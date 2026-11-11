@@ -13,8 +13,20 @@ A person associated with a company who can influence or decide whether to buy th
 _Avoid_: Treating a company account or main phone number as a person's identity.
 
 **Campaign**:
-A coordinated outreach effort for a selected audience, with messages, channels, timing and response rules.
+A coordinated outreach effort containing imported leads, outreach strategies, cross-channel sequence and message copy.
 _Avoid_: Assuming one campaign is limited to one channel.
+
+**Sequence**:
+The ordered outreach steps and conditions a campaign applies across its channels.
+_Avoid_: Treating unrelated channel-specific schedules as a coordinated sequence.
+
+**Call task**:
+A prospect phone call placed on the user's daily list for him to work through manually.
+_Avoid_: Using call task to imply an autonomous AI voice conversation.
+
+**Reply handoff**:
+The point where a prospect's reply stops automated outreach and the user takes over the conversation to arrange an appointment.
+_Avoid_: Calling automated appointment booking part of the reply handoff.
 
 **Channel**:
 A way to contact someone, such as email, a phone call, SMS, LinkedIn, Instagram or Facebook.

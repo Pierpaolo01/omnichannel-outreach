@@ -7,7 +7,7 @@ This is an internal product for coordinating business/decision-maker outreach wi
 1. Read README.md and CONTEXT.md.
 2. Load the `wayfinder` skill and its required `grilling` and `domain-modeling` skills.
 3. Read [.agents/issue-tracker.md](.agents/issue-tracker.md). GitHub Issues is the canonical tracker, with native sub-issues and issue dependencies when available.
-4. Find the issue labelled `wayfinder:map` and read it before choosing a decision ticket. The map has not been published while the initial destination/frontier discussion is still open; do not invent its answers.
+4. Find the issue labelled `wayfinder:map` and read it before choosing a decision ticket. Read README.md for the initial inputs already settled by the user. Do not reopen those choices as unanswered questions.
 
 ## Decision ownership
 
@@ -15,7 +15,7 @@ This is an internal product for coordinating business/decision-maker outreach wi
 - The AI software factory owns architecture, stack, integration mechanics, implementation, testing and operational engineering. Do not make the human choose frameworks, databases, APIs or worker designs. Raise a technical limitation only when it changes a product choice.
 - Prior planning suggestions about technology, milestones and timing are proposals, not approved implementation constraints.
 - Existing agreements are product inputs: internal-first, local-machine operation, central CRM, external scraper input, Instantly for email delivery, other named outreach channels, configurable markets/languages/timezones.
-- The first release's channel coverage, autonomy and human handoff are still product decisions.
+- The MVP covers email/SMS/phone, with CSV enrollment into campaigns and human takeover at a prospect reply. Calls are a daily manually worked list; the user speaks. Social channels follow. Detailed sequence, call-outcome, handoff and acceptance behavior remain decision tickets.
 
 ## Wayfinder discipline
 
