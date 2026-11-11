@@ -24,6 +24,22 @@ _Avoid_: Treating unrelated channel-specific schedules as a coordinated sequence
 A prospect phone call placed on the user's daily list for him to work through manually.
 _Avoid_: Using call task to imply an autonomous AI voice conversation.
 
+**Call outcome**:
+What happened on one call task, logged by the user to complete it, such as no answer, callback requested or conversation.
+_Avoid_: Using call outcome for the lead's sales stage.
+
+**Callback**:
+A call task at a time the prospect asked for, during which the lead's automated outreach is paused.
+_Avoid_: Calling a user-chosen redial a callback.
+
+**Redial**:
+The user's choice to move an unreached call task onto the next day's dial list.
+_Avoid_: Automatic retry.
+
+**Sales stage**:
+Where a lead stands in the sales process, such as interested or appointment booked, recorded separately from any call outcome.
+_Avoid_: Status, call result.
+
 **Reply handoff**:
 The point where a prospect's reply stops automated outreach and the user takes over the conversation to arrange an appointment.
 _Avoid_: Calling automated appointment booking part of the reply handoff.
