@@ -5,7 +5,7 @@ Internal omnichannel outreach and CRM. Product scoping with Wayfinder; AI softwa
 
 Product scoping with Wayfinder. This repository is private and contains planning material only. The human decides product outcomes and acceptance. The AI software factory decides technical design and implementation.
 
-Planning destination: an agreed product scope and outcome-level decision map for the email, SMS and phone MVP, with later social expansion, ready for the software factory to plan delivery. The GitHub Wayfinder map is the canonical index once published.
+Planning destination: an agreed product scope and outcome-level decision map for the email, SMS and phone MVP, with later social expansion, ready for the software factory to plan delivery. [Wayfinder: define the email, SMS and phone outreach product](https://github.com/Pierpaolo01/omnichannel-outreach/issues/1) is the canonical index.
 
 ## Starting context
 
@@ -29,6 +29,7 @@ Earlier email/LinkedIn-first suggestions and technical architecture proposals ar
 - [Agent instructions](AGENTS.md)
 - [Product glossary](CONTEXT.md)
 - [GitHub tracker operations](.agents/issue-tracker.md)
+- [Wayfinder product map](https://github.com/Pierpaolo01/omnichannel-outreach/issues/1)
 - [GitHub Issues](https://github.com/Pierpaolo01/omnichannel-outreach/issues)
 
 Source: the user's November 11, 2026 project-scoping conversation. No unrelated personal or client material is copied into this repository.
