@@ -12,6 +12,14 @@ _Avoid_: Using company and person interchangeably.
 A person associated with a company who can influence or decide whether to buy the offered service.
 _Avoid_: Treating a company account or main phone number as a person's identity.
 
+**Lead**:
+A decision maker enrolled in a campaign, or a company enrolled through its company contact details when no decision maker is known. Each lead runs its own sequence; a decision maker's company groups them with colleagues and holds shared contact details.
+_Avoid_: Calling a CSV row or an unenrolled contact a lead.
+
+**Company contact details**:
+A company's general main line and shared inbox, such as info@. Calls may use them for any lead. A decision maker's email and SMS go only to their own details; a company lead uses the company's.
+_Avoid_: Treating a company main line or shared inbox as a person's own contact details.
+
 **Campaign**:
 A coordinated outreach effort containing imported leads, outreach strategies, cross-channel sequence and message copy.
 _Avoid_: Assuming one campaign is limited to one channel.
