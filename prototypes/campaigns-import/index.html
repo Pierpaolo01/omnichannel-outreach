@@ -1,0 +1,710 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Variant B: Guided import</title>
+<!-- THROWAWAY PROTOTYPE for omnichannel-outreach #11 design choice. Invented data; nothing persists. Visual language copied from prototypes/daily-workspace (3515d86). -->
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&display=swap">
+<style>/* Layout: left rail + one working area. The call sheet is the one loud element: a dark in-call header with the name and number large. */
+:root{
+  --paper:#F3F5F8; --surface:#FFFFFF; --raised:#F8F9FB; --line:#E1E5EC; --line-strong:#C9CFDA;
+  --ink:#151A2D; --ink-2:#3A4157; --muted:#636B80; --faint:#949BAD;
+  --call:#0B8A5F; --call-hover:#097550; --call-ink:#FFFFFF; --call-soft:#E2F4EC;
+  --band:#151A2D; --band-ink:#FFFFFF; --band-muted:#A9B0C6;
+  --you:#0B7A55; --you-soft:#E2F4EC; --hand:#2C55C9; --hand-soft:#E5ECFB; --pause:#9A5A00; --pause-soft:#FCEFD9; --end:#6B7285; --end-soft:#EDEFF3; --crit:#C0352B; --crit-soft:#FBE6E4;
+  --f:"Schibsted Grotesk",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  --r-sm:5px; --r:9px; --r-lg:14px;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --paper:#0F131E; --surface:#161B28; --raised:#1B2131; --line:#262D3E; --line-strong:#36405A;
+  --ink:#E8EBF3; --ink-2:#C5CADA; --muted:#98A0B5; --faint:#6D7590;
+  --call:#22B07D; --call-hover:#2BC48B; --call-ink:#04170F; --call-soft:#123327;
+  --band:#222A3E; --band-ink:#FFFFFF; --band-muted:#A9B0C6;
+  --you:#4CCB9A; --you-soft:#123327; --hand:#8AA8F5; --hand-soft:#1A2646; --pause:#F0B35A; --pause-soft:#3A2A10; --end:#98A0B5; --end-soft:#21283A; --crit:#F2928B; --crit-soft:#3E1C1A;
+  color-scheme:dark}}
+:root[data-theme="dark"]{
+  --paper:#0F131E; --surface:#161B28; --raised:#1B2131; --line:#262D3E; --line-strong:#36405A;
+  --ink:#E8EBF3; --ink-2:#C5CADA; --muted:#98A0B5; --faint:#6D7590;
+  --call:#22B07D; --call-hover:#2BC48B; --call-ink:#04170F; --call-soft:#123327;
+  --band:#222A3E; --band-ink:#FFFFFF; --band-muted:#A9B0C6;
+  --you:#4CCB9A; --you-soft:#123327; --hand:#8AA8F5; --hand-soft:#1A2646; --pause:#F0B35A; --pause-soft:#3A2A10; --end:#98A0B5; --end-soft:#21283A; --crit:#F2928B; --crit-soft:#3E1C1A;
+  color-scheme:dark}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{background:var(--paper);color:var(--ink);font-family:var(--f);font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}
+h1,h2,h3{margin:0;font-weight:600;text-wrap:balance;letter-spacing:-.01em}
+h1{font-size:30px;line-height:1.15;letter-spacing:-.02em}
+h2{font-size:19px;line-height:1.25}
+h3{font-size:15px}
+p{margin:0}
+a{color:inherit}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--call);outline-offset:2px}
+svg.i{width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.muted{color:var(--muted)} .faint{color:var(--faint)} .sm{font-size:13px} .xs{font-size:12px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.stack{display:flex;flex-direction:column}
+.sec-title{font-size:13px;font-weight:600;color:var(--muted);margin-bottom:10px}
+
+/* shell */
+.app{display:grid;grid-template-columns:220px minmax(0,1fr);min-height:100%}
+.rail{position:sticky;top:0;height:100vh;height:100dvh;display:flex;flex-direction:column;gap:28px;padding:24px 14px 20px max(14px,env(safe-area-inset-left,0px));border-right:1px solid var(--line);background:var(--surface)}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:17px;padding:0 10px;letter-spacing:-.01em}
+.brand .mark{width:26px;height:26px;border-radius:7px;background:var(--ink);color:var(--paper);display:grid;place-items:center}
+.brand .mark svg{width:15px;height:15px;stroke-width:2}
+.nav{display:flex;flex-direction:column;gap:2px}
+.nav a{display:flex;align-items:center;gap:11px;padding:9px 10px;border-radius:var(--r);text-decoration:none;color:var(--ink-2);font-weight:500}
+.nav a:hover{background:var(--raised)}
+.nav a.on{background:var(--paper);color:var(--ink);font-weight:600}
+.nav a.on svg{color:var(--call)}
+.nav .count{margin-left:auto;font-size:12px;font-weight:600;background:var(--call);color:var(--call-ink);min-width:22px;height:20px;border-radius:10px;display:grid;place-items:center;padding:0 6px}
+.rail .foot{margin-top:auto;margin-bottom:56px;padding:0 10px;font-size:12px;color:var(--faint);line-height:1.45}
+.rail .foot a{color:var(--muted)}
+.main{min-width:0;padding:32px max(16px,env(safe-area-inset-right,0px)) 96px 40px}
+.page{max-width:1180px}
+.search-top{display:flex;justify-content:flex-end;margin-bottom:22px}
+.search-top label{display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:7px 12px;width:340px;max-width:100%;color:var(--muted)}
+.search-top label input{border:0;outline:0;background:transparent;width:100%;color:var(--ink);padding:0}
+
+/* controls */
+.btn{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line-strong);background:var(--surface);padding:7px 13px;border-radius:var(--r);font-weight:500;font-size:14px;text-decoration:none;color:var(--ink);line-height:1.2}
+.btn:hover{border-color:var(--ink-2)}
+.btn.small{padding:5px 10px;font-size:13px}
+.btn.go{background:var(--call);border-color:var(--call);color:var(--call-ink);font-weight:600}
+.btn.go:hover{background:var(--call-hover)}
+.btn.quiet{border-color:transparent;background:transparent;color:var(--muted)}
+.btn.quiet:hover{color:var(--ink);background:var(--raised)}
+.btn.warn{color:var(--crit)}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+input[type=text],input[type=search],input[type=date],input[type=time],select,textarea{border:1px solid var(--line-strong);background:var(--surface);border-radius:var(--r);padding:7px 10px;font-size:14px}
+textarea{width:100%;min-height:76px;resize:vertical;line-height:1.45}
+label.check{display:flex;gap:9px;align-items:flex-start;font-size:14px;cursor:pointer}
+label.check input{margin-top:3px;accent-color:var(--call)}
+
+/* status */
+.status{display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:500;white-space:nowrap;padding:2px 8px 2px 7px;border-radius:var(--r-sm)}
+.status::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.g-run{color:var(--ink-2);background:var(--raised);box-shadow:inset 0 0 0 1px var(--line)}
+.g-you{color:var(--you);background:var(--you-soft)}
+.g-hand{color:var(--hand);background:var(--hand-soft)}
+.g-pause{color:var(--pause);background:var(--pause-soft)}
+.g-end{color:var(--end);background:var(--end-soft)}
+.g-end::before{background:transparent;box-shadow:inset 0 0 0 1.5px currentColor}
+
+/* today */
+.today-head{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;flex-wrap:wrap;padding-bottom:28px;border-bottom:1px solid var(--line)}
+.today-head .date{color:var(--muted);font-size:15px;margin-bottom:6px}
+.today-head h1{font-size:38px}
+.today-head .lede{font-size:18px;color:var(--ink-2);margin-top:8px;max-width:46ch}
+.btn.start{padding:14px 22px;font-size:16px;border-radius:12px;gap:10px}
+.today-grid{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:48px;padding-top:28px}
+.upnext ul{margin:0;padding:0}
+.upnext li{list-style:none;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 16px;padding:14px 0;border-top:1px solid var(--line)}
+.upnext li:first-child{border-top:0}
+.upnext .who{font-weight:600}
+.upnext .why{font-size:13px;margin-top:2px;font-weight:500}
+.upnext .lt{text-align:right;font-size:13px;color:var(--muted)}
+.upnext .lt b{display:block;font-size:17px;color:var(--ink);font-weight:500}
+.later-note{margin-top:14px;font-size:13px;color:var(--muted)}
+.attn{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
+.attn li{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px;display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 12px}
+.attn .dot{width:9px;height:9px;border-radius:50%;margin-top:7px}
+.attn .txt b{font-weight:600}
+.attn .txt p{font-size:13.5px;color:var(--muted);margin-top:2px}
+.attn .act{grid-column:2;margin-top:8px}
+.calm{color:var(--muted);font-size:14px;padding:14px 0}
+
+/* calls */
+.calls{display:grid;grid-template-columns:290px minmax(0,1fr);gap:28px;align-items:start}
+.queue{position:sticky;top:24px}
+.queue .grp{font-size:13px;font-weight:600;color:var(--muted);margin:0 0 6px 10px}
+.qlist{display:flex;flex-direction:column;gap:2px;margin-bottom:22px}
+.qi{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:1px 10px;text-align:left;width:100%;border:0;background:transparent;padding:10px;border-radius:var(--r)}
+.qi:hover{background:var(--surface)}
+.qi.cur{background:var(--surface);box-shadow:inset 3px 0 0 var(--call),0 0 0 1px var(--line)}
+.qi .nm{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.qi .co{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.qi .lt{font-size:13px;color:var(--muted);text-align:right}
+.qi .why{grid-column:1/-1;font-size:12.5px;margin-top:3px;font-weight:500}
+.why-crit{color:var(--crit)} .why-you{color:var(--you)} .why-pause{color:var(--pause)} .why-muted{color:var(--muted)}
+.rule{font-size:12.5px;color:var(--faint);padding:0 10px;line-height:1.45}
+
+.sheet{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);overflow:clip}
+.band{background:var(--band);color:var(--band-ink);padding:26px 30px 28px}
+.band .reason{display:inline-flex;align-items:center;gap:8px;font-size:13px;font-weight:500;color:var(--band-muted)}
+.band .reason.crit{color:#FFB4AC}
+.band .reason.you{color:#7BE0B5}
+.band-top{display:flex;justify-content:space-between;gap:24px;flex-wrap:wrap;align-items:flex-start}
+.band h1{font-size:44px;letter-spacing:-.03em;line-height:1.05;margin-top:10px}
+.band h1 a{text-decoration:none}
+.band h1 a:hover{text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:6px}
+.band .role{color:var(--band-muted);font-size:16px;margin-top:6px}
+.band .role b{color:var(--band-ink);font-weight:500}
+.band .clock{text-align:right}
+.band .clock .t{font-size:34px;font-weight:500;letter-spacing:-.02em;line-height:1}
+.band .clock .w{font-size:13px;color:var(--band-muted);margin-top:6px}
+.band .clock .w.ok{color:#7BE0B5} .band .clock .w.no{color:#FFCE85}
+.dial{margin-top:24px;display:flex;flex-direction:column;gap:8px}
+.num{display:grid;grid-template-columns:minmax(0,auto) auto auto;justify-content:start;align-items:center;gap:14px}
+.num .v{font-size:26px;font-weight:500;letter-spacing:.01em}
+.num.alt .v{font-size:17px;color:var(--band-muted);font-weight:400}
+.num .kind{font-size:13px;color:var(--band-muted)}
+.num.bad .v{text-decoration:line-through;text-decoration-thickness:1.5px;color:#7F879E}
+.btn.callbtn{background:var(--call);border-color:var(--call);color:#fff;font-weight:600;padding:8px 16px;border-radius:22px}
+.btn.callbtn:hover{background:var(--call-hover)}
+.btn.callbtn.alt{background:transparent;border-color:#4A5372;color:var(--band-ink);padding:4px 12px;font-size:13px}
+.dialing{margin-top:10px;font-size:13px;color:#7BE0B5;display:flex;gap:8px;align-items:center}
+.dialing .pulse{width:8px;height:8px;border-radius:50%;background:#7BE0B5;animation:p 1.2s ease-in-out infinite}
+@keyframes p{50%{opacity:.25}}
+.sheet-body{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+.sheet-body>section{padding:24px 30px;min-width:0}
+.sheet-body>section+section{border-left:1px solid var(--line)}
+.askfor{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:12px}
+.askfor li .n{font-weight:600}
+.askfor li .r{font-size:13.5px;color:var(--muted)}
+.askfor li .q{font-size:13.5px;color:var(--ink-2);margin-top:3px;padding-left:10px;border-left:2px solid var(--line-strong)}
+.conote{margin-top:14px;font-size:13.5px;background:var(--raised);border-radius:var(--r);padding:10px 12px}
+.conote b{font-weight:600}
+.script{white-space:pre-wrap;font-size:14px;line-height:1.6;color:var(--ink-2);margin-top:8px}
+details.fold>summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--muted)}
+details.fold>summary::-webkit-details-marker{display:none}
+details.fold>summary::before{content:"";width:6px;height:6px;border-right:1.6px solid currentColor;border-bottom:1.6px solid currentColor;transform:rotate(-45deg);transition:transform .15s}
+details.fold[open]>summary::before{transform:rotate(45deg)}
+.logbar{position:sticky;bottom:0;background:var(--surface);border-top:1px solid var(--line);padding:20px 30px 22px;display:flex;flex-direction:column;gap:14px;box-shadow:0 -10px 24px -18px rgba(21,26,45,.35)}
+.notes-row{display:grid;grid-template-columns:minmax(0,1fr);gap:6px}
+.notes-row label.top{font-size:13px;font-weight:600;color:var(--muted)}
+.outs{display:flex;flex-wrap:wrap;gap:8px}
+.out{border:1px solid var(--line-strong);background:var(--surface);border-radius:20px;padding:7px 14px;font-size:14px;font-weight:500}
+.out:hover{border-color:var(--ink-2)}
+.out.sel{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.subopts{background:var(--raised);border-radius:var(--r);padding:14px 16px;display:flex;flex-direction:column;gap:10px;font-size:14px}
+.hint{font-size:13px;color:var(--muted)}
+.logrow{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+
+/* timeline */
+.tl{list-style:none;margin:0;padding:0}
+.tl li{display:grid;grid-template-columns:32px minmax(0,1fr) auto;gap:2px 12px;padding:12px 0}
+.tl li+li{border-top:1px solid var(--line)}
+.tl .ic{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;background:var(--raised);color:var(--muted);box-shadow:inset 0 0 0 1px var(--line)}
+.tl .ic svg{width:16px;height:16px}
+.tl .k-call .ic{color:var(--call);background:var(--call-soft);box-shadow:none}
+.tl .k-reply .ic{color:var(--hand);background:var(--hand-soft);box-shadow:none}
+.tl .k-note .ic{color:var(--pause);background:var(--pause-soft);box-shadow:none}
+.tl .t{font-weight:500;padding-top:5px;min-width:0}
+.tl .c{font-size:13px;color:var(--muted);font-weight:400}
+.tl .b{font-size:14px;color:var(--ink-2);margin-top:3px}
+.tl time{font-size:13px;color:var(--muted);padding-top:6px;white-space:nowrap;text-align:right}
+.tl .body{grid-column:2/-1;min-width:0}
+.tl details summary{cursor:pointer;color:var(--muted);font-size:13px;margin-top:4px;list-style:none;text-decoration:underline;text-underline-offset:3px;text-decoration-color:var(--line-strong)}
+.tl details summary::-webkit-details-marker{display:none}
+.tl .msg{white-space:pre-wrap;font-size:14px;line-height:1.55;background:var(--raised);border-radius:var(--r);padding:12px 14px;margin-top:8px;color:var(--ink-2)}
+.tl .msg .subj{display:block;font-weight:600;color:var(--ink);margin-bottom:8px}
+.tl li.fresh{animation:fresh 2.4s ease-out}
+@keyframes fresh{from{background:var(--call-soft)}to{background:transparent}}
+.compact .tl li{padding:9px 0;grid-template-columns:26px minmax(0,1fr) auto}
+.compact .tl .ic{width:26px;height:26px}
+.compact .tl .ic svg{width:14px;height:14px}
+.compact .tl .t{padding-top:2px;font-size:14px}
+.compact .tl time{padding-top:3px}
+
+/* leads */
+.lead-head{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:18px}
+.bigsearch{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--line-strong);border-radius:12px;padding:11px 16px;color:var(--muted)}
+.bigsearch input{border:0;outline:0;background:transparent;width:100%;font-size:17px;color:var(--ink);padding:0}
+.bigsearch:focus-within{border-color:var(--call);box-shadow:0 0 0 3px var(--call-soft)}
+.filters{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px}
+.filters .clear{margin-left:auto}
+.table{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);overflow:hidden;margin-top:16px}
+.tablewrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%}
+th{font-size:13px;color:var(--muted);text-align:left;font-weight:500;padding:12px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:14px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:0}
+tr.click{cursor:pointer}
+tr.click:hover td{background:var(--raised)}
+tr.selected td{background:var(--call-soft)}
+td .nm{font-weight:600}
+td .sub{font-size:13px;color:var(--muted)}
+.enrl{display:flex;flex-direction:column;gap:6px}
+.enrl div{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.enrl .cn{font-size:13px;color:var(--muted);min-width:0}
+input[type=checkbox],input[type=radio]{accent-color:var(--call);width:16px;height:16px}
+.bulk{position:sticky;top:12px;z-index:4;display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:var(--ink);color:var(--paper);border-radius:12px;padding:10px 14px;margin-top:16px;box-shadow:0 10px 30px -12px rgba(21,26,45,.5)}
+.bulk b{font-weight:600;margin-right:6px}
+.bulk .btn{background:transparent;color:var(--paper);border-color:color-mix(in srgb,var(--paper) 35%,transparent)}
+.bulk .btn:hover{border-color:var(--paper)}
+.bulk select{background:var(--ink);color:var(--paper);border-color:color-mix(in srgb,var(--paper) 35%,transparent)}
+.bulk .end{margin-left:auto}
+.confirm{display:flex;gap:12px;align-items:center;flex-wrap:wrap;background:var(--pause-soft);border-radius:12px;padding:12px 16px;margin-top:12px;font-size:14px}
+.confirm span{flex:1 1 320px}
+.foot-note{font-size:13px;color:var(--muted);margin-top:12px}
+
+/* campaigns */
+.camps{display:flex;flex-direction:column;gap:12px;margin-top:20px}
+.camp{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);padding:18px 20px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px 20px;align-items:center}
+.camp h2{font-size:17px}
+.camp .meta{font-size:13.5px;color:var(--muted);margin-top:4px}
+.seq{display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-top:12px}
+.seq .s{width:28px;height:28px;border-radius:7px;display:grid;place-items:center;background:var(--raised);color:var(--ink-2);box-shadow:inset 0 0 0 1px var(--line)}
+.seq .s svg{width:15px;height:15px}
+.seq .s.wb{color:var(--hand);background:var(--hand-soft);box-shadow:none}
+.seq .gap{width:10px;height:1.5px;background:var(--line-strong)}
+.seq .lbl{font-size:12.5px;color:var(--muted);margin:0 4px 0 8px}
+
+/* person shared */
+.back{display:inline-flex;align-items:center;gap:6px;font-size:14px;color:var(--muted);text-decoration:none;margin-bottom:18px}
+.back:hover{color:var(--ink)}
+.p-top{display:flex;justify-content:space-between;align-items:flex-end;gap:20px;flex-wrap:wrap}
+.p-head .kind{font-size:13.5px;color:var(--muted);margin-bottom:4px}
+.p-head h1{font-size:34px}
+.p-head .role{font-size:16px;color:var(--ink-2);margin-top:4px}
+.p-head .role a{font-weight:600;text-decoration:none}
+.p-head .role a:hover{text-decoration:underline}
+.localtime{text-align:right}
+.localtime .t{font-size:26px;font-weight:500;line-height:1}
+.localtime .w{font-size:13px;color:var(--muted);margin-top:4px}
+.facts{display:flex;flex-direction:column;font-size:14.5px;margin:0}
+.facts dt{color:var(--muted);font-size:12.5px;margin-top:12px}
+.facts dt:first-child{margin-top:0}
+.facts dd{margin:1px 0 0;min-width:0;overflow-wrap:break-word;word-break:normal}
+.facts .bad{text-decoration:line-through;color:var(--faint)}
+.tagline{font-size:12px;color:var(--muted);margin-left:6px}
+.tagline.new{color:var(--you);font-weight:600}
+.colls{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
+.colls li{padding:12px 0;display:flex;flex-direction:column;gap:6px}
+.colls li:first-child{padding-top:0}
+.colls li+li{border-top:1px solid var(--line)}
+.colls .top{display:flex;justify-content:space-between;gap:8px;align-items:baseline;flex-wrap:wrap}
+.colls .top a{font-weight:600;text-decoration:none}
+.colls .top a:hover{text-decoration:underline}
+.colls .r{font-size:13px;color:var(--muted)}
+.colls .q{font-size:13.5px;color:var(--ink-2);padding-left:10px;border-left:2px solid var(--line-strong)}
+.enrcard{display:flex;flex-direction:column;gap:12px;padding:18px 0}
+.enrcard:last-of-type{padding-bottom:6px}
+.enrcard+.enrcard{border-top:1px solid var(--line)}
+.enrcard .top{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+.enrcard .cn{font-weight:600}
+.enrcard .nx{font-size:14px;color:var(--ink-2)}
+.ctrl{display:flex;gap:6px;flex-wrap:wrap}
+.track{display:flex;align-items:center;flex-wrap:wrap;row-gap:6px}
+.track .s{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;color:var(--faint);box-shadow:inset 0 0 0 1.5px var(--line-strong);background:var(--surface)}
+.track .s svg{width:14px;height:14px}
+.track .s.done{background:var(--ink-2);color:var(--surface);box-shadow:none}
+.track .s.cur{background:var(--call);color:#fff;box-shadow:0 0 0 4px var(--call-soft)}
+.track .s.skip{opacity:.55;background:repeating-linear-gradient(-45deg,transparent 0 3px,var(--line) 3px 4px)}
+.track .s.wb{box-shadow:inset 0 0 0 1.5px var(--hand);color:var(--hand)}
+.track .s.wb.done{background:var(--hand);color:var(--surface);box-shadow:none}
+.track .s.wb.cur{background:var(--hand);color:#fff;box-shadow:0 0 0 4px var(--hand-soft)}
+.track .ln{width:14px;height:1.5px;background:var(--line-strong)}
+.track .br{font-size:12px;color:var(--hand);font-weight:600;margin:0 8px}
+.composer{display:flex;flex-direction:column;gap:8px}
+.composer .row{justify-content:space-between}
+.composer label.check{font-size:13.5px;color:var(--ink-2)}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);padding:20px 22px;min-width:0}
+.pp{max-width:780px;display:flex;flex-direction:column;gap:40px}
+.contact{display:flex;flex-wrap:wrap;gap:14px 32px;font-size:14.5px;margin-top:-16px}
+.contact .l{display:block;font-size:12.5px;color:var(--muted)}
+.contact .bad{text-decoration:line-through;color:var(--faint)}
+.pp h2{margin-bottom:6px}
+.rows{list-style:none;margin:0;padding:0}
+.rows li{padding:16px 0;display:flex;flex-direction:column;gap:8px}
+.rows li+li{border-top:1px solid var(--line)}
+.rows .rtop{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+.rows .cn{font-weight:600;text-decoration:none}
+a.cn:hover{text-decoration:underline}
+.rows .nx{font-size:14px;color:var(--ink-2)}
+/* A — Record */
+.vA{display:grid;grid-template-columns:300px minmax(0,1fr);gap:36px;margin-top:28px;align-items:start}
+.vA .side{display:flex;flex-direction:column;gap:30px;position:sticky;top:24px}
+.vA .main-col{display:flex;flex-direction:column;gap:20px;min-width:0}
+/* B — By campaign */
+.vB-facts{display:flex;gap:12px 32px;flex-wrap:wrap;margin-top:18px;font-size:14px}
+.vB-facts div span:first-child{display:block;font-size:12.5px;color:var(--muted)}
+.vB-facts .bad{text-decoration:line-through;color:var(--faint)}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);flex-wrap:wrap;margin-top:26px}
+.tab{border:0;background:none;padding:10px 14px 12px;font-weight:500;color:var(--muted);display:flex;align-items:center;gap:9px;border-bottom:2px solid transparent;margin-bottom:-1px}
+.tab:hover{color:var(--ink)}
+.tab.on{color:var(--ink);border-bottom-color:var(--ink)}
+.tab .dot{width:7px;height:7px;border-radius:50%}
+.vB-body{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:36px;margin-top:24px;align-items:start}
+.bigtrack{display:flex;overflow-x:auto;margin:16px 0 4px;padding-bottom:6px}
+.bstep{flex:1 0 124px;padding-right:10px;font-size:13.5px}
+.bstep .bar{height:4px;border-radius:2px;background:var(--line);margin-bottom:10px}
+.bstep.done .bar{background:var(--ink-2)}
+.bstep.cur .bar{background:var(--call)}
+.bstep.skip .bar{background:repeating-linear-gradient(90deg,var(--line-strong) 0 4px,transparent 4px 8px)}
+.bstep.wb .bar{background:var(--hand-soft)} .bstep.wb.done .bar,.bstep.wb.cur .bar{background:var(--hand)}
+.bstep .ch{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12.5px}
+.bstep .ch svg{width:14px;height:14px}
+.bstep .nm{font-weight:500;margin-top:2px}
+.bstep .st{font-size:12.5px;color:var(--muted)}
+.bstep.cur .st{color:var(--you);font-weight:600}
+.nextbox{background:var(--raised);border-radius:var(--r);padding:12px 14px;font-size:14px;color:var(--ink-2);margin-top:14px}
+/* C — Feed */
+.vC{max-width:760px;display:flex;flex-direction:column;gap:24px}
+.strip{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface);overflow:hidden}
+.strip .line{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:14px;align-items:center;padding:14px 18px;border:0;background:none;text-align:left;width:100%}
+.strip .line:hover{background:var(--raised)}
+.strip>*+.line{border-top:1px solid var(--line)}
+.strip .line .cn{font-weight:600}
+.strip .line .nx{font-size:13.5px;color:var(--muted)}
+.strip .open{padding:4px 18px 18px;display:flex;flex-direction:column;gap:14px}
+.chev{width:8px;height:8px;border-right:1.6px solid var(--muted);border-bottom:1.6px solid var(--muted);transform:rotate(45deg);margin:0 4px 4px}
+.chev.up{transform:rotate(-135deg);margin:4px 4px 0}
+.vC details.more{border-top:1px solid var(--line);padding-top:18px}
+.vC details.more>summary{font-size:15px;font-weight:600;color:var(--ink-2)}
+.more-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:28px;margin-top:16px}
+
+/* guide */
+.guide{max-width:700px}
+.guide h1{margin-bottom:12px}
+.guide h2{margin:30px 0 10px}
+.guide p{color:var(--ink-2);max-width:66ch}
+.guide ol,.guide ul{padding-left:20px;margin:0;color:var(--ink-2)}
+.guide li{margin:7px 0;max-width:66ch}
+.guide li b{color:var(--ink)}
+
+/* prototype control (deliberately outside the design) */
+.proto{position:fixed;left:max(16px,env(safe-area-inset-left,0px));bottom:calc(16px + env(safe-area-inset-bottom,0px));z-index:30;display:flex;align-items:center;gap:4px;background:#2A2440;color:#EDE9FF;border-radius:12px;padding:6px;box-shadow:0 10px 30px -10px rgba(0,0,0,.45);font-size:13px}
+.proto .lbl{padding:0 8px 0 6px;color:#B9B1DA}
+.proto button{border:0;background:transparent;color:inherit;border-radius:8px;padding:5px 10px;font-weight:500}
+.proto button:hover{background:rgba(255,255,255,.1)}
+.proto button.on{background:#EDE9FF;color:#2A2440}
+.proto .sep{width:1px;height:18px;background:rgba(255,255,255,.18);margin:0 4px}
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(24px + env(safe-area-inset-bottom,0px));z-index:31;background:var(--ink);color:var(--paper);padding:11px 16px;border-radius:10px;max-width:min(460px,calc(100vw - 32px));font-size:14px;box-shadow:0 10px 30px -10px rgba(0,0,0,.5)}
+
+@media (max-width:1180px){.calls{grid-template-columns:250px minmax(0,1fr)}.sheet-body{grid-template-columns:minmax(0,1fr)}.sheet-body>section+section{border-left:0;border-top:1px solid var(--line)}.vB-body{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:900px){
+  .app{grid-template-columns:minmax(0,1fr)}
+  .rail{min-width:0;max-width:100vw;position:sticky;top:0;height:auto;flex-direction:row;align-items:center;gap:12px;padding:10px max(16px,env(safe-area-inset-right,0px)) 10px max(16px,env(safe-area-inset-left,0px));border-right:0;border-bottom:1px solid var(--line);z-index:10;overflow-x:auto}
+  .rail .foot,.brand span{display:none}
+  .nav{flex-direction:row}
+  .nav a{padding:7px 9px;white-space:nowrap}
+  .main{padding:20px max(16px,env(safe-area-inset-right,0px)) 110px max(16px,env(safe-area-inset-left,0px))}
+  .today-grid,.calls,.vA{grid-template-columns:minmax(0,1fr);gap:24px}
+  .queue,.vA .side{position:static}
+  .band{padding:20px}.band h1{font-size:32px}.sheet-body>section,.logbar{padding:18px 20px}
+  .search-top{display:none}
+  .tl li{grid-template-columns:32px minmax(0,1fr)}.tl time{grid-column:2;text-align:left;padding-top:0}
+  .proto .lbl{display:none}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+/* ===== additions for the campaign + import variants (same tokens, same component vocabulary) ===== */
+body{margin:0}
+.proto[hidden]{display:none}
+.res-t{font-size:14px;font-weight:600}
+.res-t.no{color:var(--muted)}
+::selection{background:var(--call-soft);color:var(--ink)}
+input::placeholder{color:var(--faint)}
+.num-t{font-variant-numeric:tabular-nums}
+.page-head{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap}
+.page-head .lede{font-size:15px;color:var(--muted);margin-top:6px;max-width:64ch}
+.g-draft{color:var(--ink-2);background:var(--raised);box-shadow:inset 0 0 0 1px var(--line)}
+.g-draft::before{background:transparent;border:1.5px dashed currentColor;width:8px;height:8px;box-sizing:border-box}
+.g-crit{color:var(--crit);background:var(--crit-soft)}
+.g-new{color:var(--you);background:var(--you-soft)}
+.g-upd{color:var(--hand);background:var(--hand-soft)}
+.btn svg.i{width:16px;height:16px}
+.btn.go:disabled:hover{background:var(--call)}
+.empty{border:1px dashed var(--line-strong);border-radius:var(--r-lg);padding:44px 40px;display:flex;flex-direction:column;align-items:flex-start;gap:10px;margin-top:24px;background:var(--surface)}
+.empty h2{font-size:19px}
+.empty p{color:var(--ink-2);max-width:60ch}
+.empty .row{margin-top:8px}
+.field{display:flex;flex-direction:column;gap:6px}
+.field>label,.field>.lbl{font-size:13px;font-weight:600;color:var(--muted)}
+.field input[type=text]{font-size:15px;padding:9px 12px;width:100%;max-width:460px}
+.field .hint{margin-top:0}
+.formpanel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);padding:22px 24px;display:flex;flex-direction:column;gap:16px;margin-top:20px}
+.formpanel .actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.cmeta{font-size:13.5px;color:var(--muted);margin-top:4px}
+.camp .noseq{font-size:13px;color:var(--faint);margin-top:10px;display:flex;align-items:center;gap:8px}
+.camp .noseq .dash{width:62px;height:0;border-top:1.5px dashed var(--line-strong)}
+.camp .acts{display:flex;gap:8px;align-items:center}
+
+/* file slots */
+.slots{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.slot{border:1.5px dashed var(--line-strong);border-radius:var(--r-lg);padding:18px 18px 16px;display:flex;flex-direction:column;gap:8px;background:var(--surface);min-width:0}
+.slot .st{display:flex;align-items:center;gap:8px;font-weight:600}
+.slot .st svg{color:var(--muted)}
+.slot .d{font-size:13.5px;color:var(--muted)}
+.slot .fn{font-size:14px;font-weight:500;overflow-wrap:anywhere}
+.slot.ok{border-style:solid;border-color:var(--line)}
+.slot.ok .st svg{color:var(--call)}
+.slot.bad{border-style:solid;border-color:color-mix(in srgb,var(--crit) 45%,var(--line));background:color-mix(in srgb,var(--crit-soft) 55%,var(--surface))}
+.slot.bad .st svg{color:var(--crit)}
+.slot .em{font-size:13.5px;color:var(--ink-2)}
+.slot .row{margin-top:4px}
+.importbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:14px}
+.importbar .hint{flex:1 1 280px}
+
+/* error / notice */
+.err{background:var(--crit-soft);border-radius:12px;padding:14px 16px;display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 12px;font-size:14px}
+.err svg{color:var(--crit);margin-top:2px}
+.err b{color:var(--ink);font-weight:600}
+.err p{color:var(--ink-2)}
+.err .row{grid-column:2;margin-top:6px}
+.note{background:var(--raised);border-radius:var(--r);padding:12px 14px;font-size:14px;color:var(--ink-2)}
+
+/* import result tally (a compact table, not stat tiles) */
+.tally{list-style:none;margin:0;padding:0;border-top:1px solid var(--line)}
+.tally li{display:grid;grid-template-columns:52px 150px minmax(0,1fr);gap:4px 16px;align-items:baseline;padding:12px 0;border-bottom:1px solid var(--line)}
+.tally .n{font-size:22px;font-weight:600;letter-spacing:-.01em;font-variant-numeric:tabular-nums;text-align:right}
+.tally .n.zero{color:var(--faint);font-weight:500}
+.tally .k{font-weight:600}
+.tally .x{font-size:14px;color:var(--muted)}
+.detail-list{list-style:none;margin:0;padding:0}
+.detail-list li{display:grid;grid-template-columns:minmax(0,260px) minmax(0,1fr);gap:2px 20px;padding:11px 0;border-top:1px solid var(--line);font-size:14px}
+.detail-list li:first-child{border-top:0}
+.detail-list .who a{font-weight:600;text-decoration:none}
+.detail-list .who a:hover{text-decoration:underline}
+.detail-list .who .sub{font-size:13px;color:var(--muted)}
+.detail-list .why{color:var(--ink-2)}
+.detail-list .why .bad{text-decoration:line-through;color:var(--faint)}
+.subhead{display:flex;align-items:baseline;gap:10px;margin:26px 0 6px}
+.subhead h3{font-size:15px}
+.subhead .c{font-size:13px;color:var(--muted)}
+.history{list-style:none;margin:0;padding:0;font-size:14px}
+.history li{display:flex;justify-content:space-between;gap:16px;padding:9px 0;border-top:1px solid var(--line);color:var(--ink-2)}
+.history li:first-child{border-top:0}
+
+/* campaign page */
+.cp{max-width:880px;display:flex;flex-direction:column;gap:36px}
+.cp section>h2{margin-bottom:6px}
+.cp section>.lede{color:var(--muted);font-size:14.5px;max-width:66ch;margin-bottom:16px}
+.cp .shead{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+
+/* ledger (variant B) */
+.ledger td{font-size:14px}
+.ledger td.res{white-space:nowrap}
+.ledger tr.grp td{background:var(--raised);font-size:13px;font-weight:600;color:var(--muted);padding:9px 14px}
+.ledger .more td{color:var(--muted);font-size:13.5px}
+.tabs .tab .c{font-size:12.5px;color:var(--faint);font-variant-numeric:tabular-nums}
+.tabs .tab.on .c{color:var(--muted)}
+.progress{height:6px;border-radius:3px;background:var(--line);overflow:hidden;margin-top:18px;max-width:520px}
+.progress span{display:block;height:100%;width:58%;background:var(--call);border-radius:3px}
+.skel{height:12px;border-radius:6px;background:var(--line);opacity:.7}
+.filerow{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:2px 12px;align-items:center;padding:14px 16px;border:1px solid var(--line);border-radius:var(--r);background:var(--surface)}
+.filerow svg{color:var(--muted)}
+.filerow.ok svg.s{color:var(--call)}
+.filerow.bad{border-color:color-mix(in srgb,var(--crit) 45%,var(--line));background:color-mix(in srgb,var(--crit-soft) 55%,var(--surface))}
+.filerow.bad svg.s{color:var(--crit)}
+.filerow .nm{font-weight:600}
+.filerow .d{font-size:13.5px;color:var(--muted);grid-column:2}
+.filerow.bad .d{color:var(--ink-2)}
+.filerow .btn{grid-row:1/3;grid-column:3}
+.files{display:flex;flex-direction:column;gap:8px;max-width:640px}
+.form1{max-width:680px;display:flex;flex-direction:column;gap:26px;margin-top:24px}
+.cofacts{display:flex;flex-wrap:wrap;gap:10px 28px;font-size:14px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);padding:14px 18px;margin-top:16px;align-items:baseline}
+.cofacts .l{display:block;font-size:12.5px;color:var(--muted)}
+.cofacts h3{font-size:16px;margin-right:8px}
+
+/* variant C: expanding campaign strips + single drop */
+.strip .line .meta{font-size:13.5px;color:var(--muted)}
+.strip .line.on{background:var(--raised)}
+.drop{border:1.5px dashed var(--line-strong);border-radius:var(--r-lg);padding:26px 22px;display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:4px 16px;align-items:center;background:var(--surface)}
+.drop .ic{width:40px;height:40px;border-radius:10px;background:var(--raised);display:grid;place-items:center;color:var(--ink-2);grid-row:1/3}
+.drop .t{font-weight:600}
+.drop .d{font-size:13.5px;color:var(--muted)}
+.drop .btn{grid-row:1/3;grid-column:3}
+.sentences{display:flex;flex-direction:column;gap:12px;font-size:15px;color:var(--ink-2);max-width:70ch}
+.sentences b{color:var(--ink);font-weight:600}
+.sentences details.fold>summary{font-size:15px;font-weight:400;color:var(--ink-2)}
+.sentences details.fold>summary b{color:var(--ink)}
+.sentences .detail-list{margin:6px 0 4px 14px}
+.cohead .kind{display:flex;align-items:center;gap:8px}
+.ledger .bad{text-decoration:line-through;color:var(--faint)}
+</style></head><body><script>/* Shared shell for the throwaway variants. Invented example data; nothing persists. */
+const I = {
+  email:'<svg class="i" viewBox="0 0 20 20"><rect x="2.5" y="4.5" width="15" height="11" rx="2"/><path d="M3.5 6l6.5 5 6.5-5"/></svg>',
+  sms:'<svg class="i" viewBox="0 0 20 20"><path d="M4 4h12a1.5 1.5 0 0 1 1.5 1.5v7A1.5 1.5 0 0 1 16 14H9l-4 3v-3H4a1.5 1.5 0 0 1-1.5-1.5v-7A1.5 1.5 0 0 1 4 4z"/></svg>',
+  call:'<svg class="i" viewBox="0 0 20 20"><path d="M6.5 2.8l2 3.6-1.6 1.5a10 10 0 0 0 5.2 5.2l1.5-1.6 3.6 2-.8 2.8a1.5 1.5 0 0 1-1.6 1C8.6 16.6 3.4 11.4 2.7 5.2a1.5 1.5 0 0 1 1-1.6z"/></svg>',
+  today:'<svg class="i" viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="13" rx="2"/><path d="M3 8h14M7 2.5v3M13 2.5v3"/></svg>',
+  leads:'<svg class="i" viewBox="0 0 20 20"><circle cx="8" cy="7" r="3"/><path d="M2.5 16.5c.6-3 2.8-4.5 5.5-4.5s4.9 1.5 5.5 4.5"/><path d="M13 4.2a3 3 0 0 1 0 5.6M15 12.3c1.4.6 2.3 1.9 2.6 4.2"/></svg>',
+  camps:'<svg class="i" viewBox="0 0 20 20"><rect x="2.5" y="3" width="6" height="5" rx="1.2"/><rect x="11.5" y="12" width="6" height="5" rx="1.2"/><path d="M8.5 5.5H12a2 2 0 0 1 2 2V12"/></svg>',
+  search:'<svg class="i" viewBox="0 0 20 20"><circle cx="9" cy="9" r="5.5"/><path d="M13 13l4 4"/></svg>',
+  back:'<svg class="i" viewBox="0 0 20 20" style="width:16px;height:16px"><path d="M12 4.5L6.5 10l5.5 5.5"/></svg>',
+  file:'<svg class="i" viewBox="0 0 20 20"><path d="M5 2.5h6.5L15 6v11.5H5z"/><path d="M11.5 2.5V6H15M7.5 10.5h5M7.5 13.5h5"/></svg>',
+  ok:'<svg class="i s" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7"/><path d="M6.8 10.2l2.2 2.2 4.2-4.6"/></svg>',
+  bad:'<svg class="i s" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7"/><path d="M10 6.3v4.4M10 13.4v.2"/></svg>',
+  upload:'<svg class="i" viewBox="0 0 20 20"><path d="M10 13V3.8M6.3 7.3L10 3.6l3.7 3.7"/><path d="M3.5 12.5v2.5a1.5 1.5 0 0 0 1.5 1.5h10a1.5 1.5 0 0 0 1.5-1.5v-2.5"/></svg>',
+  plus:'<svg class="i" viewBox="0 0 20 20"><path d="M10 4.5v11M4.5 10h11"/></svg>',
+  building:'<svg class="i" viewBox="0 0 20 20"><path d="M3.5 17V4.5A1.5 1.5 0 0 1 5 3h6a1.5 1.5 0 0 1 1.5 1.5V17M12.5 8H15a1.5 1.5 0 0 1 1.5 1.5V17M2.5 17h15"/><path d="M6.5 6.5h3M6.5 9.5h3M6.5 12.5h3"/></svg>'
+};
+const status = (cls,label)=>`<span class="status ${cls}">${label}</span>`;
+const topSearch = (v='')=>`<div class="search-top"><label>${I.search}<input type="search" placeholder="Find a lead by name, company, email or phone" aria-label="Find a lead" value="${v}"></label></div>`;
+const back = (label)=>`<a class="back" href="#">${I.back}${label}</a>`;
+
+/* shared invented data */
+const F = {
+  p1:'people_physio-london_2026-11-10.csv', b1:'businesses_physio-london_2026-11-10.csv',
+  p2:'people_physio-london_2026-11-12.csv', b2:'businesses_physio-london_2026-11-12.csv'
+};
+const NOT1 = [
+  ['Rachel Owusu','Head physiotherapist','Hackney Spine Clinic','No personal email or mobile, and Hackney Spine Clinic has no main line in the file.'],
+  ['Ben Adeyemi','Clinical lead','Hackney Spine Clinic','No personal email or mobile, and Hackney Spine Clinic has no main line in the file.']
+];
+const NEW1_DM = [
+  ['James Whitfield','Clinic director','Balham Physio & Sports Injury','Email, mobile and main line'],
+  ['Marcus Bell','Owner','Hackney Spine Clinic','Email only. No main line for calls.'],
+  ['Priya Raman','Owner','Islington Physio Rooms','Email, direct line and main line'],
+  ['Tom Clarke','Operations lead','Islington Physio Rooms','Email and main line'],
+  ['Hannah Price','Practice manager','Wimbledon Physio Studio','Main line only, so phone steps only'],
+  ['Oliver Grant','Founder','Camden Movement Clinic','Email, mobile and main line'],
+  ['Sofia Marin','Physiotherapist and partner','Camden Movement Clinic','Email and main line']
+];
+const NEW1_CO = [
+  ['Canary Wharf Physiotherapy','Main line'],['Clapham Physio Hub','Main line and shared inbox'],['Greenwich Back & Joint','Main line and shared inbox'],
+  ['Richmond Sports Rehab','Main line and shared inbox'],['Stratford Physio Centre','Main line'],['Ealing Hands Clinic','Main line and shared inbox'],['Peckham Physiotherapy','Main line and shared inbox']
+];
+const NEW2 = [
+  ['Rachel Owusu','Head physiotherapist','Hackney Spine Clinic','Now has a personal email: r.owusu@hackneyspine.co.uk'],
+  ['Daniel Osei','Clinical director','Islington Physio Rooms','New in the People file. Email and main line.'],
+  ['Fulham Sports Physio','Company lead','','New in the Businesses file. Main line and shared inbox.']
+];
+const UPD2 = [
+  ['Priya Raman','Owner','Islington Physio Rooms','Added email priya.raman.physio@fastmail-example.com, marked newer. Direct line <span class="bad">+44 20 7946 0878</span> is still marked wrong.'],
+  ['Tom Clarke','Operations lead','Islington Physio Rooms','Added mobile +44 7700 900318, marked newer.'],
+  ['Canary Wharf Physiotherapy','Company lead','','Added shared inbox hello@cwphysio.co.uk, marked newer.']
+];
+const NOT2 = [['Ben Adeyemi','Clinical lead','Hackney Spine Clinic','Still no personal email or mobile, and Hackney Spine Clinic still has no main line in the file.']];
+
+function detailList(rows,opts={}){
+  return `<ul class="detail-list">${rows.map(r=>`<li><div class="who"><a href="#">${r[0]}</a><div class="sub">${[r[1],r[2]].filter(Boolean).join(', ')}</div></div><div class="why">${r[3]}</div></li>`).join('')}</ul>`;
+}
+
+/* shell + state router */
+function shell(variant, states){
+  const keys = Object.keys(states);
+  const shot = new URLSearchParams(location.search).has('shot');
+  document.body.innerHTML = `<div class="app">
+    <aside class="rail">
+      <div class="brand"><span class="mark">${I.call.replace('class="i"','class="i"')}</span><span>Outreach</span></div>
+      <nav class="nav" id="nav"></nav>
+      <div class="foot">Variant ${variant}. Throwaway prototype with invented example data. Nothing is saved.</div>
+    </aside>
+    <main class="main"><div id="view"></div></main>
+  </div>
+  <div class="proto" role="toolbar" aria-label="Prototype states" ${shot?'hidden':''}>
+    <span class="lbl">State</span><select id="pick" aria-label="Prototype state" style="background:#2A2440;color:#EDE9FF;border-color:#4b4370;font-size:13px;padding:4px 8px">${keys.map(k=>`<option value="${k}">${states[k].label}</option>`).join('')}</select>
+    <span class="sep"></span><button id="th-l">Light</button><button id="th-d">Dark</button>
+  </div>`;
+  const render = ()=>{
+    const k = keys.includes(location.hash.slice(1)) ? location.hash.slice(1) : keys[0];
+    const s = states[k];
+    const nav=[['today','Today',I.today],['calls','Calls',I.call],['leads','Leads',I.leads],['campaigns','Campaigns',I.camps]];
+    document.getElementById('nav').innerHTML = nav.map(([id,l,ic])=>`<a href="#" class="${(s.nav||'campaigns')===id?'on':''}">${ic}<span>${l}</span></a>`).join('');
+    document.getElementById('view').innerHTML = `<div class="page">${s.html}</div>`;
+    document.getElementById('pick').value = k;
+    document.title = `Variant ${variant}: ${s.label}`;
+    window.scrollTo(0,0);
+  };
+  document.getElementById('pick').onchange = e=>{ location.hash = e.target.value };
+  document.getElementById('th-l').onclick = ()=>document.documentElement.dataset.theme='light';
+  document.getElementById('th-d').onclick = ()=>document.documentElement.dataset.theme='dark';
+  /* links inside the mock are inert except explicit state jumps */
+  document.addEventListener('click', e=>{ const a=e.target.closest('[data-go]'); if(a){ e.preventDefault(); location.hash=a.dataset.go; return } const h=e.target.closest('a[href="#"]'); if(h) e.preventDefault(); });
+  addEventListener('hashchange', render);
+  render();
+}
+
+/* Variant B: Guided import page. Creating a campaign and importing its first files is one page.
+   The result is a full-page ledger of every row, filtered by outcome. Re-import starts from the campaign list.
+   No new company page: the company name opens Leads filtered to that company, as in the prototype. */
+const campRow = (name,meta,btn)=>`<div class="camp"><div><div class="row" style="gap:12px"><h2>${name}</h2>${status('g-draft','Not launched')}</div>
+  <div class="cmeta">${meta}</div><div class="noseq"><span class="dash"></span>No sequence yet</div></div><div class="acts">${btn}</div></div>`;
+
+const fileRow = (cls,name,d,btn)=>`<div class="filerow ${cls}">${cls==='ok'?I.ok:cls==='bad'?I.bad:I.file}<span class="nm">${name}</span><span class="d">${d}</span>${btn}</div>`;
+
+const formPage = (title,nameField,files,err,cta)=>`${back('Campaigns')}<h1>${title}</h1>
+  <div class="form1">${err||''}${nameField}
+  <div class="field"><span class="lbl">Scraper files</span><p class="hint" style="margin:-2px 0 6px">The People and Businesses files from one scraper run. Every reachable decision maker becomes a lead; a company with no named decision maker becomes a company lead.</p><div class="files">${files}</div></div>
+  <div class="row">${cta}</div></div>`;
+const nameField = `<div class="field"><label for="nm">Campaign name</label><input type="text" id="nm" value="Physiotherapy, Greater London"></div>`;
+
+const ledgerHead = `<thead><tr><th>Decision maker or company lead</th><th>Company</th><th>Result</th><th>What happened</th></tr></thead>`;
+const lrow = (a,b,res,d)=>{const [n,...sub]=a.split('<div');return `<tr><td><div class="nm">${n}</div>${sub.length?'<div'+sub.join('<div'):''}</td>`+`<td>${b}</td><td class="res">${res}</td><td>${d}</td></tr>`};
+const R = {
+  nw:'<span class="res-t">New</span>', al:'<span class="res-t">Already enrolled</span>', up:'<span class="res-t">Updated</span>', no:'<span class="res-t no">Not enrolled</span>'
+};
+const tabs = (items,on)=>`<div class="tabs" role="tablist">${items.map(([l,c])=>`<button class="tab ${l===on?'on':''}" role="tab" aria-selected="${l===on}">${l}<span class="c">${c}</span></button>`).join('')}</div>`;
+
+const STATES = {
+  'list-empty':{label:'1. Campaigns, empty',html:`${topSearch()}<div class="page-head"><div><h1>Campaigns</h1></div></div>
+    <div class="empty"><h2>Start a campaign from a scraper run</h2><p>Name the campaign and add the People and Businesses files the scraper exported. The people and companies in them become this campaign’s leads.</p><div class="row"><a class="btn go" href="#" data-go="new">${I.plus}New campaign</a></div></div>`},
+
+  'new':{label:'2. New campaign with files',html:formPage('New campaign',nameField,
+      fileRow('ok','People file',`${F.p1}. 9 people, matches the scraper’s People export.`,'<button class="btn small quiet">Replace</button>')+
+      fileRow('ok','Businesses file',`${F.b1}. 12 businesses, matches the scraper’s Businesses export.`,'<button class="btn small quiet">Replace</button>'),
+      '',`<a class="btn go" href="#" data-go="importing">Create campaign and import</a><button class="btn quiet">Create without importing</button>`)},
+
+  'new-empty':{label:'2a. New campaign, no files yet',html:formPage('New campaign',`<div class="field"><label for="nm">Campaign name</label><input type="text" id="nm" placeholder="For example: Physiotherapy, Greater London"></div>`,
+      fileRow('','People file','Choose the people export, or drop it here.',`<button class="btn small">${I.upload}Choose file</button>`)+
+      fileRow('','Businesses file','Choose the businesses export from the same run.',`<button class="btn small">${I.upload}Choose file</button>`),
+      '',`<button class="btn go" disabled>Create campaign and import</button><button class="btn quiet" disabled>Create without importing</button><span class="hint">Name the campaign first.</span>`)},
+
+  'invalid':{label:'3. Invalid files',html:formPage('New campaign',nameField,
+      fileRow('ok','People file',`${F.p1}. 9 people, matches the scraper’s People export.`,'<button class="btn small quiet">Replace</button>')+
+      fileRow('bad','Businesses file',`businesses_dental-rotterdam_2026-11-09.csv is from a different scraper run. None of the 9 people belong to a business in it.`,`<button class="btn small">${I.upload}Choose another file</button>`),
+      `<div class="err">${I.bad}<div><b>Nothing was imported, and the campaign wasn’t created.</b><p>These two files don’t belong together. Export both from the same scraper run, then choose them again. Your campaign name is kept.</p></div></div>`,
+      `<button class="btn go" disabled>Create campaign and import</button><button class="btn quiet">Create without importing</button>`)},
+
+  'importing':{label:'4. Importing',html:`${back('Campaigns')}<h1>Importing into Physiotherapy, Greater London</h1>
+    <p class="lede" style="font-size:15px;color:var(--ink-2);margin-top:8px">Matching 12 businesses and 9 people against the people and companies you already have. 12 of 21 rows done.</p>
+    <div class="progress" role="progressbar" aria-valuenow="12" aria-valuemin="0" aria-valuemax="21" aria-label="Import progress"><span></span></div>
+    <div class="table" style="max-width:900px"><table class="ledger">${ledgerHead}<tbody>${[1,2,3,4].map(()=>`<tr><td><div class="skel" style="width:140px"></div></td><td><div class="skel" style="width:170px"></div></td><td><div class="skel" style="width:80px"></div></td><td><div class="skel" style="width:220px"></div></td></tr>`).join('')}</tbody></table></div>
+    <p class="foot-note">You can leave this page. The import finishes on its own and the result stays on the campaign.</p>`},
+
+  'first':{label:'5. Result, first import',html:`${back('Campaigns')}<div class="page-head"><div><h1>Imported into Physiotherapy, Greater London</h1>
+    <p class="lede" style="font-size:16px;color:var(--ink-2)">14 new leads: 7 decision makers and 7 company leads. 2 people weren’t enrolled and stay on their company record.</p></div>
+    <div class="row"><a class="btn" href="#">Find them in Leads</a></div></div>
+    <p class="sm muted" style="margin-top:10px">Today at 09:14 from ${F.p1} and ${F.b1}.</p>
+    <div style="margin-top:14px">${tabs([['All','16'],['New','14'],['Already enrolled','0'],['Updated','0'],['Not enrolled','2']],'All')}</div>
+    <div class="table" style="margin-top:0;border-top-left-radius:0;border-top-right-radius:0;border-top:0"><table class="ledger">${ledgerHead}<tbody>
+      <tr class="grp"><td colspan="4">Not enrolled, 2</td></tr>
+      ${NOT1.map(r=>lrow(r[0]+`<div class="sub">${r[1]}</div>`,r[2],R.no,r[3])).join('')}
+      <tr class="grp"><td colspan="4">New, 14</td></tr>
+      ${NEW1_DM.slice(0,4).map(r=>lrow(r[0]+`<div class="sub">${r[1]}</div>`,r[2],R.nw,r[3])).join('')}
+      ${NEW1_CO.slice(0,2).map(r=>lrow(r[0]+`<div class="sub">Company lead</div>`,'<span class="sub">No named decision maker</span>',R.nw,r[1])).join('')}
+      <tr class="more"><td colspan="4">8 more new leads. <a href="#">Show all</a></td></tr>
+    </tbody></table></div>`},
+
+  'reimport':{label:'6. Result, re-import',html:`${back('Campaigns')}<div class="page-head"><div><h1>Imported again into Physiotherapy, Greater London</h1>
+    <p class="lede" style="font-size:16px;color:var(--ink-2)">3 new leads and 3 updated. 11 were already enrolled and carry on where they are. 1 person still isn’t enrolled.</p></div>
+    <div class="row"><a class="btn" href="#">Find them in Leads</a></div></div>
+    <p class="sm muted" style="margin-top:10px">Today at 16:40 from ${F.p2} and ${F.b2}. No sequence was restarted.</p>
+    <div style="margin-top:14px">${tabs([['All','18'],['New','3'],['Already enrolled','11'],['Updated','3'],['Not enrolled','1']],'All')}</div>
+    <div class="table" style="margin-top:0;border-top-left-radius:0;border-top-right-radius:0;border-top:0"><table class="ledger">${ledgerHead}<tbody>
+      <tr class="grp"><td colspan="4">Not enrolled, 1</td></tr>${NOT2.map(r=>lrow(r[0]+`<div class="sub">${r[1]}</div>`,r[2],R.no,r[3])).join('')}
+      <tr class="grp"><td colspan="4">New, 3</td></tr>${NEW2.map(r=>lrow(r[0]+`<div class="sub">${r[1]}</div>`,r[2]||'<span class="sub">No named decision maker</span>',R.nw,r[3])).join('')}
+      <tr class="grp"><td colspan="4">Updated, 3</td></tr>${UPD2.map(r=>lrow(r[0]+`<div class="sub">${r[1]}</div>`,r[2]||'<span class="sub">No named decision maker</span>',R.up,r[3])).join('')}
+      <tr class="grp"><td colspan="4">Already enrolled, 11</td></tr><tr class="more"><td colspan="4">No change for 11 leads. <a href="#">Show them</a></td></tr>
+    </tbody></table></div>`},
+
+  'list':{label:'7. Campaigns, import again',html:`${topSearch()}<div class="page-head"><div><h1>Campaigns</h1></div><a class="btn go" href="#" data-go="new">${I.plus}New campaign</a></div>
+    <div class="camps">${campRow('Physiotherapy, Greater London','17 leads. Last import today at 16:40: 3 new, 3 updated, 1 not enrolled. <a href="#" data-go="reimport">See result</a>',`<a class="btn" href="#" data-go="again">${I.upload}Import again</a>`)}
+    ${campRow('Dental clinics, Rotterdam','21 leads. Last import 9 November: 21 new. <a href="#">See result</a>',`<a class="btn" href="#">${I.upload}Import again</a>`)}</div>`},
+
+  'again':{label:'8. Import again into a campaign',html:formPage('Import again into Physiotherapy, Greater London','<p class="sm muted" style="margin-top:-12px">17 leads now. Anyone already enrolled is updated with newer details and never enrolled twice or restarted.</p>',
+      fileRow('ok','People file',`${F.p2}. 10 people, matches the scraper’s People export.`,'<button class="btn small quiet">Replace</button>')+
+      fileRow('ok','Businesses file',`${F.b2}. 13 businesses, matches the scraper’s Businesses export.`,'<button class="btn small quiet">Replace</button>'),
+      '',`<a class="btn go" href="#" data-go="reimport">Import</a><button class="btn quiet">Cancel</button>`)},
+
+  'company':{label:'9. Company record via Leads (not settled by prototype)',nav:'leads',html:`<div class="lead-head"><h1>Leads</h1></div>
+    <label class="bigsearch">${I.search}<input type="search" value="Hackney Spine Clinic" aria-label="Search leads"></label>
+    <div class="filters"><select aria-label="Campaign"><option>All campaigns</option></select><select aria-label="Outreach status"><option>Any status</option></select><button class="btn quiet small clear">Clear</button></div>
+    <div class="cofacts"><h3>Hackney Spine Clinic</h3><div><span class="l">Main line</span><span class="muted">None in the scraper file</span></div><div><span class="l">Shared inbox</span>reception@hackneyspine.co.uk</div><div><span class="l">People on record</span>3, of whom 2 are enrolled</div></div>
+    <div class="table"><table><thead><tr><th style="width:44px"><input type="checkbox" aria-label="Select all shown"></th><th>Person</th><th>Company</th><th>Campaigns</th></tr></thead><tbody>
+      <tr class="click"><td><input type="checkbox" aria-label="Select Marcus Bell"></td><td><div class="nm">Marcus Bell</div><div class="sub">Owner</div></td><td>Hackney Spine Clinic<div class="sub">London</div></td><td><div class="enrl"><div>${status('g-run','Queued')}<span class="cn">Physiotherapy, Greater London</span></div></div></td></tr>
+      <tr class="click"><td><input type="checkbox" aria-label="Select Rachel Owusu"></td><td><div class="nm">Rachel Owusu</div><div class="sub">Head physiotherapist</div></td><td>Hackney Spine Clinic<div class="sub">London</div></td><td><div class="enrl"><div>${status('g-run','Queued')}<span class="cn">Physiotherapy, Greater London</span></div></div></td></tr>
+      <tr class="click" data-go="person"><td><input type="checkbox" aria-label="Select Ben Adeyemi"></td><td><div class="nm">Ben Adeyemi</div><div class="sub">Clinical lead</div></td><td>Hackney Spine Clinic<div class="sub">London</div></td><td><span class="sub">Not in a campaign: no personal email or mobile, and the company has no main line</span></td></tr>
+    </tbody></table></div><p class="foot-note">The company name on any person page opens this view.</p>`},
+
+  'person':{label:'10. Not-enrolled person page',nav:'leads',html:`${back('Leads')}<div class="pp">
+    <div class="p-top"><div class="p-head"><div class="kind">Decision maker</div><h1>Ben Adeyemi</h1><div class="role">Clinical lead at <a href="#" data-go="company">Hackney Spine Clinic</a>, London</div></div><div class="localtime"><div class="t">14:05</div><div class="w">Their time, inside calling hours</div></div></div>
+    <div class="contact"><div><span class="l">Main line</span><span class="muted">None in the scraper file</span></div><div><span class="l">Shared inbox</span>reception@hackneyspine.co.uk</div></div>
+    <section><h2>Campaigns</h2><ul class="rows"><li class="muted sm">Not in any campaign. The import into Physiotherapy, Greater London today at 16:40 found no personal email or mobile, and the company has no main line. Company details aren’t used for a decision maker’s email.</li></ul></section>
+    <section><h2>Others at Hackney Spine Clinic</h2><ul class="rows"><li><div class="rtop"><a class="cn" href="#">Marcus Bell</a>${status('g-run','Queued')}</div><p class="nx">Owner</p></li><li><div class="rtop"><a class="cn" href="#">Rachel Owusu</a>${status('g-run','Queued')}</div><p class="nx">Head physiotherapist</p></li></ul></section>
+  </div>`}
+};
+shell('B, Guided import', STATES);
+</script></body></html>
