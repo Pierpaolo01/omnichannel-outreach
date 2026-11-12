@@ -95,8 +95,10 @@ export type LeadRow =
       readonly id: string;
       readonly name: string;
       readonly city: string;
-      /** Named decision makers on record. A company lead with any has none reachable. */
+      /** Named decision makers on record. */
       readonly peopleOnRecord: number;
+      /** Of them, those enrolled or with a usable channel now. A later import can make one reachable. */
+      readonly peopleReachable: number;
       readonly enrollments: readonly EnrollmentView[];
       readonly unenrolledReason: UnenrolledReason;
     };

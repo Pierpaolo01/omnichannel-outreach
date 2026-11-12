@@ -160,11 +160,13 @@ function ImportForm({ campaign }: { campaign: CampaignListItem | null }) {
 
   const title = campaign ? `Import again into ${campaign.name}` : "New campaign";
   // As the approved invalid state shows: a pair the server refused marks the Businesses slot.
-  const problemFor = (slot: Slot): string | null => {
+  // The banner above then carries the explanation, so the slot says only what is wrong with it.
+  const problemFor = (slot: Slot): ((fileName: string) => string) | null => {
     const own = failure?.problems.find((p) => p.file === slot)?.message;
-    if (own) return own;
+    if (own) return (fileName) => `${fileName}: ${own}`;
     if (slot !== "businesses") return null;
-    return failure?.problems.find((p) => p.file === "pair")?.message ?? pairProblem;
+    if (failure?.problems.some((p) => p.file === "pair")) return (fileName) => `${fileName} is from a different scraper run.`;
+    return pairProblem === null ? null : (fileName) => `${fileName}: ${pairProblem}`;
   };
 
   return (
@@ -266,7 +268,8 @@ function FileRow({
 }: {
   slot: Slot;
   file: ChosenFile;
-  problem: string | null;
+  /** What is wrong with the chosen file, given its name. */
+  problem: ((fileName: string) => string) | null;
   onChoose: (file: File) => void;
 }) {
   const input = useRef<HTMLInputElement>(null);
@@ -280,7 +283,7 @@ function FileRow({
   if (file.state === "checking") description = `Checking ${file.name}…`;
   if (file.state === "checked") {
     if (!file.check.ok) description = `${file.name}: ${file.check.message}`;
-    else if (problem) description = `${file.name}: ${problem}`;
+    else if (problem) description = problem(file.name);
     else {
       const n = file.check.rows;
       description = `${file.name}. ${n} ${n === 1 ? meta.noun[0] : meta.noun[1]}, matches the scraper’s ${meta.export} export.`;

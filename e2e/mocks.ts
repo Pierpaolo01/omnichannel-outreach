@@ -1,9 +1,11 @@
 import type { Route } from "@playwright/test";
 import type {
   ApiError,
+  Campaign,
   CampaignListItem,
   CompanyRecord,
   FileCheckResult,
+  ImportRecord,
   LeadSearchResult,
   PersonRecord,
 } from "../src/shared/api.ts";
@@ -13,7 +15,14 @@ import type {
  * types, so when the API changes shape a stale mock fails typecheck instead of rendering
  * "undefined" in evidence. ESLint forbids calling route.fulfill anywhere else in e2e/.
  */
-export type MockBody = ApiError | LeadSearchResult | { campaigns: CampaignListItem[] } | PersonRecord | CompanyRecord | FileCheckResult;
+export type MockBody =
+  | ApiError
+  | LeadSearchResult
+  | { campaigns: CampaignListItem[] }
+  | { campaign: Campaign; imports: ImportRecord[] }
+  | PersonRecord
+  | CompanyRecord
+  | FileCheckResult;
 
 export function respond(route: Route, body: MockBody, status = 200): Promise<void> {
   // eslint-disable-next-line no-restricted-syntax -- the one typed entry point

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test } from "vitest";
+import { business, csvOf, person } from "../../test/support/export-builder.ts";
 import { scraperExport } from "../../test/support/fixtures.ts";
 import { testApi, type TestApi } from "../../test/support/http.ts";
 import type {
@@ -299,6 +300,18 @@ describe("contact details on the record", () => {
       expect.objectContaining({ name: "Marco Bianchi", enrollments: [], unenrolledReason: "no_usable_channel" }),
     ]);
     expect(await personNamed("Marco Bianchi")).toMatchObject({ enrollments: [], unenrolledReason: "no_usable_channel" });
+  });
+
+  test("a company lead's row says how many of its decision makers can be reached, after an import makes one reachable", async () => {
+    const campaign = await api.createCampaign("Pilates");
+    const studio = business({ business_id: "b1", place_id: "P1", business_name: "Juniper Pilates Studio", general_emails: "studio@juniper.example" });
+    const marco = (email: string) => person({ person_id: "p1", business_id: "b1", full_name: "Marco Bianchi", email });
+    await api.post(`/api/campaigns/${campaign.id}/imports`, csvOf({ businesses: [studio], people: [marco("")] }));
+    expect(await findRow("Juniper Pilates Studio")).toMatchObject({ kind: "company", peopleOnRecord: 1, peopleReachable: 0 });
+
+    await api.post(`/api/campaigns/${campaign.id}/imports`, csvOf({ businesses: [studio], people: [marco("marco@juniper.example")] }));
+    expect(await findRow("Juniper Pilates Studio")).toMatchObject({ kind: "company", peopleOnRecord: 1, peopleReachable: 1, enrollments: [expect.anything()] });
+    expect(await personNamed("Marco Bianchi")).toMatchObject({ enrollments: [expect.anything()], unenrolledReason: null });
   });
 
   test("a company lead's record holds its shared details and its enrollment", async () => {

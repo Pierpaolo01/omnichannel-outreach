@@ -192,12 +192,14 @@ class SqliteStore implements OutreachStore {
         };
       }
       const company = this.companyRef(id);
+      const people = this.peopleAt(id);
       return {
         kind: "company",
         id,
         name: company.name,
         city: company.city,
-        peopleOnRecord: this.peopleAt(id).length,
+        peopleOnRecord: people.length,
+        peopleReachable: people.filter((p) => p.unenrolledReason === null).length,
         enrollments: this.enrollments({ kind: "company", companyId: id }),
         unenrolledReason: this.companyUnenrolledReason(id),
       };
@@ -426,7 +428,8 @@ class SqliteStore implements OutreachStore {
       );
     }
 
-    // A direct number now known to be a mobile, or a person's number that is the main line.
+    // A direct number now known to be a mobile, a person's number that is the main line, or a
+    // number first stored without a known country, now read in the company's.
     for (const change of plan.detailChanges) {
       const ownerId = change.owner.kind === "person" ? change.owner.personId : change.owner.companyId;
       this.run("UPDATE contact_details SET owner_kind = ?, owner_id = ?, phone_kind = ? WHERE id = ?", [
@@ -435,9 +438,13 @@ class SqliteStore implements OutreachStore {
         change.phoneKind,
         change.id,
       ]);
+      if (change.rekeyed) {
+        this.run("UPDATE contact_details SET key = ?, search_digits = ? WHERE id = ?", [change.rekeyed.key, change.rekeyed.searchDigits, change.id]);
+      }
     }
 
-    // A personal copy of a company detail folds into it; a bad mark on either side survives.
+    // A personal copy of a company detail folds into it; a bad mark on either side survives. The
+    // copy's row is deleted: see docs/adr/0001 before anything references detail ids.
     for (const { fromId, intoId } of plan.consolidations) {
       this.run("UPDATE contact_details SET bad = MAX(bad, (SELECT bad FROM contact_details WHERE id = ?)) WHERE id = ?", [fromId, intoId]);
       this.run("DELETE FROM contact_details WHERE id = ?", [fromId]);

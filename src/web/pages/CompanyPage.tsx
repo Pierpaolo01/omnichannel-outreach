@@ -45,9 +45,7 @@ function Company({ company }: { company: CompanyRecord }) {
       </header>
 
       {company.people.length > 0 && company.enrollments.length > 0 && (
-        <p className="-mt-6 max-w-[60ch] text-[14px] text-ink-2">
-          None of its decision makers can be reached directly, so the company is contacted through its shared inbox.
-        </p>
+        <p className="-mt-6 max-w-[60ch] text-[14px] text-ink-2">{companyLeadNote(company)}</p>
       )}
 
       <ContactRow details={company.contactDetails} />
@@ -63,4 +61,17 @@ function Company({ company }: { company: CompanyRecord }) {
       )}
     </article>
   );
+}
+
+/**
+ * Why a company with decision makers on record is a company lead. It was enrolled while none of
+ * them could be reached; a later import can make one reachable, and the company lead carries on
+ * (whether it should end then is with the principal), so the note follows what is true now.
+ */
+function companyLeadNote(company: CompanyRecord): string {
+  // A colleague is reachable when enrolled or holding a usable channel: then no reason is given.
+  const reachable = company.people.filter((p) => p.unenrolledReason === null).length;
+  if (reachable === 0) return "None of its decision makers can be reached directly, so the company is contacted through its shared inbox.";
+  const who = company.people.length === 1 ? "Its decision maker" : `${reachable} of its ${company.people.length} decision makers`;
+  return `It is contacted through its shared inbox as a company lead. ${who} can now be reached too; their campaigns are under People on record.`;
 }

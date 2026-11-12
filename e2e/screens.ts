@@ -1,7 +1,7 @@
 import type { APIRequestContext, Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { OUTREACH_STATUSES } from "../src/domain/outreach-status.ts";
-import type { PersonRecord } from "../src/shared/api.ts";
+import type { ImportRecord, PersonRecord, SummaryEntry } from "../src/shared/api.ts";
 import { refusedPair, respond, serverError } from "./mocks.ts";
 import { fixture } from "./support.ts";
 
@@ -137,6 +137,58 @@ async function readyForm(page: Page): Promise<void> {
   await page.getByLabel("People file", { exact: true }).setInputFiles(fixture("people-run1.csv"));
   await page.getByLabel("Businesses file", { exact: true }).setInputFiles(fixture("businesses-run1.csv"));
   await settle(page, /6 businesses, matches/);
+}
+
+/** An import whose rows include the ones that changed nothing and a number a colleague holds. */
+function importWithUnmatchedRows(): { campaign: { id: string; name: string; defaultTimezone: null; createdAt: string }; imports: ImportRecord[] } {
+  const reach = { email: false, sms: false, call: true };
+  const person = (name: string, title: string, outcome: "new" | "already_enrolled", id: string): SummaryEntry => ({
+    outcome,
+    lead: { kind: "person", personId: id },
+    name,
+    title,
+    companyId: "co-harbour",
+    companyName: "Harbour Lane Physio",
+    peopleAtCompany: 4,
+    channels: reach,
+    via: ["direct", "main_line"],
+    added: [],
+    becameMobile: [],
+    stillBad: [],
+    heldByColleague: [{ detail: { channel: "phone", phoneKind: "direct", value: "+44 20 7946 0166" }, colleague: "Yara Glen" }],
+  });
+  const entries: SummaryEntry[] = [
+    { outcome: "not_enrolled", reason: "ambiguous_match", lead: null, name: "Sam Lee", file: "people", record: "person", conflict: "several_records", companyName: "Harbour Lane Physio" },
+    { outcome: "not_enrolled", reason: "ambiguous_match", lead: null, name: "Sam Lee", file: "people", record: "person", conflict: "another_row", companyName: "Harbour Lane Physio" },
+    { outcome: "not_enrolled", reason: "ambiguous_match", lead: null, name: "City Physio", file: "businesses", record: "company", conflict: "several_records", companyName: "City Physio" },
+    { outcome: "not_enrolled", reason: "ambiguous_match", lead: null, name: "Nia Cole", file: "people", record: "company", conflict: "several_records", companyName: "City Physio" },
+    person("Zara Glen", "Practice manager", "new", "p-zara"),
+    person("Yusuf Amin", "Physiotherapist", "already_enrolled", "p-yusuf"),
+  ];
+  return {
+    campaign: { id: "c-unmatched", name: "Physio clinics, London", defaultTimezone: null, createdAt: "2026-11-12T09:00:00.000Z" },
+    imports: [
+      {
+        id: "i-unmatched",
+        campaignId: "c-unmatched",
+        importedAt: "2026-11-13T09:00:00.000Z",
+        fileNames: { people: "people-run3.csv", businesses: "businesses-run3.csv" },
+        summary: {
+          rows: { businesses: 2, people: 5 },
+          counts: { new: 1, already_enrolled: 1, updated: 0, not_enrolled: 4 },
+          entries,
+          rowRecords: { businesses: ["co-harbour", null], people: [null, null, null, "p-zara", "p-yusuf"] },
+        },
+      },
+      {
+        id: "i-first",
+        campaignId: "c-unmatched",
+        importedAt: "2026-11-12T09:00:00.000Z",
+        fileNames: { people: "people-run1.csv", businesses: "businesses-run1.csv" },
+        summary: { rows: { businesses: 0, people: 0 }, counts: { new: 0, already_enrolled: 0, updated: 0, not_enrolled: 0 }, entries: [], rowRecords: { businesses: [], people: [] } },
+      },
+    ],
+  };
 }
 
 export const SCREENS: readonly Screen[] = [
@@ -317,6 +369,32 @@ export const SCREENS: readonly Screen[] = [
       await readyImportAgain(page, data);
       await page.getByRole("button", { name: "Import", exact: true }).click();
       await page.getByRole("alert").waitFor();
+    },
+  },
+  {
+    name: "new campaign, import failed on the server",
+    open: async (page) => {
+      await fail(page, "**/api/campaigns", "POST");
+      await readyForm(page);
+      await page.getByRole("button", { name: "Create campaign and import" }).click();
+      await page.getByRole("alert").waitFor();
+    },
+  },
+  {
+    name: "import again, import failed on the server",
+    open: async (page, data) => {
+      await fail(page, "**/api/campaigns/*/imports", "POST");
+      await readyImportAgain(page, data);
+      await page.getByRole("button", { name: "Import", exact: true }).click();
+      await page.getByRole("alert").waitFor();
+    },
+  },
+  {
+    name: "import result with rows that changed nothing and a number a colleague holds",
+    open: async (page) => {
+      await page.route("**/api/campaigns/c-unmatched", (route) => respond(route, importWithUnmatchedRows()));
+      await page.goto("/campaigns/c-unmatched/imports/i-unmatched");
+      await settle(page, "nothing in the row tells them apart");
     },
   },
   {

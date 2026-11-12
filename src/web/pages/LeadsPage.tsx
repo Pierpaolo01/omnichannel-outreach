@@ -224,11 +224,17 @@ function LeadTableRow({ row }: { row: LeadRow }) {
         <Link href={href} className="font-semibold no-underline hover:underline">
           {row.name}
         </Link>
-        <div className="text-[13px] text-muted">{row.kind === "person"
+        <div className="text-[13px] text-muted">
+          {row.kind === "person"
             ? row.title
-            : row.peopleOnRecord > 0
-              ? "Its decision makers can’t be reached directly"
-              : "No named decision maker"}</div>
+            : row.peopleOnRecord === 0
+              ? "No named decision maker"
+              : row.peopleReachable === 0
+                ? "Its decision makers can’t be reached directly"
+                : row.peopleOnRecord === 1
+                  ? "Its decision maker can now be reached"
+                  : `${row.peopleReachable} of its ${row.peopleOnRecord} decision makers can now be reached`}
+        </div>
       </td>
       <td className="px-3.5 py-3.5">
         {row.kind === "person" ? (
@@ -237,7 +243,14 @@ function LeadTableRow({ row }: { row: LeadRow }) {
             <div className="text-[13px] text-muted">{row.company.city}</div>
           </>
         ) : (
-          <span className="text-[13px] text-muted">{row.enrollments.length > 0 ? "Company lead" : "Company"}</span>
+          row.enrollments.length > 0 ? (
+            <span className="text-[13px] text-muted">Company lead</span>
+          ) : (
+            <span className="text-[13px] text-muted">
+              <span aria-hidden="true">—</span>
+              <span className="sr-only">Not a company lead</span>
+            </span>
+          )
         )}
       </td>
       <td className="px-3.5 py-3.5">

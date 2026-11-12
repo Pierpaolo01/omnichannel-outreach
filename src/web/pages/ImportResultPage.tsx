@@ -70,7 +70,8 @@ function Result({ campaign, imports, importId }: { campaign: Campaign; imports: 
         {files.length > 0 ? ` from ${files.join(" and ")}` : ""}.{firstImport ? "" : " No sequence was restarted."}
       </p>
 
-      <div role="tablist" aria-label="Import outcomes" className="tabs tabs-border mt-[30px] flex-wrap border-b border-line">
+      {/* The approved ledger's underline tabs: a 2px ink underline sitting on a full-width rule. */}
+      <div role="tablist" aria-label="Import outcomes" className="mt-[30px] flex flex-wrap gap-1 border-b border-line">
         {tabs.map(([key, label, count]) => (
           <button
             key={key}
@@ -79,7 +80,9 @@ function Result({ campaign, imports, importId }: { campaign: Campaign; imports: 
             id={`tab-${key}`}
             aria-selected={tab === key}
             aria-controls="import-rows"
-            className={`tab gap-2 px-3.5 font-medium ${tab === key ? "tab-active text-base-content" : "text-muted"}`}
+            className={`-mb-px flex cursor-pointer items-center gap-[9px] border-b-2 px-3.5 pb-3 pt-2.5 font-medium hover:text-base-content focus-visible:outline-offset-[-2px] ${
+              tab === key ? "border-base-content text-base-content" : "border-transparent text-muted"
+            }`}
             onClick={() => setTab(key)}
           >
             {label}
@@ -98,7 +101,7 @@ function Result({ campaign, imports, importId }: { campaign: Campaign; imports: 
         <div className="overflow-x-auto max-[720px]:overflow-visible">
           <table className="table text-[14px] max-[720px]:block">
             <thead className="max-[720px]:sr-only">
-              <tr className="border-line text-[13px] text-muted">
+              <tr className="border-b border-line text-[13px] text-muted">
                 <th className="px-3.5 py-3 font-medium">Decision maker or company lead</th>
                 <th className="px-3.5 py-3 font-medium">Company</th>
                 <th className="px-3.5 py-3 font-medium">Result</th>
@@ -158,7 +161,7 @@ function Rows({ entries, tab, onShow }: { entries: readonly SummaryEntry[]; tab:
 function EntryRow({ entry }: { entry: SummaryEntry }) {
   const href =
     entry.lead === null ? null : entry.lead.kind === "person" ? `/leads/people/${entry.lead.personId}` : `/leads/companies/${entry.lead.companyId}`;
-  const isCompany = entry.lead?.kind === "company";
+  const isCompany = entry.lead?.kind === "company" || ("file" in entry && entry.file === "businesses");
   const sub = isCompany ? (entry.outcome === "not_enrolled" ? "Company" : "Company lead") : entry.lead === null ? "" : entry.title;
   return (
     <tr className="border-line align-top max-[720px]:grid max-[720px]:grid-cols-[minmax(0,1fr)_auto] max-[720px]:gap-x-3 max-[720px]:gap-y-1 max-[720px]:px-3.5 max-[720px]:py-3 max-[720px]:[&>td]:border-0 max-[720px]:[&>td]:p-0">
@@ -174,7 +177,11 @@ function EntryRow({ entry }: { entry: SummaryEntry }) {
       </td>
       <td className="px-3.5 py-3.5 max-[720px]:order-3 max-[720px]:col-span-2">
         {entry.lead === null ? (
-          <span className="text-[13px] text-muted">Not in the Businesses file</span>
+          entry.reason === "ambiguous_match" && entry.file === "people" ? (
+            entry.companyName
+          ) : (
+            <span className="text-[13px] text-muted">{entry.reason === "ambiguous_match" ? "Not matched" : "Not in the Businesses file"}</span>
+          )
         ) : isCompany ? (
           <span className="text-[13px] text-muted">
             {entry.peopleAtCompany > 0 ? `${entry.peopleAtCompany} on record, none reachable` : "No named decision maker"}

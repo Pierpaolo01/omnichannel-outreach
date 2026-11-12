@@ -1,6 +1,7 @@
-import { emailKey, nameKey, type Channel, type PhoneKind } from "./contact-details.ts";
+import { emailKey, foldText, nameKey, type Channel, type PhoneKind } from "./contact-details.ts";
+import { resolveMatches, type Conflict } from "./matching.ts";
 import { ENROLLED_BY_IMPORT, type OutreachStatus } from "./outreach-status.ts";
-import { companyRegion, displayPhone, parsePhone } from "./phone.ts";
+import { companyRegion, displayPhone, parsePhone, type PhoneNumber } from "./phone.ts";
 import {
   companyLeadReach,
   companyLeadRoutes,
@@ -28,7 +29,8 @@ import type { ScrapedBusiness, ScrapedPerson, ScraperExport } from "./scraper-ex
  * - re-importing never enrols anyone twice and never touches an existing enrollment;
  * - new contact details are added alongside existing ones; bad marks are never cleared;
  * - only this campaign's enrollments matter: no exclusions from other campaigns.
- * Matching is the factory's choice, recorded in docs/adr/0001.
+ * Matching is the factory's choice, recorded in docs/adr/0001: a row matches only on evidence
+ * that singles out one record, and a row that cannot be matched safely changes nothing.
  */
 
 export type CompanyFields = {
@@ -120,16 +122,22 @@ export interface NewDetail {
 }
 
 /**
- * A change to a detail the CRM already holds: a direct number now known to be a mobile, or a
- * person's number that turned out to be the company main line. The id and bad mark are kept.
+ * A change to a detail the CRM already holds: a direct number now known to be a mobile, a
+ * person's number that turned out to be the company main line, or a number first stored without
+ * a known country, now read in the company's. The id and bad mark are kept.
  */
 export interface DetailChange {
   readonly id: string;
   readonly owner: DetailOwner;
   readonly phoneKind: PhoneKind | null;
+  /** The number's new key, when it can now be read in the company's country. */
+  readonly rekeyed: { readonly key: string; readonly searchDigits: string } | null;
 }
 
-/** A personal copy of a company detail, folded into it. A bad mark on either side survives. */
+/**
+ * A personal copy of a company detail, folded into it. A bad mark on either side survives. The
+ * store deletes the copy's row (docs/adr/0001 records what that means for later tickets).
+ */
 export interface DetailConsolidation {
   readonly fromId: string;
   readonly intoId: string;
@@ -162,13 +170,21 @@ export interface NewEnrollment {
 
 export type LeadOutcome = "new" | "already_enrolled" | "updated" | "not_enrolled";
 
-export type NotEnrolledReason = "no_usable_channel" | "company_not_in_export";
+export type NotEnrolledReason = "no_usable_channel" | "company_not_in_export" | "ambiguous_match";
+
+export type { Conflict } from "./matching.ts";
 
 /** A contact detail as the import summary reports it. Phones are grouped for reading. */
 export interface DetailNote {
   readonly channel: Channel;
   readonly phoneKind: PhoneKind | null;
   readonly value: string;
+}
+
+/** A detail the row listed that was not stored for this person, because a colleague holds it. */
+export interface HeldByColleague {
+  readonly detail: DetailNote;
+  readonly colleague: string;
 }
 
 export type SummaryEntry =
@@ -189,6 +205,7 @@ export type SummaryEntry =
       readonly becameMobile: readonly DetailNote[];
       /** Details in the export that the CRM already holds marked bad. They stay bad. */
       readonly stillBad: readonly DetailNote[];
+      readonly heldByColleague: readonly HeldByColleague[];
     }
   | {
       readonly outcome: "not_enrolled";
@@ -199,6 +216,7 @@ export type SummaryEntry =
       readonly companyId: string;
       readonly companyName: string;
       readonly peopleAtCompany: number;
+      readonly heldByColleague: readonly HeldByColleague[];
     }
   | {
       readonly outcome: "not_enrolled";
@@ -207,12 +225,28 @@ export type SummaryEntry =
       readonly name: string;
       /** The People row's business_id, blank or matching no business in this export. */
       readonly sourceBusinessId: string;
+    }
+  | {
+      readonly outcome: "not_enrolled";
+      /** The row could not be matched safely, so it changed nothing. */
+      readonly reason: "ambiguous_match";
+      readonly lead: null;
+      readonly name: string;
+      /** The file the row is in. */
+      readonly file: "businesses" | "people";
+      /** A person row that fits no single person, or a row whose company fits no single company. */
+      readonly record: "person" | "company";
+      readonly conflict: Conflict;
+      /** The company's name: on record for a person row, as in the file for a company row. */
+      readonly companyName: string;
     };
 
 export interface ImportSummary {
   readonly rows: { readonly businesses: number; readonly people: number };
   readonly counts: Readonly<Record<LeadOutcome, number>>;
   readonly entries: readonly SummaryEntry[];
+  /** The company or person record each row of the two files landed in, in file order; null when the row changed nothing. */
+  readonly rowRecords: { readonly businesses: readonly (string | null)[]; readonly people: readonly (string | null)[] };
 }
 
 export interface ImportPlan {
@@ -233,47 +267,79 @@ export function planImport(input: {
 }): ImportPlan {
   const { scraped, now, newId } = input;
   const crm = new WorkingDirectory(input.directory, now, newId);
+  const businessRecords: (string | null)[] = scraped.businesses.map(() => null);
+  const personRecords: (string | null)[] = scraped.people.map(() => null);
+  const unapplied: SummaryEntry[] = [];
 
-  // Businesses first: People rows join only to a business in this export.
-  const companyForBusinessId = new Map<string, string>();
-  const companiesInExport: string[] = [];
-  for (const business of scraped.businesses) {
-    const companyId = crm.upsertCompany(business);
-    if (business.sourceBusinessId) companyForBusinessId.set(business.sourceBusinessId, companyId);
-    companiesInExport.push(companyId);
+  // Businesses first: People rows join only to a business in this export. Rows that are one
+  // company are collapsed, then each is matched against the companies already on record.
+  const businessGroups = groupBusinesses(scraped.businesses);
+  const companyMatches = crm.matchCompanies(businessGroups);
+  const groupOfBusinessId = new Map<string, number>();
+  const companyOfGroup: ({ companyId: string } | { conflict: Conflict })[] = businessGroups.map((group, g) => {
+    for (const { row } of group.rows) if (row.sourceBusinessId) groupOfBusinessId.set(row.sourceBusinessId, g);
+    const match = companyMatches[g];
+    if (match?.kind === "ambiguous") {
+      unapplied.push({ outcome: "not_enrolled", reason: "ambiguous_match", lead: null, name: group.name, file: "businesses", record: "company", conflict: match.conflict, companyName: group.name });
+      return { conflict: match.conflict };
+    }
+    const companyId = crm.upsertCompany(group, match?.kind === "match" ? match.id : null);
     const owner: DetailOwner = { kind: "company", companyId };
-    if (business.mainPhone) {
-      const { e164, original } = business.mainPhone;
-      const region = crm.regionOf(companyId, e164);
-      crm.addPhone(owner, "main_line", e164 || original, parsePhone(e164, region) ?? parsePhone(original, region));
+    for (const { row, index } of group.rows) {
+      businessRecords[index] = companyId;
+      if (row.mainPhone) {
+        const { e164, original } = row.mainPhone;
+        const region = crm.regionOf(companyId, e164);
+        crm.addPhone(owner, "main_line", e164 || original, parsePhone(e164, region) ?? parsePhone(original, region));
+      }
+      for (const email of row.generalEmails) crm.addEmail(owner, email);
     }
-    for (const email of business.generalEmails) crm.addEmail(owner, email);
-  }
+    return { companyId };
+  });
 
-  const joined: { row: ScrapedPerson; companyId: string }[] = [];
-  const unmatched: SummaryEntry[] = [];
-  for (const row of scraped.people) {
-    const companyId = row.sourceBusinessId ? companyForBusinessId.get(row.sourceBusinessId) : undefined;
-    if (companyId) joined.push({ row, companyId });
-    else {
-      unmatched.push({
-        outcome: "not_enrolled",
-        reason: "company_not_in_export",
-        lead: null,
-        name: personDisplayName(fieldsOf(row)),
-        sourceBusinessId: row.sourceBusinessId,
-      });
+  const joined: JoinedRow[] = [];
+  scraped.people.forEach((row, index) => {
+    const g = row.sourceBusinessId ? groupOfBusinessId.get(row.sourceBusinessId) : undefined;
+    const company = g === undefined ? undefined : companyOfGroup[g];
+    const name = personDisplayName(fieldsOf(row));
+    if (!company) {
+      unapplied.push({ outcome: "not_enrolled", reason: "company_not_in_export", lead: null, name, sourceBusinessId: row.sourceBusinessId });
+    } else if ("conflict" in company) {
+      const companyName = businessGroups[g ?? 0]?.name ?? "";
+      unapplied.push({ outcome: "not_enrolled", reason: "ambiguous_match", lead: null, name, file: "people", record: "company", conflict: company.conflict, companyName });
+    } else {
+      joined.push({ row, index, companyId: company.companyId });
     }
-  }
+  });
 
-  // Rows sharing a scraper business and person ID, or a personal email at one company, are one
-  // person. Same-name rows with different identifiers stay separate.
-  const groups = groupRows(joined, crm);
-  const matches = crm.matchPeople(groups);
-  const peopleInExport = groups.map((group, index) => {
-    const personId = crm.upsertPerson(group, matches[index] ?? null);
-    for (const row of group.rows) addPersonDetails(crm, row, personId, group.companyId);
-    return personId;
+  // Rows that are one person are collapsed, then each is matched against the people already on
+  // record at its company. Same-name rows that differ stay separate people.
+  const groups = groupPeople(joined, crm);
+  const personMatches = crm.matchPeople(groups);
+  const peopleInExport: string[] = [];
+  groups.forEach((group, g) => {
+    const match = personMatches[g];
+    if (match?.kind === "ambiguous") {
+      for (const { row } of group.rows) {
+        unapplied.push({
+          outcome: "not_enrolled",
+          reason: "ambiguous_match",
+          lead: null,
+          name: personDisplayName(fieldsOf(row)),
+          file: "people",
+          record: "person",
+          conflict: match.conflict,
+          companyName: crm.company(group.companyId).fields.name,
+        });
+      }
+      return;
+    }
+    const personId = crm.upsertPerson(group, match?.kind === "match" ? match.id : null);
+    for (const { row, index } of group.rows) {
+      personRecords[index] = personId;
+      addPersonDetails(crm, row, personId, group.companyId);
+    }
+    peopleInExport.push(personId);
   });
 
   const entries: SummaryEntry[] = [];
@@ -282,15 +348,15 @@ export function planImport(input: {
   const decide = (lead: LeadRef, reachable: { reach: Reach; via: ContactRoute[] }, who: { name: string; title: string; companyId: string }): void => {
     const companyName = crm.company(who.companyId).fields.name;
     const base = { lead, ...who, companyName, peopleAtCompany: crm.peopleAt(who.companyId).length };
-    const notes = crm.notesFor(lead);
+    const { heldByColleague, ...notes } = crm.notesFor(lead);
     if (crm.isEnrolled(lead)) {
       const updated = notes.added.length > 0 || notes.becameMobile.length > 0;
-      entries.push({ ...base, outcome: updated ? "updated" : "already_enrolled", channels: reachable.reach, via: reachable.via, ...notes });
+      entries.push({ ...base, outcome: updated ? "updated" : "already_enrolled", channels: reachable.reach, via: reachable.via, ...notes, heldByColleague });
     } else if (hasUsableChannel(reachable.reach)) {
       enrollments.push({ id: newId(), lead, status: ENROLLED_BY_IMPORT, enrolledAt: now });
-      entries.push({ ...base, outcome: "new", channels: reachable.reach, via: reachable.via, ...notes });
+      entries.push({ ...base, outcome: "new", channels: reachable.reach, via: reachable.via, ...notes, heldByColleague });
     } else {
-      entries.push({ ...base, outcome: "not_enrolled", reason: "no_usable_channel" });
+      entries.push({ ...base, outcome: "not_enrolled", reason: "no_usable_channel", heldByColleague });
     }
   };
 
@@ -315,7 +381,8 @@ export function planImport(input: {
   // A company is a company lead when it has no named decision maker, or when none of its
   // decision makers can be reached: then its shared inbox is contacted and their names stay on
   // the record for calls (principal's decision, issue #11, 12 November 2026).
-  for (const companyId of unique(companiesInExport)) {
+  const companiesInExport = unique(companyOfGroup.flatMap((c) => ("companyId" in c ? [c.companyId] : [])));
+  for (const companyId of companiesInExport) {
     const people = crm.peopleAt(companyId);
     const company = crm.company(companyId);
     const lead: LeadRef = { kind: "company", companyId };
@@ -327,7 +394,7 @@ export function planImport(input: {
     decide(lead, reachable, { name: company.fields.name, title: "", companyId });
   }
 
-  entries.push(...unmatched);
+  entries.push(...unapplied);
   return {
     companies: crm.companyWrites(),
     people: crm.personWrites(),
@@ -339,6 +406,7 @@ export function planImport(input: {
       rows: { businesses: scraped.businesses.length, people: scraped.people.length },
       counts: countOutcomes(entries),
       entries,
+      rowRecords: { businesses: businessRecords, people: personRecords },
     },
   };
 }
@@ -358,25 +426,34 @@ export function noteOf(detail: { channel: Channel; phoneKind: PhoneKind | null; 
   };
 }
 
-/**
- * The identifier a row is recognised by next time: its scraper person_id, or for a row without
- * one, a stand-in built from its name, so the same row always finds the same person. Stand-ins
- * never group rows within one export; only real IDs and emails do.
- */
-function sourceIdOf(row: ScrapedPerson): string {
-  if (row.sourcePersonId) return row.sourcePersonId;
-  const name = personNameKey(fieldsOf(row));
-  return name ? `~name:${name}` : "";
+interface Indexed<T> {
+  readonly row: T;
+  /** The row's position in its file. */
+  readonly index: number;
+}
+
+/** Business rows of one export that are one company. */
+interface BusinessGroup {
+  readonly rows: readonly Indexed<ScrapedBusiness>[];
+  readonly name: string;
+}
+
+interface JoinedRow extends Indexed<ScrapedPerson> {
+  readonly companyId: string;
 }
 
 /** People rows of one export that are one person. */
-interface RowGroup {
+interface PersonGroup {
   readonly companyId: string;
-  readonly rows: readonly ScrapedPerson[];
+  readonly rows: readonly JoinedRow[];
 }
 
-function groupRows(joined: readonly { row: ScrapedPerson; companyId: string }[], crm: WorkingDirectory): RowGroup[] {
-  const parent = joined.map((_, i) => i);
+/**
+ * Collapses the rows that share any key into one group, keeping the first row's position.
+ * `keysOf` gives each row's keys; an empty key never joins anything.
+ */
+function collapse<T>(items: readonly T[], keysOf: (item: T) => readonly string[]): T[][] {
+  const parent = items.map((_, i) => i);
   const find = (i: number): number => {
     let root = i;
     while (parent[root] !== root) root = parent[root] ?? root;
@@ -384,25 +461,63 @@ function groupRows(joined: readonly { row: ScrapedPerson; companyId: string }[],
     return root;
   };
   const firstWith = new Map<string, number>();
-  joined.forEach(({ row, companyId }, i) => {
-    const keys: string[] = [];
-    if (row.sourceBusinessId && row.sourcePersonId) keys.push(`id|${row.sourceBusinessId}|${row.sourcePersonId}`);
-    const email = emailKey(row.email);
-    if (email && !crm.companyHolds(companyId, "email", email)) keys.push(`email|${companyId}|${email}`);
-    for (const key of keys) {
+  items.forEach((item, i) => {
+    for (const key of keysOf(item)) {
+      if (!key) continue;
       const other = firstWith.get(key);
       if (other === undefined) firstWith.set(key, i);
       else parent[find(i)] = find(other);
     }
   });
-  const groups = new Map<number, { companyId: string; rows: ScrapedPerson[] }>();
-  joined.forEach(({ row, companyId }, i) => {
+  const groups = new Map<number, T[]>();
+  items.forEach((item, i) => {
     const root = find(i);
-    const group = groups.get(root) ?? { companyId, rows: [] };
-    group.rows.push(row);
-    groups.set(root, group);
+    groups.set(root, [...(groups.get(root) ?? []), item]);
   });
   return [...groups.values()];
+}
+
+/** Rows with the same non-blank business_id or place_id, or identical after normalising, are one company. */
+function groupBusinesses(rows: readonly ScrapedBusiness[]): BusinessGroup[] {
+  const indexed = rows.map((row, index) => ({ row, index }));
+  return collapse(indexed, ({ row }) => [
+    row.sourceBusinessId ? `id|${row.sourceBusinessId}` : "",
+    row.placeId ? `place|${row.placeId}` : "",
+    `row|${JSON.stringify([
+      row.sourceBusinessId,
+      row.placeId ?? "",
+      nameKey(row.name),
+      mainLineOf(row)?.key ?? "",
+      row.generalEmails.map((e) => emailKey(e) ?? "").sort(),
+      ...[row.category, row.website, row.domain, row.street, row.neighborhood, row.city, row.stateProvince, row.postalCode, row.country, row.timezone ?? ""].map(foldText),
+    ])}`,
+  ]).map((group) => ({ rows: group, name: group.find((r) => r.row.name)?.row.name ?? "" }));
+}
+
+/**
+ * At one company, rows with the same non-blank person_id or personal email, or identical after
+ * normalising, are one person. Rows that differ in anything else stay separate people.
+ */
+function groupPeople(joined: readonly JoinedRow[], crm: WorkingDirectory): PersonGroup[] {
+  return collapse(joined, ({ row, companyId }) => {
+    const email = emailKey(row.email);
+    const personal = email && !crm.companyHolds(companyId, "email", email) ? email : "";
+    const region = crm.regionOf(companyId, "");
+    const phone = (raw: string) => parsePhone(raw, region)?.key ?? "";
+    return [
+      row.sourcePersonId ? `id|${companyId}|${row.sourcePersonId}` : "",
+      personal ? `email|${companyId}|${personal}` : "",
+      `row|${companyId}|${JSON.stringify([
+        row.sourcePersonId,
+        personNameKey(fieldsOf(row)),
+        email ?? "",
+        phone(row.directPhone),
+        phone(row.dialPhone),
+        dialKindOf(row),
+        ...[row.title, row.roleTier, row.linkedinUrl, row.timezone ?? ""].map(foldText),
+      ])}`,
+    ];
+  }).map((rows) => ({ companyId: rows[0]?.companyId ?? "", rows }));
 }
 
 function addPersonDetails(crm: WorkingDirectory, row: ScrapedPerson, personId: string, companyId: string): void {
@@ -412,12 +527,30 @@ function addPersonDetails(crm: WorkingDirectory, row: ScrapedPerson, personId: s
   crm.addEmail(owner, row.email);
 
   // A mobile first, so a number listed both as direct and as mobile keeps its mobile capability.
-  const dialKind: PhoneKind = /mobile|cell/i.test(row.dialPhoneType) ? "mobile" : "direct";
   const phones: [PhoneKind, string][] = [
-    [dialKind, row.dialPhone],
+    [dialKindOf(row), row.dialPhone],
     ["direct", row.directPhone],
   ];
   for (const [kind, raw] of phones) crm.addPhone(owner, kind, raw, parsePhone(raw, region));
+}
+
+/** dial_phone is a mobile only when dial_phone_type says mobile or cell. */
+function dialKindOf(row: ScrapedPerson): PhoneKind {
+  return /mobile|cell/i.test(row.dialPhoneType) ? "mobile" : "direct";
+}
+
+function mainLineOf(row: ScrapedBusiness): PhoneNumber | null {
+  if (!row.mainPhone) return null;
+  const region = companyRegion(row.country, [row.mainPhone.e164]);
+  return parsePhone(row.mainPhone.e164, region) ?? parsePhone(row.mainPhone.original, region);
+}
+
+/** A street address for matching: the street with its postal code, or empty when either is missing. */
+function addressKey(fields: Pick<CompanyFields, "street" | "postalCode">): string {
+  const fold = (text: string) => foldText(text).replace(/[^\p{L}\p{N}]/gu, "");
+  const street = fold(fields.street);
+  const postal = fold(fields.postalCode);
+  return street && postal ? `${street}|${postal}` : "";
 }
 
 function fieldsOf(row: ScrapedPerson): PersonFields {
@@ -459,8 +592,8 @@ function mergeFields<T extends Readonly<Record<string, string | null>>>(known: T
   return merged;
 }
 
-function unique(ids: readonly string[]): string[] {
-  return [...new Set(ids)];
+function unique<T>(items: readonly T[]): T[] {
+  return [...new Set(items)];
 }
 
 function countOutcomes(entries: readonly SummaryEntry[]): Record<LeadOutcome, number> {
@@ -506,30 +639,7 @@ interface MutablePerson {
   touched: boolean;
 }
 
-/** A map from a key to every id holding it. A key held by more than one id is ambiguous. */
-class Index {
-  private readonly map = new Map<string, Set<string>>();
-
-  add(key: string, id: string): void {
-    if (!key) return;
-    const ids = this.map.get(key) ?? new Set<string>();
-    ids.add(id);
-    this.map.set(key, ids);
-  }
-
-  all(key: string): string[] {
-    return [...(this.map.get(key) ?? [])];
-  }
-
-  /** The id holding `key`, or undefined when none or several do. */
-  only(key: string): string | undefined {
-    const ids = this.map.get(key);
-    if (ids?.size !== 1) return undefined;
-    return [...ids][0];
-  }
-}
-
-/** The directory as it evolves while one export is applied, with the indexes used for matching. */
+/** The directory as it evolves while one export is applied. */
 class WorkingDirectory {
   private readonly companies = new Map<string, MutableCompany>();
   private readonly people = new Map<string, MutablePerson>();
@@ -539,9 +649,7 @@ class WorkingDirectory {
   private readonly merged: DetailConsolidation[] = [];
   private readonly keptBad: { owner: DetailOwner; detail: MutableDetail }[] = [];
   private readonly upgraded: { owner: DetailOwner; detail: MutableDetail }[] = [];
-  private readonly companyByPlace = new Map<string, string>();
-  private readonly companyByBusinessId = new Index();
-  private readonly companyByNameAndMainLine = new Index();
+  private readonly heldElsewhere: { owner: DetailOwner; held: HeldByColleague }[] = [];
   private readonly now: string;
   private readonly newId: () => string;
 
@@ -560,7 +668,6 @@ class WorkingDirectory {
         source: {},
         touched: false,
       });
-      this.indexCompany(c.id);
     }
     for (const p of directory.people) {
       this.people.set(p.id, {
@@ -599,48 +706,61 @@ class WorkingDirectory {
   }
 
   /**
-   * Same company when the place_id matches; otherwise the scraper's business_id, or the name with
-   * any main line the company holds, when exactly one company fits and neither side carries a
-   * different place_id. Scraper IDs are not proven stable across runs, so a conflicting place_id
-   * always wins, and an ambiguous key matches nothing.
+   * Matches each group of business rows to a company already on record, on evidence that
+   * singles one out, strongest first:
+   * 1. the same place_id;
+   * 2. one of its business_ids, with an agreeing name and, where both sides have them, an
+   *    agreeing main line or address;
+   * 3. an agreeing name and a main line the row carries;
+   * 4. an agreeing name and address;
+   * 5. an agreeing name alone, when the row has no place_id, main line or address.
+   * A company with a different place_id never matches. Called before any company is written.
    */
-  upsertCompany(row: ScrapedBusiness): string {
-    const compatible = (id: string | undefined): string | undefined => {
-      if (!id) return undefined;
-      const known = this.company(id);
-      return known.placeId && row.placeId && known.placeId !== row.placeId ? undefined : id;
-    };
-    const region = companyRegion(row.country, [row.mainPhone?.e164 ?? ""]);
-    const mainLine = row.mainPhone ? (parsePhone(row.mainPhone.e164, region) ?? parsePhone(row.mainPhone.original, region)) : null;
-    // A business_id alone is not enough: the name or a main line must agree too (round 2).
-    const corroborated = (id: string | undefined): string | undefined => {
-      if (!id) return undefined;
-      const known = this.company(id);
-      const sameName = nameKey(known.fields.name) !== "" && nameKey(known.fields.name) === nameKey(row.name);
-      const sharedLine = mainLine !== null && known.details.some((d) => d.phoneKind === "main_line" && d.key === mainLine.key);
-      return sameName || sharedLine ? id : undefined;
-    };
-    // Of the companies holding this business_id, one the name or a main line corroborates. When
-    // several do, prefer one whose name agrees, then the most recently created, so importing the
-    // same files again settles on the same company instead of adding another.
-    const byBusinessId = (): string | undefined => {
-      if (!row.sourceBusinessId) return undefined;
-      const fits = this.companyByBusinessId.all(row.sourceBusinessId).filter((id) => corroborated(compatible(id)) !== undefined);
-      const named = fits.filter((id) => nameKey(this.company(id).fields.name) === nameKey(row.name));
-      return (named.length > 0 ? named : fits).at(-1);
-    };
-    const existing =
-      (row.placeId ? this.companyByPlace.get(row.placeId) : undefined) ??
-      byBusinessId() ??
-      compatible(mainLine ? this.companyByNameAndMainLine.only(`${nameKey(row.name)}|${mainLine.key}`) : undefined);
+  matchCompanies(groups: readonly BusinessGroup[]) {
+    const known = [...this.companies.values()];
+    return resolveMatches(
+      groups.map((group) => {
+        const rows = group.rows.map((r) => r.row);
+        const places = unique(rows.flatMap((r) => (r.placeId ? [r.placeId] : [])));
+        const businessIds = unique(rows.flatMap((r) => (r.sourceBusinessId ? [r.sourceBusinessId] : [])));
+        const names = unique(rows.map((r) => nameKey(r.name)).filter(Boolean));
+        const lines = unique(rows.flatMap((r) => mainLineOf(r)?.key ?? []));
+        const addresses = unique(rows.map(addressKey).filter(Boolean));
+        const compatible = known.filter((c) => !c.placeId || places.length === 0 || places.includes(c.placeId));
+        const named = compatible.filter((c) => names.includes(nameKey(c.fields.name)));
+        const linesOf = (c: MutableCompany) => c.details.filter((d) => d.phoneKind === "main_line").map((d) => d.key);
+        const sharesLine = (c: MutableCompany) => linesOf(c).some((key) => lines.includes(key));
+        const sharesAddress = (c: MutableCompany) => addresses.includes(addressKey(c.fields));
+        const corroborated = (c: MutableCompany) => {
+          const comparable = (lines.length > 0 && linesOf(c).length > 0) || (addresses.length > 0 && addressKey(c.fields) !== "");
+          return !comparable || sharesLine(c) || sharesAddress(c);
+        };
+        const ids = (list: readonly MutableCompany[]) => list.map((c) => c.id);
+        const bare = places.length === 0 && lines.length === 0 && addresses.length === 0;
+        return [
+          ids(known.filter((c) => c.placeId !== null && places.includes(c.placeId))),
+          ids(named.filter((c) => businessIds.some((id) => c.sourceBusinessIds.has(id)) && corroborated(c))),
+          ids(named.filter(sharesLine)),
+          ids(named.filter(sharesAddress)),
+          bare ? ids(named) : [],
+        ];
+      }),
+    );
+  }
 
-    const incoming = companyFieldsOf(row);
-    const newIds = row.sourceBusinessId ? [row.sourceBusinessId] : [];
+  upsertCompany(group: BusinessGroup, existing: string | null): string {
+    const rows = group.rows.map((r) => r.row);
+    const [first, ...rest] = rows;
+    if (!first) throw new Error("an empty business group");
+    const incoming = rest.reduce((fields, row) => mergeFields(fields, companyFieldsOf(row)), companyFieldsOf(first));
+    const placeId = rows.find((r) => r.placeId)?.placeId ?? null;
+    const source = rows.at(-1)?.source ?? first.source;
+    const newIds = unique(rows.flatMap((r) => (r.sourceBusinessId ? [r.sourceBusinessId] : [])));
     if (existing) {
       const company = this.company(existing);
       company.fields = mergeFields(company.fields, incoming);
-      company.placeId ??= row.placeId;
-      company.source = row.source;
+      company.placeId ??= placeId;
+      company.source = source;
       company.touched = true;
       for (const id of newIds) {
         if (!company.sourceBusinessIds.has(id)) {
@@ -648,7 +768,6 @@ class WorkingDirectory {
           company.newSourceBusinessIds.add(id);
         }
       }
-      this.indexCompany(existing);
       return existing;
     }
 
@@ -656,80 +775,53 @@ class WorkingDirectory {
     this.companies.set(id, {
       id,
       isNew: true,
-      placeId: row.placeId,
+      placeId,
       sourceBusinessIds: new Set(newIds),
       newSourceBusinessIds: new Set(newIds),
       fields: incoming,
       details: [],
-      source: row.source,
+      source,
       touched: true,
     });
-    this.indexCompany(id);
     return id;
   }
 
   /**
-   * Matches each group of People rows to a person already in the CRM, or to nobody. Groups of
-   * one export never share a person, and each existing person is claimed at most once.
-   * In order, a group matches the one unclaimed person at its company who:
-   * 1. has one of the group's own emails;
-   * 2. has one of its scraper person_ids and the same name;
-   * 3. has the same name, and no email that conflicts with the group's;
-   * 4. has the same name, when nobody else at the company and no other group in the export
-   *    does; a differing email is then a newly found one (round 2, item 4).
-   * A reused person_id under a different name is not a match.
+   * Matches each group of People rows to a person who was on record at its company before this
+   * import, on evidence that singles one out, strongest first:
+   * 1. one of the row's personal emails;
+   * 2. one of its scraper person_ids, with an agreeing name;
+   * 3. an agreeing name and a personal number the row carries;
+   * 4. an agreeing name, when nobody else at the company has it.
    */
-  matchPeople(groups: readonly RowGroup[]): (string | null)[] {
-    const result: (string | null)[] = groups.map(() => null);
-    const claimed = new Set<string>();
-    const candidates = (companyId: string) => this.peopleAt(companyId).filter((p) => !p.isNew && !claimed.has(p.id));
-    const emailsOf = (p: MutablePerson) => p.details.filter((d) => d.channel === "email").map((d) => d.key);
-    const identity = groups.map((g) => ({
-      emails: g.rows.map((r) => emailKey(r.email)).filter((e): e is string => e !== null && !this.companyHolds(g.companyId, "email", e)),
-      ids: g.rows.map(sourceIdOf).filter(Boolean),
-      names: [...new Set(g.rows.map((r) => personNameKey(fieldsOf(r))).filter(Boolean))],
-    }));
-    const groupsWithName = (companyId: string, name: string) =>
-      groups.filter((g, i) => g.companyId === companyId && identity[i]?.names.includes(name)).length;
-
-    const pass = (fits: (index: number, candidate: MutablePerson) => boolean, several: "none" | "latest" = "none") => {
-      groups.forEach((group, index) => {
-        if (result[index] !== null) return;
-        const found = candidates(group.companyId).filter((c) => fits(index, c));
-        const chosen = found.length === 1 || several === "latest" ? found.at(-1) : undefined;
-        if (chosen) {
-          result[index] = chosen.id;
-          claimed.add(chosen.id);
-        }
-      });
-    };
-    const id = (index: number) => identity[index] ?? { emails: [], ids: [], names: [] };
-    const sameName = (index: number, c: MutablePerson) => id(index).names.includes(personNameKey(c.fields));
-
-    pass((index, c) => id(index).emails.some((e) => emailsOf(c).includes(e)));
-    // Several people holding the same ID and name are left from an earlier ambiguous row: take
-    // the most recently created, so the same files always settle on the same person.
-    pass((index, c) => id(index).ids.some((pid) => c.sourcePersonIds.has(pid)) && sameName(index, c), "latest");
-    pass((index, c) => {
-      const known = emailsOf(c);
-      const mine = id(index).emails;
-      const conflicting = mine.length > 0 && known.length > 0 && !mine.some((e) => known.includes(e));
-      return sameName(index, c) && !conflicting;
-    });
-    pass((index, c) => {
-      const name = personNameKey(c.fields);
-      const group = groups[index];
-      return group !== undefined && sameName(index, c) && groupsWithName(group.companyId, name) === 1;
-    });
-    return result;
+  matchPeople(groups: readonly PersonGroup[]) {
+    return resolveMatches(
+      groups.map((group) => {
+        const rows = group.rows.map((r) => r.row);
+        const region = this.regionOf(group.companyId, "");
+        const emails = unique(rows.flatMap((r) => emailKey(r.email) ?? [])).filter((e) => !this.companyHolds(group.companyId, "email", e));
+        const ids = unique(rows.flatMap((r) => (r.sourcePersonId ? [r.sourcePersonId] : [])));
+        const names = unique(rows.map((r) => personNameKey(fieldsOf(r))).filter(Boolean));
+        const phones = unique(rows.flatMap((r) => [r.directPhone, r.dialPhone].flatMap((raw) => parsePhone(raw, region)?.key ?? [])));
+        const candidates = this.peopleAt(group.companyId).filter((p) => !p.isNew);
+        const named = candidates.filter((p) => names.includes(personNameKey(p.fields)));
+        const idsOf = (list: readonly MutablePerson[]) => list.map((p) => p.id);
+        return [
+          idsOf(candidates.filter((p) => p.details.some((d) => d.channel === "email" && emails.includes(d.key)))),
+          idsOf(named.filter((p) => ids.some((id) => p.sourcePersonIds.has(id)))),
+          idsOf(named.filter((p) => phones.some((key) => this.findNumber(p.details, key, region) !== undefined))),
+          idsOf(named),
+        ];
+      }),
+    );
   }
 
-  upsertPerson(group: RowGroup, existing: string | null): string {
-    const [first, ...rest] = group.rows;
+  upsertPerson(group: PersonGroup, existing: string | null): string {
+    const [first, ...rest] = group.rows.map((r) => r.row);
     if (!first) throw new Error("an empty row group");
     const incoming = rest.reduce((fields, row) => mergeFields(fields, fieldsOf(row)), fieldsOf(first));
-    const source = group.rows.at(-1)?.source ?? first.source;
-    const ids = [...new Set(group.rows.map(sourceIdOf).filter(Boolean))];
+    const source = group.rows.at(-1)?.row.source ?? first.source;
+    const ids = unique(group.rows.flatMap((r) => (r.row.sourcePersonId ? [r.row.sourcePersonId] : [])));
     if (existing) {
       const person = this.person(existing);
       person.fields = mergeFields(person.fields, incoming);
@@ -785,7 +877,12 @@ class WorkingDirectory {
       return;
     }
     const companyId = this.person(owner.personId).companyId;
-    if (this.companyHolds(companyId, "email", key) || this.colleagueHolds(owner.personId, "email", key)) return;
+    if (this.companyHolds(companyId, "email", key)) return;
+    const colleague = this.colleagueHolding(owner.personId, (details) => details.find((d) => d.channel === "email" && d.key === key));
+    if (colleague) {
+      this.noteHeldElsewhere(owner, { channel: "email", phoneKind: null, key, value: raw.trim() }, colleague);
+      return;
+    }
     const existing = this.person(owner.personId).details.find((d) => d.channel === "email" && d.key === key);
     if (existing) this.noteKeptBad(owner, existing);
     else this.add(owner, "email", null, raw, key, "");
@@ -797,28 +894,34 @@ class WorkingDirectory {
    * personal copy at the company into the one company detail, keeping a bad mark. A number a
    * colleague already holds stays theirs. A direct number later shown to be a mobile becomes one.
    */
-  addPhone(owner: DetailOwner, kind: PhoneKind, raw: string, phone: ReturnType<typeof parsePhone>): void {
+  addPhone(owner: DetailOwner, kind: PhoneKind, raw: string, phone: PhoneNumber | null): void {
     if (!phone) return;
     if (owner.kind === "company") {
       const held = this.claimForCompany(owner.companyId, "phone", phone.key, "main_line");
       if (held) this.noteKeptBad(owner, held);
       else this.add(owner, "phone", "main_line", raw, phone.key, phone.searchDigits);
-      this.indexCompany(owner.companyId);
       return;
     }
     const person = this.person(owner.personId);
     const companyId = person.companyId;
-    if (this.companyHolds(companyId, "phone", phone.key)) {
-      const mainLine = this.company(companyId).details.find((d) => d.channel === "phone" && d.key === phone.key);
-      if (mainLine) this.noteKeptBad({ kind: "company", companyId }, mainLine);
+    const region = this.regionOf(companyId, "");
+    const mainLine = this.findNumber(this.company(companyId).details, phone.key, region);
+    if (mainLine) {
+      this.rekey(mainLine, { kind: "company", companyId }, phone);
+      this.noteKeptBad({ kind: "company", companyId }, mainLine);
       return;
     }
-    if (this.colleagueHolds(owner.personId, "phone", phone.key)) return;
-    const existing = person.details.find((d) => d.channel === "phone" && d.key === phone.key);
+    const colleague = this.colleagueHolding(owner.personId, (details) => this.findNumber(details, phone.key, region));
+    if (colleague) {
+      this.noteHeldElsewhere(owner, { channel: "phone", phoneKind: kind, key: phone.key, value: raw.trim() }, colleague);
+      return;
+    }
+    const existing = this.findNumber(person.details, phone.key, region);
     if (!existing) {
       this.add(owner, "phone", kind, raw, phone.key, phone.searchDigits);
       return;
     }
+    this.rekey(existing, owner, phone);
     this.noteKeptBad(owner, existing);
     if (kind === "mobile" && existing.phoneKind === "direct") {
       existing.phoneKind = "mobile";
@@ -827,9 +930,26 @@ class WorkingDirectory {
     }
   }
 
-  private colleagueHolds(personId: string, channel: Channel, key: string): boolean {
+  /**
+   * The detail holding this number: by its key, or, for a number first stored without a known
+   * country (keyed by its digits), by reading what was written in the company's country now.
+   */
+  private findNumber(details: readonly MutableDetail[], key: string, region: string | null): MutableDetail | undefined {
+    return details.find(
+      (d) => d.channel === "phone" && (d.key === key || (region !== null && !d.key.startsWith("+") && parsePhone(d.value, region)?.key === key)),
+    );
+  }
+
+  /** Gives a number first stored without a known country its proper key. */
+  private rekey(detail: MutableDetail, owner: DetailOwner, phone: PhoneNumber): void {
+    if (detail.key === phone.key) return;
+    detail.key = phone.key;
+    this.recordChange(detail, owner, { key: phone.key, searchDigits: phone.searchDigits });
+  }
+
+  private colleagueHolding(personId: string, holds: (details: readonly MutableDetail[]) => MutableDetail | undefined): MutablePerson | undefined {
     const companyId = this.person(personId).companyId;
-    return this.peopleAt(companyId).some((p) => p.id !== personId && p.details.some((d) => d.channel === channel && d.key === key));
+    return this.peopleAt(companyId).find((p) => p.id !== personId && holds(p.details) !== undefined);
   }
 
   /**
@@ -839,14 +959,24 @@ class WorkingDirectory {
   private claimForCompany(companyId: string, channel: Channel, key: string, phoneKind: PhoneKind | null): MutableDetail | null {
     const owner: DetailOwner = { kind: "company", companyId };
     const company = this.company(companyId);
-    let target = company.details.find((d) => d.channel === channel && d.key === key) ?? null;
+    const region = this.regionOf(companyId, "");
+    const holding = (d: MutableDetail) =>
+      d.channel === channel && (d.key === key || (channel === "phone" && region !== null && !d.key.startsWith("+") && parsePhone(d.value, region)?.key === key));
+    const searchDigits = channel === "phone" ? (parsePhone(key, region)?.searchDigits ?? "") : "";
+    let target = company.details.find(holding) ?? null;
+    if (target && target.key !== key) {
+      target.key = key;
+      this.recordChange(target, owner, { key, searchDigits });
+    }
     for (const person of this.peopleAt(companyId)) {
-      for (const copy of person.details.filter((d) => d.channel === channel && d.key === key)) {
+      for (const copy of person.details.filter(holding)) {
         person.details = person.details.filter((d) => d !== copy);
         if (!target) {
           copy.phoneKind = phoneKind;
+          const rekeyed = copy.key === key ? null : { key, searchDigits };
+          copy.key = key;
           company.details.push(copy);
-          this.recordChange(copy, owner);
+          this.recordChange(copy, owner, rekeyed);
           target = copy;
           continue;
         }
@@ -860,8 +990,8 @@ class WorkingDirectory {
     return target;
   }
 
-  /** What this import added to the lead's own record, and which of its details stayed bad. */
-  notesFor(lead: LeadRef): { added: DetailNote[]; becameMobile: DetailNote[]; stillBad: DetailNote[] } {
+  /** What this import added to the lead's own record, which of its details stayed bad, and what a colleague kept. */
+  notesFor(lead: LeadRef): { added: DetailNote[]; becameMobile: DetailNote[]; stillBad: DetailNote[]; heldByColleague: HeldByColleague[] } {
     const owns = (owner: DetailOwner) =>
       lead.kind === "person"
         ? owner.kind === "person" && owner.personId === lead.personId
@@ -871,6 +1001,7 @@ class WorkingDirectory {
       added: this.added.filter((d) => owns(d.owner)).map((d) => noteOf({ ...d, phoneKind: current(d.id)?.phoneKind ?? d.phoneKind })),
       becameMobile: this.upgraded.filter((u) => owns(u.owner)).map((u) => noteOf(u.detail)),
       stillBad: this.keptBad.filter((k) => owns(k.owner)).map((k) => noteOf(k.detail)),
+      heldByColleague: this.heldElsewhere.filter((h) => owns(h.owner)).map((h) => h.held),
     };
   }
 
@@ -900,11 +1031,11 @@ class WorkingDirectory {
       }));
   }
 
-  /** New details, with any kind change made later in the same import folded in. */
+  /** New details, with any change made later in the same import folded in. */
   newDetails(): NewDetail[] {
     return this.added.map((d) => {
       const change = this.changed.get(d.id);
-      return change ? { ...d, owner: change.owner, phoneKind: change.phoneKind } : d;
+      return change ? { ...d, owner: change.owner, phoneKind: change.phoneKind, ...(change.rekeyed ?? {}) } : d;
     });
   }
 
@@ -942,24 +1073,23 @@ class WorkingDirectory {
     this.added.push(detail);
   }
 
-  private recordChange(detail: MutableDetail, owner: DetailOwner): void {
-    this.changed.set(detail.id, { id: detail.id, owner, phoneKind: detail.phoneKind });
+  private recordChange(detail: MutableDetail, owner: DetailOwner, rekeyed: DetailChange["rekeyed"] = null): void {
+    const earlier = this.changed.get(detail.id)?.rekeyed ?? null;
+    this.changed.set(detail.id, { id: detail.id, owner, phoneKind: detail.phoneKind, rekeyed: rekeyed ?? earlier });
   }
 
   private noteKeptBad(owner: DetailOwner, detail: MutableDetail): void {
     if (detail.bad && !this.keptBad.some((k) => k.detail.id === detail.id)) this.keptBad.push({ owner, detail });
   }
 
-  private indexCompany(id: string): void {
-    const company = this.company(id);
-    if (company.placeId) this.companyByPlace.set(company.placeId, id);
-    for (const businessId of company.sourceBusinessIds) this.companyByBusinessId.add(businessId, id);
-    for (const d of company.details) {
-      if (d.phoneKind === "main_line") this.companyByNameAndMainLine.add(`${nameKey(company.fields.name)}|${d.key}`, id);
-    }
+  private noteHeldElsewhere(owner: DetailOwner, detail: { channel: Channel; phoneKind: PhoneKind | null; key: string; value: string }, colleague: MutablePerson): void {
+    const note = noteOf(detail);
+    const same = (h: { owner: DetailOwner; held: HeldByColleague }) =>
+      leadKey(h.owner) === leadKey(owner) && h.held.detail.channel === note.channel && h.held.detail.value === note.value;
+    if (!this.heldElsewhere.some(same)) this.heldElsewhere.push({ owner, held: { detail: note, colleague: personDisplayName(colleague.fields) } });
   }
 }
 
-function leadKey(lead: LeadRef): string {
+function leadKey(lead: LeadRef | DetailOwner): string {
   return lead.kind === "person" ? `person:${lead.personId}` : `company:${lead.companyId}`;
 }

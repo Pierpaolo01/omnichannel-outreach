@@ -49,15 +49,38 @@ function routesSentence(entry: Extract<SummaryEntry, { channels: unknown }>): st
   return `${sentenceCase(joinWords(words))}.`;
 }
 
+/** Why a row that could not be matched safely changed nothing. */
+function ambiguousSentence(entry: Extract<SummaryEntry, { reason: "ambiguous_match" }>): string {
+  if (entry.record === "person") {
+    return entry.conflict === "several_records"
+      ? `Matches more than one person on record at ${entry.companyName}, and nothing in the row tells them apart. Nothing was changed.`
+      : "Another row in this file fits the same person on record, so nothing was changed for this row.";
+  }
+  const what = entry.file === "businesses" ? "for this company or its people" : "for this person";
+  const subject = entry.file === "businesses" ? "This company" : "Their company";
+  return entry.conflict === "several_records"
+    ? `${subject} matches more than one company on record, and nothing in the row tells them apart. Nothing was changed ${what}.`
+    : `Another row in this file fits the same company on record, so nothing was changed ${what}.`;
+}
+
+/** A number or address the row listed that a colleague already holds, so it stayed theirs. */
+function heldSentences(entry: Extract<SummaryEntry, { heldByColleague: unknown }>): string {
+  return entry.heldByColleague
+    .map(({ detail, colleague }) => ` ${sentenceCase(detailWord(detail, "person"))} ${detail.value} is already ${colleague}’s, so it wasn’t added.`)
+    .join("");
+}
+
 /** The "What happened" cell for one row of the import summary. */
 export function whatHappened(entry: SummaryEntry): ReactNode {
   if (entry.outcome === "not_enrolled") {
     if (entry.reason === "company_not_in_export") return "Their company isn’t in the Businesses file.";
+    if (entry.reason === "ambiguous_match") return ambiguousSentence(entry);
     return entry.lead.kind === "company"
       ? "No usable main line or shared inbox."
-      : `No personal email or mobile, and ${entry.companyName} has no usable main line.`;
+      : `No personal email or mobile, and ${entry.companyName} has no usable main line.${heldSentences(entry)}`;
   }
   const owner = entry.lead.kind;
+  const held = heldSentences(entry);
   const added = entry.added.map((d) => `Added ${detailWord(d, owner)} ${d.value}, marked newer.`).join(" ");
   const stillBad = entry.stillBad.map((d) => (
     <span key={`${d.channel}:${d.value}`}>
@@ -65,9 +88,9 @@ export function whatHappened(entry: SummaryEntry): ReactNode {
       {sentenceCase(detailWord(d, owner))} <s className="text-faint">{d.value}</s> is still marked wrong.
     </span>
   ));
-  if (entry.outcome === "new") return routesSentence(entry);
-  if (entry.outcome === "updated") return <>{added}{stillBad}</>;
-  return stillBad.length > 0 ? <>No new details.{stillBad}</> : "No change.";
+  if (entry.outcome === "new") return `${routesSentence(entry)}${held}`;
+  if (entry.outcome === "updated") return <>{added}{stillBad}{held}</>;
+  return stillBad.length > 0 || held ? <>No new details.{stillBad}{held}</> : "No change.";
 }
 
 /** The sentence under the results heading. */
