@@ -1,5 +1,6 @@
-import { emailKey, foldText, phoneKey, type Channel, type PhoneKind } from "./contact-details.ts";
+import { emailKey, foldText, nameKey, type Channel, type PhoneKind } from "./contact-details.ts";
 import { ENROLLED_BY_IMPORT, type OutreachStatus } from "./outreach-status.ts";
+import { displayPhone, parsePhone } from "./phone.ts";
 import {
   companyLeadReach,
   companyLeadRoutes,
@@ -17,13 +18,17 @@ import type { ScrapedBusiness, ScrapedPerson, ScraperExport } from "./scraper-ex
  * the import summary reports. Pure: the caller loads the directory, applies the plan and supplies
  * the clock and identifiers.
  *
- * Rules (spec issue #10, "Define CSV enrollment and repeat-contact behavior"):
+ * Rules (spec issue #10, "Define CSV enrollment and repeat-contact behavior", and the principal's
+ * decisions on #11):
  * - every reachable decision maker is enrolled as their own lead;
- * - a company with no named decision maker is enrolled as a company lead;
+ * - a company with no named decision maker, or none who can be reached but a shared inbox, is
+ *   enrolled as a company lead;
  * - a decision maker with no usable channel stays on the company record, unenrolled;
+ * - a People row joins only to a business in the same export;
  * - re-importing never enrols anyone twice and never touches an existing enrollment;
  * - new contact details are added alongside existing ones; bad marks are never cleared;
  * - only this campaign's enrollments matter: no exclusions from other campaigns.
+ * Matching is the factory's choice, recorded in docs/adr/0001.
  */
 
 export type CompanyFields = {
@@ -38,7 +43,7 @@ export type CompanyFields = {
   readonly postalCode: string;
   readonly country: string;
   readonly timezone: string | null;
-}
+};
 
 export type PersonFields = {
   readonly fullName: string;
@@ -48,7 +53,7 @@ export type PersonFields = {
   readonly roleTier: string;
   readonly timezone: string | null;
   readonly linkedinUrl: string;
-}
+};
 
 export interface KnownDetail {
   readonly id: string;
@@ -105,12 +110,23 @@ export interface NewDetail {
   readonly owner: DetailOwner;
   readonly channel: Channel;
   readonly phoneKind: PhoneKind | null;
-  /** As written in the export; for a main line, the E.164 form when the export has one. */
+  /** As written in the export. */
   readonly value: string;
-  /** Another written form of the same number, such as the export's national phone_original. */
-  readonly original: string | null;
+  /** One key per address or number, however it is written. */
   readonly key: string;
+  /** For phones: the digit forms search matches, international and national. */
+  readonly searchDigits: string;
   readonly addedAt: string;
+}
+
+/**
+ * A change to a detail the CRM already holds: a direct number now known to be a mobile, or a
+ * person's number that turned out to be the company main line. The id and bad mark are kept.
+ */
+export interface DetailChange {
+  readonly id: string;
+  readonly owner: DetailOwner;
+  readonly phoneKind: PhoneKind | null;
 }
 
 export interface CompanyWrite {
@@ -142,7 +158,7 @@ export type LeadOutcome = "new" | "already_enrolled" | "updated" | "not_enrolled
 
 export type NotEnrolledReason = "no_usable_channel" | "company_not_in_export";
 
-/** A contact detail as the import summary reports it. */
+/** A contact detail as the import summary reports it. Phones are grouped for reading. */
 export interface DetailNote {
   readonly channel: Channel;
   readonly phoneKind: PhoneKind | null;
@@ -163,6 +179,8 @@ export type SummaryEntry =
       readonly via: readonly ContactRoute[];
       /** Details this import added to the lead's own record, marked newer. */
       readonly added: readonly DetailNote[];
+      /** Numbers on the lead's record that this import showed to be mobiles. */
+      readonly becameMobile: readonly DetailNote[];
       /** Details in the export that the CRM already holds marked bad. They stay bad. */
       readonly stillBad: readonly DetailNote[];
     }
@@ -181,7 +199,7 @@ export type SummaryEntry =
       readonly reason: "company_not_in_export";
       readonly lead: null;
       readonly name: string;
-      /** The people row's business_id, which matched no business in this export or the CRM. */
+      /** The People row's business_id, blank or matching no business in this export. */
       readonly sourceBusinessId: string;
     };
 
@@ -195,6 +213,7 @@ export interface ImportPlan {
   readonly companies: readonly CompanyWrite[];
   readonly people: readonly PersonWrite[];
   readonly details: readonly NewDetail[];
+  readonly detailChanges: readonly DetailChange[];
   readonly enrollments: readonly NewEnrollment[];
   readonly summary: ImportSummary;
 }
@@ -206,30 +225,29 @@ export function planImport(input: {
   newId: () => string;
 }): ImportPlan {
   const { scraped, now, newId } = input;
-  const crm = new WorkingDirectory(input.directory);
+  const crm = new WorkingDirectory(input.directory, now, newId);
 
+  // Businesses first: People rows join only to a business in this export.
   const companyForBusinessId = new Map<string, string>();
   const companiesInExport: string[] = [];
-  const peopleInExport: string[] = [];
-  const unmatched: SummaryEntry[] = [];
-
   for (const business of scraped.businesses) {
-    const companyId = crm.upsertCompany(business, newId);
-    companyForBusinessId.set(business.sourceBusinessId, companyId);
+    const companyId = crm.upsertCompany(business);
+    if (business.sourceBusinessId) companyForBusinessId.set(business.sourceBusinessId, companyId);
     companiesInExport.push(companyId);
+    const owner: DetailOwner = { kind: "company", companyId };
     if (business.mainPhone) {
-      const { e164, original } = business.mainPhone;
-      const raw = e164 || original;
-      crm.addDetail({ kind: "company", companyId }, "phone", "main_line", raw, phoneKey(raw), now, newId, e164 ? original : "");
+      const raw = business.mainPhone.e164 || business.mainPhone.original;
+      crm.addPhone(owner, "main_line", raw, parsePhone(raw, business.country) ?? parsePhone(business.mainPhone.original, business.country));
     }
-    for (const email of business.generalEmails) {
-      crm.addDetail({ kind: "company", companyId }, "email", null, email, emailKey(email), now, newId);
-    }
+    for (const email of business.generalEmails) crm.addEmail(owner, email);
   }
 
+  const joined: { row: ScrapedPerson; companyId: string }[] = [];
+  const unmatched: SummaryEntry[] = [];
   for (const row of scraped.people) {
-    const companyId = companyForBusinessId.get(row.sourceBusinessId) ?? crm.companyBySourceBusinessId(row.sourceBusinessId);
-    if (!companyId) {
+    const companyId = row.sourceBusinessId ? companyForBusinessId.get(row.sourceBusinessId) : undefined;
+    if (companyId) joined.push({ row, companyId });
+    else {
       unmatched.push({
         outcome: "not_enrolled",
         reason: "company_not_in_export",
@@ -237,12 +255,15 @@ export function planImport(input: {
         name: personDisplayName(fieldsOf(row)),
         sourceBusinessId: row.sourceBusinessId,
       });
-      continue;
     }
-    const personId = crm.upsertPerson(row, companyId, newId);
-    peopleInExport.push(personId);
-    addPersonDetails(crm, row, personId, companyId, now, newId);
   }
+
+  const matches = crm.matchPeople(joined);
+  const peopleInExport = joined.map(({ row, companyId }, index) => {
+    const personId = crm.upsertPerson(row, companyId, matches[index] ?? null);
+    addPersonDetails(crm, row, personId, companyId);
+    return personId;
+  });
 
   const entries: SummaryEntry[] = [];
   const enrollments: NewEnrollment[] = [];
@@ -252,7 +273,8 @@ export function planImport(input: {
     const base = { lead, ...who, companyName, peopleAtCompany: crm.peopleAt(who.companyId).length };
     const notes = crm.notesFor(lead);
     if (crm.isEnrolled(lead)) {
-      entries.push({ ...base, outcome: notes.added.length > 0 ? "updated" : "already_enrolled", channels: reachable.reach, via: reachable.via, ...notes });
+      const updated = notes.added.length > 0 || notes.becameMobile.length > 0;
+      entries.push({ ...base, outcome: updated ? "updated" : "already_enrolled", channels: reachable.reach, via: reachable.via, ...notes });
     } else if (hasUsableChannel(reachable.reach)) {
       enrollments.push({ id: newId(), lead, status: ENROLLED_BY_IMPORT, enrolledAt: now });
       entries.push({ ...base, outcome: "new", channels: reachable.reach, via: reachable.via, ...notes });
@@ -270,7 +292,7 @@ export function planImport(input: {
     };
   };
 
-  for (const personId of unique(peopleInExport)) {
+  for (const personId of peopleInExport) {
     const person = crm.person(personId);
     decide({ kind: "person", personId }, personReach(personId), {
       name: personDisplayName(person.fields),
@@ -299,6 +321,7 @@ export function planImport(input: {
     companies: crm.companyWrites(),
     people: crm.personWrites(),
     details: crm.newDetails(),
+    detailChanges: crm.detailChanges(),
     enrollments,
     summary: {
       rows: { businesses: scraped.businesses.length, people: scraped.people.length },
@@ -314,30 +337,31 @@ export function personDisplayName(fields: Pick<PersonFields, "fullName" | "first
   return fields.fullName || joined || "Unnamed decision maker";
 }
 
-function addPersonDetails(
-  crm: WorkingDirectory,
-  row: ScrapedPerson,
-  personId: string,
-  companyId: string,
-  now: string,
-  newId: () => string,
-): void {
+/** A detail as reported in the summary: phones grouped for reading. */
+export function noteOf(detail: { channel: Channel; phoneKind: PhoneKind | null; key: string; value: string }): DetailNote {
+  return {
+    channel: detail.channel,
+    phoneKind: detail.phoneKind,
+    value: detail.channel === "phone" ? displayPhone(detail.key) : detail.value,
+  };
+}
+
+function addPersonDetails(crm: WorkingDirectory, row: ScrapedPerson, personId: string, companyId: string): void {
   const owner: DetailOwner = { kind: "person", personId };
   const company = crm.company(companyId);
-  const companyKeys = new Set(company.details.map((d) => d.key));
+  const country = company.fields.country;
 
-  // A company's shared inbox or main line listed against a person is not their own detail.
+  // A company's shared inbox listed against a person is not their own email.
   const email = emailKey(row.email);
-  if (email && !companyKeys.has(email)) crm.addDetail(owner, "email", null, row.email, email, now, newId);
+  if (email && !company.details.some((d) => d.channel === "email" && d.key === email)) crm.addEmail(owner, row.email);
 
-  const direct = phoneKey(row.directPhone);
-  if (direct && !companyKeys.has(direct)) crm.addDetail(owner, "phone", "direct", row.directPhone, direct, now, newId);
-
-  const dial = phoneKey(row.dialPhone);
-  if (dial && !companyKeys.has(dial)) {
-    const kind: PhoneKind = /mobile|cell/i.test(row.dialPhoneType) ? "mobile" : "direct";
-    crm.addDetail(owner, "phone", kind, row.dialPhone, dial, now, newId);
-  }
+  // A mobile first, so a number listed both as direct and as mobile keeps its mobile capability.
+  const dialKind: PhoneKind = /mobile|cell/i.test(row.dialPhoneType) ? "mobile" : "direct";
+  const phones: [PhoneKind, string][] = [
+    [dialKind, row.dialPhone],
+    ["direct", row.directPhone],
+  ];
+  for (const [kind, raw] of phones) crm.addPhone(owner, kind, raw, parsePhone(raw, country));
 }
 
 function fieldsOf(row: ScrapedPerson): PersonFields {
@@ -389,6 +413,19 @@ function countOutcomes(entries: readonly SummaryEntry[]): Record<LeadOutcome, nu
   return counts;
 }
 
+function personNameKey(fields: Pick<PersonFields, "fullName" | "firstName" | "lastName">): string {
+  return nameKey(fields.fullName || [fields.firstName, fields.lastName].filter(Boolean).join(" "));
+}
+
+interface MutableDetail {
+  id: string;
+  channel: Channel;
+  phoneKind: PhoneKind | null;
+  value: string;
+  key: string;
+  bad: boolean;
+}
+
 interface MutableCompany {
   id: string;
   isNew: boolean;
@@ -396,7 +433,7 @@ interface MutableCompany {
   sourceBusinessIds: Set<string>;
   newSourceBusinessIds: Set<string>;
   fields: CompanyFields;
-  details: KnownDetail[];
+  details: MutableDetail[];
   source: Readonly<Record<string, string>>;
   touched: boolean;
 }
@@ -408,9 +445,28 @@ interface MutablePerson {
   sourcePersonIds: Set<string>;
   newSourcePersonIds: Set<string>;
   fields: PersonFields;
-  details: KnownDetail[];
+  details: MutableDetail[];
   source: Readonly<Record<string, string>>;
   touched: boolean;
+}
+
+/** A map from a key to every id holding it. A key held by more than one id is ambiguous. */
+class Index {
+  private readonly map = new Map<string, Set<string>>();
+
+  add(key: string, id: string): void {
+    if (!key) return;
+    const ids = this.map.get(key) ?? new Set<string>();
+    ids.add(id);
+    this.map.set(key, ids);
+  }
+
+  /** The id holding `key`, or undefined when none or several do. */
+  only(key: string): string | undefined {
+    const ids = this.map.get(key);
+    if (ids?.size !== 1) return undefined;
+    return [...ids][0];
+  }
 }
 
 /** The directory as it evolves while one export is applied, with the indexes used for matching. */
@@ -419,13 +475,18 @@ class WorkingDirectory {
   private readonly people = new Map<string, MutablePerson>();
   private readonly enrolled = new Set<string>();
   private readonly added: NewDetail[] = [];
-  private readonly keptBad: { owner: DetailOwner; detail: KnownDetail }[] = [];
+  private readonly changed = new Map<string, DetailChange>();
+  private readonly keptBad: { owner: DetailOwner; detail: MutableDetail }[] = [];
+  private readonly upgraded: { owner: DetailOwner; detail: MutableDetail }[] = [];
   private readonly companyByPlace = new Map<string, string>();
-  private readonly companyByBusinessId = new Map<string, string>();
-  private readonly companyByNameAndPhone = new Map<string, string>();
-  private readonly personByIdentity = new Map<string, string>();
+  private readonly companyByBusinessId = new Index();
+  private readonly companyByNameAndMainLine = new Index();
+  private readonly now: string;
+  private readonly newId: () => string;
 
-  constructor(directory: Directory) {
+  constructor(directory: Directory, now: string, newId: () => string) {
+    this.now = now;
+    this.newId = newId;
     for (const c of directory.companies) {
       this.companies.set(c.id, {
         id: c.id,
@@ -434,7 +495,7 @@ class WorkingDirectory {
         sourceBusinessIds: new Set(c.sourceBusinessIds),
         newSourceBusinessIds: new Set(),
         fields: c.fields,
-        details: [...c.details],
+        details: c.details.map((d) => ({ ...d })),
         source: {},
         touched: false,
       });
@@ -448,11 +509,10 @@ class WorkingDirectory {
         sourcePersonIds: new Set(p.sourcePersonIds),
         newSourcePersonIds: new Set(),
         fields: p.fields,
-        details: [...p.details],
+        details: p.details.map((d) => ({ ...d })),
         source: {},
         touched: false,
       });
-      this.indexPerson(p.id);
     }
     for (const e of directory.enrollments) this.enrolled.add(leadKey(e.lead));
   }
@@ -469,25 +529,8 @@ class WorkingDirectory {
     return person;
   }
 
-  companyBySourceBusinessId(sourceBusinessId: string): string | undefined {
-    return this.companyByBusinessId.get(sourceBusinessId);
-  }
-
   peopleAt(companyId: string): MutablePerson[] {
     return [...this.people.values()].filter((p) => p.companyId === companyId);
-  }
-
-  /** What this import added to the lead's own record, and which of its details stayed bad. */
-  notesFor(lead: LeadRef): { added: DetailNote[]; stillBad: DetailNote[] } {
-    const owns = (owner: DetailOwner) =>
-      lead.kind === "person"
-        ? owner.kind === "person" && owner.personId === lead.personId
-        : owner.kind === "company" && owner.companyId === lead.companyId;
-    const note = (d: DetailNote): DetailNote => ({ channel: d.channel, phoneKind: d.phoneKind, value: d.value });
-    return {
-      added: this.added.filter((d) => owns(d.owner)).map(note),
-      stillBad: this.keptBad.filter((d) => owns(d.owner)).map(({ detail }) => note(detail)),
-    };
   }
 
   isEnrolled(lead: LeadRef): boolean {
@@ -495,44 +538,48 @@ class WorkingDirectory {
   }
 
   /**
-   * Same company when the place_id matches; otherwise the scraper's business_id, or name and main
-   * line together, provided neither side carries a different place_id. Scraper IDs are not proven
-   * stable across runs, so a conflicting place_id always wins.
+   * Same company when the place_id matches; otherwise the scraper's business_id, or the name with
+   * any main line the company holds, when exactly one company fits and neither side carries a
+   * different place_id. Scraper IDs are not proven stable across runs, so a conflicting place_id
+   * always wins, and an ambiguous key matches nothing.
    */
-  upsertCompany(row: ScrapedBusiness, newId: () => string): string {
+  upsertCompany(row: ScrapedBusiness): string {
     const compatible = (id: string | undefined): string | undefined => {
       if (!id) return undefined;
       const known = this.company(id);
       return known.placeId && row.placeId && known.placeId !== row.placeId ? undefined : id;
     };
+    const mainLine = row.mainPhone ? parsePhone(row.mainPhone.e164 || row.mainPhone.original, row.country) : null;
     const existing =
       (row.placeId ? this.companyByPlace.get(row.placeId) : undefined) ??
-      compatible(this.companyByBusinessId.get(row.sourceBusinessId)) ??
-      compatible(this.companyByNameAndPhone.get(nameAndPhoneKey(row)));
+      compatible(row.sourceBusinessId ? this.companyByBusinessId.only(row.sourceBusinessId) : undefined) ??
+      compatible(mainLine ? this.companyByNameAndMainLine.only(`${foldText(row.name)}|${mainLine.key}`) : undefined);
 
     const incoming = companyFieldsOf(row);
+    const newIds = row.sourceBusinessId ? [row.sourceBusinessId] : [];
     if (existing) {
       const company = this.company(existing);
-      const merged = mergeFields(company.fields, incoming);
-      company.fields = merged;
+      company.fields = mergeFields(company.fields, incoming);
       company.placeId ??= row.placeId;
       company.source = row.source;
       company.touched = true;
-      if (!company.sourceBusinessIds.has(row.sourceBusinessId)) {
-        company.sourceBusinessIds.add(row.sourceBusinessId);
-        company.newSourceBusinessIds.add(row.sourceBusinessId);
+      for (const id of newIds) {
+        if (!company.sourceBusinessIds.has(id)) {
+          company.sourceBusinessIds.add(id);
+          company.newSourceBusinessIds.add(id);
+        }
       }
       this.indexCompany(existing);
       return existing;
     }
 
-    const id = newId();
+    const id = this.newId();
     this.companies.set(id, {
       id,
       isNew: true,
       placeId: row.placeId,
-      sourceBusinessIds: new Set([row.sourceBusinessId]),
-      newSourceBusinessIds: new Set([row.sourceBusinessId]),
+      sourceBusinessIds: new Set(newIds),
+      newSourceBusinessIds: new Set(newIds),
       fields: incoming,
       details: [],
       source: row.source,
@@ -542,29 +589,67 @@ class WorkingDirectory {
     return id;
   }
 
-  /** People match only within their company: by own email, scraper person_id, or name. */
-  upsertPerson(row: ScrapedPerson, companyId: string, newId: () => string): string {
-    const incoming = fieldsOf(row);
-    const existing = identitiesOf(companyId, row.sourcePersonId, row.email, incoming)
-      .map((identity) => this.personByIdentity.get(identity))
-      .find((id) => id !== undefined);
+  /**
+   * Matches each joined People row to a person already in the CRM, or to nobody. Two rows of one
+   * export never share a person, and each existing person is claimed at most once. In order:
+   * 1. the row's own email is on exactly one unclaimed person at the company;
+   * 2. the scraper person_id is on exactly one unclaimed person whose name agrees;
+   * 3. the name agrees with exactly one unclaimed person, and their emails don't conflict.
+   * A reused person_id under a different name is not a match.
+   */
+  matchPeople(rows: readonly { row: ScrapedPerson; companyId: string }[]): (string | null)[] {
+    const result: (string | null)[] = rows.map(() => null);
+    const claimed = new Set<string>();
+    const candidates = (companyId: string) => this.peopleAt(companyId).filter((p) => !p.isNew && !claimed.has(p.id));
+    const emails = (p: MutablePerson) => p.details.filter((d) => d.channel === "email").map((d) => d.key);
 
+    const pass = (fits: (row: ScrapedPerson, candidate: MutablePerson) => boolean) => {
+      rows.forEach(({ row, companyId }, index) => {
+        if (result[index] !== null) return;
+        const found = candidates(companyId).filter((c) => fits(row, c));
+        const [only] = found;
+        if (found.length === 1 && only) {
+          result[index] = only.id;
+          claimed.add(only.id);
+        }
+      });
+    };
+
+    pass((row, c) => {
+      const key = emailKey(row.email);
+      return key !== null && emails(c).includes(key);
+    });
+    pass((row, c) => {
+      const name = personNameKey(fieldsOf(row));
+      return row.sourcePersonId !== "" && c.sourcePersonIds.has(row.sourcePersonId) && name !== "" && name === personNameKey(c.fields);
+    });
+    pass((row, c) => {
+      const name = personNameKey(fieldsOf(row));
+      const key = emailKey(row.email);
+      const known = emails(c);
+      const conflicting = key !== null && known.length > 0 && !known.includes(key);
+      return name !== "" && name === personNameKey(c.fields) && !conflicting;
+    });
+    return result;
+  }
+
+  upsertPerson(row: ScrapedPerson, companyId: string, existing: string | null): string {
+    const incoming = fieldsOf(row);
+    const ids = row.sourcePersonId ? [row.sourcePersonId] : [];
     if (existing) {
       const person = this.person(existing);
-      const merged = mergeFields(person.fields, incoming);
-      person.fields = merged;
+      person.fields = mergeFields(person.fields, incoming);
       person.source = row.source;
       person.touched = true;
-      if (row.sourcePersonId && !person.sourcePersonIds.has(row.sourcePersonId)) {
-        person.sourcePersonIds.add(row.sourcePersonId);
-        person.newSourcePersonIds.add(row.sourcePersonId);
+      for (const id of ids) {
+        if (!person.sourcePersonIds.has(id)) {
+          person.sourcePersonIds.add(id);
+          person.newSourcePersonIds.add(id);
+        }
       }
-      this.indexPerson(existing);
       return existing;
     }
-
-    const id = newId();
-    const ids = row.sourcePersonId ? [row.sourcePersonId] : [];
+    const id = this.newId();
     this.people.set(id, {
       id,
       isNew: true,
@@ -576,33 +661,73 @@ class WorkingDirectory {
       source: row.source,
       touched: true,
     });
-    this.indexPerson(id);
     return id;
   }
 
-  /** Adds a detail unless its owner already has it. An existing detail keeps its bad mark. */
-  addDetail(
-    owner: DetailOwner,
-    channel: Channel,
-    phoneKind: PhoneKind | null,
-    value: string,
-    key: string | null,
-    now: string,
-    newId: () => string,
-    original = "",
-  ): void {
+  addEmail(owner: DetailOwner, raw: string): void {
+    const key = emailKey(raw);
     if (!key) return;
-    const holder = owner.kind === "person" ? this.person(owner.personId) : this.company(owner.companyId);
-    const existing = holder.details.find((d) => d.channel === channel && d.key === key);
-    if (existing) {
-      if (existing.bad && !this.keptBad.some((k) => k.detail.id === existing.id)) this.keptBad.push({ owner, detail: existing });
+    const holder = this.holder(owner);
+    const existing = holder.details.find((d) => d.channel === "email" && d.key === key);
+    if (existing) this.noteKeptBad(owner, existing);
+    else this.add(owner, "email", null, raw, key, "");
+  }
+
+  /**
+   * Adds a phone unless its owner already has it, in any written form. A person's number that is
+   * the company's main line stays the main line. When a later import lists the company main line
+   * a person already holds, that detail moves to the company, keeping its id and bad mark.
+   * A direct number later shown to be a mobile becomes a mobile.
+   */
+  addPhone(owner: DetailOwner, kind: PhoneKind, raw: string, phone: ReturnType<typeof parsePhone>): void {
+    if (!phone) return;
+    if (owner.kind === "person") {
+      const company = this.company(this.person(owner.personId).companyId);
+      const mainLine = company.details.find((d) => d.channel === "phone" && d.key === phone.key);
+      if (mainLine) {
+        this.noteKeptBad({ kind: "company", companyId: company.id }, mainLine);
+        return;
+      }
+    } else if (kind === "main_line") {
+      for (const person of this.peopleAt(owner.companyId)) {
+        const held = person.details.find((d) => d.channel === "phone" && d.key === phone.key);
+        if (!held) continue;
+        person.details = person.details.filter((d) => d !== held);
+        held.phoneKind = "main_line";
+        this.company(owner.companyId).details.push(held);
+        this.recordChange(held, owner);
+        this.indexCompany(owner.companyId);
+        return;
+      }
+    }
+
+    const holder = this.holder(owner);
+    const existing = holder.details.find((d) => d.channel === "phone" && d.key === phone.key);
+    if (!existing) {
+      this.add(owner, "phone", kind, raw, phone.key, phone.searchDigits);
+      if (owner.kind === "company") this.indexCompany(owner.companyId);
       return;
     }
-    const detail: NewDetail = { id: newId(), owner, channel, phoneKind, value: value.trim(), original: original.trim() || null, key, addedAt: now };
-    holder.details.push({ id: detail.id, channel, phoneKind, value: detail.value, key, bad: false });
-    this.added.push(detail);
-    if (owner.kind === "person" && channel === "email") this.indexPerson(owner.personId);
-    if (owner.kind === "company" && phoneKind === "main_line") this.indexCompany(owner.companyId);
+    this.noteKeptBad(owner, existing);
+    if (kind === "mobile" && existing.phoneKind === "direct") {
+      existing.phoneKind = "mobile";
+      this.recordChange(existing, owner);
+      if (!this.added.some((d) => d.id === existing.id)) this.upgraded.push({ owner, detail: existing });
+    }
+  }
+
+  /** What this import added to the lead's own record, and which of its details stayed bad. */
+  notesFor(lead: LeadRef): { added: DetailNote[]; becameMobile: DetailNote[]; stillBad: DetailNote[] } {
+    const owns = (owner: DetailOwner) =>
+      lead.kind === "person"
+        ? owner.kind === "person" && owner.personId === lead.personId
+        : owner.kind === "company" && owner.companyId === lead.companyId;
+    const current = (id: string) => [...this.holderOf(lead).details].find((d) => d.id === id);
+    return {
+      added: this.added.filter((d) => owns(d.owner)).map((d) => noteOf({ ...d, phoneKind: current(d.id)?.phoneKind ?? d.phoneKind })),
+      becameMobile: this.upgraded.filter((u) => owns(u.owner)).map((u) => noteOf(u.detail)),
+      stillBad: this.keptBad.filter((k) => owns(k.owner)).map((k) => noteOf(k.detail)),
+    };
   }
 
   companyWrites(): CompanyWrite[] {
@@ -631,48 +756,59 @@ class WorkingDirectory {
       }));
   }
 
+  /** New details, with any kind change made later in the same import folded in. */
   newDetails(): NewDetail[] {
-    return [...this.added];
+    return this.added.map((d) => {
+      const change = this.changed.get(d.id);
+      return change ? { ...d, owner: change.owner, phoneKind: change.phoneKind } : d;
+    });
+  }
+
+  /** Changes to details that existed before this import. */
+  detailChanges(): DetailChange[] {
+    const fresh = new Set(this.added.map((d) => d.id));
+    return [...this.changed.values()].filter((c) => !fresh.has(c.id));
+  }
+
+  private holder(owner: DetailOwner): MutableCompany | MutablePerson {
+    return owner.kind === "person" ? this.person(owner.personId) : this.company(owner.companyId);
+  }
+
+  private holderOf(lead: LeadRef): MutableCompany | MutablePerson {
+    return lead.kind === "person" ? this.person(lead.personId) : this.company(lead.companyId);
+  }
+
+  private add(owner: DetailOwner, channel: Channel, phoneKind: PhoneKind | null, raw: string, key: string, searchDigits: string): void {
+    const detail: NewDetail = {
+      id: this.newId(),
+      owner,
+      channel,
+      phoneKind,
+      value: raw.trim(),
+      key,
+      searchDigits,
+      addedAt: this.now,
+    };
+    this.holder(owner).details.push({ id: detail.id, channel, phoneKind, value: detail.value, key, bad: false });
+    this.added.push(detail);
+  }
+
+  private recordChange(detail: MutableDetail, owner: DetailOwner): void {
+    this.changed.set(detail.id, { id: detail.id, owner, phoneKind: detail.phoneKind });
+  }
+
+  private noteKeptBad(owner: DetailOwner, detail: MutableDetail): void {
+    if (detail.bad && !this.keptBad.some((k) => k.detail.id === detail.id)) this.keptBad.push({ owner, detail });
   }
 
   private indexCompany(id: string): void {
     const company = this.company(id);
     if (company.placeId) this.companyByPlace.set(company.placeId, id);
-    for (const businessId of company.sourceBusinessIds) this.companyByBusinessId.set(businessId, id);
-    const mainLine = company.details.find((d) => d.phoneKind === "main_line");
-    if (mainLine) this.companyByNameAndPhone.set(`${foldText(company.fields.name)}|${mainLine.key}`, id);
+    for (const businessId of company.sourceBusinessIds) this.companyByBusinessId.add(businessId, id);
+    for (const d of company.details) {
+      if (d.phoneKind === "main_line") this.companyByNameAndMainLine.add(`${foldText(company.fields.name)}|${d.key}`, id);
+    }
   }
-
-  private indexPerson(id: string): void {
-    const person = this.person(id);
-    const emails = person.details.filter((d) => d.channel === "email").map((d) => d.key);
-    const identities = [
-      ...[...person.sourcePersonIds].map((sourceId) => `${person.companyId}|id|${sourceId}`),
-      ...emails.map((email) => `${person.companyId}|email|${email}`),
-      ...nameIdentity(person.companyId, person.fields),
-    ];
-    for (const identity of identities) this.personByIdentity.set(identity, id);
-  }
-}
-
-function identitiesOf(companyId: string, sourcePersonId: string, email: string, fields: PersonFields): string[] {
-  const key = emailKey(email);
-  return [
-    ...(key ? [`${companyId}|email|${key}`] : []),
-    ...(sourcePersonId ? [`${companyId}|id|${sourcePersonId}`] : []),
-    ...nameIdentity(companyId, fields),
-  ];
-}
-
-function nameIdentity(companyId: string, fields: PersonFields): string[] {
-  const joined = [fields.firstName, fields.lastName].filter(Boolean).join(" ");
-  const name = foldText(fields.fullName || joined);
-  return name ? [`${companyId}|name|${name}`] : [];
-}
-
-function nameAndPhoneKey(row: ScrapedBusiness): string {
-  const phone = row.mainPhone ? phoneKey(row.mainPhone.e164 || row.mainPhone.original) : null;
-  return phone ? `${foldText(row.name)}|${phone}` : "";
 }
 
 function leadKey(lead: LeadRef): string {

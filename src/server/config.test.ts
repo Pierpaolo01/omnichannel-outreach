@@ -31,4 +31,21 @@ describe("resolveDataDir", () => {
     ).toThrow(/inside the repository/);
     expect(() => resolveDataDir({ env: { OUTREACH_DATA_DIR: project }, home: "/h", projectRoot: project })).toThrow();
   });
+
+  test("the development profile never reads OUTREACH_DATA_DIR, so a seed reset cannot reach real data", () => {
+    const env = { OUTREACH_DATA_DIR: "/Users/someone/real-outreach" };
+    expect(resolveDataDir({ env, home: "/Users/someone", projectRoot: project, profile: "development" })).toBe(
+      "/Users/someone/.local/share/omnichannel-outreach-dev",
+    );
+  });
+
+  test("the development profile refuses the app's data directory, however it is named", () => {
+    const home = "/Users/someone";
+    for (const env of [
+      { OUTREACH_DEV_DATA_DIR: "/Users/someone/.local/share/omnichannel-outreach" },
+      { OUTREACH_DEV_DATA_DIR: "/srv/outreach", OUTREACH_DATA_DIR: "/srv/outreach/" },
+    ]) {
+      expect(() => resolveDataDir({ env, home, projectRoot: project, profile: "development" })).toThrow(/app's data directory/);
+    }
+  });
 });

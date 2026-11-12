@@ -46,6 +46,11 @@ export default tseslint.config(
     },
   },
   {
+    // The SQLite adapter satisfies an asynchronous interface over a synchronous driver.
+    files: ["src/server/persistence/sqlite-store.ts"],
+    rules: { "@typescript-eslint/require-await": "off" },
+  },
+  {
     files: ["src/web/**/*.{ts,tsx}"],
     plugins: { "react-hooks": reactHooks },
     rules: { ...reactHooks.configs.recommended.rules },

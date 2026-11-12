@@ -1,5 +1,6 @@
 import { DatabaseSync, type SQLInputValue, type SQLOutputValue } from "node:sqlite";
 import { digitsOf, foldText, isNewerDetail, type Channel, type PhoneKind } from "../../domain/contact-details.ts";
+import { displayPhone } from "../../domain/phone.ts";
 import {
   personDisplayName,
   type Directory,
@@ -47,7 +48,11 @@ class SqliteStore implements OutreachStore {
     this.db = db;
   }
 
-  createCampaign(campaign: Campaign): void {
+  async createCampaign(campaign: Campaign): Promise<void> {
+    this.insertCampaign(campaign);
+  }
+
+  private insertCampaign(campaign: Campaign): void {
     this.run("INSERT INTO campaigns (id, name, default_timezone, created_at) VALUES (?, ?, ?, ?)", [
       campaign.id,
       campaign.name,
@@ -56,12 +61,16 @@ class SqliteStore implements OutreachStore {
     ]);
   }
 
-  campaign(id: string): Campaign | null {
+  async campaign(id: string): Promise<Campaign | null> {
+    return this.campaignRow(id);
+  }
+
+  private campaignRow(id: string): Campaign | null {
     const row = this.db.prepare("SELECT * FROM campaigns WHERE id = ?").get(id);
     return row ? toCampaign(row) : null;
   }
 
-  listCampaigns(): CampaignListItem[] {
+  async listCampaigns(): Promise<CampaignListItem[]> {
     return this.db
       .prepare(
         `SELECT c.*, (SELECT COUNT(*) FROM enrollments e WHERE e.campaign_id = c.id) AS lead_count
@@ -69,7 +78,7 @@ class SqliteStore implements OutreachStore {
       )
       .all()
       .map((row) => {
-        const last = this.listImports(str(row, "id"))[0];
+        const last = this.importsOf(str(row, "id"))[0];
         return {
           ...toCampaign(row),
           leadCount: num(row, "lead_count"),
@@ -78,16 +87,16 @@ class SqliteStore implements OutreachStore {
       });
   }
 
-  importIntoCampaign(input: {
+  async importIntoCampaign(input: {
     campaign: { readonly create: Campaign } | { readonly id: string };
     importId: string;
     importedAt: string;
     fileNames: ImportFileNames;
     plan: (directory: Directory) => ImportPlan;
-  }): ImportRecord {
+  }): Promise<ImportRecord> {
     return this.transaction(() => {
       const campaignId = "create" in input.campaign ? input.campaign.create.id : input.campaign.id;
-      if ("create" in input.campaign) this.createCampaign(input.campaign.create);
+      if ("create" in input.campaign) this.insertCampaign(input.campaign.create);
       const plan = input.plan(this.directory(campaignId));
       this.apply(plan, { campaignId, importId: input.importId, importedAt: input.importedAt, fileNames: input.fileNames });
       return {
@@ -100,19 +109,23 @@ class SqliteStore implements OutreachStore {
     });
   }
 
-  listImports(campaignId: string): ImportRecord[] {
+  async listImports(campaignId: string): Promise<ImportRecord[]> {
+    return this.importsOf(campaignId);
+  }
+
+  private importsOf(campaignId: string): ImportRecord[] {
     return this.db
       .prepare("SELECT * FROM imports WHERE campaign_id = ? ORDER BY imported_at DESC, rowid DESC")
       .all(campaignId)
       .map(toImportRecord);
   }
 
-  importRecord(campaignId: string, importId: string): ImportRecord | null {
+  async importRecord(campaignId: string, importId: string): Promise<ImportRecord | null> {
     const row = this.db.prepare("SELECT * FROM imports WHERE campaign_id = ? AND id = ?").get(campaignId, importId);
     return row ? toImportRecord(row) : null;
   }
 
-  searchLeads(query: LeadQuery): LeadSearchResult {
+  async searchLeads(query: LeadQuery): Promise<LeadSearchResult> {
     const text = foldText(query.text);
     const like = `%${escapeLike(text)}%`;
     const digits = /^[\d\s+().\-/]+$/.test(query.text.trim()) ? digitsOf(query.text) : "";
@@ -153,7 +166,11 @@ class SqliteStore implements OutreachStore {
         OR ${detailMatch("d.owner_kind = 'company' AND d.owner_id = c.id")})
       AND ${enrollmentFilter("e.lead_kind = 'company' AND e.company_id = c.id")}
     `;
-    const total = num(this.db.prepare(`SELECT COUNT(*) AS n FROM (${sql})`).get(params) ?? {}, "n");
+    const counts = this.db
+      .prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(kind = 'company'), 0) AS companies FROM (${sql})`)
+      .get(params) ?? {};
+    const total = num(counts, "n");
+    const companies = num(counts, "companies");
     const ids = this.db
       .prepare(`${sql} ORDER BY sort_name COLLATE NOCASE, id LIMIT :limit`)
       .all({ ...params, limit: query.limit });
@@ -184,10 +201,10 @@ class SqliteStore implements OutreachStore {
         unenrolledReason: this.companyUnenrolledReason(id),
       };
     });
-    return { rows, total, limit: query.limit };
+    return { rows, total, people: total - companies, companies, limit: query.limit };
   }
 
-  person(id: string): PersonRecord | null {
+  async person(id: string): Promise<PersonRecord | null> {
     const row = this.personRow(id);
     if (!row) return null;
     const companyId = str(row, "company_id");
@@ -195,7 +212,7 @@ class SqliteStore implements OutreachStore {
     const enrollments = this.enrollments({ kind: "person", personId: id });
     const own = this.details("person", id);
     const shared = this.details("company", companyId);
-    const fallbackZone = enrollments.map((e) => this.campaign(e.campaign.id)?.defaultTimezone).find(Boolean) ?? null;
+    const fallbackZone = enrollments.map((e) => this.campaignRow(e.campaign.id)?.defaultTimezone).find(Boolean) ?? null;
     return {
       kind: "person",
       id,
@@ -211,12 +228,12 @@ class SqliteStore implements OutreachStore {
     };
   }
 
-  company(id: string): CompanyRecord | null {
+  async company(id: string): Promise<CompanyRecord | null> {
     const row = this.companyRow(id);
     if (!row) return null;
     const enrollments = this.enrollments({ kind: "company", companyId: id });
     const people = this.peopleAt(id);
-    const fallbackZone = enrollments.map((e) => this.campaign(e.campaign.id)?.defaultTimezone).find(Boolean) ?? null;
+    const fallbackZone = enrollments.map((e) => this.campaignRow(e.campaign.id)?.defaultTimezone).find(Boolean) ?? null;
     return {
       kind: "company",
       id,
@@ -230,11 +247,11 @@ class SqliteStore implements OutreachStore {
     };
   }
 
-  markContactDetailBad(detailId: string): boolean {
+  async markContactDetailBad(detailId: string): Promise<boolean> {
     return Number(this.db.prepare("UPDATE contact_details SET bad = 1 WHERE id = ?").run(detailId).changes) > 0;
   }
 
-  close(): void {
+  async close(): Promise<void> {
     this.db.close();
   }
 
@@ -401,12 +418,22 @@ class SqliteStore implements OutreachStore {
 
     for (const d of plan.details) {
       const ownerId = d.owner.kind === "person" ? d.owner.personId : d.owner.companyId;
-      const searchDigits = [digitsOf(d.value), d.original ? digitsOf(d.original) : ""].filter(Boolean).join(" ");
       this.run(
-        `INSERT INTO contact_details (id, owner_kind, owner_id, channel, phone_kind, value, original, key, search_digits, added_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [d.id, d.owner.kind, ownerId, d.channel, d.phoneKind, d.value, d.original, d.key, d.channel === "phone" ? searchDigits : "", d.addedAt],
+        `INSERT INTO contact_details (id, owner_kind, owner_id, channel, phone_kind, value, key, search_digits, added_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [d.id, d.owner.kind, ownerId, d.channel, d.phoneKind, d.value, d.key, d.searchDigits, d.addedAt],
       );
+    }
+
+    // A direct number now known to be a mobile, or a person's number that is the main line.
+    for (const change of plan.detailChanges) {
+      const ownerId = change.owner.kind === "person" ? change.owner.personId : change.owner.companyId;
+      this.run("UPDATE contact_details SET owner_kind = ?, owner_id = ?, phone_kind = ? WHERE id = ?", [
+        change.owner.kind,
+        ownerId,
+        change.phoneKind,
+        change.id,
+      ]);
     }
 
     this.run(
@@ -481,15 +508,17 @@ class SqliteStore implements OutreachStore {
   private details(ownerKind: "person" | "company", ownerId: string): ContactDetailView[] {
     const rows = this.db
       .prepare(
+        // The prototype's order: a person's email, direct, mobile; a company's main line, then inbox.
         `SELECT * FROM contact_details WHERE owner_kind = ? AND owner_id = ?
-         ORDER BY channel = 'phone', CASE phone_kind WHEN 'direct' THEN 0 WHEN 'mobile' THEN 1 ELSE 2 END, added_at, rowid`,
+         ORDER BY CASE WHEN owner_kind = 'company' THEN channel = 'email' ELSE channel = 'phone' END,
+           CASE phone_kind WHEN 'direct' THEN 0 WHEN 'mobile' THEN 1 ELSE 2 END, added_at, rowid`,
       )
       .all(ownerKind, ownerId)
       .map((row) => ({
         id: str(row, "id"),
         channel: channelOf(row),
         phoneKind: phoneKindOf(row),
-        value: str(row, "value"),
+        value: channelOf(row) === "phone" ? displayPhone(str(row, "key")) : str(row, "value"),
         bad: num(row, "bad") === 1,
         addedAt: str(row, "added_at"),
       }));

@@ -4,6 +4,9 @@
  *
  *   pnpm seed:dev            refuses to touch a database that already has campaigns
  *   pnpm seed:dev --reset    deletes the development database first
+ *
+ * It only ever uses the development data directory (OUTREACH_DEV_DATA_DIR), never
+ * OUTREACH_DATA_DIR; resolveDataDir refuses a development directory that is the app's.
  */
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
@@ -24,7 +27,7 @@ if (process.argv.includes("--reset")) {
 mkdirSync(dataDir, { recursive: true, mode: 0o700 });
 const fresh = !existsSync(dbPath);
 const store = openSqliteStore(dbPath);
-if (!fresh && store.listCampaigns().length > 0) {
+if (!fresh && (await store.listCampaigns()).length > 0) {
   console.error(`${dbPath} already has campaigns. Run with --reset to replace it with the fixtures.`);
   process.exit(1);
 }
@@ -74,4 +77,4 @@ for (const [label, record] of [["Physio clinics, first import", first], ["Physio
   console.info(`${label}: ${JSON.stringify(total)}`);
 }
 console.info(`Seeded ${dbPath}`);
-store.close();
+await store.close();

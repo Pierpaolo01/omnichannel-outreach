@@ -107,7 +107,7 @@ export function parseScraperExport(files: { businessesCsv: string; peopleCsv: st
   if (!businesses.ok || !people.ok) return { ok: false, problems };
 
   const value = { businesses: businesses.rows.map(toBusiness), people: people.rows.map(toPerson) };
-  const businessIds = new Set(value.businesses.map((b) => b.sourceBusinessId));
+  const businessIds = new Set(value.businesses.map((b) => b.sourceBusinessId).filter(Boolean));
   if (value.people.length > 0 && !value.people.some((p) => businessIds.has(p.sourceBusinessId))) {
     const count = value.people.length;
     return {

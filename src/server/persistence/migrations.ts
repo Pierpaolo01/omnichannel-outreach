@@ -82,7 +82,6 @@ export const MIGRATIONS: readonly Migration[] = [
         channel TEXT NOT NULL CHECK (channel IN ('email', 'phone')),
         phone_kind TEXT CHECK (phone_kind IN ('direct', 'mobile', 'main_line')),
         value TEXT NOT NULL,
-        original TEXT,
         key TEXT NOT NULL,
         search_digits TEXT NOT NULL,
         bad INTEGER NOT NULL DEFAULT 0 CHECK (bad IN (0, 1)),

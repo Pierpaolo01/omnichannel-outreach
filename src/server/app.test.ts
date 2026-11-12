@@ -220,13 +220,13 @@ describe("re-importing into the same campaign", () => {
     await api.importRun(campaign.id, "run1");
     const mobile = (await personNamed("Amira Hassan")).contactDetails.find((d) => d.phoneKind === "mobile");
     if (!mobile) throw new Error("Amira has no mobile");
-    expect(api.store.markContactDetailBad(mobile.id)).toBe(true);
+    expect(await api.store.markContactDetailBad(mobile.id)).toBe(true);
 
     const again = await api.importRun(campaign.id, "run1");
     expect(outcomeOf(again, "Amira Hassan")).toMatchObject({
       outcome: "already_enrolled",
       channels: { sms: false },
-      stillBad: [{ channel: "phone", phoneKind: "mobile", value: "+447700900101" }],
+      stillBad: [{ channel: "phone", phoneKind: "mobile", value: "+44 7700 900101" }],
     });
     const after = (await personNamed("Amira Hassan")).contactDetails.filter((d) => d.phoneKind === "mobile");
     expect(after).toEqual([expect.objectContaining({ id: mobile.id, bad: true })]);
@@ -261,7 +261,7 @@ describe("contact details on the record", () => {
 
     const grace = await personNamed("Grace Okafor");
     expect(grace.contactDetails).toEqual([
-      expect.objectContaining({ owner: "company", channel: "phone", phoneKind: "main_line", value: "+442079460202" }),
+      expect.objectContaining({ owner: "company", channel: "phone", phoneKind: "main_line", value: "+44 20 7946 0202" }),
     ]);
     expect(grace.enrollments).toHaveLength(1);
   });
@@ -308,7 +308,7 @@ describe("contact details on the record", () => {
       people: [],
       enrollments: [expect.objectContaining({ status: "queued" })],
     });
-    expect(res.body.contactDetails.map((d) => d.value)).toEqual(["info@riversidesports.example", "+442079460303"]);
+    expect(res.body.contactDetails.map((d) => d.value)).toEqual(["+44 20 7946 0303", "info@riversidesports.example"]);
   });
 
   test("an unknown person is a 404", async () => {
@@ -342,6 +342,11 @@ describe("lead search", () => {
     expect(await names("q=7946%200303")).toEqual(["Riverside Sports Clinic"]);
     expect(await names("q=020%207946%200202")).toEqual(["Grace Okafor"]);
     expect(await names("q=900101")).toEqual(["Amira Hassan"]);
+    expect(await names("q=07700%20900101")).toEqual(["Amira Hassan"]);
+  });
+
+  test("counts people and companies separately", async () => {
+    expect(await search("")).toMatchObject({ total: 9, people: 6, companies: 3 });
   });
 
   test("filters by campaign and outreach status", async () => {
@@ -368,5 +373,37 @@ describe("lead search", () => {
   test("says why someone on record is not in a campaign", async () => {
     expect(await findRow("Sofia Marin")).toMatchObject({ enrollments: [], unenrolledReason: "no_usable_channel" });
     expect(await findRow("Copper Kettle Osteopathy")).toMatchObject({ kind: "company", unenrolledReason: "no_usable_channel" });
+  });
+});
+
+describe("the local server's request guard", () => {
+  const post = (headers: Record<string, string>, body = JSON.stringify({ name: "Physio" })) =>
+    api.raw("/api/campaigns", { method: "POST", headers, body });
+
+  test("refuses a request for another host, as a DNS-rebinding page would send", async () => {
+    const res = await api.raw("/api/leads", { headers: { host: "attacker.example:4310" } });
+    expect(res.status).toBe(403);
+  });
+
+  test("accepts localhost and 127.0.0.1 on any port", async () => {
+    expect((await api.raw("/api/leads", { headers: { host: "127.0.0.1:4310" } })).status).toBe(200);
+    expect((await api.raw("/api/leads", { headers: { host: "localhost:5173" } })).status).toBe(200);
+  });
+
+  test("refuses a change that isn't JSON, as a cross-site form or no-cors fetch would send", async () => {
+    const res = await post({ "content-type": "text/plain" });
+    expect(res.status).toBe(415);
+    expect((await api.get<{ campaigns: CampaignListItem[] }>("/api/campaigns")).body.campaigns).toEqual([]);
+  });
+
+  test("refuses a change from another site", async () => {
+    expect((await post({ "content-type": "application/json", origin: "https://attacker.example" })).status).toBe(403);
+    expect((await post({ "content-type": "application/json", "sec-fetch-site": "cross-site" })).status).toBe(403);
+    expect((await api.get<{ campaigns: CampaignListItem[] }>("/api/campaigns")).body.campaigns).toEqual([]);
+  });
+
+  test("accepts a change from the app's own page", async () => {
+    const res = await post({ "content-type": "application/json", origin: "http://127.0.0.1:4310", "sec-fetch-site": "same-origin" });
+    expect(res.status).toBe(201);
   });
 });

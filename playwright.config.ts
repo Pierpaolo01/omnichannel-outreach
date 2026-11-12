@@ -35,7 +35,7 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: `rm -rf "${dataDir}" && pnpm build && node --no-warnings=ExperimentalWarning src/server/main.ts`,
+    command: `rm -rf "${dataDir}" && pnpm build && node --import ./src/server/quiet-sqlite-warning.ts src/server/main.ts`,
     url: `http://127.0.0.1:${port}/api/campaigns`,
     env: { NODE_ENV: "production", OUTREACH_PORT: String(port), OUTREACH_DATA_DIR: dataDir },
     reuseExistingServer: false,

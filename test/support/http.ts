@@ -17,6 +17,7 @@ export function steppingClock(start = "2026-11-12T09:00:00.000Z"): () => string 
 
 export interface TestApi {
   readonly store: OutreachStore;
+  raw(path: string, init?: RequestInit): Promise<Response>;
   get<T>(path: string): Promise<{ status: number; body: T }>;
   post<T>(path: string, body: unknown): Promise<{ status: number; body: T }>;
   createCampaign(name: string, defaultTimezone?: string): Promise<Campaign>;
@@ -39,6 +40,7 @@ export function testApi(): TestApi {
 
   return {
     store,
+    raw: async (path, init) => app.request(path, init),
     get,
     post,
     async createCampaign(name, defaultTimezone) {

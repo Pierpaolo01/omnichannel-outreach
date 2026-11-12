@@ -9,6 +9,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { createApp } from "./app.ts";
 import { DATABASE_FILE, resolveDataDir } from "./config.ts";
+import { checkHost } from "./guard.ts";
 import { openSqliteStore } from "./persistence/sqlite-store.ts";
 
 /**
@@ -48,8 +49,17 @@ async function webHandler(): Promise<Handler> {
 
 const web = await webHandler();
 const server = createServer((req, res) => {
-  if (req.url === "/api" || req.url?.startsWith("/api/")) void api(req, res);
-  else web(req, res);
+  // The API checks its own requests; pages need the Host check too, against DNS rebinding.
+  if (req.url === "/api" || req.url?.startsWith("/api/")) {
+    void api(req, res);
+    return;
+  }
+  const host = checkHost(req.headers.host ?? null);
+  if (!host.ok) {
+    res.writeHead(host.status, { "content-type": "text/plain; charset=utf-8" }).end(host.message);
+    return;
+  }
+  web(req, res);
 });
 
 server.listen(port, host, () => {
@@ -59,7 +69,6 @@ server.listen(port, host, () => {
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     server.close();
-    store.close();
-    process.exit(0);
+    void store.close().finally(() => process.exit(0));
   });
 }

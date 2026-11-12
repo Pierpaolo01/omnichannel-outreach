@@ -13,21 +13,25 @@ export function emailKey(raw: string): string | null {
   return EMAIL_SHAPE.test(value) ? value : null;
 }
 
-/**
- * International numbers keep their "+" so "+44 20..." and "0044 20..." compare equal;
- * national numbers compare by digits. Fewer than six digits is not a phone number.
- */
-export function phoneKey(raw: string): string | null {
-  const trimmed = raw.trim();
-  const digits = digitsOf(trimmed);
-  if (digits.length < 6) return null;
-  if (trimmed.startsWith("+")) return `+${digits}`;
-  if (digits.startsWith("00")) return `+${digits.slice(2)}`;
-  return digits;
-}
-
 export function digitsOf(raw: string): string {
   return raw.replace(/\D/g, "");
+}
+
+const NAME_AFFIXES = new Set([
+  "dr", "drs", "mr", "mrs", "ms", "miss", "mx", "prof", "professor", "sir", "dame", "rev",
+  "jr", "sr", "phd", "md", "dds", "dmd", "msc", "bsc", "mba", "ii", "iii",
+]);
+
+/**
+ * A person's name for matching: accents, case, punctuation and titles such as "Dr" or "PhD"
+ * removed, so "Dr. Grace Okafor" and "grace okafor" compare equal. Empty when no name is left.
+ */
+export function nameKey(raw: string): string {
+  return foldText(raw)
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .split(/\s+/)
+    .filter((word) => word && !NAME_AFFIXES.has(word))
+    .join(" ");
 }
 
 /** Lower-case, accent-free text for matching names and search. */

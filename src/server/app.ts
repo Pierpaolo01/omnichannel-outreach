@@ -5,6 +5,7 @@ import { planImport } from "../domain/import-plan.ts";
 import { isOutreachStatus } from "../domain/outreach-status.ts";
 import { checkScraperFile, parseScraperExport } from "../domain/scraper-export.ts";
 import type { ApiError, Campaign, FileCheckResult } from "../shared/api.ts";
+import { checkApiRequest } from "./guard.ts";
 import type { OutreachStore } from "./persistence/store.ts";
 
 export interface AppDependencies {
@@ -61,10 +62,24 @@ const checkBody = z.object({ businessesCsv: z.string().optional(), peopleCsv: z.
 /** The HTTP interface. Every route is under /api; the web client is served separately. */
 export function createApp({ store, now, newId }: AppDependencies): Hono {
   const app = new Hono().basePath("/api");
+  app.use(async (c, next) => {
+    const verdict = checkApiRequest({
+      method: c.req.method,
+      host: c.req.header("host") ?? new URL(c.req.url).host,
+      origin: c.req.header("origin") ?? null,
+      secFetchSite: c.req.header("sec-fetch-site") ?? null,
+      contentType: c.req.header("content-type") ?? null,
+    });
+    if (!verdict.ok) {
+      return c.json<ApiError>({ error: { code: verdict.status === 415 ? "unsupported_media_type" : "forbidden", message: verdict.message } }, verdict.status);
+    }
+    await next();
+    return undefined;
+  });
   const withinImportLimit = bodyLimit({ maxSize: IMPORT_BODY_LIMIT, onError: (c) => tooLarge(c) });
 
   /** Parses, plans and applies one import; with `create`, creates the campaign in the same step. */
-  const runImport = (
+  const runImport = async (
     c: Context,
     campaign: { create: Campaign } | { id: string },
     body: { businessesCsv: string; peopleCsv: string; fileNames?: z.infer<typeof fileNames> },
@@ -83,17 +98,17 @@ export function createApp({ store, now, newId }: AppDependencies): Hono {
       );
     }
     const importedAt = now();
-    const record = store.importIntoCampaign({
+    const record = await store.importIntoCampaign({
       campaign,
       importId: newId(),
       importedAt,
       fileNames: { people: body.fileNames?.people ?? null, businesses: body.fileNames?.businesses ?? null },
       plan: (directory) => planImport({ directory, scraped: parsed.value, now: importedAt, newId }),
     });
-    return c.json({ campaign: store.campaign(record.campaignId), import: record }, 201);
+    return c.json({ campaign: await store.campaign(record.campaignId), import: record }, 201);
   };
 
-  app.get("/campaigns", (c) => c.json({ campaigns: store.listCampaigns() }));
+  app.get("/campaigns", async (c) => c.json({ campaigns: await store.listCampaigns() }));
 
   app.post("/campaigns", withinImportLimit, async (c) => {
     const parsed = newCampaignBody.safeParse(await readJson(c));
@@ -103,31 +118,31 @@ export function createApp({ store, now, newId }: AppDependencies): Hono {
     if (businessesCsv !== undefined && peopleCsv !== undefined) {
       return runImport(c, { create: campaign }, { businessesCsv, peopleCsv, fileNames: parsed.data.fileNames });
     }
-    store.createCampaign(campaign);
+    await store.createCampaign(campaign);
     return c.json({ campaign }, 201);
   });
 
-  app.get("/campaigns/:id", (c) => {
-    const campaign = store.campaign(c.req.param("id"));
+  app.get("/campaigns/:id", async (c) => {
+    const campaign = await store.campaign(c.req.param("id"));
     if (!campaign) return notFound(c, "campaign");
-    return c.json({ campaign, imports: store.listImports(campaign.id) });
+    return c.json({ campaign, imports: await store.listImports(campaign.id) });
   });
 
-  app.get("/campaigns/:id/imports", (c) => {
-    const campaign = store.campaign(c.req.param("id"));
+  app.get("/campaigns/:id/imports", async (c) => {
+    const campaign = await store.campaign(c.req.param("id"));
     if (!campaign) return notFound(c, "campaign");
-    return c.json({ imports: store.listImports(campaign.id) });
+    return c.json({ imports: await store.listImports(campaign.id) });
   });
 
-  app.get("/campaigns/:id/imports/:importId", (c) => {
-    const campaign = store.campaign(c.req.param("id"));
-    const record = campaign ? store.importRecord(campaign.id, c.req.param("importId")) : null;
+  app.get("/campaigns/:id/imports/:importId", async (c) => {
+    const campaign = await store.campaign(c.req.param("id"));
+    const record = campaign ? await store.importRecord(campaign.id, c.req.param("importId")) : null;
     if (!campaign || !record) return notFound(c, "import");
     return c.json({ campaign, import: record });
   });
 
   app.post("/campaigns/:id/imports", withinImportLimit, async (c) => {
-    const campaign = store.campaign(c.req.param("id"));
+    const campaign = await store.campaign(c.req.param("id"));
     if (!campaign) return notFound(c, "campaign");
     const body = importBody.safeParse(await readJson(c));
     if (!body.success) return invalid(c, body.error);
@@ -148,7 +163,7 @@ export function createApp({ store, now, newId }: AppDependencies): Hono {
     return c.json<FileCheckResult>({ businesses, people, pair });
   });
 
-  app.get("/leads", (c) => {
+  app.get("/leads", async (c) => {
     const status = c.req.query("status") || null;
     if (status !== null && !isOutreachStatus(status)) {
       return c.json<ApiError>({ error: { code: "invalid_query", message: `Unknown outreach status: ${status}` } }, 400);
@@ -156,7 +171,7 @@ export function createApp({ store, now, newId }: AppDependencies): Hono {
     const requested = Number(c.req.query("limit") ?? SEARCH_LIMIT_DEFAULT);
     const limit = Number.isInteger(requested) && requested > 0 ? Math.min(requested, SEARCH_LIMIT_MAX) : SEARCH_LIMIT_DEFAULT;
     return c.json(
-      store.searchLeads({
+      await store.searchLeads({
         text: c.req.query("q") ?? "",
         campaignId: c.req.query("campaign") || null,
         companyId: c.req.query("company") || null,
@@ -166,13 +181,13 @@ export function createApp({ store, now, newId }: AppDependencies): Hono {
     );
   });
 
-  app.get("/people/:id", (c) => {
-    const person = store.person(c.req.param("id"));
+  app.get("/people/:id", async (c) => {
+    const person = await store.person(c.req.param("id"));
     return person ? c.json(person) : notFound(c, "person");
   });
 
-  app.get("/companies/:id", (c) => {
-    const company = store.company(c.req.param("id"));
+  app.get("/companies/:id", async (c) => {
+    const company = await store.company(c.req.param("id"));
     return company ? c.json(company) : notFound(c, "company");
   });
 

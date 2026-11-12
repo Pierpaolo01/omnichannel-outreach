@@ -101,8 +101,10 @@ export type LeadRow =
 
 export interface LeadSearchResult {
   readonly rows: readonly LeadRow[];
-  /** Matching rows before the limit was applied. */
+  /** Matching rows before the limit was applied, and how many of them are people or companies. */
   readonly total: number;
+  readonly people: number;
+  readonly companies: number;
   readonly limit: number;
 }
 

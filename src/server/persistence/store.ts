@@ -22,13 +22,13 @@ export interface LeadQuery {
 
 /**
  * The CRM's persistence. Callers never see SQL or transactions; an import is one atomic call.
- * The SQLite adapter is the only implementation today. Hosting is deferred, so the interface
- * stays small enough for another adapter to satisfy later.
+ * Every method is asynchronous, so a hosted adapter (Postgres, D1, libSQL) can satisfy the same
+ * interface later. The SQLite adapter is the only implementation today.
  */
 export interface OutreachStore {
-  createCampaign(campaign: Campaign): void;
-  campaign(id: string): Campaign | null;
-  listCampaigns(): CampaignListItem[];
+  createCampaign(campaign: Campaign): Promise<void>;
+  campaign(id: string): Promise<Campaign | null>;
+  listCampaigns(): Promise<CampaignListItem[]>;
 
   /**
    * Loads the directory for the campaign, lets `plan` decide the changes, and applies them with
@@ -42,16 +42,16 @@ export interface OutreachStore {
     importedAt: string;
     fileNames: ImportFileNames;
     plan: (directory: Directory) => ImportPlan;
-  }): ImportRecord;
-  listImports(campaignId: string): ImportRecord[];
-  importRecord(campaignId: string, importId: string): ImportRecord | null;
+  }): Promise<ImportRecord>;
+  listImports(campaignId: string): Promise<ImportRecord[]>;
+  importRecord(campaignId: string, importId: string): Promise<ImportRecord | null>;
 
-  searchLeads(query: LeadQuery): LeadSearchResult;
-  person(id: string): PersonRecord | null;
-  company(id: string): CompanyRecord | null;
+  searchLeads(query: LeadQuery): Promise<LeadSearchResult>;
+  person(id: string): Promise<PersonRecord | null>;
+  company(id: string): Promise<CompanyRecord | null>;
 
   /** Marks one contact detail bad (wrong number, hard bounce). Imports never clear the mark. */
-  markContactDetailBad(detailId: string): boolean;
+  markContactDetailBad(detailId: string): Promise<boolean>;
 
-  close(): void;
+  close(): Promise<void>;
 }
