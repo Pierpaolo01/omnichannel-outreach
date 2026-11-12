@@ -57,7 +57,7 @@ Where one lead's automated outreach stands in its campaign, such as queued, acti
 _Avoid_: Confusing it with a call outcome.
 
 **Reply handoff**:
-The point where any reply from a lead, including an auto-reply or opt-out, stops that lead's automated outreach in the campaign. The user continues the conversation wherever the prospect replied, outside the product's outreach.
+The point where any reply from a lead, including an auto-reply or opt-out, stops that lead's automated outreach in the campaign. The user continues the conversation wherever the prospect replied, outside the product's outreach. The product detects email and SMS replies; the user marks social replies by hand.
 _Avoid_: Calling automated appointment booking, reply sorting or inbox management part of the reply handoff.
 
 **Test run**:
@@ -75,6 +75,18 @@ _Avoid_: Confusing a channel with a sender account.
 **Sender account**:
 The identity used to contact a prospect on a channel, such as one email inbox or social profile.
 _Avoid_: Using account without distinguishing sender identity from a target company.
+
+**Connection invite**:
+A LinkedIn request to connect, with an optional note, that opens a LinkedIn track. Its acceptance only lets the track's DMs begin and is not a reply.
+_Avoid_: Treating an accepted invite as a prospect reply.
+
+**InMail fallback**:
+An optional single InMail a LinkedIn track sends when its connection invite has not been accepted within the track's wait. The track's DM follow-ups follow it.
+_Avoid_: Calling InMail the LinkedIn track's default first contact.
+
+**Message request**:
+A first social DM to someone who doesn't follow or know the sender, which lands in their requests folder until accepted. Instagram and Facebook tracks start with one.
+_Avoid_: Treating a delivered request as a read or accepted conversation.
 
 **Conversation**:
 An exchange of messages with a person or business in a particular channel thread.
