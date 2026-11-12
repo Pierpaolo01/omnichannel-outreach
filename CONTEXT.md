@@ -24,8 +24,12 @@ _Avoid_: Treating a company main line or shared inbox as a person's own contact 
 A coordinated outreach effort containing imported leads, outreach strategies, cross-channel sequence and message copy.
 _Avoid_: Assuming one campaign is limited to one channel.
 
+**Channel track**:
+A campaign's first message and follow-ups on one channel, sent in order with a wait before each follow-up.
+_Avoid_: Calling one channel's follow-ups the sequence.
+
 **Sequence**:
-The ordered outreach steps and conditions a campaign applies across its channels.
+How a campaign arranges its channel tracks: which tracks start together and which start a set delay after another track finishes.
 _Avoid_: Treating unrelated channel-specific schedules as a coordinated sequence.
 
 **Call task**:
