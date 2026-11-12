@@ -161,7 +161,7 @@ function EntryRow({ entry }: { entry: SummaryEntry }) {
   const isCompany = entry.lead?.kind === "company";
   const sub = isCompany ? (entry.outcome === "not_enrolled" ? "Company" : "Company lead") : entry.lead === null ? "" : entry.title;
   return (
-    <tr className="border-line align-top max-[720px]:grid max-[720px]:grid-cols-[minmax(0,1fr)_auto] max-[720px]:gap-x-3 max-[720px]:gap-y-1 max-[720px]:px-3.5 max-[720px]:py-3 max-[720px]:[&>td]:p-0">
+    <tr className="border-line align-top max-[720px]:grid max-[720px]:grid-cols-[minmax(0,1fr)_auto] max-[720px]:gap-x-3 max-[720px]:gap-y-1 max-[720px]:px-3.5 max-[720px]:py-3 max-[720px]:[&>td]:border-0 max-[720px]:[&>td]:p-0">
       <td className="px-3.5 py-3.5">
         {href ? (
           <Link href={href} className="font-semibold no-underline hover:underline">
