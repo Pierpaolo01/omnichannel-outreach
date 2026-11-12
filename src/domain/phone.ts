@@ -13,9 +13,11 @@ export interface PhoneNumber {
   readonly display: string;
   /** Digit strings search matches against: international and national forms. */
   readonly searchDigits: string;
+  /** The two-letter region the number belongs to, when it can be read. */
+  readonly region: string | null;
 }
 
-function countryCode(country: string | null): CountryCode | undefined {
+export function countryCode(country: string | null): CountryCode | undefined {
   const code = (country ?? "").trim().toUpperCase();
   return /^[A-Z]{2}$/.test(code) && isSupportedCountry(code) ? code : undefined;
 }
@@ -30,10 +32,11 @@ export function parsePhone(raw: string, country: string | null): PhoneNumber | n
       key: parsed.number,
       display: parsed.formatInternational(),
       searchDigits: [...new Set([digitsOf(parsed.number), digitsOf(parsed.formatNational()), digits])].join(" "),
+      region: parsed.country ?? null,
     };
   }
   const key = written.startsWith("+") ? `+${digits}` : digits.startsWith("00") ? `+${digits.slice(2)}` : digits;
-  return { key, display: written, searchDigits: digits };
+  return { key, display: written, searchDigits: digits, region: null };
 }
 
 /** A stored phone key shown for reading. Keys that are not E.164 show as they are. */
@@ -41,4 +44,18 @@ export function displayPhone(key: string): string {
   if (!key.startsWith("+")) return key;
   const parsed = parsePhoneNumberFromString(key);
   return parsed?.isPossible() ? parsed.formatInternational() : key;
+}
+
+/**
+ * The region to read a company's national numbers in: its country column when that is a
+ * two-letter code, otherwise the region of its international main line (round 2, item 6).
+ */
+export function companyRegion(country: string | null, mainLines: readonly string[]): string | null {
+  const code = countryCode(country);
+  if (code) return code;
+  for (const raw of mainLines) {
+    const region = raw.trim().startsWith("+") ? parsePhone(raw, null)?.region : null;
+    if (region) return region;
+  }
+  return null;
 }

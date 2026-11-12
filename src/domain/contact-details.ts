@@ -23,15 +23,17 @@ const NAME_AFFIXES = new Set([
 ]);
 
 /**
- * A person's name for matching: accents, case, punctuation and titles such as "Dr" or "PhD"
- * removed, so "Dr. Grace Okafor" and "grace okafor" compare equal. Empty when no name is left.
+ * A name for matching: accents, case and titles such as "Dr" or "PhD" removed, and punctuation
+ * and spacing dropped rather than treated as word breaks, so "Dr. Grace Okafor" matches
+ * "grace okafor", "O'Neil" matches "ONeil" and "Mary-Jane" matches "Mary Jane".
+ * Empty when no name is left.
  */
 export function nameKey(raw: string): string {
   return foldText(raw)
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .split(/\s+/)
+    .map((word) => word.replace(/[^\p{L}\p{N}]/gu, ""))
     .filter((word) => word && !NAME_AFFIXES.has(word))
-    .join(" ");
+    .join("");
 }
 
 /** Lower-case, accent-free text for matching names and search. */

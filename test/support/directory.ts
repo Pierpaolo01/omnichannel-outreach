@@ -42,6 +42,14 @@ export function directoryAfter(directory: Directory, plan: ImportPlan): Director
     const owner = change.owner.kind === "person" ? `person:${change.owner.personId}` : `company:${change.owner.companyId}`;
     all.set(change.id, { owner, detail: { ...entry.detail, phoneKind: change.phoneKind } });
   }
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+  for (const { fromId, intoId } of plan.consolidations ?? []) {
+    const from = all.get(fromId);
+    const into = all.get(intoId);
+    if (!from || !into) throw new Error(`consolidation of unknown detail ${fromId} into ${intoId}`);
+    all.set(intoId, { ...into, detail: { ...into.detail, bad: into.detail.bad || from.detail.bad } });
+    all.delete(fromId);
+  }
   const owned = (owner: string) => [...all.values()].filter((e) => e.owner === owner).map((e) => e.detail);
 
   return {
@@ -51,9 +59,9 @@ export function directoryAfter(directory: Directory, plan: ImportPlan): Director
   };
 }
 
-/** Marks every detail with this key bad, as a wrong-number outcome would. */
-export function markBad(directory: Directory, key: string): Directory {
-  const mark = (d: KnownDetail) => (d.key === key ? { ...d, bad: true } : d);
+/** Marks one detail bad by its id, as the store's markContactDetailBad does. */
+export function markBad(directory: Directory, detailId: string): Directory {
+  const mark = (d: KnownDetail) => (d.id === detailId ? { ...d, bad: true } : d);
   return {
     ...directory,
     companies: directory.companies.map((c) => ({ ...c, details: c.details.map(mark) })),

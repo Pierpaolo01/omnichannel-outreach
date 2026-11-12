@@ -22,8 +22,18 @@ export function person(fields: Row): Row {
   return { first_name: first, last_name: rest.join(" "), title: "Owner", role_tier: "decision_maker", ...fields };
 }
 
-export function exportOf(rows: { businesses: readonly Row[]; people?: readonly Row[] }): ScraperExport {
-  const result = parseScraperExport({ businessesCsv: csv(BUSINESS_HEADER, rows.businesses), peopleCsv: csv(PEOPLE_HEADER, rows.people ?? []) });
+export interface ExportRows {
+  readonly businesses: readonly Row[];
+  readonly people?: readonly Row[];
+}
+
+/** The two CSV files, as a user would upload them. */
+export function csvOf(rows: ExportRows): { businessesCsv: string; peopleCsv: string } {
+  return { businessesCsv: csv(BUSINESS_HEADER, rows.businesses), peopleCsv: csv(PEOPLE_HEADER, rows.people ?? []) };
+}
+
+export function exportOf(rows: ExportRows): ScraperExport {
+  const result = parseScraperExport(csvOf(rows));
   if (!result.ok) throw new Error(JSON.stringify(result.problems));
   return result.value;
 }

@@ -283,7 +283,7 @@ class SqliteStore implements OutreachStore {
 
     return {
       companies: this.db
-        .prepare("SELECT * FROM companies")
+        .prepare("SELECT * FROM companies ORDER BY created_at, rowid")
         .all()
         .map((row) => ({
           id: str(row, "id"),
@@ -305,7 +305,7 @@ class SqliteStore implements OutreachStore {
           details: detailsByOwner.get(`company:${str(row, "id")}`) ?? [],
         })),
       people: this.db
-        .prepare("SELECT * FROM people")
+        .prepare("SELECT * FROM people ORDER BY created_at, rowid")
         .all()
         .map((row) => ({
           id: str(row, "id"),
@@ -434,6 +434,12 @@ class SqliteStore implements OutreachStore {
         change.phoneKind,
         change.id,
       ]);
+    }
+
+    // A personal copy of a company detail folds into it; a bad mark on either side survives.
+    for (const { fromId, intoId } of plan.consolidations) {
+      this.run("UPDATE contact_details SET bad = MAX(bad, (SELECT bad FROM contact_details WHERE id = ?)) WHERE id = ?", [fromId, intoId]);
+      this.run("DELETE FROM contact_details WHERE id = ?", [fromId]);
     }
 
     this.run(
