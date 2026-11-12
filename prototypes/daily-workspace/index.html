@@ -1,0 +1,890 @@
+<title>Outreach Daily Workspace</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<!-- PROTOTYPE — throwaway. Answers: "What should the daily workspace show for calls and lead management?"
+     Ticket: Choose the daily workspace for calls and lead management (omnichannel-outreach #6).
+     Three variants of the person page, switchable from the bottom bar. All data is invented example data; nothing persists. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: laptop-first work tool — top nav, one working area per view, a call-centre focus layout for calls. */
+:root{
+  --bg:#F3F5F4; --surface:#FFFFFF; --sunk:#E9EDEB; --line:#D5DCD9; --ink:#17201D; --muted:#5C6B66; --faint:#8A9893;
+  --accent:#0E6655; --accent-ink:#FFFFFF; --accent-soft:#DCEFEA;
+  --ok:#2F7D32; --ok-soft:#E1F1E1; --warn:#9A5B00; --warn-soft:#FBEBD0; --crit:#B3261E; --crit-soft:#F9DEDC; --info:#2457A6; --info-soft:#DFE8F7;
+  --switch-bg:#1D1A2B; --switch-ink:#F4F1FF;
+  --f-head:"IBM Plex Sans Condensed","Arial Narrow",system-ui,sans-serif;
+  --f-body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+  --r:6px;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#111715; --surface:#18201D; --sunk:#0D1311; --line:#2C3833; --ink:#E4ECE8; --muted:#A1B0AA; --faint:#73827C;
+  --accent:#4FC2A6; --accent-ink:#06231C; --accent-soft:#163A32;
+  --ok:#7CCB80; --ok-soft:#1B3220; --warn:#F0B35A; --warn-soft:#3A2A10; --crit:#F2928B; --crit-soft:#3E1C1A; --info:#8DB3F2; --info-soft:#1A2A45;
+  --switch-bg:#E9E4FF; --switch-ink:#1D1A2B; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#111715; --surface:#18201D; --sunk:#0D1311; --line:#2C3833; --ink:#E4ECE8; --muted:#A1B0AA; --faint:#73827C;
+  --accent:#4FC2A6; --accent-ink:#06231C; --accent-soft:#163A32;
+  --ok:#7CCB80; --ok-soft:#1B3220; --warn:#F0B35A; --warn-soft:#3A2A10; --crit:#F2928B; --crit-soft:#3E1C1A; --info:#8DB3F2; --info-soft:#1A2A45;
+  --switch-bg:#E9E4FF; --switch-ink:#1D1A2B; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:14px;line-height:1.45;padding-bottom:84px}
+h1,h2,h3{font-family:var(--f-head);font-weight:600;margin:0;text-wrap:balance;letter-spacing:.005em}
+h1{font-size:24px} h2{font-size:18px} h3{font-size:15px}
+a{color:var(--accent)}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.mono{font-family:var(--f-mono);font-variant-numeric:tabular-nums}
+.muted{color:var(--muted)} .faint{color:var(--faint)} .small{font-size:12.5px}
+.label{font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.wrap{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));max-width:1440px;margin:0 auto}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--surface)}
+.top{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--surface);border-bottom:1px solid var(--line)}
+.top .wrap{display:flex;align-items:center;gap:20px;padding-block:10px;flex-wrap:wrap}
+.brand{font-family:var(--f-head);font-weight:600;font-size:17px;display:flex;align-items:center;gap:8px}
+.brand i{width:10px;height:10px;border-radius:2px;background:var(--accent);display:inline-block}
+nav{display:flex;gap:4px;flex-wrap:wrap}
+nav a{padding:6px 10px;border-radius:var(--r);text-decoration:none;color:var(--muted);font-weight:500}
+nav a.on{background:var(--accent-soft);color:var(--ink)}
+nav a .n{font-family:var(--f-mono);font-size:12px;background:var(--accent);color:var(--accent-ink);border-radius:9px;padding:0 6px;margin-left:4px}
+.top .right{margin-left:auto;display:flex;gap:10px;align-items:center}
+.proto{font-size:11.5px;border:1px dashed var(--faint);color:var(--muted);padding:3px 8px;border-radius:12px}
+.quick{width:220px;max-width:40vw;padding:6px 10px;border:1px solid var(--line);border-radius:var(--r);background:var(--bg)}
+
+main{padding-block:20px}
+.cols{display:grid;gap:16px}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:16px;min-width:0}
+.panel>h2,.panel>h3{margin-bottom:10px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.stack{display:flex;flex-direction:column;gap:10px}
+.between{justify-content:space-between}
+.btn{border:1px solid var(--line);background:var(--surface);padding:6px 12px;border-radius:var(--r);font-weight:500}
+.btn:hover{border-color:var(--muted)}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.btn.danger{color:var(--crit);border-color:color-mix(in srgb,var(--crit) 45%,var(--line))}
+.btn.sm{padding:3px 9px;font-size:12.5px}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+input[type=text],input[type=search],input[type=date],input[type=time],select,textarea{border:1px solid var(--line);background:var(--surface);border-radius:var(--r);padding:6px 9px}
+textarea{width:100%;min-height:70px;resize:vertical}
+
+/* pills */
+.pill{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:500;padding:2px 8px;border-radius:10px;white-space:nowrap;background:var(--sunk);color:var(--muted)}
+.pill::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.t-ok{background:var(--ok-soft);color:var(--ok)} .t-warn{background:var(--warn-soft);color:var(--warn)}
+.t-crit{background:var(--crit-soft);color:var(--crit)} .t-info{background:var(--info-soft);color:var(--info)}
+.t-acc{background:var(--accent-soft);color:var(--accent)} .t-mute{background:var(--sunk);color:var(--muted)}
+.tag{font-family:var(--f-mono);font-size:10.5px;letter-spacing:.04em;padding:1px 5px;border-radius:3px;border:1px solid var(--line);color:var(--muted);text-transform:uppercase}
+.bad{text-decoration:line-through;color:var(--faint)}
+
+/* today */
+.today-grid{grid-template-columns:minmax(0,1.3fr) minmax(0,1fr)}
+.callhero{display:flex;gap:24px;align-items:flex-end;flex-wrap:wrap}
+.big{font-family:var(--f-head);font-size:56px;line-height:1;font-weight:600}
+.breakdown{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:13.5px}
+.breakdown b{font-family:var(--f-mono);text-align:right;font-weight:500}
+.attn{display:flex;flex-direction:column}
+.attn li{list-style:none;display:grid;grid-template-columns:4px 1fr auto;gap:12px;padding:10px 0;border-top:1px solid var(--line);align-items:start}
+.attn li:first-child{border-top:0}
+.attn .sev{height:100%;border-radius:2px;min-height:34px}
+.attn ul{padding:0;margin:0}
+table{border-collapse:collapse;width:100%}
+th{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);text-align:left;font-weight:600;padding:6px 8px;border-bottom:1px solid var(--line)}
+td{padding:8px;border-bottom:1px solid var(--line);vertical-align:top}
+td.num,th.num{text-align:right;font-family:var(--f-mono);font-variant-numeric:tabular-nums}
+.tablewrap{overflow-x:auto}
+tr.click{cursor:pointer} tr.click:hover td{background:var(--bg)}
+
+/* calls */
+.calls{display:grid;grid-template-columns:300px minmax(0,1fr);gap:16px;align-items:start}
+.queue{position:sticky;top:70px}
+.queue h3{margin:6px 0}
+.qitem{display:block;width:100%;text-align:left;border:1px solid transparent;background:none;padding:8px 10px;border-radius:var(--r)}
+.qitem:hover{background:var(--bg)}
+.qitem.cur{background:var(--accent-soft);border-color:var(--accent)}
+.qitem .nm{font-weight:600}
+.qitem.later{opacity:.75}
+.task-head{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;align-items:flex-start}
+.clock{text-align:right}
+.clock .t{font-family:var(--f-mono);font-size:26px;font-weight:500}
+.task-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;margin-top:16px}
+.numbers li{list-style:none;display:flex;gap:10px;align-items:center;padding:6px 0;border-top:1px solid var(--line)}
+.numbers ul{padding:0;margin:0}.numbers li:first-child{border-top:0}
+.numbers .v{font-family:var(--f-mono);font-size:15px}
+.outcomes{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.oc{border:1px solid var(--line);background:var(--surface);border-radius:var(--r);padding:8px;text-align:left;font-weight:500;font-size:13px}
+.oc small{display:block;font-weight:400;color:var(--muted);font-size:11.5px}
+.oc.sel{border-color:var(--accent);background:var(--accent-soft)}
+.sub{background:var(--bg);border:1px solid var(--line);border-radius:var(--r);padding:12px;margin-top:10px}
+.script{white-space:pre-wrap;font-size:13px;background:var(--bg);padding:10px;border-radius:var(--r)}
+.dialing{font-family:var(--f-mono);font-size:12.5px;color:var(--accent)}
+
+/* leads */
+.filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.filters input[type=search]{flex:1 1 260px;min-width:0}
+.bulk{position:sticky;top:62px;z-index:3;background:var(--ink);color:var(--bg);border-radius:var(--r);padding:8px 12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0}
+.bulk .btn{background:transparent;color:var(--bg);border-color:color-mix(in srgb,var(--bg) 40%,transparent)}
+.bulk select{background:var(--ink);color:var(--bg);border-color:color-mix(in srgb,var(--bg) 40%,transparent)}
+.confirm{background:var(--warn-soft);border:1px solid var(--warn);color:var(--ink);border-radius:var(--r);padding:10px 12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0}
+
+/* person shared */
+.steps{display:flex;gap:3px;flex-wrap:wrap;align-items:center}
+.st{font-family:var(--f-mono);font-size:10.5px;min-width:26px;text-align:center;padding:3px 4px;border-radius:3px;border:1px solid var(--line);color:var(--muted)}
+.st.done{background:var(--sunk);color:var(--muted)}
+.st.cur{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.st.skip{text-decoration:line-through;color:var(--faint);border-style:dashed}
+.st.wb{border-color:var(--info);color:var(--info)}
+.st.wb.cur{background:var(--info);color:var(--surface)}
+.sep{color:var(--faint);font-size:11px;padding:0 3px}
+.enr{border:1px solid var(--line);border-radius:var(--r);padding:12px;display:flex;flex-direction:column;gap:8px;background:var(--surface)}
+.enr .ctrl{display:flex;gap:6px;flex-wrap:wrap}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:13px}
+.kv dt{color:var(--muted)} .kv dd{margin:0;min-width:0;overflow-wrap:anywhere}
+.tl{list-style:none;margin:0;padding:0}
+.tl li{display:grid;grid-template-columns:86px 58px minmax(0,1fr);gap:10px;padding:9px 0;border-top:1px solid var(--line)}
+.tl li:first-child{border-top:0}
+.tl .when{font-family:var(--f-mono);font-size:11.5px;color:var(--muted)}
+.tl .what{min-width:0}
+.tl .cmp{font-size:11.5px;color:var(--faint)}
+.tl details summary{cursor:pointer;color:var(--accent);font-size:12.5px}
+.tl pre{white-space:pre-wrap;font-family:var(--f-body);font-size:13px;background:var(--bg);padding:10px;border-radius:var(--r);margin:6px 0 0}
+.k-call{color:var(--accent)} .k-reply{color:var(--crit)} .k-note{color:var(--warn)} .k-system{color:var(--faint)}
+.next{background:var(--accent-soft);border-radius:var(--r);padding:10px 12px;font-size:13px}
+.coll li{list-style:none;padding:8px 0;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:4px}
+.coll ul{margin:0;padding:0}.coll li:first-child{border-top:0}
+.notebox{display:flex;flex-direction:column;gap:6px}
+.dnc{display:flex;gap:10px;align-items:flex-start}
+/* variant A */
+.vA{grid-template-columns:280px minmax(0,1fr) 340px;align-items:start}
+/* variant B */
+.vB-head{display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start;justify-content:space-between}
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);flex-wrap:wrap;margin-top:16px}
+.tab{border:1px solid transparent;border-bottom:0;background:none;padding:8px 14px;border-radius:var(--r) var(--r) 0 0;color:var(--muted);font-weight:500;display:flex;gap:8px;align-items:center}
+.tab.on{background:var(--surface);border-color:var(--line);color:var(--ink);margin-bottom:-1px}
+.vB-body{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:16px;align-items:start;margin-top:16px}
+.track{display:flex;gap:0;overflow-x:auto;padding:4px 0 8px}
+.tstep{min-width:118px;padding:8px 10px;border-top:3px solid var(--line);font-size:12.5px}
+.tstep.done{border-color:var(--muted)} .tstep.cur{border-color:var(--accent);background:var(--accent-soft)}
+.tstep.skip{border-top-style:dashed;color:var(--faint)} .tstep.wb{border-color:var(--info)} .tstep.wb.cur{background:var(--info-soft)}
+.tstep .c{font-family:var(--f-mono);font-size:10.5px;text-transform:uppercase;color:var(--muted)}
+/* variant C */
+.vC{max-width:860px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+.vC-head{position:sticky;top:58px;z-index:2;background:var(--bg);padding-block:10px;border-bottom:1px solid var(--line)}
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.chip{border:1px solid var(--line);background:var(--surface);border-radius:16px;padding:4px 10px;display:flex;gap:8px;align-items:center;font-size:12.5px}
+.chip.open{border-color:var(--accent)}
+
+/* about */
+.about{max-width:820px}
+.about li{margin:4px 0}
+.about p,.about ul{max-width:68ch}
+
+/* switcher — deliberately not part of the design */
+.switcher{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(14px + env(safe-area-inset-bottom,0px));z-index:20;background:var(--switch-bg);color:var(--switch-ink);border-radius:24px;padding:6px 8px;display:flex;align-items:center;gap:6px;box-shadow:0 6px 24px rgba(0,0,0,.28);font-size:13px;max-width:calc(100vw - 32px)}
+.switcher button{background:transparent;border:0;color:inherit;padding:4px 10px;border-radius:14px}
+.switcher button:hover{background:color-mix(in srgb,var(--switch-ink) 15%,transparent)}
+.switcher .lbl{padding:0 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.switcher .div{width:1px;height:18px;background:color-mix(in srgb,var(--switch-ink) 30%,transparent)}
+.toast{position:fixed;right:max(16px,env(safe-area-inset-right,0px));bottom:calc(70px + env(safe-area-inset-bottom,0px));background:var(--ink);color:var(--bg);padding:10px 14px;border-radius:var(--r);max-width:380px;z-index:21;font-size:13px}
+
+@media (max-width:1100px){.vA{grid-template-columns:minmax(0,1fr) 320px}.vA>.a-left{grid-column:1/-1}.vB-body{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:860px){.today-grid,.calls,.task-grid,.vA{grid-template-columns:minmax(0,1fr)}.queue{position:static}.outcomes{grid-template-columns:repeat(2,minmax(0,1fr))}.quick{display:none}.tl li{grid-template-columns:70px minmax(0,1fr)}.tl li .kind{display:none}.vC-head{position:static}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<header class="top"><div class="wrap">
+  <div class="brand"><i></i>Outreach</div>
+  <nav id="nav"></nav>
+  <div class="right">
+    <input class="quick" id="quick" type="search" placeholder="Find a lead…" aria-label="Find a lead">
+    <span class="proto">Prototype · example data</span>
+  </div>
+</div></header>
+<main><div class="wrap" id="view"></div></main>
+<div class="switcher" role="toolbar" aria-label="Prototype controls">
+  <button id="prevV" aria-label="Previous person page layout">←</button>
+  <span class="lbl" id="vLabel"></span>
+  <button id="nextV" aria-label="Next person page layout">→</button>
+  <span class="div"></span>
+  <button id="openSample">Open a person</button>
+  <button id="reset">Reset demo</button>
+</div>
+<div class="toast" id="toast" hidden></div>
+
+<script>
+/* ============ example data ============ */
+const NOW_MIN = 9*60+40;            // 09:40 your time (CET), Thursday 12 November 2026
+const TODAY = new Date(2026,10,12);
+const HOURS = {start:9*60,end:17*60};
+const VARIANTS = [['A','Three panes'],['B','Campaign tabs'],['C','Single feed']];
+const STATUS = {
+  queued:['Queued','t-mute'], active:['Active','t-ok'], waiting_call:['Waiting on call','t-info'], callback:['Callback scheduled','t-info'],
+  paused:['Paused','t-warn'], replied:['Replied · automation stopped','t-crit'], interested:['Interested · automation stopped','t-acc'],
+  declined:['Declined · stopped','t-mute'], winback:['In win-back','t-info'], stopped:['Stopped manually','t-mute'],
+  finished_nr:['Sequence finished · no response','t-mute'], finished_nouse:['Finished · no usable channel','t-warn']
+};
+const CH = {email:'Email',sms:'SMS',call:'Call'};
+
+function seed(){
+  const campaigns = {
+    c1:{id:'c1',name:'Dental clinics – Rotterdam',state:'active',declined:'winback',winback:true,
+      steps:[['email','Intro email'],['sms','Intro SMS'],['email','Follow-up email'],['sms','Nudge SMS'],['call','Call'],['email','Last email']],
+      wb:[['email','Win-back: case study'],['sms','Win-back: check-in']],
+      copy:{
+        'Intro email':['Quick question about new-patient bookings at {company}','Hi {first},\n\nI looked at {company} online. You have strong reviews, but the booking flow sends people to a phone line that is closed in the evening.\n\nWe set up evening and weekend booking for dental practices in Rotterdam, and most fill 6–10 extra chairs a month.\n\nWorth a 15-minute call next week?\n\nPierpaolo\nResult Labs'],
+        'Intro SMS':[null,'Hi {first}, Pierpaolo from Result Labs. I emailed about evening bookings at {company}. Ok if I call you this week?'],
+        'Follow-up email':['Re: Quick question about new-patient bookings at {company}','Hi {first},\n\nFollowing up on my note. Happy to send a 2-minute video of how it would work for {company} instead of a call.\n\nPierpaolo'],
+        'Nudge SMS':[null,'{first}, should I send the 2-minute video for {company}? A yes is enough.'],
+        'Last email':['Closing the loop','Hi {first},\n\nI won’t keep emailing. If evening bookings become a priority at {company}, reply here and I’ll pick it up.\n\nPierpaolo'],
+        'Win-back: case study':['How a practice in Kralingse Veer filled 9 chairs','Hi {first},\n\nThanks for taking my call. No pressure — here is the one-page case study I mentioned, in case the timing changes.\n\nPierpaolo'],
+        'Win-back: check-in':[null,'Hi {first}, Pierpaolo here. Did the case study land? Happy to leave it there if not.']},
+      script:'Opener: "Hi, this is Pierpaolo from Result Labs — I sent you a note about evening bookings. Did I catch you at a bad time?"\n\n• Ask: how do patients book after 17:00 today?\n• Ask: how many chairs went empty last month?\n• If interested: offer a 20-minute walkthrough this week or next.\n• If "we have an agency": ask when the contract renews.\n• Gatekeeper: ask for the practice owner or practice manager by name.'},
+    c2:{id:'c2',name:'Physiotherapy – Greater London',state:'active',declined:'continue',winback:false,
+      steps:[['email','Intro email'],['call','Call'],['email','Follow-up email'],['sms','SMS check-in'],['email','Last email']],wb:[],
+      copy:{
+        'Intro email':['Patients who find {company} after hours','Hi {first},\n\nMost physio clinics in London lose evening enquiries to whoever answers first. We make sure that is you.\n\nCould I call you on Thursday to show you how?\n\nPierpaolo\nResult Labs'],
+        'Follow-up email':['Re: Patients who find {company} after hours','Hi {first},\n\nI tried to call earlier this week. Is there a better time or person?\n\nPierpaolo'],
+        'SMS check-in':[null,'Hi {first}, Pierpaolo from Result Labs. Tried you by phone about after-hours enquiries at {company}. Worth a chat?'],
+        'Last email':['Last note from me','Hi {first},\n\nLast note from me. Reply any time if this becomes useful for {company}.\n\nPierpaolo']},
+      script:'Opener: "Hi {first}, it’s Pierpaolo from Result Labs, I emailed on Monday about after-hours enquiries."\n\n• Ask: who answers enquiries after 18:00?\n• Ask: do you track enquiries that never book?\n• If interested: book a 20-minute walkthrough.'},
+    c3:{id:'c3',name:'Roofing contractors – Antwerp',state:'paused',declined:'stop',winback:false,
+      steps:[['email','Intro email'],['email','Follow-up email'],['call','Call'],['email','Last email']],wb:[],
+      copy:{'Intro email':['Offerteaanvragen voor {company}','Dag {first},\n\nWe helpen dakwerkers in Antwerpen om offerteaanvragen sneller op te volgen.\n\nPierpaolo'],
+        'Follow-up email':['Re: Offerteaanvragen voor {company}','Dag {first},\n\nEven opvolgen op mijn vorige bericht.\n\nPierpaolo'],
+        'Last email':['Laatste bericht','Dag {first},\n\nIk laat het hierbij.\n\nPierpaolo']},
+      script:'Speak Dutch or English. Ask for the zaakvoerder.'},
+    c4:{id:'c4',name:'Physio pilot – London (Sept)',state:'active',declined:'stop',winback:false,
+      steps:[['email','Intro email'],['email','Follow-up email'],['email','Last email']],wb:[],
+      copy:{'Intro email':['A question for {company}','Hi {first},\n\nShort question about how {company} handles evening enquiries.\n\nPierpaolo'],
+        'Follow-up email':['Re: A question for {company}','Hi {first}, bumping this up.\n\nPierpaolo'],
+        'Last email':['Closing the loop','Hi {first}, closing the loop on this.\n\nPierpaolo']},
+      script:''}
+  };
+  const companies = {
+    k1:{id:'k1',name:'Tandartspraktijk Kralingen',city:'Rotterdam',tz:0,main:{v:'+31 10 412 7730'},inbox:'info@tandartskralingen.nl'},
+    k2:{id:'k2',name:'Dental Care Blijdorp',city:'Rotterdam',tz:0,main:{v:'+31 10 466 2180'},inbox:'balie@dentalcareblijdorp.nl'},
+    k3:{id:'k3',name:'Mondzorg Hillegersberg',city:'Rotterdam',tz:0,main:{v:'+31 10 418 5521'},inbox:'info@mondzorghillegersberg.nl'},
+    k4:{id:'k4',name:'Smile Studio Rotterdam Centrum',city:'Rotterdam',tz:0,main:{v:'+31 10 214 9902'},inbox:'hello@smilestudiorotterdam.nl'},
+    k5:{id:'k5',name:'Balham Physio & Sports Injury',city:'London',tz:-60,main:{v:'+44 20 7946 0412'},inbox:'reception@balhamphysio.co.uk'},
+    k6:{id:'k6',name:'Islington Physio Rooms',city:'London',tz:-60,main:{v:'+44 20 7946 0877'},inbox:'hello@islingtonphysio.co.uk'},
+    k7:{id:'k7',name:'Canary Wharf Physiotherapy',city:'London',tz:-60,main:{v:'+44 20 7946 0193'},inbox:'info@cwphysio.co.uk'},
+    k8:{id:'k8',name:'Dakwerken Peeters',city:'Antwerp',tz:0,main:{v:'+32 3 488 21 90'},inbox:'info@dakwerkenpeeters.be'},
+    k9:{id:'k9',name:'Van den Broeck Dakwerken',city:'Antwerp',tz:0,main:{v:'+32 3 457 10 06',bad:true},inbox:null}
+  };
+  const people = {
+    p1:{id:'p1',kind:'person',name:'Sanne de Vries',first:'Sanne',role:'Owner, dentist',k:'k1',emails:[{v:'s.devries@tandartskralingen.nl'}],phones:[{v:'+31 10 412 7731',t:'direct'},{v:'+31 6 4182 9375',t:'mobile'}],dnc:false,stage:null},
+    p2:{id:'p2',kind:'person',name:'Mark Jansen',first:'Mark',role:'Practice manager',k:'k1',emails:[{v:'m.jansen@tandartskralingen.nl'}],phones:[],dnc:false,stage:null},
+    p3:{id:'p3',kind:'person',name:'Ahmed El Amrani',first:'Ahmed',role:'Owner',k:'k2',emails:[{v:'ahmed@dentalcareblijdorp.nl'}],phones:[{v:'+31 6 2219 4470',t:'mobile'}],dnc:false,stage:{s:'booked',date:'2026-11-18'}},
+    p4:{id:'p4',kind:'company',name:'Mondzorg Hillegersberg',first:null,role:'No named decision maker',k:'k3',emails:[],phones:[],dnc:false,stage:null},
+    p5:{id:'p5',kind:'person',name:'Lotte Bakker',first:'Lotte',role:'Practice manager',k:'k4',emails:[{v:'lotte@smilestudiorotterdam.nl'}],phones:[{v:'+31 6 5530 1288',t:'mobile'}],dnc:false,stage:null},
+    p6:{id:'p6',kind:'person',name:'Pieter Visser',first:'Pieter',role:'Co-owner, orthodontist',k:'k4',emails:[{v:'pieter@smilestudiorotterdam.nl'}],phones:[{v:'+31 10 214 9905',t:'direct'}],dnc:false,stage:null},
+    p7:{id:'p7',kind:'person',name:'James Whitfield',first:'James',role:'Clinic director',k:'k5',emails:[{v:'james@balhamphysio.co.uk'}],phones:[{v:'+44 7700 900412',t:'mobile'}],dnc:false,stage:null},
+    p13:{id:'p13',kind:'person',name:'Rachel Owusu',first:'Rachel',role:'Head physiotherapist',k:'k5',emails:[],phones:[],dnc:false,stage:null,unenrolled:'no own email or mobile in the CSV'},
+    p8:{id:'p8',kind:'person',name:'Priya Raman',first:'Priya',role:'Owner',k:'k6',emails:[{v:'priya@islingtonphysio.co.uk'},{v:'priya.raman.physio@gmail.com',newer:true}],phones:[{v:'+44 20 7946 0878',t:'direct',bad:true},{v:'+44 7700 900871',t:'mobile'}],dnc:false,stage:null},
+    p9:{id:'p9',kind:'person',name:'Tom Clarke',first:'Tom',role:'Operations lead',k:'k6',emails:[{v:'tom@islingtonphysio.co.uk'}],phones:[],dnc:false,stage:null},
+    p10:{id:'p10',kind:'person',name:'Olivia Hart',first:'Olivia',role:'Founder',k:'k7',emails:[{v:'olivia@cwphysio.co.uk'}],phones:[{v:'+44 7700 900195',t:'mobile'}],dnc:false,stage:null},
+    p11:{id:'p11',kind:'person',name:'Koen Peeters',first:'Koen',role:'Zaakvoerder (owner)',k:'k8',emails:[{v:'koen@dakwerkenpeeters.be'}],phones:[{v:'+32 475 21 88 40',t:'mobile'}],dnc:false,stage:null},
+    p12:{id:'p12',kind:'company',name:'Van den Broeck Dakwerken',first:null,role:'No named decision maker',k:'k9',emails:[],phones:[],dnc:false,stage:null},
+    p14:{id:'p14',kind:'person',name:'Daniel Moreau',first:'Daniel',role:'Owner',k:null,emails:[{v:'daniel@moreau-physio.co.uk'}],phones:[],dnc:true,stage:null,companyName:'Moreau Physio (Clapham)'}
+  };
+  const enrollments = [
+    {id:'e1',p:'p1',c:'c1',idx:4,status:'waiting_call',callDue:0,rolled:0,skipped:[]},
+    {id:'e2',p:'p2',c:'c1',idx:2,status:'active',nextDue:1,skipped:[]},
+    {id:'e3',p:'p3',c:'c1',idx:3,status:'replied',replied:{ch:'Email',day:-1},skipped:[]},
+    {id:'e4',p:'p4',c:'c1',idx:4,status:'waiting_call',callDue:-1,rolled:1,skipped:[1,3]},
+    {id:'e5',p:'p5',c:'c1',idx:4,status:'callback',cb:{day:0,time:'11:30'},skipped:[]},
+    {id:'e6',p:'p6',c:'c1',idx:1,branch:'wb',status:'winback',nextDue:2,skipped:[]},
+    {id:'e7',p:'p7',c:'c2',idx:1,status:'waiting_call',callDue:0,rolled:0,skipped:[]},
+    {id:'e8',p:'p8',c:'c2',idx:1,status:'waiting_call',callDue:0,rolled:0,skipped:[]},
+    {id:'e9',p:'p9',c:'c2',idx:0,status:'queued',skipped:[]},
+    {id:'e10',p:'p10',c:'c2',idx:1,status:'callback',cb:{day:-1,time:'15:00'},skipped:[]},
+    {id:'e11',p:'p8',c:'c4',idx:3,status:'finished_nr',skipped:[]},
+    {id:'e12',p:'p11',c:'c3',idx:2,status:'waiting_call',callDue:-2,rolled:0,skipped:[]},
+    {id:'e13',p:'p12',c:'c3',idx:4,status:'finished_nouse',skipped:[0,1,2,3]},
+    {id:'e14',p:'p14',c:'c4',idx:3,status:'finished_nr',skipped:[]}
+  ];
+  const events = [];
+  const ev = (p,c,day,time,kind,title,body)=>events.push({p,c,day,time,kind,title,body});
+  // generated "sent" events
+  for(const e of enrollments){
+    const cp = campaigns[e.c];
+    const mainUpTo = e.branch==='wb' ? cp.steps.length-1 : e.idx; // win-back leads finished the main track up to the call
+    let day = -2*mainUpTo - (e.c==='c4'?40:0);
+    for(let i=0;i<mainUpTo;i++){
+      const [ch,label]=cp.steps[i];
+      if(e.skipped.includes(i)){ ev(e.p,e.c,day,'—','system',`${label} skipped`, ({email:'No email address.',sms:'No mobile number.',call:'No good phone number.'})[ch]); day+=2; continue; }
+      if(ch==='call'){ day+=2; continue; }
+      ev(e.p,e.c,day,ch==='sms'?'10:12':'09:05',ch,`${label} sent`,{step:label,c:e.c}); day+=2;
+    }
+    if(e.branch==='wb'){
+      for(let i=0;i<e.idx;i++){ const [ch,label]=cp.wb[i]; ev(e.p,e.c,-1,'09:05',ch,`${label} sent`,{step:label,c:e.c}); }
+    }
+  }
+  ev('p1','c1',-7,'14:22','system','Intro email opened (2×)');
+  ev('p1','c1',-3,'08:47','system','Follow-up email opened');
+  ev('p3','c1',-1,'16:03','reply','Replied by email','Automation stopped in Dental clinics – Rotterdam. Read and answer the reply in Instantly.');
+  ev('p3',null,0,'08:55','stage','Sales stage: appointment booked for Wed 18 Nov');
+  ev('p6','c1',-3,'11:20','call','Call: conversation, not interested','Happy with their current agency, contract runs until March. Declined path: win-back branch.');
+  ev('p5','c1',-1,'10:05','call','Call: callback requested','Asked me to call back Thursday 11:30, after the morning clinic.');
+  ev('p10','c2',-2,'14:40','call','Call: callback requested','Wants a call Wednesday 15:00 when the new receptionist starts.');
+  ev('p10','c2',-1,'15:00','system','Callback missed','Still on the call list, flagged overdue.');
+  ev('p4','c1',-1,'—','system','Call rolled over to today','Not worked yesterday. Day 1 of 2 before it is marked skipped.');
+  ev('p8','c2',-4,'11:31','call','Call: wrong / dead number','+44 20 7946 0878 marked bad. Mobile still available.');
+  ev('p8','c4',-30,'—','system','Sequence finished, no response');
+  ev('p12','c3',-6,'09:30','call','Call: wrong / dead number','+32 3 457 10 06 marked bad. No usable channel left.');
+  ev('p12','c3',-6,'09:30','system','Finished: no usable channel');
+  ev('p11','c3',-2,'17:10','system','Campaign paused','Call task removed from the daily list. Clocks frozen.');
+  ev('p14',null,-10,'12:00','system','Marked do-not-contact','Future imports skip this person.');
+  ev('p9','c2',0,'—','system','Queued','Waiting for sender capacity. About 9 days until all queued leads have started.');
+  const notes = [
+    {p:null,k:'k1',day:-3,text:'Receptionist is Fleur. Dr. de Vries is in the practice Tuesday to Thursday.'},
+    {p:'p1',k:null,day:-6,text:'Opened the intro twice. Mention the evening-booking gap on their site.'},
+    {p:'p6',k:null,day:-3,text:'Contract with current agency ends in March. Try again in February.'}
+  ];
+  return {campaigns,companies,people,enrollments,events,notes,
+    attention:[{id:'sms',sev:'crit',title:'SMS sender +31 97 0102 3344 disconnected',body:'SMS steps in Dental clinics – Rotterdam are on hold until it is reconnected. Nothing is dropped.',action:['Open campaigns','#campaigns']},
+               {id:'cap',sev:'warn',title:'Physiotherapy – Greater London: 212 leads queued',body:'At 25 new leads a day across your inboxes, the last one starts in about 9 days.',action:['Open campaign','#campaigns']}],
+    ui:{variant:'A',cur:null,outcome:null,sub:{},dial:null,sel:new Set(),confirm:null,q:'',fc:'',fs:'',fst:'',fdnc:false,tab:null,chip:null,tlc:''}};
+}
+let S = seed();
+try{ const v=localStorage.getItem('dw-variant'); if(v && VARIANTS.some(x=>x[0]===v)) S.ui.variant=v; }catch(e){}
+
+/* ============ helpers ============ */
+const $ = s=>document.querySelector(s);
+const esc = s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const P = id=>S.people[id]; const C = id=>S.campaigns[id]; const K = id=>S.companies[id];
+const company = p=>p.k?K(p.k):{name:p.companyName||'—',city:'',tz:-60,main:null,inbox:null};
+function dayDate(d){const x=new Date(TODAY);x.setDate(x.getDate()+d);return x}
+function fmtDay(d){ if(d===0)return'Today'; if(d===-1)return'Yesterday'; if(d===1)return'Tomorrow';
+  return dayDate(d).toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short'}); }
+const hm = m=>`${String(Math.floor(((m%1440)+1440)%1440/60)).padStart(2,'0')}:${String(((m%60)+60)%60).padStart(2,'0')}`;
+const toMin = t=>{const[a,b]=t.split(':').map(Number);return a*60+b};
+const localNow = p=>NOW_MIN+company(p).tz;
+const pill = st=>`<span class="pill ${STATUS[st][1]}">${STATUS[st][0]}</span>`;
+const enrOf = pid=>S.enrollments.filter(e=>e.p===pid);
+const stepsOf = e=>e.branch==='wb'?C(e.c).wb:C(e.c).steps;
+function stepLabel(e){const st=stepsOf(e);return e.idx<st.length?st[e.idx][1]:'—'}
+function stageText(p){ if(!p.stage)return'None'; return p.stage.s==='interested'?'Interested':`Appointment booked${p.stage.date?' · '+new Date(p.stage.date).toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short'}):''}` }
+function render_copy(text,p){ return (text||'').replaceAll('{first}',p.first||'there').replaceAll('{company}',company(p).name) }
+function toast(msg){const t=$('#toast');t.textContent=msg;t.hidden=false;clearTimeout(toast._t);toast._t=setTimeout(()=>t.hidden=true,3600)}
+function addEv(p,c,kind,title,body){S.events.push({p,c,day:0,time:hm(NOW_MIN),kind,title,body,fresh:true})}
+function goodNumbers(p){ const n=p.phones.filter(x=>!x.bad).map(x=>({...x})); const co=company(p); if(co.main && !co.main.bad) n.push({v:co.main.v,t:'company main line'}); return n }
+function allNumbers(p){ const order={direct:0,mobile:1,'company main line':2}; const n=p.phones.map(x=>({...x,own:true})); const co=company(p); if(co.main) n.push({v:co.main.v,t:'company main line',bad:co.main.bad}); return n.sort((a,b)=>order[a.t]-order[b.t]) }
+
+/* ============ call queue ============ */
+function callTasks(){
+  const ready=[],later=[];
+  for(const e of S.enrollments){
+    if(C(e.c).state!=='active')continue;
+    const p=P(e.p), ln=localNow(p);
+    let key,kind,note,isLater=false;
+    if(e.status==='waiting_call' && e.callDue<=0){ key=e.callDue*1440; kind='call';
+      note = e.callDue<0?`Rolled over · day ${e.rolled} of 2`:'Due today';
+      if(ln<HOURS.start){isLater=true;note=`Calling hours open ${hm(HOURS.start-company(p).tz)} your time`} }
+    else if(e.status==='callback' && e.cb.day<=0){ key=e.cb.day*1440+toMin(e.cb.time); kind='callback';
+      const overdue = e.cb.day<0 || toMin(e.cb.time)<ln;
+      note = overdue?`Overdue callback · was ${fmtDay(e.cb.day).toLowerCase()} ${e.cb.time}`:`Callback at ${e.cb.time} their time`;
+      if(!overdue)isLater=true; }
+    else continue;
+    (isLater?later:ready).push({e,p,key,kind,note,overdue:kind==='callback'&&!isLater});
+  }
+  ready.sort((a,b)=>a.key-b.key); later.sort((a,b)=>a.key-b.key);
+  return {ready,later};
+}
+
+/* ============ views ============ */
+function nav(){
+  const h=location.hash.slice(1)||'today'; const n=callTasks().ready.length;
+  const items=[['today','Today'],['calls',`Calls<span class="n">${n}</span>`],['leads','Leads'],['campaigns','Campaigns'],['about','About this prototype']];
+  $('#nav').innerHTML=items.map(([k,l])=>`<a href="#${k}" class="${h===k||(k==='leads'&&h.startsWith('p-'))?'on':''}">${l}</a>`).join('');
+}
+
+function viewToday(){
+  const {ready,later}=callTasks();
+  const overdue=ready.filter(t=>t.overdue).length, rolled=ready.filter(t=>t.kind==='call'&&t.e.callDue<0).length, due=ready.length-overdue-rolled;
+  const nouse=S.enrollments.filter(e=>e.status==='finished_nouse').length;
+  const items=[...S.attention];
+  if(overdue) items.unshift({sev:'crit',title:`${overdue} overdue callback${overdue>1?'s':''}`,body:ready.filter(t=>t.overdue).map(t=>`${t.p.name} (${company(t.p).name}) — ${t.note.replace('Overdue callback · ','')}`).join('; ')+'. It stays on the list until you log an outcome.',action:['Call now','#calls']});
+  if(nouse) items.push({sev:'warn',title:`${nouse} lead${nouse>1?'s':''} finished with no usable channel`,body:'Every email, mobile and phone number is missing or marked bad. Add details by re-importing, or leave them.',action:['Show leads','#leads?nouse']});
+  const camps=Object.values(S.campaigns).map(c=>{const es=S.enrollments.filter(e=>e.c===c.id);const cnt=s=>es.filter(e=>s.includes(e.status)).length;
+    return `<tr class="click" data-go="#leads" data-fc="${c.id}"><td><b>${esc(c.name)}</b></td><td>${c.state==='active'?'<span class="pill t-ok">Running</span>':'<span class="pill t-warn">Paused</span>'}</td>
+    <td class="num">${es.length}</td><td class="num">${cnt(['active','queued','waiting_call','callback','winback'])}</td><td class="num">${cnt(['replied','interested'])}</td><td class="num">${cnt(['declined','stopped','finished_nr','finished_nouse'])}</td></tr>`}).join('');
+  return `<div class="stack" style="gap:16px">
+  <div class="row between"><div><div class="label">Thursday 12 November</div><h1>Good morning. It’s 09:40.</h1></div></div>
+  <div class="cols today-grid">
+    <section class="panel">
+      <div class="label">Today’s call list</div>
+      <div class="callhero" style="margin-top:8px">
+        <div><div class="big mono">${ready.length}</div><div class="muted">ready to call now</div></div>
+        <div class="breakdown">
+          <span>Overdue callbacks</span><b>${overdue}</b>
+          <span>Rolled over from earlier days</span><b>${rolled}</b>
+          <span>Due today</span><b>${due}</b>
+          <span class="muted">Later today</span><b class="muted">${later.length}</b>
+        </div>
+      </div>
+      <div class="row" style="margin-top:16px"><a class="btn primary" href="#calls" style="text-decoration:none">Start calling</a>
+        <span class="small muted">${later.map(t=>`${esc(t.p.name)}: ${esc(t.note.toLowerCase())}`).join(' · ')}</span></div>
+    </section>
+    <section class="panel">
+      <div class="label">Needs attention</div>
+      <ul class="attn" style="margin-top:6px;padding:0">${items.map(i=>`<li><span class="sev" style="background:var(--${i.sev})"></span><div><b>${esc(i.title)}</b><div class="small muted">${esc(i.body)}</div></div>${i.action?`<a class="btn sm" style="text-decoration:none" href="${i.action[1].split('?')[0]}" ${i.action[1].includes('nouse')?'data-nouse="1"':''}>${i.action[0]}</a>`:''}</li>`).join('')}</ul>
+    </section>
+  </div>
+  <section class="panel">
+    <div class="row between"><div class="label">Campaigns at a glance</div><span class="small faint">Placeholder: the outcome measures are decided in “Define the observable MVP acceptance outcomes”.</span></div>
+    <div class="tablewrap"><table style="margin-top:6px"><thead><tr><th>Campaign</th><th>State</th><th class="num">Leads</th><th class="num">In progress</th><th class="num">Replied / interested</th><th class="num">Ended</th></tr></thead><tbody>${camps}</tbody></table></div>
+  </section></div>`;
+}
+
+function viewCalls(){
+  const {ready,later}=callTasks();
+  if(!S.ui.cur || !ready.concat(later).some(t=>t.e.id===S.ui.cur)) S.ui.cur = ready[0]?.e.id || later[0]?.e.id || null;
+  const qi=t=>`<button class="qitem ${t.e.id===S.ui.cur?'cur':''} ${later.includes(t)?'later':''}" data-task="${t.e.id}">
+    <div class="row between"><span class="nm">${esc(t.p.name)}</span><span class="mono small">${hm(localNow(t.p))}</span></div>
+    <div class="small muted">${esc(company(t.p).name)}</div>
+    <div class="small" style="color:var(--${t.overdue?'crit':t.kind==='callback'?'info':t.e.callDue<0?'warn':'muted'})">${esc(t.note)}</div></button>`;
+  const queue=`<aside class="panel queue"><h3>Ready now · ${ready.length}</h3>${ready.map(qi).join('')||'<p class="muted small">Nothing to call right now.</p>'}
+    <h3 style="margin-top:14px">Later today · ${later.length}</h3>${later.map(qi).join('')||'<p class="muted small">Nothing else today.</p>'}
+    <p class="small faint" style="margin-top:12px">Order: inside calling hours first, oldest due first. The next task opens after you log an outcome.</p></aside>`;
+  const t=ready.concat(later).find(t=>t.e.id===S.ui.cur);
+  if(!t) return `<div class="calls">${queue}<section class="panel"><h2>List done</h2><p class="muted">Every call task for today has an outcome. Tomorrow’s list includes redials and anything you skipped.</p><a class="btn" href="#today">Back to Today</a></section></div>`;
+  return `<div class="calls">${queue}${taskPanel(t)}</div>`;
+}
+
+function taskPanel(t){
+  const {e,p}=t, cp=C(e.c), co=company(p), ln=localNow(p), inHours=ln>=HOURS.start&&ln<HOURS.end;
+  const nums=allNumbers(p);
+  const colleagues=Object.values(S.people).filter(x=>x.k&&x.k===p.k&&x.id!==p.id);
+  const touches=S.events.filter(x=>x.p===p.id).sort((a,b)=>b.day-a.day||String(b.time).localeCompare(String(a.time))).slice(0,7);
+  const coNotes=S.notes.filter(n=>n.k&&n.k===p.k);
+  const o=S.ui.outcome, sub=S.ui.sub;
+  const OUT=[['no_answer','No answer','Sequence continues'],['voicemail','Voicemail left','Sequence continues'],['gatekeeper','Gatekeeper / not reached','Note required'],['wrong','Wrong / dead number','Marks a number bad'],
+    ['callback','Callback requested','Pauses automation'],['interested','Conversation: interested','Stops automation'],['declined','Conversation: not interested','Follows the declined path'],['skip','Skip for now','Rolls to tomorrow']];
+  let subHtml='';
+  if(['no_answer','voicemail','gatekeeper'].includes(o)) subHtml=`<label class="row"><input type="checkbox" id="redial" ${sub.redial?'checked':''}> Redial tomorrow <span class="small muted">(keeps the call step open; later steps keep waiting)</span></label>
+      <div class="small muted">Without a redial the phone track finishes and ${nextAfterCall(e)}.</div>`;
+  if(o==='wrong') subHtml=`<div class="small">Which number was wrong?</div>${nums.filter(n=>!n.bad).map((n,i)=>`<label class="row"><input type="radio" name="badnum" value="${esc(n.v)}" ${sub.bad===n.v||(!sub.bad&&i===0)?'checked':''}> <span class="mono">${esc(n.v)}</span> <span class="tag">${n.t}</span></label>`).join('')}
+      <div class="small muted">If another good number remains, the task stays open so you can try it. Otherwise phone steps are skipped.</div>`;
+  if(o==='callback') subHtml=`<div class="row"><label>Day <select id="cbday">${[0,1,2,3,4].map(d=>`<option value="${d}" ${+sub.cbday===d?'selected':''}>${fmtDay(d)}</option>`).join('')}</select></label>
+      <label>Time (their time) <input type="time" id="cbtime" value="${sub.cbtime||'14:00'}"></label></div><div class="small muted">Automated steps pause until you log the callback’s outcome.</div>`;
+  if(o==='interested') subHtml=`<div class="small">Sales stage for ${esc(p.name)}</div>
+      <label class="row"><input type="radio" name="stg" value="interested" ${sub.stg!=='booked'?'checked':''}> Interested</label>
+      <label class="row"><input type="radio" name="stg" value="booked" ${sub.stg==='booked'?'checked':''}> Appointment booked <input type="date" id="stgdate" value="${sub.stgdate||'2026-11-17'}"></label>
+      <div class="small muted">All automated outreach to this lead stops in ${esc(cp.name)}. Other campaigns and colleagues keep running.</div>`;
+  if(o==='declined'){ const d=sub.path||cp.declined;
+    subHtml=`<div class="small">Declined path <span class="muted">(preselected from the campaign canvas: ${({stop:'stop',continue:'continue',winback:'win-back'})[cp.declined]})</span></div>
+      <label class="row"><input type="radio" name="path" value="stop" ${d==='stop'?'checked':''}> Stop this lead in the campaign</label>
+      <label class="row"><input type="radio" name="path" value="continue" ${d==='continue'?'checked':''}> Continue the other channels</label>
+      <label class="row"><input type="radio" name="path" value="winback" ${d==='winback'?'checked':''} ${cp.winback?'':'disabled'}> Move to the win-back branch ${cp.winback?'':'<span class="small faint">(this campaign has none)</span>'}</label>
+      <div class="small muted">No path calls this lead again.</div>`;}
+  if(o==='skip') subHtml=`<div class="small muted">Moves to the top of tomorrow’s list. ${(e.rolled||0)+1>=2?'<b style="color:var(--warn)">This is day 2 of 2: the call will be marked skipped and the sequence moves on.</b>':`Day ${(e.rolled||0)+1} of 2 before the call is marked skipped.`}</div>`;
+  const needsNote = o==='gatekeeper';
+  return `<section class="panel">
+    <div class="task-head">
+      <div><div class="row">${t.kind==='callback'?`<span class="pill ${t.overdue?'t-crit':'t-info'}">${esc(t.note)}</span>`:e.callDue<0?`<span class="pill t-warn">${esc(t.note)}</span>`:''}</div>
+        <h1 style="margin-top:6px"><a href="#p-${p.id}" style="color:inherit">${esc(p.name)}</a></h1>
+        <div class="muted">${esc(p.role)} · <b style="color:var(--ink)">${esc(co.name)}</b>, ${esc(co.city)}</div>
+        <div class="small muted" style="margin-top:4px">${esc(cp.name)} · step ${e.idx+1} of ${stepsOf(e).length}: Call</div></div>
+      <div class="clock"><div class="label">Their time</div><div class="t">${hm(ln)}</div><div class="small ${inHours?'':'t-warn'}" style="${inHours?'color:var(--ok)':'color:var(--warn)'}">${inHours?'Inside calling hours':'Before calling hours (09:00)'}</div></div>
+    </div>
+    <div class="task-grid">
+      <div class="stack">
+        <div class="numbers"><div class="label">Numbers</div><ul>${nums.map(n=>`<li><span class="v ${n.bad?'bad':''}">${esc(n.v)}</span><span class="tag">${n.t}</span>${n.bad?'<span class="small faint">marked bad</span>':`<button class="btn sm" data-dial="${esc(n.v)}" style="margin-left:auto">Call</button>`}</li>`).join('')}</ul>
+          ${S.ui.dial?`<div class="dialing">● Calling ${esc(S.ui.dial)} … (simulated; dialing is the software factory’s choice)</div>`:''}</div>
+        <div><div class="label">Ask for</div><ul style="margin:6px 0 0;padding-left:18px" class="small">
+          ${(p.kind==='person'?[p]:[]).concat(colleagues).map(x=>{const last=S.events.filter(v=>v.p===x.id&&v.kind==='call').sort((a,b)=>b.day-a.day)[0];
+            const en=enrOf(x.id).find(y=>y.c===e.c);
+            return `<li><b>${esc(x.name)}</b>, ${esc(x.role)} ${en?pill(en.status):x.unenrolled?'<span class="faint">not enrolled</span>':''}${last?`<div class="muted">Last call ${fmtDay(last.day).toLowerCase()}: ${esc(last.body||last.title)}</div>`:''}</li>`}).join('')||'<li class="muted">No named decision makers at this company.</li>'}
+        </ul>${coNotes.map(n=>`<div class="small" style="margin-top:6px"><span class="tag">company note</span> ${esc(n.text)}</div>`).join('')}</div>
+        <details ${cp.script?'open':''}><summary class="label" style="cursor:pointer">Call script</summary><div class="script" style="margin-top:6px">${esc(render_copy(cp.script,p))}</div></details>
+      </div>
+      <div class="stack">
+        <div><div class="label">Earlier touches</div>${timelineList(touches,true)}<a class="small" href="#p-${p.id}">Open full record →</a></div>
+      </div>
+    </div>
+    <div style="margin-top:16px" class="stack">
+      <div class="notebox"><label class="label" for="callnote">Notes${needsNote?' <span style="color:var(--crit)">(required for gatekeeper)</span>':''}</label>
+        <textarea id="callnote" placeholder="What happened on the call">${esc(sub.note||'')}</textarea>
+        <label class="row small"><input type="checkbox" id="callnoteco" ${sub.co?'checked':''}> Also save as a company note (shows for every colleague at ${esc(co.name)})</label></div>
+      <div class="label">Call outcome</div>
+      <div class="outcomes">${OUT.map(([k,l,s])=>`<button class="oc ${o===k?'sel':''}" data-oc="${k}">${l}<small>${s}</small></button>`).join('')}</div>
+      ${o?`<div class="sub stack">${subHtml}</div>`:''}
+      <div class="row"><button class="btn primary" id="logoc" ${!o?'disabled':''}>Log outcome and open next</button><span class="small muted">${!o?'Pick an outcome to complete this call task.':''}</span></div>
+    </div>
+  </section>`;
+}
+function nextAfterCall(e){ const st=stepsOf(e); const n=st[e.idx+1]; return n?`the next step (${n[1]}) is scheduled`:'the sequence finishes' }
+
+/* timeline */
+function timelineList(list,compact){
+  if(!list.length) return '<p class="muted small">No activity yet.</p>';
+  return `<ul class="tl">${list.map(x=>{
+    const p=P(x.p); let body='';
+    if(x.body && typeof x.body==='object'){ const cp=C(x.body.c); const cpy=cp.copy[x.body.step]||[null,''];
+      body=compact?'':`<details><summary>Show message</summary><pre>${cpy[0]?`<b>Subject:</b> ${esc(render_copy(cpy[0],p))}\n\n`:''}${esc(render_copy(cpy[1],p))}</pre></details>`; }
+    else if(x.body) body=`<div class="small muted">${esc(x.body)}</div>`;
+    const kind=({email:'EMAIL',sms:'SMS',call:'CALL',reply:'REPLY',note:'NOTE',system:'EVENT',stage:'STAGE'})[x.kind];
+    return `<li${x.fresh?' style="background:var(--accent-soft)"':''}><span class="when">${fmtDay(x.day)}<br>${x.time}</span><span class="kind"><span class="tag k-${x.kind}">${kind}</span></span>
+      <div class="what"><div>${esc(x.title)}</div>${x.c&&!compact?`<div class="cmp">${esc(C(x.c).name)}</div>`:''}${body}</div></li>`}).join('')}</ul>`;
+}
+function personEvents(pid,cfilter){
+  const p=P(pid);
+  const evs=S.events.filter(x=>x.p===pid && (!cfilter||x.c===cfilter||x.c===null));
+  const ns=S.notes.filter(n=>n.p===pid||(p.k&&n.k===p.k)).map(n=>({p:pid,c:null,day:n.day,time:n.time||'—',kind:'note',title:n.k?'Company note':'Note',body:n.text,fresh:n.fresh}));
+  return evs.concat(ns).sort((a,b)=>b.day-a.day||String(b.time).localeCompare(String(a.time)));
+}
+
+/* ============ leads ============ */
+function viewLeads(){
+  const u=S.ui, q=u.q.trim().toLowerCase();
+  let rows=Object.values(S.people).filter(p=>{
+    const co=company(p);
+    const hay=[p.name,co.name,...p.emails.map(x=>x.v),...p.phones.map(x=>x.v.replace(/\s/g,'')),co.main?.v.replace(/\s/g,'')||'',co.inbox||''].join(' ').toLowerCase();
+    if(q && !hay.includes(q.replace(/\s/g,'')) && !hay.includes(q)) return false;
+    const es=enrOf(p.id);
+    if(u.fc && !es.some(e=>e.c===u.fc)) return false;
+    if(u.fs && !es.some(e=>e.status===u.fs && (!u.fc||e.c===u.fc))) return false;
+    if(u.fst==='none' && p.stage) return false;
+    if(u.fst && u.fst!=='none' && p.stage?.s!==u.fst) return false;
+    if(u.fdnc && !p.dnc) return false;
+    return true;
+  });
+  const sel=[...u.sel].filter(id=>rows.some(r=>r.id===id));
+  const opt=(v,l,cur)=>`<option value="${v}" ${cur===v?'selected':''}>${l}</option>`;
+  const scope=u.fc?`in ${C(u.fc).name}`:'in every campaign they are in';
+  const bulk=sel.length?`<div class="bulk"><b>${sel.length} selected</b>
+     <select id="bulkcamp" aria-label="Campaign to enroll into"><option value="">Enroll in campaign…</option>${Object.values(S.campaigns).map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
+     <button class="btn sm" data-bulk="pause">Pause</button><button class="btn sm" data-bulk="resume">Resume</button><button class="btn sm" data-bulk="stop">Stop</button>
+     <button class="btn sm" data-bulk="clear" style="margin-left:auto">Clear</button></div>`:'';
+  const conf=u.confirm?`<div class="confirm"><span>${esc(u.confirm.text)}</span><button class="btn sm primary" id="confYes">${esc(u.confirm.yes)}</button><button class="btn sm" id="confNo">Cancel</button></div>`:'';
+  return `<div class="stack" style="gap:12px">
+    <div class="row between"><h1>Leads</h1><span class="small muted">${rows.length} of ${Object.keys(S.people).length} people · search covers name, company, email and phone</span></div>
+    <div class="filters panel" style="padding:10px">
+      <input type="search" id="q" placeholder="Name, company, email or phone" value="${esc(u.q)}" aria-label="Search leads">
+      <select id="fc" aria-label="Campaign">${opt('','All campaigns',u.fc)}${Object.values(S.campaigns).map(c=>opt(c.id,esc(c.name),u.fc)).join('')}</select>
+      <select id="fs" aria-label="Outreach status">${opt('','Any outreach status',u.fs)}${Object.entries(STATUS).map(([k,[l]])=>opt(k,l,u.fs)).join('')}</select>
+      <select id="fst" aria-label="Sales stage">${opt('','Any sales stage',u.fst)}${opt('none','No stage',u.fst)}${opt('interested','Interested',u.fst)}${opt('booked','Appointment booked',u.fst)}</select>
+      <label class="row small"><input type="checkbox" id="fdnc" ${u.fdnc?'checked':''}> Do-not-contact only</label>
+    </div>
+    ${bulk}${conf}
+    <div class="panel" style="padding:0"><div class="tablewrap"><table>
+      <thead><tr><th style="width:32px"><input type="checkbox" id="selall" aria-label="Select all" ${sel.length&&sel.length===rows.length?'checked':''}></th><th>Person</th><th>Company</th><th>Campaigns and outreach status</th><th>Sales stage</th><th>Last activity</th></tr></thead>
+      <tbody>${rows.map(p=>{const es=enrOf(p.id);const last=personEvents(p.id)[0];
+        return `<tr class="click" data-go="#p-${p.id}"><td><input type="checkbox" data-sel="${p.id}" ${u.sel.has(p.id)?'checked':''} aria-label="Select ${esc(p.name)}"></td>
+        <td><b>${esc(p.name)}</b>${p.dnc?' <span class="pill t-crit">Do not contact</span>':''}<div class="small muted">${esc(p.role)}</div></td>
+        <td>${esc(company(p).name)}<div class="small muted">${esc(company(p).city)}</div></td>
+        <td><div class="stack" style="gap:4px">${es.map(e=>`<div class="row" style="gap:6px"><span class="small muted">${esc(C(e.c).name)}${C(e.c).state==='paused'?' (paused)':''}</span>${pill(e.status)}</div>`).join('')||`<span class="small faint">${p.unenrolled?'Not enrolled: '+esc(p.unenrolled):'Not in any campaign'}</span>`}</div></td>
+        <td class="small">${p.stage?esc(stageText(p)):'<span class="faint">—</span>'}</td>
+        <td class="small muted">${last?`${fmtDay(last.day)} · ${esc(last.title)}`:'—'}</td></tr>`}).join('')||'<tr><td colspan="6" class="muted">No one matches. Try part of a phone number without spaces.</td></tr>'}</tbody></table></div></div>
+    <p class="small faint">Bulk actions apply to the selected people’s enrollments ${esc(scope)}. Set a campaign filter to act on one campaign only.</p>
+  </div>`;
+}
+
+/* ============ campaigns ============ */
+function viewCampaigns(){
+  const conf=S.ui.confirm?`<div class="confirm"><span>${esc(S.ui.confirm.text)}</span><button class="btn sm primary" id="confYes">${esc(S.ui.confirm.yes)}</button><button class="btn sm" id="confNo">Cancel</button></div>`:'';
+  return `<div class="stack" style="gap:12px"><h1>Campaigns</h1>
+  <p class="muted small" style="max-width:70ch">The canvas, CSV import and launch checks were decided in earlier tickets and aren’t prototyped here. This page exists so you can pause a campaign and see what happens to the call list.</p>${conf}
+  <div class="panel" style="padding:0"><div class="tablewrap"><table><thead><tr><th>Campaign</th><th>Sequence</th><th>Declined path</th><th>State</th><th></th></tr></thead><tbody>
+  ${Object.values(S.campaigns).map(c=>`<tr><td><b>${esc(c.name)}</b><div class="small muted">${S.enrollments.filter(e=>e.c===c.id).length} leads in this demo</div></td>
+   <td><div class="steps">${c.steps.map(s=>`<span class="st">${s[0]==='email'?'E':s[0]==='sms'?'S':'☎'}</span>`).join('')}${c.wb.length?`<span class="sep">win-back</span>${c.wb.map(s=>`<span class="st wb">${s[0]==='email'?'E':'S'}</span>`).join('')}`:''}</div></td>
+   <td class="small">${({stop:'Stop',continue:'Continue other channels',winback:'Win-back branch'})[c.declined]}</td>
+   <td>${c.state==='active'?'<span class="pill t-ok">Running</span>':'<span class="pill t-warn">Paused</span>'}</td>
+   <td><button class="btn sm" data-camp="${c.id}">${c.state==='active'?'Pause':'Resume'}</button></td></tr>`).join('')}
+  </tbody></table></div></div>
+  <div class="panel"><h3>SMS sender +31 97 0102 3344</h3><p class="small muted">Disconnected 2 hours ago. SMS steps are on hold; nothing is dropped.</p><button class="btn sm" id="reconnect">Mark reconnected (demo)</button></div></div>`;
+}
+
+/* ============ person page: shared parts ============ */
+function contactBlock(p){
+  const co=company(p);
+  return `<dl class="kv">
+    ${p.emails.map(x=>`<dt>Email</dt><dd class="mono small ${x.bad?'bad':''}">${esc(x.v)} ${x.newer?'<span class="tag">newer</span>':''}</dd>`).join('')}
+    ${p.phones.map(x=>`<dt>${x.t[0].toUpperCase()+x.t.slice(1)}</dt><dd class="mono small ${x.bad?'bad':''}">${esc(x.v)} ${x.bad?'<span class="tag">bad</span>':''}</dd>`).join('')}
+    ${co.main?`<dt>Main line</dt><dd class="mono small ${co.main.bad?'bad':''}">${esc(co.main.v)} <span class="tag">company</span></dd>`:''}
+    ${co.inbox?`<dt>Inbox</dt><dd class="mono small">${esc(co.inbox)} <span class="tag">company</span></dd>`:''}
+    <dt>Local time</dt><dd class="mono small">${hm(localNow(p))} · ${esc(co.city||'unknown')}</dd>
+  </dl>`;
+}
+function colleaguesBlock(p){
+  const cols=Object.values(S.people).filter(x=>x.k&&x.k===p.k&&x.id!==p.id);
+  if(!p.k) return '<p class="small muted">No company record.</p>';
+  return `<div class="coll"><ul>${cols.map(x=>{const es=enrOf(x.id);const last=S.events.filter(v=>v.p===x.id&&v.kind==='call').sort((a,b)=>b.day-a.day)[0];
+    const act=es.filter(e=>['active','queued','waiting_call','callback','winback'].includes(e.status));
+    return `<li><div class="row between"><a href="#p-${x.id}"><b>${esc(x.name)}</b></a><span class="small muted">${esc(x.role)}</span></div>
+      <div class="row" style="gap:6px">${es.map(e=>pill(e.status)).join('')||`<span class="small faint">${x.unenrolled?'Not enrolled: '+esc(x.unenrolled):'Not enrolled'}</span>`}</div>
+      ${last?`<div class="small muted">Last call ${fmtDay(last.day).toLowerCase()}: ${esc(last.body||last.title)}</div>`:''}
+      ${act.length?`<div class="row" style="gap:6px">${act.map(e=>`<button class="btn sm" data-act="pause" data-e="${e.id}">Pause</button><button class="btn sm danger" data-act="stop" data-e="${e.id}">Stop</button>`).join('')}</div>`:''}</li>`}).join('')||'<li class="small muted">No colleagues on record.</li>'}</ul></div>`;
+}
+function steps(e){
+  const cp=C(e.c);
+  const main=cp.steps.map((s,i)=>{let cls='';
+    if(e.branch==='wb') cls=i<cp.steps.length-1?'done':'skip';
+    else if(e.skipped.includes(i)) cls='skip'; else if(i<e.idx) cls='done'; else if(i===e.idx && !['finished_nr','finished_nouse'].includes(e.status)) cls='cur';
+    return `<span class="st ${cls}" title="${esc(s[1])}">${s[0]==='email'?'E':s[0]==='sms'?'S':'☎'}${i+1}</span>`}).join('');
+  const wb=e.branch==='wb'?`<span class="sep">win-back</span>`+cp.wb.map((s,i)=>`<span class="st wb ${i<e.idx?'done':i===e.idx?'cur':''}" title="${esc(s[1])}">${s[0]==='email'?'E':'S'}${i+1}</span>`).join(''):'';
+  return `<div class="steps">${main}${wb}</div>`;
+}
+function nextLine(e){
+  const st=stepsOf(e);
+  if(e.status==='waiting_call') return `Call task ${e.callDue<=0?'on today’s list':'on '+fmtDay(e.callDue).toLowerCase()+'’s list'}${C(e.c).state==='paused'?' (held: campaign paused)':''}`;
+  if(e.status==='callback') return `Callback ${fmtDay(e.cb.day).toLowerCase()} at ${e.cb.time} their time${e.cb.day<0?' · overdue':''}`;
+  if(e.status==='replied') return `Replied by ${e.replied.ch.toLowerCase()} ${fmtDay(e.replied.day).toLowerCase()}. Answer it in ${e.replied.ch==='Email'?'Instantly':'your phone'}.`;
+  if(['active','winback','queued'].includes(e.status) && e.idx<st.length) return `${e.status==='queued'?'Starts when there is capacity: ':'Next: '}${st[e.idx][1]} · ${e.status==='queued'?'about 9 days':fmtDay(e.nextDue??1)} ${e.status==='queued'?'':'(09:00–17:00 their time)'}`;
+  if(e.status==='paused') return `Paused before ${stepLabel(e)}. Clocks are frozen.`;
+  return '';
+}
+function controls(e){
+  const b=(a,l,cls='')=>`<button class="btn sm ${cls}" data-act="${a}" data-e="${e.id}">${l}</button>`;
+  const cp=C(e.c), more=e.idx<stepsOf(e).length;
+  let h='';
+  if(['active','queued','waiting_call','callback','winback'].includes(e.status)) h+=b('pause','Pause')+b('skip','Skip current step')+b('stop','Stop','danger');
+  else if(e.status==='paused') h+=b('resume','Resume')+b('stop','Stop','danger');
+  else if(['replied','stopped','declined','finished_nr'].includes(e.status)){ if(more&&e.status!=='finished_nr') h+=b('resume','Resume from next step'); if(cp.winback&&e.branch!=='wb') h+=b('winback','Move to win-back'); }
+  return h?`<div class="ctrl">${h}</div>`:'<div class="small faint">No controls: outreach has ended for this lead here.</div>';
+}
+function enrollmentCard(e){
+  const cp=C(e.c);
+  return `<div class="enr"><div class="row between"><b>${esc(cp.name)}</b>${pill(e.status)}</div>
+    ${cp.state==='paused'?'<div class="small" style="color:var(--warn)">Campaign paused</div>':''}
+    ${steps(e)}<div class="small muted">${esc(nextLine(e))}</div>${controls(e)}</div>`;
+}
+function stageBlock(p){
+  return `<div class="stack" style="gap:6px"><label class="label" for="stage-${p.id}">Sales stage</label>
+    <div class="row"><select id="stage-${p.id}" data-stage="${p.id}"><option value="">None</option><option value="interested" ${p.stage?.s==='interested'?'selected':''}>Interested</option><option value="booked" ${p.stage?.s==='booked'?'selected':''}>Appointment booked</option></select>
+    ${p.stage?.s==='booked'?`<input type="date" data-stagedate="${p.id}" value="${p.stage.date||''}" aria-label="Appointment date">`:''}</div>
+    <div class="small faint">Belongs to the person, across campaigns. Pipelines and deals come with the later CRM phase.</div></div>`;
+}
+function dncBlock(p){
+  return `<label class="dnc"><input type="checkbox" data-dnc="${p.id}" ${p.dnc?'checked':''}><span><b>Do not contact</b><div class="small muted">Future imports skip this person. Current campaigns keep running; stop them yourself if needed.</div></span></label>`;
+}
+function enrollAnother(p){
+  const avail=Object.values(S.campaigns).filter(c=>!enrOf(p.id).some(e=>e.c===c.id));
+  if(!avail.length) return '';
+  return `<div class="row"><select id="enr-${p.id}" aria-label="Campaign to enroll into">${avail.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><button class="btn sm" data-enroll="${p.id}">Enroll</button></div>`;
+}
+function noteComposer(p){
+  return `<div class="notebox"><textarea id="note-${p.id}" placeholder="Add a note about ${esc(p.name)}"></textarea>
+    <div class="row between"><label class="row small"><input type="checkbox" id="noteco-${p.id}" ${p.k?'':'disabled'}> Company note (shows for every colleague)</label><button class="btn sm primary" data-note="${p.id}">Add note</button></div></div>`;
+}
+function headerBits(p){
+  const co=company(p);
+  return `<div class="label">${p.kind==='company'?'Company lead':'Decision maker'}</div>
+    <h1>${esc(p.name)} ${p.dnc?'<span class="pill t-crit" style="vertical-align:middle">Do not contact</span>':''}</h1>
+    <div class="muted">${esc(p.role)}${p.kind==='person'?` · <b style="color:var(--ink)">${esc(co.name)}</b>`:''} · ${esc(co.city)}</div>`;
+}
+function tlFilter(p){
+  const es=enrOf(p.id);
+  if(es.length<2) return '';
+  return `<select data-tlc="1" aria-label="Filter timeline by campaign"><option value="">All campaigns</option>${es.map(e=>`<option value="${e.c}" ${S.ui.tlc===e.c?'selected':''}>${esc(C(e.c).name)}</option>`).join('')}</select>`;
+}
+
+/* Variant A — three panes */
+function personA(p){
+  const es=enrOf(p.id);
+  return `<div class="cols vA">
+    <div class="stack a-left"><section class="panel">${headerBits(p)}<div style="margin-top:12px">${contactBlock(p)}</div></section>
+      <section class="panel"><h3>${p.kind==='company'?'Decision makers':'Colleagues at '+esc(company(p).name)}</h3>${colleaguesBlock(p)}</section></div>
+    <section class="panel stack"><div class="row between"><h2>Timeline</h2>${tlFilter(p)}</div>${noteComposer(p)}${timelineList(personEvents(p.id,S.ui.tlc))}</section>
+    <div class="stack"><section class="panel stack"><h3>Campaigns</h3>${es.map(enrollmentCard).join('')||'<p class="small muted">Not enrolled anywhere.</p>'}${enrollAnother(p)}</section>
+      <section class="panel stack">${stageBlock(p)}</section><section class="panel">${dncBlock(p)}</section></div>
+  </div>`;
+}
+/* Variant B — campaign tabs with a sequence track */
+function personB(p){
+  const es=enrOf(p.id); let tab=S.ui.tab;
+  if(tab!=='all' && !es.some(e=>e.id===tab)) tab=es[0]?.id||'all';
+  const e=es.find(x=>x.id===tab);
+  const track=e?(()=>{const cp=C(e.c);const list=cp.steps.map((s,i)=>({s,i,wb:false})).concat(e.branch==='wb'?cp.wb.map((s,i)=>({s,i,wb:true})):[]);
+    return `<div class="track">${list.map(({s,i,wb})=>{let cls='';
+      if(!wb){ if(e.branch==='wb') cls=i<cp.steps.length-1?'done':'skip'; else if(e.skipped.includes(i))cls='skip'; else if(i<e.idx)cls='done'; else if(i===e.idx&&!['finished_nr','finished_nouse'].includes(e.status))cls='cur'; }
+      else cls='wb '+(i<e.idx?'done':i===e.idx?'cur':'');
+      return `<div class="tstep ${cls}"><div class="c">${wb?'win-back · ':''}${CH[s[0]]}</div><div>${esc(s[1])}</div><div class="small faint">${cls.includes('done')?'sent':cls.includes('skip')?'skipped':cls.includes('cur')?'current':'later'}</div></div>`}).join('')}</div>`})():'';
+  return `<div>
+    <section class="panel"><div class="vB-head"><div>${headerBits(p)}</div>
+      <div style="min-width:240px">${contactBlock(p)}</div>
+      <div class="stack" style="min-width:220px">${stageBlock(p)}${dncBlock(p)}</div></div></section>
+    <div class="tabs" role="tablist">${es.map(x=>`<button class="tab ${x.id===tab?'on':''}" data-tab="${x.id}">${esc(C(x.c).name)} ${pill(x.status)}</button>`).join('')}<button class="tab ${tab==='all'?'on':''}" data-tab="all">All activity</button></div>
+    <div class="vB-body">
+      <section class="panel stack">${e?`<div class="row between"><h2>${esc(C(e.c).name)}</h2>${pill(e.status)}</div>${track}<div class="next">${esc(nextLine(e))||'Outreach has ended here.'}</div>${controls(e)}`:''}
+        <h3 style="margin-top:6px">${e?'Activity in this campaign':'All activity'}</h3>${noteComposer(p)}${timelineList(personEvents(p.id,e?e.c:''))}</section>
+      <div class="stack"><section class="panel"><h3>${p.kind==='company'?'Decision makers':'Colleagues'}</h3>${colleaguesBlock(p)}</section>
+        <section class="panel stack"><h3>Enroll in another campaign</h3>${enrollAnother(p)||'<p class="small muted">Already in every campaign.</p>'}</section></div>
+    </div></div>`;
+}
+/* Variant C — single feed */
+function personC(p){
+  const es=enrOf(p.id); const open=S.ui.chip;
+  const nexts=es.map(e=>({e,l:nextLine(e)})).filter(x=>x.l);
+  return `<div class="vC">
+    <div class="vC-head">${headerBits(p)}
+      <div class="chips">${es.map(e=>`<button class="chip ${open===e.id?'open':''}" data-chip="${e.id}">${esc(C(e.c).name)} ${pill(e.status)} <span class="faint">${open===e.id?'▴':'▾'}</span></button>`).join('')}
+        <span class="chip" style="cursor:default">Sales stage: <b>${esc(stageText(p))}</b></span>${p.dnc?'<span class="pill t-crit">Do not contact</span>':''}</div>
+      ${open&&es.find(e=>e.id===open)?`<div style="margin-top:10px">${enrollmentCard(es.find(e=>e.id===open))}</div>`:''}
+    </div>
+    ${nexts.length?`<div class="next">${nexts.map(x=>`<div><b>${esc(C(x.e.c).name)}:</b> ${esc(x.l)}</div>`).join('')}</div>`:''}
+    <section class="panel">${noteComposer(p)}</section>
+    <section class="panel stack"><div class="row between"><h2>Everything that happened</h2>${tlFilter(p)}</div>${timelineList(personEvents(p.id,S.ui.tlc))}</section>
+    <details class="panel"><summary style="cursor:pointer"><b>Contact details, ${p.kind==='company'?'decision makers':'colleagues'}, sales stage and do-not-contact</b></summary>
+      <div class="cols" style="grid-template-columns:repeat(auto-fit,minmax(240px,1fr));margin-top:12px"><div>${contactBlock(p)}</div><div>${colleaguesBlock(p)}</div><div class="stack">${stageBlock(p)}${dncBlock(p)}${enrollAnother(p)}</div></div></details>
+  </div>`;
+}
+function viewPerson(id){
+  const p=P(id); if(!p) return '<p>Not found.</p>';
+  const v=S.ui.variant; return `<div class="row" style="margin-bottom:12px"><a href="#leads" class="small">← Leads</a></div>`+(v==='A'?personA(p):v==='B'?personB(p):personC(p));
+}
+
+function viewAbout(){
+  return `<div class="about stack" style="gap:14px"><h1>About this prototype</h1>
+  <p>This is a throwaway, clickable prototype for the ticket <a href="https://github.com/Pierpaolo01/omnichannel-outreach/issues/6" target="_blank" rel="noopener">Choose the daily workspace for calls and lead management</a>. Every person, company and number is invented. Nothing is saved, and Reset demo puts everything back.</p>
+  <section class="panel"><h3>Try these</h3><ul>
+    <li><b>Work the call list.</b> Today → Start calling. Log outcomes and watch each lead’s outreach status, the queue and the Today counts change. Try “not interested” on Sanne de Vries (preselects win-back) and on Priya Raman (preselects continue).</li>
+    <li><b>Skip a rolled-over call.</b> Mondzorg Hillegersberg is on day 1 of 2. Skipping it once more marks the call skipped and moves the sequence on.</li>
+    <li><b>Find a lead.</b> Search “0878” or “gmail” or “Kralingen”. Filter by outreach status “Replied · automation stopped”.</li>
+    <li><b>Manage one person.</b> Open Priya Raman: two campaigns, a bad number, a newer email. Pause, skip, stop, resume, move to win-back, add a company note, set an appointment.</li>
+    <li><b>Compare layouts.</b> Use ← → in the bottom bar (or your arrow keys) to switch the person page between three layouts.</li>
+    <li><b>Pause a campaign.</b> Campaigns → Pause “Dental clinics – Rotterdam” and its calls leave the list.</li></ul></section>
+  <section class="panel"><h3>What this reflects</h3><ul>
+    <li>Today opens first: call counts, Start calling, and a needs-attention list (overdue callbacks, sender problems, capacity, no usable channel). No replies count: replies are handled in Instantly and on your phone.</li>
+    <li>The call screen follows the decided call task view, focus queue and outcomes. The declined path is preselected from the campaign and can be changed for one lead.</li>
+    <li>One page per person (or company, for a company lead) with a block per campaign. Each campaign has one <b>outreach status</b>. The <b>sales stage</b> belongs to the person and is limited to Interested and Appointment booked.</li>
+    <li>Notes can be personal or company-wide. Company notes show on every colleague’s page and call task.</li>
+    <li>Do-not-contact only affects future imports.</li>
+    <li>Bulk: enroll in another campaign, pause, resume, stop.</li></ul></section>
+  <section class="panel"><h3>Feedback I need</h3><ul>
+    <li>Which person page layout: A, B, C, or parts of several?</li>
+    <li>Anything on the call screen you’d remove, or that you’d miss while dialing?</li>
+    <li>Is anything missing from Today’s needs-attention list, or is anything there noise?</li>
+    <li>Any outreach status name that reads wrong?</li></ul></section></div>`;
+}
+
+/* ============ actions ============ */
+function act(kind,eid){
+  const e=S.enrollments.find(x=>x.id===eid), p=P(e.p), cp=C(e.c);
+  if(kind==='pause'){ e.prev=e.status; e.status='paused'; addEv(p.id,e.c,'system','Paused','Clocks frozen for this lead.'); toast(`Paused ${p.name} in ${cp.name}`); }
+  if(kind==='resume'){ const was=e.status; e.status = was==='paused' ? (e.prev||'active') : (stepsOf(e)[e.idx]?.[0]==='call'?'waiting_call':'active');
+    if(e.status==='waiting_call'){e.callDue=1;e.rolled=0}
+    addEv(p.id,e.c,'system',was==='paused'?'Resumed':'Resumed from next unsent step',`Next: ${stepLabel(e)}. Sends spread across the window.`); toast(`Resumed ${p.name}`); }
+  if(kind==='skip'){ const lbl=stepLabel(e); e.skipped.push(e.idx); e.idx++; advance(e); addEv(p.id,e.c,'system',`${lbl} skipped`,'Skipped by you.'); toast(`Skipped ${lbl} for ${p.name}`); }
+  if(kind==='stop'){ e.status='stopped'; addEv(p.id,e.c,'system','Stopped manually',`No more outreach in ${cp.name}.`); toast(`Stopped ${p.name} in ${cp.name}`); }
+  if(kind==='winback'){ e.branch='wb'; e.idx=0; e.status='winback'; e.nextDue=1; addEv(p.id,e.c,'system','Moved to win-back branch','Remaining main-sequence steps dropped.'); toast(`${p.name} moved to win-back`); }
+  render();
+}
+function advance(e){ // after a step finishes
+  const st=stepsOf(e);
+  if(e.idx>=st.length){ e.status=e.branch==='wb'?'finished_nr':'finished_nr'; return }
+  if(st[e.idx][0]==='call'){ e.status='waiting_call'; e.callDue=1; e.rolled=0 } else { e.status=e.branch==='wb'?'winback':'active'; e.nextDue=1 }
+}
+function logOutcome(){
+  const e=S.enrollments.find(x=>x.id===S.ui.cur), p=P(e.p), cp=C(e.c), o=S.ui.outcome, sub=S.ui.sub;
+  const note=($('#callnote')?.value||'').trim();
+  if(o==='gatekeeper' && !note){ toast('Add a note: who did you reach and what did they say?'); $('#callnote').focus(); return }
+  const names={no_answer:'No answer',voicemail:'Voicemail left',gatekeeper:'Gatekeeper / not reached',wrong:'Wrong / dead number',callback:'Callback requested',interested:'Conversation: interested',declined:'Conversation: not interested',skip:'Skipped for now'};
+  let body=note, stay=false, msg='';
+  if(['no_answer','voicemail','gatekeeper'].includes(o)){
+    if(sub.redial){ e.status='waiting_call'; e.callDue=1; e.rolled=0; if(e.cb)delete e.cb; body+=(body?' · ':'')+'Redial tomorrow.'; msg='On tomorrow’s list.' }
+    else { e.idx++; advance(e); msg=`Phone track finished. ${STATUS[e.status][0]}.` } }
+  if(o==='wrong'){ const v=sub.bad||goodNumbers(p)[0]?.v; const own=p.phones.find(x=>x.v===v); if(own)own.bad=true; else if(company(p).main?.v===v) company(p).main.bad=true;
+    body=`${v} marked bad.`+(note?' '+note:'');
+    if(goodNumbers(p).length){ stay=true; msg='Another number is available. The task stays open.' } else { e.skipped.push(e.idx); e.idx++; advance(e); msg='No good number left. Phone steps skipped.' } }
+  if(o==='callback'){ e.status='callback'; e.cb={day:+(sub.cbday||0),time:sub.cbtime||'14:00'}; body=`Call back ${fmtDay(e.cb.day).toLowerCase()} at ${e.cb.time} their time.`+(note?' '+note:''); msg='Callback scheduled. Automation paused.' }
+  if(o==='interested'){ e.status='interested'; p.stage=sub.stg==='booked'?{s:'booked',date:sub.stgdate||'2026-11-17'}:{s:'interested'}; addEv(p.id,null,'stage',`Sales stage: ${stageText(p)}`); msg='Automation stopped. Over to you.' }
+  if(o==='declined'){ const path=sub.path||cp.declined; body=`Declined path: ${({stop:'stop',continue:'continue other channels',winback:'win-back branch'})[path]}.`+(note?' '+note:'');
+    if(path==='stop') e.status='declined'; else if(path==='continue'){ e.idx++; advance(e) } else { e.branch='wb'; e.idx=0; e.status='winback'; e.nextDue=1 } msg=STATUS[e.status][0]+'.' }
+  if(o==='skip' && e.status==='callback'){ e.cb={day:1,time:e.cb.time}; body='Callback moved to tomorrow.'; msg='Callback moved to tomorrow.' }
+  else if(o==='skip'){ e.rolled=(e.rolled||0)+1; if(e.rolled>=2){ e.skipped.push(e.idx); e.idx++; advance(e); body='Unworked for 2 days: call marked skipped.'; msg='Call marked skipped. Sequence moves on.' } else { e.callDue=1; body='Rolled to tomorrow.'; msg='Rolled to tomorrow.' } }
+  addEv(p.id,e.c,'call',`Call: ${names[o].toLowerCase()}`,body);
+  if(note && sub.co && p.k) S.notes.push({p:null,k:p.k,day:0,time:hm(NOW_MIN),text:note,fresh:true});
+  S.ui.outcome=null; S.ui.sub={}; S.ui.dial=null;
+  if(!stay){ const {ready}=callTasks(); S.ui.cur=ready[0]?.e.id||null; }
+  toast(`${p.name}: ${names[o]}. ${msg}`); render(); window.scrollTo({top:0});
+}
+function bulk(kind){
+  const u=S.ui, ids=[...u.sel];
+  const targets=S.enrollments.filter(e=>ids.includes(e.p)&&(!u.fc||e.c===u.fc));
+  const ok={pause:e=>['active','queued','waiting_call','callback','winback'].includes(e.status),resume:e=>e.status==='paused',stop:e=>['active','queued','waiting_call','callback','winback','paused'].includes(e.status)}[kind];
+  const hit=targets.filter(ok);
+  u.confirm={text:`${kind[0].toUpperCase()+kind.slice(1)} ${hit.length} enrollment${hit.length===1?'':'s'} for ${ids.length} ${ids.length===1?'person':'people'}${u.fc?' in '+C(u.fc).name:''}? ${targets.length-hit.length?`${targets.length-hit.length} can’t be ${kind}d in their current status.`:''}`,yes:kind[0].toUpperCase()+kind.slice(1),
+    run:()=>{hit.forEach(e=>{ if(kind==='pause'){e.prev=e.status;e.status='paused'} if(kind==='resume'){e.status=e.prev||'active'} if(kind==='stop')e.status='stopped'; addEv(e.p,e.c,'system',kind==='pause'?'Paused (bulk)':kind==='resume'?'Resumed (bulk)':'Stopped (bulk)')}); toast(`${hit.length} enrollment${hit.length===1?'':'s'} updated`); u.sel.clear()}};
+  render();
+}
+function bulkEnroll(cid){
+  const u=S.ui, ids=[...u.sel]; let n=0,already=0,dnc=0;
+  ids.forEach(pid=>{const p=P(pid); if(p.dnc){dnc++;return} if(enrOf(pid).some(e=>e.c===cid)){already++;return}
+    S.enrollments.push({id:'e'+Math.random().toString(36).slice(2,7),p:pid,c:cid,idx:0,status:'queued',skipped:[]}); addEv(pid,cid,'system','Enrolled','Queued until there is capacity.'); n++});
+  u.confirm={text:`Enroll ${ids.length} into ${C(cid).name}?`,yes:'Enroll',run:()=>{}}; // replaced below
+  u.confirm=null; u.sel.clear();
+  toast(`Enrolled ${n} in ${C(cid).name}${already?` · ${already} already in it`:''}${dnc?` · ${dnc} skipped: do not contact`:''}`); render();
+}
+
+/* ============ render + events ============ */
+function render(){
+  nav(); const h=decodeURIComponent(location.hash.slice(1))||'today';
+  let html;
+  if(h==='today') html=viewToday(); else if(h==='calls') html=viewCalls(); else if(h==='leads') html=viewLeads(); else if(h==='campaigns') html=viewCampaigns(); else if(h==='about') html=viewAbout();
+  else if(h.startsWith('p-')) html=viewPerson(h.slice(2)); else html=viewToday();
+  const focusId=document.activeElement?.id, selStart=document.activeElement?.selectionStart;
+  $('#view').innerHTML=html;
+  if(focusId){const el=document.getElementById(focusId); if(el && (el.tagName==='INPUT'||el.tagName==='TEXTAREA')){el.focus(); try{el.setSelectionRange(selStart,selStart)}catch(e){}}}
+  const v=VARIANTS.find(x=>x[0]===S.ui.variant); $('#vLabel').textContent=`Person page: ${v[0]} · ${v[1]}`;
+}
+function setVariant(dir){ const i=VARIANTS.findIndex(x=>x[0]===S.ui.variant); S.ui.variant=VARIANTS[(i+dir+VARIANTS.length)%VARIANTS.length][0];
+  try{localStorage.setItem('dw-variant',S.ui.variant)}catch(e){}
+  if(!location.hash.startsWith('#p-')) location.hash='#p-p8'; else render(); }
+$('#prevV').onclick=()=>setVariant(-1); $('#nextV').onclick=()=>setVariant(1);
+$('#openSample').onclick=()=>{location.hash='#p-p8'};
+$('#reset').onclick=()=>{const v=S.ui.variant;S=seed();S.ui.variant=v;toast('Demo reset');location.hash='#today';render()};
+document.addEventListener('keydown',ev=>{ const a=document.activeElement; if(a&&(['INPUT','TEXTAREA','SELECT'].includes(a.tagName)||a.isContentEditable))return;
+  if(ev.key==='ArrowLeft')setVariant(-1); if(ev.key==='ArrowRight')setVariant(1); });
+$('#quick').addEventListener('keydown',ev=>{if(ev.key==='Enter'){S.ui.q=ev.target.value;ev.target.value='';location.hash='#leads';render()}});
+window.addEventListener('hashchange',()=>{S.ui.confirm=null;S.ui.tlc='';render();window.scrollTo({top:0})});
+
+document.addEventListener('click',ev=>{
+  const t=ev.target, d=t.closest('[data-task],[data-oc],[data-dial],[data-act],[data-tab],[data-chip],[data-note],[data-enroll],[data-bulk],[data-camp],[data-go],[data-nouse],#logoc,#confYes,#confNo,#reconnect');
+  if(!d) return;
+  if(t.matches('input[type=checkbox][data-sel]')||t.matches('#selall')) return; // handled in change
+  if(d.dataset.nouse){ S.ui.fs='finished_nouse'; S.ui.fc=''; S.ui.q=''; return }
+  if(d.dataset.task){ S.ui.cur=d.dataset.task; S.ui.outcome=null; S.ui.sub={}; S.ui.dial=null; render(); return }
+  if(d.dataset.oc){ const note=$('#callnote')?.value; S.ui.outcome=d.dataset.oc; S.ui.sub={note,co:$('#callnoteco')?.checked}; render(); return }
+  if(d.dataset.dial){ S.ui.dial=d.dataset.dial; S.ui.sub.note=$('#callnote')?.value; render(); return }
+  if(d.id==='logoc'){ logOutcome(); return }
+  if(d.dataset.act){ act(d.dataset.act,d.dataset.e); return }
+  if(d.dataset.tab){ S.ui.tab=d.dataset.tab; render(); return }
+  if(d.dataset.chip){ S.ui.chip=S.ui.chip===d.dataset.chip?null:d.dataset.chip; render(); return }
+  if(d.dataset.note){ const pid=d.dataset.note, ta=$('#note-'+pid), txt=ta.value.trim(); if(!txt){toast('Write the note first.');return}
+    const co=$('#noteco-'+pid)?.checked; S.notes.push({p:co?null:pid,k:co?P(pid).k:null,day:0,time:hm(NOW_MIN),text:txt,fresh:true}); toast(co?'Company note added. It shows for every colleague.':'Note added.'); render(); return }
+  if(d.dataset.enroll){ const pid=d.dataset.enroll, cid=$('#enr-'+pid).value; S.enrollments.push({id:'e'+Math.random().toString(36).slice(2,7),p:pid,c:cid,idx:0,status:'queued',skipped:[]}); addEv(pid,cid,'system','Enrolled','Queued until there is capacity.'); toast(`Enrolled in ${C(cid).name}`); render(); return }
+  if(d.dataset.bulk){ if(d.dataset.bulk==='clear'){S.ui.sel.clear();S.ui.confirm=null;render();return} bulk(d.dataset.bulk); return }
+  if(d.id==='confYes'){ S.ui.confirm.run(); S.ui.confirm=null; render(); return }
+  if(d.id==='confNo'){ S.ui.confirm=null; render(); return }
+  if(d.id==='reconnect'){ S.attention=S.attention.filter(a=>a.id!=='sms'); toast('SMS sender reconnected. Held SMS steps resume.'); render(); return }
+  if(d.dataset.camp){ const c=C(d.dataset.camp);
+    S.ui.confirm={text:c.state==='active'?`Pause ${c.name}? Sends stop, its call tasks leave the daily list, and every clock freezes.`:`Resume ${c.name}? Each lead continues where it was, spread across the sending window.`,yes:c.state==='active'?'Pause campaign':'Resume campaign',
+      run:()=>{c.state=c.state==='active'?'paused':'active'; toast(`${c.name} ${c.state==='active'?'resumed':'paused'}`)}}; render(); return }
+  if(d.dataset.go && !t.closest('a,button,input,select')){ if(d.dataset.fc){S.ui.fc=d.dataset.fc;S.ui.fs='';S.ui.q=''} location.hash=d.dataset.go; return }
+});
+document.addEventListener('input',ev=>{ const t=ev.target;
+  if(t.id==='q'){S.ui.q=t.value;S.ui.sel.clear();render()}
+  if(t.id==='callnote'){S.ui.sub.note=t.value}
+});
+document.addEventListener('change',ev=>{ const t=ev.target, u=S.ui;
+  if(t.id==='fc'){u.fc=t.value;u.sel.clear();render()} if(t.id==='fs'){u.fs=t.value;u.sel.clear();render()} if(t.id==='fst'){u.fst=t.value;render()} if(t.id==='fdnc'){u.fdnc=t.checked;render()}
+  if(t.dataset.sel){ t.checked?u.sel.add(t.dataset.sel):u.sel.delete(t.dataset.sel); u.confirm=null; render() }
+  if(t.id==='selall'){ const boxes=[...document.querySelectorAll('[data-sel]')]; boxes.forEach(b=>t.checked?u.sel.add(b.dataset.sel):u.sel.delete(b.dataset.sel)); render() }
+  if(t.id==='bulkcamp' && t.value){ const cid=t.value; const ids=[...u.sel]; u.confirm={text:`Enroll ${ids.length} ${ids.length===1?'person':'people'} into ${C(cid).name}? People already in it or marked do-not-contact are skipped.`,yes:'Enroll',run:()=>bulkEnroll(cid)}; render() }
+  if(t.id==='redial'){u.sub.redial=t.checked;u.sub.note=$('#callnote')?.value;render()}
+  if(t.name==='badnum'){u.sub.bad=t.value}
+  if(t.id==='cbday'){u.sub.cbday=t.value} if(t.id==='cbtime'){u.sub.cbtime=t.value}
+  if(t.name==='stg'){u.sub.stg=t.value;u.sub.note=$('#callnote')?.value;render()} if(t.id==='stgdate'){u.sub.stgdate=t.value}
+  if(t.name==='path'){u.sub.path=t.value}
+  if(t.id==='callnoteco'){u.sub.co=t.checked}
+  if(t.dataset.stage){ const p=P(t.dataset.stage); p.stage=t.value?{s:t.value,date:t.value==='booked'?'2026-11-17':null}:null; addEv(p.id,null,'stage',`Sales stage: ${stageText(p)}`); toast(`Sales stage: ${stageText(p)}`); render() }
+  if(t.dataset.stagedate){ const p=P(t.dataset.stagedate); p.stage.date=t.value; render() }
+  if(t.dataset.dnc){ const p=P(t.dataset.dnc); p.dnc=t.checked; addEv(p.id,null,'system',p.dnc?'Marked do-not-contact':'Do-not-contact removed',p.dnc?'Future imports skip this person.':'Future imports may enroll this person again.'); toast(p.dnc?'Marked do-not-contact. Future imports skip this person.':'Do-not-contact removed.'); render() }
+  if(t.dataset.tlc){ u.tlc=t.value; render() }
+});
+render();
+</script>
