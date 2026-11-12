@@ -53,8 +53,12 @@ The user's choice to move an unreached call task onto the next day's dial list.
 _Avoid_: Automatic retry.
 
 **Sales stage**:
-Where a lead stands in the sales process, such as interested or appointment booked, recorded separately from any call outcome.
-_Avoid_: Status, call result.
+Where a decision maker, or a company contacted without one, stands in the sales process, such as interested or appointment booked. It belongs to the person across all campaigns and is recorded separately from any call outcome or outreach status.
+_Avoid_: Status, call result, pipeline or deal.
+
+**Outreach status**:
+Where one lead's automated outreach stands in its campaign, such as queued, active, waiting on call, callback scheduled, paused, replied, in win-back, stopped or sequence finished. Each lead has exactly one.
+_Avoid_: Using status for the sales stage.
 
 **Reply handoff**:
 The point where any reply from a lead, including an auto-reply or opt-out, stops that lead's automated outreach in the campaign. The user continues the conversation wherever the prospect replied, outside the product's outreach.
