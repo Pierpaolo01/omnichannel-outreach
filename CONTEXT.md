@@ -42,7 +42,7 @@ _Avoid_: Using call task to imply an autonomous AI voice conversation.
 
 **Call outcome**:
 What happened on one call task, logged by the user to complete it, such as no answer, callback requested or conversation.
-_Avoid_: Using call outcome for the lead's sales stage.
+_Avoid_: Using call outcome for the lead's outreach status.
 
 **Callback**:
 A call task at a time the prospect asked for, during which the lead's automated outreach is paused.
@@ -52,21 +52,13 @@ _Avoid_: Calling a user-chosen redial a callback.
 The user's choice to move an unreached call task onto the next day's dial list.
 _Avoid_: Automatic retry.
 
-**Sales stage**:
-Where a decision maker, or a company contacted without one, stands in the sales process, such as interested or appointment booked. It belongs to the person across all campaigns and is recorded separately from any call outcome or outreach status.
-_Avoid_: Status, call result, pipeline or deal.
-
 **Outreach status**:
 Where one lead's automated outreach stands in its campaign, such as queued, active, waiting on call, callback scheduled, paused, replied, in win-back, stopped or sequence finished. Each lead has exactly one.
-_Avoid_: Using status for the sales stage.
+_Avoid_: Confusing it with a call outcome.
 
 **Reply handoff**:
 The point where any reply from a lead, including an auto-reply or opt-out, stops that lead's automated outreach in the campaign. The user continues the conversation wherever the prospect replied, outside the product's outreach.
 _Avoid_: Calling automated appointment booking, reply sorting or inbox management part of the reply handoff.
-
-**Do-not-contact**:
-A mark the user sets on a person so that future imports never enroll them.
-_Avoid_: Treating a reply or a stopped lead as do-not-contact.
 
 **Channel**:
 A way to contact someone, such as email, a phone call, SMS, LinkedIn, Instagram or Facebook.
