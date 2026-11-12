@@ -3,8 +3,8 @@ import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { planImport } from "../domain/import-plan.ts";
 import { isOutreachStatus } from "../domain/outreach-status.ts";
-import { parseScraperExport } from "../domain/scraper-export.ts";
-import type { ApiError } from "../shared/api.ts";
+import { checkScraperFile, parseScraperExport } from "../domain/scraper-export.ts";
+import type { ApiError, Campaign, FileCheckResult } from "../shared/api.ts";
 import type { OutreachStore } from "./persistence/store.ts";
 
 export interface AppDependencies {
@@ -27,35 +27,82 @@ const isTimeZone = (value: string): boolean => {
   }
 };
 
-const newCampaignBody = z.object({
-  name: z.string().trim().min(1, "Give the campaign a name.").max(200),
-  defaultTimezone: z
-    .string()
-    .trim()
-    .refine(isTimeZone, "Use an IANA time zone such as Europe/London.")
-    .nullish(),
-});
+const fileNames = z
+  .object({ people: z.string().max(300).nullish(), businesses: z.string().max(300).nullish() })
+  .nullish();
+
+/** Both files or neither: a campaign can be created before its first import. */
+const scraperFiles = {
+  businessesCsv: z.string().min(1, "Add the Businesses file.").optional(),
+  peopleCsv: z.string().min(1, "Add the People file.").optional(),
+  fileNames,
+};
+
+const newCampaignBody = z
+  .object({
+    name: z.string().trim().min(1, "Give the campaign a name.").max(200),
+    defaultTimezone: z
+      .string()
+      .trim()
+      .refine(isTimeZone, "Use an IANA time zone such as Europe/London.")
+      .nullish(),
+    ...scraperFiles,
+  })
+  .refine((b) => (b.businessesCsv === undefined) === (b.peopleCsv === undefined), "Add both the People and Businesses files.");
 
 const importBody = z.object({
-  businessesCsv: z.string().min(1, "Add the businesses file."),
-  peopleCsv: z.string().min(1, "Add the people file."),
+  businessesCsv: z.string().min(1, "Add the Businesses file."),
+  peopleCsv: z.string().min(1, "Add the People file."),
+  fileNames,
 });
+
+const checkBody = z.object({ businessesCsv: z.string().optional(), peopleCsv: z.string().optional() });
 
 /** The HTTP interface. Every route is under /api; the web client is served separately. */
 export function createApp({ store, now, newId }: AppDependencies): Hono {
   const app = new Hono().basePath("/api");
+  const withinImportLimit = bodyLimit({ maxSize: IMPORT_BODY_LIMIT, onError: (c) => tooLarge(c) });
+
+  /** Parses, plans and applies one import; with `create`, creates the campaign in the same step. */
+  const runImport = (
+    c: Context,
+    campaign: { create: Campaign } | { id: string },
+    body: { businessesCsv: string; peopleCsv: string; fileNames?: z.infer<typeof fileNames> },
+  ) => {
+    const parsed = parseScraperExport(body);
+    if (!parsed.ok) {
+      return c.json<ApiError>(
+        {
+          error: {
+            code: "invalid_export",
+            message: "Nothing was imported. Fix the files and choose them again.",
+            problems: parsed.problems,
+          },
+        },
+        400,
+      );
+    }
+    const importedAt = now();
+    const record = store.importIntoCampaign({
+      campaign,
+      importId: newId(),
+      importedAt,
+      fileNames: { people: body.fileNames?.people ?? null, businesses: body.fileNames?.businesses ?? null },
+      plan: (directory) => planImport({ directory, scraped: parsed.value, now: importedAt, newId }),
+    });
+    return c.json({ campaign: store.campaign(record.campaignId), import: record }, 201);
+  };
 
   app.get("/campaigns", (c) => c.json({ campaigns: store.listCampaigns() }));
 
-  app.post("/campaigns", async (c) => {
+  app.post("/campaigns", withinImportLimit, async (c) => {
     const parsed = newCampaignBody.safeParse(await readJson(c));
     if (!parsed.success) return invalid(c, parsed.error);
-    const campaign = {
-      id: newId(),
-      name: parsed.data.name,
-      defaultTimezone: parsed.data.defaultTimezone || null,
-      createdAt: now(),
-    };
+    const { name, defaultTimezone, businessesCsv, peopleCsv } = parsed.data;
+    const campaign: Campaign = { id: newId(), name, defaultTimezone: defaultTimezone || null, createdAt: now() };
+    if (businessesCsv !== undefined && peopleCsv !== undefined) {
+      return runImport(c, { create: campaign }, { businessesCsv, peopleCsv, fileNames: parsed.data.fileNames });
+    }
     store.createCampaign(campaign);
     return c.json({ campaign }, 201);
   });
@@ -72,34 +119,33 @@ export function createApp({ store, now, newId }: AppDependencies): Hono {
     return c.json({ imports: store.listImports(campaign.id) });
   });
 
-  app.post("/campaigns/:id/imports", bodyLimit({ maxSize: IMPORT_BODY_LIMIT, onError: (c) => tooLarge(c) }), async (c) => {
+  app.get("/campaigns/:id/imports/:importId", (c) => {
+    const campaign = store.campaign(c.req.param("id"));
+    const record = campaign ? store.importRecord(campaign.id, c.req.param("importId")) : null;
+    if (!campaign || !record) return notFound(c, "import");
+    return c.json({ campaign, import: record });
+  });
+
+  app.post("/campaigns/:id/imports", withinImportLimit, async (c) => {
     const campaign = store.campaign(c.req.param("id"));
     if (!campaign) return notFound(c, "campaign");
     const body = importBody.safeParse(await readJson(c));
     if (!body.success) return invalid(c, body.error);
+    return runImport(c, { id: campaign.id }, body.data);
+  });
 
-    const parsed = parseScraperExport(body.data);
-    if (!parsed.ok) {
-      return c.json<ApiError>(
-        {
-          error: {
-            code: "invalid_export",
-            message: "The export could not be imported. Nothing was changed.",
-            problems: parsed.problems,
-          },
-        },
-        400,
-      );
+  app.post("/scraper-files/check", withinImportLimit, async (c) => {
+    const body = checkBody.safeParse(await readJson(c));
+    if (!body.success) return invalid(c, body.error);
+    const { businessesCsv, peopleCsv } = body.data;
+    const businesses = businessesCsv === undefined ? null : checkScraperFile("businesses", businessesCsv);
+    const people = peopleCsv === undefined ? null : checkScraperFile("people", peopleCsv);
+    let pair: string | null = null;
+    if (businessesCsv !== undefined && peopleCsv !== undefined && businesses?.ok && people?.ok) {
+      const both = parseScraperExport({ businessesCsv, peopleCsv });
+      pair = both.ok ? null : (both.problems.find((p) => p.file === "pair")?.message ?? null);
     }
-
-    const importedAt = now();
-    const record = store.importIntoCampaign({
-      campaignId: campaign.id,
-      importId: newId(),
-      importedAt,
-      plan: (directory) => planImport({ directory, scraped: parsed.value, now: importedAt, newId }),
-    });
-    return c.json({ import: record }, 201);
+    return c.json<FileCheckResult>({ businesses, people, pair });
   });
 
   app.get("/leads", (c) => {
@@ -110,7 +156,13 @@ export function createApp({ store, now, newId }: AppDependencies): Hono {
     const requested = Number(c.req.query("limit") ?? SEARCH_LIMIT_DEFAULT);
     const limit = Number.isInteger(requested) && requested > 0 ? Math.min(requested, SEARCH_LIMIT_MAX) : SEARCH_LIMIT_DEFAULT;
     return c.json(
-      store.searchLeads({ text: c.req.query("q") ?? "", campaignId: c.req.query("campaign") || null, status, limit }),
+      store.searchLeads({
+        text: c.req.query("q") ?? "",
+        campaignId: c.req.query("campaign") || null,
+        companyId: c.req.query("company") || null,
+        status,
+        limit,
+      }),
     );
   });
 

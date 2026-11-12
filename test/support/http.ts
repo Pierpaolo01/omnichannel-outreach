@@ -47,7 +47,10 @@ export function testApi(): TestApi {
       return res.body.campaign;
     },
     async importRun(campaignId, run) {
-      const res = await post<{ import: ImportRecord }>(`/api/campaigns/${campaignId}/imports`, scraperExport(run));
+      const res = await post<{ import: ImportRecord }>(`/api/campaigns/${campaignId}/imports`, {
+        ...scraperExport(run),
+        fileNames: { people: `people-${run}.csv`, businesses: `businesses-${run}.csv` },
+      });
       if (res.status !== 201) throw new Error(`import failed: ${JSON.stringify(res.body)}`);
       return res.body.import;
     },

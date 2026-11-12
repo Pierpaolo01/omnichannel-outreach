@@ -2,6 +2,7 @@ import type { Directory, ImportPlan } from "../../domain/import-plan.ts";
 import type { OutreachStatus } from "../../domain/outreach-status.ts";
 import type {
   Campaign,
+  ImportFileNames,
   CampaignListItem,
   CompanyRecord,
   ImportRecord,
@@ -14,6 +15,8 @@ export interface LeadQuery {
   readonly text: string;
   readonly campaignId: string | null;
   readonly status: OutreachStatus | null;
+  /** Only this company's people and its company lead. */
+  readonly companyId: string | null;
   readonly limit: number;
 }
 
@@ -30,14 +33,18 @@ export interface OutreachStore {
   /**
    * Loads the directory for the campaign, lets `plan` decide the changes, and applies them with
    * the import record, all in one write transaction. Concurrent imports cannot interleave.
+   * With `create`, the campaign is created in the same transaction, so a failed import leaves
+   * no campaign behind.
    */
   importIntoCampaign(input: {
-    campaignId: string;
+    campaign: { readonly create: Campaign } | { readonly id: string };
     importId: string;
     importedAt: string;
+    fileNames: ImportFileNames;
     plan: (directory: Directory) => ImportPlan;
   }): ImportRecord;
   listImports(campaignId: string): ImportRecord[];
+  importRecord(campaignId: string, importId: string): ImportRecord | null;
 
   searchLeads(query: LeadQuery): LeadSearchResult;
   person(id: string): PersonRecord | null;

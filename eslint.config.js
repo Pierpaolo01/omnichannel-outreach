@@ -55,6 +55,8 @@ export default tseslint.config(
     rules: {
       "@typescript-eslint/no-non-null-assertion": "off",
       "@typescript-eslint/no-unnecessary-type-parameters": "off",
+      // Vitest's asymmetric matchers (expect.objectContaining) are typed `any`.
+      "@typescript-eslint/no-unsafe-assignment": "off",
     },
   },
   { files: ["eslint.config.js"], ...tseslint.configs.disableTypeChecked },

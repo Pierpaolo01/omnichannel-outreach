@@ -1,6 +1,14 @@
 import { emailKey, foldText, phoneKey, type Channel, type PhoneKind } from "./contact-details.ts";
 import { ENROLLED_BY_IMPORT, type OutreachStatus } from "./outreach-status.ts";
-import { companyLeadReach, decisionMakerReach, hasUsableChannel, type Reach } from "./reach.ts";
+import {
+  companyLeadReach,
+  companyLeadRoutes,
+  decisionMakerReach,
+  decisionMakerRoutes,
+  hasUsableChannel,
+  type ContactRoute,
+  type Reach,
+} from "./reach.ts";
 import type { ScrapedBusiness, ScrapedPerson, ScraperExport } from "./scraper-export.ts";
 
 /**
@@ -46,6 +54,7 @@ export interface KnownDetail {
   readonly id: string;
   readonly channel: Channel;
   readonly phoneKind: PhoneKind | null;
+  readonly value: string;
   readonly key: string;
   readonly bad: boolean;
 }
@@ -133,19 +142,35 @@ export type LeadOutcome = "new" | "already_enrolled" | "updated" | "not_enrolled
 
 export type NotEnrolledReason = "no_usable_channel" | "company_not_in_export";
 
+/** A contact detail as the import summary reports it. */
+export interface DetailNote {
+  readonly channel: Channel;
+  readonly phoneKind: PhoneKind | null;
+  readonly value: string;
+}
+
 export type SummaryEntry =
   | {
       readonly outcome: "new" | "already_enrolled" | "updated";
       readonly lead: LeadRef;
       readonly name: string;
+      readonly title: string;
+      readonly companyId: string;
       readonly companyName: string;
       readonly channels: Reach;
+      readonly via: readonly ContactRoute[];
+      /** Details this import added to the lead's own record, marked newer. */
+      readonly added: readonly DetailNote[];
+      /** Details in the export that the CRM already holds marked bad. They stay bad. */
+      readonly stillBad: readonly DetailNote[];
     }
   | {
       readonly outcome: "not_enrolled";
       readonly reason: "no_usable_channel";
       readonly lead: LeadRef;
       readonly name: string;
+      readonly title: string;
+      readonly companyId: string;
       readonly companyName: string;
     }
   | {
@@ -219,40 +244,51 @@ export function planImport(input: {
   const entries: SummaryEntry[] = [];
   const enrollments: NewEnrollment[] = [];
 
-  const decide = (lead: LeadRef, reach: Reach, changed: boolean, name: string, companyName: string): void => {
+  const decide = (lead: LeadRef, reachable: { reach: Reach; via: ContactRoute[] }, who: { name: string; title: string; companyId: string }): void => {
+    const companyName = crm.company(who.companyId).fields.name;
+    const base = { lead, ...who, companyName };
+    const notes = crm.notesFor(lead);
     if (crm.isEnrolled(lead)) {
-      entries.push({ outcome: changed ? "updated" : "already_enrolled", lead, name, companyName, channels: reach });
-    } else if (hasUsableChannel(reach)) {
+      entries.push({ ...base, outcome: notes.added.length > 0 ? "updated" : "already_enrolled", channels: reachable.reach, via: reachable.via, ...notes });
+    } else if (hasUsableChannel(reachable.reach)) {
       enrollments.push({ id: newId(), lead, status: ENROLLED_BY_IMPORT, enrolledAt: now });
-      entries.push({ outcome: "new", lead, name, companyName, channels: reach });
+      entries.push({ ...base, outcome: "new", channels: reachable.reach, via: reachable.via, ...notes });
     } else {
-      entries.push({ outcome: "not_enrolled", reason: "no_usable_channel", lead, name, companyName });
+      entries.push({ ...base, outcome: "not_enrolled", reason: "no_usable_channel" });
     }
+  };
+
+  const personReach = (personId: string) => {
+    const person = crm.person(personId);
+    const company = crm.company(person.companyId);
+    return {
+      reach: decisionMakerReach(person.details, company.details),
+      via: decisionMakerRoutes(person.details, company.details),
+    };
   };
 
   for (const personId of unique(peopleInExport)) {
     const person = crm.person(personId);
-    const company = crm.company(person.companyId);
-    const changed = crm.personChanged(personId) || crm.addedMainLine(person.companyId);
-    decide(
-      { kind: "person", personId },
-      decisionMakerReach(person.details, company.details),
-      changed,
-      personDisplayName(person.fields),
-      company.fields.name,
-    );
+    decide({ kind: "person", personId }, personReach(personId), {
+      name: personDisplayName(person.fields),
+      title: person.fields.title,
+      companyId: person.companyId,
+    });
   }
 
+  // A company is a company lead when it has no named decision maker, or when none of its
+  // decision makers can be reached: then its shared inbox is contacted and their names stay on
+  // the record for calls (principal's decision, issue #11, 12 November 2026).
   for (const companyId of unique(companiesInExport)) {
-    if (crm.hasPeople(companyId)) continue;
+    const people = crm.peopleAt(companyId);
     const company = crm.company(companyId);
-    decide(
-      { kind: "company", companyId },
-      companyLeadReach(company.details),
-      crm.companyChanged(companyId),
-      company.fields.name,
-      company.fields.name,
-    );
+    const lead: LeadRef = { kind: "company", companyId };
+    const reachable = { reach: companyLeadReach(company.details), via: companyLeadRoutes(company.details) };
+    if (people.length > 0) {
+      const anyoneReachable = people.some((p) => hasUsableChannel(personReach(p.id).reach));
+      if (!crm.isEnrolled(lead) && (anyoneReachable || !reachable.reach.email)) continue;
+    }
+    decide(lead, reachable, { name: company.fields.name, title: "", companyId });
   }
 
   entries.push(...unmatched);
@@ -360,7 +396,6 @@ interface MutableCompany {
   details: KnownDetail[];
   source: Readonly<Record<string, string>>;
   touched: boolean;
-  shownFieldsChanged: boolean;
 }
 
 interface MutablePerson {
@@ -373,7 +408,6 @@ interface MutablePerson {
   details: KnownDetail[];
   source: Readonly<Record<string, string>>;
   touched: boolean;
-  shownFieldsChanged: boolean;
 }
 
 /** The directory as it evolves while one export is applied, with the indexes used for matching. */
@@ -382,6 +416,7 @@ class WorkingDirectory {
   private readonly people = new Map<string, MutablePerson>();
   private readonly enrolled = new Set<string>();
   private readonly added: NewDetail[] = [];
+  private readonly keptBad: { owner: DetailOwner; detail: KnownDetail }[] = [];
   private readonly companyByPlace = new Map<string, string>();
   private readonly companyByBusinessId = new Map<string, string>();
   private readonly companyByNameAndPhone = new Map<string, string>();
@@ -399,7 +434,6 @@ class WorkingDirectory {
         details: [...c.details],
         source: {},
         touched: false,
-        shownFieldsChanged: false,
       });
       this.indexCompany(c.id);
     }
@@ -414,7 +448,6 @@ class WorkingDirectory {
         details: [...p.details],
         source: {},
         touched: false,
-        shownFieldsChanged: false,
       });
       this.indexPerson(p.id);
     }
@@ -437,9 +470,21 @@ class WorkingDirectory {
     return this.companyByBusinessId.get(sourceBusinessId);
   }
 
-  hasPeople(companyId: string): boolean {
-    for (const person of this.people.values()) if (person.companyId === companyId) return true;
-    return false;
+  peopleAt(companyId: string): MutablePerson[] {
+    return [...this.people.values()].filter((p) => p.companyId === companyId);
+  }
+
+  /** What this import added to the lead's own record, and which of its details stayed bad. */
+  notesFor(lead: LeadRef): { added: DetailNote[]; stillBad: DetailNote[] } {
+    const owns = (owner: DetailOwner) =>
+      lead.kind === "person"
+        ? owner.kind === "person" && owner.personId === lead.personId
+        : owner.kind === "company" && owner.companyId === lead.companyId;
+    const note = (d: DetailNote): DetailNote => ({ channel: d.channel, phoneKind: d.phoneKind, value: d.value });
+    return {
+      added: this.added.filter((d) => owns(d.owner)).map(note),
+      stillBad: this.keptBad.filter((d) => owns(d.owner)).map(({ detail }) => note(detail)),
+    };
   }
 
   isEnrolled(lead: LeadRef): boolean {
@@ -466,7 +511,6 @@ class WorkingDirectory {
     if (existing) {
       const company = this.company(existing);
       const merged = mergeFields(company.fields, incoming);
-      company.shownFieldsChanged ||= merged.name !== company.fields.name;
       company.fields = merged;
       company.placeId ??= row.placeId;
       company.source = row.source;
@@ -490,7 +534,6 @@ class WorkingDirectory {
       details: [],
       source: row.source,
       touched: true,
-      shownFieldsChanged: false,
     });
     this.indexCompany(id);
     return id;
@@ -506,8 +549,6 @@ class WorkingDirectory {
     if (existing) {
       const person = this.person(existing);
       const merged = mergeFields(person.fields, incoming);
-      person.shownFieldsChanged ||=
-        personDisplayName(merged) !== personDisplayName(person.fields) || merged.title !== person.fields.title;
       person.fields = merged;
       person.source = row.source;
       person.touched = true;
@@ -531,7 +572,6 @@ class WorkingDirectory {
       details: [],
       source: row.source,
       touched: true,
-      shownFieldsChanged: false,
     });
     this.indexPerson(id);
     return id;
@@ -550,31 +590,16 @@ class WorkingDirectory {
   ): void {
     if (!key) return;
     const holder = owner.kind === "person" ? this.person(owner.personId) : this.company(owner.companyId);
-    if (holder.details.some((d) => d.channel === channel && d.key === key)) return;
+    const existing = holder.details.find((d) => d.channel === channel && d.key === key);
+    if (existing) {
+      if (existing.bad && !this.keptBad.some((k) => k.detail.id === existing.id)) this.keptBad.push({ owner, detail: existing });
+      return;
+    }
     const detail: NewDetail = { id: newId(), owner, channel, phoneKind, value: value.trim(), original: original.trim() || null, key, addedAt: now };
-    holder.details.push({ id: detail.id, channel, phoneKind, key, bad: false });
+    holder.details.push({ id: detail.id, channel, phoneKind, value: detail.value, key, bad: false });
     this.added.push(detail);
     if (owner.kind === "person" && channel === "email") this.indexPerson(owner.personId);
     if (owner.kind === "company" && phoneKind === "main_line") this.indexCompany(owner.companyId);
-  }
-
-  personChanged(personId: string): boolean {
-    const person = this.person(personId);
-    return person.shownFieldsChanged || this.added.some((d) => d.owner.kind === "person" && d.owner.personId === personId);
-  }
-
-  companyChanged(companyId: string): boolean {
-    return (
-      this.company(companyId).shownFieldsChanged ||
-      this.added.some((d) => d.owner.kind === "company" && d.owner.companyId === companyId)
-    );
-  }
-
-  /** A new main line changes how every decision maker at the company can be called. */
-  addedMainLine(companyId: string): boolean {
-    return this.added.some(
-      (d) => d.owner.kind === "company" && d.owner.companyId === companyId && d.phoneKind === "main_line",
-    );
   }
 
   companyWrites(): CompanyWrite[] {

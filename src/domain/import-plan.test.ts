@@ -66,8 +66,31 @@ describe("first import into a campaign", () => {
     expect(plan.people.some((p) => p.fields.fullName === "Jordan Lee")).toBe(false);
   });
 
+  test("enrols the company through its shared inbox when none of its decision makers can be reached", () => {
+    expect(entryFor(plan.summary, "Juniper Pilates Studio")).toMatchObject({
+      outcome: "new",
+      lead: { kind: "company" },
+      channels: { email: true, sms: false, call: false },
+      via: ["shared_inbox"],
+    });
+    expect(entryFor(plan.summary, "Marco Bianchi")).toMatchObject({ outcome: "not_enrolled", reason: "no_usable_channel" });
+    const juniper = plan.companies.find((c) => c.fields.name === "Juniper Pilates Studio");
+    expect(plan.people.find((p) => p.fields.fullName === "Marco Bianchi")?.companyId).toBe(juniper?.id);
+  });
+
+  test("does not enrol the company itself while one of its decision makers can be reached", () => {
+    expect(plan.summary.entries.some((e) => e.name === "Elm Street Chiropractic")).toBe(false);
+    expect(plan.summary.entries.some((e) => e.name === "Harbour Lane Physio")).toBe(false);
+  });
+
+  test("names the routes each new lead can be reached on", () => {
+    expect(entryFor(plan.summary, "Amira Hassan")).toMatchObject({ via: ["email", "mobile", "main_line"] });
+    expect(entryFor(plan.summary, "Grace Okafor")).toMatchObject({ via: ["main_line"] });
+    expect(entryFor(plan.summary, "Riverside Sports Clinic")).toMatchObject({ via: ["shared_inbox", "main_line"] });
+  });
+
   test("counts each outcome", () => {
-    expect(plan.summary.counts).toEqual({ new: 5, already_enrolled: 0, updated: 0, not_enrolled: 3 });
+    expect(plan.summary.counts).toEqual({ new: 6, already_enrolled: 0, updated: 0, not_enrolled: 4 });
   });
 
   test("enrols new leads as queued, stamped with the time passed in", () => {

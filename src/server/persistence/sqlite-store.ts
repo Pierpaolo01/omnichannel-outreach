@@ -13,6 +13,7 @@ import { companyLeadReach, decisionMakerReach, hasUsableChannel } from "../../do
 import type {
   Campaign,
   CampaignListItem,
+  ImportFileNames,
   ColleagueView,
   CompanyRecord,
   CompanyRef,
@@ -67,22 +68,33 @@ class SqliteStore implements OutreachStore {
          FROM campaigns c ORDER BY c.created_at DESC, c.name`,
       )
       .all()
-      .map((row) => ({ ...toCampaign(row), leadCount: num(row, "lead_count") }));
+      .map((row) => {
+        const last = this.listImports(str(row, "id"))[0];
+        return {
+          ...toCampaign(row),
+          leadCount: num(row, "lead_count"),
+          lastImport: last ? { id: last.id, importedAt: last.importedAt, counts: last.summary.counts } : null,
+        };
+      });
   }
 
   importIntoCampaign(input: {
-    campaignId: string;
+    campaign: { readonly create: Campaign } | { readonly id: string };
     importId: string;
     importedAt: string;
+    fileNames: ImportFileNames;
     plan: (directory: Directory) => ImportPlan;
   }): ImportRecord {
     return this.transaction(() => {
-      const plan = input.plan(this.directory(input.campaignId));
-      this.apply(plan, input);
+      const campaignId = "create" in input.campaign ? input.campaign.create.id : input.campaign.id;
+      if ("create" in input.campaign) this.createCampaign(input.campaign.create);
+      const plan = input.plan(this.directory(campaignId));
+      this.apply(plan, { campaignId, importId: input.importId, importedAt: input.importedAt, fileNames: input.fileNames });
       return {
         id: input.importId,
-        campaignId: input.campaignId,
+        campaignId,
         importedAt: input.importedAt,
+        fileNames: input.fileNames,
         summary: plan.summary,
       };
     });
@@ -92,13 +104,12 @@ class SqliteStore implements OutreachStore {
     return this.db
       .prepare("SELECT * FROM imports WHERE campaign_id = ? ORDER BY imported_at DESC, rowid DESC")
       .all(campaignId)
-      .map((row) => ({
-        id: str(row, "id"),
-        campaignId: str(row, "campaign_id"),
-        importedAt: str(row, "imported_at"),
-        // Written by this module from a typed ImportSummary.
-        summary: JSON.parse(str(row, "summary")) as ImportSummary,
-      }));
+      .map(toImportRecord);
+  }
+
+  importRecord(campaignId: string, importId: string): ImportRecord | null {
+    const row = this.db.prepare("SELECT * FROM imports WHERE campaign_id = ? AND id = ?").get(campaignId, importId);
+    return row ? toImportRecord(row) : null;
   }
 
   searchLeads(query: LeadQuery): LeadSearchResult {
@@ -112,6 +123,7 @@ class SqliteStore implements OutreachStore {
       digitsLike,
       campaign: query.campaignId ?? "",
       status: query.status ?? "",
+      company: query.companyId ?? "",
     };
 
     const detailMatch = (ownerFilter: string): string => `EXISTS (
@@ -130,10 +142,13 @@ class SqliteStore implements OutreachStore {
         OR ${detailMatch(
           "((d.owner_kind = 'person' AND d.owner_id = p.id) OR (d.owner_kind = 'company' AND d.owner_id = c.id))",
         )})
+      AND (:company = '' OR p.company_id = :company)
       AND ${enrollmentFilter("e.lead_kind = 'person' AND e.person_id = p.id")}
       UNION ALL
       SELECT 'company' AS kind, c.id AS id, c.name AS sort_name FROM companies c
-      WHERE NOT EXISTS (SELECT 1 FROM people p WHERE p.company_id = c.id)
+      WHERE (NOT EXISTS (SELECT 1 FROM people p WHERE p.company_id = c.id)
+        OR EXISTS (SELECT 1 FROM enrollments e WHERE e.lead_kind = 'company' AND e.company_id = c.id))
+      AND (:company = '' OR c.id = :company)
       AND (:text = '' OR c.search_name LIKE :like ESCAPE '\\'
         OR ${detailMatch("d.owner_kind = 'company' AND d.owner_id = c.id")})
       AND ${enrollmentFilter("e.lead_kind = 'company' AND e.company_id = c.id")}
@@ -230,6 +245,7 @@ class SqliteStore implements OutreachStore {
         id: str(row, "id"),
         channel: channelOf(row),
         phoneKind: phoneKindOf(row),
+        value: str(row, "value"),
         key: str(row, "key"),
         bad: num(row, "bad") === 1,
       });
@@ -300,7 +316,10 @@ class SqliteStore implements OutreachStore {
     };
   }
 
-  private apply(plan: ImportPlan, meta: { campaignId: string; importId: string; importedAt: string }): void {
+  private apply(
+    plan: ImportPlan,
+    meta: { campaignId: string; importId: string; importedAt: string; fileNames: ImportFileNames },
+  ): void {
     const at = meta.importedAt;
     for (const c of plan.companies) {
       const f = c.fields;
@@ -388,12 +407,11 @@ class SqliteStore implements OutreachStore {
       );
     }
 
-    this.run("INSERT INTO imports (id, campaign_id, imported_at, summary) VALUES (?, ?, ?, ?)", [
-      meta.importId,
-      meta.campaignId,
-      meta.importedAt,
-      JSON.stringify(plan.summary),
-    ]);
+    this.run(
+      `INSERT INTO imports (id, campaign_id, imported_at, people_file_name, businesses_file_name, summary)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [meta.importId, meta.campaignId, meta.importedAt, meta.fileNames.people, meta.fileNames.businesses, JSON.stringify(plan.summary)],
+    );
 
     for (const e of plan.enrollments) {
       const companyId = e.lead.kind === "company" ? e.lead.companyId : this.companyIdOfPerson(e.lead.personId);
@@ -519,6 +537,17 @@ class SqliteStore implements OutreachStore {
       throw error;
     }
   }
+}
+
+function toImportRecord(row: Row): ImportRecord {
+  return {
+    id: str(row, "id"),
+    campaignId: str(row, "campaign_id"),
+    importedAt: str(row, "imported_at"),
+    fileNames: { people: strOrNull(row, "people_file_name"), businesses: strOrNull(row, "businesses_file_name") },
+    // Written by this module from a typed ImportSummary.
+    summary: JSON.parse(str(row, "summary")) as ImportSummary,
+  };
 }
 
 function toCampaign(row: Row): Campaign {

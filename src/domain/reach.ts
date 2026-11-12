@@ -43,3 +43,25 @@ export function companyLeadReach(company: readonly ContactPoint[]): Reach {
 export function hasUsableChannel(reach: Reach): boolean {
   return reach.email || reach.sms || reach.call;
 }
+
+/** The contact details a lead can be reached through, in the order the user reads them. */
+export type ContactRoute = "email" | "mobile" | "direct" | "shared_inbox" | "main_line";
+
+const has = (points: readonly ContactPoint[], channel: ContactPoint["channel"], kind: ContactPoint["phoneKind"]): boolean =>
+  points.some((p) => !p.bad && p.channel === channel && (channel === "email" || p.phoneKind === kind));
+
+export function decisionMakerRoutes(own: readonly ContactPoint[], company: readonly ContactPoint[]): ContactRoute[] {
+  return [
+    ...(has(own, "email", null) ? (["email"] as const) : []),
+    ...(has(own, "phone", "mobile") ? (["mobile"] as const) : []),
+    ...(has(own, "phone", "direct") ? (["direct"] as const) : []),
+    ...(has(company, "phone", "main_line") ? (["main_line"] as const) : []),
+  ];
+}
+
+export function companyLeadRoutes(company: readonly ContactPoint[]): ContactRoute[] {
+  return [
+    ...(has(company, "email", null) ? (["shared_inbox"] as const) : []),
+    ...(has(company, "phone", "main_line") ? (["main_line"] as const) : []),
+  ];
+}

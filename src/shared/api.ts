@@ -3,10 +3,13 @@
  * Types only: nothing here runs.
  */
 import type { Channel, PhoneKind } from "../domain/contact-details.ts";
-import type { ImportSummary, NotEnrolledReason } from "../domain/import-plan.ts";
+import type { ImportSummary, LeadOutcome, NotEnrolledReason } from "../domain/import-plan.ts";
+import type { FileCheck } from "../domain/scraper-export.ts";
 import type { OutreachStatus } from "../domain/outreach-status.ts";
 
-export type { ImportSummary, LeadOutcome, NotEnrolledReason, SummaryEntry } from "../domain/import-plan.ts";
+export type { DetailNote, ImportSummary, LeadOutcome, NotEnrolledReason, SummaryEntry } from "../domain/import-plan.ts";
+export type { ContactRoute } from "../domain/reach.ts";
+export type { FileCheck } from "../domain/scraper-export.ts";
 export type { OutreachStatus, StatusGroup } from "../domain/outreach-status.ts";
 
 export interface Campaign {
@@ -19,13 +22,32 @@ export interface Campaign {
 
 export interface CampaignListItem extends Campaign {
   readonly leadCount: number;
+  readonly lastImport: {
+    readonly id: string;
+    readonly importedAt: string;
+    readonly counts: Readonly<Record<LeadOutcome, number>>;
+  } | null;
+}
+
+export interface ImportFileNames {
+  readonly people: string | null;
+  readonly businesses: string | null;
 }
 
 export interface ImportRecord {
   readonly id: string;
   readonly campaignId: string;
   readonly importedAt: string;
+  readonly fileNames: ImportFileNames;
   readonly summary: ImportSummary;
+}
+
+/** POST /api/scraper-files/check: each chosen file on its own, then the pair together. */
+export interface FileCheckResult {
+  readonly businesses: FileCheck | null;
+  readonly people: FileCheck | null;
+  /** Why the two files don't belong together, when both are valid on their own. */
+  readonly pair: string | null;
 }
 
 export interface EnrollmentView {

@@ -7,8 +7,8 @@ describe("parseScraperExport", () => {
     const result = parseScraperExport(scraperExport("run1"));
     if (!result.ok) throw new Error(JSON.stringify(result.problems));
 
-    expect(result.value.businesses).toHaveLength(5);
-    expect(result.value.people).toHaveLength(6);
+    expect(result.value.businesses).toHaveLength(6);
+    expect(result.value.people).toHaveLength(7);
     const tom = result.value.people.find((p) => p.sourcePersonId === "pp-tom-02");
     expect(tom).toMatchObject({ fullName: "Tom", firstName: "Tom", lastName: "", title: "Operations lead" });
   });
@@ -35,8 +35,9 @@ describe("parseScraperExport", () => {
   });
 
   test("rejects files whose headers are missing required columns, naming the file and columns", () => {
-    const { peopleCsv } = scraperExport("run1");
-    const result = parseScraperExport({ businessesCsv: peopleCsv, peopleCsv });
+    const { businessesCsv, peopleCsv } = scraperExport("run1");
+    const withoutPlace = businessesCsv.replace("business_id,place_id,", "business_id,place,");
+    const result = parseScraperExport({ businessesCsv: withoutPlace, peopleCsv });
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.problems[0]?.file).toBe("businesses");
@@ -50,7 +51,27 @@ describe("parseScraperExport", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.problems[0]).toMatchObject({ file: "businesses" });
-    expect(result.problems[0]?.message).toMatch(/line 7/);
+    expect(result.problems[0]?.message).toMatch(/line 8/);
+  });
+
+  test("rejects a people file whose rows belong to none of the businesses, as from another scraper run", () => {
+    const { peopleCsv } = scraperExport("run1");
+    const header = scraperExport("run1").businessesCsv.split("\n")[0] ?? "";
+    const result = parseScraperExport({ businessesCsv: `${header}\n`, peopleCsv });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problems).toEqual([{ file: "pair", message: expect.stringMatching(/same scraper run/) }]);
+  });
+
+  test("tells the user when the two files are swapped", () => {
+    const { businessesCsv, peopleCsv } = scraperExport("run1");
+    const result = parseScraperExport({ businessesCsv: peopleCsv, peopleCsv: businessesCsv });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problems.map((p) => p.message)).toEqual([
+      expect.stringMatching(/People file/),
+      expect.stringMatching(/Businesses file/),
+    ]);
   });
 
   test("ignores an unrecognised timezone instead of guessing one", () => {

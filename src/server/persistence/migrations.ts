@@ -95,6 +95,8 @@ export const MIGRATIONS: readonly Migration[] = [
         id TEXT PRIMARY KEY,
         campaign_id TEXT NOT NULL REFERENCES campaigns(id),
         imported_at TEXT NOT NULL,
+        people_file_name TEXT,
+        businesses_file_name TEXT,
         summary TEXT NOT NULL
       );
 

@@ -48,7 +48,9 @@ describe("campaigns", () => {
 
     await api.importRun(campaign.id, "run1");
     const res = await api.get<{ campaigns: CampaignListItem[] }>("/api/campaigns");
-    expect(res.body.campaigns).toEqual([expect.objectContaining({ id: campaign.id, leadCount: 5 })]);
+    expect(res.body.campaigns).toEqual([
+      expect.objectContaining({ id: campaign.id, leadCount: 6, lastImport: expect.objectContaining({ counts: expect.objectContaining({ new: 6 }) }) }),
+    ]);
   });
 
   test("a campaign needs a name and a recognised time zone", async () => {
@@ -64,13 +66,69 @@ describe("campaigns", () => {
   });
 });
 
+describe("creating a campaign from its first scraper files", () => {
+  test("creates the campaign and imports both files in one step", async () => {
+    const res = await api.post<{ campaign: { id: string; name: string }; import: ImportRecord }>("/api/campaigns", {
+      name: "Physio clinics, London",
+      ...scraperExport("run1"),
+      fileNames: { people: "people-run1.csv", businesses: "businesses-run1.csv" },
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.import).toMatchObject({
+      campaignId: res.body.campaign.id,
+      fileNames: { people: "people-run1.csv", businesses: "businesses-run1.csv" },
+      summary: { counts: { new: 6 } },
+    });
+    const found = await api.get<{ campaign: { id: string }; import: ImportRecord }>(
+      `/api/campaigns/${res.body.campaign.id}/imports/${res.body.import.id}`,
+    );
+    expect(found.body.import.summary.counts).toEqual(res.body.import.summary.counts);
+  });
+
+  test("invalid files import nothing and create no campaign", async () => {
+    const { businessesCsv, peopleCsv } = scraperExport("run1");
+    const res = await api.post<ApiError>("/api/campaigns", { name: "Physio clinics, London", businessesCsv: peopleCsv, peopleCsv: businessesCsv });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("invalid_export");
+    expect((await api.get<{ campaigns: CampaignListItem[] }>("/api/campaigns")).body.campaigns).toEqual([]);
+    expect((await search("")).total).toBe(0);
+  });
+
+  test("needs both files, or neither", async () => {
+    const res = await api.post<ApiError>("/api/campaigns", { name: "Physio", peopleCsv: scraperExport("run1").peopleCsv });
+    expect(res.status).toBe(400);
+    expect((await api.get<{ campaigns: CampaignListItem[] }>("/api/campaigns")).body.campaigns).toEqual([]);
+  });
+});
+
+describe("checking a chosen file before importing", () => {
+  test("counts the rows of a file that matches the scraper export", async () => {
+    const res = await api.post<{ businesses: unknown; people: unknown; pair: unknown }>("/api/scraper-files/check", {
+      peopleCsv: scraperExport("run1").peopleCsv,
+    });
+    expect(res.body).toEqual({ businesses: null, people: { ok: true, rows: 7 }, pair: null });
+  });
+
+  test("says when a file is in the wrong slot, and when two files are from different runs", async () => {
+    const { businessesCsv, peopleCsv } = scraperExport("run1");
+    const swapped = await api.post<{ businesses: { ok: boolean; message?: string } }>("/api/scraper-files/check", {
+      businessesCsv: peopleCsv,
+    });
+    expect(swapped.body.businesses).toEqual({ ok: false, message: "This is the People file. Choose the Businesses file here." });
+
+    const header = businessesCsv.split("\n")[0] ?? "";
+    const unrelated = await api.post<{ pair: string | null }>("/api/scraper-files/check", { businessesCsv: `${header}\n`, peopleCsv });
+    expect(unrelated.body.pair).toMatch(/same scraper run/);
+  });
+});
+
 describe("importing the paired scraper export", () => {
   test("reports new, already enrolled, updated and not enrolled leads with reasons", async () => {
     const campaign = await api.createCampaign("Physio clinics, London");
     const record = await api.importRun(campaign.id, "run1");
 
-    expect(record.summary.counts).toEqual({ new: 5, already_enrolled: 0, updated: 0, not_enrolled: 3 });
-    expect(record.summary.rows).toEqual({ businesses: 5, people: 6 });
+    expect(record.summary.counts).toEqual({ new: 6, already_enrolled: 0, updated: 0, not_enrolled: 4 });
+    expect(record.summary.rows).toEqual({ businesses: 6, people: 7 });
     expect(outcomeOf(record, "Sofia Marin")).toMatchObject({ outcome: "not_enrolled", reason: "no_usable_channel" });
     expect(outcomeOf(record, "Jordan Lee")).toMatchObject({ outcome: "not_enrolled", reason: "company_not_in_export" });
   });
@@ -99,13 +157,20 @@ describe("re-importing into the same campaign", () => {
     await api.importRun(campaign.id, "run1");
     const again = await api.importRun(campaign.id, "run2");
 
-    expect(again.summary.counts).toEqual({ new: 1, already_enrolled: 4, updated: 1, not_enrolled: 3 });
+    expect(again.summary.counts).toEqual({ new: 1, already_enrolled: 4, updated: 2, not_enrolled: 4 });
     expect(outcomeOf(again, "Ravi Patel")).toMatchObject({ outcome: "new" });
-    expect(outcomeOf(again, "Amira Hassan")).toMatchObject({ outcome: "updated" });
+    expect(outcomeOf(again, "Amira Hassan")).toMatchObject({
+      outcome: "updated",
+      added: [{ channel: "email", phoneKind: null, value: "amira.hassan@harbourmail.example" }],
+    });
+    expect(outcomeOf(again, "Riverside Sports Clinic")).toMatchObject({
+      outcome: "updated",
+      added: [{ channel: "email", value: "bookings@riversidesports.example" }],
+    });
     expect(outcomeOf(again, "Tom")).toMatchObject({ outcome: "already_enrolled" });
 
     const inCampaign = await search(`campaign=${campaign.id}`);
-    expect(inCampaign.total).toBe(6);
+    expect(inCampaign.total).toBe(7);
     expect(inCampaign.rows.every((r) => r.enrollments.length === 1)).toBe(true);
   });
 
@@ -138,6 +203,18 @@ describe("re-importing into the same campaign", () => {
     ]);
   });
 
+  test("counts as updated only a lead whose import brought newer contact details", async () => {
+    const campaign = await api.createCampaign("Physio clinics, London");
+    await api.importRun(campaign.id, "run1");
+    const { businessesCsv, peopleCsv } = scraperExport("run1");
+    const retitled = await api.post<{ import: ImportRecord }>(`/api/campaigns/${campaign.id}/imports`, {
+      businessesCsv,
+      peopleCsv: peopleCsv.replace("Clinic director", "Managing director"),
+    });
+    expect(outcomeOf(retitled.body.import, "Amira Hassan")).toMatchObject({ outcome: "already_enrolled", added: [] });
+    expect((await personNamed("Amira Hassan")).title).toBe("Managing director");
+  });
+
   test("keeps a detail marked bad as bad, and does not count it as an update", async () => {
     const campaign = await api.createCampaign("Physio clinics, London");
     await api.importRun(campaign.id, "run1");
@@ -146,7 +223,11 @@ describe("re-importing into the same campaign", () => {
     expect(api.store.markContactDetailBad(mobile.id)).toBe(true);
 
     const again = await api.importRun(campaign.id, "run1");
-    expect(outcomeOf(again, "Amira Hassan")).toMatchObject({ outcome: "already_enrolled", channels: { sms: false } });
+    expect(outcomeOf(again, "Amira Hassan")).toMatchObject({
+      outcome: "already_enrolled",
+      channels: { sms: false },
+      stillBad: [{ channel: "phone", phoneKind: "mobile", value: "+447700900101" }],
+    });
     const after = (await personNamed("Amira Hassan")).contactDetails.filter((d) => d.phoneKind === "mobile");
     expect(after).toEqual([expect.objectContaining({ id: mobile.id, bad: true })]);
   });
@@ -159,11 +240,11 @@ describe("several campaigns", () => {
     await api.importRun(first.id, "run1");
     const intoSecond = await api.importRun(second.id, "run1");
 
-    expect(intoSecond.summary.counts).toEqual({ new: 5, already_enrolled: 0, updated: 0, not_enrolled: 3 });
+    expect(intoSecond.summary.counts).toEqual({ new: 6, already_enrolled: 0, updated: 0, not_enrolled: 4 });
     const amira = await findRow("Amira Hassan");
     expect(amira.enrollments.map((e) => e.campaign.name)).toEqual(["Physio clinics, London", "Spring follow-up, London"]);
     expect(amira.enrollments.every((e) => e.status === "queued")).toBe(true);
-    expect((await search("")).total).toBe(7);
+    expect((await search("")).total).toBe(9);
   });
 });
 
@@ -198,6 +279,19 @@ describe("contact details on the record", () => {
     ]);
     const company = await api.get<CompanyRecord>(`/api/companies/${daniel.company.id}`);
     expect(company.body.people.map((p) => p.name)).toEqual(["Daniel Price", "Sofia Marin"]);
+  });
+
+  test("a company whose decision makers cannot be reached is a company lead through its shared inbox", async () => {
+    const campaign = await api.createCampaign("Physio clinics, London");
+    await api.importRun(campaign.id, "run1");
+
+    const row = await findRow("Juniper Pilates Studio");
+    expect(row).toMatchObject({ kind: "company", enrollments: [expect.objectContaining({ status: "queued" })] });
+    const company = await api.get<CompanyRecord>(`/api/companies/${row.id}`);
+    expect(company.body.people).toEqual([
+      expect.objectContaining({ name: "Marco Bianchi", enrollments: [], unenrolledReason: "no_usable_channel" }),
+    ]);
+    expect(await personNamed("Marco Bianchi")).toMatchObject({ enrollments: [], unenrolledReason: "no_usable_channel" });
   });
 
   test("a company lead's record holds its shared details and its enrollment", async () => {
@@ -255,8 +349,16 @@ describe("lead search", () => {
     const res = await api.get<{ campaigns: CampaignListItem[] }>("/api/campaigns");
     const first = res.body.campaigns.find((c) => c.id !== other.id);
     expect((await search(`campaign=${other.id}`)).total).toBe(0);
-    expect((await search(`campaign=${first?.id}&status=queued`)).total).toBe(5);
+    expect((await search(`campaign=${first?.id}&status=queued`)).total).toBe(6);
     expect((await search("status=replied")).total).toBe(0);
+  });
+
+  test("filters to one company: its people and its company lead", async () => {
+    const daniel = await findRow("Daniel Price");
+    if (daniel.kind !== "person") throw new Error("expected a person row");
+    expect(await names(`company=${daniel.company.id}`)).toEqual(["Daniel Price", "Sofia Marin"]);
+    const juniper = await findRow("Juniper Pilates Studio");
+    expect(await names(`company=${juniper.id}`)).toEqual(["Juniper Pilates Studio", "Marco Bianchi"]);
   });
 
   test("rejects an unknown outreach status", async () => {

@@ -44,8 +44,11 @@ const PEOPLE_COLUMNS = [
 
 export type ExportFile = "businesses" | "people";
 
+/** "pair" problems concern how the two files fit together rather than either file alone. */
+export type ProblemSource = ExportFile | "pair";
+
 export interface ExportProblem {
-  readonly file: ExportFile;
+  readonly file: ProblemSource;
   readonly message: string;
 }
 
@@ -103,13 +106,31 @@ export function parseScraperExport(files: { businessesCsv: string; peopleCsv: st
   const problems = [...(businesses.ok ? [] : [businesses.problem]), ...(people.ok ? [] : [people.problem])];
   if (!businesses.ok || !people.ok) return { ok: false, problems };
 
-  return {
-    ok: true,
-    value: {
-      businesses: businesses.rows.map(toBusiness),
-      people: people.rows.map(toPerson),
-    },
-  };
+  const value = { businesses: businesses.rows.map(toBusiness), people: people.rows.map(toPerson) };
+  const businessIds = new Set(value.businesses.map((b) => b.sourceBusinessId));
+  if (value.people.length > 0 && !value.people.some((p) => businessIds.has(p.sourceBusinessId))) {
+    const count = value.people.length;
+    return {
+      ok: false,
+      problems: [
+        {
+          file: "pair",
+          message: `These two files don’t belong together: none of the ${count} ${count === 1 ? "person" : "people"} belong to a business in the Businesses file. Export both from the same scraper run.`,
+        },
+      ],
+    };
+  }
+  return { ok: true, value };
+}
+
+export type FileCheck =
+  | { readonly ok: true; readonly rows: number }
+  | { readonly ok: false; readonly message: string };
+
+/** Checks one file on its own, as soon as it is chosen. The import repeats every check. */
+export function checkScraperFile(file: ExportFile, text: string): FileCheck {
+  const table = file === "businesses" ? readTable(file, text, BUSINESS_COLUMNS) : readTable(file, text, PEOPLE_COLUMNS);
+  return table.ok ? { ok: true, rows: table.rows.length } : { ok: false, message: table.problem.message };
 }
 
 type Row<C extends string> = Readonly<Record<C, string>> & { readonly all: Readonly<Record<string, string>> };
@@ -134,6 +155,12 @@ function readTable<C extends string>(file: ExportFile, text: string, required: r
 
   const names = header.map((name) => name.trim());
   const missing = required.filter((column) => !names.includes(column));
+  const otherFile = file === "businesses" ? PEOPLE_COLUMNS : BUSINESS_COLUMNS;
+  if (missing.length > 0 && otherFile.every((column) => names.includes(column))) {
+    const other = file === "businesses" ? "People" : "Businesses";
+    const self = file === "businesses" ? "Businesses" : "People";
+    return { ok: false, problem: { file, message: `This is the ${other} file. Choose the ${self} file here.` } };
+  }
   if (missing.length > 0) {
     return {
       ok: false,

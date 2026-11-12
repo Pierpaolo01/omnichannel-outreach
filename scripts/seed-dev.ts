@@ -31,7 +31,11 @@ if (!fresh && store.listCampaigns().length > 0) {
 
 const app = createApp({ store, now: () => new Date().toISOString(), newId: randomUUID });
 const fixture = (name: string) => readFileSync(path.join(projectRoot, "test/fixtures/scraper", name), "utf8");
-const run = (n: 1 | 2) => ({ businessesCsv: fixture(`businesses-run${n}.csv`), peopleCsv: fixture(`people-run${n}.csv`) });
+const run = (n: 1 | 2) => ({
+  businessesCsv: fixture(`businesses-run${n}.csv`),
+  peopleCsv: fixture(`people-run${n}.csv`),
+  fileNames: { people: `people-run${n}.csv`, businesses: `businesses-run${n}.csv` },
+});
 
 async function post(url: string, body: unknown): Promise<unknown> {
   const response = await app.request(url, {
@@ -58,11 +62,11 @@ function counts(response: unknown): unknown {
   return typeof response === "object" && response !== null && "import" in response ? response.import : response;
 }
 
-const physio = campaignId(await post("/api/campaigns", { name: "Physio clinics, London", defaultTimezone: "Europe/London" }));
-const first = counts(await post(`/api/campaigns/${physio}/imports`, run(1)));
+const created = await post("/api/campaigns", { name: "Physio clinics, London", ...run(1) });
+const physio = campaignId(created);
+const first = counts(created);
 const second = counts(await post(`/api/campaigns/${physio}/imports`, run(2)));
-const spring = campaignId(await post("/api/campaigns", { name: "Spring follow-up, London", defaultTimezone: "Europe/London" }));
-const third = counts(await post(`/api/campaigns/${spring}/imports`, run(1)));
+const third = counts(await post("/api/campaigns", { name: "Spring follow-up, London", ...run(1) }));
 
 for (const [label, record] of [["Physio clinics, first import", first], ["Physio clinics, re-import", second], ["Spring follow-up, import", third]] as const) {
   const summary = typeof record === "object" && record !== null && "summary" in record ? record.summary : null;
