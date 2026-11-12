@@ -1,6 +1,6 @@
 import { Link } from "wouter";
 import type { CampaignListItem, LeadOutcome } from "../../shared/api.ts";
-import { PageTitle } from "../App.tsx";
+import { PageTitle, QuickSearch } from "../App.tsx";
 import { useApi } from "../api.ts";
 import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
@@ -14,6 +14,7 @@ export function CampaignsPage() {
 
   return (
     <div>
+      <QuickSearch />
       <div className="flex flex-wrap items-end justify-between gap-4">
         <PageTitle>Campaigns</PageTitle>
         {campaigns && campaigns.length > 0 && <NewCampaignButton />}

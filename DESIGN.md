@@ -10,7 +10,7 @@ colors:
   ink: "#151A2D"
   ink-2: "#3A4157"
   muted: "#636B80"
-  faint: "#646D83"
+  faint: "#636B80"
   call: "#0B875D"
   call-hover: "#097450"
   call-soft: "#E2F4EC"
@@ -79,6 +79,10 @@ typography:
     fontFamily: "Schibsted Grotesk Variable, ui-sans-serif, system-ui, sans-serif"
     fontSize: "14px"
     fontWeight: 400
+  nav-narrow:
+    fontFamily: "Schibsted Grotesk Variable, ui-sans-serif, system-ui, sans-serif"
+    fontSize: "12px"
+    fontWeight: 500
   label:
     fontFamily: "Schibsted Grotesk Variable, ui-sans-serif, system-ui, sans-serif"
     fontSize: "13px"
@@ -147,8 +151,9 @@ Tokens live in `src/web/styles.css`. daisyUI themes `outreach-light` and `outrea
 - **Status groups** use the same tokens everywhere a status appears: running is neutral with an inset line; waiting on you is green (`you`); handed to you is blue (`hand`); paused is amber (`pause`); ended is grey (`end`), with a hollow dot.
 - **Critical** (`crit` on `crit-soft`) is for errors and refused files only.
 - Never use raw Tailwind palette colors in UI. Every color comes from a theme token, so both themes stay readable.
-- **Contrast adjustments, 12 November 2026.** The prototypes' colors were kept wherever WCAG AA allows. Four tokens moved to the nearest value that passes 4.5:1 for normal text on every surface they appear on: light `faint` `#949BAD` → `#646D83` (was 2.8:1 on white), dark `faint` `#6D7590` → `#8E94A9` (was 3.5:1 on raised), light `call`/`primary` `#0B8A5F` → `#0B875D` with hover `#097550` → `#097450` (white label was 4.36:1), and light `end` `#6B7285` → `#666C7E` (ended badge was 4.17:1). `faint` is now almost as dark as `muted` in light mode: it remains for text one step quieter, and decorative lines use `line-strong` instead.
-- `e2e/accessibility.spec.ts` runs an axe WCAG 2.1 AA scan, colour contrast included, over every route and state in `e2e/screens.ts`, in both themes. Add every new screen and state there.
+- **Contrast adjustments, 12 November 2026.** The prototypes' colors were kept wherever WCAG AA allows. Four tokens moved to the nearest value that passes 4.5:1 for normal text on every surface they appear on: light `faint` `#949BAD` → `#646D83` (was 2.8:1 on white), dark `faint` `#6D7590` → `#8E94A9` (was 3.5:1 on raised), light `call`/`primary` `#0B8A5F` → `#0B875D` with hover `#097550` → `#097450` (white label was 4.36:1), and light `end` `#6B7285` → `#666C7E` (ended badge was 4.17:1). In the light theme `faint` is now an alias of `muted` (review round 1). AA leaves no lighter text tier on these surfaces, so one color has one name. Dark keeps its separate, lighter value, which passes. Decorative lines use `line-strong`.
+- Placeholders use `muted` at full opacity in both themes. daisyUI's default is base-content at 50%, about 3.3:1 in light.
+- `e2e/accessibility.spec.ts` runs an axe WCAG 2.1 AA scan, colour contrast included, over every route and state in `e2e/screens.ts`, in both themes. It also measures what axe skips: text axe cannot resolve (select chevrons, tab counts), every visible placeholder, and text faded by opacity, which fails outright. Add every new screen and state there, including pending and error states. A fixture screen renders every outreach status, a bad number and a newer email.
 
 ## Typography
 
@@ -161,14 +166,16 @@ Tokens live in `src/web/styles.css`. daisyUI themes `outreach-light` and `outrea
 - The shell is a 220px left rail plus one working area, padded 32px top and 40px left. Content is capped at 1180px wide. Below 901px the rail becomes a top bar.
 - The person and company-lead record is one column, at most 780px: header with local time, a contact row, Campaigns, then Others at the company.
 - Forms sit in one column at most 680px wide; file rows at most 640px.
-- Every page except Leads has the quick search at the top right.
-- Nothing scrolls sideways or clips at any width. Below 561px the four areas share the top bar, each with its icon above its label. Below 721px the import results table stacks each row into a block: name and result on the first line, then the company, then what happened. `e2e/layout.spec.ts` checks every screen in `e2e/screens.ts` at 1440, 1024, 768 and 390px.
+- The quick search sits at the top right of the Campaigns list only, as in the guided-import prototype. The daily-workspace prototype defines it but shows it nowhere. Forms, results and records start with their back link.
+- Nothing scrolls sideways or clips at any width. Below 561px the four areas share the top bar, each with its icon above a 12px label. Below 721px the import results table stacks each row into a block: name and result on the first line, then the company, then what happened. `e2e/layout.spec.ts` checks every screen in `e2e/screens.ts` at 1440, 1024, 768 and 390px.
 
 ## Elevation & Depth
 
 Flat. Depth comes from tone (paper, surface, raised) and 1px lines, not shadows. daisyUI `--depth` is 0.
 
 ## Shapes
+
+Field and button size follows the prototype: `--size-field` is 0.21875rem, so buttons, inputs and selects are 35px tall and small buttons 28px (the prototype's are 33px and 28px).
 
 daisyUI's button noise layer is switched off (`.btn { background-image: none }`). The themes set `--noise: 0` anyway, and a plain background lets the contrast scan measure buttons.
 
@@ -177,12 +184,14 @@ Radii: 5px for status badges, 9px for fields and buttons, 14px for panels and ta
 ## Components
 
 - **Status badge** (`StatusBadge`, `src/web/status.tsx`): the status name with a 7px dot, colored by group. Labels follow the spec's wording.
-- **Lead table**: Person, Company and Campaigns columns. Each campaign enrollment shows its status badge and campaign name. Rows open the record; the name is a real link.
-- **Contact row**: label above value. Bad details are struck through and labelled "marked wrong". Newer details are labelled "newer" in `you`. A missing main line reads "None in the scraper file".
+- **Lead table**: Person, Company and Campaigns columns at 27%, 27% and the rest, with cells at the 15px body size, as in the approved table. Each campaign enrollment shows its status badge and campaign name. Rows open the record; the name is a real link. The counter says "7 people and 3 companies", because company leads are rows too. While a search refreshes, the previous rows stay at full contrast, and a small spinner with "Updating results." sits beside the counter. Never fade content to show loading.
+- **Enrollment list** (`EnrollmentList`): each status badge sits beside its campaign's name. Used on Leads rows and for colleagues on records, so a person in two campaigns never shows two unlabelled badges.
+- **Contact row**: label above value, in the prototype's order: the person's emails, direct and mobile numbers, then the main line, then the shared inbox. Phone numbers are grouped for reading and dialing ("+44 20 7946 0101"). Bad details are struck through and labelled "marked wrong". Newer details are labelled "newer", in the same neutral label color. A missing main line reads "None in the scraper file".
 - **Company record**: when Leads is filtered to a company, a panel above the table shows its main line, shared inbox and how many people on record are enrolled. There is no separate company page. A company lead keeps the single-column record from the daily-workspace prototype.
 - **Campaign row**: name, a Not launched badge with a dashed dot, lead count, the last import's changes with See result, a No sequence yet rule, and Import again (or Import, before the first import).
 - **File row** (guided import): icon, title, then the filename and the check result. Three states: empty (choose or drop), checked OK (green tick, Replace), refused (critical tint and message, Choose another file).
 - **Import results**: underline tabs (All, New, Already enrolled, Updated, Not enrolled) with counts, then a table with Decision maker or company lead, Company, Result and What happened. In All, rows are grouped with raised group headers in the order Not enrolled, New, Updated, Already enrolled. The unchanged Already enrolled group collapses to one line with Show them.
+- **Not-enrolled reasons** use the import results' wording everywhere: "no personal email or mobile, and the company has no main line" for a person, "no main line or shared inbox" for a company.
 - **Empty states** say what is missing and what makes it appear. Areas that later tickets deliver (the Today call list, the Calls queue) say honestly that nothing is due.
 - **Loading** uses daisyUI skeletons shaped like the content, in a `role="status"` container with an accessible name. **Errors** use a critical-tinted alert that names the problem and offers Try again. A secondary request that fails, such as the campaign options behind the Leads filter, gets its own alert and retry, and the control that depends on it is disabled.
 

@@ -38,9 +38,13 @@ function Company({ company }: { company: CompanyRecord }) {
           <p className="mb-1 text-[13.5px] text-muted">{company.enrollments.length > 0 ? "Company lead" : "Company"}</p>
           <h1 className="text-[34px] leading-[1.15] tracking-[-0.02em]">{company.name}</h1>
           <p className="mt-1 text-[16px] text-ink-2">
-            {company.people.length > 0 ? "Its decision makers can’t be reached directly" : "No named decision maker"}
-            {company.city ? `, ${company.city}` : ""}
+            {[company.people.length > 0 ? "" : "No named decision maker", company.city].filter(Boolean).join(", ")}
           </p>
+          {company.people.length > 0 && company.enrollments.length > 0 && (
+            <p className="mt-2 max-w-[60ch] text-[14px] text-ink-2">
+              None of its decision makers can be reached directly, so the company is contacted through its shared inbox.
+            </p>
+          )}
         </div>
         <LocalTime timeZone={company.timezone} />
       </header>

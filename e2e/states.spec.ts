@@ -17,8 +17,8 @@ test("the four areas are reachable from the rail, and Today and Calls say honest
   await expect(page.getByRole("heading", { name: "Campaigns", exact: true })).toBeVisible();
 });
 
-test("the quick search above each page opens Leads with the query", async ({ page }) => {
-  await page.goto("/");
+test("the quick search above the Campaigns list opens Leads with the query", async ({ page }) => {
+  await page.goto("/campaigns");
   await page.getByLabel("Find a lead").fill("Okafor");
   await page.getByLabel("Find a lead").press("Enter");
   await expect(page).toHaveURL(/\/leads\?q=Okafor/);

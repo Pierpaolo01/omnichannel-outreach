@@ -18,7 +18,7 @@ pnpm dev                # http://127.0.0.1:4310
 pnpm check              # typecheck, lint, unit, HTTP and browser tests
 ```
 
-`pnpm dev` keeps its data in `~/.local/share/omnichannel-outreach-dev`. `pnpm build && pnpm start` runs the production build against `~/.local/share/omnichannel-outreach`. Set `OUTREACH_DATA_DIR` to use another directory outside the repository. The foundation and import model are recorded in [docs/adr/0001](docs/adr/0001-application-foundation-and-import-model.md).
+`pnpm dev` keeps its data in `~/.local/share/omnichannel-outreach-dev` (`OUTREACH_DEV_DATA_DIR`). `pnpm build && pnpm start` runs the production build against `~/.local/share/omnichannel-outreach`. Set `OUTREACH_DATA_DIR` to use another directory outside the repository. The foundation and import model are recorded in [docs/adr/0001](docs/adr/0001-application-foundation-and-import-model.md).
 
 ## Starting context
 

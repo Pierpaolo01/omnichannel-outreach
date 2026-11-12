@@ -71,26 +71,36 @@ function detailLabel(detail: ContactDetailView): string {
  * A missing company main line is said out loud, since calls depend on it.
  */
 export function ContactRow({ details }: { details: readonly ContactDetailView[] }) {
-  const noMainLine = !details.some((d) => d.phoneKind === "main_line");
+  const own = details.filter((d) => d.owner === "person");
+  const mainLines = details.filter((d) => d.phoneKind === "main_line");
+  const inboxes = details.filter((d) => d.owner === "company" && d.channel === "email");
+  const item = (detail: ContactDetailView) => (
+    <div key={detail.id} className="min-w-0">
+      <dt className="text-[12.5px] text-muted">{detailLabel(detail)}</dt>
+      <dd className={`break-words ${detail.bad ? "text-faint line-through" : ""}`}>{detail.value}</dd>
+    </div>
+  );
   return (
     <dl className="-mt-4 flex flex-wrap gap-x-8 gap-y-3.5 text-[14.5px]">
-      {noMainLine && (
+      {own.map(item)}
+      {mainLines.length > 0 ? (
+        mainLines.map(item)
+      ) : (
         <div>
           <dt className="text-[12.5px] text-muted">Main line</dt>
           <dd className="text-muted">None in the scraper file</dd>
         </div>
       )}
-      {details.map((detail) => (
-        <div key={detail.id} className="min-w-0">
-          <dt className={`text-[12.5px] ${detail.newer && !detail.bad ? "font-semibold text-you" : "text-muted"}`}>
-            {detailLabel(detail)}
-          </dt>
-          <dd className={`break-words ${detail.bad ? "text-faint line-through" : ""}`}>{detail.value}</dd>
-        </div>
-      ))}
+      {inboxes.map(item)}
     </dl>
   );
 }
+
+/** Why someone on record has no enrollment, worded as the import results word it. */
+export const UNENROLLED_SHORT = {
+  person: "no personal email or mobile, and the company has no main line",
+  company: "no main line or shared inbox",
+} as const;
 
 export const UNENROLLED_TEXT = {
   person: "There’s no personal email or mobile, and the company has no main line. Company details aren’t used for a decision maker’s email.",
@@ -141,23 +151,35 @@ export function PeopleRows({ people }: { people: readonly ColleagueView[] }) {
     <ul>
       {people.map((person) => (
         <li key={person.id} className="flex flex-col gap-2 border-line py-4 [&+&]:border-t">
-          <div className="flex flex-wrap items-center justify-between gap-2.5">
+          <div className="flex flex-wrap items-baseline justify-between gap-2.5">
             <Link href={`/leads/people/${person.id}`} className="font-semibold no-underline hover:underline">
               {person.name}
             </Link>
-            <span className="flex flex-wrap gap-1.5">
-              {person.enrollments.length > 0 ? (
-                person.enrollments.map((e) => <StatusBadge key={e.id} status={e.status} />)
-              ) : (
-                <span className="text-[14px] text-muted">Not in a campaign</span>
-              )}
-            </span>
+            <span className="text-[13px] text-muted">{person.title}</span>
           </div>
-          <p className="text-[14px] text-ink-2">
-            {[person.title, person.unenrolledReason === "no_usable_channel" ? "No email or phone number to reach them" : ""]
-              .filter(Boolean)
-              .join(". ")}
-          </p>
+          <EnrollmentList
+            enrollments={person.enrollments}
+            empty={
+              person.unenrolledReason === "no_usable_channel"
+                ? `Not in a campaign: ${UNENROLLED_SHORT.person}`
+                : "Not in a campaign"
+            }
+          />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** Each enrollment as its status and the campaign it belongs to, as on Leads rows. */
+export function EnrollmentList({ enrollments, empty }: { enrollments: readonly EnrollmentView[]; empty: string }) {
+  if (enrollments.length === 0) return <span className="text-[13px] text-muted">{empty}</span>;
+  return (
+    <ul className="flex flex-col gap-1.5">
+      {enrollments.map((e) => (
+        <li key={e.id} className="flex flex-wrap items-center gap-2">
+          <StatusBadge status={e.status} />
+          <span className="min-w-0 text-[13px] text-muted">{e.campaign.name}</span>
         </li>
       ))}
     </ul>

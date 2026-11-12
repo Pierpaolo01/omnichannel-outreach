@@ -1,5 +1,5 @@
 import { useState, type ReactNode, type SyntheticEvent } from "react";
-import { Link, Route, Switch, useLocation, useRoute } from "wouter";
+import { Link, Route, Switch, useLocation } from "wouter";
 import { Icon, type IconName } from "./icons.tsx";
 import { CallsPage } from "./pages/CallsPage.tsx";
 import { CampaignsPage } from "./pages/CampaignsPage.tsx";
@@ -19,7 +19,6 @@ const AREAS: readonly { path: string; label: string; icon: IconName }[] = [
 ];
 
 export function App() {
-  const [onLeads] = useRoute("/leads");
   return (
     <div className="grid min-h-screen grid-cols-1 grid-rows-[auto_1fr] min-[901px]:grid-cols-[220px_minmax(0,1fr)] min-[901px]:grid-rows-1">
       <a
@@ -31,7 +30,6 @@ export function App() {
       <Rail />
       <main id="main" className="min-w-0 px-4 pb-24 pt-5 min-[901px]:pl-10 min-[901px]:pr-4 min-[901px]:pt-8">
         <div className="max-w-[1180px]">
-          {!onLeads && <QuickSearch />}
           <Switch>
             <Route path="/" component={TodayPage} />
             <Route path="/calls" component={CallsPage} />
@@ -85,8 +83,8 @@ function Rail() {
   );
 }
 
-/** The prototype's search above every page but Leads. Enter opens Leads with the query. */
-function QuickSearch() {
+/** The guided-import prototype's search above the Campaigns list. Enter opens Leads with the query. */
+export function QuickSearch() {
   const [, navigate] = useLocation();
   const [text, setText] = useState("");
   const submit = (event: SyntheticEvent) => {

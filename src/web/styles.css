@@ -37,7 +37,7 @@
   --radius-field: 9px;
   --radius-box: 14px;
   --size-selector: 0.25rem;
-  --size-field: 0.25rem;
+  --size-field: 0.21875rem;
   --border: 1px;
   --depth: 0;
   --noise: 0;
@@ -72,7 +72,7 @@
   --radius-field: 9px;
   --radius-box: 14px;
   --size-selector: 0.25rem;
-  --size-field: 0.25rem;
+  --size-field: 0.21875rem;
   --border: 1px;
   --depth: 0;
   --noise: 0;
@@ -85,7 +85,8 @@
   --o-line-strong: #c9cfda;
   --o-ink-2: #3a4157;
   --o-muted: #636b80;
-  --o-faint: #646d83;
+  /* AA leaves no room for a lighter text tier on these surfaces, so faint is muted. */
+  --o-faint: var(--o-muted);
   --o-call: #0b875d;
   --o-call-hover: #097450;
   --o-call-soft: #e2f4ec;
@@ -235,4 +236,12 @@
    Without it, buttons have a plain background that the accessibility scan can measure. */
 .btn {
   background-image: none;
+}
+
+/* Placeholders in enabled fields are readable text: muted meets AA on every field surface.
+   daisyUI's default is base-content at 50%, about 3.3:1 in the light theme. */
+input::placeholder,
+textarea::placeholder {
+  color: var(--o-muted);
+  opacity: 1;
 }

@@ -3,9 +3,9 @@ import { Link, useLocation, useSearch } from "wouter";
 import type { CampaignListItem, CompanyRecord, ContactDetailView, LeadRow, LeadSearchResult } from "../../shared/api.ts";
 import { PageTitle } from "../App.tsx";
 import { useApi } from "../api.ts";
-import { ErrorState } from "../components.tsx";
+import { EnrollmentList, ErrorState, UNENROLLED_SHORT } from "../components.tsx";
 import { Icon } from "../icons.tsx";
-import { STATUS_OPTIONS, StatusBadge } from "../status.tsx";
+import { STATUS_OPTIONS } from "../status.tsx";
 
 /** Search and filters live in the URL, so a search can be linked, refreshed and gone back to. */
 function useLeadQuery() {
@@ -60,7 +60,8 @@ export function LeadsPage() {
   const everyone = useApi<LeadSearchResult>("/api/leads?limit=1");
 
   const filtered = Boolean(query.q || query.campaign || query.status || query.company);
-  const total = everyone.result.state === "ready" ? everyone.result.data.total : null;
+  const overall = everyone.result.state === "ready" ? everyone.result.data : null;
+  const total = overall?.total ?? null;
   const shown = result.state === "ready" ? result.data : result.state === "loading" ? result.previous : null;
   const campaignList = campaignOptions.state === "ready" ? campaignOptions.data.campaigns : [];
 
@@ -68,9 +69,15 @@ export function LeadsPage() {
     <div>
       <div className="mb-[18px] flex flex-wrap items-end justify-between gap-4">
         <PageTitle>Leads</PageTitle>
-        {shown && total !== null && (
-          <span className="text-[13px] text-muted" aria-live="polite">
-            {shown.total === total ? `${total} people` : `${shown.total} of ${total} people`}
+        {shown && overall && (
+          <span className="flex items-center gap-2 text-[13px] text-muted" aria-live="polite">
+            {result.state === "loading" && (
+              <>
+                <span className="loading loading-spinner loading-xs text-call" aria-hidden="true" />
+                <span>Updating results.</span>
+              </>
+            )}
+            <span>{filtered ? `${describeCount(shown)} of ${overall.total}` : describeCount(overall)}</span>
           </span>
         )}
       </div>
@@ -90,7 +97,7 @@ export function LeadsPage() {
       <div className="mt-3 flex flex-wrap items-center gap-2.5">
         <select
           aria-label="Campaign"
-          className="select select-sm h-9 w-auto max-w-full border-line-strong bg-base-100 text-[14px]"
+          className="select w-auto max-w-full border-line-strong bg-base-100 text-[14px]"
           value={query.campaign}
           disabled={campaignOptions.state !== "ready"}
           onChange={(event) => update({ campaign: event.target.value })}
@@ -104,7 +111,7 @@ export function LeadsPage() {
         </select>
         <select
           aria-label="Outreach status"
-          className="select select-sm h-9 w-auto max-w-full border-line-strong bg-base-100 text-[14px]"
+          className="select w-auto max-w-full border-line-strong bg-base-100 text-[14px]"
           value={query.status}
           onChange={(event) => update({ status: event.target.value })}
         >
@@ -160,11 +167,17 @@ function LeadTable({ result, query, loading }: { result: LeadSearchResult; query
   return (
     <>
       <div
-        className={`overflow-hidden rounded-box border border-line bg-base-100 transition-opacity ${loading ? "opacity-60" : ""}`}
+        className="overflow-hidden rounded-box border border-line bg-base-100"
         aria-busy={loading}
       >
         <div className="overflow-x-auto">
-          <table className="table">
+          {/* The approved table: body-size cells, identity columns a quarter each, campaigns wider. */}
+          <table className="table text-[15px]">
+            <colgroup>
+              <col className="w-[27%]" />
+              <col className="w-[27%]" />
+              <col />
+            </colgroup>
             <thead>
               <tr className="border-line text-[13px] font-medium text-muted">
                 <th className="px-3.5 py-3 font-medium">Person</th>
@@ -228,20 +241,14 @@ function LeadTableRow({ row }: { row: LeadRow }) {
         )}
       </td>
       <td className="px-3.5 py-3.5">
-        <div className="flex flex-col gap-1.5">
-          {row.enrollments.length > 0 ? (
-            row.enrollments.map((e) => (
-              <div key={e.id} className="flex flex-wrap items-center gap-2">
-                <StatusBadge status={e.status} />
-                <span className="min-w-0 text-[13px] text-muted">{e.campaign.name}</span>
-              </div>
-            ))
-          ) : (
-            <span className="text-[13px] text-muted">
-              {row.unenrolledReason === "no_usable_channel" ? "Not in a campaign: no usable email or phone" : "Not in a campaign"}
-            </span>
-          )}
-        </div>
+        <EnrollmentList
+          enrollments={row.enrollments}
+          empty={
+            row.unenrolledReason === "no_usable_channel"
+              ? `Not in a campaign: ${UNENROLLED_SHORT[row.kind]}`
+              : "Not in a campaign"
+          }
+        />
       </td>
     </tr>
   );
@@ -290,6 +297,14 @@ function CompanyFacts({ id }: { id: string }) {
       </div>
     </section>
   );
+}
+
+/** "7 people and 3 companies": rows include company leads, which are not people. */
+function describeCount({ people, companies }: { people: number; companies: number }): string {
+  const part = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+  if (companies === 0) return part(people, "person", "people");
+  if (people === 0) return part(companies, "company", "companies");
+  return `${part(people, "person", "people")} and ${part(companies, "company", "companies")}`;
 }
 
 function Empty({ children }: { children: string }) {

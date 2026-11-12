@@ -117,7 +117,7 @@ test("import twice, into a second campaign, then find people, company leads and 
     await expect(record).toContainText("None in the scraper file");
     await expect(record).toContainText("2, of whom 1 is enrolled");
     const sofia = page.getByRole("row", { name: /Sofia Marin/ });
-    await expect(sofia).toContainText("Not in a campaign: no usable email or phone");
+    await expect(sofia).toContainText("Not in a campaign: no personal email or mobile, and the company has no main line");
     await sofia.getByRole("link", { name: "Sofia Marin" }).click();
 
     await expect(page.getByRole("heading", { name: "Sofia Marin", level: 1 })).toBeVisible();

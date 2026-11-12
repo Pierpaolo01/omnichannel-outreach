@@ -61,7 +61,7 @@ function ImportForm({ campaign }: { campaign: CampaignListItem | null }) {
   const [name, setName] = useState("");
   const [files, setFiles] = useState<Record<Slot, ChosenFile>>({ people: { state: "empty" }, businesses: { state: "empty" } });
   const [pairProblem, setPairProblem] = useState<string | null>(null);
-  const [failure, setFailure] = useState<{ message: string; problems: { file: string; message: string }[] } | null>(null);
+  const [failure, setFailure] = useState<{ mode: "import" | "create"; message: string; problems: { file: string; message: string }[] } | null>(null);
   const [submitting, setSubmitting] = useState<"import" | "create" | null>(null);
   const latest = useRef(files);
 
@@ -133,7 +133,7 @@ function ImportForm({ campaign }: { campaign: CampaignListItem | null }) {
       navigate(created.import ? `/campaigns/${created.campaign.id}/imports/${created.import.id}` : "/campaigns");
     } catch (error) {
       setSubmitting(null);
-      setFailure({ message: error instanceof Error ? error.message : "The import failed.", problems: exportProblems(error) });
+      setFailure({ mode, message: error instanceof Error ? error.message : "The import failed.", problems: exportProblems(error) });
     }
   };
 
@@ -164,7 +164,13 @@ function ImportForm({ campaign }: { campaign: CampaignListItem | null }) {
           <div role="alert" className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 rounded-xl bg-crit-soft px-4 py-3.5 text-[14px]">
             <Icon name="bad" className="mt-0.5 size-[18px] text-crit" />
             <div>
-              <b className="font-semibold">{campaign ? "Nothing was imported." : "Nothing was imported, and the campaign wasn’t created."}</b>
+              <b className="font-semibold">
+                {failure.mode === "create"
+                  ? "The campaign wasn’t created."
+                  : campaign
+                    ? "Nothing was imported."
+                    : "Nothing was imported, and the campaign wasn’t created."}
+              </b>
               <p className="text-ink-2">
                 {failure.problems.find((p) => p.file === "pair")?.message ?? failure.message}
                 {campaign ? "" : " Your campaign name is kept."}
