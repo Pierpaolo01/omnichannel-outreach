@@ -90,3 +90,19 @@ test("files from two different scraper runs are refused before import", async ({
   await expect(page.getByText(/don’t belong together/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Create campaign and import" })).toBeDisabled();
 });
+
+test("the campaign filter says when its campaigns didn't load, and recovers on retry", async ({ page }) => {
+  let fail = true;
+  await page.route("**/api/campaigns", async (route) => {
+    if (fail) await route.fulfill({ status: 500, json: { error: { code: "internal", message: "Something went wrong on the server." } } });
+    else await route.continue();
+  });
+  await page.goto("/leads");
+  await expect(page.getByRole("alert")).toContainText("Campaigns for the filter didn’t load.");
+  await expect(page.getByLabel("Campaign", { exact: true })).toBeDisabled();
+  await expect(page.getByRole("link", { name: "Amira Hassan" })).toBeVisible();
+  fail = false;
+  await page.getByRole("button", { name: "Try again" }).click();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByLabel("Campaign", { exact: true }).locator("option", { hasText: "Physio clinics, London" })).toHaveCount(1);
+});

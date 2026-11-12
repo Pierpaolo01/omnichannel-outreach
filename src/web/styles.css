@@ -6,7 +6,8 @@
   logs: false;
 }
 
-/* Tokens from the approved daily-workspace prototype (prototype/daily-workspace, 3515d86). */
+/* Tokens from the approved daily-workspace prototype (prototype/daily-workspace, 3515d86).
+   Four were adjusted on 12 November 2026 to meet WCAG AA text contrast; see DESIGN.md. */
 @plugin "daisyui/theme" {
   name: "outreach-light";
   default: true;
@@ -16,11 +17,11 @@
   --color-base-200: #f3f5f8;
   --color-base-300: #e1e5ec;
   --color-base-content: #151a2d;
-  --color-primary: #0b8a5f;
+  --color-primary: #0b875d;
   --color-primary-content: #ffffff;
   --color-secondary: #2c55c9;
   --color-secondary-content: #ffffff;
-  --color-accent: #0b8a5f;
+  --color-accent: #0b875d;
   --color-accent-content: #ffffff;
   --color-neutral: #151a2d;
   --color-neutral-content: #f3f5f8;
@@ -84,9 +85,9 @@
   --o-line-strong: #c9cfda;
   --o-ink-2: #3a4157;
   --o-muted: #636b80;
-  --o-faint: #949bad;
-  --o-call: #0b8a5f;
-  --o-call-hover: #097550;
+  --o-faint: #646d83;
+  --o-call: #0b875d;
+  --o-call-hover: #097450;
   --o-call-soft: #e2f4ec;
   --o-band: #151a2d;
   --o-band-ink: #ffffff;
@@ -97,7 +98,7 @@
   --o-hand-soft: #e5ecfb;
   --o-pause: #9a5a00;
   --o-pause-soft: #fcefd9;
-  --o-end: #6b7285;
+  --o-end: #666c7e;
   --o-end-soft: #edeff3;
   --o-crit: #c0352b;
   --o-crit-soft: #fbe6e4;
@@ -110,7 +111,7 @@
     --o-line-strong: #36405a;
     --o-ink-2: #c5cada;
     --o-muted: #98a0b5;
-    --o-faint: #6d7590;
+    --o-faint: #8e94a9;
     --o-call: #22b07d;
     --o-call-hover: #2bc48b;
     --o-call-soft: #123327;
@@ -134,7 +135,7 @@
   --o-line-strong: #36405a;
   --o-ink-2: #c5cada;
   --o-muted: #98a0b5;
-  --o-faint: #6d7590;
+  --o-faint: #8e94a9;
   --o-call: #22b07d;
   --o-call-hover: #2bc48b;
   --o-call-soft: #123327;
@@ -228,4 +229,10 @@
 .input,
 .select {
   --input-color: var(--o-call);
+}
+
+/* Our themes set --noise to 0, but daisyUI still declares the noise layer as a background image.
+   Without it, buttons have a plain background that the accessibility scan can measure. */
+.btn {
+  background-image: none;
 }

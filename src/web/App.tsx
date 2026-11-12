@@ -56,14 +56,14 @@ function Rail() {
   const [location] = useLocation();
   const isActive = (path: string) => (path === "/" ? location === "/" : location === path || location.startsWith(`${path}/`));
   return (
-    <aside className="sticky top-0 z-10 flex items-center gap-3 overflow-x-auto border-b border-line bg-base-100 px-4 py-2.5 min-[901px]:h-dvh min-[901px]:flex-col min-[901px]:items-stretch min-[901px]:gap-7 min-[901px]:border-b-0 min-[901px]:border-r min-[901px]:px-3.5 min-[901px]:pb-5 min-[901px]:pt-6">
+    <aside className="sticky top-0 z-10 flex items-center gap-3 border-b border-line bg-base-100 px-4 py-2.5 min-[901px]:h-dvh min-[901px]:flex-col min-[901px]:items-stretch min-[901px]:gap-7 min-[901px]:border-b-0 min-[901px]:border-r min-[901px]:px-3.5 min-[901px]:pb-5 min-[901px]:pt-6">
       <div className="flex items-center gap-2.5 px-2.5 text-[17px] font-bold tracking-[-0.01em]">
         <span className="grid size-[26px] place-items-center rounded-[7px] bg-base-content text-base-200">
           <Icon name="call" className="size-[15px] [stroke-width:2]" />
         </span>
         <span className="max-[900px]:sr-only">Outreach</span>
       </div>
-      <nav aria-label="Areas" className="flex gap-0.5 min-[901px]:flex-col">
+      <nav aria-label="Areas" className="flex gap-0.5 max-[560px]:flex-1 max-[560px]:justify-between min-[901px]:flex-col">
         {AREAS.map((area) => {
           const active = isActive(area.path);
           return (
@@ -71,7 +71,7 @@ function Rail() {
               key={area.path}
               href={area.path}
               aria-current={active ? "page" : undefined}
-              className={`flex items-center gap-[11px] whitespace-nowrap rounded-field px-2.5 py-[9px] font-medium no-underline max-[900px]:px-[9px] max-[900px]:py-[7px] ${
+              className={`flex items-center gap-[11px] whitespace-nowrap rounded-field px-2.5 py-[9px] font-medium no-underline max-[900px]:px-[9px] max-[900px]:py-[7px] max-[560px]:flex-1 max-[560px]:flex-col max-[560px]:gap-0.5 max-[560px]:px-1 max-[560px]:py-1.5 max-[560px]:text-[12px] ${
                 active ? "bg-base-200 font-semibold text-base-content [&_svg]:text-call" : "text-ink-2 hover:bg-raised"
               }`}
             >

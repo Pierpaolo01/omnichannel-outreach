@@ -10,9 +10,9 @@ colors:
   ink: "#151A2D"
   ink-2: "#3A4157"
   muted: "#636B80"
-  faint: "#949BAD"
-  call: "#0B8A5F"
-  call-hover: "#097550"
+  faint: "#646D83"
+  call: "#0B875D"
+  call-hover: "#097450"
   call-soft: "#E2F4EC"
   band: "#151A2D"
   you: "#0B7A55"
@@ -21,7 +21,7 @@ colors:
   hand-soft: "#E5ECFB"
   pause: "#9A5A00"
   pause-soft: "#FCEFD9"
-  end: "#6B7285"
+  end: "#666C7E"
   end-soft: "#EDEFF3"
   crit: "#C0352B"
   crit-soft: "#FBE6E4"
@@ -31,6 +31,7 @@ colors:
   dark-line: "#262D3E"
   dark-ink: "#E8EBF3"
   dark-call: "#22B07D"
+  dark-faint: "#8E94A9"
 typography:
   display:
     fontFamily: "Schibsted Grotesk Variable, ui-sans-serif, system-ui, sans-serif"
@@ -146,6 +147,8 @@ Tokens live in `src/web/styles.css`. daisyUI themes `outreach-light` and `outrea
 - **Status groups** use the same tokens everywhere a status appears: running is neutral with an inset line; waiting on you is green (`you`); handed to you is blue (`hand`); paused is amber (`pause`); ended is grey (`end`), with a hollow dot.
 - **Critical** (`crit` on `crit-soft`) is for errors and refused files only.
 - Never use raw Tailwind palette colors in UI. Every color comes from a theme token, so both themes stay readable.
+- **Contrast adjustments, 12 November 2026.** The prototypes' colors were kept wherever WCAG AA allows. Four tokens moved to the nearest value that passes 4.5:1 for normal text on every surface they appear on: light `faint` `#949BAD` → `#646D83` (was 2.8:1 on white), dark `faint` `#6D7590` → `#8E94A9` (was 3.5:1 on raised), light `call`/`primary` `#0B8A5F` → `#0B875D` with hover `#097550` → `#097450` (white label was 4.36:1), and light `end` `#6B7285` → `#666C7E` (ended badge was 4.17:1). `faint` is now almost as dark as `muted` in light mode: it remains for text one step quieter, and decorative lines use `line-strong` instead.
+- `e2e/accessibility.spec.ts` runs an axe WCAG 2.1 AA scan, colour contrast included, over every route and state in `e2e/screens.ts`, in both themes. Add every new screen and state there.
 
 ## Typography
 
@@ -159,12 +162,15 @@ Tokens live in `src/web/styles.css`. daisyUI themes `outreach-light` and `outrea
 - The person and company-lead record is one column, at most 780px: header with local time, a contact row, Campaigns, then Others at the company.
 - Forms sit in one column at most 680px wide; file rows at most 640px.
 - Every page except Leads has the quick search at the top right.
+- Nothing scrolls sideways or clips at any width. Below 561px the four areas share the top bar, each with its icon above its label. Below 721px the import results table stacks each row into a block: name and result on the first line, then the company, then what happened. `e2e/layout.spec.ts` checks every screen in `e2e/screens.ts` at 1440, 1024, 768 and 390px.
 
 ## Elevation & Depth
 
 Flat. Depth comes from tone (paper, surface, raised) and 1px lines, not shadows. daisyUI `--depth` is 0.
 
 ## Shapes
+
+daisyUI's button noise layer is switched off (`.btn { background-image: none }`). The themes set `--noise: 0` anyway, and a plain background lets the contrast scan measure buttons.
 
 Radii: 5px for status badges, 9px for fields and buttons, 14px for panels and tables. Dashed borders mean "nothing here yet": the empty Campaigns state, the Not launched dot and the No sequence yet rule.
 
@@ -178,7 +184,7 @@ Radii: 5px for status badges, 9px for fields and buttons, 14px for panels and ta
 - **File row** (guided import): icon, title, then the filename and the check result. Three states: empty (choose or drop), checked OK (green tick, Replace), refused (critical tint and message, Choose another file).
 - **Import results**: underline tabs (All, New, Already enrolled, Updated, Not enrolled) with counts, then a table with Decision maker or company lead, Company, Result and What happened. In All, rows are grouped with raised group headers in the order Not enrolled, New, Updated, Already enrolled. The unchanged Already enrolled group collapses to one line with Show them.
 - **Empty states** say what is missing and what makes it appear. Areas that later tickets deliver (the Today call list, the Calls queue) say honestly that nothing is due.
-- **Loading** uses daisyUI skeletons shaped like the content. **Errors** use a critical-tinted alert that names the problem and offers Try again.
+- **Loading** uses daisyUI skeletons shaped like the content, in a `role="status"` container with an accessible name. **Errors** use a critical-tinted alert that names the problem and offers Try again. A secondary request that fails, such as the campaign options behind the Leads filter, gets its own alert and retry, and the control that depends on it is disabled.
 
 ## Do's and Don'ts
 

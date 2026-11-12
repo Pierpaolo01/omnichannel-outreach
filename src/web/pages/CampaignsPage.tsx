@@ -23,7 +23,7 @@ export function CampaignsPage() {
           <ErrorState title="Campaigns didn’t load." message={result.message} onRetry={retry} />
         </div>
       ) : campaigns === null ? (
-        <div className="mt-5 flex flex-col gap-3" aria-busy="true" aria-label="Loading campaigns">
+        <div className="mt-5 flex flex-col gap-3" role="status" aria-busy="true" aria-label="Loading campaigns">
           <div className="skeleton h-[104px] w-full" />
           <div className="skeleton h-[104px] w-full" />
         </div>

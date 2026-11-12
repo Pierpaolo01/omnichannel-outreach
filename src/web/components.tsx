@@ -166,7 +166,7 @@ export function PeopleRows({ people }: { people: readonly ColleagueView[] }) {
 
 export function RecordSkeleton() {
   return (
-    <div className="flex max-w-[780px] flex-col gap-10" aria-busy="true" aria-label="Loading">
+    <div className="flex max-w-[780px] flex-col gap-10" role="status" aria-busy="true" aria-label="Loading">
       <div className="flex flex-col gap-3">
         <div className="skeleton h-4 w-28" />
         <div className="skeleton h-9 w-72" />

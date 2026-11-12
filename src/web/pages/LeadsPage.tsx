@@ -50,7 +50,7 @@ export function LeadsPage() {
     return () => clearTimeout(timer);
   }, [text, query.q, update]);
 
-  const campaigns = useApi<{ campaigns: CampaignListItem[] }>("/api/campaigns");
+  const { result: campaignOptions, retry: retryCampaigns } = useApi<{ campaigns: CampaignListItem[] }>("/api/campaigns");
   const api = new URLSearchParams();
   if (query.q) api.set("q", query.q);
   if (query.campaign) api.set("campaign", query.campaign);
@@ -62,7 +62,7 @@ export function LeadsPage() {
   const filtered = Boolean(query.q || query.campaign || query.status || query.company);
   const total = everyone.result.state === "ready" ? everyone.result.data.total : null;
   const shown = result.state === "ready" ? result.data : result.state === "loading" ? result.previous : null;
-  const campaignList = campaigns.result.state === "ready" ? campaigns.result.data.campaigns : [];
+  const campaignList = campaignOptions.state === "ready" ? campaignOptions.data.campaigns : [];
 
   return (
     <div>
@@ -90,8 +90,9 @@ export function LeadsPage() {
       <div className="mt-3 flex flex-wrap items-center gap-2.5">
         <select
           aria-label="Campaign"
-          className="select select-sm h-9 w-auto border-line-strong bg-base-100 text-[14px]"
+          className="select select-sm h-9 w-auto max-w-full border-line-strong bg-base-100 text-[14px]"
           value={query.campaign}
+          disabled={campaignOptions.state !== "ready"}
           onChange={(event) => update({ campaign: event.target.value })}
         >
           <option value="">All campaigns</option>
@@ -103,7 +104,7 @@ export function LeadsPage() {
         </select>
         <select
           aria-label="Outreach status"
-          className="select select-sm h-9 w-auto border-line-strong bg-base-100 text-[14px]"
+          className="select select-sm h-9 w-auto max-w-full border-line-strong bg-base-100 text-[14px]"
           value={query.status}
           onChange={(event) => update({ status: event.target.value })}
         >
@@ -127,6 +128,16 @@ export function LeadsPage() {
           </button>
         )}
       </div>
+
+      {campaignOptions.state === "error" && (
+        <div className="mt-3">
+          <ErrorState
+            title="Campaigns for the filter didn’t load."
+            message={`${campaignOptions.message} Search still works; filtering by campaign needs them.`}
+            onRetry={retryCampaigns}
+          />
+        </div>
+      )}
 
       {query.company && <CompanyFacts id={query.company} />}
 
@@ -239,7 +250,7 @@ function LeadTableRow({ row }: { row: LeadRow }) {
 /** The company record: shown above Leads when it is filtered to one company. */
 function CompanyFacts({ id }: { id: string }) {
   const { result, retry } = useApi<CompanyRecord>(`/api/companies/${encodeURIComponent(id)}`);
-  if (result.state === "loading") return <div className="skeleton mt-4 h-[74px] w-full" aria-busy="true" aria-label="Loading the company" />;
+  if (result.state === "loading") return <div className="skeleton mt-4 h-[74px] w-full" role="status" aria-busy="true" aria-label="Loading the company" />;
   if (result.state === "error") {
     return (
       <div className="mt-4">
@@ -287,7 +298,7 @@ function Empty({ children }: { children: string }) {
 
 function TableSkeleton() {
   return (
-    <div className="rounded-box border border-line bg-base-100 p-4" aria-busy="true" aria-label="Loading leads">
+    <div className="rounded-box border border-line bg-base-100 p-4" role="status" aria-busy="true" aria-label="Loading leads">
       {[0, 1, 2, 3].map((i) => (
         <div key={i} className="flex gap-6 border-line py-3.5 [&+&]:border-t">
           <div className="skeleton h-5 w-44" />

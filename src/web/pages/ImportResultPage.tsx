@@ -19,7 +19,7 @@ export function ImportResultPage({ campaignId, importId }: { campaignId: string;
         Campaigns
       </Link>
       {result.state === "loading" ? (
-        <div className="flex flex-col gap-3" aria-busy="true" aria-label="Loading the import result">
+        <div className="flex flex-col gap-3" role="status" aria-busy="true" aria-label="Loading the import result">
           <div className="skeleton h-9 w-[28rem] max-w-full" />
           <div className="skeleton h-5 w-[36rem] max-w-full" />
           <div className="skeleton mt-6 h-64 w-full" />
@@ -70,7 +70,7 @@ function Result({ campaign, imports, importId }: { campaign: Campaign; imports: 
         {files.length > 0 ? ` from ${files.join(" and ")}` : ""}.{firstImport ? "" : " No sequence was restarted."}
       </p>
 
-      <div role="tablist" aria-label="Import outcomes" className="tabs tabs-border mt-3.5">
+      <div role="tablist" aria-label="Import outcomes" className="tabs tabs-border mt-3.5 flex-wrap">
         {tabs.map(([key, label, count]) => (
           <button
             key={key}
@@ -94,9 +94,10 @@ function Result({ campaign, imports, importId }: { campaign: Campaign; imports: 
         aria-labelledby={`tab-${tab}`}
         className="overflow-hidden rounded-b-box border border-t-0 border-line bg-base-100"
       >
-        <div className="overflow-x-auto">
-          <table className="table text-[14px]">
-            <thead>
+        {/* Below 720px each row stacks into a card-like block, so nothing scrolls sideways. */}
+        <div className="overflow-x-auto max-[720px]:overflow-visible">
+          <table className="table text-[14px] max-[720px]:block">
+            <thead className="max-[720px]:sr-only">
               <tr className="border-line text-[13px] text-muted">
                 <th className="px-3.5 py-3 font-medium">Decision maker or company lead</th>
                 <th className="px-3.5 py-3 font-medium">Company</th>
@@ -104,7 +105,7 @@ function Result({ campaign, imports, importId }: { campaign: Campaign; imports: 
                 <th className="px-3.5 py-3 font-medium">What happened</th>
               </tr>
             </thead>
-            <tbody>
+            <tbody className="max-[720px]:block">
               <Rows entries={summary.entries} tab={tab} onShow={setTab} />
             </tbody>
           </table>
@@ -119,8 +120,8 @@ function Rows({ entries, tab, onShow }: { entries: readonly SummaryEntry[]; tab:
     const rows = entries.filter((e) => e.outcome === tab);
     if (rows.length === 0) {
       return (
-        <tr>
-          <td colSpan={4} className="px-3.5 py-6 text-muted">
+        <tr className="max-[720px]:block">
+          <td colSpan={4} className="px-3.5 py-6 text-muted max-[720px]:block">
             None in this import.
           </td>
         </tr>
@@ -133,15 +134,15 @@ function Rows({ entries, tab, onShow }: { entries: readonly SummaryEntry[]; tab:
     if (rows.length === 0) return null;
     const collapsed = outcome === "already_enrolled";
     return [
-      <tr key={`${outcome}-head`} className="border-line">
-        <td colSpan={4} className="bg-raised px-3.5 py-[9px] text-[13px] font-semibold text-muted">
+      <tr key={`${outcome}-head`} className="border-line max-[720px]:block">
+        <td colSpan={4} className="max-[720px]:block bg-raised px-3.5 py-[9px] text-[13px] font-semibold text-muted">
           {OUTCOME_LABEL[outcome]}, {rows.length}
         </td>
       </tr>,
       ...(collapsed
         ? [
-            <tr key={`${outcome}-more`} className="border-line">
-              <td colSpan={4} className="px-3.5 py-3.5 text-[13.5px] text-muted">
+            <tr key={`${outcome}-more`} className="border-line max-[720px]:block">
+              <td colSpan={4} className="max-[720px]:block px-3.5 py-3.5 text-[13.5px] text-muted">
                 No change for {rows.length} {rows.length === 1 ? "lead" : "leads"}.{" "}
                 <button type="button" className="link text-muted hover:text-base-content" onClick={() => onShow("already_enrolled")}>
                   Show them
@@ -160,7 +161,7 @@ function EntryRow({ entry }: { entry: SummaryEntry }) {
   const isCompany = entry.lead?.kind === "company";
   const sub = isCompany ? (entry.outcome === "not_enrolled" ? "Company" : "Company lead") : entry.lead === null ? "" : entry.title;
   return (
-    <tr className="border-line align-top">
+    <tr className="border-line align-top max-[720px]:grid max-[720px]:grid-cols-[minmax(0,1fr)_auto] max-[720px]:gap-x-3 max-[720px]:gap-y-1 max-[720px]:px-3.5 max-[720px]:py-3 max-[720px]:[&>td]:p-0">
       <td className="px-3.5 py-3.5">
         {href ? (
           <Link href={href} className="font-semibold no-underline hover:underline">
@@ -171,7 +172,7 @@ function EntryRow({ entry }: { entry: SummaryEntry }) {
         )}
         {sub && <div className="text-[13px] text-muted">{sub}</div>}
       </td>
-      <td className="px-3.5 py-3.5">
+      <td className="px-3.5 py-3.5 max-[720px]:order-3 max-[720px]:col-span-2">
         {entry.lead === null ? (
           <span className="text-[13px] text-muted">Not in the Businesses file</span>
         ) : isCompany ? (
@@ -184,10 +185,10 @@ function EntryRow({ entry }: { entry: SummaryEntry }) {
           </Link>
         )}
       </td>
-      <td className="whitespace-nowrap px-3.5 py-3.5">
+      <td className="whitespace-nowrap px-3.5 py-3.5 max-[720px]:order-2 max-[720px]:text-right">
         <span className={`font-semibold ${entry.outcome === "not_enrolled" ? "text-muted" : ""}`}>{OUTCOME_LABEL[entry.outcome]}</span>
       </td>
-      <td className="px-3.5 py-3.5 text-ink-2">{whatHappened(entry)}</td>
+      <td className="px-3.5 py-3.5 text-ink-2 max-[720px]:order-4 max-[720px]:col-span-2">{whatHappened(entry)}</td>
     </tr>
   );
 }

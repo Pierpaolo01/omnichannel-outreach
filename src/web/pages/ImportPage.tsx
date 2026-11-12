@@ -33,7 +33,7 @@ export function ImportPage({ campaignId }: { campaignId?: string }) {
 
 function ImportAgain({ campaignId }: { campaignId: string }) {
   const { result, retry } = useApi<{ campaigns: CampaignListItem[] }>("/api/campaigns");
-  if (result.state === "loading") return <div className="skeleton h-40 w-full max-w-[680px]" aria-busy="true" aria-label="Loading" />;
+  if (result.state === "loading") return <div className="skeleton h-40 w-full max-w-[680px]" role="status" aria-busy="true" aria-label="Loading" />;
   if (result.state === "error") return <ErrorState title="This campaign didn’t load." message={result.message} onRetry={retry} />;
   const campaign = result.data.campaigns.find((c) => c.id === campaignId);
   if (!campaign) {

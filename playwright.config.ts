@@ -20,7 +20,20 @@ export default defineConfig({
     video: process.env["RECORD_DEMO"] ? { mode: "on", size: { width: 1360, height: 900 } } : "off",
     launchOptions: { slowMo: process.env["RECORD_DEMO"] ? 350 : 0 },
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } } }],
+  // The demonstration runs first on the empty database; every other test builds on its data.
+  projects: [
+    {
+      name: "demonstration",
+      testMatch: "demonstration.spec.ts",
+      use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } },
+    },
+    {
+      name: "chromium",
+      testIgnore: "demonstration.spec.ts",
+      dependencies: ["demonstration"],
+      use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } },
+    },
+  ],
   webServer: {
     command: `rm -rf "${dataDir}" && pnpm build && node --no-warnings=ExperimentalWarning src/server/main.ts`,
     url: `http://127.0.0.1:${port}/api/campaigns`,
