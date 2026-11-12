@@ -60,6 +60,14 @@ _Avoid_: Confusing it with a call outcome.
 The point where any reply from a lead, including an auto-reply or opt-out, stops that lead's automated outreach in the campaign. The user continues the conversation wherever the prospect replied, outside the product's outreach.
 _Avoid_: Calling automated appointment booking, reply sorting or inbox management part of the reply handoff.
 
+**Test run**:
+A campaign's full sequence sent to test contacts from the real sender accounts, with each wait cut short, including test call tasks and a reply that stops it. It checks that everything arrives, before launch or after an edit.
+_Avoid_: Calling a test run a launch, or a pre-launch preview.
+
+**Test contact**:
+The user's own email, mobile or social profile, chosen to receive a test run.
+_Avoid_: Treating a test contact as a lead.
+
 **Channel**:
 A way to contact someone, such as email, a phone call, SMS, LinkedIn, Instagram or Facebook.
 _Avoid_: Confusing a channel with a sender account.
