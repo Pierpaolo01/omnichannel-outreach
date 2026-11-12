@@ -32,6 +32,10 @@ _Avoid_: Calling one channel's follow-ups the sequence.
 How a campaign arranges its channel tracks: which tracks start together and which start a set delay after another track finishes.
 _Avoid_: Treating unrelated channel-specific schedules as a coordinated sequence.
 
+**Win-back branch**:
+An alternative set of channel tracks within a campaign that a lead enters after declining on a call, replacing the rest of their sequence, with no further cold call.
+_Avoid_: Calling a separate follow-up campaign a win-back branch.
+
 **Call task**:
 A prospect phone call placed on the user's daily list for him to work through manually.
 _Avoid_: Using call task to imply an autonomous AI voice conversation.
