@@ -107,7 +107,7 @@ export function resultLede(summary: ImportSummary, firstImport: boolean): string
   } else {
     parts.push(`${plural(counts.new, "new lead", "new leads")} and ${counts.updated} updated.`);
     if (counts.already_enrolled > 0) {
-      parts.push(`${counts.already_enrolled} ${counts.already_enrolled === 1 ? "was" : "were"} already enrolled and carry on where they are.`);
+      parts.push(`${counts.already_enrolled} ${counts.already_enrolled === 1 ? "was already enrolled and carries" : "were already enrolled and carry"} on where they are.`);
     }
   }
   if (counts.not_enrolled > 0) {
