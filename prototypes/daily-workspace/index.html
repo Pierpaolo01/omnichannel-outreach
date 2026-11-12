@@ -2,7 +2,7 @@
 <meta name="claude:viewport-fit-sides" content="cover">
 <!-- PROTOTYPE, throwaway. Question: what should the daily workspace show for calls and lead management?
      Ticket: Choose the daily workspace for calls and lead management (omnichannel-outreach #6).
-     Person page has three layouts (A/B/C) switchable from the corner control. Invented example data; nothing persists. -->
+     Invented example data; nothing persists. -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&display=swap">
@@ -304,6 +304,18 @@ input[type=checkbox],input[type=radio]{accent-color:var(--call);width:16px;heigh
 .composer .row{justify-content:space-between}
 .composer label.check{font-size:13.5px;color:var(--ink-2)}
 .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);padding:20px 22px;min-width:0}
+.pp{max-width:780px;display:flex;flex-direction:column;gap:40px}
+.contact{display:flex;flex-wrap:wrap;gap:14px 32px;font-size:14.5px;margin-top:-16px}
+.contact .l{display:block;font-size:12.5px;color:var(--muted)}
+.contact .bad{text-decoration:line-through;color:var(--faint)}
+.pp h2{margin-bottom:6px}
+.rows{list-style:none;margin:0;padding:0}
+.rows li{padding:16px 0;display:flex;flex-direction:column;gap:8px}
+.rows li+li{border-top:1px solid var(--line)}
+.rows .rtop{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+.rows .cn{font-weight:600;text-decoration:none}
+a.cn:hover{text-decoration:underline}
+.rows .nx{font-size:14px;color:var(--ink-2)}
 /* A — Record */
 .vA{display:grid;grid-template-columns:300px minmax(0,1fr);gap:36px;margin-top:28px;align-items:start}
 .vA .side{display:flex;flex-direction:column;gap:30px;position:sticky;top:24px}
@@ -391,9 +403,6 @@ input[type=checkbox],input[type=radio]{accent-color:var(--call);width:16px;heigh
   <main class="main"><div id="view"></div></main>
 </div>
 <div class="proto" role="toolbar" aria-label="Prototype controls">
-  <span class="lbl">Person page</span>
-  <button data-v="A">A</button><button data-v="B">B</button><button data-v="C">C</button>
-  <span class="sep"></span>
   <button id="reset">Reset demo</button>
 </div>
 <div class="toast" id="toast" hidden></div>
@@ -543,7 +552,6 @@ function seed(){
     ui:{variant:'A',cur:null,outcome:null,sub:{},dial:null,sel:new Set(),confirm:null,q:'',fc:'',fs:'',tab:null,chip:null,tlc:''}};
 }
 let S = seed();
-try{ const v=localStorage.getItem('dw-variant'); if(['A','B','C'].includes(v)) S.ui.variant=v; }catch(e){}
 
 /* ============ helpers ============ */
 const $ = s=>document.querySelector(s);
@@ -594,7 +602,6 @@ function nav(){
   const h=location.hash.slice(1)||'today'; const n=callTasks().ready.length;
   const items=[['today','Today',I.today],['calls','Calls',I.call,n],['leads','Leads',I.leads],['campaigns','Campaigns',I.camps]];
   $('#nav').innerHTML=items.map(([k,l,ic,c])=>`<a href="#${k}" class="${h===k||(k==='leads'&&h.startsWith('p-'))?'on':''}">${ic}<span>${l}</span>${c?`<span class="count">${c}</span>`:''}</a>`).join('');
-  document.querySelectorAll('.proto [data-v]').forEach(b=>b.classList.toggle('on',b.dataset.v===S.ui.variant));
 }
 const topSearch = ()=>`<div class="search-top"><label>${I.search}<input id="quick" type="search" placeholder="Find a lead by name, company, email or phone" aria-label="Find a lead"></label></div>`;
 
@@ -854,56 +861,25 @@ const localTime = p=>{const ln=localNow(p), inH=ln>=HOURS.start&&ln<HOURS.end;re
 function tlFilter(p){ const es=enrOf(p.id); if(es.length<2) return '';
   return `<select data-tlc="1" aria-label="Show activity from"><option value="">All campaigns</option>${es.map(e=>`<option value="${e.c}" ${S.ui.tlc===e.c?'selected':''}>${esc(C(e.c).name)}</option>`).join('')}</select>`; }
 
-/* A: Record */
-function personA(p){
-  const es=enrOf(p.id);
-  return `<div class="p-top">${head(p)}${localTime(p)}</div>
-  <div class="vA">
-    <aside class="side">
-      <section><div class="sec-title">Contact details</div>${facts(p)}</section>
-      <section><div class="sec-title">${p.kind==='company'?'People on record':`Colleagues at ${esc(company(p).name)}`}</div>${colleagues(p)}</section>
-    </aside>
-    <div class="main-col">
-      <section class="panel"><h2>Campaigns</h2>${es.map(enrCard).join('')||'<p class="muted sm" style="padding:12px 0">Not in any campaign.</p>'}${addToCampaign(p)}</section>
-      <section class="panel"><div class="row" style="justify-content:space-between;margin-bottom:14px"><h2>Activity</h2>${tlFilter(p)}</div>${composer(p)}<div style="margin-top:10px">${timeline(personEvents(p.id,S.ui.tlc))}</div></section>
-    </div>
-  </div>`;
-}
-/* B: By campaign */
-function personB(p){
-  const es=enrOf(p.id); let tab=S.ui.tab;
-  if(tab!=='all' && !es.some(e=>e.id===tab)) tab=es[0]?.id||'all';
-  const e=es.find(x=>x.id===tab), co=company(p);
-  const big=e?(()=>{const cp=C(e.c);const list=cp.steps.map((s,i)=>[s,i,false]).concat(e.branch==='wb'?cp.wb.map((s,i)=>[s,i,true]):[]);
-    return `<div class="bigtrack">${list.map(([s,i,wb])=>{const cls=stepClass(e,i,wb);const word=cls.includes('done')?'Sent':cls.includes('skip')?'Skipped':cls.includes('cur')?(s[0]==='call'?'Waiting on you':'Next'):'Later';
-      return `<div class="bstep ${cls}"><div class="bar"></div><div class="ch">${I[s[0]]}${wb?'Win-back ':''}${CH[s[0]]}</div><div class="nm">${esc(s[1])}</div><div class="st">${word}</div></div>`}).join('')}</div>`})():'';
-  const fact=(l,v,bad)=>`<div><span>${l}</span><span class="${bad?'bad':''}">${esc(v)}</span></div>`;
-  return `<div class="p-top">${head(p)}${localTime(p)}</div>
-    <div class="vB-facts">${p.emails.map(x=>fact(x.newer?'Email, newer':'Email',x.v)).join('')}${p.phones.map(x=>fact(`${x.t==='direct'?'Direct':'Mobile'}${x.bad?', marked wrong':''}`,x.v,x.bad)).join('')}${co.main?fact(`Main line${co.main.bad?', marked wrong':''}`,co.main.v,co.main.bad):''}</div>
-    <div class="tabs" role="tablist">${es.map(x=>`<button class="tab ${x.id===tab?'on':''}" role="tab" data-tab="${x.id}"><span class="dot" style="background:var(--${STATUS[x.status][1]==='run'?'ink-2':STATUS[x.status][1]})"></span>${esc(C(x.c).name)}</button>`).join('')}<button class="tab ${tab==='all'?'on':''}" role="tab" data-tab="all">All activity</button></div>
-    <div class="vB-body">
-      <section>${e?`<div class="row" style="justify-content:space-between"><h2>${esc(C(e.c).name)}</h2>${status(e.status)}</div>${big}<div class="nextbox">${esc(nextLine(e))}</div><div style="margin-top:14px">${controls(e)}</div>`:''}
-        <h2 style="margin:${e?'34px':'0'} 0 14px">${e?'Activity in this campaign':'All activity'}</h2>${composer(p)}<div style="margin-top:10px">${timeline(personEvents(p.id,e?e.c:''))}</div></section>
-      <aside class="stack" style="gap:28px"><section><div class="sec-title">${p.kind==='company'?'People on record':'Colleagues'}</div>${colleagues(p)}</section>
-        ${addToCampaign(p)?`<section><div class="sec-title">Add to another campaign</div>${addToCampaign(p)}</section>`:''}</aside>
-    </div>`;
-}
-/* C: Feed */
-function personC(p){
-  const es=enrOf(p.id), open=S.ui.chip;
-  return `<div class="vC">
+/* Person page: one simple column */
+function stepPos(e){ const st=stepsOf(e); if(!(LIVE.includes(e.status)||e.status==='paused')||e.idx>=st.length) return '';
+  return `${e.branch==='wb'?'Win-back step':'Step'} ${e.idx+1} of ${st.length}, ${st[e.idx][1].toLowerCase()}. `; }
+function personPage(p){
+  const es=enrOf(p.id), co=company(p), cols=colleaguesOf(p);
+  const contact=[...p.emails.map(x=>[x.newer?'Email, newer':'Email',x.v,false]),...p.phones.map(x=>[`${x.t==='direct'?'Direct':'Mobile'}${x.bad?', marked wrong':''}`,x.v,x.bad]),...(co.main?[[`Main line${co.main.bad?', marked wrong':''}`,co.main.v,co.main.bad]]:[]),...(co.inbox?[['Shared inbox',co.inbox,false]]:[])];
+  return `<div class="pp">
     <div class="p-top">${head(p)}${localTime(p)}</div>
-    <div class="strip">${es.map(e=>`<button class="line" data-chip="${e.id}" aria-expanded="${open===e.id}"><span><span class="cn">${esc(C(e.c).name)}</span><br><span class="nx">${esc(nextLine(e))}</span></span>${status(e.status)}<span class="chev ${open===e.id?'up':''}"></span></button>${open===e.id?`<div class="open">${track(e)}${controls(e)||'<span class="sm muted">Nothing to change here.</span>'}</div>`:''}`).join('')||'<p class="muted sm" style="padding:14px 16px">Not in any campaign.</p>'}</div>
-    ${composer(p)}
-    <section><div class="row" style="justify-content:space-between;margin-bottom:6px"><h2>Activity</h2>${tlFilter(p)}</div>${timeline(personEvents(p.id,S.ui.tlc))}</section>
-    <details class="more fold"><summary>Contact details and colleagues</summary>
-      <div class="more-grid"><div>${facts(p)}${addToCampaign(p)}</div><div>${colleagues(p)}</div></div></details>
+    <div class="contact">${contact.map(([l,v,b])=>`<div><span class="l">${l}</span><span class="${b?'bad':''}">${esc(v)}</span></div>`).join('')}</div>
+    <section><h2>Campaigns</h2><ul class="rows">${es.map(e=>`<li><div class="rtop"><span class="cn">${esc(C(e.c).name)}${C(e.c).state==='paused'?' <span class="xs muted">(campaign paused)</span>':''}</span>${status(e.status)}</div>
+      <p class="nx">${esc(stepPos(e)+nextLine(e))}</p>${controls(e)}</li>`).join('')||'<li class="muted sm">Not in any campaign.</li>'}</ul>${addToCampaign(p)}</section>
+    ${cols.length?`<section><h2>${p.kind==='company'?'People on record':`Others at ${esc(co.name)}`}</h2><ul class="rows">${cols.map(x=>{const es2=enrOf(x.id), lc=lastCall(x.id);
+      return `<li><div class="rtop"><a class="cn" href="#p-${x.id}">${esc(x.name)}</a>${es2.map(e=>status(e.status)).join('')||'<span class="sm muted">Not in a campaign</span>'}</div><p class="nx">${esc(x.role)}${lc?`. Last call ${fmtDay(lc.day).toLowerCase()}: ${esc(lc.body||lc.title)}`:''}</p></li>`}).join('')}</ul></section>`:''}
+    <section><div class="row" style="justify-content:space-between;margin-bottom:12px"><h2>Activity</h2>${tlFilter(p)}</div>${composer(p)}<div style="margin-top:8px">${timeline(personEvents(p.id,S.ui.tlc))}</div></section>
   </div>`;
 }
 function viewPerson(id){
   const p=P(id); if(!p) return '<div class="page"><h1>No one found</h1><p class="muted">This person isn’t in the example data. <a href="#leads">Back to Leads</a>.</p></div>';
-  const v=S.ui.variant;
-  return `<div class="page"><a class="back" href="#leads">${I.back}Leads</a>${v==='A'?personA(p):v==='B'?personB(p):personC(p)}</div>`;
+  return `<div class="page"><a class="back" href="#leads">${I.back}Leads</a>${personPage(p)}</div>`;
 }
 
 /* ============ Guide ============ */
@@ -917,7 +893,6 @@ function viewGuide(){
     <li><b>Skip a rolled-over call.</b> Mondzorg Hillegersberg was rolled over yesterday, so skipping it again skips the call for good.</li>
     <li><b>Find someone.</b> Search for “0878”, “gmail” or “Kralingen”, or filter by “Replied, automation stopped”.</li>
     <li><b>Manage one person.</b> Priya Raman is in two campaigns and has a wrong number and a newer email. Pause, skip, stop, resume, add a company note.</li>
-    <li><b>Compare layouts.</b> Switch the person page between A, B and C in the corner control, or with the arrow keys.</li>
     <li><b>Pause a campaign.</b> Its calls leave your list.</li>
   </ol>
   <h2>Left out on purpose</h2>
@@ -992,16 +967,10 @@ function render(){
   else if(h.startsWith('p-')) html=viewPerson(h.slice(2)); else html=viewToday();
   nav();
   const a=document.activeElement, fid=a?.id, pos=a?.selectionStart;
-  const showSearch=!['calls','leads','guide'].includes(h);
-  $('#view').innerHTML=(showSearch?topSearch():'')+html;
+  $('#view').innerHTML=html;
   if(fid){const el=document.getElementById(fid); if(el&&(el.tagName==='INPUT'||el.tagName==='TEXTAREA')){el.focus();try{el.setSelectionRange(pos,pos)}catch(e){}}}
 }
-function setVariant(v){ S.ui.variant=v; try{localStorage.setItem('dw-variant',v)}catch(e){}
-  if(!location.hash.startsWith('#p-')) location.hash='#p-p8'; else render(); }
-document.querySelectorAll('.proto [data-v]').forEach(b=>b.onclick=()=>setVariant(b.dataset.v));
-$('#reset').onclick=()=>{const v=S.ui.variant;S=seed();S.ui.variant=v;toast('Demo reset');if(location.hash==='#today')render();else location.hash='#today'};
-document.addEventListener('keydown',ev=>{ const a=document.activeElement; if(a&&(['INPUT','TEXTAREA','SELECT'].includes(a.tagName)||a.isContentEditable))return;
-  if(ev.key==='ArrowLeft'||ev.key==='ArrowRight'){const vs=['A','B','C'],i=vs.indexOf(S.ui.variant);setVariant(vs[(i+(ev.key==='ArrowRight'?1:2))%3])} });
+$('#reset').onclick=()=>{S=seed();toast('Demo reset');if(location.hash==='#today')render();else location.hash='#today'};
 document.addEventListener('keydown',ev=>{ if(ev.target.id==='quick'&&ev.key==='Enter'){S.ui.q=ev.target.value;S.ui.fc='';S.ui.fs='';location.hash='#leads';render()} });
 window.addEventListener('hashchange',()=>{S.ui.confirm=null;S.ui.tlc='';render();window.scrollTo({top:0})});
 
