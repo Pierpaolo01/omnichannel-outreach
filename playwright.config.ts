@@ -16,7 +16,9 @@ export default defineConfig({
   use: {
     baseURL: `http://127.0.0.1:${port}`,
     trace: "retain-on-failure",
-    video: process.env["RECORD_DEMO"] ? "on" : "off",
+    // RECORD_DEMO=1 records a watchable video of the demonstration for pull request evidence.
+    video: process.env["RECORD_DEMO"] ? { mode: "on", size: { width: 1360, height: 900 } } : "off",
+    launchOptions: { slowMo: process.env["RECORD_DEMO"] ? 350 : 0 },
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } } }],
   webServer: {
