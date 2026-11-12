@@ -1,35 +1,33 @@
-# Omnichannel outreach planning
+# Omnichannel outreach
 
-This is an internal product for coordinating business/decision-maker outreach with a central CRM. The current phase is product scoping through the Wayfinder skill. No product implementation is authorized by the planning request.
+Internal product that coordinates business and decision-maker outreach around a central CRM. Product scoping finished on 12 November 2026. On that date the principal asked the software factory to build the agreed spec, so this repository is in delivery.
 
 ## Start here
 
-1. Read README.md and CONTEXT.md.
-2. Load the `wayfinder` skill and its required `grilling` and `domain-modeling` skills.
-3. Read [.agents/issue-tracker.md](.agents/issue-tracker.md). GitHub Issues is the canonical tracker, with native sub-issues and issue dependencies when available.
-4. Find the issue labelled `wayfinder:map` and read it before choosing a decision ticket. Read README.md for the initial inputs already settled by the user. Do not reopen those choices as unanswered questions.
+1. Read [the spec](https://github.com/Pierpaolo01/omnichannel-outreach/issues/10). It is the implementation source of truth. Its tickets are the open issues that name it as parent; blocking uses native GitHub issue dependencies, described in [.agents/issue-tracker.md](.agents/issue-tracker.md).
+2. Read [CONTEXT.md](CONTEXT.md) and use its vocabulary in code, UI copy, tests and commits.
+3. Read [docs/agents/delivery-workflow.md](docs/agents/delivery-workflow.md) before branching, opening a PR or reporting work as done.
+4. Read [the access and runtime handoff](https://github.com/Pierpaolo01/omnichannel-outreach/issues/28) before touching a provider, a credential or a test send.
+5. For any UI work, read [docs/agents/ui.md](docs/agents/ui.md) first.
+6. Technical decisions are dated records in [docs/adr/](docs/adr/). Read the ones that touch your ticket.
 
 ## Decision ownership
 
-- The human decides desired outcomes, scope, user-visible behavior, autonomy and acceptance. Ask concrete product questions and provide recommendations. Never resolve a human decision by answering for them.
-- The AI software factory owns architecture, stack, integration mechanics, implementation, testing and operational engineering. Do not make the human choose frameworks, databases, APIs or worker designs. Raise a technical limitation only when it changes a product choice.
-- Prior planning suggestions about technology, milestones and timing are proposals, not approved implementation constraints.
-- Existing agreements are product inputs: internal-first, local-machine operation, central CRM, external scraper input, Instantly for email delivery, other named outreach channels, configurable markets/languages/timezones.
-- The MVP covers email/SMS/phone, with CSV enrollment into campaigns and human takeover at a prospect reply. Calls are a daily manually worked list; the user speaks. Social channels follow. Detailed sequence, call-outcome, handoff and acceptance behavior remain decision tickets.
+- The human decides desired outcomes, scope, user-visible behavior, autonomy and acceptance. Settled decisions in the spec are not reopened. A product question the spec leaves open goes to the coordinator, who asks the human. Never answer it for them.
+- The software factory owns architecture, stack, integration mechanics, implementation, testing and operations. Record a technical decision that later tickets depend on as an ADR.
+- A demonstrated provider limitation that prevents agreed behavior is reported with evidence. It is never silently worked around or weakened.
+- Campaign copy, cadence, markets, languages, timezones and account capacities are configurable campaign inputs, not missing requirements.
 
-## Wayfinder discipline
+## Boundaries
 
-- Plan before building. Tickets resolve decisions; they are not a premature implementation backlog.
-- Refer to issues by linked titles, not bare numbers.
-- Claim a decision issue by assignment before working it. Use native parent/child and blocking relationships.
-- Resolve at most one non-research decision ticket per session, through its required human exchange.
-- Keep detailed resolutions in issue comments and link them from the map's Decisions so far. Do not duplicate resolutions across documents.
-- Keep product vocabulary in CONTEXT.md. It is a glossary, not a technical spec.
+- No outreach to real prospects. Test sends and test calls go only to contacts the user has explicitly designated as their own, recorded in the access handoff. If none is designated for a channel, send nothing on it.
+- No purchases, number provisioning, paid hosting, new account connections, collaborator invitations or public sharing.
+- No secrets, browser profiles or raw prospect records in Git, issues, PRs, screenshots, recordings or logs. Fixtures and demo data are fictitious. Credentials live in `~/.config/omnichannel-outreach/runtime.env`; load them, never print them.
+- Operation is local-only for now. SMS and calling must not be presented as working provider integrations until they are provisioned and verified. Report an acceptance condition that cannot yet be verified as unverified.
+- The spec's out-of-scope list and optional-polish list stay out. Do not expand a ticket beyond its acceptance criteria.
 
-## Scope and privacy
+## History
 
-- Repository setup, planning documents and issue operations are authorized. Runtime account connections, live outreach, purchases, collaborator invitations and public sharing are not part of this scoping request.
-- No secrets, browser profiles, raw prospect records or unrelated vault/client material belong in Git or issues.
-- Commit and push meaningful planning edits. Do not start implementation until the product-scoping handoff and an explicit build request.
+Scoping used the Wayfinder skill. [The map](https://github.com/Pierpaolo01/omnichannel-outreach/issues/1) links each resolution; where its summaries are stale, the spec wins. The approved daily-workspace prototype is on branch `prototype/daily-workspace` at `prototypes/daily-workspace/index.html` (commit `3515d86`). Social research is on branch `research/social-first-contact`.
 
-Source: principal's November 11, 2026 request to use Wayfinder in a new private GitHub repository, with human product ownership and AI software-factory technical ownership.
+Source: principal's 11 November 2026 scoping request and 12 November 2026 build request.
