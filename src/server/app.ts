@@ -5,6 +5,7 @@ import { planImport } from "../domain/import-plan.ts";
 import { isOutreachStatus } from "../domain/outreach-status.ts";
 import { checkScraperFile, parseScraperExport } from "../domain/scraper-export.ts";
 import type { ApiError, Campaign, FileCheckResult } from "../shared/api.ts";
+import { CAMPAIGN_NAME_MAX } from "../shared/limits.ts";
 import { checkApiRequest } from "./guard.ts";
 import type { OutreachStore } from "./persistence/store.ts";
 
@@ -41,7 +42,7 @@ const scraperFiles = {
 
 const newCampaignBody = z
   .object({
-    name: z.string().trim().min(1, "Give the campaign a name.").max(200),
+    name: z.string().trim().min(1, "Give the campaign a name.").max(CAMPAIGN_NAME_MAX, `Keep the campaign name to ${CAMPAIGN_NAME_MAX} characters or fewer.`),
     defaultTimezone: z
       .string()
       .trim()

@@ -53,6 +53,13 @@ describe("campaigns", () => {
     ]);
   });
 
+  test("a campaign name is at most 100 characters, and the refusal says so", async () => {
+    const res = await api.post<ApiError>("/api/campaigns", { name: `L${"x".repeat(100)}` });
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toBe("Keep the campaign name to 100 characters or fewer.");
+    expect((await api.post<ApiError>("/api/campaigns", { name: "x".repeat(100) })).status).toBe(201);
+  });
+
   test("a campaign needs a name and a recognised time zone", async () => {
     expect((await api.post<ApiError>("/api/campaigns", { name: "  " })).status).toBe(400);
     const badZone = await api.post<ApiError>("/api/campaigns", { name: "Physio", defaultTimezone: "Mars/Olympus" });

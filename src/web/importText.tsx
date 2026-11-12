@@ -54,8 +54,8 @@ export function whatHappened(entry: SummaryEntry): ReactNode {
   if (entry.outcome === "not_enrolled") {
     if (entry.reason === "company_not_in_export") return "Their company isn’t in the Businesses file.";
     return entry.lead.kind === "company"
-      ? "No main line or shared inbox in the file."
-      : `No personal email or mobile, and ${entry.companyName} has no main line in the file.`;
+      ? "No usable main line or shared inbox."
+      : `No personal email or mobile, and ${entry.companyName} has no usable main line.`;
   }
   const owner = entry.lead.kind;
   const added = entry.added.map((d) => `Added ${detailWord(d, owner)} ${d.value}, marked newer.`).join(" ");

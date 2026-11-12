@@ -1,11 +1,13 @@
 import { useRef, useState, type DragEvent, type ReactNode, type SyntheticEvent } from "react";
 import { Link, useLocation } from "wouter";
 import type { Campaign, CampaignListItem, FileCheck, FileCheckResult, ImportRecord } from "../../shared/api.ts";
+import { CAMPAIGN_NAME_MAX } from "../../shared/limits.ts";
 import { exportProblems, postJson, useApi } from "../api.ts";
 import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
 
 type Slot = "people" | "businesses";
+
 
 type ChosenFile =
   | { readonly state: "empty" }
@@ -81,6 +83,8 @@ function ImportForm({ campaign }: { campaign: CampaignListItem | null }) {
       setFiles(settled);
       setPairProblem(res.pair);
     } catch (error) {
+      // A newer selection has replaced these files: this late failure is about files no longer chosen.
+      if (latest.current !== next) return;
       const message = error instanceof Error ? error.message : "The file couldn’t be checked.";
       const settled = Object.fromEntries(
         (["people", "businesses"] as const).map((slot) => {
@@ -104,14 +108,16 @@ function ImportForm({ campaign }: { campaign: CampaignListItem | null }) {
   };
 
   const ready = (f: ChosenFile): f is Extract<ChosenFile, { state: "checked" }> => f.state === "checked" && f.check.ok;
-  const bothReady = ready(files.people) && ready(files.businesses) && pairProblem === null;
+  // A refused import blocks the same files until one is replaced (choosing a file clears it).
+  const refused = failure !== null && failure.mode === "import" && failure.problems.length > 0;
+  const bothReady = ready(files.people) && ready(files.businesses) && pairProblem === null && !refused;
   const named = campaign !== null || name.trim() !== "";
   const blocker = !named
     ? "Name the campaign first."
     : files.people.state === "empty" || files.businesses.state === "empty"
       ? "Add both files."
       : !bothReady && files.people.state !== "checking" && files.businesses.state !== "checking"
-        ? "Fix the file marked above."
+        ? "Replace the file marked above."
         : null;
 
   const submit = async (mode: "import" | "create") => {
@@ -153,7 +159,13 @@ function ImportForm({ campaign }: { campaign: CampaignListItem | null }) {
   }
 
   const title = campaign ? `Import again into ${campaign.name}` : "New campaign";
-  const problemFor = (slot: Slot) => failure?.problems.find((p) => p.file === slot)?.message ?? (slot === "businesses" ? pairProblem : null);
+  // As the approved invalid state shows: a pair the server refused marks the Businesses slot.
+  const problemFor = (slot: Slot): string | null => {
+    const own = failure?.problems.find((p) => p.file === slot)?.message;
+    if (own) return own;
+    if (slot !== "businesses") return null;
+    return failure?.problems.find((p) => p.file === "pair")?.message ?? pairProblem;
+  };
 
   return (
     <div>
@@ -197,7 +209,14 @@ function ImportForm({ campaign }: { campaign: CampaignListItem | null }) {
               value={name}
               onChange={(event) => setName(event.target.value)}
               autoComplete="off"
+              maxLength={CAMPAIGN_NAME_MAX}
+              aria-describedby={name.length >= CAMPAIGN_NAME_MAX - 20 ? "campaign-name-length" : undefined}
             />
+            {name.length >= CAMPAIGN_NAME_MAX - 20 && (
+              <p id="campaign-name-length" className="text-[13px] text-muted">
+                {name.length} of {CAMPAIGN_NAME_MAX} characters. Campaign names can be up to {CAMPAIGN_NAME_MAX} characters.
+              </p>
+            )}
           </div>
         )}
 

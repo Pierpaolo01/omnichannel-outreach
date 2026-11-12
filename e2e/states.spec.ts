@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
-import { nav } from "./support.ts";
+import type { LeadSearchResult } from "../src/shared/api.ts";
+import { refusedPair, respond, serverError } from "./mocks.ts";
+import { fixture, nav } from "./support.ts";
 
 test("the four areas are reachable from the rail, and Today and Calls say honestly that nothing is due", async ({ page }) => {
   await page.goto("/");
@@ -26,9 +28,11 @@ test("the quick search above the Campaigns list opens Leads with the query", asy
 });
 
 test("Leads shows an empty state when nothing has been imported", async ({ page }) => {
-  await page.route("**/api/leads?*", (route) => route.fulfill({ json: { rows: [], total: 0, limit: 100 } }));
+  const empty = { rows: [], total: 0, people: 0, companies: 0, limit: 100 } satisfies LeadSearchResult;
+  await page.route("**/api/leads?*", (route) => respond(route, empty));
   await page.goto("/leads");
   await expect(page.getByText("No leads yet.", { exact: false })).toBeVisible();
+  await expect(page.getByText("undefined")).toHaveCount(0);
 });
 
 test("Leads says when no one matches a search", async ({ page }) => {
@@ -39,7 +43,7 @@ test("Leads says when no one matches a search", async ({ page }) => {
 test("a failed load says so and offers to try again", async ({ page }) => {
   let fail = true;
   await page.route("**/api/leads?*", async (route) => {
-    if (fail) await route.fulfill({ status: 500, json: { error: { code: "internal", message: "Something went wrong on the server." } } });
+    if (fail) await serverError(route);
     else await route.continue();
   });
   await page.goto("/leads");
@@ -94,7 +98,7 @@ test("files from two different scraper runs are refused before import", async ({
 test("the campaign filter says when its campaigns didn't load, and recovers on retry", async ({ page }) => {
   let fail = true;
   await page.route("**/api/campaigns", async (route) => {
-    if (fail) await route.fulfill({ status: 500, json: { error: { code: "internal", message: "Something went wrong on the server." } } });
+    if (fail) await serverError(route);
     else await route.continue();
   });
   await page.goto("/leads");
@@ -105,4 +109,58 @@ test("the campaign filter says when its campaigns didn't load, and recovers on r
   await page.getByRole("button", { name: "Try again" }).click();
   await expect(page.getByRole("alert")).toHaveCount(0);
   await expect(page.getByLabel("Campaign", { exact: true }).locator("option", { hasText: "Physio clinics, London" })).toHaveCount(1);
+});
+
+test("a late failure from an obsolete file check does not replace newer selections", async ({ page }) => {
+  let release: () => void = () => undefined;
+  const oldCheckHeld = new Promise<void>((resolve) => (release = resolve));
+  await page.route("**/api/scraper-files/check", async (route) => {
+    const body = route.request().postDataJSON() as { businessesCsv?: string };
+    if (body.businessesCsv === undefined) {
+      await oldCheckHeld;
+      await serverError(route);
+    } else await route.continue();
+  });
+  await page.goto("/campaigns/new");
+  await page.getByLabel("People file", { exact: true }).setInputFiles(fixture("people-run1.csv"));
+  await page.getByLabel("Businesses file", { exact: true }).setInputFiles(fixture("businesses-run1.csv"));
+  await expect(page.getByText(/businesses-run1\.csv\. 6 businesses, matches/)).toBeVisible();
+  release();
+  await page.waitForTimeout(300);
+  await expect(page.getByText(/businesses-run1\.csv\. 6 businesses, matches/)).toBeVisible();
+  await expect(page.getByText(/people-run1\.csv\. 7 people, matches/)).toBeVisible();
+});
+
+test("a pair the server refuses marks the Businesses slot and blocks Import until a file is replaced", async ({ page }) => {
+  let refuse = true;
+  await page.route("**/api/campaigns", async (route) => {
+    if (route.request().method() === "POST" && refuse) {
+      await refusedPair(route);
+    } else await route.continue();
+  });
+  await page.goto("/campaigns/new");
+  await page.getByLabel("Campaign name").fill("Refused pair");
+  await page.getByLabel("People file", { exact: true }).setInputFiles(fixture("people-run1.csv"));
+  await page.getByLabel("Businesses file", { exact: true }).setInputFiles(fixture("businesses-run1.csv"));
+  await expect(page.getByText(/6 businesses, matches/)).toBeVisible();
+  await page.getByRole("button", { name: "Create campaign and import" }).click();
+
+  await expect(page.getByRole("alert")).toContainText("Nothing was imported, and the campaign wasn’t created.");
+  await expect(page.getByText("businesses-run1.csv: These two files don’t belong together.")).toBeVisible();
+  await expect(page.getByText(/6 businesses, matches/)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Create campaign and import" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Choose another businesses file" })).toBeVisible();
+
+  refuse = false;
+  await page.getByLabel("Businesses file", { exact: true }).setInputFiles(fixture("businesses-run1.csv"));
+  await expect(page.getByRole("button", { name: "Create campaign and import" })).toBeEnabled();
+});
+
+test("a long campaign name is limited, says so, and wraps", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 900 });
+  await page.goto("/campaigns/new");
+  await page.getByLabel("Campaign name").fill(`Long${"x".repeat(200)}`);
+  await expect(page.getByLabel("Campaign name")).toHaveValue(`Long${"x".repeat(96)}`);
+  await expect(page.getByText("100 of 100 characters.", { exact: false })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
 });

@@ -77,7 +77,7 @@ function CampaignRow({ campaign }: { campaign: CampaignListItem }) {
     <li className="grid grid-cols-1 items-center gap-x-5 gap-y-3 rounded-box border border-line bg-base-100 px-5 py-[18px] sm:grid-cols-[minmax(0,1fr)_auto]">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-3">
-          <h2 className="text-[17px]">{campaign.name}</h2>
+          <h2 className="min-w-0 text-[17px]">{campaign.name}</h2>
           <span className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-[5px] bg-raised py-0.5 pl-[7px] pr-2 text-[13px] font-medium text-ink-2 shadow-[inset_0_0_0_1px_var(--color-line)] before:box-border before:size-2 before:rounded-full before:border-[1.5px] before:border-dashed before:border-current before:content-['']">
             Not launched
           </span>

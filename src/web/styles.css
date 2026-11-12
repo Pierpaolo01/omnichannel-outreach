@@ -199,6 +199,8 @@
     font-weight: 600;
     letter-spacing: -0.01em;
     text-wrap: balance;
+    /* User content such as a long unbroken campaign name wraps instead of scrolling sideways. */
+    overflow-wrap: anywhere;
   }
   :focus-visible {
     outline: 2px solid var(--o-call);

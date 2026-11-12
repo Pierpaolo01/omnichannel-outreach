@@ -40,14 +40,15 @@ function Company({ company }: { company: CompanyRecord }) {
           <p className="mt-1 text-[16px] text-ink-2">
             {[company.people.length > 0 ? "" : "No named decision maker", company.city].filter(Boolean).join(", ")}
           </p>
-          {company.people.length > 0 && company.enrollments.length > 0 && (
-            <p className="mt-2 max-w-[60ch] text-[14px] text-ink-2">
-              None of its decision makers can be reached directly, so the company is contacted through its shared inbox.
-            </p>
-          )}
         </div>
         <LocalTime timeZone={company.timezone} />
       </header>
+
+      {company.people.length > 0 && company.enrollments.length > 0 && (
+        <p className="-mt-6 max-w-[60ch] text-[14px] text-ink-2">
+          None of its decision makers can be reached directly, so the company is contacted through its shared inbox.
+        </p>
+      )}
 
       <ContactRow details={company.contactDetails} />
 

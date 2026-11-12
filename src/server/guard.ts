@@ -58,3 +58,12 @@ export function checkApiRequest(request: GuardedRequest): GuardResult {
   }
   return { ok: true };
 }
+
+/**
+ * The server listens only on this machine until hosting brings real authentication. A LAN
+ * client could otherwise send `Host: 127.0.0.1` and read every prospect record.
+ */
+export function isLoopbackAddress(host: string): boolean {
+  const value = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return value === "localhost" || value === "::1" || /^127(\.\d{1,3}){3}$/.test(value);
+}

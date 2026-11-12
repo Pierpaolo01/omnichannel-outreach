@@ -85,6 +85,8 @@ export type LeadRow =
       readonly name: string;
       readonly title: string;
       readonly company: CompanyRef;
+      /** The company is a company lead, contacted through its own details. */
+      readonly companyIsLead: boolean;
       readonly enrollments: readonly EnrollmentView[];
       readonly unenrolledReason: UnenrolledReason;
     }

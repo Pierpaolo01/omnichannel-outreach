@@ -62,6 +62,20 @@ export default tseslint.config(
       "@typescript-eslint/no-unnecessary-type-parameters": "off",
       // Vitest's asymmetric matchers (expect.objectContaining) are typed `any`.
       "@typescript-eslint/no-unsafe-assignment": "off",
+      // Test harnesses satisfy async interfaces with synchronous fakes.
+      "@typescript-eslint/require-await": "off",
+    },
+  },
+  {
+    files: ["e2e/**/*.ts"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "CallExpression[callee.property.name='fulfill']",
+          message: "Fake responses with respond() from e2e/mocks.ts, so they are typed against src/shared/api.ts.",
+        },
+      ],
     },
   },
   { files: ["eslint.config.js"], ...tseslint.configs.disableTypeChecked },

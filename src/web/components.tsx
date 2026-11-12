@@ -98,13 +98,13 @@ export function ContactRow({ details }: { details: readonly ContactDetailView[] 
 
 /** Why someone on record has no enrollment, worded as the import results word it. */
 export const UNENROLLED_SHORT = {
-  person: "no personal email or mobile, and the company has no main line",
-  company: "no main line or shared inbox",
+  person: "no personal email or mobile, and no usable company main line",
+  company: "no usable main line or shared inbox",
 } as const;
 
 export const UNENROLLED_TEXT = {
-  person: "There’s no personal email or mobile, and the company has no main line. Company details aren’t used for a decision maker’s email.",
-  company: "The company has no shared inbox or main line on record.",
+  person: "There’s no personal email or mobile, and the company has no usable main line. Company details aren’t used for a decision maker’s email.",
+  company: "The company has no usable main line or shared inbox.",
 } as const;
 
 /** One row per campaign, with the enrollment's outreach status. */
@@ -134,7 +134,7 @@ export function CampaignRows({
         return (
           <li key={enrollment.id} className="flex flex-col gap-2 border-line py-4 [&+&]:border-t">
             <div className="flex flex-wrap items-center justify-between gap-2.5">
-              <span className="font-semibold">{enrollment.campaign.name}</span>
+              <span className="min-w-0 font-semibold [overflow-wrap:anywhere]">{enrollment.campaign.name}</span>
               <StatusBadge status={enrollment.status} />
             </div>
             {sentence && <p className="text-[14px] text-ink-2">{sentence}</p>}
@@ -151,20 +151,24 @@ export function PeopleRows({ people }: { people: readonly ColleagueView[] }) {
     <ul>
       {people.map((person) => (
         <li key={person.id} className="flex flex-col gap-2 border-line py-4 [&+&]:border-t">
-          <div className="flex flex-wrap items-baseline justify-between gap-2.5">
-            <Link href={`/leads/people/${person.id}`} className="font-semibold no-underline hover:underline">
-              {person.name}
-            </Link>
-            <span className="text-[13px] text-muted">{person.title}</span>
+          <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-2">
+            <div className="min-w-0">
+              <Link href={`/leads/people/${person.id}`} className="font-semibold no-underline hover:underline">
+                {person.name}
+              </Link>
+              {person.title && <p className="text-[14px] text-ink-2">{person.title}</p>}
+            </div>
+            <div className="min-w-0 sm:max-w-[60%] sm:[&_li]:justify-end">
+              <EnrollmentList
+                enrollments={person.enrollments}
+                empty={
+                  person.unenrolledReason === "no_usable_channel"
+                    ? `Not in a campaign: ${UNENROLLED_SHORT.person}`
+                    : "Not in a campaign"
+                }
+              />
+            </div>
           </div>
-          <EnrollmentList
-            enrollments={person.enrollments}
-            empty={
-              person.unenrolledReason === "no_usable_channel"
-                ? `Not in a campaign: ${UNENROLLED_SHORT.person}`
-                : "Not in a campaign"
-            }
-          />
         </li>
       ))}
     </ul>
@@ -179,7 +183,7 @@ export function EnrollmentList({ enrollments, empty }: { enrollments: readonly E
       {enrollments.map((e) => (
         <li key={e.id} className="flex flex-wrap items-center gap-2">
           <StatusBadge status={e.status} />
-          <span className="min-w-0 text-[13px] text-muted">{e.campaign.name}</span>
+          <span className="min-w-0 text-[13px] text-muted [overflow-wrap:anywhere]">{e.campaign.name}</span>
         </li>
       ))}
     </ul>

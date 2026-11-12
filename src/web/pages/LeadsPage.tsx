@@ -243,11 +243,12 @@ function LeadTableRow({ row }: { row: LeadRow }) {
       <td className="px-3.5 py-3.5">
         <EnrollmentList
           enrollments={row.enrollments}
-          empty={
-            row.unenrolledReason === "no_usable_channel"
-              ? `Not in a campaign: ${UNENROLLED_SHORT[row.kind]}`
-              : "Not in a campaign"
-          }
+          empty={[
+            row.unenrolledReason === "no_usable_channel" ? `Not in a campaign: ${UNENROLLED_SHORT[row.kind]}.` : "Not in a campaign.",
+            row.kind === "person" && row.companyIsLead ? "The company is contacted through its shared inbox instead." : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
         />
       </td>
     </tr>

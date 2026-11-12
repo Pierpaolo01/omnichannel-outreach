@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, test } from "vitest";
 import { resolveDataDir } from "./config.ts";
 
@@ -47,5 +50,27 @@ describe("resolveDataDir", () => {
     ]) {
       expect(() => resolveDataDir({ env, home, projectRoot: project, profile: "development" })).toThrow(/app's data directory/);
     }
+  });
+
+  test("compares real directories, so a symlink to the app's directory is refused", () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "outreach-config-"));
+    const app = path.join(root, "application");
+    mkdirSync(app);
+    symlinkSync(app, path.join(root, "alias"));
+    const env = { OUTREACH_DATA_DIR: app, OUTREACH_DEV_DATA_DIR: path.join(root, "alias") };
+    expect(() => resolveDataDir({ env, home: "/h", projectRoot: project, profile: "development" })).toThrow(/app's data directory/);
+  });
+
+  test("an alias of the temporary directory is the same directory", () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "outreach-config-"));
+    const real = realpathSync.native(root);
+    // On macOS os.tmpdir() is under /var, which is a link to /private/var.
+    const env = { OUTREACH_DATA_DIR: path.join(real, "data"), OUTREACH_DEV_DATA_DIR: path.join(root, "data") };
+    expect(() => resolveDataDir({ env, home: "/h", projectRoot: project, profile: "development" })).toThrow(/app's data directory/);
+  });
+
+  test("a development directory inside the app's is refused", () => {
+    const env = { OUTREACH_DATA_DIR: "/srv/outreach", OUTREACH_DEV_DATA_DIR: "/srv/outreach/dev" };
+    expect(() => resolveDataDir({ env, home: "/h", projectRoot: project, profile: "development" })).toThrow(/app's data directory/);
   });
 });

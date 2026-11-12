@@ -1,4 +1,8 @@
 import type { APIRequestContext, Page } from "@playwright/test";
+import { readFileSync } from "node:fs";
+import { OUTREACH_STATUSES } from "../src/domain/outreach-status.ts";
+import type { PersonRecord } from "../src/shared/api.ts";
+import { refusedPair, respond, serverError } from "./mocks.ts";
 import { fixture } from "./support.ts";
 
 /**
@@ -11,9 +15,14 @@ export interface Screen {
   readonly open: (page: Page, data: SeedData) => Promise<void>;
 }
 
+/** The longest campaign name the server accepts, with no break opportunity. */
+export const LONG_CAMPAIGN_NAME = `Long${"x".repeat(96)}`;
+
 export interface SeedData {
   readonly campaignId: string;
   readonly unimportedCampaignId: string;
+  readonly longCampaignId: string;
+  readonly longImportId: string;
   readonly firstImportId: string;
   readonly reimportId: string;
   readonly person: (name: string) => string;
@@ -36,6 +45,14 @@ export async function seedData(request: APIRequestContext): Promise<SeedData> {
     const created = await request.post("/api/campaigns", { data: { name: "Dental clinics, Leeds" } });
     unimported = ((await created.json()) as { campaign: { id: string; name: string } }).campaign;
   }
+  let long = campaigns.campaigns.find((c) => c.name === LONG_CAMPAIGN_NAME);
+  if (!long) {
+    const created = await request.post("/api/campaigns", {
+      data: { name: LONG_CAMPAIGN_NAME, businessesCsv: readFileSync(fixture("businesses-run1.csv"), "utf8"), peopleCsv: readFileSync(fixture("people-run1.csv"), "utf8") },
+    });
+    long = ((await created.json()) as { campaign: { id: string; name: string } }).campaign;
+  }
+  const longImports = (await (await request.get(`/api/campaigns/${long.id}`)).json()) as { imports: { id: string }[] };
   if (!physio) throw new Error("the demonstration project has not created its campaigns");
   const detail = (await (await request.get(`/api/campaigns/${physio.id}`)).json()) as { imports: { id: string }[] };
   const [reimport, first] = detail.imports;
@@ -49,6 +66,8 @@ export async function seedData(request: APIRequestContext): Promise<SeedData> {
   return {
     campaignId: physio.id,
     unimportedCampaignId: unimported.id,
+    longCampaignId: long.id,
+    longImportId: longImports.imports[0]?.id ?? "",
     firstImportId: first.id,
     reimportId: reimport.id,
     person: (name) => row(name).id,
@@ -66,22 +85,11 @@ async function hold(page: Page, pattern: string, method?: string): Promise<void>
 }
 
 async function fail(page: Page, pattern: string, method?: string): Promise<void> {
-  await page.route(pattern, (route) =>
-    method && route.request().method() !== method
-      ? route.continue()
-      : route.fulfill({ status: 500, json: { error: { code: "internal", message: "Something went wrong on the server." } } }),
-  );
+  await page.route(pattern, (route) => (method && route.request().method() !== method ? route.continue() : serverError(route)));
 }
 
 async function refuse(page: Page, pattern: string): Promise<void> {
-  await page.route(pattern, (route) =>
-    route.request().method() === "POST"
-      ? route.fulfill({
-          status: 400,
-          json: { error: { code: "invalid_export", message: "Nothing was imported.", problems: [{ file: "pair", message: "These two files don’t belong together." }] } },
-        })
-      : route.continue(),
-  );
+  await page.route(pattern, (route) => (route.request().method() === "POST" ? refusedPair(route) : route.continue()));
 }
 
 async function readyImportAgain(page: Page, data: SeedData): Promise<void> {
@@ -95,11 +103,8 @@ const BUSINESS_HEADER_ONLY_MISSING_PLACE =
   "business_id,business_name,phone_e164\nbz-1,Some Clinic,+442079460999\n";
 
 /** A person record showing every outreach status, a bad number and a newer email. */
-function galleryRecord(id: string) {
-  const statuses = [
-    "queued", "active", "in_win_back", "waiting_on_call", "callback_scheduled", "replied",
-    "interested_on_call", "paused", "declined_on_call", "stopped_manually", "sequence_finished_no_response", "finished_no_usable_channel",
-  ];
+function galleryRecord(id: string): PersonRecord {
+  const statuses = OUTREACH_STATUSES;
   return {
     kind: "person",
     id,
@@ -141,7 +146,7 @@ export const SCREENS: readonly Screen[] = [
   {
     name: "campaigns empty",
     open: async (page) => {
-      await page.route("**/api/campaigns", (route) => route.fulfill({ json: { campaigns: [] } }));
+      await page.route("**/api/campaigns", (route) => respond(route, { campaigns: [] }));
       await page.goto("/campaigns");
       await settle(page, "Start a campaign from a scraper run");
     },
@@ -167,14 +172,7 @@ export const SCREENS: readonly Screen[] = [
   {
     name: "new campaign refused",
     open: async (page) => {
-      await page.route("**/api/campaigns", (route) =>
-        route.request().method() === "POST"
-          ? route.fulfill({
-              status: 400,
-              json: { error: { code: "invalid_export", message: "Nothing was imported.", problems: [{ file: "pair", message: "These two files don’t belong together." }] } },
-            })
-          : route.continue(),
-      );
+      await refuse(page, "**/api/campaigns");
       await readyForm(page);
       await page.getByRole("button", { name: "Create campaign and import" }).click();
       await page.getByRole("alert").waitFor();
@@ -222,7 +220,7 @@ export const SCREENS: readonly Screen[] = [
   {
     name: "leads empty",
     open: async (page) => {
-      await page.route("**/api/leads?*", (route) => route.fulfill({ json: { rows: [], total: 0, limit: 100 } }));
+      await page.route("**/api/leads?*", (route) => respond(route, { rows: [], total: 0, people: 0, companies: 0, limit: 100 }));
       await page.goto("/leads");
       await settle(page, "No leads yet.");
     },
@@ -459,10 +457,60 @@ export const SCREENS: readonly Screen[] = [
     name: "every outreach status, a bad number and a newer email",
     open: async (page, data) => {
       const id = data.person("Amira Hassan");
-      await page.route(`**/api/people/${id}`, (route) => route.fulfill({ json: galleryRecord(id) }));
+      await page.route(`**/api/people/${id}`, (route) => respond(route, galleryRecord(id)));
       await page.goto(`/leads/people/${id}`);
       await settle(page, "Finished, no usable channel");
     },
+  },
+  // States added after verification round 3 (D4, D5).
+  {
+    name: "new campaign with the Businesses file in the People slot",
+    open: async (page) => {
+      await page.goto("/campaigns/new");
+      await page.getByLabel("People file", { exact: true }).setInputFiles(fixture("businesses-run1.csv"));
+      await settle(page, "This is the Businesses file.");
+    },
+  },
+  {
+    name: "new campaign with a malformed CSV",
+    open: async (page) => {
+      await page.goto("/campaigns/new");
+      await page.getByLabel("People file", { exact: true }).setInputFiles({ name: "people-broken.csv", mimeType: "text/csv", buffer: Buffer.from('person_id,full_name\n"pp-1,Unclosed quote\n') });
+      await settle(page, "is not valid CSV");
+    },
+  },
+  {
+    name: "a file dragged over its slot",
+    open: async (page) => {
+      await page.goto("/campaigns/new");
+      const slot = page.getByText("People file", { exact: true }).locator("..");
+      await slot.dispatchEvent("dragover", { dataTransfer: await page.evaluateHandle(() => new DataTransfer()) });
+      await page.locator(".bg-call-soft").first().waitFor();
+    },
+  },
+  {
+    name: "hovering the primary action",
+    open: async (page) => { await readyForm(page); await page.getByRole("button", { name: "Create campaign and import" }).hover(); },
+  },
+  {
+    name: "campaigns list with the longest accepted name",
+    open: async (page) => { await page.goto("/campaigns"); await settle(page, LONG_CAMPAIGN_NAME); },
+  },
+  {
+    name: "import again into a campaign with the longest accepted name",
+    open: async (page, data) => { await page.goto(`/campaigns/${data.longCampaignId}/import`); await settle(page, `Import again into ${LONG_CAMPAIGN_NAME}`); },
+  },
+  {
+    name: "import result for a campaign with the longest accepted name",
+    open: async (page, data) => { await page.goto(`/campaigns/${data.longCampaignId}/imports/${data.longImportId}`); await settle(page, "What happened"); },
+  },
+  {
+    name: "leads filtered to a campaign with the longest accepted name",
+    open: async (page, data) => { await page.goto(`/leads?campaign=${data.longCampaignId}`); await settle(page, "Amira Hassan"); },
+  },
+  {
+    name: "a person in a campaign with the longest accepted name",
+    open: async (page, data) => { await page.goto(`/leads/people/${data.person("Amira Hassan")}`); await settle(page, LONG_CAMPAIGN_NAME); },
   },
   { name: "record not found", open: async (page) => { await page.goto("/leads/people/nobody"); await settle(page, "No one found"); } },
   { name: "page not found", open: async (page) => { await page.goto("/nowhere"); await settle(page, "Page not found"); } },

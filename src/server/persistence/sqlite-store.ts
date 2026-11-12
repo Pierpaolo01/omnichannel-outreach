@@ -186,6 +186,7 @@ class SqliteStore implements OutreachStore {
           name: str(person, "display_name"),
           title: str(person, "title"),
           company: this.companyRef(str(person, "company_id")),
+          companyIsLead: this.enrollments({ kind: "company", companyId: str(person, "company_id") }).length > 0,
           enrollments: this.enrollments({ kind: "person", personId: id }),
           unenrolledReason: this.personUnenrolledReason(id, str(person, "company_id")),
         };

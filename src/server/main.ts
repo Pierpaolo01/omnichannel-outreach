@@ -9,7 +9,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { createApp } from "./app.ts";
 import { DATABASE_FILE, resolveDataDir } from "./config.ts";
-import { checkHost } from "./guard.ts";
+import { checkHost, isLoopbackAddress } from "./guard.ts";
 import { openSqliteStore } from "./persistence/sqlite-store.ts";
 
 /**
@@ -20,6 +20,10 @@ const projectRoot = fileURLToPath(new URL("../..", import.meta.url));
 const production = process.env["NODE_ENV"] === "production";
 const port = Number(process.env["OUTREACH_PORT"] ?? 4310);
 const host = process.env["OUTREACH_HOST"] ?? "127.0.0.1";
+if (!isLoopbackAddress(host)) {
+  console.error(`OUTREACH_HOST=${host} is not a loopback address. The app only listens on this machine (127.0.0.1, ::1 or localhost).`);
+  process.exit(1);
+}
 
 const dataDir = resolveDataDir({
   env: process.env,

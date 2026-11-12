@@ -70,7 +70,7 @@ function Result({ campaign, imports, importId }: { campaign: Campaign; imports: 
         {files.length > 0 ? ` from ${files.join(" and ")}` : ""}.{firstImport ? "" : " No sequence was restarted."}
       </p>
 
-      <div role="tablist" aria-label="Import outcomes" className="tabs tabs-border mt-3.5 flex-wrap">
+      <div role="tablist" aria-label="Import outcomes" className="tabs tabs-border mt-[30px] flex-wrap border-b border-line">
         {tabs.map(([key, label, count]) => (
           <button
             key={key}

@@ -37,7 +37,7 @@ test("import twice, into a second campaign, then find people, company leads and 
     await page.getByRole("tab", { name: "Not enrolled 4" }).click();
     const rows = page.getByRole("tabpanel");
     await expect(rows.getByRole("row", { name: /Sofia Marin/ })).toContainText(
-      "No personal email or mobile, and Elm Street Chiropractic has no main line in the file.",
+      "No personal email or mobile, and Elm Street Chiropractic has no usable main line.",
     );
     await expect(rows.getByRole("row", { name: /Jordan Lee/ })).toContainText("Their company isn’t in the Businesses file.");
     await page.getByRole("tab", { name: "New 6" }).click();
@@ -117,7 +117,7 @@ test("import twice, into a second campaign, then find people, company leads and 
     await expect(record).toContainText("None in the scraper file");
     await expect(record).toContainText("2, of whom 1 is enrolled");
     const sofia = page.getByRole("row", { name: /Sofia Marin/ });
-    await expect(sofia).toContainText("Not in a campaign: no personal email or mobile, and the company has no main line");
+    await expect(sofia).toContainText("Not in a campaign: no personal email or mobile, and no usable company main line.");
     await sofia.getByRole("link", { name: "Sofia Marin" }).click();
 
     await expect(page.getByRole("heading", { name: "Sofia Marin", level: 1 })).toBeVisible();
