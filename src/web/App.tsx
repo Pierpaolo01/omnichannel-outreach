@@ -4,6 +4,8 @@ import { Icon, type IconName } from "./icons.tsx";
 import { CallsPage } from "./pages/CallsPage.tsx";
 import { CampaignsPage } from "./pages/CampaignsPage.tsx";
 import { CompanyPage } from "./pages/CompanyPage.tsx";
+import { ImportPage } from "./pages/ImportPage.tsx";
+import { ImportResultPage } from "./pages/ImportResultPage.tsx";
 import { LeadsPage } from "./pages/LeadsPage.tsx";
 import { NotFoundPage } from "./pages/NotFoundPage.tsx";
 import { PersonPage } from "./pages/PersonPage.tsx";
@@ -19,7 +21,7 @@ const AREAS: readonly { path: string; label: string; icon: IconName }[] = [
 export function App() {
   const [onLeads] = useRoute("/leads");
   return (
-    <div className="grid min-h-screen grid-cols-1 min-[901px]:grid-cols-[220px_minmax(0,1fr)]">
+    <div className="grid min-h-screen grid-cols-1 grid-rows-[auto_1fr] min-[901px]:grid-cols-[220px_minmax(0,1fr)] min-[901px]:grid-rows-1">
       <a
         href="#main"
         className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-field focus:bg-base-100 focus:px-3 focus:py-2"
@@ -37,6 +39,11 @@ export function App() {
             <Route path="/leads/people/:id">{(params) => <PersonPage id={params.id} />}</Route>
             <Route path="/leads/companies/:id">{(params) => <CompanyPage id={params.id} />}</Route>
             <Route path="/campaigns" component={CampaignsPage} />
+            <Route path="/campaigns/new">{() => <ImportPage />}</Route>
+            <Route path="/campaigns/:id/import">{(params) => <ImportPage campaignId={params.id} />}</Route>
+            <Route path="/campaigns/:id/imports/:importId">
+              {(params) => <ImportResultPage campaignId={params.id} importId={params.importId} />}
+            </Route>
             <Route component={NotFoundPage} />
           </Switch>
         </div>

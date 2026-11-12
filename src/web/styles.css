@@ -222,3 +222,10 @@
     }
   }
 }
+
+/* daisyUI fields take their focus outline from --input-color; the prototype's is the call green.
+   Unlayered so it wins over daisyUI's component layer. */
+.input,
+.select {
+  --input-color: var(--o-call);
+}

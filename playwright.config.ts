@@ -1,0 +1,29 @@
+import os from "node:os";
+import path from "node:path";
+import { defineConfig, devices } from "@playwright/test";
+
+/** Browser tests run against the production build, with a throwaway database outside the repo. */
+const port = 4320;
+const dataDir = path.join(os.tmpdir(), "omnichannel-outreach-e2e");
+
+export default defineConfig({
+  testDir: "e2e",
+  fullyParallel: false,
+  workers: 1,
+  forbidOnly: Boolean(process.env["CI"]),
+  retries: 0,
+  reporter: process.env["CI"] ? [["list"], ["html", { open: "never" }]] : "list",
+  use: {
+    baseURL: `http://127.0.0.1:${port}`,
+    trace: "retain-on-failure",
+    video: process.env["RECORD_DEMO"] ? "on" : "off",
+  },
+  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } } }],
+  webServer: {
+    command: `rm -rf "${dataDir}" && pnpm build && node --no-warnings=ExperimentalWarning src/server/main.ts`,
+    url: `http://127.0.0.1:${port}/api/campaigns`,
+    env: { NODE_ENV: "production", OUTREACH_PORT: String(port), OUTREACH_DATA_DIR: dataDir },
+    reuseExistingServer: false,
+    timeout: 120_000,
+  },
+});

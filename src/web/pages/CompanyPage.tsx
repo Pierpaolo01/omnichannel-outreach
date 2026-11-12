@@ -1,9 +1,13 @@
+import { Redirect } from "wouter";
 import type { CompanyRecord } from "../../shared/api.ts";
 import { useApi } from "../api.ts";
 import { BackToLeads, CampaignRows, ContactRow, ErrorState, LocalTime, PeopleRows, RecordSkeleton, Section } from "../components.tsx";
 import { NoSuchRecord } from "./PersonPage.tsx";
 
-/** A company lead's record: the company contacted through its own details. */
+/**
+ * A company lead's record: the company contacted through its own details. A company that is not
+ * a lead has no page of its own; its record is Leads filtered to the company (principal, 12 Nov 2026).
+ */
 export function CompanyPage({ id }: { id: string }) {
   const { result, retry } = useApi<CompanyRecord>(`/api/companies/${encodeURIComponent(id)}`);
   return (
@@ -17,6 +21,8 @@ export function CompanyPage({ id }: { id: string }) {
         ) : (
           <ErrorState title="This record didn’t load." message={result.message} onRetry={retry} />
         )
+      ) : result.data.enrollments.length === 0 && result.data.people.length > 0 ? (
+        <Redirect to={`/leads?company=${result.data.id}`} replace />
       ) : (
         <Company company={result.data} />
       )}
@@ -32,7 +38,7 @@ function Company({ company }: { company: CompanyRecord }) {
           <p className="mb-1 text-[13.5px] text-muted">{company.enrollments.length > 0 ? "Company lead" : "Company"}</p>
           <h1 className="text-[34px] leading-[1.15] tracking-[-0.02em]">{company.name}</h1>
           <p className="mt-1 text-[16px] text-ink-2">
-            {company.people.length > 0 ? "Company" : "No named decision maker"}
+            {company.people.length > 0 ? "Its decision makers can’t be reached directly" : "No named decision maker"}
             {company.city ? `, ${company.city}` : ""}
           </p>
         </div>

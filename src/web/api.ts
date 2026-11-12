@@ -8,10 +8,18 @@ export type Loadable<T> =
 
 export class ApiRequestError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
+  readonly body: unknown;
+  constructor(status: number, message: string, body: unknown = null) {
     super(message);
     this.status = status;
+    this.body = body;
   }
+}
+
+/** The per-file problems of a rejected import, when the server sent them. */
+export function exportProblems(error: unknown): { file: string; message: string }[] {
+  if (!(error instanceof ApiRequestError) || !isApiError(error.body)) return [];
+  return [...(error.body.error.problems ?? [])];
 }
 
 function isApiError(value: unknown): value is ApiError {
@@ -32,6 +40,20 @@ export async function getJson(path: string, signal?: AbortSignal): Promise<unkno
 type Settled<T> =
   | { readonly key: string; readonly ok: true; readonly data: T }
   | { readonly key: string; readonly ok: false; readonly message: string; readonly notFound: boolean };
+
+/** Sends JSON and returns the parsed body. A non-2xx answer throws with the server's message. */
+export async function postJson(path: string, body: unknown): Promise<unknown> {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  const json: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new ApiRequestError(response.status, isApiError(json) ? json.error.message : `The server answered ${response.status}.`, json);
+  }
+  return json;
+}
 
 /**
  * Loads one resource. While a new path loads, the last result stays available as `previous`.

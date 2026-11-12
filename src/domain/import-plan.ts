@@ -157,6 +157,8 @@ export type SummaryEntry =
       readonly title: string;
       readonly companyId: string;
       readonly companyName: string;
+      /** Decision makers on record at the company after this import. */
+      readonly peopleAtCompany: number;
       readonly channels: Reach;
       readonly via: readonly ContactRoute[];
       /** Details this import added to the lead's own record, marked newer. */
@@ -172,6 +174,7 @@ export type SummaryEntry =
       readonly title: string;
       readonly companyId: string;
       readonly companyName: string;
+      readonly peopleAtCompany: number;
     }
   | {
       readonly outcome: "not_enrolled";
@@ -246,7 +249,7 @@ export function planImport(input: {
 
   const decide = (lead: LeadRef, reachable: { reach: Reach; via: ContactRoute[] }, who: { name: string; title: string; companyId: string }): void => {
     const companyName = crm.company(who.companyId).fields.name;
-    const base = { lead, ...who, companyName };
+    const base = { lead, ...who, companyName, peopleAtCompany: crm.peopleAt(who.companyId).length };
     const notes = crm.notesFor(lead);
     if (crm.isEnrolled(lead)) {
       entries.push({ ...base, outcome: notes.added.length > 0 ? "updated" : "already_enrolled", channels: reachable.reach, via: reachable.via, ...notes });

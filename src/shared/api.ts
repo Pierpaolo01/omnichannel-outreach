@@ -93,6 +93,8 @@ export type LeadRow =
       readonly id: string;
       readonly name: string;
       readonly city: string;
+      /** Named decision makers on record. A company lead with any has none reachable. */
+      readonly peopleOnRecord: number;
       readonly enrollments: readonly EnrollmentView[];
       readonly unenrolledReason: UnenrolledReason;
     };
@@ -120,6 +122,8 @@ export interface PersonRecord {
   /** The person's time zone, else the company's, else the first campaign default. */
   readonly timezone: string | null;
   readonly company: CompanyRef;
+  /** The company itself is enrolled as a company lead, contacted through its own details. */
+  readonly companyIsLead: boolean;
   readonly contactDetails: readonly ContactDetailView[];
   readonly enrollments: readonly EnrollmentView[];
   readonly unenrolledReason: UnenrolledReason;

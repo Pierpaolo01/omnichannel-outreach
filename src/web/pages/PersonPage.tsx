@@ -33,7 +33,7 @@ function Person({ person }: { person: PersonRecord }) {
           <h1 className="text-[34px] leading-[1.15] tracking-[-0.02em]">{person.name}</h1>
           <p className="mt-1 text-[16px] text-ink-2">
             {person.title ? `${person.title} at ` : ""}
-            <Link href={`/leads?q=${encodeURIComponent(company.name)}`} className="font-semibold no-underline hover:underline">
+            <Link href={`/leads?company=${company.id}`} className="font-semibold no-underline hover:underline">
               {company.name}
             </Link>
             {company.city ? `, ${company.city}` : ""}
@@ -45,7 +45,12 @@ function Person({ person }: { person: PersonRecord }) {
       <ContactRow details={person.contactDetails} />
 
       <Section title="Campaigns">
-        <CampaignRows enrollments={person.enrollments} unenrolledReason={person.unenrolledReason} who="person" />
+        <CampaignRows
+          enrollments={person.enrollments}
+          unenrolledReason={person.unenrolledReason}
+          who="person"
+          companyIsLead={person.companyIsLead}
+        />
       </Section>
 
       {person.colleagues.length > 0 && (

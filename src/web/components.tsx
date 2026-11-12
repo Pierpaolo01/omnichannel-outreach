@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 import { Link } from "wouter";
 import type { ColleagueView, ContactDetailView, EnrollmentView, UnenrolledReason } from "../shared/api.ts";
 import { Icon } from "./icons.tsx";
@@ -30,10 +30,13 @@ export function BackToLeads() {
 }
 
 export function Section({ title, aside, children }: { title: ReactNode; aside?: ReactNode; children: ReactNode }) {
+  const id = useId();
   return (
-    <section>
+    <section aria-labelledby={id}>
       <div className="mb-1.5 flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-[19px] leading-[1.25]">{title}</h2>
+        <h2 id={id} className="text-[19px] leading-[1.25]">
+          {title}
+        </h2>
         {aside}
       </div>
       {children}
@@ -47,7 +50,7 @@ export function LocalTime({ timeZone }: { timeZone: string | null }) {
   if (!timeZone) return null;
   return (
     <div className="text-right">
-      <div className="text-[26px] font-medium leading-none tabular-nums">{clockIn(timeZone, now)}</div>
+      <div className="text-[26px] font-medium leading-none">{clockIn(timeZone, now)}</div>
       <div className="mt-1 text-[13px] text-muted">Their time</div>
     </div>
   );
@@ -63,13 +66,20 @@ function detailLabel(detail: ContactDetailView): string {
   return base;
 }
 
-/** Every contact detail in one row. Bad details are struck through; newer ones are marked. */
+/**
+ * Every contact detail in one row. Bad details are struck through; newer ones are marked.
+ * A missing company main line is said out loud, since calls depend on it.
+ */
 export function ContactRow({ details }: { details: readonly ContactDetailView[] }) {
-  if (details.length === 0) {
-    return <p className="-mt-4 text-[14.5px] text-muted">No email or phone number on record.</p>;
-  }
+  const noMainLine = !details.some((d) => d.phoneKind === "main_line");
   return (
     <dl className="-mt-4 flex flex-wrap gap-x-8 gap-y-3.5 text-[14.5px]">
+      {noMainLine && (
+        <div>
+          <dt className="text-[12.5px] text-muted">Main line</dt>
+          <dd className="text-muted">None in the scraper file</dd>
+        </div>
+      )}
       {details.map((detail) => (
         <div key={detail.id} className="min-w-0">
           <dt className={`text-[12.5px] ${detail.newer && !detail.bad ? "font-semibold text-you" : "text-muted"}`}>
@@ -83,7 +93,7 @@ export function ContactRow({ details }: { details: readonly ContactDetailView[] 
 }
 
 export const UNENROLLED_TEXT = {
-  person: "They have no email or phone number of their own, and the company has no main line to call.",
+  person: "There’s no personal email or mobile, and the company has no main line. Company details aren’t used for a decision maker’s email.",
   company: "The company has no shared inbox or main line on record.",
 } as const;
 
@@ -92,15 +102,18 @@ export function CampaignRows({
   enrollments,
   unenrolledReason,
   who,
+  companyIsLead = false,
 }: {
   enrollments: readonly EnrollmentView[];
   unenrolledReason: UnenrolledReason;
   who: "person" | "company";
+  companyIsLead?: boolean;
 }) {
   if (enrollments.length === 0) {
     return (
       <p className="py-4 text-[14px] text-muted">
         Not in any campaign.{unenrolledReason === "no_usable_channel" ? ` ${UNENROLLED_TEXT[who]}` : ""}
+        {who === "person" && companyIsLead ? " The company is contacted through its shared inbox instead." : ""}
       </p>
     );
   }

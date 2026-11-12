@@ -30,6 +30,31 @@ const paths = {
     </>
   ),
   back: <path d="M12 4.5L6.5 10l5.5 5.5" />,
+  file: (
+    <>
+      <path d="M5 2.5h6.5L15 6v11.5H5z" />
+      <path d="M11.5 2.5V6H15M7.5 10.5h5M7.5 13.5h5" />
+    </>
+  ),
+  ok: (
+    <>
+      <circle cx="10" cy="10" r="7" />
+      <path d="M6.8 10.2l2.2 2.2 4.2-4.6" />
+    </>
+  ),
+  bad: (
+    <>
+      <circle cx="10" cy="10" r="7" />
+      <path d="M10 6.3v4.4M10 13.4v.2" />
+    </>
+  ),
+  upload: (
+    <>
+      <path d="M10 13V3.8M6.3 7.3L10 3.6l3.7 3.7" />
+      <path d="M3.5 12.5v2.5a1.5 1.5 0 0 0 1.5 1.5h10a1.5 1.5 0 0 0 1.5-1.5v-2.5" />
+    </>
+  ),
+  plus: <path d="M10 4.5v11M4.5 10h11" />,
 } satisfies Record<string, ReactNode>;
 
 export type IconName = keyof typeof paths;

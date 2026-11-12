@@ -179,6 +179,7 @@ class SqliteStore implements OutreachStore {
         id,
         name: company.name,
         city: company.city,
+        peopleOnRecord: this.peopleAt(id).length,
         enrollments: this.enrollments({ kind: "company", companyId: id }),
         unenrolledReason: this.companyUnenrolledReason(id),
       };
@@ -202,6 +203,7 @@ class SqliteStore implements OutreachStore {
       title: str(row, "title"),
       timezone: strOrNull(row, "timezone") ?? (company ? strOrNull(company, "timezone") : null) ?? fallbackZone,
       company: this.companyRef(companyId),
+      companyIsLead: this.enrollments({ kind: "company", companyId }).length > 0,
       contactDetails: [...own, ...shared],
       enrollments,
       unenrolledReason: this.personUnenrolledReason(id, companyId),

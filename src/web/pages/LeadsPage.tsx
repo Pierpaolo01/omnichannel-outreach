@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useSearch } from "wouter";
-import type { CampaignListItem, LeadRow, LeadSearchResult } from "../../shared/api.ts";
+import type { CampaignListItem, CompanyRecord, ContactDetailView, LeadRow, LeadSearchResult } from "../../shared/api.ts";
 import { PageTitle } from "../App.tsx";
 import { useApi } from "../api.ts";
 import { ErrorState } from "../components.tsx";
@@ -13,7 +13,12 @@ function useLeadQuery() {
   const [, navigate] = useLocation();
   const query = useMemo(() => {
     const params = new URLSearchParams(search);
-    return { q: params.get("q") ?? "", campaign: params.get("campaign") ?? "", status: params.get("status") ?? "" };
+    return {
+      q: params.get("q") ?? "",
+      campaign: params.get("campaign") ?? "",
+      status: params.get("status") ?? "",
+      company: params.get("company") ?? "",
+    };
   }, [search]);
   const update = useCallback(
     (next: Partial<typeof query>) => {
@@ -50,10 +55,11 @@ export function LeadsPage() {
   if (query.q) api.set("q", query.q);
   if (query.campaign) api.set("campaign", query.campaign);
   if (query.status) api.set("status", query.status);
+  if (query.company) api.set("company", query.company);
   const { result, retry } = useApi<LeadSearchResult>(`/api/leads?${api.toString()}`);
   const everyone = useApi<LeadSearchResult>("/api/leads?limit=1");
 
-  const filtered = Boolean(query.q || query.campaign || query.status);
+  const filtered = Boolean(query.q || query.campaign || query.status || query.company);
   const total = everyone.result.state === "ready" ? everyone.result.data.total : null;
   const shown = result.state === "ready" ? result.data : result.state === "loading" ? result.previous : null;
   const campaignList = campaigns.result.state === "ready" ? campaigns.result.data.campaigns : [];
@@ -114,13 +120,15 @@ export function LeadsPage() {
             className="btn btn-ghost btn-sm ml-auto font-medium text-muted"
             onClick={() => {
               setText("");
-              update({ q: "", campaign: "", status: "" });
+              update({ q: "", campaign: "", status: "", company: "" });
             }}
           >
             Clear search and filters
           </button>
         )}
       </div>
+
+      {query.company && <CompanyFacts id={query.company} />}
 
       <div className="mt-4">
         {result.state === "error" ? (
@@ -192,7 +200,11 @@ function LeadTableRow({ row }: { row: LeadRow }) {
         <Link href={href} className="font-semibold no-underline hover:underline">
           {row.name}
         </Link>
-        <div className="text-[13px] text-muted">{row.kind === "person" ? row.title : "No named decision maker"}</div>
+        <div className="text-[13px] text-muted">{row.kind === "person"
+            ? row.title
+            : row.peopleOnRecord > 0
+              ? "Its decision makers can’t be reached directly"
+              : "No named decision maker"}</div>
       </td>
       <td className="px-3.5 py-3.5">
         {row.kind === "person" ? (
@@ -221,6 +233,51 @@ function LeadTableRow({ row }: { row: LeadRow }) {
         </div>
       </td>
     </tr>
+  );
+}
+
+/** The company record: shown above Leads when it is filtered to one company. */
+function CompanyFacts({ id }: { id: string }) {
+  const { result, retry } = useApi<CompanyRecord>(`/api/companies/${encodeURIComponent(id)}`);
+  if (result.state === "loading") return <div className="skeleton mt-4 h-[74px] w-full" aria-busy="true" aria-label="Loading the company" />;
+  if (result.state === "error") {
+    return (
+      <div className="mt-4">
+        <ErrorState title="This company didn’t load." message={result.message} onRetry={retry} />
+      </div>
+    );
+  }
+  const company = result.data;
+  const mainLines = company.contactDetails.filter((d) => d.phoneKind === "main_line");
+  const inboxes = company.contactDetails.filter((d) => d.channel === "email");
+  const enrolled = company.people.filter((p) => p.enrollments.length > 0).length;
+  const fact = (label: string, values: readonly ContactDetailView[]) => (
+    <div>
+      <span className="block text-[12.5px] text-muted">{label}</span>
+      {values.length === 0 ? (
+        <span className="text-muted">None in the scraper file</span>
+      ) : (
+        values.map((d) => (
+          <span key={d.id} className={`mr-3 ${d.bad ? "text-faint line-through" : ""}`}>
+            {d.value}
+          </span>
+        ))
+      )}
+    </div>
+  );
+  return (
+    <section
+      aria-label={`Company record: ${company.name}`}
+      className="mt-4 flex flex-wrap items-baseline gap-x-7 gap-y-2.5 rounded-box border border-line bg-base-100 px-[18px] py-3.5 text-[14px]"
+    >
+      <h2 className="mr-2 text-[16px]">{company.name}</h2>
+      {fact("Main line", mainLines)}
+      {fact(inboxes.length > 1 ? "Shared inboxes" : "Shared inbox", inboxes)}
+      <div>
+        <span className="block text-[12.5px] text-muted">People on record</span>
+        {company.people.length === 0 ? "None" : `${company.people.length}, of whom ${enrolled} ${enrolled === 1 ? "is" : "are"} enrolled`}
+      </div>
+    </section>
   );
 }
 

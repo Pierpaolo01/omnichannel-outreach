@@ -7,6 +7,19 @@ Delivery. Product scoping with Wayfinder finished on 12 November 2026, and the p
 
 [Wayfinder: define the email, SMS and phone outreach product](https://github.com/Pierpaolo01/omnichannel-outreach/issues/1) remains the index of the scoping decisions.
 
+## Running it
+
+Node 22.18 or later and pnpm 10.
+
+```sh
+pnpm install
+pnpm seed:dev --reset   # fictitious fixtures into the development database
+pnpm dev                # http://127.0.0.1:4310
+pnpm check              # typecheck, lint, unit, HTTP and browser tests
+```
+
+`pnpm dev` keeps its data in `~/.local/share/omnichannel-outreach-dev`. `pnpm build && pnpm start` runs the production build against `~/.local/share/omnichannel-outreach`. Set `OUTREACH_DATA_DIR` to use another directory outside the repository. The foundation and import model are recorded in [docs/adr/0001](docs/adr/0001-application-foundation-and-import-model.md).
+
 ## Starting context
 
 The product is an internal outreach workspace running on the user's machine. An existing scraper supplies companies and decision makers. The CRM centralizes the records, campaign activity, conversations and sales progress. Instantly handles email delivery using six reported warmed inboxes. The broader requested channels also include phone/SMS, LinkedIn, Instagram and Facebook. Country, language, timezone and campaign settings should be configurable.
