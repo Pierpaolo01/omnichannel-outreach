@@ -57,8 +57,12 @@ Where a lead stands in the sales process, such as interested or appointment book
 _Avoid_: Status, call result.
 
 **Reply handoff**:
-The point where a prospect's reply stops automated outreach and the user takes over the conversation to arrange an appointment.
-_Avoid_: Calling automated appointment booking part of the reply handoff.
+The point where any reply from a lead, including an auto-reply or opt-out, stops that lead's automated outreach in the campaign. The user continues the conversation wherever the prospect replied, outside the product's outreach.
+_Avoid_: Calling automated appointment booking, reply sorting or inbox management part of the reply handoff.
+
+**Do-not-contact**:
+A mark the user sets on a person so that future imports never enroll them.
+_Avoid_: Treating a reply or a stopped lead as do-not-contact.
 
 **Channel**:
 A way to contact someone, such as email, a phone call, SMS, LinkedIn, Instagram or Facebook.
