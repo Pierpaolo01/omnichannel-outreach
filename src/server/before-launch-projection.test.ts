@@ -458,8 +458,32 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
     return { start: pick(r, ANCHORS) + Math.floor(r() * 5) * MIN, inboxes, numbers, campaigns, people };
   }
 
-  async function compareWorld(w: World) {
+  /**
+   * What happened in the earlier campaigns before the projection (council on 10121d3, item 1): calls
+   * the user logged (no answer or gatekeeper, which complete the phone track and start what follows;
+   * interested, which ends the lead), and a campaign paused. Every logged call touches its lead.
+   */
+  const startedFrom = new Set<string>();
+  async function logCalls(h: EngineHarness, campaignId: string, r: () => number, after = false) {
+    let logged = 0;
+    for (const id of await h.store.engine.subjectsOf(campaignId)) {
+      const s = (await h.store.engine.subject(id, h.clock))!;
+      const task = s.callTasks.find((t) => t.open);
+      const number = s.lead.phones.find((n) => !n.bad);
+      if (!task || !number || r() < 0.3) continue;
+      const outcome = pick(r, ["no_answer", "gatekeeper", "interested"] as const);
+      const res = await h.request("POST", `/api/call-tasks/${task.id}/outcome`, { requestId: `r-${task.id}`, outcome, numberId: number.id, note: "" });
+      if (res.status !== 200) continue;
+      logged++;
+      if (!after) startedFrom.add(outcome === "interested" ? "an interested call ended a lead" : "a logged call touched a lead and finished its phone track");
+    }
+    return logged;
+  }
+
+  async function compareWorld(w: World, seed: number) {
     const h = new EngineHarness({ start: w.start, accounts: w.inboxes, sms: { numbers: w.numbers } });
+    expect((await h.request("PUT", "/api/call-settings", { dailyCapacity: 50, userZone: "Europe/London" })).status).toBe(200);
+    const r = rng(seed + 77);
     const rows = (leads: readonly number[]) => ({
       businesses: leads.map((i) => business({ business_id: `b${i}`, business_name: `Clinic ${i}`, timezone: w.people[i]!.zone })),
       people: leads.map((i) => person({ person_id: `p${i}`, business_id: `b${i}`, full_name: `Lead Person${i}`, email: w.people[i]!.email ? `lead${i}@clinic${i}.example` : "", timezone: "", ...(w.people[i]!.mobile ? { dial_phone: mobileOf(i), dial_phone_type: "mobile" } : {}) })),
@@ -473,6 +497,23 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
       if (i === w.campaigns.length - 1) break;
       expect((await h.launch(ids[i]!)).status).toBe(200);
       if (c.launchAfterMs > 0) await h.advanceTo(h.clock + c.launchAfterMs);
+      if (r() < 0.7) {
+        await h.advanceTo(h.clock + pick(r, [H, 3 * H, DAY]));
+        if ((await logCalls(h, ids[i]!, r)) > 0) await h.advanceTo(h.clock + pick(r, [MIN, 2 * H, DAY]));
+      }
+      if (r() < 0.2) {
+        const db = (h.store.engine as unknown as { db: { prepare(sql: string): { run(...a: unknown[]): unknown } } }).db;
+        db.prepare("UPDATE campaigns SET paused_since = ?, version = version + 1 WHERE id = ?").run(h.clock, ids[i]!);
+        startedFrom.add("a paused competing campaign");
+      }
+    }
+    for (const id of ids.slice(0, -1)) {
+      for (const sid of await h.store.engine.subjectsOf(id)) {
+        const st = (await h.store.engine.subject(sid, h.clock))!;
+        const def = st.campaign.definition;
+        const afterCall = def.tracks.filter((t) => t.start.kind === "after" && def.tracks.find((x) => x.id === (t.start as { trackId: string }).trackId)?.channel === "call");
+        if (afterCall.some((t) => st.tracks.find((p) => p.trackId === t.id)?.startedAt != null && st.tracks.find((p) => p.trackId === (t.start as { trackId: string }).trackId)?.finishReason === "completed")) startedFrom.add("a track after a phone track started when its call was logged");
+      }
     }
     const target = ids.at(-1)!;
     const projected = await projectedSends(h.store, target, h.clock);
@@ -505,7 +546,7 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
   const REGRESSIONS = [13_056, 13_106];
   for (const seed of [...REGRESSIONS, ...Array.from({ length: SEEDS }, (_, i) => 13_000 + i).filter((x) => !REGRESSIONS.includes(x))]) {
     test(`generated multi-track world ${seed}`, async () => {
-      const { actual, predicted, view, projected, noCall, channels } = await compareWorld(world(seed));
+      const { actual, predicted, view, projected, noCall, channels } = await compareWorld(world(seed), seed);
       texted.push(channels.has("sms"));
       const withheld = view.load?.withheldBy ?? null;
       if (withheld === null) {
@@ -517,11 +558,18 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
       withheldWorlds.push(seed);
       expect(withheld.tracks.every((t) => t.why === "after_a_phone_track")).toBe(true);
       expect(projected).toBeNull();
+      // A competing campaign's tracks: named with that campaign; its own sends are not this test's to check.
+      if (withheld.campaign !== null) return;
       const waiting = withheld.tracks.map((t) => `${t.trackId}s`);
       expect(actual.filter((line) => !noCall.has(line.split(" ")[2] ?? "") && waiting.some((prefix) => line.split(" ")[3]?.startsWith(prefix)))).toEqual([]);
     });
   }
   const withheldWorlds: number[] = [];
+  test("the worlds start from logged calls, interested calls and a paused competing campaign", () => {
+    expect([...startedFrom].sort()).toEqual(
+      ["a logged call touched a lead and finished its phone track", "a paused competing campaign", "a track after a phone track started when its call was logged", "an interested call ended a lead"].filter((x) => SEEDS >= 40 || startedFrom.has(x)),
+    );
+  });
   test("the worlds include phone tracks that hold the tracks after them, and worlds with phone tracks still projected", () => {
     expect(withheldWorlds.length).toBeGreaterThan(0);
     expect(withheldWorlds.length).toBeLessThan(SEEDS);
@@ -814,4 +862,54 @@ describe("stored state the engine will go on to change, whoever owns it (review 
     const view = (await h.request<BeforeLaunchView>("GET", `/api/campaigns/${newer.id}/before-launch`)).body;
     expect(view.load?.cannotProject).toEqual([expect.objectContaining({ accountId: "inbox-a", reason: "reply_being_matched" })]);
   });
+});
+
+describe("generated: a competing campaign whose email track waits on its calls, which are logged after the projection (council on 10121d3, item 1)", () => {
+  const SEEDS = Number(process.env["PROJECTION_SEEDS"] ?? 8);
+  for (const seed of Array.from({ length: SEEDS }, (_, i) => 31_000 + i)) {
+    test(`case ${seed}`, { timeout: 120_000 }, async () => {
+      const r = rng(seed);
+      const start = Date.parse("2026-11-02T09:00:00Z");
+      const h = new EngineHarness({ start, accounts: [{ id: "inbox-a", capacity: 1 + Math.floor(r() * 3), gapMs: pick(r, [MIN, 7 * MIN]), k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+      expect((await h.request("PUT", "/api/call-settings", { dailyCapacity: 50, userZone: "Europe/London" })).status).toBe(200);
+      const all = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
+      const n = 1 + Math.floor(r() * 3);
+      const rows = (prefix: string) => ({
+        businesses: Array.from({ length: n }, (_, i) => business({ business_id: `${prefix}b${i}`, business_name: `${prefix} Clinic ${i}`, timezone: "UTC" })),
+        people: Array.from({ length: n }, (_, i) => person({ person_id: `${prefix}p${i}`, business_id: `${prefix}b${i}`, full_name: `${prefix} Person${i}`, email: `${prefix}${i}@clinic.example`, timezone: "", direct_phone: `+4420794602${prefix === "a" ? 1 : 2}${i}` })),
+      });
+      const step = (id: string, body = "A note.", subject = "Hi"): StepDefinition => ({ id, waitDays: 0, subject, body, threading: "new_subject", removed: false });
+      const { campaign: older } = await h.createCampaign("Winter physio", rows("a"));
+      const { campaign: newer } = await h.createCampaign("Spring physio", rows("b"));
+      await h.tick();
+      await h.defineSequence(older.id, {
+        timezone: "Europe/London",
+        callSkipLimitDays: 2,
+        emailPool: ["inbox-a"],
+        tracks: [
+          { id: "p1", channel: "call", branch: "main", window: all, start: { kind: "entry" }, removed: false, steps: [step("c1", "", "")] },
+          { id: "e2", channel: "email", branch: "main", window: all, start: { kind: "after", trackId: "p1", delayDays: Math.floor(r() * 2) }, removed: false, steps: [step("s1")] },
+        ],
+      });
+      expect((await h.launch(older.id)).status).toBe(200);
+      await h.advanceTo(h.clock + 30 * MIN);
+      await h.defineSequence(newer.id, { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: ["inbox-a"], tracks: [{ id: "t1", channel: "email", branch: "main", window: all, start: { kind: "entry" }, removed: false, steps: [step("s1")] }] });
+      const view = (await h.request<BeforeLaunchView>("GET", `/api/campaigns/${newer.id}/before-launch`)).body;
+      expect(view.load?.withheldBy).toEqual({ campaign: { id: older.id, name: "Winter physio" }, tracks: [{ trackId: "e2", channel: "email", label: "the email track", why: "after_a_phone_track", phoneTrack: "the phone track" }] });
+      expect(await projectedSends(h.store, newer.id, h.clock)).toBeNull();
+      // The user logs the older campaign's calls after the projection: each releases its email, which
+      // then competes for the inbox, so no figure taken before could have been right.
+      expect((await h.launch(newer.id)).status).toBe(200);
+      await h.advanceTo(h.clock + pick(r, [MIN, 20 * MIN]));
+      for (const id of await h.store.engine.subjectsOf(older.id)) {
+        const s = (await h.store.engine.subject(id, h.clock))!;
+        const task = s.callTasks.find((t) => t.open);
+        const number = s.lead.phones.find((x) => !x.bad);
+        if (task && number) expect((await h.request("POST", `/api/call-tasks/${task.id}/outcome`, { requestId: `r-${task.id}`, outcome: "no_answer", numberId: number.id, note: "" })).status).toBe(200);
+      }
+      await h.advanceTo(h.clock + 4 * DAY);
+      const released = new Set(await h.store.engine.subjectsOf(older.id));
+      expect(h.fake.deliveryLog.filter((d) => released.has(d.subjectId)).length).toBe(n);
+    });
+  }
 });
