@@ -416,8 +416,15 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
   // ------------------------------------------------------------------------------------------
   // The generated user.
 
+  /** The call the user's screen is on: named on every read of the queue, so it keeps the focus while it is listed. */
+  let focus: string | null = null;
   async function queue(): Promise<CallsView> {
-    const q = (await h.request<CallsView>("GET", "/api/calls")).body;
+    const q = (await h.request<CallsView>("GET", `/api/calls${focus ? `?focus=${focus}` : ""}`)).body;
+    const held = focus;
+    focus = q.focusTaskId;
+    // The focus moves only when the call the user is on leaves the list (an outcome, or its lead stopping).
+    const expected = held !== null && knownTasks.has(held) && listedByRecord(held, h.clock) ? held : ((await recordReadyNow())[0] ?? null);
+    if (q.focusTaskId !== expected) problem(`16: the focus is ${q.focusTaskId ?? "none"} at ${new Date(h.clock).toISOString()}; the user was on ${held ?? "nothing"}, and the record says ${expected ?? "none"}`);
     for (const item of [...q.readyNow, ...q.laterToday]) knownTasks.set(item.taskId, { subjectId: item.enrollmentId, trackId: item.track.id });
     return q;
   }
@@ -437,7 +444,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     const note = chance(0.5) ? pick(["Rang out.", "Spoke to reception.", "Call back after lunch.", ""]) : "";
     const noteScope = chance(0.3) ? "company" : "person";
     const body = { requestId: `action-${++actions}`, outcome, numberId, note, noteScope };
-    const post = () => h.request<{ error?: { message: string } }>("POST", `/api/call-tasks/${taskId}/outcome`, body);
+    const post = () => h.request<{ error?: { message: string }; nextFocusTaskId?: string | null }>("POST", `/api/call-tasks/${taskId}/outcome`, body);
     // The same action may reach the app twice: posted twice at once (a double click), or posted again after
     // its answer was lost, sometimes across a restart. It is one action: the record logs it once.
     const r = rand();
@@ -453,6 +460,16 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     const res = answers[0]!;
     const accepted = res.status === 200;
     if (accepted !== expected) problem(`16: ${outcome} on ${view.enrollmentId}/${view.track.id} at ${new Date(now).toISOString()} was ${accepted ? "accepted" : `refused (${res.body.error?.message ?? res.status})`}; the record says it must be ${expected ? "accepted" : "refused"}`);
+    if (accepted && expected && answers.length === 1) {
+      // The answer names the next focus: the first call ready now, by the record, once this outcome is logged.
+      logged.push({ at: now, taskId, subjectId: view.enrollmentId, trackId: view.track.id, outcome, numberKey: key, accepted: expected, note: note.trim(), noteScope });
+      if (outcome === "skip_for_now") skips.set(taskId, now);
+      const next = (await recordReadyNow())[0] ?? null;
+      logged.pop();
+      skips.delete(taskId);
+      if (res.body.nextFocusTaskId !== next) problem(`16: after ${outcome} on ${view.enrollmentId}/${view.track.id} the answer moves the focus to ${res.body.nextFocusTaskId ?? "none"}; the record says ${next ?? "none"}`);
+      focus = res.body.nextFocusTaskId ?? null;
+    }
     if (answers.some((a) => a.status !== res.status)) problem(`16: ${body.requestId} (${outcome}) was answered ${answers.map((a) => a.status).join(" and ")}; one action has one answer`);
     // The record follows its own prediction, so one wrong answer is reported once, not compounded.
     logged.push({ at: now, taskId, subjectId: view.enrollmentId, trackId: view.track.id, outcome, numberKey: key, accepted: expected, note: note.trim(), noteScope });
@@ -600,9 +617,8 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       // 19 and 2. Calls are logged on the lead's own numbers or its company's main line; nothing is sent after it stops.
       for (const a of st.callAttempts) {
         if (a.numberDetailId === null) continue;
-        // A recorded number id follows the merge pointer to the detail it stands for now (ADR 0001).
-        const live = st.lead.resolved[a.numberDetailId]?.liveId ?? a.numberDetailId;
-        const n = st.lead.phones.find((x) => x.id === live);
+        // The number a call was logged on, as the detail it stands for now through every merge (ADR 0001).
+        const n = st.recordedNumbers[a.numberDetailId];
         if (!n || !phonesOf(s).some((p) => p.key === n.key)) problem(`19: ${id} logged a call on ${a.numberDetailId}, which is not one of its numbers`);
       }
       for (const ch of ["email", "sms"] as const) {
@@ -670,13 +686,12 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     if ([...q.readyNow, ...q.laterToday].some((x) => x.reason === "rolled_over")) features.add("rolled-over");
     // Ready now: oldest due first; calls skipped for now today go last, in the order skipped.
     const today = userDay(now);
-    const skippedToday = (id: string) => (skips.get(id) ?? -Infinity) >= today.start;
-    const fresh = q.readyNow.filter((x) => !skippedToday(x.taskId));
-    const skipped = q.readyNow.filter((x) => skippedToday(x.taskId));
-    if (q.readyNow.findIndex((x) => skippedToday(x.taskId)) !== -1 && q.readyNow.slice(q.readyNow.findIndex((x) => skippedToday(x.taskId))).some((x) => !skippedToday(x.taskId))) problem("16: a call skipped for now is ahead of one not skipped");
-    for (let i = 1; i < fresh.length; i++) if (Date.parse(fresh[i]!.dueAt) < Date.parse(fresh[i - 1]!.dueAt)) problem("16: ready now is not oldest due first");
-    for (let i = 1; i < skipped.length; i++) if ((skips.get(skipped[i]!.taskId) ?? 0) < (skips.get(skipped[i - 1]!.taskId) ?? 0)) problem("16: calls skipped for now are not in the order skipped");
-    if (q.focusTaskId !== (q.readyNow[0]?.taskId ?? null)) problem("16: the focused call is not the first ready now");
+    // The record's own order, from its own due times, compared whole, so a reordering of any two calls shows.
+    const order = await recordReadyNow();
+    const shown = q.readyNow.map((x) => x.taskId);
+    if (shown.length === order.length && shown.join() !== order.join()) problem(`16: ready now is ${shown.join(", ")}; the record orders it ${order.join(", ")} (oldest due first, calls skipped for now today last)`);
+    if (order.length > 1) features.add("two-ready-calls");
+    if (shown.some((id) => (skips.get(id) ?? -Infinity) >= today.start)) features.add("skipped-call-last");
     // 4. Sent at most once.
     for (const ch of ["email", "sms"] as const) {
       const n = new Map<string, number>();
@@ -685,7 +700,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     }
   }
 
-  /** New tasks placed on the user day of `t`, and committed tasks: placed earlier and open at its start, for leads not stopped by then. */
+  /** New tasks placed on the user day of `t`, and committed tasks: placed earlier, open at its start, for leads not stopped by then, on a day they can be listed. */
   function dayCounts(all: readonly { s: Subject; task: CallTask }[], t: number): { placed: number; committed: number } {
     const { start: from, end } = userDay(t);
     const placed = all.filter((x) => x.task.placedWall >= from && x.task.placedWall < end).length;
@@ -695,7 +710,8 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       const f = finishFacts(x.s, tr);
       const closed = f !== null && f.at < from;
       const interested = interestedAt(x.s) < from;
-      return !closed && !interested && endLimitOf(x.s) >= from && !sequenceDoneAt(x.s, from - 1);
+      // Counted only on a day it can be listed: its prospect's calling hours open that day.
+      return !closed && !interested && endLimitOf(x.s) >= from && !sequenceDoneAt(x.s, from - 1) && hoursOnUserDay(x.s, x.task.trackId, from);
     }).length;
     return { placed, committed };
   }
@@ -704,6 +720,36 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
   function checkDrained(s: Subject, st: SubjectState, progress: EnrollmentProgress): void {
     if (st.subject.ended === null) problem(`18: ${s.id} is ${progress.status} after the drain (${JSON.stringify(progress.tracks.map((t) => [t.trackId, t.finishReason]))})`);
     if (st.callTasks.some((t) => t.open) && st.subject.ended === null) problem(`18: ${s.id} still has an open call task after the drain`);
+  }
+
+  /**
+   * Ready now by the record: open tasks of running leads inside the prospect's calling hours, the ones not
+   * skipped for now today oldest due first by the record's own due time, then by lead and step, and the
+   * ones skipped today after them in the order skipped.
+   */
+  async function recordReadyNow(): Promise<string[]> {
+    const now = h.clock;
+    const today = userDay(now);
+    const ready: { id: string; skippedAt: number | null; due: number; subjectId: string; stepId: string }[] = [];
+    for (const id of subjects.keys()) {
+      const st = await h.store.engine.subject(id, now);
+      const s = subjects.get(id)!;
+      for (const task of st?.callTasks ?? []) {
+        knownTasks.set(task.id, { subjectId: id, trackId: task.trackId });
+        if (!listedByRecord(task.id, now) || !inWindow(windowOf(s, task.trackId), zoneFor(s), now)) continue;
+        const tr = def(s).tracks.find((t) => t.id === task.trackId)!;
+        const skippedAt = skips.get(task.id) ?? null;
+        ready.push({ id: task.id, skippedAt: skippedAt !== null && skippedAt >= today.start ? skippedAt : null, due: startOf(s, tr) ?? Infinity, subjectId: id, stepId: task.stepId });
+      }
+    }
+    ready.sort((a, b) =>
+      (a.skippedAt === null) !== (b.skippedAt === null) ? (a.skippedAt === null ? -1 : 1)
+      : a.skippedAt !== null && b.skippedAt !== null && a.skippedAt !== b.skippedAt ? a.skippedAt - b.skippedAt
+      : a.due !== b.due ? a.due - b.due
+      : a.subjectId !== b.subjectId ? (a.subjectId < b.subjectId ? -1 : 1)
+      : a.stepId < b.stepId ? -1 : 1,
+    );
+    return ready.map((x) => x.id);
   }
 
   async function checkNumbers(): Promise<void> {

@@ -4,7 +4,7 @@ import { z } from "zod";
 import { planImport } from "../domain/import-plan.ts";
 import { isOutreachStatus } from "../domain/outreach-status.ts";
 import { checkScraperFile, parseScraperExport } from "../domain/scraper-export.ts";
-import type { ApiError, Campaign, FileCheckResult, SmsProviderStatus } from "../shared/api.ts";
+import type { ApiError, CallOutcomeAnswer, Campaign, FileCheckResult, SmsProviderStatus } from "../shared/api.ts";
 import { CAMPAIGN_NAME_MAX } from "../shared/limits.ts";
 import { checkApiRequest } from "./guard.ts";
 import { invalidBodyMessage, requestObject } from "./request-body.ts";
@@ -15,6 +15,7 @@ import { Engine } from "./engine/engine.ts";
 import { UnconnectedEmailPort, UnprovisionedSmsPort } from "./engine/ports.ts";
 import { accountView, needsAttention, progressView } from "./engine/views.ts";
 import { callsView, callTaskView, todayView } from "./engine/call-views.ts";
+import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
 import type { SequenceView } from "../shared/api.ts";
 import { registerEmailProviderRoutes, type EmailProviderSource } from "./instantly/routes.ts";
 
@@ -32,6 +33,8 @@ export interface AppDependencies {
    * no SMS provider is provisioned (#28); `test-simulator` only in the test harness's fake.
    */
   readonly smsProvider?: "none" | "test-simulator";
+  /** The engine's rules, as the read models use them; the tests' broken engines replace entries (ADR 0003 9.2). */
+  readonly rules?: Partial<Rules>;
 }
 
 const windowRule = requestObject({ day: z.number().int().min(0).max(6), start: z.number().int().min(0).max(23), end: z.number().int().min(0).max(24) });
@@ -126,7 +129,8 @@ const launchBody = requestObject({});
 const checkBody = requestObject({ businessesCsv: z.string().optional(), peopleCsv: z.string().optional() });
 
 /** The HTTP interface. Every route is under /api; the web client is served separately. */
-export function createApp({ store, now, newId, engine: givenEngine, emailProvider, smsProvider = "none" }: AppDependencies): Hono {
+export function createApp({ store, now, newId, engine: givenEngine, emailProvider, smsProvider = "none", rules: givenRules }: AppDependencies): Hono {
+  const rules: Rules = { ...DEFAULT_RULES, ...givenRules };
   const engine = givenEngine ?? new Engine({ store: store.engine, port: new UnconnectedEmailPort(), smsPort: new UnprovisionedSmsPort(), now: () => Date.parse(now()), newId });
   const app = new Hono().basePath("/api");
   app.use(async (c, next) => {
@@ -350,9 +354,10 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     return c.json(await store.engine.callSettings());
   });
 
-  app.get("/today", async (c) => c.json(await todayView(store, Date.parse(now()))));
+  app.get("/today", async (c) => c.json(await todayView(store, Date.parse(now()), rules)));
 
-  app.get("/calls", async (c) => c.json(await callsView(store, Date.parse(now()))));
+  // `focus`: the call the user's screen is on. It stays the focus while it is listed.
+  app.get("/calls", async (c) => c.json(await callsView(store, Date.parse(now()), { focus: c.req.query("focus") || null, rules })));
 
   app.get("/call-tasks/:id", async (c) => {
     const view = await callTaskView(store, c.req.param("id"), Date.parse(now()));
@@ -366,7 +371,11 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     if ((await store.engine.callTaskSubject(id)) === null) return notFound(c, "call task");
     const outcome = await engine.logCallOutcome(id, { requestId: body.data.requestId, outcome: body.data.outcome, numberId: body.data.numberId ?? null, note: body.data.note, noteScope: body.data.noteScope });
     if (!outcome.ok) return c.json<ApiError>({ error: { code: "outcome_refused", message: outcome.reason } }, 409);
-    return c.json(await callTaskView(store, id, Date.parse(now())));
+    // The answer names the next focus: the queue moves on only now that an outcome is logged.
+    const at = Date.parse(now());
+    const task = await callTaskView(store, id, at);
+    if (!task) return notFound(c, "call task");
+    return c.json<CallOutcomeAnswer>({ task, nextFocusTaskId: (await callsView(store, at, { rules })).focusTaskId });
   });
 
   app.get("/needs-attention", async (c) => c.json(await needsAttention(store.engine, Date.parse(now()))));

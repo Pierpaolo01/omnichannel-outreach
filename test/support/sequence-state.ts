@@ -115,6 +115,7 @@ export function subjectState(fields: Partial<SubjectState> = {}): SubjectState {
     accounts: { "inbox-a": account("inbox-a"), "inbox-b": account("inbox-b") },
     callTasks: [],
     callAttempts: [],
+    recordedNumbers: {},
     newNotes: [],
     callDay: { userZone: "Europe/London", day: Math.floor(MONDAY_9 / 86_400_000), capacity: 20, placedToday: 0, committed: 0 },
     ...fields,

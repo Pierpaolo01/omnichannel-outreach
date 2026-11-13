@@ -92,6 +92,13 @@ const RULES: Record<string, Partial<Rules>> = {
   "a person note kept on the company": {
     logCallOutcome: (s, taskId, input, now, ids, listed) => R.logCallOutcome(s, taskId, { ...input, noteScope: "company" }, now, ids, listed),
   },
+  // Council on 7902093: the queue the read models show.
+  "ready now newest due first": {
+    readyNowOrder: (a, b) => (a.dueWall !== b.dueWall && a.skippedWall === null && b.skippedWall === null ? b.dueWall - a.dueWall : R.readyNowOrder(a, b)),
+  },
+  "the focus moves to the oldest ready call": {
+    focusOf: (readyNow) => R.focusOf(readyNow, null),
+  },
   // ADR 0003 9.2: "a track that finishes without closing its call task", whichever change finishes it.
   "a track that finishes without closing its call task": {
     evaluate: (s, now, options) => keepTasksOpen(s, R.evaluate(s, now, options)),
@@ -118,6 +125,8 @@ const EXPECTED: Record<string, { invariant: string; seed: number }> = {
   "a replayed action is logged again": { invariant: "16", seed: 0 },
   "a person note kept on the company": { invariant: "16", seed: 0 },
   "a track that finishes without closing its call task": { invariant: "16", seed: 0 },
+  "ready now newest due first": { invariant: "16", seed: 0 },
+  "the focus moves to the oldest ready call": { invariant: "16", seed: 0 },
 };
 
 export const CALL_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number }> = Object.fromEntries(

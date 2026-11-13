@@ -4,6 +4,7 @@ import { isTimeZone, localDayNumber, prospectZone, resetDayOf, startOfLocalDay, 
 import { defaultGap } from "../../domain/sequence/dispatch.ts";
 import type { MergeData } from "../../domain/sequence/copy.ts";
 import { emptyDefinition, poolOf, type CampaignDefinition } from "../../domain/sequence/definition.ts";
+import { callableOnDay } from "../../domain/sequence/calls.ts";
 import { deriveStatus } from "../../domain/sequence/progress.ts";
 import type {
   AccountState,
@@ -15,6 +16,7 @@ import type {
   CallOutcome,
   CallTask,
   EndReason,
+  RecordedNumber,
   FinishReason,
   LeadDetail,
   LookupAnswer,
@@ -357,7 +359,7 @@ export class SqliteEngineStore implements EngineStore {
 
   async lastCallNotes(subjectIds: readonly string[]): Promise<CallNoteRecord[]> {
     return subjectIds.flatMap((id) => {
-      const r = this.sql("SELECT * FROM call_attempts WHERE subject_id = ? AND note <> '' ORDER BY at_wall DESC, rowid DESC LIMIT 1").get(id);
+      const r = this.sql("SELECT * FROM call_attempts WHERE subject_id = ? AND note <> '' AND outcome <> 'skip_for_now' ORDER BY at_wall DESC, rowid DESC LIMIT 1").get(id);
       return r ? [{ subjectId: id, outcome: str(r, "outcome"), note: str(r, "note"), atWall: num(r, "at_wall") }] : [];
     });
   }
@@ -374,15 +376,23 @@ export class SqliteEngineStore implements EngineStore {
     const day = localDayNumber(now, userZone);
     const start = startOfLocalDay(day, userZone);
     const end = startOfLocalDay(day + 1, userZone);
-    const counts =
-      this.sql(
-        `SELECT
-           (SELECT COUNT(*) FROM call_tasks WHERE placed_wall >= :start AND placed_wall < :end) AS placed,
-           (SELECT COUNT(*) FROM call_tasks t JOIN enrollments e ON e.id = t.subject_id
-             WHERE t.placed_wall < :start AND (t.closed_wall IS NULL OR t.closed_wall >= :start)
-               AND (e.ended_wall IS NULL OR e.ended_wall >= :start)) AS committed`,
-      ).get({ start, end }) ?? {};
-    return { userZone, day, capacity: dailyCapacity, placedToday: num(counts, "placed"), committed: num(counts, "committed") };
+    const placed = num(this.sql("SELECT COUNT(*) AS n FROM call_tasks WHERE placed_wall >= :start AND placed_wall < :end").get({ start, end }) ?? {}, "n");
+    // A carried call counts only on a day it can be listed: its prospect's calling hours open that day
+    // (council on 7902093), so a weekday call left on Friday takes none of the weekend's room.
+    const committed = this.sql(
+      `SELECT t.track_id, c.id AS campaign_id, c.definition_version, c.definition, c.default_timezone, p.timezone AS person_zone, co.timezone AS company_zone
+       FROM call_tasks t JOIN enrollments e ON e.id = t.subject_id JOIN campaigns c ON c.id = e.campaign_id
+         LEFT JOIN people p ON p.id = e.person_id JOIN companies co ON co.id = e.company_id
+       WHERE t.placed_wall < :start AND (t.closed_wall IS NULL OR t.closed_wall >= :start) AND (e.ended_wall IS NULL OR e.ended_wall >= :start)`,
+    )
+      .all({ start })
+      .filter((r) => {
+        const definition = r["definition"] == null ? null : this.definitionOf({ ...r, id: str(r, "campaign_id") });
+        const window = definition?.tracks.find((t) => t.id === str(r, "track_id"))?.window ?? [];
+        const zone = prospectZone([strOrNull(r, "person_zone"), strOrNull(r, "company_zone")], definition?.timezone ?? "UTC");
+        return callableOnDay(window, zone, start, end);
+      }).length;
+    return { userZone, day, capacity: dailyCapacity, placedToday: placed, committed };
   }
 
   private accountState(id: string, now: number): AccountState | null {
@@ -630,6 +640,14 @@ export class SqliteEngineStore implements EngineStore {
       accounts,
       callTasks: this.sql("SELECT * FROM call_tasks WHERE subject_id = ? ORDER BY placed_wall, rowid").all(subjectId).map(toCallTask),
       callAttempts,
+      recordedNumbers: Object.fromEntries(
+        callAttempts.flatMap((c): [string, RecordedNumber][] => {
+          const live = c.numberDetailId === null ? undefined : liveDetailRowOf(this.db, c.numberDetailId);
+          if (!live || c.numberDetailId === null) return [];
+          const company = str(live, "owner_kind") === "company";
+          return [[c.numberDetailId, { id: str(live, "id"), kind: company ? "main_line" : strOrNull(live, "phone_kind") === "mobile" ? "mobile" : "direct", owner: company ? "company" : "person", key: str(live, "key") }]];
+        }),
+      ),
       newNotes: [],
       callDay: this.callDayAt(now),
     };

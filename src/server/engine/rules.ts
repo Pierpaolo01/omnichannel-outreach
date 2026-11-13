@@ -15,7 +15,7 @@ import {
   readyItems,
   retryFailures,
 } from "../../domain/sequence/dispatch.ts";
-import { isListed, logCallOutcome, placeCall, readyCalls } from "../../domain/sequence/calls.ts";
+import { compareReadyNow, focusOf, isListed, logCallOutcome, placeCall, readyCalls } from "../../domain/sequence/calls.ts";
 import { applyBadDestination, applyReply, applyToAttempt, applyToWork, enterMain, evaluate, replyMatches, smsReplyOwner } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
 
@@ -52,6 +52,10 @@ export interface Rules {
   /** The listing rule (2.3), which decides whether an outcome is accepted. */
   readonly isListed: typeof isListed;
   readonly logCallOutcome: typeof logCallOutcome;
+  /** The order of ready-now calls in the queue the read models show (4.4). */
+  readonly readyNowOrder: typeof compareReadyNow;
+  /** Which call the focus queue shows (part b): the one the user is on while it is listed. */
+  readonly focusOf: typeof focusOf;
   /** The version guard (2.5): a change computed from `computedFrom` applies only if nothing it read has changed. */
   readonly versionsMatch: (computedFrom: SubjectState, current: SubjectState) => boolean;
 }
@@ -81,6 +85,8 @@ export const DEFAULT_RULES: Rules = {
   placeCall,
   isListed,
   logCallOutcome,
+  readyNowOrder: compareReadyNow,
+  focusOf,
   // Everything an evaluation reads: the subject's and campaign's versions cover its progress and the
   // definition; the lead's facts (contact details and their marks, zone, merge data) change without
   // bumping them (an import, a mark elsewhere), so they are compared as they were read.

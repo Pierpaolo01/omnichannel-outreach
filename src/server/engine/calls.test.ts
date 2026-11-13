@@ -116,11 +116,13 @@ describe("outcomes the user logs (spec: Call outcomes and their effect on the le
     const mainLine = before.numbers.find((n) => n.kind === "main_line");
     expect(mainLine).toMatchObject({ owner: "company", value: expect.stringContaining("7946 0101") });
 
+    // A past call shows the number dialled, with no claim about dialling it now.
+    const dialled = { detailId: mainLine?.detailId, kind: "main_line", owner: "company", value: mainLine?.value };
     const logged = await log(taskId, { outcome: "gatekeeper", numberId: mainLine?.detailId, note: "Receptionist says Pat is in clinic until 3." });
     expect(logged.status).toBe(200);
     const after = await task(taskId);
     expect(after).toMatchObject({ open: false, listed: false, outcomes: [], status: "active" });
-    expect(after.touches.at(-1)).toEqual({ kind: "call", at: "2026-11-02T11:00:00.000Z", outcome: "gatekeeper", number: mainLine, note: "Receptionist says Pat is in clinic until 3." });
+    expect(after.touches.at(-1)).toEqual({ kind: "call", at: "2026-11-02T11:00:00.000Z", outcome: "gatekeeper", number: dialled, note: "Receptionist says Pat is in clinic until 3." });
     expect(after.personNotes.map((n) => n.body)).toEqual(["Receptionist says Pat is in clinic until 3."]);
     expect(after.companyNotes).toEqual([]);
     expect((await calls()).readyNow).toEqual([]);
@@ -131,7 +133,7 @@ describe("outcomes the user logs (spec: Call outcomes and their effect on the le
       finishReason: "completed",
       finishedAt: "2026-11-02T11:00:00.000Z",
       callTask: { taskId, open: false, placedAt: "2026-11-02T09:00:00.000Z", listed: false },
-      steps: [{ stepId: "c1", result: "sent", reason: "gatekeeper", calls: [{ outcome: "gatekeeper", at: "2026-11-02T11:00:00.000Z", number: mainLine, note: "Receptionist says Pat is in clinic until 3." }] }],
+      steps: [{ stepId: "c1", result: "sent", reason: "gatekeeper", calls: [{ outcome: "gatekeeper", at: "2026-11-02T11:00:00.000Z", number: dialled, note: "Receptionist says Pat is in clinic until 3." }] }],
     });
     // The track after the phone track starts one calendar day after the call: Tuesday 00:00 London.
     await h.advanceTo(MONDAY_9 + 2 * DAY);
@@ -497,6 +499,125 @@ describe("a user action posted twice is logged once (verifier B3 on a1399ce)", (
     const reused = await log(b?.taskId ?? "", { requestId: "same", outcome: "no_answer", numberId: (await task(b?.taskId ?? "")).numbers[0]?.detailId });
     expect(reused).toMatchObject({ status: 409, body: { error: { message: "This request id was already used for another call: send a new one." } } });
     expect((await task(b?.taskId ?? "")).open).toBe(true);
+  });
+});
+
+describe("council on 7902093", () => {
+  test("the call the user is on keeps the focus while it is listed: a later-today call opening with an older due time does not take it; the outcome's answer names the next focus", async () => {
+    const { h, campaign, task, log } = await world();
+    h.clock = Date.parse("2026-11-02T08:00:00Z");
+    // Nia's calling hours open at 13:00; her call is due at 08:00, so it is the oldest due.
+    await campaign("Afternoons", definition([track("p1", "call", [call("c1")], { kind: "entry" }, [1, 2, 3, 4, 5].map((day) => ({ day, start: 13, end: 17 })))], { emailPool: [] }), [NIA]);
+    h.clock = MONDAY_9;
+    await campaign("Mornings", definition([track("p1", "call", [call("c1")], { kind: "entry" }, WEEKDAYS_9_TO_17)], { emailPool: [] }), [PAT]);
+    await h.advanceTo(MONDAY_9 + 30 * MIN);
+    const calls = async (focus: string | null) => (await h.request<CallsView>("GET", `/api/calls${focus ? `?focus=${focus}` : ""}`)).body;
+    const morning = await calls(null);
+    const pat = morning.focusTaskId ?? "";
+    expect(morning.readyNow.map((x) => x.person?.name)).toEqual(["Pat Oneil"]);
+    expect(morning.laterToday.map((x) => x.person?.name)).toEqual(["Nia Cole"]);
+
+    await h.advanceTo(Date.parse("2026-11-02T13:05:00Z"));
+    const afternoon = await calls(pat);
+    expect(afternoon.readyNow.map((x) => x.person?.name)).toEqual(["Nia Cole", "Pat Oneil"]);
+    expect(afternoon.focusTaskId).toBe(pat);
+    // A screen that names no call starts at the first one ready.
+    expect((await calls(null)).focusTaskId).toBe(afternoon.readyNow[0]?.taskId);
+
+    const answer = await log(pat, { outcome: "no_answer", numberId: (await task(pat)).numbers[0]?.detailId });
+    expect(answer.status).toBe(200);
+    expect(answer.body).toMatchObject({ task: { taskId: pat, open: false }, nextFocusTaskId: afternoon.readyNow[0]?.taskId });
+  });
+
+  test("a carried call counts against capacity only on a day it can be listed: a weekday call left on Friday leaves the weekend's room free", async () => {
+    const SAM = person({ person_id: "p3", business_id: "b1", full_name: "Sam Lee", email: "sam@harbour.example" });
+    const { h, campaign, calls } = await world({ capacity: 1, people: [PAT] });
+    const friday = Date.parse("2026-11-06T09:00:00Z");
+    h.clock = friday;
+    await campaign("Weekdays", definition([track("p1", "call", [call("c1")], { kind: "entry" }, WEEKDAYS_9_TO_17)], { emailPool: [] }));
+    await h.advanceTo(friday + H);
+    expect(await calls()).toMatchObject({ placedToday: 1, committed: 0 });
+    // Saturday: Pat's call cannot be listed, so it takes none of the day's room; Sam's every-day call is placed.
+    h.clock = Date.parse("2026-11-07T09:00:00Z");
+    await campaign("Every day", definition([track("p1", "call", [call("c1")], { kind: "entry" }, ALWAYS)], { emailPool: [] }), [SAM]);
+    await h.advanceTo(h.clock + H);
+    const saturday = await calls();
+    expect(saturday).toMatchObject({ placedToday: 1, committed: 0 });
+    expect(saturday.readyNow.map((x) => x.person?.name)).toEqual(["Sam Lee"]);
+    // Monday: Pat's call is listed again and counts first.
+    await h.advanceTo(Date.parse("2026-11-09T09:30:00Z"));
+    expect((await calls()).committed).toBeGreaterThanOrEqual(1);
+    expect((await calls()).readyNow.map((x) => x.person?.name)).toContain("Pat Oneil");
+  });
+
+  test("an outcome is accepted after the prospect's calling hours closed earlier that day, and refused on a day they never open", async () => {
+    const { h, campaign, calls, task, log } = await world({ people: [PAT] });
+    h.clock = MONDAY_9;
+    await campaign("Hours", definition([track("p1", "call", [call("c1")], { kind: "entry" }, WEEKDAYS_9_TO_17)], { emailPool: [] }));
+    await h.advanceTo(MONDAY_9 + H);
+    const id = (await calls()).focusTaskId ?? "";
+    const numberId = (await task(id)).numbers[0]?.detailId;
+    // Monday 17:30: the hours have closed for the day. The call is in neither part of the queue, but it is on today's list.
+    await h.advanceTo(Date.parse("2026-11-02T17:30:00Z"));
+    expect(await calls()).toMatchObject({ readyNow: [], laterToday: [] });
+    expect((await task(id)).listed).toBe(true);
+    expect((await log(id, { outcome: "skip_for_now" })).status).toBe(200);
+    // Saturday: the hours never open, so the call is not listed and its outcome is refused.
+    await h.advanceTo(Date.parse("2026-11-07T12:00:00Z"));
+    expect((await log(id, { outcome: "no_answer", numberId })).status).toBe(409);
+  });
+
+  test("a skip for now is not a call: its note is never a colleague's last call note", async () => {
+    const { h, campaign, calls, task, log } = await world();
+    h.clock = MONDAY_9;
+    await campaign("Last notes", definition([track("p1", "call", [call("c1")], { kind: "entry" }, WEEKDAYS_9_TO_17)], { emailPool: [] }));
+    await h.advanceTo(MONDAY_9 + H);
+    const [first, second] = (await calls()).readyNow;
+    const firstView = await task(first?.taskId ?? "");
+    expect((await log(first?.taskId ?? "", { outcome: "voicemail", numberId: firstView.numbers[0]?.detailId, note: "Left a message." })).status).toBe(200);
+    expect((await log(second?.taskId ?? "", { outcome: "skip_for_now", note: "Skipping: in a meeting." })).status).toBe(200);
+    const fromSecond = (await task(second?.taskId ?? "")).colleagues.find((c) => c.name === firstView.person?.name);
+    expect(fromSecond?.lastCallNote).toMatchObject({ note: "Left a message.", outcome: "voicemail" });
+    const fromFirst = (await task(first?.taskId ?? "")).colleagues.find((c) => c.name !== firstView.person?.name);
+    expect(fromFirst?.lastCallNote).toBeNull();
+  });
+});
+
+describe("a call's history is what was dialled, not what may be dialled now (verifier re-check on 7902093)", () => {
+  test("a dialled number merged into a colleague's detail, then into the company main line, stays on both histories after each import", async () => {
+    const YARA = person({ person_id: "p6", business_id: "b1", full_name: "Yara Haddad", direct_phone: "+442079460155" });
+    const ZARA = person({ person_id: "p7", business_id: "b1", full_name: "Zara Malik", direct_phone: "020 7946 0155" });
+    // No country at first: Zara's national number is kept as its digits, and the company's line is not read.
+    const harbour = (country: string) => business({ business_id: "b1", business_name: "Harbour Lane Physio", country, phone_original: "011442079460155" });
+    const { h, calls, task, log } = await world();
+    const { campaign: c } = await h.createCampaign("History", { businesses: [harbour("")], people: [YARA, ZARA] });
+    await h.defineSequence(c.id, definition([track("p1", "call", [call("c1")], { kind: "entry" }, WEEKDAYS_9_TO_17)], { emailPool: [] }));
+    h.clock = MONDAY_9;
+    expect((await h.launch(c.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + H);
+    const zara = await task((await calls()).readyNow.find((x) => x.person?.name === "Zara Malik")?.taskId ?? "");
+    const dialled = zara.numbers.find((n) => n.value.replace(/\D/g, "").endsWith("79460155"));
+    expect(dialled).toBeDefined();
+    expect((await log(zara.taskId, { outcome: "no_answer", numberId: dialled?.detailId, note: "Rang out." })).status).toBe(200);
+    const histories = async () => {
+      const view = await task(zara.taskId);
+      const progress = await h.progress(zara.enrollmentId);
+      return [view.touches.find((t) => t.kind === "call"), progress.tracks[0]?.steps[0]?.calls[0]] as const;
+    };
+    const [before] = await histories();
+    expect(before).toMatchObject({ number: { value: "02079460155" } });
+
+    // Import 1: the company's country arrives; Zara's copy folds into Yara's direct line, a colleague's number.
+    await h.reimport(c.id, { businesses: [harbour("GB")], people: [YARA, ZARA] });
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    for (const recorded of await histories()) expect(recorded).toMatchObject({ number: { value: "+44 20 7946 0155", kind: "direct", owner: "person" } });
+    // The colleague's line is history only: Zara cannot log a new call on it.
+    expect((await task(zara.taskId)).numbers.map((n) => n.value)).not.toContain("+44 20 7946 0155");
+
+    // Import 2: the country is corrected to US, the line is read as international and becomes the company main line.
+    await h.reimport(c.id, { businesses: [harbour("US")], people: [YARA, ZARA] });
+    await h.advanceTo(MONDAY_9 + 3 * H);
+    for (const recorded of await histories()) expect(recorded).toMatchObject({ number: { value: "+44 20 7946 0155" }, note: "Rang out." });
   });
 });
 

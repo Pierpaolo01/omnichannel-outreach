@@ -8,7 +8,7 @@
 import { leadNow, localDayNumber, nextWindowOpen, span, startOfLocalDay, wallOfLead, windowOpen, type WindowRule } from "./clock.ts";
 import type { ReadyItem } from "./dispatch.ts";
 import { advanceTrack, end, evaluate, finishTrack, markDetailBad, progressOf, runs } from "./progress.ts";
-import type { CallAttempt, CallNumber, CallOutcome, CallTask, NoteDraft, SubjectState } from "./state.ts";
+import type { CallAttempt, CallNumber, CallOutcome, CallTask, NoteDraft, RecordedNumber, SubjectState } from "./state.ts";
 
 export const CALL_OUTCOMES: readonly CallOutcome[] = ["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "skip_for_now"];
 
@@ -20,14 +20,23 @@ export function callNumbers(state: SubjectState): CallNumber[] {
 }
 
 /**
- * The lead's number a stored or submitted detail id stands for, following merges (ADR 0001 "Merged
- * contact details", ticket 12a): a re-import may fold the dialled detail into another, and the id
- * then points at it. Every read of a detail id about calls goes through here. Null when the id
- * names none of the lead's numbers.
+ * The lead's dialable number a submitted detail id stands for, following merges (ADR 0001 "Merged
+ * contact details", ticket 12a): a screen read before a re-import folded the detail into another names
+ * the same number. Null when the id names none of the numbers the lead may be called on now. For a
+ * new outcome only: a past call's number is `recordedNumberOf`'s.
  */
 export function numberOf(state: SubjectState, detailId: string): CallNumber | null {
   const live = state.lead.resolved[detailId]?.liveId ?? detailId;
   return state.lead.phones.find((n) => n.id === live) ?? null;
+}
+
+/**
+ * The number a past call was logged on, as the detail it stands for now through every merge, whoever's
+ * detail that has become (verifier re-check on 7902093): history records what was dialled, not what may
+ * be dialled now. Null only for a call with no number (skip for now).
+ */
+export function recordedNumberOf(state: SubjectState, detailId: string | null): RecordedNumber | null {
+  return detailId === null ? null : (state.recordedNumbers[detailId] ?? null);
 }
 
 /** The numbers the user may dial now: not marked bad. */
@@ -54,7 +63,15 @@ function opensToday(state: SubjectState, trackId: string, now: number): number |
 /** Whether the prospect's calling hours open at some point on the current user day (2.3). */
 function hoursOpenOnUserDay(state: SubjectState, trackId: string): boolean {
   const { start, end } = userDay(state);
-  const opens = nextWindowOpen(callWindow(state, trackId), state.lead.zone, start);
+  return callableOnDay(callWindow(state, trackId), state.lead.zone, start, end);
+}
+
+/**
+ * Whether calling hours open at some point of a user day [start, end): the day a call can be listed
+ * on (2.3), and so the only day a carried call counts against capacity (4.4).
+ */
+export function callableOnDay(window: readonly WindowRule[], zone: string, start: number, end: number): boolean {
+  const opens = nextWindowOpen(window, zone, start);
   return opens !== null && opens < end;
 }
 
@@ -81,6 +98,37 @@ export function bucketOf(state: SubjectState, task: CallTask, now: number): { bu
   if (windowOpen(callWindow(state, task.trackId), state.lead.zone, now)) return { bucket: "ready_now", opensAt: null };
   const opens = opensToday(state, task.trackId, now);
   return opens === null ? null : { bucket: "later_today", opensAt: opens };
+}
+
+/** One ready-now call as the queue orders it. `skippedWall` is set only for a skip for now on the current user day. */
+export interface QueueEntry {
+  readonly taskId: string;
+  readonly subjectId: string;
+  readonly stepId: string;
+  readonly dueWall: number;
+  readonly skippedWall: number | null;
+}
+
+/**
+ * Ready now's order (4.4): calls not skipped for now today, oldest due first, then by lead and step;
+ * calls skipped for now today after them, in the order they were skipped.
+ */
+export function compareReadyNow(a: QueueEntry, b: QueueEntry): number {
+  if ((a.skippedWall === null) !== (b.skippedWall === null)) return a.skippedWall === null ? -1 : 1;
+  if (a.skippedWall !== null && b.skippedWall !== null && a.skippedWall !== b.skippedWall) return a.skippedWall - b.skippedWall;
+  if (a.dueWall !== b.dueWall) return a.dueWall - b.dueWall;
+  if (a.subjectId !== b.subjectId) return a.subjectId < b.subjectId ? -1 : 1;
+  return a.stepId < b.stepId ? -1 : a.stepId > b.stepId ? 1 : 0;
+}
+
+/**
+ * The focused call (spec "The next task opens only after a call outcome is logged"): the call the user
+ * is on, which they name, keeps the focus while it is listed, whatever opens or is placed meanwhile;
+ * otherwise the first call ready now.
+ */
+export function focusOf(readyNow: readonly string[], named: { readonly taskId: string; readonly listed: boolean } | null): string | null {
+  if (named?.listed) return named.taskId;
+  return readyNow[0] ?? null;
 }
 
 /** Why a task is on the list: rolled over from an earlier day, or due today (overdue callbacks arrive with ticket 15). */

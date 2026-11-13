@@ -103,6 +103,7 @@ export class EngineHarness {
       engine: { launch: (id) => this.engine.launch(id), logCallOutcome: (id, input) => this.engine.logCallOutcome(id, input) },
       emailProvider: "status" in this.provider ? (this.provider as Provider & EmailProviderSource) : null,
       smsProvider: this.smsProvider ? "test-simulator" : "none",
+      ...(options.rules ? { rules: options.rules } : {}),
     });
   }
 

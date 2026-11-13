@@ -1,7 +1,7 @@
 /** Read models for the HTTP interface, built from the engine's stored facts. */
 import { isLive, markable } from "../../domain/sequence/attempt.ts";
-import { isListed, numberOf as callNumberOf } from "../../domain/sequence/calls.ts";
-import { displayPhone } from "../../domain/phone.ts";
+import { isListed, recordedNumberOf } from "../../domain/sequence/calls.ts";
+import { recordedView } from "./call-views.ts";
 import { leadNow } from "../../domain/sequence/clock.ts";
 import { heldReason, stalledAccounts } from "../../domain/sequence/dispatch.ts";
 import { deriveStatus, liveTracksFor } from "../../domain/sequence/progress.ts";
@@ -53,10 +53,7 @@ export function progressView(s: SubjectState, now: number): EnrollmentProgress {
               result: result?.result ?? null,
               calls: s.callAttempts
                 .filter((c) => s.callTasks.some((t) => t.id === c.taskId && t.stepId === st.id))
-                .map((c) => {
-                  const n = c.numberDetailId === null ? null : callNumberOf(s, c.numberDetailId);
-                  return { outcome: c.outcome, at: new Date(c.atWall).toISOString(), number: n ? { detailId: n.id, kind: n.kind, owner: n.owner, value: displayPhone(n.key), bad: n.bad } : null, note: c.note };
-                }),
+                .map((c) => ({ outcome: c.outcome, at: new Date(c.atWall).toISOString(), number: recordedView(recordedNumberOf(s, c.numberDetailId)), note: c.note })),
               reason: result?.reason ?? null,
               at: iso(result?.atWall ?? null),
               sends: s.attempts

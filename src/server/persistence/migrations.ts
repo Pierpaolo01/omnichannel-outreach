@@ -483,7 +483,9 @@ export const MIGRATIONS: readonly Migration[] = [
         subject_id TEXT NOT NULL REFERENCES subjects(id),
         -- The client's key for the action that logged it: one action is logged once, whatever retries it.
         request_id TEXT NOT NULL UNIQUE,
-        outcome TEXT NOT NULL CHECK (outcome IN ('no_answer', 'voicemail', 'gatekeeper', 'wrong_number', 'interested', 'skip_for_now')),
+        -- Which outcomes a release accepts is the domain's and the HTTP interface's to say, not the schema's,
+        -- so tickets 15 and 16 add callbacks and declines without rebuilding this table (council on 7902093).
+        outcome TEXT NOT NULL,
         number_detail_id TEXT REFERENCES contact_details(id),
         note TEXT NOT NULL,
         at INTEGER NOT NULL,

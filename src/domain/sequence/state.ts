@@ -270,6 +270,19 @@ export interface CallNumber {
 }
 
 /**
+ * The number a past call was logged on, as the detail it stands for now (ADR 0001 merges): what was
+ * dialled, whoever's detail it has become. History only: whether it may be dialled is `CallNumber`'s.
+ */
+export interface RecordedNumber {
+  /** The live detail the recorded id stands for now. */
+  readonly id: string;
+  readonly kind: "direct" | "mobile" | "main_line";
+  /** The detail's owner now: a person (this lead or a colleague) or the company. */
+  readonly owner: "person" | "company";
+  readonly key: string;
+}
+
+/**
  * The user's call list on the current user day (ADR 0003 4.4), across every subject: read in the
  * transaction that places a task, so capacity is checked against current state.
  */
@@ -367,6 +380,8 @@ export interface SubjectState {
   /** The subject's call tasks, open and closed, and the outcomes logged on them. */
   readonly callTasks: readonly CallTask[];
   readonly callAttempts: readonly CallAttempt[];
+  /** The number each call was logged on, by the id recorded on it, resolved through merges to the live detail (history only). */
+  readonly recordedNumbers: Readonly<Record<string, RecordedNumber>>;
   /** Notes this change adds (with a call outcome); notes are never loaded back into decisions. */
   readonly newNotes: readonly NoteDraft[];
   readonly callDay: CallDay;

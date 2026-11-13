@@ -165,6 +165,6 @@ export interface EngineStore {
   subjectsWithOpenCallTasks(): Promise<string[]>;
   /** Notes on a person or a company, newest first. */
   notesOf(owner: "person" | "company", ownerId: string): Promise<StoredNote[]>;
-  /** The latest call outcome with a note on each of these subjects. */
+  /** The latest call made with a note on each of these subjects; a skip for now is not a call. */
   lastCallNotes(subjectIds: readonly string[]): Promise<CallNoteRecord[]>;
 }

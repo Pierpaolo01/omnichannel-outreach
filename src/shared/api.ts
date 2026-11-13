@@ -231,7 +231,7 @@ export interface StepProgressView {
   readonly at: string | null;
   readonly sends: readonly SendView[];
   /** A call step's logged outcomes, skip for now included (ticket 14); empty on email and SMS steps. */
-  readonly calls: readonly { readonly outcome: CallOutcomeApi; readonly at: string; readonly number: CallNumberView | null; readonly note: string }[];
+  readonly calls: readonly { readonly outcome: CallOutcomeApi; readonly at: string; readonly number: RecordedNumberView | null; readonly note: string }[];
 }
 
 export interface TrackProgressView {
@@ -409,16 +409,39 @@ export interface CallsView {
   readonly committed: number;
   /** Inside the prospect's calling hours: oldest due first; tasks skipped for now today go last, in the order skipped. */
   readonly readyNow: readonly CallQueueItem[];
-  /** Calling hours open later on the user's day: soonest first. */
+  /** Callable later on the user's day: the calling hours open later today. Soonest first. */
   readonly laterToday: readonly CallQueueItem[];
+  /**
+   * The focused call. Send the call the screen is on as `?focus=`: it stays the focus while it is
+   * listed, so the queue moves on only after an outcome. With none, the first call ready now.
+   */
   readonly focusTaskId: string | null;
+}
+
+/** POST /api/call-tasks/:id/outcome: the task after the outcome, and the call the focus queue moves on to. */
+export interface CallOutcomeAnswer {
+  readonly task: CallTaskView;
+  readonly nextFocusTaskId: string | null;
 }
 
 /** One earlier touch on the lead in this campaign. Replies show channel and date only. */
 export type TouchView =
   | { readonly kind: "email" | "sms"; readonly at: string; readonly stepId: string; readonly copy: { readonly subject: string; readonly body: string } | null }
   | { readonly kind: "reply"; readonly channel: "email" | "sms"; readonly at: string }
-  | { readonly kind: "call"; readonly at: string; readonly outcome: CallOutcomeApi; readonly number: CallNumberView | null; readonly note: string };
+  | { readonly kind: "call"; readonly at: string; readonly outcome: CallOutcomeApi; readonly number: RecordedNumberView | null; readonly note: string };
+
+/**
+ * The number a past call was logged on, as the detail it stands for now: what was dialled, kept through
+ * re-imports that merge it, even into a colleague's detail. It says nothing about whether it may be
+ * dialled now; the task's `numbers` say that.
+ */
+export interface RecordedNumberView {
+  readonly detailId: string;
+  readonly kind: "direct" | "mobile" | "main_line";
+  /** The detail's owner now: a person (the lead or a colleague) or the company. */
+  readonly owner: "person" | "company";
+  readonly value: string;
+}
 
 export interface NoteView {
   readonly id: string;

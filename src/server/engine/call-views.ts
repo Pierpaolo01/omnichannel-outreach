@@ -3,15 +3,19 @@
  * task with everything the call screen shows. Built from the engine's stored facts and the CRM, so
  * the screens render them without recomputing anything.
  */
-import { bucketOf, CALL_OUTCOMES, callNumbers, isListed, numberOf, reasonOf, type CallBucket } from "../../domain/sequence/calls.ts";
+import { bucketOf, CALL_OUTCOMES, callNumbers, isListed, reasonOf, recordedNumberOf, type CallBucket } from "../../domain/sequence/calls.ts";
 import { displayPhone } from "../../domain/phone.ts";
 import { localDayNumber } from "../../domain/sequence/clock.ts";
 import { liveTracks } from "../../domain/sequence/definition.ts";
 import { deriveStatus } from "../../domain/sequence/progress.ts";
-import type { CallNumber, CallTask, SubjectState } from "../../domain/sequence/state.ts";
-import type { CallColleagueView, CallNumberView, CallQueueItem, CallsView, CallTaskView, NoteView, TodayView, TouchView } from "../../shared/api.ts";
+import type { CallNumber, CallTask, RecordedNumber, SubjectState } from "../../domain/sequence/state.ts";
+import type { CallColleagueView, CallNumberView, CallQueueItem, RecordedNumberView, CallsView, CallTaskView, NoteView, TodayView, TouchView } from "../../shared/api.ts";
 import type { OutreachStore } from "../persistence/store.ts";
 import type { StoredNote } from "./engine-store.ts";
+import { DEFAULT_RULES, type Rules } from "./rules.ts";
+
+/** The decisions the call read models make: the queue order and the focus, from the engine's rules. */
+export type CallViewRules = Pick<Rules, "readyNowOrder" | "focusOf">;
 
 const iso = (t: number) => new Date(t).toISOString();
 
@@ -34,6 +38,8 @@ function trackLabel(s: SubjectState, trackId: string): string {
 
 /** Shown as the person and company pages show numbers: read from the key, so one number always looks the same. */
 const numberView = (n: CallNumber): CallNumberView => ({ detailId: n.id, kind: n.kind, owner: n.owner, value: displayPhone(n.key), bad: n.bad });
+/** A past call's number: what was dialled, with no claim about dialling it now. */
+export const recordedView = (n: RecordedNumber | null): RecordedNumberView | null => (n ? { detailId: n.id, kind: n.kind, owner: n.owner, value: displayPhone(n.key) } : null);
 const noteView = (n: StoredNote): NoteView => ({ id: n.id, body: n.body, at: iso(n.atWall) });
 
 interface Parties {
@@ -74,13 +80,16 @@ function queueItem(s: SubjectState, task: CallTask, parties: Parties, place: { b
  * The call list now (4.4): ready now, oldest due first, with tasks skipped for now today after the
  * rest in the order they were skipped; later today, soonest opening first.
  */
-async function callList(store: OutreachStore, now: number) {
+async function callList(store: OutreachStore, now: number, rules: CallViewRules = DEFAULT_RULES) {
   const day = await store.engine.callDay(now);
   const items: { item: CallQueueItem; task: CallTask; skippedToday: boolean; subjectId: string; opensAt: number }[] = [];
+  /** Every open task listed now, in a queue part or not (its hours closed for the day). */
+  const listed = new Set<string>();
   for (const id of await store.engine.subjectsWithOpenCallTasks()) {
     const s = await store.engine.subject(id, now);
     if (!s) continue;
     for (const task of s.callTasks) {
+      if (task.open && isListed(s, task)) listed.add(task.id);
       const place = task.open ? bucketOf(s, task, now) : null;
       if (!place) continue;
       const parties = await partiesOf(store, id);
@@ -91,19 +100,25 @@ async function callList(store: OutreachStore, now: number) {
   }
   const byDue = (a: (typeof items)[number], b: (typeof items)[number]) =>
     a.task.dueWall - b.task.dueWall || (a.subjectId < b.subjectId ? -1 : a.subjectId > b.subjectId ? 1 : 0) || (a.task.stepId < b.task.stepId ? -1 : 1);
+  const entry = (x: (typeof items)[number]) => ({ taskId: x.task.id, subjectId: x.subjectId, stepId: x.task.stepId, dueWall: x.task.dueWall, skippedWall: x.skippedToday ? x.task.skippedWall : null });
   const readyNow = items
     .filter((x) => x.item.bucket === "ready_now")
-    .sort((a, b) => Number(a.skippedToday) - Number(b.skippedToday) || (a.skippedToday && b.skippedToday ? (a.task.skippedWall ?? 0) - (b.task.skippedWall ?? 0) : 0) || byDue(a, b))
+    .sort((a, b) => rules.readyNowOrder(entry(a), entry(b)))
     .map((x) => x.item);
   const laterToday = items
     .filter((x) => x.item.bucket === "later_today")
     .sort((a, b) => a.opensAt - b.opensAt || byDue(a, b))
     .map((x) => x.item);
-  return { day, readyNow, laterToday };
+  return { day, readyNow, laterToday, listed };
 }
 
-export async function callsView(store: OutreachStore, now: number): Promise<CallsView> {
-  const { day, readyNow, laterToday } = await callList(store, now);
+/**
+ * The focus queue. `focus` is the call the user's screen is on: it keeps the focus while it is listed,
+ * so the queue moves on only after an outcome (or a skip for now) is logged on it.
+ */
+export async function callsView(store: OutreachStore, now: number, options: { readonly focus?: string | null; readonly rules?: CallViewRules } = {}): Promise<CallsView> {
+  const { day, readyNow, laterToday, listed } = await callList(store, now, options.rules);
+  const focus = options.focus ?? null;
   return {
     date: dateIn(day.userZone, now),
     userZone: day.userZone,
@@ -112,15 +127,18 @@ export async function callsView(store: OutreachStore, now: number): Promise<Call
     committed: day.committed,
     readyNow,
     laterToday,
-    focusTaskId: readyNow[0]?.taskId ?? null,
+    focusTaskId: (options.rules ?? DEFAULT_RULES).focusOf(
+      readyNow.map((x) => x.taskId),
+      focus === null ? null : { taskId: focus, listed: listed.has(focus) },
+    ),
   };
 }
 
 /** How many calls Up next shows on Today. */
 const UP_NEXT = 5;
 
-export async function todayView(store: OutreachStore, now: number): Promise<TodayView> {
-  const { day, readyNow, laterToday } = await callList(store, now);
+export async function todayView(store: OutreachStore, now: number, rules?: CallViewRules): Promise<TodayView> {
+  const { day, readyNow, laterToday } = await callList(store, now, rules);
   return { date: dateIn(day.userZone, now), userZone: day.userZone, readyNow: readyNow.length, laterToday: laterToday.length, upNext: [...readyNow, ...laterToday].slice(0, UP_NEXT) };
 }
 
@@ -145,8 +163,7 @@ export async function callTaskView(store: OutreachStore, taskId: string, now: nu
   for (const r of s.replies) touches.push({ touch: { kind: "reply", channel: r.channel, at: iso(r.atWall) }, t: r.atWall });
   for (const c of s.callAttempts) {
     if (c.outcome === "skip_for_now") continue;
-    const number = c.numberDetailId === null ? null : numberOf(s, c.numberDetailId);
-    touches.push({ touch: { kind: "call", at: iso(c.atWall), outcome: c.outcome, number: number ? numberView(number) : null, note: c.note }, t: c.atWall });
+    touches.push({ touch: { kind: "call", at: iso(c.atWall), outcome: c.outcome, number: recordedView(recordedNumberOf(s, c.numberDetailId)), note: c.note }, t: c.atWall });
   }
   touches.sort((a, b) => a.t - b.t);
 
