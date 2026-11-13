@@ -63,26 +63,31 @@ export class Refresher<T extends Timed> {
 
   /** Reads now; the next read is then scheduled from the answer, or from the backoff after a failure. */
   async now(): Promise<void> {
-    if (this.stopped) return;
+    if (this.halted()) return;
     let value: T;
     try {
       value = await this.deps.read();
     } catch (error) {
-      if (this.stopped) return;
+      if (this.halted()) return;
       this.failures++;
       this.deps.onFailure(error, this.freshness());
       this.schedule(REFRESH_RETRY_MS[Math.min(this.failures - 1, REFRESH_RETRY_MS.length - 1)] ?? 60_000);
       return;
     }
-    if (this.stopped) return;
+    if (this.halted()) return;
     this.failures = 0;
     this.lastReadAt = value.asOf;
     await this.deps.onRead(value);
-    if (this.stopped) return;
+    if (this.halted()) return;
     if (value.nextChangeAt === null) {
       this.cancel?.();
       this.cancel = null;
     } else this.schedule(Math.max(0, Date.parse(value.nextChangeAt) - Date.parse(value.asOf)));
+  }
+
+  /** Read through a method: `stop` may run while a read is awaited. */
+  private halted(): boolean {
+    return this.stopped;
   }
 
   private schedule(ms: number): void {
