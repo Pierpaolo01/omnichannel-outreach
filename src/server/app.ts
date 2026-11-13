@@ -9,11 +9,11 @@ import { CAMPAIGN_NAME_MAX } from "../shared/limits.ts";
 import { checkApiRequest } from "./guard.ts";
 import type { OutreachStore } from "./persistence/store.ts";
 import { launchCheck } from "../domain/sequence/blockers.ts";
-import { definitionProblems, emptyDefinition, type CampaignDefinition } from "../domain/sequence/definition.ts";
+import { definitionProblems, emptyDefinition, liveTracks, type CampaignDefinition } from "../domain/sequence/definition.ts";
 import { Engine } from "./engine/engine.ts";
 import { UnconnectedEmailPort } from "./engine/ports.ts";
 import { accountView, needsAttention, progressView } from "./engine/views.ts";
-import type { SequenceView } from "../shared/api.ts";
+import type { CampaignDetail, CampaignListItem, CampaignSequenceSummary, SequenceView } from "../shared/api.ts";
 import { beforeLaunchView, copyPreview } from "./before-launch.ts";
 import { activityOf } from "./activity.ts";
 
@@ -160,7 +160,20 @@ export function createApp({ store, now, newId, engine: givenEngine }: AppDepende
     return c.json({ campaign: await store.campaign(record.campaignId), import: record }, 201);
   };
 
-  app.get("/campaigns", async (c) => c.json({ campaigns: await store.listCampaigns() }));
+  /** Whether the campaign has launched and its live main-sequence tracks' channels (ticket 12c). */
+  const sequenceSummary = async (campaignId: string): Promise<CampaignSequenceSummary> => {
+    const row = await store.engine.campaign(campaignId);
+    return {
+      launchedAt: row?.launchedAt == null ? null : new Date(row.launchedAt).toISOString(),
+      tracks: row?.definition ? liveTracks(row.definition, "main").map((t) => t.channel) : [],
+    };
+  };
+
+  app.get("/campaigns", async (c) => {
+    const campaigns: CampaignListItem[] = [];
+    for (const item of await store.listCampaigns()) campaigns.push({ ...item, sequence: await sequenceSummary(item.id) });
+    return c.json({ campaigns });
+  });
 
   app.post("/campaigns", withinImportLimit, async (c) => {
     const parsed = newCampaignBody.safeParse(await readJson(c));
@@ -177,7 +190,8 @@ export function createApp({ store, now, newId, engine: givenEngine }: AppDepende
   app.get("/campaigns/:id", async (c) => {
     const campaign = await store.campaign(c.req.param("id"));
     if (!campaign) return notFound(c, "campaign");
-    return c.json({ campaign, imports: await store.listImports(campaign.id) });
+    const leadCount = (await store.listCampaigns()).find((item) => item.id === campaign.id)?.leadCount ?? 0;
+    return c.json<CampaignDetail>({ campaign, imports: await store.listImports(campaign.id), leadCount, sequence: await sequenceSummary(campaign.id) });
   });
 
   app.get("/campaigns/:id/imports", async (c) => {

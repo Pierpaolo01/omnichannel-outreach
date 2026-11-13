@@ -20,13 +20,28 @@ export interface Campaign {
   readonly createdAt: string;
 }
 
+/** Whether a campaign has launched, and the channels of its live main-sequence tracks, in order. */
+export interface CampaignSequenceSummary {
+  readonly launchedAt: string | null;
+  readonly tracks: readonly ("email" | "sms" | "call")[];
+}
+
 export interface CampaignListItem extends Campaign {
   readonly leadCount: number;
+  readonly sequence: CampaignSequenceSummary;
   readonly lastImport: {
     readonly id: string;
     readonly importedAt: string;
     readonly counts: Readonly<Record<LeadOutcome, number>>;
   } | null;
+}
+
+/** GET /api/campaigns/:id */
+export interface CampaignDetail {
+  readonly campaign: Campaign;
+  readonly imports: readonly ImportRecord[];
+  readonly leadCount: number;
+  readonly sequence: CampaignSequenceSummary;
 }
 
 export interface ImportFileNames {
@@ -299,6 +314,12 @@ export interface PreviewLead {
   readonly company: string;
   /** The address the email track would send to: the lead's own email, or a company lead's shared inbox. */
   readonly email: string | null;
+  /** A good mobile of the decision maker's own; company leads are never texted. */
+  readonly mobile: boolean;
+  /** A good phone number to call: their own, or the company's main line. */
+  readonly phone: boolean;
+  /** Merge fields the live copy uses that this lead has no value for. */
+  readonly lacks: readonly string[];
 }
 
 /** GET /api/campaigns/:id/before-launch */

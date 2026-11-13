@@ -97,7 +97,7 @@ class SqliteStore implements OutreachStore {
     return row ? toCampaign(row) : null;
   }
 
-  async listCampaigns(): Promise<CampaignListItem[]> {
+  async listCampaigns(): Promise<Omit<CampaignListItem, "sequence">[]> {
     return this.db
       .prepare(
         `SELECT c.*, (SELECT COUNT(*) FROM enrollments e WHERE e.campaign_id = c.id) AS lead_count

@@ -3,7 +3,7 @@ import { EngineHarness } from "../../test/support/engine-harness.ts";
 import { business, person } from "../../test/support/export-builder.ts";
 import type { FakeAccount } from "../../test/support/fake-email-port.ts";
 import type { CampaignDefinition, StepDefinition } from "../domain/sequence/definition.ts";
-import type { ApiError, BeforeLaunchView, CopyPreview } from "../shared/api.ts";
+import type { ApiError, BeforeLaunchView, CampaignDetail, CampaignListItem, CopyPreview } from "../shared/api.ts";
 
 /**
  * The Before launch tab's read models (ticket 12c), through the real HTTP app and store with the
@@ -71,6 +71,12 @@ describe("Before launch: the leads, channel coverage and missing merge fields", 
       ]),
     );
     const view = await beforeLaunch(h, id);
+    // Each lead says which fields the copy uses that it lacks, and which channels it has.
+    expect(view.leads.map((l) => [l.name, l.lacks, l.mobile, l.phone])).toEqual([
+      ["Northgate Dental", ["first_name", "title"], false, false],
+      ["Pat Oneil", [], true, true],
+      ["Sam Lee", [], false, true],
+    ]);
     expect(view.mergeFields).toEqual([
       { field: "company", leadsMissing: 0, companyLeadsMissing: 0, fallbacks: [], someUseWithoutFallback: true },
       { field: "first_name", leadsMissing: 1, companyLeadsMissing: 1, fallbacks: ["there"], someUseWithoutFallback: true },
@@ -197,5 +203,19 @@ describe("Before launch: projected daily load per sender inbox", () => {
     await h.defineSequence(id, emailTrack([step("s1", { subject: "Hi", threading: "new_subject" })]));
     expect((await h.launch(id)).status).toBe(200);
     expect((await beforeLaunch(h, id)).load).toBeNull();
+  });
+});
+
+describe("the campaign list and page say whether a campaign has launched and what its sequence holds", () => {
+  test("not launched with no sequence, then an email track, then launched", async () => {
+    const { h, id } = await campaign();
+    const row = async () => (await h.request<{ campaigns: CampaignListItem[] }>("GET", "/api/campaigns")).body.campaigns.find((c) => c.id === id)!;
+    expect((await row()).sequence).toEqual({ launchedAt: null, tracks: [] });
+    await h.defineSequence(id, emailTrack([step("s1", { subject: "Hi", threading: "new_subject" })]));
+    expect((await row()).sequence).toEqual({ launchedAt: null, tracks: ["email"] });
+    await h.launch(id);
+    expect((await row()).sequence.launchedAt).toBe(new Date(MONDAY_8).toISOString());
+    const detail = await h.request<CampaignDetail>("GET", `/api/campaigns/${id}`);
+    expect(detail.body).toMatchObject({ campaign: { id }, leadCount: 3, sequence: { tracks: ["email"] } });
   });
 });

@@ -24,7 +24,8 @@ interface CampaignLead {
 }
 
 /** Every enrollment of the campaign that has not ended, in lead-search order (by name). */
-async function campaignLeads(store: OutreachStore, campaignId: string, now: number): Promise<CampaignLead[]> {
+async function campaignLeads(store: OutreachStore, campaignId: string, definition: CampaignDefinition, now: number): Promise<CampaignLead[]> {
+  const fields = usedFields(definition);
   const { rows } = await store.searchLeads({ text: "", campaignId, companyId: null, status: null, limit: Number.MAX_SAFE_INTEGER });
   const out: CampaignLead[] = [];
   for (const row of rows) {
@@ -33,27 +34,28 @@ async function campaignLeads(store: OutreachStore, campaignId: string, now: numb
     const state = await store.engine.subject(enrollment.id, now);
     if (!state || state.subject.ended !== null) continue;
     const record = row.kind === "person" ? await store.person(row.id) : await store.company(row.id);
-    const email = goodEmail(state.lead.details);
-    out.push({ lead: previewLead(row, enrollment.id, email?.value ?? null), state, details: record?.contactDetails ?? [] });
+    const details = record?.contactDetails ?? [];
+    const channels = {
+      email: goodEmail(state.lead.details)?.value ?? null,
+      // A decision maker's own mobile; company leads are never texted on a company line.
+      mobile: row.kind === "person" && good(details, (d) => d.owner === "person" && d.phoneKind === "mobile"),
+      // Calls may use the company's main line for any lead.
+      phone: good(details, (d) => d.channel === "phone"),
+      lacks: [...fields.keys()].filter((f) => !state.lead.mergeData[f]?.trim()),
+    };
+    out.push({ lead: previewLead(row, enrollment.id, channels), state, details });
   }
   return out;
 }
 
-function previewLead(row: LeadRow, enrollmentId: string, email: string | null): PreviewLead {
+function previewLead(row: LeadRow, enrollmentId: string, channels: Pick<PreviewLead, "email" | "mobile" | "phone" | "lacks">): PreviewLead {
   return row.kind === "person"
-    ? { id: enrollmentId, kind: "person", recordId: row.id, name: row.name, title: row.title, company: row.company.name, email }
-    : { id: enrollmentId, kind: "company", recordId: row.id, name: row.name, title: "", company: row.name, email };
+    ? { id: enrollmentId, kind: "person", recordId: row.id, name: row.name, title: row.title, company: row.company.name, ...channels }
+    : { id: enrollmentId, kind: "company", recordId: row.id, name: row.name, title: "", company: row.name, ...channels };
 }
 
-const good = (details: readonly ContactDetailView[], test: (d: ContactDetailView) => boolean) => details.some((d) => !d.bad && test(d));
-
-/** The live email and SMS steps of the main sequence and the win-back branch, in track order. */
-const copySteps = (def: CampaignDefinition) =>
-  [...liveTracks(def, "main"), ...liveTracks(def, "win_back")].filter((t) => t.channel !== "call").flatMap((track) => liveSteps(track).map((step) => ({ track, step })));
-
-export async function beforeLaunchView(store: OutreachStore, campaignId: string, definition: CampaignDefinition, launched: boolean, now: number): Promise<BeforeLaunchView> {
-  const leads = await campaignLeads(store, campaignId, now);
-
+/** Each merge field the live copy uses, sorted, with its fallbacks and whether some use has none. */
+function usedFields(definition: CampaignDefinition): Map<string, { fallbacks: Set<string>; without: boolean }> {
   const uses = new Map<string, { fallbacks: Set<string>; without: boolean }>();
   for (const { step } of copySteps(definition)) {
     for (const use of [...mergeUses(step.subject), ...mergeUses(step.body)]) {
@@ -63,11 +65,19 @@ export async function beforeLaunchView(store: OutreachStore, campaignId: string,
       uses.set(use.field, entry);
     }
   }
-  const lacks = (l: CampaignLead, field: string) => !l.state.lead.mergeData[field]?.trim();
-  const mergeFields = [...uses.entries()]
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([field, use]) => {
-      const missing = leads.filter((l) => lacks(l, field));
+  return new Map([...uses.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+}
+
+const good = (details: readonly ContactDetailView[], test: (d: ContactDetailView) => boolean) => details.some((d) => !d.bad && test(d));
+
+/** The live email and SMS steps of the main sequence and the win-back branch, in track order. */
+const copySteps = (def: CampaignDefinition) =>
+  [...liveTracks(def, "main"), ...liveTracks(def, "win_back")].filter((t) => t.channel !== "call").flatMap((track) => liveSteps(track).map((step) => ({ track, step })));
+
+export async function beforeLaunchView(store: OutreachStore, campaignId: string, definition: CampaignDefinition, launched: boolean, now: number): Promise<BeforeLaunchView> {
+  const leads = await campaignLeads(store, campaignId, definition, now);
+  const mergeFields = [...usedFields(definition).entries()].map(([field, use]) => {
+      const missing = leads.filter((l) => l.lead.lacks.includes(field));
       return {
         field,
         leadsMissing: missing.length,
@@ -83,10 +93,8 @@ export async function beforeLaunchView(store: OutreachStore, campaignId: string,
     coverage: {
       leads: leads.length,
       email: leads.filter((l) => l.lead.email !== null).length,
-      // A decision maker's own mobile; company leads are never texted on a company line.
-      mobile: leads.filter((l) => l.lead.kind === "person" && good(l.details, (d) => d.owner === "person" && d.phoneKind === "mobile")).length,
-      // Calls may use the company's main line for any lead.
-      phone: leads.filter((l) => good(l.details, (d) => d.channel === "phone")).length,
+      mobile: leads.filter((l) => l.lead.mobile).length,
+      phone: leads.filter((l) => l.lead.phone).length,
     },
     mergeFields,
     load: launched ? null : await loadProjection(store, definition, leads, now),
@@ -129,7 +137,7 @@ async function loadProjection(store: OutreachStore, definition: CampaignDefiniti
 export async function copyPreview(store: OutreachStore, campaignId: string, enrollmentId: string, definition: CampaignDefinition, now: number): Promise<CopyPreview | null> {
   const state = await store.engine.subject(enrollmentId, now);
   if (!state || state.subject.campaignId !== campaignId) return null;
-  const lead = (await campaignLeads(store, campaignId, now)).find((l) => l.lead.id === enrollmentId)?.lead;
+  const lead = (await campaignLeads(store, campaignId, definition, now)).find((l) => l.lead.id === enrollmentId)?.lead;
   if (!lead) return null;
   const data = state.lead.mergeData;
   const steps: CopyPreview["steps"][number][] = [];
