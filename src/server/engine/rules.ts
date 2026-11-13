@@ -15,6 +15,7 @@ import {
   readyItems,
   retryFailures,
 } from "../../domain/sequence/dispatch.ts";
+import { isListed, logCallOutcome, placeCall, readyCalls } from "../../domain/sequence/calls.ts";
 import { applyBadDestination, applyReply, applyToAttempt, applyToWork, enterMain, evaluate, replyMatches, smsReplyOwner } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
 
@@ -42,6 +43,15 @@ export interface Rules {
   readonly handOver: typeof handOver;
   readonly retryFailures: typeof retryFailures;
   readonly authorizeRetry: typeof authorizeRetry;
+  /** Due calls waiting to be placed on the user's list (ticket 14). */
+  readonly readyCalls: typeof readyCalls;
+  /** Ready calls are placed in this order (4.4: the priority classes of 4.3). */
+  readonly callOrder: typeof comparePriority;
+  /** Places one call within the day's capacity, or refuses. */
+  readonly placeCall: typeof placeCall;
+  /** The listing rule (2.3), which decides whether an outcome is accepted. */
+  readonly isListed: typeof isListed;
+  readonly logCallOutcome: typeof logCallOutcome;
   /** The version guard (2.5): a change computed from `computedFrom` applies only if nothing it read has changed. */
   readonly versionsMatch: (computedFrom: SubjectState, current: SubjectState) => boolean;
 }
@@ -66,6 +76,11 @@ export const DEFAULT_RULES: Rules = {
   handOver,
   retryFailures,
   authorizeRetry,
+  readyCalls,
+  callOrder: comparePriority,
+  placeCall,
+  isListed,
+  logCallOutcome,
   // Everything an evaluation reads: the subject's and campaign's versions cover its progress and the
   // definition; the lead's facts (contact details and their marks, zone, merge data) change without
   // bumping them (an import, a mark elsewhere), so they are compared as they were read.

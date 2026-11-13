@@ -1,6 +1,6 @@
 import type { DatabaseSync, SQLInputValue, SQLOutputValue, StatementSync } from "node:sqlite";
 import type { SenderAccountView } from "../../domain/sequence/blockers.ts";
-import { prospectZone, resetDayOf, type WindowRule } from "../../domain/sequence/clock.ts";
+import { isTimeZone, localDayNumber, prospectZone, resetDayOf, startOfLocalDay, type WindowRule } from "../../domain/sequence/clock.ts";
 import { defaultGap } from "../../domain/sequence/dispatch.ts";
 import type { MergeData } from "../../domain/sequence/copy.ts";
 import { emptyDefinition, poolOf, type CampaignDefinition } from "../../domain/sequence/definition.ts";
@@ -9,6 +9,11 @@ import type {
   AccountState,
   Attempt,
   AttemptState,
+  CallAttempt,
+  CallDay,
+  CallNumber,
+  CallOutcome,
+  CallTask,
   EndReason,
   FinishReason,
   LeadDetail,
@@ -22,12 +27,20 @@ import type {
   WorkSettlement,
 } from "../../domain/sequence/state.ts";
 import { isOutreachStatus } from "../../domain/outreach-status.ts";
-import type { CampaignEngineRow, EngineStore, LaunchOutcome, ReplyEvent, SenderAccountConfig } from "../engine/engine-store.ts";
+import type { CallNoteRecord, CallSettings, CampaignEngineRow, EngineStore, LaunchOutcome, ReplyEvent, SenderAccountConfig, StoredNote } from "../engine/engine-store.ts";
 import { liveDetailRowOf } from "./sqlite-store.ts";
 
 type Row = Record<string, SQLOutputValue>;
 
 const LIVE_STATES = "('claimed', 'handed', 'accepted')";
+
+/**
+ * The default daily call capacity until the user sets one: a factory default, configurable over
+ * HTTP (PUT /api/call-settings), not a product decision.
+ */
+export const DEFAULT_DAILY_CALL_CAPACITY = 50;
+/** The user's zone until they set one: the machine's (ADR 0003 3.4). */
+const machineZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 /** The engine's tables in the same SQLite database as the CRM (ADR 0003 1.3). */
 export class SqliteEngineStore implements EngineStore {
@@ -146,7 +159,7 @@ export class SqliteEngineStore implements EngineStore {
         `SELECT e.id, e.version || '/' || c.version || '/' || c.definition_version || '/' ||
            COALESCE((SELECT group_concat(d.id || ':' || d.bad, ',') FROM live_contact_details d
              WHERE (e.person_id IS NOT NULL AND d.owner_kind = 'person' AND d.owner_id = e.person_id)
-                OR (e.person_id IS NULL AND d.owner_kind = 'company' AND d.owner_id = e.company_id)), '') || '/' ||
+                OR (d.owner_kind = 'company' AND d.owner_id = e.company_id)), '') || '/' ||
            COALESCE((SELECT p.updated_at FROM people p WHERE p.id = e.person_id), '') || '/' ||
            (SELECT co.updated_at FROM companies co WHERE co.id = e.company_id) AS v
          FROM enrollments e JOIN campaigns c ON c.id = e.campaign_id
@@ -297,7 +310,75 @@ export class SqliteEngineStore implements EngineStore {
       .map((r) => ({ attemptId: strOrNull(r, "attempt_id"), what: str(r, "what"), atWall: num(r, "at_wall") }));
   }
 
+  async callSettings(): Promise<CallSettings> {
+    return this.callSettingsNow();
+  }
+
+  private callSettingsNow(): CallSettings {
+    const row = this.sql("SELECT value FROM engine_meta WHERE key = 'call_settings'").get();
+    // Written by setCallSettings from validated settings.
+    const stored = row ? (JSON.parse(str(row, "value")) as Partial<CallSettings>) : {};
+    const zone = stored.userZone && isTimeZone(stored.userZone) ? stored.userZone : machineZone();
+    return { dailyCapacity: stored.dailyCapacity ?? DEFAULT_DAILY_CALL_CAPACITY, userZone: zone };
+  }
+
+  async callDay(now: number): Promise<CallDay> {
+    return this.callDayAt(now);
+  }
+
+  async subjectParties(subjectId: string): Promise<{ personId: string | null; companyId: string; campaignId: string } | null> {
+    const e = this.sql("SELECT person_id, company_id, campaign_id FROM enrollments WHERE id = ?").get(subjectId);
+    return e ? { personId: strOrNull(e, "person_id"), companyId: str(e, "company_id"), campaignId: str(e, "campaign_id") } : null;
+  }
+
+  async setCallSettings(settings: CallSettings): Promise<void> {
+    this.run("INSERT INTO engine_meta (key, value) VALUES ('call_settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [JSON.stringify(settings)]);
+  }
+
+  async callTaskSubject(taskId: string): Promise<string | null> {
+    const row = this.sql("SELECT subject_id FROM call_tasks WHERE id = ?").get(taskId);
+    return row ? str(row, "subject_id") : null;
+  }
+
+  async subjectsWithOpenCallTasks(): Promise<string[]> {
+    return this.sql("SELECT DISTINCT subject_id FROM call_tasks WHERE open = 1 ORDER BY subject_id").all().map((r) => str(r, "subject_id"));
+  }
+
+  async notesOf(owner: "person" | "company", ownerId: string): Promise<StoredNote[]> {
+    return this.sql("SELECT * FROM notes WHERE owner_kind = ? AND owner_id = ? ORDER BY at_wall DESC, rowid DESC")
+      .all(owner, ownerId)
+      .map((r) => ({ id: str(r, "id"), owner, ownerId, body: str(r, "body"), atWall: num(r, "at_wall"), subjectId: strOrNull(r, "subject_id"), callAttemptId: strOrNull(r, "call_attempt_id") }));
+  }
+
+  async lastCallNotes(subjectIds: readonly string[]): Promise<CallNoteRecord[]> {
+    return subjectIds.flatMap((id) => {
+      const r = this.sql("SELECT * FROM call_attempts WHERE subject_id = ? AND note <> '' ORDER BY at_wall DESC, rowid DESC LIMIT 1").get(id);
+      return r ? [{ subjectId: id, outcome: str(r, "outcome"), note: str(r, "note"), atWall: num(r, "at_wall") }] : [];
+    });
+  }
+
   // -------------------------------------------------------------------------------------------
+
+  /**
+   * The user's call list on the user day of `now` (ADR 0003 4.4), across every subject: tasks placed
+   * today, and committed tasks, placed before today and open at its start for leads that had not
+   * ended by then. Committed tasks are always listed, so they count first against the capacity.
+   */
+  private callDayAt(now: number): CallDay {
+    const { dailyCapacity, userZone } = this.callSettingsNow();
+    const day = localDayNumber(now, userZone);
+    const start = startOfLocalDay(day, userZone);
+    const end = startOfLocalDay(day + 1, userZone);
+    const counts =
+      this.sql(
+        `SELECT
+           (SELECT COUNT(*) FROM call_tasks WHERE placed_wall >= :start AND placed_wall < :end) AS placed,
+           (SELECT COUNT(*) FROM call_tasks t JOIN enrollments e ON e.id = t.subject_id
+             WHERE t.placed_wall < :start AND (t.closed_wall IS NULL OR t.closed_wall >= :start)
+               AND (e.ended_wall IS NULL OR e.ended_wall >= :start)) AS committed`,
+      ).get({ start, end }) ?? {};
+    return { userZone, day, capacity: dailyCapacity, placedToday: num(counts, "placed"), committed: num(counts, "committed") };
+  }
 
   private accountState(id: string, now: number): AccountState | null {
     const a = this.sql("SELECT * FROM sender_accounts WHERE id = ?").get(id);
@@ -388,6 +469,23 @@ export class SqliteEngineStore implements EngineStore {
         channel: str(d, "channel") === "email" ? ("email" as const) : ("phone" as const),
         ownEmail: str(d, "channel") === "email" && num(d, "listed_shared") === 0,
         mobile: textable(d, owner.kind),
+        key: str(d, "key"),
+        value: str(d, "value"),
+        bad: num(d, "bad") === 1,
+        order: num(d, "row_order"),
+      }));
+
+    // Every number the user may dial for the lead: its own direct and mobile numbers, and the company main line (ADR 0001).
+    const phones: CallNumber[] = this.sql(
+      `SELECT * FROM live_contact_details WHERE channel = 'phone'
+         AND ((owner_kind = 'person' AND owner_id = ?) OR (owner_kind = 'company' AND owner_id = ? AND phone_kind = 'main_line'))
+       ORDER BY row_order`,
+    )
+      .all(personId ?? "", companyId)
+      .map((d) => ({
+        id: str(d, "id"),
+        kind: str(d, "owner_kind") === "company" ? ("main_line" as const) : strOrNull(d, "phone_kind") === "mobile" ? ("mobile" as const) : ("direct" as const),
+        owner: str(d, "owner_kind") === "company" ? ("company" as const) : ("person" as const),
         key: str(d, "key"),
         value: str(d, "value"),
         bad: num(d, "bad") === 1,
@@ -500,9 +598,16 @@ export class SqliteEngineStore implements EngineStore {
         details,
         resolved,
         mergeData: this.mergeDataOf(e),
+        phones,
       },
       markBad: [],
       accounts,
+      callTasks: this.sql("SELECT * FROM call_tasks WHERE subject_id = ? ORDER BY placed_wall, rowid").all(subjectId).map(toCallTask),
+      callAttempts: this.sql("SELECT * FROM call_attempts WHERE subject_id = ? ORDER BY at_wall, rowid")
+        .all(subjectId)
+        .map((r): CallAttempt => ({ id: str(r, "id"), taskId: str(r, "task_id"), outcome: str(r, "outcome") as CallOutcome, numberDetailId: strOrNull(r, "number_detail_id"), note: str(r, "note"), at: num(r, "at"), atWall: num(r, "at_wall") })),
+      newNotes: [],
+      callDay: this.callDayAt(now),
     };
   }
 
@@ -600,6 +705,36 @@ export class SqliteEngineStore implements EngineStore {
       this.run("INSERT INTO sms_bindings (sender_number, recipient_key, owner_subject, created_at) VALUES (?, ?, ?, ?)", [b.sender, b.recipient, id, now]);
     }
     if (base.smsBindings.some((b) => !next.smsBindings.some((x) => x.sender === b.sender && x.recipient === b.recipient))) throw new Error("an SMS binding is never removed by a subject's change");
+    for (const t of next.callTasks) {
+      const before = base.callTasks.find((b) => b.id === t.id);
+      if (same(before, t)) continue;
+      if (before && !before.open && t.open) throw new Error(`a closed call task never reopens (${t.id})`);
+      if (before && (before.dueAt !== t.dueAt || before.skipDeadline !== t.skipDeadline)) throw new Error(`a call task keeps its original due time and skip deadline (${t.id})`);
+      changed = true;
+      this.run(
+        `INSERT INTO call_tasks (id, subject_id, track_id, step_id, due_at, due_wall, due_zone, skip_deadline, list_day, placed_wall, kind, callback_at, open, closed_wall, skipped_wall)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET list_day = excluded.list_day, kind = excluded.kind, callback_at = excluded.callback_at,
+           open = excluded.open, closed_wall = excluded.closed_wall, skipped_wall = excluded.skipped_wall`,
+        [t.id, id, t.trackId, t.stepId, t.dueAt, t.dueWall, t.dueZone, t.skipDeadline, t.listDay, t.placedWall, t.kind, t.callbackAt, t.open ? 1 : 0, t.closedWall, t.skippedWall],
+      );
+    }
+    if (base.callTasks.some((b) => !next.callTasks.some((t) => t.id === b.id))) throw new Error("a call task is never deleted");
+    for (const a of next.callAttempts) {
+      if (base.callAttempts.some((b) => b.id === a.id)) continue;
+      changed = true;
+      this.run("INSERT INTO call_attempts (id, task_id, subject_id, outcome, number_detail_id, note, at, at_wall) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [a.id, a.taskId, id, a.outcome, a.numberDetailId, a.note, a.at, a.atWall]);
+    }
+    if (next.newNotes.length > 0) {
+      const e = this.sql("SELECT person_id, company_id FROM enrollments WHERE id = ?").get(id);
+      for (const n of next.newNotes) {
+        if (base.newNotes.some((b) => b.id === n.id)) continue;
+        changed = true;
+        const personId = e ? strOrNull(e, "person_id") : null;
+        const owner = n.owner === "person" && personId !== null ? { kind: "person", id: personId } : { kind: "company", id: e ? str(e, "company_id") : "" };
+        this.run("INSERT INTO notes (id, owner_kind, owner_id, body, at_wall, subject_id, call_attempt_id) VALUES (?, ?, ?, ?, ?, ?, ?)", [n.id, owner.kind, owner.id, n.body, n.atWall, id, n.callAttemptId]);
+      }
+    }
     for (const detailId of next.markBad) {
       if (base.markBad.includes(detailId)) continue;
       const live = liveDetailRowOf(this.db, detailId);
@@ -657,6 +792,26 @@ function parseDefinition(row: Row): CampaignDefinition {
  */
 function textable(d: Row, ownerKind: string): boolean {
   return ownerKind === "person" && str(d, "channel") === "phone" && strOrNull(d, "phone_kind") === "mobile" && str(d, "key").startsWith("+");
+}
+
+function toCallTask(r: Row): CallTask {
+  return {
+    id: str(r, "id"),
+    subjectId: str(r, "subject_id"),
+    trackId: str(r, "track_id"),
+    stepId: str(r, "step_id"),
+    dueAt: num(r, "due_at"),
+    dueWall: num(r, "due_wall"),
+    dueZone: str(r, "due_zone"),
+    skipDeadline: num(r, "skip_deadline"),
+    listDay: num(r, "list_day"),
+    placedWall: num(r, "placed_wall"),
+    kind: str(r, "kind") === "callback" ? "callback" : "call",
+    callbackAt: numOrNull(r, "callback_at"),
+    open: num(r, "open") === 1,
+    closedWall: numOrNull(r, "closed_wall"),
+    skippedWall: numOrNull(r, "skipped_wall"),
+  };
 }
 
 function toTrack(r: Row): TrackProgress {

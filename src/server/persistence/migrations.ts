@@ -452,6 +452,54 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX sms_bindings_by_recipient ON sms_bindings(recipient_key);
     `,
   },
+  {
+    // Ticket 14a. Pull request 41 (ticket 12c) has not merged; whichever merges second renumbers.
+    version: 10,
+    name: "call tasks, the outcomes logged on them, and person and company notes (ADR 0003 1.3; ticket 14)",
+    // One task per call step, never a second; it closes once, when its track finishes. Outcomes
+    // are kept for good. A note belongs to a person, or to a company and shows for everyone there.
+    sql: `
+      CREATE TABLE call_tasks (
+        id TEXT PRIMARY KEY,
+        subject_id TEXT NOT NULL REFERENCES subjects(id),
+        track_id TEXT NOT NULL,
+        step_id TEXT NOT NULL,
+        due_at INTEGER NOT NULL, due_wall INTEGER NOT NULL, due_zone TEXT NOT NULL,
+        skip_deadline INTEGER NOT NULL,
+        list_day INTEGER NOT NULL,
+        placed_wall INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('call', 'callback')),
+        callback_at INTEGER,
+        open INTEGER NOT NULL CHECK (open IN (0, 1)),
+        closed_wall INTEGER,
+        skipped_wall INTEGER,
+        CHECK ((open = 1) = (closed_wall IS NULL))
+      );
+      CREATE UNIQUE INDEX one_task_per_call_step ON call_tasks(subject_id, step_id);
+      CREATE INDEX call_tasks_open ON call_tasks(open, placed_wall);
+      CREATE TABLE call_attempts (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES call_tasks(id),
+        subject_id TEXT NOT NULL REFERENCES subjects(id),
+        outcome TEXT NOT NULL CHECK (outcome IN ('no_answer', 'voicemail', 'gatekeeper', 'wrong_number', 'interested', 'skip_for_now')),
+        number_detail_id TEXT REFERENCES contact_details(id),
+        note TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        at_wall INTEGER NOT NULL
+      );
+      CREATE INDEX call_attempts_by_subject ON call_attempts(subject_id, at_wall);
+      CREATE TABLE notes (
+        id TEXT PRIMARY KEY,
+        owner_kind TEXT NOT NULL CHECK (owner_kind IN ('person', 'company')),
+        owner_id TEXT NOT NULL,
+        body TEXT NOT NULL,
+        at_wall INTEGER NOT NULL,
+        subject_id TEXT REFERENCES subjects(id),
+        call_attempt_id TEXT REFERENCES call_attempts(id)
+      );
+      CREATE INDEX notes_by_owner ON notes(owner_kind, owner_id, at_wall);
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string): void {

@@ -48,7 +48,7 @@ describe("the sequence interface (tickets 12b and 13)", () => {
     const campaign = await api.createCampaign("Autumn", "Europe/London");
     const call = await put(api, campaign.id, { timezone: "Europe/London", emailPool: [], tracks: [track(), track({ id: "t2", channel: "call", steps: [] })] });
     expect(call.status).toBe(400);
-    expect(((await call.json()) as ApiError).error.message).toContain("Phone tracks arrive with a later release");
+    expect(((await call.json()) as ApiError).error.message).toContain("The phone track is one call with no follow-ups");
     const circle = await put(api, campaign.id, { timezone: "Europe/London", emailPool: [], tracks: [track({ start: { kind: "after", trackId: "t1", delayDays: 1 } })] });
     expect(((await circle.json()) as ApiError).error).toMatchObject({ code: "invalid_sequence" });
     const malformed = await put(api, campaign.id, { timezone: "Europe/London", tracks: "none" });

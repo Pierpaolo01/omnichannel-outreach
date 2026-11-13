@@ -99,7 +99,7 @@ export class EngineHarness {
       store: this.store,
       now: () => new Date(this.clock).toISOString(),
       newId: sequentialIds(),
-      engine: { launch: (id) => this.engine.launch(id) },
+      engine: { launch: (id) => this.engine.launch(id), logCallOutcome: (id, input) => this.engine.logCallOutcome(id, input) },
       emailProvider: "status" in this.provider ? (this.provider as Provider & EmailProviderSource) : null,
       smsProvider: this.smsProvider ? "test-simulator" : "none",
     });

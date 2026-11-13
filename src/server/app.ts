@@ -13,6 +13,7 @@ import { definitionProblems, emptyDefinition, type CampaignDefinition } from "..
 import { Engine } from "./engine/engine.ts";
 import { UnconnectedEmailPort, UnprovisionedSmsPort } from "./engine/ports.ts";
 import { accountView, needsAttention, progressView } from "./engine/views.ts";
+import { callsView, callTaskView, todayView } from "./engine/call-views.ts";
 import type { SequenceView } from "../shared/api.ts";
 import { registerEmailProviderRoutes, type EmailProviderSource } from "./instantly/routes.ts";
 
@@ -22,7 +23,7 @@ export interface AppDependencies {
   readonly now: () => string;
   readonly newId: () => string;
   /** The sequence engine. Without one, the app runs an engine with no connected email provider. */
-  readonly engine?: Pick<Engine, "launch">;
+  readonly engine?: Pick<Engine, "launch" | "logCallOutcome">;
   /** The email provider's own description, for GET /api/email-provider; absent when none is connected. */
   readonly emailProvider?: EmailProviderSource | null;
   /**
@@ -49,17 +50,31 @@ const trackBody = z.object({
   steps: z.array(stepBody).max(50),
   start: z.union([z.object({ kind: z.literal("entry") }), z.object({ kind: z.literal("after"), trackId: z.string(), delayDays: z.number() })]).default({ kind: "entry" }),
   removed: z.boolean().default(false),
+  declinedPath: z.enum(["stop", "continue", "win_back"]).optional(),
 });
 const definitionBody = z.object({
   timezone: z.string().trim().min(1),
   callSkipLimitDays: z.number().default(2),
   emailPool: z.array(z.string().min(1).max(200)).max(100),
   smsPool: z.array(z.string().min(1).max(200)).max(100).default([]),
+  callScript: z.string().max(20_000).default(""),
   tracks: z.array(trackBody).max(20),
 });
 
 /** The user's zone: the machine's, which a campaign's default zone starts from (ADR 0003 1.1). */
 const machineZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+const callSettingsBody = z.object({
+  dailyCapacity: z.number().int("The daily call capacity is a whole number.").positive("The daily call capacity is at least 1.").max(1_000),
+  userZone: z.string().trim().refine((z) => isTimeZone(z), "Use an IANA time zone such as Europe/London."),
+});
+// Not interested, callback and redial arrive with tickets 15 and 16; they are refused here until then.
+const outcomeBody = z.object({
+  outcome: z.enum(["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "skip_for_now"], { message: "Choose one of the outcomes this release offers: no answer, voicemail left, gatekeeper or not reached, wrong or dead number, interested, or skip for now." }),
+  numberId: z.string().min(1).max(200).nullish(),
+  note: z.string().max(10_000).default(""),
+  noteScope: z.enum(["person", "company"]).default("person"),
+});
 
 const SEARCH_LIMIT_DEFAULT = 100;
 const SEARCH_LIMIT_MAX = 500;
@@ -282,7 +297,8 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     if (!campaign) return notFound(c, "campaign");
     const body = definitionBody.safeParse(await readJson(c));
     if (!body.success) return invalid(c, body.error);
-    const definition: CampaignDefinition = body.data;
+    // A declined path is stored only when the canvas set one.
+    const definition: CampaignDefinition = { ...body.data, tracks: body.data.tracks.map(({ declinedPath, ...t }) => (declinedPath ? { ...t, declinedPath } : t)) };
     const previous = (await store.engine.campaign(campaign.id))?.definition ?? null;
     const problems = definitionProblems(definition, previous);
     if (problems.length > 0) return c.json<ApiError>({ error: { code: "invalid_sequence", message: problems.join(" ") } }, 400);
@@ -312,6 +328,37 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     const at = Date.parse(now());
     const state = await store.engine.subject(c.req.param("id"), at);
     return state ? c.json(progressView(state, at)) : notFound(c, "enrollment");
+  });
+
+  // -------------------------------------------------------------------------------------------
+  // Calls (ticket 14). The user dials on their own phone; nothing here dials.
+
+  app.get("/call-settings", async (c) => c.json(await store.engine.callSettings()));
+
+  app.put("/call-settings", async (c) => {
+    const body = callSettingsBody.safeParse(await readJson(c));
+    if (!body.success) return invalid(c, body.error);
+    await store.engine.setCallSettings(body.data);
+    return c.json(await store.engine.callSettings());
+  });
+
+  app.get("/today", async (c) => c.json(await todayView(store, Date.parse(now()))));
+
+  app.get("/calls", async (c) => c.json(await callsView(store, Date.parse(now()))));
+
+  app.get("/call-tasks/:id", async (c) => {
+    const view = await callTaskView(store, c.req.param("id"), Date.parse(now()));
+    return view ? c.json(view) : notFound(c, "call task");
+  });
+
+  app.post("/call-tasks/:id/outcome", async (c) => {
+    const body = outcomeBody.safeParse(await readJson(c));
+    if (!body.success) return invalid(c, body.error);
+    const id = c.req.param("id");
+    if ((await store.engine.callTaskSubject(id)) === null) return notFound(c, "call task");
+    const outcome = await engine.logCallOutcome(id, { outcome: body.data.outcome, numberId: body.data.numberId ?? null, note: body.data.note, noteScope: body.data.noteScope });
+    if (!outcome.ok) return c.json<ApiError>({ error: { code: "outcome_refused", message: outcome.reason } }, 409);
+    return c.json(await callTaskView(store, id, Date.parse(now())));
   });
 
   app.get("/needs-attention", async (c) => c.json(await needsAttention(store.engine, Date.parse(now()))));

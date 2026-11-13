@@ -200,6 +200,85 @@ export interface Reply {
   readonly providerRef: string;
 }
 
+/** What the user logged on a call task (ADR 0003 2.4 "Calls"; ticket 14 builds these, without redial, callback or not interested). */
+export type CallOutcome = "no_answer" | "voicemail" | "gatekeeper" | "wrong_number" | "interested" | "skip_for_now";
+
+/**
+ * One call step's task on the user's list (ADR 0003 1.3): one per step, never a second. `listDay`
+ * is the user-local day it is listed for (the day it was placed until a redial, ticket 15, moves it).
+ * It closes when its track finishes, for any reason, and never reopens.
+ */
+export interface CallTask {
+  readonly id: string;
+  readonly subjectId: string;
+  readonly trackId: string;
+  readonly stepId: string;
+  /** The call step's original due time, in lead time, and the wall instant and zone it was resolved to. */
+  readonly dueAt: number;
+  readonly dueWall: number;
+  readonly dueZone: string;
+  /** The call skip limit's deadline in lead time (3.5), stored for ticket 15, which builds its expiry. */
+  readonly skipDeadline: number;
+  /** User-local day numbers (days since 1970-01-01 in the user's zone). */
+  readonly listDay: number;
+  readonly placedWall: number;
+  readonly kind: "call" | "callback";
+  readonly callbackAt: number | null;
+  readonly open: boolean;
+  readonly closedWall: number | null;
+  /** "Skip for now": the task moved to the end of that day's queue at this instant. */
+  readonly skippedWall: number | null;
+}
+
+/** One logged outcome on a call task. Skip for now is recorded too, but is not a call made. */
+export interface CallAttempt {
+  readonly id: string;
+  readonly taskId: string;
+  readonly outcome: CallOutcome;
+  /** The number the user chose to dial; none for skip for now. */
+  readonly numberDetailId: string | null;
+  readonly note: string;
+  readonly at: number;
+  readonly atWall: number;
+}
+
+/** A note to store with an outcome: on the person, or shared with everyone at the company. */
+export interface NoteDraft {
+  readonly id: string;
+  readonly owner: "person" | "company";
+  readonly callAttemptId: string | null;
+  readonly body: string;
+  readonly atWall: number;
+}
+
+/** A number the user may dial for the lead (ADR 0001 "Usable channels"): their own, or the company main line. */
+export interface CallNumber {
+  readonly id: string;
+  readonly kind: "direct" | "mobile" | "main_line";
+  readonly owner: "person" | "company";
+  /** E.164 where it can be read, else its digits. */
+  readonly key: string;
+  readonly value: string;
+  readonly bad: boolean;
+  /** Later details are newer. */
+  readonly order: number;
+}
+
+/**
+ * The user's call list on the current user day (ADR 0003 4.4), across every subject: read in the
+ * transaction that places a task, so capacity is checked against current state.
+ */
+export interface CallDay {
+  readonly userZone: string;
+  /** The current user-local day number. */
+  readonly day: number;
+  readonly capacity: number;
+  /** Tasks placed today. */
+  readonly placedToday: number;
+  /** Tasks placed before today that were open at its start, for leads that had not ended by then. */
+  readonly committed: number;
+}
+
 /** A live contact detail of the lead, as engine decisions read it. */
 export interface LeadDetail {
   readonly id: string;
@@ -229,6 +308,8 @@ export interface LeadFacts {
    */
   readonly resolved: Readonly<Record<string, { readonly liveId: string; readonly bad: boolean; readonly owned: boolean }>>;
   readonly mergeData: MergeData;
+  /** Every number the user may dial for the lead, good or bad: its own, then the company main line (ticket 14). */
+  readonly phones: readonly CallNumber[];
 }
 
 export interface AccountState {
@@ -278,4 +359,10 @@ export interface SubjectState {
   readonly markBad: readonly string[];
   /** Accounts this subject's change reads or writes. */
   readonly accounts: Readonly<Record<string, AccountState>>;
+  /** The subject's call tasks, open and closed, and the outcomes logged on them. */
+  readonly callTasks: readonly CallTask[];
+  readonly callAttempts: readonly CallAttempt[];
+  /** Notes this change adds (with a call outcome); notes are never loaded back into decisions. */
+  readonly newNotes: readonly NoteDraft[];
+  readonly callDay: CallDay;
 }

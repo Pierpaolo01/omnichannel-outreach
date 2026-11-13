@@ -109,9 +109,14 @@ export function subjectState(fields: Partial<SubjectState> = {}): SubjectState {
       details: [{ id: "d-email", channel: "email", ownEmail: true, mobile: false, key: "pat@harbour.example", value: "pat@harbour.example", bad: false, order: 1 }],
       resolved: { "d-email": { liveId: "d-email", bad: false, owned: true } },
       mergeData: { first_name: "Pat", company: "Harbour Lane Physio" },
+      phones: [],
     },
     markBad: [],
     accounts: { "inbox-a": account("inbox-a"), "inbox-b": account("inbox-b") },
+    callTasks: [],
+    callAttempts: [],
+    newNotes: [],
+    callDay: { userZone: "Europe/London", day: Math.floor(MONDAY_9 / 86_400_000), capacity: 20, placedToday: 0, committed: 0 },
     ...fields,
   };
 }

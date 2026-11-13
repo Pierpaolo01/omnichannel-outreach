@@ -6,6 +6,7 @@
  */
 import { ENGINE_PARAMS, isLive, type AttemptEffect, type AttemptEvent, type CallAnswer, type WorkEvent } from "../../domain/sequence/attempt.ts";
 import { launchCheck, type LaunchCheck } from "../../domain/sequence/blockers.ts";
+import type { OutcomeInput } from "../../domain/sequence/calls.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
@@ -134,8 +135,10 @@ export class Engine {
    */
   private readonly settled = new Map<string, { key: string; until: number }>();
   private readonly nothingReady = new Map<string, { key: string; until: number }>();
+  /** Subjects with no due call to place, by version key and call settings, until a wall instant. */
+  private readonly noCallsReady = new Map<string, { key: string; until: number }>();
   /** Per subject and version: the wall instants its pending steps fall due, with their windows. */
-  private readonly wakeCache = new Map<string, { version: string; due: { wall: number; window: ReturnType<typeof windowOf>; zone: string }[] }>();
+  private readonly wakeCache = new Map<string, { version: string; due: { wall: number; window: ReturnType<typeof windowOf> | null; zone: string }[] }>();
 
   constructor(deps: EngineDependencies) {
     this.store = deps.store;
@@ -214,6 +217,7 @@ export class Engine {
       changed = (await this.correlate(false, true)) || changed;
       changed = (await this.withdraw()) || changed;
       changed = (await this.evaluateAll()) || changed;
+      changed = (await this.placeCallsAll()) || changed;
       changed = (await this.claimAll()) || changed;
       changed = (await this.handOverAll()) || changed;
       if (!changed) return;
@@ -231,10 +235,13 @@ export class Engine {
         if (!state) continue;
         const s = state;
         // A running subject's lead time advances with the wall, so a deadline's wall instant is fixed.
+        const isCall = (trackId: string) => s.campaign.definition.tracks.find((t) => t.id === trackId)?.channel === "call";
         const due = s.tracks
           .filter((p) => p.finishedAt === null && p.nextStepId !== null && p.dueAt !== null)
           .filter((p) => !s.attempts.some((a) => a.stepId === p.nextStepId && isLive(a)))
-          .map((p) => ({ wall: now + ((p.dueAt ?? 0) - leadNow(s.subject.clock, now)), window: windowOf(s, p.trackId), zone: s.lead.zone }));
+          .filter((p) => !s.callTasks.some((t) => t.stepId === p.nextStepId))
+          // A due call not yet placed waits for the next user day: its calling hours or the day's capacity (4.4).
+          .map((p) => ({ wall: now + ((p.dueAt ?? 0) - leadNow(s.subject.clock, now)), window: isCall(p.trackId) ? null : windowOf(s, p.trackId), zone: s.lead.zone }));
         // A track waiting to start after another (ticket 13) starts at its resolved instant; it has no window of its own to wait for then.
         for (const p of s.tracks) if (p.startedAt === null && p.startAt !== null) due.push({ wall: now + (p.startAt - leadNow(s.subject.clock, now)), window: [], zone: s.lead.zone });
         cached = { version, due };
@@ -242,6 +249,7 @@ export class Engine {
       }
       for (const d of cached.due) {
         if (d.wall > now) times.push(d.wall);
+        else if (d.window === null) times.push(await this.nextUserDay(now));
         else {
           const opens = nextWindowOpen(d.window, d.zone, now);
           if (opens !== null && opens > now) times.push(opens);
@@ -625,6 +633,73 @@ export class Engine {
       changed = true;
     }
     return changed;
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Calls (ticket 14): due calls are placed on the user's list; the user dials and logs outcomes.
+
+  private async nextUserDay(now: number): Promise<number> {
+    const { userZone } = await this.store.callSettings();
+    return startOfLocalDay(localDayNumber(now, userZone) + 1, userZone);
+  }
+
+  /**
+   * Places due calls on today's list in priority order (4.4), each in its own transaction that
+   * re-checks the day's capacity against current state. A call that does not fit waits for the next
+   * user day and is never dropped.
+   */
+  private async placeCallsAll(): Promise<boolean> {
+    const now = this.now();
+    const settings = JSON.stringify(await this.store.callSettings());
+    const ready: { item: ReadyItem; snapshot: SubjectState }[] = [];
+    for (const [id, version] of await this.store.runningSubjectVersions()) {
+      const key = `${version}|${settings}`;
+      const known = this.noCallsReady.get(id);
+      if (known?.key === key && now < known.until) continue;
+      const snapshot = await this.store.subject(id, now);
+      if (!snapshot) continue;
+      const items = this.rules.readyCalls(snapshot, now);
+      if (items.length === 0) {
+        // Nothing to place until a call falls due, or the next user day (its hours may open then).
+        const lead = leadNow(snapshot.subject.clock, now);
+        const dues = snapshot.tracks.filter((p) => p.finishedAt === null && p.dueAt !== null && p.dueAt > lead).map((p) => now + ((p.dueAt ?? 0) - lead));
+        this.noCallsReady.set(id, { key, until: Math.min(await this.nextUserDay(now), ...dues) });
+      }
+      for (const item of items) ready.push({ item, snapshot });
+    }
+    ready.sort((a, b) => this.rules.callOrder(a.item, b.item));
+    let changed = false;
+    for (const { item } of ready) {
+      const taskId = this.newId();
+      const written = await this.store.update(item.subjectId, now, (s) => this.rules.placeCall(s, item, now, taskId));
+      changed = written !== null || changed;
+    }
+    return changed;
+  }
+
+  /**
+   * The user logs what happened on a call task (ADR 0003 2.4 "Calls"): accepted only while the task
+   * is listed, checked in the transaction that records it. The application never dials.
+   */
+  logCallOutcome(taskId: string, input: OutcomeInput): Promise<{ ok: true } | { ok: false; reason: string }> {
+    return this.ticks.run(async () => {
+      const subjectId = await this.store.callTaskSubject(taskId);
+      if (subjectId === null) return { ok: false as const, reason: "There is no such call task." };
+      const now = this.now();
+      const refused: { reason: string | null } = { reason: null };
+      const ids = { attempt: this.newId(), note: this.newId() };
+      await this.store.update(subjectId, now, (s) => {
+        const out = this.rules.logCallOutcome(s, taskId, input, now, ids, this.rules.isListed);
+        if (!out.ok) {
+          refused.reason = out.reason;
+          return null;
+        }
+        return out.state;
+      });
+      if (refused.reason !== null) return { ok: false as const, reason: refused.reason };
+      await this.runTick();
+      return { ok: true as const };
+    });
   }
 
   // -------------------------------------------------------------------------------------------
