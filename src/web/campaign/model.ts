@@ -22,9 +22,14 @@ export function newStep(first: boolean): StepDefinition {
 
 /** A new email track: weekdays from 09:00 to 17:00 in the lead's time, and an empty first email. */
 export function newEmailTrack(): TrackDefinition {
+  return newTrack("email");
+}
+
+/** A new track on `channel`, starting at launch: weekdays from 09:00 to 17:00 in the lead's time, and an empty first message. */
+export function newTrack(channel: "email" | "sms"): TrackDefinition {
   return {
     id: newId("track"),
-    channel: "email",
+    channel,
     branch: "main",
     window: [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 })),
     steps: [newStep(true)],

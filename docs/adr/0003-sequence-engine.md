@@ -1229,13 +1229,16 @@ Each returns either the new definition or a **refusal**, a plain sentence. A ref
 - starting a track after itself, or after a track that starts after it through its chain (a cycle): "SMS track starts after this one, so this one can't start after it: each would wait for the other.";
 - starting a track after a track that is removed, in the other branch, or not in the definition;
 - removing a track that another live track starts after: "Email track 2 starts after this one. Change how it starts first.";
-- a delay that is negative or not a whole number is not an operation: as with a step's wait, the field keeps what was typed, the draft is not saved, and the inspector says why (`draftProblems`).
+- a delay that is negative or not a whole number: "The delay is a whole number of days, 0 or more." The field keeps what was typed and says so; the draft keeps the last whole delay;
+- a delay on a track that starts at launch, which has none.
+
+The editor offers operations on live tracks only; an operation naming a track that is gone is refused ("That track is no longer in the sequence.").
 
 **Invariants** (asserted after every operation by the generated test):
 
 1. From a draft the validator accepts, every operation's result is a draft the validator accepts (`definitionProblems` is empty): the editor cannot produce what 7.1 refuses. This holds by construction rather than by recovery.
 2. A refusal leaves the draft identical, and says why in a non-empty sentence.
-3. Nothing is refused that the validator would accept: applying a refused operation naively makes `definitionProblems` non-empty.
+3. Of the operations the editor offers, nothing is refused that the validator would accept: applying a refused operation naively makes `definitionProblems` non-empty.
 4. An operation changes only what it names. Removing a track removes that track and nothing else; no other track's start rule is rewritten.
 5. An added track's id has never been used in the definition, live or removed.
 
