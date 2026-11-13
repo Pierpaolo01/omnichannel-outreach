@@ -5,7 +5,7 @@ import { useApi } from "../api.ts";
 import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
 import { campaignPath, longDate } from "../pages/CampaignPage.tsx";
-import { emailTrackOf, fieldLabel, liveSteps, STEP_NOUN, trackName } from "./model.ts";
+import { emailTrackOf, fieldLabel, STEP_NOUN, stepUsing, trackName } from "./model.ts";
 import { CANNOT_SEND, ConflictNotice } from "./SequenceTab.tsx";
 import type { SequenceEditor } from "./useSequence.ts";
 
@@ -138,7 +138,7 @@ function Blockers({ campaignId, editor }: { campaignId: string; editor: Sequence
   const { blockers, nothingToLaunch } = editor.view.launch;
   const track = emailTrackOf(editor.view.definition);
   const open = (stepId?: string) => navigate(`${campaignPath(campaignId)}${track ? `?track=${encodeURIComponent(track.id)}${stepId ? `&step=${encodeURIComponent(stepId)}` : ""}` : ""}`);
-  const firstUsing = (field: string) => track && liveSteps(track).find((s) => `${s.subject} ${s.body}`.includes(`{{${field}`))?.id;
+  const firstUsing = (field: string) => (track ? stepUsing(track, field)?.id : undefined);
   return (
     <section aria-labelledby="blocks-launch">
       <h3 id="blocks-launch" className="mb-2 text-[15px] font-semibold">

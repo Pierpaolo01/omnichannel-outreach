@@ -627,6 +627,16 @@ test.describe("review of pull request 41", () => {
     for (const route of held) if (route !== newest()) await route.abort().catch(() => undefined);
   });
 
+  test("a field written with spaces inside its braces keeps its Add fallback action, which opens the email that uses it (PR 41 review: BeforeLaunchTab.tsx)", async ({ page }) => {
+    const id = await campaign(track([{ ...COPY.first, body: "Hi {{ first_name }}, a note for {{company}}." }, COPY.second]));
+    await page.goto(`${r.url}/campaigns/${id}/before-launch`);
+    await expect(page.getByText("First name has no fallback")).toBeVisible();
+    await expect(page.getByText("It is used only in a track this editor can’t open yet.")).toHaveCount(0);
+    await page.getByRole("button", { name: "Add fallback" }).click();
+    await expect(page).toHaveURL(/step=s1/);
+    await expect(page.getByLabel("Fallback for first name")).toBeVisible();
+  });
+
   test("a second email track's blockers (defined through the API) are named as that email track's, never as an SMS track's (PR 41 review: BeforeLaunchTab.tsx)", async ({ page }) => {
     const id = await campaign(track([COPY.first, COPY.second]));
     const email = (await stored(id)).definition;

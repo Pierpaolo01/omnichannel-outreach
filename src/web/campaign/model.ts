@@ -1,5 +1,5 @@
 /** The campaign editor's draft helpers (ticket 12c). Pure: no React, no requests. */
-import { mergeUses } from "../../domain/sequence/copy.ts";
+import { mergeUses, rewriteMergeUses, type MergeUse } from "../../domain/sequence/copy.ts";
 import { ownSubject } from "../../domain/sequence/definition.ts";
 import type { CampaignDefinition, LaunchBlocker, StepDefinition, TrackDefinition, WindowRule } from "../../shared/api.ts";
 
@@ -64,23 +64,37 @@ export function trackSummary(track: TrackDefinition): string {
 /** "first_name" as the user reads it: "first name". */
 export const fieldLabel = (field: string): string => field.replace(/_/g, " ");
 
+/**
+ * A step's merge-field uses, read by the domain's own parser (`mergeUses`) from the same copy the
+ * domain renders and checks (`ownSubject` and the body), so the screen and launch blocker 2 agree
+ * on every spelling: spaces, fallbacks, case, subject (PR 41 review). Nothing in the editor matches
+ * a token by hand.
+ */
+export const usesOf = (step: StepDefinition): MergeUse[] => [...mergeUses(ownSubject(step)), ...mergeUses(step.body)];
+
 /** The fields a step's copy uses, in order of first use. */
-export const fieldsOf = (step: StepDefinition): string[] => [...new Set([...mergeUses(ownSubject(step)), ...mergeUses(step.body)].map((u) => u.field))];
+export const fieldsOf = (step: StepDefinition): string[] => [...new Set(usesOf(step).map((u) => u.field))];
 
 /** The fallback this step gives `field` (the first one written), or "" when none. */
 export function fallbackIn(step: StepDefinition, field: string): string {
-  return [...mergeUses(ownSubject(step)), ...mergeUses(step.body)].find((u) => u.field === field && u.fallback !== null)?.fallback ?? "";
+  return usesOf(step).find((u) => u.field === field && u.fallback !== null)?.fallback ?? "";
+}
+
+/** The step where `field` is fixed: the first using it with no fallback, else the first using it at all. */
+export function stepUsing(track: TrackDefinition, field: string): StepDefinition | undefined {
+  const steps = liveSteps(track);
+  return steps.find((s) => usesOf(s).some((u) => u.field === field && u.fallback === null)) ?? steps.find((s) => usesOf(s).some((u) => u.field === field));
 }
 
 /** Rewrites every use of `field` in `text` with the fallback, or without one when it is blank. */
 export function withFallback(text: string, field: string, fallback: string): string {
   const clean = fallback.replace(/[{}|]/g, "");
-  return text.replace(/\{\{\s*([^}|]*?)\s*(?:\|([^}]*))?\}\}/g, (all, name: string) => (name.trim() === field ? (clean ? `{{${field}|${clean}}}` : `{{${field}}}`) : all));
+  return rewriteMergeUses(text, (use) => (use.field === field ? (clean ? `{{${field}|${clean}}}` : `{{${field}}}`) : null));
 }
 
 /** The launch blockers that name this step: empty copy, or a field with no fallback it uses. */
 export function stepBlockers(step: StepDefinition, blockers: readonly LaunchBlocker[]): LaunchBlocker[] {
-  const uses = [...mergeUses(ownSubject(step)), ...mergeUses(step.body)];
+  const uses = usesOf(step);
   return blockers.filter((b) =>
     b.kind === "empty_copy" ? b.stepId === step.id : b.kind === "missing_merge_field" ? uses.some((u) => u.field === b.field && u.fallback === null) : false,
   );
