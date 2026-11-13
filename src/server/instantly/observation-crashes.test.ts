@@ -7,9 +7,10 @@ import { InstantlyEmailPort } from "./port.ts";
 
 /**
  * Generated runs of the adapter's poller with the process dying at points inside observation, an
- * engine that dies between receiving a batch and storing its checkpoint, and provider outages that
- * fail polls in the same process (council on `387a19b`, items 1 and 4; the verifier's follow-up;
- * review bot on `c942fd2`). Each seed draws a sequence of provider happenings and
+ * engine that dies between receiving a batch and storing its checkpoint, provider outages that fail
+ * polls in the same process, suspensions with no polls, and jumps of the app's clock forwards and
+ * backwards (council on `387a19b`, items 1 and 4; the verifier's follow-up; review bot on `c942fd2`
+ * and `c66a0c8`). Each seed draws a sequence of provider happenings and
  * polls; an independent record, kept by the test from what it told the fake to do, says which
  * replies and unsubscribes must reach the engine and which mail must never. Small pages make every
  * scan span several polls. Runs are bounded by a count of steps, not by time. Fictitious data.
@@ -39,9 +40,11 @@ const INBOX = "ada@sender.example";
 async function run(seed: number): Promise<{ missing: string[]; unexpected: string[]; violations: string[] }> {
   const rnd = random(seed);
   const pick = <T,>(xs: readonly T[]): T => xs[Math.floor(rnd() * xs.length)] as T;
+  // Provider time, and the app's clock, which may be skewed from it by a jump.
   let clock = T0;
-  const now = () => clock;
-  const fake = new FakeInstantly({ now, accounts: [{ email: INBOX, status: 1, daily_limit: 30 }] });
+  let skew = 0;
+  const now = () => clock + skew;
+  const fake = new FakeInstantly({ now: () => clock, accounts: [{ email: INBOX, status: 1, daily_limit: 30 }] });
   const store = openSqliteStore(":memory:");
   const client = new InstantlyClient({ apiKey: "test-key-not-real", fetch: fake.fetch, writes: true, now, timeoutMs: 10_000 });
   let crashAt: { point: string; after: number } | null = null;
@@ -75,7 +78,8 @@ async function run(seed: number): Promise<{ missing: string[]; unexpected: strin
   let stored: string | null = null;
   const applied = new Map<string, ProviderEvent>();
   const violations: string[] = [];
-  // The independent clock of observed time: gaps between two polls in a row that both succeeded in one process.
+  // The independent clock of observed time, on the app's clock: each gap between two polls in a row
+  // that both succeeded in one process, never less than nothing and never more than one minute.
   const created = new Map<string, number>();
   const observed = new Map<string, number>();
   let chainLast: number | null = null;
@@ -87,9 +91,9 @@ async function run(seed: number): Promise<{ missing: string[]; unexpected: strin
       const r = await port.observe(stored);
       if (chainLast !== null) {
         const last = chainLast;
-        for (const [id, at] of created) observed.set(id, (observed.get(id) ?? 0) + Math.max(0, clock - Math.max(last, at)));
+        for (const [id, at] of created) observed.set(id, (observed.get(id) ?? 0) + Math.min(MINUTE, Math.max(0, now() - Math.max(last, at))));
       }
-      chainLast = clock;
+      chainLast = now();
       const upTo = dieBeforeStoring ? Math.floor(rnd() * (r.events.length + 1)) : r.events.length;
       for (const e of r.events.slice(0, upTo)) {
         applied.set(e.id, e);
@@ -150,7 +154,7 @@ async function run(seed: number): Promise<{ missing: string[]; unexpected: strin
       // The fake answers the latest campaign email the lead received, which may be another campaign's.
       const foreign = (email.thread_id !== null && foreignThreads.has(email.thread_id)) || (email.campaign_id !== null && foreignCampaigns.has(email.campaign_id));
       (foreign ? mustNotReach : mustReach).add(`reply:${email.id}`);
-      created.set(`reply:${email.id}`, clock);
+      created.set(`reply:${email.id}`, now());
     } else if (action < 0.35) {
       for (let i = 0; i < 1 + Math.floor(rnd() * 4); i++) mustNotReach.add(`reply:${fake.receive({ from_address_email: `stranger-${String(step)}-${String(i)}@else.example`, eaccount: INBOX }).id}`);
     } else if (action < 0.42) {
@@ -167,7 +171,13 @@ async function run(seed: number): Promise<{ missing: string[]; unexpected: strin
         const id = fake.leads.find((l) => l.email === lead && !l.deleted)?.id;
         if (id) mustReach.add(`unsubscribed:${id}`);
       }
-    } else if (action < 0.55) {
+    } else if (action < 0.51) {
+      // A suspension of the same process: time passes with no poll.
+      advance((10 + Math.floor(rnd() * 30)) * MINUTE);
+    } else if (action < 0.53) {
+      // The app's clock jumps backwards or forwards; the provider's does not.
+      skew += rnd() < 0.5 ? -(5 + Math.floor(rnd() * 25)) * MINUTE : (30 + Math.floor(rnd() * 150)) * MINUTE;
+    } else if (action < 0.56) {
       // The provider fails every request for the next few polls.
       fake.failWith = 500;
       outage = 2 + Math.floor(rnd() * 14);

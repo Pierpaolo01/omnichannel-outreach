@@ -18,6 +18,8 @@ export const ENGINE_PARAMS = {
   MAX_QUEUED_LOOKUPS: 12,
   PRESEND_MAX_AGE: 60_000,
   CALL_TIMEOUT: 30_000,
+  /** The most running time one observation may credit to a wait (`runningCredit`): four of the worker's 15-second ticks. */
+  MAX_RUNNING_CREDIT: 60_000,
 } as const;
 
 export const TERMINAL = new Set(["sent", "rejected", "withdrawn"]);

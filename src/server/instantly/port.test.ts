@@ -282,8 +282,8 @@ describe("observation, lookup, withdrawal and the pre-send check", () => {
     // The off-thread reply is held by the adapter, pausing sends to that address from that inbox,
     // and after the settling period it is reported with no thread, for the engine's fallback.
     expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [] })).toEqual({ kind: "unavailable" });
-    advance(16 * MINUTE);
-    const released = (await port.observe(c2.checkpoint)).events.filter((e) => e.kind === "reply" && e.providerRef !== ref);
+    // Released after fifteen minutes of running time: polls once a minute, not one long jump.
+    const released = (await pollFor({ port, advance }, c2.checkpoint, 16)).events.filter((e) => e.kind === "reply" && e.providerRef !== ref);
     expect(released).toEqual([{ id: expect.any(String), kind: "reply", providerRef: null, at: T0 + 3 * MINUTE, inbox: "ada@sender.example", from: "pat@harbour.example" }]);
   });
 
@@ -672,4 +672,74 @@ describe("review bot on c942fd2: a held reply waits only for time the adapter co
     const backlog = await pollFor(ctx, c, 16);
     expect(repliesFrom(backlog.events, "pat@harbour.example")).toEqual([]);
   });
+});
+
+/**
+ * Review bot on `c66a0c8`: no gap of any cause is credited whole to a held reply's wait. Each cause
+ * happens right after the reply is held; then the test counts ordinary one-minute polls until the
+ * reply is released with no reference. The cause may have credited at most one poll interval (one
+ * minute), so at least fourteen ordinary polls are needed, and the reply is released by the sixteenth.
+ */
+describe("review bot on c66a0c8: every cause of a gap credits at most one poll interval", () => {
+  type Ctx = Awaited<ReturnType<typeof sentOpener>>;
+  const causes: [string, (ctx: Ctx, port: InstantlyEmailPort, c: string) => Promise<InstantlyEmailPort>][] = [
+    ["a restart after 17 minutes stopped", async (ctx) => {
+      ctx.advance(17 * MINUTE);
+      return ctx.restart();
+    }],
+    ["a crash inside a poll, then a restart", async (ctx, port, c) => {
+      crashOnBatchWrite(ctx.store);
+      ctx.advance(17 * MINUTE);
+      await expect(port.observe(c)).rejects.toThrow(/simulated crash/);
+      return ctx.restart();
+    }],
+    ["sixteen failed polls in the same process", async (ctx, port, c) => {
+      ctx.fake.failWith = 500;
+      for (let i = 0; i < 16; i++) {
+        ctx.advance(MINUTE);
+        await expect(port.observe(c)).rejects.toThrow();
+      }
+      ctx.fake.failWith = null;
+      return port;
+    }],
+    ["a 17-minute suspension of the same process with no polls", async (ctx, port) => {
+      ctx.advance(17 * MINUTE);
+      return port;
+    }],
+    ["a poll that took 17 minutes", async (ctx, port, c) => {
+      const open = ctx.fake.hold("GET", "/api/v2/emails");
+      ctx.advance(MINUTE);
+      const slow = port.observe(c);
+      await flush();
+      ctx.advance(17 * MINUTE);
+      open();
+      await slow;
+      return port;
+    }],
+    ["the clock jumping back 30 minutes", async (ctx, port) => {
+      ctx.advance(-30 * MINUTE);
+      return port;
+    }],
+    ["the clock jumping forward 3 hours", async (ctx, port) => {
+      ctx.advance(3 * 60 * MINUTE);
+      return port;
+    }],
+  ];
+  for (const [cause, apply] of causes) {
+    test(cause, async () => {
+      const ctx = await sentOpener();
+      let c = (await ctx.port.observe("c0")).checkpoint;
+      ctx.fake.reply("pat@harbour.example", { onThread: false, withLead: false });
+      c = (await pollFor(ctx, c, 1)).checkpoint;
+      const port = await apply(ctx, ctx.port, c);
+      let polls = 0;
+      for (; polls < 20; polls++) {
+        const r = await pollFor(ctx, c, 1, port);
+        c = r.checkpoint;
+        if (repliesFrom(r.events, "pat@harbour.example").length > 0) break;
+      }
+      expect(polls + 1).toBeGreaterThanOrEqual(14);
+      expect(polls + 1).toBeLessThanOrEqual(16);
+    });
+  }
 });

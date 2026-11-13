@@ -688,6 +688,7 @@ If the slot is busy, the retry waits for it. If any other condition fails, there
 | `MAX_QUEUED_LOOKUPS` | 12 | Consecutive `queued` answers before an attempt is unresolved. |
 | `PRESEND_MAX_AGE` | 60 seconds | How old a pre-send check may be at the handover or retry it authorizes. |
 | `CALL_TIMEOUT` | 30 seconds | How long a send call may take before it counts as `unknown`. |
+| `MAX_RUNNING_CREDIT` | 60 seconds, four of the worker's 15-second ticks | The most running time one observation may credit to a wait. `runningCredit` in `clock.ts` is the one definition of running time: the gap since the wait was last counted, never negative and never more than this. A suspension of the process, a slow tick or a forward clock jump is never credited whole, and a backward jump credits nothing. A held reply counts running time this way. |
 
 ## 6. Restart and the interruption notice
 
@@ -1092,6 +1093,7 @@ Two reviewers, an independent verification and the review bot on `51d9503`, and 
 | - | - | - |
 | A port's `Transport` may say `available: false`; the engine claims no step that travels by it, so it waits and nothing is sent. Instantly's continue-thread follow-ups use it until ADR 0002's X2 | 4.2, 5.3 | `src/server/instantly/engine-instantly.test.ts` (the follow-up waits unsent; fails without the rule) |
 | `HandoverRequest` carries the attempt's `trackId`, so the adapter names the dispatch campaign; it is read from the authorized attempt like every other field | 5.5 step 6 | `src/server/instantly/port.test.ts` |
+| A held reply's running time was the full gap since its last count whenever observation succeeded, so a same-process suspension with no ticks (a sleeping laptop) was credited whole and could fall back by address before the delayed sent event attached (review bot on `c66a0c8`, found through the adapter). Running time is now `runningCredit`, bounded by `MAX_RUNNING_CREDIT`, and the worker wakes at least that often while a reply waits. The Instantly adapter uses the same function | 2.4, 5.6 parameters | `lifecycle.test.ts` "review bot on c66a0c8"; `clock.test.ts` "running time" (each cause of a gap); the fixed seeds and mutations unchanged |
 
 ## Consequences
 

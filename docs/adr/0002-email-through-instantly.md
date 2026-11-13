@@ -326,21 +326,26 @@ The regressions are in `src/server/instantly/port.test.ts` ("signal identity", "
 **Four more rules** (council and review bot on `387a19b`; regressions in `port.test.ts` "council round on 387a19b" and `engine-instantly.test.ts` "council item 5"; the generated `observation-crashes.test.ts`):
 
 3. **One commit per poll.** A poll keeps everything that decides what is read or reported again in a draft, and writes it in one transaction at the end. That covers the mail and status scan cursors, their start and completion times, the held replies, the acknowledgement of the previous batch, and the new batch with its sequence number. A poll that dies anywhere before it returns changes none of it. Facts learned from Instantly on the way are written as found: which email and thread a lead's send is, the running maximum of analytics, and an intent or a lead recorded around an add. They stay true whatever happens next, and writing them again changes nothing. Nothing else in the adapter moves a cursor. `src/server/instantly/observation-crashes.test.ts` runs 40 generated sequences of replies, unsubscribes, other campaigns' mail and strangers' mail, with the process dying at every point inside a poll and the engine dying between a batch and its checkpoint, on pages of two items. After every applied event it asserts that no mail outside the app's work reaches the engine and that every reference is its own work's. At the end it asserts that every reply and unsubscribe arrived. Moving the mail cursor out of the commit makes it fail. It also found that the first mail scan read only from "now less the overlap": the first scan now reads from the first lead add.
-4. **Observed time.** A held reply's wait is the one correlation wait in the adapter, and it counts only time in which the adapter could have read the record that would attach the reply. A mail scan that reached its end has read all mail up to the moment it began, so the wait advances by how far that moment moves between two completed scans. It never counts across a gap in observation: a failed poll starts a new chain, and nothing before the chain's first poll counts (review bot on `c942fd2`). The fallback also needs a poll whose scan completed and a lookup of the reply's thread. Each way a poll can fail to observe:
-   - **a request error, a timeout, or a provider outage** (any failed read of the inbox list or the mail): the poll fails, and the chain breaks;
-   - **the local `/emails` budget spent:** the mail read fails, and the chain breaks;
-   - **incomplete paging:** the scan carries on at the next poll, and nothing is credited until it reaches its end. It is then credited only up to the moment it began;
-   - **a crash or a restart:** a new process starts a new chain, so the time it was stopped never counts;
-   - **a stale inbox** is not a cause but a result of the cases above, which already stop the count;
-   - **a quota hold** stops handovers, not reads, so the count goes on;
-   - **a status scan that stopped short, or a thread lookup that could not run,** does not touch the count: the sent record is mail, and a thread lookup that cannot run only keeps the reply held.
+4. **Running time, one definition.** The adapter's one correlation wait, a held reply's, uses the engine's definition of running time, `runningCredit` in `src/domain/sequence/clock.ts` (ADR 0003 `MAX_RUNNING_CREDIT`): each poll credits the gap since the reply was last counted, never negative and never more than the poll interval (`maxCreditMs`, one minute). No gap of any cause is credited whole. On top of that, the adapter credits a poll only when its mail scan reached its end and the previous poll of the same process committed. The fallback also needs such a poll and a lookup of the reply's thread. Review bot on `387a19b`, `c942fd2` and `c66a0c8`: three instances of one kind, closed by bounding every credit, not by naming causes. Each cause of a gap, and what it credits:
+   - **a restart, or a crash inside a poll:** the first poll of the new process credits nothing;
+   - **failed polls** (a request error, a timeout, an outage, the local `/emails` budget spent): a failed poll credits nothing, and neither does the first poll after it;
+   - **a suspension of the same process with no polls** (a sleeping laptop): the next poll credits at most one minute;
+   - **a slow poll:** at most one minute;
+   - **the app's clock jumping forwards:** at most one minute; **jumping backwards:** nothing, and poll spacing does not suppress polls until the clock catches up;
+   - **incomplete paging:** a poll whose scan did not reach its end credits nothing;
+   - **a stale inbox** results from the causes above; **a quota hold** stops handovers, not reads, so polls go on crediting;
+   - **a status scan cut short or an unavailable thread lookup** credits normally; an unavailable lookup only keeps the reply held.
 
    The other clocks are wall time by design, because they measure the world, not the app's attention:
    - the freshness bound (staleness must include downtime);
    - the quota recheck (Instantly's plan changes in real time);
    - poll spacing and the analytics cache.
 
-   The regressions are "item 4 (review bot)", "an outage of failed polls in the same process" and "polls whose mail scan did not reach its end". The generated observation test also fails provider polls for 2 to 15 polls at a time. It checks that a reply reported with no reference had at least `SETTLING` of independently counted observed time, meaning gaps between two successful polls in a row in one process. Letting a failed poll keep its chain makes it fail.
+   The tests:
+   - `port.test.ts` "every cause of a gap credits at most one poll interval" runs one test per cause above and asserts the bound;
+   - `clock.test.ts` "running time" asserts the same causes on the function;
+   - `lifecycle.test.ts` "review bot on c66a0c8" holds the engine to the same bound;
+   - the generated `observation-crashes.test.ts` adds suspensions and jumps of the app's clock to its crashes and outages, and checks every fallback with no reference against observed time counted independently by the test. An unbounded credit makes all of them fail.
 5. **Single-flight.** The engine may stop waiting for a call without cancelling it, so a handover runs at most once at a time per idempotency key, a dispatch campaign is ensured at most once at a time per key, and polls run one at a time. A call made while one is still running joins it. After a create, a campaign id another process saved first is kept.
 6. **In-doubt adds.** The adapter records (inbox, destination, key) before every `POST /leads/add`. A reply from that address is then held, not dropped, even if the add's answer is lost.
 

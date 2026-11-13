@@ -1,5 +1,5 @@
 import type { CallAnswer } from "../../domain/sequence/attempt.ts";
-import { resetDayOf } from "../../domain/sequence/clock.ts";
+import { resetDayOf, runningCredit } from "../../domain/sequence/clock.ts";
 import type { AccountStatus, AttemptRef, HandoverRequest, LookupResult, ProviderEvent, SendPort, Transport } from "../engine/ports.ts";
 import type {
   AddLeadsRequest,
@@ -71,6 +71,8 @@ export interface InstantlyPortConfig {
   readonly pageSize?: number;
   /** Pages one scan reads per poll before it resumes at the next. */
   readonly pagesPerPoll?: number;
+  /** The most running time one poll may credit to a held reply's wait: the poll interval. */
+  readonly maxCreditMs?: number;
 }
 
 export interface InstantlyPortDependencies {
@@ -92,7 +94,7 @@ export type InboxHoldReason = InboxHoldReasonApi;
 export type InstantlyStatus = Omit<EmailProviderStatus, "provider" | "waitingFollowUps"> & { readonly provider: "instantly" };
 
 const MINUTE = 60_000;
-const DEFAULTS = { freshnessMs: 10 * MINUTE, pollIntervalMs: MINUTE, analyticsCacheMs: 5 * MINUTE, k: 1, quotaRecheckMs: 60 * MINUTE, overlapMs: 10 * MINUTE, replyHoldMs: 15 * MINUTE, pageSize: 100, pagesPerPoll: 20 };
+const DEFAULTS = { freshnessMs: 10 * MINUTE, pollIntervalMs: MINUTE, analyticsCacheMs: 5 * MINUTE, k: 1, quotaRecheckMs: 60 * MINUTE, overlapMs: 10 * MINUTE, replyHoldMs: 15 * MINUTE, pageSize: 100, pagesPerPoll: 20, maxCreditMs: MINUTE };
 
 const META = {
   /** When the last poll ran, complete or not: polls are spaced by it. */
@@ -151,7 +153,7 @@ interface HeldReply {
   readonly at: number;
   /** When it was first read and held. */
   readonly heldWall: number;
-  /** Observed time waited (see `chainStart`): never a failed poll's gap, never the time the process was stopped. */
+  /** Running time waited (`runningCredit`, see `previousPollCommitted`). */
   readonly waitedMs: number;
   readonly lastCountedWall: number;
   readonly released: boolean;
@@ -174,14 +176,12 @@ export class InstantlyEmailPort implements SendPort {
   private analyticsReadWall: number | null = null;
   private readonly crashPoint: ((point: string) => void) | null;
   /**
-   * Observed time, for a held reply's wait. A mail scan that reached its end has read all mail up to
-   * the moment it began, so the wait advances by how far that moment moves between two completed
-   * scans, and never across a gap in observation: a failed poll (a request error, the /emails
-   * budget, a crash) or a restart starts a new chain, and nothing before the chain's first poll counts.
+   * Whether the previous poll of this process committed. A held reply's wait is the engine's running
+   * time (`runningCredit`, bounded per poll), credited only by a poll whose mail scan reached its end
+   * and that follows a committed poll of the same process: after a restart or a failed poll
+   * (a request error, the /emails budget, a crash) the first poll credits nothing.
    */
-  private chainStart: number | null = null;
-  /** The start of the last scan that reached its end in this chain. */
-  private lastCertified: number | null = null;
+  private previousPollCommitted = false;
   private readonly flights = new Map<string, Promise<unknown>>();
 
   constructor(deps: InstantlyPortDependencies) {
@@ -496,9 +496,8 @@ export class InstantlyEmailPort implements SendPort {
       try {
         return await this.observeOnce(checkpoint);
       } catch (error) {
-        // A poll that failed for any reason observed nothing: the next poll starts a new chain.
-        this.chainStart = null;
-        this.lastCertified = null;
+        // A poll that failed for any reason observed nothing.
+        this.previousPollCommitted = false;
         throw error;
       }
     });
@@ -507,20 +506,20 @@ export class InstantlyEmailPort implements SendPort {
   private async observeOnce(checkpoint: string | null): Promise<{ events: readonly ProviderEvent[]; checkpoint: string }> {
     const now = this.now();
     const lastRun = this.store.meta(META.lastPollRun);
-    if (checkpoint !== null && lastRun !== null && now - Number(lastRun) < this.config.pollIntervalMs) return { events: [], checkpoint };
+    // Spacing only: a clock that jumped back does not suppress polls until it catches up.
+    const sinceLastRun = lastRun === null ? null : now - Number(lastRun);
+    if (checkpoint !== null && sinceLastRun !== null && sinceLastRun >= 0 && sinceLastRun < this.config.pollIntervalMs) return { events: [], checkpoint };
     this.store.setMeta(META.lastPollRun, String(now));
-    this.chainStart ??= now;
     const draft: Draft = { meta: new Map() };
     const previous = this.previousBatch(checkpoint);
     const inboxes = await this.readInboxes();
     await this.readAnalytics();
     const events = new Map<string, ProviderEvent>(previous.replay.map((e) => [e.id, e]));
     const changes: Record<string, readonly [number, number | null]> = { ...previous.unapplied };
-    let certified: number | null = now;
     if (this.store.anyDispatched()) {
-      certified = await this.pollEmails(inboxes, events, draft);
+      const mailComplete = await this.pollEmails(inboxes, events, draft);
       await this.pollLeadStatuses(events, changes, draft, previous.applied);
-      await this.releaseHeldReplies(events, draft, certified);
+      await this.releaseHeldReplies(events, draft, mailComplete);
     } else {
       draft.meta.set(META.lastMailScan, String(now));
     }
@@ -534,7 +533,7 @@ export class InstantlyEmailPort implements SendPort {
       for (const [key, value] of draft.meta) this.store.setMeta(key, value);
       this.store.setMeta(META.batch, JSON.stringify(batch));
     });
-    if (certified !== null) this.lastCertified = certified;
+    this.previousPollCommitted = true;
     this.crash("observe:after_commit");
     return { events: batch.events, checkpoint: token };
   }
@@ -575,8 +574,8 @@ export class InstantlyEmailPort implements SendPort {
     return { items, complete: false, next: after };
   }
 
-  /** One mail scan, resumed where the previous poll stopped. When it reached the end, the moment it began; otherwise null. */
-  private async pollEmails(inboxes: readonly InstantlyAccount[], events: Map<string, ProviderEvent>, draft: Draft): Promise<number | null> {
+  /** One mail scan, resumed where the previous poll stopped. True when it reached the end. */
+  private async pollEmails(inboxes: readonly InstantlyAccount[], events: Map<string, ProviderEvent>, draft: Draft): Promise<boolean> {
     const now = this.now();
     const saved = this.store.meta(META.mailScan);
     const previous = saved ? (JSON.parse(saved) as MailScan) : null;
@@ -602,7 +601,7 @@ export class InstantlyEmailPort implements SendPort {
     } else {
       draft.meta.set(META.mailScan, JSON.stringify({ ...scan, after: read.next ?? null, newest } satisfies MailScan));
     }
-    return read.complete ? scan.startedWall : null;
+    return read.complete;
   }
 
   /** The work a received email proves it answers: by its thread, else by its Instantly lead, with the sender and inbox matching. */
@@ -659,11 +658,11 @@ export class InstantlyEmailPort implements SendPort {
    * for the thread: a campaign email of the app's work names it, another campaign's drops it, and
    * with neither it is reported with no reference for the engine's fallback (ADR 0003 2.4).
    */
-  private async releaseHeldReplies(events: Map<string, ProviderEvent>, draft: Draft, certified: number | null): Promise<void> {
+  private async releaseHeldReplies(events: Map<string, ProviderEvent>, draft: Draft, mailComplete: boolean): Promise<void> {
     const now = this.now();
-    // Observed time this poll adds: from the previous certified moment (or the chain's start) to this one.
-    const chain = this.chainStart ?? now;
-    const from = Math.max(this.lastCertified ?? chain, chain);
+    // The adapter's condition on top of the engine's running time: this poll read all the mail, and the
+    // previous poll of this process committed.
+    const credits = mailComplete && this.previousPollCommitted;
     const next: HeldReply[] = [];
     let changed = false;
     for (const h of this.heldReplies(draft)) {
@@ -671,12 +670,12 @@ export class InstantlyEmailPort implements SendPort {
         next.push(h);
         continue;
       }
-      const added = certified === null ? 0 : Math.max(0, certified - Math.max(from, h.heldWall));
+      const added = credits ? runningCredit(h.lastCountedWall, now, this.config.maxCreditMs) : 0;
       const waited: HeldReply = { ...h, waitedMs: h.waitedMs + added, lastCountedWall: now };
       changed = true;
       const byThread = h.threadId ? this.store.dispatchedByThread(h.threadId) : null;
       let owner = byThread && byThread.inbox === h.inbox && byThread.destination === h.from ? byThread : null;
-      if (!owner && (waited.waitedMs < this.config.replyHoldMs || certified === null)) {
+      if (!owner && (waited.waitedMs < this.config.replyHoldMs || !mailComplete)) {
         next.push(waited);
         continue;
       }
