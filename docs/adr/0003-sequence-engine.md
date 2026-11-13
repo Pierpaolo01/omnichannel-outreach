@@ -1153,7 +1153,7 @@ Recorded on 13 November 2026 by the 12c implementer. The projection changes no e
 
   Not read, and so not foreseen: a provider state the engine has not met yet (a quota or rate limit on an inbox no send has tried), provider failures, replies, bounces and pauses. The generated two-campaign test gives each campaign its own subset of three inboxes, makes some unavailable for each reason, and lifts only the states the engine has not met.
 - **Cost.** Measured on 13 November 2026, on this workstation: about 0.3–0.5 s for 500 leads with 500 waiting in another campaign, and about 4–5 s for 2,000 with 2,000 waiting. The Sequence and Leads tabs ask for coverage and fields without the projection (`load=0`). Before launch shows its loading state while it runs.
-- **SMS tracks (merged with ticket 13a, 13 November 2026).** The projection simulates one email track; SMS sends are not in it yet (ticket 13 part b adds them). Another track can change when emails go: a text marks the lead touched, which moves its emails ahead in priority (4.3), and a track can start after another finishes (1.1). Neither can happen when the campaign's one email track starts at entry and every other live track starts, through its chain of start rules, after it (`emailTimingAlone` in `before-launch.ts`). Then the email load is projected, and the screen says SMS sends are not in the estimate (`leavesOutSms`). Otherwise (an SMS track or a second email track that does not wait for the email track, in this campaign or in another running campaign whose emails on these inboxes are not all sent) nothing is projected and the screen says why (`otherTracksChangeTiming`), as for an inbox with no known end. `before-launch-projection.test.ts` runs 20 generated cases with an SMS track after the email track, with texts sent, and requires the email sends to match the engine's exactly. With the rule switched off, 2 of 20 cases with an SMS track at entry contradict the engine.
+- **SMS tracks (merged with ticket 13a, 13 November 2026; replaced by ticket 13b, below).** The projection simulated one email track; SMS sends are not in it yet (ticket 13 part b adds them). Another track can change when emails go: a text marks the lead touched, which moves its emails ahead in priority (4.3), and a track can start after another finishes (1.1). Neither can happen when the campaign's one email track starts at entry and every other live track starts, through its chain of start rules, after it (`emailTimingAlone` in `before-launch.ts`). Then the email load is projected, and the screen says SMS sends are not in the estimate (`leavesOutSms`). Otherwise (an SMS track or a second email track that does not wait for the email track, in this campaign or in another running campaign whose emails on these inboxes are not all sent) nothing is projected and the screen says why (`otherTracksChangeTiming`), as for an inbox with no known end. `before-launch-projection.test.ts` runs 20 generated cases with an SMS track after the email track, with texts sent, and requires the email sends to match the engine's exactly. With the rule switched off, 2 of 20 cases with an SMS track at entry contradict the engine.
 - **What it does not model.** Provider failures, retries, lookups, replies, bounces and pauses: every send is assumed to succeed at once. The screen says so. Production ticks every 15 seconds, not at the exact instants, so a real send can land up to one tick later than projected.
 - **What it reports.** Each pool inbox's busiest day for this campaign, the sends used today across campaigns, and its pacing gap. Also the days until every lead with an email has had its first email, counting launch day as 1, in the campaign's zone.
 
@@ -1206,6 +1206,82 @@ Recorded on 13 November 2026 by the 13a implementer. Each change was built test-
 | No mutation proved an email reply stops SMS work | Mutation "an email reply stops only the email tracks" (14); the generator also replies by email while the lead's text is with the provider | 9.2 | `sequence-runs-tracks-oracle.test.ts` |
 
 Questions kept with their interim: Q7 (a mobile whose conversation from every pool number belongs to another campaign is held as `sms_conversation_taken`, listed in Needs attention; it is not skipped), and Q10 (a company lead has no SMS destination, so its SMS track is skipped). Q1 (one incoming connection per track) is unchanged.
+
+## Ticket 13b: arranging tracks in the editor, and the projection with every track
+
+Recorded on 13 November 2026 by the 13b implementer, before the code. Two rules: one new (the editor's arrangement operations), one replaced (the Before launch projection). Neither changes the engine, the validator (7.1) or any invariant in section 8.
+
+### The arrangement rule (a deep rule: it decides the draft across every edit)
+
+**The rule.** The editor changes a campaign's arrangement only through four pure operations, `arrange(definition, operation)` in `src/web/campaign/arrangement.ts`:
+
+- **add** a track on a channel (email or SMS). It is new, with an id never used in the definition, and starts at launch (`entry`);
+- **remove** a track;
+- **start** a track at launch (`entry`), or **after** another live track of the same branch with a delay in whole days (`after(X, d)`);
+- **delay**: change the days of an `after` start.
+
+Each returns either the new definition or a **refusal**, a plain sentence. A refused operation leaves the draft as it was; the sentence is shown beside the control that asked for it, and focus stays on that control. Every operation goes through the editor's one state and save queue (1.1.1) like any other edit: none saves on its own. Before launch only; a running campaign's arrangement is read-only until ticket 19.
+
+"Together" is not stored (1.1: "together from X to Y gives Y the same rule as X"). The canvas draws the tracks that share a start rule as together: every track that starts at launch hangs from the Launch point, and every track `after(X, d)` hangs from X with the label "after · d days". The inspector's Starts control offers "At launch" or "After" a track with a delay; two tracks are together when both start at launch, or both after the same track with the same delay.
+
+**Refused, in plain words, at the control:**
+
+- starting a track after itself, or after a track that starts after it through its chain (a cycle): "SMS track starts after this one, so this one can't start after it: each would wait for the other.";
+- starting a track after a track that is removed, in the other branch, or not in the definition;
+- removing a track that another live track starts after: "Email track 2 starts after this one. Change how it starts first.";
+- a delay that is negative or not a whole number is not an operation: as with a step's wait, the field keeps what was typed, the draft is not saved, and the inspector says why (`draftProblems`).
+
+**Invariants** (asserted after every operation by the generated test):
+
+1. From a draft the validator accepts, every operation's result is a draft the validator accepts (`definitionProblems` is empty): the editor cannot produce what 7.1 refuses. This holds by construction rather than by recovery.
+2. A refusal leaves the draft identical, and says why in a non-empty sentence.
+3. Nothing is refused that the validator would accept: applying a refused operation naively makes `definitionProblems` non-empty.
+4. An operation changes only what it names. Removing a track removes that track and nothing else; no other track's start rule is rewritten.
+5. An added track's id has never been used in the definition, live or removed.
+
+**The boundary.** The server's validator (7.1) still refuses any such definition from any client; this rule only keeps the editor from producing one.
+
+**The generated test.** `src/web/campaign/arrangement.generated.test.ts` starts from generated valid definitions (one to five email and SMS tracks, chains and fans of `after`, delays 0 to 3, removed tracks) and applies generated sequences of operations, including ones that should be refused, asserting invariants 1 to 5 after each. Its mutations, each of which must fail it: no cycle check; removal that ignores dependants; a refusal that still changes the draft; refusing every `after`.
+
+**Saving the new edits.** The arrangement operations, an SMS track's copy, waits and window, and the SMS pool are edits like any other, so 1.1.1's rule and its generated test cover them: `saveQueue.generated.test.ts` adds them to its generated edits, and SMS numbers connecting to its pool sync.
+
+**The SMS pool** follows the connected SMS numbers, as the email pool follows the connected email inboxes (1.1.1): one pool sync for both channels, counted as one edit. In the running app there is no SMS provider, so the SMS pool stays empty and every SMS track meets launch blocker 3.
+
+### The projection with every track (replaces "SMS tracks" in "Ticket 12c: the Before launch projection")
+
+**The rule.** The projection is the engine's own decisions run forward without a provider. It takes every subject it simulates as the engine's own `SubjectState` (`EngineStore.subject`) and moves it only with the engine's own rules object (`DEFAULT_RULES` in `src/server/engine/rules.ts`, the one the engine uses):
+
+- this campaign's leads enter as launch enters them: `evaluate(enterMain(s))` on the definition being projected;
+- each instant runs the engine's passes until nothing changes, in the engine's order: observe the sends of the previous pass (`applyToWork` with the send at its handover instant), expire claims older than the settling time (`applyToAttempt`, `claim_expired`), `evaluate`, claim every `readyItems` item in `claimOrder` with `claimRefusal`, `chooseAccount` and `claim`, then hand over per account in `handoverOrder` with `handoverFailures` and `handOver`, then the provider's acceptance (`applyToAttempt`, `call_answer accepted`);
+- time moves to the next instant at which anything can change, as `Engine.nextWakeAt` computes it: a due step or its window's next opening, a resolved track start, a claim's slot or expiry, an account's wait ending, a reset day.
+
+So track starts, `after` delays counted from the earlier track's finish, a missing channel skipping its track and releasing the tracks after it, touched leads going first across channels, windows, capacity per account across campaigns, pacing, a lead's fixed sender per channel and the SMS conversation rule (4.5) are the engine's, not a second implementation.
+
+What the projection supplies itself, because the store supplies it to the engine: each account's state (`used` on its reset day, counting the simulation's sends and open reservations; `inFlight`; `nextSlotAt`), starting from the engine's own `AccountState` records, and the SMS bindings, starting from the stored ones, shared by every simulated subject as the store shares them. And the provider: every handover is accepted and sent at once, and observed in the next pass, as the fake providers do in tests.
+
+**Which subjects it simulates.** This campaign's leads that have not ended, and every running subject of another campaign whose pools (or fixed senders) share an account with this campaign, or with a campaign already included (the closure: capacity is shared transitively). Their stored progress, claims and bindings are taken as they are; work already with a provider is taken as sent at the instant of the projection, as before.
+
+**When it shows no figure, and says why.**
+
+- An account in a live track's pool cannot send, with no known end (unhealthy, or a quota held), as before.
+- A live track's channel has no connected sender (launch blocker 3): its leads would wait on it for ever, and so would every track after it. In the running app this is every campaign with an SMS track, since no SMS provider exists. The screen names the track.
+
+**What it reports.** For each account in a live track's pool, on either channel: its busiest day for this campaign, the sends used today across campaigns, and its pacing gap. The days until every lead that has a channel some live track uses has had its first message on any channel, counting launch day as day 1, in the campaign's zone.
+
+**What it still does not model.** Provider failures, retries, replies, bounces, invalid numbers found at the send, pauses, and a port's transport that cannot send a step yet (Instantly's continue-thread follow-ups before ADR 0002's X2). Every send is assumed to succeed at once. Production ticks every 15 seconds, so a real send can land up to one tick later.
+
+**Every input it reads**, replacing the 12c table:
+
+| Input | The projection reads it from | The engine reads it in |
+| - | - | - |
+| A subject's progress, lead facts, zone, merge data, fixed senders, touched, claims and work | `EngineStore.subject`, the `SubjectState` unchanged | `EngineStore.subject` in every pass |
+| Every decision on a subject | `DEFAULT_RULES` | `Engine.rules`, `DEFAULT_RULES` unless a test swaps one |
+| An account's health, waits, capacity, count with reservations, in-flight bound, gap, slot, reset zone, channel | `EngineStore.accounts(now)`, then the simulation's ledger | `EngineStore.accounts` / `SubjectState.accounts` |
+| SMS conversations | the stored bindings for each simulated mobile, then the simulation's own | `SubjectState.smsBindings` |
+| Which other subjects compete | `runningSubjectIds`, closed over shared accounts | `runningSubjectVersions` in `evaluateAll` and `claimAll` |
+| When to look next | the same instants as `Engine.nextWakeAt` | `Engine.nextWakeAt` |
+
+**The test.** `src/server/before-launch-projection.test.ts` keeps every earlier comparison and adds generated cases with one to four email and SMS tracks connected together or after (delays 0 to 3), leads with and without an email or a mobile, one to three campaigns sharing inboxes and numbers, the same mobile in two campaigns, and other campaigns launched earlier with work in progress. The projection taken just before launch must list exactly the engine's sends over the fake providers, on both channels: the same lead, track, step, account and instant. A mutation that swaps one entry of the engine's rules (for example "after delay ignored") changes the engine and the projection together, which is the point: they cannot disagree.
 
 ## Consequences
 
