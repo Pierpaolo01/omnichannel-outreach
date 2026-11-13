@@ -98,6 +98,18 @@ export function createApp({ store, now, newId }: AppDependencies): Hono {
         400,
       );
     }
+    if (!(await store.remembersAppliedRows())) {
+      return c.json<ApiError>(
+        {
+          error: {
+            code: "database_before_provenance",
+            message:
+              "This database was created before imports remembered the rows they applied, so importing into it could duplicate people. Nothing was imported. Recreate the database (delete it, or run pnpm seed:dev for development data) and import again.",
+          },
+        },
+        409,
+      );
+    }
     const importedAt = now();
     const record = await store.importIntoCampaign({
       campaign,

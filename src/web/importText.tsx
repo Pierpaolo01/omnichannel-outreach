@@ -83,6 +83,15 @@ function unmatchedSentence(entry: UnmatchedEntry): string {
   const kind = entry.record === "person" ? "person" : "company";
   const scope = entry.file === "businesses" ? " for this company or its people" : entry.record === "company" ? " for this person" : "";
   const subject = entry.record === "company" && entry.file === "people" ? "Their company’s row" : "The row";
+  if (entry.conflict === "repeated_id") {
+    if (entry.file === "businesses") {
+      const what = entry.disagreeing.includes("place_id") ? "different place IDs" : "different names";
+      return `Its business ID is on more than one row of the Businesses file with ${what}, so none of those rows changed anything, nor did their people.`;
+    }
+    return entry.record === "company"
+      ? "Their company’s business ID is on more than one row of the Businesses file that disagree, so nothing was changed for this person."
+      : "Its person ID is on more than one row of this file with different names, so none of those rows changed anything.";
+  }
   if (entry.conflict === "contradiction") {
     const [first, second] = entry.disagreeing;
     if (first === "business_id" && second === "place_id") {

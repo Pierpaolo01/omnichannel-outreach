@@ -106,6 +106,13 @@ export interface History {
   carriedBySameName(kind: "person" | "company", logical: number, id: string): boolean;
   /** Whether anyone else has carried the ID onto a record. */
   carriedByAnyoneElse(kind: "person" | "company", logical: number, id: string): boolean;
+  /** Whether an applied business row ever listed this address as a shared inbox. */
+  everAnInbox(email: string): boolean;
+  /**
+   * The personal email a person's row under another name was applied with. The record may now
+   * carry that other name, so the person's later rows carry this email to stay decidable.
+   */
+  sharedEmailOf(person: number): string | undefined;
 }
 
 export function generateRun(rand: () => number, step: number, history: History): Generated {
@@ -142,7 +149,7 @@ export function generateRun(rand: () => number, step: number, history: History):
     const businessId = idFor("company", i, `bz-${i}`, otherNames);
     businessIdOf.set(i, businessId);
     // A twin's email never becomes a shared inbox: it is how the twin is told apart.
-    const sameCompanyEmails = PEOPLE.filter((p) => p.company === i && p.twin === undefined).flatMap((p) => p.emails);
+    const sameCompanyEmails = PEOPLE.flatMap((p, j) => (p.company === i && p.twin === undefined ? p.emails.filter((e) => e.toLowerCase() !== history.sharedEmailOf(j)) : []));
     const row = business({
       business_id: businessId,
       place_id: c.anchor === "place" || (c.anchor !== "none" && chance(0.5)) ? `PL-${i}` : "",
@@ -161,6 +168,13 @@ export function generateRun(rand: () => number, step: number, history: History):
     if (chance(0.1)) {
       businesses.push(row);
       companyOfRow.push(i);
+    }
+    // Bad input: the same business ID on a row with another name or another place ID. Every row
+    // with that ID, and every People row of it, must change nothing.
+    if (businessId && chance(0.06)) {
+      // A blank place ID agrees with any, so another place only conflicts with a row that has one.
+      businesses.push(row["place_id"] && chance(0.5) ? { ...row, place_id: `PL-${i}-elsewhere` } : { ...row, business_name: `${pick(c.names)} Annex` });
+      companyOfRow.push(NO_ONE);
     }
   }
 
@@ -185,7 +199,7 @@ export function generateRun(rand: () => number, step: number, history: History):
       business_id: businessIdOf.get(p.company) ?? "",
       full_name: pick(p.names),
       title: p.title,
-      email: chance(0.6) ? pick(p.emails) : "",
+      email: history.sharedEmailOf(i) ?? (chance(0.6) ? pick(p.emails) : ""),
       direct_phone: companyLine || (chance(0.3) ? pick(forms(p.direct)) : ""),
       dial_phone: mobile ? pick(forms(p.mobile)) : "",
       dial_phone_type: mobile ? pick(["mobile", "mobile", "cell", ""]) : "",
@@ -202,9 +216,22 @@ export function generateRun(rand: () => number, step: number, history: History):
     // A blank-field copy only of a row whose ID nobody else has carried: with a blank name, the ID
     // is evidence for whoever holds it.
     const ownId = row["person_id"] === `pp-${i}` && !history.carriedByAnyoneElse("person", i, `pp-${i}`);
+    let aliasWithId = false;
     if (p.alias && row["person_id"]) {
-      if (chance(0.1)) extras.push({ ...row, full_name: p.alias, first_name: "", last_name: "", email: "", dial_phone: "", dial_phone_type: "" });
+      // Bad input: the same person ID under another name. Both rows must change nothing.
+      if (chance(0.1)) {
+        extras.push({ ...row, full_name: p.alias, first_name: "", last_name: "", email: "", dial_phone: "", dial_phone_type: "" });
+        aliasWithId = true;
+      }
       if (chance(0.1) && ownId) extras.push({ ...row, full_name: "", first_name: "", last_name: "", email: "", direct_phone: "", dial_phone: "", dial_phone_type: "" });
+    }
+    // Two names and one personal email with no ID: one person by the email, whose fields must not
+    // depend on which row comes first.
+    const email = (row["email"] ?? "").trim().toLowerCase();
+    const someInbox = COMPANIES.some((c) => c.inbox === email);
+    if (p.alias && !aliasWithId && email && !someInbox && !history.everAnInbox(email) && !businesses.some((b) => (b["general_emails"] ?? "").toLowerCase().includes(email)) && chance(0.1)) {
+      rows.push({ ...row, person_id: "", full_name: p.alias, first_name: "", last_name: "", title: "Practice lead", direct_phone: "", dial_phone: "", dial_phone_type: "" });
+      personOfRow.push(i);
     }
   }
   for (const extra of extras) {
@@ -244,6 +271,8 @@ class Ledger implements History {
   private readonly carriers = new Map<string, Set<number>>();
   /** Records that only rows belonging to no logical person landed in. */
   readonly unattributed = new Set<string>();
+  private readonly inboxes = new Set<string>();
+  private readonly sharedEmails = new Map<number, string>();
   /** Each logical person's applied rows, normalised: provenance returns an unchanged row to its record. */
   readonly appliedRows = new Map<number, Set<string>>();
 
@@ -258,18 +287,31 @@ class Ledger implements History {
       const cells = run.rows.people?.[row];
       if (!record || !cells) return;
       this.carry("person", logical, cells["person_id"] ?? "");
+      if (cells["full_name"] === PEOPLE[logical]?.alias && cells["email"]) this.sharedEmails.set(logical, cells["email"].trim().toLowerCase());
       this.appliedRows.set(logical, (this.appliedRows.get(logical) ?? new Set()).add(signatureOf(cells)));
       this.evidence.set(logical, new Set([...(this.evidence.get(logical) ?? []), ...evidenceOf(cells)]));
     });
     run.companyOfRow.forEach((logical, row) => {
       const record = summary.rowRecords.businesses[row];
+      const cells = run.rows.businesses[row];
+      if (!record || !cells) return;
+      for (const email of (cells["general_emails"] ?? "").split(";")) if (email) this.inboxes.add(email.trim().toLowerCase());
+      if (logical === NO_ONE) return;
       link(this.recordsOfCompany, logical, record);
-      if (record) this.carry("company", logical, run.rows.businesses[row]?.["business_id"] ?? "");
+      this.carry("company", logical, cells["business_id"] ?? "");
     });
   }
 
   appeared(person: number): boolean {
     return (this.recordsOfPerson.get(person)?.size ?? 0) > 0;
+  }
+
+  sharedEmailOf(person: number): string | undefined {
+    return this.sharedEmails.get(person);
+  }
+
+  everAnInbox(email: string): boolean {
+    return this.inboxes.has(email);
   }
 
   carriedByAnyoneElse(kind: "person" | "company", logical: number, id: string): boolean {
@@ -319,7 +361,44 @@ function link(map: Map<number, Set<string>>, logical: number, record: string | n
 }
 
 /** What the generator's own record says should happen to a row. */
-type Expected = "applied" | "ambiguous" | "company_not_in_export" | "no_one";
+type Expected = "applied" | "ambiguous" | "company_not_in_export" | "refused" | "no_one";
+
+/** The generator's own name normalisation: case, accents, punctuation and the titles it uses. */
+function nameOf(raw: string): string {
+  return raw
+    .normalize("NFKD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase()
+    .split(/\s+/)
+    .map((w) => w.replace(/[^a-z]/g, ""))
+    .filter((w) => w && w !== "dr" && w !== "phd")
+    .join("");
+}
+
+/** Values shared by rows of one key that disagree: the generator's record of bad input. */
+function conflicting<T>(rows: readonly T[], keyOf: (row: T) => string, valuesOf: (row: T) => readonly string[]): Set<string> {
+  const byKey = new Map<string, T[]>();
+  for (const row of rows) {
+    const key = keyOf(row);
+    if (key) byKey.set(key, [...(byKey.get(key) ?? []), row]);
+  }
+  const bad = new Set<string>();
+  for (const [key, group] of byKey) {
+    const width = valuesOf(group[0] as T).length;
+    for (let k = 0; k < width; k++) if (new Set(group.map((r) => valuesOf(r)[k] ?? "").filter(Boolean)).size > 1) bad.add(key);
+  }
+  return bad;
+}
+
+/** Business IDs on rows that disagree on the name or the place ID. */
+function refusedBusinessIds(run: Generated): Set<string> {
+  return conflicting(run.rows.businesses, (b) => b["business_id"] ?? "", (b) => [nameOf(b["business_name"] ?? ""), b["place_id"] ?? ""]);
+}
+
+/** People rows of one business and person ID whose names disagree. */
+function refusedPersonIds(run: Generated): Set<string> {
+  return conflicting(run.rows.people ?? [], (p) => (p["business_id"] && p["person_id"] ? `${p["business_id"]}|${p["person_id"]}` : ""), (p) => [nameOf(p["full_name"] ?? "")]);
+}
 
 /**
  * Predicts each People row from the ledger alone, before the import. Company rows always carry an
@@ -330,15 +409,22 @@ type Expected = "applied" | "ambiguous" | "company_not_in_export" | "no_one";
  */
 function expectations(run: Generated, ledger: Ledger): Expected[] {
   const people = run.rows.people ?? [];
+  const badBusinesses = refusedBusinessIds(run);
+  const badPeople = refusedPersonIds(run);
+  const refused = (row: number) => {
+    const cells = people[row];
+    return cells !== undefined && (badBusinesses.has(cells["business_id"] ?? "") || badPeople.has(`${cells["business_id"] ?? ""}|${cells["person_id"] ?? ""}`));
+  };
   const ownEvidence = (row: number) => {
     const logical = run.personOfRow[row] ?? -1;
     const cells = people[row];
     // The twin's record holds this row's ID, email or number, or the identical row was applied to it.
-    return cells !== undefined && (evidenceOf(cells).some((e) => ledger.evidence.get(logical)?.has(e)) || (ledger.appliedRows.get(logical)?.has(signatureOf(cells)) ?? false));
+    return cells !== undefined && !refused(row) && (evidenceOf(cells).some((e) => ledger.evidence.get(logical)?.has(e)) || (ledger.appliedRows.get(logical)?.has(signatureOf(cells)) ?? false));
   };
   return run.personOfRow.map((logical, row) => {
+    if (!people[row]?.["business_id"]) return logical === NO_ONE ? "no_one" : "company_not_in_export";
+    if (refused(row)) return "refused";
     if (logical === NO_ONE) return "no_one";
-    if (!people[row]?.["business_id"]) return "company_not_in_export";
     const twin = PEOPLE[logical]?.twin;
     if (twin === undefined || !ledger.appeared(logical) || ownEvidence(row)) return "applied";
     const namesakeDecisive = run.personOfRow.some((other, r) => other === twin && ownEvidence(r));
@@ -393,15 +479,24 @@ function rowProblems(run: Generated, expected: readonly Expected[], summary: Imp
   if (summary.rowRecords.people.length !== people.length || summary.rowRecords.businesses.length !== run.rows.businesses.length) {
     problems.push("the row records do not cover every row");
   }
+  const badBusinesses = refusedBusinessIds(run);
   run.companyOfRow.forEach((logical, row) => {
-    if (summary.rowRecords.businesses[row] === null) problems.push(`${companyLabel(logical)}'s decisive row was not applied`);
+    const record = summary.rowRecords.businesses[row];
+    if (badBusinesses.has(run.rows.businesses[row]?.["business_id"] ?? "")) {
+      const said = summary.entries.filter(isUnmatched).some((e) => e.file === "businesses" && e.conflict === "repeated_id" && e.rowNumbers.includes(row + 2));
+      if (record !== null || !said) problems.push(`business row ${row + 2}, bad input, was applied or not reported`);
+    } else if (logical !== NO_ONE && record === null) problems.push(`${companyLabel(logical)}'s decisive row was not applied`);
   });
   const reported = (row: number) => summary.entries.filter(isUnmatched).find((e) => e.file === "people" && e.rowNumbers.includes(row + 2));
   run.personOfRow.forEach((logical, row) => {
     const record = summary.rowRecords.people[row] ?? null;
     const want = expected[row];
-    const label = `${personLabel(logical)}'s row ${row + 2}`;
+    const label = `${logical === NO_ONE ? "an unattributed" : personLabel(logical)}'s row ${row + 2}`;
     if (want === "no_one") return;
+    if (want === "refused") {
+      if (record !== null || reported(row)?.conflict !== "repeated_id") problems.push(`${label} is bad input but was applied or not reported as such`);
+      return;
+    }
     if (want === "company_not_in_export") {
       if (record !== null || !summary.entries.some((e) => notJoined(e) && e.name === people[row]?.["full_name"])) problems.push(`${label} should not join a company`);
       return;
@@ -606,6 +701,9 @@ export async function runSequence(seed: number, options: { shuffle?: boolean } =
       continue;
     }
     const importOnce = async (label: string): Promise<{ summary: ImportSummary; after: World } | string[]> => {
+      // SQLite is synchronous and the app is called in-process, so nothing here waits on I/O. Let
+      // the event loop turn, or the Vitest worker cannot report progress and times out (CI, round 8).
+      await new Promise((resolve) => setImmediate(resolve));
       const before = await world(api);
       const expected = expectations(run, ledger);
       const res = await send();

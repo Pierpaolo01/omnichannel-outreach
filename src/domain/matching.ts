@@ -19,8 +19,11 @@
 
 export type EvidenceKind = "place_id" | "business_id" | "main_line" | "address" | "name" | "email" | "person_id" | "phone";
 
-/** Why a row changed nothing. */
-export type Conflict = "several_records" | "another_row" | "contradiction";
+/**
+ * Why a row changed nothing. "repeated_id" is not decided here: it is bad input, a scraper ID
+ * repeated with a conflicting identity inside one file, refused before matching.
+ */
+export type Conflict = "several_records" | "another_row" | "contradiction" | "repeated_id";
 
 export interface Tier {
   readonly kind: EvidenceKind;

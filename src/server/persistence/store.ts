@@ -44,6 +44,11 @@ export interface OutreachStore {
     plan: (directory: Directory) => ImportPlan;
   }): Promise<ImportRecord>;
   listImports(campaignId: string): Promise<ImportRecord[]>;
+  /**
+   * False for a database that holds people from before migration 2 without the rows that were
+   * applied to them. Importing into it could duplicate people, so it must be recreated (ADR 0001).
+   */
+  remembersAppliedRows(): Promise<boolean>;
   importRecord(campaignId: string, importId: string): Promise<ImportRecord | null>;
 
   searchLeads(query: LeadQuery): Promise<LeadSearchResult>;

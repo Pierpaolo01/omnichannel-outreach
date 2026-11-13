@@ -114,6 +114,11 @@ class SqliteStore implements OutreachStore {
     });
   }
 
+  async remembersAppliedRows(): Promise<boolean> {
+    const row = this.db.prepare("SELECT (SELECT COUNT(*) FROM people) AS people, (SELECT COUNT(*) FROM row_identities) AS remembered").get() ?? {};
+    return num(row, "people") === 0 || num(row, "remembered") > 0;
+  }
+
   async listImports(campaignId: string): Promise<ImportRecord[]> {
     return this.importsOf(campaignId);
   }
@@ -302,6 +307,7 @@ class SqliteStore implements OutreachStore {
           placeId: strOrNull(row, "place_id"),
           sourceBusinessIds: sourceBusinessIds.get(str(row, "id")) ?? [],
           rowIdentities: companyIdentities.get(str(row, "id")) ?? [],
+          source: sourceRow(row),
           fields: {
             name: str(row, "name"),
             category: str(row, "category"),
@@ -325,6 +331,7 @@ class SqliteStore implements OutreachStore {
           companyId: str(row, "company_id"),
           sourcePersonIds: sourcePersonIds.get(str(row, "id")) ?? [],
           rowIdentities: personIdentities.get(str(row, "id")) ?? [],
+          source: sourceRow(row),
           fields: {
             fullName: str(row, "full_name"),
             firstName: str(row, "first_name"),
@@ -643,6 +650,11 @@ function toImportRecord(row: Row): ImportRecord {
     // Written by this module from a typed ImportSummary.
     summary: JSON.parse(str(row, "summary")) as ImportSummary,
   };
+}
+
+/** The source row stored with a company or person: written by this module from string cells. */
+function sourceRow(row: Row): Readonly<Record<string, string>> {
+  return JSON.parse(str(row, "source_row")) as Record<string, string>;
 }
 
 function toCampaign(row: Row): Campaign {

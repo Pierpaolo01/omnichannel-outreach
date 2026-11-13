@@ -678,22 +678,6 @@ describe("contradicting evidence changes nothing", () => {
     expect((await h.peopleNamed("Sam Lee")).map((p) => p.title).sort()).toEqual(["Owner", "Practice manager"]);
   });
 
-  // GPT round 4, item 1: rows sharing a business ID but not a place ID merged two branches.
-  test("business rows that share an ID but carry different place IDs stay two companies, and their people change nothing", async () => {
-    const h = importHarness();
-    const summary = await h.import({
-      businesses: [
-        business({ business_id: "b7", place_id: "P1", business_name: "City Physio", phone_e164: "+442079460101" }),
-        business({ business_id: "b7", place_id: "P2", business_name: "City Physio", phone_e164: "+442079460202" }),
-      ],
-      people: [person({ person_id: "p1", business_id: "b7", full_name: "Nia Cole", email: "nia@cityphysio.example" })],
-    });
-    const branches = await h.companies("City Physio");
-    expect(branches.map((c) => c.details.map((d) => d.value)).sort()).toEqual([["+44 20 7946 0101"], ["+44 20 7946 0202"]]);
-    expect(entry(summary, "Nia Cole")).toMatchObject({ ...ambiguousCompany, conflict: "contradiction", disagreeing: ["business_id", "place_id"] });
-    expect(await h.peopleNamed("Nia Cole")).toEqual([]);
-  });
-
   test("a person row whose ID points to one person and number to another names both details", async () => {
     const h = importHarness();
     await h.import({
@@ -872,19 +856,18 @@ describe("each collapsed row is checked on its own evidence", () => {
     });
   }
 
-  // Opus round 6, finding 2: Jo's row borrowed Sam's match through the shared ID and renamed Sam.
+  // Opus round 6, finding 2, now bad input (round 8): one person ID on rows with different names.
   for (const order of ["Sam first", "Jo first"] as const) {
-    test(`a row sharing a reused person ID with no evidence of its own for the match settles as if imported alone (${order})`, async () => {
+    test(`a person ID on rows with different names changes nothing and leaves Sam untouched (${order})`, async () => {
       const h = importHarness();
       const samRow = person({ person_id: "a", business_id: "b1", full_name: "Sam Lee", direct_phone: "+44 20 7946 0303" });
       await h.import({ businesses: [harbour], people: [samRow] });
       const [sam] = await h.peopleNamed("Sam Lee");
       const jo = person({ person_id: "a", business_id: "b1", full_name: "Jo Bloggs", title: "Practice manager", email: "jo@harbour.example" });
       const summary = await h.import({ businesses: [harbour], people: order === "Sam first" ? [samRow, jo] : [jo, samRow] });
-      expect(entry(summary, "Sam Lee")).toMatchObject({ outcome: "already_enrolled" });
-      expect(entry(summary, "Jo Bloggs")).toMatchObject({ outcome: "new" });
+      expect(summary.rowRecords.people).toEqual([null, null]);
       expect(await h.peopleNamed("Sam Lee")).toEqual([sam]);
-      expect((await h.peopleNamed("Jo Bloggs"))[0]?.details.map((d) => d.value)).toEqual(["jo@harbour.example"]);
+      expect(await h.peopleNamed("Jo Bloggs")).toEqual([]);
     });
   }
 });
@@ -1015,17 +998,138 @@ for (const order of ["owner first", "manager first"] as const) {
   });
 }
 
-// Shrunk from generated sequence seed 50000273 (round 7): identical rows that leave a group together stay together.
-for (const order of ["named rows first", "blank row first"] as const) {
-  test(`identical rows that leave a blank row's group return to their own person together (${order})`, async () => {
+// Review round 8.
+describe("company details are never a person's personal claims", () => {
+  const withInbox = business({ business_id: "b1", place_id: "P1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101", general_emails: "info@harbour.example" });
+  const alice = person({ person_id: "a", business_id: "b1", full_name: "Alice Hart", email: "info@harbour.example" });
+  const ben = person({ person_id: "b", business_id: "b1", full_name: "Ben Cole", email: "info@harbour.example" });
+  for (const order of ["Alice first", "Ben first"] as const) {
+    test(`two colleagues listing the company's shared inbox both enroll through the main line (${order})`, async () => {
+      const h = importHarness();
+      const rows = { businesses: [withInbox], people: order === "Alice first" ? [alice, ben] : [ben, alice] };
+      expect((await h.import(rows)).counts).toMatchObject({ new: 2, not_enrolled: 0 });
+      expect((await h.import(rows)).counts).toMatchObject({ new: 0, already_enrolled: 2, not_enrolled: 0 });
+    });
+
+    test(`... also when the address moved from a person to the company earlier (${order})`, async () => {
+      const h = importHarness();
+      await h.import({ businesses: [{ ...withInbox, general_emails: "" }], people: [alice] });
+      await h.import({ businesses: [withInbox], people: [alice] });
+      const summary = await h.import({ businesses: [withInbox], people: order === "Alice first" ? [alice, ben] : [ben, alice] });
+      expect(entry(summary, "Ben Cole")).toMatchObject({ outcome: "new" });
+      expect(entry(summary, "Alice Hart")).toMatchObject({ outcome: "already_enrolled" });
+    });
+  }
+});
+
+describe("a scraper ID repeated with a conflicting identity inside one file is bad input", () => {
+  const malformedPerson = { outcome: "not_enrolled", reason: "ambiguous_match", lead: null, conflict: "repeated_id" };
+  for (const order of ["in file order", "reversed"] as const) {
+    // GPT round 8, finding 1.
+    test(`rows with one person ID and different names change nothing, on every import, and say why (${order})`, async () => {
+      const h = importHarness();
+      await h.import({ businesses: [harbour], people: [person({ person_id: "p1", business_id: "b1", full_name: "Alice Hart", email: "alice@harbour.example" })] });
+      const before = await h.companies("Harbour Lane Physio");
+      const people = [
+        person({ person_id: "p1", business_id: "b1", full_name: "Alice Cole", email: "alice@harbour.example" }),
+        person({ person_id: "p1", business_id: "b1", full_name: "Alice Hart" }),
+      ];
+      const rows = { businesses: [harbour], people: order === "in file order" ? people : [...people].reverse() };
+      for (let time = 1; time <= 2; time++) {
+        const summary = await h.import(rows);
+        expect(summary.rowRecords.people).toEqual([null, null]);
+        expect(entry(summary, "Alice Cole")).toMatchObject({ ...malformedPerson, record: "person" });
+        expect(entry(summary, "Alice Hart")).toMatchObject({ ...malformedPerson, record: "person" });
+        expect(await h.companies("Harbour Lane Physio")).toEqual(before);
+      }
+    });
+
+    // GPT round 8, finding 4.
+    test(`business rows with one business ID and different names change nothing, nor do their people, on every import (${order})`, async () => {
+      const h = importHarness();
+      const old = business({ business_id: "b1", place_id: "", business_name: "Harbour Clinic", phone_e164: "+442079460101" });
+      await h.import({ businesses: [old] });
+      await h.import({ businesses: [{ ...old, place_id: "P1" }] });
+      await h.import({ businesses: [{ ...old, business_id: "b2", place_id: "P1", business_name: "Harbour Wellness" }] });
+      const before = [await h.companies("Harbour Clinic"), await h.companies("Harbour Wellness")];
+      const businesses = [old, { ...old, place_id: "P1", business_name: "Harbour Wellness" }];
+      const rows = { businesses: order === "in file order" ? businesses : [...businesses].reverse(), people: [person({ person_id: "p9", business_id: "b1", full_name: "Ben Cole", email: "ben@harbour.example" })] };
+      for (let time = 1; time <= 2; time++) {
+        const summary = await h.import(rows);
+        expect(summary.rowRecords.businesses).toEqual([null, null]);
+        expect(entry(summary, "Harbour Wellness")).toMatchObject({ ...malformedPerson, record: "company", file: "businesses" });
+        expect(entry(summary, "Ben Cole")).toMatchObject({ ...malformedPerson, record: "company", file: "people" });
+        expect([await h.companies("Harbour Clinic"), await h.companies("Harbour Wellness")]).toEqual(before);
+        expect(await h.peopleNamed("Ben Cole")).toEqual([]);
+      }
+    });
+  }
+
+  test("business rows with one business ID and different place IDs are bad input too", async () => {
     const h = importHarness();
-    const grace = person({ person_id: "pp-3", business_id: "b1", full_name: "Grace Okafor", dial_phone: "+447700900104", dial_phone_type: "mobile" });
-    const blank = person({ person_id: "pp-3", business_id: "b1", full_name: "", first_name: "", last_name: "" });
-    await h.import({ businesses: [harbour], people: [grace, { ...grace, full_name: "Gracie Okafor", first_name: "Gracie", dial_phone: "", dial_phone_type: "" }, blank] });
-    const [record] = await h.peopleNamed("Grace Okafor");
-    const withEmail = { ...grace, email: "grace@harbour.example", dial_phone: "", dial_phone_type: "" };
-    const rows = order === "named rows first" ? [withEmail, withEmail, blank] : [blank, withEmail, withEmail];
-    const summary = await h.import({ businesses: [harbour], people: rows });
-    expect(entry(summary, "Grace Okafor")).toMatchObject({ outcome: "updated", lead: { kind: "person", personId: record?.id } });
+    const summary = await h.import({
+      businesses: [
+        business({ business_id: "b7", place_id: "P1", business_name: "City Physio", phone_e164: "+442079460101" }),
+        business({ business_id: "b7", place_id: "P2", business_name: "City Physio", phone_e164: "+442079460202" }),
+      ],
+    });
+    expect(summary.rowRecords.businesses).toEqual([null, null]);
+    expect(await h.companies("City Physio")).toEqual([]);
+  });
+
+  test("rows with one ID and agreeing or blank names are still one person", async () => {
+    const h = importHarness();
+    const summary = await h.import({
+      businesses: [harbour],
+      people: [
+        person({ person_id: "p1", business_id: "b1", full_name: "Dr. Grace Okafor", email: "grace@harbour.example" }),
+        person({ person_id: "p1", business_id: "b1", full_name: "", first_name: "", last_name: "" }),
+        person({ person_id: "p1", business_id: "b1", full_name: "Grace OKAFOR" }),
+      ],
+    });
+    expect(new Set(summary.rowRecords.people).size).toBe(1);
+    expect(summary.rowRecords.people[0]).not.toBeNull();
+  });
+});
+
+// Opus round 8, follow-up 1: the fields of a record several rows land on do not depend on row order.
+for (const order of ["Sam first", "Jo first"] as const) {
+  test(`rows sharing one email are one person whose fields do not depend on row order (${order})`, async () => {
+    const h = importHarness();
+    const sam = person({ person_id: "", business_id: "b1", full_name: "Sam Lee", title: "Owner", email: "sam@harbour.example" });
+    const jo = person({ person_id: "", business_id: "b1", full_name: "Jo Bloggs", title: "Receptionist", email: "sam@harbour.example" });
+    await h.import({ businesses: [harbour], people: order === "Sam first" ? [sam, jo] : [jo, sam] });
+    const [company] = await h.companies("Harbour Lane Physio");
+    expect(company?.people.map((p) => [p.name, p.title])).toEqual([["Sam Lee", "Owner"]]);
+  });
+}
+
+// Shrunk from generated sequence seed 70000545 (round 8): an inbox two enrolled company leads newly
+// list in one file used to go to whichever row came first.
+for (const order of ["Harbour first", "Elm first"] as const) {
+  test(`an inbox two company leads of one campaign newly list goes to neither (${order})`, async () => {
+    const h = importHarness();
+    const clinic = (id: string, name: string, line: string, inbox: string) => business({ business_id: id, place_id: `P-${id}`, business_name: name, phone_e164: line, general_emails: inbox });
+    await h.import({ businesses: [clinic("b1", "Harbour Clinic", "+442079460101", ""), clinic("b2", "Elm Clinic", "+442079460202", "")] });
+    const businesses = [clinic("b1", "Harbour Clinic", "+442079460101", "office@group.example"), clinic("b2", "Elm Clinic", "+442079460202", "office@group.example")];
+    await h.import({ businesses: order === "Harbour first" ? businesses : [...businesses].reverse() });
+    for (const name of ["Harbour Clinic", "Elm Clinic"]) {
+      expect((await onlyCompany(h, name)).details.map((d) => d.value)).not.toContain("office@group.example");
+    }
+  });
+}
+
+// Shrunk from generated sequence seed 70000257 (round 8): a blank-field copy with an ID new to the
+// CRM left its person's group and became an unnamed record.
+for (const order of ["named row first", "blank row first"] as const) {
+  test(`a blank-field copy of a row stays with it when the ID is new (${order})`, async () => {
+    const h = importHarness();
+    const grace = person({ person_id: "", business_id: "b1", full_name: "Grace Okafor", email: "grace@harbour.example" });
+    await h.import({ businesses: [harbour], people: [grace] });
+    const withId = { ...grace, person_id: "pp-3" };
+    const blank = { ...withId, full_name: "", first_name: "", last_name: "", email: "" };
+    const summary = await h.import({ businesses: [harbour], people: order === "named row first" ? [withId, blank] : [blank, withId] });
+    expect(summary.rowRecords.people[0]).toBe(summary.rowRecords.people[1]);
+    expect((await onlyCompany(h, "Harbour Lane Physio")).people).toHaveLength(1);
   });
 }

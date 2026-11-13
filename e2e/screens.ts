@@ -184,6 +184,8 @@ function importWithUnmatchedRows(): { campaign: { id: string; name: string; defa
       shared: { detail: { channel: "phone", phoneKind: "mobile", value: "+44 7700 900901" }, lead: "Alice Hart", companyName: "Harbour Lane Physio", enrolled: false },
       heldElsewhere: [{ detail: { channel: "phone", phoneKind: "mobile", value: "+44 7700 900901" }, holder: "Alice Hart", holderHasIt: false }],
     },
+    { ...unmatched("Alice Cole", "Owner", "people", [7], "person", "Harbour Lane Physio"), conflict: "repeated_id", disagreeing: ["person_id", "name"] },
+    { ...unmatched("Harbour Wellness", "London", "businesses", [5], "company", "Harbour Wellness"), conflict: "repeated_id", disagreeing: ["business_id", "name"] },
     { ...unmatched("Sam Lee", "Owner", "people", [3], "person", "Harbour Lane Physio"), conflict: "several_records", disagreeing: [] },
     { ...unmatched("Sam Lee", "Practice manager", "people", [4], "person", "Harbour Lane Physio"), conflict: "contradiction", disagreeing: ["person_id", "phone"] },
     { ...unmatched("Harbour Lane Physiotherapy Clinic", "London", "businesses", [2], "company", "Harbour Lane Physiotherapy Clinic"), conflict: "contradiction", disagreeing: ["name", "main_line"] },
@@ -202,10 +204,10 @@ function importWithUnmatchedRows(): { campaign: { id: string; name: string; defa
         importedAt: "2026-11-13T09:00:00.000Z",
         fileNames: { people: "people-run3.csv", businesses: "businesses-run3.csv" },
         summary: {
-          rows: { businesses: 4, people: 9 },
-          counts: { new: 1, already_enrolled: 1, updated: 1, not_enrolled: 7 },
+          rows: { businesses: 5, people: 10 },
+          counts: { new: 1, already_enrolled: 1, updated: 1, not_enrolled: 9 },
           entries,
-          rowRecords: { businesses: [null, null, null, "co-harbour"], people: ["p-ann", "p-ben", null, null, null, "p-zara", "p-uma", "p-yusuf", "p-ann"] },
+          rowRecords: { businesses: [null, null, null, "co-harbour", null], people: ["p-ann", "p-ben", null, null, null, "p-zara", null, "p-uma", "p-yusuf", "p-ann"] },
         },
       },
       {

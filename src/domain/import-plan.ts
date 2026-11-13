@@ -73,6 +73,8 @@ export interface KnownCompany {
   /** Provenance: the normalised identity of every row applied to this company. */
   readonly rowIdentities: readonly string[];
   readonly fields: CompanyFields;
+  /** The source row of its latest import. */
+  readonly source: Readonly<Record<string, string>>;
   readonly details: readonly KnownDetail[];
 }
 
@@ -83,6 +85,8 @@ export interface KnownPerson {
   /** Provenance: the normalised identity of every row applied to this person. */
   readonly rowIdentities: readonly string[];
   readonly fields: PersonFields;
+  /** The source row of its latest import. */
+  readonly source: Readonly<Record<string, string>>;
   readonly details: readonly KnownDetail[];
 }
 
@@ -306,9 +310,28 @@ export function planImport(input: {
   const personRecords: (string | null)[] = scraped.people.map(() => null);
   const unapplied: SummaryEntry[] = [];
 
+  // A scraper ID repeated with a conflicting identity inside one file is bad input: those rows
+  // change nothing, nor do the People rows of a refused business (coordinator ruling, round 8).
+  const businessRows = scraped.businesses.map((row, index) => ({ row, index }));
+  const refusedBusinessIds = new Map<string, readonly EvidenceKind[]>();
+  for (const rows of repeatedIds(businessRows, (r) => r.row.sourceBusinessId)) {
+    const places = distinct(rows.map((r) => r.row.placeId ?? ""));
+    if (places.length <= 1 && distinct(rows.map((r) => nameKey(r.row.name))).length <= 1) continue;
+    const disagreeing: EvidenceKind[] = places.length > 1 ? ["business_id", "place_id"] : ["business_id", "name"];
+    refusedBusinessIds.set(rows[0]?.row.sourceBusinessId ?? "", disagreeing);
+    for (const r of rows) {
+      unapplied.push({ ...unmatched(r.row.name, r.row.city, "businesses", [r], "company", { conflict: "repeated_id", disagreeing }), companyName: r.row.name });
+    }
+  }
+  const refusedPeople = new Set<number>();
+  for (const rows of repeatedIds(scraped.people.map((row, index) => ({ row, index })), (r) => (r.row.sourceBusinessId && r.row.sourcePersonId ? `${r.row.sourceBusinessId}|${r.row.sourcePersonId}` : ""))) {
+    if (distinct(rows.map((r) => personNameKey(fieldsOf(r.row)))).length <= 1) continue;
+    for (const r of rows) refusedPeople.add(r.index);
+  }
+
   // Businesses first: People rows join only to a business in this export. Rows that are one
   // company are collapsed, then each is matched against the companies already on record.
-  const settledCompanies = crm.matchCompanies(groupBusinesses(scraped.businesses));
+  const settledCompanies = crm.matchCompanies(groupBusinesses(businessRows.filter((r) => !refusedBusinessIds.has(r.row.sourceBusinessId))));
   const businessGroups = settledCompanies.groups;
   const companyMatches = settledCompanies.matches;
   const groupsOfBusinessId = new Map<string, Set<number>>();
@@ -326,18 +349,28 @@ export function planImport(input: {
       return { conflict: match.conflict, disagreeing: match.disagreeing };
     }
     const companyId = crm.upsertCompany(group, match?.kind === "match" ? match.id : null);
-    const owner: DetailOwner = { kind: "company", companyId };
-    for (const { row, index } of group.rows) {
-      businessRecords[index] = companyId;
-      if (row.mainPhone) {
-        const { e164, original } = row.mainPhone;
-        const region = crm.regionOf(companyId, e164);
-        crm.addPhone(owner, "main_line", e164 || original, parsePhone(e164, region) ?? parsePhone(original, region));
-      }
-      for (const email of row.generalEmails) crm.addEmail(owner, email);
-    }
+    for (const { index } of group.rows) businessRecords[index] = companyId;
     return { companyId };
   });
+  // Every company of the file is known before any detail is stored, so an inbox two companies
+  // newly list is an equal claim, never decided by which row comes first.
+  const appliedBusinessRows = businessGroups.flatMap((group, g) => {
+    const company = companyOfGroup[g];
+    return company && "companyId" in company ? group.rows.map((r) => ({ ...r, companyId: company.companyId })) : [];
+  });
+  crm.noteDestinationListers(
+    appliedBusinessRows.flatMap(({ row, companyId }) => row.generalEmails.flatMap((e) => emailKey(e) ?? []).map((key) => ({ lead: { kind: "company", companyId } as const, kind: "inbox", key }))),
+  );
+  // Rows in a fixed order, so which spelling of an equivalent detail is stored never depends on row order.
+  for (const { row, companyId } of [...appliedBusinessRows].sort((a, b) => companyRowIdentity(a.row).localeCompare(companyRowIdentity(b.row)) || a.index - b.index)) {
+    const owner: DetailOwner = { kind: "company", companyId };
+    if (row.mainPhone) {
+      const { e164, original } = row.mainPhone;
+      const region = crm.regionOf(companyId, e164);
+      crm.addPhone(owner, "main_line", e164 || original, parsePhone(e164, region) ?? parsePhone(original, region));
+    }
+    for (const email of row.generalEmails) crm.addEmail(owner, email);
+  }
 
   const joined: JoinedRow[] = [];
   scraped.people.forEach((row, index) => {
@@ -347,14 +380,18 @@ export function planImport(input: {
     const company = g === undefined || !row.sourceBusinessId ? undefined : companyOfGroup[g];
     const indexed = [{ row, index }];
     const companyName = businessGroups[g ?? 0]?.name ?? "";
-    if (!company) {
+    const refusedCompany = refusedBusinessIds.get(row.sourceBusinessId);
+    if (refusedCompany) {
+      const businessName = scraped.businesses.find((b) => b.sourceBusinessId === row.sourceBusinessId)?.name ?? "";
+      unapplied.push({ ...unmatched(name, row.title, "people", indexed, "company", { conflict: "repeated_id", disagreeing: refusedCompany }), companyName: businessName });
+    } else if (refusedPeople.has(index)) {
+      unapplied.push({ ...unmatched(name, row.title, "people", indexed, "person", { conflict: "repeated_id", disagreeing: ["person_id", "name"] }), companyName });
+    } else if (!company) {
       unapplied.push({ outcome: "not_enrolled", reason: "company_not_in_export", lead: null, name, sourceBusinessId: row.sourceBusinessId });
     } else if (candidates.length > 1) {
-      // Business rows sharing this business_id are two companies (different place_ids, or a row
-      // that settled apart from its group): the person could belong to either.
-      const places = new Set(candidates.flatMap((c) => businessGroups[c]?.rows.flatMap((r) => (r.row.placeId ? [r.row.placeId] : [])) ?? []));
-      const disagreeing: EvidenceKind[] = places.size > 1 ? ["business_id", "place_id"] : ["business_id"];
-      const conflict = { conflict: "contradiction", disagreeing } as const;
+      // Business rows sharing this business_id settled apart as two companies: the person could
+      // belong to either.
+      const conflict = { conflict: "contradiction", disagreeing: ["business_id"] } as const;
       unapplied.push({ ...unmatched(name, row.title, "people", indexed, "company", conflict), companyName });
     } else if ("conflict" in company) {
       unapplied.push({ ...unmatched(name, row.title, "people", indexed, "company", company), companyName });
@@ -388,7 +425,19 @@ export function planImport(input: {
   // this import is settled by the equal-claims rule, never by which row comes first.
   const appliedRows = joined.flatMap((r) => (personRecords[r.index] ? [{ ...r, personId: personRecords[r.index] ?? "" }] : []));
   crm.noteListers(appliedRows);
-  for (const { row, personId, companyId } of appliedRows) addPersonDetails(crm, row, personId, companyId);
+  crm.noteDestinationListers(
+    appliedRows.flatMap(({ row, personId, companyId }) => {
+      const lead = { kind: "person", personId } as const;
+      const email = emailKey(row.email);
+      const mobile = dialKindOf(row) === "mobile" ? parsePhone(row.dialPhone, crm.regionOf(companyId, ""))?.key : undefined;
+      return [
+        ...(email && !crm.companyHolds(companyId, "email", email) ? [{ lead, kind: "email", key: email }] : []),
+        ...(mobile ? [{ lead, kind: "mobile", key: mobile }] : []),
+      ];
+    }),
+  );
+  const inOrder = appliedRows.map((r) => ({ r, key: crm.personRowIdentity(r) })).sort((a, b) => a.key.localeCompare(b.key) || a.r.personId.localeCompare(b.r.personId));
+  for (const { r } of inOrder) addPersonDetails(crm, r.row, r.personId, r.companyId);
 
   const entries: SummaryEntry[] = [];
   const enrollments: NewEnrollment[] = [];
@@ -488,16 +537,19 @@ export function personDisplayName(fields: Pick<PersonFields, "fullName" | "first
  *   applied there before, unchanged) resolves to that record before any evidence is weighed, and
  *   its group with it. Towards other groups it weighs only what its own evidence weighs, so
  *   another row contests the record exactly as it did on the import that applied it.
- * - A row of a collapsed group, pinned or not, that is not itself pinned is decided on its own
- *   evidence, name agreement included, beside the file's other groups: a row that does not itself
- *   point to its group's match leaves the group and is settled exactly as if it were imported
- *   alone; the rest are matched again without it (review rounds 5 to 7).
+ * - A row of a collapsed group that is not itself pinned is decided on its own evidence, name
+ *   agreement included, beside the file's other groups: a row whose own evidence points to
+ *   another record, or contradicts itself, leaves the group and is settled exactly as if it were
+ *   imported alone; the rest are matched again without it. A row with no evidence of its own
+ *   stays: it is a copy of the others (review rounds 5 to 8).
  */
 function settleGroups<R extends { readonly index: number }, G extends { readonly rows: readonly R[] }>(
   initial: readonly G[],
   evidenceOf: (group: G) => Evidence,
   withRows: (group: G, rows: readonly R[]) => G,
   pinnedOf: (row: R) => string | undefined,
+  /** The decisive key (a personal email, a place_id) a row shares with its group, if any. */
+  decisiveKeyOf: (row: R) => string,
 ): { groups: G[]; matches: Resolution[] } {
   // Each group carries at most one pinned record; rows pinned elsewhere form their own groups.
   let groups: { group: G; pin: string | undefined }[] = initial.flatMap((group) => {
@@ -528,15 +580,23 @@ function settleGroups<R extends { readonly index: number }, G extends { readonly
     const resolved = resolveMatches(evidence);
     const matches = groups.map((x, g): Resolution => (x.pin === undefined ? (resolved[g] ?? { kind: "new" }) : { kind: "match", id: x.pin }));
     const leaving = new Map<R, string>();
-    groups.forEach(({ group }, g) => {
+    groups.forEach(({ group, pin }, g) => {
       const match = matches[g];
       if (group.rows.length < 2 || match?.kind !== "match") return;
       // The row on its own, beside the file's other groups but without its own group's other rows.
       const others = evidence.filter((_, o) => o !== g);
-      for (const row of group.rows) {
+      // A row that shares a decisive detail with another row of its group is that row's person or
+      // company within the file; only rows held in by weaker keys are checked on their own.
+      const decisive = group.rows.map(decisiveKeyOf);
+      for (const [r, row] of group.rows.entries()) {
         if (pinnedRows.has(row)) continue;
+        // In a pinned group every other row answers to the pin; elsewhere a shared decisive key holds.
+        const key = decisive[r];
+        if (pin === undefined && key && decisive.some((other, o) => o !== r && other === key)) continue;
         const alone = resolveMatches([...others, evidenceOf(withRows(group, [row]))]).at(-1);
-        if (alone?.kind !== "match" || alone.id !== match.id) leaving.set(row, JSON.stringify(alone));
+        // A row leaves only when its own evidence points elsewhere; having none is no reason.
+        const elsewhere = (alone?.kind === "match" && alone.id !== match.id) || (alone?.kind === "ambiguous" && alone.conflict === "contradiction");
+        if (elsewhere) leaving.set(row, JSON.stringify(alone));
       }
     });
     if (leaving.size === 0) {
@@ -740,26 +800,20 @@ function indexOf(item: unknown): number {
  * agreeing name and main line, are one company: never across two place_ids, and the name-and-line
  * link never across two addresses.
  */
-function groupBusinesses(rows: readonly ScrapedBusiness[]): BusinessGroup[] {
-  const indexed = rows.map((row, index) => ({ row, index }));
+function groupBusinesses(indexed: readonly Indexed<ScrapedBusiness>[]): BusinessGroup[] {
   return groupRows(indexed, {
     strong: ({ row }) => [
-      // A shared business_id joins rows only when their names agree, as it does across imports.
-      row.sourceBusinessId && nameKey(row.name) ? `id|${row.sourceBusinessId}|${nameKey(row.name)}` : "",
+      // Rows sharing a business_id agree on its name and place: the rest were refused as bad input.
+      row.sourceBusinessId ? `id|${row.sourceBusinessId}` : "",
       row.placeId ? `place|${row.placeId}` : "",
       `row|${companyRowIdentity(row)}`,
     ],
     weak: ({ row }) => {
       const line = mainLineOf(row)?.key;
-      return [
-        ...(line && nameKey(row.name) ? [`${nameKey(row.name)}|${line}`] : []),
-        // A row with a blank name joins the rows sharing its business_id when they agree on one name.
-        ...(row.sourceBusinessId ? [`idblank|${row.sourceBusinessId}`] : []),
-      ];
+      return line && nameKey(row.name) ? [`${nameKey(row.name)}|${line}`] : [];
     },
     identity: ({ row }) => row.placeId ?? "",
-    fit: (group) =>
-      new Set(group.map(({ row }) => addressKey(row)).filter(Boolean)).size <= 1 && new Set(group.map(({ row }) => nameKey(row.name)).filter(Boolean)).size <= 1,
+    fit: (group) => new Set(group.map(({ row }) => addressKey(row)).filter(Boolean)).size <= 1,
   }).map((group) => ({ rows: group, name: group.find((r) => r.row.name)?.row.name ?? "" }));
 }
 
@@ -782,22 +836,18 @@ function groupPeople(joined: readonly JoinedRow[], crm: WorkingDirectory): Perso
     strong: (r) => {
       const { row, companyId } = r;
       return [
-        // A shared person_id joins rows only when their names agree, as it does across imports.
-        row.sourcePersonId && personNameKey(fieldsOf(row)) ? `id|${companyId}|${row.sourcePersonId}|${personNameKey(fieldsOf(row))}` : "",
+        // Rows sharing a person_id agree on the name: the rest were refused as bad input.
+        row.sourcePersonId ? `id|${companyId}|${row.sourcePersonId}` : "",
         personal(r) ? `email|${companyId}|${personal(r)}` : "",
         `row|${companyId}|${crm.personRowIdentity(r)}`,
       ];
     },
     weak: (r) => {
       const name = personNameKey(fieldsOf(r.row));
-      return [
-        ...(name ? phones(r).map((key) => `${r.companyId}|${name}|${key}`) : []),
-        // A row with a blank name joins the rows sharing its person_id when they agree on one name.
-        ...(r.row.sourcePersonId ? [`idblank|${r.companyId}|${r.row.sourcePersonId}`] : []),
-      ];
+      return name ? phones(r).map((key) => `${r.companyId}|${name}|${key}`) : [];
     },
     identity: (r) => (personal(r) ? (crm.personHolding(r.companyId, personal(r)) ?? "") : ""),
-    fit: (rows) => new Set(rows.map((r) => personNameKey(fieldsOf(r.row))).filter(Boolean)).size <= 1,
+    fit: () => true,
   }).map((rows) => ({ companyId: rows[0]?.companyId ?? "", rows }));
 }
 
@@ -873,6 +923,21 @@ function mergeFields<T extends Readonly<Record<string, string | null>>>(known: T
   return merged;
 }
 
+/** The rows of each non-blank key shared by more than one row. */
+function repeatedIds<T>(rows: readonly T[], keyOf: (row: T) => string): T[][] {
+  const byKey = new Map<string, T[]>();
+  for (const row of rows) {
+    const key = keyOf(row);
+    if (key) byKey.set(key, [...(byKey.get(key) ?? []), row]);
+  }
+  return [...byKey.values()].filter((group) => group.length > 1);
+}
+
+/** The distinct non-blank values. */
+function distinct(values: readonly string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
+}
+
 /** "Ann", "Ann and Bea", "Ann, Bea and Cai". */
 function joinNames(names: readonly string[]): string {
   return names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1) ?? ""}`;
@@ -912,6 +977,8 @@ interface MutableCompany {
   fields: CompanyFields;
   details: MutableDetail[];
   source: Readonly<Record<string, string>>;
+  /** What was stored before this import, to write back only what changed. */
+  original: string;
   touched: boolean;
 }
 
@@ -926,6 +993,8 @@ interface MutablePerson {
   fields: PersonFields;
   details: MutableDetail[];
   source: Readonly<Record<string, string>>;
+  /** What was stored before this import, to write back only what changed. */
+  original: string;
   touched: boolean;
 }
 
@@ -934,6 +1003,8 @@ class WorkingDirectory {
   private readonly companies = new Map<string, MutableCompany>();
   private readonly people = new Map<string, MutablePerson>();
   private readonly enrolled = new Set<string>();
+  /** Which leads list each outreach destination in this import, by kind and key. */
+  private readonly destinationListers = new Map<string, LeadRef[]>();
   /** Who lists each personal detail in this import, by company, channel and key. */
   private readonly listers = new Map<string, Set<string>>();
   /** The other campaigns each lead is enrolled in. */
@@ -961,7 +1032,8 @@ class WorkingDirectory {
         newRowIdentities: new Set(),
         fields: c.fields,
         details: c.details.map((d) => ({ ...d })),
-        source: {},
+        source: c.source,
+        original: JSON.stringify([c.fields, c.placeId, c.source]),
         touched: false,
       });
     }
@@ -976,7 +1048,8 @@ class WorkingDirectory {
         newRowIdentities: new Set(),
         fields: p.fields,
         details: p.details.map((d) => ({ ...d })),
-        source: {},
+        source: p.source,
+        original: JSON.stringify([p.fields, p.companyId, p.source]),
         touched: false,
       });
     }
@@ -1026,7 +1099,9 @@ class WorkingDirectory {
    */
   private contested(personId: string, channel: Channel, key: string, region: string | null): { winner: string | undefined; others: string[] } | undefined {
     const companyId = this.person(personId).companyId;
-    const listers = [...(this.listers.get(`${companyId}|${channel}|${key}`) ?? [])].sort();
+    const listers = [...(this.listers.get(`${companyId}|${channel}|${key}`) ?? [])].sort((a, b) =>
+      this.contentKey({ kind: "person", personId: a }).localeCompare(this.contentKey({ kind: "person", personId: b })),
+    );
     if (listers.length < 2) return undefined;
     const fresh = new Set(this.added.map((d) => d.id));
     const heldBefore = this.peopleAt(companyId).some((p) => {
@@ -1058,14 +1133,34 @@ class WorkingDirectory {
   }
 
   /** Another lead holding this destination who shares a campaign with `lead`, enrolled or about to be. */
+  /**
+   * Who stops `lead` gaining this destination: another lead in one of its campaigns that held it
+   * before this import, or, when several such leads newly list it in this import, the
+   * equal-claims rule (row order never decides).
+   */
   private destinationHolder(lead: LeadRef, kind: string, key: string, campaigns: ReadonlySet<string>): LeadRef | undefined {
+    const fresh = new Set(this.added.map((d) => d.id));
+    const shares = (other: LeadRef) => [...this.campaignsOf(other)].some((c) => campaigns.has(c));
     const others: LeadRef[] =
       lead.kind === "company"
         ? [...this.companies.keys()].filter((id) => id !== lead.companyId).map((companyId) => ({ kind: "company", companyId }))
         : [...this.people.keys()].filter((id) => id !== lead.personId).map((personId) => ({ kind: "person", personId }));
-    return others.find(
-      (other) => this.destinations(other).some((d) => d.kind === kind && d.detail.key === key) && [...this.campaignsOf(other)].some((c) => campaigns.has(c)),
-    );
+    const heldBefore = others.find((other) => shares(other) && this.destinations(other).some((d) => d.kind === kind && d.detail.key === key && !fresh.has(d.detail.id)));
+    if (heldBefore) return heldBefore;
+    const rivals = [...(this.destinationListers.get(`${kind}|${key}`) ?? [])].filter((other) => leadKey(other) !== leadKey(lead) && shares(other));
+    if (rivals.length === 0) return undefined;
+    const tied = [lead, ...rivals].sort((a, b) => this.contentKey(a).localeCompare(this.contentKey(b)));
+    const winner = settleEqualClaims(tied);
+    return winner && leadKey(winner) === leadKey(lead) ? undefined : rivals[0];
+  }
+
+  /** Records which leads list which outreach destinations in this import, before any is stored. */
+  noteDestinationListers(listed: readonly { lead: LeadRef; kind: string; key: string }[]): void {
+    for (const { lead, kind, key } of listed) {
+      const at = `${kind}|${key}`;
+      const known = this.destinationListers.get(at) ?? [];
+      if (!known.some((l) => leadKey(l) === leadKey(lead))) this.destinationListers.set(at, [...known, lead]);
+    }
   }
 
   /**
@@ -1097,8 +1192,11 @@ class WorkingDirectory {
         if (kind) claims.push({ lead, key: `${kind}|${h.key}`, rank: enrolled ? 0 : 3, detail: h.held.detail });
       }
       if (lead.kind === "person") {
+        // The company's own details (its shared inboxes and main lines) are never a person's claims.
+        const company = this.company(this.person(lead.personId).companyId);
+        const companyKeys = new Set(company.details.map((d) => `${d.channel === "email" ? "email" : "mobile"}|${d.key}`));
         for (const listed of listedDestinations(this.person(lead.personId).rowIdentities)) {
-          claims.push({ lead, key: listed.key, rank: enrolled ? 0 : 3, detail: listed.detail });
+          if (!companyKeys.has(listed.key)) claims.push({ lead, key: listed.key, rank: enrolled ? 0 : 3, detail: listed.detail });
         }
       }
     }
@@ -1121,7 +1219,7 @@ class WorkingDirectory {
         const stronger = rivals.filter((r) => r.rank === best).sort((a, b) => name(a.lead).localeCompare(name(b.lead)));
         // Equal claims go to the equal-claims rule; a strictly stronger claim always wins.
         if (best === claim.rank) {
-          const tied = [lead, ...stronger.map((r) => r.lead)].sort((a, b) => leadKey(a).localeCompare(leadKey(b)));
+          const tied = [lead, ...stronger.map((r) => r.lead)].sort((a, b) => this.contentKey(a).localeCompare(this.contentKey(b)));
           const winner = settleEqualClaims(tied);
           if (winner && leadKey(winner) === leadKey(lead)) continue;
         }
@@ -1136,6 +1234,15 @@ class WorkingDirectory {
       }
     }
     return refused;
+  }
+
+  /**
+   * What a lead is, by content rather than by record ID: new records receive IDs in row order,
+   * so claimants are ordered by their rows' normalised identities.
+   */
+  private contentKey(lead: LeadRef): string {
+    const identities = lead.kind === "company" ? this.company(lead.companyId).rowIdentities : this.person(lead.personId).rowIdentities;
+    return [...identities].sort().join("\n");
   }
 
   private nameOf(lead: LeadRef): string {
@@ -1155,7 +1262,7 @@ class WorkingDirectory {
    */
   matchCompanies(groups: readonly BusinessGroup[]) {
     const pinned = (r: Indexed<ScrapedBusiness>) => onlyHolder([...this.companies.values()], companyRowIdentity(r.row));
-    return settleGroups<Indexed<ScrapedBusiness>, BusinessGroup>(groups, (group) => this.companyEvidence(group), (group, rows) => ({ rows, name: group.name }), pinned);
+    return settleGroups<Indexed<ScrapedBusiness>, BusinessGroup>(groups, (group) => this.companyEvidence(group), (group, rows) => ({ rows, name: group.name }), pinned, (r) => r.row.placeId ?? "");
   }
 
   private companyEvidence(group: BusinessGroup): Evidence {
@@ -1200,13 +1307,14 @@ class WorkingDirectory {
   }
 
   upsertCompany(group: BusinessGroup, existing: string | null): string {
-    const rows = group.rows.map((r) => r.row);
+    // In a fixed order that does not depend on where the rows sit in the file.
+    const rows = group.rows.map((r) => r.row).sort((a, b) => companyRowIdentity(a).localeCompare(companyRowIdentity(b)));
     const [first, ...rest] = rows;
     if (!first) throw new Error("an empty business group");
     const incoming = rest.reduce((fields, row) => mergeFields(fields, companyFieldsOf(row)), companyFieldsOf(first));
     const placeId = rows.find((r) => r.placeId)?.placeId ?? null;
     const source = rows.at(-1)?.source ?? first.source;
-    const newIds = unique(rows.flatMap((r) => (r.sourceBusinessId ? [r.sourceBusinessId] : [])));
+    const newIds = unique(rows.flatMap((r) => (r.sourceBusinessId ? [r.sourceBusinessId] : []))).sort();
     const identities = unique(rows.map(companyRowIdentity));
     if (existing) {
       const company = this.company(existing);
@@ -1241,6 +1349,7 @@ class WorkingDirectory {
       fields: incoming,
       details: [],
       source,
+      original: "",
       touched: true,
     });
     return id;
@@ -1256,7 +1365,11 @@ class WorkingDirectory {
    */
   matchPeople(groups: readonly PersonGroup[]) {
     const pinned = (r: JoinedRow) => onlyHolder(this.peopleAt(r.companyId).filter((p) => !p.isNew), this.personRowIdentity(r));
-    return settleGroups<JoinedRow, PersonGroup>(groups, (group) => this.personEvidence(group), (group, rows) => ({ companyId: group.companyId, rows }), pinned);
+    const personalEmail = ({ row, companyId }: JoinedRow) => {
+      const email = emailKey(row.email);
+      return email && !this.companyHolds(companyId, "email", email) ? email : "";
+    };
+    return settleGroups<JoinedRow, PersonGroup>(groups, (group) => this.personEvidence(group), (group, rows) => ({ companyId: group.companyId, rows }), pinned, personalEmail);
   }
 
   /**
@@ -1312,11 +1425,13 @@ class WorkingDirectory {
   }
 
   upsertPerson(group: PersonGroup, existing: string | null): string {
-    const [first, ...rest] = group.rows.map((r) => r.row);
+    // In a fixed order that does not depend on where the rows sit in the file.
+    const ordered = [...group.rows].sort((a, b) => this.personRowIdentity(a).localeCompare(this.personRowIdentity(b))).map((r) => r.row);
+    const [first, ...rest] = ordered;
     if (!first) throw new Error("an empty row group");
     const incoming = rest.reduce((fields, row) => mergeFields(fields, fieldsOf(row)), fieldsOf(first));
-    const source = group.rows.at(-1)?.row.source ?? first.source;
-    const ids = unique(group.rows.flatMap((r) => (r.row.sourcePersonId ? [r.row.sourcePersonId] : [])));
+    const source = ordered.at(-1)?.source ?? first.source;
+    const ids = unique(group.rows.flatMap((r) => (r.row.sourcePersonId ? [r.row.sourcePersonId] : []))).sort();
     const identities = unique(group.rows.map((r) => this.personRowIdentity(r)));
     if (existing) {
       const person = this.person(existing);
@@ -1349,6 +1464,7 @@ class WorkingDirectory {
       fields: incoming,
       details: [],
       source,
+      original: "",
       touched: true,
     });
     return id;
@@ -1531,8 +1647,9 @@ class WorkingDirectory {
   }
 
   companyWrites(): CompanyWrite[] {
+    // A record a repeat import leaves as it was is not written, so its timestamps stay.
     return [...this.companies.values()]
-      .filter((c) => c.touched)
+      .filter((c) => c.touched && (c.isNew || c.newSourceBusinessIds.size > 0 || c.newRowIdentities.size > 0 || JSON.stringify([c.fields, c.placeId, c.source]) !== c.original))
       .map((c) => ({
         id: c.id,
         isNew: c.isNew,
@@ -1546,7 +1663,7 @@ class WorkingDirectory {
 
   personWrites(): PersonWrite[] {
     return [...this.people.values()]
-      .filter((p) => p.touched)
+      .filter((p) => p.touched && (p.isNew || p.newSourcePersonIds.size > 0 || p.newRowIdentities.size > 0 || JSON.stringify([p.fields, p.companyId, p.source]) !== p.original))
       .map((p) => ({
         id: p.id,
         isNew: p.isNew,
