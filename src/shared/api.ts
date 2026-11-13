@@ -364,6 +364,12 @@ export interface LoadProjectionView {
   /** Leads that would not have started within the projection's horizon. */
   readonly notStartedWithinHorizon: number;
   readonly horizonDays: number;
+  /**
+   * Pool inboxes that cannot send now with no known end: the provider reports them unable to send
+   * (stale, sending off, not active), or the lead quota is held. While any is listed there is no
+   * projection, because none can be honest. A rate limit has an end, and the projection resumes there.
+   */
+  readonly cannotProject: readonly { readonly accountId: string; readonly label: string; readonly reason: "cannot_send" | "quota" }[];
 }
 
 /** Rendered copy, in pieces, so a fallback the lead gets can be shown as one. */

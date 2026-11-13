@@ -285,6 +285,32 @@ test.describe("review of pull request 41", () => {
     expect((await page.getByTestId("canvas").boundingBox())!.y).toBe(canvas!.y);
   });
 
+  test("switching the preview lead shows loading, never the previous lead's copy under the new name (council item 2)", async ({ page }) => {
+    const id = await campaign(track([COPY.first, COPY.second]));
+    await page.goto(`${r.url}/campaigns/${id}/before-launch`);
+    await expect(page.getByText("Hi Amira,").first()).toBeVisible();
+    await page.route("**/api/campaigns/*/preview/**", () => new Promise(() => undefined));
+    await page.getByRole("button", { name: "Next lead" }).click();
+    await expect(page.getByLabel("Loading the copy")).toBeVisible();
+    await expect(page.getByText("Hi Amira,")).toHaveCount(0);
+  });
+
+  test("a new definition version shows loading for the copy and checks, not the older ones (council item 2)", async ({ page }) => {
+    // Stored with an empty pool: opening the campaign saves the connected inboxes, a new version.
+    const id = await campaign({ ...track([COPY.first, COPY.second]), emailPool: [] });
+    const held: Route[] = [];
+    await page.route("**/api/campaigns/*/sequence", (route) => (route.request().method() === "PUT" ? void held.push(route) : route.continue()));
+    await page.goto(`${r.url}/campaigns/${id}/before-launch`);
+    await expect(page.getByText("Hi Amira,").first()).toBeVisible();
+    // The new version's checks and copy never arrive; the older ones must not stand in for them.
+    await page.route("**/api/campaigns/*/before-launch?*", () => new Promise(() => undefined));
+    await page.route("**/api/campaigns/*/preview/**", () => new Promise(() => undefined));
+    await expect.poll(() => held.length).toBe(1);
+    await held[0]!.continue();
+    await expect(page.getByLabel("Loading the checks before launch")).toBeVisible();
+    await expect(page.getByText("Hi Amira,")).toHaveCount(0);
+  });
+
   test("a follow-up that continues the thread names the subject of the nearest email that started one (SequenceTab.tsx:274)", async ({ page }) => {
     const id = await campaign(track([COPY.first, { ...COPY.second, threading: "new_subject", subject: "A second idea" }, { ...COPY.second, id: "s3", body: "Last note." }]));
     await page.goto(`${r.url}/campaigns/${id}?track=email&step=s3`);

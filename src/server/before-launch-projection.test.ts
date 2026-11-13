@@ -146,3 +146,55 @@ describe("the Before launch projection makes exactly the engine's sends (PR 41 v
     });
   }
 });
+
+describe("an inbox that cannot send now (PR 41 council, item 1)", () => {
+  const inbox = (fields: Partial<FakeAccount> = {}): FakeAccount => ({ id: "inbox-a", capacity: 30, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC", ...fields });
+  const oneEmail: CampaignDefinition = {
+    timezone: "Europe/London",
+    callSkipLimitDays: 2,
+    emailPool: ["inbox-a"],
+    tracks: [{ id: "t1", channel: "email", branch: "main", window: [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 })), steps: [{ id: "s1", waitDays: 0, subject: "Hi", body: "Hi.", threading: "new_subject", removed: false }], start: { kind: "entry" }, removed: false }],
+  };
+  const MONDAY_10 = Date.parse("2026-11-09T10:00:00Z");
+  const lead = (i: number) => ({ business: business({ business_id: `b${i}`, business_name: `Clinic ${i}` }), person: person({ person_id: `p${i}`, business_id: `b${i}`, full_name: `Lead Person${i}`, email: `lead${i}@clinic${i}.example` }) });
+
+  async function twoCampaigns(account: FakeAccount, before: (h: EngineHarness) => void, launchFirst = true) {
+    const h = new EngineHarness({ start: MONDAY_10, accounts: [account] });
+    const a = lead(1);
+    const { campaign: first } = await h.createCampaign("First", { businesses: [a.business], people: [a.person] });
+    await h.tick();
+    await h.defineSequence(first.id, oneEmail);
+    before(h);
+    if (launchFirst) expect((await h.launch(first.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_10 + 30_000);
+    const b = lead(2);
+    const { campaign: second } = await h.createCampaign("Second", { businesses: [b.business], people: [b.person] });
+    await h.defineSequence(second.id, oneEmail);
+    const view = (await h.request<BeforeLaunchView>("GET", `/api/campaigns/${second.id}/before-launch`)).body;
+    const projected = await projectedSends(h.store, second.id, h.clock);
+    return { h, second, view, projected };
+  }
+
+  test("a rate limit with an end resumes at that instant, as the engine does, instead of looking like an outage", async () => {
+    const { h, second, view, projected } = await twoCampaigns(inbox(), (x) => x.fake.rateLimitedUntil.set("inbox-a", MONDAY_10 + 2 * MIN));
+    expect(view.load).toMatchObject({ daysUntilAllStart: 1, notStartedWithinHorizon: 0, cannotProject: [] });
+    expect((await h.launch(second.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_10 + DAY);
+    const sentSecond = h.fake.deliveryLog.find((d) => d.destination === "lead2@clinic2.example");
+    // The first campaign's waiting lead goes first at the end of the wait, so this one goes one
+    // gap later: the projection does not model other campaigns' pending work (ADR 0003, 12c).
+    expect(projected!.sends[0]!.at).toBeGreaterThanOrEqual(MONDAY_10 + 2 * MIN);
+    expect(sentSecond!.at - projected!.sends[0]!.at).toBeLessThanOrEqual(MIN);
+  });
+
+  test("an inbox the provider reports cannot send has no known end: the screen says it cannot project, never a number", async () => {
+    // An inbox that cannot send also blocks launch (blocker 3), so only the projection is checked.
+    const { view } = await twoCampaigns(inbox(), (x) => (x.fake.accountsById.get("inbox-a")!.healthy = false), false);
+    expect(view.load).toMatchObject({ daysUntilAllStart: null, cannotProject: [{ accountId: "inbox-a", reason: "cannot_send" }] });
+  });
+
+  test("a lead quota held at the provider has no known end either", async () => {
+    const { view } = await twoCampaigns(inbox(), (x) => (x.fake.accountsById.get("inbox-a")!.quotaAvailable = false));
+    expect(view.load).toMatchObject({ daysUntilAllStart: null, cannotProject: [{ accountId: "inbox-a", reason: "quota" }] });
+  });
+});

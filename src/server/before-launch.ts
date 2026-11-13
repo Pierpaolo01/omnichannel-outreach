@@ -8,9 +8,8 @@ import { missingFields, renderSegments, type Segment } from "../domain/copy-prev
 import { projectLoad, type Projection } from "../domain/load-projection.ts";
 import { mergeUses } from "../domain/sequence/copy.ts";
 import { liveSteps, liveTracks, type CampaignDefinition, type TrackDefinition } from "../domain/sequence/definition.ts";
-import { accountAvailable } from "../domain/sequence/dispatch.ts";
 import { goodEmail } from "../domain/sequence/progress.ts";
-import type { SubjectState } from "../domain/sequence/state.ts";
+import type { AccountState, SubjectState } from "../domain/sequence/state.ts";
 import type { BeforeLaunchView, ContactDetailView, CopyPreview, LeadRow, LoadProjectionView, PreviewLead } from "../shared/api.ts";
 import type { OutreachStore } from "./persistence/store.ts";
 
@@ -101,17 +100,29 @@ export async function beforeLaunchView(store: OutreachStore, campaignId: string,
   };
 }
 
+/**
+ * Why an inbox cannot be projected: it cannot send and nothing says when it will again. The
+ * provider reports it unable (stale, sending off, not active), or the lead quota is held until the
+ * provider confirms it again. A rate limit's wait has an end, so it is projected.
+ */
+function cannotProject(a: AccountState, now: number): "cannot_send" | "quota" | null {
+  if (!a.healthy) return "cannot_send";
+  if (a.waitReason === "quota" && (a.waitUntil === null || a.waitUntil > now)) return "quota";
+  return null;
+}
+
 /** The projection's input, from the store: the same lead zones, inboxes, slots and counts sending reads. */
 async function projectionOf(store: OutreachStore, definition: CampaignDefinition, leads: readonly CampaignLead[], now: number): Promise<Projection | null> {
   const track: TrackDefinition | undefined = liveTracks(definition, "main").find((t) => t.channel === "email");
   if (!track) return null;
   const pool = (await store.engine.accounts(now)).filter((a) => definition.emailPool.includes(a.id));
+  if (pool.some((a) => cannotProject(a, now) !== null)) return null;
   return projectLoad({
     start: now,
     window: track.window,
     waits: liveSteps(track).map((s) => s.waitDays),
     leads: leads.filter((l) => l.lead.email !== null).map((l) => ({ id: l.state.subject.id, zone: l.state.lead.zone, sender: l.state.subject.emailSender })),
-    accounts: pool.map((a) => ({ id: a.id, capacity: a.capacity, usedToday: a.used, gapMs: a.gapMs, nextSlotAt: a.nextSlotAt, resetZone: a.resetZone, available: accountAvailable(a, now) })),
+    accounts: pool.map((a) => ({ id: a.id, capacity: a.capacity, usedToday: a.used, gapMs: a.gapMs, nextSlotAt: a.nextSlotAt, resetZone: a.resetZone, waitUntil: a.waitUntil !== null && a.waitUntil > now ? a.waitUntil : null })),
     zone: definition.timezone,
     horizonDays: PROJECTION_HORIZON_DAYS,
   });
@@ -141,6 +152,10 @@ async function loadProjection(store: OutreachStore, definition: CampaignDefiniti
     daysUntilAllStart: projection?.daysUntilAllStart ?? null,
     notStartedWithinHorizon: projection?.notStarted ?? 0,
     horizonDays: PROJECTION_HORIZON_DAYS,
+    cannotProject: pool.flatMap((a) => {
+      const reason = cannotProject(a, now);
+      return reason ? [{ accountId: a.id, label: labels[a.id] ?? a.id, reason }] : [];
+    }),
   };
 }
 

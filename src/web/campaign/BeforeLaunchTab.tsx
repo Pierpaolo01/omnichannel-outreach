@@ -15,7 +15,9 @@ import type { SequenceEditor } from "./useSequence.ts";
 export function BeforeLaunchTab({ campaignId, editor }: { campaignId: string; editor: SequenceEditor }) {
   const version = editor.view.definitionVersion;
   const { result, retry } = useApi<BeforeLaunchView>(`/api/campaigns/${encodeURIComponent(campaignId)}/before-launch?v=${version}${editor.launched ? "&launched" : ""}`);
-  const facts = result.state === "ready" ? result.data : result.state === "loading" ? result.previous : null;
+  // Only checks for the current version are shown: while a newer version loads, the loading
+  // state shows, not the older checks (PR 41 council, item 2).
+  const facts = result.state === "ready" ? result.data : null;
   return (
     <div className="flex flex-col gap-4">
       <LaunchBar editor={editor} facts={facts} />
@@ -288,6 +290,7 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
   if (editor.launched || !load) return <p className="text-[14px] text-muted">The projection is for before launch. Once running, leads waiting for sending capacity show in Needs attention.</p>;
   if (!emailTrackOf(editor.view.definition)) return <p className="text-[14px] text-muted">Add an email track to see the load it puts on each sender inbox.</p>;
   if (load.accounts.length === 0) return <p className="text-[14px] text-crit">No connected sender inbox, so there is no load to project.</p>;
+  const blocked = load.cannotProject.length > 0;
   return (
     <>
       <table className="table text-[14px] max-[560px]:block">
@@ -310,7 +313,7 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
                   </span>
                 </span>
               </td>
-              <td className="py-2.5 max-[560px]:p-0">{a.busiestDay} a day</td>
+              <td className="py-2.5 max-[560px]:p-0">{blocked ? "—" : `${a.busiestDay} a day`}</td>
               <td className="py-2.5 max-[560px]:p-0">
                 <span className={a.usedToday >= a.capacity ? "font-medium text-pause" : ""}>
                   {a.usedToday} of {a.capacity}
@@ -323,6 +326,15 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
           ))}
         </tbody>
       </table>
+      {blocked ? (
+        <p className="mt-2 text-[13px] text-ink-2">
+          Can’t project the load while{" "}
+          {load.cannotProject
+            .map((c) => (c.reason === "quota" ? `${c.label} waits for Instantly’s lead quota` : `${c.label} can’t send (the provider reports it unavailable)`))
+            .join(", and ")}
+          . Nothing says when that ends.
+        </p>
+      ) : (
       <p className="mt-2 text-[13px] text-muted">
         {load.daysUntilAllStart !== null
           ? `All ${load.leadsWithEmail} leads with an email start within ${load.daysUntilAllStart} ${load.daysUntilAllStart === 1 ? "day" : "days"} of launch.`
@@ -331,6 +343,7 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
             : `${load.notStartedWithinHorizon} of ${load.leadsWithEmail} leads would not start within ${load.horizonDays} days.`}{" "}
         Follow-ups always go before first emails when an inbox is full. Other campaigns’ sends after today aren’t counted.
       </p>
+      )}
     </>
   );
 }
@@ -397,7 +410,8 @@ function Preview({ campaignId, editor, leads }: { campaignId: string; editor: Se
 function LeadCopy({ campaignId, enrollmentId, version, hasEmail }: { campaignId: string; enrollmentId: string; version: number; hasEmail: boolean }) {
   const { result, retry } = useApi<CopyPreview>(`/api/campaigns/${encodeURIComponent(campaignId)}/preview/${encodeURIComponent(enrollmentId)}?v=${version}`);
   if (result.state === "error") return <ErrorState title="This lead’s copy didn’t load." message={result.message} onRetry={retry} />;
-  const preview = result.state === "ready" ? result.data : result.previous;
+  // Only copy for this lead and this version: never the previous lead's copy under this name.
+  const preview = result.state === "ready" && result.data.lead.id === enrollmentId ? result.data : null;
   if (!preview)
     return (
       <div role="status" aria-busy="true" aria-label="Loading the copy" className="flex flex-col gap-2">

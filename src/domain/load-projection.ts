@@ -45,8 +45,12 @@ export interface ProjectionAccount {
   /** The account's next pacing slot. */
   readonly nextSlotAt: number;
   readonly resetZone: string;
-  /** Healthy and not waiting on a quota or rate limit. */
-  readonly available: boolean;
+  /**
+   * The end of an account-level wait (a rate limit's backoff): nothing is claimed on the inbox
+   * before it, as `accountAvailable` says. An inbox that cannot send with no known end is not
+   * projected at all (src/server/before-launch.ts).
+   */
+  readonly waitUntil: number | null;
 }
 
 export interface ProjectionInput {
@@ -96,7 +100,8 @@ interface Claim {
 
 export function projectLoad(input: ProjectionInput): Projection {
   const { waits, window } = input;
-  const accounts = input.accounts.filter((a) => a.available).sort((a, b) => (a.id < b.id ? -1 : 1));
+  const accounts = [...input.accounts].sort((a, b) => (a.id < b.id ? -1 : 1));
+  const waiting = (a: ProjectionAccount, at: number) => a.waitUntil !== null && at < a.waitUntil;
   const runs: LeadRun[] = input.leads.map((lead) => ({ lead, sender: lead.sender, next: 0, dueWall: input.start, claimed: false }));
   const sentOn = new Map<string, number>();
   const slot = new Map(accounts.map((a) => [a.id, a.nextSlotAt]));
@@ -135,7 +140,7 @@ export function projectLoad(input: ProjectionInput): Projection {
         // `chooseAccount`: the fixed sender, or the pool's account that can send soonest, then
         // the one with most remaining capacity, then the lowest id.
         const account = accounts
-          .filter((a) => (item.run.sender === null || a.id === item.run.sender) && !claims.has(a.id) && used(a, t) < a.capacity)
+          .filter((a) => (item.run.sender === null || a.id === item.run.sender) && !claims.has(a.id) && !waiting(a, t) && used(a, t) < a.capacity)
           .sort((a, b) => Math.max(slotOf(a), t) - Math.max(slotOf(b), t) || b.capacity - used(b, t) - (a.capacity - used(a, t)) || (a.id < b.id ? -1 : 1))[0];
         if (!account) continue;
         claims.set(account.id, { run: item.run, at: t });
@@ -145,7 +150,7 @@ export function projectLoad(input: ProjectionInput): Projection {
       // The handover (5.5) at the account's slot, re-checking the window at that instant.
       for (const account of accounts) {
         const c = claims.get(account.id);
-        if (!c || slotOf(account) > t) continue;
+        if (!c || slotOf(account) > t || waiting(account, t)) continue;
         claims.delete(account.id);
         c.run.claimed = false;
         changed = true;
@@ -176,6 +181,7 @@ export function projectLoad(input: ProjectionInput): Projection {
     for (const a of accounts) {
       const c = claims.get(a.id);
       if (c) candidates.push(slotOf(a), c.at + ENGINE_PARAMS.SETTLING);
+      if (a.waitUntil !== null && a.waitUntil > t) candidates.push(a.waitUntil);
       if (used(a, t) >= a.capacity) candidates.push(startOfLocalDay(localDayNumber(t, a.resetZone) + 1, a.resetZone));
     }
     const next = Math.min(...candidates.filter((c) => c > t));
