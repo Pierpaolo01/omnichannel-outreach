@@ -1,6 +1,7 @@
 import { createApp } from "../../src/server/app.ts";
 import { Engine, TickQueue, type EngineDependencies, type EngineHooks } from "../../src/server/engine/engine.ts";
 import type { SendPort } from "../../src/server/engine/ports.ts";
+import type { EmailProviderSource } from "../../src/server/instantly/routes.ts";
 import type { Rules } from "../../src/server/engine/rules.ts";
 import { openSqliteStore } from "../../src/server/persistence/sqlite-store.ts";
 import type { OutreachStore } from "../../src/server/persistence/store.ts";
@@ -22,8 +23,8 @@ export interface EngineHarnessOptions {
   readonly random?: () => number;
   readonly rules?: Partial<Rules>;
   readonly hooks?: EngineHooks;
-  /** A provider other than the generated test's fake, such as a scripted one. */
-  readonly port?: Provider;
+  /** A provider other than the generated test's fake, such as a scripted one, or one built on the harness's store and clock. */
+  readonly port?: Provider | ((store: OutreachStore, now: () => number) => Provider);
   /** Further engine dependencies, such as how port waits are bounded. */
   readonly engine?: Partial<EngineDependencies>;
 }
@@ -82,13 +83,16 @@ export class EngineHarness {
       if (written) this.writes++;
       return written;
     };
-    this.provider = options.port ?? new FakeEmailPort({ now: () => this.clock, random: options.random ?? (() => 0.5), accounts: options.accounts, modes: options.modes ?? ["honest"] });
+    this.provider =
+      typeof options.port === "function" ? options.port(this.store, () => this.clock)
+      : options.port ?? new FakeEmailPort({ now: () => this.clock, random: options.random ?? (() => 0.5), accounts: options.accounts, modes: options.modes ?? ["honest"] });
     this.engine = this.newEngine();
     this.app = createApp({
       store: this.store,
       now: () => new Date(this.clock).toISOString(),
       newId: sequentialIds(),
       engine: { launch: (id) => this.engine.launch(id) },
+      emailProvider: "status" in this.provider ? (this.provider as Provider & EmailProviderSource) : null,
     });
   }
 

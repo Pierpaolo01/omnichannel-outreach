@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -9,7 +9,10 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { createApp } from "./app.ts";
 import { Engine } from "./engine/engine.ts";
-import { UnconnectedEmailPort } from "./engine/ports.ts";
+import { UnconnectedEmailPort, type SendPort } from "./engine/ports.ts";
+import { InstantlyClient } from "./instantly/client.ts";
+import { instantlyRuntime } from "./instantly/config.ts";
+import { InstantlyEmailPort } from "./instantly/port.ts";
 import { DATABASE_FILE, resolveDataDir } from "./config.ts";
 import { checkHost, isLoopbackAddress } from "./guard.ts";
 import { openSqliteStore } from "./persistence/sqlite-store.ts";
@@ -35,10 +38,29 @@ const dataDir = resolveDataDir({
 });
 mkdirSync(dataDir, { recursive: true, mode: 0o700 });
 const store = openSqliteStore(path.join(dataDir, DATABASE_FILE));
-// No email provider is connected until the Instantly adapter lands (ticket 12c), so every email
-// track meets launch blocker 3 here: the engine runs, honestly, with nothing to send through.
-const engine = new Engine({ store: store.engine, port: new UnconnectedEmailPort(), now: () => Date.now(), newId: randomUUID });
-const api = getRequestListener(createApp({ store, now: () => new Date().toISOString(), newId: randomUUID, engine }).fetch);
+// Email goes through Instantly when a key is configured (ADR 0002); real writes stay off unless the
+// run sets OUTREACH_INSTANTLY_WRITES=on. Without a key every email track meets launch blocker 3.
+const readText = (file: string): string | null => {
+  try {
+    return readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+};
+const instantly = instantlyRuntime(process.env, readText);
+const emailPort: SendPort = instantly
+  ? new InstantlyEmailPort({
+      client: new InstantlyClient({ apiKey: instantly.apiKey, fetch: (input, init) => fetch(input, init), writes: instantly.writes, now: () => Date.now() }),
+      store: store.instantly,
+      now: () => Date.now(),
+      config: { resetZone: instantly.resetZone },
+    })
+  : new UnconnectedEmailPort();
+console.info(JSON.stringify({ level: "info", event: "email_provider", provider: instantly ? "instantly" : "none", sending: instantly?.writes ? "on" : "off" }));
+const engine = new Engine({ store: store.engine, port: emailPort, now: () => Date.now(), newId: randomUUID });
+const api = getRequestListener(
+  createApp({ store, now: () => new Date().toISOString(), newId: randomUUID, engine, emailProvider: emailPort instanceof InstantlyEmailPort ? emailPort : null }).fetch,
+);
 
 /** The worker: restart settlement once (ADR 0003 section 6), then a tick on an interval. */
 const TICK_MS = 15_000;

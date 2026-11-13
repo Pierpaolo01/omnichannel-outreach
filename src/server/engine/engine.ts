@@ -6,7 +6,7 @@
  */
 import { ENGINE_PARAMS, isLive, type AttemptEffect, type AttemptEvent, type CallAnswer, type WorkEvent } from "../../domain/sequence/attempt.ts";
 import { launchCheck, type LaunchCheck } from "../../domain/sequence/blockers.ts";
-import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, startOfLocalDay } from "../../domain/sequence/clock.ts";
+import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
 import type { EngineStore, ReplyEvent } from "./engine-store.ts";
@@ -246,7 +246,8 @@ export class Engine {
     }
     for (const w of await this.store.openWork()) if (w.nextLookupWall !== null) times.push(w.nextLookupWall);
     // A held reply falls back once it has waited one settling period of running time.
-    for (const r of await this.store.pendingReplies()) times.push(r.lastCountedWall + (ENGINE_PARAMS.SETTLING - r.waitedMs));
+    // Each observation credits at most MAX_RUNNING_CREDIT, so the worker wakes at least that often while one waits.
+    for (const r of await this.store.pendingReplies()) times.push(r.lastCountedWall + Math.min(ENGINE_PARAMS.SETTLING - r.waitedMs, ENGINE_PARAMS.MAX_RUNNING_CREDIT));
     for (const acc of accounts.values()) {
       if (acc.waitUntil !== null && acc.waitUntil !== QUOTA_WAIT) times.push(acc.waitUntil);
       // Capacity frees at the account's next reset day.
@@ -453,7 +454,7 @@ export class Engine {
       }
       if (reply.state !== "pending") continue;
       if (!fallback) {
-        const waitedMs = reply.waitedMs + (countTime ? Math.max(0, now - reply.lastCountedWall) : 0);
+        const waitedMs = reply.waitedMs + (countTime ? runningCredit(reply.lastCountedWall, now, ENGINE_PARAMS.MAX_RUNNING_CREDIT) : 0);
         if (waitedMs !== reply.waitedMs || reply.lastCountedWall !== now) await this.store.updateReplyEvent(reply.eventId, { waitedMs, lastCountedWall: now });
         continue;
       }
@@ -582,6 +583,8 @@ export class Engine {
       if (this.rules.claimRefusal(snapshot, item, now) !== null) continue;
       const step = snapshot.campaign.definition.tracks.find((t) => t.id === item.trackId)?.steps.find((s) => s.id === item.stepId);
       const transport = this.port.transportFor({ threading: step?.threading ?? "new_subject" });
+      // A step the port cannot send yet is not claimed: it waits, and nothing is sent for it.
+      if (transport.available === false) continue;
       const attemptId = this.newId();
       const written = await this.store.update(item.subjectId, now, (s) => {
         if (!this.rules.versionsMatch(snapshot, s)) return null;
@@ -680,6 +683,7 @@ export class Engine {
       rendered: a.copy,
       threadRef: a.threadRef,
       subjectId: a.subjectId,
+      trackId: a.trackId,
       stepId: a.stepId,
     };
   }

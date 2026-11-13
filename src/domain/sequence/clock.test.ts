@@ -172,3 +172,20 @@ describe("the prospect's zone (ADR 0003 3.4)", () => {
     expect(isTimeZone("Mars/Base")).toBe(false);
   });
 });
+
+describe("running time: the one definition of time the application was running and observing (ADR 0003 2.4, ADR 0002 rule 4)", () => {
+  const MIN = 60_000;
+  // Each cause of a gap between two observations, and what one observation may credit.
+  test.each([
+    ["two observations a tick apart", 15_000, 15_000],
+    ["two observations one bound apart", MIN, MIN],
+    ["a suspension of the same process with no observation (a sleeping laptop)", 17 * MIN, MIN],
+    ["a slow observation that took minutes", 7 * MIN, MIN],
+    ["a forward clock jump", 3 * 60 * MIN, MIN],
+    ["a backward clock jump", -30 * MIN, 0],
+    ["no time at all", 0, 0],
+  ])("%s: credits at most the bound", async (_cause, gap, credited) => {
+    const { runningCredit } = await import("./clock.ts");
+    expect(runningCredit(1_000_000, 1_000_000 + gap, MIN)).toBe(credited);
+  });
+});

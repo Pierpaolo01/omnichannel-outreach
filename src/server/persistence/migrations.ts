@@ -363,6 +363,54 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE TABLE engine_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     `,
   },
+  {
+    version: 7,
+    name: "the Instantly adapter: dispatch campaigns, dispatched leads and their threads (ADR 0002)",
+    // The adapter's own records, so a restart keeps every mapping between the engine's provider
+    // work and Instantly's campaigns, leads, emails and threads. No message body is stored.
+    sql: `
+      CREATE TABLE instantly_dispatch_campaigns (
+        key TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        instantly_id TEXT,
+        timestamp_updated TEXT
+      );
+      CREATE TABLE instantly_dispatched (
+        work_key TEXT PRIMARY KEY,
+        ref TEXT NOT NULL UNIQUE,
+        lead_id TEXT NOT NULL,
+        dispatch_campaign TEXT NOT NULL REFERENCES instantly_dispatch_campaigns(key),
+        instantly_campaign_id TEXT NOT NULL,
+        inbox TEXT NOT NULL,
+        destination TEXT NOT NULL,
+        added_wall INTEGER NOT NULL,
+        sent_email_id TEXT,
+        thread_id TEXT,
+        sent_wall INTEGER,
+        lead_status INTEGER,
+        verification_status INTEGER
+      );
+      CREATE INDEX instantly_dispatched_by_lead ON instantly_dispatched(lead_id);
+      CREATE INDEX instantly_dispatched_by_thread ON instantly_dispatched(thread_id);
+      CREATE INDEX instantly_dispatched_by_address ON instantly_dispatched(inbox, destination);
+      CREATE TABLE instantly_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    `,
+  },
+  {
+    version: 8,
+    name: "the Instantly adapter: in-doubt adds, recorded before the request (ADR 0002)",
+    // A lead add whose answer may be lost still means the app may have written to that address
+    // from that inbox, so a reply from it is held, not dropped.
+    sql: `
+      CREATE TABLE instantly_intents (
+        work_key TEXT PRIMARY KEY,
+        inbox TEXT NOT NULL,
+        destination TEXT NOT NULL,
+        intended_wall INTEGER NOT NULL
+      );
+      CREATE INDEX instantly_intents_by_address ON instantly_intents(inbox, destination);
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string): void {
