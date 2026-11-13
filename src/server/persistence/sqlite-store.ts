@@ -582,17 +582,16 @@ class SqliteStore implements OutreachStore {
   }
 
   /**
-   * Whether two live details are one detail held twice, as the planner's claim read them: the
-   * same channel; held by the same owner, or a person's copy of their own company's detail; the
-   * target holding the claim's key; and the copy holding it too, or, for a number stored by its
-   * digits, reading as it in the claim's region. The store never derives a reading of its own.
+   * Whether two live details are one detail held twice, as the plan read them: the same channel;
+   * held at one company, never a company's detail folded into a person's; the target holding the
+   * plan's key; and the copy holding it too, or, kept by its digits, reading as it in the country
+   * the plan carries. The store never derives a reading of its own.
    */
   private isOneDetail(copy: Row, target: Row, claim: DetailConsolidation): boolean {
     if (str(copy, "channel") !== str(target, "channel")) return false;
     const companyOf = (row: Row) => (str(row, "owner_kind") === "company" ? str(row, "owner_id") : this.companyIdOfPerson(str(row, "owner_id")));
-    const sameOwner = str(copy, "owner_kind") === str(target, "owner_kind") && str(copy, "owner_id") === str(target, "owner_id");
-    const copyOfOwnCompany = str(copy, "owner_kind") === "person" && str(target, "owner_kind") === "company" && companyOf(copy) === str(target, "owner_id");
-    if (!sameOwner && !copyOfOwnCompany) return false;
+    if (companyOf(copy) !== companyOf(target)) return false;
+    if (str(copy, "owner_kind") === "company" && str(target, "owner_kind") === "person") return false;
     if (str(target, "key") !== claim.key) return false;
     const copyKey = str(copy, "key");
     if (copyKey === claim.key) return true;

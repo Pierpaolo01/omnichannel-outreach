@@ -1,6 +1,7 @@
 import { business, csvOf, person, type ExportRows } from "./export-builder.ts";
 import { testApi, type TestApi } from "./http.ts";
 import type { OutreachStore } from "../../src/server/persistence/store.ts";
+import { digitsOf } from "../../src/domain/contact-details.ts";
 import { parsePhone } from "../../src/domain/phone.ts";
 import type { CompanyRecord, ContactDetailView, ImportSummary, LeadSearchResult, PersonRecord, SummaryEntry } from "../../src/shared/api.ts";
 
@@ -47,20 +48,31 @@ export function random(seed: number): () => number {
 
 /** The ways one UK number is written. */
 const forms = (digits: string) => [`+44${digits}`, `0${digits.replace(/^(\d{2})(\d{4})/, "$1 $2 ")}`, `0044 ${digits}`, `+44 ${digits}`];
+/** A freephone main line: an international number that belongs to no country. */
+const FREEPHONE = "+80012345606";
 /** The ways one North American number (+1 and ten digits) is written, nationally too. */
 const foreignForms = (e164: string) => [e164, e164.slice(2).replace(/^(\d{3})(\d{3})/, "$1 $2 "), `+1 ${e164.slice(2)}`];
 
-/** The regions the generator writes numbers for. A number shown by its digits may be read in any. */
-const REGIONS = ["GB", "US"] as const;
-
-/** A number shown by its digits: stored while no region could read it. */
+/** A number shown by its digits: written in national form at a company with no two-letter country. */
 const unread = (d: Pick<ContactDetailView, "channel" | "value">) => d.channel === "phone" && !d.value.startsWith("+");
 
-/** Whether a detail first shown as `shown` is still that detail with `key`, perhaps read since in some region. */
+/**
+ * How the rule permits a written number to be read (docs/adr/0001, "Phone identity"): as written
+ * when international; in the company's country when it has one, which the model reads as the
+ * number the generator meant, in that number's own region; otherwise as its digits.
+ */
+function permittedReading(raw: string, countried: boolean): string {
+  const written = raw.trim();
+  const digits = digitsOf(written);
+  if (written.startsWith("+") || digits.startsWith("00")) return parsePhone(written, null)?.key ?? digits;
+  return countried ? (catalogue().get(digits) ?? digits) : digits;
+}
+
+/** Whether a detail first shown as `shown` is still that number as `key`: its digits, or read once its company has a country. */
 function sameValue(shown: Pick<ContactDetailView, "channel" | "value">, channel: string, key: string): boolean {
   if (shown.channel !== channel) return false;
   if (!unread(shown)) return valueKey(shown) === valueKey({ channel: shown.channel, value: key });
-  return key === shown.value || REGIONS.some((region) => parsePhone(shown.value, region)?.key === key);
+  return key === digitsOf(shown.value) || key === permittedReading(shown.value, true);
 }
 
 interface LogicalCompany {
@@ -115,6 +127,18 @@ export const PEOPLE: readonly LogicalPerson[] = [
   { company: 6, names: ["Ada Moss"], title: "Owner", emails: ["ada@atlantic.example"], direct: "2079461010", mobile: "7700900110" },
   { company: 6, names: ["Bea Lund"], title: "Practice manager", emails: ["bea@atlantic.example"], direct: "2079461011", mobile: "7700900111" },
 ];
+
+/** Every number the generator writes, by the digits of its national forms: the number it means, in its own region. */
+let numbers: Map<string, string> | undefined;
+function catalogue(): Map<string, string> {
+  numbers ??= new Map(
+    [
+      ...COMPANIES.flatMap((c) => [...(c.line ? [`+44${c.line}`] : []), ...(c.foreignLine ? [c.foreignLine] : [])]),
+      ...PEOPLE.flatMap((p) => [`+44${p.direct}`, `+44${p.mobile}`]),
+    ].flatMap((e164) => (e164.startsWith("+44") ? forms(e164.slice(3)) : foreignForms(e164)).filter((f) => !f.startsWith("+") && !f.startsWith("00")).map((f) => [digitsOf(f), e164] as const)),
+  );
+  return numbers;
+}
 
 /** A shared address both City Physio branches may list, and their people may give as their email. */
 const GROUP_INBOX = "bookings@cityphysio.example";
@@ -183,9 +207,11 @@ export function generateRun(rand: () => number, step: number, history: History):
     const c = COMPANIES[i];
     if (!c) continue;
     const withLine = c.line !== null && (c.anchor === "line" || chance(0.5));
-    // A company with no country may so gain main lines from two countries across imports.
+    // A company with no country may so gain main lines from two countries across imports, and a
+    // freephone line that belongs to none (review round 3).
     const foreign = c.foreignLine !== undefined && chance(0.35);
-    const line = foreign ? (c.foreignLine ?? "") : withLine && c.line ? pick(forms(c.line)) : "";
+    const lineOf = (choice: "freephone" | "foreign" | "own") => (choice === "freephone" ? FREEPHONE : choice === "foreign" ? (c.foreignLine ?? "") : withLine && c.line ? pick(forms(c.line)) : "");
+    const line = lineOf(c.noCountry && chance(0.2) ? "freephone" : foreign ? "foreign" : "own");
     if (withLine && !foreign) lineListed.add(i);
     const e164 = line.startsWith("+") && !line.includes(" ") ? line : "";
     const otherNames = COMPANIES.flatMap((o, j) => (o.names[0] !== c.names[0] ? [`bz-${j}`] : []));
@@ -197,10 +223,11 @@ export function generateRun(rand: () => number, step: number, history: History):
       business_id: businessId,
       place_id: c.anchor === "place" || (c.anchor !== "none" && chance(0.5)) ? `PL-${i}` : "",
       business_name: pick(c.names),
-      // A company first seen with no country and no international main line stores its numbers
-      // by their digits; a later import, always with a region, reads them again, merging any copy
-      // a person holds in international form into the company's line (ADR 0001).
-      country: c.noCountry ? pick(["", "United Kingdom", "United States"]) : e164 ? pick(["GB", "GB", "United Kingdom", ""]) : step === 1 && chance(0.4) ? "" : "GB",
+      // A company first seen with no country keeps national numbers as their digits; once a row
+      // gives it a two-letter country they are read in it, once (ADR 0001, "Phone identity").
+      // A company known by its main line alone always has a country when it lists the line in
+      // national form: without one the line is kept as its digits and no later row could find it.
+      country: c.noCountry ? pick(["", "United Kingdom", "United States"]) : e164 ? pick(["GB", "GB", "United Kingdom", ""]) : step === 1 && c.anchor !== "line" && chance(0.4) ? "" : "GB",
       phone_e164: e164,
       phone_original: line,
       street: c.anchor === "address" || (c.anchor !== "none" && chance(0.5)) ? c.street : "",
@@ -213,6 +240,12 @@ export function generateRun(rand: () => number, step: number, history: History):
     if (!row["street"] || !row["postal_code"]) Object.assign(row, c.anchor === "address" ? { street: c.street, postal_code: c.postal } : { street: "", postal_code: "" });
     businesses.push(row);
     companyOfRow.push(i);
+    // A second row for the company with its own ID, the same place and another line (review round 4).
+    if (c.noCountry && row["place_id"] && chance(0.3)) {
+      const other = lineOf(pick(["freephone", "foreign", "own"] as const));
+      businesses.push({ ...row, business_id: businessId ? `${businessId}-line` : "", phone_e164: other.startsWith("+") && !other.includes(" ") ? other : "", phone_original: other });
+      companyOfRow.push(i);
+    }
     if (chance(0.1)) {
       businesses.push(row);
       companyOfRow.push(i);
@@ -240,7 +273,7 @@ export function generateRun(rand: () => number, step: number, history: History):
     const c = p ? COMPANIES[p.company] : undefined;
     if (!p || !c) continue;
     const otherNames = PEOPLE.flatMap((o, j) => (o.names[0] !== p.names[0] ? [`pp-${j}`] : []));
-    const companyLine = c.line && p.twin === undefined && (c.noCountry || lineListed.has(p.company) || chance(0.3)) && chance(c.noCountry ? 0.7 : c.foreignLine ? 0.5 : 0.15) ? pick(c.foreignLine && chance(0.5) ? foreignForms(c.foreignLine) : forms(c.line)) : "";
+    const companyLine = c.line && p.twin === undefined && (c.noCountry || lineListed.has(p.company) || chance(0.3)) && chance(c.noCountry ? 0.7 : c.foreignLine ? 0.5 : 0.15) ? pick(c.foreignLine && chance(0.5) ? foreignForms(c.foreignLine).filter((f) => c.noCountry || f.startsWith("+")) : forms(c.line)) : "";
     const mobile = chance(0.3);
     const row = person({
       person_id: idFor("person", i, `pp-${i}`, otherNames),
@@ -291,7 +324,7 @@ export function generateRun(rand: () => number, step: number, history: History):
 
 /** One key per value: phones by their E.164 key, emails lower-cased. */
 export function valueKey(d: Pick<ContactDetailView, "channel" | "value">): string {
-  return d.channel === "phone" ? `phone|${parsePhone(d.value, "GB")?.key ?? d.value}` : `email|${d.value.trim().toLowerCase()}`;
+  return d.channel === "phone" ? `phone|${permittedReading(d.value, false)}` : `email|${d.value.trim().toLowerCase()}`;
 }
 
 interface World {
@@ -324,7 +357,24 @@ class Ledger implements History {
   /** Each logical person's applied rows, normalised: provenance returns an unchanged row to its record. */
   readonly appliedRows = new Map<number, Set<string>>();
 
+  /** Logical companies an applied row has given a two-letter country: their numbers are read in it. */
+  readonly countried = new Set<number>();
+
+  /** Whether a company record belongs to a logical company with a two-letter country. */
+  countriedRecord(companyId: string): boolean {
+    return [...this.countried].some((logical) => this.recordsOfCompany.get(logical)?.has(companyId));
+  }
+
+  /** Whether this person's company has, or this run gives it, a two-letter country. */
+  countriedFor(run: Generated, cells: Readonly<Record<string, string>>, logical: number): boolean {
+    const company = PEOPLE[logical]?.company ?? NO_ONE;
+    return this.countried.has(company) || run.rows.businesses.some((b, row) => run.companyOfRow[row] === company && b["business_id"] === cells["business_id"] && b["country"] === "GB");
+  }
+
   record(summary: ImportSummary, run: Generated): void {
+    run.companyOfRow.forEach((logical, row) => {
+      if (summary.rowRecords.businesses[row] && run.rows.businesses[row]?.["country"] === "GB" && logical !== NO_ONE) this.countried.add(logical);
+    });
     run.personOfRow.forEach((logical, row) => {
       const record = summary.rowRecords.people[row];
       if (logical === NO_ONE) {
@@ -336,8 +386,9 @@ class Ledger implements History {
       if (!record || !cells) return;
       this.carry("person", logical, cells["person_id"] ?? "");
       if (cells["full_name"] === PEOPLE[logical]?.alias && cells["email"]) this.sharedEmails.set(logical, cells["email"].trim().toLowerCase());
-      this.appliedRows.set(logical, (this.appliedRows.get(logical) ?? new Set()).add(signatureOf(cells)));
-      this.evidence.set(logical, new Set([...(this.evidence.get(logical) ?? []), ...evidenceOf(cells)]));
+      const countried = this.countried.has(PEOPLE[logical]?.company ?? NO_ONE);
+      this.appliedRows.set(logical, (this.appliedRows.get(logical) ?? new Set()).add(signatureOf(cells, countried)));
+      this.evidence.set(logical, new Set([...(this.evidence.get(logical) ?? []), ...evidenceOf(cells, countried)]));
     });
     run.companyOfRow.forEach((logical, row) => {
       const record = summary.rowRecords.businesses[row];
@@ -379,8 +430,8 @@ class Ledger implements History {
 }
 
 /** A People row as provenance sees it: the generator's own normalisation of every identifying field. */
-function signatureOf(cells: Readonly<Record<string, string>>): string {
-  const phone = (raw: string) => (raw ? (parsePhone(raw, "GB")?.key ?? raw) : "");
+function signatureOf(cells: Readonly<Record<string, string>>, countried: boolean): string {
+  const phone = (raw: string) => (raw ? permittedReading(raw, countried) : "");
   return JSON.stringify([
     cells["person_id"] ?? "",
     (cells["full_name"] ?? "").toLowerCase(),
@@ -393,8 +444,8 @@ function signatureOf(cells: Readonly<Record<string, string>>): string {
 }
 
 /** A People row's identifying evidence: its ID, email and numbers, as the generator wrote them. */
-function evidenceOf(cells: Readonly<Record<string, string>>): string[] {
-  const phone = (raw: string) => (raw ? [`phone|${parsePhone(raw, "GB")?.key ?? raw}`] : []);
+function evidenceOf(cells: Readonly<Record<string, string>>, countried: boolean): string[] {
+  const phone = (raw: string) => (raw ? [`phone|${permittedReading(raw, countried)}`] : []);
   return [
     ...(cells["person_id"] ? [`id|${cells["person_id"]}`] : []),
     ...(cells["email"] ? [`email|${cells["email"].trim().toLowerCase()}`] : []),
@@ -467,7 +518,9 @@ function expectations(run: Generated, ledger: Ledger): Expected[] {
     const logical = run.personOfRow[row] ?? -1;
     const cells = people[row];
     // The twin's record holds this row's ID, email or number, or the identical row was applied to it.
-    return cells !== undefined && !refused(row) && (evidenceOf(cells).some((e) => ledger.evidence.get(logical)?.has(e)) || (ledger.appliedRows.get(logical)?.has(signatureOf(cells)) ?? false));
+    if (cells === undefined || refused(row)) return false;
+    const countried = ledger.countriedFor(run, cells, logical);
+    return evidenceOf(cells, countried).some((e) => ledger.evidence.get(logical)?.has(e)) || (ledger.appliedRows.get(logical)?.has(signatureOf(cells, countried)) ?? false);
   };
   return run.personOfRow.map((logical, row) => {
     if (!people[row]?.["business_id"]) return logical === NO_ONE ? "no_one" : "company_not_in_export";
@@ -604,7 +657,7 @@ function writeProblems(before: World, after: World, summary: ImportSummary): str
  * The safety net counts what a row lists, not only what is stored: a lead enrolled by this import
  * never listed a personal email or mobile that another lead enrolled in the campaign holds.
  */
-function listedProblems(run: Generated, summary: ImportSummary, w: World, campaignId: string, history: History): string[] {
+function listedProblems(run: Generated, summary: ImportSummary, w: World, campaignId: string, history: Ledger): string[] {
   const problems: string[] = [];
   const newlyEnrolled = new Set(summary.entries.flatMap((e) => (e.outcome === "new" && e.lead.kind === "person" ? [e.lead.personId] : [])));
   const held = new Map<string, string>();
@@ -617,7 +670,10 @@ function listedProblems(run: Generated, summary: ImportSummary, w: World, campai
     if (!record || !newlyEnrolled.has(record)) return;
     const listed = [
       ...(cells["email"] ? [valueKey({ channel: "email", value: cells["email"] })] : []),
-      ...(cells["dial_phone"] && /mobile|cell/i.test(cells["dial_phone_type"] ?? "") ? [valueKey({ channel: "phone", value: cells["dial_phone"] })] : []),
+      // A mobile kept by its digits, at a company with no country, is no SMS destination.
+      ...(cells["dial_phone"] && /mobile|cell/i.test(cells["dial_phone_type"] ?? "")
+        ? [permittedReading(cells["dial_phone"], history.countriedFor(run, cells, run.personOfRow[row] ?? NO_ONE))].filter((k) => k.startsWith("+")).map((k) => `phone|${k}`)
+        : []),
     ];
     // An address the person's company lists as shared is not theirs to claim (review round 10).
     const companyListed = (key: string) =>
@@ -705,12 +761,13 @@ interface Issued {
 
 /**
  * Every detail id the sequence has seen on a page, from any import, must still resolve to one
- * live detail, the same address or number, held by the same owner or, for a person's detail,
- * their company: merging keeps the absorbed id, pointing at the detail it is (docs/adr/0001).
- * Values are keyed as the generator keys them (phones read in Great Britain, so a number stored
- * by its digits and later read is still the same number).
+ * live detail, the same address or number, held at the same company, and never a company's
+ * detail resolving to a person's: merging keeps the absorbed id, pointing at the detail it is
+ * (docs/adr/0001). A number shown by its digits is the same number once read in its company's
+ * country. No live detail at a company is an unmarked copy of a number marked bad there, read
+ * as the rule permits.
  */
-async function detailIdProblems(store: OutreachStore, w: World, issued: Map<string, Issued>, marked: ReadonlySet<string>): Promise<string[]> {
+async function detailIdProblems(store: OutreachStore, w: World, issued: Map<string, Issued>, marked: ReadonlySet<string>, ledger: Ledger): Promise<string[]> {
   const problems: string[] = [];
   const shown = [
     ...w.people.flatMap((p) => p.contactDetails.filter((d) => d.owner === "person").map((d) => ({ d, owner: `person ${p.id}`, company: p.company.id }))),
@@ -728,11 +785,20 @@ async function detailIdProblems(store: OutreachStore, w: World, issued: Map<stri
       continue;
     }
     const owner = resolved.owner.kind === "person" ? `person ${resolved.owner.personId}` : `company ${resolved.owner.companyId}`;
+    const ownerCompany = resolved.owner.kind === "company" ? resolved.owner.companyId : w.people.find((p) => resolved.owner.kind === "person" && p.id === resolved.owner.personId)?.company.id;
+    const intoPerson = was.owner.startsWith("company") && resolved.owner.kind === "person";
     if ((await store.contactDetail(resolved.id))?.id !== resolved.id) problems.push(`detail ${id} resolves to ${resolved.id}, which is not live`);
     else if (!sameValue(was.shown, resolved.channel, resolved.key)) problems.push(`detail ${id}, first shown as ${was.shown.value}, resolves to another detail, ${resolved.key}`);
-    else if (owner !== was.owner && owner !== `company ${was.company}`) problems.push(`detail ${id}, first held by ${was.owner}, resolves to a detail held by ${owner}`);
-    // A bad mark is never lost, whichever detail the marked one became.
+    else if (owner !== was.owner && (ownerCompany !== was.company || intoPerson)) problems.push(`detail ${id}, first held by ${was.owner}, resolves to a detail held by ${owner}`);
+    // A bad mark is never lost, whichever detail the marked one became, nor copied unmarked.
     if (marked.has(id) && !resolved.bad) problems.push(`detail ${id} was marked bad, but resolves to ${resolved.id}, which is not`);
+    if (marked.has(id) && resolved.channel === "phone" && ownerCompany) {
+      const countried = ledger.countriedRecord(ownerCompany);
+      const number = permittedReading(resolved.key, countried);
+      for (const { d } of shown.filter((x) => x.company === ownerCompany && x.d.channel === "phone" && !x.d.bad)) {
+        if (permittedReading(d.value, countried) === number) problems.push(`${d.value} is an unmarked copy of ${number}, marked bad through detail ${id}`);
+      }
+    }
   }
   return problems;
 }
@@ -844,7 +910,7 @@ export async function runSequence(seed: number, options: { shuffle?: boolean; st
         ...identityProblems(ledger, after),
         ...detailProblems(after, summary, badMarks, ledger),
         ...listedProblems(run, summary, after, campaign ?? "", ledger),
-        ...(await detailIdProblems(api.store, after, issuedDetails, markedDetails)),
+        ...(await detailIdProblems(api.store, after, issuedDetails, markedDetails, ledger)),
         // An address a company's row lists as shared is never a personal email of its people.
         ...run.rows.businesses.flatMap((b, row) => {
           const companyId = summary.rowRecords.businesses[row];
