@@ -54,7 +54,7 @@ export function useSequence(campaignId: string) {
           if (!current) throw new Error("The sequence has not loaded.");
           return { draft: current.draft, accountIds: current.view.accounts.map((a) => a.id) };
         },
-        put: async (definition, options) => (await putJson(`/api/campaigns/${encodeURIComponent(campaignId)}/sequence`, definition, options)) as SequenceView,
+        put: async (definition, options, stamp) => (await putJson(`/api/campaigns/${encodeURIComponent(campaignId)}/sequence`, { ...definition, stamp }, options)) as SequenceView,
         onStatus: (status) => {
           setSave(status);
           setUnsaved(status.kind !== "saved" && status.kind !== "idle");
@@ -79,17 +79,21 @@ export function useSequence(campaignId: string) {
     [getQueue],
   );
 
-  // Leaving the page, or this campaign, saves a change still waiting for its moment.
+  // Leaving the page sends the newest unsaved draft at once, with keepalive, even behind a save in
+  // flight: a queued save dies with the document (PR 41 re-check, B6). Leaving the campaign inside
+  // the app keeps the page alive, so its change goes through the ordered queue.
   useEffect(() => {
-    const flush = () => {
-      if (timer.current !== undefined) void saveNow({ keepalive: true });
+    const leavePage = () => {
+      clearTimeout(timer.current);
+      timer.current = undefined;
+      getQueue().sendNow();
     };
-    window.addEventListener("pagehide", flush);
+    window.addEventListener("pagehide", leavePage);
     return () => {
-      window.removeEventListener("pagehide", flush);
-      flush();
+      window.removeEventListener("pagehide", leavePage);
+      if (timer.current !== undefined) void saveNow();
     };
-  }, [saveNow]);
+  }, [saveNow, getQueue]);
 
   const update = useCallback(
     (change: (draft: CampaignDefinition) => CampaignDefinition) => {

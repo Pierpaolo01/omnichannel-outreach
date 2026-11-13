@@ -61,16 +61,18 @@ export class SqliteEngineStore implements EngineStore {
     };
   }
 
-  async saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string): Promise<"saved" | "launched" | "missing"> {
+  async saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, stamp: number | null = null): Promise<"saved" | "launched" | "missing" | "stale"> {
     return this.transaction(() => {
       const row = this.sql("SELECT launched_at FROM campaigns WHERE id = ?").get(campaignId);
       if (!row) return "missing";
       if (row["launched_at"] != null) return "launched";
-      this.run(
-        "UPDATE campaigns SET definition = ?, definition_version = definition_version + 1, definition_edited_at = ?, version = version + 1 WHERE id = ?",
-        [JSON.stringify(definition), editedAt, campaignId],
-      );
-      return "saved";
+      // The stamp is compared in the statement that stores: a save stamped no newer than the stored
+      // one changes nothing. An unstamped save (API clients, tests) is stored as before.
+      const changed = this.sql(
+        `UPDATE campaigns SET definition = ?, definition_version = definition_version + 1, definition_edited_at = ?, version = version + 1, definition_stamp = ?
+         WHERE id = ? AND (? IS NULL OR definition_stamp IS NULL OR definition_stamp < ?)`,
+      ).run(JSON.stringify(definition), editedAt, stamp, campaignId, stamp, stamp).changes;
+      return Number(changed) > 0 ? "saved" : "stale";
     });
   }
 

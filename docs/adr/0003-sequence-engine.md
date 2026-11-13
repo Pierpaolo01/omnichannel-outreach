@@ -37,6 +37,8 @@ Round 1 of review found six ways the first draft could double-send, burst, call 
 
 The campaign holds **one current definition**, plus `definition_version`, a counter bumped by every published edit. There is no revision history. Attempts store the copy they rendered, and no invariant needs older definitions; the generated test keeps its own copy of each definition it published. `definition_edited_at` serves ticket 21's "no test since the last edit" warning.
 
+**An older save never replaces a newer one (ticket 12c, PR 41 re-check B6).** The editor stamps every edit with an increasing number, and each save carries the stamp of the draft it sends. `campaigns.definition_stamp` (migration 10) holds the stored stamp. The `UPDATE` that stores a definition compares the stamps in the same statement (`definition_stamp IS NULL OR definition_stamp < ?`), so a save no newer than the stored one changes nothing and is answered `409 stale_edit`. This is what lets the editor send its newest draft with `keepalive` when the page is left, even while an older save is still in flight: if the older one lands later, it is refused. The same rule settles two tabs editing one campaign: the later edit wins, and the other tab is told its change was not saved. A save with no stamp (an API client, a test) is stored as before.
+
 The definition holds:
 
 - **Campaign inputs:**

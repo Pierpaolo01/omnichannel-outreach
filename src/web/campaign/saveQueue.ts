@@ -22,7 +22,8 @@ export type SaveOutcome =
 export interface SaveQueueDeps {
   /** The draft as it stands now, and the inboxes the provider reports (the email track's pool). */
   read(): { readonly draft: CampaignDefinition; readonly accountIds: readonly string[] };
-  put(definition: CampaignDefinition, options: { readonly keepalive?: boolean }): Promise<SequenceView>;
+  /** `stamp` is the draft's edit stamp: the server stores a save only if it is newer than the stored one. */
+  put(definition: CampaignDefinition, options: { readonly keepalive?: boolean }, stamp: number): Promise<SequenceView>;
   onStatus(status: SaveStatus): void;
   /** The server accepted a save; `current` when no edit came after the draft it carried. */
   onAccepted(view: SequenceView, current: boolean): void;
@@ -48,6 +49,8 @@ export function draftProblems(def: CampaignDefinition): string[] {
 export class SaveQueue {
   private revision = 0;
   private accepted = 0;
+  /** The newest edit's stamp: increasing, so the server can tell a late older save from a newer one. */
+  private stamp = 0;
   private chain: Promise<unknown> = Promise.resolve();
   private readonly deps: SaveQueueDeps;
 
@@ -58,6 +61,19 @@ export class SaveQueue {
   /** The draft changed: the next save sends it. */
   edited(): void {
     this.revision++;
+    this.stamp = Math.max(Date.now(), this.stamp + 1);
+  }
+
+  /**
+   * Leaving the page: sends the newest draft now, with a request that outlives the document, even
+   * while an older save is in flight. Saves queued behind that one die with the page; the server
+   * refuses the older one if it lands later, because its stamp is older (PR 41 re-check, B6).
+   */
+  sendNow(): void {
+    if (this.upToDate) return;
+    const { draft, accountIds } = this.deps.read();
+    if (draftProblems(draft).length > 0) return;
+    void this.deps.put({ ...draft, emailPool: [...accountIds] }, { keepalive: true }, this.stamp).catch(() => undefined);
   }
 
   /** Whether the server has the newest revision. */
@@ -74,6 +90,7 @@ export class SaveQueue {
   private async step(options: { readonly keepalive?: boolean }): Promise<SaveOutcome> {
     if (this.upToDate) return { ok: true };
     const target = this.revision;
+    const stamp = this.stamp;
     const { draft, accountIds } = this.deps.read();
     const problems = draftProblems(draft);
     if (problems.length > 0) {
@@ -83,7 +100,7 @@ export class SaveQueue {
     }
     this.deps.onStatus({ kind: "saving" });
     try {
-      const view = await this.deps.put({ ...draft, emailPool: [...accountIds] }, options);
+      const view = await this.deps.put({ ...draft, emailPool: [...accountIds] }, options, stamp);
       this.accepted = Math.max(this.accepted, target);
       const current = this.revision === target;
       this.deps.onAccepted(view, current);

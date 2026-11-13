@@ -348,6 +348,62 @@ test.describe("review of pull request 41", () => {
     await expect(page.getByRole("button", { name: /^Email 1/ })).toHaveAttribute("aria-expanded", "false");
   });
 
+  test("leaving the page with a save in flight keeps the newest edit, and the late older save is refused (re-check B6)", async ({ page }) => {
+    const id = await campaign(track([COPY.first, COPY.second]));
+    await page.goto(`${r.url}/campaigns/${id}?track=email&step=s1`);
+    const held: Route[] = [];
+    await page.route("**/api/campaigns/*/sequence", (route) => (route.request().method() === "PUT" && held.length === 0 ? void held.push(route) : route.continue()));
+    await page.getByLabel("Email 1 subject").fill("Older delayed save");
+    await expect.poll(() => held.length).toBe(1);
+    const older = held[0]!.request().postData() ?? "";
+    await page.getByLabel("Email 1 subject").fill("Newest edit must survive navigation");
+    await page.waitForTimeout(900);
+    // A full document navigation, then the older request reaches the server late.
+    await page.goto(`${r.url}/campaigns`);
+    await held[0]!.abort().catch(() => undefined);
+    const late = await r.harness.request<{ error: { code: string } }>("PUT", `/api/campaigns/${id}/sequence`, JSON.parse(older));
+    expect(late).toMatchObject({ status: 409, body: { error: { code: "stale_edit" } } });
+    await expect.poll(async () => (await stored(id)).definition.tracks[0]!.steps[0]!.subject).toBe("Newest edit must survive navigation");
+    await page.goto(`${r.url}/campaigns/${id}?track=email&step=s1`);
+    await expect(page.getByLabel("Email 1 subject")).toHaveValue("Newest edit must survive navigation");
+  });
+
+  test("an edit still inside its debounce survives a full navigation (re-check B6, opposite case)", async ({ page }) => {
+    const id = await campaign(track([COPY.first, COPY.second]));
+    await page.goto(`${r.url}/campaigns/${id}?track=email&step=s1`);
+    await page.getByLabel("Email 1 subject").fill("Debounce leave is preserved");
+    await page.goto(`${r.url}/campaigns`);
+    await expect.poll(async () => (await stored(id)).definition.tracks[0]!.steps[0]!.subject).toBe("Debounce leave is preserved");
+  });
+
+  test("an in-app navigation behind a held save keeps the newest edit (re-check B6, opposite case)", async ({ page }) => {
+    const id = await campaign(track([COPY.first, COPY.second]));
+    await page.goto(`${r.url}/campaigns/${id}?track=email&step=s1`);
+    const held: Route[] = [];
+    await page.route("**/api/campaigns/*/sequence", (route) => (route.request().method() === "PUT" && held.length === 0 ? void held.push(route) : route.continue()));
+    await page.getByLabel("Email 1 subject").fill("Older behind the leave");
+    await expect.poll(() => held.length).toBe(1);
+    await page.getByLabel("Email 1 subject").fill("Latest before SPA leave");
+    await page.waitForTimeout(900);
+    await page.getByRole("link", { name: "Campaigns", exact: true }).first().click();
+    await expect(page.getByRole("heading", { name: "Campaigns", level: 1 })).toBeVisible();
+    await held[0]!.continue();
+    await expect.poll(async () => (await stored(id)).definition.tracks[0]!.steps[0]!.subject).toBe("Latest before SPA leave");
+  });
+
+  test("a failed save recovers through Try again, and launch is ready again (re-check B6, opposite case)", async ({ page }) => {
+    const id = await campaign(track([COPY.first, COPY.second]));
+    await page.goto(`${r.url}/campaigns/${id}?track=email&step=s1`);
+    await page.route("**/api/campaigns/*/sequence", (route) => (route.request().method() === "PUT" ? serverError(route) : route.continue()));
+    await page.getByLabel("Email 1 subject").fill("Saved on the second try");
+    await page.getByRole("link", { name: /Before launch/ }).click();
+    await expect(page.getByText("Your latest change isn’t saved, so launch waits.")).toBeVisible();
+    await page.unroute("**/api/campaigns/*/sequence");
+    await page.getByRole("button", { name: "Try again" }).click();
+    await expect(page.getByRole("button", { name: "Launch campaign" })).toBeEnabled();
+    expect((await stored(id)).definition.tracks[0]!.steps[0]!.subject).toBe("Saved on the second try");
+  });
+
   test("a follow-up that continues the thread names the subject of the nearest email that started one (SequenceTab.tsx:274)", async ({ page }) => {
     const id = await campaign(track([COPY.first, { ...COPY.second, threading: "new_subject", subject: "A second idea" }, { ...COPY.second, id: "s3", body: "Last note." }]));
     await page.goto(`${r.url}/campaigns/${id}?track=email&step=s3`);

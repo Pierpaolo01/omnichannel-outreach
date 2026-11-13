@@ -63,3 +63,35 @@ describe("the sequence interface for one email track (ticket 12b)", () => {
     expect((await api.get<NeedsAttention>("/api/needs-attention")).body).toEqual({ stalledInboxes: [], heldTracks: [], accountWaits: [], unhealthyInboxes: [], heldCapacity: [], anomalies: [] });
   });
 });
+
+describe("an older save never replaces a newer one (PR 41 re-check, B6)", () => {
+  const body = (subject: string, stamp?: number) => ({
+    timezone: "Europe/London",
+    emailPool: [],
+    tracks: [track({ steps: [{ id: "s1", waitDays: 0, subject, body: "Hello.", threading: "new_subject" }] })],
+    ...(stamp === undefined ? {} : { stamp }),
+  });
+
+  test("a save stamped older than the stored one is refused, in the same statement that stores, and changes nothing", async () => {
+    const api = testApi();
+    const campaign = await api.createCampaign("Autumn", "Europe/London");
+    expect((await put(api, campaign.id, body("Newest", 2000))).status).toBe(200);
+    const late = await put(api, campaign.id, body("Older", 1000));
+    expect(late.status).toBe(409);
+    expect(((await late.json()) as ApiError).error.code).toBe("stale_edit");
+    const stored = (await api.get<SequenceView>(`/api/campaigns/${campaign.id}/sequence`)).body;
+    expect(stored.definition.tracks[0]!.steps[0]!.subject).toBe("Newest");
+    expect(stored.definitionVersion).toBe(1);
+    // An equal stamp is the same edit again, not a newer one.
+    expect((await put(api, campaign.id, body("Same", 2000))).status).toBe(409);
+    expect((await put(api, campaign.id, body("Later", 3000))).status).toBe(200);
+  });
+
+  test("a save with no stamp (an API client, a test) is stored as before", async () => {
+    const api = testApi();
+    const campaign = await api.createCampaign("Autumn", "Europe/London");
+    expect((await put(api, campaign.id, body("Stamped", 5000))).status).toBe(200);
+    expect((await put(api, campaign.id, body("Unstamped"))).status).toBe(200);
+    expect((await api.get<SequenceView>(`/api/campaigns/${campaign.id}/sequence`)).body.definition.tracks[0]!.steps[0]!.subject).toBe("Unstamped");
+  });
+});

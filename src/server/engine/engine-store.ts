@@ -69,8 +69,12 @@ export type LaunchOutcome = { readonly ok: true } | { readonly ok: false; readon
  */
 export interface EngineStore {
   campaign(campaignId: string): Promise<CampaignEngineRow | null>;
-  /** Saves a definition before launch. Editing a launched campaign arrives with ticket 19. */
-  saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string): Promise<"saved" | "launched" | "missing">;
+  /**
+   * Saves a definition before launch. Editing a launched campaign arrives with ticket 19. With a
+   * stamp, the save is stored only if it is newer than the stored stamp ("stale" otherwise), so a
+   * late older save never replaces a newer one (ADR 0003, ticket 12c).
+   */
+  saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, stamp?: number | null): Promise<"saved" | "launched" | "missing" | "stale">;
   /** The merge data of every enrollment of the campaign that has not ended, and the sender accounts. */
   launchInputs(campaignId: string): Promise<{ leads: MergeData[]; accounts: SenderAccountView[] }>;
   /**

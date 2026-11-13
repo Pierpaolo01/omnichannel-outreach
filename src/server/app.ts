@@ -52,6 +52,8 @@ const definitionBody = z.object({
   callSkipLimitDays: z.number().default(2),
   emailPool: z.array(z.string().min(1).max(200)).max(100),
   tracks: z.array(trackBody).max(20),
+  /** The editor's edit stamp, increasing with every edit: a save no newer than the stored one is refused. */
+  stamp: z.number().int().nonnegative().optional(),
 });
 
 /** The user's zone: the machine's, which a campaign's default zone starts from (ADR 0003 1.1). */
@@ -292,11 +294,14 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     if (!campaign) return notFound(c, "campaign");
     const body = definitionBody.safeParse(await readJson(c));
     if (!body.success) return invalid(c, body.error);
-    const definition: CampaignDefinition = body.data;
+    const { stamp, ...definition }: CampaignDefinition & { stamp?: number | undefined } = body.data;
     const previous = (await store.engine.campaign(campaign.id))?.definition ?? null;
     const problems = definitionProblems(definition, previous);
     if (problems.length > 0) return c.json<ApiError>({ error: { code: "invalid_sequence", message: problems.join(" ") } }, 400);
-    const saved = await store.engine.saveDefinition(campaign.id, definition, now());
+    const saved = await store.engine.saveDefinition(campaign.id, definition, now(), stamp ?? null);
+    if (saved === "stale") {
+      return c.json<ApiError>({ error: { code: "stale_edit", message: "A newer change to this sequence was already saved, so this older one was not. Reload to see it." } }, 409);
+    }
     if (saved === "launched") {
       return c.json<ApiError>({ error: { code: "launched", message: "This campaign is running. Editing a running campaign arrives with a later release." } }, 409);
     }

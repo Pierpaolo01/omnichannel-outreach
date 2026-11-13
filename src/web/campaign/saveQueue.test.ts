@@ -30,16 +30,17 @@ function harness() {
   let draft = def("First");
   let stored: CampaignDefinition | null = null;
   let version = 0;
-  const calls: { definition: CampaignDefinition; keepalive: boolean; resolve: () => void; reject: (e: Error) => void }[] = [];
+  const calls: { definition: CampaignDefinition; keepalive: boolean; stamp: number; resolve: () => void; reject: (e: Error) => void }[] = [];
   const statuses: SaveStatus[] = [];
   const accepted: { view: SequenceView; current: boolean }[] = [];
   const queue = new SaveQueue({
     read: () => ({ draft, accountIds: ["inbox-a"] }),
-    put: (definition, options) =>
+    put: (definition, options, stamp) =>
       new Promise<SequenceView>((resolve, reject) => {
         calls.push({
           definition,
           keepalive: options.keepalive === true,
+          stamp,
           resolve: () => {
             stored = definition;
             resolve(viewOf(definition, ++version));
@@ -138,6 +139,43 @@ describe("a save that cannot complete says so, and anything waiting on it (launc
     const h = harness();
     h.setDraft(def("A", { tracks: [{ ...def("A").tracks[0]!, window: [] }] }));
     expect(await h.queue.save()).toEqual({ ok: false, reason: "invalid", message: "Choose at least one sending day." });
+    expect(h.calls).toHaveLength(0);
+  });
+});
+
+describe("leaving the page with a save in flight (PR 41 re-check, B6)", () => {
+  test("every edit gets a newer stamp than the last, and each save carries its draft's stamp", async () => {
+    const h = harness();
+    h.edit("A");
+    void h.queue.save();
+    await h.settle();
+    h.edit("B");
+    h.calls[0]!.resolve();
+    await h.settle();
+    void h.queue.save();
+    await h.settle();
+    expect(h.calls[1]!.stamp).toBeGreaterThan(h.calls[0]!.stamp);
+  });
+
+  test("the newest draft goes at once with keepalive, without waiting for the older save in flight, carrying the newer stamp", async () => {
+    const h = harness();
+    h.edit("Older delayed save");
+    void h.queue.save();
+    await h.settle();
+    h.edit("Newest edit must survive navigation");
+    void h.queue.save(); // queued behind the first; dies with the page
+    await h.settle();
+    expect(h.calls).toHaveLength(1);
+    h.queue.sendNow();
+    expect(h.calls).toHaveLength(2);
+    expect(h.calls[1]).toMatchObject({ keepalive: true });
+    expect(h.calls[1]!.definition.tracks[0]!.steps[0]!.subject).toBe("Newest edit must survive navigation");
+    expect(h.calls[1]!.stamp).toBeGreaterThan(h.calls[0]!.stamp);
+  });
+
+  test("nothing is sent when the server already has the newest revision", () => {
+    const h = harness();
+    h.queue.sendNow();
     expect(h.calls).toHaveLength(0);
   });
 });

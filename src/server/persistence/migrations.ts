@@ -429,6 +429,11 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX bounce_events_by_subject ON bounce_events (subject_id, at_wall);
     `,
   },
+  {
+    version: 10,
+    name: "the editor's edit stamp: an older save never replaces a newer one (ticket 12c, PR 41 re-check B6)",
+    sql: `ALTER TABLE campaigns ADD COLUMN definition_stamp INTEGER;`,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string): void {
