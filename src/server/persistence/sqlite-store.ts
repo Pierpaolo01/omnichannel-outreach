@@ -27,7 +27,7 @@ import type {
   UnenrolledReason,
 } from "../../shared/api.ts";
 import { migrate } from "./migrations.ts";
-import type { LeadQuery, OutreachStore } from "./store.ts";
+import type { LeadQuery, OutreachStore, StoredContactDetail } from "./store.ts";
 
 type Row = Record<string, SQLOutputValue>;
 
@@ -150,7 +150,7 @@ class SqliteStore implements OutreachStore {
     };
 
     const detailMatch = (ownerFilter: string): string => `EXISTS (
-      SELECT 1 FROM contact_details d WHERE ${ownerFilter}
+      SELECT 1 FROM contact_details d WHERE d.merged_into IS NULL AND ${ownerFilter}
       AND ((d.channel = 'email' AND d.key LIKE :like ESCAPE '\\')
         OR (:digitsLike <> '' AND d.search_digits LIKE :digitsLike)))`;
     const enrollmentFilter = (leadFilter: string): string => `
@@ -260,8 +260,45 @@ class SqliteStore implements OutreachStore {
     };
   }
 
+  async contactDetail(detailId: string): Promise<StoredContactDetail | null> {
+    const row = this.liveDetailRow(detailId);
+    if (!row) return null;
+    const ownerId = str(row, "owner_id");
+    return {
+      id: str(row, "id"),
+      owner: str(row, "owner_kind") === "person" ? { kind: "person", personId: ownerId } : { kind: "company", companyId: ownerId },
+      channel: channelOf(row),
+      phoneKind: phoneKindOf(row),
+      value: str(row, "value"),
+      key: str(row, "key"),
+      bad: num(row, "bad") === 1,
+      listedShared: num(row, "listed_shared") === 1,
+    };
+  }
+
   async markContactDetailBad(detailId: string): Promise<boolean> {
-    return Number(this.db.prepare("UPDATE contact_details SET bad = 1 WHERE id = ?").run(detailId).changes) > 0;
+    const row = this.liveDetailRow(detailId);
+    if (!row) return false;
+    this.run("UPDATE contact_details SET bad = 1 WHERE id = ?", [str(row, "id")]);
+    return true;
+  }
+
+  /**
+   * The live row an issued detail id stands for: its own row, or the row at the end of the
+   * chain of details it was merged into. A merge only ever points at a live detail, so the
+   * chain has no cycle; its length is bounded anyway.
+   */
+  private liveDetailRow(detailId: string): Row | undefined {
+    return this.db
+      .prepare(
+        `WITH RECURSIVE chain(id, hops) AS (
+           SELECT ?, 0
+           UNION ALL
+           SELECT d.merged_into, chain.hops + 1 FROM contact_details d JOIN chain ON d.id = chain.id
+           WHERE d.merged_into IS NOT NULL AND chain.hops < 1000)
+         SELECT d.* FROM chain JOIN contact_details d ON d.id = chain.id WHERE d.merged_into IS NULL`,
+      )
+      .get(detailId);
   }
 
   async close(): Promise<void> {
@@ -270,7 +307,8 @@ class SqliteStore implements OutreachStore {
 
   private directory(campaignId: string): Directory {
     const detailsByOwner = new Map<string, KnownDetail[]>();
-    for (const row of this.db.prepare("SELECT * FROM contact_details").all()) {
+    // Only live details: one merged into another is history, matched and claimed through its target.
+    for (const row of this.db.prepare("SELECT * FROM contact_details WHERE merged_into IS NULL").all()) {
       const key = `${str(row, "owner_kind")}:${str(row, "owner_id")}`;
       const list = detailsByOwner.get(key) ?? [];
       list.push({
@@ -378,12 +416,12 @@ class SqliteStore implements OutreachStore {
            SELECT e.campaign_id, e.id AS enrollment_id,
              CASE WHEN d.channel = 'email' THEN 'email' ELSE 'mobile' END || '|' || d.key AS destination
            FROM enrollments e JOIN contact_details d ON d.owner_kind = 'person' AND d.owner_id = e.person_id
-           WHERE e.lead_kind = 'person' AND d.listed_shared = 0 AND (d.channel = 'email' OR d.phone_kind = 'mobile')
+           WHERE e.lead_kind = 'person' AND d.merged_into IS NULL AND d.listed_shared = 0 AND (d.channel = 'email' OR d.phone_kind = 'mobile')
            UNION ALL
            -- One address is one mailbox, a person's email or a company's shared inbox alike.
            SELECT e.campaign_id, e.id, 'email|' || d.key
            FROM enrollments e JOIN contact_details d ON d.owner_kind = 'company' AND d.owner_id = e.company_id
-           WHERE e.lead_kind = 'company' AND d.channel = 'email')
+           WHERE e.lead_kind = 'company' AND d.merged_into IS NULL AND d.channel = 'email')
          SELECT campaign_id || ' ' || destination AS shared FROM destinations
          GROUP BY campaign_id, destination HAVING COUNT(DISTINCT enrollment_id) > 1`,
       )
@@ -504,10 +542,12 @@ class SqliteStore implements OutreachStore {
     }
 
     // A personal copy of a company detail folds into it; a bad mark on either side survives. The
-    // copy's row is deleted: see docs/adr/0001 before anything references detail ids.
+    // copy keeps its row and id and points at its target, so an id once issued always resolves
+    // to one live detail (docs/adr/0001). Only live details may be merged, or merged into.
     for (const { fromId, intoId } of plan.consolidations) {
-      this.run("UPDATE contact_details SET bad = MAX(bad, (SELECT bad FROM contact_details WHERE id = ?)) WHERE id = ?", [fromId, intoId]);
-      this.run("DELETE FROM contact_details WHERE id = ?", [fromId]);
+      this.run("UPDATE contact_details SET bad = MAX(bad, (SELECT bad FROM contact_details WHERE id = ?)) WHERE id = ? AND merged_into IS NULL", [fromId, intoId]);
+      const merged = this.db.prepare("UPDATE contact_details SET merged_into = ? WHERE id = ? AND merged_into IS NULL AND EXISTS (SELECT 1 FROM contact_details t WHERE t.id = ? AND t.merged_into IS NULL)").run(intoId, fromId, intoId);
+      if (Number(merged.changes) !== 1) throw new Error(`contact detail ${fromId} cannot be merged into ${intoId}: both must be live`);
     }
 
     this.run(
@@ -584,7 +624,7 @@ class SqliteStore implements OutreachStore {
       .prepare(
         // The prototype's order: a person's email, direct, mobile; a company's main line, then inbox.
         // A person's copy of an address their company lists as shared is not theirs to show or use.
-        `SELECT * FROM contact_details WHERE owner_kind = ? AND owner_id = ? AND listed_shared = 0
+        `SELECT * FROM contact_details WHERE owner_kind = ? AND owner_id = ? AND listed_shared = 0 AND merged_into IS NULL
          ORDER BY CASE WHEN owner_kind = 'company' THEN channel = 'email' ELSE channel = 'phone' END,
            CASE phone_kind WHEN 'direct' THEN 0 WHEN 'mobile' THEN 1 ELSE 2 END, added_at, rowid`,
       )

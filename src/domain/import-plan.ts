@@ -156,7 +156,7 @@ export interface DetailChange {
 
 /**
  * A personal copy of a company detail, folded into it. A bad mark on either side survives. The
- * store deletes the copy's row (docs/adr/0001 records what that means for later tickets).
+ * store keeps the copy's row and id, pointing at the detail it was merged into (docs/adr/0001).
  */
 export interface DetailConsolidation {
   readonly fromId: string;
