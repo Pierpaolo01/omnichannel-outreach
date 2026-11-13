@@ -1,4 +1,4 @@
-import { useId, useState, type ReactNode } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 import { Link, useLocation } from "wouter";
 import type { BeforeLaunchView, CopyPreview, CopySegment, LaunchBlocker, PreviewLead } from "../../shared/api.ts";
 import { useApi } from "../api.ts";
@@ -6,7 +6,7 @@ import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
 import { campaignPath, longDate } from "../pages/CampaignPage.tsx";
 import { emailTrackOf, fieldLabel, liveSteps } from "./model.ts";
-import { ConflictNotice } from "./SequenceTab.tsx";
+import { CANNOT_SEND, ConflictNotice } from "./SequenceTab.tsx";
 import type { SequenceEditor } from "./useSequence.ts";
 
 /**
@@ -60,7 +60,10 @@ export function BeforeLaunchTab({ campaignId, editor }: { campaignId: string; ed
 }
 
 function LaunchBar({ editor, facts }: { editor: SequenceEditor; facts: BeforeLaunchView | null }) {
-  const [state, setState] = useState<{ kind: "idle" | "launching" } | { kind: "error"; message: string }>({ kind: "idle" });
+  const [error, setError] = useState<string | null>(null);
+  // When the focused Launch button or "Load the saved version" goes away, focus moves to this
+  // line, which then says what happened (PR 41 re-check, F8).
+  const said = useRef<HTMLParagraphElement>(null);
   const { launch, launchedAt } = editor.view;
   const n = launch.blockers.length;
   const failed = editor.unsaved && editor.save.kind !== "saving";
@@ -70,6 +73,8 @@ function LaunchBar({ editor, facts }: { editor: SequenceEditor; facts: BeforeLau
   let text: ReactNode;
   if (launchedAt) text = <><b className="font-semibold">Launched {longDate(launchedAt)}.</b> Email goes out on its own, inside each lead’s sending window.</>;
   else if (editor.save.kind === "conflict") text = null;
+  // The checks for the definition on the page are still on their way (PR 41 council, item 6).
+  else if (!facts) text = <><b className="font-semibold">Checking the sequence…</b> Launch is ready once the checks have arrived.</>;
   else if (editor.unsaved && editor.save.kind !== "saving")
     text = (
       <>
@@ -89,27 +94,29 @@ function LaunchBar({ editor, facts }: { editor: SequenceEditor; facts: BeforeLau
     );
   return (
     <div className={`flex flex-wrap items-center justify-between gap-x-6 gap-y-3 rounded-box border px-4 py-3.5 text-[14.5px] ${tone}`}>
-      <p className="min-w-0 flex-[1_1_360px]">{text}</p>
+      <p ref={said} tabIndex={-1} className="min-w-0 flex-[1_1_360px] rounded-field outline-offset-4">
+        {text}
+      </p>
       {!launchedAt && !launch.nothingToLaunch && (
         <button
           type="button"
           className="btn btn-primary font-semibold"
           // Only once the checks for the definition on the page have arrived (PR 41 re-check, F7).
-          disabled={!launch.canLaunch || editor.unsaved || !facts || state.kind === "launching"}
+          disabled={!launch.canLaunch || editor.unsaved || !facts || editor.launching}
           onClick={() => {
-            setState({ kind: "launching" });
+            setError(null);
             editor.launch().then(
-              () => setState({ kind: "idle" }),
-              (error: unknown) => setState({ kind: "error", message: error instanceof Error ? error.message : "Launch failed." }),
+              () => said.current?.focus(),
+              (e: unknown) => setError(e instanceof Error ? e.message : "Launch failed."),
             );
           }}
         >
-          {state.kind === "launching" ? "Launching…" : "Launch campaign"}
+          {editor.launching ? "Launching…" : "Launch campaign"}
         </button>
       )}
       {editor.save.kind === "conflict" && (
         <div className="w-full">
-          <ConflictNotice editor={editor} />
+          <ConflictNotice editor={editor} onLoaded={() => said.current?.focus()} />
         </div>
       )}
       {failed && !launchedAt && editor.save.kind !== "conflict" && (
@@ -117,9 +124,9 @@ function LaunchBar({ editor, facts }: { editor: SequenceEditor; facts: BeforeLau
           Try again
         </button>
       )}
-      {state.kind === "error" && (
+      {error !== null && (
         <div className="w-full">
-          <ErrorState title="The campaign didn’t launch." message={state.message} />
+          <ErrorState title="The campaign didn’t launch." message={error} />
         </div>
       )}
     </div>
@@ -203,7 +210,7 @@ function Warnings({ facts, editor }: { facts: BeforeLaunchView; editor: Sequence
     if (a.usedToday > 0) items.push({ title: `${a.label} has ${a.usedToday} of its ${a.capacity} sends a day used today`, detail: "Other campaigns sent or reserved them, so fewer first emails can go today." });
   }
   for (const a of editor.view.accounts.filter((x) => !x.healthy)) {
-    items.push({ title: `${a.label} is disconnected`, detail: "Its leads wait until it is connected again." });
+    items.push({ title: `${a.label} ${CANNOT_SEND}`, detail: "Its leads wait until it can send again." });
   }
   if (facts.load && facts.load.notStartedWithinHorizon > 0) {
     items.push({ title: `${facts.load.notStartedWithinHorizon} leads would not start within ${facts.load.horizonDays} days`, detail: "The inboxes’ daily capacity is too small for this many leads." });
@@ -338,7 +345,7 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
         <p className="mt-2 text-[13px] text-ink-2">
           Can’t project the load while{" "}
           {load.cannotProject
-            .map((c) => (c.reason === "quota" ? `${c.label} waits for Instantly’s lead quota` : `${c.label} can’t send (the provider reports it unavailable)`))
+            .map((c) => (c.reason === "quota" ? `${c.label} waits for Instantly’s lead quota` : `${c.label} ${CANNOT_SEND}`))
             .join(", and ")}
           . Nothing says when that ends.
         </p>

@@ -30,17 +30,25 @@ function harness() {
   let draft = def("First");
   let stored: CampaignDefinition | null = null;
   let version = 0;
-  const calls: { definition: CampaignDefinition; keepalive: boolean; stamp: number; base: number; session: string; resolve: () => void; reject: (e: Error) => void }[] = [];
+  const calls: { definition: CampaignDefinition; keepalive: boolean; aborted: () => boolean; stamp: number; base: number; session: string; resolve: () => void; reject: (e: Error) => void }[] = [];
+  const waits: number[] = [];
+  let accountIds = ["inbox-a"];
   const statuses: SaveStatus[] = [];
   const accepted: { view: SequenceView; current: boolean }[] = [];
   const queue = new SaveQueue({
-    read: () => ({ draft, accountIds: ["inbox-a"], version }),
+    read: () => ({ draft, accountIds, version }),
     session: "page-1",
+    // The backoff is counted, not waited: the test is bounded by tries, never by time.
+    wait: (ms) => {
+      waits.push(ms);
+      return Promise.resolve();
+    },
     put: (definition, options, save) =>
       new Promise<SequenceView>((resolve, reject) => {
         calls.push({
           definition,
           keepalive: options.keepalive === true,
+          aborted: () => options.signal?.aborted === true,
           // The save's number in the session, read as `stamp` by the tests below.
           stamp: save.seq,
           base: save.base,
@@ -53,14 +61,14 @@ function harness() {
         });
       }),
     onStatus: (s) => statuses.push(s),
-    onAccepted: (view, current) => accepted.push({ view, current }),
+    onAccepted: (view, seq) => accepted.push({ view, current: seq === queue.edit }),
   });
   const edit = (subject: string) => {
     draft = def(subject);
     queue.edited();
   };
   const settle = () => new Promise((r) => setTimeout(r, 0));
-  return { queue, edit, calls, statuses, accepted, get stored() { return stored; }, settle, setDraft: (d: CampaignDefinition) => { draft = d; queue.edited(); } };
+  return { queue, edit, calls, statuses, accepted, waits, get stored() { return stored; }, settle, setDraft: (d: CampaignDefinition) => { draft = d; queue.edited(); }, setInboxes: (ids: string[]) => { accountIds = ids; } };
 }
 
 describe("autosaves are sent one at a time, each with the newest draft", () => {
@@ -245,7 +253,7 @@ describe("another page changed the campaign (ADR 0003 1.1.1, B7)", () => {
     await h.settle();
     h.calls[0]!.reject(Object.assign(new Error("Changed elsewhere."), { code: "edit_conflict" }));
     expect(await saved).toMatchObject({ ok: false, reason: "conflict" });
-    expect(h.statuses.at(-1)).toEqual({ kind: "conflict", message: "Changed elsewhere." });
+    expect(h.statuses.at(-1)).toEqual({ kind: "conflict", message: "Changed elsewhere.", saved: false });
     h.edit("Mine, again");
     expect(await h.queue.save()).toMatchObject({ ok: false, reason: "conflict" });
     h.queue.sendNow();
@@ -278,3 +286,72 @@ describe("another page changed the campaign (ADR 0003 1.1.1, B7)", () => {
     expect(h.calls).toHaveLength(0);
   });
 });
+
+describe("PR 41 council, items 3, 4, 5 and 11", () => {
+  test("after no answer the queue backs off between tries, a growing gap counted not waited (item 5)", async () => {
+    const h = harness();
+    h.edit("A");
+    const saved = h.queue.save();
+    for (let i = 0; i < 2; i++) {
+      await h.settle();
+      h.calls[i]!.reject(new NoAnswer());
+    }
+    await h.settle();
+    h.calls[2]!.resolve();
+    expect(await saved).toEqual({ ok: true });
+    expect(h.waits).toEqual([1_000, 2_000]);
+  });
+
+  test("the browser coming back online ends a backoff at once (item 5)", async () => {
+    const h = harness();
+    let release: (() => void) | null = null;
+    const q = new SaveQueue({
+      read: () => ({ draft: def("A"), accountIds: [], version: 0 }),
+      session: "p",
+      put: () => (release === null ? Promise.reject(new NoAnswer()) : Promise.resolve(viewOf(def("A"), 1))),
+      onStatus: () => undefined,
+      onAccepted: () => undefined,
+      wait: () => new Promise<void>((r) => (release = r)),
+    });
+    q.edited();
+    const saved = q.save();
+    await h.settle();
+    expect(release).not.toBeNull();
+    q.wake();
+    expect(await saved).toEqual({ ok: true });
+  });
+
+  test("a retry carries the body first sent under its number, even if the inboxes changed meanwhile (item 4)", async () => {
+    const h = harness();
+    h.edit("A");
+    const saved = h.queue.save();
+    await h.settle();
+    h.setInboxes(["inbox-a", "inbox-b"]);
+    h.calls[0]!.reject(new NoAnswer());
+    await h.settle();
+    expect(h.calls[1]!.definition).toEqual(h.calls[0]!.definition);
+    h.calls[1]!.resolve();
+    expect(await saved).toEqual({ ok: true });
+  });
+
+  test("a launch refused because the campaign changed elsewhere is the conflict state (item 3)", () => {
+    const h = harness();
+    h.queue.markConflict("Changed elsewhere.");
+    expect(h.queue.inConflict).toBe(true);
+    expect(h.statuses.at(-1)).toEqual({ kind: "conflict", message: "Changed elsewhere.", saved: false });
+  });
+
+  test("leaving again cancels the leave-save still outstanding: at most one outlives the page (item 11)", async () => {
+    const h = harness();
+    h.edit("Left the first time");
+    h.queue.sendNow();
+    h.edit("Left the second time");
+    h.queue.sendNow();
+    expect(h.calls).toHaveLength(2);
+    expect(h.calls[0]!.aborted()).toBe(true);
+    expect(h.calls[1]!.aborted()).toBe(false);
+    expect(subject(h.calls[1]!.definition)).toBe("Left the second time");
+  });
+});
+
+const subject = (d: CampaignDefinition) => d.tracks[0]?.steps[0]?.subject;

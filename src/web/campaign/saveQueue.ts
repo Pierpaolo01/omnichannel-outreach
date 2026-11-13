@@ -28,8 +28,12 @@ import { DEFINITION_MAX_BYTES, STEP_BODY_MAX, STEP_SUBJECT_MAX } from "../../sha
 export type SaveStatus =
   | { readonly kind: "idle" | "saving" | "saved" }
   | { readonly kind: "error"; readonly message: string }
-  /** Another page changed the campaign since this one loaded it: the draft is kept, not saved. */
-  | { readonly kind: "conflict"; readonly message: string };
+  /**
+   * Another page changed the campaign since this one loaded it: the draft is kept. `saved` when this
+   * page's newest edit was saved before the other change replaced it (a refused launch finds that),
+   * so the page never says "Not saved" of an edit the server accepted.
+   */
+  | { readonly kind: "conflict"; readonly message: string; readonly saved: boolean };
 
 export type SaveOutcome =
   | { readonly ok: true }
@@ -59,13 +63,18 @@ export interface SaveQueueDeps {
    * Sends one save. Rejects with `NoAnswer` when no answer came, or with an error carrying the
    * server's `code` (`superseded`, `edit_conflict`, `too_large`) when the server refused it.
    */
-  put(definition: CampaignDefinition, options: { readonly keepalive?: boolean }, save: SaveIdentity): Promise<SequenceView>;
+  put(definition: CampaignDefinition, options: { readonly keepalive?: boolean; readonly signal?: AbortSignal }, save: SaveIdentity): Promise<SequenceView>;
   onStatus(status: SaveStatus): void;
-  /** The server confirmed a save; `current` when no edit came after the draft it carried. */
-  onAccepted(view: SequenceView, current: boolean): void;
+  /** The server confirmed a save: its view, and the edit number it answered (see `edit`). */
+  onAccepted(view: SequenceView, seq: number): void;
   /** The editing session's id; tests inject one. */
   session?: string;
+  /** Waits before the next try after no answer; tests inject one that only records. */
+  wait?: (ms: number) => Promise<void>;
 }
+
+/** The gaps between tries after no answer: a short drop costs one or two of them, not all at once. */
+export const NO_ANSWER_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000] as const;
 
 /** The size of a save's JSON body, with room for its identity. */
 export const saveSize = (def: CampaignDefinition): number => new TextEncoder().encode(JSON.stringify(def)).length + 200;
@@ -91,7 +100,7 @@ export function draftProblems(def: CampaignDefinition): string[] {
 }
 
 /** How many times one save is resent after no answer before it is reported as not saved. */
-const NO_ANSWER_RETRIES = 4;
+const NO_ANSWER_RETRIES = NO_ANSWER_BACKOFF_MS.length;
 
 type Sent =
   | { readonly kind: "accepted" }
@@ -114,6 +123,18 @@ export class SaveQueue {
   private conflictSeq: number | null = null;
   private chain: Promise<unknown> = Promise.resolve();
   private readonly deps: SaveQueueDeps;
+  /**
+   * The body sent under each number: fixed when the number is first sent, so a retry is the same
+   * save again (same content, same pool), never a false conflict (PR 41 council, item 4).
+   */
+  private sentBody: { readonly seq: number; readonly definition: CampaignDefinition } | null = null;
+  /**
+   * The one leave-save outstanding: the browser's 64 KiB budget covers every request that outlives
+   * the page together, so a newer one cancels the one it supersedes (PR 41 council, item 11).
+   */
+  private leaveSave: AbortController | null = null;
+  /** Ends a backoff wait early: the browser came back online. */
+  private wakeUp: (() => void) | null = null;
 
   constructor(deps: SaveQueueDeps) {
     this.deps = deps;
@@ -123,6 +144,11 @@ export class SaveQueue {
   /** The draft changed: the next save sends it. */
   edited(): void {
     this.seq++;
+  }
+
+  /** The newest edit's number: the identity of the draft on the page, which an answer must match to replace it. */
+  get edit(): number {
+    return this.seq;
   }
 
   /** Whether the server has confirmed the newest edit. */
@@ -138,6 +164,35 @@ export class SaveQueue {
   /** A method, not the getter, inside `step`: the answer changes across each await. */
   private confirmed(): boolean {
     return this.acceptedSeq >= this.seq;
+  }
+
+  /** Another page changed the campaign, as a refused launch reports: the conflict state. */
+  markConflict(message: string): void {
+    this.conflictSeq = Math.max(this.conflictSeq ?? 0, this.seq, 1);
+    this.deps.onStatus({ kind: "conflict", message, saved: this.confirmed() && this.seq > 0 });
+  }
+
+  /** The browser is online again: a save waiting after no answer tries at once. */
+  wake(): void {
+    this.wakeUp?.();
+  }
+
+  private pause(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      this.wakeUp = resolve;
+      void (this.deps.wait ?? ((t: number) => new Promise<void>((r) => setTimeout(r, t))))(ms).then(resolve);
+    }).finally(() => {
+      this.wakeUp = null;
+    });
+  }
+
+  /** The body for the newest number: built when it is first sent, then reused unchanged. */
+  private bodyFor(seq: number): CampaignDefinition {
+    if (this.sentBody?.seq === seq) return this.sentBody.definition;
+    const { draft, accountIds } = this.deps.read();
+    const definition = { ...draft, emailPool: [...accountIds] };
+    this.sentBody = { seq, definition };
+    return definition;
   }
 
   /** The user loaded the stored version: what was typed before is set aside, and saving starts again from it. */
@@ -160,9 +215,15 @@ export class SaveQueue {
    */
   sendNow(): void {
     if (this.confirmed() || this.inConflict) return;
-    const { draft, accountIds, version } = this.deps.read();
+    const { draft, version } = this.deps.read();
     if (draftProblems(draft).length > 0) return;
-    void this.send({ ...draft, emailPool: [...accountIds] }, { keepalive: true }, { session: this.session, seq: this.seq, base: version });
+    // At most one request that outlives the page: the newest carries everything, so the older one goes.
+    this.leaveSave?.abort();
+    const abort = new AbortController();
+    this.leaveSave = abort;
+    void this.send(this.bodyFor(this.seq), { keepalive: true, signal: abort.signal }, { session: this.session, seq: this.seq, base: version }).finally(() => {
+      if (this.leaveSave === abort) this.leaveSave = null;
+    });
   }
 
   /** The page came back from the back-forward cache: whatever was unconfirmed is sent again. */
@@ -172,12 +233,12 @@ export class SaveQueue {
   }
 
   /** One request, whose outcome always reports into the queue. */
-  private async send(definition: CampaignDefinition, options: { readonly keepalive?: boolean }, save: SaveIdentity): Promise<Sent> {
+  private async send(definition: CampaignDefinition, options: { readonly keepalive?: boolean; readonly signal?: AbortSignal }, save: SaveIdentity): Promise<Sent> {
     try {
       const view = await this.deps.put(definition, options, save);
       if (save.seq > this.acceptedSeq) {
         this.acceptedSeq = save.seq;
-        this.deps.onAccepted(view, save.seq === this.seq);
+        this.deps.onAccepted(view, save.seq);
       }
       // A later save of this page got in: an older one's conflict no longer counts.
       if (this.conflictSeq !== null && save.seq > this.conflictSeq) this.conflictSeq = null;
@@ -192,7 +253,7 @@ export class SaveQueue {
         // An older save than one already accepted: superseded, whatever it collided with.
         if (save.seq <= this.acceptedSeq) return { kind: "superseded" };
         this.conflictSeq = Math.max(this.conflictSeq ?? 0, save.seq);
-        this.deps.onStatus({ kind: "conflict", message });
+        this.deps.onStatus({ kind: "conflict", message, saved: false });
         return { kind: "conflict", message };
       }
       if (save.seq === this.seq && !this.inConflict) this.deps.onStatus({ kind: "error", message });
@@ -211,7 +272,7 @@ export class SaveQueue {
         return { ok: true };
       }
       const seq = this.seq;
-      const { draft, accountIds, version } = this.deps.read();
+      const { draft, version } = this.deps.read();
       const problems = draftProblems(draft);
       if (problems.length > 0) {
         const message = problems.join(" ");
@@ -219,7 +280,7 @@ export class SaveQueue {
         return { ok: false, reason: "invalid", message };
       }
       this.deps.onStatus({ kind: "saving" });
-      const sent = await this.send({ ...draft, emailPool: [...accountIds] }, options, { session: this.session, seq, base: version });
+      const sent = await this.send(this.bodyFor(seq), options, { session: this.session, seq, base: version });
       if (sent.kind === "accepted") return this.confirmed() ? { ok: true } : { ok: false, reason: "changed" };
       if (sent.kind === "conflict") return { ok: false, reason: "conflict", message: sent.message };
       if (sent.kind === "refused") return { ok: false, reason: "failed", message: sent.message };
@@ -229,6 +290,7 @@ export class SaveQueue {
         this.deps.onStatus({ kind: "error", message });
         return { ok: false, reason: "failed", message };
       }
+      if (sent.kind === "no_answer") await this.pause(NO_ANSWER_BACKOFF_MS[tries] ?? 8_000);
       // Superseded, or no answer yet: look again; the same save is safe to resend.
     }
   }

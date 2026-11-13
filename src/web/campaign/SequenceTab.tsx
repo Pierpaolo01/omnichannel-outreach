@@ -29,6 +29,9 @@ import type { SequenceEditor } from "./useSequence.ts";
 /** The address for every email collapsed. */
 const NO_STEP = "none";
 
+/** One wording, everywhere, for an inbox the provider reports cannot send (PR 41 council, item 7). */
+export const CANNOT_SEND = "can’t send: the provider reports it unavailable";
+
 const LATER = "SMS and phone tracks, and connecting tracks together or after one another, arrive with later releases.";
 
 /** The Sequence tab: the canvas, and the selected track's inspector beside it. */
@@ -45,10 +48,17 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
   // closing the inspector returns it to the track, and adding the first track moves it to
   // Email 1's subject.
   const node = useRef<HTMLButtonElement>(null);
-  const [focusNext, setFocusNext] = useState<{ to: "node" } | { to: "subject" | "toggle"; stepId: string } | null>(null);
+  // After loading the saved version, focus goes to the first email of what loaded: its subject if
+  // it is open, else its row (PR 41 re-check, F8).
+  const [focusNext, setFocusNext] = useState<{ to: "node" | "first" } | { to: "subject" | "toggle"; stepId: string } | null>(null);
   useEffect(() => {
     if (!focusNext) return;
-    const target = focusNext.to === "node" ? node.current : document.getElementById(`${focusNext.to === "subject" ? "subject" : "step-toggle"}-${focusNext.stepId}`);
+    const first = selected ? liveSteps(selected)[0] : undefined;
+    let target: HTMLElement | null;
+    if (focusNext.to === "node") target = node.current;
+    else if (focusNext.to === "first") target = first ? (document.getElementById(`subject-${first.id}`) ?? document.getElementById(`step-toggle-${first.id}`)) : null;
+    else if ("stepId" in focusNext) target = document.getElementById(`${focusNext.to === "subject" ? "subject" : "step-toggle"}-${focusNext.stepId}`);
+    else target = null;
     if (target) {
       target.focus();
       setFocusNext(null);
@@ -126,6 +136,7 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
           openStep={openStep === NO_STEP ? null : (openStep ?? liveSteps(selected)[0]?.id ?? null)}
           onOpenStep={(stepId) => select(selected.id, stepId ?? NO_STEP)}
           onFocusStep={(stepId) => setFocusNext({ to: "toggle", stepId })}
+          onLoadedStored={() => setFocusNext({ to: "first" })}
           onClose={() => {
             select(null);
             setFocusNext({ to: "node" });
@@ -192,13 +203,16 @@ interface InspectorProps {
   openStep: string | null;
   onOpenStep: (stepId: string | null) => void;
   onFocusStep: (stepId: string) => void;
+  onLoadedStored: () => void;
   onClose: () => void;
 }
 
-function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, onOpenStep, onFocusStep, onClose }: InspectorProps) {
+function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, onOpenStep, onFocusStep, onLoadedStored, onClose }: InspectorProps) {
   const steps = liveSteps(track);
   const titleId = useId();
-  const locked = editor.launched;
+  // Locked once launched, and while a launch or a load of the stored version is in flight
+  // (PR 41 council, items 9 and 12): the answer it waits for is then always for the draft on the page.
+  const locked = editor.launched || editor.launching || editor.loading;
   const changeTrack = (change: (t: TrackDefinition) => TrackDefinition) =>
     editor.update((d: CampaignDefinition) => ({ ...d, tracks: d.tracks.map((t) => (t.id === track.id ? change(t) : t)) }));
   const changeStep = (stepId: string, change: (s: StepDefinition) => StepDefinition) => changeTrack((t) => ({ ...t, steps: t.steps.map((s) => (s.id === stepId ? change(s) : s)) }));
@@ -226,13 +240,18 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
           header, the tabs and the main area's bottom padding. */}
       <div data-testid="inspector-body" className="relative flex min-h-0 flex-1 flex-col gap-[18px] px-[18px] pb-5 pt-4 min-[1020px]:overflow-y-auto">
         {editor.save.kind === "error" && <ErrorState title="Your last change wasn’t saved." message={editor.save.message} onRetry={editor.retrySave} />}
-        {editor.save.kind === "conflict" && <ConflictNotice editor={editor} />}
+        {editor.save.kind === "conflict" && <ConflictNotice editor={editor} onLoaded={onLoadedStored} />}
         {editor.problems.length > 0 && (
           <p role="alert" className="rounded-field bg-crit-soft px-3 py-2 text-[13.5px] text-crit">
             {editor.problems.join(" ")} Nothing is saved until this is fixed.
           </p>
         )}
-        {locked && <p className="rounded-field bg-raised px-3 py-2 text-[13.5px] text-ink-2">This campaign is running. Editing a running campaign arrives with a later release.</p>}
+        {editor.launched && <p className="rounded-field bg-raised px-3 py-2 text-[13.5px] text-ink-2">This campaign is running. Editing a running campaign arrives with a later release.</p>}
+        {(editor.launching || editor.loading) && (
+          <p role="status" className="rounded-field bg-raised px-3 py-2 text-[13.5px] text-ink-2">
+            {editor.launching ? "Launching. Editing is paused until the launch answers." : "Loading the saved version. Editing is paused until it arrives."}
+          </p>
+        )}
         {factsFailed && <ErrorState title="Lead counts for the fallbacks didn’t load." message="The copy still saves." onRetry={onRetryFacts} />}
         {/* Only the editing controls lock on a running campaign; every email still opens. */}
         <div role="group" aria-label="Emails" className="flex min-w-0 flex-col">
@@ -280,7 +299,7 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
 }
 
 function SaveStatus({ editor }: { editor: SequenceEditor }) {
-  const text = editor.launched ? "" : editor.save.kind === "saving" ? "Saving…" : editor.save.kind === "saved" ? "Saved" : editor.save.kind === "conflict" ? "Not saved" : "";
+  const text = editor.launched ? "" : editor.save.kind === "saving" ? "Saving…" : editor.save.kind === "saved" ? "Saved" : editor.save.kind === "conflict" ? (editor.save.saved ? "Changed elsewhere" : "Not saved") : "";
   return (
     <span role="status" className="text-[12.5px] text-muted">
       {text}
@@ -516,7 +535,7 @@ function TimingAndSender({ track, editor, onWindow }: { track: TrackDefinition; 
                 {accounts.map((a) => (
                   <li key={a.id} className="[overflow-wrap:anywhere]">
                     {a.label}
-                    {!a.healthy && <span className="text-crit"> (disconnected)</span>}
+                    {!a.healthy && <span className="text-crit"> {CANNOT_SEND}</span>}
                   </li>
                 ))}
               </ul>
@@ -611,25 +630,35 @@ export function Pill({ children }: { children: ReactNode }) {
  * Another page changed the campaign since this one loaded it (ADR 0003 1.1.1): what was typed here
  * is kept, not saved, until the user loads the stored version.
  */
-export function ConflictNotice({ editor }: { editor: SequenceEditor }) {
-  const [loading, setLoading] = useState(false);
+/**
+ * The conflict and its one way out. Loading the stored version locks authoring until it arrives
+ * (the editor's pending state, not this component's); once loaded, the alert and its button go, so
+ * `onLoaded` moves focus somewhere stable (PR 41 re-check, F8).
+ */
+export function ConflictNotice({ editor, onLoaded }: { editor: SequenceEditor; onLoaded?: () => void }) {
   return (
     <div role="alert" className="flex flex-wrap items-center gap-3 rounded-box bg-crit-soft px-4 py-3 text-[14px]">
       <span className="min-w-0 flex-[1_1_320px]">
         <b className="font-semibold text-crit">This campaign was changed elsewhere since this page loaded it.</b>{" "}
-        <span className="text-ink-2">What you typed is still here, but it is not saved. Loading the saved version replaces it.</span>
+        <span className="text-ink-2">
+          {editor.save.kind === "conflict" && editor.save.saved
+            ? "Your last change was saved, then changed there. Load the saved version to carry on."
+            : "What you typed is still here, but it is not saved. Loading the saved version replaces it."}
+        </span>
       </span>
       <button
         type="button"
         className="btn btn-sm border-line-strong bg-base-100 font-medium"
-        disabled={loading}
+        disabled={editor.loading}
         onClick={() => {
-          setLoading(true);
-          void editor.loadStored().finally(() => setLoading(false));
+          void editor.loadStored().then((loaded) => {
+            if (loaded) onLoaded?.();
+          });
         }}
       >
-        {loading ? "Loading…" : "Load the saved version"}
+        {editor.loading ? "Loading…" : "Load the saved version"}
       </button>
     </div>
   );
 }
+

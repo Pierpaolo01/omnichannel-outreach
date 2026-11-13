@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import type { CampaignDefinition, SequenceView } from "../../shared/api.ts";
 import { ApiRequestError, getJson, postJson, putJson, useApi } from "../api.ts";
 import { WEEK } from "./model.ts";
-import { NoAnswer, SaveQueue, draftProblems, type SaveStatus } from "./saveQueue.ts";
+import { EditorStore, type EditorSnapshot } from "./editorStore.ts";
+import { NoAnswer, type SaveStatus } from "./saveQueue.ts";
 
 export { draftProblems } from "./saveQueue.ts";
 export type SaveState = SaveStatus;
@@ -18,24 +19,29 @@ export interface SequenceEditor {
   /** The draft differs from what the server accepted: launch waits until it is saved. */
   readonly unsaved: boolean;
   readonly launched: boolean;
+  /** A launch is in flight: authoring is locked until it answers. */
+  readonly launching: boolean;
+  /** The stored version is loading after a conflict: authoring is locked until it arrives. */
+  readonly loading: boolean;
   readonly update: (change: (draft: CampaignDefinition) => CampaignDefinition) => void;
   readonly retrySave: () => void;
-  /** After a conflict: replaces the draft with the stored version, setting aside what was typed. */
-  readonly loadStored: () => Promise<void>;
+  /** After a conflict: replaces the draft with the stored version, setting aside what was typed. Resolves true once it has. */
+  readonly loadStored: () => Promise<boolean>;
   /** Saves the draft through the same ordered path first, and launches only if that succeeded and only the revision on the page. */
   readonly launch: () => Promise<void>;
 }
 
-const SAVE_DELAY_MS = 600;
 /** How long a save waits for its answer before it counts as no answer and is resent. */
 const ANSWER_TIMEOUT_MS = 20_000;
 
 /** One PUT of the sequence: no answer (network failure, timeout) is `NoAnswer`; a refusal carries the server's code. */
-async function putSequence(campaignId: string, body: unknown, options: { keepalive?: boolean }): Promise<SequenceView> {
+async function putSequence(campaignId: string, body: unknown, options: { keepalive?: boolean; signal?: AbortSignal }): Promise<SequenceView> {
   const abort = new AbortController();
   const timeout = setTimeout(() => abort.abort(), ANSWER_TIMEOUT_MS);
+  // A leave-save superseded by a newer one is cancelled (one outstanding at most).
+  options.signal?.addEventListener("abort", () => abort.abort());
   try {
-    return (await putJson(`/api/campaigns/${encodeURIComponent(campaignId)}/sequence`, body, { ...options, signal: abort.signal })) as SequenceView;
+    return (await putJson(`/api/campaigns/${encodeURIComponent(campaignId)}/sequence`, body, { ...(options.keepalive ? { keepalive: true } : {}), signal: abort.signal })) as SequenceView;
   } catch (error) {
     if (!(error instanceof ApiRequestError)) throw new NoAnswer();
     const code = (error.body as { error?: { code?: unknown } } | null)?.error?.code;
@@ -46,149 +52,77 @@ async function putSequence(campaignId: string, body: unknown, options: { keepali
 }
 
 /**
- * The campaign's sequence, as the editor edits it. Before launch every change is saved on its
- * own, a moment after it is made, through one ordered queue (saveQueue.ts); the inboxes the
- * provider reports are the email track's pool.
+ * The campaign's sequence, as the editor edits it: a binding of EditorStore (editorStore.ts), which
+ * holds every state transition, to React and the browser (timers, leaving the page, coming back,
+ * going online). The generated save test drives the same EditorStore.
  */
 export function useSequence(campaignId: string) {
   const { result, retry } = useApi<SequenceView>(`/api/campaigns/${encodeURIComponent(campaignId)}/sequence`);
-  // What the editor changed or saved since loading; until then, what the server sent.
-  const [local, setLocal] = useState<{ view: SequenceView; draft: CampaignDefinition } | null>(null);
   const loaded = result.state === "ready" ? result.data : null;
-  const state = local ?? (loaded ? { view: loaded, draft: loaded.definition } : null);
-  const [save, setSave] = useState<SaveState>({ kind: "idle" });
-  const [unsaved, setUnsaved] = useState(false);
-  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const latest = useRef<{ view: SequenceView; draft: CampaignDefinition } | null>(null);
+  const [store, setStore] = useState<EditorStore | null>(null);
+  // One store per load of this campaign's page, created once the sequence has arrived.
+  if (loaded && store === null) {
+    setStore(
+      new EditorStore(loaded, {
+        put: (body, options) => putSequence(campaignId, body, options),
+        launch: async (definitionVersion) => {
+          try {
+            return (await postJson(`/api/campaigns/${encodeURIComponent(campaignId)}/launch`, { definitionVersion })) as SequenceView;
+          } catch (error) {
+            const code = error instanceof ApiRequestError ? (error.body as { error?: { code?: unknown } } | null)?.error?.code : null;
+            throw Object.assign(error instanceof Error ? error : new Error("Launch failed."), { code });
+          }
+        },
+        load: async () => (await getJson(`/api/campaigns/${encodeURIComponent(campaignId)}/sequence`)) as SequenceView,
+        setTimer: (run, ms) => setTimeout(run, ms),
+        clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+      }),
+    );
+  }
+  const snapshot = useSyncExternalStore(store?.subscribe ?? noSubscribe, store?.getSnapshot ?? noSnapshot);
+
   useEffect(() => {
-    latest.current = state;
-  });
-
-  // Created on first use, outside render: one ordered queue for this campaign's editor.
-  const queueRef = useRef<SaveQueue | null>(null);
-  const getQueue = useCallback((): SaveQueue => {
-    queueRef.current ??= new SaveQueue({
-        read: () => {
-          const current = latest.current;
-          if (!current) throw new Error("The sequence has not loaded.");
-          return { draft: current.draft, accountIds: current.view.accounts.map((a) => a.id), version: current.view.definitionVersion };
-        },
-        put: (definition, options, save) => putSequence(campaignId, { ...definition, save }, options),
-        onStatus: (status) => {
-          setSave(status);
-          setUnsaved(status.kind !== "saved" && status.kind !== "idle");
-        },
-        // Saves land in order, so each accepted view is the newest; a newer draft is kept.
-        onAccepted: (view, current) => {
-          const next = { view, draft: current ? view.definition : (latest.current?.draft ?? view.definition) };
-          latest.current = next;
-          setLocal(next);
-        },
-      });
-    return queueRef.current;
-  }, [campaignId]);
-
-  const saveNow = useCallback(
-    (options: { keepalive?: boolean } = {}) => {
-      clearTimeout(timer.current);
-      timer.current = undefined;
-      if (latest.current?.view.launchedAt != null) return Promise.resolve({ ok: true } as const);
-      return getQueue().save(options);
-    },
-    [getQueue],
-  );
-
-  // Leaving the page sends the newest unsaved draft at once, with keepalive, even behind a save in
-  // flight: a queued save dies with the document (PR 41 re-check, B6). If the browser keeps the
-  // page for Back, it comes back with `pageshow` and the queue sends whatever is unconfirmed again.
-  // Leaving the campaign inside the app keeps the page alive, so its change goes through the queue.
-  useEffect(() => {
-    const leavePage = () => {
-      clearTimeout(timer.current);
-      timer.current = undefined;
-      getQueue().sendNow();
-    };
+    if (!store) return;
+    const leavePage = () => store.leavePage();
     const back = (event: PageTransitionEvent) => {
-      if (event.persisted) void getQueue().restored();
+      if (event.persisted) void store.restored();
     };
+    const online = () => store.online();
     window.addEventListener("pagehide", leavePage);
     window.addEventListener("pageshow", back);
+    window.addEventListener("online", online);
     return () => {
       window.removeEventListener("pagehide", leavePage);
       window.removeEventListener("pageshow", back);
-      if (timer.current !== undefined) void saveNow();
+      window.removeEventListener("online", online);
+      store.dispose();
     };
-  }, [saveNow, getQueue]);
+  }, [store]);
 
-  const update = useCallback(
-    (change: (draft: CampaignDefinition) => CampaignDefinition) => {
-      const base = latest.current;
-      if (!base) return;
-      const next = { ...base, draft: change(base.draft) };
-      latest.current = next;
-      setLocal(next);
-      getQueue().edited();
-      // Shown at once, so a change is never labelled saved while it waits to be sent.
-      setSave({ kind: "saving" });
-      setUnsaved(true);
-      clearTimeout(timer.current);
-      timer.current = setTimeout(() => {
-        timer.current = undefined;
-        void getQueue().save();
-      }, SAVE_DELAY_MS);
-    },
-    [getQueue],
-  );
-
-  // The pool follows the provider's inboxes: when they differ from what is saved, save once.
-  const view = state?.view;
-  useEffect(() => {
-    if (!view || view.launchedAt !== null || !view.definition.tracks.some((t) => !t.removed && t.channel === "email")) return;
-    const pool = [...view.definition.emailPool].sort().join("\n");
-    const connected = view.accounts.map((a) => a.id).sort().join("\n");
-    if (pool === connected) return;
-    getQueue().edited();
-    void saveNow();
-  }, [view, getQueue, saveNow]);
-
-  const launch = useCallback(async () => {
-    const saved = await saveNow();
-    if (!saved.ok) {
-      throw new Error(
-        saved.reason === "changed" ? "A newer change is still being saved. Launch again once it is saved." : `Your latest change isn’t saved, so nothing was launched. ${saved.message}`,
-      );
-    }
-    // The revision on the page: the server refuses to launch any other (ADR 0003 1.1.1, invariant 4).
-    const shown = latest.current?.view.definitionVersion;
-    const launched = (await postJson(`/api/campaigns/${encodeURIComponent(campaignId)}/launch`, { definitionVersion: shown })) as SequenceView;
-    setLocal({ view: launched, draft: launched.definition });
-  }, [campaignId, saveNow]);
-
-  const loadStored = useCallback(async () => {
-    const view = (await getJson(`/api/campaigns/${encodeURIComponent(campaignId)}/sequence`)) as SequenceView;
-    clearTimeout(timer.current);
-    timer.current = undefined;
-    const next = { view, draft: view.definition };
-    latest.current = next;
-    setLocal(next);
-    getQueue().loadedStored();
-  }, [campaignId, getQueue]);
-
-  const editor: SequenceEditor | null = state
-    ? {
-        view: state.view,
-        draft: state.draft,
-        save,
-        problems: draftProblems(state.draft),
-        unsaved,
-        launched: state.view.launchedAt !== null,
-        update,
-        retrySave: () => void saveNow(),
-        loadStored,
-        launch,
-      }
-    : null;
+  const editor: SequenceEditor | null =
+    store && snapshot
+      ? {
+          view: snapshot.view,
+          draft: snapshot.draft,
+          save: snapshot.save,
+          problems: snapshot.problems,
+          unsaved: snapshot.unsaved,
+          launched: snapshot.view.launchedAt !== null,
+          launching: snapshot.pending === "launch",
+          loading: snapshot.pending === "load",
+          update: (change) => store.update(change),
+          retrySave: () => store.retrySave(),
+          loadStored: async () => {
+            await store.loadStored();
+            return !store.inConflict;
+          },
+          launch: () => store.launch(),
+        }
+      : null;
   return { result, retry, editor };
 }
+
+const noSubscribe = () => () => undefined;
+const noSnapshot = (): EditorSnapshot | null => null;
 
 export const dayName = (day: number): string => WEEK.find((d) => d.day === day)?.name ?? "";
