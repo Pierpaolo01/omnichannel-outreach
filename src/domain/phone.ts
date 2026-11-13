@@ -1,11 +1,11 @@
 import { isSupportedCountry, parsePhoneNumberFromString, type CountryCode } from "libphonenumber-js/min";
-import metadata from "libphonenumber-js/min/metadata";
 import { digitsOf } from "./contact-details.ts";
 
 /**
  * Phone numbers. One number has one key however it is written: "+44 20 7946 0101",
  * "020 7946 0101" in Great Britain and "0044 20 7946 0101" all key to +442079460101.
- * National forms need the country the number belongs to (the company's country).
+ * National forms need the country the number belongs to: the company's two-letter country.
+ * Without one, a number written in national form is not read: it is kept as its digits.
  */
 export interface PhoneNumber {
   /** E.164 when the number can be read, otherwise its digits as written. */
@@ -40,17 +40,6 @@ export function parsePhone(raw: string, country: string | null): PhoneNumber | n
   return { key, display: written, searchDigits: digits, region: null };
 }
 
-/**
- * The region a number in international form belongs to: the country it names, else the main
- * region of its calling code (+44 7700 900xxx names no country, but is British). A number with a
- * non-geographic calling code, such as +800, belongs to none.
- */
-export function regionOfNumber(key: string): string | null {
-  const parsed = parsePhoneNumberFromString(key.trim());
-  if (!parsed) return null;
-  return parsed.country ?? metadata.country_calling_codes[parsed.countryCallingCode]?.[0] ?? null;
-}
-
 /** A stored phone key shown for reading. Keys that are not E.164 show as they are. */
 export function displayPhone(key: string): string {
   if (!key.startsWith("+")) return key;
@@ -59,15 +48,17 @@ export function displayPhone(key: string): string {
 }
 
 /**
- * The region to read a company's national numbers in: its country column when that is a
- * two-letter code, otherwise the region of its international main line (round 2, item 6).
+ * A business row's main line (ADR 0001, "Phone identity"). With a two-letter country it is read
+ * in that country. Without one, the `phone_e164` cell is international by definition, so it is
+ * read as international, even without its plus sign when it is valid that way; otherwise the
+ * line is read as any number is: as written in international form, or kept as its digits.
  */
-export function companyRegion(country: string | null, mainLines: readonly string[]): string | null {
-  const code = countryCode(country);
-  if (code) return code;
-  for (const raw of mainLines) {
-    const region = raw.trim().startsWith("+") ? parsePhone(raw, null)?.region : null;
-    if (region) return region;
-  }
-  return null;
+export function readMainLine(e164: string, original: string, country: string | null): PhoneNumber | null {
+  if (countryCode(country)) return parsePhone(e164, country) ?? parsePhone(original, country);
+  const written = e164.trim();
+  const digits = digitsOf(written);
+  const international = written.startsWith("+") || digits.startsWith("00");
+  const withoutPlus = !international && digits.length >= 6 && parsePhoneNumberFromString(`+${digits}`)?.isValid() === true;
+  const cell = international ? parsePhone(written, null) : withoutPlus ? parsePhone(`+${digits}`, null) : null;
+  return cell ?? parsePhone(original, null) ?? parsePhone(written, null);
 }
