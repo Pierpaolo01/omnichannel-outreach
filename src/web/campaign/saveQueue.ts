@@ -58,7 +58,8 @@ export interface SaveIdentity {
 
 export interface SaveQueueDeps {
   /** The draft as it stands, the inboxes the provider reports, and the revision the page last had from the server. */
-  read(): { readonly draft: CampaignDefinition; readonly accountIds: readonly string[]; readonly version: number };
+  /** The draft, the connected email inboxes and SMS numbers its pools follow, and the revision the page last saw. */
+  read(): { readonly draft: CampaignDefinition; readonly accountIds: readonly string[]; readonly smsNumberIds?: readonly string[]; readonly version: number };
   /**
    * Sends one save. Rejects with `NoAnswer` when no answer came, or with an error carrying the
    * server's `code` (`superseded`, `edit_conflict`, `too_large`) when the server refused it.
@@ -189,8 +190,8 @@ export class SaveQueue {
   /** The body for the newest number: built when it is first sent, then reused unchanged. */
   private bodyFor(seq: number): CampaignDefinition {
     if (this.sentBody?.seq === seq) return this.sentBody.definition;
-    const { draft, accountIds } = this.deps.read();
-    const definition = { ...draft, emailPool: [...accountIds] };
+    const { draft, accountIds, smsNumberIds } = this.deps.read();
+    const definition = { ...draft, emailPool: [...accountIds], ...(smsNumberIds ? { smsPool: [...smsNumberIds] } : {}) };
     this.sentBody = { seq, definition };
     return definition;
   }
