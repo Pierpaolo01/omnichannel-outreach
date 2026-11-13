@@ -277,3 +277,52 @@ describe("SMS on the timeline (ticket 13b): texts sent, bad numbers, skipped and
     expect(lee[1]).toMatchObject({ reason: "no_mobile" });
   });
 });
+
+describe("Activity states only what is stored (council on 10121d3, item 8)", () => {
+  const N1 = "+447700900001";
+  const always = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
+  const twoThenAfter = (first: "email" | "sms", second: "email" | "sms"): CampaignDefinition => ({
+    timezone: "Europe/London",
+    callSkipLimitDays: 2,
+    emailPool: ["inbox-a"],
+    smsPool: [N1],
+    tracks: [
+      { id: "t1", channel: first, branch: "main", window: always, start: { kind: "entry" }, removed: false, steps: [step("a1", { subject: first === "email" ? "Hi" : "", body: "One.", threading: "new_subject" }), step("a2", { waitDays: 3, body: "Two.", threading: first === "email" ? "continue_thread" : "new_subject" })] },
+      { id: "t2", channel: second, branch: "main", window: always, start: { kind: "after", trackId: "t1", delayDays: 1 }, removed: false, steps: [step("b1", { subject: second === "email" ? "Hi" : "", body: "Later.", threading: "new_subject" })] },
+    ],
+  });
+  async function stoppedBeforeTheSecondTrack(first: "email" | "sms", lead: Record<string, string>) {
+    const h = new EngineHarness({
+      start: MONDAY_8,
+      accounts: [{ id: "inbox-a", capacity: 30, gapMs: 60_000, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
+      sms: { numbers: [{ id: N1, capacity: 30, gapMs: 60_000, k: 1, healthy: true, resetZone: "Europe/London" }] },
+    });
+    const { campaign } = await h.createCampaign("Autumn physio", { businesses: [business({ business_id: "b1", business_name: "Harbour Lane Physio" })], people: [lead] });
+    await h.tick();
+    await h.defineSequence(campaign.id, twoThenAfter(first, first === "email" ? "sms" : "email"));
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_8 + 2 * H);
+    // The lead replies on the first track's channel, before the second track would start.
+    if (first === "email") h.fake.prospectReplies(lead["email"]!);
+    else expect(h.sms.prospectTexts(lead["dial_phone"]!, "Thanks")).toBe(true);
+    await h.advanceTo(MONDAY_8 + 8 * DAY);
+    const rows = (await h.request<{ rows: { id: string; name: string }[] }>("GET", "/api/leads")).body.rows;
+    return (await h.request<ActivityView>("GET", `/api/people/${rows[0]!.id}/activity`)).body.entries;
+  }
+
+  test("an email reply before the SMS track starts: no SMS entry is invented for a lead with no mobile", async () => {
+    const entries = await stoppedBeforeTheSecondTrack("email", person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example" }));
+    expect(entries.map((e) => [e.kind, "channel" in e ? e.channel : null])).toEqual([
+      ["replied", "email"],
+      ["sent", "email"],
+    ]);
+  });
+
+  test("a text reply before the email track starts: no email entry is invented for a lead with no email", async () => {
+    const entries = await stoppedBeforeTheSecondTrack("sms", person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", dial_phone: "+447700900211", dial_phone_type: "mobile" }));
+    expect(entries.map((e) => [e.kind, "channel" in e ? e.channel : null])).toEqual([
+      ["replied", "sms"],
+      ["sent", "sms"],
+    ]);
+  });
+});

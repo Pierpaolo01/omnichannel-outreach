@@ -1,4 +1,11 @@
 /**
+ * Each entry kind reads one stored fact (council on 10121d3, item 8): `sent`, an attempt in state
+ * `sent` and its work's `sent_wall`; `failed` and a step's `skipped`, a step result; a track's
+ * `skipped`, its progress's finish reason `skipped_missing_channel` with no step result; `released`,
+ * a started track whose start rule names a track that finished skipped or failed; `bounced`, a stored
+ * bounce event; `address_bad`, a finish on a bad destination with neither; `replied`, the stored
+ * stopping reply; `ended`, the lead's stored ending. The one exception is said where it is built.
+ *
  * The person and company-lead timeline's campaign activity (tickets 12c and 13b): built from each
  * enrollment's stored progress, the same facts GET /api/enrollments/:id reports. It shows only
  * what happened: emails and texts the provider reported sent, failures, skips and tracks released by them, a hard bounce, the reply
@@ -40,6 +47,9 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
       const channel = channelOfTrack(b.trackId);
       entries.push({ campaign, at: new Date(b.atWall).toISOString(), kind: "bounced", channel, track: labelOf(b.trackId), stepNumber: step?.number ?? null, to: shown(channel, b.destination) });
     }
+    // Ended for want of a usable channel before any track started: the only case Activity says more
+    // than the stored outcomes (council on 10121d3, item 8).
+    const endedAtLaunch = progress.status === "finished_no_usable_channel" && !progress.tracks.some((t) => t.started);
     for (const track of progress.tracks) {
       if (track.channel !== "email" && track.channel !== "sms") continue;
       const channel = track.channel;
@@ -61,8 +71,9 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
           entries.push({ campaign, at: step.at, kind: "skipped", channel, track: label, stepNumber: step.number, reason: SKIP_REASON[step.reason ?? ""] ?? step.reason ?? "skipped" });
         }
       }
-      if (!track.started && progress.endedAt !== null && !hasChannel) {
-        // A lead with no usable channel ends at entry: this track never starts, for want of its channel.
+      if (endedAtLaunch && progress.endedAt !== null && !hasChannel) {
+        // The one entry not read from this track's own stored outcome: a lead with no usable channel
+        // ends at launch, before any track starts, so no track stores a skip; each says why here.
         entries.push({ campaign, at: progress.endedAt, kind: "skipped", channel, track: label, stepNumber: null, reason: missing });
         continue;
       }
