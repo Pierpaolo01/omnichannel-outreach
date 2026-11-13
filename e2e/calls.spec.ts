@@ -10,6 +10,9 @@ import { focused, freshCalls, logElsewhere, logWithMouse } from "./screens.ts";
  * lists calls and records outcomes. All data is fictitious.
  */
 
+// The user and the prospects are in London: times on screen read as the calls' own.
+test.use({ timezoneId: "Europe/London" });
+
 const MONDAY_10 = Date.parse("2026-11-09T10:00:00Z");
 const DAY = 24 * 3_600_000;
 
@@ -193,6 +196,11 @@ test("wrong number marks the number dialled; interested stops only this lead wit
   await expect(page.getByText("+44 7700 900101").first()).toHaveCSS("text-decoration-line", "line-through");
 });
 
+/** When recording the demonstration, holds each step on screen long enough to read. */
+const linger = async (page: Page) => {
+  if (process.env["RECORD_DEMO"]) await page.waitForTimeout(2_500);
+};
+
 /**
  * The ticket's demonstration (recorded with RECORD_DEMO=1): manual dialling and logged outcomes from
  * a campaign, the visible state and timeline changes, and the email track beside the phone track
@@ -201,38 +209,47 @@ test("wrong number marks the number dialled; interested stops only this lead wit
 test("demonstration: work the call list from Today, see each outcome on the record, and the parallel email track carry on", async ({ page }) => {
   const f = await freshCalls("ready", "demonstration");
   await test.step("Today: four calls ready now", async () => {
+    // A ticking clock from the app's time, so the screen's dates agree with the calls (and the recording keeps time).
+    await page.clock.install({ time: f.harness.clock });
     await page.goto(f.url);
     await expect(page.getByText("4 calls are ready now.")).toBeVisible();
     await page.getByRole("link", { name: "Start calling" }).click();
+    await linger(page);
   });
   await test.step("Amira: dialled on her mobile, on your own phone; no answer, with a note", async () => {
     await expect(page.getByRole("heading", { name: "Amira Hassan" })).toBeVisible();
     await expect(page.getByText("the app never places a call")).toBeVisible();
     await logWithMouse(page, "No answer", "Rang eight times, no voicemail.");
     await expect(outcomeStatus(page)).toContainText("Amira Hassan: no answer logged. The phone track is finished.");
+    await linger(page);
   });
   await test.step("Tom: interested, so automation stops for him in this campaign only", async () => {
     await expect(page.getByRole("heading", { name: "Tom" })).toBeVisible();
     await logWithMouse(page, "Interested", "Wants a walkthrough on Thursday at 2.");
     await expect(outcomeStatus(page)).toContainText("Interested on call, automation stopped");
+    await linger(page);
   });
   await test.step("Grace: skipped for now, so the call stays on today's list", async () => {
     await expect(page.getByRole("heading", { name: "Grace Okafor" })).toBeVisible();
     await logWithMouse(page, "Skip for now");
     await expect(outcomeStatus(page)).toContainText("Grace Okafor skipped for now. The call stays on today’s list.");
+    await linger(page);
   });
   await test.step("the email after Amira's call goes once the call is logged; her first email track carried on beside it", async () => {
     await f.harness.advanceTo(MONDAY_10 + 2 * DAY + 3_600_000);
+    await page.clock.setSystemTime(f.harness.clock);
     await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
     await expect(page.getByText("Call: no answer")).toBeVisible();
     await expect(page.getByText(/Rang eight times, no voicemail\./)).toBeVisible();
     await expect(page.getByText("Email 2 sent")).toBeVisible();
     await expect(page.getByText("Email 1 sent")).toHaveCount(2);
+    await linger(page);
   });
   await test.step("Tom's record: interested, the call and its note; nothing more goes to him", async () => {
     await page.goto(`${f.url}/leads/people/${f.person("Tom")}`);
     await expect(page.getByText("Interested on call, automation stopped")).toBeVisible();
     await expect(page.getByText(/Wants a walkthrough on Thursday at 2\./)).toBeVisible();
     await expect(page.getByText("Email 2 sent")).toHaveCount(0);
+    await linger(page);
   });
 });
