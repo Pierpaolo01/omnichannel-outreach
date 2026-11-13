@@ -6,9 +6,10 @@ import { InstantlyClient } from "./client.ts";
 import { InstantlyEmailPort } from "./port.ts";
 
 /**
- * Generated runs of the adapter's poller with the process dying at points inside observation, and
- * an engine that dies between receiving a batch and storing its checkpoint (council on `387a19b`,
- * items 1 and 4; the verifier's follow-up). Each seed draws a sequence of provider happenings and
+ * Generated runs of the adapter's poller with the process dying at points inside observation, an
+ * engine that dies between receiving a batch and storing its checkpoint, and provider outages that
+ * fail polls in the same process (council on `387a19b`, items 1 and 4; the verifier's follow-up;
+ * review bot on `c942fd2`). Each seed draws a sequence of provider happenings and
  * polls; an independent record, kept by the test from what it told the fake to do, says which
  * replies and unsubscribes must reach the engine and which mail must never. Small pages make every
  * scan span several polls. Runs are bounded by a count of steps, not by time. Fictitious data.
@@ -74,9 +75,21 @@ async function run(seed: number): Promise<{ missing: string[]; unexpected: strin
   let stored: string | null = null;
   const applied = new Map<string, ProviderEvent>();
   const violations: string[] = [];
+  // The independent clock of observed time: gaps between two polls in a row that both succeeded in one process.
+  const created = new Map<string, number>();
+  const observed = new Map<string, number>();
+  let chainLast: number | null = null;
+  const breakChain = () => {
+    chainLast = null;
+  };
   const engineObserve = async (dieBeforeStoring: boolean) => {
     try {
       const r = await port.observe(stored);
+      if (chainLast !== null) {
+        const last = chainLast;
+        for (const [id, at] of created) observed.set(id, (observed.get(id) ?? 0) + Math.max(0, clock - Math.max(last, at)));
+      }
+      chainLast = clock;
       const upTo = dieBeforeStoring ? Math.floor(rnd() * (r.events.length + 1)) : r.events.length;
       for (const e of r.events.slice(0, upTo)) {
         applied.set(e.id, e);
@@ -84,16 +97,25 @@ async function run(seed: number): Promise<{ missing: string[]; unexpected: strin
           const lead = LEADS.includes(e.from) ? e.from : null;
           if (!lead || e.inbox !== INBOX) violations.push(`reply ${e.id} from ${e.from} reached the engine`);
           if (e.providerRef !== null && e.providerRef !== refs.get(e.from)) violations.push(`reply ${e.id} names ${e.providerRef}, not ${e.from}'s work`);
+          // A fallback with no reference only after the settling period of observed time.
+          if (e.providerRef === null && e.id.startsWith("reply:") && (observed.get(e.id) ?? 0) < 15 * MINUTE) violations.push(`reply ${e.id} fell back after ${String((observed.get(e.id) ?? 0) / MINUTE)} observed minutes`);
         }
         if (mustNotReach.has(e.id)) violations.push(`${e.id} must never reach the engine`);
       }
       if (!dieBeforeStoring) stored = r.checkpoint;
-      else port = build();
+      else {
+        port = build();
+        breakChain();
+      }
     } catch (error) {
-      if (!(error instanceof Crash)) throw error;
-      port = build();
+      breakChain();
+      // A crash restarts the process; a provider outage only fails the poll.
+      if (error instanceof Crash) port = build();
+      else if (outage === 0) throw error;
     }
+    if (outage > 0 && --outage === 0) fake.failWith = null;
   };
+  let outage = 0;
 
   await port.observe(null).then((r) => (stored = r.checkpoint));
   let n = 0;
@@ -128,6 +150,7 @@ async function run(seed: number): Promise<{ missing: string[]; unexpected: strin
       // The fake answers the latest campaign email the lead received, which may be another campaign's.
       const foreign = (email.thread_id !== null && foreignThreads.has(email.thread_id)) || (email.campaign_id !== null && foreignCampaigns.has(email.campaign_id));
       (foreign ? mustNotReach : mustReach).add(`reply:${email.id}`);
+      created.set(`reply:${email.id}`, clock);
     } else if (action < 0.35) {
       for (let i = 0; i < 1 + Math.floor(rnd() * 4); i++) mustNotReach.add(`reply:${fake.receive({ from_address_email: `stranger-${String(step)}-${String(i)}@else.example`, eaccount: INBOX }).id}`);
     } else if (action < 0.42) {
@@ -144,6 +167,10 @@ async function run(seed: number): Promise<{ missing: string[]; unexpected: strin
         const id = fake.leads.find((l) => l.email === lead && !l.deleted)?.id;
         if (id) mustReach.add(`unsubscribed:${id}`);
       }
+    } else if (action < 0.55) {
+      // The provider fails every request for the next few polls.
+      fake.failWith = 500;
+      outage = 2 + Math.floor(rnd() * 14);
     } else if (action < 0.62) {
       crashAt = { point: pick(["observe:page", "observe:before_commit", "observe:after_commit"]), after: Math.floor(rnd() * 3) };
       await engineObserve(false);
@@ -155,8 +182,8 @@ async function run(seed: number): Promise<{ missing: string[]; unexpected: strin
     }
     advance((1 + Math.floor(rnd() * 3)) * MINUTE);
   }
-  // Quiet: clean polls once a minute until everything has had its settling period in running time.
-  for (let i = 0; i < 60; i++) {
+  // Quiet: clean polls once a minute until everything has had its settling period in observed time.
+  for (let i = 0; i < 80; i++) {
     await engineObserve(false);
     advance(MINUTE);
   }

@@ -636,3 +636,40 @@ describe("council round on 387a19b", () => {
     expect(repliesFrom(later.events, "pat@harbour.example")).toHaveLength(1);
   });
 });
+
+describe("review bot on c942fd2: a held reply waits only for time the adapter could observe", () => {
+  test("an outage of failed polls in the same process does not count toward the wait", async () => {
+    const ctx = await sentOpener();
+    const { port, fake } = ctx;
+    let c = (await port.observe("c0")).checkpoint;
+    fake.reply("pat@harbour.example", { onThread: false, withLead: false });
+    c = (await pollFor(ctx, c, 1)).checkpoint;
+    // Sixteen one-minute polls fail.
+    fake.failWith = 500;
+    for (let i = 0; i < 16; i++) {
+      ctx.advance(MINUTE);
+      await expect(port.observe(c)).rejects.toThrow();
+    }
+    fake.failWith = null;
+    const early = await pollFor(ctx, c, 14);
+    expect(repliesFrom(early.events, "pat@harbour.example")).toEqual([]);
+    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [] })).toEqual({ kind: "unavailable" });
+    const late = await pollFor(ctx, early.checkpoint, 2);
+    expect(repliesFrom(late.events, "pat@harbour.example").map((e) => e.providerRef)).toEqual([null]);
+  });
+
+  test("polls whose mail scan did not reach its end do not count toward the wait", async () => {
+    const ctx = await setUp({ config: { pageSize: 2, pagesPerPoll: 1 } });
+    const { port, fake } = ctx;
+    await port.observe(null);
+    await port.handover(request({ idempotencyKey: "k-pat" }));
+    ctx.advance(2 * MINUTE);
+    let c = (await pollFor(ctx, "c0", 3)).checkpoint;
+    fake.reply("pat@harbour.example", { onThread: false, withLead: false });
+    c = (await pollFor(ctx, c, 2)).checkpoint;
+    // A backlog of thirty strangers' emails: fifteen one-page polls before a scan reaches its end.
+    for (let i = 0; i < 30; i++) fake.receive({ from_address_email: `stranger-${String(i)}@else.example`, eaccount: "ada@sender.example" });
+    const backlog = await pollFor(ctx, c, 16);
+    expect(repliesFrom(backlog.events, "pat@harbour.example")).toEqual([]);
+  });
+});
