@@ -1,5 +1,6 @@
 import { business, csvOf, person, type ExportRows } from "./export-builder.ts";
 import { testApi, type TestApi } from "./http.ts";
+import type { OutreachStore } from "../../src/server/persistence/store.ts";
 import { parsePhone } from "../../src/domain/phone.ts";
 import type { CompanyRecord, ContactDetailView, ImportSummary, LeadSearchResult, PersonRecord, SummaryEntry } from "../../src/shared/api.ts";
 
@@ -23,7 +24,9 @@ const notJoined = (e: SummaryEntry) => e.outcome === "not_enrolled" && e.reason 
  * 5. a contact value has exactly one owner within a company, and personal reach uses only personal
  *    details; a bad mark survives every import;
  * 6. importing the same files again changes nothing;
- * 7. no import returns a server error.
+ * 7. no import returns a server error;
+ * 8. every contact detail id ever shown still resolves to exactly one live detail, and a detail
+ *    shown on a page is live (it resolves to itself).
  * The generator only produces input the rule can decide: same-name colleagues first appear
  * together, an ID is never reused by someone whose namesake has carried it onto a record, a twin
  * lists only its own email and numbers, and every company row carries its anchor (a place_id,
@@ -168,7 +171,10 @@ export function generateRun(rand: () => number, step: number, history: History):
       business_id: businessId,
       place_id: c.anchor === "place" || (c.anchor !== "none" && chance(0.5)) ? `PL-${i}` : "",
       business_name: pick(c.names),
-      country: e164 ? pick(["GB", "GB", "United Kingdom", ""]) : "GB",
+      // A company first seen with no country and no international main line stores its numbers
+      // by their digits; a later import, always with a region, reads them again, merging any copy
+      // a person holds in international form into the company's line (ADR 0001).
+      country: e164 ? pick(["GB", "GB", "United Kingdom", ""]) : step === 1 && chance(0.4) ? "" : "GB",
       phone_e164: e164,
       phone_original: line,
       street: c.anchor === "address" || (c.anchor !== "none" && chance(0.5)) ? c.street : "",
@@ -611,7 +617,9 @@ function detailProblems(w: World, summary: ImportSummary, badMarks: BadMarks, hi
   for (const company of w.companies) {
     const owners = new Map<string, string>();
     for (const { d, owner } of atCompany(company.id)) {
-      const key = valueKey(d);
+      // A number stored while its company's region was unknown is keyed, and shown, by its digits
+      // until an import gives the company a region; until then it is a different number (ADR 0001).
+      const key = d.channel === "phone" && !d.value.startsWith("+") ? `unread|${d.value}` : valueKey(d);
       const other = owners.get(key);
       if (other && other !== owner) problems.push(`${d.value} at ${company.name} is held by ${other} and ${owner}`);
       owners.set(key, owner);
@@ -652,6 +660,26 @@ function detailProblems(w: World, summary: ImportSummary, badMarks: BadMarks, hi
   return problems;
 }
 
+/**
+ * Every detail id the sequence has seen on a page, from any import, must still resolve to one
+ * live detail: merging two details keeps the absorbed one's id (docs/adr/0001).
+ */
+async function detailIdProblems(store: OutreachStore, w: World, issued: Set<string>): Promise<string[]> {
+  const problems: string[] = [];
+  const shown = new Set([...w.people, ...w.companies].flatMap((r) => r.contactDetails.map((d) => d.id)));
+  for (const id of shown) {
+    issued.add(id);
+    const resolved = await store.contactDetail(id);
+    if (resolved?.id !== id) problems.push(`detail ${id} is shown on a page but resolves to ${resolved?.id ?? "nothing"}`);
+  }
+  for (const id of [...issued].sort()) {
+    const resolved = await store.contactDetail(id);
+    if (!resolved) problems.push(`detail ${id}, issued earlier, resolves to nothing`);
+    else if ((await store.contactDetail(resolved.id))?.id !== resolved.id) problems.push(`detail ${id} resolves to ${resolved.id}, which is not live`);
+  }
+  return problems;
+}
+
 /** The CRM without its generated identifiers, so two runs that differ only in row order compare equal. */
 function canonical(w: World): string {
   const details = (list: readonly ContactDetailView[]) => list.map((d) => [d.owner, d.channel, d.phoneKind, valueKey(d), d.bad, d.newer].join(" ")).sort();
@@ -682,10 +710,11 @@ export interface SequenceResult {
  * One generated sequence. With `shuffle`, every file's rows are reordered before it is imported;
  * the outcome must be identical to the unshuffled run.
  */
-export async function runSequence(seed: number, options: { shuffle?: boolean } = {}): Promise<SequenceResult> {
+export async function runSequence(seed: number, options: { shuffle?: boolean; store?: OutreachStore } = {}): Promise<SequenceResult> {
   const rand = random(seed);
   const reorder = random(seed * 31 + 7);
-  const api = testApi();
+  const api = testApi(options.store ? { store: options.store } : {});
+  const issuedDetails = new Set<string>();
   const campaigns = [(await api.createCampaign("Generated A")).id, (await api.createCampaign("Generated B")).id];
   const ledger = new Ledger();
   const badMarks: BadMarks = new Set();
@@ -743,6 +772,7 @@ export async function runSequence(seed: number, options: { shuffle?: boolean } =
         ...identityProblems(ledger, after),
         ...detailProblems(after, summary, badMarks, ledger),
         ...listedProblems(run, summary, after, campaign ?? "", ledger),
+        ...(await detailIdProblems(api.store, after, issuedDetails)),
         // An address a company's row lists as shared is never a personal email of its people.
         ...run.rows.businesses.flatMap((b, row) => {
           const companyId = summary.rowRecords.businesses[row];
