@@ -8,9 +8,6 @@ const strOrNull = (r: Row, k: string): string | null => (r[k] === null || r[k] =
 const numOrNull = (r: Row, k: string): number | null => (r[k] === null || r[k] === undefined ? null : Number(r[k]));
 
 const COLUMNS: Readonly<Record<string, string>> = {
-  sentEmailId: "sent_email_id",
-  threadId: "thread_id",
-  sentWall: "sent_wall",
   leadStatus: "lead_status",
   verificationStatus: "verification_status",
 };
@@ -54,9 +51,21 @@ export class SqliteInstantlyStore implements InstantlyStore {
     this.db
       .prepare(
         `INSERT INTO instantly_dispatch_campaigns (key, name, instantly_id, timestamp_updated) VALUES (?, ?, ?, ?)
-         ON CONFLICT(key) DO UPDATE SET instantly_id = excluded.instantly_id, timestamp_updated = excluded.timestamp_updated`,
+         ON CONFLICT(key) DO NOTHING`,
       )
       .run(record.key, record.name, record.instantlyId, record.timestampUpdated);
+  }
+
+  adoptDispatchCampaignId(key: string, instantlyId: string, timestampUpdated: string): DispatchCampaignRecord {
+    // A compare-and-set: only a record with no id yet takes this one. The read is of the row the statement left.
+    this.db.prepare("UPDATE instantly_dispatch_campaigns SET instantly_id = ?, timestamp_updated = ? WHERE key = ? AND instantly_id IS NULL").run(instantlyId, timestampUpdated, key);
+    const row = this.db.prepare("SELECT * FROM instantly_dispatch_campaigns WHERE key = ?").get(key);
+    if (!row) throw new Error(`no dispatch campaign record ${key}`);
+    return this.campaignOf(row);
+  }
+
+  setDispatchTimestamp(key: string, instantlyId: string, timestampUpdated: string): void {
+    this.db.prepare("UPDATE instantly_dispatch_campaigns SET timestamp_updated = ? WHERE key = ? AND instantly_id = ?").run(timestampUpdated, key, instantlyId);
   }
 
   dispatchCampaigns(): DispatchCampaignRecord[] {
@@ -143,7 +152,12 @@ export class SqliteInstantlyStore implements InstantlyStore {
       );
   }
 
-  updateDispatched(workKey: string, change: Partial<Pick<DispatchedLead, "sentEmailId" | "threadId" | "sentWall" | "leadStatus" | "verificationStatus">>): void {
+  recordSend(workKey: string, emailId: string, threadId: string | null, sentWall: number): DispatchedLead | null {
+    this.db.prepare("UPDATE instantly_dispatched SET sent_email_id = ?, thread_id = ?, sent_wall = ? WHERE work_key = ? AND sent_email_id IS NULL").run(emailId, threadId, sentWall, workKey);
+    return this.dispatched(workKey);
+  }
+
+  updateDispatched(workKey: string, change: Partial<Pick<DispatchedLead, "leadStatus" | "verificationStatus">>): void {
     const entries = Object.entries(change).filter(([k]) => k in COLUMNS);
     if (entries.length === 0) return;
     const sets = entries.map(([k]) => `${COLUMNS[k] ?? k} = ?`).join(", ");
@@ -158,6 +172,12 @@ export class SqliteInstantlyStore implements InstantlyStore {
   meta(key: string): string | null {
     const r = this.db.prepare("SELECT value FROM instantly_meta WHERE key = ?").get(key);
     return r ? str(r, "value") : null;
+  }
+
+  raiseMeta(key: string, value: number): void {
+    this.db
+      .prepare("INSERT INTO instantly_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = CAST(MAX(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER)) AS TEXT)")
+      .run(key, String(value));
   }
 
   setMeta(key: string, value: string): void {

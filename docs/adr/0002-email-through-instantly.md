@@ -349,6 +349,16 @@ The regressions are in `src/server/instantly/port.test.ts` ("signal identity", "
 5. **Single-flight.** The engine may stop waiting for a call without cancelling it, so a handover runs at most once at a time per idempotency key, a dispatch campaign is ensured at most once at a time per key, and polls run one at a time. A call made while one is still running joins it. After a create, a campaign id another process saved first is kept.
 6. **In-doubt adds.** The adapter records (inbox, destination, key) before every `POST /leads/add`. A reply from that address is then held, not dropped, even if the add's answer is lost.
 
+7. **Many processes, one database** (the verifier's B7 on `c66a0c8`). Single-flight serializes one process only, so every write the adapter makes to its records is either one statement or a commit that checks it changed nothing it did not read. There is no single-instance lock; that question is tracked separately.
+   - **The dispatch campaign id** is adopted by a compare-and-set (`UPDATE … WHERE instantly_id IS NULL`). Every process goes on with the id that statement leaves, before it activates the campaign or builds the add. A losing create never overwrites it. The intent row is insert-only, and timestamps update only the adopted id. A same-key add is therefore byte-identical in every process, and the dispatched lead agrees with the campaign the status scan reads. An empty losing campaign left in Instantly is a follow-up.
+   - **A poll's commit** (scan cursors and completion times, held replies, the acknowledgement of the previous batch, the batch and its sequence number) runs in one transaction. It goes ahead only if the stored batch is still the one the poll read when it began. Otherwise the poll fails and changes nothing, and the next one carries on: two processes' polls can never overwrite each other's batch, cursors or held replies.
+   - **One statement each:** recording a send (`… WHERE sent_email_id IS NULL`), raising the analytics maximum (`MAX` in the upsert), and inserting an intent or a dispatched lead (`ON CONFLICT DO NOTHING`; with one adopted campaign both writers hold the same lead).
+   - **Last writer wins, safely:** the quota hold time (either write is a hold), poll spacing, a timestamp seen (at worst one extra `PATCH`), and the completion time of a new campaign's status scan (written only by the process whose id was adopted).
+
+   Regressions, failing on `c66a0c8`, in `src/server/instantly/two-processes.test.ts`, on two stores over one SQLite file:
+   - both creators read the old state, yet one id is adopted, the two same-key adds are identical, and the unsubscribe is seen;
+   - two overlapping polls: the later commit fails, and the earlier batch is replayed until it is acknowledged.
+
 ## Sources (re-checked 12 November 2026)
 
 - **`api_v2.json` 2.0.0, 198 paths:**

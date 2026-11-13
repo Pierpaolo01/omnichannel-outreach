@@ -42,7 +42,15 @@ export interface SendContext {
 
 export interface InstantlyStore {
   dispatchCampaign(key: string): DispatchCampaignRecord | null;
+  /** Records the intent to have this dispatch campaign; an existing record, and its adopted id, are never changed. */
   saveDispatchCampaign(record: DispatchCampaignRecord): void;
+  /**
+   * Adopts `instantlyId` as the campaign's one id unless another process adopted one first, in one
+   * statement, and returns the record as it now stands: every caller uses the id this returns.
+   */
+  adoptDispatchCampaignId(key: string, instantlyId: string, timestampUpdated: string): DispatchCampaignRecord;
+  /** Records the `timestamp_updated` last seen, only for the adopted id. */
+  setDispatchTimestamp(key: string, instantlyId: string, timestampUpdated: string): void;
   dispatchCampaigns(): DispatchCampaignRecord[];
 
   dispatched(workKey: string): DispatchedLead | null;
@@ -62,10 +70,14 @@ export interface InstantlyStore {
   /** Send times of observed dispatch sends from `inbox` since `since`. */
   sentWallsSince(inbox: string, since: number): number[];
   saveDispatched(lead: DispatchedLead): void;
-  updateDispatched(workKey: string, change: Partial<Pick<DispatchedLead, "sentEmailId" | "threadId" | "sentWall" | "leadStatus" | "verificationStatus">>): void;
+  updateDispatched(workKey: string, change: Partial<Pick<DispatchedLead, "leadStatus" | "verificationStatus">>): void;
+  /** Records the work's sent email and thread unless one is recorded already, in one statement; returns the record. */
+  recordSend(workKey: string, emailId: string, threadId: string | null, sentWall: number): DispatchedLead | null;
 
   sendContext(subjectId: string): SendContext | null;
 
   meta(key: string): string | null;
   setMeta(key: string, value: string): void;
+  /** Raises a numeric meta value to at least `value`, in one statement: a running maximum never goes down. */
+  raiseMeta(key: string, value: number): void;
 }

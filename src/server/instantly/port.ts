@@ -235,9 +235,7 @@ export class InstantlyEmailPort implements SendPort {
     for (const entry of result.body) {
       if (entry.date !== day) continue;
       // A running maximum through the day, so analytics lag never lowers it (ADR 0002).
-      const key = META.analytics(day, entry.email_account);
-      const previous = Number(this.store.meta(key) ?? 0);
-      if (entry.sent > previous) this.store.setMeta(key, String(entry.sent));
+      this.store.raiseMeta(META.analytics(day, entry.email_account), entry.sent);
     }
   }
 
@@ -336,37 +334,37 @@ export class InstantlyEmailPort implements SendPort {
   }
 
   private async ensureDispatchCampaign(key: string, name: string, inbox: InstantlyAccount): Promise<DispatchCampaignRecord | null> {
+    // The intent is recorded before the create, which has no idempotency key: a retry searches by
+    // name. An existing record, and the id it adopted, are never overwritten.
+    this.store.saveDispatchCampaign({ key, name, instantlyId: null, timestampUpdated: null });
     let record = this.store.dispatchCampaign(key);
-    if (!record) {
-      // The intent is recorded before the create, which has no idempotency key: a retry searches by name.
-      record = { key, name, instantlyId: null, timestampUpdated: null };
-      this.store.saveDispatchCampaign(record);
-    }
+    if (!record) return null;
     const wanted = this.settings(name, inbox);
     let campaign: InstantlyCampaign | null = null;
     if (record.instantlyId === null) {
       // Every page of the search: a create only once the whole result shows no campaign by that name.
       const found = await this.readPages<InstantlyCampaign>((after) => this.client.get("/api/v2/campaigns", { search: name, limit: this.config.pageSize, starting_after: after }));
       if (!found?.complete) return null;
-      campaign = found.items.find((c) => c.name === name) ?? null;
-      if (!campaign) {
+      let candidate = found.items.find((c) => c.name === name) ?? null;
+      const createdHere = candidate === null;
+      if (!candidate) {
         const created = await this.client.post<InstantlyCampaign>("/api/v2/campaigns", wanted);
         if (!created.ok) return null;
-        campaign = created.body;
-        // Another process may have saved an id first: that one is kept.
-        const saved = this.store.dispatchCampaign(key);
-        if (saved?.instantlyId) return this.ensureDispatchCampaign(key, name, inbox);
-        record = { ...record, instantlyId: campaign.id, timestampUpdated: campaign.timestamp_updated };
-        // A new campaign holds no lead yet: its statuses are fully known.
-        this.store.setMeta(META.statusScanComplete(key), String(this.now()));
-      } else {
-        record = { ...record, instantlyId: campaign.id };
+        candidate = created.body;
       }
-      this.store.saveDispatchCampaign(record);
+      // One id for the campaign, whichever process got there first: adopted in one statement, and
+      // every caller goes on with the id it returns (ADR 0002 as built, rule 7). A campaign found by
+      // name has its settings re-asserted, so its timestamp is not taken as seen.
+      record = this.store.adoptDispatchCampaignId(key, candidate.id, createdHere ? candidate.timestamp_updated : "");
+      if (record.instantlyId === candidate.id) {
+        campaign = candidate;
+        // A new campaign holds no lead yet: its statuses are fully known.
+        if (createdHere) this.store.setMeta(META.statusScanComplete(key), String(this.now()));
+      }
     }
     const id = record.instantlyId;
     if (id === null) return null;
-    if (!campaign || campaign.timestamp_updated !== record.timestampUpdated) {
+    if (!campaign || campaign.id !== id || campaign.timestamp_updated !== record.timestampUpdated) {
       const current = await this.client.get<InstantlyCampaign>(`/api/v2/campaigns/${encodeURIComponent(id)}`, {});
       if (!current.ok) return null;
       campaign = current.body;
@@ -377,13 +375,13 @@ export class InstantlyEmailPort implements SendPort {
       if (!patched.ok) return null;
       campaign = patched.body;
       record = { ...record, timestampUpdated: campaign.timestamp_updated };
-      this.store.saveDispatchCampaign(record);
+      this.store.setDispatchTimestamp(key, id, campaign.timestamp_updated);
     }
     if (campaign.status !== 1) {
       const activated = await this.client.post<InstantlyCampaign>(`/api/v2/campaigns/${encodeURIComponent(id)}/activate`, {});
       if (!activated.ok) return null;
       record = { ...record, timestampUpdated: activated.body.timestamp_updated };
-      this.store.saveDispatchCampaign(record);
+      this.store.setDispatchTimestamp(key, id, activated.body.timestamp_updated);
     }
     return record;
   }
@@ -523,19 +521,25 @@ export class InstantlyEmailPort implements SendPort {
     } else {
       draft.meta.set(META.lastMailScan, String(now));
     }
-    const seq = Number(this.store.meta(META.batchSeq) ?? 0) + 1;
-    draft.meta.set(META.batchSeq, String(seq));
-    const token = `oo-batch-${String(seq)}-${iso(now)}`;
-    const batch: Batch = { token, events: [...events.values()], changes };
     this.crash("observe:before_commit");
+    const box: { batch?: Batch } = {};
     this.store.transaction(() => {
+      // Commit only if no other poll committed since this one began: another process's poll would
+      // otherwise be overwritten with its batch, cursors and held replies (ADR 0002 as built, rule 7).
+      if (this.store.meta(META.batch) !== previous.raw) throw new Error("another poll committed first: this poll changes nothing, and the next one carries on");
+      const seq = Number(this.store.meta(META.batchSeq) ?? 0) + 1;
+      const batch: Batch = { token: `oo-batch-${String(seq)}-${iso(now)}`, events: [...events.values()], changes };
+      box.batch = batch;
       for (const [workKey, [status, verification]] of Object.entries(previous.applied)) this.store.updateDispatched(workKey, { leadStatus: status, verificationStatus: verification });
       for (const [key, value] of draft.meta) this.store.setMeta(key, value);
+      this.store.setMeta(META.batchSeq, String(seq));
       this.store.setMeta(META.batch, JSON.stringify(batch));
     });
+    const committed = box.batch;
+    if (!committed) throw new Error("the poll was not committed");
     this.previousPollCommitted = true;
     this.crash("observe:after_commit");
-    return { events: batch.events, checkpoint: token };
+    return { events: committed.events, checkpoint: committed.token };
   }
 
   private crash(point: string): void {
@@ -551,12 +555,12 @@ export class InstantlyEmailPort implements SendPort {
    * The previous batch. When the engine passes back its checkpoint it was applied, and its status
    * changes are recorded with this poll's commit; otherwise it is reported again.
    */
-  private previousBatch(checkpoint: string | null): { replay: readonly ProviderEvent[]; unapplied: Batch["changes"]; applied: Batch["changes"] } {
+  private previousBatch(checkpoint: string | null): { raw: string | null; replay: readonly ProviderEvent[]; unapplied: Batch["changes"]; applied: Batch["changes"] } {
     const raw = this.store.meta(META.batch);
-    if (raw === null) return { replay: [], unapplied: {}, applied: {} };
+    if (raw === null) return { raw, replay: [], unapplied: {}, applied: {} };
     const batch = JSON.parse(raw) as Batch;
-    if (checkpoint !== batch.token) return { replay: batch.events, unapplied: batch.changes, applied: {} };
-    return { replay: [], unapplied: {}, applied: batch.changes };
+    if (checkpoint !== batch.token) return { raw, replay: batch.events, unapplied: batch.changes, applied: {} };
+    return { raw, replay: [], unapplied: {}, applied: batch.changes };
   }
 
   /** Reads pages from `start` until the end or the page budget; null when a page could not be read. */
@@ -619,8 +623,8 @@ export class InstantlyEmailPort implements SendPort {
       const d = this.store.dispatchedByLead(email.lead_id);
       if (!d || d.instantlyCampaignId !== email.campaign_id || d.inbox !== email.eaccount) return null;
       // A fact about Instantly's records, written as found (see "One commit per poll").
-      if (d.sentEmailId === null) this.store.updateDispatched(d.workKey, { sentEmailId: email.id, threadId: email.thread_id, sentWall: emailTime(email) });
-      if (d.sentEmailId !== null && d.sentEmailId !== email.id) return null;
+      const recorded = d.sentEmailId === null ? this.store.recordSend(d.workKey, email.id, email.thread_id, emailTime(email)) : d;
+      if (recorded?.sentEmailId !== email.id) return null;
       return { id: `sent:${email.id}`, kind: "sent", key: d.workKey, providerRef: d.ref, sentAt: emailTime(email) };
     }
     if (email.ue_type !== 2) return null;
@@ -768,7 +772,7 @@ export class InstantlyEmailPort implements SendPort {
     // Only the campaign's own email is the dispatch send.
     const email = read.items.find((e) => e.ue_type === 1 && e.lead_id === d.leadId && e.eaccount === d.inbox) ?? null;
     if (!email && !read.complete) return undefined;
-    if (email && d.sentEmailId === null) this.store.updateDispatched(d.workKey, { sentEmailId: email.id, threadId: email.thread_id, sentWall: emailTime(email) });
+    if (email && d.sentEmailId === null) this.store.recordSend(d.workKey, email.id, email.thread_id, emailTime(email));
     return email;
   }
 
