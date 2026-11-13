@@ -1,0 +1,83 @@
+/** The campaign editor's draft helpers (ticket 12c). Pure: no React, no requests. */
+import { mergeUses } from "../../domain/sequence/copy.ts";
+import type { CampaignDefinition, LaunchBlocker, StepDefinition, TrackDefinition, WindowRule } from "../../shared/api.ts";
+
+/** Days as the reference shows them, Monday first; the definition numbers Sunday 0. */
+export const WEEK: readonly { day: number; letter: string; name: string }[] = [
+  { day: 1, letter: "M", name: "Monday" },
+  { day: 2, letter: "T", name: "Tuesday" },
+  { day: 3, letter: "W", name: "Wednesday" },
+  { day: 4, letter: "T", name: "Thursday" },
+  { day: 5, letter: "F", name: "Friday" },
+  { day: 6, letter: "S", name: "Saturday" },
+  { day: 0, letter: "S", name: "Sunday" },
+];
+
+const newId = (prefix: string) => `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
+
+export function newStep(first: boolean): StepDefinition {
+  return { id: newId("step"), waitDays: first ? 0 : 3, subject: "", body: "", threading: first ? "new_subject" : "continue_thread", removed: false };
+}
+
+/** A new email track: weekdays from 09:00 to 17:00 in the lead's time, and an empty first email. */
+export function newEmailTrack(): TrackDefinition {
+  return {
+    id: newId("track"),
+    channel: "email",
+    branch: "main",
+    window: [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 })),
+    steps: [newStep(true)],
+    start: { kind: "entry" },
+    removed: false,
+  };
+}
+
+export const liveSteps = (track: TrackDefinition): StepDefinition[] => track.steps.filter((s) => !s.removed);
+
+/** The campaign's one email track for now, if it has one. */
+export const emailTrackOf = (def: CampaignDefinition): TrackDefinition | undefined =>
+  def.tracks.find((t) => !t.removed && t.channel === "email" && t.branch === "main");
+
+export function trackSummary(track: TrackDefinition): string {
+  const steps = liveSteps(track);
+  const days = steps.reduce((sum, s) => sum + s.waitDays, 0);
+  const n = steps.length;
+  return `${n} ${n === 1 ? "email" : "emails"}${n > 1 ? ` over ${days} ${days === 1 ? "day" : "days"}` : ""}`;
+}
+
+/** "first_name" as the user reads it: "first name". */
+export const fieldLabel = (field: string): string => field.replace(/_/g, " ");
+
+/** The fields a step's copy uses, in order of first use. */
+export const fieldsOf = (step: StepDefinition): string[] => [...new Set([...mergeUses(step.subject), ...mergeUses(step.body)].map((u) => u.field))];
+
+/** The fallback this step gives `field` (the first one written), or "" when none. */
+export function fallbackIn(step: StepDefinition, field: string): string {
+  return [...mergeUses(step.subject), ...mergeUses(step.body)].find((u) => u.field === field && u.fallback !== null)?.fallback ?? "";
+}
+
+/** Rewrites every use of `field` in `text` with the fallback, or without one when it is blank. */
+export function withFallback(text: string, field: string, fallback: string): string {
+  const clean = fallback.replace(/[{}|]/g, "");
+  return text.replace(/\{\{\s*([^}|]*?)\s*(?:\|([^}]*))?\}\}/g, (all, name: string) => (name.trim() === field ? (clean ? `{{${field}|${clean}}}` : `{{${field}}}`) : all));
+}
+
+/** The launch blockers that name this step: empty copy, or a field with no fallback it uses. */
+export function stepBlockers(step: StepDefinition, blockers: readonly LaunchBlocker[]): LaunchBlocker[] {
+  const uses = [...mergeUses(step.subject), ...mergeUses(step.body)];
+  return blockers.filter((b) =>
+    b.kind === "empty_copy" ? b.stepId === step.id : b.kind === "missing_merge_field" ? uses.some((u) => u.field === b.field && u.fallback === null) : false,
+  );
+}
+
+/** One hours range for every chosen day, as the reference edits it. */
+export function windowHours(window: readonly WindowRule[]): { start: number; end: number } {
+  const first = window[0];
+  return first ? { start: first.start, end: first.end } : { start: 9, end: 17 };
+}
+
+export function setWindow(days: readonly number[], hours: { start: number; end: number }): WindowRule[] {
+  return WEEK.filter((d) => days.includes(d.day)).map((d) => ({ day: d.day, start: hours.start, end: hours.end }));
+}
+
+export const hourLabel = (h: number): string => `${String(h).padStart(2, "0")}:00`;

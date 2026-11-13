@@ -1,5 +1,6 @@
 import { Redirect } from "wouter";
 import type { CompanyRecord } from "../../shared/api.ts";
+import { Activity } from "../activity.tsx";
 import { useApi } from "../api.ts";
 import { BackToLeads, CampaignRows, ContactRow, ErrorState, LocalTime, PeopleRows, RecordSkeleton, Section } from "../components.tsx";
 import { NoSuchRecord } from "./PersonPage.tsx";
@@ -59,6 +60,8 @@ function Company({ company }: { company: CompanyRecord }) {
           <PeopleRows people={company.people} />
         </Section>
       )}
+
+      {company.enrollments.length > 0 && <Activity path={`/api/companies/${encodeURIComponent(company.id)}/activity`} />}
     </article>
   );
 }

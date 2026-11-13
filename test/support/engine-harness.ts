@@ -92,6 +92,11 @@ export class EngineHarness {
     });
   }
 
+  /** Answers one HTTP request with the app, as a server would: the browser tests serve it this way. */
+  fetch(request: Request): Promise<Response> {
+    return Promise.resolve(this.app.fetch(request));
+  }
+
   /** The generated test's fake provider. */
   get fake(): FakeEmailPort {
     if (!(this.provider instanceof FakeEmailPort)) throw new Error("this harness runs a different provider");

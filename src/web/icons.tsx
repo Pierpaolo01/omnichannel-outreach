@@ -55,6 +55,40 @@ const paths = {
     </>
   ),
   plus: <path d="M10 4.5v11M4.5 10h11" />,
+  email: (
+    <>
+      <rect x="3" y="4.8" width="14" height="10.4" rx="1.6" />
+      <path d="M3.6 5.6L10 10.6l6.4-5" />
+    </>
+  ),
+  sms: <path d="M4.5 4.5h11a1.5 1.5 0 0 1 1.5 1.5v6.5a1.5 1.5 0 0 1-1.5 1.5H9l-3.5 2.6V14h-1A1.5 1.5 0 0 1 3 12.5V6a1.5 1.5 0 0 1 1.5-1.5z" />,
+  clock: (
+    <>
+      <circle cx="10" cy="10" r="7" />
+      <path d="M10 6.2V10l2.6 1.6" />
+    </>
+  ),
+  warn: (
+    <>
+      <path d="M10 3.4l7.2 12.6H2.8z" />
+      <path d="M10 8.2v3.6M10 14v.1" />
+    </>
+  ),
+  close: <path d="M5.5 5.5l9 9M14.5 5.5l-9 9" />,
+  chevron: <path d="M5.5 8l4.5 4.5L14.5 8" />,
+  forward: <path d="M8 4.5l5.5 5.5L8 15.5" />,
+  reply: (
+    <>
+      <path d="M8 6L3.8 10 8 14" />
+      <path d="M4.2 10h7.3a4.5 4.5 0 0 1 4.5 4.5v.5" />
+    </>
+  ),
+  system: (
+    <>
+      <circle cx="10" cy="10" r="7" />
+      <path d="M10 9.2v4.2M10 6.6v.1" />
+    </>
+  ),
 } satisfies Record<string, ReactNode>;
 
 export type IconName = keyof typeof paths;
