@@ -122,9 +122,11 @@ export function whatHappened(entry: SummaryEntry): ReactNode {
     if (entry.reason === "shares_contact") {
       const { detail, lead, companyName, enrolled } = entry.shared;
       const what = `${sentenceCase(detailWord(detail, entry.lead.kind))} ${detail.value}`;
+      // The refusal already explains this detail; other details the row lost are still named.
+      const others = heldSentences({ ...entry, heldElsewhere: entry.heldElsewhere.filter((h) => h.detail.value !== detail.value) });
       return enrolled
-        ? `${what} is already ${lead}’s at ${companyName}, who is enrolled in this campaign, so this lead wasn’t enrolled.${heldSentences(entry)}`
-        : `${what} is also ${lead}’s at ${companyName}, and nothing shows whose it is, so neither lead was enrolled with it in this campaign.${heldSentences(entry)}`;
+        ? `${what} is already ${lead}’s at ${companyName}, who is enrolled in this campaign, so this lead wasn’t enrolled.${others}`
+        : `${what} is also ${lead}’s at ${companyName}, and nothing shows whose it is, so neither lead was enrolled with it in this campaign.${others}`;
     }
     return entry.lead.kind === "company"
       ? "No usable main line or shared inbox."
