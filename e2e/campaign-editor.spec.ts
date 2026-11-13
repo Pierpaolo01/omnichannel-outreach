@@ -604,4 +604,19 @@ test.describe("review of pull request 41", () => {
     await expect.poll(async () => (await stored(id)).definition.tracks[0]!.steps[0]!.subject).toBe("Second leave, the newest");
     for (const route of held) if (route !== newest()) await route.abort().catch(() => undefined);
   });
+
+  test("a campaign with an SMS track (defined through the API) names the SMS track's blockers as its own, not the email track's (merge of ticket 13a)", async ({ page }) => {
+    const id = await campaign(track([COPY.first, COPY.second]));
+    const email = (await stored(id)).definition;
+    const sms = { id: "sms", channel: "sms" as const, branch: "main" as const, window: email.tracks[0]!.window, steps: [{ id: "m1", waitDays: 0, subject: "", body: "", threading: "new_subject" as const, removed: false }], start: { kind: "after" as const, trackId: "email", delayDays: 1 }, removed: false };
+    await r.harness.defineSequence(id, { ...email, tracks: [...email.tracks, sms] });
+    await page.goto(`${r.url}/campaigns/${id}/before-launch`);
+    await expect(page.getByText("The SMS track has no connected sender number")).toBeVisible();
+    await expect(page.getByText("Text 1 has no message")).toBeVisible();
+    // The email track has its inbox: nothing is said against it.
+    await expect(page.getByText("The email track has no connected sender inbox")).toHaveCount(0);
+    await expect(page.getByText("SMS sends are not in this estimate yet: it counts email only.", { exact: false })).toBeVisible();
+    await page.getByRole("link", { name: "Sequence" }).click();
+    await expect(page.getByRole("button", { name: /^Email track: / })).not.toContainText("to fix");
+  });
 });

@@ -157,7 +157,7 @@ function Blockers({ campaignId, editor }: { campaignId: string; editor: Sequence
       ) : (
         <ul className="flex flex-col gap-2">
           {blockers.map((b) => {
-            const { title, detail, action, stepId } = describeBlocker(b, firstUsing);
+            const { title, detail, action, stepId } = describeBlocker(b, firstUsing, track?.id ?? null);
             return (
               <li key={JSON.stringify(b)} className="flex flex-wrap items-start gap-x-2.5 gap-y-2 rounded-field bg-crit-soft px-3.5 py-3 text-[14px]">
                 <Icon name="bad" className="mt-0.5 size-[18px] text-crit" />
@@ -165,9 +165,11 @@ function Blockers({ campaignId, editor }: { campaignId: string; editor: Sequence
                   <b className="font-semibold">{title}</b>
                   <span className="block text-ink-2">{detail}</span>
                 </span>
-                <button type="button" className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={() => open(stepId)}>
-                  {action}
-                </button>
+                {action !== null && (
+                  <button type="button" className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={() => open(stepId)}>
+                    {action}
+                  </button>
+                )}
               </li>
             );
           })}
@@ -177,7 +179,15 @@ function Blockers({ campaignId, editor }: { campaignId: string; editor: Sequence
   );
 }
 
-function describeBlocker(b: LaunchBlocker, firstUsing: (field: string) => string | undefined): { title: string; detail: ReactNode; action: string; stepId?: string } {
+/**
+ * What a blocker says, and where it is fixed. A blocker of an SMS track (a campaign can have one
+ * since ticket 13a, defined outside this editor) is named as the SMS track's, with nothing to open:
+ * editing SMS tracks arrives with a later release.
+ */
+function describeBlocker(b: LaunchBlocker, firstUsing: (field: string) => string | undefined, emailTrackId: string | null): { title: string; detail: ReactNode; action: string | null; stepId?: string } {
+  const elsewhere = "Editing SMS tracks arrives with a later release.";
+  if (b.kind === "empty_copy" && b.trackId !== emailTrackId) return { title: `Text ${b.stepNumber} has no message`, detail: elsewhere, action: null };
+  if (b.kind === "no_sender" && b.channel !== "email") return { title: "The SMS track has no connected sender number", detail: `It can’t send until a number is connected. ${elsewhere}`, action: null };
   if (b.kind === "empty_copy") {
     return {
       title: b.part === "subject" ? `Email ${b.stepNumber} has no subject` : `Email ${b.stepNumber} has no copy`,

@@ -149,7 +149,7 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
 
 function Canvas({ track, selected, editor, node, onSelect }: { track: TrackDefinition; selected: boolean; editor: SequenceEditor; node: RefObject<HTMLButtonElement | null>; onSelect: () => void }) {
   const steps = liveSteps(track);
-  const issues = new Set(steps.flatMap((s) => stepBlockers(s, editor.view.launch.blockers)).map((b) => JSON.stringify(b))).size + editor.view.launch.blockers.filter((b) => b.kind === "no_sender").length;
+  const issues = new Set(steps.flatMap((s) => stepBlockers(s, editor.view.launch.blockers)).map((b) => JSON.stringify(b))).size + editor.view.launch.blockers.filter((b) => b.kind === "no_sender" && b.trackId === track.id).length;
   return (
     <div data-testid="canvas" className={`flex min-w-0 flex-col rounded-box border border-line bg-raised bg-[radial-gradient(var(--color-line-strong)_1px,transparent_1px)] bg-[length:18px_18px] h-[max(470px,calc(100dvh-306px))]`}>
       <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
