@@ -445,3 +445,31 @@ describe("review bot findings on 1c2591f", () => {
     expect(h.fake.deliveryLog.some((d) => d.subjectId === omar)).toBe(true);
   });
 });
+
+describe("a discarded stale evaluation is redone on fresh state (ADR 0003 2.5; found by the extended generator, seed 20261199)", () => {
+  test("a lead whose only address is marked bad while it is evaluated ends in the same tick", async () => {
+    const h = new EngineHarness({ start: MONDAY_9 - H, accounts: [{ id: "inbox-a", capacity: 30, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }], engine: quickWaits });
+    const businesses = [business({ business_id: "b1", business_name: "Harbour Lane Physio" })];
+    const { campaign } = await h.createCampaign("Race", { businesses, people: [PEOPLE[0]!] });
+    await h.tick();
+    await h.defineSequence(campaign.id, twoSteps());
+    h.clock = MONDAY_9;
+    await h.launch(campaign.id);
+    let marked = false;
+    h.hooks = {
+      beforeApplyEvaluation: async (subjectId) => {
+        const s = await h.store.engine.subject(subjectId, h.clock);
+        const detail = s?.lead.details.find((d) => d.value === "sam@harbour.example");
+        if (marked || !detail) return;
+        marked = true;
+        await h.store.markContactDetailBad(detail.id);
+      },
+    };
+    h.clock = MONDAY_9 + H;
+    await h.reimport(campaign.id, { businesses, people: [PEOPLE[0]!, PEOPLE[1]!] });
+    await h.tick();
+    expect(marked).toBe(true);
+    const rows = (await h.request<{ rows: { name: string; enrollments: EnrollmentView[] }[] }>("GET", "/api/leads")).body.rows;
+    expect((await h.progress(rows.find((r) => r.name === "Sam Lee")!.enrollments[0]!.id)).status).toBe("finished_no_usable_channel");
+  });
+});

@@ -1,0 +1,32 @@
+name: sequence-search
+
+# The sequence engine's full generated-sequence and mutation search (ADR 0003 9.2): all 100 seeds,
+# each also in its unlimited-capacity variant, and a seed search per mutation that reports the seed
+# killing each. It runs before a merge of a change to the engine, by hand, not on every push;
+# `pnpm check` runs the fixed seeds and known killing seeds instead.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:sequence-search --shard=${{ matrix.shard }}/8
+        env:
+          CI: "true"

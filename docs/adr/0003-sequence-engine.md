@@ -315,7 +315,7 @@ Each live attempt in scope is handled by its state:
 
 **Changing pending work withdraws the claim** (ruling 1). A `claimed` attempt becomes `withdrawn` in the same transaction as any change to its track's pending step or that step's content. These changes are a skip, an insert, a removal, a reorder, and a copy or wait edit on the step. A subject's sender is fixed at its first handover (1.3) and never changes afterwards, so there is no sender-change case. They apply to running and held tracks alike. A later claim creates a new attempt, which renders the current copy at its handover. An attempt past `claimed` is not withdrawn by an edit: it may already be with the provider, so it resolves under 5.3 with the copy it was handed.
 
-**Stale results** (ruling 4). `evaluate` and every user action compute a change from a snapshot. The store applies it only if the subject's `version` and the campaign's `version` (and `definition_version`) are unchanged. Otherwise nothing is written, and the subject is re-evaluated on fresh state. This makes these impossible:
+**Stale results** (ruling 4). `evaluate` and every user action compute a change from a snapshot. A change discarded as stale is recomputed on fresh state in the same tick. The store applies it only if the subject's `version` and the campaign's `version` (and `definition_version`) are unchanged, **and the lead's facts the change read are unchanged**: contact details and their bad marks, zone and merge data, which an import or a mark elsewhere changes without bumping either version (PR 37, review bot `rules.ts:62`). Otherwise nothing is written, and the subject is re-evaluated on fresh state. This makes these impossible:
 
 - a skip-limit expiry computed before a callback was logged closing the callback task;
 - a "sequence finished" computed before a reply overwriting `replied`.
@@ -558,7 +558,7 @@ Retryability and "not sent is final" belong to a **transport**, not the port: `t
 | Handover transaction commits (5.5) | → `handed`, `calls = 1`; copy, `handed_at`, `handed_wall`, `last_call_wall` and the pacing slot written and committed **before** the call | ignore | ignore | ignore |
 | Handover predicates fail (5.5) | → `withdrawn`, `ended_by = guard`. The provider was never called | not possible: the guard runs only on `claimed` | — | — |
 | Claim older than `SETTLING` (5.5 step 5) | → `withdrawn`, `ended_by = claim_expired` | — | — | — |
-| Call returns `accepted` | impossible | → `accepted`, with its reference | ignore (duplicate) | ignore |
+| Call returns `accepted` | impossible | → `accepted`, with its reference; any retry intent ends, and settlement stays scheduled (PR 37, review bot `attempt.ts:81`) | ignore (duplicate) | ignore |
 | Call returns `rejected` (final) | impossible | → `rejected` | → `rejected` only on a provider signal that it will not send (Instantly skipped the lead, P4) | ignore |
 | Call returns `unknown`, times out after `CALL_TIMEOUT`, or the worker crashed before recording the answer | impossible | try the **retry authorization** (5.6); if it is refused, stay `handed` and settle | stays `accepted`; settle | ignore |
 | Sent observed (with send time) | impossible: no reference to match | → `sent` | → `sent` | `sent`: a missing provider reference is attached, otherwise ignore. `withdrawn` with `ended_by = lookup_not_sent`: → `sent`, the one terminal state an observation may leave, because the provider's earlier "not sent" was not a confirmed withdrawal. Other terminal states: a missing reference is attached and the send is recorded as a provider anomaly in Needs attention, counted on its send day for capacity, never as a second send of the step |
@@ -883,7 +883,7 @@ Each fake keeps a **handover log** (every call it received, with its time) and a
 
 A failure the generator finds is shrunk into a named example test.
 
-**Which run is which** (PR 37 ruling 11). `pnpm check`, which CI runs too, runs a fixed, rule-covering set of seeds (`FIXED_SEEDS` in `test/support/sequence-chunks.ts`, each also in its unlimited variant) and, for each mutation, its known killing seed (`test/support/engine-mutations.ts`). `pnpm check:full`, run before a merge, runs all 100 seeds, ten to a chunk, and searches the seeds for every mutation, reporting the seed that kills each so the known seeds can be refreshed. Each mutation names the invariant expected to catch it, and its check passes only if that invariant fails (ruling 7).
+**Which run is which** (PR 37 ruling 11). `pnpm check`, which CI runs on every push, runs a fixed, rule-covering set of seeds (`FIXED_SEEDS` in `test/support/sequence-chunks.ts`, each also in its unlimited variant) and, for each mutation, its known killing seed (`test/support/engine-mutations.ts`). The full search, `pnpm test:sequence-search`, runs before a merge in CI only, in eight shards of the manually triggered `sequence-search` workflow: all 100 seeds, ten to a chunk, and a seed search per mutation that reports the seed killing each, so the known seeds can be refreshed. A mutation with no known killing seed is skipped by `pnpm check` and listed in the pull request until the search finds one. Each mutation names the invariant expected to catch it, and its check passes only if that invariant fails (ruling 7).
 
 **The checker is independent** (PR 37 ruling 7): its own predicates for priority eligibility, and capacity, in-flight and pacing counted from the fake provider's logs, not from the application's counters or the engine's functions. "Mark not sent" stays an engine rule with no HTTP control in 12b (#20 adds it); its exemption covers that step's at-most-once check only, not the lead's later timing.
 
@@ -1040,7 +1040,10 @@ Two reviewers and an independent verification of `1c2591f`; the coordinator's ru
 | 8 Subjects | Progress tables reference `subjects` | 1.2, migration 6 | schema test |
 | 9 Points settled | Invariant 18 wait on a listed inbox; merge-ownership skip; transport stored with the payload; invariant 12 excludes 14 and 16; "mark not sent" exemption narrowed | 2.4, 5.3, invariants 12 and 18, 9.2 | drain check; record's step delivery |
 | 10 Default gap; unhealthy inboxes | Built; listed in Needs attention | 4.1, 5.4 | default gaps in the generator |
-| 11 Check time | `pnpm check` runs fixed seeds and known killing seeds; `pnpm check:full` the full search | 9.2; `docs/agents/delivery-workflow.md` | — |
+| 11 Check time | `pnpm check` runs fixed seeds and known killing seeds; the full search runs before a merge in the `sequence-search` CI workflow | 9.2; `docs/agents/delivery-workflow.md` | — |
+| Review bot `engine.ts:223` | Ruling 1's fix | 5.3 | as ruling 1 |
+| Review bot `attempt.ts:81` | A late acceptance clears retry intent and keeps settlement scheduled | 5.3 | a lost response's acceptance replayed late; "acceptance keeps retry intent" (26) |
+| Review bot `rules.ts:62` | The stale guard compares the lead's facts too | 2.5 | changes to a lead's facts alone between evaluate and apply, a phone-only person gaining an address; "stale guard ignores lead facts" (1) |
 
 ## Consequences
 

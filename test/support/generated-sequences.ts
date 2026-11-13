@@ -615,12 +615,6 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     await checkAll(true);
   }
 
-  if ((globalThis as { DEBUG?: unknown }).DEBUG) {
-    console.info("CALLS", fake.handoverLog.map((c) => `${new Date(c.at).toISOString()} ${c.subjectId}/${c.stepId} ${c.key} ${c.mode}`).join("\n"));
-    console.info("DELIVERIES", fake.deliveryLog.map((d) => `${new Date(d.at).toISOString()} ${d.subjectId}/${d.stepId} ${d.key} vis ${new Date(Math.min(d.visibleAt, 8.6e15)).toISOString()}`).join("\n"));
-    console.info("LOOKUPS", fake.lookupLog.map((l) => `${new Date(l.at).toISOString()} ${l.key} ${l.answer}`).join("\n"));
-    console.info("SUBJECTS", [...subjects.values()].map((x) => `${x.id} c${x.campaign} ${x.person?.emails.map(([, a]) => a).join(",") ?? x.company.inbox}`).join(" | "), JSON.stringify(campaigns.map((c) => c.definition.tracks[0]!.window[0])), new Date(start).toISOString());
-  }
   const finalAttempts = (await Promise.all([...subjects.keys()].map((id) => h.store.engine.subject(id, h.clock)))).flatMap((x) => x?.attempts ?? []);
   for (const c of fake.handoverLog) features.add(`mode:${c.mode}`);
   for (const r of fake.refusals) features.add(`refused:${r.reason}`);
@@ -672,7 +666,6 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       if (column !== progress.status) problem(`1: ${id} stores ${column} but derives ${progress.status}`);
       const allowed = expectedStatuses(rec, s, now, runStart);
       if (!allowed.has(progress.status)) {
-        if ((globalThis as { DEBUG?: unknown }).DEBUG) console.info("STATUS", id, JSON.stringify({ runStart, enrolledAt: rec.enrolledAt, launchedAt: campaign.launchedAt, now, person: rec.person?.emails, inbox: rec.company.inbox, calls: fake.handoverLog.filter((c) => c.subjectId === id).map((c) => [c.at, c.destination, c.attemptId]), refusals: fake.refusals.filter((r) => fake.handoverLog.some((c) => c.subjectId === id && c.attemptId === r.attemptId)), replies: fake.replyLog, deliveries: fake.deliveryLog.filter((d) => d.subjectId === id), elsewhere: [...badElsewhere], tracks: s.tracks, ended: [s.subject.ended, s.subject.endedWall], bouncing: [...fake.bouncing] }));
         problem(`1/20: ${id} is ${progress.status}; the record allows ${[...allowed].join(" or ")} at ${new Date(now).toISOString()}`);
       }
 
@@ -940,7 +933,6 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     for (const [key, c] of firstCallOf) {
       const k = accounts.find((a) => a.id === c.sender)?.k ?? 1;
       const holding = [...firstCallOf.values()].filter((o) => o.key !== key && o.sender === c.sender && o.at <= c.at && settledAt(o.key) > c.at);
-      if (holding.length >= k && (globalThis as { DEBUG?: unknown }).DEBUG) console.info("INFLIGHT", JSON.stringify({ c: [c.key, c.at, c.mode], holding: holding.map((o) => [o.key, o.at, o.mode, o.subjectId, settledAt(o.key)]), lookups: fake.lookupLog.filter((l) => holding.some((o) => o.key === l.key)), deliveries: fake.deliveryLog.filter((d) => holding.some((o) => o.key === d.key)).map((d) => [d.key, d.at, d.visibleAt]), refusals: fake.refusals, withdraws: fake.withdrawLog, crashes: h.crashes }));
       if (holding.length >= k) problem(`11: ${c.sender} took new work for ${c.subjectId}/${c.stepId} while holding ${holding.length} unsettled against k = ${k}`);
     }
   }

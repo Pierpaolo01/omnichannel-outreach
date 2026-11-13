@@ -297,7 +297,7 @@ export function applyToAttempt(
     }
   }
   if (sentFact) {
-    const ref = event.kind === "sent_observed" ? event.providerRef : event.kind === "lookup_answer" ? (event.answer.providerRef ?? null) : null;
+    const ref = event.kind === "sent_observed" ? event.providerRef : (event.answer.providerRef ?? null);
     const sentAlready = state.attempts.find((a) => a.stepId === target.stepId && a.state === "sent");
     if (sentAlready && sentAlready.idempotencyKey === target.idempotencyKey) {
       // A later fact about work already settled as sent: attach a missing reference (ruling 1); an

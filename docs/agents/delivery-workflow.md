@@ -37,7 +37,7 @@ The council reviews the ADR before implementation starts. `docs/adr/0001-applica
 - Behavior was built test-first with the `tdd` skill at the seams the ADRs name. Each bug found later gets a regression test that failed before the fix.
 - A deep rule has a generated-sequence test from its first commit: generated inputs and event orders, an independent record of what should happen, the invariants asserted after every step, and a mutation that proves the test fails when the rule is broken.
 - `pnpm check` passes locally. It runs typecheck, lint and all tests, and is the same command CI runs. For a deep rule's generated-sequence test it runs a fixed, rule-covering seed set and each mutation's known killing seed.
-- Before a merge of a deep rule, `pnpm check:full` passes once too: the full seed and mutation search (for the sequence engine, 100 seeds and a search per mutation; ADR 0003 9.2). Report its result and timing in the pull request.
+- Before a merge of a deep rule, its full search passes once too, in CI: for the sequence engine, trigger the `sequence-search` workflow by hand (all 100 seeds and a seed search per mutation, in eight shards; ADR 0003 9.2) and link the run in the pull request. Never run the full search locally: it exhausts a workstation.
 - The integration branch tip is merged into the ticket branch.
 - The pull request description links the ticket, lists what was verified and how, and lists anything unverified.
 - Evidence is published as a pull request comment: for UI, screenshots of every changed screen in light and dark theme plus each loading, empty, error and success state the slice has, and a short recording of the ticket's demonstration; for non-UI, the command output. Evidence uses fictitious data only.

@@ -16,7 +16,7 @@
     "test": "vitest run",
     "test:e2e": "playwright test",
     "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm test:e2e",
-    "check:full": "pnpm typecheck && pnpm lint && SEQUENCE_SEARCH=full vitest run && pnpm test:e2e"
+    "test:sequence-search": "SEQUENCE_SEARCH=full vitest run src/server/sequence-runs"
   },
   "dependencies": {
     "@fontsource-variable/schibsted-grotesk": "5.3.0",

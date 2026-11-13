@@ -7,19 +7,22 @@ const MAX_SEEDS = 60;
 
 /**
  * For each named broken engine, the generated runs must fail the invariant it names (ADR 0003
- * 9.2 step 5, ruling 7). `pnpm check` runs each mutation's known killing seed; `pnpm check:full`
- * searches the seeds in order, each as generated and in its unlimited variant, and reports the
+ * 9.2 step 5, ruling 7). `pnpm check` runs each mutation's known killing seed; the search
+ * (`pnpm test:sequence-search`, run in shards by the sequence-search workflow) searches the seeds in order, each as generated and in its unlimited variant, and reports the
  * first seed that kills it, which is how the known seeds are refreshed.
  */
 export function oracle(names: readonly string[]): void {
   for (const name of names) {
     const mutation = MUTATIONS[name];
-    test(`the generated runs fail invariant ${mutation?.invariant ?? "?"} for an engine with "${name}"`, async () => {
+    const knownSeed = mutation?.seed ?? null;
+    // Without a known killing seed, only the search runs it (reported, not hidden).
+    const run = FULL_SEARCH || knownSeed !== null ? test : test.skip;
+    run(`the generated runs fail invariant ${mutation?.invariant ?? "?"} for an engine with "${name}"`, async () => {
       if (!mutation) throw new Error(`no mutation named ${name}`);
       const breaks = (problems: readonly string[]) => problems.some((p) => invariantsOf(p).includes(mutation.invariant));
-      if (!FULL_SEARCH) {
+      if (!FULL_SEARCH && mutation.seed !== null) {
         const { problems } = await runSequence(SEED + mutation.seed, { rules: mutation.rules, unlimited: mutation.unlimited ?? false, drain: true });
-        expect(problems.filter((p) => invariantsOf(p).includes(mutation.invariant)), `seed ${SEED + mutation.seed} no longer breaks invariant ${mutation.invariant}; run pnpm check:full and update its seed. Problems: ${problems.join("; ")}`).not.toEqual([]);
+        expect(problems.filter((p) => invariantsOf(p).includes(mutation.invariant)), `seed ${SEED + mutation.seed} no longer breaks invariant ${mutation.invariant}; run the sequence-search workflow and update its seed. Problems: ${problems.join("; ")}`).not.toEqual([]);
         return;
       }
       let caught: string | null = null;

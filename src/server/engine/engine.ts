@@ -411,8 +411,10 @@ export class Engine {
         continue;
       }
       await this.hooks.beforeApplyEvaluation?.(id);
-      const written = await this.store.update(id, now, (current) => (this.rules.versionsMatch(snapshot, current) ? { ...next, accounts: current.accounts } : null));
-      changed = changed || written !== null;
+      await this.store.update(id, now, (current) => (this.rules.versionsMatch(snapshot, current) ? { ...next, accounts: current.accounts } : null));
+      // Written, or discarded as stale: either way another pass follows, so a discarded change is
+      // re-evaluated on fresh state in this tick (2.5).
+      changed = true;
     }
     return changed;
   }
