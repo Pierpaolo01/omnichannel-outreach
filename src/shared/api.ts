@@ -153,3 +153,110 @@ export interface CompanyRecord {
 export interface ApiError {
   readonly error: { readonly code: string; readonly message: string; readonly problems?: readonly { file: string; message: string }[] };
 }
+
+// ---------------------------------------------------------------------------------------------
+// The sequence engine (ADR 0003), ticket 12b: one email track, launch, and each lead's progress.
+
+export type {
+  CampaignDefinition,
+  StepDefinition,
+  TrackDefinition,
+  StartRule,
+  Threading,
+} from "../domain/sequence/definition.ts";
+export type { WindowRule } from "../domain/sequence/clock.ts";
+export type { LaunchBlocker } from "../domain/sequence/blockers.ts";
+
+/** A sender account the engine may send from, as the provider reports it. */
+export interface SenderAccountViewApi {
+  readonly id: string;
+  readonly label: string;
+  readonly channel: "email";
+  readonly healthy: boolean;
+  readonly capacity: number;
+  /** The pacing gap between two sends from this account, in seconds. */
+  readonly gapSeconds: number;
+  /** Sends counted today plus open reservations. */
+  readonly usedToday: number;
+  /** An account-level wait after a quota (402) or rate-limit (429) refusal. */
+  readonly waiting: "quota" | "rate_limited" | null;
+}
+
+/** GET /api/campaigns/:id/sequence */
+export interface SequenceView {
+  readonly campaignId: string;
+  readonly definition: import("../domain/sequence/definition.ts").CampaignDefinition;
+  readonly definitionVersion: number;
+  readonly editedAt: string | null;
+  readonly launchedAt: string | null;
+  /** Exactly three blockers; "nothing to launch" is separate (ADR 0003 7.2). */
+  readonly launch: {
+    readonly blockers: readonly import("../domain/sequence/blockers.ts").LaunchBlocker[];
+    readonly nothingToLaunch: boolean;
+    readonly canLaunch: boolean;
+  };
+  readonly accounts: readonly SenderAccountViewApi[];
+}
+
+export type FinishReasonApi = import("../domain/sequence/state.ts").FinishReason;
+export type HoldReasonApi = "unresolved" | "render_failed" | "provider_skipped";
+
+export interface SendView {
+  readonly attemptId: string;
+  /** claimed, handed, accepted, sent, rejected or withdrawn (ADR 0003 5.3). */
+  readonly state: import("../domain/sequence/state.ts").AttemptState;
+  readonly sender: string;
+  readonly destination: string;
+  /** The copy as handed over; null before the handover. */
+  readonly copy: { readonly subject: string; readonly body: string } | null;
+  readonly handedAt: string | null;
+  /** The provider's send time. */
+  readonly sentAt: string | null;
+  readonly endedBy: string | null;
+  readonly rejectReason: string | null;
+  /** The app cannot tell whether it was sent; resolution controls arrive with ticket 20. */
+  readonly unresolved: boolean;
+}
+
+export interface StepProgressView {
+  readonly stepId: string;
+  readonly number: number;
+  readonly removed: boolean;
+  readonly result: "sent" | "skipped" | "failed" | null;
+  readonly reason: string | null;
+  readonly at: string | null;
+  readonly sends: readonly SendView[];
+}
+
+export interface TrackProgressView {
+  readonly trackId: string;
+  readonly channel: string;
+  readonly started: boolean;
+  readonly finishReason: FinishReasonApi | null;
+  readonly finishedAt: string | null;
+  readonly hold: HoldReasonApi | null;
+  /** The pending step and the wall instant it is due, if the lead keeps running. */
+  readonly nextStep: { readonly stepId: string; readonly number: number; readonly dueAt: string } | null;
+  readonly steps: readonly StepProgressView[];
+}
+
+/** GET /api/enrollments/:id */
+export interface EnrollmentProgress {
+  readonly id: string;
+  readonly campaignId: string;
+  readonly status: OutreachStatus;
+  readonly endedAt: string | null;
+  /** "replied, automation stopped" with channel and date only. */
+  readonly reply: { readonly channel: "email" | "sms"; readonly at: string } | null;
+  readonly sender: string | null;
+  readonly zone: string;
+  readonly tracks: readonly TrackProgressView[];
+}
+
+/** GET /api/needs-attention (the 12b part: stalled inboxes, held tracks, account waits, provider anomalies). */
+export interface NeedsAttention {
+  readonly stalledInboxes: readonly { readonly accountId: string; readonly holding: readonly string[] }[];
+  readonly heldTracks: readonly { readonly enrollmentId: string; readonly trackId: string; readonly reason: HoldReasonApi }[];
+  readonly accountWaits: readonly { readonly accountId: string; readonly reason: "quota" | "rate_limited"; readonly until: string | null }[];
+  readonly anomalies: readonly { readonly what: string; readonly at: string }[];
+}

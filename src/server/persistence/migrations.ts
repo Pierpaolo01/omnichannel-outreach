@@ -173,6 +173,147 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE VIEW live_contact_details AS SELECT *, rowid AS row_order FROM contact_details WHERE merged_into IS NULL;
     `,
   },
+  {
+    version: 6,
+    name: "the sequence engine: definitions, lead clocks, track progress, step results, attempts and sender accounts (ADR 0003)",
+    // Instants are integer milliseconds. An existing enrollment starts frozen at its enrollment
+    // instant, so its lead time is 0 until its campaign launches (ADR 0003 3.2).
+    sql: `
+      ALTER TABLE campaigns ADD COLUMN launched_at INTEGER;
+      ALTER TABLE campaigns ADD COLUMN paused_since INTEGER;
+      ALTER TABLE campaigns ADD COLUMN version INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE campaigns ADD COLUMN definition TEXT;
+      ALTER TABLE campaigns ADD COLUMN definition_version INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE campaigns ADD COLUMN definition_edited_at TEXT;
+
+      ALTER TABLE enrollments ADD COLUMN version INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE enrollments ADD COLUMN ended TEXT;
+      ALTER TABLE enrollments ADD COLUMN ended_at INTEGER;
+      ALTER TABLE enrollments ADD COLUMN ended_wall INTEGER;
+      ALTER TABLE enrollments ADD COLUMN lead_paused INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE enrollments ADD COLUMN branch TEXT NOT NULL DEFAULT 'main' CHECK (branch IN ('main', 'win_back'));
+      ALTER TABLE enrollments ADD COLUMN branch_entered_at INTEGER;
+      ALTER TABLE enrollments ADD COLUMN touched INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE enrollments ADD COLUMN no_more_calls INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE enrollments ADD COLUMN frozen_since INTEGER;
+      ALTER TABLE enrollments ADD COLUMN frozen_total INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE enrollments ADD COLUMN email_sender TEXT;
+      UPDATE enrollments SET
+        frozen_since = CAST(ROUND((julianday(enrolled_at) - 2440587.5) * 86400000) AS INTEGER),
+        frozen_total = CAST(ROUND((julianday(enrolled_at) - 2440587.5) * 86400000) AS INTEGER);
+      CREATE INDEX enrollments_by_campaign_status ON enrollments(campaign_id, status);
+
+      CREATE TABLE freezes (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        subject_id TEXT NOT NULL REFERENCES enrollments(id),
+        from_wall INTEGER NOT NULL,
+        to_wall INTEGER
+      );
+      CREATE INDEX freezes_by_subject ON freezes(subject_id);
+      CREATE UNIQUE INDEX one_open_freeze ON freezes(subject_id) WHERE to_wall IS NULL;
+      INSERT INTO freezes (subject_id, from_wall, to_wall) SELECT id, frozen_since, NULL FROM enrollments;
+
+      CREATE TABLE track_progress (
+        subject_id TEXT NOT NULL REFERENCES enrollments(id),
+        track_id TEXT NOT NULL,
+        start_at INTEGER, start_basis_at INTEGER, start_basis_wall INTEGER, start_zone TEXT,
+        started_at INTEGER,
+        destination_detail_id TEXT REFERENCES contact_details(id),
+        next_step_id TEXT, basis_at INTEGER, basis_wall INTEGER, due_at INTEGER, due_wall INTEGER, due_zone TEXT,
+        finished_at INTEGER, finished_wall INTEGER, finish_reason TEXT,
+        PRIMARY KEY (subject_id, track_id)
+      );
+
+      CREATE TABLE step_results (
+        subject_id TEXT NOT NULL REFERENCES enrollments(id),
+        step_id TEXT NOT NULL,
+        track_id TEXT NOT NULL,
+        result TEXT NOT NULL CHECK (result IN ('sent', 'skipped', 'failed')),
+        reason TEXT,
+        at INTEGER NOT NULL,
+        at_wall INTEGER NOT NULL,
+        attempt_id TEXT,
+        PRIMARY KEY (subject_id, step_id)
+      );
+
+      CREATE TABLE sender_accounts (
+        id TEXT PRIMARY KEY,
+        channel TEXT NOT NULL CHECK (channel IN ('email', 'sms')),
+        label TEXT NOT NULL,
+        capacity INTEGER NOT NULL CHECK (capacity > 0),
+        gap_ms INTEGER NOT NULL CHECK (gap_ms > 0),
+        k INTEGER NOT NULL CHECK (k > 0),
+        next_slot_at INTEGER NOT NULL DEFAULT 0,
+        healthy INTEGER NOT NULL DEFAULT 1,
+        wait_until INTEGER,
+        wait_reason TEXT,
+        backoff_ms INTEGER NOT NULL DEFAULT 0,
+        reset_zone TEXT NOT NULL DEFAULT 'UTC'
+      );
+
+      CREATE TABLE attempts (
+        id TEXT PRIMARY KEY,
+        subject_id TEXT NOT NULL REFERENCES enrollments(id),
+        track_id TEXT NOT NULL,
+        step_id TEXT NOT NULL,
+        account_id TEXT NOT NULL REFERENCES sender_accounts(id),
+        destination_detail_id TEXT NOT NULL REFERENCES contact_details(id),
+        destination TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('claimed', 'handed', 'accepted', 'sent', 'rejected', 'withdrawn')),
+        copy TEXT,
+        thread_ref TEXT,
+        provider_ref TEXT,
+        retryable INTEGER NOT NULL,
+        not_sent_final INTEGER NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        calls INTEGER NOT NULL,
+        claimed_wall INTEGER NOT NULL,
+        handed_at INTEGER, handed_wall INTEGER, last_call_wall INTEGER,
+        presend_checked_wall INTEGER, presend_found_reply INTEGER NOT NULL DEFAULT 0,
+        lookup_answer TEXT, queued_lookups INTEGER NOT NULL DEFAULT 0, next_lookup_wall INTEGER,
+        unresolved_since INTEGER,
+        ended_by TEXT,
+        withdraw_requested INTEGER NOT NULL DEFAULT 0,
+        withdraw_called INTEGER NOT NULL DEFAULT 0,
+        awaiting_answer INTEGER NOT NULL DEFAULT 0,
+        retry TEXT NOT NULL DEFAULT 'none',
+        reject_reason TEXT,
+        sent_wall INTEGER,
+        sent_day TEXT,
+        user_marked_not_sent INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE UNIQUE INDEX one_live_attempt_per_step ON attempts(subject_id, step_id) WHERE state IN ('claimed', 'handed', 'accepted');
+      CREATE UNIQUE INDEX one_sent_attempt_per_step ON attempts(subject_id, step_id) WHERE state = 'sent';
+      CREATE INDEX attempts_by_subject ON attempts(subject_id);
+      CREATE INDEX attempts_by_account_state ON attempts(account_id, state);
+      CREATE INDEX attempts_by_provider_ref ON attempts(provider_ref);
+
+      -- ADR 0002's ledger, read off the attempts so it cannot drift from them: a live attempt holds
+      -- a reservation, a sent one counts on the reset day of its send, and a rejected or withdrawn
+      -- one has released its place.
+      CREATE VIEW capacity_ledger AS
+        SELECT account_id, CASE WHEN state = 'sent' THEN sent_day END AS reset_day, id AS attempt_id,
+          CASE WHEN state = 'sent' THEN 'sent' ELSE 'reserved' END AS kind
+        FROM attempts WHERE state IN ('claimed', 'handed', 'accepted', 'sent');
+
+      CREATE TABLE replies (
+        provider_ref TEXT PRIMARY KEY,
+        subject_id TEXT NOT NULL REFERENCES enrollments(id),
+        channel TEXT NOT NULL CHECK (channel IN ('email', 'sms')),
+        at_wall INTEGER NOT NULL
+      );
+      CREATE INDEX replies_by_subject ON replies(subject_id);
+
+      CREATE TABLE provider_anomalies (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        attempt_id TEXT,
+        what TEXT NOT NULL,
+        at_wall INTEGER NOT NULL
+      );
+
+      CREATE TABLE engine_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string): void {

@@ -26,7 +26,9 @@ import type {
   PersonRecord,
   UnenrolledReason,
 } from "../../shared/api.ts";
+import type { EngineStore } from "../engine/engine-store.ts";
 import { migrate } from "./migrations.ts";
+import { SqliteEngineStore } from "./sqlite-engine-store.ts";
 import type { LeadQuery, OutreachStore, StoredContactDetail } from "./store.ts";
 
 type Row = Record<string, SQLOutputValue>;
@@ -41,11 +43,30 @@ export function openSqliteStore(path: string): OutreachStore {
   return new SqliteStore(db);
 }
 
+/**
+ * The store's resolution of a detail id (ADR 0001): its own row when live, or the live row at the
+ * end of the chain of details it was merged into. The engine store resolves through this too,
+ * inside its own transactions.
+ */
+export function liveDetailRowOf(db: DatabaseSync, detailId: string): Row | undefined {
+  return db
+    .prepare(
+      `WITH RECURSIVE chain(id) AS (
+         SELECT ?
+         UNION
+         SELECT d.merged_into FROM contact_details d JOIN chain ON d.id = chain.id WHERE d.merged_into IS NOT NULL)
+       SELECT live.* FROM chain JOIN live_contact_details live ON live.id = chain.id`,
+    )
+    .get(detailId);
+}
+
 class SqliteStore implements OutreachStore {
   private readonly db: DatabaseSync;
+  readonly engine: EngineStore;
 
   constructor(db: DatabaseSync) {
     this.db = db;
+    this.engine = new SqliteEngineStore(db);
   }
 
   async createCampaign(campaign: Campaign): Promise<void> {
@@ -289,15 +310,7 @@ class SqliteStore implements OutreachStore {
    * id once, so even a cycle, which merges cannot make, ends rather than loops.
    */
   private liveDetailRow(detailId: string): Row | undefined {
-    return this.db
-      .prepare(
-        `WITH RECURSIVE chain(id) AS (
-           SELECT ?
-           UNION
-           SELECT d.merged_into FROM contact_details d JOIN chain ON d.id = chain.id WHERE d.merged_into IS NOT NULL)
-         SELECT live.* FROM chain JOIN live_contact_details live ON live.id = chain.id`,
-      )
-      .get(detailId);
+    return liveDetailRowOf(this.db, detailId);
   }
 
   async close(): Promise<void> {
@@ -559,11 +572,15 @@ class SqliteStore implements OutreachStore {
       [meta.importId, meta.campaignId, meta.importedAt, meta.fileNames.people, meta.fileNames.businesses, JSON.stringify(plan.summary)],
     );
 
+    const campaignRow = this.db.prepare("SELECT launched_at, paused_since FROM campaigns WHERE id = ?").get(meta.campaignId);
+    const launched = campaignRow?.["launched_at"] != null && campaignRow["paused_since"] == null;
     for (const e of plan.enrollments) {
+      const enrolledMs = Date.parse(e.enrolledAt);
       const companyId = e.lead.kind === "company" ? e.lead.companyId : this.companyIdOfPerson(e.lead.personId);
       this.run(
-        `INSERT INTO enrollments (id, campaign_id, lead_kind, person_id, company_id, status, enrolled_at, import_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO enrollments (id, campaign_id, lead_kind, person_id, company_id, status, enrolled_at, import_id,
+           frozen_since, frozen_total, branch_entered_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           e.id,
           meta.campaignId,
@@ -573,8 +590,14 @@ class SqliteStore implements OutreachStore {
           e.status,
           e.enrolledAt,
           meta.importId,
+          // A new subject starts frozen at lead time 0 (ADR 0003 3.2). Enrolled after launch, it
+          // runs at once: its clock syncs in this transaction and it enters main at lead time 0.
+          launched ? null : enrolledMs,
+          enrolledMs,
+          launched ? 0 : null,
         ],
       );
+      if (!launched) this.run("INSERT INTO freezes (subject_id, from_wall, to_wall) VALUES (?, ?, NULL)", [e.id, enrolledMs]);
     }
   }
 

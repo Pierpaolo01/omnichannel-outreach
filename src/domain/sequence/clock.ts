@@ -209,3 +209,8 @@ export function nextWindowOpen(rules: readonly WindowRule[], zone: string, t: nu
   }
   return best;
 }
+
+/** The calendar date, as YYYY-MM-DD, of instant `t` in `zone`: an account's capacity reset day. */
+export function resetDayOf(t: number, zone: string): string {
+  return new Date(localDayNumber(t, zone) * DAY).toISOString().slice(0, 10);
+}
