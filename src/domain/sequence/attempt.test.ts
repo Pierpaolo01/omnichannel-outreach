@@ -60,11 +60,15 @@ describe("the attempt table, row by row (ADR 0003 5.3)", () => {
   });
 
   test("a send observed on another terminal attempt is a provider anomaly, never a second send of the step", () => {
-    for (const fields of [{ state: "withdrawn" as const, endedBy: "provider" as const }, { state: "rejected" as const }, { state: "withdrawn" as const, endedBy: "user" as const }]) {
+    // A withdrawn attempt the provider sent anyway still counts against its send day's capacity (ruling 3).
+    for (const fields of [{ state: "withdrawn" as const, endedBy: "provider" as const }, { state: "withdrawn" as const, endedBy: "user" as const }]) {
       const step = applyAttemptEvent(handed(fields), { kind: "sent_observed", providerTime: now, providerRef: "p" });
-      expect(step.attempt.state).toBe(fields.state);
-      expect(step.effects.map((e) => e.kind)).toEqual(["anomaly"]);
+      expect(step.attempt.state).toBe("withdrawn");
+      expect(step.effects.map((e) => e.kind)).toEqual(["anomaly", "sent_after_withdrawal"]);
     }
+    const refused = applyAttemptEvent(handed({ state: "rejected" }), { kind: "sent_observed", providerTime: now, providerRef: "p" });
+    expect(refused.attempt.state).toBe("rejected");
+    expect(refused.effects.map((e) => e.kind)).toEqual(["anomaly"]);
     expect(applyAttemptEvent(handed({ state: "sent" }), { kind: "sent_observed", providerTime: now, providerRef: "p" }).effects.map((e) => e.kind)).toEqual(["ignored"]);
   });
 
@@ -112,6 +116,34 @@ describe("the attempt table, row by row (ADR 0003 5.3)", () => {
   test("not-sent on a non-retryable transport withdraws only when the transport's not-sent is final", () => {
     expect(applyAttemptEvent(handed({ retryable: false, notSentIsFinal: true }), { kind: "lookup_answer", answer: { kind: "not-sent" }, now }).attempt).toMatchObject({ state: "withdrawn", endedBy: "provider" });
     expect(applyAttemptEvent(handed({ retryable: false }), { kind: "lookup_answer", answer: { kind: "not-sent" }, now }).attempt).toMatchObject({ state: "handed", unresolvedSince: now });
+  });
+
+  test("an unresolved keyed attempt is still settled by a later not-sent, keeping when it became unresolved (ruling 6)", () => {
+    const unresolved = handed({ state: "accepted", unresolvedSince: now, lookupAnswer: "unknown", awaitingAnswer: false });
+    expect(applyAttemptEvent(unresolved, { kind: "lookup_answer", answer: { kind: "not-sent" }, now: now + SETTLING }).attempt).toMatchObject({
+      state: "withdrawn",
+      endedBy: "lookup_not_sent",
+      unresolvedSince: now,
+      holdsReservation: true,
+    });
+  });
+
+  test("reservations (ruling 3): released when the provider never got the work, refused it or said it will not send; kept while its outcome is uncertain", () => {
+    expect(applyAttemptEvent(attempt(), { kind: "guard_failed" }).attempt.holdsReservation).toBe(false);
+    expect(applyAttemptEvent(handed(), { kind: "call_answer", answer: { kind: "rejected", reason: "blocklisted" }, now }).attempt.holdsReservation).toBe(false);
+    expect(applyAttemptEvent(handed({ withdrawRequested: true }), { kind: "withdraw_answer", answer: "withdrawn", now }).attempt.holdsReservation).toBe(false);
+    const lookupNotSent = applyAttemptEvent(handed({ state: "accepted" }), { kind: "lookup_answer", answer: { kind: "not-sent" }, now }).attempt;
+    expect(lookupNotSent).toMatchObject({ state: "withdrawn", endedBy: "lookup_not_sent", holdsReservation: true, nextLookupWall: now + SETTLING });
+    const marked = applyAttemptEvent(handed({ unresolvedSince: now, lookupAnswer: "unknown" }), { kind: "mark_not_sent", now }).attempt;
+    expect(marked).toMatchObject({ state: "withdrawn", endedBy: "user", holdsReservation: true });
+    // Uncertain work is still looked up; only a later sent, or a not-sent the transport vouches for, settles it.
+    expect(applyAttemptEvent(lookupNotSent, { kind: "lookup_answer", answer: { kind: "not-sent" }, now: now + SETTLING }).attempt).toMatchObject({ holdsReservation: true, nextLookupWall: now + 2 * SETTLING });
+    expect(applyAttemptEvent({ ...lookupNotSent, notSentIsFinal: true }, { kind: "lookup_answer", answer: { kind: "not-sent" }, now }).attempt.holdsReservation).toBe(false);
+    expect(applyAttemptEvent(lookupNotSent, { kind: "lookup_answer", answer: { kind: "sent", sentAt: now, providerRef: "p-1" }, now }).attempt).toMatchObject({ state: "sent", providerRef: "p-1" });
+  });
+
+  test("a waiting retry does not hold settlement back: settlement is scheduled with the unknown answer (ruling 5)", () => {
+    expect(applyAttemptEvent(handed(), { kind: "call_answer", answer: { kind: "unknown" }, now }).attempt).toMatchObject({ retry: "wanted", nextLookupWall: MONDAY_9 + SETTLING });
   });
 
   test("unknown makes the attempt unresolved, which is set once and keeps being looked up", () => {

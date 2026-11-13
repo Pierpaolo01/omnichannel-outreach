@@ -4,13 +4,13 @@
  * retry write that authorizes the call has committed. One tick runs passes until nothing changes:
  * observe, expire claims, settle, withdraw, evaluate, claim, hand over.
  */
-import { ENGINE_PARAMS, isLive, type AttemptEvent, type CallAnswer } from "../../domain/sequence/attempt.ts";
+import { ENGINE_PARAMS, isLive, isUncertain, type AttemptEvent, type CallAnswer } from "../../domain/sequence/attempt.ts";
 import { launchCheck, type LaunchCheck } from "../../domain/sequence/blockers.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
 import type { Attempt, SubjectState } from "../../domain/sequence/state.ts";
 import type { EngineStore } from "./engine-store.ts";
-import type { AttemptRef, ProviderEvent, SendPort } from "./ports.ts";
+import type { AttemptRef, HandoverRequest, ProviderEvent, SendPort } from "./ports.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 
 export type CrashPoint = "after_claim" | "after_presend" | "after_handover_commit" | "after_call" | "after_retry_commit" | "after_lookup" | "after_observe_event";
@@ -22,8 +22,48 @@ export interface EngineHooks {
   beforeHandover?(attemptId: string): Promise<void>;
   /** Before a same-key retry is authorized (ADR 0003 9.2: retries racing a quiesce). */
   beforeRetry?(attemptId: string): Promise<void>;
+  /**
+   * Between a send's authorization commit and its provider call. Synchronous: nothing
+   * asynchronous may happen there (ruling 2). Tests inject a reply and a clock advance here.
+   */
+  afterAuthorization?(attemptId: string): void;
   /** Named points at which a test may simulate a crash by throwing. */
   crashPoint?(point: CrashPoint, attemptId: string | null): void;
+}
+
+/**
+ * Serializes, per inbox, a send's authorization, its provider call and the pacing slot it takes,
+ * across every engine in the process (ruling 2), and knows which calls are in progress.
+ */
+export class InboxLocks {
+  private readonly tails = new Map<string, Promise<void>>();
+  readonly calling = new Set<string>();
+
+  async run<T>(inbox: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.tails.get(inbox) ?? Promise.resolve();
+    let release: () => void = () => undefined;
+    const mine = new Promise<void>((resolve) => (release = resolve));
+    const tail = previous.then(() => mine);
+    this.tails.set(inbox, tail);
+    await previous;
+    try {
+      return await work();
+    } finally {
+      release();
+      if (this.tails.get(inbox) === tail) this.tails.delete(inbox);
+    }
+  }
+}
+
+const PROCESS_LOCKS = new InboxLocks();
+
+/** Waits for a port call at most `ms`; the default uses a real timer. */
+export function waitWithTimer<T>(promise: Promise<T>, ms: number, timedOut: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(timedOut), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 export interface EngineDependencies {
@@ -34,6 +74,12 @@ export interface EngineDependencies {
   readonly newId: () => string;
   readonly rules?: Partial<Rules>;
   readonly hooks?: EngineHooks;
+  /**
+   * Bounds every wait on the provider (ruling 5): a pre-send check, lookup, withdrawal,
+   * observation or send call that has not answered within `ms` counts as `timedOut`.
+   */
+  readonly waitFor?: <T>(promise: Promise<T>, ms: number, timedOut: T) => Promise<T>;
+  readonly locks?: InboxLocks;
 }
 
 const OBSERVE_CHECKPOINT = "email_observe_checkpoint";
@@ -49,10 +95,14 @@ export class Engine {
   private readonly newId: () => string;
   private readonly rules: Rules;
   private readonly hooks: EngineHooks;
+  private readonly waitFor: <T>(promise: Promise<T>, ms: number, timedOut: T) => Promise<T>;
+  private readonly locks: InboxLocks;
   /**
    * Subjects known to need nothing, by version key, until a wall instant: evaluated with no
    * change, or with nothing ready to claim. A change to the subject, its campaign or its lead
    * facts changes the key; the instant is the next time-driven change (a deadline or a start).
+   * Correct only while `runningSubjectVersions` names every input of `evaluate` and
+   * `readyItems`: a ticket that adds an input (a call task, a pause) adds it to that key.
    */
   private readonly settled = new Map<string, { key: string; until: number }>();
   private readonly nothingReady = new Map<string, { key: string; until: number }>();
@@ -66,6 +116,19 @@ export class Engine {
     this.newId = deps.newId;
     this.rules = { ...DEFAULT_RULES, ...deps.rules };
     this.hooks = deps.hooks ?? {};
+    this.waitFor = deps.waitFor ?? waitWithTimer;
+    this.locks = deps.locks ?? PROCESS_LOCKS;
+  }
+
+  /** A port call bounded by CALL_TIMEOUT; a throw counts as the timed-out answer. */
+  private bounded<T>(call: () => Promise<T>, timedOut: T): Promise<T> {
+    let started: Promise<T>;
+    try {
+      started = call().catch(() => timedOut);
+    } catch {
+      return Promise.resolve(timedOut);
+    }
+    return this.waitFor(started, ENGINE_PARAMS.CALL_TIMEOUT, timedOut);
   }
 
   // -------------------------------------------------------------------------------------------
@@ -98,6 +161,7 @@ export class Engine {
       let changed = false;
       changed = (await this.observe()) || changed;
       changed = (await this.expireClaims()) || changed;
+      changed = (await this.recoverStuckAnswers()) || changed;
       changed = (await this.settle()) || changed;
       changed = (await this.withdraw()) || changed;
       changed = (await this.evaluateAll()) || changed;
@@ -137,6 +201,7 @@ export class Engine {
     for (const a of await this.store.openAttempts()) {
       const slot = accounts.get(a.accountId)?.nextSlotAt ?? 0;
       if (a.state === "claimed") times.push(a.claimedWall + ENGINE_PARAMS.SETTLING, slot);
+      if (a.awaitingAnswer) times.push((a.lastCallWall ?? a.claimedWall) + ENGINE_PARAMS.CALL_TIMEOUT);
       if (a.retry === "wanted" || a.retry === "wanted_after_not_sent") times.push(slot);
       if (a.nextLookupWall !== null) times.push(a.nextLookupWall);
     }
@@ -160,7 +225,8 @@ export class Engine {
   // Accounts.
 
   private async syncAccounts(): Promise<void> {
-    const statuses = await this.port.accounts();
+    const statuses = await this.bounded(() => this.port.accounts(), null);
+    if (statuses === null) return;
     await this.store.upsertAccounts(statuses);
     const known = new Map((await this.store.accounts(this.now())).map((a) => [a.id, a]));
     for (const s of statuses) {
@@ -206,7 +272,9 @@ export class Engine {
 
   private async observe(): Promise<boolean> {
     const checkpoint = await this.store.meta(OBSERVE_CHECKPOINT);
-    const { events, checkpoint: next } = await this.port.observe(checkpoint);
+    const observed = await this.bounded(() => this.port.observe(checkpoint), null);
+    if (observed === null) return false;
+    const { events, checkpoint: next } = observed;
     let changed = false;
     for (const event of events) {
       changed = (await this.applyEvent(event)) || changed;
@@ -216,26 +284,37 @@ export class Engine {
     return changed;
   }
 
-  /** Matches a provider event to its attempt by reference, else by idempotency key (ADR 0002 "Recovery"). */
+  /**
+   * Matches a provider event to an attempt, in any state, by reference, else by idempotency key
+   * (ADR 0002 "Recovery"). The domain then settles it on the provider work that produced it.
+   */
   private async attemptFor(event: { providerRef: string; key?: string }): Promise<Attempt | null> {
     const byRef = await this.store.attemptByProviderRef(event.providerRef);
     if (byRef || event.key === undefined) return byRef;
-    const withKey = (await this.store.openAttempts()).filter((a) => a.idempotencyKey === event.key);
-    return withKey.find((a) => isLive(a)) ?? withKey.at(-1) ?? null;
+    const withKey = await this.store.attemptsByKey(event.key);
+    return withKey.find((a) => isLive(a)) ?? withKey[0] ?? null;
   }
 
   private async applyEvent(event: ProviderEvent): Promise<boolean> {
     const now = this.now();
     if (event.kind === "reply") {
       const a = await this.attemptFor({ providerRef: event.providerRef });
-      if (!a) {
-        await this.store.recordAnomaly(null, "a reply on a thread the app does not know", now);
+      // A reply outside every known thread is reconciled by the inbox it reached and the address it
+      // came from, before any further send to that lead: observation runs first in every pass (ruling 1).
+      const subjects = a ? [a.subjectId] : await this.store.subjectsReachedFrom(event.inbox, event.from);
+      if (subjects.length === 0) {
+        await this.store.recordAnomaly(null, "a reply from an address the app never wrote to from that inbox", now);
         return false;
       }
-      return (await this.store.update(a.subjectId, now, (s) => {
-        const next = this.rules.applyReply(s, { channel: "email", atWall: Math.min(event.at, now), providerRef: event.id }, now);
-        return same(next, s) ? null : next;
-      })) !== null;
+      let changed = false;
+      for (const subjectId of subjects) {
+        const written = await this.store.update(subjectId, now, (s) => {
+          const next = this.rules.applyReply(s, { channel: "email", atWall: Math.min(event.at, now), providerRef: event.id }, now);
+          return same(next, s) ? null : next;
+        });
+        changed = changed || written !== null;
+      }
+      return changed;
     }
     const a = await this.attemptFor(event);
     if (!a) {
@@ -265,6 +344,20 @@ export class Engine {
     return changed;
   }
 
+  /**
+   * A call whose answer was never recorded, though no call is in progress (an error while applying
+   * it), is the crash row of 5.3, without waiting for a restart (ruling 5).
+   */
+  private async recoverStuckAnswers(): Promise<boolean> {
+    const now = this.now();
+    let changed = false;
+    for (const a of await this.store.openAttempts()) {
+      if (!a.awaitingAnswer || this.locks.calling.has(a.id) || now - (a.lastCallWall ?? a.claimedWall) < ENGINE_PARAMS.CALL_TIMEOUT) continue;
+      changed = (await this.applyAttempt(a, { kind: "call_answer", answer: { kind: "unknown" }, now })) || changed;
+    }
+    return changed;
+  }
+
   private ref(a: Attempt): AttemptRef {
     return { idempotencyKey: a.idempotencyKey, providerRef: a.providerRef, sender: a.accountId, destination: a.destination };
   }
@@ -272,15 +365,17 @@ export class Engine {
   private async settle(): Promise<boolean> {
     let changed = false;
     for (const a of await this.store.openAttempts()) {
-      if (a.state !== "handed" && a.state !== "accepted") continue;
-      if (a.retry === "wanted" || a.retry === "wanted_after_not_sent" || a.awaitingAnswer) continue;
+      if (!(a.state === "handed" || a.state === "accepted" || isUncertain(a)) || a.awaitingAnswer) continue;
       if (a.nextLookupWall === null || a.nextLookupWall > this.now()) continue;
-      let answer: Awaited<ReturnType<SendPort["lookup"]>>;
-      try {
-        answer = await this.port.lookup(this.ref(a));
-      } catch {
-        answer = { kind: "unknown" };
+      // Settlement runs on its own clock: a retry still waiting for its slot when the lookup is due
+      // is refused, and the attempt settles (ruling 5).
+      if (a.retry === "wanted" || a.retry === "wanted_after_not_sent") {
+        await this.applyAttempt(a, { kind: "retry_refused", now: this.now() });
+        changed = true;
+        const after = await this.store.attempt(a.id);
+        if (!after || after.state === "withdrawn" || after.nextLookupWall === null || after.nextLookupWall > this.now()) continue;
       }
+      const answer = await this.bounded(() => this.port.lookup(this.ref(a)), { kind: "unknown" as const });
       this.hooks.crashPoint?.("after_lookup", a.id);
       changed = (await this.applyAttempt(a, { kind: "lookup_answer", answer, now: this.now() })) || changed;
     }
@@ -291,12 +386,7 @@ export class Engine {
     let changed = false;
     for (const a of await this.store.openAttempts()) {
       if (!a.withdrawRequested || a.withdrawCalled || (a.state !== "handed" && a.state !== "accepted")) continue;
-      let answer: "withdrawn" | "too-late" | "unknown";
-      try {
-        answer = await this.port.withdraw(this.ref(a));
-      } catch {
-        answer = "unknown";
-      }
+      const answer = await this.bounded(() => this.port.withdraw(this.ref(a)), "unknown" as const);
       changed = (await this.applyAttempt(a, { kind: "withdraw_answer", answer, now: this.now() })) || changed;
     }
     return changed;
@@ -357,7 +447,7 @@ export class Engine {
       const written = await this.store.update(item.subjectId, now, (s) => {
         if (!this.rules.versionsMatch(snapshot, s)) return null;
         if (this.rules.claimRefusal(s, item, now) !== null) return null;
-        const account = this.rules.chooseAccount(s, now);
+        const account = this.rules.chooseAccount(s, now, item.stepId);
         if (!account) return null;
         return this.rules.claim(s, item, account, { attemptId, retryable: transport.retryable, notSentIsFinal: transport.notSentIsFinal, now });
       });
@@ -420,12 +510,7 @@ export class Engine {
     if (a.presendCheckedWall !== null && a.presendCheckedWall >= now - ENGINE_PARAMS.PRESEND_MAX_AGE && !a.presendFoundReply) return true;
     const subject = await this.store.subject(a.subjectId, now);
     const threadRefs = (subject?.attempts ?? []).filter((x) => x.providerRef !== null).map((x) => x.providerRef ?? "");
-    let result: Awaited<ReturnType<SendPort["presendCheck"]>>;
-    try {
-      result = await this.port.presendCheck({ sender: a.accountId, destination: a.destination, threadRefs });
-    } catch {
-      result = { kind: "unavailable" };
-    }
+    const result = await this.bounded(() => this.port.presendCheck({ sender: a.accountId, destination: a.destination, threadRefs }), { kind: "unavailable" as const });
     if (result.kind === "unavailable") return false;
     await this.store.update(a.subjectId, now, (s) => {
       let next: SubjectState = { ...s, attempts: s.attempts.map((x) => (x.id === a.id ? { ...x, presendCheckedWall: now, presendFoundReply: result.kind === "reply" } : x)) };
@@ -442,12 +527,11 @@ export class Engine {
     if (a && a.state !== "claimed") await this.applyAttempt(a, { kind: "call_answer", answer, now: this.now() });
   }
 
-  private async call(a: Attempt): Promise<CallAnswer> {
+  /** The immutable send request, from the authorized attempt alone: nothing is read to build it (ruling 2). */
+  private request(a: Attempt): HandoverRequest {
     if (!a.copy) throw new Error(`attempt ${a.id} has no stored copy`);
-    const subject = await this.store.subject(a.subjectId, this.now());
-    const threading = subject?.campaign.definition.tracks.find((t) => t.id === a.trackId)?.steps.find((s) => s.id === a.stepId)?.threading ?? "new_subject";
-    const request = {
-      threading,
+    return {
+      threading: a.threading,
       attemptId: a.id,
       idempotencyKey: a.idempotencyKey,
       sender: a.accountId,
@@ -457,17 +541,40 @@ export class Engine {
       subjectId: a.subjectId,
       stepId: a.stepId,
     };
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      const timeout = new Promise<CallAnswer>((resolve) => {
-        timer = setTimeout(() => resolve({ kind: "unknown" }), ENGINE_PARAMS.CALL_TIMEOUT);
-      });
-      return await Promise.race([this.port.handover(request), timeout]);
-    } catch {
-      return { kind: "unknown" };
-    } finally {
-      clearTimeout(timer);
-    }
+  }
+
+  /**
+   * Authorizes a send and calls the provider as one serialized step per inbox (ruling 2): the
+   * authorization commits, the request is already built, and the call starts with nothing
+   * asynchronous in between. The pacing slot then counts from the call's actual start.
+   */
+  private async authorizeAndCall(
+    a: Attempt,
+    authorize: (now: number) => Promise<{ authorized: Attempt | null; onlySlot: boolean }>,
+    crashPoint: CrashPoint,
+  ): Promise<{ outcome: "handed" | "withdrawn" | "waiting"; answer?: CallAnswer; authorized?: Attempt }> {
+    return this.locks.run(a.accountId, async () => {
+      const { authorized, onlySlot } = await authorize(this.now());
+      if (!authorized) return { outcome: onlySlot ? "waiting" : "withdrawn" };
+      const request = this.request(authorized);
+      this.hooks.crashPoint?.(crashPoint, a.id);
+      this.hooks.afterAuthorization?.(a.id);
+      const callStart = this.now();
+      this.locks.calling.add(a.id);
+      let pending: Promise<CallAnswer>;
+      try {
+        pending = this.port.handover(request);
+      } catch {
+        pending = Promise.resolve({ kind: "unknown" });
+      }
+      try {
+        const answer = await this.waitFor(pending.catch((): CallAnswer => ({ kind: "unknown" })), ENGINE_PARAMS.CALL_TIMEOUT, { kind: "unknown" });
+        await this.store.pushSlot(a.accountId, callStart);
+        return { outcome: "handed", answer, authorized };
+      } finally {
+        this.locks.calling.delete(a.id);
+      }
+    });
   }
 
   private async tryHandover(a: Attempt): Promise<"handed" | "withdrawn" | "waiting" | "skip"> {
@@ -476,30 +583,33 @@ export class Engine {
       return after?.state === "claimed" ? "skip" : "withdrawn";
     }
     await this.hooks.beforeHandover?.(a.id);
-    const now = this.now();
-    const out: { handed: Attempt | null; onlySlot: boolean } = { handed: null, onlySlot: false };
-    await this.store.update(a.subjectId, now, (s) => {
-      const current = s.attempts.find((x) => x.id === a.id);
-      const account = current ? s.accounts[current.accountId] : undefined;
-      if (!current || current.state !== "claimed" || !account) return null;
-      const failed = this.rules.handoverFailures(s, current, account, now);
-      if (failed.length === 0) {
-        const next = this.rules.handOver(s, current, account, now);
-        out.handed = next.attempts.find((x) => x.id === a.id) ?? null;
-        return next;
-      }
-      if (failed.every((f) => f === 16)) {
-        out.onlySlot = true;
-        return null;
-      }
-      return this.rules.applyToAttempt(s, current.id, { kind: "guard_failed" }, now, { resetDay: this.resetDay(s) }).state;
-    });
-    const handed = out.handed;
-    if (!handed) return out.onlySlot ? "waiting" : "withdrawn";
-    this.hooks.crashPoint?.("after_handover_commit", a.id);
-    const answer = await this.call(handed);
+    const result = await this.authorizeAndCall(
+      a,
+      async (now) => {
+        const out: { authorized: Attempt | null; onlySlot: boolean } = { authorized: null, onlySlot: false };
+        await this.store.update(a.subjectId, now, (s) => {
+          const current = s.attempts.find((x) => x.id === a.id);
+          const account = current ? s.accounts[current.accountId] : undefined;
+          if (!current || current.state !== "claimed" || !account) return null;
+          const failed = this.rules.handoverFailures(s, current, account, now);
+          if (failed.length === 0) {
+            const next = this.rules.handOver(s, current, account, now);
+            out.authorized = next.attempts.find((x) => x.id === a.id) ?? null;
+            return next;
+          }
+          if (failed.every((f) => f === 16)) {
+            out.onlySlot = true;
+            return null;
+          }
+          return this.rules.applyToAttempt(s, current.id, { kind: "guard_failed" }, now, { resetDay: this.resetDay(s) }).state;
+        });
+        return out;
+      },
+      "after_handover_commit",
+    );
+    if (result.outcome !== "handed" || !result.answer || !result.authorized) return result.outcome;
     this.hooks.crashPoint?.("after_call", a.id);
-    await this.applyAttempt(handed, { kind: "call_answer", answer, now: this.now() });
+    await this.applyAttempt(result.authorized, { kind: "call_answer", answer: result.answer, now: this.now() });
     return "handed";
   }
 
@@ -512,30 +622,33 @@ export class Engine {
     }
     await this.hooks.beforeRetry?.(a.id);
     const fresh = await this.presend(a);
-    const now = this.now();
-    const out: { handed: Attempt | null; onlySlot: boolean } = { handed: null, onlySlot: false };
-    await this.store.update(a.subjectId, now, (s) => {
-      const current = s.attempts.find((x) => x.id === a.id);
-      const account = current ? s.accounts[current.accountId] : undefined;
-      if (!current || !account || (current.retry !== "wanted" && current.retry !== "wanted_after_not_sent")) return null;
-      const failed = fresh ? this.rules.retryFailures(s, current, account, now) : ["predicate 14"];
-      if (failed.length === 0) {
-        const next = this.rules.authorizeRetry(s, current, account, now);
-        out.handed = next.attempts.find((x) => x.id === a.id) ?? null;
-        return next;
-      }
-      if (failed.every((f) => f === "slot")) {
-        out.onlySlot = true;
-        return null;
-      }
-      return this.rules.applyToAttempt(s, current.id, { kind: "retry_refused", now }, now, { resetDay: this.resetDay(s) }).state;
-    });
-    const authorized = out.handed;
-    if (!authorized) return out.onlySlot ? "waiting" : "withdrawn";
-    this.hooks.crashPoint?.("after_retry_commit", a.id);
-    const answer = await this.call(authorized);
+    const result = await this.authorizeAndCall(
+      a,
+      async (now) => {
+        const out: { authorized: Attempt | null; onlySlot: boolean } = { authorized: null, onlySlot: false };
+        await this.store.update(a.subjectId, now, (s) => {
+          const current = s.attempts.find((x) => x.id === a.id);
+          const acc = current ? s.accounts[current.accountId] : undefined;
+          if (!current || !acc || (current.retry !== "wanted" && current.retry !== "wanted_after_not_sent")) return null;
+          const failed = fresh ? this.rules.retryFailures(s, current, acc, now) : ["predicate 14"];
+          if (failed.length === 0) {
+            const next = this.rules.authorizeRetry(s, current, acc, now);
+            out.authorized = next.attempts.find((x) => x.id === a.id) ?? null;
+            return next;
+          }
+          if (failed.every((f) => f === "slot")) {
+            out.onlySlot = true;
+            return null;
+          }
+          return this.rules.applyToAttempt(s, current.id, { kind: "retry_refused", now }, now, { resetDay: this.resetDay(s) }).state;
+        });
+        return out;
+      },
+      "after_retry_commit",
+    );
+    if (result.outcome !== "handed" || !result.answer || !result.authorized) return result.outcome;
     this.hooks.crashPoint?.("after_call", a.id);
-    await this.applyAttempt(authorized, { kind: "call_answer", answer, now: this.now() });
+    await this.applyAttempt(result.authorized, { kind: "call_answer", answer: result.answer, now: this.now() });
     return "handed";
   }
 }

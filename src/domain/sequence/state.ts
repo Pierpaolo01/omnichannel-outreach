@@ -6,7 +6,7 @@
 import type { OutreachStatus } from "../outreach-status.ts";
 import type { Freeze, LeadClock } from "./clock.ts";
 import type { MergeData } from "./copy.ts";
-import type { Branch, CampaignDefinition } from "./definition.ts";
+import type { Branch, CampaignDefinition, Threading } from "./definition.ts";
 
 export type EndReason = Extract<
   OutreachStatus,
@@ -105,6 +105,8 @@ export interface Attempt {
   readonly state: AttemptState;
   /** Rendered in the handover transaction and never changed afterwards. */
   readonly copy: RenderedCopy | null;
+  /** The step's threading when claimed: with `retryable` and `notSentIsFinal`, the transport the payload travels by. */
+  readonly threading: Threading;
   readonly threadRef: string | null;
   readonly providerRef: string | null;
   readonly retryable: boolean;
@@ -136,6 +138,12 @@ export interface Attempt {
   readonly sentDay: string | null;
   /** The user marked this attempt not sent (ADR 0002 P3): its step is excluded from at-most-once. */
   readonly userMarkedNotSent: boolean;
+  /**
+   * The attempt holds a capacity reservation on its account (ADR 0003 4.2, ruling 3): from the
+   * claim until the provider never got the work, refused it, settled it as sent, or stated
+   * authoritatively that it will not send. Uncertain work keeps it through a withdrawal.
+   */
+  readonly holdsReservation: boolean;
 }
 
 export interface Reply {

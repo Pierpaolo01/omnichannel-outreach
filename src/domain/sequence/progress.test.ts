@@ -175,38 +175,43 @@ describe("sending (ADR 0003 2.4)", () => {
   });
 });
 
-describe("one provider send under an inherited key (found by generated seed 20261117)", () => {
+describe("a provider send belongs to the provider work that produced it (ruling 4; found by generated seed 20261117)", () => {
   const opts2 = { resetDay: () => "2026-11-02" };
-  function inherited(): SubjectState {
+  function inherited(inheritor: "accepted" | "claimed" = "accepted"): SubjectState {
     const s = launched();
     return {
       ...s,
       attempts: [
-        handed({ id: "a-1", idempotencyKey: "a-1", state: "withdrawn", endedBy: "lookup_not_sent", providerRef: "p-1" }),
-        handed({ id: "a-2", idempotencyKey: "a-1", state: "accepted", providerRef: "p-1" }),
+        handed({ id: "a-1", idempotencyKey: "a-1", state: "withdrawn", endedBy: "lookup_not_sent", providerRef: "p-1", handedWall: MONDAY_9 }),
+        inheritor === "claimed"
+          ? attempt({ id: "a-2", idempotencyKey: "a-1", claimedWall: MONDAY_9 + H })
+          : handed({ id: "a-2", idempotencyKey: "a-1", state: "accepted", providerRef: "p-1", handedWall: MONDAY_9 + 2 * H }),
       ],
     };
   }
 
-  test("a send observed on the withdrawn attempt goes to the live attempt that inherited its key", () => {
-    const after = applyToAttempt(inherited(), "a-1", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p-1" }, MONDAY_9 + 2000, opts2).state;
-    expect(after.attempts.map((a) => a.state)).toEqual(["withdrawn", "sent"]);
-    expect(after.results).toEqual([expect.objectContaining({ stepId: "s1", attemptId: "a-2" })]);
+  test("a send reported against the inheritor settles on the original work, with its own handover time, and quiesces the inheritor", () => {
+    const after = applyToAttempt(inherited(), "a-2", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p-1" }, MONDAY_9 + 3 * H, opts2).state;
+    expect(after.attempts.map((a) => [a.id, a.state, a.withdrawRequested])).toEqual([["a-1", "sent", false], ["a-2", "accepted", true]]);
+    // The original's handover (09:00) bounds the send time, not the inheritor's (11:00).
+    expect(after.results).toEqual([expect.objectContaining({ stepId: "s1", attemptId: "a-1", atWall: MONDAY_9 + 1000 })]);
   });
 
-  test("a step never gets a second sent attempt: a later answer for the same work is a duplicate", () => {
-    const once = applyToAttempt(inherited(), "a-2", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p-1" }, MONDAY_9 + 2000, opts2).state;
-    const again = applyToAttempt(once, "a-1", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p-1" }, MONDAY_9 + 3000, opts2).state;
-    expect(again.attempts.filter((a) => a.state === "sent").map((a) => a.id)).toEqual(["a-2"]);
+  test("a claimed inheritor is withdrawn when the original work's send arrives", () => {
+    const after = applyToAttempt(inherited("claimed"), "a-1", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p-1" }, MONDAY_9 + 2 * H, opts2).state;
+    expect(after.attempts.map((a) => [a.id, a.state, a.endedBy])).toEqual([["a-1", "sent", "observed"], ["a-2", "withdrawn", "quiesce"]]);
   });
 
-  test("a live attempt whose key the step already sent under ends, settled by the provider's statement", () => {
+  test("a step never gets a second sent attempt: a later sent fact for the same work settles the live inheritor by the provider's statement", () => {
+    const once = applyToAttempt(inherited(), "a-1", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p-1" }, MONDAY_9 + 3 * H, opts2).state;
+    const again = applyToAttempt(once, "a-2", { kind: "lookup_answer", answer: { kind: "sent", sentAt: MONDAY_9 + 1000, providerRef: "p-1" }, now: MONDAY_9 + 4 * H }, MONDAY_9 + 4 * H, opts2).state;
+    expect(again.attempts.map((a) => [a.id, a.state, a.endedBy])).toEqual([["a-1", "sent", "observed"], ["a-2", "withdrawn", "provider"]]);
+  });
+
+  test("a sent fact attaches a missing provider reference to work already settled as sent (ruling 1)", () => {
     const s = launched();
-    const state = {
-      ...s,
-      attempts: [handed({ id: "a-1", idempotencyKey: "k", state: "sent", endedBy: "observed" }), handed({ id: "a-2", idempotencyKey: "k", state: "accepted" })],
-    };
-    const after = applyToAttempt(state, "a-2", { kind: "lookup_answer", answer: { kind: "sent", sentAt: MONDAY_9 }, now: MONDAY_9 + 1000 }, MONDAY_9 + 1000, opts2).state;
-    expect(after.attempts.map((a) => [a.state, a.endedBy])).toEqual([["sent", "observed"], ["withdrawn", "provider"]]);
+    const state = { ...s, attempts: [handed({ id: "a-1", state: "sent", endedBy: "lookup", providerRef: null })] };
+    const after = applyToAttempt(state, "a-1", { kind: "sent_observed", providerTime: MONDAY_9, providerRef: "p-9" }, MONDAY_9 + H, opts2).state;
+    expect(after.attempts[0]?.providerRef).toBe("p-9");
   });
 });

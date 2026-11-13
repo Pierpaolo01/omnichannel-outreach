@@ -10,7 +10,8 @@ export interface SenderAccountConfig {
   readonly label: string;
   /** Daily capacity on the account's reset day. */
   readonly capacity: number;
-  readonly gapMs: number;
+  /** The pacing gap; null for ADR 0003 4.1's default from the windows the account serves. */
+  readonly gapMs: number | null;
   /** In-flight bound (ADR 0002's k). */
   readonly k: number;
   readonly healthy: boolean;
@@ -58,14 +59,20 @@ export interface EngineStore {
   runningSubjectIds(): Promise<string[]>;
   /** For each running subject, a key that changes whenever its state, its campaign's, or the lead facts it reads change. */
   runningSubjectVersions(): Promise<Map<string, string>>;
-  /** Every attempt that is not terminal, plus withdrawn ones a lookup may still settle. */
+  /** Every attempt that is not terminal, plus withdrawn ones whose outcome is still uncertain. */
   openAttempts(): Promise<Attempt[]>;
   attempt(attemptId: string): Promise<Attempt | null>;
   attemptByProviderRef(providerRef: string): Promise<Attempt | null>;
+  /** Every attempt, in any state, that used this idempotency key. */
+  attemptsByKey(key: string): Promise<Attempt[]>;
+  /** Subjects with work handed to `address` from `inbox`: where a reply outside a known thread belongs. */
+  subjectsReachedFrom(inbox: string, address: string): Promise<string[]>;
 
   upsertAccounts(accounts: readonly SenderAccountConfig[]): Promise<void>;
   accounts(now: number): Promise<AccountState[]>;
   accountLabels(): Promise<Record<string, string>>;
+  /** Moves the account's next pacing slot to at least `callStart` plus its gap. */
+  pushSlot(accountId: string, callStart: number): Promise<void>;
   updateAccount(accountId: string, change: Partial<Pick<AccountState, "healthy" | "waitUntil" | "waitReason" | "backoffMs">>): Promise<void>;
 
   meta(key: string): Promise<string | null>;

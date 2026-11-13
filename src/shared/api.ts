@@ -199,7 +199,7 @@ export interface SequenceView {
 }
 
 export type FinishReasonApi = import("../domain/sequence/state.ts").FinishReason;
-export type HoldReasonApi = "unresolved" | "render_failed" | "provider_skipped";
+export type HoldReasonApi = "unresolved" | "render_failed" | "provider_skipped" | "no_thread";
 
 export interface SendView {
   readonly attemptId: string;
@@ -258,5 +258,7 @@ export interface NeedsAttention {
   readonly stalledInboxes: readonly { readonly accountId: string; readonly holding: readonly string[] }[];
   readonly heldTracks: readonly { readonly enrollmentId: string; readonly trackId: string; readonly reason: HoldReasonApi }[];
   readonly accountWaits: readonly { readonly accountId: string; readonly reason: "quota" | "rate_limited"; readonly until: string | null }[];
+  /** Inboxes the provider reports unhealthy or disconnected: their leads wait on them. */
+  readonly unhealthyInboxes: readonly { readonly accountId: string }[];
   readonly anomalies: readonly { readonly what: string; readonly at: string }[];
 }

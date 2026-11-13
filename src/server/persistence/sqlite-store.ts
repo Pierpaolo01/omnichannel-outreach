@@ -605,6 +605,7 @@ class SqliteStore implements OutreachStore {
           launched ? 0 : null,
         ],
       );
+      this.run("INSERT INTO subjects (id, kind) VALUES (?, 'enrollment')", [e.id]);
       if (!launched) this.run("INSERT INTO freezes (subject_id, from_wall, to_wall) VALUES (?, ?, NULL)", [e.id, enrolledMs]);
     }
   }

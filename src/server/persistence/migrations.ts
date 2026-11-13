@@ -203,9 +203,17 @@ export const MIGRATIONS: readonly Migration[] = [
         frozen_total = CAST(ROUND((julianday(enrolled_at) - 2440587.5) * 86400000) AS INTEGER);
       CREATE INDEX enrollments_by_campaign_status ON enrollments(campaign_id, status);
 
+      -- Every subject the engine runs: an enrollment, or (ticket 21) a test run. Progress tables
+      -- reference this, not enrollments (ADR 0003 1.2).
+      CREATE TABLE subjects (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL CHECK (kind IN ('enrollment', 'test_run'))
+      );
+      INSERT INTO subjects (id, kind) SELECT id, 'enrollment' FROM enrollments;
+
       CREATE TABLE freezes (
         seq INTEGER PRIMARY KEY AUTOINCREMENT,
-        subject_id TEXT NOT NULL REFERENCES enrollments(id),
+        subject_id TEXT NOT NULL REFERENCES subjects(id),
         from_wall INTEGER NOT NULL,
         to_wall INTEGER
       );
@@ -214,7 +222,7 @@ export const MIGRATIONS: readonly Migration[] = [
       INSERT INTO freezes (subject_id, from_wall, to_wall) SELECT id, frozen_since, NULL FROM enrollments;
 
       CREATE TABLE track_progress (
-        subject_id TEXT NOT NULL REFERENCES enrollments(id),
+        subject_id TEXT NOT NULL REFERENCES subjects(id),
         track_id TEXT NOT NULL,
         start_at INTEGER, start_basis_at INTEGER, start_basis_wall INTEGER, start_zone TEXT,
         started_at INTEGER,
@@ -225,7 +233,7 @@ export const MIGRATIONS: readonly Migration[] = [
       );
 
       CREATE TABLE step_results (
-        subject_id TEXT NOT NULL REFERENCES enrollments(id),
+        subject_id TEXT NOT NULL REFERENCES subjects(id),
         step_id TEXT NOT NULL,
         track_id TEXT NOT NULL,
         result TEXT NOT NULL CHECK (result IN ('sent', 'skipped', 'failed')),
@@ -241,7 +249,8 @@ export const MIGRATIONS: readonly Migration[] = [
         channel TEXT NOT NULL CHECK (channel IN ('email', 'sms')),
         label TEXT NOT NULL,
         capacity INTEGER NOT NULL CHECK (capacity > 0),
-        gap_ms INTEGER NOT NULL CHECK (gap_ms > 0),
+        -- Null: the default gap of ADR 0003 4.1, from the windows the account serves.
+        gap_ms INTEGER CHECK (gap_ms IS NULL OR gap_ms > 0),
         k INTEGER NOT NULL CHECK (k > 0),
         next_slot_at INTEGER NOT NULL DEFAULT 0,
         healthy INTEGER NOT NULL DEFAULT 1,
@@ -253,7 +262,7 @@ export const MIGRATIONS: readonly Migration[] = [
 
       CREATE TABLE attempts (
         id TEXT PRIMARY KEY,
-        subject_id TEXT NOT NULL REFERENCES enrollments(id),
+        subject_id TEXT NOT NULL REFERENCES subjects(id),
         track_id TEXT NOT NULL,
         step_id TEXT NOT NULL,
         account_id TEXT NOT NULL REFERENCES sender_accounts(id),
@@ -261,6 +270,7 @@ export const MIGRATIONS: readonly Migration[] = [
         destination TEXT NOT NULL,
         state TEXT NOT NULL CHECK (state IN ('claimed', 'handed', 'accepted', 'sent', 'rejected', 'withdrawn')),
         copy TEXT,
+        threading TEXT NOT NULL CHECK (threading IN ('new_subject', 'continue_thread')),
         thread_ref TEXT,
         provider_ref TEXT,
         retryable INTEGER NOT NULL,
@@ -280,25 +290,29 @@ export const MIGRATIONS: readonly Migration[] = [
         reject_reason TEXT,
         sent_wall INTEGER,
         sent_day TEXT,
-        user_marked_not_sent INTEGER NOT NULL DEFAULT 0
+        user_marked_not_sent INTEGER NOT NULL DEFAULT 0,
+        holds_reservation INTEGER NOT NULL DEFAULT 1
       );
       CREATE UNIQUE INDEX one_live_attempt_per_step ON attempts(subject_id, step_id) WHERE state IN ('claimed', 'handed', 'accepted');
       CREATE UNIQUE INDEX one_sent_attempt_per_step ON attempts(subject_id, step_id) WHERE state = 'sent';
       CREATE INDEX attempts_by_subject ON attempts(subject_id);
       CREATE INDEX attempts_by_account_state ON attempts(account_id, state);
       CREATE INDEX attempts_by_provider_ref ON attempts(provider_ref);
+      CREATE INDEX attempts_by_key ON attempts(idempotency_key);
 
-      -- ADR 0002's ledger, read off the attempts so it cannot drift from them: a live attempt holds
-      -- a reservation, a sent one counts on the reset day of its send, and a rejected or withdrawn
-      -- one has released its place.
+      -- ADR 0002's ledger, read off the attempts so it cannot drift from them, one entry per
+      -- provider work (idempotency key): a send counts on the reset day of its send; work that has
+      -- not been sent and still holds a reservation (live, or withdrawn with its outcome uncertain)
+      -- counts as reserved (ADR 0003 4.2 as amended).
       CREATE VIEW capacity_ledger AS
-        SELECT account_id, CASE WHEN state = 'sent' THEN sent_day END AS reset_day, id AS attempt_id,
-          CASE WHEN state = 'sent' THEN 'sent' ELSE 'reserved' END AS kind
-        FROM attempts WHERE state IN ('claimed', 'handed', 'accepted', 'sent');
+        SELECT account_id, sent_day AS reset_day, idempotency_key AS work, 'sent' AS kind FROM attempts WHERE sent_wall IS NOT NULL
+        UNION
+        SELECT a.account_id, NULL, a.idempotency_key, 'reserved' FROM attempts a
+        WHERE a.holds_reservation = 1 AND NOT EXISTS (SELECT 1 FROM attempts s WHERE s.idempotency_key = a.idempotency_key AND s.sent_wall IS NOT NULL);
 
       CREATE TABLE replies (
         provider_ref TEXT PRIMARY KEY,
-        subject_id TEXT NOT NULL REFERENCES enrollments(id),
+        subject_id TEXT NOT NULL REFERENCES subjects(id),
         channel TEXT NOT NULL CHECK (channel IN ('email', 'sms')),
         at_wall INTEGER NOT NULL
       );

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { account, attempt, definition, H, handed, MONDAY_9, step, subjectState } from "../../../test/support/sequence-state.ts";
 import {
+  defaultGap,
   authorizeRetry,
   chooseAccount,
   claim,
@@ -171,5 +172,26 @@ describe("an inbox never stalls silently (ADR 0003 5.4)", () => {
     expect(stalledAccounts([account("inbox-a")], live, MONDAY_9 + ENGINE_PARAMS.SETTLING - 1)).toEqual([]);
     expect(stalledAccounts([account("inbox-a")], live, MONDAY_9 + ENGINE_PARAMS.SETTLING)).toEqual([{ accountId: "inbox-a", holding: ["pat@harbour.example"] }]);
     expect(stalledAccounts([account("inbox-a", { k: 2 })], live, MONDAY_9 + ENGINE_PARAMS.SETTLING)).toEqual([]);
+  });
+});
+
+describe("the default pacing gap (ADR 0003 4.1)", () => {
+  test("the shortest daily window among the tracks served, divided by capacity, at least 60 seconds", () => {
+    const weekdays = [{ day: 1, start: 9, end: 17 }];
+    const overnight = [{ day: 5, start: 22, end: 2 }];
+    expect(defaultGap([weekdays], 8)).toBe(H);
+    expect(defaultGap([weekdays, overnight], 4)).toBe(H);
+    expect(defaultGap([weekdays], 10_000)).toBe(60_000);
+    expect(defaultGap([], 5)).toBe(60_000);
+  });
+});
+
+describe("a continue-thread step with no thread (ruling 1)", () => {
+  test("is held as no_thread, refused at the claim, and fails the handover", () => {
+    const s = launched();
+    const sentNoRef = { ...s, attempts: [handed({ state: "sent", providerRef: null, sentWall: MONDAY_9 })], results: [{ stepId: "s1", trackId: "t1", result: "sent" as const, reason: null, at: 0, atWall: MONDAY_9, attemptId: "a-1" }] };
+    const pending = { ...sentNoRef, tracks: sentNoRef.tracks.map((t) => ({ ...t, nextStepId: "s2", dueAt: 0, dueWall: MONDAY_9 })) };
+    expect(heldReason(pending, "t1", MONDAY_9)).toBe("no_thread");
+    expect(claimRefusal(pending, item({ stepId: "s2" }), MONDAY_9)).toBe("there is no thread to continue");
   });
 });

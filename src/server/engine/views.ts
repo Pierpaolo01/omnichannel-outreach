@@ -100,6 +100,7 @@ export async function needsAttention(store: EngineStore, now: number): Promise<N
         ? [{ accountId: a.id, reason: a.waitReason, until: a.waitReason === "quota" ? null : iso(a.waitUntil) }]
         : [],
     ),
+    unhealthyInboxes: accounts.filter((a) => !a.healthy).map((a) => ({ accountId: a.id })),
     anomalies: (await store.anomalies()).map((x) => ({ what: x.what, at: new Date(x.atWall).toISOString() })),
   };
 }

@@ -294,7 +294,7 @@ export class FakeEmailPort implements SendPort {
     if (!last) return false;
     const id = `reply-${this.replyLog.length + 1}`;
     this.replyLog.push({ at: now, destination, id, threadRef: last.providerRef });
-    this.emit(now, { id, kind: "reply", providerRef: last.providerRef, at: now });
+    this.emit(now, { id, kind: "reply", providerRef: last.providerRef, at: now, inbox: last.sender, from: destination });
     return true;
   }
 
@@ -329,7 +329,7 @@ export class FakeEmailPort implements SendPort {
     const sent = all.find((w) => w.sentAt !== null && w.sentAt <= now);
     const w = all.at(-1);
     if (w?.lookupUnknown) return Promise.resolve({ kind: "unknown" });
-    if (sent) return Promise.resolve({ kind: "sent", sentAt: sent.sentAt ?? now });
+    if (sent) return Promise.resolve({ kind: "sent", sentAt: sent.sentAt ?? now, providerRef: sent.providerRef });
     if (!w || w.cancelled || w.sendAt === null) return Promise.resolve({ kind: "not-sent" });
     if (now < w.lookupNotSentUntil) return Promise.resolve({ kind: "not-sent" });
     return Promise.resolve({ kind: "queued" });

@@ -60,6 +60,6 @@ describe("the sequence interface for one email track (ticket 12b)", () => {
     expect((await api.get("/api/campaigns/nope/sequence")).status).toBe(404);
     expect((await api.get("/api/enrollments/nope")).status).toBe(404);
     expect((await put(api, "nope", { timezone: "UTC", emailPool: [], tracks: [] })).status).toBe(404);
-    expect((await api.get<NeedsAttention>("/api/needs-attention")).body).toEqual({ stalledInboxes: [], heldTracks: [], accountWaits: [], anomalies: [] });
+    expect((await api.get<NeedsAttention>("/api/needs-attention")).body).toEqual({ stalledInboxes: [], heldTracks: [], accountWaits: [], unhealthyInboxes: [], anomalies: [] });
   });
 });

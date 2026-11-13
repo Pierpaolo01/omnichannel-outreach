@@ -91,6 +91,7 @@ export function attempt(fields: Partial<Attempt> = {}): Attempt {
     destination: "pat@harbour.example",
     state: "claimed",
     copy: null,
+    threading: "new_subject",
     threadRef: null,
     providerRef: null,
     retryable: true,
@@ -116,6 +117,7 @@ export function attempt(fields: Partial<Attempt> = {}): Attempt {
     sentWall: null,
     sentDay: null,
     userMarkedNotSent: false,
+    holdsReservation: true,
     ...fields,
   };
 }

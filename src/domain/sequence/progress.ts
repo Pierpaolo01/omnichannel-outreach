@@ -285,28 +285,41 @@ export function applyToAttempt(
 ): { state: SubjectState; effects: readonly AttemptEffect[] } {
   const target = state.attempts.find((a) => a.id === attemptId);
   if (!target) throw new Error(`no attempt ${attemptId}`);
-  // One provider work per idempotency key. A step's attempts after a not-sent lookup share their
-  // key (5.3), so a send under that key belongs to the step's live attempt, and a step never gets
-  // a second sent attempt (invariant 3).
-  const reportsSent = event.kind === "sent_observed" || (event.kind === "lookup_answer" && event.answer.kind === "sent") || event.kind === "mark_sent";
-  if (reportsSent) {
-    const others = state.attempts.filter((a) => a.id !== target.id && a.stepId === target.stepId);
-    const sentAlready = others.find((a) => a.state === "sent");
-    if (sentAlready) {
-      if (isLive(target) && target.idempotencyKey === sentAlready.idempotencyKey) {
-        const settled = withAttempt(state, { ...target, state: "withdrawn", endedBy: "provider", nextLookupWall: null, awaitingAnswer: false });
-        return { state: runs(settled) ? evaluate(settled, now) : settled, effects: [] };
-      }
-      return { state, effects: [{ kind: "ignored", what: "the step was already sent" }] };
+  const sentFact = event.kind === "sent_observed" || (event.kind === "lookup_answer" && event.answer.kind === "sent");
+  if (sentFact) {
+    const ref = event.kind === "sent_observed" ? event.providerRef : event.kind === "lookup_answer" ? (event.answer.providerRef ?? null) : null;
+    const sentAlready = state.attempts.find((a) => a.stepId === target.stepId && a.state === "sent");
+    if (sentAlready && sentAlready.idempotencyKey === target.idempotencyKey) {
+      // A later fact about work already settled as sent: attach a missing reference (ruling 1); an
+      // attempt still live for that same work is settled by the provider's statement (ruling 4).
+      let s = withAttempt(state, sentAlready.providerRef === null && ref ? { ...sentAlready, providerRef: ref } : sentAlready);
+      if (isLive(target)) s = withAttempt(s, { ...target, state: "withdrawn", endedBy: "provider", holdsReservation: false, nextLookupWall: null, awaitingAnswer: false, retry: "refused" });
+      return { state: runs(s) ? evaluate(s, now) : s, effects: [{ kind: "ignored", what: "the work was already settled as sent" }] };
     }
-    const inheritor = target.state === "withdrawn" ? others.find((a) => isLive(a) && a.idempotencyKey === target.idempotencyKey) : undefined;
-    if (inheritor) return applyToAttempt(state, inheritor.id, event, now, options);
+    // A provider send belongs to the provider work that produced it: the step's first attempt
+    // handed over under this key, with its own handover time, payload and send basis (ruling 4).
+    const work = state.attempts
+      .filter((a) => a.stepId === target.stepId && a.idempotencyKey === target.idempotencyKey && a.handedWall !== null)
+      .sort((x, y) => (x.handedWall ?? 0) - (y.handedWall ?? 0))[0];
+    if (work && work.id !== target.id) return applyToAttempt(state, work.id, event, now, options);
   }
-  const before = target;
-  const { attempt, effects } = applyAttemptEvent(before, event);
+  const { attempt, effects } = applyAttemptEvent(target, event);
   let s = withAttempt(state, attempt);
   for (const effect of effects) {
-    if (effect.kind === "sent") s = recordSent(s, attempt, effect.providerTime, now, options);
+    if (effect.kind === "sent") {
+      s = recordSent(s, attempt, effect.providerTime, now, options);
+      // Its inheritors under the same key are quiesced, whether claimed or handed.
+      for (const other of s.attempts) {
+        if (other.id !== attempt.id && other.stepId === attempt.stepId && other.idempotencyKey === attempt.idempotencyKey && isLive(other)) {
+          s = withAttempt(s, applyAttemptEvent(other, { kind: "quiesce" }).attempt);
+        }
+      }
+    }
+    if (effect.kind === "sent_after_withdrawal") {
+      // Counted on its send day for capacity; it is never a second send of the step.
+      const at = Math.min(Math.max(effect.providerTime, attempt.handedWall ?? attempt.claimedWall), now);
+      s = withAttempt(s, { ...attempt, sentWall: at, sentDay: options.resetDay(attempt.accountId, at), holdsReservation: false });
+    }
     if (effect.kind === "rejected") s = recordRejected(s, attempt, effect.reason, now);
   }
   return { state: runs(s) ? evaluate(s, now) : s, effects };
@@ -321,7 +334,7 @@ function recordSent(
 ): SubjectState {
   const point = (options.point ?? sendPoint)(state.subject.clock, state.freezes, providerTime, attempt.handedWall ?? attempt.claimedWall, now);
   const sentWall = Math.min(Math.max(providerTime, attempt.handedWall ?? attempt.claimedWall), now);
-  let s = withAttempt(state, { ...attempt, sentWall, sentDay: options.resetDay(attempt.accountId, sentWall) });
+  let s = withAttempt(state, { ...attempt, sentWall, sentDay: options.resetDay(attempt.accountId, sentWall), holdsReservation: false });
   s = { ...s, subject: { ...s.subject, touched: true } };
   if (s.results.some((r) => r.stepId === attempt.stepId)) return s;
   s = { ...s, results: [...s.results, { stepId: attempt.stepId, trackId: attempt.trackId, result: "sent", reason: null, at: point.at, atWall: point.atWall, attemptId: attempt.id }] };
@@ -355,7 +368,7 @@ function recordRejected(state: SubjectState, attempt: Attempt, reason: Attempt["
 // ---------------------------------------------------------------------------------------------
 // Holds (5.4), derived.
 
-export type HoldReason = "unresolved" | "render_failed" | "provider_skipped";
+export type HoldReason = "unresolved" | "render_failed" | "provider_skipped" | "no_thread";
 
 /** Why a started, unfinished track cannot proceed without guessing or the user, or null. */
 export function trackHold(state: SubjectState, trackId: string): HoldReason | null {

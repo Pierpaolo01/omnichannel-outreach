@@ -39,6 +39,17 @@ export function renderStep(state: SubjectState, trackId: string, stepId: string)
   return subject.ok && body.ok ? { subject: subject.text, body: body.text } : null;
 }
 
+/** The thread a continue-thread step continues: the provider reference of the track's latest send. */
+export function threadOf(state: SubjectState, trackId: string): string | null {
+  const sent = state.attempts.filter((a) => a.trackId === trackId && a.state === "sent").sort((a, b) => (a.sentWall ?? 0) - (b.sentWall ?? 0));
+  return sent.at(-1)?.providerRef ?? null;
+}
+
+/** A continue-thread step with no thread to continue is held, not sent (ruling 1). */
+export function lacksThread(state: SubjectState, trackId: string, stepId: string): boolean {
+  return stepDef(state, trackId, stepId)?.threading === "continue_thread" && threadOf(state, trackId) === null;
+}
+
 /** A held track's reason (5.4), including a pending step whose copy cannot render for this lead. */
 export function heldReason(state: SubjectState, trackId: string, now: number): HoldReason | null {
   const hold = trackHold(state, trackId);
@@ -46,6 +57,8 @@ export function heldReason(state: SubjectState, trackId: string, now: number): H
   const progress = progressOf(state, trackId);
   if (!progress?.nextStepId || progress.finishedAt !== null || progress.dueAt === null) return null;
   if (progress.dueAt > leadNow(state.subject.clock, now)) return null;
+  if (state.attempts.some((a) => a.stepId === progress.nextStepId && isLive(a))) return null;
+  if (lacksThread(state, trackId, progress.nextStepId)) return "no_thread";
   return renderStep(state, trackId, progress.nextStepId) ? null : "render_failed";
 }
 
@@ -84,6 +97,7 @@ export function claimRefusal(state: SubjectState, item: ReadyItem, now: number):
   const dest = p.destinationDetailId ? state.lead.resolved[p.destinationDetailId] : undefined;
   if (!dest || dest.bad || !dest.owned) return "the destination is not a good address of the lead";
   if (!renderStep(state, item.trackId, item.stepId)) return "the copy does not render for this lead";
+  if (lacksThread(state, item.trackId, item.stepId)) return "there is no thread to continue";
   return null;
 }
 
@@ -91,21 +105,27 @@ export function accountAvailable(account: AccountState, now: number): boolean {
   return account.healthy && (account.waitUntil === null || now >= account.waitUntil);
 }
 
-/** Capacity and the in-flight bound (4.2 step 3). */
-export function accountHasRoom(account: AccountState): boolean {
-  return account.used < account.capacity && account.inFlight < account.k;
+/** Capacity and the in-flight bound (4.2 step 3). An attempt inheriting uncertain work already holds that work's reservation. */
+export function accountHasRoom(account: AccountState, reservedAlready = false): boolean {
+  return (reservedAlready || account.used < account.capacity) && account.inFlight < account.k;
+}
+
+/** The step's uncertain work this claim inherits the key of, whose reservation it carries on (ruling 3). */
+export function inheritedWork(state: SubjectState, stepId: string): Attempt | undefined {
+  return state.attempts.find((a) => a.stepId === stepId && a.endedBy === "lookup_not_sent");
 }
 
 /**
  * The account a claim uses (4.2 step 2): the subject's fixed sender, or the pool's account that
  * can send soonest, then the one with most remaining capacity, then the lowest id.
  */
-export function chooseAccount(state: SubjectState, now: number): AccountState | null {
+export function chooseAccount(state: SubjectState, now: number, stepId: string | null = null): AccountState | null {
   const fixed = state.subject.emailSender;
   const candidates = fixed !== null ? [state.accounts[fixed]] : state.campaign.definition.emailPool.map((id) => state.accounts[id]);
+  const inherited = stepId === null ? undefined : inheritedWork(state, stepId);
   return (
     candidates
-      .filter((a): a is AccountState => a !== undefined && accountAvailable(a, now) && accountHasRoom(a))
+      .filter((a): a is AccountState => a !== undefined && accountAvailable(a, now) && accountHasRoom(a, inherited?.holdsReservation === true && inherited.accountId === a.id))
       .sort((a, b) => Math.max(a.nextSlotAt, now) - Math.max(b.nextSlotAt, now) || b.capacity - b.used - (a.capacity - a.used) || (a.id < b.id ? -1 : 1))[0] ?? null
   );
 }
@@ -120,7 +140,8 @@ export function claim(
   const p = progressOf(state, item.trackId);
   if (!p?.destinationDetailId) throw new Error("claim without a destination");
   const destination = state.lead.details.find((d) => d.id === state.lead.resolved[p.destinationDetailId ?? ""]?.liveId);
-  const inherited = state.attempts.find((a) => a.stepId === item.stepId && a.endedBy === "lookup_not_sent");
+  const inherited = inheritedWork(state, item.stepId);
+  const carriesReservation = inherited?.holdsReservation === true && inherited.accountId === account.id;
   const attempt: Attempt = {
     id: input.attemptId,
     subjectId: state.subject.id,
@@ -131,6 +152,7 @@ export function claim(
     destination: destination?.value ?? "",
     state: "claimed",
     copy: null,
+    threading: stepDef(state, item.trackId, item.stepId)?.threading ?? "new_subject",
     threadRef: null,
     providerRef: null,
     retryable: input.retryable,
@@ -156,20 +178,18 @@ export function claim(
     sentWall: null,
     sentDay: null,
     userMarkedNotSent: false,
+    holdsReservation: true,
   };
   return {
     ...state,
     attempts: [...state.attempts, attempt],
-    accounts: { ...state.accounts, [account.id]: { ...account, used: account.used + 1, inFlight: account.inFlight + 1 } },
+    accounts: { ...state.accounts, [account.id]: { ...account, used: account.used + (carriesReservation ? 0 : 1), inFlight: account.inFlight + 1 } },
   };
 }
 
 /** Whether the email step continues the thread, and the provider reference it continues. */
 export function threadFor(state: SubjectState, attempt: Attempt): string | null {
-  const step = stepDef(state, attempt.trackId, attempt.stepId);
-  if (step?.threading !== "continue_thread") return null;
-  const sent = state.attempts.filter((a) => a.trackId === attempt.trackId && a.state === "sent" && a.providerRef !== null);
-  return sent.sort((a, b) => (a.sentWall ?? 0) - (b.sentWall ?? 0)).at(-1)?.providerRef ?? null;
+  return attempt.threading === "continue_thread" ? threadOf(state, attempt.trackId) : null;
 }
 
 /** Predicates 1-9 and 12-13 of 5.5, shared by the handover and the retry authorization. */
@@ -203,6 +223,7 @@ export function handoverFailures(state: SubjectState, attempt: Attempt, account:
   if (fixed !== null ? fixed !== account.id : !state.campaign.definition.emailPool.includes(account.id)) failed.push(10);
   if (!presendFresh(attempt, now)) failed.push(14);
   if (!renderStep(state, attempt.trackId, attempt.stepId)) failed.push(5);
+  if (lacksThread(state, attempt.trackId, attempt.stepId)) failed.push(17);
   if (now < account.nextSlotAt) failed.push(16);
   return [...new Set(failed)].sort((a, b) => a - b);
 }
@@ -267,4 +288,15 @@ export function stalledAccounts(
     const old = holding.filter((a) => now - (a.lastCallWall ?? a.claimedWall) >= ENGINE_PARAMS.SETTLING);
     return holding.length >= acc.k && old.length >= acc.k ? [{ accountId: acc.id, holding: old.map((a) => a.destination) }] : [];
   });
+}
+
+/**
+ * The default pacing gap (ADR 0003 4.1): the shortest daily window among the tracks the account
+ * serves, divided by its daily capacity, and at least 60 seconds, so a full day's capacity fits
+ * inside the window.
+ */
+export function defaultGap(windows: readonly (readonly { readonly start: number; readonly end: number }[])[], capacity: number): number {
+  const hours = windows.flatMap((w) => w.map((r) => (r.start < r.end ? r.end - r.start : 24 - r.start + r.end)));
+  if (hours.length === 0 || capacity <= 0) return 60_000;
+  return Math.max(60_000, Math.floor((Math.min(...hours) * 3_600_000) / capacity));
 }

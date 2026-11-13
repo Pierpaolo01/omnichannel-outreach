@@ -1,5 +1,6 @@
 import { createApp } from "../../src/server/app.ts";
-import { Engine, type EngineHooks } from "../../src/server/engine/engine.ts";
+import { Engine, type EngineDependencies, type EngineHooks } from "../../src/server/engine/engine.ts";
+import type { SendPort } from "../../src/server/engine/ports.ts";
 import type { Rules } from "../../src/server/engine/rules.ts";
 import { openSqliteStore } from "../../src/server/persistence/sqlite-store.ts";
 import type { OutreachStore } from "../../src/server/persistence/store.ts";
@@ -21,7 +22,14 @@ export interface EngineHarnessOptions {
   readonly random?: () => number;
   readonly rules?: Partial<Rules>;
   readonly hooks?: EngineHooks;
+  /** A provider other than the generated test's fake, such as a scripted one. */
+  readonly port?: Provider;
+  /** Further engine dependencies, such as how port waits are bounded. */
+  readonly engine?: Partial<EngineDependencies>;
 }
+
+/** A provider the harness can drive: it acts on its own at instants the harness advances to. */
+export type Provider = SendPort & { advance(): void; nextActivityAt(): number | null };
 
 export class Crash extends Error {
   constructor(point: string) {
@@ -32,7 +40,7 @@ export class Crash extends Error {
 export class EngineHarness {
   clock: number;
   readonly store: OutreachStore;
-  readonly fake: FakeEmailPort;
+  readonly provider: Provider;
   engine: Engine;
   readonly crashes: string[] = [];
   /** Engine ticks run so far. */
@@ -48,7 +56,7 @@ export class EngineHarness {
     this.hooks = options.hooks ?? {};
     this.clock = options.start;
     this.store = openSqliteStore(":memory:");
-    this.fake = new FakeEmailPort({ now: () => this.clock, random: options.random ?? (() => 0.5), accounts: options.accounts, modes: options.modes ?? ["honest"] });
+    this.provider = options.port ?? new FakeEmailPort({ now: () => this.clock, random: options.random ?? (() => 0.5), accounts: options.accounts, modes: options.modes ?? ["honest"] });
     this.engine = this.newEngine();
     this.app = createApp({
       store: this.store,
@@ -58,10 +66,17 @@ export class EngineHarness {
     });
   }
 
+  /** The generated test's fake provider. */
+  get fake(): FakeEmailPort {
+    if (!(this.provider instanceof FakeEmailPort)) throw new Error("this harness runs a different provider");
+    return this.provider;
+  }
+
   private newEngine(): Engine {
     return new Engine({
+      ...this.options.engine,
       store: this.store.engine,
-      port: this.fake,
+      port: this.provider,
       now: () => this.clock,
       newId: this.engineIds,
       ...(this.options.rules ? { rules: this.options.rules } : {}),
@@ -69,6 +84,7 @@ export class EngineHarness {
         beforeApplyEvaluation: async (id) => this.hooks.beforeApplyEvaluation?.(id),
         beforeHandover: async (id) => this.hooks.beforeHandover?.(id),
         beforeRetry: async (id) => this.hooks.beforeRetry?.(id),
+        afterAuthorization: (id) => this.hooks.afterAuthorization?.(id),
         crashPoint: (point, id) => this.hooks.crashPoint?.(point, id),
       },
     });
@@ -101,7 +117,7 @@ export class EngineHarness {
   }
 
   async launch(campaignId: string): Promise<{ status: number; body: unknown }> {
-    this.fake.advance();
+    this.provider.advance();
     return this.request("POST", `/api/campaigns/${campaignId}/launch`);
   }
 
@@ -120,7 +136,7 @@ export class EngineHarness {
     this.ticks++;
     // Yield to the event loop, so the test runner's worker can answer its RPC on long runs.
     await new Promise((resolve) => setImmediate(resolve));
-    this.fake.advance();
+    this.provider.advance();
     try {
       await this.engine.tick();
     } catch (error) {
@@ -135,8 +151,8 @@ export class EngineHarness {
    * it applies an injected event at once, while the main engine is between two steps.
    */
   async otherWorker(): Promise<void> {
-    this.fake.advance();
-    await new Engine({ store: this.store.engine, port: this.fake, now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) }).tick();
+    this.provider.advance();
+    await new Engine({ ...this.options.engine, store: this.store.engine, port: this.provider, now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) }).tick();
   }
 
   /** A fresh engine on the same store and provider, settling what the crash left open. */
@@ -144,7 +160,7 @@ export class EngineHarness {
     this.engine = this.newEngine();
     for (let i = 0; i < 20; i++) {
       try {
-        this.fake.advance();
+        this.provider.advance();
         await this.engine.recover();
         return;
       } catch (error) {
@@ -160,7 +176,7 @@ export class EngineHarness {
   async advanceTo(target: number, onInstant?: () => Promise<void>): Promise<void> {
     await this.tick();
     for (let guard = 0; guard < 100_000 && this.clock < target; guard++) {
-      const wakes = [await this.engine.nextWakeAt(), this.fake.nextActivityAt(), target].filter((t): t is number => t !== null && t > this.clock);
+      const wakes = [await this.engine.nextWakeAt(), this.provider.nextActivityAt(), target].filter((t): t is number => t !== null && t > this.clock);
       this.clock = Math.min(...wakes);
       await this.tick();
       await onInstant?.();

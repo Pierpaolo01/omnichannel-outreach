@@ -1,6 +1,7 @@
 import type { DatabaseSync, SQLInputValue, SQLOutputValue, StatementSync } from "node:sqlite";
 import type { SenderAccountView } from "../../domain/sequence/blockers.ts";
-import { prospectZone, resetDayOf } from "../../domain/sequence/clock.ts";
+import { prospectZone, resetDayOf, type WindowRule } from "../../domain/sequence/clock.ts";
+import { defaultGap } from "../../domain/sequence/dispatch.ts";
 import type { MergeData } from "../../domain/sequence/copy.ts";
 import { emptyDefinition, type CampaignDefinition } from "../../domain/sequence/definition.ts";
 import { deriveStatus } from "../../domain/sequence/progress.ts";
@@ -76,12 +77,10 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   private launchInputsNow(campaignId: string): { leads: MergeData[]; accounts: SenderAccountView[] } {
-    const leads = this.db
-      .prepare("SELECT * FROM enrollments WHERE campaign_id = ? AND ended IS NULL ORDER BY enrolled_at, id")
+    const leads = this.sql("SELECT * FROM enrollments WHERE campaign_id = ? AND ended IS NULL ORDER BY enrolled_at, id")
       .all(campaignId)
       .map((e) => this.mergeDataOf(e));
-    const accounts = this.db
-      .prepare("SELECT id, channel, healthy FROM sender_accounts ORDER BY id")
+    const accounts = this.sql("SELECT id, channel, healthy FROM sender_accounts ORDER BY id")
       .all()
       .map((a) => ({ id: str(a, "id"), channel: str(a, "channel") === "sms" ? ("sms" as const) : ("email" as const), healthy: num(a, "healthy") === 1 }));
     return { leads, accounts };
@@ -124,8 +123,7 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   async runningSubjectIds(): Promise<string[]> {
-    return this.db
-      .prepare(
+    return this.sql(
         `SELECT e.id FROM enrollments e JOIN campaigns c ON c.id = e.campaign_id
          WHERE c.launched_at IS NOT NULL AND e.ended IS NULL ORDER BY e.id`,
       )
@@ -157,8 +155,7 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   async openAttempts(): Promise<Attempt[]> {
-    return this.db
-      .prepare(`SELECT * FROM attempts WHERE state IN ${LIVE_STATES} OR (state = 'withdrawn' AND ended_by = 'lookup_not_sent') ORDER BY claimed_wall, rowid`)
+    return this.sql(`SELECT * FROM attempts WHERE state IN ${LIVE_STATES} OR (state = 'withdrawn' AND ended_by = 'lookup_not_sent') ORDER BY claimed_wall, rowid`)
       .all()
       .map(toAttempt);
   }
@@ -166,6 +163,19 @@ export class SqliteEngineStore implements EngineStore {
   async attempt(attemptId: string): Promise<Attempt | null> {
     const row = this.sql("SELECT * FROM attempts WHERE id = ?").get(attemptId);
     return row ? toAttempt(row) : null;
+  }
+
+  async attemptsByKey(key: string): Promise<Attempt[]> {
+    return this.sql("SELECT * FROM attempts WHERE idempotency_key = ? ORDER BY claimed_wall, rowid").all(key).map(toAttempt);
+  }
+
+  async subjectsReachedFrom(inbox: string, address: string): Promise<string[]> {
+    // A reply outside any known thread is reconciled by the inbox it reached and the lead's address (ruling 1).
+    return this.sql(
+      `SELECT DISTINCT a.subject_id FROM attempts a WHERE a.account_id = ? AND lower(a.destination) = lower(?) AND a.calls > 0 ORDER BY a.subject_id`,
+    )
+      .all(inbox, address)
+      .map((r) => str(r, "subject_id"));
   }
 
   async attemptByProviderRef(providerRef: string): Promise<Attempt | null> {
@@ -188,6 +198,11 @@ export class SqliteEngineStore implements EngineStore {
 
   async accounts(now: number): Promise<AccountState[]> {
     return this.sql("SELECT id FROM sender_accounts ORDER BY id").all().map((r) => this.accountState(str(r, "id"), now)).filter((a): a is AccountState => a !== null);
+  }
+
+  async pushSlot(accountId: string, callStart: number): Promise<void> {
+    const account = this.accountState(accountId, callStart);
+    if (account) this.run("UPDATE sender_accounts SET next_slot_at = MAX(next_slot_at, ?) WHERE id = ?", [callStart + account.gapMs, accountId]);
   }
 
   async accountLabels(): Promise<Record<string, string>> {
@@ -217,8 +232,7 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   async anomalies(): Promise<{ attemptId: string | null; what: string; atWall: number }[]> {
-    return this.db
-      .prepare("SELECT * FROM provider_anomalies ORDER BY seq")
+    return this.sql("SELECT * FROM provider_anomalies ORDER BY seq")
       .all()
       .map((r) => ({ attemptId: strOrNull(r, "attempt_id"), what: str(r, "what"), atWall: num(r, "at_wall") }));
   }
@@ -229,19 +243,22 @@ export class SqliteEngineStore implements EngineStore {
     const a = this.sql("SELECT * FROM sender_accounts WHERE id = ?").get(id);
     if (!a) return null;
     const resetZone = str(a, "reset_zone");
+    // The ledger counts provider work (keys): sent on today's reset day, plus work not yet sent
+    // that holds a reservation, live or withdrawn with its outcome uncertain (ADR 0003 4.2, ruling 3).
     const counts =
-      this.db
-        .prepare(
-          `SELECT COALESCE(SUM(state IN ${LIVE_STATES}), 0) AS live,
-             COALESCE(SUM(state = 'sent' AND sent_day = ?), 0) AS sent_today
-           FROM attempts WHERE account_id = ?`,
-        )
-        .get(resetDayOf(now, resetZone), id) ?? {};
+      this.sql(
+        `SELECT
+           (SELECT COUNT(*) FROM attempts WHERE account_id = :id AND state IN ${LIVE_STATES}) AS live,
+           (SELECT COUNT(DISTINCT idempotency_key) FROM attempts WHERE account_id = :id AND sent_wall IS NOT NULL AND sent_day = :today) AS sent_today,
+           (SELECT COUNT(DISTINCT a.idempotency_key) FROM attempts a WHERE a.account_id = :id AND a.holds_reservation = 1
+              AND NOT EXISTS (SELECT 1 FROM attempts s WHERE s.idempotency_key = a.idempotency_key AND s.sent_wall IS NOT NULL)) AS reserved`,
+      ).get({ id, today: resetDayOf(now, resetZone) }) ?? {};
+    const capacity = num(a, "capacity");
     return {
       id,
       channel: "email",
-      capacity: num(a, "capacity"),
-      gapMs: num(a, "gap_ms"),
+      capacity,
+      gapMs: numOrNull(a, "gap_ms") ?? defaultGap(this.windowsServedBy(id), capacity),
       k: num(a, "k"),
       nextSlotAt: num(a, "next_slot_at"),
       healthy: num(a, "healthy") === 1,
@@ -249,9 +266,18 @@ export class SqliteEngineStore implements EngineStore {
       waitReason: strOrNull(a, "wait_reason") as AccountState["waitReason"],
       backoffMs: num(a, "backoff_ms"),
       resetZone,
-      used: num(counts, "live") + num(counts, "sent_today"),
+      used: num(counts, "sent_today") + num(counts, "reserved"),
       inFlight: num(counts, "live"),
     };
+  }
+
+  /** The windows of every live email track whose pool includes the account (ADR 0003 4.1's default gap). */
+  private windowsServedBy(accountId: string): WindowRule[][] {
+    return this.sql("SELECT * FROM campaigns WHERE definition IS NOT NULL")
+      .all()
+      .map((c) => this.definitionOf(c))
+      .filter((d) => d.emailPool.includes(accountId))
+      .flatMap((d) => d.tracks.filter((t) => !t.removed && t.channel === "email").map((t) => [...t.window]));
   }
 
   /** Parsed definitions, by campaign and definition version: a version is never rewritten. */
@@ -292,8 +318,7 @@ export class SqliteEngineStore implements EngineStore {
     const company = this.sql("SELECT timezone FROM companies WHERE id = ?").get(companyId);
 
     const owner = personId === null ? { kind: "company", id: companyId } : { kind: "person", id: personId };
-    const details: LeadDetail[] = this.db
-      .prepare("SELECT * FROM live_contact_details WHERE owner_kind = ? AND owner_id = ? ORDER BY row_order")
+    const details: LeadDetail[] = this.sql("SELECT * FROM live_contact_details WHERE owner_kind = ? AND owner_id = ? ORDER BY row_order")
       .all(owner.kind, owner.id)
       .map((d) => ({
         id: str(d, "id"),
@@ -355,8 +380,7 @@ export class SqliteEngineStore implements EngineStore {
         definition,
       },
       tracks,
-      results: this.db
-        .prepare("SELECT * FROM step_results WHERE subject_id = ? ORDER BY at, rowid")
+      results: this.sql("SELECT * FROM step_results WHERE subject_id = ? ORDER BY at, rowid")
         .all(subjectId)
         .map((r) => ({
           stepId: str(r, "step_id"),
@@ -368,12 +392,10 @@ export class SqliteEngineStore implements EngineStore {
           attemptId: strOrNull(r, "attempt_id"),
         })),
       attempts,
-      freezes: this.db
-        .prepare("SELECT * FROM freezes WHERE subject_id = ? ORDER BY seq")
+      freezes: this.sql("SELECT * FROM freezes WHERE subject_id = ? ORDER BY seq")
         .all(subjectId)
         .map((f) => ({ fromWall: num(f, "from_wall"), toWall: numOrNull(f, "to_wall") })),
-      replies: this.db
-        .prepare("SELECT * FROM replies WHERE subject_id = ? ORDER BY at_wall, rowid")
+      replies: this.sql("SELECT * FROM replies WHERE subject_id = ? ORDER BY at_wall, rowid")
         .all(subjectId)
         .map((r) => ({ channel: str(r, "channel") === "sms" ? ("sms" as const) : ("email" as const), atWall: num(r, "at_wall"), providerRef: str(r, "provider_ref") })),
       lead: {
@@ -421,11 +443,11 @@ export class SqliteEngineStore implements EngineStore {
       if (same(base.attempts.find((b) => b.id === a.id), a)) continue;
       changed = true;
       this.run(
-        `INSERT INTO attempts (id, subject_id, track_id, step_id, account_id, destination_detail_id, destination, state, copy, thread_ref, provider_ref,
+        `INSERT INTO attempts (id, subject_id, track_id, step_id, account_id, destination_detail_id, destination, state, copy, threading, thread_ref, provider_ref,
            retryable, not_sent_final, idempotency_key, calls, claimed_wall, handed_at, handed_wall, last_call_wall, presend_checked_wall,
            presend_found_reply, lookup_answer, queued_lookups, next_lookup_wall, unresolved_since, ended_by, withdraw_requested, withdraw_called,
-           awaiting_answer, retry, reject_reason, sent_wall, sent_day, user_marked_not_sent)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           awaiting_answer, retry, reject_reason, sent_wall, sent_day, user_marked_not_sent, holds_reservation)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET state = excluded.state, copy = excluded.copy, thread_ref = excluded.thread_ref,
            provider_ref = excluded.provider_ref, calls = excluded.calls, handed_at = excluded.handed_at, handed_wall = excluded.handed_wall,
            last_call_wall = excluded.last_call_wall, presend_checked_wall = excluded.presend_checked_wall, presend_found_reply = excluded.presend_found_reply,
@@ -433,12 +455,12 @@ export class SqliteEngineStore implements EngineStore {
            unresolved_since = excluded.unresolved_since, ended_by = excluded.ended_by, withdraw_requested = excluded.withdraw_requested,
            withdraw_called = excluded.withdraw_called, awaiting_answer = excluded.awaiting_answer, retry = excluded.retry,
            reject_reason = excluded.reject_reason, sent_wall = excluded.sent_wall, sent_day = excluded.sent_day,
-           user_marked_not_sent = excluded.user_marked_not_sent`,
+           user_marked_not_sent = excluded.user_marked_not_sent, holds_reservation = excluded.holds_reservation`,
         [
-          a.id, id, a.trackId, a.stepId, a.accountId, a.destinationDetailId, a.destination, a.state, a.copy ? JSON.stringify(a.copy) : null, a.threadRef, a.providerRef,
+          a.id, id, a.trackId, a.stepId, a.accountId, a.destinationDetailId, a.destination, a.state, a.copy ? JSON.stringify(a.copy) : null, a.threading, a.threadRef, a.providerRef,
           a.retryable ? 1 : 0, a.notSentIsFinal ? 1 : 0, a.idempotencyKey, a.calls, a.claimedWall, a.handedAt, a.handedWall, a.lastCallWall, a.presendCheckedWall,
           a.presendFoundReply ? 1 : 0, a.lookupAnswer, a.queuedLookups, a.nextLookupWall, a.unresolvedSince, a.endedBy, a.withdrawRequested ? 1 : 0, a.withdrawCalled ? 1 : 0,
-          a.awaitingAnswer ? 1 : 0, a.retry, a.rejectReason, a.sentWall, a.sentDay, a.userMarkedNotSent ? 1 : 0,
+          a.awaitingAnswer ? 1 : 0, a.retry, a.rejectReason, a.sentWall, a.sentDay, a.userMarkedNotSent ? 1 : 0, a.holdsReservation ? 1 : 0,
         ],
       );
     }
@@ -542,6 +564,7 @@ function toAttempt(r: Row): Attempt {
     state: str(r, "state") as AttemptState,
     // Written by this module from a RenderedCopy.
     copy: r["copy"] == null ? null : (JSON.parse(str(r, "copy")) as Attempt["copy"]),
+    threading: str(r, "threading") === "continue_thread" ? "continue_thread" : "new_subject",
     threadRef: strOrNull(r, "thread_ref"),
     providerRef: strOrNull(r, "provider_ref"),
     retryable: num(r, "retryable") === 1,
@@ -567,6 +590,7 @@ function toAttempt(r: Row): Attempt {
     sentWall: numOrNull(r, "sent_wall"),
     sentDay: strOrNull(r, "sent_day"),
     userMarkedNotSent: num(r, "user_marked_not_sent") === 1,
+    holdsReservation: num(r, "holds_reservation") === 1,
   };
 }
 
