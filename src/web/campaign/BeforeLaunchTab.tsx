@@ -1,11 +1,12 @@
 import { useId, useRef, useState, type ReactNode } from "react";
 import { Link, useLocation } from "wouter";
-import type { BeforeLaunchView, CampaignDefinition, CopyPreview, CopySegment, LaunchBlocker, PreviewLead } from "../../shared/api.ts";
+import type { BeforeLaunchView, CampaignDefinition, CopyPreview, CopySegment, PreviewLead } from "../../shared/api.ts";
 import { useApi } from "../api.ts";
 import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
 import { campaignPath, longDate } from "../pages/CampaignPage.tsx";
-import { fieldLabel, sendsOnItsOwn, STEP_NOUN, stepUsing, trackName, trackTitle, usesOf } from "./model.ts";
+import { fieldLabel, sendsOnItsOwn, trackName, trackTitle } from "./model.ts";
+import { describeBlocker } from "./blocker-wording.ts";
 import { CANNOT_SEND, ConflictNotice } from "./SequenceTab.tsx";
 import type { SequenceEditor } from "./useSequence.ts";
 import { withheldExplanation } from "./withheld.ts";
@@ -161,19 +162,21 @@ function Blockers({ campaignId, editor }: { campaignId: string; editor: Sequence
       ) : (
         <ul className="flex flex-col gap-2">
           {blockers.map((b) => {
-            const { title, detail, action, trackId, stepId } = describeBlocker(b, def);
+            const { title, detail, actions } = describeBlocker(b, def);
             return (
               <li key={JSON.stringify(b)} className="flex flex-wrap items-start gap-x-2.5 gap-y-2 rounded-field bg-crit-soft px-3.5 py-3 text-[14px]">
                 <Icon name="bad" className="mt-0.5 size-[18px] text-crit" />
-                <span className="min-w-0 flex-[1_1_240px]">
+                <span className="min-w-0 flex-[1_1_240px] [overflow-wrap:anywhere]">
                   <b className="font-semibold">{title}</b>
                   <span className="block text-ink-2">{detail}</span>
                 </span>
-                {action !== null && trackId && (
-                  <button type="button" className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={() => open(trackId, stepId)}>
-                    {action}
-                  </button>
-                )}
+                <span className="flex flex-wrap gap-1.5">
+                  {actions.map((a) => (
+                    <button key={`${a.trackId}/${a.stepId ?? ""}`} type="button" className="btn btn-sm h-auto min-h-7 border-line-strong bg-base-100 py-1 font-medium" onClick={() => open(a.trackId, a.stepId)}>
+                      {a.label}
+                    </button>
+                  ))}
+                </span>
               </li>
             );
           })}
@@ -183,58 +186,7 @@ function Blockers({ campaignId, editor }: { campaignId: string; editor: Sequence
   );
 }
 
-/** The first live message, on any track, that uses `field`: with no fallback first, else any use. */
-function firstUsing(def: CampaignDefinition, field: string): { trackId: string; stepId: string } | null {
-  const tracks = def.tracks.filter((t) => !t.removed && t.branch === "main" && t.channel !== "call");
-  for (const withoutFallback of [true, false]) {
-    for (const t of tracks) {
-      const step = stepUsing(t, field);
-      if (step && (!withoutFallback || usesOf(step).some((u) => u.field === field && u.fallback === null))) return { trackId: t.id, stepId: step.id };
-    }
-  }
-  return null;
-}
-
-/**
- * What a blocker says, and where it is fixed. A blocker is named by the track it belongs to, by
- * that track's own channel and order (email, SMS), never by its position, and its action opens the
- * track and message it names (ticket 13b: SMS tracks open here too).
- */
-function describeBlocker(b: LaunchBlocker, def: CampaignDefinition): { title: string; detail: ReactNode; action: string | null; trackId?: string; stepId?: string } {
-  if (b.kind === "missing_merge_field") {
-    const at = firstUsing(def, b.field);
-    return {
-      title: `${capitalise(fieldLabel(b.field))} has no fallback`,
-      detail: `${b.leadsMissing} ${b.leadsMissing === 1 ? "lead has" : "leads have"} no ${fieldLabel(b.field)}. Add a fallback or remove the field.`,
-      action: at ? "Add fallback" : null,
-      ...(at ? at : {}),
-    };
-  }
-  const track = def.tracks.find((t) => t.id === b.trackId);
-  const channel = track?.channel === "sms" ? "sms" : track?.channel === "call" ? "call" : b.kind === "no_sender" && b.channel === "sms" ? "sms" : "email";
-  const name = track ? capitalise(trackName(def, track)) : "A track";
-  const several = def.tracks.filter((t) => !t.removed && t.branch === "main").length > 1;
-  if (b.kind === "empty_copy") {
-    const noun = `${STEP_NOUN[channel]} ${b.stepNumber}`;
-    const what = b.part === "subject" ? `${noun} has no subject` : `${noun} has no ${channel === "email" ? "copy" : "message"}`;
-    return {
-      title: several ? `${name}: ${what}` : what,
-      detail: b.part === "subject" ? "Give it a subject, or let it continue the thread." : `Write it, or remove the ${channel === "sms" ? "text" : "email"}.`,
-      action: "Write it",
-      trackId: b.trackId,
-      stepId: b.stepId,
-    };
-  }
-  const sender = channel === "email" ? "inbox" : "number";
-  return {
-    title: `${name} has no connected sender ${sender}`,
-    detail: channel === "sms" ? "It can’t send until a number is connected, and no SMS provider is set up yet. Remove the track to launch without it." : "It can’t send until an inbox is connected.",
-    action: "Open track",
-    trackId: b.trackId,
-  };
-}
-
-const capitalise = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+const and = (items: readonly string[]): string => (items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items.at(-1) ?? ""}`);
 
 function Warnings({ facts, editor }: { facts: BeforeLaunchView; editor: SequenceEditor }) {
   const items: { title: string; detail: string }[] = [];
@@ -242,11 +194,13 @@ function Warnings({ facts, editor }: { facts: BeforeLaunchView; editor: Sequence
   const noEmail = facts.coverage.leads - facts.coverage.email;
   const noMobile = facts.coverage.leads - facts.coverage.mobile;
   const after = (channel: "email" | "sms") => live.some((t) => t.start.kind === "after" && live.find((x) => x.id === (t.start as { trackId: string }).trackId)?.channel === channel);
+  // Each warning names the tracks it is about, by their own channel and order.
+  const tracksOn = (channel: "email" | "sms") => and(live.filter((t) => t.channel === channel).map((t) => trackName(editor.view.definition, t)));
   if (live.some((t) => t.channel === "email") && noEmail > 0) {
-    items.push({ title: `${noEmail} ${noEmail === 1 ? "lead has" : "leads have"} no email`, detail: `They skip the email ${live.filter((t) => t.channel === "email").length > 1 ? "tracks" : "track"}${after("email") ? ", and the tracks after it start sooner" : ""}.` });
+    items.push({ title: `${noEmail} ${noEmail === 1 ? "lead has" : "leads have"} no email`, detail: `They skip ${tracksOn("email")}${after("email") ? ", and the tracks after it start sooner" : ""}.` });
   }
   if (live.some((t) => t.channel === "sms") && noMobile > 0) {
-    items.push({ title: `${noMobile} ${noMobile === 1 ? "lead has" : "leads have"} no mobile of their own`, detail: `They skip the SMS ${live.filter((t) => t.channel === "sms").length > 1 ? "tracks" : "track"}${after("sms") ? ", and the tracks after it start sooner" : ""}. Company leads are never texted.` });
+    items.push({ title: `${noMobile} ${noMobile === 1 ? "lead has" : "leads have"} no mobile of their own`, detail: `They skip ${tracksOn("sms")}${after("sms") ? ", and the tracks after it start sooner" : ""}. Company leads are never texted.` });
   }
   for (const a of facts.load?.accounts ?? []) {
     if (a.usedToday > 0) items.push({ title: `${a.label} has ${a.usedToday} of its ${a.capacity} sends a day used today`, detail: `Other campaigns sent or reserved them, so fewer first ${a.channel === "sms" ? "texts" : "emails"} can go today.` });
@@ -329,7 +283,7 @@ function MissingFields({ facts }: { facts: BeforeLaunchView }) {
                 {f.leadsMissing === 0 ? (
                   <span className="text-muted">Every lead has it</span>
                 ) : blocks ? (
-                  <span className="font-medium text-crit">{f.fallbacks.length > 0 ? `“${f.fallbacks.join("”, “")}” in some emails; one has no fallback. Blocks launch.` : "No fallback. Blocks launch."}</span>
+                  <span className="font-medium text-crit">{f.fallbacks.length > 0 ? `“${f.fallbacks.join("”, “")}” in some messages; one has no fallback. Blocks launch.` : "No fallback. Blocks launch."}</span>
                 ) : (
                   `“${f.fallbacks.join("”, “")}”`
                 )}

@@ -36,6 +36,36 @@ test.describe("on the running app, with no SMS provider", () => {
   });
 });
 
+test.describe("a merge field with no fallback, named by every track and message that uses it (verifier B2)", () => {
+  test("used in an email track and two SMS tracks: the blocker names each, and each action opens its own message", async ({ page, request }) => {
+    const week = [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 }));
+    const msg = (id: string, body: string, waitDays = 0, subject = "") => ({ id, waitDays, subject, body, threading: "new_subject", removed: false });
+    const created = await request.post("/api/campaigns", { data: { name: "Fallbacks on two channels", businessesCsv: readFileSync(fixture("businesses-run1.csv"), "utf8"), peopleCsv: readFileSync(fixture("people-run1.csv"), "utf8") } });
+    const id = ((await created.json()) as { campaign: Campaign }).campaign.id;
+    await request.put(`/api/campaigns/${id}/sequence`, {
+      data: {
+        timezone: "Europe/London",
+        emailPool: [],
+        smsPool: [],
+        tracks: [
+          { id: "email", channel: "email", window: week, start: { kind: "entry" }, steps: [msg("e1", "Hi {{first_name}}.", 0, "Hello")] },
+          { id: "sms-a", channel: "sms", window: week, start: { kind: "entry" }, steps: [msg("a1", "Hi {{first_name}}, a text.")] },
+          { id: "sms-b", channel: "sms", window: week, start: { kind: "after", trackId: "email", delayDays: 1 }, steps: [msg("b1", "Hi {{first_name|there}}."), msg("b2", "Still {{first_name}}?", 2)] },
+        ],
+      },
+    });
+    await page.goto(`/campaigns/${id}/before-launch`);
+    await expect(page.getByText("First name has no fallback in Email 1 of the email track, Text 1 of SMS track 1 and Text 2 of SMS track 2")).toBeVisible();
+    await page.getByRole("button", { name: "Add fallback: Text 2 of SMS track 2" }).click();
+    await expect(page).toHaveURL(/track=sms-b&step=b2/);
+    await expect(page.getByRole("heading", { name: "SMS track 2" })).toBeVisible();
+    await expect(page.getByRole("list", { name: "Merge fields in this text" })).toBeVisible();
+    await page.goBack();
+    await page.getByRole("button", { name: "Add fallback: Email 1 of the email track" }).click();
+    await expect(page).toHaveURL(/track=email&step=e1/);
+  });
+});
+
 test.describe("on the app over the fake providers", () => {
   test("connections are saved through the one editor state: a track after another with a delay survives a reload, and a circle is refused", async ({ page }) => {
     const f = await fakeProviderApp("sms-connections");

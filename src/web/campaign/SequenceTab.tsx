@@ -147,7 +147,17 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
   return (
     <div className={`grid grid-cols-1 items-start gap-4 ${selected ? "min-[1020px]:grid-cols-[minmax(0,1fr)_430px]" : ""}`}>
       <Canvas tracks={tracks} selectedId={selected?.id ?? null} editor={editor} onSelect={(id) => select(selected?.id === id ? null : id)} onAdd={add} />
-      {selected && (
+      {selected?.channel === "call" && (
+        <PhoneTrackPanel
+          track={selected}
+          editor={editor}
+          onClose={() => {
+            select(null);
+            setFocusNext({ to: "node", trackId: selected.id });
+          }}
+        />
+      )}
+      {selected && selected.channel !== "call" && (
         <Inspector
           key={selected.id}
           track={selected}
@@ -295,15 +305,15 @@ function TrackNode({ track, def, selected, blockers, launched, onSelect }: { tra
       }`}
     >
       <span className="flex items-center gap-1.5 text-[12px] font-medium text-muted">
-        <Icon name={track.channel === "sms" ? "sms" : "email"} className="size-[15px]" />
-        {track.channel === "sms" ? "SMS" : "Email"}
+        <Icon name={track.channel === "call" ? "call" : track.channel === "sms" ? "sms" : "email"} className="size-[15px]" />
+        {track.channel === "call" ? "Phone" : track.channel === "sms" ? "SMS" : "Email"}
         {issues > 0 && <span className="ml-auto flex items-center gap-1 font-semibold text-crit before:size-[7px] before:rounded-full before:bg-current before:content-['']">{issues} to fix</span>}
       </span>
       <span className="text-[14.5px] font-semibold leading-[1.3]">{title}</span>
       <span className="text-[12.5px] text-muted">{trackSummary(track)}</span>
       <span className="mt-[5px] flex gap-[3px]" aria-hidden="true">
         {steps.map((s) => (
-          <i key={s.id} className={`h-1 flex-1 rounded-sm ${s.body.trim() ? "bg-line-strong" : "shadow-[inset_0_0_0_1px_var(--color-crit)]"}`} />
+          <i key={s.id} className={`h-1 flex-1 rounded-sm ${s.body.trim() || track.channel === "call" ? "bg-line-strong" : "shadow-[inset_0_0_0_1px_var(--color-crit)]"}`} />
         ))}
       </span>
     </button>
@@ -495,6 +505,47 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
   );
 }
 
+/**
+ * A phone track, defined over HTTP since ticket 14a: shown truthfully, and not editable here until
+ * the phone track's editor arrives. Other tracks may start after it; it holds them until its call is
+ * logged (ADR 0003, ticket 13b).
+ */
+function PhoneTrackPanel({ track, editor, onClose }: { track: TrackDefinition; editor: SequenceEditor; onClose: () => void }) {
+  const titleId = useId();
+  const name = trackName(editor.draft, track);
+  const days = WEEK.filter((d) => track.window.some((w) => w.day === d.day)).map((d) => d.name);
+  const hours = windowHours(track.window);
+  return (
+    <aside aria-labelledby={titleId} data-testid="inspector" className="flex min-w-0 flex-col rounded-box border border-line bg-base-100 min-[1020px]:h-[max(470px,calc(100dvh-306px))]">
+      <div className="flex items-start justify-between gap-2.5 border-b border-line px-[18px] pb-3.5 pt-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 id={titleId} className="text-[18px]">
+            {trackTitle(editor.draft, track)}
+          </h2>
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-line px-2 py-0.5 text-[12.5px] text-ink-2">
+            <Icon name="call" className="size-3.5" />
+            {trackSummary(track)}
+          </span>
+        </div>
+        <button type="button" className="btn btn-sm btn-ghost px-1.5" onClick={onClose} aria-label={`Close ${name}`}>
+          <Icon name="close" className="size-4" />
+        </button>
+      </div>
+      <div className="flex flex-col gap-[18px] px-[18px] pb-5 pt-4">
+        <p className="rounded-field bg-raised px-3 py-2 text-[13.5px] text-ink-2">Phone tracks are edited with a later release. This one is shown as it was set up: one call, placed on your list when it is due. The tracks after it start once you log the call.</p>
+        <dl className="grid grid-cols-[112px_minmax(0,1fr)] items-baseline gap-x-3.5 gap-y-[9px] text-[14px] max-[480px]:grid-cols-1">
+          <dt className="text-[13px] text-muted">Starts</dt>
+          <dd>{capitalise(startsText(editor.draft, track))}</dd>
+          <dt className="text-[13px] text-muted">Calling hours</dt>
+          <dd>
+            {days.join(", ") || "No days"}, {hourLabel(hours.start)} to {hourLabel(hours.end)}, the lead’s local time
+          </dd>
+        </dl>
+      </div>
+    </aside>
+  );
+}
+
 function SaveStatus({ editor }: { editor: SequenceEditor }) {
   const text = saveWording(editor.save, editor.launched).label ?? "";
   return (
@@ -632,7 +683,7 @@ function StepBlock({ channel, step, index, steps, open, facts, editor, onToggle,
               )}
             </div>
             {/* Once launched the counts would leave out leads that ended, so none is shown (PR 41 council, item 4). */}
-            <Fallbacks step={step} facts={locked ? null : facts} onChange={onChange} />
+            <Fallbacks step={step} noun={noun} facts={locked ? null : facts} onChange={onChange} />
             {steps.length > 1 && !locked && (
               <div>
                 <button type="button" className="btn btn-sm btn-ghost px-2 font-medium text-muted" onClick={onRemove}>
@@ -678,11 +729,11 @@ function MergeFieldMenu({ onPick }: { onPick: (field: string) => void }) {
   );
 }
 
-function Fallbacks({ step, facts, onChange }: { step: StepDefinition; facts: BeforeLaunchView | null; onChange: (change: (s: StepDefinition) => StepDefinition) => void }) {
+function Fallbacks({ step, noun, facts, onChange }: { step: StepDefinition; noun: string; facts: BeforeLaunchView | null; onChange: (change: (s: StepDefinition) => StepDefinition) => void }) {
   const fields = fieldsOf(step);
   if (fields.length === 0) return null;
   return (
-    <ul className="flex flex-col gap-1.5 text-[13px]" aria-label="Merge fields in this email">
+    <ul className="flex flex-col gap-1.5 text-[13px]" aria-label={`Merge fields in this ${noun.toLowerCase()}`}>
       {fields.map((field) => {
         const missing = facts?.mergeFields.find((f) => f.field === field)?.leadsMissing ?? null;
         const fallback = fallbackIn(step, field);

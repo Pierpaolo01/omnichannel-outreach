@@ -3,7 +3,8 @@ import { definitionProblems, type CampaignDefinition, type TrackDefinition } fro
 import { arrange, naive, type ArrangeMutation, type ArrangeOperation } from "./arrangement.ts";
 
 /**
- * The arrangement rule's generated test (ADR 0003, ticket 13b): generated valid definitions, then
+ * The arrangement rule's generated test (ADR 0003, ticket 13b): generated valid definitions, phone
+ * tracks among them (a track like any other: others may start after one), then
  * generated sequences of every operation the editor offers, including ones the rule must refuse.
  * After each operation it asserts the rule's five invariants. Each named mutation of the rule must
  * make it fail.
@@ -21,8 +22,10 @@ function rng(seed: number): () => number {
 const pick = <T,>(r: () => number, items: readonly T[]): T => items[Math.floor(r() * items.length)]!;
 const week = [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 }));
 
-function track(id: string, channel: "email" | "sms", start: TrackDefinition["start"], removed = false): TrackDefinition {
-  return { id, channel, branch: "main", window: week, steps: [{ id: `${id}-s1`, waitDays: 0, subject: "Hi", body: "Hello.", threading: "new_subject", removed: false }], start, removed };
+function track(id: string, channel: "email" | "sms" | "call", start: TrackDefinition["start"], removed = false): TrackDefinition {
+  // A phone track (defined over HTTP since ticket 14a) is one call with no copy.
+  const step = channel === "call" ? { subject: "", body: "" } : { subject: "Hi", body: "Hello." };
+  return { id, channel, branch: "main", window: week, steps: [{ id: `${id}-s1`, waitDays: 0, ...step, threading: "new_subject", removed: false }], start, removed };
 }
 
 /** One to five tracks, each at launch or after an earlier live one (so no cycle), and some removed ones. */
@@ -32,7 +35,7 @@ function generateDefinition(r: () => number): CampaignDefinition {
   for (let i = 0; i < n; i++) {
     const earlier = tracks.filter((t) => !t.removed);
     const start: TrackDefinition["start"] = earlier.length > 0 && r() < 0.6 ? { kind: "after", trackId: pick(r, earlier).id, delayDays: Math.floor(r() * 4) } : { kind: "entry" };
-    tracks.push(track(`t${i}`, pick(r, ["email", "sms"] as const), start));
+    tracks.push(track(`t${i}`, pick(r, ["email", "sms", "call"] as const), start));
   }
   if (r() < 0.4) tracks.push(track("gone", "email", { kind: "entry" }, true));
   return { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: [], smsPool: [], tracks };

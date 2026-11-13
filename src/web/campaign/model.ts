@@ -61,6 +61,7 @@ export function trackName(def: CampaignDefinition, track: TrackDefinition): stri
 export const trackTitle = (def: CampaignDefinition, track: TrackDefinition): string => trackLabel(def, track).label;
 
 export function trackSummary(track: TrackDefinition): string {
+  if (track.channel === "call") return "One call";
   const steps = liveSteps(track);
   const days = steps.reduce((sum, s) => sum + (Number.isFinite(s.waitDays) ? s.waitDays : 0), 0);
   const n = steps.length;

@@ -902,6 +902,19 @@ export const SCREENS: readonly Screen[] = [
     },
   },
   {
+    name: "a phone track, which this editor cannot edit yet",
+    open: async (page) => {
+      const id = await campaignWith(page, "Two channels and a call", {
+        ...TWO_CHANNELS,
+        emailPool: [],
+        smsPool: [],
+        tracks: [...TWO_CHANNELS.tracks, { id: "call", channel: "call", branch: "main", window: [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 })), start: { kind: "after", trackId: "email", delayDays: 1 }, removed: false, steps: [{ id: "c1", waitDays: 0, subject: "", body: "", threading: "new_subject", removed: false }] }],
+      });
+      await page.goto(`/campaigns/${id}?track=call`);
+      await settle(page, "Phone tracks are edited with a later release.");
+    },
+  },
+  {
     name: "the Add track menu",
     open: async (page) => {
       const id = await campaignWith(page, "Two channels, no provider");
