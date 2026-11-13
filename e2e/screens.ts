@@ -3,7 +3,14 @@ import { readFileSync } from "node:fs";
 import { OUTREACH_STATUSES } from "../src/domain/outreach-status.ts";
 import type { CompanyRecord, ImportRecord, LeadSearchResult, PersonRecord, SummaryEntry } from "../src/shared/api.ts";
 import { refusedPair, respond, serverError } from "./mocks.ts";
+import { fakeProviderApp } from "./fake-provider.ts";
 import { fixture } from "./support.ts";
+
+/** Opens a path on the app over the fake email provider. */
+async function fake(page: Page, path: string): Promise<void> {
+  const f = await fakeProviderApp();
+  await page.goto(f.url + path);
+}
 
 /**
  * Every route and state the app can show, for the standing accessibility and layout checks.
@@ -660,6 +667,119 @@ export const SCREENS: readonly Screen[] = [
     name: "a person in a campaign with the longest accepted name",
     open: async (page, data) => { await page.goto(`/leads/people/${data.person("Amira Hassan")}`); await settle(page, LONG_CAMPAIGN_NAME); },
   },
+  // The campaign editor and the timeline (ticket 12c). The running app has no email provider, so
+  // a sender inbox, launch and sent email are shown on the app over the fake provider.
+  { name: "campaign, no track yet", open: async (page, data) => { await page.goto(`/campaigns/${data.campaignId}`); await settle(page, "Add the first channel track"); } },
+  { name: "campaign with nothing imported", open: async (page, data) => { await page.goto(`/campaigns/${data.unimportedCampaignId}`); await settle(page, "nothing imported yet"); } },
+  { name: "campaign with the longest accepted name", open: async (page, data) => { await page.goto(`/campaigns/${data.longCampaignId}`); await settle(page, "Add the first channel track"); } },
+  { name: "before launch, nothing to launch", open: async (page, data) => { await page.goto(`/campaigns/${data.campaignId}/before-launch`); await settle(page, "Nothing to launch yet."); } },
+  { name: "before launch with no leads", open: async (page, data) => { await page.goto(`/campaigns/${data.unimportedCampaignId}/before-launch`); await settle(page, "No leads yet."); } },
+  { name: "test run, not yet", open: async (page, data) => { await page.goto(`/campaigns/${data.campaignId}/test-run`); await settle(page, "Test runs arrive with a later release"); } },
+  { name: "campaign leads tab", open: async (page, data) => { await page.goto(`/campaigns/${data.campaignId}/leads`); await settle(page, "Uses a fallback for"); } },
+  { name: "campaign leads tab, nothing imported", open: async (page, data) => { await page.goto(`/campaigns/${data.unimportedCampaignId}/leads`); await settle(page, "No leads yet."); } },
+  { name: "campaign imports tab", open: async (page, data) => { await page.goto(`/campaigns/${data.campaignId}/imports`); await settle(page, "See result"); } },
+  {
+    name: "campaign loading",
+    open: async (page, data) => { await hold(page, "**/api/campaigns/*/sequence"); await page.goto(`/campaigns/${data.campaignId}`); await page.getByLabel("Loading the campaign").waitFor(); },
+  },
+  {
+    name: "campaign error",
+    open: async (page, data) => { await fail(page, "**/api/campaigns/*/sequence"); await page.goto(`/campaigns/${data.campaignId}`); await settle(page, "This campaign didn’t load."); },
+  },
+  { name: "campaign not found", open: async (page) => { await page.goto("/campaigns/nobody"); await settle(page, "No such campaign"); } },
+  {
+    name: "person activity loading",
+    open: async (page, data) => { await hold(page, "**/api/people/*/activity"); await page.goto(`/leads/people/${data.person("Amira Hassan")}`); await page.getByLabel("Loading the activity").waitFor(); },
+  },
+  {
+    name: "person activity error",
+    open: async (page, data) => { await fail(page, "**/api/people/*/activity"); await page.goto(`/leads/people/${data.person("Amira Hassan")}`); await settle(page, "The activity didn’t load."); },
+  },
+  { name: "fake provider: campaigns list with a running campaign", open: async (page) => { await fake(page, "/campaigns"); await settle(page, "Running"); } },
+  { name: "fake provider: email track in the inspector", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.ready}?track=email`); await settle(page, "Timing and sender"); } },
+  {
+    name: "fake provider: a follow-up with a new subject",
+    open: async (page) => {
+      const f = await fakeProviderApp();
+      await fake(page, `/campaigns/${f.ready}?track=email&step=s2`);
+      await page.route("**/api/campaigns/*/sequence", (route) => (route.request().method() === "PUT" ? new Promise(() => undefined) : route.continue()));
+      // The save is held here, never reaching the shared app, so leaving the page cannot send it.
+      const held = page.waitForRequest((r) => r.method() === "PUT");
+      await page.getByText("New subject", { exact: true }).click();
+      await held;
+      await settle(page, "Saving…");
+    },
+  },
+  {
+    name: "fake provider: a change that wasn't saved",
+    open: async (page) => {
+      const f = await fakeProviderApp();
+      await fake(page, `/campaigns/${f.ready}?track=email`);
+      await fail(page, "**/api/campaigns/*/sequence", "PUT");
+      await page.getByLabel("Email 1 subject").fill("Evening bookings");
+      await settle(page, "Your last change wasn’t saved.");
+    },
+  },
+  {
+    name: "fake provider: a wait that isn't a whole number of days",
+    open: async (page) => {
+      const f = await fakeProviderApp();
+      await fake(page, `/campaigns/${f.ready}?track=email&step=s2`);
+      await page.route("**/api/campaigns/*/sequence", (route) => (route.request().method() === "PUT" ? serverError(route) : route.continue()));
+      await page.getByLabel("Days to wait before Email 2").fill("");
+      await settle(page, "Nothing is saved until this is fixed.");
+    },
+  },
+  { name: "fake provider: before launch, ready", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.ready}/before-launch`); await settle(page, "Ready to launch."); await settle(page, "Evening bookings at Harbour Lane Physio"); } },
+  {
+    name: "fake provider: before launch, copy for a company lead with fallbacks",
+    open: async (page) => {
+      const f = await fakeProviderApp();
+      await fake(page, `/campaigns/${f.ready}/before-launch`);
+      await page.getByLabel("Preview as lead").selectOption({ label: "Riverside Sports Clinic (company lead)" });
+      await settle(page, "Hi there,");
+    },
+  },
+  { name: "fake provider: before launch, blocked", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.blocked}/before-launch`); await settle(page, "2 things block launch."); } },
+  { name: "fake provider: blocked email track in the inspector", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.blocked}?track=email&step=s1`); await settle(page, "Add a fallback or remove the field."); } },
+  {
+    name: "fake provider: before launch loading",
+    open: async (page) => { const f = await fakeProviderApp(); await hold(page, "**/api/campaigns/*/before-launch*"); await fake(page, `/campaigns/${f.ready}/before-launch`); await page.getByLabel("Loading the checks before launch").waitFor(); },
+  },
+  {
+    name: "fake provider: before launch error",
+    open: async (page) => { const f = await fakeProviderApp(); await fail(page, "**/api/campaigns/*/before-launch*"); await fake(page, `/campaigns/${f.ready}/before-launch`); await settle(page, "The checks before launch didn’t load."); },
+  },
+  {
+    name: "fake provider: copy for a lead loading",
+    open: async (page) => { const f = await fakeProviderApp(); await hold(page, "**/api/campaigns/*/preview/*"); await fake(page, `/campaigns/${f.ready}/before-launch`); await page.getByLabel("Loading the copy").waitFor(); },
+  },
+  {
+    name: "fake provider: launch failed",
+    open: async (page) => {
+      const f = await fakeProviderApp();
+      await fail(page, "**/api/campaigns/*/launch");
+      await fake(page, `/campaigns/${f.ready}/before-launch`);
+      await page.getByRole("button", { name: "Launch campaign" }).click();
+      await settle(page, "The campaign didn’t launch.");
+    },
+  },
+  { name: "fake provider: running campaign", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}`); await settle(page, "Pausing, resuming and editing a running campaign arrive with later releases."); } },
+  { name: "fake provider: running campaign's email track", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}?track=email`); await settle(page, "Editing a running campaign arrives with a later release."); } },
+  { name: "fake provider: running campaign, before launch", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}/before-launch`); await settle(page, "The projection is for before launch."); } },
+  {
+    name: "fake provider: sent emails, the copy shown, and the sequence finished",
+    open: async (page) => {
+      const f = await fakeProviderApp();
+      await fake(page, `/leads/people/${f.person("Amira Hassan")}`);
+      await page.getByText("Show message").first().click();
+      await settle(page, "Hide message");
+    },
+  },
+  { name: "fake provider: a hard bounce", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/leads/people/${f.person("Tom")}`); await settle(page, "Email bounced"); } },
+  { name: "fake provider: replied, automation stopped", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/leads/people/${f.person("Daniel Price")}`); await settle(page, "Replied by email"); } },
+  { name: "fake provider: email skipped for a missing address", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/leads/people/${f.person("Grace Okafor")}`); await settle(page, "Email skipped"); } },
+  { name: "fake provider: a company lead's activity", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/leads/companies/${f.company("Riverside Sports Clinic")}`); await settle(page, "Email 1 sent"); } },
   { name: "record not found", open: async (page) => { await page.goto("/leads/people/nobody"); await settle(page, "No one found"); } },
   { name: "page not found", open: async (page) => { await page.goto("/nowhere"); await settle(page, "Page not found"); } },
 ];

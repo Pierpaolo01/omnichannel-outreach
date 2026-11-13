@@ -56,9 +56,10 @@ export async function postJson(path: string, body: unknown): Promise<unknown> {
 }
 
 /** Replaces a resource with a JSON body and returns the parsed answer. A non-2xx answer throws with the server's message. */
-export async function putJson(path: string, body: unknown): Promise<unknown> {
+export async function putJson(path: string, body: unknown, options: { keepalive?: boolean } = {}): Promise<unknown> {
   const response = await fetch(path, {
     method: "PUT",
+    ...(options.keepalive ? { keepalive: true } : {}),
     headers: { "content-type": "application/json", accept: "application/json" },
     body: JSON.stringify(body),
   });

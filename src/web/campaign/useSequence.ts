@@ -55,7 +55,7 @@ export function useSequence(campaignId: string) {
     latest.current = state;
   });
 
-  const send = useCallback(async () => {
+  const send = useCallback(async (options: { keepalive?: boolean } = {}) => {
     const current = latest.current;
     if (!current || current.view.launchedAt !== null || draftProblems(current.draft).length > 0) return;
     const sent = revision.current;
@@ -63,7 +63,7 @@ export function useSequence(campaignId: string) {
     setSave({ kind: "saving" });
     const run = (async () => {
       try {
-        const view = (await putJson(`/api/campaigns/${encodeURIComponent(campaignId)}/sequence`, definition)) as SequenceView;
+        const view = (await putJson(`/api/campaigns/${encodeURIComponent(campaignId)}/sequence`, definition, options)) as SequenceView;
         // A change made while this save ran keeps its draft; the next save sends it.
         setLocal((s) => ({ view, draft: revision.current === sent ? view.definition : (s ?? current).draft }));
         setSave(revision.current === sent ? { kind: "saved" } : { kind: "saving" });
@@ -84,15 +84,20 @@ export function useSequence(campaignId: string) {
     }, SAVE_DELAY_MS);
   }, [send]);
 
-  // Leaving the page saves a change still waiting for its moment, rather than dropping it.
-  useEffect(
-    () => () => {
+  // Leaving the page, or this campaign, saves a change still waiting for its moment.
+  useEffect(() => {
+    const flush = () => {
       if (timer.current === undefined) return;
       clearTimeout(timer.current);
-      void send();
-    },
-    [send],
-  );
+      timer.current = undefined;
+      void send({ keepalive: true });
+    };
+    window.addEventListener("pagehide", flush);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      flush();
+    };
+  }, [send]);
 
   // The pool follows the provider's inboxes: when they differ from what is saved, save once.
   const view = state?.view;
@@ -108,6 +113,8 @@ export function useSequence(campaignId: string) {
       const base = latest.current;
       if (!base) return;
       revision.current++;
+      // Shown at once, so a change is never labelled saved while it waits to be sent.
+      setSave({ kind: "saving" });
       setLocal((s) => {
         const from = s ?? base;
         const next = { ...from, draft: change(from.draft) };

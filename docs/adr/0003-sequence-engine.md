@@ -1086,6 +1086,14 @@ Two reviewers, an independent verification and the review bot on `51d9503`, and 
 | Review bot on `0dc88ab` | Settling work withdraws its claimed attempts in the same change; the handover refuses settled work (predicate 15); a provider skip of work an inheritor was claimed for still holds the track | 5.3, 5.5 predicate 15, invariant 2 | `claimedInheritorRetired`; "handover of settled work" (2) |
 | Small items | `heldCapacity` lists the lookup answer, destination, step, today's sends and whether "not sent" is allowed; the checker exempts only deliveries of work handed over before a mark; `pendingReplies` required; the wait of a user action or a launch behind the running tick recorded as a known limit | 5.4, 5.5, 9.2 | — |
 
+## Ticket 12c: the Before launch projection
+
+Recorded on 13 November 2026 by the 12c implementer; no engine or sequence code changed.
+
+- **What is built.** `src/domain/load-projection.ts`, called by `GET /api/campaigns/:id/before-launch`. It is a dry run with no provider and no writes, stepping through time in 15-minute ticks for up to 120 days. It reuses `comparePriority` (4.3), `windowOpen` (3.4), `span` (3.3) and the account's stored capacity, reset zone, pacing gap and today's count (4.1). A lead keeps the inbox of its first email; a first inbox is chosen by most remaining capacity, then the lowest id, as `chooseAccount` does without its "soonest slot" term, which the tick folds into the slot check.
+- **How it differs from section 10's wording.** It does not run the claim, the handover or the attempt lifecycle: every send is assumed to succeed at once, and the in-flight bound `k` is not modelled. Other campaigns' sends count only for today; what they will send on later days is not projected. The screen says so. A full dry run of the engine (a copy of the store, the real worker and a fake port on a simulated clock) was judged too costly to run on each page view for a real export.
+- **What it reports.** Each pool inbox's busiest day for this campaign, sends used today across campaigns and its pacing gap, and the days, launch day counting as 1 in the campaign's zone, until every lead with an email has had its first email. Its tests are in `src/server/before-launch.test.ts`: capacity per day, follow-ups first, a weekend outside the window, two inboxes sharing leads, and today's count from another campaign.
+
 ## Consequences
 
 - **ADR 0001.** The merge that deletes a contact-detail row becomes a redirect in 12a. Enrollments gain the fields in 1.3. `status` stays the one stored status column.
