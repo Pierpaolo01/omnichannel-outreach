@@ -270,7 +270,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
   let armed: string | null = null;
   let inject = 0;
   /** A user or prospect event aimed at one lead, injected while the engine is between two steps. */
-  const eventOn = async (subjectId: string | null, prefer: "any" | "title" = "any") => {
+  const eventOn = async (subjectId: string | null, prefer: "any" | "title" = "any", concurrentWorker = true) => {
     const r = prefer === "title" ? (chance(0.6) ? 0.99 : rand()) : rand();
     const target = subjectId ? subjects.get(subjectId) : pick([...subjects.values()]);
     const lastSent = target ? fake.deliveryLog.filter((d) => d.subjectId === target.id && d.at <= h.clock).at(-1) : undefined;
@@ -282,12 +282,13 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       a.healthy = false;
       await h.store.engine.updateAccount(a.id, { healthy: false });
     } else await reimport(target?.person ?? null);
-    // A concurrent worker applies it before the main engine's next step.
-    await h.otherWorker();
+    // A concurrent worker applies it before the main engine's next step, or, between a claim and
+    // its handover, the change lands as stored facts alone, which the handover must re-check.
+    if (concurrentWorker) await h.otherWorker();
   };
   const subjectOfAttempt = async (attemptId: string) => (await h.store.engine.attempt(attemptId))?.subjectId ?? null;
   /** Injections a run may make from inside the engine, whatever event is running. */
-  let hookBudget = unlimited ? 0 : 8;
+  let hookBudget = 0; // set once every campaign has launched
   const armedNow = () => {
     if (inject > 0 && chance(0.5)) {
       inject--;
@@ -299,10 +300,8 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     }
     return false;
   };
-  const maybeInject = async (subjectId: string | null) => {
-    if (armedNow()) {
-      await eventOn(subjectId);
-    }
+  const maybeInject = async (subjectId: string | null, concurrentWorker = true) => {
+    if (armedNow()) await eventOn(subjectId, "any", concurrentWorker);
   };
   const hooks = {
     crashPoint: (point: string) => {
@@ -314,7 +313,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     beforeApplyEvaluation: (subjectId: string) => {
       return maybeInject(subjectId);
     },
-    beforeHandover: async (attemptId: string) => maybeInject(await subjectOfAttempt(attemptId)),
+    beforeHandover: async (attemptId: string) => maybeInject(await subjectOfAttempt(attemptId), chance(0.5)),
     beforeRetry: async (attemptId: string) => {
       if (armedNow()) {
         await eventOn(await subjectOfAttempt(attemptId), "title");
@@ -410,6 +409,8 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     c.launchedAt = h.clock;
   }
 
+  hookBudget = unlimited ? 0 : 8;
+
   // ------------------------------------------------------------------------------------------
   // Events.
   const history = new Map<string, { states: string[]; withdrawRequested: boolean; handedOnce: boolean }>();
@@ -489,7 +490,18 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       a.quotaAvailable = true;
       a.capacity = Math.max(a.capacity, 100);
     }
+    // "Enough time": three weeks, then a week at a time while a running lead still waits for a
+    // deadline (a narrow window can space five steps a week apart), up to ten weeks.
     await h.advanceTo(h.clock + 21 * DAY);
+    for (let week = 0; week < 7; week++) {
+      let waiting = false;
+      for (const id of await h.store.engine.runningSubjectIds()) {
+        const st = await h.store.engine.subject(id, h.clock);
+        if (st?.tracks.some((t) => t.finishedAt === null && t.dueWall !== null && t.dueAt !== null && t.dueAt > h.clock - st.subject.clock.frozenTotal)) waiting = true;
+      }
+      if (!waiting) break;
+      await h.advanceTo(h.clock + 7 * DAY);
+    }
     await checkAll(true);
   }
 
@@ -822,6 +834,8 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       const withdrawn = fake.withdrawLog.find((w) => w.key === first.key);
       if (withdrawn && calls.some((c) => c.at > withdrawn.at)) problem(`5: ${attemptId} was called after a withdrawal was requested`);
     }
+    // 2 (predicate 9). No send call from an inbox the provider reported unhealthy at that moment.
+    for (const c of fake.handoverLog) if (!c.healthy) problem(`2: ${c.subjectId}/${c.stepId} was called from ${c.sender} while it was unhealthy`);
     // 11. Pacing: two send calls from one account are never closer than its gap.
     const bySender = new Map<string, number[]>();
     for (const c of fake.handoverLog) bySender.set(c.sender, [...(bySender.get(c.sender) ?? []), c.at]);

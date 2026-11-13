@@ -49,6 +49,8 @@ export interface HandoverLogEntry {
   readonly threadRef: string | null;
   readonly mode: FakeMode;
   readonly retryable: boolean;
+  /** Whether the provider reported the sending account healthy when the call arrived. */
+  readonly healthy: boolean;
 }
 
 export interface DeliveryLogEntry {
@@ -171,6 +173,7 @@ export class FakeEmailPort implements SendPort {
       threadRef: request.threadRef,
       mode,
       retryable,
+      healthy: this.accountsById.get(request.sender)?.healthy ?? false,
     };
     this.handoverLog.push(entry);
     await this.onHandover?.(entry);

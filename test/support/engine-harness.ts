@@ -118,6 +118,8 @@ export class EngineHarness {
   /** One engine tick at the current instant, recovering from a simulated crash. */
   async tick(): Promise<void> {
     this.ticks++;
+    // Yield to the event loop, so the test runner's worker can answer its RPC on long runs.
+    await new Promise((resolve) => setImmediate(resolve));
     this.fake.advance();
     try {
       await this.engine.tick();
@@ -161,8 +163,6 @@ export class EngineHarness {
       const wakes = [await this.engine.nextWakeAt(), this.fake.nextActivityAt(), target].filter((t): t is number => t !== null && t > this.clock);
       this.clock = Math.min(...wakes);
       await this.tick();
-      // Let the test runner's worker breathe on long runs of synchronous SQLite work.
-      if (guard % 50 === 49) await new Promise((resolve) => setImmediate(resolve));
       await onInstant?.();
     }
   }
