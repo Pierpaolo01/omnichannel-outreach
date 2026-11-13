@@ -144,3 +144,32 @@ describe("saving the definition: sessions, numbers and the base revision (ADR 00
     expect([res.status, res.body.error.code]).toEqual([409, "changed_elsewhere"]);
   });
 });
+
+describe("the answers are the rows written, not read afterwards (PR 41 council, item 4)", () => {
+  const body = (subject: string, save: { session: string; seq: number; base: number }) => ({
+    timezone: "Europe/London",
+    emailPool: [],
+    tracks: [track({ steps: [{ id: "s1", waitDays: 0, subject, body: "Hello.", threading: "new_subject" }] })],
+    save,
+  });
+
+  test("a save answers with the definition it stored, even if another tab's save commits right after it", async () => {
+    const api = testApi();
+    const campaign = await api.createCampaign("Autumn", "Europe/London");
+    const engine = api.store.engine;
+    const save = engine.saveDefinition.bind(engine);
+    let raced = false;
+    engine.saveDefinition = async (...args) => {
+      const out = await save(...args);
+      if (!raced) {
+        raced = true;
+        // Another tab's save, based on the revision just stored, commits before the answer is built.
+        await save(args[0], { ...args[1], tracks: [{ ...args[1].tracks[0]!, steps: [{ ...args[1].tracks[0]!.steps[0]!, subject: "Other tab" }] }] }, args[2], { session: "B", seq: 1, base: 1 });
+      }
+      return out;
+    };
+    const res = await put(api, campaign.id, body("Mine", { session: "A", seq: 1, base: 0 }));
+    const view = (await res.json()) as SequenceView;
+    expect([view.definition.tracks[0]!.steps[0]!.subject, view.definitionVersion]).toEqual(["Mine", 1]);
+  });
+});

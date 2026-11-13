@@ -11,7 +11,7 @@ import type { OutreachStore } from "./persistence/store.ts";
 import { launchCheck } from "../domain/sequence/blockers.ts";
 import { definitionProblems, emptyDefinition, liveTracks, type CampaignDefinition } from "../domain/sequence/definition.ts";
 import { Engine } from "./engine/engine.ts";
-import type { DefinitionSave } from "./engine/engine-store.ts";
+import type { DefinitionSave, StoredDefinition } from "./engine/engine-store.ts";
 import { UnconnectedEmailPort } from "./engine/ports.ts";
 import { accountView, needsAttention, progressView } from "./engine/views.ts";
 import type { CampaignDetail, CampaignListItem, CampaignSequenceSummary, SequenceView } from "../shared/api.ts";
@@ -266,9 +266,11 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   // -------------------------------------------------------------------------------------------
   // The sequence engine (ADR 0003), ticket 12b.
 
-  const sequenceView = async (campaignId: string, defaultZone: string | null): Promise<SequenceView | null> => {
-    const row = await store.engine.campaign(campaignId);
-    if (!row) return null;
+  /** `written`: the row as the transaction that wrote it left it, so the answer is that write's (PR 41 council, item 4). */
+  const sequenceView = async (campaignId: string, defaultZone: string | null, written?: StoredDefinition): Promise<SequenceView | null> => {
+    const read = written ? null : await store.engine.campaign(campaignId);
+    if (!written && !read) return null;
+    const row = written ?? { definition: read!.definition, definitionVersion: read!.definitionVersion, definitionEditedAt: read!.definitionEditedAt, launchedAt: read!.launchedAt };
     const definition = row.definition ?? emptyDefinition(defaultZone ?? machineZone());
     const at = Date.parse(now());
     const { leads, accounts } = await store.engine.launchInputs(campaignId);
@@ -304,7 +306,9 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     const previous = (await store.engine.campaign(campaign.id))?.definition ?? null;
     const problems = definitionProblems(definition, previous);
     if (problems.length > 0) return c.json<ApiError>({ error: { code: "invalid_sequence", message: problems.join(" ") } }, 400);
-    const saved = await store.engine.saveDefinition(campaign.id, definition, now(), save ?? null);
+    const result = await store.engine.saveDefinition(campaign.id, definition, now(), save ?? null);
+    const saved = result.outcome;
+    if (saved === "missing") return notFound(c, "campaign");
     if (saved === "superseded") {
       return c.json<ApiError>({ error: { code: "superseded", message: "A later change from this page was already saved." } }, 409);
     }
@@ -314,7 +318,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     if (saved === "launched") {
       return c.json<ApiError>({ error: { code: "launched", message: "This campaign is running. Editing a running campaign arrives with a later release." } }, 409);
     }
-    return c.json(await sequenceView(campaign.id, campaign.defaultTimezone));
+    return c.json(await sequenceView(campaign.id, campaign.defaultTimezone, result.stored));
   });
 
   app.post("/campaigns/:id/launch", async (c) => {
@@ -334,7 +338,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
         : `Launch is blocked: ${outcome.check?.blockers.map((b) => b.message).join(" ") ?? ""}`;
       return c.json<ApiError>({ error: { code: outcome.reason === "already_launched" ? "already_launched" : "launch_blocked", message } }, 409);
     }
-    return c.json(await sequenceView(campaign.id, campaign.defaultTimezone));
+    return c.json(await sequenceView(campaign.id, campaign.defaultTimezone, "stored" in outcome ? outcome.stored : undefined));
   });
 
   // The campaign editor's Before launch tab (ticket 12c): read models only.

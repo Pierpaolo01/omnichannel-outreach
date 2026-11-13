@@ -9,7 +9,7 @@ import { launchCheck, type LaunchCheck } from "../../domain/sequence/blockers.ts
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
-import type { EngineStore, ReplyEvent } from "./engine-store.ts";
+import type { EngineStore, ReplyEvent, StoredDefinition } from "./engine-store.ts";
 import type { AttemptRef, HandoverRequest, ProviderEvent, SendPort } from "./ports.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 
@@ -155,14 +155,14 @@ export class Engine {
   // Entry points.
 
   /** Launches a campaign if nothing blocks it, and runs a tick. */
-  launch(campaignId: string, expectedDefinitionVersion?: number): Promise<{ ok: true } | { ok: false; reason: string; check: LaunchCheck | null }> {
+  launch(campaignId: string, expectedDefinitionVersion?: number): Promise<{ ok: true; stored: StoredDefinition } | { ok: false; reason: string; check: LaunchCheck | null }> {
     return this.ticks.run(async () => {
       await this.syncAccounts();
       const now = this.now();
       const outcome = await this.store.launch(campaignId, now, launchCheck, (s) => this.rules.evaluate(this.rules.enterMain(s, now), now), expectedDefinitionVersion);
       if (!outcome.ok) return outcome;
       await this.runTick();
-      return { ok: true as const };
+      return { ok: true as const, stored: outcome.stored };
     });
   }
 

@@ -59,7 +59,17 @@ export interface BounceEvent {
   readonly receivedWall: number;
 }
 
-export type LaunchOutcome = { readonly ok: true } | { readonly ok: false; readonly check: LaunchCheck | null; readonly reason: "already_launched" | "blocked" | "no_definition" | "changed" };
+export type LaunchOutcome = { readonly ok: true; readonly stored: StoredDefinition } | { readonly ok: false; readonly check: LaunchCheck | null; readonly reason: "already_launched" | "blocked" | "no_definition" | "changed" };
+
+/** The row as the saving transaction left it: what the answer is built from (PR 41 council, item 4). */
+export interface StoredDefinition {
+  readonly definition: CampaignDefinition;
+  readonly definitionVersion: number;
+  readonly definitionEditedAt: string | null;
+  readonly launchedAt: number | null;
+}
+
+export type SaveResult = { readonly outcome: "saved" | "unchanged" | "launched" | "superseded" | "conflict"; readonly stored: StoredDefinition } | { readonly outcome: "missing" };
 
 /** Who wrote a save (ADR 0003 1.1.1): the editing session, its number in it, and the revision it last saw. */
 export interface DefinitionSave {
@@ -81,7 +91,7 @@ export interface EngineStore {
    * transaction. Without `save` (API clients, tests) it is stored as before. Editing a launched
    * campaign arrives with ticket 19.
    */
-  saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save?: DefinitionSave | null): Promise<"saved" | "unchanged" | "launched" | "missing" | "superseded" | "conflict">;
+  saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save?: DefinitionSave | null): Promise<SaveResult>;
   /** The merge data of every enrollment of the campaign that has not ended, and the sender accounts. */
   launchInputs(campaignId: string): Promise<{ leads: MergeData[]; accounts: SenderAccountView[] }>;
   /**
