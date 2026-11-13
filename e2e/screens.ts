@@ -1,9 +1,16 @@
-import type { APIRequestContext, Page } from "@playwright/test";
+import type { APIRequestContext, Locator, Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { OUTREACH_STATUSES } from "../src/domain/outreach-status.ts";
-import type { CompanyRecord, ImportRecord, LeadSearchResult, PersonRecord, SummaryEntry } from "../src/shared/api.ts";
+import type { CompanyRecord, ImportRecord, LeadSearchResult, PersonRecord, SequenceView, SummaryEntry } from "../src/shared/api.ts";
 import { refusedPair, respond, serverError } from "./mocks.ts";
+import { FAKE_INBOX, fakeProviderApp } from "./fake-provider.ts";
 import { fixture } from "./support.ts";
+
+/** Opens a path on the app over the fake email provider. */
+async function fake(page: Page, path: string): Promise<void> {
+  const f = await fakeProviderApp();
+  await page.goto(f.url + path);
+}
 
 /**
  * Every route and state the app can show, for the standing accessibility and layout checks.
@@ -660,6 +667,301 @@ export const SCREENS: readonly Screen[] = [
     name: "a person in a campaign with the longest accepted name",
     open: async (page, data) => { await page.goto(`/leads/people/${data.person("Amira Hassan")}`); await settle(page, LONG_CAMPAIGN_NAME); },
   },
+  // The campaign editor and the timeline (ticket 12c). The running app has no email provider, so
+  // a sender inbox, launch and sent email are shown on the app over the fake provider.
+  {
+    name: "campaign with an email track and no connected sender",
+    open: async (page) => {
+      // Its own campaign, so the shared scan campaigns keep no track.
+      const created = await page.request.post("/api/campaigns", { data: { name: "No sender yet", businessesCsv: readFileSync(fixture("businesses-run1.csv"), "utf8"), peopleCsv: readFileSync(fixture("people-run1.csv"), "utf8") } });
+      const id = ((await created.json()) as { campaign: { id: string } }).campaign.id;
+      await page.request.put(`/api/campaigns/${id}/sequence`, {
+        data: { timezone: "Europe/London", emailPool: [], tracks: [{ id: "email", channel: "email", window: [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 })), steps: [{ id: "s1", waitDays: 0, subject: "Evening bookings at {{company}}", body: "Hi {{first_name|there}},", threading: "new_subject" }] }] },
+      });
+      await page.goto(`/campaigns/${id}?track=email&step=s1`);
+      await settle(page, "No email provider is set up on this machine.");
+    },
+  },
+  { name: "campaign, no track yet", open: async (page, data) => { await page.goto(`/campaigns/${data.campaignId}`); await settle(page, "Add the first channel track"); } },
+  { name: "campaign with nothing imported", open: async (page, data) => { await page.goto(`/campaigns/${data.unimportedCampaignId}`); await settle(page, "nothing imported yet"); } },
+  { name: "campaign with the longest accepted name", open: async (page, data) => { await page.goto(`/campaigns/${data.longCampaignId}`); await settle(page, "Add the first channel track"); } },
+  { name: "before launch, nothing to launch", open: async (page, data) => { await page.goto(`/campaigns/${data.campaignId}/before-launch`); await settle(page, "Nothing to launch yet."); } },
+  { name: "before launch with no leads", open: async (page, data) => { await page.goto(`/campaigns/${data.unimportedCampaignId}/before-launch`); await settle(page, "No leads yet."); } },
+  { name: "test run, not yet", open: async (page, data) => { await page.goto(`/campaigns/${data.campaignId}/test-run`); await settle(page, "Test runs arrive with a later release"); } },
+  { name: "campaign leads tab", open: async (page, data) => { await page.goto(`/campaigns/${data.campaignId}/leads`); await settle(page, "Uses a fallback for"); } },
+  { name: "campaign leads tab, nothing imported", open: async (page, data) => { await page.goto(`/campaigns/${data.unimportedCampaignId}/leads`); await settle(page, "No leads yet."); } },
+  { name: "campaign imports tab", open: async (page, data) => { await page.goto(`/campaigns/${data.campaignId}/imports`); await settle(page, "See result"); } },
+  {
+    name: "campaign loading",
+    open: async (page, data) => { await hold(page, "**/api/campaigns/*/sequence"); await page.goto(`/campaigns/${data.campaignId}`); await page.getByLabel("Loading the campaign").waitFor(); },
+  },
+  {
+    name: "campaign error",
+    open: async (page, data) => { await fail(page, "**/api/campaigns/*/sequence"); await page.goto(`/campaigns/${data.campaignId}`); await settle(page, "This campaign didn’t load."); },
+  },
+  { name: "campaign not found", open: async (page) => { await page.goto("/campaigns/nobody"); await settle(page, "No such campaign"); } },
+  {
+    name: "person activity loading",
+    open: async (page, data) => { await hold(page, "**/api/people/*/activity"); await page.goto(`/leads/people/${data.person("Amira Hassan")}`); await page.getByLabel("Loading the activity").waitFor(); },
+  },
+  {
+    name: "person activity error",
+    open: async (page, data) => { await fail(page, "**/api/people/*/activity"); await page.goto(`/leads/people/${data.person("Amira Hassan")}`); await settle(page, "The activity didn’t load."); },
+  },
+  { name: "fake provider: campaigns list with a running campaign", open: async (page) => { await fake(page, "/campaigns"); await settle(page, "Running"); } },
+  { name: "fake provider: email track in the inspector", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.ready}?track=email`); await settle(page, "Timing and sender"); } },
+  {
+    name: "fake provider: a follow-up with a new subject",
+    open: async (page) => {
+      const f = await fakeProviderApp();
+      await fake(page, `/campaigns/${f.ready}?track=email&step=s2`);
+      await page.route("**/api/campaigns/*/sequence", (route) => (route.request().method() === "PUT" ? new Promise(() => undefined) : route.continue()));
+      // The save is held here, never reaching the shared app, so leaving the page cannot send it.
+      const held = page.waitForRequest((r) => r.method() === "PUT");
+      await page.getByText("New subject", { exact: true }).click();
+      await held;
+      await settle(page, "Saving…");
+    },
+  },
+  {
+    name: "fake provider: a change that wasn't saved",
+    open: async (page) => {
+      const f = await fakeProviderApp();
+      await fake(page, `/campaigns/${f.ready}?track=email`);
+      await fail(page, "**/api/campaigns/*/sequence", "PUT");
+      await page.getByLabel("Email 1 subject").fill("Evening bookings");
+      await settle(page, "Your last change wasn’t saved.");
+    },
+  },
+  {
+    name: "fake provider: a wait that isn't a whole number of days",
+    open: async (page) => {
+      const f = await fakeProviderApp();
+      await fake(page, `/campaigns/${f.ready}?track=email&step=s2`);
+      await page.route("**/api/campaigns/*/sequence", (route) => (route.request().method() === "PUT" ? serverError(route) : route.continue()));
+      await page.getByLabel("Days to wait before Email 2").fill("");
+      await settle(page, "Nothing is saved until this is fixed.");
+    },
+  },
+  { name: "fake provider: before launch, ready", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.ready}/before-launch`); await settle(page, "Ready to launch."); await settle(page, "Evening bookings at Harbour Lane Physio"); } },
+  {
+    name: "fake provider: before launch, copy for a company lead with fallbacks",
+    open: async (page) => {
+      const f = await fakeProviderApp();
+      await fake(page, `/campaigns/${f.ready}/before-launch`);
+      await page.getByLabel("Preview as lead").selectOption({ label: "Riverside Sports Clinic (company lead)" });
+      await settle(page, "Hi there,");
+    },
+  },
+  { name: "fake provider: before launch, blocked", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.blocked}/before-launch`); await settle(page, "2 things block launch."); } },
+  { name: "fake provider: blocked email track in the inspector", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.blocked}?track=email&step=s1`); await settle(page, "Add a fallback or remove the field."); } },
+  {
+    name: "fake provider: before launch loading",
+    open: async (page) => { const f = await fakeProviderApp(); await hold(page, "**/api/campaigns/*/before-launch*"); await fake(page, `/campaigns/${f.ready}/before-launch`); await page.getByLabel("Loading the checks before launch").waitFor(); },
+  },
+  {
+    name: "fake provider: before launch error",
+    open: async (page) => { const f = await fakeProviderApp(); await fail(page, "**/api/campaigns/*/before-launch*"); await fake(page, `/campaigns/${f.ready}/before-launch`); await settle(page, "The checks before launch didn’t load."); },
+  },
+  {
+    name: "fake provider: copy for a lead loading",
+    open: async (page) => { const f = await fakeProviderApp(); await hold(page, "**/api/campaigns/*/preview/*"); await fake(page, `/campaigns/${f.ready}/before-launch`); await page.getByLabel("Loading the copy").waitFor(); },
+  },
+  {
+    name: "fake provider: launch failed",
+    open: async (page) => {
+      const f = await fakeProviderApp();
+      await fail(page, "**/api/campaigns/*/launch");
+      await fake(page, `/campaigns/${f.ready}/before-launch`);
+      await page.getByRole("button", { name: "Launch campaign" }).click();
+      await settle(page, "The campaign didn’t launch.");
+    },
+  },
+  {
+    // The editor builds no SMS track yet (ticket 13 part b); a campaign defined through the API can have one.
+    name: "fake provider: before launch, an SMS track that can move the emails",
+    open: async (page) => {
+      const f = await fakeProviderApp("sms-screen");
+      const id = await f.freshCampaign("Podiatrists, Exeter");
+      const email = (await f.harness.request<SequenceView>("GET", `/api/campaigns/${id}/sequence`)).body.definition;
+      const sms = { id: "sms", channel: "sms" as const, branch: "main" as const, window: email.tracks[0]!.window, steps: [{ id: "m1", waitDays: 0, subject: "", body: "Hi {{first_name|there}}, a quick text about evening booking.", threading: "new_subject" as const, removed: false }], start: { kind: "entry" as const }, removed: false };
+      await f.harness.defineSequence(id, { ...email, tracks: [...email.tracks, sms] });
+      await page.goto(`${f.url}/campaigns/${id}/before-launch`);
+      await settle(page, "Can’t project the load yet");
+    },
+  },
+  { name: "fake provider: running campaign", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}`); await settle(page, "Pausing, resuming and editing a running campaign arrive with later releases."); } },
+  { name: "fake provider: running campaign's email track", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}?track=email`); await settle(page, "Editing a running campaign arrives with a later release."); } },
+  {
+    name: "fake provider: before launch with a change that isn't saved",
+    open: async (page) => {
+      const f = await fakeProviderApp();
+      await fake(page, `/campaigns/${f.ready}?track=email`);
+      await fail(page, "**/api/campaigns/*/sequence", "PUT");
+      await page.getByLabel("Email 1 subject").fill("Evening bookings");
+      await settle(page, "Your last change wasn’t saved.");
+      await page.getByRole("link", { name: /Before launch/ }).click();
+      await settle(page, "Your latest change isn’t saved, so launch waits.");
+    },
+  },
+  {
+    name: "fake provider: a running campaign's later email, read-only",
+    open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}?track=email&step=s2`); await settle(page, "Editing a running campaign arrives with a later release."); },
+  },
+  { name: "fake provider: a running campaign's leads, with their outreach status", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}/leads`); await settle(page, "Replied, automation stopped"); } },
+  {
+    name: "fake provider: before launch while an inbox cannot send, with no projection",
+    open: async (page) => {
+      // Its own app: the inbox the provider reports unable to send would block the shared campaigns.
+      const f = await fakeProviderApp("cannot-send");
+      f.harness.fake.accountsById.get(FAKE_INBOX)!.healthy = false;
+      await f.harness.tick();
+      await page.goto(`${f.url}/campaigns/${f.ready}/before-launch`);
+      await settle(page, "Can’t project the load while");
+    },
+  },
+  {
+    name: "fake provider: a tab whose campaign was changed elsewhere",
+    open: async (page) => {
+      // Its own app: another session's save changes the campaign after this tab loaded it.
+      const f = await fakeProviderApp("changed-elsewhere");
+      await page.goto(`${f.url}/campaigns/${f.ready}?track=email&step=s1`);
+      await page.getByLabel("Email 1 subject").waitFor();
+      const current = (await f.harness.request<SequenceView>("GET", `/api/campaigns/${f.ready}/sequence`)).body;
+      await f.harness.request("PUT", `/api/campaigns/${f.ready}/sequence`, { ...current.definition, save: { session: `other-${Date.now()}`, seq: 1, base: current.definitionVersion } });
+      await page.getByLabel("Email 1 copy").fill("Typed here after the other tab saved.");
+      await settle(page, "This campaign was changed elsewhere since this page loaded it.");
+    },
+  },
+  { name: "fake provider: running campaign, before launch", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}/before-launch`); await settle(page, "The projection is for before launch."); } },
+  {
+    name: "fake provider: sent emails, the copy shown, and the sequence finished",
+    open: async (page) => {
+      const f = await fakeProviderApp();
+      await fake(page, `/leads/people/${f.person("Amira Hassan")}`);
+      await page.getByText("Show message").first().click();
+      await settle(page, "Hide message");
+    },
+  },
+  { name: "fake provider: a hard bounce", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/leads/people/${f.person("Tom")}`); await settle(page, "Email 1 bounced"); } },
+  { name: "fake provider: replied, automation stopped", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/leads/people/${f.person("Daniel Price")}`); await settle(page, "Replied by email"); } },
+  { name: "fake provider: email skipped for a missing address", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/leads/people/${f.person("Grace Okafor")}`); await settle(page, "Email skipped"); } },
+  { name: "fake provider: a company lead's activity", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/leads/companies/${f.company("Riverside Sports Clinic")}`); await settle(page, "Email 1 sent"); } },
   { name: "record not found", open: async (page) => { await page.goto("/leads/people/nobody"); await settle(page, "No one found"); } },
   { name: "page not found", open: async (page) => { await page.goto("/nowhere"); await settle(page, "Page not found"); } },
+];
+
+/**
+ * Standing check (e2e/focus.spec.ts): a keyboard action that removes or replaces the focused
+ * control must move focus somewhere deliberate, never to the page body. Add each such transition
+ * here with the control that should hold focus afterwards.
+ */
+export interface FocusTransition {
+  readonly name: string;
+  readonly open: (page: Page, data: SeedData) => Promise<void>;
+  /** The keyboard action, starting from the control it focuses. */
+  readonly act: (page: Page) => Promise<void>;
+  /** What holds focus afterwards. */
+  readonly focused: (page: Page) => Locator;
+}
+
+export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
+  {
+    name: "removing an email moves focus to the email that takes its place",
+    open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.ready}?track=email&step=s2`); await settle(page, "Timing and sender"); },
+    act: async (page) => {
+      // Held, so the shared campaign keeps both emails.
+      await page.route("**/api/campaigns/*/sequence", (route) => (route.request().method() === "PUT" ? new Promise(() => undefined) : route.continue()));
+      const held = page.waitForRequest((r) => r.method() === "PUT");
+      await page.getByRole("button", { name: "Remove Email 2" }).focus();
+      await page.keyboard.press("Enter");
+      await held;
+    },
+    focused: (page) => page.getByRole("button", { name: /^Email 1/ }),
+  },
+  {
+    name: "adding the first email track moves focus into the inspector, to Email 1's subject",
+    open: async (page, data) => { await page.goto(`/campaigns/${data.unimportedCampaignId}`); await settle(page, "Add the first channel track"); },
+    act: async (page) => {
+      // The track is not saved: the scan's campaign stays without one.
+      await page.route("**/api/campaigns/*/sequence", (route) => (route.request().method() === "PUT" ? new Promise(() => undefined) : route.continue()));
+      const held = page.waitForRequest((r) => r.method() === "PUT");
+      await page.getByRole("button", { name: "Email track" }).focus();
+      await page.keyboard.press("Enter");
+      await held;
+    },
+    focused: (page) => page.getByLabel("Email 1 subject"),
+  },
+  {
+    name: "closing the inspector returns focus to the track it showed",
+    open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.ready}?track=email`); await settle(page, "Timing and sender"); },
+    act: async (page) => {
+      await page.getByRole("button", { name: "Close the email track" }).focus();
+      await page.keyboard.press("Enter");
+    },
+    focused: (page) => page.getByRole("button", { name: /^Email track: / }),
+  },
+  {
+    name: "loading the saved version after a conflict moves focus to Email 1's subject, as the alert and its button go (re-check F8)",
+    open: async (page) => {
+      const f = await fakeProviderApp("focus");
+      const id = await f.freshCampaign(`Focus load ${Date.now()}`);
+      await page.goto(`${f.url}/campaigns/${id}?track=email&step=s1`);
+      await settle(page, "Timing and sender");
+      // Another page saves first; this one's edit is then refused.
+      const other = (await f.harness.request<SequenceView>("GET", `/api/campaigns/${id}/sequence`)).body.definition;
+      await f.harness.defineSequence(id, { ...other, tracks: other.tracks.map((t) => ({ ...t, steps: t.steps.map((s, i) => (i === 0 ? { ...s, subject: "Saved on another page" } : s)) })) });
+      await page.getByLabel("Email 1 copy").fill("Typed on the stale page");
+      await page.getByRole("button", { name: "Load the saved version" }).waitFor();
+    },
+    act: async (page) => {
+      await page.getByRole("button", { name: "Load the saved version" }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByRole("button", { name: "Load the saved version" }).waitFor({ state: "detached" });
+    },
+    focused: (page) => page.getByLabel("Email 1 subject"),
+  },
+  {
+    name: "while a keyboard launch is pending, focus stays on the Launch button, which says it is launching (re-check 4, F8)",
+    open: async (page) => {
+      const f = await fakeProviderApp("focus");
+      const id = await f.freshCampaign(`Focus pending launch ${Date.now()}`);
+      await page.goto(`${f.url}/campaigns/${id}/before-launch`);
+      await page.getByRole("button", { name: "Launch campaign" }).and(page.locator(":enabled")).waitFor();
+    },
+    act: async (page) => {
+      // The launch never answers here: this is the moment between the press and the answer.
+      await page.route("**/api/campaigns/*/launch", () => undefined);
+      const asked = page.waitForRequest((r) => r.url().endsWith("/launch"));
+      await page.getByRole("button", { name: "Launch campaign" }).focus();
+      await page.keyboard.press("Enter");
+      await asked;
+      await page.getByRole("button", { name: "Launching…" }).waitFor();
+    },
+    focused: (page) => page.getByRole("button", { name: "Launching…" }),
+  },
+  {
+    name: "launching from the keyboard moves focus to the launch line, which says it launched, as the button goes (re-check F8)",
+    open: async (page) => {
+      const f = await fakeProviderApp("focus");
+      const id = await f.freshCampaign(`Focus launch ${Date.now()}`);
+      await page.goto(`${f.url}/campaigns/${id}/before-launch`);
+      await page.getByRole("button", { name: "Launch campaign" }).and(page.locator(":enabled")).waitFor();
+    },
+    act: async (page) => {
+      await page.getByRole("button", { name: "Launch campaign" }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByRole("button", { name: "Launch campaign" }).waitFor({ state: "detached" });
+    },
+    focused: (page) => page.locator("p[tabindex='-1']", { hasText: /^Launched / }),
+  },
+  {
+    name: "closing a running campaign's inspector returns focus to the track",
+    open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}?track=email`); await settle(page, "Timing and sender"); },
+    act: async (page) => {
+      await page.getByRole("button", { name: "Close the email track" }).focus();
+      await page.keyboard.press("Enter");
+    },
+    focused: (page) => page.getByRole("button", { name: /^Email track: / }),
+  },
 ];

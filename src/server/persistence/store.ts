@@ -46,7 +46,8 @@ export interface StoredContactDetail {
 export interface OutreachStore {
   createCampaign(campaign: Campaign): Promise<void>;
   campaign(id: string): Promise<Campaign | null>;
-  listCampaigns(): Promise<CampaignListItem[]>;
+  /** The campaigns with their lead counts and last import; the HTTP interface adds each one's sequence summary. */
+  listCampaigns(): Promise<Omit<CampaignListItem, "sequence">[]>;
 
   /**
    * Loads the directory for the campaign, lets `plan` decide the changes, and applies them with

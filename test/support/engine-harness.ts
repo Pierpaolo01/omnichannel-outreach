@@ -99,10 +99,15 @@ export class EngineHarness {
       store: this.store,
       now: () => new Date(this.clock).toISOString(),
       newId: sequentialIds(),
-      engine: { launch: (id) => this.engine.launch(id) },
+      engine: { launch: (id, expected) => this.engine.launch(id, expected) },
       emailProvider: "status" in this.provider ? (this.provider as Provider & EmailProviderSource) : null,
       smsProvider: this.smsProvider ? "test-simulator" : "none",
     });
+  }
+
+  /** Answers one HTTP request with the app, as a server would: the browser tests serve it this way. */
+  fetch(request: Request): Promise<Response> {
+    return Promise.resolve(this.app.fetch(request));
   }
 
   /** The fake SMS provider. */

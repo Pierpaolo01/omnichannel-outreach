@@ -452,6 +452,32 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX sms_bindings_by_recipient ON sms_bindings(recipient_key);
     `,
   },
+  {
+    // Numbered after the Instantly adapter's 7 and 8 and ticket 13a's 9.
+    version: 10,
+    name: "bounce events: each hard bounce the provider reported, kept by its event id for the timeline (ticket 12c)",
+    sql: `
+      CREATE TABLE bounce_events (
+        event_id TEXT PRIMARY KEY,
+        subject_id TEXT NOT NULL,
+        work_key TEXT NOT NULL,
+        track_id TEXT NOT NULL,
+        step_id TEXT NOT NULL,
+        destination TEXT NOT NULL,
+        at_wall INTEGER NOT NULL,
+        received_wall INTEGER NOT NULL
+      );
+      CREATE INDEX bounce_events_by_subject ON bounce_events (subject_id, at_wall);
+    `,
+  },
+  {
+    version: 11,
+    name: "the editing session and number that wrote the definition (ticket 12c, ADR 0003 1.1.1)",
+    sql: `
+      ALTER TABLE campaigns ADD COLUMN definition_session TEXT;
+      ALTER TABLE campaigns ADD COLUMN definition_seq INTEGER;
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string): void {

@@ -64,6 +64,13 @@ export const liveTracks = (def: CampaignDefinition, branch: Branch = "main"): Tr
 
 export const liveSteps = (track: TrackDefinition): StepDefinition[] => track.steps.filter((s) => !s.removed);
 
+/**
+ * The subject a step writes: its own on a new-subject email; none on a continue-thread email,
+ * which goes inside the thread it continues. A subject stored on a continue-thread step (the
+ * editor hides it after a switch) is never rendered, sent or checked (PR 41 council, item 3).
+ */
+export const ownSubject = (step: StepDefinition): string => (step.threading === "new_subject" ? step.subject : "");
+
 const isWholeDays = (n: number) => Number.isInteger(n) && n >= 0;
 
 /**

@@ -20,6 +20,27 @@ export function mergeUses(text: string): MergeUse[] {
   return [...text.matchAll(TOKEN)].map((m) => ({ field: m[1] ?? "", fallback: m[2] ?? null }));
 }
 
+/** `text` in order as literal pieces and merge-field uses, read as rendering reads them. */
+export function mergeParts(text: string): ({ readonly literal: string } | { readonly use: MergeUse })[] {
+  const out: ({ readonly literal: string } | { readonly use: MergeUse })[] = [];
+  let last = 0;
+  for (const m of text.matchAll(TOKEN)) {
+    if (m.index > last) out.push({ literal: text.slice(last, m.index) });
+    out.push({ use: { field: m[1] ?? "", fallback: m[2] ?? null } });
+    last = m.index + m[0].length;
+  }
+  if (text.length > last) out.push({ literal: text.slice(last) });
+  return out;
+}
+
+/**
+ * Rewrites each merge-field use in `text`: `rewrite` returns the new token, or null to keep it. The
+ * editor changes fallbacks through this, so it reads tokens exactly as rendering does.
+ */
+export function rewriteMergeUses(text: string, rewrite: (use: MergeUse) => string | null): string {
+  return text.replace(TOKEN, (all, field: string, fallback: string | undefined) => rewrite({ field, fallback: fallback ?? null }) ?? all);
+}
+
 export type Rendered = { readonly ok: true; readonly text: string } | { readonly ok: false; readonly missing: readonly string[] };
 
 /** Renders `text` for one lead. Fails, naming the fields, when a field without fallback is missing. */

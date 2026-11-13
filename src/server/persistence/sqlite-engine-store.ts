@@ -22,7 +22,7 @@ import type {
   WorkSettlement,
 } from "../../domain/sequence/state.ts";
 import { isOutreachStatus } from "../../domain/outreach-status.ts";
-import type { CampaignEngineRow, EngineStore, LaunchOutcome, ReplyEvent, SenderAccountConfig } from "../engine/engine-store.ts";
+import type { BounceEvent, CampaignEngineRow, DefinitionSave, EngineStore, SaveResult, StoredDefinition, LaunchOutcome, ReplyEvent, SenderAccountConfig } from "../engine/engine-store.ts";
 import { liveDetailRowOf } from "./sqlite-store.ts";
 
 type Row = Record<string, SQLOutputValue>;
@@ -62,16 +62,29 @@ export class SqliteEngineStore implements EngineStore {
     };
   }
 
-  async saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string): Promise<"saved" | "launched" | "missing"> {
-    return this.transaction(() => {
-      const row = this.sql("SELECT launched_at FROM campaigns WHERE id = ?").get(campaignId);
-      if (!row) return "missing";
-      if (row["launched_at"] != null) return "launched";
-      this.run(
-        "UPDATE campaigns SET definition = ?, definition_version = definition_version + 1, definition_edited_at = ?, version = version + 1 WHERE id = ?",
-        [JSON.stringify(definition), editedAt, campaignId],
-      );
-      return "saved";
+  async saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save: DefinitionSave | null = null): Promise<SaveResult> {
+    return this.transaction((): SaveResult => {
+      const text = JSON.stringify(definition);
+      // ADR 0003 1.1.1, in the statement that stores: accepted if it continues the stored session
+      // with a higher number, or starts from the stored revision. A save with no session is stored.
+      const changed = this.sql(
+        `UPDATE campaigns SET definition = ?, definition_version = definition_version + 1, definition_edited_at = ?, version = version + 1,
+           definition_session = ?, definition_seq = ?
+         WHERE id = ? AND launched_at IS NULL
+           AND (? IS NULL OR (definition_session = ? AND definition_seq < ?) OR definition_version = ?)`,
+      ).run(text, editedAt, save?.session ?? null, save?.seq ?? null, campaignId, save?.session ?? null, save?.session ?? null, save?.seq ?? null, save?.base ?? null).changes;
+      // The row as this transaction leaves it: the answer is built from it, never read afterwards.
+      const row = this.sql("SELECT * FROM campaigns WHERE id = ?").get(campaignId);
+      if (!row) return { outcome: "missing" };
+      const stored = storedDefinitionOf(row);
+      if (Number(changed) > 0) return { outcome: "saved", stored };
+      if (row["launched_at"] != null) return { outcome: "launched", stored };
+      if (save && strOrNull(row, "definition_session") === save.session) {
+        const seq = numOrNull(row, "definition_seq") ?? 0;
+        if (seq > save.seq) return { outcome: "superseded", stored };
+        if (seq === save.seq && row["definition"] === text) return { outcome: "unchanged", stored };
+      }
+      return { outcome: "conflict", stored };
     });
   }
 
@@ -94,20 +107,23 @@ export class SqliteEngineStore implements EngineStore {
     now: number,
     decide: Parameters<EngineStore["launch"]>[2],
     enter: (state: SubjectState) => SubjectState,
+    expectedDefinitionVersion?: number,
   ): Promise<LaunchOutcome> {
     return this.transaction((): LaunchOutcome => {
       const row = this.sql("SELECT * FROM campaigns WHERE id = ?").get(campaignId);
       if (!row || row["definition"] == null) return { ok: false, check: null, reason: "no_definition" };
       if (row["launched_at"] != null) return { ok: false, check: null, reason: "already_launched" };
+      if (expectedDefinitionVersion !== undefined && num(row, "definition_version") !== expectedDefinitionVersion) return { ok: false, check: null, reason: "changed" };
       const { leads, accounts } = this.launchInputsNow(campaignId);
       const check = decide(parseDefinition(row), leads, accounts);
       if (!check.canLaunch) return { ok: false, check, reason: "blocked" };
       this.run("UPDATE campaigns SET launched_at = ?, version = version + 1 WHERE id = ?", [now, campaignId]);
+      const launchedRow = this.sql("SELECT * FROM campaigns WHERE id = ?").get(campaignId);
       for (const e of this.sql("SELECT id FROM enrollments WHERE campaign_id = ? ORDER BY enrolled_at, id").all(campaignId)) {
         const base = this.load(str(e, "id"), now);
         if (base) this.write(base, enter(base), now);
       }
-      return { ok: true };
+      return { ok: true, stored: storedDefinitionOf(launchedRow ?? row) };
     });
   }
 
@@ -285,6 +301,29 @@ export class SqliteEngineStore implements EngineStore {
 
   async setMeta(key: string, value: string): Promise<void> {
     this.run("INSERT INTO engine_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [key, value]);
+  }
+
+  async recordBounce(b: BounceEvent): Promise<void> {
+    this.run(
+      `INSERT OR IGNORE INTO bounce_events (event_id, subject_id, work_key, track_id, step_id, destination, at_wall, received_wall)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [b.eventId, b.subjectId, b.workKey, b.trackId, b.stepId, b.destination, b.atWall, b.receivedWall],
+    );
+  }
+
+  async bouncesOf(subjectId: string): Promise<BounceEvent[]> {
+    return this.sql("SELECT * FROM bounce_events WHERE subject_id = ? ORDER BY at_wall, event_id")
+      .all(subjectId)
+      .map((r) => ({
+        eventId: str(r, "event_id"),
+        subjectId: str(r, "subject_id"),
+        workKey: str(r, "work_key"),
+        trackId: str(r, "track_id"),
+        stepId: str(r, "step_id"),
+        destination: str(r, "destination"),
+        atWall: num(r, "at_wall"),
+        receivedWall: num(r, "received_wall"),
+      }));
   }
 
   async recordAnomaly(attemptId: string | null, what: string, atWall: number): Promise<void> {
@@ -771,4 +810,14 @@ function num(row: Row, column: string): number {
 function numOrNull(row: Row, column: string): number | null {
   const value = row[column];
   return value === null || value === undefined ? null : num(row, column);
+}
+
+/** The definition as a row holds it, for an answer built inside the transaction that wrote it. */
+function storedDefinitionOf(row: Row): StoredDefinition {
+  return {
+    definition: parseDefinition(row),
+    definitionVersion: num(row, "definition_version"),
+    definitionEditedAt: strOrNull(row, "definition_edited_at"),
+    launchedAt: numOrNull(row, "launched_at"),
+  };
 }

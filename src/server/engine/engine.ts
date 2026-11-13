@@ -9,7 +9,7 @@ import { launchCheck, type LaunchCheck } from "../../domain/sequence/blockers.ts
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
-import type { EngineStore, ReplyEvent } from "./engine-store.ts";
+import type { EngineStore, ReplyEvent, StoredDefinition } from "./engine-store.ts";
 import { UnprovisionedSmsPort, type AttemptRef, type HandoverRequest, type ProviderEvent, type SendPort } from "./ports.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 
@@ -164,14 +164,14 @@ export class Engine {
   // Entry points.
 
   /** Launches a campaign if nothing blocks it, and runs a tick. */
-  launch(campaignId: string): Promise<{ ok: true } | { ok: false; reason: string; check: LaunchCheck | null }> {
+  launch(campaignId: string, expectedDefinitionVersion?: number): Promise<{ ok: true; stored: StoredDefinition } | { ok: false; reason: string; check: LaunchCheck | null }> {
     return this.ticks.run(async () => {
       await this.syncAccounts();
       const now = this.now();
-      const outcome = await this.store.launch(campaignId, now, launchCheck, (s) => this.rules.evaluate(this.rules.enterMain(s, now), now));
+      const outcome = await this.store.launch(campaignId, now, launchCheck, (s) => this.rules.evaluate(this.rules.enterMain(s, now), now), expectedDefinitionVersion);
       if (!outcome.ok) return outcome;
       await this.runTick();
-      return { ok: true as const };
+      return { ok: true as const, stored: outcome.stored };
     });
   }
 
@@ -488,9 +488,26 @@ export class Engine {
     }
     if (event.kind === "sent") return this.applyWork(w.subjectId, w.key, { kind: "sent_observed", providerTime: event.sentAt, providerRef: event.providerRef });
     if (event.kind === "rejected") return this.applyWork(w.subjectId, w.key, { kind: "provider_rejected", reason: event.reason });
-    // A bounce after a send marks the address bad and fails the track if it is unfinished.
+    // A bounce after a send marks the address bad and fails the track if it is unfinished. It
+    // applies only to work some attempt handed over; for other work nothing is applied, so nothing
+    // is recorded (PR 41 council, item 5). Handing over is never undone, so this check and the
+    // update's agree. The bounce is kept first, by its event id, so the timeline shows it even on a
+    // track that had already completed; a repeat of the event, after a restart, records nothing new.
+    const handedBy = (s: SubjectState) => s.attempts.filter((a) => a.idempotencyKey === w.key && a.handedWall !== null).sort((x, y) => (x.handedWall ?? 0) - (y.handedWall ?? 0))[0];
+    const before = await this.store.subject(w.subjectId, now);
+    if (!before || !handedBy(before)) return false;
+    await this.store.recordBounce({
+      eventId: event.id,
+      subjectId: w.subjectId,
+      workKey: w.key,
+      trackId: w.trackId,
+      stepId: w.stepId,
+      destination: w.destination,
+      atWall: Math.min(event.at, now),
+      receivedWall: now,
+    });
     return (await this.store.update(w.subjectId, now, (s) => {
-      const sentBy = s.attempts.filter((a) => a.idempotencyKey === w.key && a.handedWall !== null).sort((x, y) => (x.handedWall ?? 0) - (y.handedWall ?? 0))[0];
+      const sentBy = handedBy(s);
       if (!sentBy) return null;
       const next = this.rules.applyBadDestination(s, sentBy, now);
       return same(next, s) ? null : next;

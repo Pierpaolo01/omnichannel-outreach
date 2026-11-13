@@ -48,7 +48,37 @@ export interface ReplyEvent {
   readonly lastCountedWall: number;
 }
 
-export type LaunchOutcome = { readonly ok: true } | { readonly ok: false; readonly check: LaunchCheck | null; readonly reason: "already_launched" | "blocked" | "no_definition" };
+/** A hard bounce the provider reported for one piece of provider work, kept for good by its event id. */
+export interface BounceEvent {
+  readonly eventId: string;
+  readonly subjectId: string;
+  readonly workKey: string;
+  readonly trackId: string;
+  readonly stepId: string;
+  readonly destination: string;
+  /** The provider's bounce time, clamped to now. */
+  readonly atWall: number;
+  readonly receivedWall: number;
+}
+
+export type LaunchOutcome = { readonly ok: true; readonly stored: StoredDefinition } | { readonly ok: false; readonly check: LaunchCheck | null; readonly reason: "already_launched" | "blocked" | "no_definition" | "changed" };
+
+/** The row as the saving transaction left it: what the answer is built from (PR 41 council, item 4). */
+export interface StoredDefinition {
+  readonly definition: CampaignDefinition;
+  readonly definitionVersion: number;
+  readonly definitionEditedAt: string | null;
+  readonly launchedAt: number | null;
+}
+
+export type SaveResult = { readonly outcome: "saved" | "unchanged" | "launched" | "superseded" | "conflict"; readonly stored: StoredDefinition } | { readonly outcome: "missing" };
+
+/** Who wrote a save (ADR 0003 1.1.1): the editing session, its number in it, and the revision it last saw. */
+export interface DefinitionSave {
+  readonly session: string;
+  readonly seq: number;
+  readonly base: number;
+}
 
 /**
  * The sequence engine's persistence (ADR 0003 9.1). Every change to a subject goes through
@@ -58,8 +88,12 @@ export type LaunchOutcome = { readonly ok: true } | { readonly ok: false; readon
  */
 export interface EngineStore {
   campaign(campaignId: string): Promise<CampaignEngineRow | null>;
-  /** Saves a definition before launch. Editing a launched campaign arrives with ticket 19. */
-  saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string): Promise<"saved" | "launched" | "missing">;
+  /**
+   * Saves a definition before launch, by the rule of ADR 0003 1.1.1: decided and stored in one
+   * transaction. Without `save` (API clients, tests) it is stored as before. Editing a launched
+   * campaign arrives with ticket 19.
+   */
+  saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save?: DefinitionSave | null): Promise<SaveResult>;
   /** The merge data of every enrollment of the campaign that has not ended, and the sender accounts. */
   launchInputs(campaignId: string): Promise<{ leads: MergeData[]; accounts: SenderAccountView[] }>;
   /**
@@ -71,6 +105,8 @@ export interface EngineStore {
     now: number,
     decide: (definition: CampaignDefinition, leads: MergeData[], accounts: SenderAccountView[]) => LaunchCheck,
     enter: (state: SubjectState) => SubjectState,
+    /** The revision the user is looking at: launch is refused ("changed") if the stored one is another. */
+    expectedDefinitionVersion?: number,
   ): Promise<LaunchOutcome>;
 
   subject(subjectId: string, now: number): Promise<SubjectState | null>;
@@ -118,6 +154,11 @@ export interface EngineStore {
   /** Moves the account's next pacing slot to at least `callStart` plus its gap. */
   pushSlot(accountId: string, callStart: number): Promise<void>;
   updateAccount(accountId: string, change: Partial<Pick<AccountState, "healthy" | "waitUntil" | "waitReason" | "backoffMs">>): Promise<void>;
+
+  /** Records a bounce once; a second record of the same event id changes nothing. */
+  recordBounce(bounce: BounceEvent): Promise<void>;
+  /** A subject's recorded bounces, oldest first. */
+  bouncesOf(subjectId: string): Promise<BounceEvent[]>;
 
   meta(key: string): Promise<string | null>;
   setMeta(key: string, value: string): Promise<void>;

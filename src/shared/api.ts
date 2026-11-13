@@ -20,13 +20,28 @@ export interface Campaign {
   readonly createdAt: string;
 }
 
+/** Whether a campaign has launched, and the channels of its live main-sequence tracks, in order. */
+export interface CampaignSequenceSummary {
+  readonly launchedAt: string | null;
+  readonly tracks: readonly ("email" | "sms" | "call")[];
+}
+
 export interface CampaignListItem extends Campaign {
   readonly leadCount: number;
+  readonly sequence: CampaignSequenceSummary;
   readonly lastImport: {
     readonly id: string;
     readonly importedAt: string;
     readonly counts: Readonly<Record<LeadOutcome, number>>;
   } | null;
+}
+
+/** GET /api/campaigns/:id */
+export interface CampaignDetail {
+  readonly campaign: Campaign;
+  readonly imports: readonly ImportRecord[];
+  readonly leadCount: number;
+  readonly sequence: CampaignSequenceSummary;
 }
 
 export interface ImportFileNames {
@@ -295,6 +310,138 @@ export interface NeedsAttention {
     }[];
   }[];
   readonly anomalies: readonly { readonly what: string; readonly at: string }[];
+}
+
+// ---------------------------------------------------------------------------------------------
+// The campaign editor's Before launch tab and the person timeline (ticket 12c). Read models only.
+
+/** A lead of the campaign the copy can be rendered for: an enrollment that has not ended. */
+export interface PreviewLead {
+  /** The enrollment id. */
+  readonly id: string;
+  readonly kind: "person" | "company";
+  /** The person's or company lead's record id, for its page. */
+  readonly recordId: string;
+  readonly name: string;
+  readonly title: string;
+  readonly company: string;
+  /** The address the email track would send to: the lead's own email, or a company lead's shared inbox. */
+  readonly email: string | null;
+  /** A good mobile of the decision maker's own; company leads are never texted. */
+  readonly mobile: boolean;
+  /** A good phone number to call: their own, or the company's main line. */
+  readonly phone: boolean;
+  /** Merge fields the live copy uses that this lead has no value for. */
+  readonly lacks: readonly string[];
+}
+
+/** GET /api/campaigns/:id/before-launch */
+export interface BeforeLaunchView {
+  readonly campaignId: string;
+  readonly leads: readonly PreviewLead[];
+  /** Spec "Before launch": how many leads have an email, a mobile or a phone number. */
+  readonly coverage: { readonly leads: number; readonly email: number; readonly mobile: number; readonly phone: number };
+  /** Every merge field the live copy uses, with how many leads lack it and the fallbacks written for it. */
+  readonly mergeFields: readonly {
+    readonly field: string;
+    readonly leadsMissing: number;
+    /** Of them, company leads, which have no person's name or title. */
+    readonly companyLeadsMissing: number;
+    /** The distinct fallback texts written for this field; empty when some use has none. */
+    readonly fallbacks: readonly string[];
+    /** Some use of the field has no fallback. */
+    readonly someUseWithoutFallback: boolean;
+  }[];
+  /** Null once the campaign has launched: the projection is a before-launch estimate. */
+  readonly load: LoadProjectionView | null;
+}
+
+export interface LoadProjectionView {
+  /** The leads the email track would send to; the rest have no email and skip it. */
+  readonly leadsWithEmail: number;
+  readonly accounts: readonly {
+    readonly id: string;
+    readonly label: string;
+    readonly capacity: number;
+    /** Sends already counted or reserved today on this inbox, across every campaign. */
+    readonly usedToday: number;
+    /** The most this campaign would send from it on one day. */
+    readonly busiestDay: number;
+    readonly gapSeconds: number;
+  }[];
+  /**
+   * Calendar days, counting launch day as day 1, until every lead with an email has had its first
+   * email; null when no connected inbox can send, or not all start within the projection's horizon.
+   */
+  readonly daysUntilAllStart: number | null;
+  /** Leads that would not have started within the projection's horizon. */
+  readonly notStartedWithinHorizon: number;
+  readonly horizonDays: number;
+  /**
+   * Pool inboxes that cannot send now with no known end: the provider reports them unable to send
+   * (stale, sending off, not active), or the lead quota is held. While any is listed there is no
+   * projection, because none can be honest. A rate limit has an end, and the projection resumes there.
+   */
+  readonly cannotProject: readonly { readonly accountId: string; readonly label: string; readonly reason: "cannot_send" | "quota" }[];
+  /**
+   * Another track can change when emails go, which the estimate does not simulate yet (SMS sends
+   * arrive in it with ticket 13b): an SMS track, or a second email track, that does not start after
+   * this campaign's email track, here or in another running campaign on the same inboxes. While set
+   * there is no projection.
+   */
+  readonly otherTracksChangeTiming: "this_campaign" | "other_campaign" | null;
+  /** The projection counts email only: this campaign's SMS track, which starts after its emails, is left out. */
+  readonly leavesOutSms: boolean;
+}
+
+/** Rendered copy, in pieces, so a fallback the lead gets can be shown as one. */
+export interface CopySegment {
+  readonly text: string;
+  /** A literal, the lead's own value, a fallback for a field it lacks, or a missing field with no fallback. */
+  readonly kind: "literal" | "value" | "fallback" | "missing";
+  /** The merge field, for every kind but literal. */
+  readonly field?: string;
+}
+
+/** GET /api/campaigns/:id/preview/:enrollmentId */
+export interface CopyPreview {
+  readonly lead: PreviewLead;
+  readonly steps: readonly {
+    readonly trackId: string;
+    readonly stepId: string;
+    readonly number: number;
+    /** The earliest day it can go, counting the first email as day 1: one plus every wait before it. */
+    readonly day: number;
+    readonly threading: "new_subject" | "continue_thread";
+    /** The subject the step writes; on a continue-thread step, the subject of the thread it continues. */
+    readonly subject: readonly CopySegment[];
+    readonly body: readonly CopySegment[];
+    /** Merge fields this lead lacks that have no fallback: the copy cannot be sent to them. */
+    readonly missing: readonly string[];
+  }[];
+}
+
+/** One line of a person's or company lead's timeline (GET /api/people/:id/activity). Newest first. */
+export type ActivityEntry = { readonly campaign: { readonly id: string; readonly name: string }; readonly at: string } & (
+  | {
+      readonly kind: "sent";
+      readonly stepNumber: number;
+      readonly from: string;
+      readonly to: string;
+      readonly copy: { readonly subject: string; readonly body: string } | null;
+    }
+  | { readonly kind: "failed"; readonly stepNumber: number; readonly to: string; readonly reason: string }
+  | { readonly kind: "skipped"; readonly stepNumber: number | null; readonly reason: string }
+  /** A hard bounce the provider reported for an email of this campaign: the address is marked bad. */
+  | { readonly kind: "bounced"; readonly stepNumber: number | null; readonly to: string }
+  /** The track ended because its address is marked bad, with no bounce event of this campaign's: another campaign's bounce, or this campaign's observed before migration 10. */
+  | { readonly kind: "address_bad"; readonly to: string }
+  | { readonly kind: "replied"; readonly channel: "email" | "sms" }
+  | { readonly kind: "ended"; readonly status: "sequence_finished_no_response" | "finished_no_usable_channel" }
+);
+
+export interface ActivityView {
+  readonly entries: readonly ActivityEntry[];
 }
 
 /**
