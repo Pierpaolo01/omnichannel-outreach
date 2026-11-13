@@ -67,6 +67,29 @@ describe("a number two colleagues hold in different forms becomes the main line"
   });
 });
 
+// Review round 2 (GPT): the store read the copy in the region of the first main line on record,
+// the planner in the region of the line being claimed, and refused a merge the planner asked for.
+describe("a company with a foreign main line and no country lists a colleague's number as a second main line", () => {
+  const atlantic = business({ business_id: "b1", place_id: "P1", business_name: "Atlantic Physio", phone_e164: "+12025550199", phone_original: "+1 202 555 0199", country: "" });
+  const yara = person({ person_id: "y", business_id: "b1", full_name: "Yara Glen", direct_phone: "+442079460155" });
+  const zara = person({ person_id: "z", business_id: "b1", full_name: "Zara Glen", direct_phone: "020 7946 0155" });
+
+  for (const [order, people] of [["Yara first", [yara, zara]], ["Zara first", [zara, yara]]] as const) {
+    test(`both copies fold into the new line, and each id resolves to it (${order})`, async () => {
+      const api = testApi();
+      const campaign = (await api.createCampaign("Physio")).id;
+      expect((await api.post(`/api/campaigns/${campaign}/imports`, csvOf({ businesses: [atlantic], people: [...people] }))).status).toBe(201);
+      const yaraNumber = detailId(await personNamed(api, "Yara Glen"), "person", "+44 20 7946 0155");
+      const zaraNumber = detailId(await personNamed(api, "Zara Glen"), "person", "02079460155");
+      const promoted = await api.post(`/api/campaigns/${campaign}/imports`, csvOf({ businesses: [{ ...atlantic, phone_e164: "+442079460155", phone_original: "+44 20 7946 0155" }], people: [] }));
+      expect(promoted.status).toBe(201);
+      const line = await api.store.contactDetail(yaraNumber);
+      expect(line).toMatchObject({ owner: { kind: "company" }, phoneKind: "main_line", key: "+442079460155" });
+      expect(await api.store.contactDetail(zaraNumber)).toEqual(line);
+    });
+  }
+});
+
 /**
  * The store's contract for merges, whatever the planner asks of it. These plans are written by
  * hand at the store's seam, so they can make chains the planner does not yet make; every merge
