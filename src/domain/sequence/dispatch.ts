@@ -130,9 +130,19 @@ export function chooseAccount(state: SubjectState, now: number, stepId: string |
   const fixed = state.subject.emailSender;
   const candidates = fixed !== null ? [state.accounts[fixed]] : state.campaign.definition.emailPool.map((id) => state.accounts[id]);
   const inherited = stepId === null ? undefined : inheritedWork(state, stepId);
+  return pickAccount(candidates, now, inherited?.accountId ?? null);
+}
+
+/**
+ * Of the candidate accounts, the one a claim takes (4.2 step 2): available and with room, then
+ * the one that can send soonest, then the one with most remaining capacity, then the lowest id.
+ * `reservedOn` is the account whose reservation an inherited claim already holds. The Before
+ * launch projection calls this too, so it chooses as the engine does (ADR 0003, 12c).
+ */
+export function pickAccount(candidates: readonly (AccountState | undefined)[], now: number, reservedOn: string | null = null): AccountState | null {
   return (
     candidates
-      .filter((a): a is AccountState => a !== undefined && accountAvailable(a, now) && accountHasRoom(a, inherited?.accountId === a.id))
+      .filter((a): a is AccountState => a !== undefined && accountAvailable(a, now) && accountHasRoom(a, reservedOn === a.id))
       .sort((a, b) => Math.max(a.nextSlotAt, now) - Math.max(b.nextSlotAt, now) || b.capacity - b.used - (a.capacity - a.used) || (a.id < b.id ? -1 : 1))[0] ?? null
   );
 }

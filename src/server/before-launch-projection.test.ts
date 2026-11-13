@@ -181,10 +181,10 @@ describe("an inbox that cannot send now (PR 41 council, item 1)", () => {
     expect((await h.launch(second.id)).status).toBe(200);
     await h.advanceTo(MONDAY_10 + DAY);
     const sentSecond = h.fake.deliveryLog.find((d) => d.destination === "lead2@clinic2.example");
-    // The first campaign's waiting lead goes first at the end of the wait, so this one goes one
-    // gap later: the projection does not model other campaigns' pending work (ADR 0003, 12c).
-    expect(projected!.sends[0]!.at).toBeGreaterThanOrEqual(MONDAY_10 + 2 * MIN);
-    expect(sentSecond!.at - projected!.sends[0]!.at).toBeLessThanOrEqual(MIN);
+    // The first campaign's waiting lead goes first at the end of the wait, and this one a gap
+    // later: the projection simulates the other campaign's waiting work, so the instant is exact.
+    const mine = projected!.sends.find((x) => x.leadId === second.id || x.leadId === sentSecond?.subjectId);
+    expect(mine).toMatchObject({ at: sentSecond!.at, accountId: sentSecond!.sender, step: 0 });
   });
 
   test("an inbox the provider reports cannot send has no known end: the screen says it cannot project, never a number", async () => {
@@ -235,7 +235,7 @@ describe("another running campaign's waiting work on the same inboxes (PR 41 re-
     const stepIndex = (stepId: string) => Number(stepId.slice(1)) - 1;
     const exact = (xs: { leadId: string; accountId: string; step: number; at: number }[]) => [...xs].sort((x, y) => x.at - y.at || (x.accountId < y.accountId ? -1 : 1));
     const mine = new Set(await h.store.engine.subjectsOf(b.id));
-    const actual = h.fake.deliveryLog.slice(already).filter((d) => mine.has(d.subjectId)).map((d) => ({ leadId: d.subjectId, accountId: d.sender, step: stepIndex(d.stepId), at: d.at }));
+    const actual = h.fake.deliveryLog.slice(already).filter((d) => mine.has(d.subjectId) && d.at < until).map((d) => ({ leadId: d.subjectId, accountId: d.sender, step: stepIndex(d.stepId), at: d.at }));
     return { projected: exact(projected!.sends.filter((s) => s.at < until && mine.has(s.leadId))), actual: exact(actual), view };
   }
 
@@ -258,6 +258,100 @@ describe("another running campaign's waiting work on the same inboxes (PR 41 re-
       const shared = (d: CampaignDefinition): CampaignDefinition => ({ ...d, emailPool: pool });
       const { projected, actual } = await both(first.accounts, first.start, shared(first.definition), shared(second.definition), { a: first.zones, b: second.zones }, undefined, (seed % 3) * 7 * MIN);
       expect(projected).toEqual(actual);
+    });
+  }
+});
+
+describe("every inbox of every simulated campaign as the engine sees it (PR 41 council, item 1)", () => {
+  const track = (pool: string[], window: readonly WindowRule[], waits: number[]): CampaignDefinition => ({
+    timezone: "Europe/London",
+    callSkipLimitDays: 2,
+    emailPool: pool,
+    tracks: [{ id: "t1", channel: "email", branch: "main", window, steps: waits.map((w, i) => ({ id: `s${i + 1}`, waitDays: w, subject: i === 0 ? "Hi" : "", body: "Hi.", threading: i === 0 ? "new_subject" : "continue_thread", removed: false })), start: { kind: "entry" }, removed: false }],
+  });
+  const leadsOf = (prefix: string, zones: readonly string[]) => ({
+    businesses: zones.map((zone, i) => business({ business_id: `${prefix}b${i}`, business_name: `${prefix} Clinic ${i}`, timezone: zone })),
+    people: zones.map((_, i) => person({ person_id: `${prefix}p${i}`, business_id: `${prefix}b${i}`, full_name: `${prefix} Person${i}`, email: `${prefix}${i}@clinic.example`, timezone: "" })),
+  });
+  type Unavailable = { readonly id: string; readonly reason: "unhealthy" | "quota" | "rate_limited" };
+
+  /** Campaign A runs; some inboxes become unavailable; B is projected, launched, and its sends compared. */
+  async function compareWith(o: { accounts: FakeAccount[]; start: number; a: CampaignDefinition; b: CampaignDefinition; zones: { a: readonly string[]; b: readonly string[] }; unavailable: readonly Unavailable[]; gapMs: number }) {
+    const h = new EngineHarness({ start: o.start, accounts: o.accounts });
+    const { campaign: a } = await h.createCampaign("Running", leadsOf("a", o.zones.a));
+    const { campaign: b } = await h.createCampaign("Projected", leadsOf("b", o.zones.b));
+    await h.tick();
+    await h.defineSequence(a.id, o.a);
+    for (const u of o.unavailable) {
+      const acc = h.fake.accountsById.get(u.id)!;
+      if (u.reason === "quota") acc.quotaAvailable = false;
+      if (u.reason === "rate_limited") h.fake.rateLimitedUntil.set(u.id, o.start + 40 * MIN);
+    }
+    const launchedA = await h.launch(a.id);
+    await h.advanceTo(o.start + o.gapMs);
+    for (const u of o.unavailable) if (u.reason === "unhealthy") h.fake.accountsById.get(u.id)!.healthy = false;
+    await h.tick();
+    // The projection knows what the engine knows. A quota or rate limit the engine has not met yet
+    // (no send was tried on that inbox) is a provider state nobody has observed: it is lifted, so
+    // the engine and the projection start from the same facts. Every state the engine learned stays.
+    const known = new Map((await h.store.engine.accounts(h.clock)).map((acc) => [acc.id, acc]));
+    for (const u of o.unavailable) {
+      if (u.reason === "quota" && known.get(u.id)?.waitReason !== "quota") h.fake.accountsById.get(u.id)!.quotaAvailable = true;
+      if (u.reason === "rate_limited" && known.get(u.id)?.waitReason !== "rate_limited") h.fake.rateLimitedUntil.delete(u.id);
+    }
+    await h.defineSequence(b.id, o.b);
+    const view = (await h.request<BeforeLaunchView>("GET", `/api/campaigns/${b.id}/before-launch`)).body;
+    const projected = await projectedSends(h.store, b.id, h.clock);
+    const already = h.fake.deliveryLog.length;
+    const launchedB = await h.launch(b.id);
+    h.maxWrites = 5_000;
+    const until = o.start + 10 * DAY;
+    await h.advanceTo(until);
+    const mine = new Set(await h.store.engine.subjectsOf(b.id));
+    const exact = (xs: { leadId: string; accountId: string; step: number; at: number }[]) => [...xs].sort((x, y) => x.at - y.at || (x.accountId < y.accountId ? -1 : 1));
+    const actual = exact(h.fake.deliveryLog.slice(already).filter((d) => mine.has(d.subjectId) && d.at < until).map((d) => ({ leadId: d.subjectId, accountId: d.sender, step: Number(d.stepId.slice(1)) - 1, at: d.at })));
+    return { view, projected: projected ? exact(projected.sends.filter((s) => s.at < until && mine.has(s.leadId))) : null, actual, launched: launchedA.status === 200 && launchedB.status === 200 };
+  }
+
+  test("the reviewer's case: an inbox only the other campaign uses is unhealthy, so its waiting work comes onto the shared inbox", async () => {
+    const start = Date.parse("2026-11-09T07:00:00Z");
+    const inbox = (id: string): FakeAccount => ({ id, capacity: 2, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" });
+    const nine = [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 }));
+    const out = await compareWith({ accounts: [inbox("a"), inbox("x")], start, a: track(["a", "x"], nine, [0]), b: track(["a"], nine, [0]), zones: { a: ["UTC", "UTC"], b: ["UTC", "UTC"] }, unavailable: [{ id: "x", reason: "unhealthy" }], gapMs: MIN });
+    expect(out.projected).toEqual(out.actual);
+    expect(out.view.load).toMatchObject({ daysUntilAllStart: 2, accounts: [expect.objectContaining({ id: "a", busiestDay: 2 })] });
+  });
+
+  const SEEDS = Number(process.env["PROJECTION_SEEDS"] ?? 40);
+  for (const seed of Array.from({ length: SEEDS }, (_, i) => 9000 + i)) {
+    test(`generated: each campaign its own inboxes, some unavailable, case ${seed}`, async () => {
+      const r = rng(seed);
+      const ids = ["i0", "i1", "i2"];
+      const accounts = ids.map((id): FakeAccount => ({ id, capacity: 1 + Math.floor(r() * 3), gapMs: pick(r, [MIN, 7 * MIN, 50 * MIN]), k: 1, healthy: true, quotaAvailable: true, resetZone: pick(r, ["UTC", "America/Los_Angeles"]) }));
+      const subset = () => {
+        const s = ids.filter(() => r() < 0.6);
+        return s.length > 0 ? s : [pick(r, ids)];
+      };
+      const reasons = ["unhealthy", "quota", "rate_limited"] as const;
+      const unavailable = ids.filter(() => r() < 0.35).map((id): Unavailable => ({ id, reason: pick(r, reasons) }));
+      const first = generate(seed);
+      const second = generate(seed + 20_000);
+      const out = await compareWith({
+        accounts,
+        start: first.start,
+        a: { ...first.definition, emailPool: subset() },
+        b: { ...second.definition, emailPool: subset() },
+        zones: { a: first.zones, b: second.zones },
+        unavailable,
+        gapMs: Math.floor(r() * 3) * 7 * MIN,
+      });
+      // An inbox of this campaign that cannot send with no known end: no projection, and the screen says so.
+      if (out.projected === null) {
+        expect(out.view.load === null || out.view.load.cannotProject.length > 0 || out.view.load.accounts.length === 0).toBe(true);
+        return;
+      }
+      if (!out.launched) return;
+      expect(out.projected).toEqual(out.actual);
     });
   }
 });

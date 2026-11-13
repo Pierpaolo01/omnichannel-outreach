@@ -129,10 +129,8 @@ async function projectionOf(store: OutreachStore, campaignId: string, definition
     waits: liveSteps(track).map((s) => s.waitDays),
     leads: leads.filter((l) => l.lead.email !== null).map((l) => ({ id: l.state.subject.id, zone: l.state.lead.zone, sender: l.state.subject.emailSender })),
     pool: definition.emailPool,
-    accounts: all
-      .filter((a) => used.has(a.id))
-      // An open claim's reservation is in the inbox's count; the simulation holds those claims itself.
-      .map((a) => ({ id: a.id, capacity: a.capacity, usedToday: a.used - others.filter((o) => o.claim?.accountId === a.id).length, gapMs: a.gapMs, nextSlotAt: a.nextSlotAt, resetZone: a.resetZone, waitUntil: a.waitUntil !== null && a.waitUntil > now ? a.waitUntil : null })),
+    // The engine's own account records, unchanged, for every inbox any simulated campaign may use.
+    accounts: all.filter((a) => used.has(a.id)),
     others,
     zone: definition.timezone,
     horizonDays: PROJECTION_HORIZON_DAYS,

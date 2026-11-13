@@ -26,7 +26,8 @@
  * and every send is assumed to succeed at once.
  */
 import { ENGINE_PARAMS } from "./sequence/attempt.ts";
-import { comparePriority, type ReadyItem } from "./sequence/dispatch.ts";
+import { accountAvailable, accountHasRoom, comparePriority, pickAccount, type ReadyItem } from "./sequence/dispatch.ts";
+import type { AccountState } from "./sequence/state.ts";
 import { localDayNumber, nextWindowOpen, resetDayOf, span, startOfLocalDay, windowOpen, type WindowRule } from "./sequence/clock.ts";
 
 export interface ProjectionLead {
@@ -36,22 +37,14 @@ export interface ProjectionLead {
   readonly sender: string | null;
 }
 
-export interface ProjectionAccount {
-  readonly id: string;
-  readonly capacity: number;
-  /** Counted or reserved on today's reset day, across every campaign. */
-  readonly usedToday: number;
-  readonly gapMs: number;
-  /** The account's next pacing slot. */
-  readonly nextSlotAt: number;
-  readonly resetZone: string;
-  /**
-   * The end of an account-level wait (a rate limit's backoff): nothing is claimed on the inbox
-   * before it, as `accountAvailable` says. An inbox that cannot send with no known end is not
-   * projected at all (src/server/before-launch.ts).
-   */
-  readonly waitUntil: number | null;
-}
+/**
+ * The inboxes are the engine's own account records (`AccountState`, as `EngineStore.accounts`
+ * returns them), unchanged: health, waits (a rate limit's end, or a quota hold with none),
+ * capacity, today's count with reservations, the in-flight bound, the pacing gap and slot, and the
+ * reset zone. Every decision about one is the engine's function on a record carrying the
+ * simulation's count, slot and claim: `accountAvailable`, `accountHasRoom`, `pickAccount`.
+ */
+export type ProjectionAccount = AccountState;
 
 /**
  * Waiting work of another running campaign on the same inboxes (PR 41 re-check, B10): capacity is
@@ -84,7 +77,7 @@ export interface ProjectionInput {
   /** The campaign's email pool. */
   readonly pool: readonly string[];
   /** Every inbox in this pool and in the pools of `others`. */
-  readonly accounts: readonly ProjectionAccount[];
+  readonly accounts: readonly AccountState[];
   /** Waiting work of the other running campaigns that share an inbox with this one. */
   readonly others?: readonly OtherLead[];
   /** The zone days are counted in for "days until all start": the campaign's default zone. */
@@ -132,7 +125,6 @@ interface Claim {
 
 export function projectLoad(input: ProjectionInput): Projection {
   const accounts = [...input.accounts].sort((a, b) => (a.id < b.id ? -1 : 1));
-  const waiting = (a: ProjectionAccount, at: number) => a.waitUntil !== null && at < a.waitUntil;
   const runs: LeadRun[] = [
     ...input.leads.map((lead): LeadRun => ({ lead, ours: true, window: input.window, waits: input.waits, pool: input.pool, touched: false, sender: lead.sender, next: 0, dueWall: input.start, claimed: false })),
     ...(input.others ?? []).map((o): LeadRun => ({ lead: o, ours: false, window: o.window, waits: o.waits, pool: o.pool, touched: o.touched, sender: o.sender, next: o.next, dueWall: o.dueWall, claimed: o.claim !== null })),
@@ -147,6 +139,10 @@ export function projectLoad(input: ProjectionInput): Projection {
     if (o.claim && run) claims.set(o.claim.accountId, { run, at: o.claim.at });
   }
   const today = new Map(accounts.map((a) => [a.id, resetDayOf(input.start, a.resetZone)]));
+  // The record's count includes the reservations of claims already held; the simulation holds
+  // those claims itself, so they are taken out of the starting count once.
+  const heldClaims = (id: string) => (input.others ?? []).filter((o) => o.claim?.accountId === id).length;
+  const startUsed = new Map(accounts.map((a) => [a.id, a.used - heldClaims(a.id)]));
   const sends: ProjectedSend[] = [];
   const end = input.start + input.horizonDays * 86_400_000;
 
@@ -193,9 +189,15 @@ export function projectLoad(input: ProjectionInput): Projection {
   // Sends counted on the reset day, plus an open claim's reservation (4.2 step 3).
   const used = (a: ProjectionAccount, at: number) => {
     const day = resetDay(a, at);
-    return (sentOn.get(`${a.id}/${day}`) ?? 0) + (day === today.get(a.id) ? a.usedToday : 0) + (claims.has(a.id) ? 1 : 0);
+    return (sentOn.get(`${a.id}/${day}`) ?? 0) + (day === today.get(a.id) ? (startUsed.get(a.id) ?? 0) : 0) + (claims.has(a.id) ? 1 : 0);
   };
   const slotOf = (a: ProjectionAccount) => slot.get(a.id) ?? 0;
+  /**
+   * The account as the engine would see it at `at`: its record, with the simulation's count, slot
+   * and claim. A claim is the one attempt in flight (k = 1); work already handed over before the
+   * projection is taken as settled at once.
+   */
+  const asEngineSees = (a: ProjectionAccount, at: number): AccountState => ({ ...a, used: used(a, at), nextSlotAt: slotOf(a), inFlight: claims.has(a.id) ? 1 : 0 });
 
   let t = input.start;
   // The leads with work left; a finished one is dropped so later scans skip it.
@@ -218,7 +220,8 @@ export function projectLoad(input: ProjectionInput): Projection {
       // Only as many leads as there are free inboxes can claim, so each claim takes the
       // highest-priority ready lead that some free inbox can serve: the order of a full sort.
       for (;;) {
-        const free = accounts.filter((a) => !claims.has(a.id) && !waiting(a, t) && used(a, t) < a.capacity);
+        // The engine's own tests: available now, and room (capacity and the in-flight bound).
+        const free = accounts.map((a) => asEngineSees(a, t)).filter((a) => accountAvailable(a, t) && accountHasRoom(a));
         if (free.length === 0) break;
         let best: (ReadyItem & { run: LeadRun }) | null = null;
         for (const run of active) {
@@ -232,9 +235,7 @@ export function projectLoad(input: ProjectionInput): Projection {
         const run = best.run;
         // `chooseAccount`: the fixed sender, or the pool's account that can send soonest, then
         // the one with most remaining capacity, then the lowest id.
-        const account = free
-          .filter((a) => (run.sender === null ? run.pool.includes(a.id) : a.id === run.sender))
-          .sort((a, b) => Math.max(slotOf(a), t) - Math.max(slotOf(b), t) || b.capacity - used(b, t) - (a.capacity - used(a, t)) || (a.id < b.id ? -1 : 1))[0];
+        const account = pickAccount(free.filter((a) => (run.sender === null ? run.pool.includes(a.id) : a.id === run.sender)), t);
         if (!account) break;
         claims.set(account.id, { run, at: t });
         run.claimed = true;
@@ -243,7 +244,8 @@ export function projectLoad(input: ProjectionInput): Projection {
       // The handover (5.5) at the account's slot, re-checking the window at that instant.
       for (const account of accounts) {
         const c = claims.get(account.id);
-        if (!c || slotOf(account) > t || waiting(account, t)) continue;
+        // The handover waits for the slot, and for the account to be available (predicate 9).
+        if (!c || slotOf(account) > t || !accountAvailable(asEngineSees(account, t), t)) continue;
         claims.delete(account.id);
         c.run.claimed = false;
         changed = true;
@@ -275,7 +277,8 @@ export function projectLoad(input: ProjectionInput): Projection {
     for (const a of accounts) {
       const c = claims.get(a.id);
       if (c) candidates.push(slotOf(a), c.at + ENGINE_PARAMS.SETTLING);
-      if (a.waitUntil !== null && a.waitUntil > t) candidates.push(a.waitUntil);
+      // A wait with an end (a rate limit); a quota hold has none and never ends here.
+      if (a.healthy && a.waitUntil !== null && a.waitUntil > t && Number.isSafeInteger(a.waitUntil) && a.waitUntil < Number.MAX_SAFE_INTEGER) candidates.push(a.waitUntil);
       if (used(a, t) >= a.capacity) candidates.push(startOfLocalDay(localDayNumber(t, a.resetZone) + 1, a.resetZone));
     }
     const next = Math.min(...candidates.filter((c) => c > t));
