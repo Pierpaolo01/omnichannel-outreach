@@ -669,6 +669,19 @@ export const SCREENS: readonly Screen[] = [
   },
   // The campaign editor and the timeline (ticket 12c). The running app has no email provider, so
   // a sender inbox, launch and sent email are shown on the app over the fake provider.
+  {
+    name: "campaign with an email track and no connected sender",
+    open: async (page) => {
+      // Its own campaign, so the shared scan campaigns keep no track.
+      const created = await page.request.post("/api/campaigns", { data: { name: "No sender yet", businessesCsv: readFileSync(fixture("businesses-run1.csv"), "utf8"), peopleCsv: readFileSync(fixture("people-run1.csv"), "utf8") } });
+      const id = ((await created.json()) as { campaign: { id: string } }).campaign.id;
+      await page.request.put(`/api/campaigns/${id}/sequence`, {
+        data: { timezone: "Europe/London", emailPool: [], tracks: [{ id: "email", channel: "email", window: [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 })), steps: [{ id: "s1", waitDays: 0, subject: "Evening bookings at {{company}}", body: "Hi {{first_name|there}},", threading: "new_subject" }] }] },
+      });
+      await page.goto(`/campaigns/${id}?track=email&step=s1`);
+      await settle(page, "No email provider is set up on this machine.");
+    },
+  },
   { name: "campaign, no track yet", open: async (page, data) => { await page.goto(`/campaigns/${data.campaignId}`); await settle(page, "Add the first channel track"); } },
   { name: "campaign with nothing imported", open: async (page, data) => { await page.goto(`/campaigns/${data.unimportedCampaignId}`); await settle(page, "nothing imported yet"); } },
   { name: "campaign with the longest accepted name", open: async (page, data) => { await page.goto(`/campaigns/${data.longCampaignId}`); await settle(page, "Add the first channel track"); } },

@@ -349,7 +349,9 @@ function LeadsTab({ campaignId, version, launched }: { campaignId: string; versi
                           <Channel has={lead.phone} icon="call" label="phone number" />
                         </span>
                       ) : (
-                        <span className="text-muted">Ended</span>
+                        <span className="text-muted" title="Not shown once a lead has ended">
+                          —<span className="sr-only">Not shown once a lead has ended</span>
+                        </span>
                       )}
                     </td>
                     <td className="px-3.5 py-3 max-[720px]:block max-[720px]:py-1">{enrollment && <StatusBadge status={enrollment.status} />}</td>
