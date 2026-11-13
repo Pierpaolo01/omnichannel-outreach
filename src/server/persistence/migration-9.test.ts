@@ -10,8 +10,8 @@ import type { CampaignDefinition } from "../../domain/sequence/definition.ts";
 import type { LeadSearchResult } from "../../shared/api.ts";
 
 /**
- * Migration 11 (ticket 13a) on a database the merged integration branch wrote before it. The
- * database is produced by the real app, then taken back to the state before migration 11: its
+ * Migration 9 (ticket 13a) on a database the merged integration branch wrote before it. The
+ * database is produced by the real app, then taken back to the state before migration 9: its
  * columns and table removed and its row in schema_migrations deleted. Reopening applies it again.
  */
 
@@ -45,15 +45,15 @@ const definition: CampaignDefinition = {
 const harness = (databasePath: string) =>
   new EngineHarness({ start: MONDAY_9 - H, databasePath, accounts: [{ id: "inbox-a", capacity: 50, gapMs: 60_000, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
 
-/** Takes a database back to just before migration 11. */
-function beforeMigration11(file: string): void {
+/** Takes a database back to just before migration 9. */
+function beforeMigration9(file: string): void {
   const db = new DatabaseSync(file);
   db.exec(`
     ALTER TABLE enrollments DROP COLUMN stop_reply_channel;
     ALTER TABLE enrollments DROP COLUMN stop_reply_at;
     ALTER TABLE enrollments DROP COLUMN sms_sender;
     DROP TABLE sms_bindings;
-    DELETE FROM schema_migrations WHERE version = 11;
+    DELETE FROM schema_migrations WHERE version = 9;
   `);
   if (db.prepare("SELECT name FROM pragma_table_info('sender_accounts')").all().some((r) => r["name"] === "problem")) db.exec("ALTER TABLE sender_accounts DROP COLUMN problem");
   const columns = db.prepare("SELECT name FROM pragma_table_info('enrollments')").all().map((r) => r["name"]);
@@ -61,7 +61,7 @@ function beforeMigration11(file: string): void {
   db.close();
 }
 
-describe("migration 11 on a database written before it", () => {
+describe("migration 9 on a database written before it", () => {
   test("a lead that replied keeps the channel and date of the reply that stopped it, and a later out-of-order reply leaves them unchanged", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "outreach-migration-"));
     dirs.push(dir);
@@ -71,7 +71,7 @@ describe("migration 11 on a database written before it", () => {
     // carries an earlier provider time than the moment the first was observed.
     const before = harness(file);
     await before.tick();
-    const { campaign } = await before.createCampaign("Before 11", {
+    const { campaign } = await before.createCampaign("Before 9", {
       businesses: [business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101" })],
       people: [
         person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example" }),
@@ -93,7 +93,7 @@ describe("migration 11 on a database written before it", () => {
     const stopped = { channel: "email", at: new Date(MONDAY_9 + H).toISOString() };
     expect((await before.progress(pat)).reply).toEqual(stopped);
     await before.store.close();
-    beforeMigration11(file);
+    beforeMigration9(file);
 
     const after = harness(file);
     after.clock = MONDAY_9 + 5 * H;

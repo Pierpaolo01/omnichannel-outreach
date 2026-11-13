@@ -4,6 +4,13 @@ import { OUTREACH_STATUSES } from "../../domain/outreach-status.ts";
 /**
  * Versioned schema migrations. Append a new entry for every change; never edit an applied one.
  * Each runs in its own transaction and is recorded in schema_migrations.
+ *
+ * Versions are exactly 1 to N, in order, with no gap (`migrations.test.ts` checks it). `migrate`
+ * applies what is above a database's highest recorded version, so a gap would never be filled on a
+ * database that moved past it; it therefore refuses a database whose recorded versions are not a
+ * prefix of this list. A branch takes the next number at merge time: if another branch merged a
+ * migration first, renumber yours when merging the integration branch tip (see
+ * docs/agents/delivery-workflow.md, "Standing checks").
  */
 interface Migration {
   readonly version: number;
@@ -412,8 +419,8 @@ export const MIGRATIONS: readonly Migration[] = [
     `,
   },
   {
-    // Numbered 11: 9 and 10 are the campaign editor's (pull request 41, ticket 12c).
-    version: 11,
+    // Ticket 13a. It merges before pull request 41 (ticket 12c), which then takes the next numbers.
+    version: 9,
     name: "SMS tracks: the fixed SMS sender, SMS conversation bindings, the stopping reply and sender account problems (ADR 0003 1.3, 4.5; ticket 13)",
     // A binding names the subject that owns the conversation between a sender number and a mobile
     // (E.164). One unreleased binding per pair; an enrollment's is never released or transferred,
@@ -453,8 +460,17 @@ export function migrate(db: DatabaseSync, appliedAt: () => string): void {
     name TEXT NOT NULL,
     applied_at TEXT NOT NULL
   )`);
-  const row = db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get();
-  const current = typeof row?.["version"] === "number" ? row["version"] : 0;
+  const versions = db.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((r) => Number(r["version"]));
+  const known = new Set(MIGRATIONS.map((m) => m.version));
+  const unknown = versions.filter((v) => !known.has(v));
+  if (unknown.length > 0 || versions.some((v, i) => v !== i + 1)) {
+    throw new Error(
+      `This database's schema versions are ${versions.join(", ")}, which is not a prefix of this code's migrations (1 to ${MIGRATIONS.length})` +
+        (unknown.length > 0 ? `: it records a version this code does not know (${unknown.join(", ")})` : ": a version is missing") +
+        ". It was written by other code; it is not migrated.",
+    );
+  }
+  const current = versions.length;
 
   for (const migration of MIGRATIONS) {
     if (migration.version <= current) continue;
