@@ -291,14 +291,20 @@ function carrierOf(state: SubjectState, key: string): Attempt | undefined {
 }
 
 /**
- * Unsettled work the provider may hold that no live attempt carries any more is unresolved from
- * then on (4.2, PR 37 review round 2 ruling 2), so it is listed until the provider or the user settles it.
+ * Run after every change to provider work. When work settles, by any route, every attempt still
+ * carrying it that has not been handed over is withdrawn in the same change (review bot on
+ * 0dc88ab). Unsettled work the provider may hold that no live attempt carries any more is
+ * unresolved from then on (4.2, PR 37 review round 2 ruling 2), so it is listed until the provider
+ * or the user settles it.
  */
 export function attend(state: SubjectState, now: number): SubjectState {
   let s = state;
-  for (const w of state.work) {
+  for (const a of state.attempts) {
+    if (a.state === "claimed" && state.work.some((w) => w.key === a.idempotencyKey && w.settled !== null)) s = withAttempt(s, { ...a, state: "withdrawn", endedBy: "guard" });
+  }
+  for (const w of s.work) {
     if (!isUncertain(w) || w.unresolvedSince !== null) continue;
-    if (state.attempts.some((a) => a.idempotencyKey === w.key && isLive(a))) continue;
+    if (s.attempts.some((a) => a.idempotencyKey === w.key && isLive(a))) continue;
     s = withWork(s, { ...w, unresolvedSince: now });
   }
   return s;
@@ -384,6 +390,8 @@ export function applyToWork(
       let s = withWork(state, { ...w, settled: "rejected", nextLookupWall: null });
       const refused = live && live.state !== "claimed" ? live : carrier;
       if (live && live.state !== "claimed") s = withAttempt(s, { ...live, state: "rejected", endedBy: "provider", rejectReason: event.reason, awaitingAnswer: false });
+      // Work no attempt holds at the provider: the refusal's reason is kept on the attempt that handed it over.
+      else if (refused) s = withAttempt(s, { ...refused, rejectReason: event.reason });
       if (refused) s = recordRejected(s, s.attempts.find((a) => a.id === refused.id) ?? refused, event.reason, now);
       return done(s, [{ kind: "rejected", reason: event.reason }]);
     }
@@ -469,6 +477,9 @@ export function trackHold(state: SubjectState, trackId: string): HoldReason | nu
   if (attempts.some((a) => isLive(a) && state.work.some((w) => w.key === a.idempotencyKey && w.unresolvedSince !== null && w.settled === null))) return "unresolved";
   const latest = attempts.at(-1);
   if (latest && latest.state === "rejected" && latest.rejectReason === "provider_skipped") return "provider_skipped";
+  // The step's latest work was skipped by the provider, whichever of its attempts handed it over.
+  const work = state.work.filter((w) => w.stepId === progress.nextStepId).at(-1);
+  if (work?.settled === "rejected" && attempts.some((a) => a.idempotencyKey === work.key && a.rejectReason === "provider_skipped")) return "provider_skipped";
   return null;
 }
 

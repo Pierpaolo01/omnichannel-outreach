@@ -64,6 +64,12 @@ export function oracle(names: readonly string[]): void {
       // mutation can take a shard's limit; then the regression, if it has one.
       const started = Date.now();
       let caught: string | null = null;
+      // The recorded killing seed first, so the budget can never run out before a known seed.
+      if (mutation.seed !== null) {
+        const { problems } = await runSequence(SEED + mutation.seed, { rules: mutation.rules, unlimited: mutation.unlimited ?? false, drain: true });
+        if (breaks(problems)) caught = `recorded seed offset ${mutation.seed}`;
+        else report(`recorded seed offset ${mutation.seed} no longer breaks invariant ${mutation.invariant} for "${name}"`);
+      }
       for (let i = 0; i < MAX_SEEDS && caught === null && Date.now() - started < SEARCH_BUDGET_MS; i++) {
         for (const unlimited of [false, true]) {
           const { problems } = await runSequence(SEED + i, { rules: mutation.rules, unlimited, drain: true, deadline: started + SEARCH_BUDGET_MS + RUN_GRACE_MS });

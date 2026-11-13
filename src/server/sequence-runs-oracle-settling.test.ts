@@ -7,5 +7,5 @@ describe("settling and bounded waits", () => {
 });
 
 describe("provider work and a reply's life (review rounds 2 and 3)", () => {
-  oracle(["no send pause", "user's not sent leaves the work unsettled", "settled work inherited", "fallback matches every call"]);
+  oracle(["no send pause", "user's not sent leaves the work unsettled", "settled work inherited", "fallback matches every call", "handover of settled work"]);
 });

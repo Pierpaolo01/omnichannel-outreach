@@ -243,6 +243,8 @@ const presendFresh = (attempt: Attempt, now: number) =>
 export function handoverFailures(state: SubjectState, attempt: Attempt, account: AccountState, now: number): number[] {
   if (attempt.state !== "claimed") return [15];
   const failed = currentStatePredicates(state, attempt, account, now);
+  // 15. The attempt's reservation exists: its provider work is unsettled.
+  if (state.work.find((w) => w.key === attempt.idempotencyKey)?.settled !== null) failed.push(15);
   const fixed = state.subject.emailSender;
   if (fixed !== null ? fixed !== account.id : !state.campaign.definition.emailPool.includes(account.id)) failed.push(10);
   if (!presendFresh(attempt, now)) failed.push(14);

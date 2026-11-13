@@ -8,7 +8,7 @@ import { ENGINE_PARAMS } from "../../src/domain/sequence/attempt.ts";
 import type { CampaignDefinition, StepDefinition } from "../../src/domain/sequence/definition.ts";
 import type { AccountStatus } from "../../src/server/engine/ports.ts";
 import type { Rules } from "../../src/server/engine/rules.ts";
-import type { EnrollmentView } from "../../src/shared/api.ts";
+import type { EnrollmentView, NeedsAttention } from "../../src/shared/api.ts";
 import { EngineHarness } from "./engine-harness.ts";
 import { business, person } from "./export-builder.ts";
 import { ScriptedEmailPort } from "./scripted-email-port.ts";
@@ -280,4 +280,109 @@ export async function acceptedWorkSettles(rules?: Partial<Rules>): Promise<void>
   } finally {
     current = undefined;
   }
+}
+/** progress.ts:387 (review bot on 0dc88ab): when work settles, its claimed inheritor is withdrawn in the same change and never handed over; a provider skip still holds the track. */
+export async function claimedInheritorRetired(rules?: Partial<Rules>): Promise<void> {
+  current = rules;
+  try {
+    const { h, port, start } = await launched([inbox("inbox-a")]);
+    // The opener is accepted and never sent; the lookup at 09:15 says not sent, so an inheritor takes its key.
+    port.onCall = () => ({ answer: "accepted", sendAfter: null });
+    port.lookupOverride = () => ({ kind: "not-sent" });
+    const lead = await start();
+    // No pre-send check, so the inheritor stays claimed.
+    port.presend = () => Promise.resolve({ kind: "unavailable" });
+    await h.advanceTo(MONDAY_9 + SETTLING + MIN);
+    const before = (await h.store.engine.subject(lead("Pat Oneil"), h.clock))!;
+    const key = before.attempts[0]!.idempotencyKey;
+    expect(before.attempts.map((a) => [a.state, a.idempotencyKey])).toEqual([["withdrawn", key], ["claimed", key]]);
+    // At 09:16 the provider reports it skipped the original work, and the pre-send check is back.
+    port.events.push({ visibleAt: h.clock, event: { id: "skip-1", kind: "rejected", key, providerRef: port.works[0]!.ref, reason: "provider_skipped" } });
+    port.presend = () => Promise.resolve({ kind: "clear" });
+    await h.advanceTo(MONDAY_9 + DAY);
+    const after = (await h.store.engine.subject(lead("Pat Oneil"), h.clock))!;
+    expect(after.work[0]?.settled).toBe("rejected");
+    expect(after.attempts[1]).toMatchObject({ state: "withdrawn", calls: 0 });
+    expect(port.calls).toHaveLength(1);
+    expect((await h.store.engine.accounts(h.clock))[0]!.inFlight).toBe(0);
+    expect((await h.progress(lead("Pat Oneil"))).tracks[0]?.hold).toBe("provider_skipped");
+  } finally {
+    current = undefined;
+  }
+}
+
+/** attempt.ts:218: capacity 1, the work is unresolved and the user marks it not sent: the held capacity is listed, then freed, and the next lead sends that day */
+export async function markNotSentFreesCapacity(rules?: Partial<Rules>): Promise<void> {
+  current = rules;
+  try {
+    const { h, port, start } = await launched([inbox("inbox-a", { capacity: 1 })], PEOPLE);
+    // Pat's first work is accepted and never sent; the lookup cannot say. Later work sends at once.
+    port.onCall = () => (port.calls.length === 1 ? { answer: "accepted", sendAfter: null } : { answer: "accepted", sendAfter: 0 });
+    port.lookupOverride = (work) => (work === port.works[0] ? { kind: "unknown" } : null);
+    const lead = await start();
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    const before = (await h.request<NeedsAttention>("GET", "/api/needs-attention")).body;
+    const pat = (await h.store.engine.subject(lead("Pat Oneil"), h.clock))!.attempts[0]!;
+    expect(before.heldCapacity).toEqual([{ accountId: "inbox-a", held: 1, capacity: 1, sentToday: 0, work: [expect.objectContaining({ attemptId: pat.id, enrollmentId: lead("Pat Oneil"), stepId: "s1", destination: "pat@harbour.example", unresolvedSince: expect.any(String) })] }]);
+    expect(port.deliveries.map((d) => d.subjectId)).toEqual([]);
+    expect(await h.engine.markAttempt(pat.id, "not_sent")).toBe(true);
+    await h.advanceTo(MONDAY_9 + 3 * H);
+    // The freed daily send goes out that day: Pat's step again, under a new key, first by priority.
+    expect(port.deliveries.filter((d) => d.at < MONDAY_9 + 15 * H).map((d) => d.subjectId)).toEqual([lead("Pat Oneil")]);
+    expect((await h.request<NeedsAttention>("GET", "/api/needs-attention")).body.heldCapacity).toEqual([]);
+  } finally {
+    current = undefined;
+  }
+}
+
+/** progress.ts:304: once a key's work settles (the user's not sent on its inheritor), no later attempt inherits it: the next attempt takes a fresh key and sends */
+export async function settledKeyNotInherited(rules?: Partial<Rules>): Promise<void> {
+  current = rules;
+  try {
+    const { h, port, lead, attempts } = await inheritorUnresolved();
+    const listed = (await h.request<NeedsAttention>("GET", "/api/needs-attention")).body.heldCapacity;
+    expect(listed[0]!.work.map((w) => w.attemptId)).toEqual([attempts[1]!.id]);
+    expect(await h.engine.markAttempt(attempts[1]!.id, "not_sent")).toBe(true);
+    port.onCall = () => ({ answer: "accepted", sendAfter: 0 });
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    const after = (await h.store.engine.subject(lead("Pat Oneil"), h.clock))!.attempts;
+    expect(after[2]!.idempotencyKey).not.toBe(attempts[0]!.id);
+    expect(port.deliveries.map((d) => d.subjectId)).toEqual([lead("Pat Oneil")]);
+  } finally {
+    current = undefined;
+  }
+}
+
+/** A same-key retry is never called once a withdrawal was requested (5.6): the lead's address goes bad while a retry waits for its slot. */
+export async function noRetryAfterWithdraw(rules?: Partial<Rules>): Promise<void> {
+  current = rules;
+  try {
+    const { h, port, start } = await launched([inbox("inbox-a", { gapMs: 10 * MIN })]);
+    // The answer is lost and nothing is sent, so a retry is wanted and waits ten minutes for its slot.
+    port.onCall = () => ({ answer: "unknown", sendAfter: null });
+    port.withdrawAnswer = "unknown";
+    const lead = await start();
+    const s = (await h.store.engine.subject(lead("Pat Oneil"), h.clock))!;
+    expect(s.attempts[0]).toMatchObject({ state: "handed", retry: "wanted" });
+    // The address is marked bad elsewhere: the track fails and the attempt is asked to withdraw.
+    h.clock = MONDAY_9 + MIN;
+    await h.store.markContactDetailBad(s.tracks[0]!.destinationDetailId!);
+    await h.advanceTo(MONDAY_9 + H);
+    expect(port.calls.map((c) => c.at)).toEqual([MONDAY_9]);
+  } finally {
+    current = undefined;
+  }
+}
+
+/** Pat's opener is accepted and never sent; the first lookup says not sent, so an inheritor takes its key; later lookups cannot say. */
+export async function inheritorUnresolved() {
+  const { h, port, start } = await launched([inbox("inbox-a")]);
+  port.onCall = () => ({ answer: "accepted", sendAfter: null });
+  let lookups = 0;
+  port.lookupOverride = () => (++lookups === 1 ? { kind: "not-sent" } : { kind: "unknown" });
+  const lead = await start();
+  await h.advanceTo(MONDAY_9 + 31 * MIN);
+  const attempts = (await h.store.engine.subject(lead("Pat Oneil"), h.clock))!.attempts;
+  expect(attempts.map((a) => [a.state, a.endedBy, a.idempotencyKey])).toEqual([["withdrawn", "lookup_not_sent", attempts[0]!.id], ["accepted", null, attempts[0]!.id]]);
+  return { h, port, lead, attempts };
 }

@@ -635,7 +635,7 @@ The outbox runs in this order:
    12. The destination is good and still belongs to the lead.
    13. No reply has been recorded for the subject since `claimed_wall`.
    14. `presend_checked_wall ≥ now − PRESEND_MAX_AGE`, and the check found no reply.
-   15. The attempt's capacity reservation exists.
+   15. The attempt's capacity reservation exists: its provider work is unsettled. When work settles, by any route (sent, final not-sent, confirmed withdrawal, rejection, the user's mark), every attempt still carrying it that has not been handed over is withdrawn in the same transaction (review bot on `0dc88ab`); a step whose work settled as not sent gets a fresh attempt with a fresh key through the normal claim, and a provider skip still holds the track.
    16. `now ≥ next_slot_at` on the account.
    17. A `continue_thread` step has a thread to continue (PR 37 ruling 1).
    18. No reply from the destination to this account is pending correlation (2.4; PR 37 review round 2, ruling 3). While one is, the claim waits (it is neither handed over nor withdrawn by the guard; its age limit still applies), and a same-key retry waits too.
@@ -1083,6 +1083,7 @@ Two reviewers, an independent verification and the review bot on `51d9503`, and 
 | A reply's life | Reply events kept by event id for good; replays are no-ops; an unmatched reply kept by its reference resolves when it attaches; the wait counts running time only; on restart, events and lookups come before the fallback; user-marked work counts as uncertain for matching | 1.3, 2.4, 6 | review bot `engine.ts:304` across a restart (before and after the delayed event); review bot `engine.ts:402` and the verification's B6 (replay); Opus B1 (a reply on work marked not sent stops the lead); the ownership tests of both reviewers |
 | Full search failures | Eight seeds failing invariant 26: a sent fact on work an inheritor carried, after the user's "not sent" on the older attempt, never settled the inheritor; the work record removes the class; seed 20261198 joins the fixed set | 5.3, 9.2 | "full search seed 20261198 and GPT round 3 finding 2" |
 | Unkilled mutations | Each mutation is killed by a known seed or a named regression; "retry after withdraw" names invariant 2, which catches it; new mutations for the send pause, the user's mark leaving work unsettled, settled work inherited and the fallback matching every call; the search's per-mutation budget | 9.2 | `test/support/regressions.ts`, `engine-mutations.ts` |
+| Review bot on `0dc88ab` | Settling work withdraws its claimed attempts in the same change; the handover refuses settled work (predicate 15); a provider skip of work an inheritor was claimed for still holds the track | 5.3, 5.5 predicate 15, invariant 2 | `claimedInheritorRetired`; "handover of settled work" (2) |
 | Small items | `heldCapacity` lists the lookup answer, destination, step, today's sends and whether "not sent" is allowed; the checker exempts only deliveries of work handed over before a mark; `pendingReplies` required; the wait of a user action or a launch behind the running tick recorded as a known limit | 5.4, 5.5, 9.2 | — |
 
 ## Consequences

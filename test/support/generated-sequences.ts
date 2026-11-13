@@ -1321,6 +1321,9 @@ function probeAtCall(h: EngineHarness, problem: (what: string) => void, eligible
     const p = s.tracks.find((t) => t.nextStepId === call.stepId && t.finishedAt === null);
     if (!p) problem(`2: ${call.subjectId}/${call.stepId} was called but is not its track's pending step`);
     if (s.results.some((r) => r.stepId === call.stepId)) problem(`2: ${call.subjectId}/${call.stepId} was called after it had a result`);
+    // 2 (predicate 15). No call carries provider work that has already settled.
+    const calledWork = s.work.find((w) => w.key === call.key);
+    if (calledWork?.settled != null) problem(`2: ${call.subjectId}/${call.stepId} was called carrying work ${call.key}, which had settled as ${calledWork.settled}`);
     // 2 (predicate 18). Nothing goes from an inbox to an address while a reply between them awaits correlation.
     if (s.pendingReplies.some((r) => r.inbox === call.sender && r.address === call.destination.toLowerCase())) problem(`2: ${call.subjectId}/${call.stepId} was called from ${call.sender} while a reply from ${call.destination} awaited correlation`);
     const attempt = s.attempts.find((a) => a.id === call.attemptId);

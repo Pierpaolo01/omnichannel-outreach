@@ -23,7 +23,7 @@ const R = DEFAULT_RULES;
 const EXPECTED: Record<string, { invariant: string; seed: number | null; unlimited?: boolean; regression?: keyof typeof REGRESSIONS }> = {
   "withdraw handed": { invariant: "5", seed: 21 },
   "retry non-retryable": { invariant: "5", seed: 0 },
-  "retry after withdraw": { invariant: "2", seed: 56 },
+  "retry after withdraw": { invariant: "2", seed: 56, regression: "noRetryAfterWithdraw" },
   "retry without slot or predicates": { invariant: "11", seed: 0 },
   "retry re-renders": { invariant: "5", seed: 85 },
   "new key after not-sent": { invariant: "5", seed: 72 },
@@ -51,9 +51,10 @@ const EXPECTED: Record<string, { invariant: string; seed: number | null; unlimit
   "acceptance keeps retry intent": { invariant: "26", seed: null, regression: "lateAcceptanceSettles" },
   "stale guard ignores lead facts": { invariant: "1", seed: null, regression: "reimportBeatsStaleEnding" },
   "no send pause": { invariant: "2", seed: null, regression: "fallbackScopeAndPause" },
-  "user's not sent leaves the work unsettled": { invariant: "27", seed: 72 },
-  "settled work inherited": { invariant: "5", seed: 72 },
+  "user's not sent leaves the work unsettled": { invariant: "27", seed: 72, regression: "markNotSentFreesCapacity" },
+  "settled work inherited": { invariant: "5", seed: 72, regression: "settledKeyNotInherited" },
   "fallback matches every call": { invariant: "1", seed: null, regression: "fallbackScopeAndPause" },
+  "handover of settled work": { invariant: "2", seed: null, regression: "claimedInheritorRetired" },
 };
 
 /** Wraps every rule that returns a new subject state with `fix(before, after, now)`. */
@@ -295,6 +296,14 @@ const RULES: Record<string, Partial<Rules>> = {
       if (!settled || !claimed || claimed.idempotencyKey !== claimed.id) return out;
       return { ...out, attempts: out.attempts.map((x) => (x.id === claimed.id ? { ...x, idempotencyKey: settled.key } : x)), work: out.work.filter((w) => w.key !== claimed.id) };
     },
+  },
+
+  // Review bot on 0dc88ab: a claimed attempt outlives its work's settlement and is handed over.
+  "handover of settled work": {
+    ...afterEveryChange((before, after) =>
+      mapAttempts(after, (a, b) => (b?.state === "claimed" && a.state === "withdrawn" && a.endedBy === "guard" && after.work.some((w) => w.key === a.idempotencyKey && w.settled !== null) ? { ...a, state: "claimed", endedBy: null } : a), before),
+    ),
+    handoverFailures: (s, a, acc, now) => R.handoverFailures(s, a, acc, now).filter((n) => n !== 15),
   },
 
   "fallback matches every call": {
