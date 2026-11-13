@@ -23,6 +23,8 @@ export interface SequenceEditor {
   readonly launching: boolean;
   /** The stored version is loading after a conflict: authoring is locked until it arrives. */
   readonly loading: boolean;
+  /** Editing is locked (launched, or a launch or load pending): every authoring control reads this, and edits are refused. */
+  readonly locked: boolean;
   readonly update: (change: (draft: CampaignDefinition) => CampaignDefinition) => void;
   readonly retrySave: () => void;
   /** After a conflict: replaces the draft with the stored version, setting aside what was typed. Resolves true once it has. */
@@ -110,6 +112,7 @@ export function useSequence(campaignId: string) {
           launched: snapshot.view.launchedAt !== null,
           launching: snapshot.pending === "launch",
           loading: snapshot.pending === "load",
+          locked: snapshot.locked,
           update: (change) => store.update(change),
           retrySave: () => store.retrySave(),
           loadStored: async () => {

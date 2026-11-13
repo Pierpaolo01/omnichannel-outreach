@@ -94,6 +94,7 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
                 <button
                   type="button"
                   className="btn gap-1.5 border-line-strong bg-base-100 font-medium"
+                  disabled={editor.locked}
                   onClick={() => {
                     const added = newEmailTrack();
                     editor.update((d) => ({ ...d, tracks: [...d.tracks, added] }));
@@ -210,9 +211,8 @@ interface InspectorProps {
 function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, onOpenStep, onFocusStep, onLoadedStored, onClose }: InspectorProps) {
   const steps = liveSteps(track);
   const titleId = useId();
-  // Locked once launched, and while a launch or a load of the stored version is in flight
-  // (PR 41 council, items 9 and 12): the answer it waits for is then always for the draft on the page.
-  const locked = editor.launched || editor.launching || editor.loading;
+  // One lock from the editor state, read by every authoring control (PR 41 council, items 9 and 12).
+  const locked = editor.locked;
   const changeTrack = (change: (t: TrackDefinition) => TrackDefinition) =>
     editor.update((d: CampaignDefinition) => ({ ...d, tracks: d.tracks.map((t) => (t.id === track.id ? change(t) : t)) }));
   const changeStep = (stepId: string, change: (s: StepDefinition) => StepDefinition) => changeTrack((t) => ({ ...t, steps: t.steps.map((s) => (s.id === stepId ? change(s) : s)) }));
@@ -512,7 +512,7 @@ function Fallbacks({ step, facts, onChange }: { step: StepDefinition; facts: Bef
 function TimingAndSender({ track, editor, onWindow }: { track: TrackDefinition; editor: SequenceEditor; onWindow: (window: TrackDefinition["window"]) => void }) {
   const hours = windowHours(track.window);
   const days = track.window.map((w) => w.day);
-  const locked = editor.launched;
+  const locked = editor.locked;
   const zones = timeZones(editor.draft.timezone);
   const accounts = editor.view.accounts.filter((a) => a.channel === "email");
   return (

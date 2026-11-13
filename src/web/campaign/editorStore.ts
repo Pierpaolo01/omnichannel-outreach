@@ -24,6 +24,12 @@ export interface EditorSnapshot {
   readonly unsaved: boolean;
   /** A launch or a load of the stored version is in flight: authoring is locked until it answers. */
   readonly pending: "launch" | "load" | null;
+  /**
+   * Editing is locked: the campaign has launched, or a launch or a load is pending. The one value
+   * both `update` and every authoring control read, so no control can stay enabled while its edit
+   * would be dropped (PR 41 review).
+   */
+  readonly locked: boolean;
   readonly problems: readonly string[];
 }
 
@@ -56,7 +62,7 @@ export class EditorStore {
 
   constructor(initial: SequenceView, deps: EditorDeps) {
     this.deps = deps;
-    this.state = { view: initial, draft: initial.definition, save: { kind: "idle" }, unsaved: false, pending: null, problems: draftProblems(initial.definition) };
+    this.state = { view: initial, draft: initial.definition, save: { kind: "idle" }, unsaved: false, pending: null, locked: initial.launchedAt !== null, problems: draftProblems(initial.definition) };
     this.queue = new SaveQueue({
       read: () => ({ draft: this.state.draft, accountIds: emailInboxIds(this.state.view), version: this.state.view.definitionVersion }),
       put: (definition, options, save) => deps.put({ ...definition, save }, options),
@@ -90,7 +96,7 @@ export class EditorStore {
 
   private set(change: Partial<EditorSnapshot>): void {
     const next = { ...this.state, ...change };
-    this.state = { ...next, problems: change.draft ? draftProblems(next.draft) : next.problems };
+    this.state = { ...next, problems: change.draft ? draftProblems(next.draft) : next.problems, locked: next.view.launchedAt !== null || next.pending !== null };
     for (const l of this.listeners) l();
   }
 
@@ -123,7 +129,7 @@ export class EditorStore {
 
   /** An edit by the user. Ignored once launched, and while a launch or a load is in flight. */
   update(change: (draft: CampaignDefinition) => CampaignDefinition): void {
-    if (this.launched() || this.state.pending !== null) return;
+    if (this.state.locked) return;
     this.queue.edited();
     // Shown at once, so a change is never labelled saved while it waits; a conflict stays shown,
     // now with an edit of its own that is not saved.

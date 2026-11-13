@@ -245,6 +245,12 @@ test.describe("review of pull request 41", () => {
     await expect(page.getByLabel("Email 1 copy")).toHaveValue(COPY.second.body);
   });
 
+  test("a running campaign's inspector has no enabled authoring control (PR 41 review: one lock)", async ({ page }) => {
+    await page.goto(`${r.url}/campaigns/${r.running}?track=email&step=s1`);
+    await expect(page.getByText("This campaign is running.")).toBeVisible();
+    expect(await enabledAuthoring(page)).toEqual([]);
+  });
+
   test("a running campaign's emails still open, read-only (SequenceTab.tsx:207)", async ({ page }) => {
     const id = await campaign(track([COPY.first, COPY.second]));
     expect((await r.harness.launch(id)).status).toBe(200);
@@ -505,6 +511,19 @@ test.describe("review of pull request 41", () => {
     await expect(page.getByText("Re: A second idea")).toBeVisible();
   });
 
+  /**
+   * The inspector's authoring controls that are enabled: every input, select, textarea and button
+   * except the ones that only show or close (the close button, each email's row) and the conflict's
+   * way out. While editing is locked this is empty (PR 41 review: TimingAndSender).
+   */
+  const enabledAuthoring = (page: Page) =>
+    page.getByTestId("inspector").evaluate((root) =>
+      [...root.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLButtonElement>("input, select, textarea, button")]
+        .map((el) => ({ el, name: el.getAttribute("aria-label") ?? (el.labels?.[0]?.textContent ?? el.textContent).trim() }))
+        .filter(({ el, name }) => !el.matches(":disabled") && !el.matches("[id^='step-toggle-']") && !["Close the email track", "Load the saved version", "Loading…"].includes(name))
+        .map(({ name }) => name),
+    );
+
   /** Tab B saves a change; tab A, still on the older revision, edits and is refused. Returns tab A. */
   const conflicted = async (browser: Browser, id: string) => {
     const context = await browser.newContext();
@@ -544,6 +563,7 @@ test.describe("review of pull request 41", () => {
     await expect.poll(() => held.length).toBe(1);
     await expect(a.getByText("Loading the saved version. Editing is paused until it arrives.")).toBeVisible();
     await expect(a.getByLabel("Email 1 copy")).toBeDisabled();
+    expect(await enabledAuthoring(a)).toEqual([]);
     await held[0]!.continue();
     await a.unroute("**/api/campaigns/*/sequence");
     await expect(a.getByLabel("Email 1 subject")).toHaveValue("Tab B saved subject");
@@ -565,6 +585,8 @@ test.describe("review of pull request 41", () => {
     await page.getByRole("button", { name: /^Email track: / }).click();
     await expect(page.getByText("Launching. Editing is paused until the launch answers.")).toBeVisible();
     await expect(page.getByLabel("Email 1 copy")).toBeDisabled();
+    // Every authoring control, not only the copy: sending days, hours, time zone, add and remove.
+    expect(await enabledAuthoring(page)).toEqual([]);
     await held[0]!.continue();
     await expect(page.getByText("This campaign is running.")).toBeVisible();
     expect((await stored(id)).launchedAt).not.toBeNull();

@@ -220,11 +220,15 @@ async function run(seed: number) {
       const size = r();
       const subject = `typed ${++typed}`;
       const before = page.store.getSnapshot().draft;
+      // What the page shows as locked is what refuses an edit: no authoring control is enabled while locked.
+      const lockedBefore = page.store.getSnapshot().locked;
       const pool = before.emailPool;
       const next = size < 0.08 ? definitionWith(subject, pool, 4, 18_000) : size < 0.2 ? definitionWith(subject, pool, 3, Math.floor((DEFINITION_MAX_BYTES - 2_000) / 3)) : definitionWith(subject, pool);
       page.store.update(() => next);
       // Typing is refused once launched and while a launch or a load is in flight: nothing was typed.
+      if (page.store.getSnapshot().draft === before && !lockedBefore) problems.push(`6: ${page.session} refused an edit while editing was shown open`);
       if (page.store.getSnapshot().draft !== before) {
+        if (lockedBefore) problems.push(`6: ${page.session} took an edit while editing was shown locked`);
         page.newestTyped = subject;
         page.newestSendable = draftProblems(next).length === 0 ? subject : null;
       }

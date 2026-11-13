@@ -78,9 +78,12 @@ describe("no answer replaces a draft newer than the one it answered (invariant 6
     expect(h.store.getSnapshot().pending).toBe("launch");
     h.type("Typed while the launch is pending");
     expect(subjectOf(h.store)).toBe("Ready to launch");
+    expect(h.store.getSnapshot().locked).toBe(true);
     h.launches[0]!.resolve(view("Ready to launch", 2, true));
     await launched;
     expect([subjectOf(h.store), h.store.getSnapshot().pending]).toEqual(["Ready to launch", null]);
+    // Launched: still locked, for good.
+    expect(h.store.getSnapshot().locked).toBe(true);
   });
 
   test("while the saved version loads, typing is refused, so the load never erases copy typed after choosing it (re-check B12)", async () => {
@@ -95,7 +98,7 @@ describe("no answer replaces a draft newer than the one it answered (invariant 6
     expect(subjectOf(h.store)).toBe("Stale tab's copy");
     h.loads[0]!.resolve(view("Other tab's saved copy", 2));
     await loading;
-    expect([subjectOf(h.store), h.store.inConflict, h.store.getSnapshot().pending]).toEqual(["Other tab's saved copy", false, null]);
+    expect([subjectOf(h.store), h.store.inConflict, h.store.getSnapshot().pending, h.store.getSnapshot().locked]).toEqual(["Other tab's saved copy", false, null, false]);
     // Editing carries on from the loaded version, saved from its revision.
     h.type("After loading");
     h.fire();
