@@ -48,17 +48,19 @@ export function displayPhone(key: string): string {
 }
 
 /**
- * A business row's main line (ADR 0001, "Phone identity"). With a two-letter country it is read
- * in that country. Without one, the `phone_e164` cell is international by definition, so it is
- * read as international, even without its plus sign when it is valid that way; otherwise the
- * line is read as any number is: as written in international form, or kept as its digits.
+ * A business row's main line (ADR 0001, "Phone identity"). The `phone_e164` cell is international
+ * by definition, so it is read as international first, whatever the company's country, even
+ * without its plus sign when it is valid that way. Otherwise the line is read as any number is:
+ * in the company's two-letter country, or, without one, as written in international form or kept
+ * as its digits.
  */
 export function readMainLine(e164: string, original: string, country: string | null): PhoneNumber | null {
-  if (countryCode(country)) return parsePhone(e164, country) ?? parsePhone(original, country);
   const written = e164.trim();
   const digits = digitsOf(written);
   const international = written.startsWith("+") || digits.startsWith("00");
   const withoutPlus = !international && digits.length >= 6 && parsePhoneNumberFromString(`+${digits}`)?.isValid() === true;
   const cell = international ? parsePhone(written, null) : withoutPlus ? parsePhone(`+${digits}`, null) : null;
-  return cell ?? parsePhone(original, null) ?? parsePhone(written, null);
+  if (cell) return cell;
+  const code = countryCode(country) ?? null;
+  return code ? (parsePhone(written, code) ?? parsePhone(original, code)) : (parsePhone(original, null) ?? parsePhone(written, null));
 }

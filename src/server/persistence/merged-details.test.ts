@@ -91,6 +91,35 @@ describe("a company with a foreign main line and no country lists a colleague's 
   }
 });
 
+// Review round 5: when a company gains a country, a colleague's copy kept by its digits folds into
+// the copy another colleague already holds read; the merged id resolves to it, bad mark and all.
+describe("two colleagues' copies of one number consolidate when their company gains a country", () => {
+  const atlantic = (country: string) => business({ business_id: "b1", place_id: "P1", business_name: "Atlantic Physio", country, phone_e164: "", phone_original: "" });
+  const ada = person({ person_id: "a", business_id: "b1", full_name: "Ada Moss", direct_phone: "020 7946 0155" });
+  const bo = person({ person_id: "b", business_id: "b1", full_name: "Bo Lind", direct_phone: "+44 20 7946 0155" });
+
+  for (const [order, people] of [["Ada first", [ada, bo]], ["Bo first", [bo, ada]]] as const) {
+    test(`Ada's bad copy folds into Bo's number, and her id resolves to it (${order})`, async () => {
+      const api = testApi();
+      const campaign = (await api.createCampaign("Physio")).id;
+      expect((await api.post(`/api/campaigns/${campaign}/imports`, csvOf({ businesses: [atlantic("")], people: [...people] }))).status).toBe(201);
+      const adaNumber = detailId(await personNamed(api, "Ada Moss"), "person", "02079460155");
+      const boNumber = detailId(await personNamed(api, "Bo Lind"), "person", "+44 20 7946 0155");
+      await api.store.markContactDetailBad(adaNumber);
+      const gained = csvOf({ businesses: [atlantic("GB")], people: [...people] });
+      expect((await api.post(`/api/campaigns/${campaign}/imports`, gained)).status).toBe(201);
+      const number = { id: boNumber, owner: { kind: "person" }, key: "+442079460155", bad: true };
+      expect(await api.store.contactDetail(adaNumber)).toMatchObject(number);
+      expect(await api.store.contactDetail(boNumber)).toMatchObject(number);
+      expect((await personNamed(api, "Ada Moss")).contactDetails.filter((d) => d.channel === "phone")).toEqual([]);
+      const again = await api.post<{ import: { summary: { counts: Record<string, number> } } }>(`/api/campaigns/${campaign}/imports`, gained);
+      expect(again.body.import.summary.counts).toMatchObject({ new: 0, updated: 0 });
+      expect(await api.store.contactDetail(adaNumber)).toMatchObject(number);
+      expect((await personNamed(api, "Bo Lind")).contactDetails.filter((d) => d.channel === "phone")).toEqual([expect.objectContaining({ id: boNumber, bad: true })]);
+    });
+  }
+});
+
 /**
  * The store's contract for merges, whatever the planner asks of it. These plans are written by
  * hand at the store's seam, so they can make chains the planner does not yet make; every merge
@@ -220,6 +249,15 @@ describe("the store keeps an absorbed detail out of everything that reads live d
     test("another address", () => refused((s) => ({ fromId: s.ids.amiraEmail, intoId: s.ids.inbox, key: "info@harbour.example", region: null })));
     test("the same number at another company", () =>
       refused((s) => ({ fromId: "amira-0199", intoId: s.ids.quayLine, key: "+442079460199", region: "GB" }), (s) => [s.phone("amira-0199", s.amiraOwns, "+44 20 7946 0199", "+442079460199")]));
+    test("a person's copy into a person's at another company", async () => {
+      const s = await setUp();
+      await s.api.post(`/api/campaigns/${s.campaign}/imports`, csvOf({ businesses: [quay], people: [person({ person_id: "q", business_id: "b2", full_name: "Quinn Hale", direct_phone: "+44 20 7946 0177" })] }));
+      const quinnNumber = detailId(await personNamed(s.api, "Quinn Hale"), "person", "+44 20 7946 0177");
+      const before = await s.api.store.person(s.ids.amira);
+      const copy = s.phone("amira-0177", s.amiraOwns, "+44 20 7946 0177", "+442079460177");
+      await expect(s.apply({ details: [copy], consolidations: [{ fromId: copy.id, intoId: quinnNumber, key: "+442079460177", region: null }] })).rejects.toThrow(/cannot be merged/);
+      expect(await s.api.store.person(s.ids.amira)).toEqual(before);
+    });
     test("a company's detail into a person's", () => refused((s) => ({ fromId: s.ids.inbox, intoId: s.inboxCopy.id, key: "info@harbour.example", region: null }), (s) => [s.inboxCopy]));
     test("a target that does not hold the claim's key", () => refused((s) => ({ fromId: s.inboxCopy.id, intoId: s.ids.inbox, key: "office@harbour.example", region: null }), (s) => [s.inboxCopy]));
     // The planner's claim names the region it read the copy in; the store uses that reading, never its own.
