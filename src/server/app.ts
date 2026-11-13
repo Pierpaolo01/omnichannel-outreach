@@ -14,6 +14,8 @@ import { Engine } from "./engine/engine.ts";
 import { UnconnectedEmailPort } from "./engine/ports.ts";
 import { accountView, needsAttention, progressView } from "./engine/views.ts";
 import type { SequenceView } from "../shared/api.ts";
+import { beforeLaunchView, copyPreview } from "./before-launch.ts";
+import { activityOf } from "./activity.ts";
 
 export interface AppDependencies {
   readonly store: OutreachStore;
@@ -297,6 +299,37 @@ export function createApp({ store, now, newId, engine: givenEngine }: AppDepende
       return c.json<ApiError>({ error: { code: outcome.reason === "already_launched" ? "already_launched" : "launch_blocked", message } }, 409);
     }
     return c.json(await sequenceView(campaign.id, campaign.defaultTimezone));
+  });
+
+  // The campaign editor's Before launch tab (ticket 12c): read models only.
+  const definitionOf = async (campaignId: string, defaultZone: string | null) => {
+    const row = await store.engine.campaign(campaignId);
+    return row ? { definition: row.definition ?? emptyDefinition(defaultZone ?? machineZone()), launched: row.launchedAt !== null } : null;
+  };
+
+  app.get("/campaigns/:id/before-launch", async (c) => {
+    const campaign = await store.campaign(c.req.param("id"));
+    const def = campaign ? await definitionOf(campaign.id, campaign.defaultTimezone) : null;
+    if (!campaign || !def) return notFound(c, "campaign");
+    return c.json(await beforeLaunchView(store, campaign.id, def.definition, def.launched, Date.parse(now())));
+  });
+
+  app.get("/campaigns/:id/preview/:enrollmentId", async (c) => {
+    const campaign = await store.campaign(c.req.param("id"));
+    const def = campaign ? await definitionOf(campaign.id, campaign.defaultTimezone) : null;
+    const preview = campaign && def ? await copyPreview(store, campaign.id, c.req.param("enrollmentId"), def.definition, Date.parse(now())) : null;
+    return preview ? c.json(preview) : notFound(c, campaign ? "lead in this campaign" : "campaign");
+  });
+
+  // The timeline's campaign activity on a person or company-lead record (ticket 12c).
+  app.get("/people/:id/activity", async (c) => {
+    const person = await store.person(c.req.param("id"));
+    return person ? c.json({ entries: await activityOf(store, person.enrollments, Date.parse(now())) }) : notFound(c, "person");
+  });
+
+  app.get("/companies/:id/activity", async (c) => {
+    const company = await store.company(c.req.param("id"));
+    return company ? c.json({ entries: await activityOf(store, company.enrollments, Date.parse(now())) }) : notFound(c, "company");
   });
 
   app.get("/enrollments/:id", async (c) => {

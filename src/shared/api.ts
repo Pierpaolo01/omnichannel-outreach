@@ -283,3 +283,112 @@ export interface NeedsAttention {
   }[];
   readonly anomalies: readonly { readonly what: string; readonly at: string }[];
 }
+
+// ---------------------------------------------------------------------------------------------
+// The campaign editor's Before launch tab and the person timeline (ticket 12c). Read models only.
+
+/** A lead of the campaign the copy can be rendered for: an enrollment that has not ended. */
+export interface PreviewLead {
+  /** The enrollment id. */
+  readonly id: string;
+  readonly kind: "person" | "company";
+  /** The person's or company lead's record id, for its page. */
+  readonly recordId: string;
+  readonly name: string;
+  readonly title: string;
+  readonly company: string;
+  /** The address the email track would send to: the lead's own email, or a company lead's shared inbox. */
+  readonly email: string | null;
+}
+
+/** GET /api/campaigns/:id/before-launch */
+export interface BeforeLaunchView {
+  readonly campaignId: string;
+  readonly leads: readonly PreviewLead[];
+  /** Spec "Before launch": how many leads have an email, a mobile or a phone number. */
+  readonly coverage: { readonly leads: number; readonly email: number; readonly mobile: number; readonly phone: number };
+  /** Every merge field the live copy uses, with how many leads lack it and the fallbacks written for it. */
+  readonly mergeFields: readonly {
+    readonly field: string;
+    readonly leadsMissing: number;
+    /** Of them, company leads, which have no person's name or title. */
+    readonly companyLeadsMissing: number;
+    /** The distinct fallback texts written for this field; empty when some use has none. */
+    readonly fallbacks: readonly string[];
+    /** Some use of the field has no fallback. */
+    readonly someUseWithoutFallback: boolean;
+  }[];
+  /** Null once the campaign has launched: the projection is a before-launch estimate. */
+  readonly load: LoadProjectionView | null;
+}
+
+export interface LoadProjectionView {
+  /** The leads the email track would send to; the rest have no email and skip it. */
+  readonly leadsWithEmail: number;
+  readonly accounts: readonly {
+    readonly id: string;
+    readonly label: string;
+    readonly capacity: number;
+    /** Sends already counted or reserved today on this inbox, across every campaign. */
+    readonly usedToday: number;
+    /** The most this campaign would send from it on one day. */
+    readonly busiestDay: number;
+    readonly gapSeconds: number;
+  }[];
+  /**
+   * Calendar days, counting launch day as day 1, until every lead with an email has had its first
+   * email; null when no connected inbox can send, or not all start within the projection's horizon.
+   */
+  readonly daysUntilAllStart: number | null;
+  /** Leads that would not have started within the projection's horizon. */
+  readonly notStartedWithinHorizon: number;
+  readonly horizonDays: number;
+}
+
+/** Rendered copy, in pieces, so a fallback the lead gets can be shown as one. */
+export interface CopySegment {
+  readonly text: string;
+  /** A literal, the lead's own value, a fallback for a field it lacks, or a missing field with no fallback. */
+  readonly kind: "literal" | "value" | "fallback" | "missing";
+  /** The merge field, for every kind but literal. */
+  readonly field?: string;
+}
+
+/** GET /api/campaigns/:id/preview/:enrollmentId */
+export interface CopyPreview {
+  readonly lead: PreviewLead;
+  readonly steps: readonly {
+    readonly trackId: string;
+    readonly stepId: string;
+    readonly number: number;
+    /** The earliest day it can go, counting the first email as day 1: one plus every wait before it. */
+    readonly day: number;
+    readonly threading: "new_subject" | "continue_thread";
+    /** The subject the step writes; on a continue-thread step, the subject of the thread it continues. */
+    readonly subject: readonly CopySegment[];
+    readonly body: readonly CopySegment[];
+    /** Merge fields this lead lacks that have no fallback: the copy cannot be sent to them. */
+    readonly missing: readonly string[];
+  }[];
+}
+
+/** One line of a person's or company lead's timeline (GET /api/people/:id/activity). Newest first. */
+export type ActivityEntry = { readonly campaign: { readonly id: string; readonly name: string }; readonly at: string } & (
+  | {
+      readonly kind: "sent";
+      readonly stepNumber: number;
+      readonly from: string;
+      readonly to: string;
+      readonly copy: { readonly subject: string; readonly body: string } | null;
+    }
+  | { readonly kind: "failed"; readonly stepNumber: number; readonly to: string; readonly reason: string }
+  | { readonly kind: "skipped"; readonly stepNumber: number | null; readonly reason: string }
+  /** A hard bounce: the address is marked bad and the email track ends. */
+  | { readonly kind: "bounced"; readonly to: string }
+  | { readonly kind: "replied"; readonly channel: "email" | "sms" }
+  | { readonly kind: "ended"; readonly status: "sequence_finished_no_response" | "finished_no_usable_channel" }
+);
+
+export interface ActivityView {
+  readonly entries: readonly ActivityEntry[];
+}
