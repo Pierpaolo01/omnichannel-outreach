@@ -47,7 +47,12 @@ export interface AttemptRef {
 /** What the provider reports, each with its own id so a repeat is recognised. */
 export type ProviderEvent =
   | { readonly id: string; readonly kind: "sent"; readonly key: string; readonly providerRef: string; readonly sentAt: number }
-  /** A hard bounce of an email, or a text the SMS provider reports undeliverable to an invalid number. */
+  /**
+   * A hard bounce of an email, or for SMS a number the carrier reports invalid after the send (not
+   * a mobile, unallocated, permanently unreachable). It marks the detail bad for every campaign. An
+   * SMS adapter must never report a transient failure (a handset off, a full queue, a carrier
+   * outage, a filtered message) as `bounced`; such a failure is no event the engine acts on.
+   */
   | { readonly id: string; readonly kind: "bounced"; readonly key: string; readonly providerRef: string; readonly at: number }
   /**
    * A reply: the thread it answers (`providerRef`, null when it starts a new conversation), the

@@ -239,6 +239,8 @@ export interface AccountState {
   readonly k: number;
   readonly nextSlotAt: number;
   readonly healthy: boolean;
+  /** Why it cannot send while not healthy: its provider's reason, or `not_listed` when its provider stopped listing it. */
+  readonly problem: string | null;
   /** An account-level wait after a 402 or 429 (ADR 0003 2.4): no claim until it ends. */
   readonly waitUntil: number | null;
   readonly waitReason: "quota" | "rate_limited" | null;

@@ -154,7 +154,7 @@ export class FakeEmailPort implements SendPort {
 
   accounts(): Promise<AccountStatus[]> {
     return Promise.resolve(
-      [...this.accountsById.values()].map((a) => ({ id: a.id, channel: "email" as const, label: `Fake inbox ${a.id}`, capacity: a.capacity, gapMs: a.gapMs, k: a.k, healthy: a.healthy, resetZone: a.resetZone, quotaAvailable: a.quotaAvailable })),
+      [...this.accountsById.values()].map((a) => ({ id: a.id, channel: "email" as const, label: `Fake inbox ${a.id}`, capacity: a.capacity, gapMs: a.gapMs, k: a.k, healthy: a.healthy, problem: a.healthy ? null : "unhealthy", resetZone: a.resetZone, quotaAvailable: a.quotaAvailable })),
     );
   }
 

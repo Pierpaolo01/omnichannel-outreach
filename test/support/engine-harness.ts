@@ -28,6 +28,8 @@ export interface EngineHarnessOptions {
   readonly port?: Provider | ((store: OutreachStore, now: () => number) => Provider);
   /** Further engine dependencies, such as how port waits are bounded. */
   readonly engine?: Partial<EngineDependencies>;
+  /** A database file instead of an in-memory one, so a test can reopen it (migration tests). */
+  readonly databasePath?: string;
   /** A fake SMS provider's numbers (ticket 13). Without them the engine has the unprovisioned SMS port. */
   readonly sms?: { readonly numbers: readonly FakeNumber[]; readonly modes?: readonly FakeSmsMode[] };
 }
@@ -73,7 +75,7 @@ export class EngineHarness {
     this.options = options;
     this.hooks = options.hooks ?? {};
     this.clock = options.start;
-    this.store = openSqliteStore(":memory:");
+    this.store = openSqliteStore(options.databasePath ?? ":memory:");
     // Count the engine's subject writes: a deterministic measure of a run's work, the same on every machine.
     const store = this.store.engine;
     const update = store.update.bind(store);

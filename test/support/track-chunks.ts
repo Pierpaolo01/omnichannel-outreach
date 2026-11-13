@@ -15,11 +15,11 @@ import { TRACK_MUTATIONS } from "./track-mutations.ts";
  * Offsets from SEED. Chosen greedily from a sweep of all 100 seeds so that together they reach
  * every behaviour the runs report (`stats.features`): every profile, both connection kinds, both
  * channels, several campaigns, a conversation taken and one held by an ended owner, invalid and
- * undeliverable numbers and bounces, releases after a skip and after a failure, replies on both
- * channels, reported late and between a claim and its handover, a second worker's handovers, claims
+ * numbers invalid at the call or after a send, bounces, releases after a skip and after a failure, replies on both
+ * channels, reported late, between a claim and its handover and during a text, a second worker's handovers, claims
  * withdrawn by the guard and by age, and all three endings. Refresh it when the generator changes.
  */
-export const TRACK_FIXED_SEEDS: readonly number[] = [2, 3, 4, 42];
+export const TRACK_FIXED_SEEDS: readonly number[] = [2, 3, 4, 61];
 const SEARCH_SEEDS = 100;
 /** Seed offsets each mutation's search tries after its recorded seed. */
 const MAX_SEEDS = 30;

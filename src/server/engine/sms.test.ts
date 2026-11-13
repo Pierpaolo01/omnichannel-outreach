@@ -139,9 +139,9 @@ describe("tracks together and after (spec: Define coordinated email, SMS and pho
     expect((await h.progress(lead("Nia Cole"))).status).toBe("finished_no_usable_channel");
   });
 
-  test("a text reported undeliverable after it was sent marks the number bad and ends its track early", async () => {
+  test("a number the carrier reports invalid after a text was sent is marked bad and its track ends early", async () => {
     const { h, campaign, texts } = await world();
-    h.sms.undeliverable.add(PAT_MOBILE);
+    h.sms.invalidAfterSend.add(PAT_MOBILE);
     h.clock = MONDAY_9;
     const lead = await campaign("Undeliverable", [track("t1", "sms", [text("m1"), text("m2", 1)]), track("t2", "email", [email("s1")])]);
     await h.advanceTo(MONDAY_9 + 3 * DAY);
@@ -414,7 +414,7 @@ describe("sender checks and Needs attention cover SMS", () => {
     h.sms.numbers.get(N1)!.healthy = true;
     h.sms.numbers.get(N1)!.listed = false;
     await h.advanceTo(MONDAY_9 + 3 * DAY);
-    expect((await h.request<NeedsAttention>("GET", "/api/needs-attention")).body.senderProblems.map((p) => p.accountId)).toEqual([N1]);
+    expect((await h.request<NeedsAttention>("GET", "/api/needs-attention")).body.senderProblems).toEqual([{ accountId: N1, channel: "sms", label: `Simulated SMS (not a provider) ${N1}`, problem: "not_listed" }]);
     expect(texts(PAT_MOBILE).map((d) => d.stepId)).toEqual(["m1"]);
     h.sms.numbers.get(N1)!.listed = true;
     await h.advanceTo(MONDAY_9 + 4 * DAY);

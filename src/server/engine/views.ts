@@ -127,15 +127,14 @@ export async function needsAttention(store: EngineStore, now: number): Promise<N
         ? [{ accountId: a.id, reason: a.waitReason, until: a.waitReason === "quota" ? null : iso(a.waitUntil) }]
         : [],
     ),
-    unhealthyInboxes: accounts.filter((a) => !a.healthy && a.channel === "email").map((a) => ({ accountId: a.id })),
     senderProblems: await senderProblems(store, accounts),
     heldCapacity,
     anomalies: (await store.anomalies()).map((x) => ({ what: x.what, at: new Date(x.atWall).toISOString() })),
   };
 }
 
-/** Sender accounts on any channel that cannot send: unhealthy, or no longer listed by their provider (ticket 13). */
+/** Sender accounts on any channel that cannot send, each once, with why: its provider's reason, or that its provider no longer lists it (ticket 13). */
 async function senderProblems(store: EngineStore, accounts: readonly AccountState[]): Promise<NeedsAttention["senderProblems"][number][]> {
   const labels = await store.accountLabels();
-  return accounts.filter((a) => !a.healthy).map((a) => ({ accountId: a.id, channel: a.channel, label: labels[a.id] ?? a.id, problem: "disconnected" as const }));
+  return accounts.filter((a) => !a.healthy).map((a) => ({ accountId: a.id, channel: a.channel, label: labels[a.id] ?? a.id, problem: a.problem ?? "unhealthy" }));
 }

@@ -116,6 +116,15 @@ const RULES: Record<string, Partial<Rules>> = {
       return out;
     },
   },
+  "an email reply stops only the email tracks": {
+    applyReply: (s, reply, now) => {
+      if (reply.channel !== "email") return R.applyReply(s, reply, now);
+      if (s.replies.some((r) => r.providerRef === reply.providerRef)) return s;
+      let out: SubjectState = { ...s, replies: [...s.replies, reply] };
+      for (const t of s.campaign.definition.tracks) if (t.channel === "email") out = finishTrack(out, t.id, "skipped_by_user", leadNow(out.subject.clock, now), wallOfLead(out.subject.clock, now));
+      return out;
+    },
+  },
   "SMS capacity ignored": {
     chooseAccount: (s, now, stepId) => R.chooseAccount({ ...s, accounts: Object.fromEntries(Object.entries(s.accounts).map(([id, a]) => [id, smsAccount(s, id) ? { ...a, used: 0 } : a])) }, now, stepId),
   },
@@ -140,21 +149,22 @@ const RULES: Record<string, Partial<Rules>> = {
 
 /** The invariant each mutation must break, and the seed offset known to show it (refreshed by the CI search). */
 const EXPECTED: Record<string, { invariant: string; seed: number }> = {
-  "SMS reply to the newest campaign": { invariant: "14", seed: 13 },
+  "SMS reply to the newest campaign": { invariant: "14", seed: 0 },
   "binding transferred after an end": { invariant: "14", seed: 0 },
   "binding fixed at claim": { invariant: "14", seed: 12 },
   "ending check too late": { invariant: "20", seed: 0 },
-  "after counts from the earlier track's start": { invariant: "7", seed: 22 },
+  "after counts from the earlier track's start": { invariant: "7", seed: 12 },
   "after delay ignored": { invariant: "7", seed: 3 },
   "together tracks not together": { invariant: "7", seed: 0 },
   "a skipped or failed track releases nothing": { invariant: "7", seed: 0 },
   "SMS reply stops only the SMS tracks": { invariant: "14", seed: 0 },
+  "an email reply stops only the email tracks": { invariant: "14", seed: 0 },
   "SMS capacity ignored": { invariant: "10", seed: 0 },
   "SMS sender not fixed": { invariant: "14", seed: 16 },
   "SMS to any phone": { invariant: "20", seed: 0 },
   "a failed track finishes a day late": { invariant: "7", seed: 0 },
   "a skipped track finishes a day late": { invariant: "7", seed: 0 },
-  "first messages before follow-ups": { invariant: "12", seed: 0 },
+  "first messages before follow-ups": { invariant: "12", seed: 3 },
   "newest due first": { invariant: "12", seed: 3 },
 };
 

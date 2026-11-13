@@ -265,14 +265,14 @@ export interface NeedsAttention {
   readonly stalledInboxes: readonly { readonly accountId: string; readonly holding: readonly string[] }[];
   readonly heldTracks: readonly { readonly enrollmentId: string; readonly trackId: string; readonly reason: HoldReasonApi }[];
   readonly accountWaits: readonly { readonly accountId: string; readonly reason: "quota" | "rate_limited"; readonly until: string | null }[];
-  /** Inboxes the provider reports unhealthy or disconnected: their leads wait on them. */
-  readonly unhealthyInboxes: readonly { readonly accountId: string }[];
   /**
-   * Sender accounts on any channel that cannot send (ticket 13; spec "Needs attention": sender
-   * account problems such as a disconnected SMS number): reported unhealthy by their provider, or
-   * no longer listed by it. Their leads wait on them; nothing is dropped.
+   * Sender accounts on any channel that cannot send, each listed once (ticket 13; spec "Needs
+   * attention": sender account problems such as a disconnected SMS number). `problem` is the
+   * provider's own reason (for Instantly an `InboxHoldReasonApi`, for SMS "disconnected"),
+   * `not_listed` when the provider no longer lists the account, or `unhealthy` when no reason was
+   * given. Their leads wait on them; nothing is dropped. (Replaces 12b's `unhealthyInboxes`.)
    */
-  readonly senderProblems: readonly { readonly accountId: string; readonly channel: "email" | "sms"; readonly label: string; readonly problem: "disconnected" }[];
+  readonly senderProblems: readonly { readonly accountId: string; readonly channel: "email" | "sms"; readonly label: string; readonly problem: string }[];
   /**
    * Inboxes some of whose daily sends are held by unresolved provider work (ADR 0003 4.2): how
    * many, and the work holding them, until the provider or the user settles it.

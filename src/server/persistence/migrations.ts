@@ -414,7 +414,7 @@ export const MIGRATIONS: readonly Migration[] = [
   {
     // Numbered 11: 9 and 10 are the campaign editor's (pull request 41, ticket 12c).
     version: 11,
-    name: "SMS tracks: the subject's fixed SMS sender and the SMS conversation bindings (ADR 0003 1.3, 4.5; ticket 13)",
+    name: "SMS tracks: the fixed SMS sender, SMS conversation bindings, the stopping reply and sender account problems (ADR 0003 1.3, 4.5; ticket 13)",
     // A binding names the subject that owns the conversation between a sender number and a mobile
     // (E.164). One unreleased binding per pair; an enrollment's is never released or transferred,
     // and rows are never deleted, so the table is its own history.
@@ -423,6 +423,16 @@ export const MIGRATIONS: readonly Migration[] = [
       -- The reply that stopped the lead, stored when it stopped and never recomputed (verifier B1).
       ALTER TABLE enrollments ADD COLUMN stop_reply_channel TEXT CHECK (stop_reply_channel IN ('email', 'sms'));
       ALTER TABLE enrollments ADD COLUMN stop_reply_at INTEGER;
+      -- A lead that replied before this migration: its stopping reply is the one the engine recorded
+      -- first, since replies are inserted as they are observed and any reply ends the lead (the same
+      -- reply the engine now stores for a new stop). Leads that did not reply keep none.
+      UPDATE enrollments SET
+        stop_reply_channel = (SELECT r.channel FROM replies r WHERE r.subject_id = enrollments.id ORDER BY r.rowid LIMIT 1),
+        stop_reply_at = (SELECT r.at_wall FROM replies r WHERE r.subject_id = enrollments.id ORDER BY r.rowid LIMIT 1)
+      WHERE ended = 'replied';
+      -- Why a sender account cannot send, as its provider or the engine reported it; null while it can,
+      -- and for an account stored before this migration until the next account sync rewrites it.
+      ALTER TABLE sender_accounts ADD COLUMN problem TEXT;
       CREATE TABLE sms_bindings (
         seq INTEGER PRIMARY KEY AUTOINCREMENT,
         sender_number TEXT NOT NULL,

@@ -19,7 +19,7 @@ import { dueAfter, higherPriority, inWindow, local, renderCopy, zoneOf, type Hou
  * delay of zero to three days, with waits, windows (overnight ones too) and zones with
  * daylight-saving changes in the period; decision makers with and without an email or a mobile, a
  * company lead (no SMS), people in several campaigns on one mobile; addresses that bounce, mobiles
- * the provider refuses as invalid or reports undeliverable after a send; SMS replies (STOP
+ * the provider refuses as invalid or the carrier reports invalid after a send; SMS replies (STOP
  * included) and email replies; numbers disconnected or no longer listed; one number shared by every
  * campaign, so conversations are taken; slow pacing, so claims expire; and user and prospect events,
  * and a second worker's handovers, injected between a claim and its handover. Each run ends with a
@@ -189,7 +189,7 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
     if (p.mobile) {
       const r = rand();
       if (r < failRate) sms.invalid.add(p.mobile);
-      else if (r < 2 * failRate) sms.undeliverable.add(p.mobile);
+      else if (r < 2 * failRate) sms.invalidAfterSend.add(p.mobile);
     }
   }
 
@@ -327,7 +327,17 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
   }
   await discover();
   email.onHandover = probe(h, problem, "email", checkHandoverPriority);
-  sms.onHandover = probe(h, problem, "sms", checkHandoverPriority);
+  const smsProbe = probe(h, problem, "sms", checkHandoverPriority);
+  sms.onHandover = async (call) => {
+    await smsProbe(call);
+    // An email reply from the same lead while its text is with the provider: it must stop the SMS track too.
+    if (hookBudget <= 0 || !chance(0.3)) return;
+    const address = email.deliveryLog.filter((d) => d.subjectId === call.subjectId).at(-1)?.destination;
+    if (address && replyOnKnownThread(address)) {
+      hookBudget--;
+      features.add("email-reply-during-a-text");
+    }
+  };
   await h.tick();
   for (const [ci, c] of campaigns.entries()) {
     const wait = Math.floor(rand() * 3) * HOUR;
@@ -346,10 +356,10 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
   // The record's knowledge, derived from the definitions, the people and the providers' own logs,
   // never read back from the engine.
 
-  /** When the app knew a mobile was bad: the provider refused it, or reported a text to it undeliverable. */
+  /** When the app knew a mobile was bad: the provider refused it, or the carrier reported it invalid after a text. */
   function mobileBadAt(mobile: string): number {
     const refused = sms.refusals.find((r) => r.destination === mobile && r.reason === "invalid_destination")?.at ?? Infinity;
-    const failed = sms.undeliverable.has(mobile) ? (sms.deliveryLog.find((d) => d.destination === mobile)?.at ?? Infinity) + 2 * MINUTE : Infinity;
+    const failed = sms.invalidAfterSend.has(mobile) ? (sms.deliveryLog.find((d) => d.destination === mobile)?.at ?? Infinity) + 2 * MINUTE : Infinity;
     return Math.min(refused, failed);
   }
   function emailBadAt(address: string): number {
@@ -540,7 +550,7 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
     if (st.subject.ended) features.add(`ended:${st.subject.ended}`);
   }
   if (sms.refusals.length > 0) features.add("invalid-number");
-  if (sms.deliveryLog.some((d) => sms.undeliverable.has(d.destination))) features.add("undeliverable");
+  if (sms.deliveryLog.some((d) => sms.invalidAfterSend.has(d.destination))) features.add("invalid-after-send");
   if (email.deliveryLog.some((d) => email.bouncing.has(d.destination))) features.add("bounce");
   return { problems, stats: { texts: sms.deliveryLog.length, emails: email.deliveryLog.length, subjects: subjects.size, ticks: h.ticks, writes: h.writes, features: [...features] } };
 

@@ -70,7 +70,7 @@ export function multiTrackState(tracks: TrackDefinition[], details: "both" | "em
 }
 
 export function account(id: string, fields: Partial<AccountState> = {}): AccountState {
-  return { id, channel: "email", capacity: 30, gapMs: 120_000, k: 1, nextSlotAt: 0, healthy: true, waitUntil: null, waitReason: null, backoffMs: 0, resetZone: "UTC", used: 0, inFlight: 0, ...fields };
+  return { id, channel: "email", capacity: 30, gapMs: 120_000, k: 1, nextSlotAt: 0, healthy: true, problem: null, waitUntil: null, waitReason: null, backoffMs: 0, resetZone: "UTC", used: 0, inFlight: 0, ...fields };
 }
 
 /** An enrolled lead with one good email, enrolled before launch at Monday 08:00. */

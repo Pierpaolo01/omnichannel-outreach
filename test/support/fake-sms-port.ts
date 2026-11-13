@@ -60,8 +60,12 @@ export class FakeSmsPort implements SendPort {
   readonly numbers: Map<string, FakeNumber>;
   /** Mobiles the provider refuses as invalid at the call. */
   readonly invalid = new Set<string>();
-  /** Mobiles a text is sent to and then reported undeliverable (a "failed" status after the send). */
-  readonly undeliverable = new Set<string>();
+  /**
+   * Mobiles a text is sent to and then reported invalid by the carrier (not a mobile, unallocated):
+   * the `bounced` event. The fake never reports a transient failure, which the port contract keeps
+   * out of `bounced`.
+   */
+  readonly invalidAfterSend = new Set<string>();
   onHandover: ((entry: HandoverLogEntry) => Promise<void>) | null = null;
 
   private readonly now: () => number;
@@ -87,7 +91,7 @@ export class FakeSmsPort implements SendPort {
     return Promise.resolve(
       [...this.numbers.values()]
         .filter((n) => n.listed !== false)
-        .map((n) => ({ id: n.id, channel: "sms" as const, label: `Simulated SMS (not a provider) ${n.id}`, capacity: n.capacity, gapMs: n.gapMs, k: n.k, healthy: n.healthy, resetZone: n.resetZone, quotaAvailable: true })),
+        .map((n) => ({ id: n.id, channel: "sms" as const, label: `Simulated SMS (not a provider) ${n.id}`, capacity: n.capacity, gapMs: n.gapMs, k: n.k, healthy: n.healthy, problem: n.healthy ? null : "disconnected", resetZone: n.resetZone, quotaAvailable: true })),
     );
   }
 
@@ -153,8 +157,8 @@ export class FakeSmsPort implements SendPort {
         visibleAt: t.sentAt + t.observeDelay,
       });
       this.emit(t.sentAt + t.observeDelay, { id: `sent-${t.providerRef}`, kind: "sent", key: t.key, providerRef: t.providerRef, sentAt: t.sentAt });
-      if (this.undeliverable.has(t.request.destination)) {
-        this.emit(t.sentAt + 2 * MINUTE, { id: `failed-${t.providerRef}`, kind: "bounced", key: t.key, providerRef: t.providerRef, at: t.sentAt + 2 * MINUTE });
+      if (this.invalidAfterSend.has(t.request.destination)) {
+        this.emit(t.sentAt + 2 * MINUTE, { id: `invalid-${t.providerRef}`, kind: "bounced", key: t.key, providerRef: t.providerRef, at: t.sentAt + 2 * MINUTE });
       }
     }
   }

@@ -233,10 +233,10 @@ export class SqliteEngineStore implements EngineStore {
     this.transaction(() => {
       for (const a of accounts) {
         this.run(
-          `INSERT INTO sender_accounts (id, channel, label, capacity, gap_ms, k, healthy, reset_zone) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO sender_accounts (id, channel, label, capacity, gap_ms, k, healthy, problem, reset_zone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET channel = excluded.channel, label = excluded.label, capacity = excluded.capacity,
-             gap_ms = excluded.gap_ms, k = excluded.k, healthy = excluded.healthy, reset_zone = excluded.reset_zone`,
-          [a.id, a.channel, a.label, a.capacity, a.gapMs, a.k, a.healthy ? 1 : 0, a.resetZone],
+             gap_ms = excluded.gap_ms, k = excluded.k, healthy = excluded.healthy, problem = excluded.problem, reset_zone = excluded.reset_zone`,
+          [a.id, a.channel, a.label, a.capacity, a.gapMs, a.k, a.healthy ? 1 : 0, a.healthy ? null : (a.problem ?? "unhealthy"), a.resetZone],
         );
       }
     });
@@ -244,8 +244,8 @@ export class SqliteEngineStore implements EngineStore {
 
   async disconnectUnlisted(channel: "email" | "sms", listed: readonly string[]): Promise<void> {
     this.transaction(() => {
-      for (const r of this.sql("SELECT id FROM sender_accounts WHERE channel = ? AND healthy = 1").all(channel)) {
-        if (!listed.includes(str(r, "id"))) this.run("UPDATE sender_accounts SET healthy = 0 WHERE id = ?", [str(r, "id")]);
+      for (const r of this.sql("SELECT id FROM sender_accounts WHERE channel = ? AND (healthy = 1 OR problem IS NOT 'not_listed')").all(channel)) {
+        if (!listed.includes(str(r, "id"))) this.run("UPDATE sender_accounts SET healthy = 0, problem = 'not_listed' WHERE id = ?", [str(r, "id")]);
       }
     });
   }
@@ -271,7 +271,7 @@ export class SqliteEngineStore implements EngineStore {
 
   async updateAccount(accountId: string, change: Partial<Pick<AccountState, "healthy" | "waitUntil" | "waitReason" | "backoffMs">>): Promise<void> {
     this.transaction(() => {
-      if (change.healthy !== undefined) this.run("UPDATE sender_accounts SET healthy = ? WHERE id = ?", [change.healthy ? 1 : 0, accountId]);
+      if (change.healthy !== undefined) this.run("UPDATE sender_accounts SET healthy = ?, problem = ? WHERE id = ?", [change.healthy ? 1 : 0, change.healthy ? null : "unhealthy", accountId]);
       if (change.waitUntil !== undefined) this.run("UPDATE sender_accounts SET wait_until = ? WHERE id = ?", [change.waitUntil, accountId]);
       if (change.waitReason !== undefined) this.run("UPDATE sender_accounts SET wait_reason = ? WHERE id = ?", [change.waitReason, accountId]);
       if (change.backoffMs !== undefined) this.run("UPDATE sender_accounts SET backoff_ms = ? WHERE id = ?", [change.backoffMs, accountId]);
@@ -324,6 +324,7 @@ export class SqliteEngineStore implements EngineStore {
       k: num(a, "k"),
       nextSlotAt: num(a, "next_slot_at"),
       healthy: num(a, "healthy") === 1,
+      problem: num(a, "healthy") === 1 ? null : (strOrNull(a, "problem") ?? "unhealthy"),
       waitUntil: numOrNull(a, "wait_until"),
       waitReason: strOrNull(a, "wait_reason") as AccountState["waitReason"],
       backoffMs: num(a, "backoff_ms"),

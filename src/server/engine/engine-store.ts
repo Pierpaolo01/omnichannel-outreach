@@ -15,6 +15,8 @@ export interface SenderAccountConfig {
   /** In-flight bound (ADR 0002's k). */
   readonly k: number;
   readonly healthy: boolean;
+  /** Why the provider says it cannot send, when not healthy, in the provider's own words (such as Instantly's "sending_off"). */
+  readonly problem?: string | null;
   readonly resetZone: string;
 }
 
