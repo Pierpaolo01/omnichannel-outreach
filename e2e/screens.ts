@@ -1,7 +1,7 @@
 import type { APIRequestContext, Locator, Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { OUTREACH_STATUSES } from "../src/domain/outreach-status.ts";
-import type { CompanyRecord, ImportRecord, LeadSearchResult, PersonRecord, SummaryEntry } from "../src/shared/api.ts";
+import type { CompanyRecord, ImportRecord, LeadSearchResult, PersonRecord, SequenceView, SummaryEntry } from "../src/shared/api.ts";
 import { refusedPair, respond, serverError } from "./mocks.ts";
 import { FAKE_INBOX, fakeProviderApp } from "./fake-provider.ts";
 import { fixture } from "./support.ts";
@@ -805,6 +805,19 @@ export const SCREENS: readonly Screen[] = [
       await f.harness.tick();
       await page.goto(`${f.url}/campaigns/${f.ready}/before-launch`);
       await settle(page, "Can’t project the load while");
+    },
+  },
+  {
+    name: "fake provider: a tab whose campaign was changed elsewhere",
+    open: async (page) => {
+      // Its own app: another session's save changes the campaign after this tab loaded it.
+      const f = await fakeProviderApp("changed-elsewhere");
+      await page.goto(`${f.url}/campaigns/${f.ready}?track=email&step=s1`);
+      await page.getByLabel("Email 1 subject").waitFor();
+      const current = (await f.harness.request<SequenceView>("GET", `/api/campaigns/${f.ready}/sequence`)).body;
+      await f.harness.request("PUT", `/api/campaigns/${f.ready}/sequence`, { ...current.definition, save: { session: `other-${Date.now()}`, seq: 1, base: current.definitionVersion } });
+      await page.getByLabel("Email 1 copy").fill("Typed here after the other tab saved.");
+      await settle(page, "This campaign was changed elsewhere since this page loaded it.");
     },
   },
   { name: "fake provider: running campaign, before launch", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}/before-launch`); await settle(page, "The projection is for before launch."); } },
