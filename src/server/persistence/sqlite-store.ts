@@ -1,6 +1,6 @@
 import { DatabaseSync, type SQLInputValue, type SQLOutputValue } from "node:sqlite";
 import { digitsOf, foldText, isNewerDetail, type Channel, type PhoneKind } from "../../domain/contact-details.ts";
-import { displayPhone } from "../../domain/phone.ts";
+import { companyRegion, displayPhone, parsePhone } from "../../domain/phone.ts";
 import {
   personDisplayName,
   type Directory,
@@ -150,7 +150,7 @@ class SqliteStore implements OutreachStore {
     };
 
     const detailMatch = (ownerFilter: string): string => `EXISTS (
-      SELECT 1 FROM contact_details d WHERE d.merged_into IS NULL AND ${ownerFilter}
+      SELECT 1 FROM live_contact_details d WHERE ${ownerFilter}
       AND ((d.channel = 'email' AND d.key LIKE :like ESCAPE '\\')
         OR (:digitsLike <> '' AND d.search_digits LIKE :digitsLike)))`;
     const enrollmentFilter = (leadFilter: string): string => `
@@ -284,19 +284,18 @@ class SqliteStore implements OutreachStore {
   }
 
   /**
-   * The live row an issued detail id stands for: its own row, or the row at the end of the
-   * chain of details it was merged into. A merge only ever points at a live detail, so the
-   * chain has no cycle; its length is bounded anyway.
+   * The store's resolution of a detail id: its own row when live, or the live row at the end of
+   * the chain of details it was merged into. Chains of any length are followed; UNION keeps each
+   * id once, so even a cycle, which merges cannot make, ends rather than loops.
    */
   private liveDetailRow(detailId: string): Row | undefined {
     return this.db
       .prepare(
-        `WITH RECURSIVE chain(id, hops) AS (
-           SELECT ?, 0
-           UNION ALL
-           SELECT d.merged_into, chain.hops + 1 FROM contact_details d JOIN chain ON d.id = chain.id
-           WHERE d.merged_into IS NOT NULL AND chain.hops < 1000)
-         SELECT d.* FROM chain JOIN contact_details d ON d.id = chain.id WHERE d.merged_into IS NULL`,
+        `WITH RECURSIVE chain(id) AS (
+           SELECT ?
+           UNION
+           SELECT d.merged_into FROM contact_details d JOIN chain ON d.id = chain.id WHERE d.merged_into IS NOT NULL)
+         SELECT live.* FROM chain JOIN live_contact_details live ON live.id = chain.id`,
       )
       .get(detailId);
   }
@@ -308,7 +307,7 @@ class SqliteStore implements OutreachStore {
   private directory(campaignId: string): Directory {
     const detailsByOwner = new Map<string, KnownDetail[]>();
     // Only live details: one merged into another is history, matched and claimed through its target.
-    for (const row of this.db.prepare("SELECT * FROM contact_details WHERE merged_into IS NULL").all()) {
+    for (const row of this.db.prepare("SELECT * FROM live_contact_details").all()) {
       const key = `${str(row, "owner_kind")}:${str(row, "owner_id")}`;
       const list = detailsByOwner.get(key) ?? [];
       list.push({
@@ -415,13 +414,13 @@ class SqliteStore implements OutreachStore {
         `WITH destinations AS (
            SELECT e.campaign_id, e.id AS enrollment_id,
              CASE WHEN d.channel = 'email' THEN 'email' ELSE 'mobile' END || '|' || d.key AS destination
-           FROM enrollments e JOIN contact_details d ON d.owner_kind = 'person' AND d.owner_id = e.person_id
-           WHERE e.lead_kind = 'person' AND d.merged_into IS NULL AND d.listed_shared = 0 AND (d.channel = 'email' OR d.phone_kind = 'mobile')
+           FROM enrollments e JOIN live_contact_details d ON d.owner_kind = 'person' AND d.owner_id = e.person_id
+           WHERE e.lead_kind = 'person' AND d.listed_shared = 0 AND (d.channel = 'email' OR d.phone_kind = 'mobile')
            UNION ALL
            -- One address is one mailbox, a person's email or a company's shared inbox alike.
            SELECT e.campaign_id, e.id, 'email|' || d.key
-           FROM enrollments e JOIN contact_details d ON d.owner_kind = 'company' AND d.owner_id = e.company_id
-           WHERE e.lead_kind = 'company' AND d.merged_into IS NULL AND d.channel = 'email')
+           FROM enrollments e JOIN live_contact_details d ON d.owner_kind = 'company' AND d.owner_id = e.company_id
+           WHERE e.lead_kind = 'company' AND d.channel = 'email')
          SELECT campaign_id || ' ' || destination AS shared FROM destinations
          GROUP BY campaign_id, destination HAVING COUNT(DISTINCT enrollment_id) > 1`,
       )
@@ -543,11 +542,15 @@ class SqliteStore implements OutreachStore {
 
     // A personal copy of a company detail folds into it; a bad mark on either side survives. The
     // copy keeps its row and id and points at its target, so an id once issued always resolves
-    // to one live detail (docs/adr/0001). Only live details may be merged, or merged into.
+    // to one live detail, and to the same address or number (docs/adr/0001).
     for (const { fromId, intoId } of plan.consolidations) {
-      this.run("UPDATE contact_details SET bad = MAX(bad, (SELECT bad FROM contact_details WHERE id = ?)) WHERE id = ? AND merged_into IS NULL", [fromId, intoId]);
-      const merged = this.db.prepare("UPDATE contact_details SET merged_into = ? WHERE id = ? AND merged_into IS NULL AND EXISTS (SELECT 1 FROM contact_details t WHERE t.id = ? AND t.merged_into IS NULL)").run(intoId, fromId, intoId);
-      if (Number(merged.changes) !== 1) throw new Error(`contact detail ${fromId} cannot be merged into ${intoId}: both must be live`);
+      const copy = this.db.prepare("SELECT * FROM live_contact_details WHERE id = ?").get(fromId);
+      const target = this.db.prepare("SELECT * FROM live_contact_details WHERE id = ?").get(intoId);
+      if (!copy || !target || fromId === intoId || !this.isOneDetail(copy, target)) {
+        throw new Error(`contact detail ${fromId} cannot be merged into ${intoId}: only a live detail held twice at one company is merged`);
+      }
+      this.run("UPDATE contact_details SET bad = MAX(bad, ?) WHERE id = ?", [num(copy, "bad"), intoId]);
+      this.run("UPDATE contact_details SET merged_into = ? WHERE id = ?", [intoId, fromId]);
     }
 
     this.run(
@@ -573,6 +576,32 @@ class SqliteStore implements OutreachStore {
         ],
       );
     }
+  }
+
+  /**
+   * Whether two live details are one detail held twice: the same channel, held by the same owner
+   * or a person's copy of their own company's detail, and the same key once a number stored by
+   * its digits is read in the company's region, as the planner reads it (ADR 0001).
+   */
+  private isOneDetail(copy: Row, target: Row): boolean {
+    if (str(copy, "channel") !== str(target, "channel")) return false;
+    const companyOf = (row: Row) => (str(row, "owner_kind") === "company" ? str(row, "owner_id") : this.companyIdOfPerson(str(row, "owner_id")));
+    const sameOwner = str(copy, "owner_kind") === str(target, "owner_kind") && str(copy, "owner_id") === str(target, "owner_id");
+    const copyOfOwnCompany = str(copy, "owner_kind") === "person" && str(target, "owner_kind") === "company" && companyOf(copy) === str(target, "owner_id");
+    if (!sameOwner && !copyOfOwnCompany) return false;
+    const companyId = companyOf(target);
+    const company = this.companyRow(companyId);
+    const lines = this.db
+      .prepare("SELECT key FROM live_contact_details WHERE owner_kind = 'company' AND owner_id = ? AND phone_kind = 'main_line'")
+      .all(companyId)
+      .map((row) => str(row, "key"));
+    const region = companyRegion(company ? str(company, "country") : null, lines);
+    const read = (row: Row) => {
+      const key = str(row, "key");
+      if (str(row, "channel") !== "phone" || key.startsWith("+") || region === null) return key;
+      return parsePhone(str(row, "value"), region)?.key ?? key;
+    };
+    return read(copy) === read(target);
   }
 
   private companyIdOfPerson(personId: string): string {
@@ -624,9 +653,9 @@ class SqliteStore implements OutreachStore {
       .prepare(
         // The prototype's order: a person's email, direct, mobile; a company's main line, then inbox.
         // A person's copy of an address their company lists as shared is not theirs to show or use.
-        `SELECT * FROM contact_details WHERE owner_kind = ? AND owner_id = ? AND listed_shared = 0 AND merged_into IS NULL
+        `SELECT * FROM live_contact_details WHERE owner_kind = ? AND owner_id = ? AND listed_shared = 0
          ORDER BY CASE WHEN owner_kind = 'company' THEN channel = 'email' ELSE channel = 'phone' END,
-           CASE phone_kind WHEN 'direct' THEN 0 WHEN 'mobile' THEN 1 ELSE 2 END, added_at, rowid`,
+           CASE phone_kind WHEN 'direct' THEN 0 WHEN 'mobile' THEN 1 ELSE 2 END, added_at, row_order`,
       )
       .all(ownerKind, ownerId)
       .map((row) => ({

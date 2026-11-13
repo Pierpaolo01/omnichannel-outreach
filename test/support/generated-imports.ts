@@ -25,8 +25,9 @@ const notJoined = (e: SummaryEntry) => e.outcome === "not_enrolled" && e.reason 
  *    details; a bad mark survives every import;
  * 6. importing the same files again changes nothing;
  * 7. no import returns a server error;
- * 8. every contact detail id ever shown still resolves to exactly one live detail, and a detail
- *    shown on a page is live (it resolves to itself).
+ * 8. every contact detail id ever shown still resolves to exactly one live detail with the
+ *    channel and value it had when first shown (a number read again once its company's region
+ *    is known is still that number), and a detail shown on a page is live (resolves to itself).
  * The generator only produces input the rule can decide: same-name colleagues first appear
  * together, an ID is never reused by someone whose namesake has carried it onto a record, a twin
  * lists only its own email and numbers, and every company row carries its anchor (a place_id,
@@ -662,20 +663,23 @@ function detailProblems(w: World, summary: ImportSummary, badMarks: BadMarks, hi
 
 /**
  * Every detail id the sequence has seen on a page, from any import, must still resolve to one
- * live detail: merging two details keeps the absorbed one's id (docs/adr/0001).
+ * live detail, and to the same address or number: merging two details keeps the absorbed one's
+ * id, pointing at the detail it is (docs/adr/0001). `issued` maps each id to the value it was
+ * first shown with, keyed as the generator keys values (phones read in Great Britain, so a
+ * number stored by its digits and later read is still the same number).
  */
-async function detailIdProblems(store: OutreachStore, w: World, issued: Set<string>): Promise<string[]> {
+async function detailIdProblems(store: OutreachStore, w: World, issued: Map<string, string>): Promise<string[]> {
   const problems: string[] = [];
-  const shown = new Set([...w.people, ...w.companies].flatMap((r) => r.contactDetails.map((d) => d.id)));
-  for (const id of shown) {
-    issued.add(id);
-    const resolved = await store.contactDetail(id);
-    if (resolved?.id !== id) problems.push(`detail ${id} is shown on a page but resolves to ${resolved?.id ?? "nothing"}`);
+  for (const d of [...w.people, ...w.companies].flatMap((r) => r.contactDetails)) {
+    if (!issued.has(d.id)) issued.set(d.id, valueKey(d));
+    const resolved = await store.contactDetail(d.id);
+    if (resolved?.id !== d.id) problems.push(`detail ${d.id} is shown on a page but resolves to ${resolved?.id ?? "nothing"}`);
   }
-  for (const id of [...issued].sort()) {
+  for (const [id, value] of [...issued].sort(([a], [b]) => a.localeCompare(b))) {
     const resolved = await store.contactDetail(id);
     if (!resolved) problems.push(`detail ${id}, issued earlier, resolves to nothing`);
     else if ((await store.contactDetail(resolved.id))?.id !== resolved.id) problems.push(`detail ${id} resolves to ${resolved.id}, which is not live`);
+    else if (valueKey({ channel: resolved.channel, value: resolved.key }) !== value) problems.push(`detail ${id}, first shown as ${value}, resolves to another detail, ${resolved.key}`);
   }
   return problems;
 }
@@ -714,7 +718,7 @@ export async function runSequence(seed: number, options: { shuffle?: boolean; st
   const rand = random(seed);
   const reorder = random(seed * 31 + 7);
   const api = testApi(options.store ? { store: options.store } : {});
-  const issuedDetails = new Set<string>();
+  const issuedDetails = new Map<string, string>();
   const campaigns = [(await api.createCampaign("Generated A")).id, (await api.createCampaign("Generated B")).id];
   const ledger = new Ledger();
   const badMarks: BadMarks = new Set();
