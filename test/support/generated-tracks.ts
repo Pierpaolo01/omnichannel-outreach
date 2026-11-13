@@ -689,42 +689,37 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
         const last = sends.at(-1);
         return last !== undefined && sends.every((d) => d !== undefined) && knownAt(t.channel, last) < badAtOf(rec, t.channel);
       };
-      // The lead ends first when its last channel goes bad (2.1), so a start at that very instant is
-      // not stored, unless the track's own call to the provider is what found it bad, or the lead's
-      // reply came in that same instant after the call: the provider's log of calls (independent of the
-      // engine's store) shows the track started then (search on 7401eb2, seeds 20261142 and 20261191).
+      // At the instant the lead ends (its first reply, or its last channel known bad), the record does
+      // not model the order within the engine's pass: a track that starts then may be stored or not.
+      // The provider's log of calls (independent of the engine's store) settles it when the track
+      // called; otherwise Activity must show either all of what the record expects of that track, or
+      // none of it (search on 7401eb2: seeds 20261124, 20261125, 20261142, 20261191 and others).
       const called = (t: TrackDefinition) => ownCall(t).length > 0;
       const started = (t: TrackDefinition) => {
         const start = startOf(rec, t);
-        return start !== null && start <= now && (start < endLimitOf(rec) || (start === endLimitOf(rec) && called(t))) ? start : null;
+        return start !== null && start <= now && start <= endLimitOf(rec) ? start : null;
       };
-      for (const t of def.tracks) {
-        if (t.channel === "call") continue;
+      const entriesOf = (t: TrackDefinition, start: number): string[] => {
+        const out: string[] = [];
         const label = trackLabel(def, t).label;
-        if (atLaunch) {
-          expected.push(`skipped|${t.channel}|${label}|-`);
-          continue;
-        }
-        const start = started(t);
-        if (start === null) continue;
         const rule = t.start;
         const before = rule.kind === "after" ? def.tracks.find((x) => x.id === rule.trackId) : undefined;
         if (before) {
           const beforeStart = started(before);
-          if (beforeStart !== null && (!reachesAt(rec, before.channel, beforeStart) || !completed(before))) expected.push(`released|${t.channel}|${label}|-`);
+          if (beforeStart !== null && (!reachesAt(rec, before.channel, beforeStart) || !completed(before))) out.push(`released|${t.channel}|${label}|-`);
         }
         const owned = { failure: false };
         t.steps.forEach((st, i) => {
           const d = deliveryOf(t.channel, rec.id, st.id);
-          if (d && knownAt(t.channel, d) <= now) expected.push(`sent|${t.channel}|${label}|${i + 1}`);
+          if (d && knownAt(t.channel, d) <= now) out.push(`sent|${t.channel}|${label}|${i + 1}`);
           const refused = ownCall(t).some((c) => c.stepId === st.id && sms.refusals.some((r) => r.attemptId === c.attemptId && r.reason === "invalid_destination"));
           if (t.channel === "sms" && refused) {
-            expected.push(`failed|sms|${label}|${i + 1}`);
+            out.push(`failed|sms|${label}|${i + 1}`);
             owned.failure = true;
           }
           const bad = t.channel === "sms" ? sms.invalidAfterSend : email.bouncing;
           if (d && bad.has(d.destination)) {
-            expected.push(`bounced|${t.channel}|${label}|${i + 1}`);
+            out.push(`bounced|${t.channel}|${label}|${i + 1}`);
             owned.failure = true;
           }
         });
@@ -732,18 +727,29 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
         // found it bad at that very instant (then it failed); ended on a bad detail with no failure or
         // bounce of its own: marked bad elsewhere.
         const own = owned.failure;
-        // A track that starts at the very instant another track's call finds the detail bad: the
-        // record does not model the order within that pass, so it is stored skipped (started after the
-        // detail went bad) or failed (started first, then found bad), and both are what the engine may
-        // store (check 20). Activity must say whichever it is (search on 7401eb2, seed 20261142).
+        // A track that starts at the very instant another track's call finds the detail bad: stored
+        // skipped (started after the detail went bad) or failed (started first, then found bad), both
+        // of which the engine may store (check 20). Activity must say whichever it is (seed 20261142).
         if (!own && badAtOf(rec, t.channel) === start && !called(t)) {
           const either = [`skipped|${t.channel}|${label}|-`, `address_bad|${t.channel}|${label}|-`];
-          expected.push(either.find((x) => shown.includes(x)) ?? either[0]!);
-          continue;
+          out.push(either.find((x) => shown.includes(x)) ?? either[0]!);
+          return out;
         }
         const skipped = !own && !reachesAt(rec, t.channel, start);
-        if (skipped) expected.push(`skipped|${t.channel}|${label}|-`);
-        if (!skipped && !own && !completed(t) && badAtOf(rec, t.channel) < Math.min(now + 1, endLimitOf(rec))) expected.push(`address_bad|${t.channel}|${label}|-`);
+        if (skipped) out.push(`skipped|${t.channel}|${label}|-`);
+        if (!skipped && !own && !completed(t) && badAtOf(rec, t.channel) < Math.min(now + 1, endLimitOf(rec))) out.push(`address_bad|${t.channel}|${label}|-`);
+        return out;
+      };
+      for (const t of def.tracks) {
+        if (t.channel === "call") continue;
+        if (atLaunch) {
+          expected.push(`skipped|${t.channel}|${trackLabel(def, t).label}|-`);
+          continue;
+        }
+        const start = started(t);
+        if (start === null) continue;
+        const entries = entriesOf(t, start);
+        if (start < endLimitOf(rec) || called(t) || entries.every((e) => shown.includes(e))) expected.push(...entries);
       }
       const stop = stopOf(rec.id);
       if (stop && stop.seenAt <= now) {
