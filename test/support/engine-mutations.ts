@@ -41,7 +41,7 @@ const EXPECTED: Record<string, { invariant: string; seed: number; unlimited?: bo
   "send settled on the inheritor": { invariant: "9", seed: 0 },
   "retry blocks settlement": { invariant: "26", seed: 0 },
   "unresolved ignores not-sent": { invariant: "18", seed: 0 },
-  "lookup sent without reference": { invariant: "18", seed: 0 },
+  "lookup sent without reference": { invariant: "8", seed: 0 },
 };
 
 /** Wraps every rule that returns a new subject state with `fix(before, after, now)`. */

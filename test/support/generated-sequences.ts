@@ -528,7 +528,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       const s = pick([...subjects.values()]);
       await markBad(s);
       await h.tick();
-    } else if (r < 0.74 && !unlimited) {
+    } else if (r < 0.74 && !unlimited && profile !== "lagging-capacity") {
       const a = pick(accounts);
       const what = rand();
       if (what < 0.4) a.healthy = !a.healthy;
@@ -572,16 +572,20 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     fake.portHangs = false;
     transient = null;
     fake.rateLimitedUntil.clear();
-    // "With enough time and capacity": every inbox gets room for the whole backlog.
     for (const a of accounts) {
       a.healthy = true;
       a.quotaAvailable = true;
+    }
+    // Three days at the configured capacity, where contention for it goes on; then "enough
+    // capacity": every inbox gets room for the whole backlog.
+    await h.advanceTo(h.clock + 3 * DAY);
+    for (const a of accounts) {
       a.capacity = Math.max(a.capacity, 100);
       capacityHistory.get(a.id)?.push([h.clock, a.capacity]);
     }
     // "Enough time": three weeks, then a week at a time while a running lead still has pending,
     // unheld work (a narrow window can space five steps a week apart), up to ten weeks.
-    await h.advanceTo(h.clock + 21 * DAY);
+    await h.advanceTo(h.clock + 18 * DAY);
     for (let week = 0; week < 7; week++) {
       let waiting = false;
       const stalled = new Set((await h.request<NeedsAttention>("GET", "/api/needs-attention")).body.stalledInboxes.map((x) => x.accountId));
@@ -597,6 +601,12 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     await checkAll(true);
   }
 
+  if ((globalThis as { DEBUG?: unknown }).DEBUG) {
+    console.info("CALLS", fake.handoverLog.map((c) => `${new Date(c.at).toISOString()} ${c.subjectId}/${c.stepId} ${c.key} ${c.mode}`).join("\n"));
+    console.info("DELIVERIES", fake.deliveryLog.map((d) => `${new Date(d.at).toISOString()} ${d.subjectId}/${d.stepId} ${d.key} vis ${new Date(Math.min(d.visibleAt, 8.6e15)).toISOString()}`).join("\n"));
+    console.info("LOOKUPS", fake.lookupLog.map((l) => `${new Date(l.at).toISOString()} ${l.key} ${l.answer}`).join("\n"));
+    console.info("SUBJECTS", [...subjects.values()].map((x) => `${x.id} c${x.campaign} ${x.person?.emails.map(([, a]) => a).join(",") ?? x.company.inbox}`).join(" | "), JSON.stringify(campaigns.map((c) => c.definition.tracks[0]!.window[0])), new Date(start).toISOString());
+  }
   const finalAttempts = (await Promise.all([...subjects.keys()].map((id) => h.store.engine.subject(id, h.clock)))).flatMap((x) => x?.attempts ?? []);
   for (const c of fake.handoverLog) features.add(`mode:${c.mode}`);
   for (const r of fake.refusals) features.add(`refused:${r.reason}`);
