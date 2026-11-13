@@ -51,12 +51,17 @@ const definition = (steps: StepDefinition[]): CampaignDefinition => ({
   tracks: [{ id: "email", channel: "email", branch: "main", window: [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 })), steps, start: { kind: "entry" }, removed: false }],
 });
 
-let started: Promise<FakeProviderApp> | null = null;
+const started = new Map<string, Promise<FakeProviderApp>>();
 
-/** One app per test worker, seeded once. */
-export function fakeProviderApp(): Promise<FakeProviderApp> {
-  started ??= start();
-  return started;
+/**
+ * One app per name and test worker, seeded once. The scans share "shared" and change nothing in
+ * it; a test that sends, bounces or replies takes its own, because a bounce marks an address bad
+ * in the CRM for every campaign.
+ */
+export function fakeProviderApp(name = "shared"): Promise<FakeProviderApp> {
+  let app = started.get(name);
+  if (!app) started.set(name, (app = start()));
+  return app;
 }
 
 async function start(): Promise<FakeProviderApp> {

@@ -103,11 +103,12 @@ test.describe("on the app over the fake email provider", () => {
 
   test("demonstration: write, preview and launch an email track; see sends, a bounce, a reply and the end on the timeline", async ({ page }) => {
     test.setTimeout(120_000);
-    const h = f.harness;
+    const demo = await fakeProviderApp("demonstration");
+    const h = demo.harness;
     const csv = { businessesCsv: readFileSync(fixture("businesses-run1.csv"), "utf8"), peopleCsv: readFileSync(fixture("people-run1.csv"), "utf8") };
     const { campaign } = (await h.request<{ campaign: Campaign }>("POST", "/api/campaigns", { name: "Sports clinics, Exeter", defaultTimezone: "Europe/London", ...csv })).body;
 
-    await page.goto(`${f.url}/campaigns`);
+    await page.goto(`${demo.url}/campaigns`);
     await page.getByRole("link", { name: "Open Sports clinics, Exeter" }).click();
     await writeEmailTrack(page);
     await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
@@ -130,24 +131,24 @@ test.describe("on the app over the fake email provider", () => {
 
     const rows = (await h.request<{ rows: { id: string; kind: string; name: string; enrollments: EnrollmentView[] }[] }>("GET", `/api/leads?campaign=${campaign.id}&limit=500`)).body.rows;
     const person = (name: string) => rows.find((r) => r.name === name)?.id ?? "";
-    await page.goto(`${f.url}/leads/people/${person("Amira Hassan")}`);
+    await page.goto(`${demo.url}/leads/people/${person("Amira Hassan")}`);
     await page.getByLabel("Show activity from").selectOption({ label: "Sports clinics, Exeter" });
     await expect(page.getByText("Sequence finished with no response")).toBeVisible();
     await page.getByText("Show message").last().click();
     await expect(page.getByText("Online booking at Harbour Lane Physio stops at 18:00.")).toBeVisible();
 
     // A company lead's shared inbox bounces: the address is struck through and the track ends.
-    await page.goto(`${f.url}/leads/companies/${person("Riverside Sports Clinic")}`);
+    await page.goto(`${demo.url}/leads/companies/${person("Riverside Sports Clinic")}`);
     await page.getByLabel("Show activity from").selectOption({ label: "Sports clinics, Exeter" });
     await expect(page.getByText("Email bounced")).toBeVisible();
     await expect(page.getByText("info@riversidesports.example", { exact: true })).toHaveCSS("text-decoration-line", "line-through");
 
-    await page.goto(`${f.url}/leads/people/${person("Daniel Price")}`);
+    await page.goto(`${demo.url}/leads/people/${person("Daniel Price")}`);
     await page.getByLabel("Show activity from").selectOption({ label: "Sports clinics, Exeter" });
     await expect(page.getByText("Replied by email")).toBeVisible();
     await expect(page.getByText("Email 2 sent")).toHaveCount(0);
 
-    await page.goto(`${f.url}/leads/people/${person("Grace Okafor")}`);
+    await page.goto(`${demo.url}/leads/people/${person("Grace Okafor")}`);
     await page.getByLabel("Show activity from").selectOption({ label: "Sports clinics, Exeter" });
     await expect(page.getByText("Email skipped")).toBeVisible();
   });
