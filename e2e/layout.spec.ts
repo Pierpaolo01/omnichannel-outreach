@@ -73,12 +73,30 @@ for (const width of WIDTHS) {
             continue;
           }
           if (b.top < p.bottom - 1) problems.push(`${t.id} is not below ${parentOf(t) ?? "Launch"}`);
-          if (stacked && b.left <= p.left + 4) problems.push(`${t.id} is not indented under ${parentOf(t) ?? "Launch"}`);
+          // Past the depth the panel can indent, a track sits at its parent's indent and its label names
+          // the parent (review bot on 7401eb2).
+          const el = document.getElementById(`track-node-${t.id}`);
+          const named = el?.closest("ul")?.dataset["outline"] === "named";
+          if (stacked && named) {
+            const pill = el.parentElement?.querySelector(":scope > span")?.textContent.toLowerCase() ?? "";
+            const parentTitle = document.getElementById(`track-node-${parentOf(t) ?? ""}`)?.getAttribute("aria-label")?.split(":")[0]?.toLowerCase() ?? "?";
+            if (!pill.includes(parentTitle)) problems.push(`${t.id} is drawn at its parent's indent, but its label "${pill}" does not name ${parentTitle}`);
+            if (Math.abs(b.left - p.left) > 1) problems.push(`${t.id} is neither indented under ${parentOf(t) ?? "Launch"} nor at its indent`);
+          } else if (stacked && b.left <= p.left + 4) problems.push(`${t.id} is not indented under ${parentOf(t) ?? "Launch"}`);
           const siblings = tracks.filter((x) => parentOf(x) === parentOf(t)).map((x) => box(x.id)).filter((x): x is DOMRect => x !== null);
           if (stacked && siblings.some((x) => Math.abs(x.left - b.left) > 1)) problems.push(`${t.id} does not share an indent with the tracks that start at the same point`);
           if (!stacked && siblings.some((x) => Math.abs(x.top - b.top) > 1)) problems.push(`${t.id} is not in one row with the tracks that start at the same point`);
           const centre = (p.left + p.right) / 2;
           if (!stacked && !(Math.min(...siblings.map((x) => x.left)) <= centre && centre <= Math.max(...siblings.map((x) => x.right)))) problems.push(`${t.id}'s row does not hang under ${parentOf(t) ?? "Launch"}`);
+        }
+        // Every node, label and connector stays inside the canvas panel, and every node's content inside
+        // the node, at every width and depth (review bot on 7401eb2).
+        const panel = canvas.getBoundingClientRect();
+        const drawn = [...canvas.querySelectorAll<HTMLElement>('[id^="track-node-"], ul[data-outline], ul[data-outline] > li > span')];
+        for (const el of drawn) {
+          const r = el.getBoundingClientRect();
+          if (r.left < panel.left - 1 || r.right > panel.right + 1) problems.push(`${el.id || el.textContent.slice(0, 30)} crosses the canvas panel's edge (${Math.round(r.left)}–${Math.round(r.right)} in ${Math.round(panel.left)}–${Math.round(panel.right)})`);
+          if (el.id && el.scrollWidth > el.clientWidth + 1) problems.push(`${el.id}'s content needs ${el.scrollWidth}px but the node is ${el.clientWidth}px`);
         }
         const area = launch?.closest<HTMLElement>(".overflow-auto");
         if (launch && area && tracks.length > 0) {

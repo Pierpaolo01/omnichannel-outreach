@@ -145,6 +145,21 @@ async function campaignWith(page: Page, name: string, definition: CampaignDefini
   return id;
 }
 
+/** n tracks, email and SMS in turn, each after the one before: the deepest arrangement of n tracks. */
+function chainOf(n: number): CampaignDefinition {
+  const template = (channel: "email" | "sms") => TWO_CHANNELS.tracks.find((t) => t.channel === channel)!;
+  const tracks = Array.from({ length: n }, (_, i) => {
+    const like = template(i % 2 === 0 ? "email" : "sms");
+    return {
+      ...like,
+      id: `t${i}`,
+      start: i === 0 ? { kind: "entry" as const } : { kind: "after" as const, trackId: `t${i - 1}`, delayDays: i % 3 },
+      steps: like.steps.map((st) => ({ ...st, id: `t${i}-${st.id}` })),
+    };
+  });
+  return { ...TWO_CHANNELS, emailPool: [], smsPool: [], tracks };
+}
+
 async function settle(page: Page, text: string | RegExp): Promise<void> {
   await page.getByText(text).first().waitFor();
 }
@@ -927,6 +942,18 @@ export const SCREENS: readonly Screen[] = [
       await settle(page, "which finishes only when you log the call");
     },
   },
+  // Chains the outline must fit at every width (review bot on 7401eb2): four tracks deep, as the bot
+  // reported, and twelve, deeper than any width indents, so every deeper chain is drawn alike.
+  ...([4, 12] as const).flatMap((n) =>
+    [true, false].map((open) => ({
+      name: `a chain of ${n} tracks, ${open ? "the last one in the inspector" : "the inspector closed"}`,
+      open: async (page: Page) => {
+        const id = await campaignWith(page, `A chain of ${n}`, chainOf(n));
+        await page.goto(`/campaigns/${id}${open ? `?track=t${n - 1}&step=none` : ""}`);
+        await settle(page, open ? "Counted from when that track has sent its last step" : "together or after");
+      },
+    })),
+  ),
   {
     name: "the Add track menu",
     open: async (page) => {

@@ -186,7 +186,11 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
 
 const ADD_TRACK_ID = "add-track";
 /** The width one track node takes beside another: the node and the space around it. */
-const NODE_SPAN = 230 + 24;
+const NODE_WIDTH = 230;
+const NODE_GAP = 24;
+/** The outline (stacked canvas): each level's indent (11px, a 1.5px connector, 12px), and the narrowest a node may get. */
+const OUTLINE_INDENT = 25;
+const NODE_MIN = 176;
 
 /** An element's content width, kept current as it resizes; null until measured. */
 function useWidth(ref: RefObject<HTMLElement | null>): number | null {
@@ -233,8 +237,10 @@ function Canvas({ tracks, selectedId, editor, onSelect, onAdd }: { tracks: reado
   const rootLabel = roots.length > 1 ? "together" : editor.launched ? "at launch" : "starts at launch";
   // Side by side while the widest row of tracks fits the canvas; stacked in one column otherwise,
   // so nothing scrolls sideways or clips at any width (DESIGN.md, Layout).
-  const leaves = (t: TrackDefinition, depth = 0): number => (depth > tracks.length ? 1 : Math.max(1, childrenOf(t.id).reduce((n, c) => n + leaves(c, depth + 1), 0)));
-  const needed = roots.reduce((n, t) => n + leaves(t), 0) * NODE_SPAN + 16;
+  // A track's drawn width side by side: its node, or its row of children, each with 12px either side,
+  // so every level of a chain adds 24px (review bot on 7401eb2).
+  const span = (t: TrackDefinition, depth = 0): number => (depth > tracks.length ? NODE_WIDTH : Math.max(NODE_WIDTH, childrenOf(t.id).reduce((n, c) => n + span(c, depth + 1) + NODE_GAP, 0)));
+  const needed = roots.reduce((n, t) => n + span(t) + NODE_GAP, 0) + 16;
   const area = useRef<HTMLDivElement>(null);
   const width = useWidth(area);
   const stacked = width !== null && needed > width;
@@ -247,20 +253,28 @@ function Canvas({ tracks, selectedId, editor, onSelect, onAdd }: { tracks: reado
    * the track it starts after, indented, on a connector line drawn down from that track; tracks that
    * start at the same point share an indent and a line, so together never reads as a chain.
    */
-  const outline = (list: readonly TrackDefinition[], label: (t: TrackDefinition) => string, depth: number, name: string): ReactNode => (
-    <ul aria-label={name} className="ml-[11px] flex flex-col gap-3 border-l-[1.5px] border-line-strong pl-3 pt-2">
-      {list.map((t) => {
-        const children = depth > tracks.length ? [] : childrenOf(t.id);
-        return (
-          <li key={t.id} className="flex flex-col items-start gap-1.5">
-            <Pill>{label(t)}</Pill>
-            {node(t)}
-            {children.length > 0 && outline(children, afterLabel, depth + 1, `Tracks after ${trackName(editor.draft, t)}`)}
-          </li>
-        );
-      })}
-    </ul>
-  );
+  // Nodes narrow with each level, down to NODE_MIN; a level that would make them narrower is not
+  // indented further: its tracks sit at their parent's indent, and their label names the parent
+  // (review bot on 7401eb2). So nothing crosses the panel at any width or depth.
+  const levels = Math.max(1, Math.floor(((width ?? 0) - 24 - NODE_MIN) / OUTLINE_INDENT));
+  const afterNamed = (parent: TrackDefinition) => (t: TrackDefinition) => `after ${trackName(editor.draft, parent)} · ${t.start.kind === "after" ? days(t.start.delayDays) : ""}`;
+  const outline = (list: readonly TrackDefinition[], label: (t: TrackDefinition) => string, depth: number, name: string): ReactNode => {
+    const indented = depth < levels;
+    return (
+      <ul aria-label={name} data-outline={indented ? "indented" : "named"} className={`flex min-w-0 flex-col gap-3 self-stretch pt-2 ${indented ? "ml-[11px] border-l-[1.5px] border-line-strong pl-3" : ""}`}>
+        {list.map((t) => {
+          const children = depth > tracks.length ? [] : childrenOf(t.id);
+          return (
+            <li key={t.id} className="flex min-w-0 flex-col items-start gap-1.5">
+              <Pill>{label(t)}</Pill>
+              {node(t)}
+              {children.length > 0 && outline(children, depth + 1 < levels ? afterLabel : afterNamed(t), depth + 1, `Tracks after ${trackName(editor.draft, t)}`)}
+            </li>
+          );
+        })}
+      </ul>
+    );
+  };
   const branch = (track: TrackDefinition, label: string, depth: number): ReactNode => {
     const children = depth > tracks.length ? [] : childrenOf(track.id);
     return (
@@ -297,7 +311,7 @@ function Canvas({ tracks, selectedId, editor, onSelect, onAdd }: { tracks: reado
           stays in view as the canvas scrolls. */}
       <div ref={area} className="min-h-0 flex-1 overflow-auto px-1 pb-10 pt-4">
         {stacked ? (
-          <div className="flex flex-col items-start px-3">
+          <div className="flex min-w-0 flex-col items-start px-3">
             <span data-testid="launch-point" className="sticky top-0 z-[1] rounded-full bg-base-content px-3.5 py-1 text-[12.5px] font-semibold text-base-100">
               Launch
             </span>
@@ -1101,7 +1115,7 @@ function timeZones(current: string): string[] {
 }
 
 export function Pill({ children }: { children: ReactNode }) {
-  return <span className="rounded-full border border-line-strong bg-base-100 px-2 text-[12px] text-ink-2">{children}</span>;
+  return <span className="max-w-full rounded-full border border-line-strong bg-base-100 px-2 text-[12px] text-ink-2">{children}</span>;
 }
 
 /**
