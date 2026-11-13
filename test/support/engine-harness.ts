@@ -68,6 +68,20 @@ export class EngineHarness {
     this.hooks = options.hooks ?? {};
     this.clock = options.start;
     this.store = openSqliteStore(":memory:");
+    // Count the engine's subject writes: a deterministic measure of a run's work, the same on every machine.
+    const store = this.store.engine;
+    const update = store.update.bind(store);
+    const updateNow = store.updateNow.bind(store);
+    store.update = async (...args) => {
+      const written = await update(...args);
+      if (written) this.writes++;
+      return written;
+    };
+    store.updateNow = (...args) => {
+      const written = updateNow(...args);
+      if (written) this.writes++;
+      return written;
+    };
     this.provider = options.port ?? new FakeEmailPort({ now: () => this.clock, random: options.random ?? (() => 0.5), accounts: options.accounts, modes: options.modes ?? ["honest"] });
     this.engine = this.newEngine();
     this.app = createApp({
@@ -188,12 +202,16 @@ export class EngineHarness {
   }
 
   /** Advances the clock to `target`, ticking at every instant the engine or the provider has work. */
-  /** A wall-clock instant (Date.now) after which every advance stops at once: a run's time budget. */
+  /** Engine writes to subjects so far: every claim, handover, settlement and evaluation that changed state. */
+  writes = 0;
+  /** A run's bound: the number of engine writes after which every advance stops at once. */
+  maxWrites: number | null = null;
+  /** An outer safety net only: a wall-clock instant (Date.now) after which every advance stops. */
   stopAt: number | null = null;
 
-  /** Whether the run's time budget is spent. */
+  /** Whether the run's bound is spent: its engine writes, or, as a safety net, its wall-clock instant. */
   get stopped(): boolean {
-    return this.stopAt !== null && Date.now() > this.stopAt;
+    return (this.maxWrites !== null && this.writes > this.maxWrites) || (this.stopAt !== null && Date.now() > this.stopAt);
   }
 
   async advanceTo(target: number, onInstant?: () => Promise<void>): Promise<void> {

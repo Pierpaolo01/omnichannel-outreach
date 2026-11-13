@@ -132,13 +132,18 @@ export interface RunOptions {
   readonly events?: number;
   /** Run the drain phase (invariants 18 and 26 at the end). On by default. */
   readonly drain?: boolean;
-  /** A wall-clock instant (Date.now) after which the run stops early, as the search's time budget. */
+  /**
+   * The run stops after this many engine writes to subjects: a deterministic bound, so a broken
+   * engine that churns without progress stops the same way on every machine.
+   */
+  readonly maxWrites?: number;
+  /** An outer safety net only: a wall-clock instant (Date.now) after which the run stops early. */
   readonly deadline?: number;
 }
 
 export interface RunResult {
   readonly problems: string[];
-  readonly stats: { sends: number; calls: number; crashes: number; subjects: number; ticks: number; modes: readonly FakeMode[]; features: readonly string[] };
+  readonly stats: { sends: number; calls: number; crashes: number; subjects: number; ticks: number; writes?: number; modes: readonly FakeMode[]; features: readonly string[] };
 }
 
 /** The invariants a problem names: the numbers before its first colon ("1/20: ..." names 1 and 20). */
@@ -224,7 +229,8 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
   });
 
   const h = new EngineHarness({ start, accounts, modes, random: random(seed ^ 0x5eed), engine: { waitFor: quickWait }, ...(options.rules ? { rules: options.rules } : {}) });
-  // The search's time budget bounds every advance, the drain's included, so no run can postpone it.
+  // The run's bound stops every advance, the drain's included, so no run can postpone it.
+  h.maxWrites = options.maxWrites ?? null;
   h.stopAt = options.deadline ?? null;
   const fake = h.fake;
   fake.withdrawAnswers = unlimited ? "honest" : profile === "lagging-capacity" ? "unknown-sends" : pick(["honest", "unknown-cancels", "unknown-sends"] as const);
@@ -652,7 +658,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
   if (fake.deliveryLog.some((d) => fake.bouncing.has(d.destination))) features.add("bounce");
   return {
     problems,
-    stats: { sends: fake.deliveryLog.length, calls: fake.handoverLog.length, crashes: h.crashes.length, subjects: subjects.size, ticks: h.ticks, modes, features: [...features] },
+    stats: { sends: fake.deliveryLog.length, calls: fake.handoverLog.length, crashes: h.crashes.length, subjects: subjects.size, ticks: h.ticks, writes: h.writes, modes, features: [...features] },
   };
 
   // ------------------------------------------------------------------------------------------

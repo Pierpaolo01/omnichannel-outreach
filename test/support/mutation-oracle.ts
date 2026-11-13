@@ -6,13 +6,20 @@ import { invariantsOf, runSequence } from "./generated-sequences.ts";
 import { appendFileSync } from "node:fs";
 import { FULL_SEARCH, inShard, SEED } from "./sequence-chunks.ts";
 
-const MAX_SEEDS = 60;
-/** The seed search per mutation stops trying new seeds after this, well inside the test's 30 minutes. */
-const SEARCH_BUDGET_MS = 6 * 60_000;
-/** A single run a broken engine makes pathological stops this long after the budget. */
-const RUN_GRACE_MS = 3 * 60_000;
-/** `pnpm check` allows a mutation's recorded seed this long to kill it. */
-const CHECK_SEED_MS = 30_000;
+/** Seeds the search tries per mutation, after its recorded seed. */
+const MAX_SEEDS = 30;
+/**
+ * Every run, in the check and the search alike, stops after this many engine writes to subjects (a
+ * claim, handover, settlement or evaluation that changed state), counted by the harness. Recorded
+ * seeds kill their mutations within 3,661 writes ("capacity off by one"; most within a few
+ * hundred), and an unmutated fixed seed needs at most 3,303: about three times either. A broken
+ * engine that churns without progress, claiming and withdrawing settled work, stops here, the
+ * same on every machine.
+ */
+const RUN_WRITES = 10_000;
+/** An outer safety net only, never what decides a result: a run's wall-clock limit. */
+const RUN_SAFETY_MS = 10 * 60_000;
+const bounded = () => ({ maxWrites: RUN_WRITES, deadline: Date.now() + RUN_SAFETY_MS });
 
 /** One line per mutation in the search's log and, in CI, the job summary: the seed that kills it, or none. */
 function report(line: string): void {
@@ -59,24 +66,23 @@ export function oracle(names: readonly string[]): void {
         // became slow fails here instead of stretching the check.
         if (mutation.regression) expect(await regressionFails(name, mutation), `regression "${mutation.regression}" passes under "${name}"`).toBe(true);
         if (mutation.seed !== null) {
-          const { problems } = await runSequence(SEED + mutation.seed, { rules: mutation.rules, unlimited: mutation.unlimited ?? false, drain: true, deadline: Date.now() + CHECK_SEED_MS });
-          expect(problems.filter((p) => invariantsOf(p).includes(mutation.invariant)), `seed ${SEED + mutation.seed} no longer breaks invariant ${mutation.invariant} within ${CHECK_SEED_MS / 1000} s; run the sequence-search workflow and update its seed. Problems: ${problems.join("; ")}`).not.toEqual([]);
+          const { problems } = await runSequence(SEED + mutation.seed, { rules: mutation.rules, unlimited: mutation.unlimited ?? false, drain: true, ...bounded() });
+          expect(problems.filter((p) => invariantsOf(p).includes(mutation.invariant)), `seed ${SEED + mutation.seed} no longer breaks invariant ${mutation.invariant} within ${RUN_WRITES} engine writes; run the sequence-search workflow and update its seed. Problems: ${problems.join("; ")}`).not.toEqual([]);
         }
         return;
       }
-      // The search: seeds in order, each as generated and unlimited, within a time budget, so no
+      // The search: seeds in order, each as generated and unlimited, every run bounded in engine writes, so no
       // mutation can take a shard's limit; then the regression, if it has one.
-      const started = Date.now();
       let caught: string | null = null;
-      // The recorded killing seed first, so the budget can never run out before a known seed.
+      // The recorded killing seed first, so a known seed is never missed.
       if (mutation.seed !== null) {
-        const { problems } = await runSequence(SEED + mutation.seed, { rules: mutation.rules, unlimited: mutation.unlimited ?? false, drain: true, deadline: started + SEARCH_BUDGET_MS });
+        const { problems } = await runSequence(SEED + mutation.seed, { rules: mutation.rules, unlimited: mutation.unlimited ?? false, drain: true, ...bounded() });
         if (breaks(problems)) caught = `recorded seed offset ${mutation.seed}`;
         else report(`recorded seed offset ${mutation.seed} no longer breaks invariant ${mutation.invariant} for "${name}"`);
       }
-      for (let i = 0; i < MAX_SEEDS && caught === null && Date.now() - started < SEARCH_BUDGET_MS; i++) {
+      for (let i = 0; i < MAX_SEEDS && caught === null; i++) {
         for (const unlimited of [false, true]) {
-          const { problems } = await runSequence(SEED + i, { rules: mutation.rules, unlimited, drain: true, deadline: started + SEARCH_BUDGET_MS + RUN_GRACE_MS });
+          const { problems } = await runSequence(SEED + i, { rules: mutation.rules, unlimited, drain: true, ...bounded() });
           if (breaks(problems)) {
             caught = `seed offset ${i}${unlimited ? " (unlimited)" : ""}`;
             break;
@@ -84,8 +90,8 @@ export function oracle(names: readonly string[]): void {
         }
       }
       const byRegression = await regressionFails(name, mutation);
-      report(`killing seed: mutation "${name}" (invariant ${mutation.invariant}): ${caught ?? "none tried within the budget"}; recorded seed ${mutation.seed ?? "none"}${mutation.regression ? `; regression "${mutation.regression}" ${byRegression ? "fails under it" : "PASSES under it"}` : ""}`);
-      expect(caught !== null || byRegression, `no seed broke invariant ${mutation.invariant} for "${name}" within the budget, and it has no failing regression`).toBe(true);
+      report(`killing seed: mutation "${name}" (invariant ${mutation.invariant}): ${caught ?? `none in offsets 0-${MAX_SEEDS - 1}`}; recorded seed ${mutation.seed ?? "none"}${mutation.regression ? `; regression "${mutation.regression}" ${byRegression ? "fails under it" : "PASSES under it"}` : ""}`);
+      expect(caught !== null || byRegression, `no seed broke invariant ${mutation.invariant} for "${name}", and it has no failing regression`).toBe(true);
       if (mutation.regression) expect(byRegression).toBe(true);
     }, 1_800_000);
   }
