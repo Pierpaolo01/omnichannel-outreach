@@ -1,6 +1,6 @@
 # 0003. The sequence engine
 
-- **Date:** 2026-11-13. Revised the same day after review rounds 1, 2 and 3 (two reviewers each; coordinator rulings 1–14, 1–10 and items 1–7), and amended in PR 37 after its review round 1 (coordinator rulings 1–11, "Changes from PR 37 review round 1").
+- **Date:** 2026-11-13. Revised the same day after review rounds 1, 2 and 3 (two reviewers each; coordinator rulings 1–14, 1–10 and items 1–7), and amended in PR 37 after its review round 1 (coordinator rulings 1–11, "Changes from PR 37 review round 1"), and by ticket 13a ("Changes from ticket 13a").
 - **Status:** Proposed. The council reviews it before ticket [12](https://github.com/Pierpaolo01/omnichannel-outreach/issues/12) starts.
 - **Consumers:** tickets [12](https://github.com/Pierpaolo01/omnichannel-outreach/issues/12) to [23](https://github.com/Pierpaolo01/omnichannel-outreach/issues/23).
 - **Builds on:** [ADR 0001](0001-application-foundation-and-import-model.md) (domain code never reads the clock; the closed outreach-status type; the store interface) and [ADR 0002](0002-email-through-instantly.md) (the application owns every clock; Instantly only carries email). This ADR is the "application owns every clock" half. The Instantly adapter, its experiments and its questions P1–P4 stay in ADR 0002.
@@ -42,7 +42,7 @@ The definition holds:
 - **Campaign inputs:**
   - the default time zone, which is required and defaults to the user's zone when the campaign is created;
   - the call skip limit in days, default 2 (spec "Unfinished call tasks");
-  - the email and SMS sender pools.
+  - the email and SMS sender pools. A definition saved before ticket 13 has no SMS pool, which reads as empty.
 - **Tracks.** Each track has:
   - a stable `track_id`, never reused;
   - a `channel`: `email`, `sms` or `call`;
@@ -149,7 +149,7 @@ Two partial unique indexes allow, per `(subject, step_id)`, at most one attempt 
 
 **Capacity reservations** follow ADR 0002 "Sender inbox and capacity", for SMS accounts too, counted per **provider work** (one idempotency key): a send counts on the reset day of its send, and unsettled work not yet sent holds one reservation (4.2 as amended). The `capacity_ledger` is a view over `provider_work`. Each sender account also stores `next_slot_at`, taken at handover and moved to the call's actual start plus the gap (4.2, 5.5).
 
-**SMS bindings** `sms_bindings(sender_number, recipient_key, owner_subject, created_at, released_at)` name the subject that owns that conversation (4.5). An enrollment's binding is never released or transferred. A test run's binding is released when the test run ends. A partial unique index allows one unreleased binding per pair. Rows are never deleted, so the table is its own history.
+**SMS bindings** `sms_bindings(sender_number, recipient_key, owner_subject, created_at, released_at)` name the subject that owns that conversation (4.5). The recipient key is the mobile's E.164 form, which is also where an SMS attempt is sent (migration 11). An enrollment's binding is never released or transferred. A test run's binding is released when the test run ends. A partial unique index allows one unreleased binding per pair. Rows are never deleted, so the table is its own history.
 
 ### 1.4 What is derived, not stored
 
@@ -551,10 +551,11 @@ Retryability and "not sent is final" belong to a **transport**, not the port: `t
 
 **Email** is ADR 0002's Instantly adapter. The `/leads/add` opener is `retryable: true`. The reply and forward follow-up transports have no key, so they are `retryable: false`. `withdraw` returns `unknown`, and `notSentIsFinal` is false, until ADR 0002's X5 shows otherwise. A `not-sent` that is not final is treated as `unknown`.
 
-**SMS:** no provider is provisioned (#28).
+**SMS:** no provider is provisioned or chosen (#28).
 
-- The running app registers an `UnprovisionedSmsPort` with no sender accounts. An SMS track therefore always meets launch blocker 3, which is honest by construction.
-- Tests and ticket 13's demonstration use a simulator port, whose accounts read "Simulated SMS (not a provider)" on every screen. It is registered only against the development data directory (ADR 0001).
+- The running app registers an `UnprovisionedSmsPort` with no sender accounts, whose transport is unavailable. An SMS track therefore always meets launch blocker 3, which is honest by construction, and no SMS step is ever claimed.
+- Tests and ticket 13's demonstration use a fake SMS provider (`test/support/fake-sms-port.ts`), whose numbers read "Simulated SMS (not a provider)". **The running app never registers it**, not even against the development data directory (ticket 13a: the brief allows no simulated provider in the running application, so nothing can be mistaken for a working integration). `GET /api/sms-provider` reports `none` in the running app.
+- A text has no idempotency key the app can rely on, so the fake's transport is `retryable: false`; a real adapter states its own. An SMS reply carries only the two numbers (4.5). An undeliverable number after a send is reported as the `bounced` event.
 
 **Calls** have no port (ruling 9). The user dials on their own phone, and a call counts as made only when the user logs an outcome. That refuses, by construction, to "pretend a call happened when it did not". A phone track needs no connected sender account.
 
@@ -930,7 +931,8 @@ Each ticket implements its part completely. A later ticket's area shows an hones
 | 12a Detail redirect | Merging a contact detail keeps the merged row, pointing at its target (#32 item 3; ADR 0001 "Constraints"), before any attempt references a detail id. | — |
 | 12b Engine core | Definition and validator, limited to one email track in `main`. Lead time, `syncClock` and deadline resolution. Track progress with the pending step's stored deadline and basis, step results and attempts with the full 5.3 table and settling, the version guard, the claim with capacity and `k`, the **handover transaction** with the full re-check, rendering and the pacing slot. The outbox worker with **withdrawal and quiesce**, the reply stop, late facts on finished tracks, endings, the stalled-inbox listing. Statuses queued, active, replied, sequence finished no response and finished no usable channel. Blockers for email. Restart settlement. All against a fake email port. | A second track is refused with "one email track for now". Unresolved attempts are held and shown, but their resolution controls arrive in #20. |
 | 12c Instantly and UI | The ADR 0002 adapter behind the port, the editor, preview, launch, and the timeline. The preview's **projected daily load per sender account and time until all leads start** is a dry run of `dispatch.ts`: the claim and handover rules with an unlimited clock over the enrolled leads, with no provider and no writes. So the preview cannot disagree with sending, and it shows each account's gap. | Real provider proof is gated by ADR 0002's experiments. Laptop-off is unverified. |
-| 13 SMS beside email | Multiple tracks with together and after; release on skip and failure; the SMS port (unprovisioned and simulator) and bindings; the cross-channel reply stop; account problems in Needs attention. | In the real app, SMS is blocked by blocker 3 until a provider exists. |
+| 13a SMS and coordination, engine and HTTP | Multiple tracks with together and after; release on skip and failure; the SMS port (unprovisioned, and a fake for tests only) and bindings; the cross-channel reply stop; account problems in Needs attention. | In the real app, SMS is blocked by blocker 3 until a provider exists. No screens. |
+| 13b SMS on the screens | After pull request 41: the SMS editor, canvas connections, preview, coverage, load and timeline for SMS. | — |
 | 14 Phone track | Call tracks, placement and capacity, ready now and later today, outcomes without redial, callback or not interested; `waiting_on_call`, `interested_on_call`; the rule that a finishing track closes its task. | "Not interested" is not offered. Unworked tasks stay listed with no skip limit. That is still truthful: they hold only their dependents. |
 | 15 Redial, callback, rollover | `skip_deadline` and its expiry rule, rollover, redial, the callback hold, overdue callbacks. | Campaign pause (#17). |
 | 16 Declined paths | The win-back branch, declined paths with overrides, `no_more_calls`, closing tasks on a decline, entering win-back, `in_win_back`, `declined_on_call`. It depends only on #14: tasks closing on a decline releases a callback hold whenever #15 is present, with no code of #15's needed. | Moving a stopped or replied lead to win-back (#17). |
@@ -1094,6 +1096,24 @@ Two reviewers, an independent verification and the review bot on `51d9503`, and 
 | A port's `Transport` may say `available: false`; the engine claims no step that travels by it, so it waits and nothing is sent. Instantly's continue-thread follow-ups use it until ADR 0002's X2 | 4.2, 5.3 | `src/server/instantly/engine-instantly.test.ts` (the follow-up waits unsent; fails without the rule) |
 | `HandoverRequest` carries the attempt's `trackId`, so the adapter names the dispatch campaign; it is read from the authorized attempt like every other field | 5.5 step 6 | `src/server/instantly/port.test.ts` |
 | A held reply's running time was the full gap since its last count whenever observation succeeded, so a same-process suspension with no ticks (a sleeping laptop) was credited whole and could fall back by address before the delayed sent event attached (review bot on `c66a0c8`, found through the adapter). Running time is now `runningCredit`, bounded by `MAX_RUNNING_CREDIT`, and the worker wakes at least that often while a reply waits. The Instantly adapter uses the same function | 2.4, 5.6 parameters | `lifecycle.test.ts` "review bot on c66a0c8"; `clock.test.ts` "running time" (each cause of a gap); the fixed seeds and mutations unchanged |
+
+## Changes from ticket 13a (SMS tracks and coordination)
+
+Recorded on 13 November 2026 by the 13a implementer. Each change was built test-first; the generated test of 9.3's ticket 13 row runs from the pull request's first commit.
+
+| Change | Sections | Test |
+| - | - | - |
+| The validator accepts email and SMS tracks in the main branch, any number, each `entry` or `after(track, d)` with whole d ≥ 0, naming a live track of the same branch, with no cycle. Phone tracks and the win-back branch are refused with "arrive with a later release" until tickets 14 and 16. Two tracks on one channel are named by order ("Email track 2"). | 7.1 | `definition.test.ts` |
+| Track starts run to a fixpoint in one evaluation, so a track skipped at its start releases a chain of zero-delay successors at the same lead time. A delayed start is resolved from the predecessor's stored `finished_at` and `finished_wall` with 3.3's `span`. `nextWakeAt` now includes unstarted tracks' resolved starts, so the worker wakes for them (the running worker also ticks every 15 seconds, so this changed timing only in tests). | 2.6, 3.3 | `progress.test.ts`, `sms.test.ts` |
+| SMS destination: the newest good **own mobile** (phone kind mobile, read as an E.164 number) of a decision maker. A company lead's details hold only main lines, which ADR 0001 ("Usable channels") never treats as an SMS destination, so a company lead's SMS track is skipped as a missing channel. The spec's "company details for company leads" therefore yields no SMS today; this follows ADR 0001 and is reported, not a new rule. | 2.1, 2.6 | `progress.test.ts`, `sms.test.ts` |
+| Dispatch per channel: a claim chooses from the track's channel pool (`poolOf`); the sender is fixed per channel (`email_sender`, `sms_sender`, migration 11) at the first handover; predicate 10 also requires the account's channel; predicate 11 is checked; the handover inserts the binding in the same write. An SMS step renders no subject and is never held `no_thread`. A track held `sms_conversation_taken` stays ready, so a number that joins the pool is used at once; the claim decides. | 4.2, 4.5, 5.5 | `dispatch.test.ts` |
+| An SMS reply is attributed by a pure rule, `smsReplyOwner` (the pair's unreleased owner, else its latest released owner), never by thread or address fallback, and never pending. Its event id is kept as `sms:<id>`; it is applied before its event is recorded, so a crash in between replays as a no-op. | 2.4, 4.5 | `dispatch.test.ts`, `sms.test.ts` |
+| One port per channel in the engine; each attempt reaches the port of its account's channel; each channel has its own observation checkpoint. An account its port no longer lists is marked unhealthy (disconnected). Needs attention adds `senderProblems` (any channel, with label). | 5.3, 5.4 | `sms.test.ts` |
+| The status's reply date is the reply that stopped the lead (the latest at or before its ending), not the latest reply (found by the generated test: a prospect texting twice). | 2.1 | `sms.test.ts` "a second text" |
+| **The ticket 13 generator is a second generator** (`test/support/generated-tracks.ts`, `src/server/sequence-runs-tracks*.test.ts`), with its own independent record, beside the ticket 12 one, which still runs every email fake mode, crash and retry. It generates one to three campaigns, each a tree of one to four email and SMS tracks connected together or after (delay 0–3), people with and without email or mobile in several campaigns, a company lead, bounces, invalid and undeliverable numbers, replies on both channels (STOP included), disconnected and unlisted numbers, one number shared by every campaign, slow pacing that expires claims, and replies and a second worker's handovers between a claim and its handover. It asserts after every event invariants 1–4, 6–8, 10, 11, 13, 14, 19 and 20, and 18 after the drain; 7 and 14 for the first time. Its record predicts each start from its own calendar arithmetic and the delivery log, each conversation's owner from the SMS provider's call log, and each track's final outcome. | 9.2, 9.3 | — |
+| Mutations, each killed by its known seed in `pnpm check` (`test/support/track-mutations.ts`): the ADR's four ("SMS reply to the newest campaign", "binding transferred after an end", "binding fixed at claim", "ending check too late"), and one per further rule: "after counts from the earlier track's start", "after delay ignored", "together tracks not together", "a skipped or failed track releases nothing", "SMS reply stops only the SMS tracks", "SMS capacity ignored", "SMS sender not fixed", "SMS to any phone". A transferred binding is refused by the store's unique index or its no-removal guard, which the test reports under invariant 14: that guarantee holds by construction. | 9.2 | `sequence-runs-tracks-oracle.test.ts` |
+
+Questions kept with their interim: Q7 (a mobile whose conversation from every pool number belongs to another campaign is held as `sms_conversation_taken`, listed in Needs attention; it is not skipped). Q1 (one incoming connection per track) is unchanged.
 
 ## Consequences
 
