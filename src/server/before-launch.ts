@@ -5,10 +5,13 @@
  * the handover renders with; nothing here writes.
  */
 import { missingFields, renderSegments, type Segment } from "../domain/copy-preview.ts";
-import { projectLoad, type Projection } from "../domain/load-projection.ts";
+import { projectLoad, type OtherLead, type Projection } from "../domain/load-projection.ts";
+import { isLive } from "../domain/sequence/attempt.ts";
+import { leadNow, span } from "../domain/sequence/clock.ts";
+import { heldReason } from "../domain/sequence/dispatch.ts";
 import { mergeUses } from "../domain/sequence/copy.ts";
 import { liveSteps, liveTracks, ownSubject, type CampaignDefinition, type TrackDefinition } from "../domain/sequence/definition.ts";
-import { goodEmail } from "../domain/sequence/progress.ts";
+import { goodEmail, runs } from "../domain/sequence/progress.ts";
 import type { AccountState, SubjectState } from "../domain/sequence/state.ts";
 import type { BeforeLaunchView, ContactDetailView, CopyPreview, LeadRow, LoadProjectionView, PreviewLead } from "../shared/api.ts";
 import type { OutreachStore } from "./persistence/store.ts";
@@ -96,7 +99,7 @@ export async function beforeLaunchView(store: OutreachStore, campaignId: string,
       phone: leads.filter((l) => l.lead.phone).length,
     },
     mergeFields,
-    load: launched ? null : await loadProjection(store, definition, leads, now),
+    load: launched ? null : await loadProjection(store, campaignId, definition, leads, now),
   };
 }
 
@@ -112,33 +115,87 @@ function cannotProject(a: AccountState, now: number): "cannot_send" | "quota" | 
 }
 
 /** The projection's input, from the store: the same lead zones, inboxes, slots and counts sending reads. */
-async function projectionOf(store: OutreachStore, definition: CampaignDefinition, leads: readonly CampaignLead[], now: number): Promise<Projection | null> {
+async function projectionOf(store: OutreachStore, campaignId: string, definition: CampaignDefinition, leads: readonly CampaignLead[], now: number): Promise<Projection | null> {
   const track: TrackDefinition | undefined = liveTracks(definition, "main").find((t) => t.channel === "email");
   if (!track) return null;
-  const pool = (await store.engine.accounts(now)).filter((a) => definition.emailPool.includes(a.id));
+  const all = await store.engine.accounts(now);
+  const pool = all.filter((a) => definition.emailPool.includes(a.id));
   if (pool.some((a) => cannotProject(a, now) !== null)) return null;
+  const others = await otherWaitingWork(store, campaignId, definition, now);
+  const used = new Set([...definition.emailPool, ...others.flatMap((o) => [...o.pool, ...(o.sender ? [o.sender] : [])])]);
   return projectLoad({
     start: now,
     window: track.window,
     waits: liveSteps(track).map((s) => s.waitDays),
     leads: leads.filter((l) => l.lead.email !== null).map((l) => ({ id: l.state.subject.id, zone: l.state.lead.zone, sender: l.state.subject.emailSender })),
-    accounts: pool.map((a) => ({ id: a.id, capacity: a.capacity, usedToday: a.used, gapMs: a.gapMs, nextSlotAt: a.nextSlotAt, resetZone: a.resetZone, waitUntil: a.waitUntil !== null && a.waitUntil > now ? a.waitUntil : null })),
+    pool: definition.emailPool,
+    accounts: all
+      .filter((a) => used.has(a.id))
+      // An open claim's reservation is in the inbox's count; the simulation holds those claims itself.
+      .map((a) => ({ id: a.id, capacity: a.capacity, usedToday: a.used - others.filter((o) => o.claim?.accountId === a.id).length, gapMs: a.gapMs, nextSlotAt: a.nextSlotAt, resetZone: a.resetZone, waitUntil: a.waitUntil !== null && a.waitUntil > now ? a.waitUntil : null })),
+    others,
     zone: definition.timezone,
     horizonDays: PROJECTION_HORIZON_DAYS,
   });
+}
+
+/**
+ * The waiting work of other running campaigns that shares an inbox with this one (PR 41 re-check,
+ * B10): each running lead's pending email step, with its due instant, window, remaining waits and
+ * any claim it holds. A step already handed to the provider holds its reservation in the inbox's
+ * count; its later steps are taken as due from now. Leads that do not run (paused, ended, held)
+ * are left out, as the engine leaves them.
+ */
+async function otherWaitingWork(store: OutreachStore, campaignId: string, definition: CampaignDefinition, now: number): Promise<OtherLead[]> {
+  const ours = new Set(definition.emailPool);
+  const out: OtherLead[] = [];
+  for (const id of await store.engine.runningSubjectIds()) {
+    const s = await store.engine.subject(id, now);
+    if (!s || s.campaign.id === campaignId || !runs(s)) continue;
+    const pool = s.campaign.definition.emailPool;
+    if (s.subject.emailSender ? !ours.has(s.subject.emailSender) : !pool.some((a) => ours.has(a))) continue;
+    for (const p of s.tracks) {
+      const other = s.campaign.definition.tracks.find((t) => t.id === p.trackId);
+      if (!other || other.channel !== "email" || p.finishedAt !== null || p.nextStepId === null || p.dueAt === null || heldReason(s, p.trackId, now)) continue;
+      const steps = liveSteps(other);
+      const next = steps.findIndex((st) => st.id === p.nextStepId);
+      if (next < 0) continue;
+      const live = s.attempts.find((a) => a.stepId === p.nextStepId && isLive(a));
+      // In the provider's hands: its reservation is counted; what follows is due from now.
+      if (live && live.state !== "claimed") {
+        if (next + 1 >= steps.length) continue;
+        out.push({ id, zone: s.lead.zone, sender: live.accountId, window: other.window, waits: steps.map((st) => st.waitDays), next: next + 1, dueWall: now + span(now, steps[next + 1]?.waitDays ?? 0, s.lead.zone), touched: true, pool, claim: null });
+        continue;
+      }
+      out.push({
+        id,
+        zone: s.lead.zone,
+        sender: s.subject.emailSender,
+        window: other.window,
+        waits: steps.map((st) => st.waitDays),
+        next,
+        // The stored due instant, which the engine's priority compares (4.3).
+        dueWall: p.dueWall ?? now + (p.dueAt - leadNow(s.subject.clock, now)),
+        touched: s.subject.touched,
+        pool,
+        claim: live ? { accountId: live.accountId, at: live.claimedWall } : null,
+      });
+    }
+  }
+  return out;
 }
 
 /** The projected sends for a campaign's leads, for tests that compare them with the engine's. */
 export async function projectedSends(store: OutreachStore, campaignId: string, now: number): Promise<Projection | null> {
   const row = await store.engine.campaign(campaignId);
   if (!row?.definition) return null;
-  return projectionOf(store, row.definition, await campaignLeads(store, campaignId, row.definition, now), now);
+  return projectionOf(store, campaignId, row.definition, await campaignLeads(store, campaignId, row.definition, now), now);
 }
 
-async function loadProjection(store: OutreachStore, definition: CampaignDefinition, leads: readonly CampaignLead[], now: number): Promise<LoadProjectionView> {
+async function loadProjection(store: OutreachStore, campaignId: string, definition: CampaignDefinition, leads: readonly CampaignLead[], now: number): Promise<LoadProjectionView> {
   const labels = await store.engine.accountLabels();
   const pool = (await store.engine.accounts(now)).filter((a) => definition.emailPool.includes(a.id));
-  const projection = await projectionOf(store, definition, leads, now);
+  const projection = await projectionOf(store, campaignId, definition, leads, now);
   return {
     leadsWithEmail: leads.filter((l) => l.lead.email !== null).length,
     accounts: pool.map((a) => ({

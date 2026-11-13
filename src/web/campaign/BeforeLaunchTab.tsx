@@ -349,7 +349,7 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
           : load.leadsWithEmail === 0
             ? "No lead has an email yet."
             : `${load.notStartedWithinHorizon} of ${load.leadsWithEmail} leads would not start within ${load.horizonDays} days.`}{" "}
-        Follow-ups always go before first emails when an inbox is full. Other campaigns’ sends after today aren’t counted.
+        Follow-ups always go before first emails when an inbox is full. The emails other running campaigns have waiting on these inboxes are counted; every send is assumed to succeed, and replies, bounces and pauses are not foreseen.
       </p>
       )}
     </>

@@ -54,7 +54,7 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
       setFocusNext(null);
     }
   }, [focusNext, selected, openStep]);
-  const coverage = useApi<BeforeLaunchView>(`/api/campaigns/${encodeURIComponent(campaignId)}/before-launch?v=${editor.view.definitionVersion}`);
+  const coverage = useApi<BeforeLaunchView>(`/api/campaigns/${encodeURIComponent(campaignId)}/before-launch?load=0&v=${editor.view.definitionVersion}`);
   const facts = coverage.result.state === "ready" ? coverage.result.data : coverage.result.state === "loading" ? null : null;
 
   if (!track) {

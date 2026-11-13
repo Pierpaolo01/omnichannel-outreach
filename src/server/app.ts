@@ -347,7 +347,9 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     const campaign = await store.campaign(c.req.param("id"));
     const def = campaign ? await definitionOf(campaign.id, campaign.defaultTimezone) : null;
     if (!campaign || !def) return notFound(c, "campaign");
-    return c.json(await beforeLaunchView(store, campaign.id, def.definition, def.launched, Date.parse(now())));
+    // `load=0`: coverage and merge fields only, without the load projection (the Sequence and Leads tabs).
+    const withLoad = c.req.query("load") !== "0";
+    return c.json(await beforeLaunchView(store, campaign.id, def.definition, def.launched || !withLoad, Date.parse(now())));
   });
 
   app.get("/campaigns/:id/preview/:enrollmentId", async (c) => {

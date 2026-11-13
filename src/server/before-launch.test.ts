@@ -185,7 +185,8 @@ describe("Before launch: projected daily load per sender inbox", () => {
 
   test("an inbox's sends already counted today leave less room on launch day", async () => {
     const { h, id } = await campaign([inbox("inbox-a", { capacity: 10 })], many(12).people, many(12).businesses);
-    // Another campaign has already sent 8 today from the same inbox.
+    // Another campaign has used 8 of today's sends on the same inbox: 7 sent, and one claimed that
+    // goes at 14:36 before this campaign's (it is older, PR 41 re-check B10).
     const { campaign: other } = await h.createCampaign("Other", many(8));
     await h.defineSequence(other.id, emailTrack([step("s1", { subject: "Hi", threading: "new_subject" })]));
     h.clock = MONDAY_8 + H;
@@ -194,7 +195,7 @@ describe("Before launch: projected daily load per sender inbox", () => {
     await h.defineSequence(id, emailTrack([step("s1", { subject: "Hi", threading: "new_subject" })]));
     const { load } = await beforeLaunch(h, id);
     expect(load!.accounts[0]).toMatchObject({ usedToday: 8 });
-    // Today: 2 of 12. Tuesday: 10. All start on day 2.
+    // Today: the other campaign's claimed lead, then 2 of 12. Tuesday: 10. All start on day 2.
     expect(load!.daysUntilAllStart).toBe(2);
   });
 

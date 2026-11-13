@@ -198,3 +198,66 @@ describe("an inbox that cannot send now (PR 41 council, item 1)", () => {
     expect(view.load).toMatchObject({ daysUntilAllStart: null, cannotProject: [{ accountId: "inbox-a", reason: "quota" }] });
   });
 });
+
+describe("another running campaign's waiting work on the same inboxes (PR 41 re-check, B10)", () => {
+  const allDay: CampaignDefinition = {
+    timezone: "Europe/London",
+    callSkipLimitDays: 2,
+    emailPool: ["inbox-a"],
+    tracks: [{ id: "t1", channel: "email", branch: "main", window: [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 })), steps: [{ id: "s1", waitDays: 0, subject: "Hi", body: "Hi.", threading: "new_subject", removed: false }], start: { kind: "entry" }, removed: false }],
+  };
+  const leadsOf = (prefix: string, zones: readonly string[]) => ({
+    businesses: zones.map((zone, i) => business({ business_id: `${prefix}b${i}`, business_name: `${prefix} Clinic ${i}`, timezone: zone })),
+    people: zones.map((_, i) => person({ person_id: `${prefix}p${i}`, business_id: `${prefix}b${i}`, full_name: `${prefix} Person${i}`, email: `${prefix}${i}@clinic.example`, timezone: "" })),
+  });
+
+  /**
+   * Launches `first`, lets `gapMs` pass, then projects `second`, launches it and compares its sends
+   * with the engine's: the other campaign's waiting work competes for the inboxes in both.
+   */
+  async function both(accounts: FakeAccount[], start: number, first: CampaignDefinition, second: CampaignDefinition, zones: { a: readonly string[]; b: readonly string[] }, before?: (h: EngineHarness) => void, gapMs = 0) {
+    const h = new EngineHarness({ start, accounts });
+    const { campaign: a } = await h.createCampaign("Running", leadsOf("a", zones.a));
+    const { campaign: b } = await h.createCampaign("Projected", leadsOf("b", zones.b));
+    await h.tick();
+    await h.defineSequence(a.id, first);
+    before?.(h);
+    expect((await h.launch(a.id)).status).toBe(200);
+    if (gapMs > 0) await h.advanceTo(start + gapMs);
+    await h.defineSequence(b.id, second);
+    const projected = await projectedSends(h.store, b.id, h.clock);
+    const view = (await h.request<BeforeLaunchView>("GET", `/api/campaigns/${b.id}/before-launch`)).body;
+    const already = h.fake.deliveryLog.length;
+    expect((await h.launch(b.id)).status).toBe(200);
+    h.maxWrites = 5_000;
+    const until = start + 10 * DAY;
+    await h.advanceTo(until);
+    const stepIndex = (stepId: string) => Number(stepId.slice(1)) - 1;
+    const exact = (xs: { leadId: string; accountId: string; step: number; at: number }[]) => [...xs].sort((x, y) => x.at - y.at || (x.accountId < y.accountId ? -1 : 1));
+    const mine = new Set(await h.store.engine.subjectsOf(b.id));
+    const actual = h.fake.deliveryLog.slice(already).filter((d) => mine.has(d.subjectId)).map((d) => ({ leadId: d.subjectId, accountId: d.sender, step: stepIndex(d.stepId), at: d.at }));
+    return { projected: exact(projected!.sends.filter((s) => s.at < until && mine.has(s.leadId))), actual: exact(actual), view };
+  }
+
+  test("the verifier's case: capacity 2, an older waiting lead of another campaign takes today's slot, so this campaign starts over two days", async () => {
+    const start = Date.parse("2026-11-09T10:00:00Z");
+    const inbox: FakeAccount = { id: "inbox-a", capacity: 2, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" };
+    // The other campaign's lead is older: its campaign launched two minutes before this one is projected.
+    const { projected, actual, view } = await both([inbox], start, allDay, allDay, { a: ["UTC"], b: ["UTC", "UTC"] }, (h) => h.fake.rateLimitedUntil.set("inbox-a", start + 5 * MIN), 2 * MIN);
+    expect(projected).toEqual(actual);
+    expect(view.load).toMatchObject({ daysUntilAllStart: 2, accounts: [expect.objectContaining({ busiestDay: 1 })] });
+  });
+
+  const SEEDS = Number(process.env["PROJECTION_SEEDS"] ?? 40);
+  for (const seed of Array.from({ length: SEEDS }, (_, i) => 5000 + i)) {
+    test(`generated two-campaign case ${seed}`, async () => {
+      const first = generate(seed);
+      const second = generate(seed + 10_000);
+      // Both campaigns draw on the first case's inboxes, so they compete for them.
+      const pool = first.accounts.map((x) => x.id);
+      const shared = (d: CampaignDefinition): CampaignDefinition => ({ ...d, emailPool: pool });
+      const { projected, actual } = await both(first.accounts, first.start, shared(first.definition), shared(second.definition), { a: first.zones, b: second.zones }, undefined, (seed % 3) * 7 * MIN);
+      expect(projected).toEqual(actual);
+    });
+  }
+});

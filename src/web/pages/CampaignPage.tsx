@@ -270,7 +270,7 @@ const SHOWN = 50;
  */
 function LeadsTab({ campaignId, version, launched }: { campaignId: string; version: number; launched: boolean }) {
   const search = useApi<LeadSearchResult>(`/api/leads?campaign=${encodeURIComponent(campaignId)}&limit=500&v=${version}`);
-  const facts = useApi<BeforeLaunchView>(`/api/campaigns/${encodeURIComponent(campaignId)}/before-launch?v=${version}`);
+  const facts = useApi<BeforeLaunchView>(`/api/campaigns/${encodeURIComponent(campaignId)}/before-launch?load=0&v=${version}`);
   const [, navigate] = useLocation();
   const all = new URLSearchParams(useSearch()).get("all") === "1";
   const failed = search.result.state === "error" ? search.result : facts.result.state === "error" ? facts.result : null;
