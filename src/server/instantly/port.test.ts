@@ -58,6 +58,16 @@ const request = (fields: Partial<HandoverRequest> = {}): HandoverRequest => {
   };
 };
 
+async function sentOpener() {
+  const ctx = await setUp();
+  await ctx.port.observe(null);
+  const r = request({ idempotencyKey: "key-sent" });
+  const answer = await ctx.port.handover(r);
+  if (answer.kind !== "accepted") throw new Error("not accepted");
+  ctx.advance(2 * MINUTE);
+  return { ...ctx, r, ref: answer.providerRef };
+}
+
 describe("sender inboxes", () => {
   test("are read from Instantly, healthy only while writes are on, the inbox is Active and its poll is fresh", async () => {
     const { port } = await setUp();
@@ -245,15 +255,6 @@ describe("follow-ups", () => {
 });
 
 describe("observation, lookup, withdrawal and the pre-send check", () => {
-  async function sentOpener() {
-    const ctx = await setUp();
-    await ctx.port.observe(null);
-    const r = request({ idempotencyKey: "key-sent" });
-    const answer = await ctx.port.handover(r);
-    if (answer.kind !== "accepted") throw new Error("not accepted");
-    ctx.advance(2 * MINUTE);
-    return { ...ctx, r, ref: answer.providerRef };
-  }
 
   test("a sent campaign email becomes a sent event for its work, once", async () => {
     const { port, ref } = await sentOpener();
@@ -264,19 +265,23 @@ describe("observation, lookup, withdrawal and the pre-send check", () => {
     expect(again.events.filter((e) => e.kind === "sent").map((e) => e.id)).toEqual(first.events.map((e) => e.id));
   });
 
-  test("a reply in the lead's thread names that work; a reply outside it names no known thread; mail from an address the app never wrote to is not reported", async () => {
+  test("a reply in the lead's thread names that work; one outside every known thread is held, then reported with no thread; mail from an address the app never wrote to is not reported", async () => {
     const { port, fake, ref, advance } = await sentOpener();
     const c1 = await port.observe("c0");
     fake.reply("Pat Oneil <PAT@harbour.example>");
     advance(MINUTE);
-    fake.reply("pat@harbour.example", { onThread: false });
+    // A new conversation without the lead's id: nothing proves which work it answers.
+    fake.reply("pat@harbour.example", { onThread: false, withLead: false });
     fake.reply("someone@else.example", { inbox: "ada@sender.example" });
     advance(MINUTE);
-    const replies = (await port.observe(c1.checkpoint)).events.filter((e) => e.kind === "reply");
-    expect(replies).toEqual([
-      { id: expect.any(String), kind: "reply", providerRef: ref, at: T0 + 2 * MINUTE, inbox: "ada@sender.example", from: "pat@harbour.example" },
-      { id: expect.any(String), kind: "reply", providerRef: expect.stringMatching(/^it:/), at: T0 + 3 * MINUTE, inbox: "ada@sender.example", from: "pat@harbour.example" },
-    ]);
+    const c2 = await port.observe(c1.checkpoint);
+    expect(c2.events.filter((e) => e.kind === "reply")).toEqual([{ id: expect.any(String), kind: "reply", providerRef: ref, at: T0 + 2 * MINUTE, inbox: "ada@sender.example", from: "pat@harbour.example" }]);
+    // The off-thread reply is held by the adapter, pausing sends to that address from that inbox,
+    // and after the settling period it is reported with no thread, for the engine's fallback.
+    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [] })).toEqual({ kind: "unavailable" });
+    advance(16 * MINUTE);
+    const released = (await port.observe(c2.checkpoint)).events.filter((e) => e.kind === "reply" && e.providerRef !== ref);
+    expect(released).toEqual([{ id: expect.any(String), kind: "reply", providerRef: null, at: T0 + 3 * MINUTE, inbox: "ada@sender.example", from: "pat@harbour.example" }]);
   });
 
   test("lead statuses: a bounce fails the work, an unsubscribe stops it like a reply, a skip is explained or held", async () => {
@@ -329,5 +334,148 @@ describe("observation, lookup, withdrawal and the pre-send check", () => {
     expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [ref] })).toEqual({ kind: "reply", providerRef: reply.id, at: T0 + 2 * MINUTE });
     for (let i = 0; i < 25; i++) await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [ref] });
     expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [ref] })).toEqual({ kind: "unavailable" });
+  });
+});
+
+/**
+ * Review bot findings on `7de601e`, two kinds. Signal identity: an event names a piece of work only
+ * when the message's own identity (its thread or its lead, with the sender and the inbox) proves it,
+ * and the reference is one the engine already holds. Completeness: a poll counts as current only
+ * when every read it depends on reached its end, and nothing the adapter reported is forgotten
+ * before the engine has stored the checkpoint it came with.
+ */
+describe("signal identity", () => {
+  test("a delivery notice in the lead's thread is not the lead's reply (finding 3)", async () => {
+    const { port, fake, advance } = await sentOpener();
+    const c1 = await port.observe("c0");
+    fake.reply("mailer-daemon@googlemail.example", { inThreadOf: "pat@harbour.example" });
+    // The lead's own address, in the lead's thread, but received by another inbox.
+    fake.reply("pat@harbour.example", { inbox: "bo@sender.example" });
+    advance(MINUTE);
+    const c2 = await port.observe(c1.checkpoint);
+    advance(16 * MINUTE);
+    const later = await port.observe(c2.checkpoint);
+    expect([...c2.events, ...later.events].filter((e) => e.kind === "reply")).toEqual([]);
+  });
+
+  test("a reply seen before its sent record attaches to its own work, never by a reference the engine cannot hold (finding 2)", async () => {
+    const { port, fake, advance } = await setUp();
+    await port.observe(null);
+    fake.visibleDelayMs = 5 * MINUTE;
+    const answer = await port.handover(request({ idempotencyKey: "k-pat" }));
+    const ref = answer.kind === "accepted" ? answer.providerRef : "";
+    advance(2 * MINUTE);
+    const c1 = await port.observe("c0");
+    expect(c1.events).toEqual([]);
+    // Without the lead's id on the message, only its thread can name the work, and that is not known yet.
+    fake.reply("pat@harbour.example", { withLead: false });
+    advance(MINUTE);
+    const c2 = await port.observe(c1.checkpoint);
+    expect(c2.events.filter((e) => e.kind === "reply")).toEqual([]);
+    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [ref] })).toEqual({ kind: "unavailable" });
+    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "nia@harbour.example", threadRefs: [] })).toEqual({ kind: "clear" });
+    advance(5 * MINUTE);
+    const c3 = await port.observe(c2.checkpoint);
+    expect(c3.events.map((e) => [e.kind, e.providerRef])).toEqual([
+      ["sent", ref],
+      ["reply", ref],
+    ]);
+  });
+
+  test("a reply carrying the lead's id attaches at once, before the sent record is visible (finding 2)", async () => {
+    const { port, fake, advance } = await setUp();
+    await port.observe(null);
+    fake.visibleDelayMs = 5 * MINUTE;
+    const answer = await port.handover(request({ idempotencyKey: "k-pat" }));
+    advance(2 * MINUTE);
+    fake.reply("pat@harbour.example");
+    advance(MINUTE);
+    const c1 = await port.observe("c0");
+    expect(c1.events.filter((e) => e.kind === "reply").map((e) => e.providerRef)).toEqual([answer.kind === "accepted" ? answer.providerRef : ""]);
+  });
+
+  test("a message the user sends by hand in the lead's thread is not the opener's send (sibling)", async () => {
+    const { port, fake, advance } = await sentOpener();
+    const c1 = await port.observe("c0");
+    expect(c1.events.filter((e) => e.kind === "sent")).toHaveLength(1);
+    const manual = fake.manualSend("pat@harbour.example");
+    advance(MINUTE);
+    const c2 = await port.observe(c1.checkpoint);
+    expect(c2.events.filter((e) => e.id.includes(manual.id))).toEqual([]);
+  });
+});
+
+describe("completeness", () => {
+  test("a status-only batch is reported again until the engine stores the checkpoint it came with (finding 1)", async () => {
+    const { port, fake, advance } = await sentOpener();
+    const c1 = (await port.observe("c0")).checkpoint;
+    fake.setLeadStatus("pat@harbour.example", -2);
+    advance(MINUTE);
+    const batch = await port.observe(c1);
+    expect(batch.events.filter((e) => e.kind === "reply")).toHaveLength(1);
+    // The engine crashed before applying it, so its stored checkpoint is still c1.
+    advance(MINUTE);
+    const replay = await port.observe(c1);
+    expect(replay.events.filter((e) => e.kind === "reply")).toHaveLength(1);
+    // Applied and stored: not reported again.
+    advance(MINUTE);
+    const after = await port.observe(replay.checkpoint);
+    expect(after.events.filter((e) => e.kind === "reply")).toEqual([]);
+  });
+
+  test("lead statuses past the first 2,000 leads are read, and the inbox is not fresh until the whole campaign has been read (finding 4)", async () => {
+    const { port, fake, store, advance } = await sentOpener();
+    let checkpoint = (await port.observe("c0")).checkpoint;
+    const campaign = store.instantly.dispatchCampaigns()[0]!;
+    const seeded = fake.seedLeads(campaign.instantlyId ?? "", 2_100);
+    const deep = seeded[2_050]!;
+    store.instantly.saveDispatched({ workKey: "k-deep", ref: `il:${deep.id}`, leadId: deep.id, dispatchCampaign: campaign.key, instantlyCampaignId: campaign.instantlyId ?? "", inbox: "ada@sender.example", destination: deep.email, addedWall: T0, sentEmailId: "email-seeded", threadId: "thread-seeded", sentWall: T0, leadStatus: 3, verificationStatus: 0 });
+    fake.setLeadStatusById(deep.id, -2);
+    advance(11 * MINUTE);
+    const first = await port.observe(checkpoint);
+    checkpoint = first.checkpoint;
+    // Twenty pages read, more remain: the inbox's statuses are not known to be current.
+    expect(port.status().inboxes.find((i) => i.id === "ada@sender.example")?.reason).toBe("stale");
+    const events = [...first.events];
+    for (let i = 0; i < 2; i++) {
+      advance(MINUTE);
+      const next = await port.observe(checkpoint);
+      checkpoint = next.checkpoint;
+      events.push(...next.events);
+    }
+    expect(events.filter((e) => e.kind === "reply" && e.providerRef === `il:${deep.id}`)).toHaveLength(1);
+    expect(port.status().inboxes.find((i) => i.id === "ada@sender.example")?.reason).toBeNull();
+  });
+
+  test("a poll that could not read every new email does not count as fresh, and the next one carries on (sibling)", async () => {
+    const { port, fake, advance } = await sentOpener();
+    let checkpoint = (await port.observe("c0")).checkpoint;
+    for (let i = 0; i < 2_100; i++) fake.reply(`stranger-${String(i)}@else.example`, { inbox: "ada@sender.example" });
+    advance(11 * MINUTE);
+    checkpoint = (await port.observe(checkpoint)).checkpoint;
+    expect(port.status().inboxes.find((i) => i.id === "ada@sender.example")?.reason).toBe("stale");
+    advance(MINUTE);
+    await port.observe(checkpoint);
+    expect(port.status().inboxes.find((i) => i.id === "ada@sender.example")?.reason).toBeNull();
+  });
+
+  test("a dispatch campaign found by name past the first page of search results is not created again (sibling)", async () => {
+    const { port, fake, store } = await setUp();
+    await port.observe(null);
+    const name = "oo·camp-1·t1·s1·ada@sender.example";
+    for (let i = 0; i < 100; i++) fake.seedCampaign(`${name} (old ${String(i)})`);
+    store.instantly.saveDispatchCampaign({ key: "enrollment|camp-1|t1|s1|ada@sender.example", name, instantlyId: null, timestampUpdated: null });
+    fake.seedCampaign(name);
+    await port.handover(request());
+    expect(fake.campaigns.filter((c) => c.name === name)).toHaveLength(1);
+  });
+
+  test("the pre-send check reads every page of the lead's mail, so an older reply is not missed (sibling)", async () => {
+    const { port, fake, ref, advance } = await sentOpener();
+    await port.observe("c0");
+    fake.reply("pat@harbour.example");
+    advance(MINUTE);
+    for (let i = 0; i < 120; i++) fake.manualSend("pat@harbour.example");
+    expect((await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [ref] })).kind).toBe("reply");
   });
 });

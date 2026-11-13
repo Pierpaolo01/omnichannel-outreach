@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { EngineHarness, type Provider } from "../../../test/support/engine-harness.ts";
+import { Crash, EngineHarness, type Provider } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import { FakeInstantly } from "../../../test/support/fake-instantly.ts";
 import type { CampaignDefinition } from "../../domain/sequence/definition.ts";
@@ -123,7 +123,8 @@ describe("the engine through the Instantly adapter", () => {
       sending: "on",
       followUps: "unavailable",
       quota: "available",
-      lastPolledAt: new Date(h.clock).toISOString(),
+      // The start of the last mail scan that read to the end.
+      lastPolledAt: expect.any(String),
       inboxes: [{ id: "ada@sender.example", status: 1, dailyLimit: 30, capacity: 30, healthy: true, reason: null }],
       waitingFollowUps: [{ enrollmentId: lead("Pat Oneil"), trackId: "t1", stepId: "s2" }],
     });
@@ -168,5 +169,72 @@ describe("the engine through the Instantly adapter", () => {
     expect(fake.deliveries()).toHaveLength(1);
     const results = [(await h.progress(lead("Pat Oneil"))).tracks[0]?.steps[0]?.result, (await h.progress(lead("Nia Cole"))).tracks[0]?.steps[0]?.result];
     expect(results.filter((r) => r === "sent")).toHaveLength(1);
+  });
+
+  test("review bot finding 1: a crash partway through a status-only batch loses none of it; both unsubscribes stop their leads after the restart", async () => {
+    const { h, fake } = setUp(true);
+    const { campaign, lead } = await enrolled(h);
+    await h.tick();
+    await h.tick();
+    await h.defineSequence(campaign.id, twoEmails());
+    h.clock = MONDAY_9;
+    await h.tick();
+    await h.launch(campaign.id);
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    expect(fake.deliveries()).toHaveLength(2);
+    fake.setLeadStatus("pat@harbour.example", -2);
+    fake.setLeadStatus("nia@harbour.example", -2);
+    let crashed = false;
+    h.hooks = {
+      crashPoint: (point) => {
+        if (point === "after_observe_event" && !crashed) {
+          crashed = true;
+          throw new Crash(point);
+        }
+      },
+    };
+    h.clock += 60_000;
+    await h.tick();
+    expect(h.crashes).toHaveLength(1);
+    h.hooks = {};
+    await h.advanceTo(h.clock + H);
+    expect((await h.progress(lead("Pat Oneil"))).status).toBe("replied");
+    expect((await h.progress(lead("Nia Cole"))).status).toBe("replied");
+  });
+
+  test("review bot finding 2: the same person in two campaigns replies to campaign B before B's sent record is visible; only B stops", async () => {
+    const { h, fake } = setUp(true);
+    const onlyPat = { businesses: rows.businesses, people: rows.people.filter((p) => p.person_id === "p1") };
+    const a = (await h.createCampaign("Campaign A", onlyPat)).campaign;
+    const b = (await h.createCampaign("Campaign B", onlyPat)).campaign;
+    const people = (await h.request<{ rows: { id: string; name: string; enrollments: EnrollmentView[] }[] }>("GET", "/api/leads")).body.rows;
+    const enrollmentIn = (campaignId: string) => people[0]?.enrollments.find((e) => e.campaign.id === campaignId)?.id ?? "";
+    await h.tick();
+    await h.tick();
+    await h.defineSequence(a.id, twoEmails());
+    await h.defineSequence(b.id, twoEmails());
+    fake.visibleDelayMs = 5 * 60_000;
+    h.clock = MONDAY_9;
+    await h.tick();
+    expect((await h.launch(a.id)).status).toBe(200);
+    expect((await h.launch(b.id)).status).toBe(200);
+    let replied = false;
+    await h.advanceTo(MONDAY_9 + 2 * DAY, async () => {
+      if (replied || fake.deliveries().length < 2) return;
+      replied = true;
+      // Pat answers the latest email, B's, without the lead's id on the message: only the thread names it.
+      const latest = fake.deliveries().at(-1);
+      h.clock += 60_000;
+      fake.reply("pat@harbour.example", { withLead: false });
+      expect(latest?.to).toBe("pat@harbour.example");
+      // Polled while B's sent record is still invisible.
+      h.clock += 60_000;
+      await h.tick();
+    });
+    expect(replied).toBe(true);
+    const latestCampaign = fake.campaigns.find((c) => c.id === fake.emails.filter((e) => e.ue_type === 1).at(-1)?.campaign_id)?.name ?? "";
+    const [repliedCampaign, otherCampaign] = latestCampaign.includes(b.id) ? [b.id, a.id] : [a.id, b.id];
+    expect((await h.progress(enrollmentIn(repliedCampaign))).status).toBe("replied");
+    expect((await h.progress(enrollmentIn(otherCampaign))).status).toBe("active");
   });
 });

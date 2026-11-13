@@ -344,20 +344,27 @@ export class FakeInstantly {
       });
   }
 
-  /** The prospect replies: in the thread of the latest email they received, or as a new conversation. */
-  reply(from: string, options: { onThread?: boolean; inbox?: string } = {}): InstantlyEmail {
+  /**
+   * A message arrives in an inbox: the prospect's reply in the thread of the latest email they
+   * received, a new conversation, or (with `inThreadOf`) any sender's message in that address's
+   * thread, such as a delivery notice. `withLead: false` leaves out `lead_id` and `campaign_id`,
+   * which the documentation gives only "if any".
+   */
+  reply(from: string, options: { onThread?: boolean; inbox?: string; inThreadOf?: string; withLead?: boolean } = {}): InstantlyEmail {
     const address = (/<([^>]+)>/.exec(from)?.[1] ?? from).toLowerCase();
-    const last = this.emails.filter((e) => e.ue_type === 1 && e.lead === address).at(-1);
+    const threadOf = options.inThreadOf?.toLowerCase() ?? address;
+    const last = this.emails.filter((e) => e.ue_type === 1 && e.lead === threadOf).at(-1);
     const inbox = options.inbox ?? last?.eaccount ?? this.accounts[0]?.email ?? "";
+    const withLead = options.withLead !== false && options.inThreadOf === undefined;
     const email: InstantlyEmail = {
       id: this.id("email"),
       timestamp_created: iso(this.now()),
       timestamp_email: iso(this.now()),
       from_address_email: from,
       to_address_email_list: inbox,
-      campaign_id: last?.campaign_id ?? null,
-      lead: address,
-      lead_id: last?.lead_id ?? null,
+      campaign_id: withLead ? (last?.campaign_id ?? null) : null,
+      lead: withLead ? address : null,
+      lead_id: withLead ? (last?.lead_id ?? null) : null,
       eaccount: inbox,
       ue_type: 2,
       thread_id: options.onThread === false || !last ? this.id("thread") : last.thread_id,
@@ -366,9 +373,39 @@ export class FakeInstantly {
     return email;
   }
 
+  /** The user writes to a lead by hand from the Unibox: `ue_type` 3, "Sent", in the lead's thread. */
+  manualSend(to: string): InstantlyEmail {
+    const last = this.emails.filter((e) => e.ue_type === 1 && e.lead === to.toLowerCase()).at(-1);
+    const email: InstantlyEmail = { ...(last ?? ({} as InstantlyEmail)), id: this.id("email"), timestamp_created: iso(this.now()), timestamp_email: iso(this.now()), ue_type: 3 };
+    this.emails.push(email);
+    return email;
+  }
+
+  /** Leads added to a campaign outside this test's handovers, so a campaign can hold thousands. */
+  seedLeads(campaignId: string, count: number, status: LeadStatusCode = 3): InstantlyLead[] {
+    const out: InstantlyLead[] = [];
+    for (let i = 0; i < count; i++) {
+      const l: FakeLead = { id: this.id("lead"), email: `seed-${String(i)}@seeded.example`, campaign: campaignId, status, verification_status: 0, addedAt: this.now(), variables: {}, sendAt: null, sentEmailId: null, deleted: false };
+      this.leads.push(l);
+      out.push(this.leadView(l));
+    }
+    return out;
+  }
+
+  /** A campaign created outside the adapter, such as an older one whose name contains a dispatch name. */
+  seedCampaign(name: string): void {
+    this.campaigns.push({ id: this.id("camp"), name, status: 0, timestamp_updated: iso(this.now()), settings: { name } as DispatchCampaignSettings });
+  }
+
   /** A lead's status changes in Instantly (an unsubscribe, a late skip). */
   setLeadStatus(email: string, status: LeadStatusCode, verification: VerificationStatusCode | null = null): void {
     for (const l of this.leads) if (l.email === email.toLowerCase() && !l.deleted) Object.assign(l, { status, ...(verification === null ? {} : { verification_status: verification }) });
+  }
+
+  /** Sets one lead's status by id. */
+  setLeadStatusById(id: string, status: LeadStatusCode): void {
+    const l = this.leads.find((x) => x.id === id);
+    if (l) l.status = status;
   }
 
   /** The start of the UTC day of `t`, for tests that cross a reset. */
