@@ -89,6 +89,9 @@ export const PEOPLE: readonly LogicalPerson[] = [
   { company: 5, names: ["Lena Ward"], alias: "Helena Ward", title: "Owner", emails: ["lena@unkeyed.example"], direct: "2079461009", mobile: "7700900109" },
 ];
 
+/** A shared address both City Physio branches may list, and their people may give as their email. */
+const GROUP_INBOX = "bookings@cityphysio.example";
+
 /** A People row that belongs to no logical person. */
 export const NO_ONE = -1;
 
@@ -159,7 +162,8 @@ export function generateRun(rand: () => number, step: number, history: History):
       phone_original: line,
       street: c.anchor === "address" || (c.anchor !== "none" && chance(0.5)) ? c.street : "",
       postal_code: c.anchor === "address" || (c.anchor !== "none" && chance(0.5)) ? c.postal : "",
-      general_emails: [chance(0.5) ? c.inbox : "", chance(0.1) ? pick(sameCompanyEmails) : ""].filter(Boolean).join(";"),
+      // The two City Physio branches sometimes share one bookings address (review round 9).
+      general_emails: [chance(0.5) ? c.inbox : "", chance(0.1) ? pick(sameCompanyEmails) : "", (i === 3 || i === 4) && chance(0.3) ? GROUP_INBOX : ""].filter(Boolean).join(";"),
     });
     // An address is the street with its postal code: keep both or neither, so the anchor holds.
     if (!row["street"] || !row["postal_code"]) Object.assign(row, c.anchor === "address" ? { street: c.street, postal_code: c.postal } : { street: "", postal_code: "" });
@@ -199,7 +203,7 @@ export function generateRun(rand: () => number, step: number, history: History):
       business_id: businessIdOf.get(p.company) ?? "",
       full_name: pick(p.names),
       title: p.title,
-      email: history.sharedEmailOf(i) ?? (chance(0.6) ? pick(p.emails) : ""),
+      email: history.sharedEmailOf(i) ?? ((p.company === 3 || p.company === 4) && chance(0.15) ? GROUP_INBOX : chance(0.6) ? pick(p.emails) : ""),
       direct_phone: companyLine || (chance(0.3) ? pick(forms(p.direct)) : ""),
       dial_phone: mobile ? pick(forms(p.mobile)) : "",
       dial_phone_type: mobile ? pick(["mobile", "mobile", "cell", ""]) : "",
@@ -719,6 +723,14 @@ export async function runSequence(seed: number, options: { shuffle?: boolean } =
         ...identityProblems(ledger, after),
         ...detailProblems(after, summary, badMarks),
         ...listedProblems(run, summary, after, campaign ?? ""),
+        // An address a company's row lists as shared is never a personal email of its people.
+        ...run.rows.businesses.flatMap((b, row) => {
+          const companyId = summary.rowRecords.businesses[row];
+          const shared = (b["general_emails"] ?? "").split(";").map((e) => e.trim().toLowerCase()).filter(Boolean);
+          return after.people
+            .filter((p) => p.company.id === companyId)
+            .flatMap((p) => p.contactDetails.filter((d) => d.owner === "person" && d.channel === "email" && shared.includes(d.value.trim().toLowerCase())).map((d) => `${p.name} holds ${d.value}, which their company lists as shared`));
+        }),
         // A duplicate under a different name is a different person by the rule, never merged in.
         ...run.personOfRow.flatMap((logical, row) => {
           const record = summary.rowRecords.people[row];

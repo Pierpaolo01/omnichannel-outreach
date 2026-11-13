@@ -1133,3 +1133,22 @@ for (const order of ["named row first", "blank row first"] as const) {
     expect((await onlyCompany(h, "Harbour Lane Physio")).people).toHaveLength(1);
   });
 }
+
+// Review round 9, finding 1: the tie stored the shared inbox on neither company, and it then became Alice's personal email.
+for (const order of ["Harbour first", "Elm first"] as const) {
+  test(`an address the Businesses file lists as a company's shared inbox is never a person's, even when the tie stores it on no company (${order})`, async () => {
+    const h = importHarness();
+    const clinic = (id: string, name: string, line: string, inbox: string) => business({ business_id: id, place_id: `P-${id}`, business_name: name, phone_e164: line, general_emails: inbox });
+    await h.import({ businesses: [clinic("b1", "Harbour Clinic", "+442079460101", ""), clinic("b2", "Elm Clinic", "+442079460202", "")] });
+    const businesses = [clinic("b1", "Harbour Clinic", "+442079460101", "office@group.example"), clinic("b2", "Elm Clinic", "+442079460202", "office@group.example")];
+    const rows = {
+      businesses: order === "Harbour first" ? businesses : [...businesses].reverse(),
+      people: [person({ person_id: "a1", business_id: "b1", full_name: "Alice Hart", email: "office@group.example" })],
+    };
+    for (let time = 1; time <= 2; time++) {
+      const summary = await h.import(rows);
+      expect(entry(summary, "Alice Hart")).toMatchObject({ channels: { email: false, call: true }, via: ["main_line"] });
+      expect((await h.peopleNamed("Alice Hart"))[0]?.details).toEqual([]);
+    }
+  });
+}

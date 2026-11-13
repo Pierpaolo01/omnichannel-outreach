@@ -358,6 +358,7 @@ export function planImport(input: {
     const company = companyOfGroup[g];
     return company && "companyId" in company ? group.rows.map((r) => ({ ...r, companyId: company.companyId })) : [];
   });
+  crm.noteSharedAddresses(appliedBusinessRows);
   crm.noteDestinationListers(
     appliedBusinessRows.flatMap(({ row, companyId }) => row.generalEmails.flatMap((e) => emailKey(e) ?? []).map((key) => ({ lead: { kind: "company", companyId } as const, kind: "inbox", key }))),
   );
@@ -431,7 +432,7 @@ export function planImport(input: {
       const email = emailKey(row.email);
       const mobile = dialKindOf(row) === "mobile" ? parsePhone(row.dialPhone, crm.regionOf(companyId, ""))?.key : undefined;
       return [
-        ...(email && !crm.companyHolds(companyId, "email", email) ? [{ lead, kind: "email", key: email }] : []),
+        ...(email && !crm.companyShares(companyId, email) ? [{ lead, kind: "email", key: email }] : []),
         ...(mobile ? [{ lead, kind: "mobile", key: mobile }] : []),
       ];
     }),
@@ -826,7 +827,7 @@ function groupBusinesses(indexed: readonly Indexed<ScrapedBusiness>[]): Business
 function groupPeople(joined: readonly JoinedRow[], crm: WorkingDirectory): PersonGroup[] {
   const personal = ({ row, companyId }: JoinedRow) => {
     const email = emailKey(row.email);
-    return email && !crm.companyHolds(companyId, "email", email) ? email : "";
+    return email && !crm.companyShares(companyId, email) ? email : "";
   };
   const phones = ({ row, companyId }: JoinedRow) => {
     const region = crm.regionOf(companyId, "");
@@ -1003,6 +1004,8 @@ class WorkingDirectory {
   private readonly companies = new Map<string, MutableCompany>();
   private readonly people = new Map<string, MutablePerson>();
   private readonly enrolled = new Set<string>();
+  /** The shared inboxes each company's business rows list in this import. */
+  private readonly listedShared = new Map<string, Set<string>>();
   /** Which leads list each outreach destination in this import, by kind and key. */
   private readonly destinationListers = new Map<string, LeadRef[]>();
   /** Who lists each personal detail in this import, by company, channel and key. */
@@ -1082,7 +1085,7 @@ class WorkingDirectory {
       const region = this.regionOf(companyId, "");
       const email = emailKey(row.email);
       const keys = [
-        ...(email && !this.companyHolds(companyId, "email", email) ? [`email|${email}`] : []),
+        ...(email && !this.companyShares(companyId, email) ? [`email|${email}`] : []),
         ...[row.directPhone, row.dialPhone].flatMap((raw) => parsePhone(raw, region)?.key ?? []).map((k) => `phone|${k}`),
       ];
       for (const key of keys) {
@@ -1194,7 +1197,10 @@ class WorkingDirectory {
       if (lead.kind === "person") {
         // The company's own details (its shared inboxes and main lines) are never a person's claims.
         const company = this.company(this.person(lead.personId).companyId);
-        const companyKeys = new Set(company.details.map((d) => `${d.channel === "email" ? "email" : "mobile"}|${d.key}`));
+        const companyKeys = new Set([
+          ...company.details.map((d) => `${d.channel === "email" ? "email" : "mobile"}|${d.key}`),
+          ...[...this.sharedAddresses(company.id)].map((key) => `email|${key}`),
+        ]);
         for (const listed of listedDestinations(this.person(lead.personId).rowIdentities)) {
           if (!companyKeys.has(listed.key)) claims.push({ lead, key: listed.key, rank: enrolled ? 0 : 3, detail: listed.detail });
         }
@@ -1367,7 +1373,7 @@ class WorkingDirectory {
     const pinned = (r: JoinedRow) => onlyHolder(this.peopleAt(r.companyId).filter((p) => !p.isNew), this.personRowIdentity(r));
     const personalEmail = ({ row, companyId }: JoinedRow) => {
       const email = emailKey(row.email);
-      return email && !this.companyHolds(companyId, "email", email) ? email : "";
+      return email && !this.companyShares(companyId, email) ? email : "";
     };
     return settleGroups<JoinedRow, PersonGroup>(groups, (group) => this.personEvidence(group), (group, rows) => ({ companyId: group.companyId, rows }), pinned, personalEmail);
   }
@@ -1394,7 +1400,7 @@ class WorkingDirectory {
     return ((): Evidence => {
         const rows = group.rows.map((r) => r.row);
         const region = this.regionOf(group.companyId, "");
-        const emails = unique(rows.flatMap((r) => emailKey(r.email) ?? [])).filter((e) => !this.companyHolds(group.companyId, "email", e));
+        const emails = unique(rows.flatMap((r) => emailKey(r.email) ?? [])).filter((e) => !this.companyShares(group.companyId, e));
         const ids = unique(rows.flatMap((r) => (r.sourcePersonId ? [r.sourcePersonId] : [])));
         const names = unique(rows.map((r) => personNameKey(fieldsOf(r))).filter(Boolean));
         const phones = unique(rows.flatMap((r) => [r.directPhone, r.dialPhone].flatMap((raw) => parsePhone(raw, region)?.key ?? [])));
@@ -1470,6 +1476,33 @@ class WorkingDirectory {
     return id;
   }
 
+  /**
+   * Whether this address is the company's shared address: it holds it, or the Businesses file
+   * lists it for the company, in this import or in a row applied before. That is decided by the
+   * listing, not by whether the equal-claims rule let the company store it (review round 9).
+   */
+  companyShares(companyId: string, email: string): boolean {
+    return this.companyHolds(companyId, "email", email) || this.sharedAddresses(companyId).has(email);
+  }
+
+  /** Addresses the Businesses file lists as the company's shared inbox, now or in its applied rows. */
+  private sharedAddresses(companyId: string): Set<string> {
+    const company = this.company(companyId);
+    const fromRows = [...company.rowIdentities].flatMap((identity) => {
+      // Shaped by companyRowIdentity: [business_id, place_id, name, main line, shared inboxes, ...].
+      const inboxes = (JSON.parse(identity) as unknown[])[4];
+      return Array.isArray(inboxes) ? inboxes.filter((e): e is string => typeof e === "string" && e !== "") : [];
+    });
+    return new Set([...fromRows, ...(this.listedShared.get(companyId) ?? [])]);
+  }
+
+  /** Records the shared inboxes each company's business rows list in this import. */
+  noteSharedAddresses(rows: readonly { row: ScrapedBusiness; companyId: string }[]): void {
+    for (const { row, companyId } of rows) {
+      for (const key of row.generalEmails.flatMap((e) => emailKey(e) ?? [])) this.listedShared.set(companyId, (this.listedShared.get(companyId) ?? new Set()).add(key));
+    }
+  }
+
   /** Whether the company itself holds this address or number. */
   companyHolds(companyId: string, channel: Channel, key: string): boolean {
     return this.company(companyId).details.some((d) => d.channel === channel && d.key === key);
@@ -1502,7 +1535,7 @@ class WorkingDirectory {
       return;
     }
     const companyId = this.person(owner.personId).companyId;
-    if (this.companyHolds(companyId, "email", key)) return;
+    if (this.companyShares(companyId, key)) return;
     const contest = this.contested(owner.personId, "email", key, null);
     if (contest && contest.winner !== owner.personId) {
       this.noteContested(owner, { channel: "email", phoneKind: null, key, value: raw.trim() }, contest.others);
