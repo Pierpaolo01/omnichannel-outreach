@@ -93,6 +93,9 @@
   --o-band: #151a2d;
   --o-band-ink: #ffffff;
   --o-band-muted: #a9b0c6;
+  /* On the call band, light and dark: inside calling hours, and outside them (the daily-workspace prototype). */
+  --o-band-ok: #7be0b5;
+  --o-band-warn: #ffce85;
   --o-you: #0b7a55;
   --o-you-soft: #e2f4ec;
   --o-hand: #2c55c9;
@@ -167,6 +170,8 @@
   --color-band: var(--o-band);
   --color-band-ink: var(--o-band-ink);
   --color-band-muted: var(--o-band-muted);
+  --color-band-ok: var(--o-band-ok);
+  --color-band-warn: var(--o-band-warn);
   --color-you: var(--o-you);
   --color-you-soft: var(--o-you-soft);
   --color-hand: var(--o-hand);

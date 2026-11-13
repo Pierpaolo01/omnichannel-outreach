@@ -8,7 +8,7 @@
 import { leadNow, localDayNumber, nextWindowOpen, span, startOfLocalDay, wallOfLead, windowOpen, type WindowRule } from "./clock.ts";
 import type { ReadyItem } from "./dispatch.ts";
 import { advanceTrack, end, evaluate, finishTrack, markDetailBad, progressOf, runs } from "./progress.ts";
-import type { CallAttempt, CallNumber, CallOutcome, CallTask, NoteDraft, RecordedNumber, SubjectState } from "./state.ts";
+import type { CallAttempt, CallDay, CallNumber, CallOutcome, CallTask, NoteDraft, RecordedNumber, SubjectState } from "./state.ts";
 
 export const CALL_OUTCOMES: readonly CallOutcome[] = ["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "skip_for_now"];
 
@@ -156,8 +156,12 @@ export function readyCalls(state: SubjectState, now: number): ReadyItem[] {
 
 /** Whether the user's list has room for one more new task today (4.4): new tasks placed today stay below capacity minus committed tasks. */
 export function callRoom(state: SubjectState): boolean {
-  const { capacity, placedToday, committed } = state.callDay;
-  return placedToday < capacity - committed;
+  return dayHasRoom(state.callDay);
+}
+
+/** The day's rule behind `callRoom`, for the read models that say when today's capacity is used (ticket 14b). */
+export function dayHasRoom(day: Pick<CallDay, "capacity" | "placedToday" | "committed">): boolean {
+  return day.placedToday < day.capacity - day.committed;
 }
 
 /**

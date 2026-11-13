@@ -3,14 +3,15 @@
  * task with everything the call screen shows. Built from the engine's stored facts and the CRM, so
  * the screens render them without recomputing anything.
  */
-import { bucketOf, CALL_OUTCOMES, callNumbers, isListed, reasonOf, recordedNumberOf, type CallBucket } from "../../domain/sequence/calls.ts";
+import { bucketOf, CALL_OUTCOMES, callNumbers, callWindow, dayHasRoom, isListed, reasonOf, recordedNumberOf, type CallBucket } from "../../domain/sequence/calls.ts";
 import { displayPhone } from "../../domain/phone.ts";
 import { localDayNumber } from "../../domain/sequence/clock.ts";
 import { liveTracks } from "../../domain/sequence/definition.ts";
 import { deriveStatus } from "../../domain/sequence/progress.ts";
 import type { CallNumber, CallTask, RecordedNumber, SubjectState } from "../../domain/sequence/state.ts";
-import type { CallColleagueView, CallNumberView, CallQueueItem, RecordedNumberView, CallsView, CallTaskView, NoteView, TodayView, TouchView } from "../../shared/api.ts";
+import type { CallColleagueView, CallNumberView, CallOffListView, CallQueueItem, RecordedNumberView, CallsView, CallTaskView, NoteView, TodayView, TouchView } from "../../shared/api.ts";
 import type { OutreachStore } from "../persistence/store.ts";
+import { DEFAULT_DAILY_CALL_CAPACITY } from "../persistence/sqlite-engine-store.ts";
 import type { StoredNote } from "./engine-store.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 
@@ -123,6 +124,8 @@ export async function callsView(store: OutreachStore, now: number, options: { re
     date: dateIn(day.userZone, now),
     userZone: day.userZone,
     dailyCapacity: day.capacity,
+    defaultDailyCapacity: DEFAULT_DAILY_CALL_CAPACITY,
+    capacityReached: !dayHasRoom(day),
     placedToday: day.placedToday,
     committed: day.committed,
     readyNow,
@@ -139,7 +142,21 @@ const UP_NEXT = 5;
 
 export async function todayView(store: OutreachStore, now: number, rules?: CallViewRules): Promise<TodayView> {
   const { day, readyNow, laterToday } = await callList(store, now, rules);
-  return { date: dateIn(day.userZone, now), userZone: day.userZone, readyNow: readyNow.length, laterToday: laterToday.length, upNext: [...readyNow, ...laterToday].slice(0, UP_NEXT) };
+  return { date: dateIn(day.userZone, now), userZone: day.userZone, readyNow: readyNow.length, laterToday: laterToday.length, capacityReached: !dayHasRoom(day), upNext: [...readyNow, ...laterToday].slice(0, UP_NEXT) };
+}
+
+/**
+ * Why a task is not on today's list (ADR 0003 4.4.1), read from the stored task and its call records:
+ * an outcome logged on it comes first, then the lead's ending, then its track's finish.
+ */
+function offListOf(s: SubjectState, task: CallTask, listed: boolean): CallOffListView | null {
+  if (listed) return null;
+  const status = deriveStatus(s);
+  const logged = s.callAttempts.filter((a) => a.taskId === task.id && a.outcome !== "skip_for_now").at(-1);
+  if (logged) return { reason: "logged", outcome: logged.outcome, at: iso(logged.atWall), status };
+  if (s.subject.ended !== null) return { reason: "lead_ended", status };
+  if (!task.open) return { reason: "track_finished", finish: s.tracks.find((p) => p.trackId === task.trackId)?.finishReason ?? null, status };
+  return { reason: "not_listed_today", status };
 }
 
 /** One call task with everything the call screen shows, or null for an unknown task. */
@@ -188,12 +205,14 @@ export async function callTaskView(store: OutreachStore, taskId: string, now: nu
     enrollmentId: s.subject.id,
     open: task.open,
     listed,
+    offList: offListOf(s, task, listed),
     status: deriveStatus(s),
     ...parties,
     track: { id: task.trackId, label: trackLabel(s, task.trackId) },
     zone: s.lead.zone,
     localTime: localTimeIn(s.lead.zone, now),
     numbers: numbers.map(numberView),
+    callingHours: callWindow(s, task.trackId),
     script: s.campaign.definition.callScript ?? "",
     touches: touches.map((x) => x.touch),
     personNotes: parties.person ? (await store.engine.notesOf("person", parties.person.id)).map(noteView) : [],

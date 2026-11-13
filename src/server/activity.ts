@@ -7,7 +7,8 @@
  * the track completed, and an address marked bad by another campaign is not a bounce here. A bounce
  * observed before migration 10 kept no event, so it shows only as the ending on a bad address. Email
  * has no delivered
- * state, because Instantly reports none (ADR 0002, "Delivered").
+ * state, because Instantly reports none (ADR 0002, "Delivered"). Calls show each outcome the user
+ * logged, skip for now included, with the number dialled and the call's note (ticket 14b).
  */
 import type { ActivityEntry, EnrollmentView } from "../shared/api.ts";
 import { goodEmail } from "../domain/sequence/progress.ts";
@@ -31,6 +32,11 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
       entries.push({ campaign, at: new Date(b.atWall).toISOString(), kind: "bounced", stepNumber: step?.number ?? null, to: b.destination });
     }
     for (const track of progress.tracks) {
+      if (track.channel === "call") {
+        // Every outcome the user logged on the call, skip for now included, with the number dialled and its note (ticket 14b).
+        for (const step of track.steps) for (const c of step.calls) entries.push({ campaign, at: c.at, kind: "call", outcome: c.outcome, number: c.number, note: c.note });
+        continue;
+      }
       if (track.channel !== "email") continue;
       let lastTo: string | null = null;
       for (const step of track.steps) {

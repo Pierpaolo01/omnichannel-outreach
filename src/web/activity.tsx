@@ -2,13 +2,15 @@ import { useId, useState } from "react";
 import type { ActivityEntry, ActivityView } from "../shared/api.ts";
 import { useApi } from "./api.ts";
 import { ErrorState, Section } from "./components.tsx";
+import { OUTCOME_TITLE, dialledLine } from "./calls/wording.ts";
 import { Icon, type IconName } from "./icons.tsx";
 import { useNow } from "./time.ts";
 
 /**
  * The record's Activity: one timeline across campaigns, newest first, as in the approved
  * daily-workspace prototype. Sent emails expand to the copy that went; a reply shows its channel
- * and date only. The note box arrives with the ticket that adds notes.
+ * and date only. Calls show each logged outcome with the number dialled and its note (ticket 14b).
+ * The note box arrives with the ticket that adds notes.
  */
 export function Activity({ path }: { path: string }) {
   const { result, retry } = useApi<ActivityView>(path);
@@ -67,6 +69,7 @@ const REASON: Readonly<Record<string, string>> = {
 const PLAIN = "bg-raised text-muted shadow-[inset_0_0_0_1px_var(--color-line)]";
 const CRIT = "bg-crit-soft text-crit";
 const HAND = "bg-hand-soft text-hand";
+const CALL = "bg-call-soft text-call";
 
 /** What one timeline entry says. Exported for its tests. */
 export function describeEntry(entry: ActivityEntry): { icon: IconName; tone: string; title: string; body: string | null } {
@@ -88,6 +91,9 @@ export function describeEntry(entry: ActivityEntry): { icon: IconName; tone: str
         title: entry.channel === "email" ? "Replied by email" : "Replied by text",
         body: entry.channel === "email" ? "Automation stopped in this campaign. Read and answer the reply in Instantly." : "Automation stopped in this campaign. Answer the reply on your phone.",
       };
+    case "call":
+      // The number dialled and the call's note; a skip for now has no number.
+      return { icon: "call", tone: CALL, title: OUTCOME_TITLE[entry.outcome], body: [dialledLine(entry.number), entry.note.trim()].filter(Boolean).join(". ") || null };
     case "ended":
       return entry.status === "sequence_finished_no_response"
         ? { icon: "system", tone: PLAIN, title: "Sequence finished with no response", body: null }
@@ -133,7 +139,7 @@ function Line({ entry }: { entry: ActivityEntry }) {
   );
 }
 
-function when(iso: string, now: Date): string {
+export function when(iso: string, now: Date): string {
   const at = new Date(iso);
   const time = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(at);
   if (at.toDateString() === now.toDateString()) return `Today, ${time}`;

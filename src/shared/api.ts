@@ -448,6 +448,8 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
   | { readonly kind: "address_bad"; readonly to: string }
   | { readonly kind: "replied"; readonly channel: "email" | "sms" }
   | { readonly kind: "ended"; readonly status: "sequence_finished_no_response" | "finished_no_usable_channel" }
+  /** A call outcome the user logged (ticket 14), skip for now included, with the number dialled (none on a skip) and its note. */
+  | { readonly kind: "call"; readonly outcome: CallOutcomeApi; readonly number: RecordedNumberView | null; readonly note: string }
 );
 
 export interface ActivityView {
@@ -566,6 +568,8 @@ export interface TodayView {
   readonly userZone: string;
   readonly readyNow: number;
   readonly laterToday: number;
+  /** Today's call capacity is used: calls due after this wait for the next day, and none is dropped (4.4). */
+  readonly capacityReached: boolean;
   /** The next calls, in queue order: ready now first, then later today. */
   readonly upNext: readonly CallQueueItem[];
 }
@@ -575,6 +579,10 @@ export interface CallsView {
   readonly date: string;
   readonly userZone: string;
   readonly dailyCapacity: number;
+  /** The capacity the user has until they set one. */
+  readonly defaultDailyCapacity: number;
+  /** Today's call capacity is used: no new call is placed today (4.4: new placed today < capacity − committed). */
+  readonly capacityReached: boolean;
   /** New tasks placed today, and tasks carried into today from earlier days, which count first. */
   readonly placedToday: number;
   readonly committed: number;
@@ -629,6 +637,18 @@ export interface CallColleagueView {
   readonly lastCallNote: { readonly note: string; readonly outcome: string; readonly at: string } | null;
 }
 
+/**
+ * Why a call task is not on today's list (ADR 0003 4.4.1), from the stored task and its call records:
+ * `logged`, an outcome was logged on it (by any tab or client); `track_finished`, its phone track
+ * finished otherwise (with the reason); `lead_ended`, the lead's outreach ended in this campaign;
+ * `not_listed_today`, it waits for a day its calling hours open. `status` is the lead's status now.
+ */
+export type CallOffListView =
+  | { readonly reason: "logged"; readonly outcome: CallOutcomeApi; readonly at: string; readonly status: OutreachStatus }
+  | { readonly reason: "track_finished"; readonly finish: FinishReasonApi | null; readonly status: OutreachStatus }
+  | { readonly reason: "lead_ended"; readonly status: OutreachStatus }
+  | { readonly reason: "not_listed_today"; readonly status: OutreachStatus };
+
 /** GET /api/call-tasks/:id: everything the call screen shows for one task. */
 export interface CallTaskView {
   readonly task: CallQueueItem | null;
@@ -638,6 +658,8 @@ export interface CallTaskView {
   readonly open: boolean;
   /** On today's list now, so an outcome is accepted. */
   readonly listed: boolean;
+  /** Why it is not on today's list; null while it is. */
+  readonly offList: CallOffListView | null;
   readonly status: OutreachStatus;
   readonly person: { readonly id: string; readonly name: string; readonly title: string } | null;
   readonly company: { readonly id: string; readonly name: string };
@@ -646,6 +668,8 @@ export interface CallTaskView {
   readonly zone: string;
   readonly localTime: string;
   readonly numbers: readonly CallNumberView[];
+  /** The phone track's calling hours, in the prospect's local time (its window: days 0 = Sunday, whole hours). */
+  readonly callingHours: readonly import("../domain/sequence/clock.ts").WindowRule[];
   /** The campaign's call script or talking points. */
   readonly script: string;
   /** Every earlier touch on this lead in this campaign, oldest first. Engagement (opens, clicks) is not tracked. */
