@@ -182,6 +182,45 @@ describe("replies stop the lead in its campaign across all its tracks (spec: Def
     expect((await h.progress(lead("Pat Oneil"))).reply).toEqual({ channel: "sms", at: new Date(MONDAY_9 + H).toISOString() });
   });
 
+  test("replies observed late and out of order never move the stopping reply's channel or date, on either channel, across a restart (verifier B1)", async () => {
+    const { h, campaign } = await world({ people: [PEOPLE[0]!], businesses: [BUSINESSES[0]!] });
+    h.clock = MONDAY_9;
+    const lead = await campaign("Late replies", [track("t1", "email", [email("s1"), email("s2", 3)]), track("t2", "sms", [text("m1"), text("m2", 3)])]);
+    await h.advanceTo(MONDAY_9 + 3 * H);
+    // Observed at 12:00: a text Pat sent at 10:00. It stops the lead.
+    h.clock = MONDAY_9 + 3 * H;
+    h.sms.prospectTexts(PAT_MOBILE, "STOP", null, MONDAY_9 + H);
+    await h.tick();
+    const stopped = { channel: "sms", at: new Date(MONDAY_9 + H).toISOString() };
+    expect((await h.progress(lead("Pat Oneil"))).reply).toEqual(stopped);
+    // Observed at 13:00: a text sent at 11:00, earlier than when the first was observed.
+    h.clock = MONDAY_9 + 4 * H;
+    h.sms.prospectTexts(PAT_MOBILE, "Again", null, MONDAY_9 + 2 * H);
+    await h.tick();
+    expect((await h.progress(lead("Pat Oneil"))).reply).toEqual(stopped);
+    // Observed at 14:00: an email reply on its thread, sent at 10:30 by the provider's clock.
+    h.clock = MONDAY_9 + 5 * H;
+    expect(h.fake.prospectReplies("pat@harbour.example", true, MONDAY_9 + H + 30 * MIN)).toBe(true);
+    await h.tick();
+    expect((await h.progress(lead("Pat Oneil"))).reply).toEqual(stopped);
+    await h.restart();
+    await h.advanceTo(MONDAY_9 + 6 * DAY);
+    expect((await h.progress(lead("Pat Oneil"))).reply).toEqual(stopped);
+  });
+
+  test("the reply observed first stops the lead, even when a reply observed later carries an earlier time on the other channel", async () => {
+    const { h, campaign } = await world({ people: [PEOPLE[0]!], businesses: [BUSINESSES[0]!] });
+    h.clock = MONDAY_9;
+    const lead = await campaign("Email first", [track("t1", "email", [email("s1"), email("s2", 3)]), track("t2", "sms", [text("m1"), text("m2", 3)])]);
+    await h.advanceTo(MONDAY_9 + 3 * H);
+    h.fake.prospectReplies("pat@harbour.example", true, MONDAY_9 + 2 * H);
+    await h.tick();
+    h.clock = MONDAY_9 + 4 * H;
+    h.sms.prospectTexts(PAT_MOBILE, "STOP", null, MONDAY_9 + H);
+    await h.tick();
+    expect((await h.progress(lead("Pat Oneil"))).reply).toEqual({ channel: "email", at: new Date(MONDAY_9 + 2 * H).toISOString() });
+  });
+
   test("an email reply stops the lead's SMS track", async () => {
     const { h, campaign, texts } = await world();
     h.clock = MONDAY_9;
@@ -333,6 +372,30 @@ describe("SMS sending: windows, capacity across campaigns and priority (spec: Pa
     for (const d of ["2026-11-02", "2026-11-03", "2026-11-04", "2026-11-05"]) expect(perDay(d).length).toBeLessThanOrEqual(2);
     expect((await h.progress(a("Ada Hart"))).status).toBe("sequence_finished_no_response");
     expect((await h.progress(b("Dev Hart"))).status).toBe("sequence_finished_no_response");
+  });
+});
+
+describe("priority when a lead has items on two channels at once (found by the generated test's priority check)", () => {
+  test("a lead's second ready item is still claimed in its priority turn after its first item's claim in the same pass", async () => {
+    // One number that holds one text in flight, one inbox that holds two emails in flight. Three
+    // leads, each with an email and a text due at launch.
+    const people = ["Ada", "Ben", "Cat"].map((first, i) => person({ person_id: `q${i}`, business_id: "b1", full_name: `${first} Hart`, email: `${first.toLowerCase()}@harbour.example`, dial_phone: `+4477009002${i}0`, dial_phone_type: "mobile" }));
+    const h = new EngineHarness({
+      start: MONDAY_9 - H,
+      accounts: [{ id: "inbox-a", capacity: 50, gapMs: 10 * MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
+      sms: { numbers: [number(N1, { k: 1, gapMs: 10 * MIN })] },
+    });
+    await h.tick();
+    const { campaign: c } = await h.createCampaign("Two channels", { businesses: [BUSINESSES[0]!], people });
+    await h.defineSequence(c.id, definition([track("t1", "sms", [text("m1")]), track("t2", "email", [email("s1")])], [N1]));
+    h.clock = MONDAY_9;
+    expect((await h.launch(c.id)).status).toBe(200);
+    const ids = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${c.id}`)).body.rows.map((r) => r.enrollments[0]!.id);
+    // Priority among equals is by subject id: the two emails in flight belong to the first two.
+    const byPriority = [...ids].sort((a, b) => (a < b ? -1 : 1));
+    const inFlight = (await h.store.engine.openAttempts()).filter((a) => a.accountId === "inbox-a").map((a) => a.subjectId);
+    const called = h.fake.handoverLog.map((x) => x.subjectId);
+    expect([...new Set([...called, ...inFlight])].slice(0, 2).sort()).toEqual(byPriority.slice(0, 2));
   });
 });
 

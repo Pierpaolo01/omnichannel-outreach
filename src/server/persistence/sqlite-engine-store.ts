@@ -445,6 +445,7 @@ export class SqliteEngineStore implements EngineStore {
         clock: { frozenSince: numOrNull(e, "frozen_since"), frozenTotal: num(e, "frozen_total") },
         emailSender: strOrNull(e, "email_sender"),
         smsSender: strOrNull(e, "sms_sender"),
+        stopReply: e["stop_reply_channel"] == null ? null : { channel: str(e, "stop_reply_channel") === "sms" ? "sms" : "email", atWall: num(e, "stop_reply_at") },
       },
       campaign: {
         id: str(c, "id"),
@@ -619,8 +620,9 @@ export class SqliteEngineStore implements EngineStore {
     const version = base.subject.version + 1;
     this.run(
       `UPDATE enrollments SET version = ?, status = ?, ended = ?, ended_at = ?, ended_wall = ?, lead_paused = ?, branch = ?, branch_entered_at = ?,
-         touched = ?, no_more_calls = ?, frozen_since = ?, frozen_total = ?, email_sender = ?, sms_sender = ? WHERE id = ? AND version = ?`,
-      [version, status, s.ended, s.endedAt, s.endedWall, s.leadPaused ? 1 : 0, s.branch, s.branchEnteredAt, s.touched ? 1 : 0, s.noMoreCalls ? 1 : 0, s.clock.frozenSince, s.clock.frozenTotal, s.emailSender, s.smsSender, id, base.subject.version],
+         touched = ?, no_more_calls = ?, frozen_since = ?, frozen_total = ?, email_sender = ?, sms_sender = ?,
+         stop_reply_channel = ?, stop_reply_at = ? WHERE id = ? AND version = ?`,
+      [version, status, s.ended, s.endedAt, s.endedWall, s.leadPaused ? 1 : 0, s.branch, s.branchEnteredAt, s.touched ? 1 : 0, s.noMoreCalls ? 1 : 0, s.clock.frozenSince, s.clock.frozenTotal, s.emailSender, s.smsSender, s.stopReply?.channel ?? null, s.stopReply?.atWall ?? null, id, base.subject.version],
     );
     return { ...next, subject: { ...s, status, version } };
   }

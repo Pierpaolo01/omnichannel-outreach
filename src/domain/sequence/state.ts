@@ -43,6 +43,12 @@ export interface SubjectRecord {
   readonly emailSender: string | null;
   /** The subject's SMS sender number, fixed at its first SMS handover (ADR 0003 1.3), never reassigned. */
   readonly smsSender: string | null;
+  /**
+   * The reply that stopped the lead: its channel and its time as the provider reported it. Stored in
+   * the transaction that ends the lead as replied, and never recomputed from later replies, whatever
+   * order they are observed in (ticket 13a, verifier B1).
+   */
+  readonly stopReply: { readonly channel: "email" | "sms"; readonly atWall: number } | null;
 }
 
 export interface CampaignState {

@@ -50,8 +50,11 @@ export class FakeSmsPort implements SendPort {
   readonly channel = "sms";
   readonly handoverLog: HandoverLogEntry[] = [];
   readonly deliveryLog: DeliveryLogEntry[] = [];
-  /** Every text a prospect sent back: from their mobile to one of the numbers. */
-  readonly replyLog: { at: number; id: string; from: string; to: string; body: string }[] = [];
+  /**
+   * Every text a prospect sent back: from their mobile to one of the numbers. `at`: when its event
+   * became visible; `providerAt`: the text's own time as the provider reports it.
+   */
+  readonly replyLog: { at: number; providerAt: number; id: string; from: string; to: string; body: string }[] = [];
   readonly refusals: { at: number; attemptId: string; destination: string; reason: string }[] = [];
   readonly lookupLog: { at: number; key: string; answer: LookupResult["kind"] }[] = [];
   readonly numbers: Map<string, FakeNumber>;
@@ -165,15 +168,18 @@ export class FakeSmsPort implements SendPort {
   /**
    * The prospect at `from` texts `to` back: by default the number that last texted them. An SMS
    * reply carries only the two numbers, never a campaign. False if no number ever texted them and
-   * none is given.
+   * none is given. `providerAt`: the text's time as the provider reports it, earlier than now for a
+   * text the app only observes now.
    */
-  prospectTexts(from: string, body = "Thanks, not now", to: string | null = null): boolean {
+  prospectTexts(from: string, body = "Thanks, not now", to: string | null = null, providerAt: number | null = null): boolean {
     const now = this.now();
     const number = to ?? this.deliveryLog.filter((d) => d.destination === from && d.at <= now).at(-1)?.sender ?? null;
     if (number === null) return false;
     const id = `text-${this.replyLog.length + 1}`;
-    this.replyLog.push({ at: now, id, from, to: number, body });
-    this.emit(now, { id, kind: "reply", providerRef: null, at: now, inbox: number, from });
+    // A text the provider reports late carries its own earlier time; its event becomes visible now.
+    const at = providerAt ?? now;
+    this.replyLog.push({ at: now, providerAt: at, id, from, to: number, body });
+    this.emit(now, { id, kind: "reply", providerRef: null, at, inbox: number, from });
     return true;
   }
 

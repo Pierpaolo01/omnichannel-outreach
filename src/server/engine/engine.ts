@@ -20,6 +20,8 @@ export interface EngineHooks {
   beforeApplyEvaluation?(subjectId: string): Promise<void>;
   /** Between the claim commit and the handover commit. */
   beforeHandover?(attemptId: string): Promise<void>;
+  /** Right after a claim commits, before the next claim (ADR 0003 invariant 12: the tests check priority at the claim). */
+  afterClaim?(attemptId: string): Promise<void>;
   /** Before a same-key retry is authorized (ADR 0003 9.2: retries racing a quiesce). */
   beforeRetry?(attemptId: string): Promise<void>;
   /**
@@ -646,7 +648,13 @@ export class Engine {
     }
     ready.sort((a, b) => this.rules.claimOrder(a.item, b.item));
     let changed = false;
-    for (const { item, snapshot } of ready) {
+    // A subject's own claims bump its version: its later items in this pass are checked against the
+    // state its claim wrote, not the snapshot it superseded, so a lead with items on two channels
+    // keeps each item's priority turn (found by ticket 13a's generated priority check).
+    const latest = new Map<string, SubjectState>();
+    for (const entry of ready) {
+      const { item } = entry;
+      const snapshot = latest.get(item.subjectId) ?? entry.snapshot;
       // Cheap refusals on the snapshot first; the transaction checks everything again on current state.
       if (this.rules.claimRefusal(snapshot, item, now) !== null) continue;
       const track = snapshot.campaign.definition.tracks.find((t) => t.id === item.trackId);
@@ -664,6 +672,8 @@ export class Engine {
       });
       if (written) {
         changed = true;
+        latest.set(item.subjectId, written);
+        await this.hooks.afterClaim?.(attemptId);
         this.hooks.crashPoint?.("after_claim", attemptId);
       }
     }

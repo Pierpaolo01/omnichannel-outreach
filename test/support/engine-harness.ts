@@ -133,6 +133,7 @@ export class EngineHarness {
       hooks: {
         beforeApplyEvaluation: async (id) => this.hooks.beforeApplyEvaluation?.(id),
         beforeHandover: async (id) => this.hooks.beforeHandover?.(id),
+        afterClaim: async (id) => this.hooks.afterClaim?.(id),
         beforeRetry: async (id) => this.hooks.beforeRetry?.(id),
         afterAuthorization: (id) => this.hooks.afterAuthorization?.(id),
         crashPoint: (point, id) => this.hooks.crashPoint?.(point, id),

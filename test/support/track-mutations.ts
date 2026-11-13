@@ -28,6 +28,31 @@ function onStarts(fix: (s: SubjectState, before: TrackProgress | undefined, afte
   };
 }
 
+/** Moves every track this change finished with `reason` one day later, finish and lead time alike. */
+function finishesLate(reason: TrackProgress["finishReason"]): Partial<Rules> {
+  const fix = (before: SubjectState, after: SubjectState): SubjectState => ({
+    ...after,
+    tracks: after.tracks.map((t) => (t.finishReason === reason && progressOf(before, t.trackId)?.finishedAt == null && t.finishedAt !== null && t.finishedWall !== null ? { ...t, finishedAt: t.finishedAt + DAY, finishedWall: t.finishedWall + DAY } : t)),
+  });
+  return {
+    evaluate: (s, now, options) => fix(s, R.evaluate(s, now, options)),
+    applyBadDestination: (s, a, now) => fix(s, R.applyBadDestination(s, a, now)),
+    applyToAttempt: (s, id, event, now) => {
+      const out = R.applyToAttempt(s, id, event, now);
+      return { ...out, state: fix(s, out.state) };
+    },
+    applyToWork: (s, key, event, now, options) => {
+      const out = R.applyToWork(s, key, event, now, options);
+      return { ...out, state: fix(s, out.state) };
+    },
+  };
+}
+
+/** Priority with one ordering rule broken, at the claim and at the handover alike. */
+function priority(compare: Rules["claimOrder"]): Partial<Rules> {
+  return { claimOrder: compare, handoverOrder: compare };
+}
+
 const startRule = (s: SubjectState, trackId: string) => s.campaign.definition.tracks.find((t) => t.id === trackId)?.start;
 const smsAccount = (s: SubjectState, id: string) => s.accounts[id]?.channel === "sms";
 /** The bindings other subjects hold whose owner has ended, which a broken engine treats as free. */
@@ -103,11 +128,19 @@ const RULES: Record<string, Partial<Rules>> = {
   "SMS to any phone": {
     evaluate: (s, now, options) => R.evaluate({ ...s, lead: { ...s.lead, details: s.lead.details.map((d) => (d.channel === "phone" ? { ...d, mobile: true } : d)) } }, now, options),
   },
+
+  // Verifier B2: a finish the record derives on its own, so a late one shows in every release after it.
+  "a failed track finishes a day late": finishesLate("failed_bad_destination"),
+  "a skipped track finishes a day late": finishesLate("skipped_missing_channel"),
+
+  // Verifier F1: each ordering rule of 4.3, across both channels.
+  "first messages before follow-ups": priority((a, b) => R.claimOrder({ ...a, touched: !a.touched }, { ...b, touched: !b.touched })),
+  "newest due first": priority((a, b) => (a.touched !== b.touched || a.dueWall === b.dueWall ? R.claimOrder(a, b) : b.dueWall - a.dueWall)),
 };
 
 /** The invariant each mutation must break, and the seed offset known to show it (refreshed by the CI search). */
 const EXPECTED: Record<string, { invariant: string; seed: number }> = {
-  "SMS reply to the newest campaign": { invariant: "14", seed: 7 },
+  "SMS reply to the newest campaign": { invariant: "14", seed: 13 },
   "binding transferred after an end": { invariant: "14", seed: 0 },
   "binding fixed at claim": { invariant: "14", seed: 12 },
   "ending check too late": { invariant: "20", seed: 0 },
@@ -119,6 +152,10 @@ const EXPECTED: Record<string, { invariant: string; seed: number }> = {
   "SMS capacity ignored": { invariant: "10", seed: 0 },
   "SMS sender not fixed": { invariant: "14", seed: 16 },
   "SMS to any phone": { invariant: "20", seed: 0 },
+  "a failed track finishes a day late": { invariant: "7", seed: 0 },
+  "a skipped track finishes a day late": { invariant: "7", seed: 0 },
+  "first messages before follow-ups": { invariant: "12", seed: 0 },
+  "newest due first": { invariant: "12", seed: 3 },
 };
 
 export const TRACK_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number }> = Object.fromEntries(

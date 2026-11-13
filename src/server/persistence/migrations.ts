@@ -420,6 +420,9 @@ export const MIGRATIONS: readonly Migration[] = [
     // and rows are never deleted, so the table is its own history.
     sql: `
       ALTER TABLE enrollments ADD COLUMN sms_sender TEXT;
+      -- The reply that stopped the lead, stored when it stopped and never recomputed (verifier B1).
+      ALTER TABLE enrollments ADD COLUMN stop_reply_channel TEXT CHECK (stop_reply_channel IN ('email', 'sms'));
+      ALTER TABLE enrollments ADD COLUMN stop_reply_at INTEGER;
       CREATE TABLE sms_bindings (
         seq INTEGER PRIMARY KEY AUTOINCREMENT,
         sender_number TEXT NOT NULL,

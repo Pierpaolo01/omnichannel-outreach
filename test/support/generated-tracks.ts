@@ -7,7 +7,7 @@ import { business, person, type ExportRows } from "./export-builder.ts";
 import type { FakeAccount, FakeMode, HandoverLogEntry } from "./fake-email-port.ts";
 import type { FakeNumber, FakeSmsMode } from "./fake-sms-port.ts";
 import { random } from "./generated-sequences.ts";
-import { dueAfter, inWindow, local, renderCopy, zoneOf, type Hours } from "./sequence-model.ts";
+import { dueAfter, higherPriority, inWindow, local, renderCopy, zoneOf, type Hours } from "./sequence-model.ts";
 
 /**
  * Generated sequences for coordination between tracks (ADR 0003 9.2; the ticket 13 row of 9.3),
@@ -277,7 +277,7 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
       features.add("second-worker");
       await h.otherWorker();
     } else if (r < 0.6 && target?.person?.mobile) {
-      if (sms.prospectTexts(target.person.mobile, pick(["STOP", "Not interested", "Call me"]))) features.add("reply-between-claim-and-handover");
+      if (textBack(target.person.mobile, null)) features.add("reply-between-claim-and-handover");
     } else if (r < 0.8 && target) {
       const address = email.deliveryLog.filter((d) => d.subjectId === target.id).at(-1)?.destination;
       if (address) replyOnKnownThread(address);
@@ -289,15 +289,36 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
       features.add("number-health");
     }
   };
+  /**
+   * A reply the provider reports late: its own time is earlier than now, after the send it answers
+   * (verifier B1). The app observes it now either way.
+   */
+  function lateTime(after: number): number | null {
+    return (chance(0.4) ? Math.max(after, h.clock - Math.floor(rand() * 6 * HOUR)) : null);
+  }
   /** The prospect replies to the latest email to `address`, only once the app has seen that send, so the thread is known. */
   function replyOnKnownThread(address: string): boolean {
     const last = email.deliveryLog.filter((x) => x.destination === address && x.at <= h.clock).at(-1);
     if (!last || last.visibleAt > h.clock) return false;
-    if (!email.prospectReplies(address)) return false;
-    features.add("email-reply");
+    const providerAt = lateTime(last.at);
+    if (!email.prospectReplies(address, true, providerAt)) return false;
+    features.add(providerAt === null ? "email-reply" : "email-reply-reported-late");
     return true;
   }
-  h.hooks = { beforeHandover: async (attemptId) => injectAround((await h.store.engine.attempt(attemptId))?.subjectId ?? null) };
+  /** The prospect texts back the number that last texted them, or `to`. */
+  function textBack(mobile: string, to: string | null): boolean {
+    const last = sms.deliveryLog.filter((d) => d.destination === mobile && d.at <= h.clock && (to === null || d.sender === to)).at(-1);
+    if (!last) return false;
+    const first = sms.deliveryLog.find((d) => d.destination === mobile && d.sender === last.sender)!;
+    const providerAt = lateTime(first.at);
+    if (!sms.prospectTexts(mobile, pick(["STOP", "Thanks, not now", "Who is this?"]), last.sender, providerAt)) return false;
+    features.add(providerAt === null ? "sms-reply" : "sms-reply-reported-late");
+    return true;
+  }
+  h.hooks = {
+    beforeHandover: async (attemptId) => injectAround((await h.store.engine.attempt(attemptId))?.subjectId ?? null),
+    afterClaim: (attemptId) => checkClaimPriority(attemptId),
+  };
 
   for (const [ci, c] of campaigns.entries()) {
     const created = await h.createCampaign(`Campaign ${ci + 1}`, rowsFor(c), c.definition.timezone);
@@ -305,8 +326,8 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
     await h.defineSequence(c.id, c.definition);
   }
   await discover();
-  email.onHandover = probe(h, problem, "email");
-  sms.onHandover = probe(h, problem, "sms");
+  email.onHandover = probe(h, problem, "email", checkHandoverPriority);
+  sms.onHandover = probe(h, problem, "sms", checkHandoverPriority);
   await h.tick();
   for (const [ci, c] of campaigns.entries()) {
     const wait = Math.floor(rand() * 3) * HOUR;
@@ -322,33 +343,136 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
   hookBudget = 8;
 
   // ------------------------------------------------------------------------------------------
-  // The record's knowledge.
-  const smsReplies: { at: number; from: string; to: string }[] = [];
-  const emailReplies: { at: number; subjectId: string }[] = [];
+  // The record's knowledge, derived from the definitions, the people and the providers' own logs,
+  // never read back from the engine.
 
   /** When the app knew a mobile was bad: the provider refused it, or reported a text to it undeliverable. */
-  const mobileBadAt = (mobile: string): number => {
+  function mobileBadAt(mobile: string): number {
     const refused = sms.refusals.find((r) => r.destination === mobile && r.reason === "invalid_destination")?.at ?? Infinity;
     const failed = sms.undeliverable.has(mobile) ? (sms.deliveryLog.find((d) => d.destination === mobile)?.at ?? Infinity) + 2 * MINUTE : Infinity;
     return Math.min(refused, failed);
-  };
-  const emailBadAt = (address: string): number => (email.bouncing.has(address) ? (email.deliveryLog.find((d) => d.destination === address)?.at ?? Infinity) + 5 * MINUTE : Infinity);
+  }
+  function emailBadAt(address: string): number {
+    return (email.bouncing.has(address) ? (email.deliveryLog.find((d) => d.destination === address)?.at ?? Infinity) + 5 * MINUTE : Infinity);
+  }
   /** The conversation owner by the SMS provider's call log: the subject the number first texted that mobile for. */
-  const ownerOf = (sender: string, mobile: string) => sms.handoverLog.find((c) => c.sender === sender && c.destination === mobile)?.subjectId ?? null;
-  /** When the record says the subject replied: an SMS reply on its conversation, or an email reply on its visible thread. */
-  const repliedAt = (id: string): number =>
-    Math.min(...smsReplies.filter((r) => ownerOf(r.to, r.from) === id && (sms.handoverLog.find((c) => c.sender === r.to && c.destination === r.from)?.at ?? Infinity) <= r.at).map((r) => r.at), ...emailReplies.filter((r) => r.subjectId === id).map((r) => r.at));
-  const zoneFor = (s: Subject) => zoneOf(s.person?.zone ?? "", s.company.zone, campaigns[s.campaign]!.definition.timezone);
-  const runStartOf = (s: Subject) => Math.max(s.enrolledAt, campaigns[s.campaign]!.launchedAt ?? Infinity);
-  const addressOf = (s: Subject) => s.person?.email ?? (s.person ? null : s.company.inbox);
-  const mobileOf = (s: Subject) => s.person?.mobile ?? null;
+  function ownerOf(sender: string, mobile: string) {
+    return sms.handoverLog.find((c) => c.sender === sender && c.destination === mobile)?.subjectId ?? null;
+  }
+  /**
+   * The replies that reached a subject, in the order the app observed them (the providers' reply
+   * logs, in order): an SMS on a conversation it owned when the text was observed, or an email on its
+   * thread, which the generator only answers once the app knows it. `seenAt`: when the app observed
+   * it; `at`: its own time as the provider reported it.
+   */
+  function repliesOf(id: string): { channel: "email" | "sms"; seenAt: number; at: number }[] {
+    return [
+      ...sms.replyLog.filter((r) => ownerOf(r.to, r.from) === id && (sms.handoverLog.find((c) => c.sender === r.to && c.destination === r.from)?.at ?? Infinity) <= r.at).map((r) => ({ channel: "sms" as const, seenAt: r.at, at: Math.min(r.providerAt, r.at), order: sms.replyLog.indexOf(r) })),
+      ...email.replyLog.filter((r) => r.subjectId === id).map((r) => ({ channel: "email" as const, seenAt: r.at, at: Math.min(r.providerAt, r.at), order: email.replyLog.indexOf(r) })),
+    ].sort((a, b) => a.seenAt - b.seenAt || a.order - b.order);
+  }
+  /** The reply that stopped the subject: the first the app observed, whatever replies follow (verifier B1). */
+  function stopOf(id: string) {
+    return repliesOf(id)[0] ?? null;
+  }
+  function stoppedAt(id: string) {
+    return stopOf(id)?.seenAt ?? Infinity;
+  }
+  function zoneFor(s: Subject) {
+    return zoneOf(s.person?.zone ?? "", s.company.zone, campaigns[s.campaign]!.definition.timezone);
+  }
+  function runStartOf(s: Subject) {
+    return Math.max(s.enrolledAt, campaigns[s.campaign]!.launchedAt ?? Infinity);
+  }
+  function addressOf(s: Subject) {
+    return s.person?.email ?? (s.person ? null : s.company.inbox);
+  }
+  function mobileOf(s: Subject) {
+    return s.person?.mobile ?? null;
+  }
   /** Whether the subject's channel has a good detail at instant t, by the record. */
-  const reachesAt = (s: Subject, channel: TrackChannel, t: number): boolean => {
+  function reachesAt(s: Subject, channel: TrackChannel, t: number): boolean {
     const detail = channel === "email" ? addressOf(s) : mobileOf(s);
     return detail !== null && (channel === "email" ? emailBadAt(detail) : mobileBadAt(detail)) > t;
-  };
-  const deliveriesOf = (channel: TrackChannel) => (channel === "sms" ? sms.deliveryLog : email.deliveryLog);
-  const deliveryOf = (channel: TrackChannel, subjectId: string, stepId: string) => deliveriesOf(channel).find((d) => d.subjectId === subjectId && d.stepId === stepId);
+  }
+  function deliveriesOf(channel: TrackChannel) {
+    return (channel === "sms" ? sms.deliveryLog : email.deliveryLog);
+  }
+  function deliveryOf(channel: TrackChannel, subjectId: string, stepId: string) {
+    return deliveriesOf(channel).find((d) => d.subjectId === subjectId && d.stepId === stepId);
+  }
+  /** When the app can start a track: its start, once it can know the track it waits on finished. */
+  function startSeenAt(s: Subject, t: TrackDefinition): number | null {
+    const start = startOf(s, t);
+    if (start === null || t.start.kind === "entry") return start;
+    const rule = t.start;
+    const before = campaigns[s.campaign]!.definition.tracks.find((x) => x.id === rule.trackId);
+    const seen = before ? finishSeenAt(s, before) : null;
+    return seen === null ? null : Math.max(start, seen);
+  }
+  /** When the app could first know of a send: its sent event, or a lookup that confirmed it. */
+  function knownAt(channel: TrackChannel, d: { key: string; at: number; visibleAt: number }): number {
+    const looked = (channel === "sms" ? sms.lookupLog : email.lookupLog).find((l) => l.key === d.key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity;
+    return Math.min(d.visibleAt, looked);
+  }
+  function badAtOf(s: Subject, channel: TrackChannel): number {
+    const detail = channel === "email" ? addressOf(s) : mobileOf(s);
+    return detail === null ? -Infinity : channel === "email" ? emailBadAt(detail) : mobileBadAt(detail);
+  }
+  /**
+   * The instant the lead stops running, by the record: the first reply it observed, or the moment
+   * no channel of its campaign reaches it any more (the last of its channels' details known bad).
+   */
+  function endLimitOf(s: Subject): number {
+    const channels = [...new Set(campaigns[s.campaign]!.definition.tracks.map((t) => t.channel))];
+    return Math.min(stoppedAt(s.id), Math.max(...channels.map((c) => badAtOf(s, c))));
+  }
+  /**
+   * A track's start, by the record: launch for an entry track; for after(P, d), the start of the
+   * prospect's local day d days after the record's own finish of P (3.3). Null when it never starts
+   * (its predecessor never finished, or the lead stopped first).
+   */
+  function startOf(s: Subject, t: TrackDefinition): number | null {
+    const def = campaigns[s.campaign]!.definition;
+    const runStart = runStartOf(s);
+    if (!Number.isFinite(runStart)) return null;
+    const rule = t.start;
+    let start: number | null = runStart;
+    if (rule.kind === "after") {
+      const before = def.tracks.find((x) => x.id === rule.trackId);
+      const f = before ? finishOf(s, before) : null;
+      start = f === null ? null : dueAfter(f, rule.delayDays, zoneFor(s));
+    }
+    // Resolved when the earlier track finishes, even if the lead stops before it comes (it then never starts).
+    return start;
+  }
+  /**
+   * A track's finish, by the record, and when the app can know it: at its start when its channel has
+   * no detail or the detail is already known bad (skipped); at its last send when every step reached
+   * the provider and the app knew of that send before it knew the detail was bad (completed; known
+   * once its sent event or a confirming lookup came); otherwise at the instant the app learned the
+   * detail was bad (failed). Null while it runs, or when the lead stopped first.
+   */
+  function finishFacts(s: Subject, t: TrackDefinition): { at: number; seen: number } | null {
+    const start = startOf(s, t);
+    if (start === null || start > endLimitOf(s)) return null;
+    const bad = badAtOf(s, t.channel);
+    if (bad <= start) return { at: start, seen: start };
+    const sends = t.steps.map((st) => deliveryOf(t.channel, s.id, st.id));
+    const lastSend = sends.at(-1);
+    if (lastSend && sends.every((d) => d !== undefined) && knownAt(t.channel, lastSend) < bad) {
+      const at = Math.max(lastSend.at, firstCall(t.channel, s.id, t.steps.at(-1)!.id)?.at ?? 0);
+      return { at, seen: Math.max(at, knownAt(t.channel, lastSend)) };
+    }
+    return Number.isFinite(bad) && bad <= endLimitOf(s) ? { at: bad, seen: bad } : null;
+  }
+  function finishOf(s: Subject, t: TrackDefinition): number | null {
+    return finishFacts(s, t)?.at ?? null;
+  }
+  function finishSeenAt(s: Subject, t: TrackDefinition): number | null {
+    return finishFacts(s, t)?.seen ?? null;
+  }
+
 
   // ------------------------------------------------------------------------------------------
   const finishedSnapshots = new Map<string, string>();
@@ -361,10 +485,7 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
       const texted = sms.deliveryLog.filter((d) => d.at <= h.clock);
       if (texted.length > 0) {
         const d = pick(texted);
-        if (sms.prospectTexts(d.destination, pick(["STOP", "Thanks, not now", "Who is this?"]), d.sender)) {
-          smsReplies.push({ at: h.clock, from: d.destination, to: d.sender });
-          features.add("sms-reply");
-        }
+        textBack(d.destination, d.sender);
       }
       await h.tick();
     } else if (r < 0.8) {
@@ -381,9 +502,6 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
     } else {
       await h.advanceTo(h.clock + pick([MINUTE, HOUR, DAY]));
     }
-    // Replies injected by the hooks are recorded too.
-    for (const t of sms.replyLog) if (!smsReplies.some((x) => x.at === t.at && x.from === t.from && x.to === t.to)) smsReplies.push({ at: t.at, from: t.from, to: t.to });
-    for (const t of email.replyLog) if (!emailReplies.some((x) => x.at === t.at && x.subjectId === t.subjectId)) emailReplies.push({ at: t.at, subjectId: t.subjectId });
     await checkAll(false);
     if (problems.length > 0 || h.stopped) break;
   }
@@ -450,11 +568,16 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
       const column = await storedStatus(rec, id);
       if (column !== progress.status) problem(`1: ${id} stores ${String(column)} but derives ${progress.status}`);
 
-      // 14 and 2.4. A reply stops exactly the subject that owns it.
-      const replied = repliedAt(id);
-      if (replied <= now && progress.status !== "replied") problem(`14: ${id} replied at ${new Date(replied).toISOString()} but is ${progress.status}`);
-      if (progress.status === "replied" && replied > now) problem(`14: ${id} is replied, but no reply on its own conversation or thread reached it`);
-      if (progress.reply && progress.reply.at !== new Date(replied).toISOString()) problem(`14: ${id} shows a reply at ${progress.reply.at}; the record says ${new Date(replied).toISOString()}`);
+      // 14 and 2.4. A reply stops exactly the subject that owns it, and the status shows the reply
+      // that stopped it, whatever replies the app observes later, in any order and on either channel.
+      const stop = stopOf(id);
+      if (stop && stop.seenAt <= now && progress.status !== "replied") problem(`14: ${id} replied (observed ${new Date(stop.seenAt).toISOString()}) but is ${progress.status}`);
+      if (progress.status === "replied" && (!stop || stop.seenAt > now)) problem(`14: ${id} is replied, but no reply on its own conversation or thread reached it`);
+      // Replies observed at the same instant reach the app in one pass, in an order the record does not model: either may be the one that stopped it.
+      const firsts = stop ? repliesOf(id).filter((r) => r.seenAt === stop.seenAt) : [];
+      if (stop && progress.reply && !firsts.some((r) => progress.reply?.channel === r.channel && progress.reply.at === new Date(r.at).toISOString())) {
+        problem(`14: ${id} shows a ${progress.reply.channel} reply at ${progress.reply.at}; the reply that stopped it was ${stop.channel} at ${new Date(stop.at).toISOString()}`);
+      }
 
       // 20. Correct endings.
       const channels = [...new Set(def.tracks.map((t) => t.channel))];
@@ -469,39 +592,24 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
         problem(`20: ${id} had no usable channel at launch but started ${JSON.stringify(s.tracks.map((p) => [p.trackId, p.finishReason]))}`);
       }
 
-      // 7. Starts follow their rule, by the record's own calendar arithmetic.
-      for (const p of s.tracks) {
-        const t = def.tracks.find((x) => x.id === p.trackId);
-        if (!t || p.startAt === null) continue;
-        if (t.start.kind === "entry") {
-          if (p.startAt !== 0) problem(`7: ${id}/${t.id} starts at lead ${p.startAt}; an entry track starts at 0`);
-          continue;
+      // 7. Starts and finishes, and so every release, are the record's own: compared after every event.
+      const endLimit = endLimitOf(rec);
+      for (const t of def.tracks) {
+        const p = s.tracks.find((x) => x.trackId === t.id);
+        const start = startOf(rec, t);
+        const finish = finishOf(rec, t);
+        const startWall = p?.startAt != null ? runStart + p.startAt : null;
+        if (startWall !== null && startWall !== start) problem(`7: ${id}/${t.id} starts at ${new Date(startWall).toISOString()}; the record says ${start === null ? "never" : new Date(start).toISOString()} (${t.start.kind === "after" ? `${t.start.delayDays} day(s) after ${t.start.trackId}` : "entry"}, ${zone})`);
+        const startSeen = startSeenAt(rec, t);
+        if (start !== null && startSeen !== null && startSeen <= now && start < endLimit && p?.startedAt == null) problem(`7: ${id}/${t.id} was due to start at ${new Date(start).toISOString()} but has not`);
+        if (start !== null && startSeen !== null && startSeen <= now && startWall === null && s.subject.ended === null) problem(`7: ${id}/${t.id} has no start, though the record has it at ${new Date(start).toISOString()}`);
+        if (p?.finishedWall != null && p.finishedWall !== finish) {
+          // After the lead stopped, its clock is frozen: a late fact may finish a track at that frozen instant.
+          const frozen = s.subject.endedWall !== null && p.finishedWall === s.subject.endedWall && (finish === null || finish >= s.subject.endedWall);
+          if (!frozen) problem(`7: ${id}/${t.id} finished ${p.finishReason ?? ""} at ${new Date(p.finishedWall).toISOString()}; the record says ${finish === null ? "it has not finished" : new Date(finish).toISOString()}`);
         }
-        const before = s.tracks.find((x) => x.trackId === (t.start.kind === "after" ? t.start.trackId : ""));
-        if (!before || before.finishedWall === null) {
-          problem(`7: ${id}/${t.id} has a start though the track it waits on has not finished`);
-          continue;
-        }
-        const expectedWall = dueAfter(before.finishedWall, t.start.delayDays, zone);
-        if (p.startAt !== expectedWall - runStart) problem(`7: ${id}/${t.id} starts at ${new Date(runStart + p.startAt).toISOString()}; ${t.start.delayDays} day(s) after ${before.trackId} finished at ${new Date(before.finishedWall).toISOString()} is ${new Date(expectedWall).toISOString()} (${zone})`);
-        // The earlier track's finish, by the record: its last step's send, or its start when it was skipped there.
-        const earlier = def.tracks.find((x) => x.id === before.trackId)!;
-        const lastStep = earlier.steps.at(-1)!;
-        if (before.finishReason === "completed") {
-          const d = deliveryOf(earlier.channel, id, lastStep.id);
-          if (d && before.finishedWall !== Math.max(d.at, firstCall(earlier.channel, id, lastStep.id)?.at ?? 0)) problem(`7: ${id}/${earlier.id} finished at ${new Date(before.finishedWall).toISOString()}, not at its last send ${new Date(d.at).toISOString()}`);
-        }
-        if (before.finishReason === "skipped_missing_channel" && before.startAt !== null && before.finishedAt !== before.startAt) problem(`7: ${id}/${earlier.id} was skipped at ${before.finishedAt} but started at ${before.startAt}`);
-      }
-      // Release: a running lead whose track's predecessor has finished has that track's start resolved, and started once due.
-      if (s.subject.ended === null && runStart <= now) {
-        for (const t of def.tracks) {
-          const p = s.tracks.find((x) => x.trackId === t.id);
-          const rule = t.start;
-          const before = rule.kind === "after" ? s.tracks.find((x) => x.trackId === rule.trackId) : undefined;
-          const due = rule.kind === "entry" ? runStart : before?.finishedWall != null ? dueAfter(before.finishedWall, rule.delayDays, zone) : Infinity;
-          if (due <= now && p?.startedAt == null) problem(`7: ${id}/${t.id} was due to start at ${new Date(due).toISOString()} but has not`);
-        }
+        const finishSeen = finishSeenAt(rec, t);
+        if (finish !== null && finishSeen !== null && finishSeen <= now && finish < endLimit && p?.finishedWall == null) problem(`7: ${id}/${t.id} should have finished at ${new Date(finish).toISOString()} but has not`);
       }
 
       // 6. A finished track never changes; nothing is called for it after it finished.
@@ -615,13 +723,10 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
     for (const rec of subjects.values()) {
       const def = campaigns[rec.campaign]!.definition;
       const zone = zoneFor(rec);
-      const runStart = runStartOf(rec);
-      const s = states.get(rec.id);
-      const replied = repliedAt(rec.id);
+      const replied = stoppedAt(rec.id);
       for (const t of def.tracks) {
         const calls = callsOf(t.channel).filter((c) => c.subjectId === rec.id && t.steps.some((st) => st.id === c.stepId));
-        const p = s?.tracks.find((x) => x.trackId === t.id);
-        const startWall = p?.startAt != null ? runStart + p.startAt : null;
+        const startWall = startOf(rec, t);
         let previous: HandoverLogEntry | undefined;
         t.steps.forEach((step, i) => {
           const c = calls.find((x) => x.stepId === step.id);
@@ -651,6 +756,91 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
     }
   }
 
+  // ------------------------------------------------------------------------------------------
+  // 12. Priority, by the checker's own eligibility (ADR 0003 4.3, ruling 7): follow-ups before first
+  // messages to new leads, then oldest due, then subject and step id, among the items an account
+  // could take.
+
+  /** The account's state at the provider, as the fakes hold it. */
+  function accountUp(accountId: string): boolean {
+    const n = numbers.find((x) => x.id === accountId);
+    if (n) return n.healthy && n.listed !== false;
+    return inboxes.find((x) => x.id === accountId)?.healthy ?? false;
+  }
+
+  /**
+   * Whether the subject's pending step on `trackId` could go on `accountId` now, slot and pre-send
+   * check aside: the lead runs, the step is due and unclaimed, the window is open in its zone, the
+   * account is up and one it may use (its fixed sender, else its pool), the detail is good by the
+   * record, and for SMS the conversation from that number is free or its own by the call log.
+   */
+  function eligible(st: SubjectState, trackId: string, accountId: string, now: number, ignoreAttempt: string | null): boolean {
+    const rec = subjects.get(st.subject.id);
+    if (!rec || st.subject.ended !== null || stoppedAt(rec.id) <= now) return false;
+    const def = campaigns[rec.campaign]!.definition;
+    const t = def.tracks.find((x) => x.id === trackId);
+    const p = st.tracks.find((x) => x.trackId === trackId);
+    if (!t || !p || p.startedAt === null || p.finishedAt !== null || p.nextStepId === null || p.dueAt === null) return false;
+    const stepId = p.nextStepId;
+    if (st.results.some((r) => r.stepId === stepId)) return false;
+    if (st.attempts.some((a) => a.id !== ignoreAttempt && a.stepId === stepId && ["claimed", "handed", "accepted"].includes(a.state))) return false;
+    if (p.dueAt > (st.subject.clock.frozenSince ?? now) - st.subject.clock.frozenTotal) return false;
+    if (!inWindow(t.window, zoneFor(rec), now)) return false;
+    if (!accountUp(accountId)) return false;
+    const fixed = t.channel === "sms" ? st.subject.smsSender : st.subject.emailSender;
+    if (fixed !== null ? fixed !== accountId : !(t.channel === "sms" ? (def.smsPool ?? []) : def.emailPool).includes(accountId)) return false;
+    if (badAtOf(rec, t.channel) <= now) return false;
+    if (t.channel === "sms") {
+      const owner = ownerOf(accountId, mobileOf(rec) ?? "");
+      if (owner !== null && owner !== rec.id) return false;
+    }
+    return true;
+  }
+
+  function itemOf(st: SubjectState, trackId: string) {
+    const p = st.tracks.find((x) => x.trackId === trackId);
+    return { touched: st.subject.touched, dueWall: p?.dueWall ?? 0, subjectId: st.subject.id, stepId: p?.nextStepId ?? "" };
+  }
+
+  /** At a claim: no unclaimed item that could have gone on that account had a higher priority. */
+  async function checkClaimPriority(attemptId: string): Promise<void> {
+    const now = h.clock;
+    const a = await h.store.engine.attempt(attemptId);
+    if (!a) return;
+    const mine = await h.store.engine.subject(a.subjectId, now);
+    if (!mine) return;
+    const channel = campaigns[subjects.get(a.subjectId)?.campaign ?? 0]!.definition.tracks.find((t) => t.id === a.trackId)?.channel;
+    const ours = { ...itemOf(mine, a.trackId), stepId: a.stepId };
+    for (const id of subjects.keys()) {
+      if (id === a.subjectId) continue;
+      const st = await h.store.engine.subject(id, now);
+      if (!st) continue;
+      for (const t of campaigns[subjects.get(id)!.campaign]!.definition.tracks) {
+        if (t.channel !== channel || !eligible(st, t.id, a.accountId, now, null)) continue;
+        const theirs = itemOf(st, t.id);
+        if (higherPriority(theirs, ours)) {
+          problem(`12: ${a.subjectId}/${a.stepId} was claimed on ${a.accountId} before ${id}/${theirs.stepId}, which had priority and could have gone there`);
+        }
+      }
+    }
+  }
+
+  /** At a first handover call: no claimed attempt on that account that met every predicate but the slot and the pre-send check had a higher priority. */
+  async function checkHandoverPriority(call: HandoverLogEntry): Promise<void> {
+    const now = h.clock;
+    const mine = await h.store.engine.subject(call.subjectId, now);
+    const attempt = mine?.attempts.find((x) => x.id === call.attemptId);
+    if (!mine || !attempt || attempt.calls > 1) return;
+    const ours = { ...itemOf(mine, attempt.trackId), stepId: call.stepId };
+    for (const other of await h.store.engine.openAttempts()) {
+      if (other.state !== "claimed" || other.accountId !== call.sender || other.id === call.attemptId) continue;
+      const st = await h.store.engine.subject(other.subjectId, now);
+      if (!st || !eligible(st, other.trackId, other.accountId, now, other.id)) continue;
+      const theirs = { ...itemOf(st, other.trackId), stepId: other.stepId };
+      if (higherPriority(theirs, ours)) problem(`12: ${call.subjectId}/${call.stepId} was handed over on ${call.sender} before ${other.subjectId}/${other.stepId}, which had priority`);
+    }
+  }
+
   function mergeData(rec: Subject): Record<string, string> {
     const data: Record<string, string> = { company: rec.company.name, city: "" };
     if (rec.person) {
@@ -673,9 +863,10 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
 
 }
 
-/** The probe at every send call (invariant 2): the app's state at the moment of the call. */
-function probe(h: EngineHarness, problem: (what: string) => void, channel: "email" | "sms") {
+/** The probe at every send call (invariants 2 and 12): the app's state at the moment of the call. */
+function probe(h: EngineHarness, problem: (what: string) => void, channel: "email" | "sms", priority: (call: HandoverLogEntry) => Promise<void>) {
   return async (call: HandoverLogEntry): Promise<void> => {
+    await priority(call);
     const s = await h.store.engine.subject(call.subjectId, h.clock);
     if (!s) return;
     if (s.subject.ended !== null) problem(`2: ${channel} ${call.subjectId}/${call.stepId} was called while the lead was ${s.subject.ended}`);

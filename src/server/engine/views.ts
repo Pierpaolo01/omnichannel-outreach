@@ -10,9 +10,9 @@ import type { EngineStore } from "./engine-store.ts";
 const iso = (t: number | null) => (t === null ? null : new Date(t).toISOString());
 
 export function progressView(s: SubjectState, now: number): EnrollmentProgress {
-  // The reply that stopped the lead: the latest one at or before its ending. A later text or email
-  // is kept on the record, but does not move the date the status shows.
-  const reply = s.subject.ended === "replied" ? [...s.replies].sort((a, b) => a.atWall - b.atWall).filter((r) => r.atWall <= (s.subject.endedWall ?? Infinity)).at(-1) ?? s.replies[0] : undefined;
+  // The reply that stopped the lead, as stored when it stopped. A later text or email is kept on the
+  // record, but never moves the channel or date the status shows.
+  const reply = s.subject.ended === "replied" ? s.subject.stopReply : null;
   const lead = leadNow(s.subject.clock, now);
   const running = s.subject.clock.frozenSince === null;
   return {

@@ -301,7 +301,10 @@ export function applyReply(state: SubjectState, reply: { channel: "email" | "sms
   if (state.replies.some((r) => r.providerRef === reply.providerRef)) return state;
   const recorded = { ...state, replies: [...state.replies, reply] };
   if (state.subject.ended === "replied" || state.subject.ended === "interested_on_call") return recorded;
-  const ended = { ...recorded, subject: { ...recorded.subject, ended: "replied" as const, endedAt: leadNow(recorded.subject.clock, now), endedWall: now } };
+  const ended = {
+    ...recorded,
+    subject: { ...recorded.subject, ended: "replied" as const, endedAt: leadNow(recorded.subject.clock, now), endedWall: now, stopReply: { channel: reply.channel, atWall: reply.atWall } },
+  };
   return attend(synced(quiesce(ended), now), now);
 }
 

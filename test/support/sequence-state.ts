@@ -93,6 +93,7 @@ export function subjectState(fields: Partial<SubjectState> = {}): SubjectState {
       clock: { frozenSince: created, frozenTotal: created },
       emailSender: null,
       smsSender: null,
+      stopReply: null,
     },
     campaign: { id: "camp-1", launchedAt: null, pausedSince: null, version: 0, definitionVersion: 1, definition: definition() },
     tracks: [],
