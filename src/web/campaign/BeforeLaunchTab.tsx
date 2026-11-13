@@ -1,11 +1,11 @@
 import { useId, useRef, useState, type ReactNode } from "react";
 import { Link, useLocation } from "wouter";
-import type { BeforeLaunchView, CopyPreview, CopySegment, LaunchBlocker, PreviewLead } from "../../shared/api.ts";
+import type { BeforeLaunchView, CampaignDefinition, CopyPreview, CopySegment, LaunchBlocker, PreviewLead } from "../../shared/api.ts";
 import { useApi } from "../api.ts";
 import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
 import { campaignPath, longDate } from "../pages/CampaignPage.tsx";
-import { emailTrackOf, fieldLabel, liveSteps } from "./model.ts";
+import { emailTrackOf, fieldLabel, liveSteps, STEP_NOUN, trackName } from "./model.ts";
 import { CANNOT_SEND, ConflictNotice } from "./SequenceTab.tsx";
 import type { SequenceEditor } from "./useSequence.ts";
 
@@ -157,7 +157,7 @@ function Blockers({ campaignId, editor }: { campaignId: string; editor: Sequence
       ) : (
         <ul className="flex flex-col gap-2">
           {blockers.map((b) => {
-            const { title, detail, action, stepId } = describeBlocker(b, firstUsing, track?.id ?? null);
+            const { title, detail, action, stepId } = describeBlocker(b, firstUsing, editor.view.definition, track?.id ?? null);
             return (
               <li key={JSON.stringify(b)} className="flex flex-wrap items-start gap-x-2.5 gap-y-2 rounded-field bg-crit-soft px-3.5 py-3 text-[14px]">
                 <Icon name="bad" className="mt-0.5 size-[18px] text-crit" />
@@ -180,32 +180,43 @@ function Blockers({ campaignId, editor }: { campaignId: string; editor: Sequence
 }
 
 /**
- * What a blocker says, and where it is fixed. A blocker of an SMS track (a campaign can have one
- * since ticket 13a, defined outside this editor) is named as the SMS track's, with nothing to open:
- * editing SMS tracks arrives with a later release.
+ * What a blocker says, and where it is fixed. A blocker is named by the track it belongs to, by
+ * that track's own channel (email, SMS, phone), never by its position. This editor opens one email
+ * track (`emailTrackOf`). A blocker on any other track says which track it is and that it cannot be
+ * edited here yet, with nothing to open: a campaign can have such tracks since ticket 13a, defined
+ * outside this editor.
  */
-function describeBlocker(b: LaunchBlocker, firstUsing: (field: string) => string | undefined, emailTrackId: string | null): { title: string; detail: ReactNode; action: string | null; stepId?: string } {
-  const elsewhere = "Editing SMS tracks arrives with a later release.";
-  if (b.kind === "empty_copy" && b.trackId !== emailTrackId) return { title: `Text ${b.stepNumber} has no message`, detail: elsewhere, action: null };
-  if (b.kind === "no_sender" && b.channel !== "email") return { title: "The SMS track has no connected sender number", detail: `It can’t send until a number is connected. ${elsewhere}`, action: null };
-  if (b.kind === "empty_copy") {
+function describeBlocker(b: LaunchBlocker, firstUsing: (field: string) => string | undefined, def: CampaignDefinition, editableId: string | null): { title: string; detail: ReactNode; action: string | null; stepId?: string } {
+  if (b.kind === "missing_merge_field") {
+    const stepId = firstUsing(b.field);
     return {
-      title: b.part === "subject" ? `Email ${b.stepNumber} has no subject` : `Email ${b.stepNumber} has no copy`,
+      title: `${capitalise(fieldLabel(b.field))} has no fallback`,
+      detail: `${b.leadsMissing} ${b.leadsMissing === 1 ? "lead has" : "leads have"} no ${fieldLabel(b.field)}. Add a fallback or remove the field.${stepId ? "" : " It is used only in a track this editor can’t open yet."}`,
+      action: stepId ? "Add fallback" : null,
+      ...(stepId ? { stepId } : {}),
+    };
+  }
+  const track = def.tracks.find((t) => t.id === b.trackId);
+  const channel = track?.channel ?? (b.kind === "no_sender" && (b.channel === "sms" || b.channel === "call") ? b.channel : "email");
+  const editable = b.trackId === editableId;
+  const name = track ? capitalise(trackName(def, track)) : "A track";
+  const several = track !== undefined && def.tracks.filter((t) => !t.removed && t.channel === channel).length > 1;
+  const cannot = channel === "email" ? `This editor opens one email track, so ${name} can’t be edited here yet.` : `Editing ${channel === "sms" ? "SMS" : "phone"} tracks arrives with a later release.`;
+  if (b.kind === "empty_copy") {
+    const noun = `${STEP_NOUN[channel]} ${b.stepNumber}`;
+    const what = b.part === "subject" ? `${noun} has no subject` : `${noun} has no ${channel === "email" ? "copy" : "message"}`;
+    if (!editable) return { title: `${name}: ${what}`, detail: cannot, action: null };
+    return {
+      title: several ? `${name}: ${what}` : what,
       detail: b.part === "subject" ? "Give it a subject, or let it continue the thread." : "Write it, or remove the email.",
       action: "Write it",
       stepId: b.stepId,
     };
   }
-  if (b.kind === "missing_merge_field") {
-    const stepId = firstUsing(b.field);
-    return {
-      title: `${capitalise(fieldLabel(b.field))} has no fallback`,
-      detail: `${b.leadsMissing} ${b.leadsMissing === 1 ? "lead has" : "leads have"} no ${fieldLabel(b.field)}. Add a fallback or remove the field.`,
-      action: "Add fallback",
-      ...(stepId ? { stepId } : {}),
-    };
-  }
-  return { title: "The email track has no connected sender inbox", detail: "It can’t send until an inbox is connected.", action: "Open track" };
+  const sender = channel === "email" ? "inbox" : "number";
+  const title = `${name} has no connected sender ${sender}`;
+  if (!editable) return { title, detail: `It can’t send until ${channel === "email" ? "an inbox" : "a number"} is connected. ${cannot}`, action: null };
+  return { title, detail: "It can’t send until an inbox is connected.", action: "Open track" };
 }
 
 const capitalise = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -355,7 +366,7 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
       {load.otherTracksChangeTiming !== null ? (
         <p className="mt-2 text-[13px] text-ink-2">
           {load.otherTracksChangeTiming === "this_campaign"
-            ? "Can’t project the load yet: another track in this campaign (an SMS track, or a second email track) can send before or alongside the emails and change when they go, and the estimate doesn’t include it yet. A track that starts after the email track keeps the estimate."
+            ? thisCampaignsOtherTracks(editor.view.definition)
             : "Can’t project the load yet: another running campaign on these inboxes has a track (an SMS track, or a second email track) that changes when its emails go, and the estimate doesn’t include it yet."}
         </p>
       ) : blocked ? (
@@ -379,6 +390,16 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
       )}
     </>
   );
+}
+
+/** Why this campaign's load is not projected, naming the tracks it actually has. */
+function thisCampaignsOtherTracks(def: CampaignDefinition): string {
+  const live = def.tracks.filter((t) => !t.removed && t.branch === "main");
+  const sms = live.some((t) => t.channel === "sms");
+  const emails = live.filter((t) => t.channel === "email").length;
+  const has = [emails > 1 ? (emails === 2 ? "a second email track" : `${emails - 1} more email tracks`) : null, sms ? "an SMS track that doesn’t start after the email track" : null].filter((x) => x !== null).join(" and ");
+  if (has === "") return "Can’t project the load yet: the email track doesn’t start at launch, and the estimate covers only an email track that does.";
+  return `Can’t project the load yet: the estimate covers one email track, and this campaign also has ${has}, which can change when its emails go.${sms ? " An SMS track that starts after the email track keeps the estimate." : ""}`;
 }
 
 const gap = (seconds: number) => (seconds < 120 ? `${seconds} seconds` : `${Math.round(seconds / 60)} minutes`);
