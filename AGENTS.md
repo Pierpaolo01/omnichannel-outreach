@@ -21,8 +21,9 @@ Internal product that coordinates business and decision-maker outreach around a 
 ## Boundaries
 
 - No outreach to real prospects. Test sends and test calls go only to contacts the user has explicitly designated as their own, recorded in the access handoff. If none is designated for a channel, send nothing on it.
-- No purchases, number provisioning, paid hosting, new account connections, collaborator invitations or public sharing.
-- No secrets, browser profiles or raw prospect records in Git, issues, PRs, screenshots, recordings or logs. Fixtures and demo data are fictitious. Credentials live in `~/.config/omnichannel-outreach/runtime.env`; load them, never print them.
+- No purchases, number provisioning, paid hosting, new account connections or collaborator invitations.
+- The repository is public, by the principal's decision on 13 November 2026. Everything pushed is world-readable: code, commit messages, issues, pull requests, comments, evidence and their edit history. Check each of them before it leaves the machine.
+- No secrets, browser profiles, raw prospect records, local file paths or machine usernames in Git, issues, PRs, screenshots, recordings or logs. Fixtures and demo data are fictitious. Credentials and the local paths of the real scraper exports (`SCRAPER_PEOPLE_CSV`, `SCRAPER_BUSINESSES_CSV`) live in `~/.config/omnichannel-outreach/runtime.env`; load them, never print them. Results from the real exports are reported as aggregate counts only.
 - Operation is local-only for now. SMS and calling must not be presented as working provider integrations until they are provisioned and verified. Report an acceptance condition that cannot yet be verified as unverified.
 - The spec's out-of-scope list and optional-polish list stay out. Do not expand a ticket beyond its acceptance criteria.
 
