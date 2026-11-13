@@ -41,7 +41,8 @@ The council reviews the ADR before implementation starts. `docs/adr/0001-applica
 - The pull request description links the ticket, lists what was verified and how, and lists anything unverified.
 - Evidence is published as a pull request comment: for UI, screenshots of every changed screen in light and dark theme plus each loading, empty, error and success state the slice has, and a short recording of the ticket's demonstration; for non-UI, the command output. Evidence uses fictitious data only.
 - Every server, browser and background job you started is stopped.
-- Report as soon as the branch is pushed: branch, head commit, pull request URL, criteria status, what remains unverified. The coordinator confirms the CI run.
+- Report as soon as the branch is pushed: branch, head commit, pull request URL, criteria status, what remains unverified. The coordinator confirms the CI run and the review bot's result on the final head.
+- The review bot (Pullfrog) reviews each push. Verify each of its findings against the code, fix a real one with a regression test that fails first, and reply on its thread with what you did; answer an invalid one with the evidence.
 
 ## What blocks a merge
 
@@ -50,7 +51,7 @@ One bar, for implementers, verifiers and reviewers alike. A finding **blocks** w
 - wrong outreach, or outreach after a reply, a stop or during a pause;
 - lost or corrupted records;
 - a security or privacy hole;
-- a failed acceptance criterion or a failing check;
+- a failed acceptance criterion, a failing check, or an unanswered review-bot finding on the final head;
 - a foundation that a later ticket would have to tear up.
 
 Everything else is a **follow-up**. Well-formed input means what the real sources produce: for the scraper export, unique non-blank IDs within each file. A database that only an unmerged head could have created is not a merge concern.
