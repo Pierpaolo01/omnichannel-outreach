@@ -77,17 +77,17 @@ describe("the listing rule and the queue (2.3, 4.4)", () => {
     const monday18 = MONDAY_9 + 9 * H;
     expect(bucketOf(s, task, monday18)).toBeNull();
     expect(isListed(s, task)).toBe(true);
-    const logged = logCallOutcome(s, task.id, { outcome: "no_answer", numberId: "d-direct", note: "", noteScope: "person" }, monday18, { attempt: "a", note: "n" });
+    const logged = logCallOutcome(s, task.id, { requestId: "r1", outcome: "no_answer", numberId: "d-direct", note: "", noteScope: "person" }, monday18, { attempt: "a", note: "n" });
     expect(logged.ok).toBe(true);
     // Saturday: Mon-Fri hours never open, so the call is not on the list and its outcome is refused.
     const saturday = MONDAY_9 + 5 * DAY;
     expect(isListed(atDay(s, saturday), task)).toBe(false);
-    expect(logCallOutcome(atDay(s, saturday), task.id, { outcome: "no_answer", numberId: "d-direct", note: "", noteScope: "person" }, saturday, { attempt: "a", note: "n" })).toEqual({ ok: false, reason: "This call is not on today's list." });
+    expect(logCallOutcome(atDay(s, saturday), task.id, { requestId: "r1", outcome: "no_answer", numberId: "d-direct", note: "", noteScope: "person" }, saturday, { attempt: "a", note: "n" })).toEqual({ ok: false, reason: "This call is not on today's list." });
   });
 
   test("skip for now keeps the task and the hold on the track, and is not a call made", () => {
     const s = placed(MONDAY_9);
-    const out = logCallOutcome(s, "task-1", { outcome: "skip_for_now", numberId: null, note: "", noteScope: "person" }, MONDAY_9 + 5 * MIN, { attempt: "a", note: "n" });
+    const out = logCallOutcome(s, "task-1", { requestId: "r1", outcome: "skip_for_now", numberId: null, note: "", noteScope: "person" }, MONDAY_9 + 5 * MIN, { attempt: "a", note: "n" });
     if (!out.ok) throw new Error(out.reason);
     expect(out.state.callTasks[0]).toMatchObject({ open: true, skippedWall: MONDAY_9 + 5 * MIN });
     expect(out.state.subject.touched).toBe(false);

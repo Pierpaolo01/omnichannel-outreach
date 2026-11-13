@@ -233,6 +233,8 @@ export interface CallTask {
 /** One logged outcome on a call task. Skip for now is recorded too, but is not a call made. */
 export interface CallAttempt {
   readonly id: string;
+  /** The client's key for the action that logged it: unique, so a retry or a double click is logged once. */
+  readonly requestId: string;
   readonly taskId: string;
   readonly outcome: CallOutcome;
   /** The number the user chose to dial; none for skip for now. */

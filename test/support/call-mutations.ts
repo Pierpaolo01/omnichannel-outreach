@@ -85,6 +85,13 @@ const RULES: Record<string, Partial<Rules>> = {
   "calls placed newest due first": {
     callOrder: (a, b) => (a.touched !== b.touched || a.dueWall === b.dueWall ? R.callOrder(a, b) : b.dueWall - a.dueWall),
   },
+  // Verifier B3 and B1 on a1399ce.
+  "a replayed action is logged again": {
+    logCallOutcome: (s, taskId, input, now, ids, listed) => R.logCallOutcome(s, taskId, { ...input, requestId: `${input.requestId}/${ids.attempt}` }, now, ids, listed),
+  },
+  "a person note kept on the company": {
+    logCallOutcome: (s, taskId, input, now, ids, listed) => R.logCallOutcome(s, taskId, { ...input, noteScope: "company" }, now, ids, listed),
+  },
   // ADR 0003 9.2: "a track that finishes without closing its call task", whichever change finishes it.
   "a track that finishes without closing its call task": {
     evaluate: (s, now, options) => keepTasksOpen(s, R.evaluate(s, now, options)),
@@ -97,7 +104,7 @@ const RULES: Record<string, Partial<Rules>> = {
 
 /** The invariant each mutation must break, and the seed offset known to show it (refreshed by the CI search). */
 const EXPECTED: Record<string, { invariant: string; seed: number }> = {
-  "outcome on an unlisted task": { invariant: "16", seed: 5 },
+  "outcome on an unlisted task": { invariant: "16", seed: 7 },
   "interested closes only its own task": { invariant: "16", seed: 16 },
   "daily call capacity ignored": { invariant: "17", seed: 0 },
   "committed calls not counted": { invariant: "17", seed: 1 },
@@ -105,9 +112,11 @@ const EXPECTED: Record<string, { invariant: string; seed: number }> = {
   "an unworked call holds the parallel tracks": { invariant: "18", seed: 6 },
   "the tracks after a call start when it is placed": { invariant: "7", seed: 3 },
   "skip for now finishes the call": { invariant: "7", seed: 3 },
-  "a wrong number leaves the number good": { invariant: "19", seed: 6 },
+  "a wrong number leaves the number good": { invariant: "19", seed: 10 },
   "an outcome on a bad number accepted": { invariant: "16", seed: 6 },
   "calls placed newest due first": { invariant: "12", seed: 3 },
+  "a replayed action is logged again": { invariant: "16", seed: 0 },
+  "a person note kept on the company": { invariant: "16", seed: 0 },
   "a track that finishes without closing its call task": { invariant: "16", seed: 0 },
 };
 

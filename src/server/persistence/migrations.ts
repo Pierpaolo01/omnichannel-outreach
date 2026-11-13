@@ -481,6 +481,8 @@ export const MIGRATIONS: readonly Migration[] = [
         id TEXT PRIMARY KEY,
         task_id TEXT NOT NULL REFERENCES call_tasks(id),
         subject_id TEXT NOT NULL REFERENCES subjects(id),
+        -- The client's key for the action that logged it: one action is logged once, whatever retries it.
+        request_id TEXT NOT NULL UNIQUE,
         outcome TEXT NOT NULL CHECK (outcome IN ('no_answer', 'voicemail', 'gatekeeper', 'wrong_number', 'interested', 'skip_for_now')),
         number_detail_id TEXT REFERENCES contact_details(id),
         note TEXT NOT NULL,

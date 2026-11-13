@@ -7,6 +7,7 @@ import { checkScraperFile, parseScraperExport } from "../domain/scraper-export.t
 import type { ApiError, Campaign, FileCheckResult, SmsProviderStatus } from "../shared/api.ts";
 import { CAMPAIGN_NAME_MAX } from "../shared/limits.ts";
 import { checkApiRequest } from "./guard.ts";
+import { invalidBodyMessage, requestObject } from "./request-body.ts";
 import type { OutreachStore } from "./persistence/store.ts";
 import { launchCheck } from "../domain/sequence/blockers.ts";
 import { definitionProblems, emptyDefinition, type CampaignDefinition } from "../domain/sequence/definition.ts";
@@ -33,8 +34,8 @@ export interface AppDependencies {
   readonly smsProvider?: "none" | "test-simulator";
 }
 
-const windowRule = z.object({ day: z.number().int().min(0).max(6), start: z.number().int().min(0).max(23), end: z.number().int().min(0).max(24) });
-const stepBody = z.object({
+const windowRule = requestObject({ day: z.number().int().min(0).max(6), start: z.number().int().min(0).max(23), end: z.number().int().min(0).max(24) });
+const stepBody = requestObject({
   id: z.string().trim().min(1).max(100),
   waitDays: z.number(),
   subject: z.string().max(1_000).default(""),
@@ -42,17 +43,17 @@ const stepBody = z.object({
   threading: z.enum(["new_subject", "continue_thread"]),
   removed: z.boolean().default(false),
 });
-const trackBody = z.object({
+const trackBody = requestObject({
   id: z.string().trim().min(1).max(100),
   channel: z.enum(["email", "sms", "call"]),
   branch: z.enum(["main", "win_back"]).default("main"),
   window: z.array(windowRule).max(14),
   steps: z.array(stepBody).max(50),
-  start: z.union([z.object({ kind: z.literal("entry") }), z.object({ kind: z.literal("after"), trackId: z.string(), delayDays: z.number() })]).default({ kind: "entry" }),
+  start: z.union([requestObject({ kind: z.literal("entry") }), requestObject({ kind: z.literal("after"), trackId: z.string(), delayDays: z.number() })]).default({ kind: "entry" }),
   removed: z.boolean().default(false),
   declinedPath: z.enum(["stop", "continue", "win_back"]).optional(),
 });
-const definitionBody = z.object({
+const definitionBody = requestObject({
   timezone: z.string().trim().min(1),
   callSkipLimitDays: z.number().default(2),
   emailPool: z.array(z.string().min(1).max(200)).max(100),
@@ -64,12 +65,17 @@ const definitionBody = z.object({
 /** The user's zone: the machine's, which a campaign's default zone starts from (ADR 0003 1.1). */
 const machineZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-const callSettingsBody = z.object({
+const callSettingsBody = requestObject({
   dailyCapacity: z.number().int("The daily call capacity is a whole number.").positive("The daily call capacity is at least 1.").max(1_000),
   userZone: z.string().trim().refine((z) => isTimeZone(z), "Use an IANA time zone such as Europe/London."),
 });
 // Not interested, callback and redial arrive with tickets 15 and 16; they are refused here until then.
-const outcomeBody = z.object({
+const outcomeBody = requestObject({
+  /**
+   * The client's key for this one action: the same key answers with the first result and stores
+   * nothing again, so a retry or a double click never logs an outcome or a note twice (verifier B3).
+   */
+  requestId: z.string().trim().min(1, "Send a request id with each outcome.").max(200),
   outcome: z.enum(["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "skip_for_now"], { message: "Choose one of the outcomes this release offers: no answer, voicemail left, gatekeeper or not reached, wrong or dead number, interested, or skip for now." }),
   numberId: z.string().min(1).max(200).nullish(),
   note: z.string().max(10_000).default(""),
@@ -89,8 +95,7 @@ const isTimeZone = (value: string): boolean => {
   }
 };
 
-const fileNames = z
-  .object({ people: z.string().max(300).nullish(), businesses: z.string().max(300).nullish() })
+const fileNames = requestObject({ people: z.string().max(300).nullish(), businesses: z.string().max(300).nullish() })
   .nullish();
 
 /** Both files or neither: a campaign can be created before its first import. */
@@ -100,25 +105,25 @@ const scraperFiles = {
   fileNames,
 };
 
-const newCampaignBody = z
-  .object({
-    name: z.string().trim().min(1, "Give the campaign a name.").max(CAMPAIGN_NAME_MAX, `Keep the campaign name to ${CAMPAIGN_NAME_MAX} characters or fewer.`),
-    defaultTimezone: z
-      .string()
-      .trim()
-      .refine(isTimeZone, "Use an IANA time zone such as Europe/London.")
-      .nullish(),
-    ...scraperFiles,
-  })
-  .refine((b) => (b.businessesCsv === undefined) === (b.peopleCsv === undefined), "Add both the People and Businesses files.");
+const newCampaignBody = requestObject({
+  name: z.string().trim().min(1, "Give the campaign a name.").max(CAMPAIGN_NAME_MAX, `Keep the campaign name to ${CAMPAIGN_NAME_MAX} characters or fewer.`),
+  defaultTimezone: z
+    .string()
+    .trim()
+    .refine(isTimeZone, "Use an IANA time zone such as Europe/London.")
+    .nullish(),
+  ...scraperFiles,
+}).refine((b) => (b.businessesCsv === undefined) === (b.peopleCsv === undefined), "Add both the People and Businesses files.");
 
-const importBody = z.object({
+const importBody = requestObject({
   businessesCsv: z.string().min(1, "Add the Businesses file."),
   peopleCsv: z.string().min(1, "Add the People file."),
   fileNames,
 });
 
-const checkBody = z.object({ businessesCsv: z.string().optional(), peopleCsv: z.string().optional() });
+const launchBody = requestObject({});
+
+const checkBody = requestObject({ businessesCsv: z.string().optional(), peopleCsv: z.string().optional() });
 
 /** The HTTP interface. Every route is under /api; the web client is served separately. */
 export function createApp({ store, now, newId, engine: givenEngine, emailProvider, smsProvider = "none" }: AppDependencies): Hono {
@@ -312,6 +317,9 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   app.post("/campaigns/:id/launch", async (c) => {
     const campaign = await store.campaign(c.req.param("id"));
     if (!campaign) return notFound(c, "campaign");
+    // Launch takes no options: a field in its body is refused, like any other.
+    const body = launchBody.safeParse((await readJson(c)) ?? {});
+    if (!body.success) return invalid(c, body.error);
     const outcome = await engine.launch(campaign.id);
     if (!outcome.ok) {
       const message =
@@ -356,7 +364,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     if (!body.success) return invalid(c, body.error);
     const id = c.req.param("id");
     if ((await store.engine.callTaskSubject(id)) === null) return notFound(c, "call task");
-    const outcome = await engine.logCallOutcome(id, { outcome: body.data.outcome, numberId: body.data.numberId ?? null, note: body.data.note, noteScope: body.data.noteScope });
+    const outcome = await engine.logCallOutcome(id, { requestId: body.data.requestId, outcome: body.data.outcome, numberId: body.data.numberId ?? null, note: body.data.note, noteScope: body.data.noteScope });
     if (!outcome.ok) return c.json<ApiError>({ error: { code: "outcome_refused", message: outcome.reason } }, 409);
     return c.json(await callTaskView(store, id, Date.parse(now())));
   });
@@ -392,8 +400,7 @@ async function readJson(c: Context): Promise<unknown> {
 }
 
 function invalid(c: Context, error: z.ZodError) {
-  const message = error.issues.map((issue) => issue.message).join(" ") || "The request body is not valid.";
-  return c.json<ApiError>({ error: { code: "invalid_request", message } }, 400);
+  return c.json<ApiError>({ error: { code: "invalid_request", message: invalidBodyMessage(error) } }, 400);
 }
 
 function notFound(c: Context, what: string) {

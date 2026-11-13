@@ -157,6 +157,8 @@ export interface EngineStore {
   /** Who a subject is: its person (null for a company lead), company and campaign. */
   subjectParties(subjectId: string): Promise<{ readonly personId: string | null; readonly companyId: string; readonly campaignId: string } | null>;
   setCallSettings(settings: CallSettings): Promise<void>;
+  /** The task a request id was logged on, whichever subject's it is, or null. */
+  callRequestTask(requestId: string): Promise<string | null>;
   /** The subject a call task belongs to, or null for an unknown task. */
   callTaskSubject(taskId: string): Promise<string | null>;
   /** Subjects with an open call task, whatever their state: the call list is built from them. */

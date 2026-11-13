@@ -123,6 +123,8 @@ export function definitionProblems(def: CampaignDefinition, previous: CampaignDe
     const steps = liveSteps(track);
     // A phone track is one call with no follow-ups (spec "Phone tracks"); the call has no copy.
     if (track.channel === "call" && steps.length !== 1) problems.push(`${name} is one call with no follow-ups: give it exactly one step.`);
+    // A call has no copy: the campaign's call script shows on every call task (verifier F2 on a1399ce).
+    if (track.channel === "call" && steps.some((st) => st.subject.trim() !== "" || st.body.trim() !== "")) problems.push(`${capital(label(track))}'s call has no copy of its own: write talking points in the campaign's call script.`);
     steps.forEach((step, i) => {
       const stepLabel = `Step ${i + 1}`;
       if (i === 0 && step.waitDays !== 0) problems.push(`${stepLabel} is the first step, so it has no wait.`);

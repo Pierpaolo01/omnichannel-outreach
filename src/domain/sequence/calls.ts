@@ -142,6 +142,8 @@ export function placeCall(state: SubjectState, item: ReadyItem, now: number, tas
 }
 
 export interface OutcomeInput {
+  /** The client's key for this one action (verifier B3): the same key is answered with the first result and stores nothing again. */
+  readonly requestId: string;
   readonly outcome: CallOutcome;
   /** The number the user dialled; required for every outcome but skip for now. */
   readonly numberId: string | null;
@@ -154,7 +156,9 @@ export interface OutcomeInput {
   readonly noteScope: "person" | "company";
 }
 
-export type OutcomeResult = { readonly ok: true; readonly state: SubjectState } | { readonly ok: false; readonly reason: string };
+export type OutcomeResult = { readonly ok: true; readonly state: SubjectState; readonly replayed?: boolean } | { readonly ok: false; readonly reason: string };
+
+export const REQUEST_ID_REUSED = "This request id was already used for another call: send a new one.";
 
 /**
  * Logs one outcome on a call task (ADR 0003 2.4 "Calls"), accepted only while the task is listed.
@@ -172,6 +176,10 @@ export function logCallOutcome(
   ids: { attempt: string; note: string },
   listed: (state: SubjectState, task: CallTask) => boolean = isListed,
 ): OutcomeResult {
+  // A key already logged is the same action again: it is answered with the first result, before any
+  // other check, so a retry of an outcome that closed its task is not refused as a stale screen.
+  const earlier = state.callAttempts.find((a) => a.requestId === input.requestId);
+  if (earlier) return earlier.taskId === taskId ? { ok: true, state, replayed: true } : { ok: false, reason: REQUEST_ID_REUSED };
   const task = state.callTasks.find((t) => t.id === taskId);
   if (!task) return { ok: false, reason: "There is no such call task." };
   if (!task.open) return { ok: false, reason: "This call is no longer on the list: its outcome was logged or its track has finished." };
@@ -186,7 +194,7 @@ export function logCallOutcome(
   const at = leadNow(state.subject.clock, now);
   const atWall = wallOfLead(state.subject.clock, now);
   const note = input.note.trim();
-  const attempt: CallAttempt = { id: ids.attempt, taskId, outcome: input.outcome, numberDetailId: number?.id ?? null, note, at, atWall: now };
+  const attempt: CallAttempt = { id: ids.attempt, requestId: input.requestId, taskId, outcome: input.outcome, numberDetailId: number?.id ?? null, note, at, atWall: now };
   // The note belongs where the user put it; never inferred from the lead's numbers (review bot on a1399ce).
   const notes: NoteDraft[] = note === "" ? [] : [{ id: ids.note, owner: input.noteScope, callAttemptId: attempt.id, body: note, atWall: now }];
   let s: SubjectState = { ...state, callAttempts: [...state.callAttempts, attempt], newNotes: [...state.newNotes, ...notes] };

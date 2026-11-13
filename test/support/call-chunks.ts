@@ -14,12 +14,13 @@ import { FULL_SEARCH, inShard, SEED } from "./sequence-chunks.ts";
 /**
  * Offsets from SEED. Chosen greedily from a sweep of all 100 seeds so that together they reach every
  * behaviour the runs report (`stats.features`): every capacity, a call waiting for room and one
- * waiting behind committed calls, later today and rolled-over calls, every outcome, a refused one and one on a number already marked bad,
+ * waiting behind committed calls, later today and rolled-over calls, every outcome, a refused one and one on a number already marked bad, a wrong mobile failing its SMS track, one action posted
+ * twice at once, again, and again after a restart,
  * two phone tracks and interested closing the other's task, a track after a call and one beside it,
  * a phone track skipped when no good number is left, replies by email and SMS, and all four endings.
  * Refresh it when the generator changes.
  */
-export const CALL_FIXED_SEEDS: readonly number[] = [14, 16, 29, 77];
+export const CALL_FIXED_SEEDS: readonly number[] = [12, 16, 27, 36, 45, 70, 93];
 const SEARCH_SEEDS = 100;
 /** Seed offsets each mutation's search tries after its recorded seed. */
 const MAX_SEEDS = 30;

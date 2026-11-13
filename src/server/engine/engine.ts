@@ -6,7 +6,7 @@
  */
 import { ENGINE_PARAMS, isLive, type AttemptEffect, type AttemptEvent, type CallAnswer, type WorkEvent } from "../../domain/sequence/attempt.ts";
 import { launchCheck, type LaunchCheck } from "../../domain/sequence/blockers.ts";
-import type { OutcomeInput } from "../../domain/sequence/calls.ts";
+import { REQUEST_ID_REUSED, type OutcomeInput } from "../../domain/sequence/calls.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
@@ -685,17 +685,26 @@ export class Engine {
     return this.ticks.run(async () => {
       const subjectId = await this.store.callTaskSubject(taskId);
       if (subjectId === null) return { ok: false as const, reason: "There is no such call task." };
+      // A key logged on another subject's call: the subject's own transaction cannot see it.
+      const loggedOn = await this.store.callRequestTask(input.requestId);
+      if (loggedOn !== null && loggedOn !== taskId) return { ok: false as const, reason: REQUEST_ID_REUSED };
       const now = this.now();
       const refused: { reason: string | null } = { reason: null };
       const ids = { attempt: this.newId(), note: this.newId() };
-      await this.store.update(subjectId, now, (s) => {
-        const out = this.rules.logCallOutcome(s, taskId, input, now, ids, this.rules.isListed);
-        if (!out.ok) {
-          refused.reason = out.reason;
-          return null;
-        }
-        return out.state;
-      });
+      try {
+        await this.store.update(subjectId, now, (s) => {
+          const out = this.rules.logCallOutcome(s, taskId, input, now, ids, this.rules.isListed);
+          if (!out.ok) {
+            refused.reason = out.reason;
+            return null;
+          }
+          return out.replayed ? null : out.state;
+        });
+      } catch (error) {
+        // Another process logged this key on another subject's call between the check and this write.
+        if (error instanceof Error && error.message.includes("call_attempts.request_id")) return { ok: false as const, reason: REQUEST_ID_REUSED };
+        throw error;
+      }
       if (refused.reason !== null) return { ok: false as const, reason: refused.reason };
       await this.runTick();
       return { ok: true as const };

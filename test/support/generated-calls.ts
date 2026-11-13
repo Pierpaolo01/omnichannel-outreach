@@ -20,10 +20,12 @@ import { dueAfter, firstOpen, higherPriority, inWindow, local, startOfDay, zoneO
  * days, every day, or evenings; people with and without email, a mobile or a direct line, at companies
  * with and without a main line, and a company lead; a user zone and a small daily call capacity, so
  * calls wait for room; outcomes chosen from the list (no answer, voicemail, gatekeeper, wrong number
- * on a direct line or main line, interested, skip for now), outcomes attempted on tasks that are not
- * listed (closed, of an ended lead, outside the prospect's calling day) and on numbers already marked
- * bad, interested on one phone track while another of the lead's tasks is open, and email and SMS
- * replies. Each run ends with a drain in which the user works every call on the list.
+ * on any kind of number, a mobile's ending its SMS track, interested, skip for now), outcomes attempted
+ * on tasks that are not listed (closed, of an ended lead, outside the prospect's calling day) and on
+ * numbers already marked bad, interested on one phone track while another of the lead's tasks is open,
+ * the same action posted twice at once, posted again, and posted again after a restart, notes on the
+ * person or the company, and email and SMS replies. Each run ends with a drain in which the user works
+ * every call on the list.
  *
  * The record imports nothing from src/domain/sequence/. From the definitions, the people, the user's
  * own logged outcomes and the providers' logs it predicts: each track's start and finish, which
@@ -31,8 +33,9 @@ import { dueAfter, firstOpen, higherPriority, inWindow, local, startOfDay, zoneO
  * task offers, when the lead stops, and its status. Placement is checked against its own capacity
  * count, priority classes and calling days.
  *
- * Checked after every event: invariants 1, 2, 4, 6, 7, 8, 13, 16 (the ticket 14 part), 17, 19 and 20
- * of ADR 0003 section 8, priority at placement (12, for calls), and 18 after the drain.
+ * Checked after every event: invariants 1, 2, 4, 6, 7, 8, 13, 16 (the ticket 14 part, with one call
+ * record per action and every note where the user put it), 17, 19 and 20 of ADR 0003 section 8,
+ * priority at placement (12, for calls), and 18 after the drain.
  */
 
 const MINUTE = 60_000;
@@ -97,6 +100,8 @@ interface LoggedOutcome {
   readonly outcome: CallOutcomeApi;
   readonly numberKey: string | null;
   readonly accepted: boolean;
+  readonly note: string;
+  readonly noteScope: "person" | "company";
 }
 
 /** The invariants a problem names: the numbers before its first colon. */
@@ -260,7 +265,9 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
   // The record, from the definitions, the people, the user's own outcomes and the providers' logs.
 
   const logged: LoggedOutcome[] = [];
+  let actions = 0;
   const skips = new Map<string, number>();
+  const checkedNotes = new Set<string>();
   /** Tasks seen on the list or in a view: the generated user's own knowledge of task ids. */
   const knownTasks = new Map<string, { subjectId: string; trackId: string }>();
 
@@ -283,7 +290,8 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
   const allPhonesBadAt = (s: Subject) => (phonesOf(s).length === 0 ? -Infinity : Math.max(...phonesOf(s).map((p) => badAt(p.key))));
   function reachesAt(s: Subject, channel: TrackDefinition["channel"], t: number): boolean {
     if (channel === "email") return addressOf(s) !== null;
-    if (channel === "sms") return mobileOf(s) !== null;
+    // A mobile marked bad on a call (a wrong number) is bad for texts too.
+    if (channel === "sms") return mobileOf(s) !== null && badAt(mobileOf(s) ?? "") > t;
     return goodPhoneAt(s, t);
   }
   function knownAt(channel: "email" | "sms", d: { key: string; at: number; visibleAt: number }): number {
@@ -305,8 +313,8 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
   /** The instant no channel of the campaign reaches the lead (2.1). */
   function noChannelAt(s: Subject): number {
     const channels = [...new Set(def(s).tracks.map((t) => t.channel))];
-    if (channels.some((c) => c !== "call" && reachesAt(s, c, 0))) return Infinity;
-    return channels.includes("call") ? Math.max(runStartOf(s), allPhonesBadAt(s)) : runStartOf(s);
+    const lostAt = (c: TrackDefinition["channel"]) => (c === "email" ? (addressOf(s) ? Infinity : -Infinity) : c === "sms" ? (mobileOf(s) ? badAt(mobileOf(s) ?? "") : -Infinity) : allPhonesBadAt(s));
+    return Math.max(runStartOf(s), ...channels.map(lostAt));
   }
   /** When the lead stops running by the record: interested, its first reply, or no usable channel. */
   const endLimitOf = (s: Subject) => Math.min(interestedAt(s), replySeenAt(s), noChannelAt(s));
@@ -351,11 +359,15 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     }
     const sends = t.steps.map((st) => deliveryOf(t.channel as "email" | "sms", s.id, st.id));
     const last = sends.at(-1);
-    if (!last || sends.some((d) => d === undefined)) return null;
-    const done = Math.max(last.at, firstCall(t.channel, s.id, t.steps.at(-1)!.id)?.at ?? 0);
-    const seen = Math.max(done, knownAt(t.channel, last));
-    // A send the app learned of at the instant the lead stopped was observed first: observation precedes every action in a tick.
-    return seen <= end ? { at: done, seen, reason: "completed" } : null;
+    // A mobile marked bad on a call while its SMS track is open fails the track then (the same rule as an invalid number).
+    const bad = t.channel === "sms" ? badAt(mobileOf(s) ?? "") : Infinity;
+    if (last && sends.every((d) => d !== undefined) && knownAt(t.channel, last) < bad) {
+      const done = Math.max(last.at, firstCall(t.channel, s.id, t.steps.at(-1)!.id)?.at ?? 0);
+      const seen = Math.max(done, knownAt(t.channel, last));
+      // A send the app learned of at the instant the lead stopped was observed first: observation precedes every action in a tick.
+      return seen <= end ? { at: done, seen, reason: "completed" } : null;
+    }
+    return Number.isFinite(bad) && bad <= end ? { at: bad, seen: bad, reason: "failed_bad_destination" } : null;
   }
 
   /** The user day of instant `t`, as wall instants. */
@@ -423,11 +435,28 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     const numberOk = outcome === "skip_for_now" || (key !== null && badAt(key) > now);
     const expected = listedByRecord(taskId, now) && numberOk;
     const note = chance(0.5) ? pick(["Rang out.", "Spoke to reception.", "Call back after lunch.", ""]) : "";
-    const res = await h.request<{ error?: { message: string } }>("POST", `/api/call-tasks/${taskId}/outcome`, { outcome, numberId, note, noteScope: chance(0.3) ? "company" : "person" });
+    const noteScope = chance(0.3) ? "company" : "person";
+    const body = { requestId: `action-${++actions}`, outcome, numberId, note, noteScope };
+    const post = () => h.request<{ error?: { message: string } }>("POST", `/api/call-tasks/${taskId}/outcome`, body);
+    // The same action may reach the app twice: posted twice at once (a double click), or posted again after
+    // its answer was lost, sometimes across a restart. It is one action: the record logs it once.
+    const r = rand();
+    const answers = r < 0.1 ? await Promise.all([post(), post()]) : [await post()];
+    if (r >= 0.1 && r < 0.3) {
+      if (r >= 0.25) {
+        await h.restart();
+        features.add("replayed-after-restart");
+      }
+      answers.push(await post());
+    }
+    if (answers.length > 1) features.add(r < 0.1 ? "posted-twice-at-once" : "replayed");
+    const res = answers[0]!;
     const accepted = res.status === 200;
     if (accepted !== expected) problem(`16: ${outcome} on ${view.enrollmentId}/${view.track.id} at ${new Date(now).toISOString()} was ${accepted ? "accepted" : `refused (${res.body.error?.message ?? res.status})`}; the record says it must be ${expected ? "accepted" : "refused"}`);
+    if (answers.some((a) => a.status !== res.status)) problem(`16: ${body.requestId} (${outcome}) was answered ${answers.map((a) => a.status).join(" and ")}; one action has one answer`);
     // The record follows its own prediction, so one wrong answer is reported once, not compounded.
-    logged.push({ at: now, taskId, subjectId: view.enrollmentId, trackId: view.track.id, outcome, numberKey: key, accepted: expected });
+    logged.push({ at: now, taskId, subjectId: view.enrollmentId, trackId: view.track.id, outcome, numberKey: key, accepted: expected, note: note.trim(), noteScope });
+    if (expected && outcome === "wrong_number" && number?.kind === "mobile") features.add("wrong-mobile");
     if (expected && outcome === "skip_for_now") skips.set(taskId, now);
     if (expected) features.add(`outcome:${outcome}`);
     else features.add("outcome-refused");
@@ -438,13 +467,11 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     const q = await queue();
     const focus = q.focusTaskId;
     if (!focus) return false;
-    const picked: CallOutcomeApi = drain ? pick(["no_answer", "voicemail", "gatekeeper"]) : pick(["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "skip_for_now", "skip_for_now"]);
-    // A wrong number is logged on a direct line or a main line; a mobile is also the lead's SMS destination, which the example tests cover.
-    const focused = (await h.request<CallTaskView>("GET", `/api/call-tasks/${focus}`)).body;
-    const outcome: CallOutcomeApi = picked === "wrong_number" && !focused.numbers.some((n) => !n.bad && n.kind !== "mobile") ? "no_answer" : picked;
+    // A wrong number on a mobile also marks it bad for texts, so an SMS track on it fails.
+    const outcome: CallOutcomeApi = drain ? pick(["no_answer", "voicemail", "gatekeeper"]) : pick(["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "skip_for_now", "skip_for_now"]);
     await logOutcome(focus, outcome, (view) => {
       const good = view.numbers.filter((n) => !n.bad);
-      const choices = outcome === "wrong_number" ? good.filter((n) => n.kind !== "mobile") : good;
+      const choices = good;
       if (!drain && chance(0.25)) {
         const bad = view.numbers.find((n) => n.bad);
         if (bad) {
@@ -558,10 +585,17 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
           const opens = firstOpen(t.window, zoneFor(s), due);
           const deadline = opens + HOUR;
           const seen = i === 0 ? startSeenAt(s, t) : due;
-          if (seen === null || seen > opens || deadline > now || !runningAt(s, deadline) || !inWindow(t.window, zoneFor(s), deadline - 1)) continue;
+          if (seen === null || seen > opens || deadline > now || !runningAt(s, deadline) || !inWindow(t.window, zoneFor(s), deadline - 1) || !reachesAt(s, ch, deadline)) continue;
           if (!firstCall(ch, id, step.id) || firstCall(ch, id, step.id)!.at > deadline) problem(`18: ${id}/${step.id} was due at ${new Date(due).toISOString()} and its window open from ${new Date(opens).toISOString()}, but it was not handed over within an hour`);
         }
       }
+
+      // 19. No text to a mobile after a call marked it bad.
+      for (const c of sms.handoverLog.filter((x) => x.subjectId === id)) if (c.at > badAt(c.destination)) problem(`19: ${id}/${c.stepId} was texted to ${c.destination} at ${new Date(c.at).toISOString()}, after a call marked it bad at ${new Date(badAt(c.destination)).toISOString()}`);
+
+      // 16. One action is one record: the app holds one call record per action the user logged, however often it was posted.
+      const actionsLogged = logged.filter((o) => o.accepted && o.subjectId === id).length;
+      if (st.callAttempts.length !== actionsLogged || new Set(st.callAttempts.map((a) => a.requestId)).size !== st.callAttempts.length) problem(`16: ${id} holds ${st.callAttempts.length} call records for ${actionsLogged} actions the user logged`);
 
       // 19 and 2. Calls are logged on the lead's own numbers or its company's main line; nothing is sent after it stops.
       for (const a of st.callAttempts) {
@@ -576,6 +610,23 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       }
       if (drained) checkDrained(s, st, progress);
     }
+
+    // Notes: each is where the user put it, once. A person's notes are the person-scoped notes of their calls,
+    // in every campaign; a company's are the company-scoped ones of its people's calls and every note of its company lead.
+    for (const [taskId, k] of knownTasks) {
+      const s = subjects.get(k.subjectId);
+      if (!s || checkedNotes.has(s.id)) continue;
+      checkedNotes.add(s.id);
+      const view = (await h.request<CallTaskView>("GET", `/api/call-tasks/${taskId}`)).body;
+      const ofSubject = (o: LoggedOutcome) => subjects.get(o.subjectId);
+      const notes = logged.filter((o) => o.accepted && o.note !== "");
+      const personNotes = s.person ? notes.filter((o) => ofSubject(o)?.person?.key === s.person?.key && o.noteScope === "person").map((o) => o.note) : [];
+      const companyNotes = notes.filter((o) => ofSubject(o)?.company.key === s.company.key && (o.noteScope === "company" || ofSubject(o)?.person === null)).map((o) => o.note);
+      const same = (a: string[], b: readonly { body: string }[]) => JSON.stringify([...a].sort()) === JSON.stringify(b.map((n) => n.body).sort());
+      if (!same(personNotes, view.personNotes)) problem(`16: ${s.id}'s person notes are ${JSON.stringify(view.personNotes.map((n) => n.body))}; the user wrote ${JSON.stringify(personNotes)}`);
+      if (!same(companyNotes, view.companyNotes)) problem(`16: ${s.company.name}'s company notes are ${JSON.stringify(view.companyNotes.map((n) => n.body))}; the user wrote ${JSON.stringify(companyNotes)}`);
+    }
+    checkedNotes.clear();
 
     // 17. Each user day's new tasks stay within the capacity left after committed tasks.
     const days = new Set(allTasks.map((x) => local(x.task.placedWall, userZone).day));
@@ -695,7 +746,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       const ids = [...knownTasks.keys()];
       if (ids.length > 0) {
         const outcome = pick(OUTCOMES);
-        await logOutcome(pick(ids), outcome, (view) => view.numbers.find((n) => !n.bad && (outcome !== "wrong_number" || n.kind !== "mobile"))?.detailId ?? null);
+        await logOutcome(pick(ids), outcome, (view) => view.numbers.find((n) => !n.bad)?.detailId ?? null);
       }
     } else if (r < 0.9) {
       const visible = email.deliveryLog.filter((d) => d.visibleAt <= h.clock);
@@ -733,6 +784,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     const st = await h.store.engine.subject(id, h.clock);
     if (st?.subject.ended) features.add(`ended:${st.subject.ended}`);
     for (const p of st?.tracks ?? []) if (p.finishReason === "closed_on_interest") features.add("closed-on-interest");
+    for (const p of st?.tracks ?? []) if (p.finishReason === "failed_bad_destination") features.add("sms-failed-on-a-wrong-mobile");
     for (const p of st?.tracks ?? []) if (p.finishReason === "skipped_missing_channel" && def(subjects.get(id)!).tracks.find((t) => t.id === p.trackId)?.channel === "call") features.add("phone-skipped");
   }
   return result();

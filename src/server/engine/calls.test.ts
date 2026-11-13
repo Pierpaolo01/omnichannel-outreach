@@ -61,7 +61,9 @@ async function world(options: { capacity?: number; people?: Record<string, strin
   const calls = async () => (await h.request<CallsView>("GET", "/api/calls")).body;
   const today = async () => (await h.request<TodayView>("GET", "/api/today")).body;
   const task = async (id: string) => (await h.request<CallTaskView>("GET", `/api/call-tasks/${id}`)).body;
-  const log = (id: string, body: Record<string, unknown>) => h.request<{ error?: { message: string } }>("POST", `/api/call-tasks/${id}/outcome`, body);
+  let requests = 0;
+  /** Logs an outcome as the client would, with a fresh request id unless the test gives one. */
+  const log = (id: string, body: Record<string, unknown>) => h.request<{ error?: { message: string } }>("POST", `/api/call-tasks/${id}/outcome`, { requestId: `req-${++requests}`, ...body });
   const emails = (to: string) => h.fake.deliveryLog.filter((d) => d.destination === to);
   return { h, campaign, calls, today, task, log, emails };
 }
@@ -384,7 +386,7 @@ describe("numbers shared across leads and channels", () => {
     await h.advanceTo(MONDAY_9 + H);
     const view = (await h.request<CallTaskView>("GET", `/api/call-tasks/${(await h.request<CallsView>("GET", "/api/calls")).body.focusTaskId ?? ""}`)).body;
     expect(view.numbers.map((n) => n.kind)).toEqual(["mobile"]);
-    expect((await h.request("POST", `/api/call-tasks/${view.taskId}/outcome`, { outcome: "wrong_number", numberId: view.numbers[0]?.detailId })).status).toBe(200);
+    expect((await h.request("POST", `/api/call-tasks/${view.taskId}/outcome`, { requestId: "req-1", outcome: "wrong_number", numberId: view.numbers[0]?.detailId })).status).toBe(200);
     await h.advanceTo(MONDAY_9 + 5 * DAY);
     const progress = await h.progress(view.enrollmentId);
     expect(progress.tracks.map((t) => [t.trackId, t.finishReason])).toEqual([["p1", "completed"], ["m1", "failed_bad_destination"], ["e1", "completed"]]);
@@ -446,6 +448,55 @@ describe("who a call record belongs to (review bot on a1399ce)", () => {
     const second = (await calls()).readyNow.find((x) => x.enrollmentId === zara.enrollmentId && x.track.id === "p2");
     expect((await log(second?.taskId ?? "", { outcome: "voicemail", numberId: dialled?.detailId })).status).toBe(200);
     expect((await task(second?.taskId ?? "")).touches.at(-1)).toMatchObject({ kind: "call", outcome: "voicemail", number: expect.objectContaining({ kind: "main_line" }) });
+  });
+});
+
+describe("a user action posted twice is logged once (verifier B3 on a1399ce)", () => {
+  test("the same skip with a note, posted again and posted twice at once, is one skip and one note; a later skip with a new id is a new one", async () => {
+    const { h, campaign, calls, task, log } = await world({ people: [PAT] });
+    h.clock = MONDAY_9;
+    await campaign("Replays", definition([track("p1", "call", [call("c1")], { kind: "entry" }, WEEKDAYS_9_TO_17)], { emailPool: [] }));
+    await h.advanceTo(MONDAY_9 + H);
+    const taskId = (await calls()).focusTaskId ?? "";
+    const skip = { requestId: "skip-1", outcome: "skip_for_now", note: "Single skip note" };
+    expect((await log(taskId, skip)).status).toBe(200);
+    expect((await log(taskId, skip)).status).toBe(200);
+    const twice = await Promise.all([log(taskId, { ...skip, requestId: "skip-2" }), log(taskId, { ...skip, requestId: "skip-2" })]);
+    expect(twice.map((r) => r.status)).toEqual([200, 200]);
+    const view = await task(taskId);
+    expect(view.personNotes.map((n) => n.body)).toEqual(["Single skip note", "Single skip note"]);
+    const progress = await h.progress(view.enrollmentId);
+    expect(progress.tracks[0]?.steps[0]?.calls.map((c) => c.outcome)).toEqual(["skip_for_now", "skip_for_now"]);
+  });
+
+  test("an outcome replayed after its response was lost, across a restart, answers with the first result and stores nothing again", async () => {
+    const { h, campaign, calls, task, log } = await world({ people: [PAT] });
+    h.clock = MONDAY_9;
+    await campaign("Lost response", definition([track("p1", "call", [call("c1")], { kind: "entry" }, WEEKDAYS_9_TO_17)], { emailPool: [] }));
+    await h.advanceTo(MONDAY_9 + H);
+    const taskId = (await calls()).focusTaskId ?? "";
+    const numberId = (await task(taskId)).numbers[0]?.detailId;
+    const body = { requestId: "vm-1", outcome: "voicemail", numberId, note: "Left a message." };
+    const first = await log(taskId, body);
+    expect(first.status).toBe(200);
+    await h.restart();
+    const replay = await log(taskId, body);
+    expect(replay).toEqual(first);
+    const view = await task(taskId);
+    expect(view.touches.filter((t) => t.kind === "call")).toHaveLength(1);
+    expect(view.personNotes.map((n) => n.body)).toEqual(["Left a message."]);
+  });
+
+  test("a request id already used for another call is refused, and nothing is stored", async () => {
+    const { h, campaign, calls, task, log } = await world();
+    h.clock = MONDAY_9;
+    await campaign("Reused id", definition([track("p1", "call", [call("c1")], { kind: "entry" }, WEEKDAYS_9_TO_17)], { emailPool: [] }));
+    await h.advanceTo(MONDAY_9 + H);
+    const [a, b] = (await calls()).readyNow;
+    expect((await log(a?.taskId ?? "", { requestId: "same", outcome: "skip_for_now" })).status).toBe(200);
+    const reused = await log(b?.taskId ?? "", { requestId: "same", outcome: "no_answer", numberId: (await task(b?.taskId ?? "")).numbers[0]?.detailId });
+    expect(reused).toMatchObject({ status: 409, body: { error: { message: "This request id was already used for another call: send a new one." } } });
+    expect((await task(b?.taskId ?? "")).open).toBe(true);
   });
 });
 

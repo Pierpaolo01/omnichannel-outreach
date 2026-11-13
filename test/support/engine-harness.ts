@@ -67,7 +67,8 @@ export class EngineHarness {
   ticks = 0;
   /** Hooks every engine this harness starts calls through, so a test may set them at any time. */
   hooks: EngineHooks;
-  private readonly app;
+  /** The HTTP app, for tests that walk its routes. */
+  readonly app;
   private readonly options: EngineHarnessOptions;
   private readonly engineIds = sequentialIds("att");
 

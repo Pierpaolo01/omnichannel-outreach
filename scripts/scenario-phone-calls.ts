@@ -67,13 +67,14 @@ const queue = async () => {
   log(`${at(h.clock)}  Calls: placed today ${q.placedToday}, committed ${q.committed} of ${q.dailyCapacity}; ready now [${q.readyNow.map((x) => x.person?.name).join(", ")}], later today [${q.laterToday.map((x) => x.person?.name).join(", ")}]; focus ${q.focusTaskId ? (q.readyNow[0]?.person?.name ?? "") : "none"}`);
   return q;
 };
+let actions = 0;
 /** The user logs what happened on the named lead's call, on the number of that kind they dialled. */
 const outcome = async (who: string, body: { outcome: string; kind?: string; note?: string; noteScope?: string }) => {
   const q = (await h.request<CallsView>("GET", "/api/calls")).body;
   const item = q.readyNow.find((x) => x.person?.name === who);
   const view = (await h.request<CallTaskView>("GET", `/api/call-tasks/${item?.taskId ?? ""}`)).body;
   const number = body.kind ? view.numbers.find((n) => n.kind === body.kind) : undefined;
-  const res = await h.request<{ error?: { message: string } }>("POST", `/api/call-tasks/${view.taskId}/outcome`, { outcome: body.outcome, numberId: number?.detailId ?? null, note: body.note ?? "", noteScope: body.noteScope ?? "person" });
+  const res = await h.request<{ error?: { message: string } }>("POST", `/api/call-tasks/${view.taskId}/outcome`, { requestId: `scenario-${++actions}`, outcome: body.outcome, numberId: number?.detailId ?? null, note: body.note ?? "", noteScope: body.noteScope ?? "person" });
   log(`${at(h.clock)}  ${who}: ${body.outcome}${number ? ` on the ${number.kind.replace("_", " ")} ${number.value}` : ""}${body.note ? ` with a ${body.noteScope ?? "person"} note "${body.note}"` : ""} -> HTTP ${res.status}${res.body.error ? ` (${res.body.error.message})` : ""}`);
 };
 

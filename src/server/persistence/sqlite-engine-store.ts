@@ -335,6 +335,11 @@ export class SqliteEngineStore implements EngineStore {
     this.run("INSERT INTO engine_meta (key, value) VALUES ('call_settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [JSON.stringify(settings)]);
   }
 
+  async callRequestTask(requestId: string): Promise<string | null> {
+    const row = this.sql("SELECT task_id FROM call_attempts WHERE request_id = ?").get(requestId);
+    return row ? str(row, "task_id") : null;
+  }
+
   async callTaskSubject(taskId: string): Promise<string | null> {
     const row = this.sql("SELECT subject_id FROM call_tasks WHERE id = ?").get(taskId);
     return row ? str(row, "subject_id") : null;
@@ -496,7 +501,7 @@ export class SqliteEngineStore implements EngineStore {
     const attempts = this.sql("SELECT * FROM attempts WHERE subject_id = ? ORDER BY claimed_wall, rowid").all(subjectId).map(toAttempt);
     const callAttempts = this.sql("SELECT * FROM call_attempts WHERE subject_id = ? ORDER BY at_wall, rowid")
       .all(subjectId)
-      .map((r): CallAttempt => ({ id: str(r, "id"), taskId: str(r, "task_id"), outcome: str(r, "outcome") as CallOutcome, numberDetailId: strOrNull(r, "number_detail_id"), note: str(r, "note"), at: num(r, "at"), atWall: num(r, "at_wall") }));
+      .map((r): CallAttempt => ({ id: str(r, "id"), requestId: str(r, "request_id"), taskId: str(r, "task_id"), outcome: str(r, "outcome") as CallOutcome, numberDetailId: strOrNull(r, "number_detail_id"), note: str(r, "note"), at: num(r, "at"), atWall: num(r, "at_wall") }));
     // Every id that can name one of the lead's numbers resolves through the merge pointer (ADR 0001, ticket 12a):
     // the numbers recorded on its calls, and every detail a re-import folded into one of its numbers, so a
     // screen read before the merge names the same number.
@@ -742,7 +747,8 @@ export class SqliteEngineStore implements EngineStore {
     for (const a of next.callAttempts) {
       if (base.callAttempts.some((b) => b.id === a.id)) continue;
       changed = true;
-      this.run("INSERT INTO call_attempts (id, task_id, subject_id, outcome, number_detail_id, note, at, at_wall) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [a.id, a.taskId, id, a.outcome, a.numberDetailId, a.note, a.at, a.atWall]);
+      // The unique request id refuses a second record of one action, even from another process.
+      this.run("INSERT INTO call_attempts (id, request_id, task_id, subject_id, outcome, number_detail_id, note, at, at_wall) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [a.id, a.requestId, a.taskId, id, a.outcome, a.numberDetailId, a.note, a.at, a.atWall]);
     }
     if (next.newNotes.length > 0) {
       const e = this.sql("SELECT person_id, company_id FROM enrollments WHERE id = ?").get(id);
