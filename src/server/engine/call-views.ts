@@ -5,7 +5,7 @@
  */
 import { bucketOf, CALL_OUTCOMES, callNumbers, callWindow, dayHasRoom, isListed, reasonOf, recordedNumberOf, type CallBucket } from "../../domain/sequence/calls.ts";
 import { displayPhone } from "../../domain/phone.ts";
-import { localDayNumber } from "../../domain/sequence/clock.ts";
+import { localDayNumber, nextWindowClose, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { liveTracks } from "../../domain/sequence/definition.ts";
 import { deriveStatus } from "../../domain/sequence/progress.ts";
 import type { CallNumber, CallTask, RecordedNumber, SubjectState } from "../../domain/sequence/state.ts";
@@ -84,6 +84,8 @@ function queueItem(s: SubjectState, task: CallTask, parties: Parties, place: { b
 async function callList(store: OutreachStore, now: number, rules: CallViewRules = DEFAULT_RULES) {
   const day = await store.engine.callDay(now);
   const items: { item: CallQueueItem; task: CallTask; skippedToday: boolean; subjectId: string; opensAt: number }[] = [];
+  /** Instants at which the list changes by the clock: hours opening (later today) and closing (ready now). */
+  const changes: number[] = [startOfLocalDay(day.day + 1, day.userZone)];
   /** Every open task listed now, in a queue part or not (its hours closed for the day). */
   const listed = new Set<string>();
   for (const id of await store.engine.subjectsWithOpenCallTasks()) {
@@ -95,6 +97,9 @@ async function callList(store: OutreachStore, now: number, rules: CallViewRules 
       if (!place) continue;
       const parties = await partiesOf(store, id);
       if (!parties) continue;
+      if (place.bucket === "later_today" && place.opensAt !== null) changes.push(place.opensAt);
+      const closes = place.bucket === "ready_now" ? nextWindowClose(callWindow(s, task.trackId), s.lead.zone, now) : null;
+      if (closes !== null) changes.push(closes);
       const skippedToday = task.skippedWall !== null && localDayNumber(task.skippedWall, day.userZone) === day.day;
       items.push({ item: queueItem(s, task, parties, place, now), task, skippedToday, subjectId: id, opensAt: place.opensAt ?? now });
     }
@@ -110,18 +115,26 @@ async function callList(store: OutreachStore, now: number, rules: CallViewRules 
     .filter((x) => x.item.bucket === "later_today")
     .sort((a, b) => a.opensAt - b.opensAt || byDue(a, b))
     .map((x) => x.item);
-  return { day, readyNow, laterToday, listed };
+  return { day, readyNow, laterToday, listed, changes };
+}
+
+/** The next instant the list can change by the clock: its own instants, and the engine's next wake (a call placed, a track started). */
+function nextChange(changes: readonly number[], nextWake: number | null, now: number): string | null {
+  const next = [...changes, ...(nextWake === null ? [] : [nextWake])].filter((t) => t > now);
+  return next.length === 0 ? null : iso(Math.min(...next));
 }
 
 /**
  * The focus queue. `focus` is the call the user's screen is on: it keeps the focus while it is listed,
  * so the queue moves on only after an outcome (or a skip for now) is logged on it.
  */
-export async function callsView(store: OutreachStore, now: number, options: { readonly focus?: string | null; readonly rules?: CallViewRules } = {}): Promise<CallsView> {
-  const { day, readyNow, laterToday, listed } = await callList(store, now, options.rules);
+export async function callsView(store: OutreachStore, now: number, options: { readonly focus?: string | null; readonly rules?: CallViewRules; readonly nextWake?: number | null } = {}): Promise<CallsView> {
+  const { day, readyNow, laterToday, listed, changes } = await callList(store, now, options.rules);
   const focus = options.focus ?? null;
   return {
     date: dateIn(day.userZone, now),
+    asOf: iso(now),
+    nextChangeAt: nextChange(changes, options.nextWake ?? null, now),
     userZone: day.userZone,
     dailyCapacity: day.capacity,
     defaultDailyCapacity: DEFAULT_DAILY_CALL_CAPACITY,
@@ -140,9 +153,9 @@ export async function callsView(store: OutreachStore, now: number, options: { re
 /** How many calls Up next shows on Today. */
 const UP_NEXT = 5;
 
-export async function todayView(store: OutreachStore, now: number, rules?: CallViewRules): Promise<TodayView> {
-  const { day, readyNow, laterToday } = await callList(store, now, rules);
-  return { date: dateIn(day.userZone, now), userZone: day.userZone, readyNow: readyNow.length, laterToday: laterToday.length, capacityReached: !dayHasRoom(day), upNext: [...readyNow, ...laterToday].slice(0, UP_NEXT) };
+export async function todayView(store: OutreachStore, now: number, rules?: CallViewRules, nextWake: number | null = null): Promise<TodayView> {
+  const { day, readyNow, laterToday, changes } = await callList(store, now, rules);
+  return { date: dateIn(day.userZone, now), asOf: iso(now), nextChangeAt: nextChange(changes, nextWake, now), userZone: day.userZone, readyNow: readyNow.length, laterToday: laterToday.length, capacityReached: !dayHasRoom(day), upNext: [...readyNow, ...laterToday].slice(0, UP_NEXT) };
 }
 
 /**

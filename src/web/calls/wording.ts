@@ -202,3 +202,19 @@ export function attentionItems(n: NeedsAttention, userZone: string): AttentionIt
   for (const [i, a] of n.anomalies.entries()) items.push({ key: `anomaly-${i}`, tone: "end", title: "The provider reported something unexpected", body: a.what });
   return items;
 }
+
+/** While this page sends again an outcome another tab left behind. */
+export function recoveringLine(who: string): string {
+  return `Sending again an outcome logged for ${who} in a tab that closed before the server answered. It is logged only once.`;
+}
+
+/** A refusal no page showed on its call: what was not logged, and why. */
+export function refusedRecordLine(record: { readonly entry: { readonly who: string; readonly body: { readonly outcome: CallOutcomeApi } }; readonly message: string }): string {
+  const what = record.entry.body.outcome === "skip_for_now" ? `Skip for now on ${record.entry.who}` : `${OUTCOME_LABEL[record.entry.body.outcome]} for ${record.entry.who}`;
+  return `Not logged: ${what}. ${record.message}`;
+}
+
+/** Under the numbers, when the one the user chose can no longer be logged on. */
+export function numberProblemLine(problem: { readonly kind: "bad" | "gone"; readonly value: string | null }): string {
+  return problem.kind === "bad" ? `The number you chose, ${problem.value ?? ""}, is now marked wrong. Choose the number you dial.` : "The number you chose is no longer one of this lead’s. Choose the number you dial.";
+}

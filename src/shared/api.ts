@@ -565,6 +565,13 @@ export interface WithheldBy {
 export interface TodayView {
   /** The user's date, YYYY-MM-DD in their zone. */
   readonly date: string;
+  /** The server's instant for this answer. */
+  readonly asOf: string;
+  /**
+   * The next instant this answer can change by the clock alone (ADR 0003 4.4.1): calling hours opening
+   * or closing, a call falling due, the engine's next wake, or the user's next day. Screens refresh then.
+   */
+  readonly nextChangeAt: string | null;
   readonly userZone: string;
   readonly readyNow: number;
   readonly laterToday: number;
@@ -577,6 +584,10 @@ export interface TodayView {
 /** GET /api/calls: the focus queue. The focused task is the first ready now; the queue moves on only after an outcome. */
 export interface CallsView {
   readonly date: string;
+  /** The server's instant for this answer. */
+  readonly asOf: string;
+  /** As on TodayView: when the queue next changes by the clock alone. */
+  readonly nextChangeAt: string | null;
   readonly userZone: string;
   readonly dailyCapacity: number;
   /** The capacity the user has until they set one. */

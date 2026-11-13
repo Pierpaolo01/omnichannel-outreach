@@ -5,8 +5,27 @@ import { CallDesk, NoAnswer, Refused, type DeskSnapshot, type KeyValue, type Out
 
 /** How long an outcome waits for its answer before it counts as no answer and is sent again. */
 const ANSWER_TIMEOUT_MS = 20_000;
-/** A tab learns of work done elsewhere at least this often. */
-const REFRESH_MS = 60_000;
+
+/**
+ * The browser's Web Locks: one exclusive lock per outbox entry across the user's tabs, asked for at
+ * once and held until released; a closed tab's locks are released by the browser. Without Web Locks
+ * every claim succeeds: two tabs may then both send an entry, which the request id keeps logged once.
+ */
+function claim(name: string): Promise<(() => void) | null> {
+  const locks = typeof navigator === "undefined" ? undefined : navigator.locks;
+  if (!locks) return Promise.resolve(() => undefined);
+  return new Promise((resolve) => {
+    locks
+      .request(name, { ifAvailable: true }, (lock) => {
+        if (!lock) {
+          resolve(null);
+          return undefined;
+        }
+        return new Promise<void>((release) => resolve(() => release()));
+      })
+      .catch(() => resolve(() => undefined));
+  });
+}
 
 /** Browser storage that never throws: private windows and blocked storage fall back to memory. */
 function storage(pick: () => Storage): KeyValue {
@@ -100,13 +119,15 @@ function browserDesk(): CallDesk {
       const t = setTimeout(fire, ms);
       return () => clearTimeout(t);
     },
+    claim,
   });
 }
 
 /**
  * The Calls page's binding of CallDesk (callDesk.ts) to React and the browser: it opens the desk,
- * refreshes on showing the tab again, on another tab's outbox change and every minute, and sends a
- * pending outcome again when the browser comes back online. The generated test drives the same desk.
+ * refreshes on showing the tab again and on another tab's outbox change (the desk itself refreshes at
+ * the server's `nextChangeAt` and after every action), and sends what it holds again when the browser
+ * comes back online. The generated test drives the same desk.
  * A remount (React's strict mode) disposes the desk and starts it again.
  */
 export function useCallDesk(): { desk: CallDesk; snap: DeskSnapshot } {
@@ -122,13 +143,13 @@ export function useCallDesk(): { desk: CallDesk; snap: DeskSnapshot } {
       if (e.key?.startsWith("outreach.calls.outbox.")) refresh();
     };
     const online = () => desk.retryNow();
-    const timer = setInterval(refresh, REFRESH_MS);
     document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", refresh);
     window.addEventListener("storage", onStorage);
     window.addEventListener("online", online);
     return () => {
-      clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", refresh);
       window.removeEventListener("storage", onStorage);
       window.removeEventListener("online", online);
       desk.dispose();

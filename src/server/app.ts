@@ -28,7 +28,7 @@ export interface AppDependencies {
   readonly now: () => string;
   readonly newId: () => string;
   /** The sequence engine. Without one, the app runs an engine with no connected email provider. */
-  readonly engine?: Pick<Engine, "launch" | "logCallOutcome">;
+  readonly engine?: Pick<Engine, "launch" | "logCallOutcome" | "nextWakeAt">;
   /** The email provider's own description, for GET /api/email-provider; absent when none is connected. */
   readonly emailProvider?: EmailProviderSource | null;
   /**
@@ -424,10 +424,11 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     return c.json(await store.engine.callSettings());
   });
 
-  app.get("/today", async (c) => c.json(await todayView(store, Date.parse(now()), rules)));
+  // `nextChangeAt` includes the engine's next wake: a call can be placed or a track start then (ADR 0003 4.4.1).
+  app.get("/today", async (c) => c.json(await todayView(store, Date.parse(now()), rules, await engine.nextWakeAt())));
 
   // `focus`: the call the user's screen is on. It stays the focus while it is listed.
-  app.get("/calls", async (c) => c.json(await callsView(store, Date.parse(now()), { focus: c.req.query("focus") || null, rules })));
+  app.get("/calls", async (c) => c.json(await callsView(store, Date.parse(now()), { focus: c.req.query("focus") || null, rules, nextWake: await engine.nextWakeAt() })));
 
   app.get("/call-tasks/:id", async (c) => {
     const view = await callTaskView(store, c.req.param("id"), Date.parse(now()));

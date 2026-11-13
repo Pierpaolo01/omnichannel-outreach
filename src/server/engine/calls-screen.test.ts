@@ -106,3 +106,38 @@ describe("calls in the record's Activity (ticket 14: the person and company-lead
     ]);
   });
 });
+
+describe("when the call list next changes by the clock (ADR 0003 4.4.1, review bot on e6872eb)", () => {
+  test("before calling hours, the instant they open; inside them, the instant they close; after them, the user's next day", async () => {
+    const h = new EngineHarness({ start: MONDAY_9 - 3 * H, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+    await h.tick();
+    await h.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "Europe/London" });
+    h.clock = MONDAY_9 - 2 * H;
+    const { campaign: c } = await h.createCampaign("Clock", { businesses: [HARBOUR], people: [PAT] });
+    await h.defineSequence(c.id, definition([track("p1", "call", [call("c1")], WEEKDAYS_9_TO_17)]));
+    expect((await h.launch(c.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 - 90 * MIN);
+    const views = async () => [(await h.request<CallsView>("GET", "/api/calls")).body, (await h.request<TodayView>("GET", "/api/today")).body] as const;
+
+    for (const v of await views()) expect(v).toMatchObject({ asOf: "2026-11-02T07:30:00.000Z", nextChangeAt: "2026-11-02T09:00:00.000Z" });
+    await h.advanceTo(MONDAY_9 + H);
+    for (const v of await views()) expect(v).toMatchObject({ asOf: "2026-11-02T10:00:00.000Z", nextChangeAt: "2026-11-02T17:00:00.000Z" });
+    await h.advanceTo(MONDAY_9 + 9 * H);
+    for (const v of await views()) expect(v).toMatchObject({ nextChangeAt: "2026-11-03T00:00:00.000Z" });
+  });
+
+  test("a call that starts after an email track: the engine's next wake, when the email goes", async () => {
+    const h = new EngineHarness({ start: MONDAY_9 - 3 * H, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+    await h.tick();
+    await h.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "Europe/London" });
+    h.clock = MONDAY_9 - H;
+    const { campaign: c } = await h.createCampaign("Call after an email", { businesses: [HARBOUR], people: [PAT] });
+    // The call starts when the email track finishes, which the call list alone cannot foresee: the engine's next wake names it.
+    await h.defineSequence(c.id, definition([track("e1", "email", [email("s1")], WEEKDAYS_9_TO_17), { ...track("p1", "call", [call("c1")], ALWAYS), start: { kind: "after", trackId: "e1", delayDays: 0 } }]));
+    expect((await h.launch(c.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 - 30 * MIN);
+    const view = (await h.request<CallsView>("GET", "/api/calls")).body;
+    expect(view.readyNow).toEqual([]);
+    expect(view.nextChangeAt).toBe("2026-11-02T09:00:00.000Z");
+  });
+});

@@ -14,9 +14,12 @@ import {
   dialledLine,
   loggedLine,
   numberKind,
+  numberProblemLine,
   offListLine,
   pendingLine,
   reasonLine,
+  recoveringLine,
+  refusedRecordLine,
 } from "../calls/wording.ts";
 import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
@@ -38,6 +41,7 @@ export function CallsPage() {
       <Queue snap={snap} />
       <div className="flex min-w-0 flex-col gap-3">
         <Status snap={snap} />
+        <Records desk={desk} snap={snap} />
         {queue.state === "error" ? (
           <ErrorState title="The call list didn’t load." message={queue.message} onRetry={() => void desk.refresh()} />
         ) : queue.state === "loading" ? (
@@ -47,7 +51,7 @@ export function CallsPage() {
         ) : snap.task === null || snap.task.state === "loading" ? (
           <SheetSkeleton />
         ) : snap.task.state === "error" ? (
-          <ErrorState title="This call didn’t load." message={snap.task.message} onRetry={() => void desk.refresh()} />
+          <ErrorState title="This call didn’t load." message={snap.task.message} onRetry={() => void desk.refresh()} retryRef={(el) => placeFocus(el, "error")} />
         ) : (
           <Sheet desk={desk} snap={snap} task={snap.task.view} userZone={queue.view.userZone} placeFocus={placeFocus} />
         )}
@@ -62,13 +66,13 @@ export function CallsPage() {
  * call, or the number to choose again). A focus found gone on a refresh moves it only if the control
  * that had it is now locked.
  */
-function useKeyboardFocus(snap: DeskSnapshot): (el: HTMLElement | null, role: "next" | "away" | "number" | "empty") => void {
+function useKeyboardFocus(snap: DeskSnapshot): (el: HTMLElement | null, role: "next" | "away" | "number" | "empty" | "error") => void {
   const handled = useRef<number | null>(null);
   const want = snap.transition;
   return (el, role) => {
     if (!el || !want || handled.current === want.seq) return;
     const matches =
-      ((want.kind === "logged" || want.kind === "moved") && (role === "number" || role === "empty")) ||
+      ((want.kind === "logged" || want.kind === "moved") && (role === "number" || role === "empty" || role === "error")) ||
       (want.kind === "refused" && (role === "away" || (role === "number" && snap.away === null))) ||
       (want.kind === "away" && role === "away" && (document.activeElement === document.body || document.activeElement?.closest("[data-locks]") !== null));
     if (!matches) return;
@@ -80,9 +84,44 @@ function useKeyboardFocus(snap: DeskSnapshot): (el: HTMLElement | null, role: "n
 function Status({ snap }: { snap: DeskSnapshot }) {
   const text = snap.pending ? pendingLine(snap.pending) : snap.logged ? loggedLine(snap.logged) : "";
   return (
-    <p role="status" className={text ? `rounded-field px-4 py-2.5 text-[14px] ${snap.pending?.unconfirmed ? "bg-pause-soft text-base-content" : "bg-you-soft text-base-content"}` : "sr-only"}>
-      {text}
-    </p>
+    <>
+      <p role="status" className={text ? `rounded-field px-4 py-2.5 text-[14px] ${snap.pending?.unconfirmed ? "bg-pause-soft text-base-content" : "bg-you-soft text-base-content"}` : "sr-only"}>
+        {text}
+      </p>
+      <div aria-live="polite" className={snap.recovering.length > 0 ? "flex flex-col gap-1.5" : "sr-only"}>
+        {snap.recovering.map((e) => (
+          <p key={e.body.requestId} className="rounded-field bg-pause-soft px-4 py-2.5 text-[14px] text-base-content">
+            {recoveringLine(e.who)}
+          </p>
+        ))}
+      </div>
+    </>
+  );
+}
+
+/** Refusals no page showed on its call: kept, with the note typed, until the user dismisses them. */
+function Records({ desk, snap }: { desk: CallDesk; snap: DeskSnapshot }) {
+  if (snap.refusedRecords.length === 0) return null;
+  return (
+    <ul aria-label="Outcomes not logged" className="flex flex-col gap-2">
+      {snap.refusedRecords.map((r) => (
+        <li key={r.entry.body.requestId} className="flex flex-col gap-2 rounded-field bg-crit-soft px-4 py-3 text-[14px]">
+          <p role="alert" className="text-base-content [overflow-wrap:anywhere]">
+            {refusedRecordLine(r)}
+          </p>
+          {r.entry.body.note.trim() !== "" && (
+            <p className="text-ink-2 [overflow-wrap:anywhere]">
+              Your note wasn’t saved: <q className="whitespace-pre-wrap">{r.entry.body.note}</q>
+            </p>
+          )}
+          <div>
+            <button type="button" className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={() => desk.dismiss(r.entry.body.requestId)}>
+              Dismiss
+            </button>
+          </div>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -234,6 +273,11 @@ function Sheet({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sna
               })}
             </div>
           )}
+          {snap.numberProblem && (
+            <p role="alert" className="mt-3 text-[14px] font-medium text-band-warn">
+              {numberProblemLine(snap.numberProblem)}
+            </p>
+          )}
           <p id={`${numbersId}-hint`} className="mt-3 text-[13px] text-band-muted">
             Dial it on your own phone; the app never places a call. Choose the number you dial, so the outcome is logged on it.
           </p>
@@ -378,7 +422,7 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
   const dialled = task.numbers.find((n) => n.detailId === draft.numberId);
   const away = snap.away;
   const pending = snap.pending !== null;
-  const canLog = draft.outcome !== null && !snap.noteTooLong && (draft.outcome === "skip_for_now" || dialled !== undefined);
+  const canLog = draft.outcome !== null && !snap.noteTooLong && (draft.outcome === "skip_for_now" || (dialled !== undefined && snap.numberProblem === null));
   return (
     <div className="flex flex-col gap-3.5 min-[901px]:sticky min-[901px]:bottom-0 border-t border-line bg-base-100 px-5 pb-[22px] pt-5 shadow-[0_-10px_24px_-18px_rgba(21,26,45,0.35)] min-[901px]:px-[30px]">
       {away && (
@@ -453,7 +497,7 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
       {!away && draft.outcome && draft.outcome !== "skip_for_now" && (
         <div className="flex flex-col gap-2.5 rounded-field bg-raised px-4 py-3.5 text-[14px]">
           {draft.outcome === "wrong_number" ? (
-            <p>{dialled ? `${dialled.value}, ${numberKind(dialled)}, the number you dial above, is marked wrong.` : "Choose the number you dialled above."}</p>
+            <p>{dialled && !snap.numberProblem ? `${dialled.value}, ${numberKind(dialled)}, the number you dial above, is marked wrong.` : "Choose the number you dialled above."}</p>
           ) : draft.outcome === "interested" ? (
             <>
               <p>
@@ -462,13 +506,13 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
               <p className="text-[13px] text-muted">Their other campaigns and colleagues keep running.</p>
             </>
           ) : (
-            <p className="text-[13px] text-muted">{draft.outcome === "gatekeeper" ? "Add a note about who you spoke to. " : ""}Logged on {dialled ? `${dialled.value}, ${numberKind(dialled)}` : "the number you choose above"}.</p>
+            <p className="text-[13px] text-muted">{draft.outcome === "gatekeeper" ? "Add a note about who you spoke to. " : ""}Logged on {dialled && !snap.numberProblem ? `${dialled.value}, ${numberKind(dialled)}` : "the number you choose above"}.</p>
           )}
         </div>
       )}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <span id={hintId} className="text-[13px] text-muted">
-          {pending ? "" : draft.outcome === null ? "Pick what happened to finish this call." : !canLog && !snap.noteTooLong ? "Choose the number you dialled." : ""}
+          {pending ? "" : draft.outcome === null ? "Pick what happened to finish this call." : !canLog && !snap.noteTooLong ? "Choose the number you dial above." : ""}
         </span>
         <span className="flex flex-wrap items-center gap-2">
           {snap.pending?.unconfirmed && (

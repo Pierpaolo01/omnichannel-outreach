@@ -1,6 +1,7 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import type { ActivityView } from "../src/shared/api.ts";
 import { fakeCallsApp, type FakeCallsApp } from "./fake-provider.ts";
+import { respond } from "./mocks.ts";
 import { focused, freshCalls, logElsewhere, logWithMouse } from "./screens.ts";
 
 /**
@@ -252,4 +253,104 @@ test("demonstration: work the call list from Today, see each outcome on the reco
     await expect(page.getByText("Email 2 sent")).toHaveCount(0);
     await linger(page);
   });
+});
+
+test.describe("whatever the server decides by the clock is refreshed when it can change (review bot and verifier on e6872eb)", () => {
+  test("Today: another client's outcome shows when the page is shown again; calling hours opening shows at the instant the server named", async ({ page }) => {
+    const f = await freshCalls("early", "today-live");
+    await page.clock.install({ time: f.harness.clock });
+    await page.goto(f.url);
+    await expect(page.getByText("Nothing to call right now. 4 calls open later today.")).toBeVisible();
+    await expect(page.getByRole("link", { name: "Start calling" })).toHaveCount(0);
+
+    // 09:00 London: the calling hours open. The page refreshes at the server's nextChangeAt, with no navigation.
+    await f.harness.advanceTo(Date.parse("2026-11-09T09:00:30Z"));
+    await page.clock.runFor(91 * 60_000);
+    await expect(page.getByText("4 calls are ready now.")).toBeVisible();
+    await expect(page.getByRole("link", { name: "Start calling" })).toBeVisible();
+
+    // Another window works the first call: shown when the page is shown again.
+    const t = await focused(f);
+    await logElsewhere(f, t.taskId, "no_answer", t.numberId);
+    await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    await expect(page.getByText("3 calls are ready now.")).toBeVisible();
+    await expect(page.getByRole("region", { name: "Up next" }).getByRole("listitem").first()).not.toContainText("Amira Hassan");
+  });
+
+  test("Today: the date turns at the user's midnight, and Needs attention is read again with it", async ({ page }) => {
+    const f = await freshCalls("ready", "today-midnight");
+    let problem = false;
+    await page.route("**/api/needs-attention", async (route) => {
+      if (!problem) return route.continue();
+      return respond(route, {
+        stalledInboxes: [],
+        heldTracks: [],
+        accountWaits: [],
+        senderProblems: [{ accountId: "sms-1", channel: "sms", label: "+44 7700 900999", problem: "disconnected" }],
+        heldCapacity: [],
+        anomalies: [],
+      });
+    });
+    await page.clock.install({ time: f.harness.clock });
+    await page.goto(f.url);
+    await expect(page.getByText(/^Monday 9 November, /)).toBeVisible();
+    await expect(page.getByText("Nothing needs you.")).toBeVisible();
+    problem = true;
+    await f.harness.advanceTo(Date.parse("2026-11-10T00:05:00Z"));
+    await page.clock.runFor(14 * 3_600_000 + 6 * 60_000);
+    await expect(page.getByText(/^Tuesday 10 November, /)).toBeVisible();
+    await expect(page.getByText("Your SMS number +44 7700 900999 can’t send")).toBeVisible();
+  });
+
+  test("Calls: the queue fills when the calling hours open, at the instant the server named", async ({ page }) => {
+    const f = await freshCalls("early", "calls-live");
+    await page.clock.install({ time: f.harness.clock });
+    await page.goto(`${f.url}/calls`);
+    await expect(page.getByRole("heading", { name: "Nothing to call right now" })).toBeVisible();
+    await f.harness.advanceTo(Date.parse("2026-11-09T09:00:30Z"));
+    await page.clock.runFor(91 * 60_000);
+    await expect(page.getByRole("heading", { name: "Ready now, 4" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Amira Hassan" })).toBeVisible();
+  });
+});
+
+test("the number chosen goes bad on a colleague's call: the choice stays, the page says so, and Log waits for a new choice (review bot on e6872eb)", async ({ page }) => {
+  const f = await freshCalls("ready", "number-gone-bad");
+  await page.goto(`${f.url}/calls`);
+  await expect(page.getByRole("heading", { name: "Amira Hassan" })).toBeVisible();
+  await numberGroup(page).getByRole("radio", { name: /7946 0101/ }).check();
+  await outcome(page, "Wrong number").click();
+  await page.getByLabel("Notes from this call").fill("The main line is dead.");
+  // Tom's call, at the same company, is logged as a wrong number on the shared main line from another window.
+  const tom = (await f.harness.request<{ readyNow: { taskId: string; person: { name: string } | null }[] }>("GET", "/api/calls")).body.readyNow.find((x) => x.person?.name === "Tom");
+  const main = (await f.harness.request<{ numbers: { detailId: string; kind: string }[] }>("GET", `/api/call-tasks/${tom?.taskId}`)).body.numbers.find((n) => n.kind === "main_line");
+  await logElsewhere(f, tom?.taskId ?? "", "wrong_number", main?.detailId ?? null);
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await expect(page.getByText("The number you chose, +44 20 7946 0101, is now marked wrong. Choose the number you dial.")).toBeVisible();
+  await expect(numberGroup(page).getByRole("radio", { checked: true })).toHaveAccessibleName(/7946 0101/);
+  await expect(page.getByLabel("Notes from this call")).toHaveValue("The main line is dead.");
+  await expect(logButton(page)).toBeDisabled();
+  await numberGroup(page).getByRole("radio", { name: /7700 900101/ }).check();
+  await expect(logButton(page)).toBeEnabled();
+});
+
+test("an outcome left by a closed tab and refused on recovery is listed with its note until dismissed (verifier on e6872eb)", async ({ page, context }) => {
+  const f = await freshCalls("ready", "closed-tab-refused");
+  const first = await context.newPage();
+  await first.goto(`${f.url}/calls`);
+  await expect(first.getByRole("heading", { name: "Amira Hassan" })).toBeVisible();
+  // The request never leaves: the tab closes before the server hears of it.
+  await first.route("**/api/call-tasks/*/outcome", (route) => route.abort("internetdisconnected"));
+  await logWithMouse(first, "No answer", "Orphan refusal note must remain visible");
+  await expect(first.locator("p[role='status']")).toContainText("not confirmed yet");
+  await first.close();
+  const t = await focused(f);
+  await logElsewhere(f, t.taskId, "interested", t.numberId);
+
+  await page.goto(`${f.url}/calls`);
+  const notLogged = page.getByRole("list", { name: "Outcomes not logged" });
+  await expect(notLogged).toContainText("Not logged: No answer for Amira Hassan. This call is no longer on the list");
+  await expect(notLogged).toContainText("Your note wasn’t saved: Orphan refusal note must remain visible");
+  await notLogged.getByRole("button", { name: "Dismiss" }).click();
+  await expect(notLogged).toHaveCount(0);
 });

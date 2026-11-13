@@ -5,14 +5,14 @@ import { Icon } from "./icons.tsx";
 import { StatusBadge, enrollmentSentence } from "./status.tsx";
 import { clockIn, useNow } from "./time.ts";
 
-export function ErrorState({ title, message, onRetry }: { title: string; message: string; onRetry?: () => void }) {
+export function ErrorState({ title, message, onRetry, retryRef }: { title: string; message: string; onRetry?: () => void; retryRef?: (el: HTMLButtonElement | null) => void }) {
   return (
     <div role="alert" className="flex flex-wrap items-center gap-3 rounded-box bg-crit-soft px-4 py-3 text-[14px]">
       <span className="min-w-0 flex-[1_1_320px]">
         <b className="font-semibold text-crit">{title}</b> <span className="text-ink-2">{message}</span>
       </span>
       {onRetry && (
-        <button type="button" className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={onRetry}>
+        <button type="button" ref={retryRef} className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={onRetry}>
           Try again
         </button>
       )}

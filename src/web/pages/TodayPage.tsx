@@ -1,6 +1,6 @@
 import { Link } from "wouter";
-import type { CallQueueItem, NeedsAttention, TodayView } from "../../shared/api.ts";
-import { useApi } from "../api.ts";
+import type { CallQueueItem, TodayView } from "../../shared/api.ts";
+import { useLiveToday } from "../calls/useLiveToday.ts";
 import { CAPACITY_USED, attentionItems, dateHeading, reasonLine, todayLede, zonePlace } from "../calls/wording.ts";
 import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
@@ -12,9 +12,8 @@ const DOT = { crit: "bg-crit", pause: "bg-pause", end: "bg-end" } as const;
 /** Today, the landing page: the date, today's calls and Needs attention, as the server reports them. */
 export function TodayPage() {
   const now = useNow();
-  const today = useApi<TodayView>("/api/today");
-  const attention = useApi<NeedsAttention>("/api/needs-attention");
-  const view = today.result.state === "ready" ? today.result.data : null;
+  const { today, attention, retry } = useLiveToday();
+  const view = today.data;
   return (
     <div>
       <div className="flex flex-wrap items-end justify-between gap-6 border-b border-line pb-7">
@@ -26,7 +25,7 @@ export function TodayPage() {
               {todayLede(view.readyNow, view.laterToday)}
               {view.capacityReached ? ` ${CAPACITY_USED}` : ""}
             </p>
-          ) : today.result.state === "loading" ? (
+          ) : today.error === null ? (
             <div role="status" aria-label="Loading today’s calls" className="skeleton mt-3 h-6 w-80 max-w-full" />
           ) : null}
         </div>
@@ -42,8 +41,8 @@ export function TodayPage() {
           <h2 id="up-next" className="mb-2 text-[19px]">
             Up next
           </h2>
-          {today.result.state === "error" ? (
-            <ErrorState title="Today’s calls didn’t load." message={today.result.message} onRetry={today.retry} />
+          {view === null && today.error !== null ? (
+            <ErrorState title="Today’s calls didn’t load." message={today.error} onRetry={retry} />
           ) : view === null ? (
             <div role="status" aria-busy="true" aria-label="Loading up next" className="flex flex-col gap-3 py-3">
               <div className="skeleton h-12 w-full" />
@@ -57,12 +56,12 @@ export function TodayPage() {
           <h2 id="needs-attention" className="mb-3.5 text-[19px]">
             Needs attention
           </h2>
-          {attention.result.state === "error" ? (
-            <ErrorState title="Needs attention didn’t load." message={attention.result.message} onRetry={attention.retry} />
-          ) : attention.result.state === "loading" ? (
+          {attention.data === null && attention.error !== null ? (
+            <ErrorState title="Needs attention didn’t load." message={attention.error} onRetry={retry} />
+          ) : attention.data === null ? (
             <div role="status" aria-busy="true" aria-label="Loading needs attention" className="skeleton h-20 w-full" />
           ) : (
-            <Attention items={attentionItems(attention.result.data, view?.userZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone)} />
+            <Attention items={attentionItems(attention.data, view?.userZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone)} />
           )}
         </section>
       </div>

@@ -397,6 +397,36 @@ export const SCREENS: readonly Screen[] = [
     },
   },
   {
+    name: "calls, the number chosen went bad",
+    open: async (page) => {
+      const f = await calls(page, "ready", "/calls", "screen-number-bad");
+      await page.getByText(/^Calling hours /).waitFor();
+      await page.getByRole("radio", { name: /7946 0101/ }).check();
+      await page.getByRole("button", { name: "Wrong number", exact: true }).click();
+      const tom = (await f.harness.request<{ readyNow: { taskId: string; person: { name: string } | null }[] }>("GET", "/api/calls")).body.readyNow.find((x) => x.person?.name === "Tom");
+      const main = (await f.harness.request<{ numbers: { detailId: string; kind: string }[] }>("GET", `/api/call-tasks/${tom?.taskId}`)).body.numbers.find((n) => n.kind === "main_line");
+      await logElsewhere(f, tom?.taskId ?? "", "wrong_number", main?.detailId ?? null);
+      await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+      await settle(page, "is now marked wrong");
+    },
+  },
+  {
+    name: "calls, an outcome from a closed tab not logged",
+    open: async (page) => {
+      const f = await freshCalls("ready", "screen-refused-record");
+      const t = await focused(f);
+      await logElsewhere(f, t.taskId, "interested", t.numberId);
+      // What a closed tab left: its entry, refused when this page sends it.
+      await page.addInitScript(([taskId, numberId]) => {
+        const body = { requestId: "left-by-a-closed-tab", outcome: "no_answer", numberId, note: "Spoke to the front desk; call back after 3.", noteScope: "person" };
+        window.localStorage.setItem("outreach.calls.outbox.left-by-a-closed-tab", JSON.stringify({ v: 1, tab: "closed-tab", taskId, who: "Amira Hassan", body }));
+      }, [t.taskId, t.numberId] as const);
+      await page.clock.setFixedTime(f.harness.clock);
+      await page.goto(`${f.url}/calls`);
+      await settle(page, "Not logged: No answer for Amira Hassan.");
+    },
+  },
+  {
     name: "a person's Activity with logged calls",
     open: async (page) => {
       const f = await calls(page, "ready", "/calls", "screen-activity");
@@ -1020,6 +1050,19 @@ export interface FocusTransition {
 }
 
 export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
+  {
+    name: "logging an outcome when the next call fails to load moves focus to its Try again (verifier on e6872eb)",
+    open: async (page) => { const f = await freshCalls("ready", "focus-load-error"); await page.goto(`${f.url}/calls`); await page.getByText(/^Calling hours /).waitFor(); },
+    act: async (page) => {
+      await page.route("**/api/call-tasks/*", (route) => (route.request().method() === "GET" ? serverError(route) : route.continue()));
+      await page.getByRole("button", { name: "No answer", exact: true }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByRole("button", { name: "Log and open next call" }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByText("This call didn’t load.").waitFor();
+    },
+    focused: (page) => page.getByRole("button", { name: "Try again" }),
+  },
   // The calling loop (ticket 14b): every transition that replaces the controls under the keyboard.
   {
     name: "logging an outcome by keyboard moves focus to the next call's number",
