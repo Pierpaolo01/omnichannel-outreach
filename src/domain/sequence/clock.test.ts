@@ -125,6 +125,13 @@ describe("a provider's send time on the lead's clock (ADR 0003 3.3 trace)", () =
     expect(inside.atWall).toBe(monday9 + 3 * H);
   });
 
+  test("a send observed at the very instant it happened, inside a still-open freeze, maps to the freeze's start (found by generated seed 20261113)", () => {
+    const clock = { frozenSince: monday9 + 3 * H, frozenTotal: monday9 - L };
+    const freezes: Freeze[] = [{ fromWall: monday9 + 3 * H, toWall: null }];
+    const t = monday9 + 4 * H;
+    expect(sendPoint(clock, freezes, t, monday9, t)).toEqual({ at: L + 3 * H, atWall: monday9 + 3 * H });
+  });
+
   test("provider clock skew is clamped to between the handover and now", () => {
     const clock = { frozenSince: null, frozenTotal: 0 };
     expect(sendPoint(clock, [], 50, 100, 200)).toEqual({ at: 100, atWall: 100 });

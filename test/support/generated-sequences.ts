@@ -417,15 +417,22 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
   const startedAt = new Map<string, number>();
   const badSeen = new Map<string, number>();
 
+  /** Time passes; at any instant the user may resolve an unresolved attempt (ADR 0002 P3). */
+  const advance = (span: number) =>
+    h.advanceTo(h.clock + span, async () => {
+      if (unlimited) return;
+      // The user acts on Needs attention now and then, more often while something unresolved is listed there.
+      const listed = (await h.store.engine.openAttempts()).some((a) => isLive(a) && a.unresolvedSince !== null);
+      if (chance(listed ? 0.4 : 0.05)) await userMarks();
+    });
+
   const eventCount = options.events ?? 22;
   for (let e = 0; e < eventCount; e++) {
     const r = rand();
     if (r < 0.45) {
       const span = pick([10_000, 45_000, 2 * MINUTE, 7 * MINUTE, 20 * MINUTE, 2 * HOUR, 7 * HOUR, DAY, 2 * DAY, 3 * DAY]);
       inject = !unlimited && chance(0.3) ? 1 : 0;
-      await h.advanceTo(h.clock + span, async () => {
-        if (!unlimited && chance(0.1)) await userMarks();
-      });
+      await advance(span);
       inject = 0;
     } else if (r < 0.55) {
       const delivered = fake.deliveryLog.filter((d) => d.at <= h.clock);
@@ -450,7 +457,7 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
       await h.tick();
     } else if (r < 0.87 && !unlimited) {
       armed = pick(["after_claim", "after_presend", "after_handover_commit", "after_call", "after_retry_commit", "after_lookup", "after_observe_event"]);
-      await h.advanceTo(h.clock + pick([MINUTE, 20 * MINUTE, 3 * HOUR]));
+      await advance(pick([MINUTE, 20 * MINUTE, 3 * HOUR]));
     } else if (r < 0.9) {
       const stale = fake.staleAnswers.splice(0);
       for (const s of stale) await h.engine.receiveLateAnswer(s.attemptId, s.answer);
@@ -462,7 +469,7 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
       });
     } else {
       inject = unlimited ? 0 : 2;
-      await h.advanceTo(h.clock + pick([MINUTE, HOUR, DAY]));
+      await advance(pick([MINUTE, HOUR, DAY]));
       inject = 0;
     }
     await checkAll(false);
@@ -557,7 +564,10 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
         if (!attempt || !delivery || attempt.userMarkedNotSent) continue;
         const endedWall = s.subject.endedWall;
         const point = leadTimeOf(Math.max(delivery.at, attempt.handedWall ?? 0), runStart, endedWall !== null && endedWall <= delivery.at ? endedWall : null);
-        if (result.at !== point.at || result.atWall !== point.wall) problem(`9: ${id}/${result.stepId} sent at lead ${result.at}/${result.atWall}; the record says ${point.at}/${point.wall}`);
+        if (result.at !== point.at || result.atWall !== point.wall) {
+          const facts = (globalThis as { DEBUG?: boolean }).DEBUG ? ` [delivery ${delivery.at} handed ${attempt.handedWall} ended ${s.subject.endedWall} runStart ${runStart} freezes ${JSON.stringify(s.freezes)} attempt ${attempt.id} ${attempt.state} ${attempt.endedBy}]` : "";
+          problem(`9: ${id}/${result.stepId} sent at lead ${result.at}/${result.atWall}; the record says ${point.at}/${point.wall}${facts}`);
+        }
         const i = steps.findIndex((x) => x.id === result.stepId);
         const next = steps[i + 1];
         const p = s.tracks.find((x) => x.trackId === track.id);

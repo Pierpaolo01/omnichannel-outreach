@@ -70,7 +70,8 @@ export function sendPoint(
   for (const f of freezes) {
     const to = f.toWall ?? now;
     overlap += Math.max(0, Math.min(to, now) - Math.max(f.fromWall, t));
-    if (f.fromWall <= t && t < to) atWall = f.fromWall;
+    // An open freeze holds every instant from its start on.
+    if (f.fromWall <= t && (f.toWall === null || t < f.toWall)) atWall = f.fromWall;
   }
   return { at: leadNow(clock, now) - (now - t) + overlap, atWall };
 }
