@@ -415,3 +415,30 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
 export interface ActivityView {
   readonly entries: readonly ActivityEntry[];
 }
+
+/** Why a sender inbox of the email provider cannot send now. */
+export type InboxHoldReasonApi = "sending_off" | "not_active" | "no_daily_limit" | "stale";
+
+/** GET /api/email-provider (ticket 12c): the email provider, its sender inboxes, and why any cannot send. */
+export interface EmailProviderStatus {
+  readonly provider: "instantly" | "none";
+  /** Real provider writes: "off" unless the runtime setting turns them on. */
+  readonly sending: "on" | "off";
+  /** Continue-thread follow-ups: unavailable until ADR 0002's experiment X2 picks a transport. */
+  readonly followUps: "available" | "unavailable";
+  /** "exhausted" after a 402 or an exhausted lead quota: every dispatch handover waits. */
+  readonly quota: "available" | "exhausted";
+  readonly lastPolledAt: string | null;
+  readonly inboxes: readonly {
+    readonly id: string;
+    /** Instantly's account status: 1 Active, 2 Paused, 3 maintenance, -1 to -3 errors. */
+    readonly status: number;
+    readonly dailyLimit: number | null;
+    /** The daily limit less what other campaigns sent from the inbox today. */
+    readonly capacity: number;
+    readonly healthy: boolean;
+    readonly reason: InboxHoldReasonApi | null;
+  }[];
+  /** Leads whose next email is a continue-thread follow-up the provider cannot send yet: they wait, and nothing is sent. */
+  readonly waitingFollowUps: readonly { readonly enrollmentId: string; readonly trackId: string; readonly stepId: string }[];
+}

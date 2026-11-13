@@ -1,7 +1,8 @@
 /**
  * The sending port (ADR 0003 5.3). Each sending channel has one; ticket 12b has email only. The
- * Instantly adapter (ticket 12c) implements this interface; until then the running app registers
- * `UnconnectedEmailPort`, which has no sender accounts, so every email track meets launch blocker 3.
+ * Instantly adapter (`src/server/instantly/port.ts`, ticket 12c) implements it when a key is
+ * configured; otherwise the running app registers `UnconnectedEmailPort`, which has no sender
+ * accounts, so every email track meets launch blocker 3.
  */
 import type { CallAnswer } from "../../domain/sequence/attempt.ts";
 import type { RenderedCopy, RejectReason } from "../../domain/sequence/state.ts";
@@ -11,6 +12,12 @@ import type { SenderAccountConfig } from "./engine-store.ts";
 export interface Transport {
   readonly retryable: boolean;
   readonly notSentIsFinal: boolean;
+  /**
+   * False when the port has no way to send this kind of step yet, such as Instantly's continue-thread
+   * follow-ups before ADR 0002's experiment X2: the engine claims no such step, so it waits, and
+   * nothing is sent for it. Absent means available.
+   */
+  readonly available?: boolean;
 }
 
 export interface HandoverRequest {
@@ -24,6 +31,7 @@ export interface HandoverRequest {
   readonly threading: "new_subject" | "continue_thread";
   /** For the provider's own records (and the fakes' logs): which lead and step this is. */
   readonly subjectId: string;
+  readonly trackId: string;
   readonly stepId: string;
 }
 

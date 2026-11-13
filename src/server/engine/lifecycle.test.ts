@@ -550,6 +550,44 @@ describe("review round 2, ruling 3: a reply keeps its campaign's scope", () => {
     expect(port.calls.filter((c) => c.request.subjectId === aLead).map((c) => c.request.stepId)).toEqual(["s1", "s2"]);
   });
 
+  test("review bot on c66a0c8: a 17-minute suspension of the same process with no ticks is not counted whole toward a held reply's wait; only B stops", async () => {
+    let clock = MONDAY_9 - H;
+    const port = new ScriptedEmailPort(() => clock, [inbox("inbox-a")]);
+    const h = new EngineHarness({ start: clock, accounts: [], port, engine: quickWaits });
+    Object.defineProperty(h, "clock", { get: () => clock, set: (v: number) => (clock = v) });
+    const rows = { businesses: [business({ business_id: "b1", business_name: "Harbour Lane Physio" })], people: [PEOPLE[0]!] };
+    const definition: CampaignDefinition = { ...twoSteps(), tracks: [{ ...twoSteps().tracks[0]!, steps: [step("s1", { subject: "Hello", threading: "new_subject" }), step("s2", { subject: "Again", threading: "new_subject", waitDays: 1 })] }] };
+    const a = await h.createCampaign("Campaign A", rows);
+    const b = await h.createCampaign("Campaign B", rows);
+    await h.tick();
+    await h.defineSequence(a.campaign.id, definition);
+    await h.defineSequence(b.campaign.id, definition);
+    const leadA = async () => (await h.store.engine.subjectsOf(a.campaign.id))[0]!;
+    const leadB = async () => (await h.store.engine.subjectsOf(b.campaign.id))[0]!;
+    port.onCall = () => (port.calls.length === 2 ? { answer: "unknown", sendAfter: 0, eventDelay: 20 * MIN } : { answer: "accepted", sendAfter: 0 });
+    const answer = port.handover.bind(port);
+    port.handover = async (request) => {
+      const result = await answer(request);
+      return port.calls.length === 2 ? { kind: "unknown" } : result;
+    };
+    // Lookups say nothing either: only B's delayed sent event can attach the reply.
+    port.lookup = () => Promise.resolve({ kind: "unknown" });
+    clock = MONDAY_9;
+    await h.launch(a.campaign.id);
+    clock = MONDAY_9 + MIN;
+    await h.launch(b.campaign.id);
+    clock = MONDAY_9 + MIN + 1000;
+    port.reply("pat@harbour.example", true, port.deliveries.find((d) => d.at === MONDAY_9 + MIN)!.ref);
+    await h.tick();
+    // The laptop sleeps: no tick for seventeen minutes, in the same process.
+    clock += 17 * MIN;
+    await h.tick();
+    expect((await h.progress(await leadA())).status).not.toBe("replied");
+    await h.advanceTo(MONDAY_9 + 3 * DAY);
+    expect((await h.progress(await leadB())).status).toBe("replied");
+    expect((await h.progress(await leadA())).status).not.toBe("replied");
+  });
+
   test("a reply on a thread the app never learns falls back after one settling period to work sent at or before it, pausing that inbox's sends to the address meanwhile; refused work and work handed after the reply are not matched", () => fallbackScopeAndPause());
 });
 

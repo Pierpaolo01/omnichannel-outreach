@@ -212,6 +212,16 @@ export function nextWindowOpen(rules: readonly WindowRule[], zone: string, t: nu
 }
 
 /** The calendar date, as YYYY-MM-DD, of instant `t` in `zone`: an account's capacity reset day. */
+/**
+ * Running time between two observations of a wait: the one definition, in the codebase, of time the
+ * application was running and observing (ADR 0003 2.4; ADR 0002 as built, rule 4). A wait advances by
+ * the gap since it was last counted, never by more than `maxGapMs`. A longer gap is a suspension, a
+ * stall, a slow observation or a forward clock jump, not observation, and a backward jump counts nothing.
+ */
+export function runningCredit(lastCountedWall: number, now: number, maxGapMs: number): number {
+  return Math.min(Math.max(0, now - lastCountedWall), maxGapMs);
+}
+
 export function resetDayOf(t: number, zone: string): string {
   return new Date(localDayNumber(t, zone) * DAY).toISOString().slice(0, 10);
 }

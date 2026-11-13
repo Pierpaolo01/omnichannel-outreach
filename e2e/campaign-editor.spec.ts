@@ -52,6 +52,8 @@ test.describe("on the running app, with no email provider connected", () => {
     await expect(page.getByRole("button", { name: "Saturday" })).toHaveAttribute("aria-pressed", "true");
     await expect(page.getByLabel("Sending starts at")).toHaveValue("8");
     await expect(page.getByText("No connected sender inbox.")).toBeVisible();
+    // The reason, from GET /api/email-provider: this run has no email provider set up.
+    await expect(page.getByText("No email provider is set up on this machine.")).toBeVisible();
 
     await page.getByRole("link", { name: /Before launch/ }).click();
     await expect(page.getByText("1 thing blocks launch.")).toBeVisible();

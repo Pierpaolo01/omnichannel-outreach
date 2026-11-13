@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useLocation, useSearch } from "wouter";
 import { MERGE_FIELDS } from "../../domain/sequence/copy.ts";
-import type { BeforeLaunchView, CampaignDefinition, StepDefinition, TrackDefinition } from "../../shared/api.ts";
+import type { BeforeLaunchView, CampaignDefinition, EmailProviderStatus, StepDefinition, TrackDefinition } from "../../shared/api.ts";
 import { useApi } from "../api.ts";
 import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
@@ -494,6 +494,7 @@ function TimingAndSender({ track, editor, onWindow }: { track: TrackDefinition; 
           {accounts.length === 0 ? (
             <>
               <span className="font-semibold text-crit">No connected sender inbox.</span>
+              <ProviderReason />
               <div className="text-[12.5px] text-muted">This track can’t send until an inbox is connected. Launch is blocked.</div>
             </>
           ) : (
@@ -573,6 +574,15 @@ function TimingAndSender({ track, editor, onWindow }: { track: TrackDefinition; 
       </dl>
     </section>
   );
+}
+
+/** One line on why no inbox is connected, from GET /api/email-provider; nothing if it is unknown. */
+function ProviderReason() {
+  const { result } = useApi<EmailProviderStatus>("/api/email-provider");
+  if (result.state !== "ready") return null;
+  const { provider, sending } = result.data;
+  const reason = provider === "none" ? "No email provider is set up on this machine." : sending === "off" ? "Sending through Instantly is turned off for this run." : null;
+  return reason ? <div className="text-[12.5px] text-ink-2">{reason}</div> : null;
 }
 
 function timeZones(current: string): string[] {

@@ -30,6 +30,8 @@ import type {
 import type { EngineStore } from "../engine/engine-store.ts";
 import { migrate } from "./migrations.ts";
 import { SqliteEngineStore } from "./sqlite-engine-store.ts";
+import { SqliteInstantlyStore } from "./sqlite-instantly-store.ts";
+import type { InstantlyStore } from "../instantly/store.ts";
 import type { LeadQuery, OutreachStore, StoredContactDetail } from "./store.ts";
 
 type Row = Record<string, SQLOutputValue>;
@@ -69,10 +71,12 @@ export function liveDetailRowOf(db: DatabaseSync, detailId: string): Row | undef
 class SqliteStore implements OutreachStore {
   private readonly db: DatabaseSync;
   readonly engine: EngineStore;
+  readonly instantly: InstantlyStore;
 
   constructor(db: DatabaseSync) {
     this.db = db;
     this.engine = new SqliteEngineStore(db);
+    this.instantly = new SqliteInstantlyStore(db);
   }
 
   async createCampaign(campaign: Campaign): Promise<void> {

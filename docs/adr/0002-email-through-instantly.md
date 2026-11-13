@@ -1,6 +1,6 @@
 # 0002. Email through Instantly: the app owns every clock
 
-- **Date:** 2026-11-12. Revised twice the same day after independent reviews.
+- **Date:** 2026-11-12. Revised twice the same day after independent reviews. Amended 2026-11-13 by ticket 12c, the adapter as built (see "Amendment: the adapter as built").
 - **Status:** Proposed. Build the app-owned scheduler and the email port now. The Instantly adapter is finished after the gating experiments (X1–X9) pass. All of them need test addresses the user owns, and none are designated yet ([#28](https://github.com/Pierpaolo01/omnichannel-outreach/issues/28)).
 - **Consumers:** tickets [12](https://github.com/Pierpaolo01/omnichannel-outreach/issues/12), [13](https://github.com/Pierpaolo01/omnichannel-outreach/issues/13), [17](https://github.com/Pierpaolo01/omnichannel-outreach/issues/17), [19](https://github.com/Pierpaolo01/omnichannel-outreach/issues/19), [20](https://github.com/Pierpaolo01/omnichannel-outreach/issues/20), [21](https://github.com/Pierpaolo01/omnichannel-outreach/issues/21).
 - **Evidence:** [docs/research/instantly-email-delivery.md](../research/instantly-email-delivery.md) at `32517dd` (cited as "research §n"), re-checked against [`api_v2.json`](https://api.instantly.ai/openapi/api_v2.json) and the help centre. See "Sources".
@@ -290,6 +290,74 @@ The factory has API access but no Instantly UI access.
 - No documented maximum queue time or observation delay. The `k` messages in flight per inbox are outside the app's control.
 - Replies from other addresses or outside the thread go undetected. Paused or disconnected inboxes are not checked for replies.
 - No proven withdrawal signal. The full no-duplicate, no-skip promise stays unverified until X5 finds one.
+
+## Amendment: the adapter as built (ticket 12c, 13 November 2026)
+
+The adapter is `src/server/instantly/`. It is built and tested against a fake Instantly service whose shapes come only from `api_v2.json` (`test/support/fake-instantly.ts`). That is not provider proof: **every experiment X1–X9 is still unverified**, and the status stays *proposed*. A read-only probe of the real workspace (`scripts/instantly-read-probe.ts`, GET requests only) confirmed that `GET /accounts` and `GET /emails` return the fields the adapter reads.
+
+Where the code is more precise than the decision above, or departs from it:
+
+| Topic | As built | Departure? |
+| - | - | - |
+| Real writes | Off unless the run's environment has `OUTREACH_INSTANTLY_WRITES=on`. The client refuses every request except GET and `POST /leads/list` before it is built. Tests and the default local run write nothing. | New, by the ticket's boundary |
+| Sender inbox health | An inbox can send only while writes are on, its `status` is 1 (Active), it has a `daily_limit`, and it is fresh: its mail scan, and the status scan of every dispatch campaign on it, each reached its end in a scan that began at most 10 minutes ago (the stale-inbox hold; polls run at most once a minute). With writes off every inbox is listed but unhealthy, so launch blocker 3 stays. `GET /api/email-provider` gives the reason per inbox. | Precision |
+| Health lag | The engine syncs accounts before it observes, so after a gap longer than the freshness bound (sleep, restart) the first tick holds sends and the next releases them. | Known limit |
+| Other senders | Applied while P1 is open: reported capacity = `daily_limit` − max(0, analytics `sent` today, as a running maximum − dispatch sends the adapter observed today). | Interim for P1 |
+| Provider reference | The engine holds `il:<Instantly lead id>` for an opener. The adapter stores the sent email and its thread, and translates a reply's `thread_id` back to that reference. | Precision |
+| Replies | A received email names a piece of work only when its thread, or its Instantly `lead_id` with `campaign_id`, maps to that work, its sender is the work's destination, and the receiving inbox is the work's inbox. Mail whose `campaign_id`, or whose thread's campaign email, belongs to a campaign outside the app's dispatch campaigns is not the app's. A reply that cannot be proved yet is held if it comes from an address the adapter dispatched to, or began a lead add for, from that inbox. While it is held, the pre-send check answers unavailable for that address and inbox. It is reported with its work's reference once the thread becomes known. Otherwise, after `SETTLING` of running time, from a poll whose mail scan reached its end, and after a lookup of its thread, it is reported with no reference for the engine's fallback (ADR 0003 2.4). Other mail, including the pre-existing campaigns' replies and delivery notices, is not reported. | Precision; replaces `it:<thread id>` (review bot on `7de601e`; council on `387a19b`) |
+| Unsubscribe | Lead status −2 is reported as a reply on that work, so it stops that lead in that campaign. | As decided |
+| Explained skips | Verification −1 (Invalid) is reported as an invalid address. −2 (Risky) and −3 (Catch All) are reported as a provider skip, so the track waits in Needs attention like an unexplained one (P4), because the engine has no reason to skip a track with "risky address" yet. | **Departs** from "an explained skip skips the track with its reason" |
+| Lead statuses | Read with `POST /leads/list` per dispatch campaign; each scan resumes from its saved page cursor, up to 20 pages a poll. | Precision |
+| `duplicated_leads` | The handover answers unknown and records nothing. A lookup for a key with no recorded lead answers a non-final not-sent without asking Instantly, so the engine's same-key retry asks again; when the retries are spent the work is unresolved and waits in Needs attention for the user (P3). Never assumed sent. | **Departs** from "the app looks up the existing lead": the existing lead is not looked up |
+| Withdrawal | `DELETE /leads/{id}` for a lead with no sent email; the answer stays `unknown`, as X5 requires. A sent one is `too-late`. | Precision (X5 probes it) |
+| Quota | A 402 or `remaining_in_plan: 0` holds every inbox for 60 minutes; then one handover probes again. | Precision |
+| Dispatch campaign | Found by its `oo·<campaign>·<track>·<step>·<inbox>` name (`oo·test·` for test runs) after its intent is recorded; settings re-asserted with `PATCH` whenever `timestamp_updated` differs from the value last seen, then activated if not Active (also from Completed, which X1 checks). Schedule 00:00–23:59 every day in `Africa/Abidjan` (UTC, no daylight saving, in the documented zone enum, which has no `UTC`); step `delay: 0`, `delay_unit: minutes`. | Precision |
+| Copy | The subject goes into `oo_subject` as written; the body is plain text escaped to HTML with `<br/>` line breaks in `oo_body`. X1 checks HTML in variables. | Precision |
+| Pre-send check | Unavailable while a reply from that address to that inbox is held. With no thread recorded for the lead from that inbox (an opener), it is clear without a request. Otherwise each recorded thread is read whole (`search=thread:<id>`), with no requirement that a reply carry lead metadata, and is clear only if every read reached its end. | Precision |
+| Follow-ups | `FollowUpTransport` is absent until X2. The port reports continue-thread steps as unavailable (`Transport.available: false`, ADR 0003 5.3), the engine claims none, and nothing is sent; the lead waits on that step. `GET /api/email-provider` lists those leads. Needs attention does not list them yet. | **Departs**: the wait shows in the provider status, not in Needs attention |
+
+**Two rules that make two kinds of defect impossible** (review bot on `7de601e`, four findings, fixed as classes in `src/server/instantly/port.ts`):
+
+1. **Signal identity.** An event names a piece of work only when the message's own identity proves it: its thread or its Instantly lead, with the sender being the work's destination and the receiving inbox the work's inbox. Only a campaign email (`ue_type` 1) is a dispatch send; a message the user writes by hand in the thread (`ue_type` 3) is not. The reference on an event is always one the engine already holds for that work, or none. This removes a delivery notice read as a reply (finding 3) and a reply under a reference that never attaches, which fell back by address and stopped the person's other campaigns (finding 2).
+2. **Completeness.** A read that pages either reaches its end or counts as incomplete, and an incomplete read never counts as current. The inbox list fails rather than being truncated. A campaign search that did not reach its end creates nothing. A pre-send check that did not read all of the lead's mail is unavailable, not clear. The mail and status scans resume from a persisted cursor, and freshness counts from the start of the last scan that reached its end (finding 4). Every batch is reported under a checkpoint of its own, and reported again, with its status changes not yet recorded, until the engine passes that checkpoint back, which it does only after applying the batch and storing it (finding 1). So nothing the adapter reported is lost to a crash before the engine stored it.
+
+The regressions are in `src/server/instantly/port.test.ts` ("signal identity", "completeness") and `src/server/instantly/engine-instantly.test.ts` ("review bot finding 1", "finding 2"). Each failed before its fix.
+
+**Four more rules** (council and review bot on `387a19b`; regressions in `port.test.ts` "council round on 387a19b" and `engine-instantly.test.ts` "council item 5"; the generated `observation-crashes.test.ts`):
+
+3. **One commit per poll.** A poll keeps everything that decides what is read or reported again in a draft, and writes it in one transaction at the end. That covers the mail and status scan cursors, their start and completion times, the held replies, the acknowledgement of the previous batch, and the new batch with its sequence number. A poll that dies anywhere before it returns changes none of it. Facts learned from Instantly on the way are written as found: which email and thread a lead's send is, the running maximum of analytics, and an intent or a lead recorded around an add. They stay true whatever happens next, and writing them again changes nothing. Nothing else in the adapter moves a cursor. `src/server/instantly/observation-crashes.test.ts` runs 40 generated sequences of replies, unsubscribes, other campaigns' mail and strangers' mail, with the process dying at every point inside a poll and the engine dying between a batch and its checkpoint, on pages of two items. After every applied event it asserts that no mail outside the app's work reaches the engine and that every reference is its own work's. At the end it asserts that every reply and unsubscribe arrived. Moving the mail cursor out of the commit makes it fail. It also found that the first mail scan read only from "now less the overlap": the first scan now reads from the first lead add.
+4. **Running time, one definition.** The adapter's one correlation wait, a held reply's, uses the engine's definition of running time, `runningCredit` in `src/domain/sequence/clock.ts` (ADR 0003 `MAX_RUNNING_CREDIT`): each poll credits the gap since the reply was last counted, never negative and never more than the poll interval (`maxCreditMs`, one minute). No gap of any cause is credited whole. On top of that, the adapter credits a poll only when its mail scan reached its end and the previous poll of the same process committed. The fallback also needs such a poll and a lookup of the reply's thread. Review bot on `387a19b`, `c942fd2` and `c66a0c8`: three instances of one kind, closed by bounding every credit, not by naming causes. Each cause of a gap, and what it credits:
+   - **a restart, or a crash inside a poll:** the first poll of the new process credits nothing;
+   - **failed polls** (a request error, a timeout, an outage, the local `/emails` budget spent): a failed poll credits nothing, and neither does the first poll after it;
+   - **a suspension of the same process with no polls** (a sleeping laptop): the next poll credits at most one minute;
+   - **a slow poll:** at most one minute;
+   - **the app's clock jumping forwards:** at most one minute; **jumping backwards:** nothing, and poll spacing does not suppress polls until the clock catches up;
+   - **incomplete paging:** a poll whose scan did not reach its end credits nothing;
+   - **a stale inbox** results from the causes above; **a quota hold** stops handovers, not reads, so polls go on crediting;
+   - **a status scan cut short or an unavailable thread lookup** credits normally; an unavailable lookup only keeps the reply held.
+
+   The other clocks are wall time by design, because they measure the world, not the app's attention:
+   - the freshness bound (staleness must include downtime);
+   - the quota recheck (Instantly's plan changes in real time);
+   - poll spacing and the analytics cache.
+
+   The tests:
+   - `port.test.ts` "every cause of a gap credits at most one poll interval" runs one test per cause above and asserts the bound;
+   - `clock.test.ts` "running time" asserts the same causes on the function;
+   - `lifecycle.test.ts` "review bot on c66a0c8" holds the engine to the same bound;
+   - the generated `observation-crashes.test.ts` adds suspensions and jumps of the app's clock to its crashes and outages, and checks every fallback with no reference against observed time counted independently by the test. An unbounded credit makes all of them fail.
+5. **Single-flight.** The engine may stop waiting for a call without cancelling it, so a handover runs at most once at a time per idempotency key, a dispatch campaign is ensured at most once at a time per key, and polls run one at a time. A call made while one is still running joins it. After a create, a campaign id another process saved first is kept.
+6. **In-doubt adds.** The adapter records (inbox, destination, key) before every `POST /leads/add`. A reply from that address is then held, not dropped, even if the add's answer is lost.
+
+7. **Many processes, one database** (the verifier's B7 on `c66a0c8`). Single-flight serializes one process only, so every write the adapter makes to its records is either one statement or a commit that checks it changed nothing it did not read. There is no single-instance lock; that question is tracked separately.
+   - **The dispatch campaign id** is adopted by a compare-and-set (`UPDATE … WHERE instantly_id IS NULL`). Every process goes on with the id that statement leaves, before it activates the campaign or builds the add. A losing create never overwrites it. The intent row is insert-only, and timestamps update only the adopted id. A same-key add is therefore byte-identical in every process, and the dispatched lead agrees with the campaign the status scan reads. An empty losing campaign left in Instantly is a follow-up.
+   - **A poll's commit** (scan cursors and completion times, held replies, the acknowledgement of the previous batch, the batch and its sequence number) runs in one transaction. It goes ahead only if the stored batch is still the one the poll read when it began. Otherwise the poll fails and changes nothing, and the next one carries on: two processes' polls can never overwrite each other's batch, cursors or held replies.
+   - **One statement each:** recording a send (`… WHERE sent_email_id IS NULL`), raising the analytics maximum (`MAX` in the upsert), and inserting an intent or a dispatched lead (`ON CONFLICT DO NOTHING`; with one adopted campaign both writers hold the same lead).
+   - **Last writer wins, safely:** the quota hold time (either write is a hold), poll spacing, a timestamp seen (at worst one extra `PATCH`), and the completion time of a new campaign's status scan (written only by the process whose id was adopted).
+
+   Regressions, failing on `c66a0c8`, in `src/server/instantly/two-processes.test.ts`, on two stores over one SQLite file:
+   - both creators read the old state, yet one id is adopted, the two same-key adds are identical, and the unsubscribe is seen;
+   - two overlapping polls: the later commit fails, and the earlier batch is replayed until it is acknowledged.
 
 ## Sources (re-checked 12 November 2026)
 
