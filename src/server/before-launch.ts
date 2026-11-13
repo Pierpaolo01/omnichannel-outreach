@@ -5,7 +5,7 @@
  * the handover renders with; nothing here writes.
  */
 import { missingFields, renderSegments, type Segment } from "../domain/copy-preview.ts";
-import { projectLoad } from "../domain/load-projection.ts";
+import { projectLoad, type Projection } from "../domain/load-projection.ts";
 import { mergeUses } from "../domain/sequence/copy.ts";
 import { liveSteps, liveTracks, type CampaignDefinition, type TrackDefinition } from "../domain/sequence/definition.ts";
 import { accountAvailable } from "../domain/sequence/dispatch.ts";
@@ -101,24 +101,35 @@ export async function beforeLaunchView(store: OutreachStore, campaignId: string,
   };
 }
 
-async function loadProjection(store: OutreachStore, definition: CampaignDefinition, leads: readonly CampaignLead[], now: number): Promise<LoadProjectionView> {
+/** The projection's input, from the store: the same lead zones, inboxes, slots and counts sending reads. */
+async function projectionOf(store: OutreachStore, definition: CampaignDefinition, leads: readonly CampaignLead[], now: number): Promise<Projection | null> {
   const track: TrackDefinition | undefined = liveTracks(definition, "main").find((t) => t.channel === "email");
-  const withEmail = leads.filter((l) => l.lead.email !== null);
+  if (!track) return null;
+  const pool = (await store.engine.accounts(now)).filter((a) => definition.emailPool.includes(a.id));
+  return projectLoad({
+    start: now,
+    window: track.window,
+    waits: liveSteps(track).map((s) => s.waitDays),
+    leads: leads.filter((l) => l.lead.email !== null).map((l) => ({ id: l.state.subject.id, zone: l.state.lead.zone, sender: l.state.subject.emailSender })),
+    accounts: pool.map((a) => ({ id: a.id, capacity: a.capacity, usedToday: a.used, gapMs: a.gapMs, nextSlotAt: a.nextSlotAt, resetZone: a.resetZone, available: accountAvailable(a, now) })),
+    zone: definition.timezone,
+    horizonDays: PROJECTION_HORIZON_DAYS,
+  });
+}
+
+/** The projected sends for a campaign's leads, for tests that compare them with the engine's. */
+export async function projectedSends(store: OutreachStore, campaignId: string, now: number): Promise<Projection | null> {
+  const row = await store.engine.campaign(campaignId);
+  if (!row?.definition) return null;
+  return projectionOf(store, row.definition, await campaignLeads(store, campaignId, row.definition, now), now);
+}
+
+async function loadProjection(store: OutreachStore, definition: CampaignDefinition, leads: readonly CampaignLead[], now: number): Promise<LoadProjectionView> {
   const labels = await store.engine.accountLabels();
   const pool = (await store.engine.accounts(now)).filter((a) => definition.emailPool.includes(a.id));
-  const projection = track
-    ? projectLoad({
-        start: now,
-        window: track.window,
-        waits: liveSteps(track).map((s) => s.waitDays),
-        leads: withEmail.map((l) => ({ id: l.state.subject.id, zone: l.state.lead.zone, sender: l.state.subject.emailSender })),
-        accounts: pool.map((a) => ({ id: a.id, capacity: a.capacity, usedToday: a.used, gapMs: a.gapMs, resetZone: a.resetZone, available: accountAvailable(a, now) })),
-        zone: definition.timezone,
-        horizonDays: PROJECTION_HORIZON_DAYS,
-      })
-    : null;
+  const projection = await projectionOf(store, definition, leads, now);
   return {
-    leadsWithEmail: withEmail.length,
+    leadsWithEmail: leads.filter((l) => l.lead.email !== null).length,
     accounts: pool.map((a) => ({
       id: a.id,
       label: labels[a.id] ?? a.id,
