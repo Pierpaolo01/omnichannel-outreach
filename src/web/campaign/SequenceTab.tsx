@@ -321,47 +321,127 @@ function TrackNode({ track, def, selected, blockers, launched, onSelect }: { tra
   );
 }
 
-/** Add track: a short menu of the channels a track can use. Phone tracks arrive later. */
+/**
+ * Add track: a menu button (WAI-ARIA menu button pattern; council on 10121d3, item 4). Enter, Space or
+ * Down opens it on the first item and Up on the last; Up, Down, Home and End move between items; Escape
+ * closes it and returns focus to the button; Tab, a click outside or focus leaving closes it. Phone
+ * tracks arrive later: that item is disabled and says so.
+ */
 function AddTrackMenu({ disabled, onAdd }: { disabled: boolean; onAdd: (channel: "email" | "sms") => void }) {
-  const [open, setOpen] = useState(false);
+  const [focusIndex, setFocusIndex] = useState<number | null>(null);
+  const open = focusIndex !== null;
   const menuId = useId();
+  const buttonId = useId();
+  const root = useRef<HTMLDivElement>(null);
   const button = useRef<HTMLButtonElement>(null);
-  const close = () => {
-    setOpen(false);
-    button.current?.focus();
+  const items = useRef<(HTMLButtonElement | null)[]>([]);
+  const entries = [
+    { key: "email", label: "Email track", icon: "email" as const, enabled: true },
+    { key: "sms", label: "SMS track", icon: "sms" as const, enabled: true },
+    { key: "call", label: "Phone track", icon: "call" as const, enabled: false },
+  ];
+  useEffect(() => {
+    if (focusIndex !== null) items.current[focusIndex]?.focus();
+  }, [focusIndex]);
+  useEffect(() => {
+    if (!open) return;
+    const outside = (event: PointerEvent) => {
+      if (root.current && !root.current.contains(event.target as Node)) setFocusIndex(null);
+    };
+    document.addEventListener("pointerdown", outside);
+    return () => document.removeEventListener("pointerdown", outside);
+  }, [open]);
+  const close = (refocus: boolean) => {
+    setFocusIndex(null);
+    if (refocus) button.current?.focus();
+  };
+  const choose = (entry: (typeof entries)[number]) => {
+    if (!entry.enabled || entry.key === "call") return;
+    setFocusIndex(null);
+    onAdd(entry.key as "email" | "sms");
   };
   return (
-    <div className="relative" onKeyDown={(e) => e.key === "Escape" && open && close()}>
-      <button ref={button} id={ADD_TRACK_ID} type="button" className="btn btn-sm gap-1.5 border-line-strong bg-base-100 font-medium" disabled={disabled} aria-expanded={open} aria-controls={menuId} onClick={() => setOpen((o) => !o)}>
-        <Icon name="plus" className="size-4" />
-        Add track
+    <div
+      ref={root}
+      className="relative"
+      onBlur={(e) => {
+        if (open && !root.current?.contains(e.relatedTarget)) setFocusIndex(null);
+      }}
+    >
+      <button
+        ref={button}
+        id={ADD_TRACK_ID}
+        type="button"
+        className="btn btn-sm gap-1.5 border-line-strong bg-base-100 font-medium"
+        disabled={disabled}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
+        onClick={() => setFocusIndex(open ? null : 0)}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setFocusIndex(0);
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            setFocusIndex(entries.length - 1);
+          }
+        }}
+      >
+        <span id={buttonId} className="flex items-center gap-1.5">
+          <Icon name="plus" className="size-4" />
+          Add track
+        </span>
       </button>
       {open && (
-        <ul id={menuId} aria-label="Add a track" className="absolute right-0 top-[calc(100%+6px)] z-10 flex w-[240px] flex-col gap-0.5 rounded-field border border-line-strong bg-base-100 p-1.5">
-          {(["email", "sms"] as const).map((channel) => (
-            <li key={channel}>
+        <ul
+          id={menuId}
+          role="menu"
+          aria-labelledby={buttonId}
+          className="absolute right-0 top-[calc(100%+6px)] z-10 flex w-[250px] flex-col gap-0.5 rounded-field border border-line-strong bg-base-100 p-1.5"
+          onKeyDown={(e) => {
+            const last = entries.length - 1;
+            const at = focusIndex;
+            const move = (to: number) => {
+              e.preventDefault();
+              setFocusIndex(to);
+            };
+            if (e.key === "ArrowDown") move(at === last ? 0 : at + 1);
+            else if (e.key === "ArrowUp") move(at === 0 ? last : at - 1);
+            else if (e.key === "Home") move(0);
+            else if (e.key === "End") move(last);
+            else if (e.key === "Escape") {
+              e.preventDefault();
+              close(true);
+            } else if (e.key === "Tab") setFocusIndex(null);
+          }}
+        >
+          {entries.map((entry, i) => (
+            <li key={entry.key} role="none">
               <button
-                type="button"
-                className="flex w-full cursor-pointer items-center gap-2 rounded-[6px] px-2.5 py-2 text-left text-[14px] hover:bg-raised"
-                onClick={() => {
-                  setOpen(false);
-                  onAdd(channel);
+                ref={(el) => {
+                  items.current[i] = el;
                 }}
+                type="button"
+                role="menuitem"
+                tabIndex={focusIndex === i ? 0 : -1}
+                aria-disabled={entry.enabled ? undefined : true}
+                aria-describedby={entry.enabled ? undefined : "phone-later"}
+                className={`flex w-full flex-col items-start rounded-[6px] px-2.5 py-2 text-left text-[14px] ${entry.enabled ? "cursor-pointer hover:bg-raised" : "cursor-default text-muted"}`}
+                onClick={() => choose(entry)}
               >
-                <Icon name={channel} className="size-4 text-muted" />
-                {channel === "email" ? "Email track" : "SMS track"}
+                <span className="flex items-center gap-2">
+                  <Icon name={entry.icon} className="size-4 text-muted" />
+                  {entry.label}
+                </span>
+                {!entry.enabled && (
+                  <span id="phone-later" className="pl-6 text-[12.5px] text-muted">
+                    {PHONE_LATER}
+                  </span>
+                )}
               </button>
             </li>
           ))}
-          <li>
-            <button type="button" disabled aria-describedby="phone-later" className="flex w-full items-center gap-2 rounded-[6px] px-2.5 py-2 text-left text-[14px] text-muted">
-              <Icon name="call" className="size-4" />
-              Phone track
-            </button>
-            <p id="phone-later" className="px-2.5 pb-1.5 text-[12.5px] text-muted">
-              {PHONE_LATER}
-            </p>
-          </li>
         </ul>
       )}
     </div>

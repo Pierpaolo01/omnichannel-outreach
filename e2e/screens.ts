@@ -1095,10 +1095,42 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
       await page.goto(`/campaigns/${id}`);
       await page.getByRole("button", { name: "Add track" }).focus();
       await page.keyboard.press("Enter");
-      await page.getByRole("button", { name: "SMS track", exact: true }).focus();
+      await page.getByRole("menuitem", { name: "SMS track" }).focus();
     },
     act: (page) => page.keyboard.press("Enter"),
     focused: (page) => page.getByLabel("Text 1 message"),
+  },
+  {
+    name: "Down on Add track opens its menu on the first item (menu button pattern, council on 10121d3, item 4)",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: menu opens");
+      await page.goto(`/campaigns/${id}`);
+      await page.getByRole("button", { name: "Add track" }).focus();
+    },
+    act: (page) => page.keyboard.press("ArrowDown"),
+    focused: (page) => page.getByRole("menuitem", { name: "Email track" }),
+  },
+  {
+    name: "Up on Add track opens its menu on the last item, the disabled phone track that says why",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: menu opens on last");
+      await page.goto(`/campaigns/${id}`);
+      await page.getByRole("button", { name: "Add track" }).focus();
+    },
+    act: (page) => page.keyboard.press("ArrowUp"),
+    focused: (page) => page.getByRole("menuitem", { name: /^Phone track/, description: "Phone tracks arrive with a later release." }),
+  },
+  {
+    name: "Down and Up move between the menu's items, wrapping",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: menu moves");
+      await page.goto(`/campaigns/${id}`);
+      await page.getByRole("button", { name: "Add track" }).focus();
+      await page.keyboard.press("Enter");
+      await page.keyboard.press("ArrowUp");
+    },
+    act: (page) => page.keyboard.press("ArrowDown"),
+    focused: (page) => page.getByRole("menuitem", { name: "Email track" }),
   },
   {
     name: "Escape closes the Add track menu and returns focus to Add track",
@@ -1107,7 +1139,7 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
       await page.goto(`/campaigns/${id}`);
       await page.getByRole("button", { name: "Add track" }).focus();
       await page.keyboard.press("Enter");
-      await page.getByRole("button", { name: "Email track", exact: true }).focus();
+      await page.getByRole("menuitem", { name: "Email track" }).focus();
     },
     act: (page) => page.keyboard.press("Escape"),
     focused: (page) => page.getByRole("button", { name: "Add track" }),

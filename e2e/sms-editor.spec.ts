@@ -66,6 +66,27 @@ test.describe("a merge field with no fallback, named by every track and message 
   });
 });
 
+test.describe("the Add track menu button (council on 10121d3, item 4)", () => {
+  test("a click outside or focus leaving closes the menu, and its phone item adds nothing", async ({ page, request }) => {
+    const created = await request.post("/api/campaigns", { data: { name: "Menu closes", businessesCsv: readFileSync(fixture("businesses-run1.csv"), "utf8"), peopleCsv: readFileSync(fixture("people-run1.csv"), "utf8") } });
+    const id = ((await created.json()) as { campaign: Campaign }).campaign.id;
+    await page.goto(`/campaigns/${id}`);
+    await page.getByRole("button", { name: "Email track" }).click();
+    const button = page.getByRole("button", { name: "Add track" });
+    await button.click();
+    await expect(page.getByRole("menu")).toBeVisible();
+    await expect(button).toHaveAttribute("aria-expanded", "true");
+    await page.getByRole("heading", { name: "Email track" }).click();
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await button.click();
+    await page.getByRole("menuitem", { name: /^Phone track/ }).click();
+    await expect(page.getByRole("menu")).toBeVisible();
+    await expect(page.getByRole("button", { name: /^Phone track: / })).toHaveCount(0);
+    await page.keyboard.press("Tab");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+  });
+});
+
 test.describe("on the app over the fake providers", () => {
   test("connections are saved through the one editor state: a track after another with a delay survives a reload, and a circle is refused", async ({ page }) => {
     const f = await fakeProviderApp("sms-connections");
@@ -73,7 +94,7 @@ test.describe("on the app over the fake providers", () => {
     await page.goto(`${f.url}/campaigns/${id}`);
     await page.getByRole("button", { name: "Email track" }).click();
     await page.getByRole("button", { name: "Add track" }).click();
-    await page.getByRole("button", { name: "SMS track", exact: true }).click();
+    await page.getByRole("menuitem", { name: "SMS track" }).click();
     await page.getByLabel("How this track starts").selectOption({ label: "After the email track" });
     await page.getByLabel("Days after that track finishes").fill("2");
     await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
@@ -101,13 +122,13 @@ test.describe("on the app over the fake providers", () => {
       await page.getByLabel("Email 1 subject").fill("Evening bookings at {{company}}");
       await page.getByLabel("Email 1 copy").fill("Hi {{first_name|there}},\n\nOnline booking at {{company}} stops at 18:00.\n\nAlex");
       await page.getByRole("button", { name: "Add track" }).click();
-      await page.getByRole("button", { name: "SMS track", exact: true }).click();
+      await page.getByRole("menuitem", { name: "SMS track" }).click();
       await writeText(page, 1, "Hi {{first_name|there}}, Alex from Northlight Bookings. I emailed about evening booking at {{company}}. OK if I call this week?");
       await page.getByRole("button", { name: "Add follow-up" }).click();
       await page.getByLabel("Days to wait before Text 2").fill("2");
       await writeText(page, 2, "Should I send the two-minute video for {{company}}? A yes is enough.");
       await page.getByRole("button", { name: "Add track" }).click();
-      await page.getByRole("button", { name: "Email track", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Email track" }).click();
       await page.getByLabel("Email 1 subject").fill("One more idea for {{company}}");
       await page.getByLabel("Email 1 copy").fill("Hi {{first_name|there}},\n\nOne last note about evening booking.\n\nAlex");
       await page.getByLabel("How this track starts").selectOption({ label: "After the SMS track" });
