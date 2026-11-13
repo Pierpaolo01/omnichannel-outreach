@@ -280,6 +280,7 @@ class SqliteStore implements OutreachStore {
         value: str(row, "value"),
         key: str(row, "key"),
         bad: num(row, "bad") === 1,
+        listedShared: num(row, "listed_shared") === 1,
       });
       detailsByOwner.set(key, list);
     }
@@ -377,9 +378,10 @@ class SqliteStore implements OutreachStore {
            SELECT e.campaign_id, e.id AS enrollment_id,
              CASE WHEN d.channel = 'email' THEN 'email' ELSE 'mobile' END || '|' || d.key AS destination
            FROM enrollments e JOIN contact_details d ON d.owner_kind = 'person' AND d.owner_id = e.person_id
-           WHERE e.lead_kind = 'person' AND (d.channel = 'email' OR d.phone_kind = 'mobile')
+           WHERE e.lead_kind = 'person' AND d.listed_shared = 0 AND (d.channel = 'email' OR d.phone_kind = 'mobile')
            UNION ALL
-           SELECT e.campaign_id, e.id, 'inbox|' || d.key
+           -- One address is one mailbox, a person's email or a company's shared inbox alike.
+           SELECT e.campaign_id, e.id, 'email|' || d.key
            FROM enrollments e JOIN contact_details d ON d.owner_kind = 'company' AND d.owner_id = e.company_id
            WHERE e.lead_kind = 'company' AND d.channel = 'email')
          SELECT campaign_id || ' ' || destination AS shared FROM destinations
@@ -495,6 +497,7 @@ class SqliteStore implements OutreachStore {
         change.phoneKind,
         change.id,
       ]);
+      this.run("UPDATE contact_details SET listed_shared = ? WHERE id = ?", [change.listedShared ? 1 : 0, change.id]);
       if (change.rekeyed) {
         this.run("UPDATE contact_details SET key = ?, search_digits = ? WHERE id = ?", [change.rekeyed.key, change.rekeyed.searchDigits, change.id]);
       }
@@ -580,7 +583,8 @@ class SqliteStore implements OutreachStore {
     const rows = this.db
       .prepare(
         // The prototype's order: a person's email, direct, mobile; a company's main line, then inbox.
-        `SELECT * FROM contact_details WHERE owner_kind = ? AND owner_id = ?
+        // A person's copy of an address their company lists as shared is not theirs to show or use.
+        `SELECT * FROM contact_details WHERE owner_kind = ? AND owner_id = ? AND listed_shared = 0
          ORDER BY CASE WHEN owner_kind = 'company' THEN channel = 'email' ELSE channel = 'phone' END,
            CASE phone_kind WHEN 'direct' THEN 0 WHEN 'mobile' THEN 1 ELSE 2 END, added_at, rowid`,
       )

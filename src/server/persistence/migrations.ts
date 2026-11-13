@@ -127,6 +127,13 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX row_identities_by_identity ON row_identities(record_kind, identity);
     `,
   },
+  {
+    version: 3,
+    name: "a person's copy of an address their company lists as shared is not personal",
+    sql: `
+      ALTER TABLE contact_details ADD COLUMN listed_shared INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string): void {

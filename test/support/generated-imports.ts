@@ -92,6 +92,17 @@ export const PEOPLE: readonly LogicalPerson[] = [
 /** A shared address both City Physio branches may list, and their people may give as their email. */
 const GROUP_INBOX = "bookings@cityphysio.example";
 
+/** Addresses the generator gives to more than one person or company, by design. */
+const OVERLAPPING = (() => {
+  const owners = new Map<string, Set<string>>();
+  const own = (address: string, owner: string) => owners.set(address.toLowerCase(), (owners.get(address.toLowerCase()) ?? new Set()).add(owner));
+  PEOPLE.forEach((p, i) => p.emails.forEach((e) => own(e, `person ${i}`)));
+  COMPANIES.forEach((c, i) => own(c.inbox, `company ${i}`));
+  own(GROUP_INBOX, "company 3");
+  own(GROUP_INBOX, "company 4");
+  return new Set([...owners].filter(([, o]) => o.size > 1).map(([address]) => address));
+})();
+
 /** A People row that belongs to no logical person. */
 export const NO_ONE = -1;
 
@@ -162,8 +173,9 @@ export function generateRun(rand: () => number, step: number, history: History):
       phone_original: line,
       street: c.anchor === "address" || (c.anchor !== "none" && chance(0.5)) ? c.street : "",
       postal_code: c.anchor === "address" || (c.anchor !== "none" && chance(0.5)) ? c.postal : "",
-      // The two City Physio branches sometimes share one bookings address (review round 9).
-      general_emails: [chance(0.5) ? c.inbox : "", chance(0.1) ? pick(sameCompanyEmails) : "", (i === 3 || i === 4) && chance(0.3) ? GROUP_INBOX : ""].filter(Boolean).join(";"),
+      // The two City Physio branches sometimes share one bookings address (review round 9), only
+      // from the second run, so their people may hold it before the branches list it (round 10).
+      general_emails: [chance(0.5) ? c.inbox : "", chance(0.1) ? pick(sameCompanyEmails) : "", (i === 3 || i === 4) && step > 1 && chance(0.3) ? GROUP_INBOX : ""].filter(Boolean).join(";"),
     });
     // An address is the street with its postal code: keep both or neither, so the anchor holds.
     if (!row["street"] || !row["postal_code"]) Object.assign(row, c.anchor === "address" ? { street: c.street, postal_code: c.postal } : { street: "", postal_code: "" });
@@ -521,6 +533,9 @@ function rowProblems(run: Generated, expected: readonly Expected[], summary: Imp
       return;
     }
     if (entry.outcome !== "not_enrolled") return;
+    // One address is one mailbox: a refusal is justified when the generator itself gave the address
+    // to more than one person or company.
+    if (entry.reason === "shares_contact" && OVERLAPPING.has(entry.shared.detail.value.trim().toLowerCase())) return;
     if (entry.reason !== "no_usable_channel") {
       problems.push(`${label} is decisive but not enrolled (${entry.reason})`);
       return;
@@ -557,7 +572,7 @@ function writeProblems(before: World, after: World, summary: ImportSummary): str
  * The safety net counts what a row lists, not only what is stored: a lead enrolled by this import
  * never listed a personal email or mobile that another lead enrolled in the campaign holds.
  */
-function listedProblems(run: Generated, summary: ImportSummary, w: World, campaignId: string): string[] {
+function listedProblems(run: Generated, summary: ImportSummary, w: World, campaignId: string, history: History): string[] {
   const problems: string[] = [];
   const newlyEnrolled = new Set(summary.entries.flatMap((e) => (e.outcome === "new" && e.lead.kind === "person" ? [e.lead.personId] : [])));
   const held = new Map<string, string>();
@@ -572,7 +587,11 @@ function listedProblems(run: Generated, summary: ImportSummary, w: World, campai
       ...(cells["email"] ? [valueKey({ channel: "email", value: cells["email"] })] : []),
       ...(cells["dial_phone"] && /mobile|cell/i.test(cells["dial_phone_type"] ?? "") ? [valueKey({ channel: "phone", value: cells["dial_phone"] })] : []),
     ];
-    for (const key of listed) {
+    // An address the person's company lists as shared is not theirs to claim (review round 10).
+    const companyListed = (key: string) =>
+      history.everAnInbox(key.replace(/^email\|/, "")) ||
+      run.rows.businesses.some((b) => b["business_id"] === cells["business_id"] && (b["general_emails"] ?? "").toLowerCase().split(";").includes(key.replace(/^email\|/, "")));
+    for (const key of listed.filter((k) => !companyListed(k))) {
       const holder = held.get(key);
       if (holder && holder !== record) problems.push(`row ${row + 2} was enrolled although ${key} is another enrolled lead's`);
     }
@@ -583,7 +602,7 @@ function listedProblems(run: Generated, summary: ImportSummary, w: World, campai
 /** Bad marks the sequence made, keyed by company, channel and value. */
 type BadMarks = Set<string>;
 
-function detailProblems(w: World, summary: ImportSummary, badMarks: BadMarks): string[] {
+function detailProblems(w: World, summary: ImportSummary, badMarks: BadMarks, history: History): string[] {
   const problems: string[] = [];
   const atCompany = (companyId: string) => [
     ...(w.companies.find((c) => c.id === companyId)?.contactDetails ?? []).map((d) => ({ d, owner: `company ${companyId}` })),
@@ -626,7 +645,8 @@ function detailProblems(w: World, summary: ImportSummary, badMarks: BadMarks): s
     const [companyId = "", ...rest] = mark.split("#");
     const key = rest.join("#");
     const held = atCompany(companyId).filter(({ d }) => valueKey(d) === key);
-    if (held.length === 0) problems.push(`bad ${key} disappeared from its company`);
+    // A person's copy of an address a company listed as shared is kept, bad mark and all, but not shown.
+    if (held.length === 0 && !history.everAnInbox(key.replace(/^email\|/, ""))) problems.push(`bad ${key} disappeared from its company`);
     if (held.some(({ d }) => !d.bad)) problems.push(`bad ${key} lost its mark`);
   }
   return problems;
@@ -721,8 +741,8 @@ export async function runSequence(seed: number, options: { shuffle?: boolean } =
         ...rowProblems(run, expected, summary, after),
         ...writeProblems(before, after, summary),
         ...identityProblems(ledger, after),
-        ...detailProblems(after, summary, badMarks),
-        ...listedProblems(run, summary, after, campaign ?? ""),
+        ...detailProblems(after, summary, badMarks, ledger),
+        ...listedProblems(run, summary, after, campaign ?? "", ledger),
         // An address a company's row lists as shared is never a personal email of its people.
         ...run.rows.businesses.flatMap((b, row) => {
           const companyId = summary.rowRecords.businesses[row];

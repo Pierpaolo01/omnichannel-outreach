@@ -64,6 +64,12 @@ export interface KnownDetail {
   readonly value: string;
   readonly key: string;
   readonly bad: boolean;
+  /**
+   * A person's copy of an address their company's business rows list as its shared inbox, when
+   * no company could store it (an equal claim). Kept, with its bad mark, but not a personal
+   * detail: it gives no reach and is never a destination (review round 10).
+   */
+  readonly listedShared: boolean;
 }
 
 export interface KnownCompany {
@@ -145,6 +151,7 @@ export interface DetailChange {
   readonly phoneKind: PhoneKind | null;
   /** The number's new key, when it can now be read in the company's country. */
   readonly rekeyed: { readonly key: string; readonly searchDigits: string } | null;
+  readonly listedShared: boolean;
 }
 
 /**
@@ -360,7 +367,7 @@ export function planImport(input: {
   });
   crm.noteSharedAddresses(appliedBusinessRows);
   crm.noteDestinationListers(
-    appliedBusinessRows.flatMap(({ row, companyId }) => row.generalEmails.flatMap((e) => emailKey(e) ?? []).map((key) => ({ lead: { kind: "company", companyId } as const, kind: "inbox", key }))),
+    appliedBusinessRows.flatMap(({ row, companyId }) => row.generalEmails.flatMap((e) => emailKey(e) ?? []).map((key) => ({ lead: { kind: "company", companyId } as const, kind: "email", key }))),
   );
   // Rows in a fixed order, so which spelling of an equivalent detail is stored never depends on row order.
   for (const { row, companyId } of [...appliedBusinessRows].sort((a, b) => companyRowIdentity(a.row).localeCompare(companyRowIdentity(b.row)) || a.index - b.index)) {
@@ -466,8 +473,8 @@ export function planImport(input: {
     const person = crm.person(personId);
     const company = crm.company(person.companyId);
     return {
-      reach: decisionMakerReach(person.details, company.details),
-      via: decisionMakerRoutes(person.details, company.details),
+      reach: decisionMakerReach(personal(person.details), company.details),
+      via: decisionMakerRoutes(personal(person.details), company.details),
     };
   };
 
@@ -643,6 +650,11 @@ function listedDestinations(identities: ReadonlySet<string>): { key: string; det
       ...(dial && kind === "mobile" ? [{ key: `mobile|${dial}`, detail: { channel: "phone" as const, phoneKind: "mobile" as const, value: displayPhone(dial) } }] : []),
     ];
   });
+}
+
+/** A person's own details: without copies of an address their company lists as shared. */
+function personal<D extends { readonly listedShared: boolean }>(details: readonly D[]): D[] {
+  return details.filter((d) => !d.listedShared);
 }
 
 /** The one record holding this provenance identity, or undefined when none or several do. */
@@ -965,6 +977,7 @@ interface MutableDetail {
   value: string;
   key: string;
   bad: boolean;
+  listedShared: boolean;
 }
 
 interface MutableCompany {
@@ -1006,6 +1019,8 @@ class WorkingDirectory {
   private readonly enrolled = new Set<string>();
   /** The shared inboxes each company's business rows list in this import. */
   private readonly listedShared = new Map<string, Set<string>>();
+  /** Each company's shared addresses, computed once (cleared when its rows or listings change). */
+  private readonly sharedCache = new Map<string, Set<string>>();
   /** Which leads list each outreach destination in this import, by kind and key. */
   private readonly destinationListers = new Map<string, LeadRef[]>();
   /** Who lists each personal detail in this import, by company, channel and key. */
@@ -1129,9 +1144,10 @@ class WorkingDirectory {
    * emails and mobiles, a company lead's shared inboxes.
    */
   private destinations(lead: LeadRef): { kind: string; detail: MutableDetail }[] {
-    if (lead.kind === "company") return this.company(lead.companyId).details.filter((d) => d.channel === "email").map((detail) => ({ kind: "inbox", detail }));
-    return this.person(lead.personId)
-      .details.filter((d) => d.channel === "email" || d.phoneKind === "mobile")
+    // One address is one mailbox, whether it is a person's email or a company's shared inbox.
+    if (lead.kind === "company") return this.company(lead.companyId).details.filter((d) => d.channel === "email").map((detail) => ({ kind: "email", detail }));
+    return personal(this.person(lead.personId).details)
+      .filter((d) => d.channel === "email" || d.phoneKind === "mobile")
       .map((detail) => ({ kind: detail.channel === "email" ? "email" : "mobile", detail }));
   }
 
@@ -1144,10 +1160,16 @@ class WorkingDirectory {
   private destinationHolder(lead: LeadRef, kind: string, key: string, campaigns: ReadonlySet<string>): LeadRef | undefined {
     const fresh = new Set(this.added.map((d) => d.id));
     const shares = (other: LeadRef) => [...this.campaignsOf(other)].some((c) => campaigns.has(c));
-    const others: LeadRef[] =
-      lead.kind === "company"
-        ? [...this.companies.keys()].filter((id) => id !== lead.companyId).map((companyId) => ({ kind: "company", companyId }))
-        : [...this.people.keys()].filter((id) => id !== lead.personId).map((personId) => ({ kind: "person", personId }));
+    const others: LeadRef[] = [
+      ...[...this.companies.keys()].map((companyId): LeadRef => ({ kind: "company", companyId })),
+      ...[...this.people.keys()].map((personId): LeadRef => ({ kind: "person", personId })),
+    ]
+      .filter((other) => leadKey(other) !== leadKey(lead))
+      // A company and its own people never stop each other: its listing makes their copies not personal.
+      .filter((other) => !(lead.kind === "company" && other.kind === "person" && this.person(other.personId).companyId === lead.companyId))
+      .filter((other) => !(lead.kind === "person" && other.kind === "company" && this.person(lead.personId).companyId === other.companyId))
+      // Nor does a person whose own company lists the address as shared: it is not theirs.
+      .filter((other) => !(kind === "email" && other.kind === "person" && this.companyShares(this.person(other.personId).companyId, key)));
     const heldBefore = others.find((other) => shares(other) && this.destinations(other).some((d) => d.kind === kind && d.detail.key === key && !fresh.has(d.detail.id)));
     if (heldBefore) return heldBefore;
     const rivals = [...(this.destinationListers.get(`${kind}|${key}`) ?? [])].filter((other) => leadKey(other) !== leadKey(lead) && shares(other));
@@ -1189,18 +1211,19 @@ class WorkingDirectory {
       // Details the lead's rows list but that are stored on someone else: from this import's
       // rows, and from the rows applied to it before (its provenance). An enrolled lead's are
       // as strong as its stored ones (review round 7).
+      // The company's own details (its shared inboxes and main lines) are never a person's claims.
+      const companyKeys = new Set<string>();
+      if (lead.kind === "person") {
+        const company = this.company(this.person(lead.personId).companyId);
+        for (const d of company.details) companyKeys.add(`${d.channel === "email" ? "email" : "mobile"}|${d.key}`);
+        for (const key of this.sharedAddresses(company.id)) companyKeys.add(`email|${key}`);
+      }
       for (const h of this.heldElsewhere) {
         if (leadKey(h.owner) !== leadKey(lead)) continue;
-        const kind = h.held.detail.channel === "email" ? (lead.kind === "company" ? "inbox" : "email") : h.held.detail.phoneKind === "mobile" ? "mobile" : null;
-        if (kind) claims.push({ lead, key: `${kind}|${h.key}`, rank: enrolled ? 0 : 3, detail: h.held.detail });
+        const kind = h.held.detail.channel === "email" ? "email" : h.held.detail.phoneKind === "mobile" ? "mobile" : null;
+        if (kind && !companyKeys.has(`${kind}|${h.key}`)) claims.push({ lead, key: `${kind}|${h.key}`, rank: enrolled ? 0 : 3, detail: h.held.detail });
       }
       if (lead.kind === "person") {
-        // The company's own details (its shared inboxes and main lines) are never a person's claims.
-        const company = this.company(this.person(lead.personId).companyId);
-        const companyKeys = new Set([
-          ...company.details.map((d) => `${d.channel === "email" ? "email" : "mobile"}|${d.key}`),
-          ...[...this.sharedAddresses(company.id)].map((key) => `email|${key}`),
-        ]);
         for (const listed of listedDestinations(this.person(lead.personId).rowIdentities)) {
           if (!companyKeys.has(listed.key)) claims.push({ lead, key: listed.key, rank: enrolled ? 0 : 3, detail: listed.detail });
         }
@@ -1331,6 +1354,7 @@ class WorkingDirectory {
       for (const identity of identities) {
         if (!company.rowIdentities.has(identity)) {
           company.rowIdentities.add(identity);
+          this.sharedCache.delete(company.id);
           company.newRowIdentities.add(identity);
         }
       }
@@ -1414,7 +1438,7 @@ class WorkingDirectory {
         const holdsNumber = (p: MutablePerson) => phones.some((key) => this.findNumber(p.details, key, region) !== undefined);
         return {
           tiers: [
-            { kind: "email", decisive: true, ids: idsOf(candidates.filter((p) => p.details.some((d) => d.channel === "email" && emails.includes(d.key)))) },
+            { kind: "email", decisive: true, ids: idsOf(candidates.filter((p) => personal(p.details).some((d) => d.channel === "email" && emails.includes(d.key)))) },
             { kind: "person_id", ids: idsOf(named.filter(holdsId)) },
             { kind: "phone", ids: idsOf(named.filter(holdsNumber)) },
             { kind: "person_id", ids: idsOf(unnamed.filter(holdsId)) },
@@ -1427,7 +1451,7 @@ class WorkingDirectory {
 
   /** The person on record before this import at the company who holds this personal email. */
   personHolding(companyId: string, email: string): string | undefined {
-    return this.peopleAt(companyId).find((p) => !p.isNew && p.details.some((d) => d.channel === "email" && d.key === email))?.id;
+    return this.peopleAt(companyId).find((p) => !p.isNew && personal(p.details).some((d) => d.channel === "email" && d.key === email))?.id;
   }
 
   upsertPerson(group: PersonGroup, existing: string | null): string {
@@ -1487,19 +1511,24 @@ class WorkingDirectory {
 
   /** Addresses the Businesses file lists as the company's shared inbox, now or in its applied rows. */
   private sharedAddresses(companyId: string): Set<string> {
+    const cached = this.sharedCache.get(companyId);
+    if (cached) return cached;
     const company = this.company(companyId);
     const fromRows = [...company.rowIdentities].flatMap((identity) => {
       // Shaped by companyRowIdentity: [business_id, place_id, name, main line, shared inboxes, ...].
       const inboxes = (JSON.parse(identity) as unknown[])[4];
       return Array.isArray(inboxes) ? inboxes.filter((e): e is string => typeof e === "string" && e !== "") : [];
     });
-    return new Set([...fromRows, ...(this.listedShared.get(companyId) ?? [])]);
+    const shared = new Set([...fromRows, ...(this.listedShared.get(companyId) ?? [])]);
+    this.sharedCache.set(companyId, shared);
+    return shared;
   }
 
   /** Records the shared inboxes each company's business rows list in this import. */
   noteSharedAddresses(rows: readonly { row: ScrapedBusiness; companyId: string }[]): void {
     for (const { row, companyId } of rows) {
       for (const key of row.generalEmails.flatMap((e) => emailKey(e) ?? [])) this.listedShared.set(companyId, (this.listedShared.get(companyId) ?? new Set()).add(key));
+      this.sharedCache.delete(companyId);
     }
   }
 
@@ -1523,8 +1552,20 @@ class WorkingDirectory {
   addEmail(owner: DetailOwner, raw: string): void {
     const key = emailKey(raw);
     if (!key) return;
-    const holder = this.destinationHolder(owner, owner.kind === "company" ? "inbox" : "email", key, this.campaignsOf(owner));
+    // A person's company's shared address is never theirs: decided before any other holder is weighed.
+    if (owner.kind === "person" && this.companyShares(this.person(owner.personId).companyId, key)) return;
+    const holder = this.destinationHolder(owner, "email", key, this.campaignsOf(owner));
     if (holder) {
+      // The company may not store its shared address, but its rows still list it: its people's
+      // copies stop being personal, whoever ends up holding the inbox (review round 10).
+      if (owner.kind === "company") {
+        for (const person of this.peopleAt(owner.companyId)) {
+          for (const copy of person.details.filter((d) => d.channel === "email" && d.key === key && !d.listedShared)) {
+            copy.listedShared = true;
+            this.recordChange(copy, { kind: "person", personId: person.id });
+          }
+        }
+      }
       this.noteHeldElsewhere(owner, { channel: "email", phoneKind: null, key, value: raw.trim() }, holder);
       return;
     }
@@ -1645,6 +1686,7 @@ class WorkingDirectory {
     for (const person of this.peopleAt(companyId)) {
       for (const copy of person.details.filter(holding)) {
         person.details = person.details.filter((d) => d !== copy);
+        copy.listedShared = false;
         if (!target) {
           copy.phoneKind = phoneKind;
           const rekeyed = copy.key === key ? null : { key, searchDigits };
@@ -1746,13 +1788,13 @@ class WorkingDirectory {
       searchDigits,
       addedAt: this.now,
     };
-    this.holder(owner).details.push({ id: detail.id, channel, phoneKind, value: detail.value, key, bad: false });
+    this.holder(owner).details.push({ id: detail.id, channel, phoneKind, value: detail.value, key, bad: false, listedShared: false });
     this.added.push(detail);
   }
 
   private recordChange(detail: MutableDetail, owner: DetailOwner, rekeyed: DetailChange["rekeyed"] = null): void {
     const earlier = this.changed.get(detail.id)?.rekeyed ?? null;
-    this.changed.set(detail.id, { id: detail.id, owner, phoneKind: detail.phoneKind, rekeyed: rekeyed ?? earlier });
+    this.changed.set(detail.id, { id: detail.id, owner, phoneKind: detail.phoneKind, rekeyed: rekeyed ?? earlier, listedShared: detail.listedShared });
   }
 
   private noteKeptBad(owner: DetailOwner, detail: MutableDetail): void {

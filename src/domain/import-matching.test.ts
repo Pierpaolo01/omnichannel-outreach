@@ -1152,3 +1152,69 @@ for (const order of ["Harbour first", "Elm first"] as const) {
     }
   });
 }
+
+// Review round 10: one rule for a person's copy of an address their company lists as shared.
+describe("a person's copy of an address their company's rows list as shared stops being personal", () => {
+  const clinic = (id: string, name: string, line: string, inbox: string) => business({ business_id: id, place_id: `P-${id}`, business_name: name, phone_e164: line, general_emails: inbox });
+  const harbourNoInbox = clinic("b1", "Harbour Clinic", "+442079460101", "");
+  const elmNoInbox = clinic("b2", "Elm Clinic", "+442079460202", "");
+  const both = [clinic("b1", "Harbour Clinic", "+442079460101", "office@group.example"), clinic("b2", "Elm Clinic", "+442079460202", "office@group.example")];
+  const alice = person({ person_id: "a1", business_id: "b1", full_name: "Alice Hart", email: "office@group.example" });
+  const sequences = {
+    // GPT round 10: both companies are company leads in one campaign, so their claims tie and neither stores it.
+    "both companies already company leads": async (h: ImportHarness) => {
+      await h.import({ businesses: [harbourNoInbox, elmNoInbox] });
+      await h.import({ businesses: [harbourNoInbox], people: [alice] });
+    },
+    // Opus round 10: Harbour is not a company lead, so there is no tie and Harbour stores it.
+    "Alice imported with both companies": async (h: ImportHarness) => {
+      await h.import({ businesses: [harbourNoInbox, elmNoInbox], people: [alice] });
+    },
+  };
+  for (const [label, seed] of Object.entries(sequences)) {
+    for (const order of ["Harbour first", "Elm first"] as const) {
+      test(`${label} (${order})`, async () => {
+        const h = importHarness();
+        await seed(h);
+        await h.markBad("office@group.example");
+        const rows = { businesses: order === "Harbour first" ? both : [...both].reverse(), people: [alice] };
+        for (let time = 1; time <= 2; time++) {
+          const summary = await h.import(rows);
+          expect(entry(summary, "Alice Hart")).toMatchObject({ channels: { email: false, call: true } });
+          expect((await h.peopleNamed("Alice Hart"))[0]?.details).toEqual([]);
+        }
+      });
+    }
+  }
+
+  for (const order of ["Harbour first", "Elm first"] as const) {
+    test(`a main line two company leads both list takes a person's copy of it, and each company holds it (${order})`, async () => {
+      const h = importHarness();
+      await h.import({ businesses: [harbourNoInbox, elmNoInbox] });
+      await h.import({ businesses: [harbourNoInbox], people: [person({ person_id: "a1", business_id: "b1", full_name: "Alice Hart", direct_phone: "+442079460909", email: "alice@mail.example" })] });
+      const shared = [{ ...harbourNoInbox, phone_e164: "+442079460909" }, { ...elmNoInbox, phone_e164: "+442079460909" }];
+      const rows = { businesses: order === "Harbour first" ? shared : [...shared].reverse() };
+      for (let time = 1; time <= 2; time++) {
+        await h.import(rows);
+        expect((await h.peopleNamed("Alice Hart"))[0]?.details.map((d) => d.value)).toEqual(["alice@mail.example"]);
+        expect((await onlyCompany(h, "Elm Clinic")).details.map((d) => d.value)).toContain("+44 20 7946 0909");
+        expect((await onlyCompany(h, "Harbour Clinic")).details.map((d) => d.value)).toContain("+44 20 7946 0909");
+      }
+    });
+  }
+});
+
+// Opus round 10, follow-up 1: one mailbox, two sequences in one campaign.
+for (const order of ["Elm first", "Harbour first"] as const) {
+  test(`a company that only now lists a person's own address as its inbox does not get it in their campaign (${order})`, async () => {
+    const h = importHarness();
+    const harbour1 = business({ business_id: "b1", place_id: "P-b1", business_name: "Harbour Clinic", phone_e164: "+442079460101" });
+    const elm = business({ business_id: "b2", place_id: "P-b2", business_name: "Elm Clinic", phone_e164: "+442079460202" });
+    const alice = person({ person_id: "a1", business_id: "b1", full_name: "Alice Hart", email: "alice@mail.example" });
+    await h.import({ businesses: [harbour1, elm], people: [alice] });
+    const businesses = [{ ...elm, general_emails: "alice@mail.example" }, harbour1];
+    await h.import({ businesses: order === "Elm first" ? businesses : [...businesses].reverse(), people: [alice] });
+    expect((await onlyCompany(h, "Elm Clinic")).details.map((d) => d.value)).not.toContain("alice@mail.example");
+    expect((await h.peopleNamed("Alice Hart"))[0]?.details.map((d) => d.value)).toEqual(["alice@mail.example"]);
+  });
+}
