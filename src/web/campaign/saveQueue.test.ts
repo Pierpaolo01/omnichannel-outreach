@@ -352,6 +352,19 @@ describe("PR 41 council, items 3, 4, 5 and 11", () => {
     expect(h.calls[1]!.aborted()).toBe(false);
     expect(subject(h.calls[1]!.definition)).toBe("Left the second time");
   });
+
+  test("a page shown again cancels its leave-save at once and resends through the queue, so the next leave has the browser's whole budget (item 11, Chromium)", async () => {
+    // Chromium frees an aborted keepalive request's share of the 64 KiB only once the abort has
+    // settled, so cancelling it as the next leave-save is sent is too late for a large draft.
+    const h = harness();
+    h.edit("Left, then shown again");
+    h.queue.sendNow();
+    void h.queue.restored();
+    await h.settle();
+    expect(h.calls[0]!.aborted()).toBe(true);
+    // The same save again, through the queue and not outliving the page; the server answers a repeat unchanged.
+    expect(h.calls.slice(1).map((c) => [subject(c.definition), c.stamp, c.keepalive])).toEqual([["Left, then shown again", 1, false]]);
+  });
 });
 
 const subject = (d: CampaignDefinition) => d.tracks[0]?.steps[0]?.subject;

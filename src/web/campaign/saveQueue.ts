@@ -226,8 +226,16 @@ export class SaveQueue {
     });
   }
 
-  /** The page came back from the back-forward cache: whatever was unconfirmed is sent again. */
+  /**
+   * The page came back from the back-forward cache: whatever was unconfirmed is sent again. The
+   * leave-save still outstanding is cancelled now, while the page is alive, and its save goes again
+   * through the queue (the server answers a repeat unchanged). Chromium frees an aborted keepalive
+   * request's share of the 64 KiB budget only once the abort has settled, so cancelling it only as
+   * the next leave-save is sent would leave a large draft no room (PR 41 council, item 11).
+   */
   restored(): Promise<SaveOutcome> {
+    this.leaveSave?.abort();
+    this.leaveSave = null;
     if (!this.confirmed() && !this.inConflict) this.deps.onStatus({ kind: "saving" });
     return this.save();
   }

@@ -31,6 +31,8 @@ export interface FakeProviderApp {
   readonly person: (name: string) => string;
   readonly company: (name: string) => string;
   readonly enrollment: (name: string) => string;
+  /** A new campaign of the fixture leads with the two-email sequence, ready to launch, for a test that changes it. */
+  readonly freshCampaign: (name: string) => Promise<string>;
 }
 
 const step = (id: string, fields: Partial<StepDefinition>): StepDefinition => ({ id, waitDays: 0, subject: "", body: "", threading: "continue_thread", removed: false, ...fields });
@@ -113,5 +115,10 @@ async function start(): Promise<FakeProviderApp> {
     person: (name) => row(name).id,
     company: (name) => row(name).id,
     enrollment: (name) => row(name).enrollments.find((e) => e.campaign.id === running)?.id ?? "",
+    freshCampaign: async (name) => {
+      const id = await create(name);
+      await harness.defineSequence(id, definition([COPY.first, COPY.second]));
+      return id;
+    },
   };
 }

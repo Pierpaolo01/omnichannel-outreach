@@ -777,6 +777,19 @@ export const SCREENS: readonly Screen[] = [
       await settle(page, "The campaign didn’t launch.");
     },
   },
+  {
+    // The editor builds no SMS track yet (ticket 13 part b); a campaign defined through the API can have one.
+    name: "fake provider: before launch, an SMS track that can move the emails",
+    open: async (page) => {
+      const f = await fakeProviderApp("sms-screen");
+      const id = await f.freshCampaign("Podiatrists, Exeter");
+      const email = (await f.harness.request<SequenceView>("GET", `/api/campaigns/${id}/sequence`)).body.definition;
+      const sms = { id: "sms", channel: "sms" as const, branch: "main" as const, window: email.tracks[0]!.window, steps: [{ id: "m1", waitDays: 0, subject: "", body: "Hi {{first_name|there}}, a quick text about evening booking.", threading: "new_subject" as const, removed: false }], start: { kind: "entry" as const }, removed: false };
+      await f.harness.defineSequence(id, { ...email, tracks: [...email.tracks, sms] });
+      await page.goto(`${f.url}/campaigns/${id}/before-launch`);
+      await settle(page, "Can’t project the load yet");
+    },
+  },
   { name: "fake provider: running campaign", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}`); await settle(page, "Pausing, resuming and editing a running campaign arrive with later releases."); } },
   { name: "fake provider: running campaign's email track", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}?track=email`); await settle(page, "Editing a running campaign arrives with a later release."); } },
   {
@@ -887,6 +900,41 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
       await page.keyboard.press("Enter");
     },
     focused: (page) => page.getByRole("button", { name: /^Email track: / }),
+  },
+  {
+    name: "loading the saved version after a conflict moves focus to Email 1's subject, as the alert and its button go (re-check F8)",
+    open: async (page) => {
+      const f = await fakeProviderApp("focus");
+      const id = await f.freshCampaign(`Focus load ${Date.now()}`);
+      await page.goto(`${f.url}/campaigns/${id}?track=email&step=s1`);
+      await settle(page, "Timing and sender");
+      // Another page saves first; this one's edit is then refused.
+      const other = (await f.harness.request<SequenceView>("GET", `/api/campaigns/${id}/sequence`)).body.definition;
+      await f.harness.defineSequence(id, { ...other, tracks: other.tracks.map((t) => ({ ...t, steps: t.steps.map((s, i) => (i === 0 ? { ...s, subject: "Saved on another page" } : s)) })) });
+      await page.getByLabel("Email 1 copy").fill("Typed on the stale page");
+      await page.getByRole("button", { name: "Load the saved version" }).waitFor();
+    },
+    act: async (page) => {
+      await page.getByRole("button", { name: "Load the saved version" }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByRole("button", { name: "Load the saved version" }).waitFor({ state: "detached" });
+    },
+    focused: (page) => page.getByLabel("Email 1 subject"),
+  },
+  {
+    name: "launching from the keyboard moves focus to the launch line, which says it launched, as the button goes (re-check F8)",
+    open: async (page) => {
+      const f = await fakeProviderApp("focus");
+      const id = await f.freshCampaign(`Focus launch ${Date.now()}`);
+      await page.goto(`${f.url}/campaigns/${id}/before-launch`);
+      await page.getByRole("button", { name: "Launch campaign" }).and(page.locator(":enabled")).waitFor();
+    },
+    act: async (page) => {
+      await page.getByRole("button", { name: "Launch campaign" }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByRole("button", { name: "Launch campaign" }).waitFor({ state: "detached" });
+    },
+    focused: (page) => page.locator("p[tabindex='-1']", { hasText: /^Launched / }),
   },
   {
     name: "closing a running campaign's inspector returns focus to the track",

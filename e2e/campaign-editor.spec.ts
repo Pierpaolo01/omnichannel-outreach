@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { expect, test, type Page, type Route } from "@playwright/test";
+import { expect, test, type Browser, type Page, type Route } from "@playwright/test";
 import type { CampaignDefinition, StepDefinition } from "../src/domain/sequence/definition.ts";
 import type { Campaign, EnrollmentView, SequenceView } from "../src/shared/api.ts";
 import { COPY, FAKE_INBOX, fakeProviderApp, type FakeProviderApp } from "./fake-provider.ts";
@@ -503,5 +503,105 @@ test.describe("review of pull request 41", () => {
     const id = await campaign(track([COPY.first, { ...COPY.second, threading: "new_subject", subject: "A second idea" }, { ...COPY.second, id: "s3", body: "Last note." }]));
     await page.goto(`${r.url}/campaigns/${id}?track=email&step=s3`);
     await expect(page.getByText("Re: A second idea")).toBeVisible();
+  });
+
+  /** Tab B saves a change; tab A, still on the older revision, edits and is refused. Returns tab A. */
+  const conflicted = async (browser: Browser, id: string) => {
+    const context = await browser.newContext();
+    const a = await context.newPage();
+    const b = await context.newPage();
+    await a.goto(`${r.url}/campaigns/${id}?track=email&step=s1`);
+    await b.goto(`${r.url}/campaigns/${id}?track=email&step=s1`);
+    await b.getByLabel("Email 1 subject").fill("Tab B saved subject");
+    await expect(b.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
+    await a.getByLabel("Email 1 copy").fill("Tab A stale body");
+    await expect(a.getByRole("button", { name: "Load the saved version" })).toBeVisible();
+    return { a, context };
+  };
+
+  test("typing again after a conflict keeps the conflict and its way out, here and on Before launch (council item 10, re-check B11)", async ({ browser }) => {
+    const id = await campaign(track([COPY.first, COPY.second]));
+    const { a, context } = await conflicted(browser, id);
+    await a.getByLabel("Email 1 copy").fill("Tab A keeps typing after the conflict");
+    // Past the debounce: nothing is sent, and the page still says what happened.
+    await a.waitForTimeout(1_500);
+    await expect(a.getByRole("button", { name: "Load the saved version" })).toBeVisible();
+    await expect(a.getByRole("status").filter({ hasText: "Not saved" })).toBeVisible();
+    await expect(a.getByLabel("Email 1 copy")).toHaveValue("Tab A keeps typing after the conflict");
+    await a.getByRole("link", { name: /Before launch/ }).click();
+    await expect(a.getByRole("button", { name: "Load the saved version" })).toBeVisible();
+    await expect(a.getByRole("button", { name: "Launch campaign" })).toBeDisabled();
+    expect((await stored(id)).definition.tracks[0]!.steps[0]!.subject).toBe("Tab B saved subject");
+    await context.close();
+  });
+
+  test("while the saved version loads, the email is locked, so its answer never erases words typed after choosing it (re-check B12)", async ({ browser }) => {
+    const id = await campaign(track([COPY.first, COPY.second]));
+    const { a, context } = await conflicted(browser, id);
+    const held: Route[] = [];
+    await a.route("**/api/campaigns/*/sequence", (route) => (route.request().method() === "GET" ? void held.push(route) : route.continue()));
+    await a.getByRole("button", { name: "Load the saved version" }).click();
+    await expect.poll(() => held.length).toBe(1);
+    await expect(a.getByText("Loading the saved version. Editing is paused until it arrives.")).toBeVisible();
+    await expect(a.getByLabel("Email 1 copy")).toBeDisabled();
+    await held[0]!.continue();
+    await a.unroute("**/api/campaigns/*/sequence");
+    await expect(a.getByLabel("Email 1 subject")).toHaveValue("Tab B saved subject");
+    // Editing carries on from the loaded version and saves.
+    await a.getByLabel("Email 1 copy").fill("Tab A after loading");
+    await expect(a.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
+    expect((await stored(id)).definition.tracks[0]!.steps[0]!.body).toBe("Tab A after loading");
+    await context.close();
+  });
+
+  test("while a launch is pending, the emails are locked, so its answer never discards copy typed meanwhile (council item 9)", async ({ page }) => {
+    const id = await campaign(track([COPY.first, COPY.second]));
+    await page.goto(`${r.url}/campaigns/${id}/before-launch`);
+    const held: Route[] = [];
+    await page.route("**/api/campaigns/*/launch", (route) => void held.push(route));
+    await page.getByRole("button", { name: "Launch campaign" }).click();
+    await expect.poll(() => held.length).toBe(1);
+    await page.getByRole("link", { name: "Sequence" }).click();
+    await page.getByRole("button", { name: /^Email track: / }).click();
+    await expect(page.getByText("Launching. Editing is paused until the launch answers.")).toBeVisible();
+    await expect(page.getByLabel("Email 1 copy")).toBeDisabled();
+    await held[0]!.continue();
+    await expect(page.getByText("This campaign is running.")).toBeVisible();
+    expect((await stored(id)).launchedAt).not.toBeNull();
+  });
+
+  test("leaving twice with a draft over 32 KiB keeps one request outliving the page, and the newest is the one stored (council item 11)", async ({ page }) => {
+    const long = "y".repeat(12_000);
+    const id = await campaign(track([COPY.first, ...[2, 3, 4].map((n) => ({ ...COPY.second, id: `s${n}`, body: long }))]));
+    // Counts the page's requests that outlive it (keepalive) while they are open.
+    await page.addInitScript(() => {
+      const count = { open: 0, most: 0 };
+      (window as unknown as { keepalive: typeof count }).keepalive = count;
+      const send = window.fetch.bind(window);
+      window.fetch = (input, init) => {
+        if (!init?.keepalive) return send(input, init);
+        count.open++;
+        count.most = Math.max(count.most, count.open);
+        return send(input, init).finally(() => count.open--);
+      };
+    });
+    await page.goto(`${r.url}/campaigns/${id}?track=email&step=s1`);
+    const held: Route[] = [];
+    await page.route("**/api/campaigns/*/sequence", (route) => (route.request().method() === "PUT" ? void held.push(route) : route.continue()));
+    const leave = () => page.evaluate(() => dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+    const keepalive = () => page.evaluate(() => (window as unknown as { keepalive: { open: number; most: number } }).keepalive);
+    await page.getByLabel("Email 1 subject").fill("First leave");
+    await leave();
+    await expect.poll(async () => (await keepalive()).open).toBe(1);
+    await page.evaluate(() => dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    await page.getByLabel("Email 1 subject").fill("Second leave, the newest");
+    await leave();
+    const newest = () => held.find((route) => (route.request().postData() ?? "").includes("Second leave, the newest"));
+    await expect.poll(() => newest() !== undefined).toBe(true);
+    // The first leave-save was cancelled as the second was sent: never two open at once.
+    expect(await keepalive()).toEqual({ open: 1, most: 1 });
+    await newest()!.continue();
+    await expect.poll(async () => (await stored(id)).definition.tracks[0]!.steps[0]!.subject).toBe("Second leave, the newest");
+    for (const route of held) if (route !== newest()) await route.abort().catch(() => undefined);
   });
 });
