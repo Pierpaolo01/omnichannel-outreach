@@ -402,6 +402,33 @@ function writeProblems(before: World, after: World, summary: ImportSummary): str
   return problems;
 }
 
+/**
+ * The safety net counts what a row lists, not only what is stored: a lead enrolled by this import
+ * never listed a personal email or mobile that another lead enrolled in the campaign holds.
+ */
+function listedProblems(run: Generated, summary: ImportSummary, w: World, campaignId: string): string[] {
+  const problems: string[] = [];
+  const newlyEnrolled = new Set(summary.entries.flatMap((e) => (e.outcome === "new" && e.lead.kind === "person" ? [e.lead.personId] : [])));
+  const held = new Map<string, string>();
+  for (const p of w.people) {
+    if (!p.enrollments.some((e) => e.campaign.id === campaignId)) continue;
+    for (const d of p.contactDetails.filter((x) => x.owner === "person" && (x.channel === "email" || x.phoneKind === "mobile"))) held.set(valueKey(d), p.id);
+  }
+  (run.rows.people ?? []).forEach((cells, row) => {
+    const record = summary.rowRecords.people[row];
+    if (!record || !newlyEnrolled.has(record)) return;
+    const listed = [
+      ...(cells["email"] ? [valueKey({ channel: "email", value: cells["email"] })] : []),
+      ...(cells["dial_phone"] && /mobile|cell/i.test(cells["dial_phone_type"] ?? "") ? [valueKey({ channel: "phone", value: cells["dial_phone"] })] : []),
+    ];
+    for (const key of listed) {
+      const holder = held.get(key);
+      if (holder && holder !== record) problems.push(`row ${row + 2} was enrolled although ${key} is another enrolled lead's`);
+    }
+  });
+  return problems;
+}
+
 /** Bad marks the sequence made, keyed by company, channel and value. */
 type BadMarks = Set<string>;
 
@@ -499,6 +526,7 @@ export async function runSequence(seed: number): Promise<string[]> {
         ...writeProblems(before, after, summary),
         ...identityProblems(ledger, after),
         ...detailProblems(after, summary, badMarks),
+        ...listedProblems(run, summary, after, campaign ?? ""),
       ];
       return found.length > 0 ? found.map((f) => `step ${step}, ${label}: ${f}`) : { summary, after };
     };

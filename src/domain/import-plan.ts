@@ -303,13 +303,6 @@ export function planImport(input: {
   const settledCompanies = crm.matchCompanies(groupBusinesses(scraped.businesses));
   const businessGroups = settledCompanies.groups;
   const companyMatches = settledCompanies.matches;
-  // A business row whose own evidence contradicts its group's match changes nothing, and so do the
-  // People rows that share its business_id, since they could belong to either business.
-  const refusedBusinessId = new Map<string, { conflict: Conflict; disagreeing: readonly EvidenceKind[] }>();
-  for (const { row, why } of settledCompanies.refused) {
-    unapplied.push({ ...unmatched(row.row.name, row.row.city, "businesses", [row], "company", why), companyName: row.row.name });
-    if (row.row.sourceBusinessId) refusedBusinessId.set(row.row.sourceBusinessId, why);
-  }
   const groupsOfBusinessId = new Map<string, Set<number>>();
   const companyOfGroup: ({ companyId: string } | { conflict: Conflict; disagreeing: readonly EvidenceKind[] })[] = businessGroups.map((group, g) => {
     for (const { row } of group.rows) {
@@ -346,14 +339,14 @@ export function planImport(input: {
     const company = g === undefined || !row.sourceBusinessId ? undefined : companyOfGroup[g];
     const indexed = [{ row, index }];
     const companyName = businessGroups[g ?? 0]?.name ?? "";
-    const refusedWith = refusedBusinessId.get(row.sourceBusinessId);
-    if (refusedWith) {
-      unapplied.push({ ...unmatched(name, row.title, "people", indexed, "company", refusedWith), companyName: row.sourceBusinessId ? companyName : "" });
-    } else if (!company) {
+    if (!company) {
       unapplied.push({ outcome: "not_enrolled", reason: "company_not_in_export", lead: null, name, sourceBusinessId: row.sourceBusinessId });
     } else if (candidates.length > 1) {
-      // Business rows sharing this business_id carry different place_ids: two companies.
-      const conflict = { conflict: "contradiction", disagreeing: ["business_id", "place_id"] } as const;
+      // Business rows sharing this business_id are two companies (different place_ids, or a row
+      // that settled apart from its group): the person could belong to either.
+      const places = new Set(candidates.flatMap((c) => businessGroups[c]?.rows.flatMap((r) => (r.row.placeId ? [r.row.placeId] : [])) ?? []));
+      const disagreeing: EvidenceKind[] = places.size > 1 ? ["business_id", "place_id"] : ["business_id"];
+      const conflict = { conflict: "contradiction", disagreeing } as const;
       unapplied.push({ ...unmatched(name, row.title, "people", indexed, "company", conflict), companyName });
     } else if ("conflict" in company) {
       unapplied.push({ ...unmatched(name, row.title, "people", indexed, "company", company), companyName });
@@ -367,9 +360,6 @@ export function planImport(input: {
   const settledPeople = crm.matchPeople(groupPeople(joined, crm));
   const groups = settledPeople.groups;
   const personMatches = settledPeople.matches;
-  for (const { row: r, why } of settledPeople.refused) {
-    unapplied.push({ ...unmatched(personDisplayName(fieldsOf(r.row)), r.row.title, "people", [r], "person", why), companyName: crm.company(r.companyId).fields.name });
-  }
   const peopleInExport: string[] = [];
   groups.forEach((group, g) => {
     const match = personMatches[g];
@@ -406,17 +396,11 @@ export function planImport(input: {
       entries.push({ ...base, outcome: "not_enrolled", reason: "no_usable_channel", heldElsewhere });
       return;
     }
-    // Safety net: whatever matching decided, one personal email, mobile or shared inbox is never
-    // two enrolled leads' in one campaign.
-    const shared = crm.sharedWithEnrolled(lead);
-    if (shared) {
-      entries.push({ ...base, outcome: "not_enrolled", reason: "shares_contact", shared, heldElsewhere });
-      return;
-    }
-    enrollments.push({ id: newId(), lead, status: ENROLLED_BY_IMPORT, enrolledAt: now });
-    crm.markEnrolled(lead);
+    // Enrolled once every lead is decided, so the safety net below does not depend on row order.
+    candidates.push({ at: entries.length, lead, entry: { ...base, outcome: "new", channels: reachable.reach, via: reachable.via, ...notes, heldElsewhere } });
     entries.push({ ...base, outcome: "new", channels: reachable.reach, via: reachable.via, ...notes, heldElsewhere });
   };
+  const candidates: { at: number; lead: LeadRef; entry: Extract<SummaryEntry, { channels: unknown }> }[] = [];
 
   const personReach = (personId: string) => {
     const person = crm.person(personId);
@@ -452,6 +436,19 @@ export function planImport(input: {
     decide(lead, reachable, { name: company.fields.name, title: "", companyId });
   }
 
+  // Safety net: whatever matching decided, one personal email, mobile or shared inbox is never two
+  // enrolled leads' in one campaign. Evidence decides who keeps it, never row order.
+  const refused = crm.reserveDestinations(candidates.map((c) => c.lead));
+  for (const { at, lead, entry } of candidates) {
+    const shared = refused.get(leadKey(lead));
+    if (shared) {
+      const { name, title, companyId, companyName, peopleAtCompany, heldElsewhere } = entry;
+      entries[at] = { outcome: "not_enrolled", reason: "shares_contact", lead, name, title, companyId, companyName, peopleAtCompany, shared, heldElsewhere };
+    } else {
+      enrollments.push({ id: newId(), lead, status: ENROLLED_BY_IMPORT, enrolledAt: now });
+    }
+  }
+
   entries.push(...unapplied);
   return {
     companies: crm.companyWrites(),
@@ -476,41 +473,37 @@ export function personDisplayName(fields: Pick<PersonFields, "fullName" | "first
 }
 
 /**
- * Matches groups of rows, then checks each row of a collapsed group on its own evidence. A row
- * whose own evidence contradicts itself, or points to a different record than its group's match,
- * leaves the group and changes nothing, as it would if imported alone; the rest are matched again
- * without it (review round 5).
+ * Matches groups of rows, then decides each row of a collapsed group on its own evidence, name
+ * agreement included, beside the file's other groups. A row that does not itself point to its
+ * group's match leaves the group and is settled exactly as if it were imported alone; the rest are
+ * matched again without it (review rounds 5 and 6).
  */
 function settleGroups<R, G extends { readonly rows: readonly R[] }>(
   initial: readonly G[],
   evidenceOf: (group: G) => Evidence,
   withRows: (group: G, rows: readonly R[]) => G,
-): { groups: G[]; matches: Resolution[]; refused: { row: R; why: { conflict: Conflict; disagreeing: readonly EvidenceKind[] } }[] } {
+): { groups: G[]; matches: Resolution[] } {
   let groups = [...initial];
-  const refused: { row: R; why: { conflict: Conflict; disagreeing: readonly EvidenceKind[] } }[] = [];
   for (;;) {
-    const matches = resolveMatches(groups.map(evidenceOf));
+    const evidence = groups.map(evidenceOf);
+    const matches = resolveMatches(evidence);
     const leaving = new Set<R>();
     groups.forEach((group, g) => {
       const match = matches[g];
       if (group.rows.length < 2 || match?.kind !== "match") return;
-      const groupEvidence = evidenceOf(group);
+      // The row on its own, beside the file's other groups but without its own group's other rows.
+      const others = evidence.filter((_, o) => o !== g);
       for (const row of group.rows) {
-        const own = evidenceOf(withRows(group, [row]));
-        const [alone] = resolveMatches([{ ...own, byName: [] }]);
-        const deciding = (e: Evidence) => e.tiers.find((t) => t.ids.length > 0)?.kind;
-        if (alone?.kind === "ambiguous" && alone.conflict === "contradiction") {
-          refused.push({ row, why: { conflict: "contradiction", disagreeing: alone.disagreeing } });
-          leaving.add(row);
-        } else if (alone?.kind === "match" && alone.id !== match.id) {
-          const kinds = [deciding(groupEvidence), deciding(own) ?? own.holders?.kind].filter((k): k is EvidenceKind => k !== undefined);
-          refused.push({ row, why: { conflict: "contradiction", disagreeing: [...new Set(kinds)] } });
-          leaving.add(row);
-        }
+        const alone = resolveMatches([...others, evidenceOf(withRows(group, [row]))]).at(-1);
+        if (alone?.kind !== "match" || alone.id !== match.id) leaving.add(row);
       }
     });
-    if (leaving.size === 0) return { groups, matches, refused };
-    groups = groups.map((group) => withRows(group, group.rows.filter((r) => !leaving.has(r)))).filter((group) => group.rows.length > 0);
+    if (leaving.size === 0) return { groups, matches };
+    groups = groups.flatMap((group) => {
+      const staying = group.rows.filter((r) => !leaving.has(r));
+      const left = group.rows.filter((r) => leaving.has(r)).map((r) => withRows(group, [r]));
+      return [...(staying.length > 0 ? [withRows(group, staying)] : []), ...left];
+    });
   }
 }
 
@@ -847,7 +840,7 @@ class WorkingDirectory {
   private readonly merged: DetailConsolidation[] = [];
   private readonly keptBad: { owner: DetailOwner; detail: MutableDetail }[] = [];
   private readonly upgraded: { owner: DetailOwner; detail: MutableDetail }[] = [];
-  private readonly heldElsewhere: { owner: DetailOwner; held: HeldElsewhere; holder: LeadRef }[] = [];
+  private readonly heldElsewhere: { owner: DetailOwner; held: HeldElsewhere; holder: LeadRef; key: string }[] = [];
   private readonly now: string;
   private readonly newId: () => string;
 
@@ -907,10 +900,6 @@ class WorkingDirectory {
     return this.enrolled.has(leadKey(lead));
   }
 
-  markEnrolled(lead: LeadRef): void {
-    this.enrolled.add(leadKey(lead));
-  }
-
   /** The campaigns a lead is enrolled in; this import's campaign is "". */
   private campaignsOf(lead: LeadRef): Set<string> {
     return new Set([...(this.isEnrolled(lead) ? [""] : []), ...(this.campaignsElsewhere.get(leadKey(lead)) ?? [])]);
@@ -938,25 +927,48 @@ class WorkingDirectory {
     );
   }
 
-  /** What stops this lead being enrolled in this campaign: a destination an enrolled lead here already has. */
-  sharedWithEnrolled(lead: LeadRef): { detail: DetailNote; lead: string; companyName: string } | null {
-    const shared = (detail: DetailNote, holder: LeadRef) => ({
-      detail,
-      lead: this.nameOf(holder),
-      companyName: this.company(holder.kind === "company" ? holder.companyId : this.person(holder.personId).companyId).fields.name,
+  /**
+   * Reserves each outreach destination in this campaign for one lead, and returns the candidates
+   * that may not be enrolled, with whose destination stopped them. A lead's claim on a destination
+   * is ranked by evidence: already enrolled here and holding it; holding it from before this
+   * import; holding it from this import; only listing it in its row (the detail stayed with
+   * whoever already had it). The strongest claim keeps the destination; every weaker or equal
+   * claim of another candidate loses, so two candidates with equal claims are both stopped.
+   */
+  reserveDestinations(candidates: readonly LeadRef[]): Map<string, { detail: DetailNote; lead: string; companyName: string }> {
+    const claims: { lead: LeadRef; key: string; rank: number; detail: DetailNote }[] = [];
+    const fresh = new Set(this.added.map((d) => d.id));
+    const enrolledHere = [...this.enrolled].map((key): LeadRef => {
+      const [kind, id = ""] = key.split(":");
+      return kind === "company" ? { kind: "company", companyId: id } : { kind: "person", personId: id };
     });
-    for (const { kind, detail } of this.destinations(lead)) {
-      const holder = this.destinationHolder(lead, kind, detail.key, new Set([""]));
-      if (holder) return shared(noteOf(detail), holder);
+    for (const lead of [...enrolledHere, ...candidates]) {
+      const enrolled = this.isEnrolled(lead);
+      for (const { kind, detail } of this.destinations(lead)) {
+        claims.push({ lead, key: `${kind}|${detail.key}`, rank: enrolled ? 0 : fresh.has(detail.id) ? 2 : 1, detail: noteOf(detail) });
+      }
+      if (enrolled) continue;
+      for (const h of this.heldElsewhere) {
+        if (leadKey(h.owner) !== leadKey(lead)) continue;
+        const kind = h.held.detail.channel === "email" ? (lead.kind === "company" ? "inbox" : "email") : h.held.detail.phoneKind === "mobile" ? "mobile" : null;
+        if (kind) claims.push({ lead, key: `${kind}|${h.key}`, rank: 3, detail: h.held.detail });
+      }
     }
-    // A personal email or mobile (or a shared inbox) the row listed but that stayed with its holder
-    // counts too: the row is that destination's, whoever the detail is stored on (review round 5).
-    for (const h of this.heldElsewhere) {
-      if (leadKey(h.owner) !== leadKey(lead) || !this.isEnrolled(h.holder) || h.holder.kind !== lead.kind) continue;
-      const destination = h.held.detail.channel === "email" || h.held.detail.phoneKind === "mobile";
-      if (destination) return shared(h.held.detail, h.holder);
+    const refused = new Map<string, { detail: DetailNote; lead: string; companyName: string }>();
+    for (const lead of candidates) {
+      for (const claim of claims.filter((c) => leadKey(c.lead) === leadKey(lead))) {
+        const rivals = claims.filter((c) => c.key === claim.key && leadKey(c.lead) !== leadKey(lead) && c.rank <= claim.rank).sort((a, b) => a.rank - b.rank);
+        const [strongest] = rivals;
+        if (!strongest || refused.has(leadKey(lead))) continue;
+        const holder = strongest.lead;
+        refused.set(leadKey(lead), {
+          detail: claim.detail,
+          lead: this.nameOf(holder),
+          companyName: this.company(holder.kind === "company" ? holder.companyId : this.person(holder.personId).companyId).fields.name,
+        });
+      }
     }
-    return null;
+    return refused;
   }
 
   private nameOf(lead: LeadRef): string {
@@ -1375,7 +1387,7 @@ class WorkingDirectory {
     const note = noteOf(detail);
     const same = (h: { owner: DetailOwner; held: HeldElsewhere }) =>
       leadKey(h.owner) === leadKey(owner) && h.held.detail.channel === note.channel && h.held.detail.value === note.value;
-    if (!this.heldElsewhere.some(same)) this.heldElsewhere.push({ owner, held: { detail: note, holder: this.nameOf(holder) }, holder });
+    if (!this.heldElsewhere.some(same)) this.heldElsewhere.push({ owner, held: { detail: note, holder: this.nameOf(holder) }, holder, key: detail.key });
   }
 }
 

@@ -88,6 +88,9 @@ function unmatchedSentence(entry: UnmatchedEntry): string {
     if (first === "business_id" && second === "place_id") {
       return `Their business ID is on two businesses with different place IDs in the Businesses file, so nothing was changed${scope}.`;
     }
+    if (first === "business_id" && second === undefined) {
+      return `Their business ID is on rows of two different businesses in the Businesses file, so nothing was changed${scope}.`;
+    }
     const other = entry.disagreeing.filter((d) => d !== "name").map((d) => EVIDENCE_WORD[d]);
     if (entry.disagreeing.includes("name")) {
       return `${subject}’s ${joinWords(other)} ${other.length === 1 ? "belongs" : "belong"} to a ${kind} on record with a different name, so nothing was changed${scope}.`;
