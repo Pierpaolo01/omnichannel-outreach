@@ -28,11 +28,14 @@ async function setUp(options: { writes?: boolean; accounts?: InstantlyAccount[];
   const campaign = { id: "camp-1", name: "Autumn physio", defaultTimezone: "Europe/London", createdAt: new Date(T0).toISOString() };
   await store.createCampaign(campaign);
   const client = new InstantlyClient({ apiKey: "test-key-not-real", fetch: fake.fetch, writes: options.writes ?? true, now, timeoutMs: 10_000 });
-  const port = new InstantlyEmailPort({ client, store: store.instantly, now, config: { resetZone: "UTC", pollIntervalMs: 0, ...options.config }, subjectCampaign: () => Promise.resolve({ kind: "enrollment", campaignId: campaign.id }) });
+  const build = () => new InstantlyEmailPort({ client, store: store.instantly, now, config: { resetZone: "UTC", pollIntervalMs: 0, ...options.config }, subjectCampaign: () => Promise.resolve({ kind: "enrollment", campaignId: campaign.id }) });
+  const port = build();
   return {
     fake,
     port,
     store,
+    /** A new process on the same database and provider: the old port is dropped. */
+    restart: build,
     advance: (ms: number) => {
       clock += ms;
       fake.advance();
@@ -477,5 +480,159 @@ describe("completeness", () => {
     advance(MINUTE);
     for (let i = 0; i < 120; i++) fake.manualSend("pat@harbour.example");
     expect((await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [ref] })).kind).toBe("reply");
+  });
+});
+
+/** Lets every promise chain that is ready run, without moving the clock. */
+const flush = async () => {
+  for (let i = 0; i < 50; i++) await new Promise((resolve) => setImmediate(resolve));
+};
+
+/** The process dies at the write that stores the batch, once: everything else the poll wrote stays. */
+function crashOnBatchWrite(store: { instantly: { setMeta(key: string, value: string): void } }): void {
+  const real = store.instantly.setMeta.bind(store.instantly);
+  let armed = true;
+  store.instantly.setMeta = (key, value) => {
+    if (armed && key === "unacknowledged_batch") {
+      armed = false;
+      throw new Error("simulated crash before the batch was stored");
+    }
+    real(key, value);
+  };
+}
+
+/** Polls once a minute for `minutes`, as the engine would, collecting every event reported. */
+async function pollFor(ctx: { port: InstantlyEmailPort; advance: (ms: number) => void }, checkpoint: string, minutes: number, port = ctx.port) {
+  const events: import("../engine/ports.ts").ProviderEvent[] = [];
+  let c = checkpoint;
+  for (let i = 0; i < minutes; i++) {
+    ctx.advance(MINUTE);
+    const r = await port.observe(c);
+    events.push(...r.events);
+    c = r.checkpoint;
+  }
+  return { events, checkpoint: c };
+}
+
+const repliesFrom = (events: readonly import("../engine/ports.ts").ProviderEvent[], from: string) => [...new Map(events.filter((e) => e.kind === "reply" && e.from === from).map((e) => [e.id, e])).values()];
+
+describe("council round on 387a19b", () => {
+  test("item 1: a crash after the mail scan and before the batch is stored loses no reply from the backlog", async () => {
+    const ctx = await sentOpener();
+    const { port, fake, store, advance, restart } = ctx;
+    const c1 = (await port.observe("c0")).checkpoint;
+    advance(MINUTE);
+    fake.reply("pat@harbour.example");
+    advance(23 * MINUTE);
+    fake.receive({ from_address_email: "stranger@else.example", eaccount: "ada@sender.example" });
+    advance(MINUTE);
+    crashOnBatchWrite(store);
+    await expect(port.observe(c1)).rejects.toThrow(/simulated crash/);
+    const recovered = await restart().observe(c1);
+    expect(repliesFrom(recovered.events, "pat@harbour.example")).toHaveLength(1);
+  });
+
+  test("item 1 (review bot): a crash after a held reply is released and before its batch is stored loses no reply", async () => {
+    const ctx = await sentOpener();
+    const { port, fake, store, restart } = ctx;
+    let c = (await port.observe("c0")).checkpoint;
+    fake.reply("pat@harbour.example", { onThread: false, withLead: false });
+    c = (await pollFor(ctx, c, 14)).checkpoint;
+    crashOnBatchWrite(store);
+    ctx.advance(2 * MINUTE);
+    await expect(port.observe(c)).rejects.toThrow(/simulated crash/);
+    const after = await pollFor(ctx, c, 4, restart());
+    expect(repliesFrom(after.events, "pat@harbour.example").map((e) => e.providerRef)).toEqual([null]);
+  });
+
+  test("item 4 (review bot): time the process was stopped does not count toward a held reply's wait", async () => {
+    const ctx = await sentOpener();
+    const { port, fake, restart } = ctx;
+    let c = (await port.observe("c0")).checkpoint;
+    fake.reply("pat@harbour.example", { onThread: false, withLead: false });
+    c = (await pollFor(ctx, c, 1)).checkpoint;
+    // Stopped for 16 minutes.
+    ctx.advance(16 * MINUTE);
+    const second = restart();
+    const first = await second.observe(c);
+    expect(repliesFrom(first.events, "pat@harbour.example")).toEqual([]);
+    expect(await second.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [] })).toEqual({ kind: "unavailable" });
+    // One minute counted before the stop, thirteen after it: still held.
+    const early = await pollFor(ctx, first.checkpoint, 13, second);
+    expect(repliesFrom(early.events, "pat@harbour.example")).toEqual([]);
+    const late = await pollFor(ctx, early.checkpoint, 2, second);
+    expect(repliesFrom(late.events, "pat@harbour.example").map((e) => e.providerRef)).toEqual([null]);
+  });
+
+  test("item 2: the pre-send check finds a reply in a recorded thread that carries no lead metadata", async () => {
+    const { port, fake, ref } = await sentOpener();
+    await port.observe("c0");
+    fake.reply("pat@harbour.example", { withLead: false });
+    expect((await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [ref] })).kind).toBe("reply");
+  });
+
+  test("item 3: mail that belongs to another campaign by its own identity, or by its thread, never stops the app's outreach", async () => {
+    const ctx = await sentOpener();
+    const { port, fake } = ctx;
+    const c = (await port.observe("c0")).checkpoint;
+    const foreign = fake.foreignSend("pat@harbour.example", "ada@sender.example");
+    ctx.advance(MINUTE);
+    fake.receive({ from_address_email: "pat@harbour.example", eaccount: "ada@sender.example", campaign_id: foreign.campaign_id, lead_id: foreign.lead_id, lead: "pat@harbour.example", thread_id: foreign.thread_id });
+    // No campaign metadata on the message, but its thread is the other campaign's.
+    fake.receive({ from_address_email: "pat@harbour.example", eaccount: "ada@sender.example", thread_id: foreign.thread_id });
+    const polled = await pollFor(ctx, c, 20);
+    expect(repliesFrom(polled.events, "pat@harbour.example")).toEqual([]);
+    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [] })).toEqual({ kind: "clear" });
+  });
+
+  test("item 5: a retry while the first call is still creating the dispatch campaign joins it, and so does another lead's opener: one campaign, one lead each", async () => {
+    const { port, fake } = await setUp();
+    await port.observe(null);
+    const open = fake.hold("POST", "/api/v2/campaigns");
+    const r = request();
+    const first = port.handover(r);
+    await flush();
+    // The engine stopped waiting for the first call and retries with the same key.
+    const retry = port.handover(r);
+    const other = port.handover(request({ destination: "nia@harbour.example" }));
+    await flush();
+    open();
+    const [a, b, o] = await Promise.all([first, retry, other]);
+    expect(fake.campaigns.filter((c) => c.name === "oo·camp-1·t1·s1·ada@sender.example")).toHaveLength(1);
+    expect(fake.leads.filter((l) => l.email === "pat@harbour.example")).toHaveLength(1);
+    expect(a).toEqual(b);
+    expect(a.kind).toBe("accepted");
+    expect(o.kind).toBe("accepted");
+  });
+
+  test("item 5: an observation still running when the engine asks again is joined, not run twice", async () => {
+    const { port, fake } = await sentOpener();
+    const c1 = (await port.observe("c0")).checkpoint;
+    const open = fake.hold("POST", "/api/v2/leads/list");
+    const before = fake.requests.filter((r) => r.path === "/api/v2/accounts").length;
+    const a = port.observe(c1);
+    await flush();
+    const b = port.observe(c1);
+    await flush();
+    open();
+    const [ra, rb] = await Promise.all([a, b]);
+    expect(rb).toEqual(ra);
+    expect(fake.requests.filter((r) => r.path === "/api/v2/accounts").length - before).toBe(1);
+  });
+
+  test("item 6: a reply after a lost add answer is held, pauses sends to that address, and is reported", async () => {
+    const ctx = await setUp();
+    const { port, fake } = ctx;
+    await port.observe(null);
+    fake.loseAddResponses = true;
+    expect(await port.handover(request({ idempotencyKey: "k-lost" }))).toEqual({ kind: "unknown" });
+    fake.loseAddResponses = false;
+    ctx.advance(2 * MINUTE);
+    fake.reply("pat@harbour.example");
+    const first = await pollFor(ctx, "c0", 1);
+    expect(repliesFrom(first.events, "pat@harbour.example")).toEqual([]);
+    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [] })).toEqual({ kind: "unavailable" });
+    const later = await pollFor(ctx, first.checkpoint, 16);
+    expect(repliesFrom(later.events, "pat@harbour.example")).toHaveLength(1);
   });
 });

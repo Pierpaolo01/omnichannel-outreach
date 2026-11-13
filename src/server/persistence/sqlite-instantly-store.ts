@@ -84,11 +84,29 @@ export class SqliteInstantlyStore implements InstantlyStore {
   }
 
   reachedFrom(inbox: string, address: string): boolean {
-    return this.db.prepare("SELECT 1 FROM instantly_dispatched WHERE inbox = ? AND destination = ? LIMIT 1").get(inbox, address.toLowerCase()) !== undefined;
+    const a = address.toLowerCase();
+    return (
+      this.db.prepare("SELECT 1 FROM instantly_dispatched WHERE inbox = ? AND destination = ? UNION ALL SELECT 1 FROM instantly_intents WHERE inbox = ? AND destination = ? LIMIT 1").get(inbox, a, inbox, a) !== undefined
+    );
+  }
+
+  saveIntent(workKey: string, inbox: string, destination: string, wall: number): void {
+    this.db.prepare("INSERT INTO instantly_intents (work_key, inbox, destination, intended_wall) VALUES (?, ?, ?, ?) ON CONFLICT(work_key) DO NOTHING").run(workKey, inbox, destination.toLowerCase(), wall);
+  }
+
+  transaction(write: () => void): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      write();
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   anyDispatched(): boolean {
-    return this.db.prepare("SELECT 1 FROM instantly_dispatched LIMIT 1").get() !== undefined;
+    return this.db.prepare("SELECT 1 FROM instantly_dispatched UNION ALL SELECT 1 FROM instantly_intents LIMIT 1").get() !== undefined;
   }
 
   sentWallsSince(inbox: string, since: number): number[] {

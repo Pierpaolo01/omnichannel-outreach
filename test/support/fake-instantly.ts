@@ -119,8 +119,29 @@ export class FakeInstantly {
     if (!headers.get("user-agent")) return error(403, "Forbidden", "Forbidden");
     if (headers.get("authorization") !== `Bearer ${this.apiKey}`) return error(401, "Unauthorized", "Unauthorized");
     if (this.failWith !== null) return this.failure(this.failWith);
+    const gate = this.gates.get(`${method} ${url.pathname}`);
+    if (gate) await gate.promise;
     return this.route(method, url, body);
   };
+
+  private readonly gates = new Map<string, { promise: Promise<void>; open: () => void }>();
+
+  /**
+   * Holds every request to `method path` until the returned function is called: a call that takes
+   * longer than the engine's bound, which the engine stops waiting for without cancelling.
+   */
+  hold(method: string, path: string): () => void {
+    let open: () => void = () => undefined;
+    const promise = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const key = `${method} ${path}`;
+    this.gates.set(key, { promise, open });
+    return () => {
+      this.gates.delete(key);
+      open();
+    };
+  }
 
   private failure(status: number): Response {
     if (status === 402) return error(402, "Payment Required", "This request cannot be fulfilled because the workspace does not have an active paid plan");
@@ -285,6 +306,14 @@ export class FakeInstantly {
     const min = q.get("min_timestamp_created");
     const type = q.get("email_type");
     let items = this.emails.filter((e) => (this.visibleAt.get(e.id) ?? 0) <= now);
+    // `search`: "an email address (the lead email address), or a special string that starts with "thread:"".
+    const search = q.get("search");
+    if (search?.startsWith("thread:")) {
+      const thread = search.slice("thread:".length);
+      items = items.filter((e) => e.thread_id === thread);
+    } else if (search) {
+      items = items.filter((e) => e.lead === search.toLowerCase());
+    }
     if (accounts) items = items.filter((e) => accounts.includes(e.eaccount));
     if (lead) items = items.filter((e) => e.lead === lead);
     if (campaign) items = items.filter((e) => e.campaign_id === campaign);
@@ -368,6 +397,45 @@ export class FakeInstantly {
       eaccount: inbox,
       ue_type: 2,
       thread_id: options.onThread === false || !last ? this.id("thread") : last.thread_id,
+    };
+    this.emails.push(email);
+    return email;
+  }
+
+  /** A received email with exactly these fields: for mail the fake's helpers do not shape. */
+  receive(fields: Partial<InstantlyEmail> & { from_address_email: string; eaccount: string }): InstantlyEmail {
+    const email: InstantlyEmail = {
+      id: this.id("email"),
+      timestamp_created: iso(this.now()),
+      timestamp_email: iso(this.now()),
+      to_address_email_list: fields.eaccount,
+      campaign_id: null,
+      lead: null,
+      lead_id: null,
+      ue_type: 2,
+      thread_id: this.id("thread"),
+      ...fields,
+    };
+    this.emails.push(email);
+    return email;
+  }
+
+  /** A campaign email another campaign in the workspace sent to `to` from `inbox`, in a thread of its own. */
+  foreignSend(to: string, inbox: string): InstantlyEmail {
+    const campaign = this.id("camp");
+    this.campaigns.push({ id: campaign, name: "Older campaign", status: 1, timestamp_updated: iso(this.now()), settings: { name: "Older campaign" } as DispatchCampaignSettings });
+    const email: InstantlyEmail = {
+      id: this.id("email"),
+      timestamp_created: iso(this.now()),
+      timestamp_email: iso(this.now()),
+      from_address_email: inbox,
+      to_address_email_list: to,
+      campaign_id: campaign,
+      lead: to.toLowerCase(),
+      lead_id: this.id("lead"),
+      eaccount: inbox,
+      ue_type: 1,
+      thread_id: this.id("thread"),
     };
     this.emails.push(email);
     return email;

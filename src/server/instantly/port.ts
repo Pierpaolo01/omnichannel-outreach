@@ -36,10 +36,12 @@ import type { DispatchCampaignRecord, DispatchedLead, InstantlyStore, SendContex
  *   with stable ids.
  *
  * The engine holds one provider reference per piece of work: `il:<Instantly lead id>` for an opener.
- * The adapter keeps the mapping to the sent email and its thread, and translates a reply's thread
- * back to the reference. A received email in a thread the adapter does not know is reported as
- * `it:<thread id>` only when it comes from an address the adapter wrote to from that inbox; other
- * mail is not the app's to report.
+ * The adapter keeps the mapping to the sent email and its thread, and translates a reply's thread or
+ * lead back to that reference. A reply whose work it cannot prove yet is held, and reported with its
+ * work's reference or with none; the rules are at "The poller" below.
+ *
+ * The engine may stop waiting for a call without cancelling it, so every entry point that writes
+ * runs single-flight: a handover per idempotency key, a dispatch campaign per key, and polls.
  */
 
 /** A continue-thread transport, chosen by ADR 0002's X2 among reply, reply with recipients, and forward. */
@@ -63,8 +65,12 @@ export interface InstantlyPortConfig {
   readonly quotaRecheckMs?: number;
   /** How far back each poll re-reads, so a late record is not missed. */
   readonly overlapMs?: number;
-  /** How long a reply whose work cannot be proved yet is held before it is reported with no reference (ADR 0003 `SETTLING`). */
+  /** How long, in running time, a reply whose work cannot be proved yet is held before it is reported with no reference (ADR 0003 `SETTLING`). */
   readonly replyHoldMs?: number;
+  /** Items per page of every paged read (the documented `limit`). */
+  readonly pageSize?: number;
+  /** Pages one scan reads per poll before it resumes at the next. */
+  readonly pagesPerPoll?: number;
 }
 
 export interface InstantlyPortDependencies {
@@ -76,6 +82,8 @@ export interface InstantlyPortDependencies {
   readonly subjectCampaign?: (subjectId: string) => Promise<SendContext | null>;
   /** Absent until X2 passes. */
   readonly followUps?: FollowUpTransport | null;
+  /** Tests only: called at points inside a poll, where a test may simulate the process dying. */
+  readonly crashPoint?: (point: string) => void;
 }
 
 export type InboxHoldReason = InboxHoldReasonApi;
@@ -84,9 +92,7 @@ export type InboxHoldReason = InboxHoldReasonApi;
 export type InstantlyStatus = Omit<EmailProviderStatus, "provider" | "waitingFollowUps"> & { readonly provider: "instantly" };
 
 const MINUTE = 60_000;
-const DEFAULTS = { freshnessMs: 10 * MINUTE, pollIntervalMs: MINUTE, analyticsCacheMs: 5 * MINUTE, k: 1, quotaRecheckMs: 60 * MINUTE, overlapMs: 10 * MINUTE, replyHoldMs: 15 * MINUTE };
-const PAGE = 100;
-const MAX_PAGES = 20;
+const DEFAULTS = { freshnessMs: 10 * MINUTE, pollIntervalMs: MINUTE, analyticsCacheMs: 5 * MINUTE, k: 1, quotaRecheckMs: 60 * MINUTE, overlapMs: 10 * MINUTE, replyHoldMs: 15 * MINUTE, pageSize: 100, pagesPerPoll: 20 };
 
 const META = {
   /** When the last poll ran, complete or not: polls are spaced by it. */
@@ -140,8 +146,15 @@ interface HeldReply {
   readonly inbox: string;
   readonly from: string;
   readonly at: number;
-  readonly heldWall: number;
+  /** Running time waited: polls of one process, never the time it was stopped. */
+  readonly waitedMs: number;
+  readonly lastCountedWall: number;
   readonly released: boolean;
+}
+
+/** What one poll will commit, kept apart until its single transaction. */
+interface Draft {
+  readonly meta: Map<string, string>;
 }
 
 export class InstantlyEmailPort implements SendPort {
@@ -154,6 +167,10 @@ export class InstantlyEmailPort implements SendPort {
   private readonly followUps: FollowUpTransport | null;
   private inboxes: InstantlyAccount[] | null = null;
   private analyticsReadWall: number | null = null;
+  private readonly crashPoint: ((point: string) => void) | null;
+  /** Whether this process has committed a poll: before that, the gap since the last one is not running time. */
+  private observedInThisProcess = false;
+  private readonly flights = new Map<string, Promise<unknown>>();
 
   constructor(deps: InstantlyPortDependencies) {
     this.client = deps.client;
@@ -162,6 +179,18 @@ export class InstantlyEmailPort implements SendPort {
     this.config = { ...DEFAULTS, ...deps.config };
     this.subjectCampaign = deps.subjectCampaign ?? ((id) => Promise.resolve(deps.store.sendContext(id)));
     this.followUps = deps.followUps ?? null;
+    this.crashPoint = deps.crashPoint ?? null;
+  }
+
+  /** Runs `run` unless a call with the same key is still running, which is joined instead. */
+  private single<T>(key: string, run: () => Promise<T>): Promise<T> {
+    const running = this.flights.get(key);
+    if (running) return running as Promise<T>;
+    const flight: Promise<T> = run().finally(() => {
+      if (this.flights.get(key) === flight) this.flights.delete(key);
+    });
+    this.flights.set(key, flight);
+    return flight;
   }
 
   transportFor(step: { readonly threading: "new_subject" | "continue_thread" }): Transport {
@@ -173,7 +202,7 @@ export class InstantlyEmailPort implements SendPort {
   // Sender inboxes.
 
   private async readInboxes(): Promise<InstantlyAccount[]> {
-    const read = await this.readPages<InstantlyAccount>((after) => this.client.get("/api/v2/accounts", { limit: PAGE, starting_after: after }));
+    const read = await this.readPages<InstantlyAccount>((after) => this.client.get("/api/v2/accounts", { limit: this.config.pageSize, starting_after: after }));
     if (!read) throw new Error("Instantly accounts could not be read");
     // An inbox list that did not reach its end is not the inbox list.
     if (!read.complete) throw new Error("Instantly accounts could not be read to the end");
@@ -287,9 +316,13 @@ export class InstantlyEmailPort implements SendPort {
   }
 
   /** The dispatch campaign for this send, created, re-asserted and active; null when Instantly could not be brought there. */
-  private async dispatchCampaign(context: SendContext, request: HandoverRequest, inbox: InstantlyAccount): Promise<DispatchCampaignRecord | null> {
+  private dispatchCampaign(context: SendContext, request: HandoverRequest, inbox: InstantlyAccount): Promise<DispatchCampaignRecord | null> {
     const key = [context.kind, context.campaignId, request.trackId, request.stepId, request.sender].join("|");
     const name = `${context.kind === "test_run" ? "oo·test·" : "oo·"}${[context.campaignId, request.trackId, request.stepId, request.sender].join("·")}`;
+    return this.single(`dispatch|${key}`, () => this.ensureDispatchCampaign(key, name, inbox));
+  }
+
+  private async ensureDispatchCampaign(key: string, name: string, inbox: InstantlyAccount): Promise<DispatchCampaignRecord | null> {
     let record = this.store.dispatchCampaign(key);
     if (!record) {
       // The intent is recorded before the create, which has no idempotency key: a retry searches by name.
@@ -300,13 +333,16 @@ export class InstantlyEmailPort implements SendPort {
     let campaign: InstantlyCampaign | null = null;
     if (record.instantlyId === null) {
       // Every page of the search: a create only once the whole result shows no campaign by that name.
-      const found = await this.readPages<InstantlyCampaign>((after) => this.client.get("/api/v2/campaigns", { search: name, limit: PAGE, starting_after: after }));
+      const found = await this.readPages<InstantlyCampaign>((after) => this.client.get("/api/v2/campaigns", { search: name, limit: this.config.pageSize, starting_after: after }));
       if (!found?.complete) return null;
       campaign = found.items.find((c) => c.name === name) ?? null;
       if (!campaign) {
         const created = await this.client.post<InstantlyCampaign>("/api/v2/campaigns", wanted);
         if (!created.ok) return null;
         campaign = created.body;
+        // Another process may have saved an id first: that one is kept.
+        const saved = this.store.dispatchCampaign(key);
+        if (saved?.instantlyId) return this.ensureDispatchCampaign(key, name, inbox);
         record = { ...record, instantlyId: campaign.id, timestampUpdated: campaign.timestamp_updated };
         // A new campaign holds no lead yet: its statuses are fully known.
         this.store.setMeta(META.statusScanComplete(key), String(this.now()));
@@ -339,7 +375,12 @@ export class InstantlyEmailPort implements SendPort {
     return record;
   }
 
-  async handover(request: HandoverRequest): Promise<CallAnswer> {
+  handover(request: HandoverRequest): Promise<CallAnswer> {
+    // A same-key retry while the call the engine stopped waiting for is still running joins it.
+    return this.single(`handover|${request.idempotencyKey}`, () => this.handoverOnce(request));
+  }
+
+  private async handoverOnce(request: HandoverRequest): Promise<CallAnswer> {
     if (request.threading === "continue_thread") {
       if (!this.followUps) throw new Error("Instantly has no follow-up transport until experiment X2: nothing was sent.");
       const replyTo = request.threadRef === null ? null : this.store.dispatchedByRef(request.threadRef);
@@ -364,6 +405,8 @@ export class InstantlyEmailPort implements SendPort {
       idempotency_key: request.idempotencyKey,
       leads: [{ email: destination, custom_variables: { oo_subject: request.rendered.subject, oo_body: htmlBody(request.rendered.body) } }],
     };
+    // Recorded before the request: from here the app may have written to this address from this inbox.
+    this.store.saveIntent(request.idempotencyKey, request.sender, destination, this.now());
     const result = await this.client.post<AddLeadsResponse>("/api/v2/leads/add", body);
     return this.reconcile(result, request, campaign, destination);
   }
@@ -411,98 +454,129 @@ export class InstantlyEmailPort implements SendPort {
   // -------------------------------------------------------------------------------------------
   // The poller.
   //
-  // Two rules, after the review bot's findings on `7de601e`:
+  // Four rules (review bot on `7de601e` and `387a19b`, council on `387a19b`):
   //
   // - **Signal identity.** An event names a piece of work only when the message's own identity
   //   proves it: its thread or its Instantly lead, with the sender being the work's destination and
   //   the receiving inbox being the work's inbox. Only a campaign email (`ue_type` 1) is a dispatch
-  //   send. The reference on an event is always one the engine already holds for that work, or none:
-  //   a reply whose work cannot be proved yet is held here, pausing sends from that inbox to that
-  //   address through the pre-send check, until its thread becomes known or the settling period
-  //   passes, and is then reported with its work's reference or with none.
-  // - **Completeness.** Every scan resumes where it stopped (a persisted page cursor), and an inbox
-  //   counts as fresh only when the mail scan and the status scan of each of its dispatch campaigns
-  //   both reached their end within the freshness bound, counted from when that scan began. Every
-  //   batch is reported under a checkpoint of its own, and reported again, with its status changes
-  //   unapplied, until the engine passes that checkpoint back, which it does only after it applied
-  //   the batch and stored the checkpoint.
+  //   send. Mail whose campaign, or whose thread's campaign email, is outside the app's dispatch
+  //   campaigns is not the app's. The reference on an event is always one the engine already holds
+  //   for that work, or none: a reply whose work cannot be proved yet is held here, pausing sends
+  //   from that inbox to that address through the pre-send check.
+  // - **Completeness.** A paged read reaches its end or counts as incomplete; scans resume from
+  //   saved cursors; an inbox is fresh only when every scan it depends on reached its end, counted
+  //   from when that scan began.
+  // - **One commit per poll.** Everything a poll decides about what is read or reported again (scan
+  //   cursors and completion, held replies, the acknowledgement of the previous batch, and the new
+  //   batch) is kept in a draft and written in one transaction at the end, so a poll that dies
+  //   anywhere before it returns changes none of it. Facts learned from Instantly on the way (which
+  //   email and thread a lead's send is) are written as found: they are true whatever happens next,
+  //   and writing them again changes nothing. Every batch is reported again until the engine passes
+  //   its checkpoint back.
+  // - **Running time.** A held reply's wait counts only the time between two polls of one running
+  //   process; a restart counts nothing for the gap. It falls back only from a poll whose mail scan
+  //   reached its end, after asking Instantly for the reply's thread.
 
-  async observe(checkpoint: string | null): Promise<{ events: readonly ProviderEvent[]; checkpoint: string }> {
+  observe(checkpoint: string | null): Promise<{ events: readonly ProviderEvent[]; checkpoint: string }> {
+    // One poll at a time: a call the engine stopped waiting for is joined, never run beside another.
+    return this.single("observe", () => this.observeOnce(checkpoint));
+  }
+
+  private async observeOnce(checkpoint: string | null): Promise<{ events: readonly ProviderEvent[]; checkpoint: string }> {
     const now = this.now();
     const lastRun = this.store.meta(META.lastPollRun);
     if (checkpoint !== null && lastRun !== null && now - Number(lastRun) < this.config.pollIntervalMs) return { events: [], checkpoint };
     this.store.setMeta(META.lastPollRun, String(now));
-    const replay = this.acknowledge(checkpoint);
+    const draft: Draft = { meta: new Map() };
+    const previous = this.previousBatch(checkpoint);
     const inboxes = await this.readInboxes();
     await this.readAnalytics();
-    const events = new Map<string, ProviderEvent>(replay.events.map((e) => [e.id, e]));
-    const changes: Record<string, readonly [number, number | null]> = { ...replay.changes };
+    const events = new Map<string, ProviderEvent>(previous.replay.map((e) => [e.id, e]));
+    const changes: Record<string, readonly [number, number | null]> = { ...previous.unapplied };
     if (this.store.anyDispatched()) {
-      await this.pollEmails(inboxes, events);
-      await this.pollLeadStatuses(events, changes);
-      this.releaseHeldReplies(events);
+      const mailComplete = await this.pollEmails(inboxes, events, draft);
+      await this.pollLeadStatuses(events, changes, draft, previous.applied);
+      await this.releaseHeldReplies(events, draft, mailComplete);
     } else {
-      this.store.setMeta(META.lastMailScan, String(now));
+      draft.meta.set(META.lastMailScan, String(now));
     }
     const seq = Number(this.store.meta(META.batchSeq) ?? 0) + 1;
-    this.store.setMeta(META.batchSeq, String(seq));
+    draft.meta.set(META.batchSeq, String(seq));
     const token = `oo-batch-${String(seq)}-${iso(now)}`;
     const batch: Batch = { token, events: [...events.values()], changes };
-    this.store.setMeta(META.batch, JSON.stringify(batch));
+    this.crash("observe:before_commit");
+    this.store.transaction(() => {
+      for (const [workKey, [status, verification]] of Object.entries(previous.applied)) this.store.updateDispatched(workKey, { leadStatus: status, verificationStatus: verification });
+      for (const [key, value] of draft.meta) this.store.setMeta(key, value);
+      this.store.setMeta(META.batch, JSON.stringify(batch));
+    });
+    this.observedInThisProcess = true;
+    this.crash("observe:after_commit");
     return { events: batch.events, checkpoint: token };
   }
 
-  /**
-   * The previous batch: applied when the engine passes back its checkpoint (its status changes are
-   * then recorded as known), otherwise returned to be reported again.
-   */
-  private acknowledge(checkpoint: string | null): { events: readonly ProviderEvent[]; changes: Readonly<Record<string, readonly [number, number | null]>> } {
-    const raw = this.store.meta(META.batch);
-    if (raw === null) return { events: [], changes: {} };
-    const batch = JSON.parse(raw) as Batch;
-    if (checkpoint !== batch.token) return { events: batch.events, changes: batch.changes };
-    for (const [workKey, [status, verification]] of Object.entries(batch.changes)) this.store.updateDispatched(workKey, { leadStatus: status, verificationStatus: verification });
-    return { events: [], changes: {} };
+  private crash(point: string): void {
+    this.crashPoint?.(point);
   }
 
-  /** Reads pages from `start` until the end or `maxPages`; null when a page could not be read. */
+  /** A meta value as this poll sees it: its own unwritten draft first. */
+  private draftMeta(draft: Draft, key: string): string | null {
+    return draft.meta.has(key) ? (draft.meta.get(key) ?? null) : this.store.meta(key);
+  }
+
+  /**
+   * The previous batch. When the engine passes back its checkpoint it was applied, and its status
+   * changes are recorded with this poll's commit; otherwise it is reported again.
+   */
+  private previousBatch(checkpoint: string | null): { replay: readonly ProviderEvent[]; unapplied: Batch["changes"]; applied: Batch["changes"] } {
+    const raw = this.store.meta(META.batch);
+    if (raw === null) return { replay: [], unapplied: {}, applied: {} };
+    const batch = JSON.parse(raw) as Batch;
+    if (checkpoint !== batch.token) return { replay: batch.events, unapplied: batch.changes, applied: {} };
+    return { replay: [], unapplied: {}, applied: batch.changes };
+  }
+
+  /** Reads pages from `start` until the end or the page budget; null when a page could not be read. */
   private async readPages<T>(read: (after: string | undefined) => Promise<InstantlyResult<Page<T>>>, start?: string): Promise<{ items: T[]; complete: boolean; next: string | undefined } | null> {
     const items: T[] = [];
     let after = start;
-    for (let i = 0; i < MAX_PAGES; i++) {
+    for (let i = 0; i < this.config.pagesPerPoll; i++) {
       const page = await read(after);
       if (!page.ok) return null;
       items.push(...page.body.items);
+      this.crash("observe:page");
       after = page.body.next_starting_after ?? undefined;
       if (!after) return { items, complete: true, next: undefined };
     }
     return { items, complete: false, next: after };
   }
 
-  /** One mail scan, resumed where the previous poll stopped; fresh only once it reaches the end. */
-  private async pollEmails(inboxes: readonly InstantlyAccount[], events: Map<string, ProviderEvent>): Promise<void> {
+  /** One mail scan, resumed where the previous poll stopped. True when it reached the end. */
+  private async pollEmails(inboxes: readonly InstantlyAccount[], events: Map<string, ProviderEvent>, draft: Draft): Promise<boolean> {
     const now = this.now();
     const saved = this.store.meta(META.mailScan);
     const previous = saved ? (JSON.parse(saved) as MailScan) : null;
     // A scan that has not read its first page yet begins now: freshness counts from here.
     const scan: MailScan = previous?.after ? previous : { since: previous?.since ?? iso(now - this.config.overlapMs), after: null, startedWall: now, newest: null };
-    const query: ListEmailsQuery = { eaccount: inboxes.map((a) => a.email).join(","), mode: "emode_all", min_timestamp_created: scan.since, sort_order: "asc", preview_only: false, limit: PAGE };
+    const query: ListEmailsQuery = { eaccount: inboxes.map((a) => a.email).join(","), mode: "emode_all", min_timestamp_created: scan.since, sort_order: "asc", preview_only: false, limit: this.config.pageSize };
     const read = await this.readPages<InstantlyEmail>((after) => this.client.get("/api/v2/emails", { ...query, starting_after: after }), scan.after ?? undefined);
     if (!read) throw new Error("Instantly emails could not be read");
     let newest = scan.newest;
+    const ours = new Set(this.store.dispatchCampaigns().flatMap((c) => (c.instantlyId === null ? [] : [c.instantlyId])));
     for (const email of read.items) {
-      const event = this.classify(email);
+      const event = this.classify(email, draft, ours);
       if (event) events.set(event.id, event);
       if (newest === null || email.timestamp_created > newest) newest = email.timestamp_created;
     }
     if (read.complete) {
       // The next scan starts from the newest record seen, less the overlap.
       const from = newest === null ? now : Math.max(Date.parse(newest), Date.parse(scan.since) + this.config.overlapMs);
-      this.store.setMeta(META.mailScan, JSON.stringify({ since: iso(from - this.config.overlapMs), after: null, startedWall: now, newest: null } satisfies MailScan));
-      this.store.setMeta(META.lastMailScan, String(scan.startedWall));
+      draft.meta.set(META.mailScan, JSON.stringify({ since: iso(from - this.config.overlapMs), after: null, startedWall: now, newest: null } satisfies MailScan));
+      draft.meta.set(META.lastMailScan, String(scan.startedWall));
     } else {
-      this.store.setMeta(META.mailScan, JSON.stringify({ ...scan, after: read.next ?? null, newest } satisfies MailScan));
+      draft.meta.set(META.mailScan, JSON.stringify({ ...scan, after: read.next ?? null, newest } satisfies MailScan));
     }
+    return read.complete;
   }
 
   /** The work a received email proves it answers: by its thread, else by its Instantly lead, with the sender and inbox matching. */
@@ -515,10 +589,11 @@ export class InstantlyEmailPort implements SendPort {
     return null;
   }
 
-  private classify(email: InstantlyEmail): ProviderEvent | null {
+  private classify(email: InstantlyEmail, draft: Draft, ours: ReadonlySet<string>): ProviderEvent | null {
     if (email.ue_type === 1 && email.lead_id) {
       const d = this.store.dispatchedByLead(email.lead_id);
       if (!d || d.instantlyCampaignId !== email.campaign_id || d.inbox !== email.eaccount) return null;
+      // A fact about Instantly's records, written as found (see "One commit per poll").
       if (d.sentEmailId === null) this.store.updateDispatched(d.workKey, { sentEmailId: email.id, threadId: email.thread_id, sentWall: emailTime(email) });
       if (d.sentEmailId !== null && d.sentEmailId !== email.id) return null;
       return { id: `sent:${email.id}`, kind: "sent", key: d.workKey, providerRef: d.ref, sentAt: emailTime(email) };
@@ -526,70 +601,115 @@ export class InstantlyEmailPort implements SendPort {
     if (email.ue_type !== 2) return null;
     const from = bare(email.from_address_email);
     const owner = this.ownerOf(email, from);
-    const held = this.heldReplies();
+    const held = this.heldReplies(draft);
     if (owner) {
-      if (held.some((h) => h.emailId === email.id && !h.released)) this.saveHeld(held.map((h) => (h.emailId === email.id ? { ...h, released: true } : h)));
+      if (held.some((h) => h.emailId === email.id && !h.released)) this.saveHeld(draft, held.map((h) => (h.emailId === email.id ? { ...h, released: true } : h)));
       return { id: `reply:${email.id}`, kind: "reply", providerRef: owner.ref, at: emailTime(email), inbox: email.eaccount, from };
     }
-    // Not provably the app's: held only when it comes from an address the app wrote to from that inbox.
+    // Another campaign's mail by its own identity is not the app's.
+    if (email.campaign_id !== null && !ours.has(email.campaign_id)) return null;
+    // Not provably the app's: held only when it comes from an address the app wrote to, or may have written to, from that inbox.
     if (this.store.reachedFrom(email.eaccount, from) && !held.some((h) => h.emailId === email.id)) {
-      this.saveHeld([...held, { emailId: email.id, threadId: email.thread_id, inbox: email.eaccount, from, at: emailTime(email), heldWall: this.now(), released: false }]);
+      this.saveHeld(draft, [...held, { emailId: email.id, threadId: email.thread_id, inbox: email.eaccount, from, at: emailTime(email), waitedMs: 0, lastCountedWall: this.now(), released: false }]);
     }
     return null;
   }
 
-  private heldReplies(): HeldReply[] {
-    const raw = this.store.meta(META.heldReplies);
+  /** Held replies as committed, or as this poll's draft has them. */
+  private heldReplies(draft?: Draft): HeldReply[] {
+    const raw = draft ? this.draftMeta(draft, META.heldReplies) : this.store.meta(META.heldReplies);
     return raw === null ? [] : (JSON.parse(raw) as HeldReply[]);
   }
 
-  private saveHeld(held: readonly HeldReply[]): void {
-    const keep = held.filter((h) => !h.released || this.now() - h.heldWall < 24 * 60 * MINUTE);
-    this.store.setMeta(META.heldReplies, JSON.stringify(keep));
+  private saveHeld(draft: Draft, held: readonly HeldReply[]): void {
+    // A released entry is kept for a day so a re-read in the overlap does not hold it again.
+    const keep = held.filter((h) => !h.released || this.now() - h.lastCountedWall < 24 * 60 * MINUTE);
+    draft.meta.set(META.heldReplies, JSON.stringify(keep));
   }
 
-  /** A held reply is reported once its thread names its work, or after the settling period with no reference (ADR 0003 2.4's fallback). */
-  private releaseHeldReplies(events: Map<string, ProviderEvent>): void {
+  /**
+   * Reports a held reply once its thread names its work. Otherwise, after it has waited the settling
+   * period in running time, and only from a poll whose mail scan reached its end, it asks Instantly
+   * for the thread: a campaign email of the app's work names it, another campaign's drops it, and
+   * with neither it is reported with no reference for the engine's fallback (ADR 0003 2.4).
+   */
+  private async releaseHeldReplies(events: Map<string, ProviderEvent>, draft: Draft, mailComplete: boolean): Promise<void> {
     const now = this.now();
-    const held = this.heldReplies();
+    const counting = this.observedInThisProcess;
     const next: HeldReply[] = [];
     let changed = false;
-    for (const h of held) {
-      const byThread = !h.released && h.threadId ? this.store.dispatchedByThread(h.threadId) : null;
-      const owner = byThread && byThread.inbox === h.inbox && byThread.destination === h.from ? byThread : null;
-      if (h.released || (!owner && now - h.heldWall < this.config.replyHoldMs)) {
+    for (const h of this.heldReplies(draft)) {
+      if (h.released) {
         next.push(h);
         continue;
       }
-      events.set(`reply:${h.emailId}`, { id: `reply:${h.emailId}`, kind: "reply", providerRef: owner ? owner.ref : null, at: h.at, inbox: h.inbox, from: h.from });
-      next.push({ ...h, released: true });
+      const waited: HeldReply = { ...h, waitedMs: h.waitedMs + (counting ? Math.max(0, now - h.lastCountedWall) : 0), lastCountedWall: now };
       changed = true;
+      const byThread = h.threadId ? this.store.dispatchedByThread(h.threadId) : null;
+      let owner = byThread && byThread.inbox === h.inbox && byThread.destination === h.from ? byThread : null;
+      if (!owner && (waited.waitedMs < this.config.replyHoldMs || !mailComplete)) {
+        next.push(waited);
+        continue;
+      }
+      if (!owner) {
+        const verdict = await this.threadVerdict(waited);
+        if (verdict === "unavailable") {
+          next.push(waited);
+          continue;
+        }
+        if (verdict === "foreign") {
+          next.push({ ...waited, released: true });
+          continue;
+        }
+        owner = verdict === "none" ? null : verdict;
+      }
+      events.set(`reply:${h.emailId}`, { id: `reply:${h.emailId}`, kind: "reply", providerRef: owner ? owner.ref : null, at: h.at, inbox: h.inbox, from: h.from });
+      next.push({ ...waited, released: true });
     }
-    if (changed) this.saveHeld(next);
+    if (changed) this.saveHeld(draft, next);
+  }
+
+  /** What the held reply's thread shows: the app's work, another campaign, neither, or nothing readable. */
+  private async threadVerdict(h: HeldReply): Promise<DispatchedLead | "foreign" | "none" | "unavailable"> {
+    if (h.threadId === null) return "none";
+    const thread = h.threadId;
+    const read = await this.readPages<InstantlyEmail>((after) => this.client.get("/api/v2/emails", { search: `thread:${thread}`, eaccount: h.inbox, mode: "emode_all", limit: this.config.pageSize, starting_after: after }));
+    if (!read?.complete) return "unavailable";
+    const ours = new Set(this.store.dispatchCampaigns().flatMap((c) => (c.instantlyId === null ? [] : [c.instantlyId])));
+    let foreign = false;
+    for (const e of read.items) {
+      if (e.ue_type !== 1) continue;
+      const d = e.lead_id ? this.store.dispatchedByLead(e.lead_id) : null;
+      if (d && d.inbox === h.inbox && d.destination === h.from && d.instantlyCampaignId === e.campaign_id) return d;
+      if (e.campaign_id !== null && !ours.has(e.campaign_id)) foreign = true;
+    }
+    return foreign ? "foreign" : "none";
   }
 
   /** Each dispatch campaign's status scan, resumed where the previous poll stopped. */
-  private async pollLeadStatuses(events: Map<string, ProviderEvent>, changes: Record<string, readonly [number, number | null]>): Promise<void> {
+  private async pollLeadStatuses(events: Map<string, ProviderEvent>, changes: Record<string, readonly [number, number | null]>, draft: Draft, applied: Batch["changes"]): Promise<void> {
     for (const campaign of this.store.dispatchCampaigns()) {
       const campaignId = campaign.instantlyId;
       if (campaignId === null) continue;
       const cursor = this.store.meta(META.statusCursor(campaign.key)) || undefined;
-      if (!cursor) this.store.setMeta(META.statusScanStarted(campaign.key), String(this.now()));
-      const read = await this.readPages<InstantlyLead>((after) => this.client.post("/api/v2/leads/list", { campaign: campaignId, limit: PAGE, ...(after ? { starting_after: after } : {}) } satisfies ListLeadsRequest), cursor);
+      if (!cursor) draft.meta.set(META.statusScanStarted(campaign.key), String(this.now()));
+      const read = await this.readPages<InstantlyLead>((after) => this.client.post("/api/v2/leads/list", { campaign: campaignId, limit: this.config.pageSize, ...(after ? { starting_after: after } : {}) } satisfies ListLeadsRequest), cursor);
       // A page that could not be read leaves the scan where it was: this campaign is not current.
       if (!read) continue;
       for (const lead of read.items) {
         const d = this.store.dispatchedByLead(lead.id);
-        if (!d || d.instantlyCampaignId !== campaignId || d.leadStatus === lead.status) continue;
+        // Known as of this poll: recorded, or applied by the engine and recorded with this poll's commit.
+        const known = d ? (applied[d.workKey]?.[0] ?? d.leadStatus) : null;
+        if (!d || d.instantlyCampaignId !== campaignId || known === lead.status) continue;
         const event = this.statusEvent(d, lead);
         if (event) events.set(event.id, event);
         changes[d.workKey] = [lead.status, lead.verification_status ?? null];
       }
       if (read.complete) {
-        this.store.setMeta(META.statusCursor(campaign.key), "");
-        this.store.setMeta(META.statusScanComplete(campaign.key), this.store.meta(META.statusScanStarted(campaign.key)) ?? String(this.now()));
+        draft.meta.set(META.statusCursor(campaign.key), "");
+        draft.meta.set(META.statusScanComplete(campaign.key), this.draftMeta(draft, META.statusScanStarted(campaign.key)) ?? String(this.now()));
       } else {
-        this.store.setMeta(META.statusCursor(campaign.key), read.next ?? "");
+        draft.meta.set(META.statusCursor(campaign.key), read.next ?? "");
       }
     }
   }
@@ -613,7 +733,7 @@ export class InstantlyEmailPort implements SendPort {
   /** The campaign email Instantly sent for this work, recorded once seen. Null when none is visible; undefined when Instantly could not be read. */
   private async sentEmail(d: DispatchedLead): Promise<InstantlyEmail | null | undefined> {
     const read = await this.readPages<InstantlyEmail>((after) =>
-      this.client.get("/api/v2/emails", { lead: d.destination, eaccount: d.inbox, campaign_id: d.instantlyCampaignId, mode: "emode_all", sort_order: "asc", limit: PAGE, starting_after: after }),
+      this.client.get("/api/v2/emails", { lead: d.destination, eaccount: d.inbox, campaign_id: d.instantlyCampaignId, mode: "emode_all", sort_order: "asc", limit: this.config.pageSize, starting_after: after }),
     );
     if (!read) return undefined;
     // Only the campaign's own email is the dispatch send.
@@ -632,7 +752,7 @@ export class InstantlyEmailPort implements SendPort {
     const email = await this.sentEmail(d);
     if (email === undefined) return { kind: "unknown" };
     if (email) return { kind: "sent", sentAt: emailTime(email), providerRef: d.ref };
-    const leads = await this.readPages<InstantlyLead>((after) => this.client.post("/api/v2/leads/list", { campaign: d.instantlyCampaignId, contacts: [d.destination], limit: PAGE, ...(after ? { starting_after: after } : {}) } satisfies ListLeadsRequest));
+    const leads = await this.readPages<InstantlyLead>((after) => this.client.post("/api/v2/leads/list", { campaign: d.instantlyCampaignId, contacts: [d.destination], limit: this.config.pageSize, ...(after ? { starting_after: after } : {}) } satisfies ListLeadsRequest));
     if (!leads) return { kind: "unknown" };
     const lead = leads.items.find((l) => l.id === d.leadId);
     if (!lead) return leads.complete ? { kind: "not-sent" } : { kind: "unknown" };
@@ -665,14 +785,15 @@ export class InstantlyEmailPort implements SendPort {
     const threads = new Set(recorded.flatMap((d) => (d.threadId === null ? [] : [d.threadId])));
     // No thread recorded for this lead from this inbox: a reply in one cannot exist yet.
     if (threads.size === 0) return { kind: "clear" };
-    const since = Math.min(...recorded.map((d) => d.addedWall)) - this.config.overlapMs;
-    const read = await this.readPages<InstantlyEmail>((after) =>
-      this.client.get("/api/v2/emails", { lead: destination, eaccount: request.sender, mode: "emode_all", min_timestamp_created: iso(since), sort_order: "desc", limit: PAGE, starting_after: after }),
-    );
-    if (!read) return { kind: "unavailable" };
-    const reply = read.items.find((e) => e.ue_type === 2 && e.eaccount === request.sender && e.thread_id !== null && threads.has(e.thread_id) && bare(e.from_address_email) === destination);
-    if (reply) return { kind: "reply", providerRef: reply.id, at: emailTime(reply) };
-    // Only a scan that reached the end can say there is no reply.
-    return read.complete ? { kind: "clear" } : { kind: "unavailable" };
+    // Each recorded thread is read whole: a reply in it need not carry the lead's metadata.
+    for (const thread of threads) {
+      const read = await this.readPages<InstantlyEmail>((after) => this.client.get("/api/v2/emails", { search: `thread:${thread}`, eaccount: request.sender, mode: "emode_all", sort_order: "desc", limit: this.config.pageSize, starting_after: after }));
+      if (!read) return { kind: "unavailable" };
+      const reply = read.items.find((e) => e.ue_type === 2 && e.eaccount === request.sender && e.thread_id === thread && bare(e.from_address_email) === destination);
+      if (reply) return { kind: "reply", providerRef: reply.id, at: emailTime(reply) };
+      // Only a read that reached the end can say there is no reply.
+      if (!read.complete) return { kind: "unavailable" };
+    }
+    return { kind: "clear" };
   }
 }

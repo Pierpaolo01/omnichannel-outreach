@@ -396,6 +396,21 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE TABLE instantly_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     `,
   },
+  {
+    version: 8,
+    name: "the Instantly adapter: in-doubt adds, recorded before the request (ADR 0002)",
+    // A lead add whose answer may be lost still means the app may have written to that address
+    // from that inbox, so a reply from it is held, not dropped.
+    sql: `
+      CREATE TABLE instantly_intents (
+        work_key TEXT PRIMARY KEY,
+        inbox TEXT NOT NULL,
+        destination TEXT NOT NULL,
+        intended_wall INTEGER NOT NULL
+      );
+      CREATE INDEX instantly_intents_by_address ON instantly_intents(inbox, destination);
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string): void {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { Crash, EngineHarness, type Provider } from "../../../test/support/engine-harness.ts";
+import { Crash, EngineHarness, quickWait, type Provider } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import { FakeInstantly } from "../../../test/support/fake-instantly.ts";
 import type { CampaignDefinition } from "../../domain/sequence/definition.ts";
@@ -52,11 +52,12 @@ const twoEmails = (): CampaignDefinition => ({
  * The harness jumps the clock between the instants something happens, with no poll in between, so
  * the freshness bound is set long here; the stale-inbox test sets the real ten minutes.
  */
-function setUp(writes: boolean, freshnessMs = 30 * DAY) {
+function setUp(writes: boolean, freshnessMs = 30 * DAY, engine: ConstructorParameters<typeof EngineHarness>[0]["engine"] = {}) {
   const built: { fake?: FakeInstantly; port?: InstantlyEmailPort } = {};
   const h = new EngineHarness({
     start: MONDAY_9 - H,
     accounts: [],
+    engine,
     port: (store, now) => {
       const fake = new FakeInstantly({ now, accounts: INBOXES });
       const client = new InstantlyClient({ apiKey: "test-key-not-real", fetch: fake.fetch, writes, now, timeoutMs: 10_000 });
@@ -236,5 +237,30 @@ describe("the engine through the Instantly adapter", () => {
     const [repliedCampaign, otherCampaign] = latestCampaign.includes(b.id) ? [b.id, a.id] : [a.id, b.id];
     expect((await h.progress(enrollmentIn(repliedCampaign))).status).toBe("replied");
     expect((await h.progress(enrollmentIn(otherCampaign))).status).toBe("active");
+  });
+
+  test("council item 5: the engine abandons a slow first send and retries it while the dispatch campaign is still being created; one campaign, one lead, one send", async () => {
+    // Every port wait that is not answered at once counts as timed out, as after CALL_TIMEOUT.
+    const { h, fake } = setUp(true, 30 * DAY, { waitFor: quickWait });
+    const onlyPat = { businesses: rows.businesses, people: rows.people.filter((p) => p.person_id === "p1") };
+    const { campaign } = await h.createCampaign("Autumn physio", onlyPat);
+    await h.tick();
+    await h.tick();
+    await h.defineSequence(campaign.id, twoEmails());
+    h.clock = MONDAY_9;
+    await h.tick();
+    const open = fake.hold("POST", "/api/v2/campaigns");
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    // The engine has stopped waiting; its same-key retry comes at the next pacing slot.
+    for (let i = 0; i < 5; i++) {
+      h.clock += 20 * 60_000;
+      await h.tick();
+    }
+    open();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await h.advanceTo(h.clock + 2 * H);
+    expect(fake.campaigns).toHaveLength(1);
+    expect(fake.leads.filter((l) => l.email === "pat@harbour.example")).toHaveLength(1);
+    expect(fake.deliveries()).toHaveLength(1);
   });
 });

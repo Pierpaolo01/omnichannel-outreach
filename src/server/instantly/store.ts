@@ -49,8 +49,13 @@ export interface InstantlyStore {
   dispatchedByRef(ref: string): DispatchedLead | null;
   dispatchedByLead(leadId: string): DispatchedLead | null;
   dispatchedByThread(threadId: string): DispatchedLead | null;
-  /** Whether the adapter ever dispatched to `address` from `inbox`. */
+  /** Whether the adapter ever dispatched, or began a lead add that may have dispatched, to `address` from `inbox`. */
   reachedFrom(inbox: string, address: string): boolean;
+  /** Records, before the request, that a lead add for this work is about to be sent. */
+  saveIntent(workKey: string, inbox: string, destination: string, wall: number): void;
+  /** Runs `write` in one transaction: every write in it lands, or none does. */
+  transaction(write: () => void): void;
+  /** Whether anything was dispatched, or a lead add begun, so there is mail to poll. */
   anyDispatched(): boolean;
   /** Send times of observed dispatch sends from `inbox` since `since`. */
   sentWallsSince(inbox: string, since: number): number[];
