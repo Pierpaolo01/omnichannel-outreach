@@ -357,41 +357,43 @@ export interface BeforeLaunchView {
 }
 
 export interface LoadProjectionView {
-  /** The leads the email track would send to; the rest have no email and skip it. */
-  readonly leadsWithEmail: number;
+  /**
+   * This campaign's leads some live track can reach: they would start. Null when nothing is
+   * projected (see `cannotProject` and `noSender`).
+   */
+  readonly leadsToStart: number | null;
+  /** Every sender account in a live track's pool, on either channel. */
   readonly accounts: readonly {
     readonly id: string;
     readonly label: string;
+    readonly channel: "email" | "sms";
     readonly capacity: number;
-    /** Sends already counted or reserved today on this inbox, across every campaign. */
+    /** Sends already counted or reserved today on this account, across every campaign. */
     readonly usedToday: number;
     /** The most this campaign would send from it on one day. */
     readonly busiestDay: number;
     readonly gapSeconds: number;
   }[];
   /**
-   * Calendar days, counting launch day as day 1, until every lead with an email has had its first
-   * email; null when no connected inbox can send, or not all start within the projection's horizon.
+   * Calendar days, counting launch day as day 1, until every lead some live track can reach has had
+   * its first message on any channel; null when nothing is projected, or not all start within the
+   * projection's horizon.
    */
   readonly daysUntilAllStart: number | null;
   /** Leads that would not have started within the projection's horizon. */
   readonly notStartedWithinHorizon: number;
   readonly horizonDays: number;
   /**
-   * Pool inboxes that cannot send now with no known end: the provider reports them unable to send
-   * (stale, sending off, not active), or the lead quota is held. While any is listed there is no
-   * projection, because none can be honest. A rate limit has an end, and the projection resumes there.
+   * Pool accounts that cannot send now with no known end: the provider reports them unable to send
+   * (stale, sending off, not active, disconnected), or the lead quota is held. While any is listed
+   * there is no projection, because none can be honest. A rate limit has an end, and the projection resumes there.
    */
-  readonly cannotProject: readonly { readonly accountId: string; readonly label: string; readonly reason: "cannot_send" | "quota" }[];
+  readonly cannotProject: readonly { readonly accountId: string; readonly label: string; readonly channel: "email" | "sms"; readonly reason: "cannot_send" | "quota" }[];
   /**
-   * Another track can change when emails go, which the estimate does not simulate yet (SMS sends
-   * arrive in it with ticket 13b): an SMS track, or a second email track, that does not start after
-   * this campaign's email track, here or in another running campaign on the same inboxes. While set
-   * there is no projection.
+   * Live tracks whose channel has no connected sender (launch blocker 3). Their leads, and every
+   * track after them, would wait for ever, so there is no projection (ADR 0003, ticket 13b).
    */
-  readonly otherTracksChangeTiming: "this_campaign" | "other_campaign" | null;
-  /** The projection counts email only: this campaign's SMS track, which starts after its emails, is left out. */
-  readonly leavesOutSms: boolean;
+  readonly noSender: readonly { readonly trackId: string; readonly channel: "email" | "sms" }[];
 }
 
 /** Rendered copy, in pieces, so a fallback the lead gets can be shown as one. */

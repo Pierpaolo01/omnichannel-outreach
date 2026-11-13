@@ -7,6 +7,10 @@ import type { WindowRule } from "../domain/sequence/clock.ts";
 import type { BeforeLaunchView } from "../shared/api.ts";
 import { localDayNumber, resetDayOf } from "../domain/sequence/clock.ts";
 import { projectedSends } from "./before-launch.ts";
+import type { ProjectedSend } from "./load-projection.ts";
+
+/** The fields the email-only comparisons check. */
+const core = ({ leadId, accountId, step, at }: ProjectedSend) => ({ leadId, accountId, step, at });
 
 /**
  * The Before launch projection against the engine's actual sends (PR 41 verification, B5). Each
@@ -130,7 +134,7 @@ async function compare(c: Case) {
     steps: sends.map((s) => `${s.leadId}/${s.step}/${localDayNumber(s.at, zoneOf.get(s.leadId) ?? "UTC")}`).sort(),
     perInboxDay: sends.map((s) => `${s.accountId}/${resetDayOf(s.at, resetOf.get(s.accountId) ?? "UTC")}`).sort(),
   });
-  const kept = projected!.sends.filter((s) => s.at < until);
+  const kept = projected!.sends.filter((s) => s.at < until && s.channel === "email").map(core);
   return { projected: kept, actual, view, daily: { projected: daily(kept), actual: daily(actual) }, texts: c.sms ? h.sms.deliveryLog.length : 0 };
 }
 
@@ -165,7 +169,7 @@ describe("the Before launch projection makes exactly the engine's sends (PR 41 v
   }
 });
 
-describe("with an SMS track after the email track, the email sends are still exactly the engine's (merge of ticket 13a)", () => {
+describe("with an SMS track after the email track, the email sends are exactly the engine's (merge of ticket 13a; texts are compared below)", () => {
   const SEEDS = Number(process.env["PROJECTION_SEEDS"] ?? 20);
   const texted: number[] = [];
   for (const seed of Array.from({ length: SEEDS }, (_, i) => 3000 + i)) {
@@ -173,7 +177,6 @@ describe("with an SMS track after the email track, the email sends are still exa
       const c = withSmsAfter(generate(seed), seed % 3);
       const { projected, actual, daily, view, texts } = await compare(c);
       texted.push(texts);
-      expect(view.load).toMatchObject({ leavesOutSms: true, otherTracksChangeTiming: null });
       expect(daily.projected).toEqual(daily.actual);
       const exact = (xs: typeof actual) => [...xs].sort((a, b) => a.at - b.at || (a.accountId < b.accountId ? -1 : 1));
       expect(exact(projected)).toEqual(exact(actual));
@@ -273,7 +276,7 @@ describe("another running campaign's waiting work on the same inboxes (PR 41 re-
     const exact = (xs: { leadId: string; accountId: string; step: number; at: number }[]) => [...xs].sort((x, y) => x.at - y.at || (x.accountId < y.accountId ? -1 : 1));
     const mine = new Set(await h.store.engine.subjectsOf(b.id));
     const actual = h.fake.deliveryLog.slice(already).filter((d) => mine.has(d.subjectId) && d.at < until).map((d) => ({ leadId: d.subjectId, accountId: d.sender, step: stepIndex(d.stepId), at: d.at }));
-    return { projected: exact(projected!.sends.filter((s) => s.at < until && mine.has(s.leadId))), actual: exact(actual), view };
+    return { projected: exact(projected!.sends.filter((s) => s.at < until && mine.has(s.leadId)).map(core)), actual: exact(actual), view };
   }
 
   test("the verifier's case: capacity 2, an older waiting lead of another campaign takes today's slot, so this campaign starts over two days", async () => {
@@ -347,7 +350,7 @@ describe("every inbox of every simulated campaign as the engine sees it (PR 41 c
     const mine = new Set(await h.store.engine.subjectsOf(b.id));
     const exact = (xs: { leadId: string; accountId: string; step: number; at: number }[]) => [...xs].sort((x, y) => x.at - y.at || (x.accountId < y.accountId ? -1 : 1));
     const actual = exact(h.fake.deliveryLog.slice(already).filter((d) => mine.has(d.subjectId) && d.at < until).map((d) => ({ leadId: d.subjectId, accountId: d.sender, step: Number(d.stepId.slice(1)) - 1, at: d.at })));
-    return { view, projected: projected ? exact(projected.sends.filter((s) => s.at < until && mine.has(s.leadId))) : null, actual, launched: launchedA.status === 200 && launchedB.status === 200 };
+    return { view, projected: projected ? exact(projected.sends.filter((s) => s.at < until && mine.has(s.leadId)).map(core)) : null, actual, launched: launchedA.status === 200 && launchedB.status === 200 };
   }
 
   test("the reviewer's case: an inbox only the other campaign uses is unhealthy, so its waiting work comes onto the shared inbox", async () => {
@@ -403,4 +406,96 @@ describe("every inbox of every simulated campaign as the engine sees it (PR 41 c
       expect(out.projected).toEqual(out.actual);
     });
   }
+});
+
+describe("every track on both channels, across campaigns (ticket 13b): the projection makes exactly the engine's sends", () => {
+  interface World {
+    readonly start: number;
+    readonly inboxes: FakeAccount[];
+    readonly numbers: { id: string; capacity: number; gapMs: number | null; k: number; healthy: boolean; resetZone: string }[];
+    /** One per campaign; the last is projected, the others launched before it. */
+    readonly campaigns: { definition: CampaignDefinition; leads: number[]; launchAfterMs: number }[];
+    /** Each lead: its zone, and whether it has an email and a mobile of its own. */
+    readonly people: { zone: string; email: boolean; mobile: boolean }[];
+  }
+
+  function world(seed: number): World {
+    const r = rng(seed);
+    const inboxes = Array.from({ length: 1 + Math.floor(r() * 2) }, (_, i): FakeAccount => ({ id: `inbox-${i}`, capacity: 1 + Math.floor(r() * 4), gapMs: pick(r, [MIN, 7 * MIN, 50 * MIN]), k: 1, healthy: true, quotaAvailable: true, resetZone: pick(r, ["UTC", "America/Los_Angeles"]) }));
+    const numbers = Array.from({ length: 1 + Math.floor(r() * 2) }, (_, i) => ({ id: `+4477009001${i}0`, capacity: 1 + Math.floor(r() * 4), gapMs: pick(r, [MIN, 7 * MIN, 50 * MIN, null]), k: 1, healthy: true, resetZone: pick(r, ["Europe/London", "UTC"]) }));
+    const people = Array.from({ length: 2 + Math.floor(r() * 5) }, () => ({ zone: pick(r, ZONES), email: r() < 0.75, mobile: r() < 0.75 }));
+    const subset = <T,>(xs: readonly T[]) => {
+      const s = xs.filter(() => r() < 0.6);
+      return s.length > 0 ? s : [pick(r, xs)];
+    };
+    const n = 1 + Math.floor(r() * 3);
+    const campaigns = Array.from({ length: n }, (_, c) => {
+      const tracks: CampaignDefinition["tracks"][number][] = [];
+      for (let i = 0; i < 1 + Math.floor(r() * 4); i++) {
+        const channel = pick(r, ["email", "sms"] as const);
+        const start = tracks.length > 0 && r() < 0.55 ? { kind: "after" as const, trackId: pick(r, tracks).id, delayDays: Math.floor(r() * 4) } : { kind: "entry" as const };
+        const id = `c${c}t${i}`;
+        tracks.push({
+          id,
+          channel,
+          branch: "main",
+          window: pick(r, WINDOWS),
+          steps: Array.from({ length: 1 + Math.floor(r() * 3) }, (_, k) => ({ id: `${id}s${k}`, waitDays: k === 0 ? 0 : Math.floor(r() * 3), subject: k === 0 && channel === "email" ? "Hello" : "", body: "A note.", threading: k === 0 || channel === "sms" ? ("new_subject" as const) : ("continue_thread" as const), removed: false })),
+          start,
+          removed: false,
+        });
+      }
+      const definition: CampaignDefinition = { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: subset(inboxes).map((x) => x.id), smsPool: subset(numbers).map((x) => x.id), tracks };
+      // People are shared between campaigns, so one mobile can be in two campaigns' conversations.
+      return { definition, leads: subset(people.map((_, i) => i)), launchAfterMs: Math.floor(r() * 3) * 9 * MIN };
+    });
+    return { start: pick(r, ANCHORS) + Math.floor(r() * 5) * MIN, inboxes, numbers, campaigns, people };
+  }
+
+  async function compareWorld(w: World) {
+    const h = new EngineHarness({ start: w.start, accounts: w.inboxes, sms: { numbers: w.numbers } });
+    const rows = (leads: readonly number[]) => ({
+      businesses: leads.map((i) => business({ business_id: `b${i}`, business_name: `Clinic ${i}`, timezone: w.people[i]!.zone })),
+      people: leads.map((i) => person({ person_id: `p${i}`, business_id: `b${i}`, full_name: `Lead Person${i}`, email: w.people[i]!.email ? `lead${i}@clinic${i}.example` : "", timezone: "", ...(w.people[i]!.mobile ? { dial_phone: mobileOf(i), dial_phone_type: "mobile" } : {}) })),
+    });
+    const ids: string[] = [];
+    for (const [i, c] of w.campaigns.entries()) ids.push((await h.createCampaign(`Campaign ${i}`, rows(c.leads))).campaign.id);
+    await h.tick();
+    h.maxWrites = 20_000;
+    for (const [i, c] of w.campaigns.entries()) {
+      await h.defineSequence(ids[i]!, c.definition);
+      if (i === w.campaigns.length - 1) break;
+      expect((await h.launch(ids[i]!)).status).toBe(200);
+      if (c.launchAfterMs > 0) await h.advanceTo(h.clock + c.launchAfterMs);
+    }
+    const target = ids.at(-1)!;
+    const projected = await projectedSends(h.store, target, h.clock);
+    const view = (await h.request<BeforeLaunchView>("GET", `/api/campaigns/${target}/before-launch`)).body;
+    const already = { email: h.fake.deliveryLog.length, sms: h.sms.deliveryLog.length };
+    expect((await h.launch(target)).status).toBe(200);
+    const until = w.start + 12 * DAY;
+    await h.advanceTo(until);
+    const mine = new Set(await h.store.engine.subjectsOf(target));
+    const pickFields = (x: { leadId: string; accountId: string; stepId: string; at: number }) => `${x.at} ${x.accountId} ${x.leadId} ${x.stepId}`;
+    const actual = [...h.fake.deliveryLog.slice(already.email), ...h.sms.deliveryLog.slice(already.sms)]
+      .filter((d) => mine.has(d.subjectId) && d.at < until)
+      .map((d) => pickFields({ leadId: d.subjectId, accountId: d.sender, stepId: d.stepId, at: d.at }))
+      .sort();
+    const predicted = (projected?.sends ?? []).filter((s) => s.at < until).map(pickFields).sort();
+    return { actual, predicted, view, channels: new Set([...h.sms.deliveryLog.slice(already.sms)].filter((d) => mine.has(d.subjectId)).length > 0 ? ["sms"] : []) };
+  }
+
+  const SEEDS = Number(process.env["PROJECTION_SEEDS"] ?? 40);
+  const texted: boolean[] = [];
+  for (const seed of Array.from({ length: SEEDS }, (_, i) => 13_000 + i)) {
+    test(`generated multi-track world ${seed}`, async () => {
+      const { actual, predicted, view, channels } = await compareWorld(world(seed));
+      texted.push(channels.has("sms"));
+      expect(view.load?.noSender).toEqual([]);
+      expect(predicted).toEqual(actual);
+    });
+  }
+  test("the worlds really text: most projected campaigns send SMS", () => {
+    expect(texted.filter(Boolean).length).toBeGreaterThan(SEEDS / 3);
+  });
 });

@@ -149,14 +149,14 @@ describe("Before launch: projected daily load per sender inbox", () => {
     const { h, id } = await campaign([]);
     await h.defineSequence(id, emailTrack([step("s1", { subject: "Hi", threading: "new_subject" })], []));
     const { load } = await beforeLaunch(h, id);
-    expect(load).toMatchObject({ leadsWithEmail: 2, accounts: [], daysUntilAllStart: null });
+    expect(load).toMatchObject({ leadsToStart: null, accounts: [], daysUntilAllStart: null, noSender: [{ trackId: "t1", channel: "email" }] });
   });
 
   test("first emails fill each inbox's daily capacity, so 25 leads at 10 a day start over three sending days", async () => {
     const { h, id } = await campaign([inbox("inbox-a", { capacity: 10 })], many(25).people, many(25).businesses);
     await h.defineSequence(id, emailTrack([step("s1", { subject: "Hi", threading: "new_subject" })]));
     const { load } = await beforeLaunch(h, id);
-    expect(load).toMatchObject({ leadsWithEmail: 25, daysUntilAllStart: 3, notStartedWithinHorizon: 0 });
+    expect(load).toMatchObject({ leadsToStart: 25, daysUntilAllStart: 3, notStartedWithinHorizon: 0 });
     expect(load!.accounts).toEqual([expect.objectContaining({ id: "inbox-a", capacity: 10, usedToday: 0, busiestDay: 10 })]);
   });
 
@@ -199,43 +199,57 @@ describe("Before launch: projected daily load per sender inbox", () => {
     expect(load!.daysUntilAllStart).toBe(2);
   });
 
-  describe("with an SMS track, which the estimate does not simulate yet (merge of ticket 13a)", () => {
+  describe("with an SMS track, texts are projected with the emails (ticket 13b)", () => {
     const N1 = "+447700900001";
     const text = (id: string): StepDefinition => step(id, { body: "A short text.", threading: "new_subject" });
-    const withSms = (start: TrackDefinition["start"]): CampaignDefinition => {
+    const withSms = (start: TrackDefinition["start"], smsPool = [N1]): CampaignDefinition => {
       const email = emailTrack([step("s1", { subject: "Hi", threading: "new_subject" })]);
-      return { ...email, smsPool: [N1], tracks: [...email.tracks, { id: "t2", channel: "sms", branch: "main", window: weekdays, steps: [text("m1")], start, removed: false }] };
+      return { ...email, smsPool, tracks: [...email.tracks, { id: "t2", channel: "sms", branch: "main", window: weekdays, steps: [text("m1")], start, removed: false }] };
     };
-    const smsWorld = async (n: number) => {
-      const h = new EngineHarness({ start: MONDAY_8, accounts: [inbox("inbox-a", { capacity: 10 })], sms: { numbers: [{ id: N1, capacity: 50, gapMs: null, k: 1, healthy: true, resetZone: "Europe/London" }] } });
-      const { campaign: c } = await h.createCampaign("Autumn physio", many(n));
+    /** `n` leads, each with an email and a fictitious UK mobile of their own. */
+    const withMobiles = (n: number) => ({
+      businesses: [HARBOUR],
+      people: Array.from({ length: n }, (_, i) =>
+        person({ person_id: `q${i}`, business_id: "b1", full_name: `Lead Number${String(i).padStart(3, "0")}`, email: `lead${i}@harbour.example`, dial_phone: `+4477009003${String(i).padStart(2, "0")}`, dial_phone_type: "mobile" }),
+      ),
+    });
+    const smsWorld = async (n: number, smsCapacity = 50) => {
+      const h = new EngineHarness({ start: MONDAY_8, accounts: [inbox("inbox-a", { capacity: 10 })], sms: { numbers: [{ id: N1, capacity: smsCapacity, gapMs: null, k: 1, healthy: true, resetZone: "Europe/London" }] } });
+      const { campaign: c } = await h.createCampaign("Autumn physio", withMobiles(n));
       await h.tick();
       return { h, id: c.id };
     };
 
-    test("an SMS track that starts with the emails can change when they go, so no daily load is projected, and the screen says why", async () => {
+    test("an SMS track that starts with the emails: every lead gets a text on launch day, so all 25 start on day 1, and both senders are listed", async () => {
       const { h, id } = await smsWorld(25);
       await h.defineSequence(id, withSms({ kind: "entry" }));
       const { load } = await beforeLaunch(h, id);
-      expect(load).toMatchObject({ otherTracksChangeTiming: "this_campaign", daysUntilAllStart: null, leavesOutSms: false });
-      expect(load!.accounts).toEqual([expect.objectContaining({ id: "inbox-a", busiestDay: 0 })]);
+      expect(load).toMatchObject({ leadsToStart: 25, daysUntilAllStart: 1, noSender: [], cannotProject: [] });
+      expect(load!.accounts).toEqual([expect.objectContaining({ id: "inbox-a", channel: "email", busiestDay: 10 }), expect.objectContaining({ id: N1, channel: "sms", busiestDay: 25 })]);
     });
 
-    test("an SMS track that starts after the email track cannot move an email, so the email load is projected, leaving SMS out", async () => {
-      const { h, id } = await smsWorld(25);
+    test("an SMS track after the email track starts each lead's texts a day after its emails finish, so texts follow the email days", async () => {
+      const { h, id } = await smsWorld(25, 10);
       await h.defineSequence(id, withSms({ kind: "after", trackId: "t1", delayDays: 1 }));
       const { load } = await beforeLaunch(h, id);
-      expect(load).toMatchObject({ otherTracksChangeTiming: null, leavesOutSms: true, daysUntilAllStart: 3 });
+      expect(load).toMatchObject({ leadsToStart: 25, daysUntilAllStart: 3 });
+      expect(load!.accounts.find((a) => a.id === N1)).toMatchObject({ busiestDay: 10 });
     });
 
-    test("another running campaign on the same inbox with an SMS track that can move its emails: no daily load is projected", async () => {
-      const { h, id } = await smsWorld(12);
-      const { campaign: other } = await h.createCampaign("Other", many(8));
-      await h.defineSequence(other.id, withSms({ kind: "entry" }));
-      expect((await h.launch(other.id)).status).toBe(200);
-      await h.defineSequence(id, emailTrack([step("s1", { subject: "Hi", threading: "new_subject" })]));
+    test("with no SMS number connected nothing is projected, and the SMS track is named", async () => {
+      const { h, id } = await smsWorld(5);
+      await h.defineSequence(id, withSms({ kind: "entry" }, []));
       const { load } = await beforeLaunch(h, id);
-      expect(load).toMatchObject({ otherTracksChangeTiming: "other_campaign", daysUntilAllStart: null });
+      expect(load).toMatchObject({ leadsToStart: null, daysUntilAllStart: null, noSender: [{ trackId: "t2", channel: "sms" }] });
+    });
+
+    test("a disconnected SMS number has no known end, so nothing is projected and the screen says which", async () => {
+      const { h, id } = await smsWorld(5);
+      await h.defineSequence(id, withSms({ kind: "entry" }, [N1, "+447700900002"]));
+      h.sms.numbers.set("+447700900002", { id: "+447700900002", capacity: 5, gapMs: null, k: 1, healthy: false, resetZone: "Europe/London" });
+      await h.tick();
+      const { load } = await beforeLaunch(h, id);
+      expect(load).toMatchObject({ daysUntilAllStart: null, cannotProject: [{ accountId: "+447700900002", channel: "sms", reason: "cannot_send" }] });
     });
   });
 
