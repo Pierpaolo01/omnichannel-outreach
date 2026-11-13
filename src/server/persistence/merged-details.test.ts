@@ -171,4 +171,24 @@ describe("the store keeps an absorbed detail out of everything that reads live d
     await apply({ details: [email("bens-copy", { kind: "person", personId: ids.ben }, "amira@harbour.example")] });
     expect(await api.store.contactDetail("bens-copy")).toMatchObject({ owner: { kind: "person", personId: ids.ben } });
   });
+
+  test("the campaign safety net does not count an absorbed inbox as its old company lead's", async () => {
+    const { api, campaign, apply } = await setUp();
+    const companyLead = (id: string, name: string, inbox: string) =>
+      business({ business_id: id, place_id: `P-${id}`, business_name: name, phone_e164: "", phone_original: "", general_emails: inbox });
+    await api.post(`/api/campaigns/${campaign}/imports`, csvOf({
+      businesses: [harbour, companyLead("b2", "Quay Street Dental", "hello@quay.example"), companyLead("b3", "Mill Road Optics", "info@mill.example")],
+      people: staff,
+    }));
+    const leads = (await api.store.searchLeads({ text: "", campaignId: campaign, status: null, companyId: null, limit: 50 })).rows.filter((r) => r.kind === "company");
+    const quay = leads.find((r) => r.name === "Quay Street Dental")?.id ?? "";
+    const mill = leads.find((r) => r.name === "Mill Road Optics")?.id ?? "";
+    const inboxOf = async (companyId: string) => (await api.store.company(companyId))?.contactDetails.find((d) => d.channel === "email")?.id ?? "";
+    const quayInbox = await inboxOf(quay);
+    const millInbox = await inboxOf(mill);
+    await apply({ consolidations: [{ fromId: quayInbox, intoId: millInbox }] });
+    // Mill Road, a company lead in the same campaign, now holds the address Quay Street's absorbed inbox carried.
+    await apply({ details: [{ id: "mill-copy", owner: { kind: "company", companyId: mill }, channel: "email", phoneKind: null, value: "hello@quay.example", key: "hello@quay.example", searchDigits: "", addedAt: "2026-11-13T12:00:00.000Z" }] });
+    expect(await api.store.contactDetail("mill-copy")).toMatchObject({ owner: { kind: "company", companyId: mill } });
+  });
 });
