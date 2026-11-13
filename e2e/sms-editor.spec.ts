@@ -79,7 +79,8 @@ test.describe("the Add track menu button (council on 10121d3, item 4)", () => {
     await page.getByRole("heading", { name: "Email track" }).click();
     await expect(page.getByRole("menu")).toHaveCount(0);
     await button.click();
-    await page.getByRole("menuitem", { name: /^Phone track/ }).click();
+    // Disabled with aria-disabled, so it stays focusable and says why; a click on it still does nothing.
+    await page.getByRole("menuitem", { name: /^Phone track/ }).click({ force: true });
     await expect(page.getByRole("menu")).toBeVisible();
     await expect(page.getByRole("button", { name: /^Phone track: / })).toHaveCount(0);
     await page.keyboard.press("Tab");

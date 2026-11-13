@@ -915,6 +915,19 @@ export const SCREENS: readonly Screen[] = [
     },
   },
   {
+    // Over the fake providers, so every track has a sender and only the call holds the figure back.
+    name: "fake provider: before launch with a track that waits on a call",
+    open: async (page) => {
+      const f = await fakeProviderApp("a-track-after-a-call");
+      const id = await f.freshTwoChannelCampaign("A track after a call");
+      const call = { id: "call", channel: "call" as const, branch: "main" as const, window: [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 })), start: { kind: "after" as const, trackId: "email", delayDays: 1 }, removed: false, steps: [{ id: "c1", waitDays: 0, subject: "", body: "", threading: "new_subject" as const, removed: false }] };
+      const definition = { ...TWO_CHANNELS, tracks: [...TWO_CHANNELS.tracks.map((t) => (t.id === "email-2" ? { ...t, start: { kind: "after" as const, trackId: "call", delayDays: 0 } } : t)), call] };
+      await page.request.put(`${f.url}/api/campaigns/${id}/sequence`, { data: definition });
+      await page.goto(`${f.url}/campaigns/${id}/before-launch`);
+      await settle(page, "which finishes only when you log the call");
+    },
+  },
+  {
     name: "the Add track menu",
     open: async (page) => {
       const id = await campaignWith(page, "Two channels, no provider");
