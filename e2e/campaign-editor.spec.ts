@@ -252,6 +252,37 @@ test.describe("review of pull request 41", () => {
     await expect(page.getByLabel("Email 2 copy")).toBeDisabled();
   });
 
+  test("a campaign whose leads have all ended lists them with their outreach status, not \"No leads yet\" (verification F5)", async ({ page }) => {
+    const id = await campaign(track([COPY.first]));
+    expect((await r.harness.launch(id)).status).toBe(200);
+    await r.harness.advanceTo(r.harness.clock + 3 * 24 * 3_600_000);
+    await page.goto(`${r.url}/campaigns/${id}/leads`);
+    const table = page.getByRole("table");
+    await expect(table.getByRole("row")).toHaveCount(7);
+    await expect(table.getByText("Sequence finished, no response").first()).toBeVisible();
+    await expect(table.getByText("Finished, no usable channel").first()).toBeVisible();
+    await expect(page.getByText("No leads yet.")).toHaveCount(0);
+  });
+
+  test("variant A's layout: the canvas fills the view and stays there, while the inspector scrolls on its own (verification)", async ({ page }) => {
+    const id = await campaign(track([COPY.first, COPY.second, { ...COPY.second, id: "s3" }]));
+    await page.setViewportSize({ width: 1360, height: 900 });
+    await page.goto(`${r.url}/campaigns/${id}?track=email&step=s1`);
+    await expect(page.getByLabel("Email 1 copy")).toBeVisible();
+    const canvas = await page.getByTestId("canvas").boundingBox();
+    const inspector = await page.getByTestId("inspector").boundingBox();
+    expect(canvas!.height).toBeGreaterThanOrEqual(470);
+    // Side by side, the same height, and inside the viewport: the page does not scroll.
+    expect(Math.abs(inspector!.height - canvas!.height)).toBeLessThan(2);
+    expect(inspector!.y + inspector!.height).toBeLessThanOrEqual(900);
+    expect(await page.evaluate(() => document.documentElement.scrollHeight - innerHeight)).toBeLessThanOrEqual(1);
+    const body = page.getByTestId("inspector-body");
+    expect(await body.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+    // Scrolling the inspector to its sender settings leaves the canvas where it was.
+    await page.getByText("Timing and sender").scrollIntoViewIfNeeded();
+    expect((await page.getByTestId("canvas").boundingBox())!.y).toBe(canvas!.y);
+  });
+
   test("a follow-up that continues the thread names the subject of the nearest email that started one (SequenceTab.tsx:274)", async ({ page }) => {
     const id = await campaign(track([COPY.first, { ...COPY.second, threading: "new_subject", subject: "A second idea" }, { ...COPY.second, id: "s3", body: "Last note." }]));
     await page.goto(`${r.url}/campaigns/${id}?track=email&step=s3`);

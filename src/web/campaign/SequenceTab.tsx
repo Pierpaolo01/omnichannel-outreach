@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useLocation, useSearch } from "wouter";
 import { MERGE_FIELDS } from "../../domain/sequence/copy.ts";
 import type { BeforeLaunchView, CampaignDefinition, StepDefinition, TrackDefinition } from "../../shared/api.ts";
@@ -37,12 +37,25 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
   const openStep = params.get("step");
   const select = (trackId: string | null, stepId?: string) =>
     navigate(trackId ? `${campaignPath(campaignId)}?track=${encodeURIComponent(trackId)}${stepId ? `&step=${encodeURIComponent(stepId)}` : ""}` : campaignPath(campaignId), { replace: true });
+  // Focus moves deliberately when the control holding it goes away (PR 41 verification, F3):
+  // closing the inspector returns it to the track, and adding the first track moves it to
+  // Email 1's subject.
+  const node = useRef<HTMLButtonElement>(null);
+  const [focusNext, setFocusNext] = useState<{ to: "node" } | { to: "subject"; stepId: string } | null>(null);
+  useEffect(() => {
+    if (!focusNext) return;
+    const target = focusNext.to === "node" ? node.current : document.getElementById(`subject-${focusNext.stepId}`);
+    if (target) {
+      target.focus();
+      setFocusNext(null);
+    }
+  }, [focusNext, selected, openStep]);
   const coverage = useApi<BeforeLaunchView>(`/api/campaigns/${encodeURIComponent(campaignId)}/before-launch?v=${editor.view.definitionVersion}`);
   const facts = coverage.result.state === "ready" ? coverage.result.data : coverage.result.state === "loading" ? null : null;
 
   if (!track) {
     return (
-      <div className="rounded-box border border-line bg-raised bg-[radial-gradient(var(--color-line-strong)_1px,transparent_1px)] bg-[length:18px_18px] px-6 py-14">
+      <div className={`rounded-box border border-line bg-raised bg-[radial-gradient(var(--color-line-strong)_1px,transparent_1px)] bg-[length:18px_18px] px-6 py-14 h-[max(470px,calc(100dvh-306px))]`}>
         <div className="mx-auto flex max-w-[520px] flex-col items-start gap-2.5">
           <h2 className="text-[19px]">Add the first channel track</h2>
           <p className="text-ink-2">A track is one channel’s first message and its follow-ups.</p>
@@ -71,6 +84,7 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
                     const added = newEmailTrack();
                     editor.update((d) => ({ ...d, tracks: [...d.tracks, added] }));
                     select(added.id, added.steps[0]?.id);
+                    if (added.steps[0]) setFocusNext({ to: "subject", stepId: added.steps[0].id });
                   }}
                 >
                   <Icon name="email" className="size-4" />
@@ -96,8 +110,8 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
   }
 
   return (
-    <div className={`grid grid-cols-1 items-start gap-4 ${selected ? "min-[1240px]:grid-cols-[minmax(0,1fr)_430px]" : ""}`}>
-      <Canvas track={track} selected={selected !== undefined} editor={editor} onSelect={() => select(selected ? null : track.id)} />
+    <div className={`grid grid-cols-1 items-start gap-4 ${selected ? "min-[1020px]:grid-cols-[minmax(0,1fr)_430px]" : ""}`}>
+      <Canvas track={track} selected={selected !== undefined} editor={editor} node={node} onSelect={() => select(selected ? null : track.id)} />
       {selected && (
         <Inspector
           track={selected}
@@ -107,18 +121,21 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
           onRetryFacts={coverage.retry}
           openStep={openStep ?? liveSteps(selected)[0]?.id ?? null}
           onOpenStep={(stepId) => select(selected.id, stepId ?? undefined)}
-          onClose={() => select(null)}
+          onClose={() => {
+            select(null);
+            setFocusNext({ to: "node" });
+          }}
         />
       )}
     </div>
   );
 }
 
-function Canvas({ track, selected, editor, onSelect }: { track: TrackDefinition; selected: boolean; editor: SequenceEditor; onSelect: () => void }) {
+function Canvas({ track, selected, editor, node, onSelect }: { track: TrackDefinition; selected: boolean; editor: SequenceEditor; node: RefObject<HTMLButtonElement | null>; onSelect: () => void }) {
   const steps = liveSteps(track);
   const issues = new Set(steps.flatMap((s) => stepBlockers(s, editor.view.launch.blockers)).map((b) => JSON.stringify(b))).size + editor.view.launch.blockers.filter((b) => b.kind === "no_sender").length;
   return (
-    <div className="min-w-0 rounded-box border border-line bg-raised bg-[radial-gradient(var(--color-line-strong)_1px,transparent_1px)] bg-[length:18px_18px] min-[1240px]:sticky min-[1240px]:top-4">
+    <div data-testid="canvas" className={`flex min-w-0 flex-col rounded-box border border-line bg-raised bg-[radial-gradient(var(--color-line-strong)_1px,transparent_1px)] bg-[length:18px_18px] h-[max(470px,calc(100dvh-306px))]`}>
       <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
         <p id="later-tracks" className="max-w-[56ch] text-[12.5px] text-muted">
           {LATER}
@@ -128,12 +145,13 @@ function Canvas({ track, selected, editor, onSelect }: { track: TrackDefinition;
           Add track
         </button>
       </div>
-      <div className="flex flex-col items-center px-4 pb-10 pt-4">
+      <div className="flex min-h-0 flex-1 flex-col items-center overflow-auto px-4 pb-10 pt-4">
         <span className="rounded-full bg-base-content px-3.5 py-1 text-[12.5px] font-semibold text-base-100">Launch</span>
         <span className="h-5 border-l-[1.5px] border-line-strong" aria-hidden="true" />
         <span className="rounded-full border border-line-strong bg-base-100 px-2 text-[12px] text-ink-2">{editor.launched ? "at launch" : "starts at launch"}</span>
         <span className="h-5 border-l-[1.5px] border-line-strong" aria-hidden="true" />
         <button
+          ref={node}
           type="button"
           aria-pressed={selected}
           aria-label={`Email track: ${trackSummary(track)}${issues > 0 ? `, ${issues} to fix` : ""}. ${selected ? "Close" : "Open"} it in the inspector.`}
@@ -179,7 +197,7 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
     editor.update((d: CampaignDefinition) => ({ ...d, tracks: d.tracks.map((t) => (t.id === track.id ? change(t) : t)) }));
   const changeStep = (stepId: string, change: (s: StepDefinition) => StepDefinition) => changeTrack((t) => ({ ...t, steps: t.steps.map((s) => (s.id === stepId ? change(s) : s)) }));
   return (
-    <aside aria-labelledby={titleId} className="min-w-0 rounded-box border border-line bg-base-100">
+    <aside aria-labelledby={titleId} data-testid="inspector" className={`flex min-w-0 flex-col rounded-box border border-line bg-base-100 min-[1020px]:h-[max(470px,calc(100dvh-306px))]`}>
       <div className="flex items-start justify-between gap-2.5 border-b border-line px-[18px] pb-3.5 pt-4">
         <div className="flex flex-wrap items-center gap-2">
           <h2 id={titleId} className="text-[18px]">
@@ -197,7 +215,10 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
           </button>
         </div>
       </div>
-      <div className="flex flex-col gap-[18px] px-[18px] pb-5 pt-4">
+      {/* Side by side, both panels fill the view below the tabs (at least 470px, as variant A), and the
+          inspector scrolls on its own, so the canvas stays in view. The 306px are the campaign
+          header, the tabs and the main area's bottom padding. */}
+      <div data-testid="inspector-body" className="relative flex min-h-0 flex-1 flex-col gap-[18px] px-[18px] pb-5 pt-4 min-[1020px]:overflow-y-auto">
         {editor.save.kind === "error" && <ErrorState title="Your last change wasn’t saved." message={editor.save.message} onRetry={editor.retrySave} />}
         {editor.problems.length > 0 && (
           <p role="alert" className="rounded-field bg-crit-soft px-3 py-2 text-[13.5px] text-crit">
@@ -347,6 +368,7 @@ function StepBlock({ step, index, steps, open, facts, editor, onToggle, onChange
               <label className="flex items-center gap-2 text-[14px]">
                 <span className="w-[54px] flex-none text-[13px] text-muted">Subject</span>
                 <input
+                  id={`subject-${step.id}`}
                   type="text"
                   className={`input min-w-0 flex-1 border-line-strong ${step.subject.trim() ? "" : "border-crit"}`}
                   value={step.subject}

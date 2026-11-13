@@ -140,7 +140,6 @@ describe("the Before launch projection makes exactly the engine's sends (PR 41 v
     test(`generated case ${seed}`, async () => {
       const c = generate(seed);
       const { projected, actual, daily } = await compare(c);
-      if (process.env["DBG"]) console.log("CASE", JSON.stringify({ start: new Date(c.start).toISOString(), accounts: c.accounts, zones: c.zones, window: c.definition.tracks[0]!.window, waits: c.definition.tracks[0]!.steps.map((s) => s.waitDays) }), "\nP", JSON.stringify(projected.map((x) => [x.leadId, x.step, x.accountId, new Date(x.at).toISOString()])), "\nA", JSON.stringify(actual.map((x) => [x.leadId, x.step, x.accountId, new Date(x.at).toISOString()])));
       expect(daily.projected).toEqual(daily.actual);
       const exact = (xs: typeof actual) => [...xs].sort((a, b) => a.at - b.at || (a.accountId < b.accountId ? -1 : 1));
       expect(exact(projected)).toEqual(exact(actual));

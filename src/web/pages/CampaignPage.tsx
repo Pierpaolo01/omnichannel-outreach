@@ -1,12 +1,13 @@
 import type { ReactNode } from "react";
 import { Link, useLocation, useSearch } from "wouter";
-import type { BeforeLaunchView, CampaignDetail, ImportRecord, LeadOutcome } from "../../shared/api.ts";
+import type { BeforeLaunchView, CampaignDetail, ImportRecord, LeadOutcome, LeadSearchResult } from "../../shared/api.ts";
 import { useApi } from "../api.ts";
 import { BeforeLaunchTab } from "../campaign/BeforeLaunchTab.tsx";
 import { SequenceTab } from "../campaign/SequenceTab.tsx";
 import { useSequence, type SequenceEditor } from "../campaign/useSequence.ts";
 import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
+import { StatusBadge } from "../status.tsx";
 import { whenImported } from "../importText.tsx";
 import { useNow } from "../time.ts";
 
@@ -126,7 +127,7 @@ function Campaign({ detail, editor, tab }: { detail: CampaignDetail; editor: Seq
         {tab === "sequence" && <SequenceTab campaignId={campaign.id} editor={editor} />}
         {tab === "before-launch" && <BeforeLaunchTab campaignId={campaign.id} editor={editor} />}
         {tab === "test-run" && <TestRunTab />}
-        {tab === "leads" && <LeadsTab campaignId={campaign.id} version={view.definitionVersion} />}
+        {tab === "leads" && <LeadsTab campaignId={campaign.id} version={view.definitionVersion} launched={editor.launched} />}
         {tab === "imports" && <ImportsTab campaignId={campaign.id} imports={imports} />}
       </div>
     </div>
@@ -262,12 +263,29 @@ const capitalise = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 const SHOWN = 50;
 
-function LeadsTab({ campaignId, version }: { campaignId: string; version: number }) {
-  const { result, retry } = useApi<BeforeLaunchView>(`/api/campaigns/${encodeURIComponent(campaignId)}/before-launch?v=${version}`);
+/**
+ * Every enrollment in the campaign, with its outreach status (the reference's running Leads tab),
+ * from lead search filtered to the campaign. The channels and fallback fields come from the
+ * before-launch model, which covers leads that have not ended; before launch that is every lead.
+ */
+function LeadsTab({ campaignId, version, launched }: { campaignId: string; version: number; launched: boolean }) {
+  const search = useApi<LeadSearchResult>(`/api/leads?campaign=${encodeURIComponent(campaignId)}&limit=500&v=${version}`);
+  const facts = useApi<BeforeLaunchView>(`/api/campaigns/${encodeURIComponent(campaignId)}/before-launch?v=${version}`);
   const [, navigate] = useLocation();
   const all = new URLSearchParams(useSearch()).get("all") === "1";
-  if (result.state === "error") return <ErrorState title="The leads didn’t load." message={result.message} onRetry={retry} />;
-  if (result.state === "loading")
+  const failed = search.result.state === "error" ? search.result : facts.result.state === "error" ? facts.result : null;
+  if (failed)
+    return (
+      <ErrorState
+        title="The leads didn’t load."
+        message={failed.message}
+        onRetry={() => {
+          search.retry();
+          facts.retry();
+        }}
+      />
+    );
+  if (search.result.state !== "ready" || facts.result.state !== "ready")
     return (
       <div role="status" aria-busy="true" aria-label="Loading the leads" className="flex flex-col gap-2">
         <div className="skeleton h-12 w-full" />
@@ -275,12 +293,13 @@ function LeadsTab({ campaignId, version }: { campaignId: string; version: number
         <div className="skeleton h-12 w-full" />
       </div>
     );
-  const { leads } = result.data;
-  const shown = all ? leads : leads.slice(0, SHOWN);
+  const { rows, total } = search.result.data;
+  const byEnrollment = new Map(facts.result.data.leads.map((l) => [l.id, l]));
+  const shown = all ? rows : rows.slice(0, SHOWN);
   return (
     <div>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-        <p className="text-[13.5px] text-muted">Every lead in this campaign that hasn’t ended. Open one for their record.</p>
+        <p className="text-[13.5px] text-muted">Every lead in this campaign, with where its outreach stands. Open one for their record.</p>
         <div className="flex flex-wrap gap-2">
           <Link href={`/leads?campaign=${campaignId}`} className="btn btn-sm border-line-strong bg-base-100 font-medium no-underline">
             Open in Leads
@@ -291,7 +310,7 @@ function LeadsTab({ campaignId, version }: { campaignId: string; version: number
           </Link>
         </div>
       </div>
-      {leads.length === 0 ? (
+      {rows.length === 0 ? (
         <p className="rounded-box border border-dashed border-line-strong bg-base-100 px-5 py-5 text-ink-2">
           No leads yet. <Link href={`/campaigns/${campaignId}/import`} className="underline">Import a scraper run</Link> to add them.
         </p>
@@ -303,51 +322,69 @@ function LeadsTab({ campaignId, version }: { campaignId: string; version: number
                 <th className="px-3.5 py-3 font-medium">Lead</th>
                 <th className="px-3.5 py-3 font-medium">Company</th>
                 <th className="px-3.5 py-3 font-medium">Email · mobile · phone</th>
-                <th className="px-3.5 py-3 font-medium">Uses a fallback for</th>
+                <th className="px-3.5 py-3 font-medium">Status</th>
+                {!launched && <th className="px-3.5 py-3 font-medium">Uses a fallback for</th>}
               </tr>
             </thead>
             <tbody className="max-[720px]:block">
-              {shown.map((lead) => (
-                <tr key={lead.id} className="border-line max-[720px]:block max-[720px]:px-1 max-[720px]:py-2 [&+&]:border-t">
-                  <td className="px-3.5 py-3 max-[720px]:block max-[720px]:py-1">
-                    <Link href={lead.kind === "person" ? `/leads/people/${lead.recordId}` : `/leads/companies/${lead.recordId}`} className="font-semibold no-underline hover:underline [overflow-wrap:anywhere]">
-                      {lead.name}
-                    </Link>
-                    <div className="text-[13px] text-muted">{lead.kind === "company" ? "Company lead" : lead.title}</div>
-                  </td>
-                  <td className="px-3.5 py-3 [overflow-wrap:anywhere] max-[720px]:block max-[720px]:py-1">{lead.kind === "company" ? <span className="text-muted">No named decision maker</span> : lead.company}</td>
-                  <td className="px-3.5 py-3 max-[720px]:block max-[720px]:py-1">
-                    <span className="flex items-center gap-1.5">
-                      <Channel has={lead.email !== null} icon="email" label="email" />
-                      <Channel has={lead.mobile} icon="sms" label="mobile" />
-                      <Channel has={lead.phone} icon="call" label="phone number" />
-                    </span>
-                  </td>
-                  <td className="px-3.5 py-3 max-[720px]:block max-[720px]:py-1">
-                    {lead.lacks.length === 0 ? (
-                      <span className="text-muted">Nothing missing</span>
-                    ) : (
-                      <span className="flex flex-wrap gap-1.5">
-                        {lead.lacks.map((field) => (
-                          <span key={field} className="rounded-[5px] bg-hand-soft px-1.5 text-[12.5px] font-semibold text-hand">
-                            {field.replace(/_/g, " ")}
+              {shown.map((row) => {
+                const enrollment = row.enrollments.find((e) => e.campaign.id === campaignId);
+                const lead = enrollment ? byEnrollment.get(enrollment.id) : undefined;
+                return (
+                  <tr key={row.id} className="border-line max-[720px]:block max-[720px]:px-1 max-[720px]:py-2 [&+&]:border-t">
+                    <td className="px-3.5 py-3 max-[720px]:block max-[720px]:py-1">
+                      <Link href={row.kind === "person" ? `/leads/people/${row.id}` : `/leads/companies/${row.id}`} className="font-semibold no-underline hover:underline [overflow-wrap:anywhere]">
+                        {row.name}
+                      </Link>
+                      <div className="text-[13px] text-muted">{row.kind === "company" ? "Company lead" : row.title}</div>
+                    </td>
+                    <td className="px-3.5 py-3 [overflow-wrap:anywhere] max-[720px]:block max-[720px]:py-1">
+                      {row.kind === "company" ? <span className="text-muted">No named decision maker</span> : row.company.name}
+                    </td>
+                    <td className="px-3.5 py-3 max-[720px]:block max-[720px]:py-1">
+                      {lead ? (
+                        <span className="flex items-center gap-1.5">
+                          <Channel has={lead.email !== null} icon="email" label="email" />
+                          <Channel has={lead.mobile} icon="sms" label="mobile" />
+                          <Channel has={lead.phone} icon="call" label="phone number" />
+                        </span>
+                      ) : (
+                        <span className="text-muted">Ended</span>
+                      )}
+                    </td>
+                    <td className="px-3.5 py-3 max-[720px]:block max-[720px]:py-1">{enrollment && <StatusBadge status={enrollment.status} />}</td>
+                    {!launched && (
+                      <td className="px-3.5 py-3 max-[720px]:block max-[720px]:py-1">
+                        {!lead || lead.lacks.length === 0 ? (
+                          <span className="text-muted">Nothing missing</span>
+                        ) : (
+                          <span className="flex flex-wrap gap-1.5">
+                            {lead.lacks.map((field) => (
+                              <span key={field} className="rounded-[5px] bg-hand-soft px-1.5 text-[12.5px] font-semibold text-hand">
+                                {field.replace(/_/g, " ")}
+                              </span>
+                            ))}
                           </span>
-                        ))}
-                      </span>
+                        )}
+                      </td>
                     )}
-                  </td>
-                </tr>
-              ))}
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
-          {shown.length < leads.length && (
+          {shown.length < rows.length ? (
             <p className="border-t border-line px-3.5 py-3 text-[14px]">
-              {leads.length - shown.length} more leads.{" "}
+              {rows.length - shown.length} more leads.{" "}
               <button type="button" className="cursor-pointer underline" onClick={() => navigate(`${campaignPath(campaignId, "leads")}?all=1`)}>
-                Show all {leads.length}
+                Show all {rows.length}
               </button>
             </p>
-          )}
+          ) : total > rows.length ? (
+            <p className="border-t border-line px-3.5 py-3 text-[14px]">
+              {total - rows.length} more leads than this list shows. <Link href={`/leads?campaign=${campaignId}`} className="underline">Open them in Leads</Link>.
+            </p>
+          ) : null}
         </div>
       )}
     </div>
