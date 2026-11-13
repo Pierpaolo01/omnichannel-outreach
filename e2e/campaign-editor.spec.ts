@@ -362,7 +362,7 @@ test.describe("review of pull request 41", () => {
     await page.goto(`${r.url}/campaigns`);
     await held[0]!.abort().catch(() => undefined);
     const late = await r.harness.request<{ error: { code: string } }>("PUT", `/api/campaigns/${id}/sequence`, JSON.parse(older));
-    expect(late).toMatchObject({ status: 409, body: { error: { code: "stale_edit" } } });
+    expect(late).toMatchObject({ status: 409, body: { error: { code: "superseded" } } });
     await expect.poll(async () => (await stored(id)).definition.tracks[0]!.steps[0]!.subject).toBe("Newest edit must survive navigation");
     await page.goto(`${r.url}/campaigns/${id}?track=email&step=s1`);
     await expect(page.getByLabel("Email 1 subject")).toHaveValue("Newest edit must survive navigation");
@@ -404,7 +404,7 @@ test.describe("review of pull request 41", () => {
     expect((await stored(id)).definition.tracks[0]!.steps[0]!.subject).toBe("Saved on the second try");
   });
 
-  test("a save stored on the server whose answer is lost is resent with the same stamp and ends Saved, with launch ready (review: stamp rule)", async ({ page }) => {
+  test("a save stored on the server whose answer is lost is resent unchanged and ends Saved, with launch ready (review: retry, B8)", async ({ page }) => {
     const id = await campaign(track([COPY.first, COPY.second]));
     await page.goto(`${r.url}/campaigns/${id}?track=email&step=s1`);
     let lost = false;
@@ -432,6 +432,71 @@ test.describe("review of pull request 41", () => {
     });
     await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
     await expect.poll(async () => (await stored(id)).definition.tracks[0]!.steps[0]!.subject).toBe("Sent as the page was hidden");
+  });
+
+  test("a stale tab cannot overwrite another tab's saved change: it keeps what was typed and offers the saved version (re-check B7)", async ({ browser }) => {
+    const id = await campaign(track([COPY.first, COPY.second]));
+    const context = await browser.newContext();
+    const a = await context.newPage();
+    const b = await context.newPage();
+    await a.goto(`${r.url}/campaigns/${id}?track=email&step=s1`);
+    await b.goto(`${r.url}/campaigns/${id}?track=email&step=s1`);
+    await b.getByLabel("Email 1 subject").fill("Tab B protected subject newer");
+    await expect(b.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
+    // Tab A still shows the old subject and changes only the body.
+    await a.getByLabel("Email 1 copy").fill("Tab A later body without changing subject");
+    await expect(a.getByText("This campaign was changed elsewhere since this page loaded it.")).toBeVisible();
+    await expect(a.getByLabel("Email 1 copy")).toHaveValue("Tab A later body without changing subject");
+    expect((await stored(id)).definition.tracks[0]!.steps[0]!.subject).toBe("Tab B protected subject newer");
+    await a.getByRole("link", { name: /Before launch/ }).click();
+    await expect(a.getByRole("button", { name: "Launch campaign" })).toBeDisabled();
+    await a.getByRole("button", { name: "Load the saved version" }).click();
+    await a.getByRole("link", { name: "Sequence" }).click();
+    await a.getByRole("button", { name: /^Email track: / }).click();
+    await expect(a.getByLabel("Email 1 subject")).toHaveValue("Tab B protected subject newer");
+    await context.close();
+  });
+
+  test("a large valid draft keeps its newest edit when the page is left with a save in flight (re-check B6, large)", async ({ page }) => {
+    const long = "y".repeat(12_000);
+    const id = await campaign(track([COPY.first, ...[2, 3, 4].map((n) => ({ ...COPY.second, id: `s${n}`, body: long }))]));
+    await page.goto(`${r.url}/campaigns/${id}?track=email&step=s1`);
+    const held: Route[] = [];
+    await page.route("**/api/campaigns/*/sequence", (route) => (route.request().method() === "PUT" && held.length === 0 ? void held.push(route) : route.continue()));
+    await page.getByLabel("Email 1 subject").fill("Large older held");
+    await expect.poll(() => held.length).toBe(1);
+    await page.getByLabel("Email 1 subject").fill("Large newest queued must survive");
+    await page.waitForTimeout(900);
+    await page.goto(`${r.url}/campaigns`);
+    await held[0]!.abort().catch(() => undefined);
+    await expect.poll(async () => (await stored(id)).definition.tracks[0]!.steps[0]!.subject).toBe("Large newest queued must survive");
+  });
+
+  test("a draft over the size bound is refused in place and never sent (boundary)", async ({ page }) => {
+    const id = await campaign(track([COPY.first, COPY.second]));
+    await page.goto(`${r.url}/campaigns/${id}?track=email&step=s2`);
+    let puts = 0;
+    await page.route("**/api/campaigns/*/sequence", (route) => (route.request().method() === "PUT" ? (puts++, route.continue()) : route.continue()));
+    for (const n of [2, 3, 4]) {
+      if (n > 2) {
+        await page.getByRole("button", { name: "Add follow-up" }).click();
+      }
+      await page.getByLabel(`Email ${n} copy`).fill("z".repeat(19_000));
+    }
+    await expect(page.getByText(/The sequence is larger than 56 KB/)).toBeVisible();
+    await page.waitForTimeout(900);
+    const before = puts;
+    await page.getByLabel("Email 4 copy").fill("z".repeat(19_500));
+    await page.waitForTimeout(900);
+    expect(puts).toBe(before);
+  });
+
+  test("Launch waits until the checks for the definition on the page have arrived (re-check F7)", async ({ page }) => {
+    const id = await campaign(track([COPY.first, COPY.second]));
+    await page.route("**/api/campaigns/*/before-launch?*", () => new Promise(() => undefined));
+    await page.goto(`${r.url}/campaigns/${id}/before-launch`);
+    await expect(page.getByLabel("Loading the checks before launch")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Launch campaign" })).toBeDisabled();
   });
 
   test("a follow-up that continues the thread names the subject of the nearest email that started one (SequenceTab.tsx:274)", async ({ page }) => {
