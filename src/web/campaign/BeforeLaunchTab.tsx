@@ -8,6 +8,7 @@ import { campaignPath, longDate } from "../pages/CampaignPage.tsx";
 import { fieldLabel, sendsOnItsOwn, STEP_NOUN, stepUsing, trackName, trackTitle, usesOf } from "./model.ts";
 import { CANNOT_SEND, ConflictNotice } from "./SequenceTab.tsx";
 import type { SequenceEditor } from "./useSequence.ts";
+import { withheldExplanation } from "./withheld.ts";
 
 /**
  * Before launch: the three blockers, every other condition as a warning, coverage, missing merge
@@ -346,12 +347,10 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
   const def = editor.view.definition;
   if (editor.launched || !load) return <p className="text-[14px] text-muted">The projection is for before launch. Once running, leads waiting for sending capacity show in Needs attention.</p>;
   if (!def.tracks.some((t) => !t.removed && t.branch === "main")) return <p className="text-[14px] text-muted">Add a track to see the load it puts on each sender.</p>;
-  // No figure that could contradict the engine: a track with no sender, or a sender with no known end.
-  const blocked = load.noSender.length > 0 || load.cannotProject.length > 0;
-  const named = (trackId: string) => {
-    const t = def.tracks.find((x) => x.id === trackId);
-    return t ? trackName(def, t) : "a track";
-  };
+  // No figure that could contradict the engine: a track the server names (no sender, or after a
+  // call), or a sender with no known end.
+  const blocked = load.withheldBy !== null || load.cannotProject.length > 0;
+  const calls = def.tracks.some((t) => !t.removed && t.branch === "main" && t.channel === "call");
   return (
     <>
       {load.accounts.length > 0 && (
@@ -392,9 +391,10 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
           </tbody>
         </table>
       )}
-      {load.noSender.length > 0 ? (
-        <p className={`${load.accounts.length > 0 ? "mt-2" : ""} text-[13.5px] text-crit`}>
-          Can’t project the load until {load.noSender.map((n) => `${named(n.trackId)} has a connected ${n.channel === "sms" ? "SMS number" : "sender inbox"}`).join(", and ")}: its leads, and every track after it, would wait.
+      {load.withheldBy !== null ? (
+        <p className={`${load.accounts.length > 0 ? "mt-2" : ""} text-[13.5px] ${load.withheldBy.tracks.some((t) => t.why === "no_sender") ? "text-crit" : "text-ink-2"}`}>
+          {/* Worded from the tracks the server names, never guessed from this campaign's channels. */}
+          {withheldExplanation(load.withheldBy)}
         </p>
       ) : load.cannotProject.length > 0 ? (
         <p className="mt-2 text-[13px] text-ink-2">
@@ -411,7 +411,8 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
             : load.daysUntilAllStart !== null
               ? `All ${load.leadsToStart} leads start within ${load.daysUntilAllStart} ${load.daysUntilAllStart === 1 ? "day" : "days"} of launch.`
               : `${load.notStartedWithinHorizon} of ${load.leadsToStart} leads would not start within ${load.horizonDays} days.`}{" "}
-          Every track counts: texts and emails, tracks that start together and tracks that wait for another. Follow-ups always go before first messages when a sender is full. What other running campaigns have waiting on these senders is counted; every send is assumed to succeed, and replies, bounces, bad numbers and pauses are not foreseen.
+          Every email and text counts: tracks that start together and tracks that wait for another.{" "}
+          {calls ? `Calls are tasks on your list, not sends, so they are not counted, and the estimate assumes no call is logged${load.onlyCalled > 0 ? `; ${load.onlyCalled} ${load.onlyCalled === 1 ? "lead is" : "leads are"} reached only by your calls` : ""}. ` : ""} Follow-ups always go before first messages when a sender is full. What other running campaigns have waiting on these senders is counted; every send is assumed to succeed, and replies, bounces, bad numbers and pauses are not foreseen.
         </p>
       )}
     </>
@@ -511,7 +512,7 @@ function LeadCopy({ campaignId, enrollmentId, version, def }: { campaignId: stri
                   {several && track ? <span className="font-normal text-muted"> · {trackTitle(def, track)}</span> : null}
                 </span>
               </span>
-              <span className="whitespace-nowrap text-muted">Day {s.day}</span>
+              <span className="whitespace-nowrap text-muted">{s.day !== null ? `Day ${s.day}` : `After ${s.waitsOnCall ?? "a call"}’s call`}</span>
             </div>
             <div className="px-3.5 py-3 text-[14px] leading-[1.55]">
               {s.skipped ? (

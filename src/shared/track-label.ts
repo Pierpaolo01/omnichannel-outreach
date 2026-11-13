@@ -19,3 +19,10 @@ export function trackLabel(def: CampaignDefinition, track: Pick<TrackDefinition,
   if (same.length <= 1) return { label: `${word} track`, several: false };
   return { label: `${word} track ${same.findIndex((t) => t.id === track.id) + 1}`, several: true };
 }
+
+/** A track's name inside a sentence: "the email track", "the SMS track", "email track 2", "SMS track 2", "the phone track". */
+export function trackPhrase(def: CampaignDefinition, track: Pick<TrackDefinition, "id" | "channel">): string {
+  const { label, several } = trackLabel(def, track);
+  const lower = track.channel === "sms" ? label : label.charAt(0).toLowerCase() + label.slice(1);
+  return several ? lower : `the ${lower}`;
+}

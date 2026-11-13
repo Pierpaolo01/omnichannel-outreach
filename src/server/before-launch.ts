@@ -7,10 +7,11 @@
 import { missingFields, renderSegments, type Segment } from "../domain/copy-preview.ts";
 import { isLive } from "../domain/sequence/attempt.ts";
 import { mergeUses } from "../domain/sequence/copy.ts";
-import { liveSteps, liveTracks, ownSubject, poolOf, type CampaignDefinition } from "../domain/sequence/definition.ts";
+import { liveSteps, liveTracks, ownSubject, poolOf, type CampaignDefinition, type TrackDefinition } from "../domain/sequence/definition.ts";
 import { goodEmail } from "../domain/sequence/progress.ts";
 import type { AccountState, SubjectState } from "../domain/sequence/state.ts";
-import type { BeforeLaunchView, ContactDetailView, CopyPreview, LeadRow, LoadProjectionView, PreviewLead } from "../shared/api.ts";
+import type { BeforeLaunchView, ContactDetailView, CopyPreview, LeadRow, LoadProjectionView, PreviewLead, WithheldBy, WithheldTrack } from "../shared/api.ts";
+import { trackLabel, trackPhrase } from "../shared/track-label.ts";
 import { projectLoad, type Projection } from "./load-projection.ts";
 import type { OutreachStore } from "./persistence/store.ts";
 
@@ -120,21 +121,37 @@ function poolAccounts(definition: CampaignDefinition, all: readonly AccountState
 }
 
 /**
- * Live tracks whose channel has no sender in their pool at all (launch blocker 3): their leads
- * would wait on them for ever, and so would every track after them, so nothing is projected.
+ * The tracks that withhold the figure (ADR 0003, ticket 13b), in track order: a live email or SMS
+ * track with no sender in its pool at all (launch blocker 3), whose leads and every track after it
+ * would wait for ever; and an email or SMS track that waits, through its chain, on a phone track,
+ * which finishes only when the user logs its call. An account that is connected but cannot send is
+ * `cannotProject`'s, said with its reason.
  */
-function tracksWithoutSender(definition: CampaignDefinition, all: readonly AccountState[]): { trackId: string; channel: "email" | "sms" }[] {
-  return liveTracks(definition, "main").flatMap((t) => {
+function withheldTracks(definition: CampaignDefinition, all: readonly AccountState[]): WithheldTrack[] {
+  const live = liveTracks(definition, "main");
+  const named = (t: TrackDefinition) => trackPhrase(definition, t);
+  const phoneBefore = (t: TrackDefinition): TrackDefinition | null => {
+    const seen = new Set<string>();
+    for (let x: TrackDefinition | undefined = t; x && x.start.kind === "after" && !seen.has(x.id); ) {
+      seen.add(x.id);
+      const before: string = x.start.trackId;
+      x = live.find((y) => y.id === before);
+      if (x?.channel === "call") return x;
+    }
+    return null;
+  };
+  return live.flatMap((t): WithheldTrack[] => {
     if (t.channel === "call") return [];
-    // An account that is connected but cannot send is `cannotProject`'s, said with its reason.
     const connected = all.some((a) => a.channel === t.channel && poolOf(definition, t.channel).includes(a.id));
-    return connected ? [] : [{ trackId: t.id, channel: t.channel }];
+    if (!connected) return [{ trackId: t.id, channel: t.channel, label: named(t), why: "no_sender" }];
+    const phone = phoneBefore(t);
+    return phone ? [{ trackId: t.id, channel: t.channel, label: named(t), why: "after_a_phone_track", phoneTrack: named(phone) }] : [];
   });
 }
 
 interface ProjectionResult {
   readonly projection: Projection | null;
-  readonly noSender: readonly { trackId: string; channel: "email" | "sms" }[];
+  readonly withheldBy: WithheldBy | null;
 }
 
 /**
@@ -143,22 +160,30 @@ interface ProjectionResult {
  * with this one (closed over shared accounts), and the engine's own account records.
  */
 async function projectionOf(store: OutreachStore, campaignId: string, definition: CampaignDefinition, leads: readonly CampaignLead[], now: number): Promise<ProjectionResult> {
-  if (liveTracks(definition, "main").length === 0) return { projection: null, noSender: [] };
+  if (liveTracks(definition, "main").length === 0) return { projection: null, withheldBy: null };
   const all = await store.engine.accounts(now);
-  const noSender = tracksWithoutSender(definition, all);
-  if (noSender.length > 0) return { projection: null, noSender };
-  if (poolAccounts(definition, all).some((a) => cannotProject(a, now) !== null)) return { projection: null, noSender };
+  const withheld = withheldTracks(definition, all);
+  if (withheld.length > 0) return { projection: null, withheldBy: { tracks: withheld } };
+  if (poolAccounts(definition, all).some((a) => cannotProject(a, now) !== null)) return { projection: null, withheldBy: null };
   const others = await competingSubjects(store, campaignId, definition, now);
+  const simulated = new Set([...leads.map((l) => l.state.subject.id), ...others.map((o) => o.subject.id)]);
+  const heldElsewhere = new Map<string, { reservations: number; live: number }>();
+  for (const h of await store.engine.heldOnAccounts()) {
+    if (simulated.has(h.subjectId)) continue;
+    const sum = heldElsewhere.get(h.accountId) ?? { reservations: 0, live: 0 };
+    heldElsewhere.set(h.accountId, { reservations: sum.reservations + h.reservations, live: sum.live + h.live });
+  }
   const projection = projectLoad({
     now,
     ours: leads.map((l) => l.state),
     definition,
     others,
     accounts: all,
+    heldElsewhere,
     zone: definition.timezone,
     horizonDays: PROJECTION_HORIZON_DAYS,
   });
-  return { projection, noSender };
+  return { projection, withheldBy: null };
 }
 
 /** The accounts a running subject may use: its campaign's pools, its fixed senders and its live attempts'. */
@@ -207,9 +232,10 @@ export async function projectedSends(store: OutreachStore, campaignId: string, n
 async function loadProjection(store: OutreachStore, campaignId: string, definition: CampaignDefinition, leads: readonly CampaignLead[], now: number): Promise<LoadProjectionView> {
   const labels = await store.engine.accountLabels();
   const pool = poolAccounts(definition, await store.engine.accounts(now));
-  const { projection, noSender } = await projectionOf(store, campaignId, definition, leads, now);
+  const { projection, withheldBy } = await projectionOf(store, campaignId, definition, leads, now);
   return {
     leadsToStart: projection?.leadsToStart ?? null,
+    onlyCalled: projection?.onlyCalled ?? 0,
     accounts: pool.map((a) => ({
       id: a.id,
       label: labels[a.id] ?? a.id,
@@ -226,7 +252,7 @@ async function loadProjection(store: OutreachStore, campaignId: string, definiti
       const reason = cannotProject(a, now);
       return reason ? [{ accountId: a.id, label: labels[a.id] ?? a.id, channel: a.channel, reason }] : [];
     }),
-    noSender,
+    withheldBy,
   };
 }
 
@@ -237,37 +263,53 @@ export async function copyPreview(store: OutreachStore, campaignId: string, enro
   const lead = (await campaignLeads(store, campaignId, definition, now)).find((l) => l.lead.id === enrollmentId)?.lead;
   if (!lead) return null;
   const data = state.lead.mergeData;
-  const tracks = liveTracks(definition, "main").filter((t) => t.channel !== "call");
+  const all = liveTracks(definition, "main");
+  const tracks = all.filter((t) => t.channel !== "call");
   // The lead skips a track whose channel it lacks; a skipped track finishes as it starts, so the
   // tracks after it start then (spec "a skipped or failed track counts as finished").
-  const skipped = (t: (typeof tracks)[number]) => (t.channel === "email" ? lead.email === null : !lead.mobile);
-  const startDay = new Map<string, number>();
-  const startOf = (t: (typeof tracks)[number], depth = 0): number => {
+  const skipped = (t: TrackDefinition) => (t.channel === "email" ? lead.email === null : t.channel === "sms" ? !lead.mobile : !lead.phone);
+  /**
+   * The day offset a track starts on, or the phone track it waits on: a phone track finishes when
+   * the user logs its call, so no day can be given for what follows it (unless the lead has no
+   * number and it is skipped).
+   */
+  const startDay = new Map<string, { day: number } | { phone: TrackDefinition }>();
+  const startOf = (t: TrackDefinition, depth = 0): { day: number } | { phone: TrackDefinition } => {
     const known = startDay.get(t.id);
     if (known !== undefined) return known;
-    let start = 0;
-    if (t.start.kind === "after" && depth <= tracks.length) {
-      const before = tracks.find((x) => x.id === (t.start as { trackId: string }).trackId);
-      if (before) start = startOf(before, depth + 1) + (skipped(before) ? 0 : liveSteps(before).reduce((sum, st) => sum + st.waitDays, 0)) + t.start.delayDays;
+    let out: { day: number } | { phone: TrackDefinition } = { day: 0 };
+    if (t.start.kind === "after" && depth <= all.length) {
+      const delay = t.start.delayDays;
+      const before = all.find((x) => x.id === (t.start as { trackId: string }).trackId);
+      const at = before ? startOf(before, depth + 1) : { day: 0 };
+      if (before && "day" in at) {
+        if (before.channel === "call" && !skipped(before)) out = { phone: before };
+        else out = { day: at.day + (skipped(before) ? 0 : liveSteps(before).reduce((sum, st) => sum + st.waitDays, 0)) + delay };
+      } else if ("phone" in at) out = at;
     }
-    startDay.set(t.id, start);
-    return start;
+    startDay.set(t.id, out);
+    return out;
   };
   const steps: { step: CopyPreview["steps"][number]; order: number }[] = [];
   tracks.forEach((track, trackIndex) => {
     const skip = skipped(track);
-    let day = 1 + startOf(track);
+    const start = startOf(track);
+    let day = "day" in start ? 1 + start.day : null;
+    const waitsOn = "phone" in start ? trackLabel(definition, start.phone).label : null;
     let threadSubject: Segment[] = [];
     liveSteps(track).forEach((step, i) => {
-      if (!skip) day += step.waitDays;
+      if (!skip && day !== null) day += step.waitDays;
       const email = track.channel === "email";
       const own = email ? renderSegments(ownSubject(step), data) : [];
       const subject = email && step.threading === "continue_thread" ? [{ text: "Re: ", kind: "literal" as const }, ...threadSubject] : own;
       if (email && step.threading === "new_subject") threadSubject = own;
       const body = renderSegments(step.body, data);
-      steps.push({ step: { trackId: track.id, stepId: step.id, channel: track.channel === "sms" ? "sms" : "email", number: i + 1, day, skipped: skip, threading: step.threading, subject, body, missing: missingFields([...own, ...body]) }, order: trackIndex * 10_000 + i });
+      steps.push({
+        step: { trackId: track.id, stepId: step.id, channel: track.channel === "sms" ? "sms" : "email", number: i + 1, day, waitsOnCall: waitsOn, skipped: skip, threading: step.threading, subject, body, missing: missingFields([...own, ...body]) },
+        order: trackIndex * 10_000 + i,
+      });
     });
   });
-  steps.sort((x, y) => x.step.day - y.step.day || x.order - y.order);
+  steps.sort((x, y) => (x.step.day ?? Infinity) - (y.step.day ?? Infinity) || x.order - y.order);
   return { lead, steps: steps.map((x) => x.step) };
 }

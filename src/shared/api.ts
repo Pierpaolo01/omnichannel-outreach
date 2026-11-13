@@ -247,6 +247,8 @@ export interface StepProgressView {
   readonly reason: string | null;
   readonly at: string | null;
   readonly sends: readonly SendView[];
+  /** A call step's logged outcomes, skip for now included (ticket 14); empty on email and SMS steps. */
+  readonly calls: readonly { readonly outcome: CallOutcomeApi; readonly at: string; readonly number: RecordedNumberView | null; readonly note: string }[];
 }
 
 export interface TrackProgressView {
@@ -258,6 +260,8 @@ export interface TrackProgressView {
   readonly hold: HoldReasonApi | null;
   /** The pending step and the wall instant it is due, if the lead keeps running. */
   readonly nextStep: { readonly stepId: string; readonly number: number; readonly dueAt: string } | null;
+  /** A phone track's call task once placed on the user's list (ticket 14): open until its outcome or its track's finish. */
+  readonly callTask: { readonly taskId: string; readonly open: boolean; readonly placedAt: string; readonly listed: boolean } | null;
   readonly steps: readonly StepProgressView[];
 }
 
@@ -364,6 +368,11 @@ export interface LoadProjectionView {
    * projected (see `cannotProject` and `noSender`).
    */
   readonly leadsToStart: number | null;
+  /**
+   * Leads only a phone track can reach. A call is a task on the user's list, not a send: the estimate
+   * counts emails and texts only, and assumes no call outcome is logged (ADR 0003, ticket 13b).
+   */
+  readonly onlyCalled: number;
   /** Every sender account in a live track's pool, on either channel. */
   readonly accounts: readonly {
     readonly id: string;
@@ -392,10 +401,12 @@ export interface LoadProjectionView {
    */
   readonly cannotProject: readonly { readonly accountId: string; readonly label: string; readonly channel: "email" | "sms"; readonly reason: "cannot_send" | "quota" }[];
   /**
-   * Live tracks whose channel has no connected sender (launch blocker 3). Their leads, and every
-   * track after them, would wait for ever, so there is no projection (ADR 0003, ticket 13b).
+   * The tracks that withhold the figure, and why, whenever one does (ADR 0003, ticket 13b): a track
+   * whose channel has no connected sender (launch blocker 3), or an email or SMS track that waits,
+   * through its chain, on a phone track, which starts only when the user logs the call. The screen
+   * words any "no figure because" from these alone (`src/web/campaign/withheld.ts`). Null when none does.
    */
-  readonly noSender: readonly { readonly trackId: string; readonly channel: "email" | "sms" }[];
+  readonly withheldBy: WithheldBy | null;
 }
 
 /** Rendered copy, in pieces, so a fallback the lead gets can be shown as one. */
@@ -421,7 +432,12 @@ export interface CopyPreview {
      * launch, or after the track it follows has finished all its steps, plus the delay) and every
      * wait before it. Sending windows can move it later.
      */
-    readonly day: number;
+    readonly day: number | null;
+    /**
+     * The phone track this message waits on, through its track's chain, when `day` is null: it goes
+     * only after the user logs that call, so no day can be given (ADR 0003, ticket 13b).
+     */
+    readonly waitsOnCall: string | null;
     /** This lead lacks the track's channel (no email; no mobile of their own, or a company lead), so the track is skipped and the tracks after it start sooner. */
     readonly skipped: boolean;
     readonly threading: "new_subject" | "continue_thread";
@@ -500,4 +516,172 @@ export interface EmailProviderStatus {
   }[];
   /** Leads whose next email is a continue-thread follow-up the provider cannot send yet: they wait, and nothing is sent. */
   readonly waitingFollowUps: readonly { readonly enrollmentId: string; readonly trackId: string; readonly stepId: string }[];
+}
+
+// ---------------------------------------------------------------------------------------------
+// Calls (ticket 14, part a): phone tracks, the user's call list, and the outcomes the user logs.
+// The user dials on their own phone; the application never dials and has no telephony provider.
+
+/** What the user logs on a call task. Not interested, callback and redial arrive with tickets 15 and 16. */
+export type CallOutcomeApi = import("../domain/sequence/state.ts").CallOutcome;
+
+/** Why a call is on the list: due today, or rolled over from an earlier day. Overdue callbacks arrive with ticket 15. */
+export type CallReasonApi = "due" | "rolled_over" | "overdue";
+
+/** GET and PUT /api/call-settings: the user's daily call capacity and the zone the call list's day is counted in. */
+export interface CallSettingsView {
+  readonly dailyCapacity: number;
+  readonly userZone: string;
+}
+
+/** A number the user may dial, labelled by kind: direct first, then mobile, then the company main line. */
+export interface CallNumberView {
+  readonly detailId: string;
+  readonly kind: "direct" | "mobile" | "main_line";
+  /** A main line is the company's: a call to it reaching a gatekeeper still counts as a call to the lead. */
+  readonly owner: "person" | "company";
+  readonly value: string;
+  /** Marked bad (struck through); the user cannot log an outcome on it. */
+  readonly bad: boolean;
+}
+
+/** One task on the call list. */
+export interface CallQueueItem {
+  readonly taskId: string;
+  readonly enrollmentId: string;
+  /** The decision maker; null for a company lead, called on the company's main line. */
+  readonly person: { readonly id: string; readonly name: string; readonly title: string } | null;
+  readonly company: { readonly id: string; readonly name: string };
+  readonly campaign: { readonly id: string; readonly name: string };
+  /** The phone track the call comes from, named as the canvas names it ("Phone track", "Phone track 2"). */
+  readonly track: { readonly id: string; readonly label: string };
+  /** The prospect's zone and their local time now, as HH:MM. */
+  readonly zone: string;
+  readonly localTime: string;
+  readonly reason: CallReasonApi;
+  /** The call step's original due time. */
+  readonly dueAt: string;
+  readonly bucket: "ready_now" | "later_today";
+  /** For later today: when the prospect's calling hours open. */
+  readonly opensAt: string | null;
+}
+
+/** A track that can change when a campaign's emails go, so the load is not projected (Before launch). */
+export interface WithheldTrack {
+  readonly trackId: string;
+  readonly channel: "email" | "sms" | "call";
+  /** As the canvas names it: "the phone track", "SMS track 2". */
+  readonly label: string;
+  /**
+   * `no_sender`: its channel has no connected sender, so its leads and every track after it would
+   * wait; `after_a_phone_track`: an email or SMS track that starts, through its chain, after a phone
+   * track, which finishes only when the user logs its call, which no estimate can know.
+   */
+  readonly why: "no_sender" | "after_a_phone_track";
+  /** For `after_a_phone_track`: the phone track it waits on. */
+  readonly phoneTrack?: string;
+}
+
+export interface WithheldBy {
+  readonly tracks: readonly WithheldTrack[];
+}
+
+/** GET /api/today: the landing page's call part. Needs attention is GET /api/needs-attention. */
+export interface TodayView {
+  /** The user's date, YYYY-MM-DD in their zone. */
+  readonly date: string;
+  readonly userZone: string;
+  readonly readyNow: number;
+  readonly laterToday: number;
+  /** The next calls, in queue order: ready now first, then later today. */
+  readonly upNext: readonly CallQueueItem[];
+}
+
+/** GET /api/calls: the focus queue. The focused task is the first ready now; the queue moves on only after an outcome. */
+export interface CallsView {
+  readonly date: string;
+  readonly userZone: string;
+  readonly dailyCapacity: number;
+  /** New tasks placed today, and tasks carried into today from earlier days, which count first. */
+  readonly placedToday: number;
+  readonly committed: number;
+  /** Inside the prospect's calling hours: oldest due first; tasks skipped for now today go last, in the order skipped. */
+  readonly readyNow: readonly CallQueueItem[];
+  /** Callable later on the user's day: the calling hours open later today. Soonest first. */
+  readonly laterToday: readonly CallQueueItem[];
+  /**
+   * The focused call. Send the call the screen is on as `?focus=`: it stays the focus while it is
+   * listed, so the queue moves on only after an outcome. With none, the first call ready now.
+   */
+  readonly focusTaskId: string | null;
+}
+
+/** POST /api/call-tasks/:id/outcome: the task after the outcome, and the call the focus queue moves on to. */
+export interface CallOutcomeAnswer {
+  readonly task: CallTaskView;
+  readonly nextFocusTaskId: string | null;
+}
+
+/** One earlier touch on the lead in this campaign. Replies show channel and date only. */
+export type TouchView =
+  | { readonly kind: "email" | "sms"; readonly at: string; readonly stepId: string; readonly copy: { readonly subject: string; readonly body: string } | null }
+  | { readonly kind: "reply"; readonly channel: "email" | "sms"; readonly at: string }
+  | { readonly kind: "call"; readonly at: string; readonly outcome: CallOutcomeApi; readonly number: RecordedNumberView | null; readonly note: string };
+
+/**
+ * The number a past call was logged on, as the detail it stands for now: what was dialled, kept through
+ * re-imports that merge it, even into a colleague's detail. It says nothing about whether it may be
+ * dialled now; the task's `numbers` say that.
+ */
+export interface RecordedNumberView {
+  readonly detailId: string;
+  readonly kind: "direct" | "mobile" | "main_line";
+  /** The detail's owner now: a person (the lead or a colleague) or the company. */
+  readonly owner: "person" | "company";
+  readonly value: string;
+}
+
+export interface NoteView {
+  readonly id: string;
+  readonly body: string;
+  readonly at: string;
+}
+
+/** Someone else at the company, enrolled or not, with their outreach statuses and their last call note. */
+export interface CallColleagueView {
+  readonly id: string;
+  readonly name: string;
+  readonly title: string;
+  readonly statuses: readonly { readonly campaign: { readonly id: string; readonly name: string }; readonly status: OutreachStatus }[];
+  readonly lastCallNote: { readonly note: string; readonly outcome: string; readonly at: string } | null;
+}
+
+/** GET /api/call-tasks/:id: everything the call screen shows for one task. */
+export interface CallTaskView {
+  readonly task: CallQueueItem | null;
+  readonly taskId: string;
+  readonly enrollmentId: string;
+  /** Open until its outcome is logged or its track finishes. */
+  readonly open: boolean;
+  /** On today's list now, so an outcome is accepted. */
+  readonly listed: boolean;
+  readonly status: OutreachStatus;
+  readonly person: { readonly id: string; readonly name: string; readonly title: string } | null;
+  readonly company: { readonly id: string; readonly name: string };
+  readonly campaign: { readonly id: string; readonly name: string };
+  readonly track: { readonly id: string; readonly label: string };
+  readonly zone: string;
+  readonly localTime: string;
+  readonly numbers: readonly CallNumberView[];
+  /** The campaign's call script or talking points. */
+  readonly script: string;
+  /** Every earlier touch on this lead in this campaign, oldest first. Engagement (opens, clicks) is not tracked. */
+  readonly touches: readonly TouchView[];
+  readonly personNotes: readonly NoteView[];
+  /** Shown for everyone at the company. */
+  readonly companyNotes: readonly NoteView[];
+  /** Every other decision maker at the company, including people not enrolled. */
+  readonly colleagues: readonly CallColleagueView[];
+  /** The outcomes the user can log now; empty when the task is not listed. */
+  readonly outcomes: readonly CallOutcomeApi[];
 }

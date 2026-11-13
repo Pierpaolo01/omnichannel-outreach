@@ -48,6 +48,32 @@ export interface ReplyEvent {
   readonly lastCountedWall: number;
 }
 
+/** The user's call settings (ADR 0003 3.4, 4.4): one daily call capacity, and the zone the call list's day is counted in. */
+export interface CallSettings {
+  readonly dailyCapacity: number;
+  readonly userZone: string;
+}
+
+/** A note on a person, or a company note shown for everyone at the company. */
+export interface StoredNote {
+  readonly id: string;
+  readonly owner: "person" | "company";
+  readonly ownerId: string;
+  readonly body: string;
+  readonly atWall: number;
+  readonly subjectId: string | null;
+  readonly callAttemptId: string | null;
+}
+
+/** A logged call outcome with a note, as a colleague's "last call note" reads it. */
+export interface CallNoteRecord {
+  readonly subjectId: string;
+  readonly outcome: string;
+  readonly note: string;
+  readonly atWall: number;
+}
+
+
 /** A hard bounce the provider reported for one piece of provider work, kept for good by its event id. */
 export interface BounceEvent {
   readonly eventId: string;
@@ -126,6 +152,12 @@ export interface EngineStore {
   attempt(attemptId: string): Promise<Attempt | null>;
   /** Unsettled provider work with a lookup scheduled. */
   openWork(): Promise<ProviderWork[]>;
+  /**
+   * What holds each account's capacity and in-flight places now, by subject, counted exactly as
+   * `accounts` counts them: unsettled work not yet sent (a reservation) and live attempts. Read by
+   * the Before launch projection for the subjects it does not simulate (ADR 0003, ticket 13b).
+   */
+  heldOnAccounts(): Promise<{ readonly accountId: string; readonly subjectId: string; readonly reservations: number; readonly live: number }[]>;
   work(key: string): Promise<ProviderWork | null>;
   workByProviderRef(providerRef: string): Promise<ProviderWork | null>;
   /** Provider work handed over to `address` (any case) from `inbox`: the candidates a reply outside a known thread may fall back to (2.4). */
@@ -166,4 +198,21 @@ export interface EngineStore {
   anomalies(): Promise<{ attemptId: string | null; what: string; atWall: number }[]>;
   /** Subject ids of a campaign, launched or not, oldest enrollment first. */
   subjectsOf(campaignId: string): Promise<string[]>;
+
+  callSettings(): Promise<CallSettings>;
+  /** The user's call list on the user day of `now`: capacity, tasks placed today and committed tasks (ADR 0003 4.4). */
+  callDay(now: number): Promise<import("../../domain/sequence/state.ts").CallDay>;
+  /** Who a subject is: its person (null for a company lead), company and campaign. */
+  subjectParties(subjectId: string): Promise<{ readonly personId: string | null; readonly companyId: string; readonly campaignId: string } | null>;
+  setCallSettings(settings: CallSettings): Promise<void>;
+  /** The task a request id was logged on, whichever subject's it is, or null. */
+  callRequestTask(requestId: string): Promise<string | null>;
+  /** The subject a call task belongs to, or null for an unknown task. */
+  callTaskSubject(taskId: string): Promise<string | null>;
+  /** Subjects with an open call task, whatever their state: the call list is built from them. */
+  subjectsWithOpenCallTasks(): Promise<string[]>;
+  /** Notes on a person or a company, newest first. */
+  notesOf(owner: "person" | "company", ownerId: string): Promise<StoredNote[]>;
+  /** The latest call made with a note on each of these subjects; a skip for now is not a call. */
+  lastCallNotes(subjectIds: readonly string[]): Promise<CallNoteRecord[]>;
 }

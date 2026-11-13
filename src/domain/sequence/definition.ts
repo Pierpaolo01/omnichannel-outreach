@@ -1,8 +1,8 @@
 /**
  * A campaign's definition (ADR 0003 1.1) and the definitions refused at the boundary (7.1).
  * Ticket 13 runs email and SMS tracks in the main branch, connected together or after a delay;
- * phone tracks and the win-back branch are refused with a plain message until the tickets that
- * build them (ADR 0003 section 10).
+ * ticket 14 adds phone tracks, each exactly one call. The win-back branch is refused with a plain
+ * message until the ticket that builds it (ADR 0003 section 10).
  */
 import { isTimeZone, type WindowRule } from "./clock.ts";
 
@@ -24,14 +24,20 @@ export interface StepDefinition {
 
 export type StartRule = { readonly kind: "entry" } | { readonly kind: "after"; readonly trackId: string; readonly delayDays: number };
 
+/** What a declined call does (ADR 0003 1.1): set on the canvas, applied by ticket 16. */
+export type DeclinedPath = "stop" | "continue" | "win_back";
+
 export interface TrackDefinition {
   readonly id: string;
   readonly channel: TrackChannel;
   readonly branch: Branch;
+  /** The sending window; for a phone track, its calling hours. */
   readonly window: readonly WindowRule[];
   readonly steps: readonly StepDefinition[];
   readonly start: StartRule;
   readonly removed: boolean;
+  /** A phone track's declined path, when the canvas has set one. Read from ticket 16 on; nothing reads it yet. */
+  readonly declinedPath?: DeclinedPath;
 }
 
 export interface CampaignDefinition {
@@ -43,10 +49,11 @@ export interface CampaignDefinition {
   readonly emailPool: readonly string[];
   /** Sender numbers SMS tracks may use. Absent in definitions saved before ticket 13: none. */
   readonly smsPool?: readonly string[];
+  /** The campaign's call script or talking points, shown on every call task (ADR 0003 1.1). Absent before ticket 14: none. */
+  readonly callScript?: string;
   readonly tracks: readonly TrackDefinition[];
 }
 
-export const CALL_TRACKS_LATER = "Phone tracks arrive with a later release: use email and SMS tracks for now.";
 export const WIN_BACK_LATER = "The win-back branch arrives with a later release.";
 
 /** An empty definition for a new campaign. */
@@ -96,13 +103,12 @@ export function definitionProblems(def: CampaignDefinition, previous: CampaignDe
   }
 
   const live = def.tracks.filter((t) => !t.removed);
-  if (live.some((t) => t.channel === "call")) problems.push(CALL_TRACKS_LATER);
-  if (live.some((t) => t.branch !== "main")) problems.push(WIN_BACK_LATER);
-  if (problems.length > 0 && live.some((t) => t.channel === "call" || t.branch !== "main")) return problems;
+  if (live.some((t) => t.branch !== "main" || t.declinedPath === "win_back")) problems.push(WIN_BACK_LATER);
+  if (problems.length > 0 && live.some((t) => t.branch !== "main")) return problems;
 
   const label = (track: TrackDefinition) => {
     const same = live.filter((t) => t.channel === track.channel);
-    const channel = track.channel === "sms" ? "SMS" : track.channel;
+    const channel = track.channel === "sms" ? "SMS" : track.channel === "call" ? "phone" : track.channel;
     return same.length === 1 ? `the ${channel} track` : `${channel[0]?.toUpperCase() ?? ""}${channel.slice(1)} track ${same.indexOf(track) + 1}`;
   };
   const capital = (text: string) => `${text[0]?.toUpperCase() ?? ""}${text.slice(1)}`;
@@ -115,13 +121,17 @@ export function definitionProblems(def: CampaignDefinition, previous: CampaignDe
       if (!before || before.branch !== track.branch) problems.push(`${name} starts after a track that is not in the sequence.`);
       if (!isWholeDays(track.start.delayDays)) problems.push(`The delay before ${label(track)} is a whole number of days.`);
     }
-    if (track.window.length === 0) problems.push(`${name}'s sending window has no days.`);
+    if (track.window.length === 0) problems.push(`${name}'s ${track.channel === "call" ? "calling hours have" : "sending window has"} no days.`);
     for (const w of track.window) {
       if (!Number.isInteger(w.day) || w.day < 0 || w.day > 6) problems.push(`${name}'s window names a day that does not exist.`);
       if (!Number.isInteger(w.start) || !Number.isInteger(w.end) || w.start < 0 || w.start > 23 || w.end < 0 || w.end > 24) problems.push(`${name}'s window hours are whole hours from 0 to 24.`);
       else if (w.start === w.end) problems.push(`${name}'s window starts and ends at the same hour.`);
     }
     const steps = liveSteps(track);
+    // A phone track is one call with no follow-ups (spec "Phone tracks"); the call has no copy.
+    if (track.channel === "call" && steps.length !== 1) problems.push(`${name} is one call with no follow-ups: give it exactly one step.`);
+    // A call has no copy: the campaign's call script shows on every call task (verifier F2 on a1399ce).
+    if (track.channel === "call" && steps.some((st) => st.subject.trim() !== "" || st.body.trim() !== "")) problems.push(`${capital(label(track))}'s call has no copy of its own: write talking points in the campaign's call script.`);
     steps.forEach((step, i) => {
       const stepLabel = `Step ${i + 1}`;
       if (i === 0 && step.waitDays !== 0) problems.push(`${stepLabel} is the first step, so it has no wait.`);

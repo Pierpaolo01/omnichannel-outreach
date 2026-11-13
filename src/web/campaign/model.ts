@@ -1,7 +1,7 @@
 /** The campaign editor's draft helpers (ticket 12c). Pure: no React, no requests. */
 import { mergeUses, rewriteMergeUses, type MergeUse } from "../../domain/sequence/copy.ts";
 import { ownSubject } from "../../domain/sequence/definition.ts";
-import { trackLabel } from "../../shared/track-label.ts";
+import { trackLabel, trackPhrase } from "../../shared/track-label.ts";
 import type { CampaignDefinition, LaunchBlocker, StepDefinition, TrackDefinition, WindowRule } from "../../shared/api.ts";
 
 /** Days as the reference shows them, Monday first; the definition numbers Sunday 0. */
@@ -54,9 +54,7 @@ export const STEP_NOUN = { email: "Email", sms: "Text", call: "Call" } as const;
  * among that channel's live tracks (`trackLabel`, shared with the server's Activity).
  */
 export function trackName(def: CampaignDefinition, track: TrackDefinition): string {
-  const { label, several } = trackLabel(def, track);
-  const lower = track.channel === "sms" ? label : label.charAt(0).toLowerCase() + label.slice(1);
-  return several ? lower : `the ${lower}`;
+  return trackPhrase(def, track);
 }
 
 /** A track's title: "Email track", "SMS track 2". */

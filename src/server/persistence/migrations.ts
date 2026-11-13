@@ -478,6 +478,58 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE campaigns ADD COLUMN definition_seq INTEGER;
     `,
   },
+  {
+    // Ticket 14a, numbered after pull request 41's 10 and 11.
+    version: 12,
+    name: "call tasks, the outcomes logged on them, and person and company notes (ADR 0003 1.3; ticket 14)",
+    // One task per call step, never a second; it closes once, when its track finishes. Outcomes
+    // are kept for good. A note belongs to a person, or to a company and shows for everyone there.
+    sql: `
+      CREATE TABLE call_tasks (
+        id TEXT PRIMARY KEY,
+        subject_id TEXT NOT NULL REFERENCES subjects(id),
+        track_id TEXT NOT NULL,
+        step_id TEXT NOT NULL,
+        due_at INTEGER NOT NULL, due_wall INTEGER NOT NULL, due_zone TEXT NOT NULL,
+        skip_deadline INTEGER NOT NULL,
+        list_day INTEGER NOT NULL,
+        placed_wall INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('call', 'callback')),
+        callback_at INTEGER,
+        open INTEGER NOT NULL CHECK (open IN (0, 1)),
+        closed_wall INTEGER,
+        skipped_wall INTEGER,
+        CHECK ((open = 1) = (closed_wall IS NULL))
+      );
+      CREATE UNIQUE INDEX one_task_per_call_step ON call_tasks(subject_id, step_id);
+      CREATE INDEX call_tasks_open ON call_tasks(open, placed_wall);
+      CREATE TABLE call_attempts (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES call_tasks(id),
+        subject_id TEXT NOT NULL REFERENCES subjects(id),
+        -- The client's key for the action that logged it: one action is logged once, whatever retries it.
+        request_id TEXT NOT NULL UNIQUE,
+        -- Which outcomes a release accepts is the domain's and the HTTP interface's to say, not the schema's,
+        -- so tickets 15 and 16 add callbacks and declines without rebuilding this table (council on 7902093).
+        outcome TEXT NOT NULL,
+        number_detail_id TEXT REFERENCES contact_details(id),
+        note TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        at_wall INTEGER NOT NULL
+      );
+      CREATE INDEX call_attempts_by_subject ON call_attempts(subject_id, at_wall);
+      CREATE TABLE notes (
+        id TEXT PRIMARY KEY,
+        owner_kind TEXT NOT NULL CHECK (owner_kind IN ('person', 'company')),
+        owner_id TEXT NOT NULL,
+        body TEXT NOT NULL,
+        at_wall INTEGER NOT NULL,
+        subject_id TEXT REFERENCES subjects(id),
+        call_attempt_id TEXT REFERENCES call_attempts(id)
+      );
+      CREATE INDEX notes_by_owner ON notes(owner_kind, owner_id, at_wall);
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string): void {

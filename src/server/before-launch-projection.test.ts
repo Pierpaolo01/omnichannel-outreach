@@ -6,6 +6,8 @@ import type { CampaignDefinition, StepDefinition } from "../domain/sequence/defi
 import type { WindowRule } from "../domain/sequence/clock.ts";
 import type { BeforeLaunchView } from "../shared/api.ts";
 import { localDayNumber, resetDayOf } from "../domain/sequence/clock.ts";
+import { inbox as scriptedInbox, quickWaits } from "../../test/support/regressions.ts";
+import { ScriptedEmailPort } from "../../test/support/scripted-email-port.ts";
 import { projectedSends } from "./before-launch.ts";
 import type { ProjectedSend } from "./load-projection.ts";
 
@@ -432,7 +434,8 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
     const campaigns = Array.from({ length: n }, (_, c) => {
       const tracks: CampaignDefinition["tracks"][number][] = [];
       for (let i = 0; i < 1 + Math.floor(r() * 4); i++) {
-        const channel = pick(r, ["email", "sms"] as const);
+        // Phone tracks too (merge of 14a): together with or after the others, and others after them.
+        const channel = pick(r, ["email", "sms", "email", "sms", "call"] as const);
         const start = tracks.length > 0 && r() < 0.55 ? { kind: "after" as const, trackId: pick(r, tracks).id, delayDays: Math.floor(r() * 4) } : { kind: "entry" as const };
         const id = `c${c}t${i}`;
         tracks.push({
@@ -440,7 +443,10 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
           channel,
           branch: "main",
           window: pick(r, WINDOWS),
-          steps: Array.from({ length: 1 + Math.floor(r() * 3) }, (_, k) => ({ id: `${id}s${k}`, waitDays: k === 0 ? 0 : Math.floor(r() * 3), subject: k === 0 && channel === "email" ? "Hello" : "", body: "A note.", threading: k === 0 || channel === "sms" ? ("new_subject" as const) : ("continue_thread" as const), removed: false })),
+          steps:
+            channel === "call"
+              ? [{ id: `${id}s0`, waitDays: 0, subject: "", body: "", threading: "new_subject" as const, removed: false }]
+              : Array.from({ length: 1 + Math.floor(r() * 3) }, (_, k) => ({ id: `${id}s${k}`, waitDays: k === 0 ? 0 : Math.floor(r() * 3), subject: k === 0 && channel === "email" ? "Hello" : "", body: "A note.", threading: k === 0 || channel === "sms" ? ("new_subject" as const) : ("continue_thread" as const), removed: false })),
           start,
           removed: false,
         });
@@ -482,7 +488,14 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
       .map((d) => pickFields({ leadId: d.subjectId, accountId: d.sender, stepId: d.stepId, at: d.at }))
       .sort();
     const predicted = (projected?.sends ?? []).filter((s) => s.at < until).map(pickFields).sort();
-    return { actual, predicted, view, channels: new Set([...h.sms.deliveryLog.slice(already.sms)].filter((d) => mine.has(d.subjectId)).length > 0 ? ["sms"] : []) };
+    // Leads whose phone tracks all were skipped for want of a number: nothing of theirs waits on a call.
+    const noCall = new Set<string>();
+    for (const id of mine) {
+      const st = (await h.store.engine.subject(id, h.clock))!;
+      const calls = st.campaign.definition.tracks.filter((t) => t.channel === "call" && !t.removed);
+      if (calls.every((t) => st.tracks.find((p) => p.trackId === t.id)?.finishReason === "skipped_missing_channel")) noCall.add(id);
+    }
+    return { actual, predicted, view, projected, noCall, channels: new Set([...h.sms.deliveryLog.slice(already.sms)].filter((d) => mine.has(d.subjectId)).length > 0 ? ["sms"] : []) };
   }
 
   const SEEDS = Number(process.env["PROJECTION_SEEDS"] ?? 40);
@@ -492,13 +505,195 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
   const REGRESSIONS = [13_056, 13_106];
   for (const seed of [...REGRESSIONS, ...Array.from({ length: SEEDS }, (_, i) => 13_000 + i).filter((x) => !REGRESSIONS.includes(x))]) {
     test(`generated multi-track world ${seed}`, async () => {
-      const { actual, predicted, view, channels } = await compareWorld(world(seed));
+      const { actual, predicted, view, projected, noCall, channels } = await compareWorld(world(seed));
       texted.push(channels.has("sms"));
-      expect(view.load?.noSender).toEqual([]);
-      expect(predicted).toEqual(actual);
+      const withheld = view.load?.withheldBy ?? null;
+      if (withheld === null) {
+        expect(predicted).toEqual(actual);
+        return;
+      }
+      // A track that waits on a call is named, nothing is projected, and with no call logged the
+      // engine indeed sends nothing on it, except to a lead with no number, whose phone track is skipped.
+      withheldWorlds.push(seed);
+      expect(withheld.tracks.every((t) => t.why === "after_a_phone_track")).toBe(true);
+      expect(projected).toBeNull();
+      const waiting = withheld.tracks.map((t) => `${t.trackId}s`);
+      expect(actual.filter((line) => !noCall.has(line.split(" ")[2] ?? "") && waiting.some((prefix) => line.split(" ")[3]?.startsWith(prefix)))).toEqual([]);
     });
   }
+  const withheldWorlds: number[] = [];
+  test("the worlds include phone tracks that hold the tracks after them, and worlds with phone tracks still projected", () => {
+    expect(withheldWorlds.length).toBeGreaterThan(0);
+    expect(withheldWorlds.length).toBeLessThan(SEEDS);
+  });
   test("the worlds really text: most projected campaigns send SMS", () => {
     expect(texted.filter(Boolean).length).toBeGreaterThan(SEEDS / 3);
+  });
+});
+
+describe("work an older campaign already holds when the projection is taken (review bot on c1e215e)", () => {
+  const allHours = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 9, end: 10 }));
+  const oneEmail = (pool: string[]): CampaignDefinition => ({
+    timezone: "Europe/London",
+    callSkipLimitDays: 2,
+    emailPool: pool,
+    tracks: [{ id: "t1", channel: "email", branch: "main", window: allHours, steps: [{ id: "s1", waitDays: 0, subject: "Hi", body: "Hi.", threading: "new_subject", removed: false }], start: { kind: "entry" }, removed: false }],
+  });
+  const rowsOf = (prefix: string, n: number) => ({
+    businesses: Array.from({ length: n }, (_, i) => business({ business_id: `${prefix}b${i}`, business_name: `${prefix} Clinic ${i}`, timezone: "UTC" })),
+    people: Array.from({ length: n }, (_, i) => person({ person_id: `${prefix}p${i}`, business_id: `${prefix}b${i}`, full_name: `${prefix} Person${i}`, email: `${prefix}${i}@clinic.example`, timezone: "" })),
+  });
+
+  test("a full inbox whose only reservation is uncertain work a ready step can carry on: the projection claims it as the engine does, and both campaigns send", async () => {
+    let clock = Date.parse("2026-11-02T09:50:00Z");
+    const port = new ScriptedEmailPort(() => clock, [scriptedInbox("inbox-a", { capacity: 1, gapMs: MIN, resetZone: "UTC" })]);
+    const h = new EngineHarness({ start: clock, accounts: [], port, engine: quickWaits });
+    Object.defineProperty(h, "clock", { get: () => clock, set: (v: number) => (clock = v) });
+    const { campaign: older } = await h.createCampaign("Older", rowsOf("a", 1));
+    const { campaign: newer } = await h.createCampaign("Newer", rowsOf("b", 1));
+    await h.tick();
+    // The older campaign's call gets no answer and is never sent; its lookups say not sent, not finally.
+    port.onCall = () => ({ answer: "unknown", sendAfter: null });
+    port.lookupOverride = (work) => (work && work.sendAt === null ? { kind: "not-sent" } : null);
+    await h.defineSequence(older.id, oneEmail(["inbox-a"]));
+    expect((await h.launch(older.id)).status).toBe(200);
+    // Its lookups say not sent until the attempt is withdrawn; the work stays uncertain and reserved.
+    await h.advanceTo(Date.parse("2026-11-02T16:00:00Z"));
+    const [account] = await h.store.engine.accounts(h.clock);
+    expect(account).toMatchObject({ used: 1, inFlight: 0 });
+
+    await h.defineSequence(newer.id, oneEmail(["inbox-a"]));
+    const projected = await projectedSends(h.store, newer.id, h.clock);
+    // From now on the provider takes every call, and the carried-on work sends when it is called again.
+    port.onCall = () => ({ answer: "accepted", sendAfter: 0 });
+    port.resendDropped = true;
+    expect((await h.launch(newer.id)).status).toBe(200);
+    await h.advanceTo(Date.parse("2026-11-06T00:00:00Z"));
+    const mine = new Set(await h.store.engine.subjectsOf(newer.id));
+    const actual = port.deliveries.filter((d) => mine.has(d.subjectId)).map((d) => ({ leadId: d.subjectId, accountId: d.sender, at: d.at }));
+    // The older lead carries its work on Tuesday at 09:00; this campaign's lead goes on Wednesday.
+    expect(actual.map((d) => new Date(d.at).toISOString())).toEqual(["2026-11-04T09:00:00.000Z"]);
+    expect(projected!.sends.map(({ leadId, accountId, at }) => ({ leadId, accountId, at }))).toEqual(actual);
+    expect(projected).toMatchObject({ notStarted: 0, daysUntilAllStart: 3 });
+  });
+});
+
+describe("generated: an older campaign's work in every provider state when the projection is taken (ticket 13b, review bot on c1e215e)", () => {
+  /**
+   * The older campaign's first calls end in one of four states: sent; dropped with an unknown answer
+   * and a same-key retry to come (retryable), or with none (not retryable), its lookups saying not
+   * sent, not finally, so the work stays uncertain and reserved, carried by an attempt or by none;
+   * or accepted and sending exactly at the projection's instant. Claims may be waiting for a slot.
+   * From the projection on, the provider takes every call, and dropped work sends when it is called
+   * again: the projection's stated provider. The projected campaign's sends must be the engine's.
+   */
+  type Outcome = "sent" | "dropped" | "in_flight";
+  const SEEDS = Number(process.env["PROJECTION_SEEDS"] ?? 30);
+  for (const seed of Array.from({ length: SEEDS }, (_, i) => 21_000 + i)) {
+    test(`case ${seed}`, { timeout: 120_000 }, async () => {
+      const r = rng(seed);
+      // Every fourth seed is free; the others pin the state they are for: a same-key retry waiting
+      // for a 50-minute slot; uncertain work no attempt carries (a dropped call whose lookups said not
+      // sent, hours later); accepted work the provider sends at the projection's instant.
+      const scenario = (["free", "retry_waiting", "uncertain", "in_flight"] as const)[seed % 4]!;
+      const start =
+        scenario === "free" ? pick(r, [Date.parse("2026-11-02T08:50:00Z"), Date.parse("2026-11-02T09:30:00Z"), Date.parse("2026-11-02T16:40:00Z")])
+        : scenario === "uncertain" ? Date.parse("2026-11-02T09:50:00Z")
+        : Date.parse("2026-11-02T09:30:00Z");
+      let clock = start;
+      const ids = Array.from({ length: 1 + Math.floor(r() * 2) }, (_, i) => `inbox-${i}`);
+      const port = new ScriptedEmailPort(
+        () => clock,
+        ids.map((id) => scriptedInbox(id, { capacity: 1 + Math.floor(r() * 3), gapMs: scenario === "retry_waiting" ? 50 * MIN : pick(r, [MIN, 7 * MIN, 50 * MIN]), resetZone: pick(r, ["UTC", "America/Los_Angeles"]) })),
+      );
+      const h = new EngineHarness({ start, accounts: [], port, engine: quickWaits });
+      Object.defineProperty(h, "clock", { get: () => clock, set: (v: number) => (clock = v) });
+      const rows = (prefix: string, n: number) => ({
+        businesses: Array.from({ length: n }, (_, i) => business({ business_id: `${prefix}b${i}`, business_name: `${prefix} Clinic ${i}`, timezone: pick(r, ZONES) })),
+        people: Array.from({ length: n }, (_, i) => person({ person_id: `${prefix}p${i}`, business_id: `${prefix}b${i}`, full_name: `${prefix} Person${i}`, email: `${prefix}${i}@clinic.example`, timezone: "" })),
+      });
+      const subset = () => {
+        const s = ids.filter(() => r() < 0.7);
+        return s.length > 0 ? s : [pick(r, ids)];
+      };
+      const always = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
+      const track = (pool: string[]): CampaignDefinition => {
+        const steps: StepDefinition[] = Array.from({ length: 1 + Math.floor(r() * 2) }, (_, i) => ({ id: `s${i + 1}`, waitDays: i === 0 ? 0 : 1 + Math.floor(r() * 2), subject: i === 0 ? "Hi" : "", body: "A note.", threading: i === 0 ? "new_subject" : "continue_thread", removed: false }));
+        // Half the time open all day, so the older campaign's work is with the provider at the projection.
+        // The uncertain case's window closes ten minutes after launch, so no retry follows the lookups.
+        const window = scenario === "uncertain" ? [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 9, end: 10 })) : scenario !== "free" || r() < 0.5 ? always : pick(r, WINDOWS);
+        return { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: pool, tracks: [{ id: "t1", channel: "email", branch: "main", window, steps, start: { kind: "entry" }, removed: false }] };
+      };
+      const { campaign: older } = await h.createCampaign("Older", rows("a", 1 + Math.floor(r() * 4)));
+      const { campaign: newer } = await h.createCampaign("Newer", rows("b", 1 + Math.floor(r() * 3)));
+      await h.tick();
+
+      const projectAt = start + (scenario === "retry_waiting" ? 10 * MIN : scenario === "uncertain" ? 6 * H : pick(r, [10 * MIN, 20 * MIN, 50 * MIN, 3 * H, 7 * H]));
+      const retryable = scenario === "retry_waiting" || scenario === "uncertain" ? true : r() < 0.5;
+      port.transportFor = () => ({ retryable, notSentIsFinal: false });
+      const outcomes = new Map<string, Outcome>();
+      port.onCall = (request) => {
+        const outcome = outcomes.get(request.destination) ?? (scenario === "retry_waiting" || scenario === "uncertain" ? "dropped" : scenario === "in_flight" ? "in_flight" : pick(r, ["sent", "dropped", "in_flight"] as const));
+        outcomes.set(request.destination, outcome);
+        if (outcome === "dropped") return { answer: "unknown", sendAfter: null };
+        if (outcome === "in_flight") return { answer: "accepted", sendAfter: Math.max(0, projectAt - clock) };
+        return { answer: "accepted", sendAfter: 0 };
+      };
+      port.lookupOverride = (work) => (work && work.sendAt === null ? { kind: "not-sent" } : null);
+      await h.defineSequence(older.id, track(subset()));
+      expect((await h.launch(older.id)).status).toBe(200);
+      // Up to the projection's instant, without the tick there: work sending then is accepted and not
+      // yet reported, as the projection finds it; the provider reports it just before the launch.
+      await h.advanceTo(projectAt - 1);
+      clock = projectAt;
+
+      await h.defineSequence(newer.id, track(subset()));
+      const projected = await projectedSends(h.store, newer.id, h.clock);
+      for (const id of await h.store.engine.subjectsOf(older.id)) {
+        const s = (await h.store.engine.subject(id, h.clock))!;
+        for (const w of s.work) if (w.settled === null && w.sentWall === null && !s.attempts.some((a) => a.idempotencyKey === w.key && ["claimed", "handed", "accepted"].includes(a.state))) seen.add("uncertain work no attempt carries");
+        for (const a of s.attempts) {
+          if (a.state === "claimed") seen.add("a claim waiting for its slot");
+          if (a.state === "accepted") seen.add("accepted work not yet sent");
+          if (a.state === "handed" && (a.retry === "wanted" || a.retry === "wanted_after_not_sent")) seen.add("a same-key retry waiting");
+          if (a.state === "handed" && a.retry === "refused") seen.add("unresolved work an attempt still carries");
+        }
+      }
+      const before = port.deliveries.length;
+      port.onCall = () => ({ answer: "accepted", sendAfter: 0 });
+      port.resendDropped = true;
+      // Work the provider has accepted sends now, as the projection assumes: the scripted port answers
+      // a same-key call for dropped work "accepted" without sending it, which no provider should do.
+      const accepted = new Set<string>();
+      for (const id of await h.store.engine.subjectsOf(older.id)) for (const a of (await h.store.engine.subject(id, h.clock))!.attempts) if (a.state === "accepted") accepted.add(a.idempotencyKey);
+      for (const w of port.works) if (w.sendAt === null && accepted.has(w.key)) w.sendAt = projectAt;
+      port.advance();
+      expect((await h.launch(newer.id)).status).toBe(200);
+      h.maxWrites = 20_000;
+      const until = projectAt + 10 * DAY;
+      await h.advanceTo(until);
+      const mine = new Set(await h.store.engine.subjectsOf(newer.id));
+      const fields = (x: { leadId: string; accountId: string; stepId: string; at: number }) => `${x.at} ${x.accountId} ${x.leadId} ${x.stepId}`;
+      const actual = port.deliveries.slice(before).filter((d) => mine.has(d.subjectId) && d.at < until).map((d) => fields({ leadId: d.subjectId, accountId: d.sender, stepId: d.stepId, at: d.at })).sort();
+      expect((projected?.sends ?? []).filter((s) => s.at < until).map(fields).sort()).toEqual(actual);
+      for (const id of await h.store.engine.subjectsOf(older.id)) {
+        const s = (await h.store.engine.subject(id, h.clock))!;
+        if (s.attempts.some((a) => a.idempotencyKey !== a.id)) seen.add("a claim that carried uncertain work on");
+      }
+    });
+  }
+
+  const seen = new Set<string>();
+  test("the cases reach every state they are for", () => {
+    expect([...seen].sort()).toEqual(
+      [
+        "a claim that carried uncertain work on",
+        "a claim waiting for its slot",
+        "a same-key retry waiting",
+        "accepted work not yet sent",
+        "uncertain work no attempt carries",
+        "unresolved work an attempt still carries",
+      ].filter((x) => SEEDS >= 30 || seen.has(x)),
+    );
   });
 });

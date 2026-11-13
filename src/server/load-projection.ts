@@ -21,10 +21,10 @@
 import { isLive } from "../domain/sequence/attempt.ts";
 import { ENGINE_PARAMS } from "../domain/sequence/attempt.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, startOfLocalDay, windowOpen, type WindowRule } from "../domain/sequence/clock.ts";
-import { accountAvailable, accountHasRoom, senderOf, windowOf, type ReadyItem } from "../domain/sequence/dispatch.ts";
-import { liveSteps, poolOf, type CampaignDefinition, type TrackChannel } from "../domain/sequence/definition.ts";
-import { channelOf } from "../domain/sequence/progress.ts";
-import type { AccountState, SmsBinding, SubjectState } from "../domain/sequence/state.ts";
+import { windowOf, type ReadyItem } from "../domain/sequence/dispatch.ts";
+import { liveSteps, liveTracks, poolOf, type CampaignDefinition, type TrackChannel } from "../domain/sequence/definition.ts";
+import { destinationFor } from "../domain/sequence/progress.ts";
+import type { AccountState, Attempt, SmsBinding, SubjectState } from "../domain/sequence/state.ts";
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
 
 /** The engine's quota wait with no known end (engine-store). */
@@ -40,6 +40,8 @@ export interface ProjectionInput {
   readonly others: readonly SubjectState[];
   /** The engine's own records of every account any simulated subject may use. */
   readonly accounts: readonly AccountState[];
+  /** Reservations and live attempts on each account held by subjects not simulated (`EngineStore.heldOnAccounts`). */
+  readonly heldElsewhere?: ReadonlyMap<string, { readonly reservations: number; readonly live: number }>;
   /** The zone launch days are counted in: the campaign's default zone. */
   readonly zone: string;
   readonly horizonDays: number;
@@ -60,8 +62,10 @@ export interface ProjectedSend {
 export interface Projection {
   /** The most this campaign sends from each account on one of its reset days. */
   readonly busiestDay: ReadonlyMap<string, number>;
-  /** This campaign's leads that some live track can reach: they have not ended at launch. */
+  /** This campaign's leads an email or SMS track can reach: they start with an email or a text. */
   readonly leadsToStart: number;
+  /** Leads only a phone track can reach: they are left to the user's calls, which the estimate does not count. */
+  readonly onlyCalled: number;
   /** Launch day is day 1. Null when some lead does not start within the horizon, or none starts. */
   readonly daysUntilAllStart: number | null;
   readonly notStarted: number;
@@ -146,6 +150,7 @@ export function projectLoad(input: ProjectionInput): Projection {
   const live = new Map<string, number>();
   /** Claimed attempts per account: the handover's candidates. */
   const claimed = new Map<string, Map<string, string>>();
+  const retrying = new Map<string, Map<string, string>>();
   const bump = (m: Map<string, number>, k: string, by: number) => m.set(k, (m.get(k) ?? 0) + by);
   const contribute = (s: SubjectState, sign: 1 | -1) => {
     for (const w of s.work) {
@@ -161,14 +166,24 @@ export function projectLoad(input: ProjectionInput): Projection {
         else m.delete(a.id);
         claimed.set(a.accountId, m);
       }
+      // A same-key retry waiting for its slot (5.6), which `handOverAll` takes before claims.
+      if (a.state === "handed" && (a.retry === "wanted" || a.retry === "wanted_after_not_sent")) {
+        const m = retrying.get(a.accountId) ?? new Map<string, string>();
+        if (sign > 0) m.set(a.id, s.subject.id);
+        else m.delete(a.id);
+        retrying.set(a.accountId, m);
+      }
     }
   };
 
   // SMS conversations, shared by every subject, by mobile.
   const bindings = new Map<string, SmsBinding[]>();
+  let bindingsVersion = 0;
   const addBinding = (b: SmsBinding) => {
     const list = bindings.get(b.recipient) ?? [];
-    if (!list.some((x) => x.sender === b.sender)) bindings.set(b.recipient, [...list, b]);
+    if (list.some((x) => x.sender === b.sender)) return;
+    bindings.set(b.recipient, [...list, b]);
+    bindingsVersion++;
   };
 
   // ---- Prepare: this campaign's leads enter as launch enters them; everyone else as stored.
@@ -182,7 +197,11 @@ export function projectLoad(input: ProjectionInput): Projection {
   }
   // The record counts every subject's sends today and open reservations; the simulation keeps
   // its own subjects' count, so theirs are taken out of the starting count once.
-  const baseToday = new Map(accountIds.map((id) => [id, (records.get(id)?.used ?? 0) - sendsBefore(id) - (reserved.get(id) ?? 0)]));
+  // What subjects it does not simulate hold (an ended lead's uncertain work, a paused campaign's
+  // attempt) stays as the store counts it: their reservations count every day until settled, their
+  // live attempts take in-flight places; nothing here settles them.
+  const held = (id: string) => input.heldElsewhere?.get(id) ?? { reservations: 0, live: 0 };
+  const baseToday = new Map(accountIds.map((id) => [id, (records.get(id)?.used ?? 0) - sendsBefore(id) - (reserved.get(id) ?? 0) - held(id).reservations]));
   const slot = new Map(accountIds.map((id) => [id, records.get(id)?.nextSlotAt ?? 0]));
 
   /** The account as the store would report it at `t`. */
@@ -190,21 +209,55 @@ export function projectLoad(input: ProjectionInput): Projection {
     const a = records.get(id);
     if (!a) return undefined;
     const day = resetDay(id, t);
-    return { ...a, nextSlotAt: slot.get(id) ?? 0, used: (day === today.get(id) ? (baseToday.get(id) ?? 0) : 0) + (sentOn.get(`${id}/${day}`) ?? 0) + (reserved.get(id) ?? 0), inFlight: live.get(id) ?? 0 };
+    const other = held(id);
+    return {
+      ...a,
+      nextSlotAt: slot.get(id) ?? 0,
+      used: (day === today.get(id) ? (baseToday.get(id) ?? 0) : 0) + (sentOn.get(`${id}/${day}`) ?? 0) + (reserved.get(id) ?? 0) + other.reservations,
+      inFlight: (live.get(id) ?? 0) + other.live,
+    };
   };
+  /** Bumped by every write: a loaded subject is reused until anything it could read has changed. */
+  let written = 0;
+  const loadCache = new Map<string, { written: number; t: number; state: SubjectState }>();
   /** The subject as the store would load it at `t`: current accounts and conversations. */
   const load = (id: string, t: number): SubjectState => {
+    const known = loadCache.get(id);
+    if (known && known.written === written && known.t === t) return known.state;
+    const state = loadNow(id, t);
+    loadCache.set(id, { written, t, state });
+    return state;
+  };
+  // Most leads read the same accounts (their campaign's pools): one accounts object per set of ids,
+  // instant and write; and each lead's conversations until a binding is added.
+  const accountsCache = new Map<string, { written: number; t: number; accounts: Record<string, AccountState> }>();
+  const idsCache = new WeakMap<SubjectState, string>();
+  const bindingsCache = new WeakMap<SubjectState, { version: number; list: SmsBinding[] }>();
+  const loadNow = (id: string, t: number): SubjectState => {
     const s = stateOf(id);
-    const def = s.campaign.definition;
-    const ids = new Set([...def.emailPool, ...poolOf(def, "sms"), ...s.attempts.map((a) => a.accountId), ...[s.subject.emailSender, s.subject.smsSender].filter((x): x is string => x !== null)]);
-    const accounts: Record<string, AccountState> = {};
-    for (const a of ids) {
-      const v = view(a, t);
-      if (v) accounts[a] = v;
+    let key = idsCache.get(s);
+    if (key === undefined) {
+      const def = s.campaign.definition;
+      key = [...new Set([...def.emailPool, ...poolOf(def, "sms"), ...s.attempts.map((a) => a.accountId), ...[s.subject.emailSender, s.subject.smsSender].filter((x): x is string => x !== null)])].sort().join("\n");
+      idsCache.set(s, key);
     }
-    const mobiles = new Set([...s.lead.details.filter((d) => d.channel === "phone").map((d) => d.key), ...s.attempts.map((a) => a.destination)]);
-    const smsBindings = [...mobiles].flatMap((m) => bindings.get(m) ?? []);
-    return { ...s, accounts, smsBindings };
+    let accounts = accountsCache.get(key);
+    if (!accounts || accounts.written !== written || accounts.t !== t) {
+      const map: Record<string, AccountState> = {};
+      for (const a of key === "" ? [] : key.split("\n")) {
+        const v = view(a, t);
+        if (v) map[a] = v;
+      }
+      accounts = { written, t, accounts: map };
+      accountsCache.set(key, accounts);
+    }
+    let smsBindings = bindingsCache.get(s);
+    if (!smsBindings || smsBindings.version !== bindingsVersion) {
+      const mobiles = new Set([...s.lead.details.filter((d) => d.channel === "phone").map((d) => d.key), ...s.attempts.map((a) => a.destination)]);
+      smsBindings = { version: bindingsVersion, list: [...mobiles].flatMap((m) => bindings.get(m) ?? []) };
+      bindingsCache.set(s, smsBindings);
+    }
+    return { ...s, accounts: accounts.accounts, smsBindings: smsBindings.list };
   };
 
   const dirty = new Set<string>(states.keys());
@@ -212,6 +265,7 @@ export function projectLoad(input: ProjectionInput): Projection {
   /** Writes a subject's change, as the store does: the ledger, the slot it took, the conversation it bound. */
   const write = (id: string, loaded: SubjectState, next: SubjectState) => {
     if (next === loaded) return false;
+    written++;
     const before = stateOf(id);
     contribute(before, -1);
     const stored = { ...next };
@@ -223,9 +277,26 @@ export function projectLoad(input: ProjectionInput): Projection {
     return true;
   };
 
-  // Work already with a provider is taken as sent at the projection's instant.
+  // The provider (ADR 0003, ticket 13b): every call the projection makes is accepted and sent at
+  // once. Work already in the provider's hands at the projection's instant: an accepted attempt is
+  // sent then, and a call still waiting for its answer is answered accepted and sent then. A call
+  // answered unknown keeps its state: a same-key retry waiting for its slot is made by the engine's
+  // retry rules below (and is accepted and sent), and uncertain work no attempt carries stays
+  // reserved until a claim carries it on (`inheritedWork`). Nothing else settles it: lookups are not
+  // foreseen.
   let observed: { id: string; key: string; at: number; ref: string }[] = [];
-  for (const s of states.values()) for (const a of s.attempts) if (a.state === "handed" || a.state === "accepted") observed.push({ id: s.subject.id, key: a.idempotencyKey, at: now, ref: `held-${a.idempotencyKey}` });
+  const answered: { id: string; attemptId: string; key: string }[] = [];
+  for (const s of states.values()) {
+    for (const a of s.attempts) {
+      if (a.state === "accepted") observed.push({ id: s.subject.id, key: a.idempotencyKey, at: now, ref: `held-${a.idempotencyKey}` });
+      else if (a.state === "handed" && a.awaitingAnswer) answered.push({ id: s.subject.id, attemptId: a.id, key: a.idempotencyKey });
+    }
+  }
+  for (const x of answered) {
+    const loaded = load(x.id, now);
+    write(x.id, loaded, rules.applyToAttempt(loaded, x.attemptId, { kind: "call_answer", answer: { kind: "accepted", providerRef: `held-${x.key}` }, now }, now).state);
+    observed.push({ id: x.id, key: x.key, at: now, ref: `held-${x.key}` });
+  }
 
   for (const s of launched) {
     const loaded = load(s.subject.id, now);
@@ -299,6 +370,71 @@ export function projectLoad(input: ProjectionInput): Projection {
     const k = windowKey(w, zone);
     if (!nextOpenMemo.has(k)) nextOpenMemo.set(k, nextWindowOpen(w, zone, t));
     return nextOpenMemo.get(k) ?? null;
+  };
+
+  /** The provider's answer to an authorized call: accepted, and sent at once (observed in the next pass). */
+  const called = (id: string, attempt: Attempt, accountId: string, t: number) => {
+    const reloaded = load(id, t);
+    const ref = `projected-ref-${attempt.idempotencyKey}`;
+    write(id, reloaded, rules.applyToAttempt(reloaded, attempt.id, { kind: "call_answer", answer: { kind: "accepted", providerRef: ref }, now: t }, t).state);
+    observed.push({ id, key: attempt.idempotencyKey, at: t, ref });
+    if (oursIds.has(id)) {
+      const track = reloaded.campaign.definition.tracks.find((x) => x.id === attempt.trackId);
+      sends.push({ leadId: id, accountId, trackId: attempt.trackId, stepId: attempt.stepId, channel: track?.channel ?? "email", step: track ? liveSteps(track).findIndex((x) => x.id === attempt.stepId) : 0, at: t });
+    }
+  };
+  /** The pre-send check: the fake providers find nothing, so it is recorded fresh and clear. */
+  const presend = (id: string, attemptId: string, t: number) => {
+    const loaded = load(id, t);
+    const a = loaded.attempts.find((x) => x.id === attemptId);
+    if (a && !(a.presendCheckedWall !== null && a.presendCheckedWall >= t - ENGINE_PARAMS.PRESEND_MAX_AGE && !a.presendFoundReply)) {
+      write(id, loaded, { ...loaded, attempts: loaded.attempts.map((x) => (x.id === attemptId ? { ...x, presendCheckedWall: t, presendFoundReply: false } : x)) });
+    }
+  };
+  /** `Engine.tryHandover`, on the engine's own predicates and writes. */
+  const handOverNow = (id: string, attemptId: string, accountId: string): "handed" | "withdrawn" | "waiting" | "skip" => {
+    presend(id, attemptId, t);
+    const loaded = load(id, t);
+    const current = loaded.attempts.find((x) => x.id === attemptId);
+    const account = current ? loaded.accounts[current.accountId] : undefined;
+    if (!current || current.state !== "claimed" || !account) return "withdrawn";
+    const failed = rules.handoverFailures(loaded, current, account, t);
+    if (failed.length === 0) {
+      const handed = rules.handOver(loaded, current, account, t);
+      write(id, loaded, handed);
+      called(id, handed.attempts.find((x) => x.id === attemptId) ?? current, accountId, t);
+      return "handed";
+    }
+    if (failed.every((f) => f === 16 || f === 18) && failed.includes(18)) return "skip";
+    if (failed.every((f) => f === 16)) return "waiting";
+    write(id, loaded, rules.applyToAttempt(loaded, current.id, { kind: "guard_failed" }, t).state);
+    return "withdrawn";
+  };
+  /** `Engine.tryRetry`, on the engine's own retry authorization. */
+  const retryNow = (id: string, attemptId: string, accountId: string): "handed" | "withdrawn" | "waiting" | "skip" => {
+    const snapshot = load(id, t);
+    const a = snapshot.attempts.find((x) => x.id === attemptId);
+    const acc = a ? snapshot.accounts[a.accountId] : undefined;
+    if (a && acc) {
+      const pending = rules.retryFailures(snapshot, a, acc, t).filter((f) => f !== "predicate 14");
+      if (pending.length > 0 && pending.every((f) => f === "slot")) return "waiting";
+    }
+    presend(id, attemptId, t);
+    const loaded = load(id, t);
+    const current = loaded.attempts.find((x) => x.id === attemptId);
+    const account = current ? loaded.accounts[current.accountId] : undefined;
+    if (!current || !account || (current.retry !== "wanted" && current.retry !== "wanted_after_not_sent")) return "withdrawn";
+    const failed = rules.retryFailures(loaded, current, account, t);
+    if (failed.includes("predicate 18")) return "skip";
+    if (failed.length === 0) {
+      const next = rules.authorizeRetry(loaded, current, account, t);
+      write(id, loaded, next);
+      called(id, next.attempts.find((x) => x.id === attemptId) ?? current, accountId, t);
+      return "handed";
+    }
+    if (failed.every((f) => f === "slot")) return "waiting";
+    write(id, loaded, rules.applyToAttempt(loaded, current.id, { kind: "retry_refused", now: t }, t).state);
+    return "withdrawn";
   };
 
   let t = now;
@@ -375,83 +511,47 @@ export function projectLoad(input: ProjectionInput): Projection {
       dirty.clear();
       for (const id of evaluatedAgain) dirty.add(id);
 
-      // Claims (4.2), every ready item in priority order (4.3), as `claimAll`.
-      const items = sortedItems();
-      // The accounts that could take a claim now, kept current as claims are written.
-      const isFree = (a: string) => {
-        const v = view(a, t);
-        return v !== undefined && accountAvailable(v, t) && accountHasRoom(v);
-      };
-      const free = new Set(accountIds.filter(isFree));
-      for (const item of items) {
-        if (free.size === 0) break;
-        const s = stateOf(item.subjectId);
+      // Claims (4.2): every ready item in claim order (4.3), exactly as `Engine.claimAll` does it.
+      // Each item goes to the engine's own step guard, account choice and claim, on the subject as
+      // the store would load it now (current accounts, conversations and its own earlier claim this
+      // pass); nothing is decided here before those calls.
+      for (const item of sortedItems()) {
         if (!ready.get(item.subjectId)?.items.includes(item)) continue;
-        // Skipped only where the engine's own checks would refuse it with no write: no account
-        // could take it now, or its window is closed (`claimRefusal`).
-        const channel = channelOf(s, item.trackId) ?? "email";
-        const fixed = senderOf(s, channel);
-        const candidates = fixed !== null ? [fixed] : poolOf(s.campaign.definition, channel);
-        if (!candidates.some((a) => free.has(a) && records.get(a)?.channel === channel)) continue;
-        if (!isOpen(windowOf(s, item.trackId), s.lead.zone, t)) continue;
         const loaded = load(item.subjectId, t);
-        if (rules.claimRefusal(loaded, item, t) !== null) continue;
+        // Both are the engine's pure checks, and a claim needs both, so their order changes no
+        // answer; the account choice goes first because it is the cheaper one (no zone or copy work).
         const account = rules.chooseAccount(loaded, t, item.stepId);
         if (!account) continue;
+        if (rules.claimRefusal(loaded, item, t) !== null) continue;
         write(item.subjectId, loaded, rules.claim(loaded, item, account, { attemptId: `projected-${++attemptSeq}`, retryable: false, notSentIsFinal: false, now: t }));
-        if (!isFree(account.id)) free.delete(account.id);
         changed = true;
       }
       // A subject's claim is written into `dirty`; its cached items are stale now.
       for (const id of dirty) dropReady(id);
 
-      // Handovers (5.5), per account in id order, each account's claims by `handoverOrder`.
+      // Handovers and retries (5.5, 5.6), exactly as `Engine.handOverAll`: per account in id order,
+      // same-key retries first, then claims by `handoverOrder`; a claim waits for the slot, a retry's
+      // own authorization decides whether it waits.
       for (const accountId of accountIds) {
         const skipped = new Set<string>();
         for (let i = 0; i < 100; i++) {
-          const waiting = [...(claimed.get(accountId) ?? [])].filter(([attemptId]) => !skipped.has(attemptId));
-          if (waiting.length === 0) break;
-          if (t < (slot.get(accountId) ?? 0)) break;
-          const order = waiting.flatMap(([attemptId, id]) => {
-            const s = stateOf(id);
-            const a = s.attempts.find((x) => x.id === attemptId);
-            return a ? [{ attemptId, id, item: { subjectId: id, trackId: a.trackId, stepId: a.stepId, touched: s.subject.touched, dueWall: s.tracks.find((p) => p.trackId === a.trackId)?.dueWall ?? 0 } }] : [];
+          const waiting = [
+            ...[...(retrying.get(accountId) ?? [])].map(([attemptId, id]) => ({ attemptId, id, retry: true })),
+            ...[...(claimed.get(accountId) ?? [])].map(([attemptId, id]) => ({ attemptId, id, retry: false })),
+          ].filter((w) => !skipped.has(w.attemptId));
+          const order = waiting.flatMap((w) => {
+            const s = stateOf(w.id);
+            const a = s.attempts.find((x) => x.id === w.attemptId);
+            return a ? [{ ...w, item: { subjectId: w.id, trackId: a.trackId, stepId: a.stepId, touched: s.subject.touched, dueWall: s.tracks.find((p) => p.trackId === a.trackId)?.dueWall ?? 0 } }] : [];
           });
-          order.sort((x, y) => rules.handoverOrder(x.item, y.item));
+          order.sort((x, y) => (x.retry !== y.retry ? (x.retry ? -1 : 1) : rules.handoverOrder(x.item, y.item)));
           const next = order[0];
           if (!next) break;
-          // The pre-send check: the fake providers find nothing, so it is fresh and clear.
-          let loaded = load(next.id, t);
-          write(next.id, loaded, { ...loaded, attempts: loaded.attempts.map((x) => (x.id === next.attemptId ? { ...x, presendCheckedWall: t, presendFoundReply: false } : x)) });
-          loaded = load(next.id, t);
-          const current = loaded.attempts.find((x) => x.id === next.attemptId);
-          const account = current ? loaded.accounts[current.accountId] : undefined;
-          if (!current || !account) {
-            skipped.add(next.attemptId);
-            continue;
-          }
-          const failed = rules.handoverFailures(loaded, current, account, t);
-          if (failed.length === 0) {
-            const handed = rules.handOver(loaded, current, account, t);
-            write(next.id, loaded, handed);
-            const reloaded = load(next.id, t);
-            const ref = `projected-ref-${current.idempotencyKey}`;
-            write(next.id, reloaded, rules.applyToAttempt(reloaded, current.id, { kind: "call_answer", answer: { kind: "accepted", providerRef: ref }, now: t }, t).state);
-            observed.push({ id: next.id, key: current.idempotencyKey, at: t, ref });
-            if (oursIds.has(next.id)) {
-              const track = loaded.campaign.definition.tracks.find((x) => x.id === current.trackId);
-              sends.push({ leadId: next.id, accountId, trackId: current.trackId, stepId: current.stepId, channel: track?.channel ?? "email", step: track ? liveSteps(track).findIndex((x) => x.id === current.stepId) : 0, at: t });
-            }
-            changed = true;
-            continue;
-          }
-          if (failed.every((f) => f === 16 || f === 18) && failed.includes(18)) {
-            skipped.add(next.attemptId);
-            continue;
-          }
-          if (failed.every((f) => f === 16)) break;
-          write(next.id, loaded, rules.applyToAttempt(loaded, current.id, { kind: "guard_failed" }, t).state);
-          changed = true;
+          if (!next.retry && t < (slot.get(accountId) ?? 0)) break;
+          const outcome = next.retry ? retryNow(next.id, next.attemptId, accountId) : handOverNow(next.id, next.attemptId, accountId);
+          if (outcome === "skip") skipped.add(next.attemptId);
+          else changed = true;
+          if (outcome === "waiting") break;
         }
       }
       for (const id of dirty) dropReady(id);
@@ -486,9 +586,10 @@ export function projectLoad(input: ProjectionInput): Projection {
           if (at !== undefined) candidates.push(at + ENGINE_PARAMS.SETTLING);
         }
       }
-      if (a.healthy && a.waitUntil !== null && a.waitUntil < NO_END) candidates.push(a.waitUntil);
-      const v = view(id, t);
-      if (v && v.used >= v.capacity) candidates.push(startOfLocalDay(localDayNumber(t, a.resetZone) + 1, a.resetZone));
+      if ((retrying.get(id)?.size ?? 0) > 0) candidates.push(slot.get(id) ?? 0);
+      if (a.waitUntil !== null && a.waitUntil < NO_END) candidates.push(a.waitUntil);
+      // Capacity frees at every account's next reset day.
+      candidates.push(startOfLocalDay(localDayNumber(t, a.resetZone) + 1, a.resetZone));
     }
     const next = Math.min(...candidates.filter((c) => c > t));
     if (!Number.isFinite(next)) break;
@@ -503,11 +604,14 @@ export function projectLoad(input: ProjectionInput): Projection {
     const id = key.slice(0, key.lastIndexOf("/"));
     busiest.set(id, Math.max(busiest.get(id) ?? 0, n));
   }
-  const entered = launched.map((s) => s.subject.id).filter((id) => {
+  // The estimate counts emails and texts. A lead no live track can reach ends at launch, with the
+  // reason shown elsewhere; a lead only a phone track can reach is left to the user's calls.
+  const sendTracks = liveTracks(input.definition, "main").filter((t) => t.channel !== "call");
+  const reachable = launched.map((s) => s.subject.id).filter((id) => {
     const s = stateOf(id);
-    // A lead no live track can reach ends at launch, with the reason shown elsewhere.
     return !(s.subject.ended === "finished_no_usable_channel" && s.results.length === 0 && (s.subject.endedWall ?? now) <= now);
   });
+  const entered = reachable.filter((id) => sendTracks.some((t) => destinationFor(stateOf(id).lead.details, t.channel) !== null));
   const first = new Map<string, number>();
   for (const s of sends) if (!first.has(s.leadId)) first.set(s.leadId, s.at);
   const notStarted = entered.filter((id) => !first.has(id)).length;
@@ -515,6 +619,7 @@ export function projectLoad(input: ProjectionInput): Projection {
   return {
     busiestDay: busiest,
     leadsToStart: entered.length,
+    onlyCalled: reachable.length - entered.length,
     daysUntilAllStart: notStarted > 0 || firsts.length === 0 ? null : localDayNumber(Math.max(...firsts), input.zone) - localDayNumber(now, input.zone) + 1,
     notStarted,
     sends,

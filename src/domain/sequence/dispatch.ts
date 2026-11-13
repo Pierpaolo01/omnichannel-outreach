@@ -109,6 +109,8 @@ export function readyItems(state: SubjectState, now: number): ReadyItem[] {
   return state.tracks.flatMap((p): ReadyItem[] => {
     if (p.startedAt === null || p.finishedAt !== null || p.nextStepId === null || p.dueAt === null || p.dueWall === null) return [];
     if (p.dueAt > lead) return [];
+    // A call is never sent: the user dials it from their list (calls.ts places it there).
+    if (channelOf(state, p.trackId) === "call") return [];
     const stepId = p.nextStepId;
     if (state.results.some((r) => r.stepId === stepId)) return [];
     if (state.attempts.some((a) => a.stepId === stepId && isLive(a))) return [];
