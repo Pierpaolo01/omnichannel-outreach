@@ -487,7 +487,10 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
 
   const SEEDS = Number(process.env["PROJECTION_SEEDS"] ?? 40);
   const texted: boolean[] = [];
-  for (const seed of Array.from({ length: SEEDS }, (_, i) => 13_000 + i)) {
+  // Found by a 200-world run: a subject changed by evaluation lost its wake at the next track
+  // start, so a delayed track started late. They failed before the fix and always run.
+  const REGRESSIONS = [13_056, 13_106];
+  for (const seed of [...REGRESSIONS, ...Array.from({ length: SEEDS }, (_, i) => 13_000 + i).filter((x) => !REGRESSIONS.includes(x))]) {
     test(`generated multi-track world ${seed}`, async () => {
       const { actual, predicted, view, channels } = await compareWorld(world(seed));
       texted.push(channels.has("sms"));

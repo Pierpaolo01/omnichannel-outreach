@@ -139,6 +139,60 @@ describe("Before launch: copy rendered for one lead", () => {
   });
 });
 
+describe("Before launch: copy for one lead across both channels, by track, dated from launch (ticket 13b)", () => {
+  const text = (id: string, fields: Partial<StepDefinition> = {}): StepDefinition => step(id, { threading: "new_subject", ...fields });
+  const tracks: CampaignDefinition = {
+    timezone: "Europe/London",
+    callSkipLimitDays: 2,
+    emailPool: ["inbox-a"],
+    smsPool: [],
+    tracks: [
+      { id: "t1", channel: "email", branch: "main", window: weekdays, start: { kind: "entry" }, removed: false, steps: [step("s1", { subject: "Hi {{company}}", threading: "new_subject" }), step("s2", { waitDays: 3 })] },
+      { id: "t2", channel: "sms", branch: "main", window: weekdays, start: { kind: "after", trackId: "t1", delayDays: 1 }, removed: false, steps: [text("m1", { body: "Hi {{first_name|there}}, a text." }), text("m2", { waitDays: 2 })] },
+      { id: "t3", channel: "sms", branch: "main", window: weekdays, start: { kind: "entry" }, removed: false, steps: [text("m3", { body: "Together with the first email." })] },
+    ],
+  };
+  const ANA = person({ person_id: "p4", business_id: "b1", full_name: "Ana Ruiz", title: "Owner", dial_phone: "+447700900244", dial_phone_type: "mobile" });
+  const preview = async (name: string) => {
+    const { h, id } = await campaign([inbox("inbox-a")], [...PEOPLE, ANA]);
+    await h.defineSequence(id, tracks);
+    const lead = (await beforeLaunch(h, id)).leads.find((l) => l.name === name)!;
+    return (await h.request<CopyPreview>("GET", `/api/campaigns/${id}/preview/${lead.id}`)).body;
+  };
+  const rows = (p: CopyPreview) => p.steps.map((s) => [s.trackId, s.stepId, s.channel, s.number, s.day, s.skipped]);
+
+  test("every track's messages, in the order they can go: an SMS track after the emails starts the day after they finish", async () => {
+    const pat = await preview("Pat Oneil");
+    expect(rows(pat)).toEqual([
+      ["t1", "s1", "email", 1, 1, false],
+      ["t3", "m3", "sms", 1, 1, false],
+      ["t1", "s2", "email", 2, 4, false],
+      ["t2", "m1", "sms", 1, 5, false],
+      ["t2", "m2", "sms", 2, 7, false],
+    ]);
+    const m1 = pat.steps.find((s) => s.stepId === "m1")!;
+    // A text has no subject.
+    expect(m1.subject).toEqual([]);
+    expect(m1.body.map((x) => x.text).join("")).toBe("Hi Pat, a text.");
+  });
+
+  test("a lead with no email skips the email track, so the SMS track after it starts a day after launch, not after the emails", async () => {
+    expect(rows(await preview("Ana Ruiz"))).toEqual([
+      ["t1", "s1", "email", 1, 1, true],
+      ["t1", "s2", "email", 2, 1, true],
+      ["t3", "m3", "sms", 1, 1, false],
+      ["t2", "m1", "sms", 1, 2, false],
+      ["t2", "m2", "sms", 2, 4, false],
+    ]);
+  });
+
+  test("a company lead is never texted: its SMS tracks are skipped (ADR 0003 Q10)", async () => {
+    const northgate = await preview("Northgate Dental");
+    expect(northgate.steps.filter((s) => s.channel === "sms").every((s) => s.skipped)).toBe(true);
+    expect(northgate.steps.filter((s) => s.channel === "email").every((s) => !s.skipped)).toBe(true);
+  });
+});
+
 describe("Before launch: projected daily load per sender inbox", () => {
   const many = (n: number) => ({
     businesses: [HARBOUR],

@@ -313,6 +313,7 @@ export function projectLoad(input: ProjectionInput): Projection {
       }
 
       // Evaluate every subject that changed or whose next start has come.
+      const evaluatedAgain = new Set<string>();
       for (const id of [...dirty]) {
         const s = states.get(id)!;
         const known = evalUntil.get(id);
@@ -328,6 +329,8 @@ export function projectLoad(input: ProjectionInput): Projection {
           continue;
         }
         write(id, loaded, next);
+        // Evaluated again in the next pass, which records its next start if nothing more changes.
+        evaluatedAgain.add(id);
         changed = true;
       }
 
@@ -338,7 +341,11 @@ export function projectLoad(input: ProjectionInput): Projection {
         if (known?.state === s && t < known.until) continue;
         const items = rules.readyItems(load(id, t), t);
         const lead = leadNow(s.subject.clock, t);
-        const dues = s.tracks.filter((p) => p.finishedAt === null && p.dueAt !== null).map((p) => t + ((p.dueAt ?? 0) - lead)).filter((x) => x > t);
+        // Its next due step, or its next track start (as `Engine.nextWakeAt`).
+        const dues = [
+          ...s.tracks.filter((p) => p.finishedAt === null && p.dueAt !== null).map((p) => t + ((p.dueAt ?? 0) - lead)),
+          ...s.tracks.filter((p) => p.startedAt === null && p.startAt !== null).map((p) => t + ((p.startAt ?? 0) - lead)),
+        ].filter((x) => x > t);
         const until = Math.min(Infinity, ...dues);
         if (ready.has(id)) gone.add(id);
         ready.set(id, { state: s, items, until, windows: items.map((i) => ({ w: windowOf(s, i.trackId), zone: s.lead.zone })) });
@@ -346,6 +353,7 @@ export function projectLoad(input: ProjectionInput): Projection {
         wakes.push(until, id);
       }
       dirty.clear();
+      for (const id of evaluatedAgain) dirty.add(id);
 
       // Claims (4.2), every ready item in priority order (4.3), as `claimAll`.
       const items = sortedItems();
