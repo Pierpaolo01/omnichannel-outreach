@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { EngineHarness } from "../../../test/support/engine-harness.ts";
+import { FakeWebLocks } from "../../../test/support/fake-web-locks.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
 import type { ApiError, CallOutcomeAnswer, CallOutcomeApi, CallsView, CallTaskView, LeadSearchResult } from "../../shared/api.ts";
@@ -80,10 +81,10 @@ const flush = async () => {
  * A desk's view of a storage, watching it: a desk no longer on screen may only remove an outbox entry
  * on a definite answer (invariant 9).
  */
-function watched(store: KeyValue, owner: () => Instance, problems: string[], label: string): KeyValue {
+function watched(store: KeyValue, owner: () => Instance, problems: string[], label: string, changed?: (key: string) => void): KeyValue {
   const gone = (what: string, key: string) => {
-    // Allowed after leaving: an outbox entry removed on a definite answer, and the refused record written first.
-    const allowed = (what === "remove" && key.startsWith("outreach.calls.outbox.")) || (what === "set" && key.startsWith("outreach.calls.refused."));
+    // Allowed after leaving: an outbox entry removed on a definite answer, after the refused or answer record is written.
+    const allowed = (what === "remove" && key.startsWith("outreach.calls.outbox.")) || (what === "set" && (key.startsWith("outreach.calls.refused.") || key.startsWith("outreach.calls.answer.")));
     if (owner().disposed && !allowed) problems.push(`9: a desk of ${label} left behind did ${what} ${key}`);
   };
   return {
@@ -92,10 +93,12 @@ function watched(store: KeyValue, owner: () => Instance, problems: string[], lab
     set: (k, v) => {
       gone("set", k);
       store.set(k, v);
+      changed?.(k);
     },
     remove: (k) => {
       gone("remove", k);
       store.remove(k);
+      changed?.(k);
     },
   };
 }
@@ -115,8 +118,11 @@ interface Instance {
   readonly ok: Set<string>;
   readonly refused: Set<string>;
   readonly timers: Set<() => void>;
+  /** Each timer's delay: settling fires only those due within a minute, as a page left alone would see. */
+  readonly timerMs: Map<() => void, number>;
   disposed: boolean;
   lastFocus: string | null;
+  lastLogged: string | null;
 }
 
 interface Tab {
@@ -159,18 +165,28 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
   const presses: Press[] = [];
   const pressOf = new Map<string, Press>();
   const problems: string[] = [];
-  /** Every id some desk was refused for, across reloads. */
+  /** Every id some desk was refused for, and accepted for, across reloads. */
   const refusedIds = new Set<string>();
+  const okIds = new Set<string>();
+  /** A storage write by one desk reaches every other desk on screen, later, as the browser's storage event. */
+  const storageEvent = (from: Instance, key: string) => {
+    if (!key.startsWith("outreach.calls.outbox.") && !key.startsWith("outreach.calls.refused.") && !key.startsWith("outreach.calls.answer.")) return;
+    for (const t of tabs) {
+      const other = t.instance;
+      if (other !== from && !other.disposed) setImmediate(() => void (other.disposed ? undefined : other.desk.refresh()));
+    }
+  };
   let ids = 0;
   /** The browser's Web Locks, shared by the tabs: name to holder. */
-  const locks = new Map<string, symbol>();
+  const locks = new FakeWebLocks();
   /** True while log() runs: its first post is a new press, recorded right after. */
   let pressing = false;
   const stored = async (id: string) => (await h.store.engine.callRequestTask(id)) !== null;
 
   const open = async (tab: Tab): Promise<Instance> => {
     const timers = new Set<() => void>();
-    const instance = { tab, ok: new Set<string>(), refused: new Set<string>(), timers, disposed: false, lastFocus: null } as Omit<Instance, "desk"> as Instance;
+    const timerMs = new Map<() => void, number>();
+    const instance = { tab, ok: new Set<string>(), refused: new Set<string>(), timers, timerMs, disposed: false, lastFocus: null, lastLogged: null } as Omit<Instance, "desk"> as Instance;
     (instance as { desk: CallDesk }).desk = new CallDesk({
       calls: async (focus) => (await h.request<CallsView>("GET", `/api/calls${focus ? `?focus=${focus}` : ""}`)).body,
       task: async (id) => {
@@ -190,21 +206,17 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
           }
           requests.push({ from: instance, taskId, body, answer: null, resolve, reject });
         }),
-      local: watched(local, () => instance, problems, tab.label),
+      // Another tab's write reaches this page as a storage event, which the page answers with a refresh (useCallDesk.ts).
+      local: watched(local, () => instance, problems, tab.label, (key) => storageEvent(instance, key)),
       session: watched(tab.session, () => instance, problems, tab.label),
       newId: () => `${tab.label}-${++ids}`,
-      setTimer: (fire) => {
+      setTimer: (fire, ms) => {
         timers.add(fire);
+        timerMs.set(fire, ms);
         return () => timers.delete(fire);
       },
-      claim: (name) => {
-        if (locks.has(name)) return Promise.resolve(null);
-        const token = Symbol(name);
-        locks.set(name, token);
-        return Promise.resolve(() => {
-          if (locks.get(name) === token) locks.delete(name);
-        });
-      },
+      claim: locks.claim,
+      wait: locks.wait,
       faults,
     });
     tab.instance = instance;
@@ -235,6 +247,7 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
     if (lost || !req.answer) return req.reject(new NoAnswer());
     if (req.answer.status === 200) {
       req.from.ok.add(req.body.requestId);
+      okIds.add(req.body.requestId);
       // A logged action consumes its draft: the call's next draft is made afresh.
       if (!req.from.disposed) req.from.tab.choices.delete(req.taskId);
       return req.resolve(req.answer.json as CallOutcomeAnswer);
@@ -267,17 +280,26 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
       for (const id of p.ids) if (await stored(id)) n++;
       if (n > 1) problems.push(`1: press ${[...p.ids].join("/")} is logged ${n} times`);
     }
+    // One tab, one identity: no two desks on screen share a tab id (a duplicated tab takes its own).
+    const ids = tabs.filter((t) => !t.instance.disposed).map((t) => t.session.get("outreach.calls.tab"));
+    if (new Set(ids).size < ids.length) problems.push(`11: two desks on screen share the tab id ${ids.find((x, k) => ids.indexOf(x) !== k)}`);
     for (const tab of tabs) {
       const i = tab.instance;
+      if (i.disposed) continue;
       const snap = i.desk.getSnapshot();
-      if (snap.logged && !i.ok.has(snap.logged.requestId)) problems.push(`2: ${tab.label} shows ${snap.logged.requestId} logged before an accepted answer`);
+      // An answer another desk had is applied from its record: logged once some desk had a 200 for it, refused once some desk had a refusal.
+      if (snap.logged && !okIds.has(snap.logged.requestId)) problems.push(`2: ${tab.label} shows ${snap.logged.requestId} logged before an accepted answer`);
+      // Invariant 11: pending is this tab's entry in the outbox.
+      if (snap.pending && local.get(`outreach.calls.outbox.${snap.pending.body.requestId}`) === null) problems.push(`11: ${tab.label} shows ${snap.pending.body.requestId} pending, but it is not in the outbox`);
       for (const shown of [snap.away?.requestId ?? null, snap.refusal?.requestId ?? null]) {
         if (shown === null) continue;
-        if (!i.refused.has(shown)) problems.push(`2: ${tab.label} shows ${shown} refused without a refusal`);
+        if (!refusedIds.has(shown)) problems.push(`2: ${tab.label} shows ${shown} refused without a refusal`);
         const press = pressOf.get(shown);
         for (const id of press?.ids ?? []) if (await stored(id)) problems.push(`2: ${tab.label} shows a press refused though the server logged it as ${id}`);
         if (snap.away?.requestId === shown && press && snap.away.note !== press.note) problems.push(`6: ${tab.label} lost the note of its refused press`);
       }
+      // A logged outcome, whichever desk had its answer, consumes its call's draft.
+      if (snap.logged !== null && snap.logged.requestId !== i.lastLogged) tab.choices.delete(snap.logged.task.taskId);
       // Invariant 7: the draft of the call on screen is what the user chose, or, before any choice, its first making.
       if (snap.focus !== null && snap.task?.state === "ready" && snap.task.view.taskId === snap.focus) {
         const chosen = tab.choices.get(snap.focus);
@@ -286,7 +308,9 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
         else if (chosen.numberId !== now.numberId || chosen.outcome !== now.outcome || chosen.note !== now.note) problems.push(`7: ${tab.label}'s draft for ${snap.focus} became ${JSON.stringify(now)}, not the user's ${JSON.stringify(chosen)}`);
       }
       if (snap.focus !== i.lastFocus && i.lastFocus !== null) tab.choices.delete(i.lastFocus);
-      if (snap.focus !== i.lastFocus && i.lastFocus !== null && !moved.has(i)) problems.push(`4: ${tab.label}'s focus moved from ${i.lastFocus} to ${snap.focus} without an outcome or moving on`);
+      const newlyLogged = snap.logged !== null && snap.logged.requestId !== i.lastLogged;
+      i.lastLogged = snap.logged?.requestId ?? null;
+      if (snap.focus !== i.lastFocus && i.lastFocus !== null && !moved.has(i) && !newlyLogged) problems.push(`4: ${tab.label}'s focus moved from ${i.lastFocus} to ${snap.focus} without an outcome or moving on`);
       i.lastFocus = snap.focus;
       if (snap.away?.requestId) seen.refusedShown++;
       if (snap.away && snap.away.requestId === null) seen.foundGone++;
@@ -300,7 +324,7 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
 
   /** Refusals a desk showed on the call and the user moved on from (acknowledged). */
   const movedOnFrom = new Set<string>();
-  const seen = { refusedShown: 0, foundGone: 0, unconfirmed: 0, blocked: 0, recovered: 0, dismissed: 0, records: 0 };
+  const seen = { refusedShown: 0, foundGone: 0, unconfirmed: 0, blocked: 0, recovered: 0, dismissed: 0, records: 0, leftWithPending: 0 };
   const tabs: Tab[] = [];
   tabs.push(await newTab("a"), await newTab("b"));
   let notes = 0;
@@ -312,7 +336,7 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
     /** Desks whose focus may move in this step: answered 200, or moving on. */
     const moved = new Set<Instance>();
     if (roll < 0.24) {
-      if (snap.task?.state === "ready" && !snap.locked) {
+      if (!tab.instance.disposed && snap.task?.state === "ready" && !snap.locked) {
         const numbers = snap.task.view.numbers;
         const outcome = OUTCOMES[Math.floor(r() * OUTCOMES.length)] ?? "no_answer";
         const note = r() < 0.6 ? `note ${++notes}` : "";
@@ -373,9 +397,21 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
       leave(tab, true);
       await open(tab);
       moved.add(tab.instance);
-    } else if (roll < 0.81) {
+    } else if (roll < 0.795) {
       leave(tab, true);
       tabs.splice(tabs.indexOf(tab), 1, await newTab(`${tab.label}'`));
+    } else if (roll < 0.805) {
+      // The pressing tab leaves Calls; another desk takes its entry over; the tab comes back while that desk holds it.
+      leave(tab, false);
+      for (const t of tabs) if (t !== tab) await t.instance.desk.refresh();
+      await open(tab);
+      moved.add(tab.instance);
+    } else if (roll < 0.81 && tabs.length < 4) {
+      // The browser duplicates a tab: the copy starts with the same sessionStorage, tab id included.
+      const copy = { label: `${tab.label}+`, session: new MapStore(), choices: new Map() } as Omit<Tab, "instance"> as Tab;
+      for (const [k, v] of tab.session.map) copy.session.set(k, v);
+      await open(copy);
+      tabs.push(copy);
     } else if (roll < 0.83) {
       desk.retryNow();
     } else if (roll < 0.88) {
@@ -394,6 +430,14 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
       }
       // The user comes back to the tabs: each refreshes, as showing a tab again does.
       for (const t of tabs) await t.instance.desk.refresh();
+    } else if (roll < 0.89) {
+      // The user leaves Calls in a tab (to Today, say) and stays there for now, if another tab is on Calls.
+      const onCalls = tabs.filter((t) => !t.instance.disposed);
+      if (!tab.instance.disposed && onCalls.length > 1) leave(tab, true);
+      else if (tab.instance.disposed) {
+        await open(tab);
+        moved.add(tab.instance);
+      }
     } else if (roll < 0.905) {
       const who = PEOPLE[Math.floor(r() * PEOPLE.length)]?.["email"] ?? "";
       h.fake.prospectReplies(who, true, null);
@@ -406,14 +450,22 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
     await check(moved);
   }
 
+  // Before settling, often: the user leaves Calls in a tab whose outcome is on its way, while another tab stays on
+  // Calls (council on b15a769, item 9). That tab must take the outcome over when the lock is released.
+  const holder = tabs.find((t) => !t.instance.disposed && t.instance.desk.getSnapshot().pending !== null);
+  if (holder && r() < 0.7 && tabs.some((t) => t !== holder && !t.instance.disposed)) {
+    leave(holder, true);
+    seen.leftWithPending++;
+  }
+  await flush();
+
   // The network settles without reopening any tab: timers fire, the browser comes back online, the
   // tabs refresh (claiming entries left by closed tabs), and every request arrives and is answered.
   for (let guard = 0; guard < 60; guard++) {
-    for (const tab of tabs) {
-      tab.instance.desk.retryNow();
-      await tab.instance.desk.refresh();
-    }
+    // A page left alone gets only lock releases, storage events from other tabs and its own timers (retries within a minute).
+    // Timers due within a minute (retries, backoff): a refresh hours away would hide an outcome left waiting.
     for (const tab of tabs) for (const fire of [...tab.instance.timers]) {
+      if ((tab.instance.timerMs.get(fire) ?? 0) > 60_000) continue;
       tab.instance.timers.delete(fire);
       fire();
     }
@@ -425,10 +477,13 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
       await flush();
       await check(moved);
     }
-    if (requests.length === 0 && local.keys().every((k) => !k.startsWith("outreach.calls.outbox."))) break;
+    const quiet = requests.length === 0 && local.keys().every((k) => !k.startsWith("outreach.calls.outbox.")) && tabs.every((t) => t.instance.disposed || t.instance.desk.getSnapshot().pending === null);
+    if (quiet) break;
   }
   await flush();
 
+  // Invariant 12: with the network settled, no desk on screen shows an action pending.
+  for (const t of tabs) if (!t.instance.disposed && t.instance.desk.getSnapshot().pending !== null) problems.push(`12: ${t.label} still shows ${t.instance.desk.getSnapshot().pending?.body.requestId} pending after the network settled`);
   // Invariant 3 and 1's other half: nothing left, and every press logged once or refused.
   const left = local.keys().filter((k) => k.startsWith("outreach.calls.outbox."));
   if (left.length > 0) problems.push(`3: the outbox still holds ${left.join(", ")}`);
@@ -444,7 +499,7 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
 }
 
 describe("working the call list in the browser, generated over the real call desk (ADR 0003 4.4.1)", () => {
-  const counts: { presses: number; logged: number; seen: { refusedShown: number; foundGone: number; unconfirmed: number; blocked: number; recovered: number; dismissed: number; records: number } }[] = [];
+  const counts: { presses: number; logged: number; seen: { refusedShown: number; foundGone: number; unconfirmed: number; blocked: number; recovered: number; dismissed: number; records: number; leftWithPending: number } }[] = [];
   for (const seed of Array.from({ length: SEEDS }, (_, i) => 9100 + i)) {
     test(`run ${seed}`, async () => {
       const out = await run(seed);
@@ -466,16 +521,19 @@ describe("working the call list in the browser, generated over the real call des
 
 describe("each desk fault is caught by its known seed (ADR 0003 4.4.1)", () => {
   const KILLING: readonly [DeskFault, number, string][] = [
-    ["new_id_on_resend", 9113, "8:"],
+    ["new_id_on_resend", 9104, "8:"],
     ["logged_when_sent", 9100, "2:"],
-    ["outbox_removed_when_sent", 9101, "3:"],
+    ["outbox_removed_when_sent", 9100, "11:"],
     ["refresh_adopts_focus", 9100, "4:"],
     ["no_lock_while_pending", 9100, "5:"],
     ["substitute_bad_number", 9100, "7:"],
     ["send_without_lock", 9100, "8:"],
-    ["orphan_sent_once", 9177, "3:"],
+    ["orphan_sent_once", 9107, "3:"],
     ["disposed_desk_applies", 9100, "9:"],
     ["refusal_dropped", 9102, "10:"],
+    ["pending_kept_after_answered_elsewhere", 9100, "11:"],
+    ["copied_tab_kept", 9104, "11:"],
+    ["no_wait_for_lock", 9127, "3:"],
   ];
   for (const [fault, seed, invariant] of KILLING) {
     test(`${fault}, seed ${seed}, invariant ${invariant}`, async () => {
@@ -487,7 +545,7 @@ describe("each desk fault is caught by its known seed (ADR 0003 4.4.1)", () => {
 
 /** By hand: CALL_DESK_FAULT_SEARCH=1 prints the first seeds that catch each fault, to fill KILLING above. */
 describe.skipIf(!process.env["CALL_DESK_FAULT_SEARCH"])("fault search (by hand)", () => {
-  const all: DeskFault[] = ["new_id_on_resend", "logged_when_sent", "outbox_removed_when_sent", "refresh_adopts_focus", "no_lock_while_pending", "substitute_bad_number", "send_without_lock", "orphan_sent_once", "disposed_desk_applies", "refusal_dropped"];
+  const all: DeskFault[] = ["new_id_on_resend", "logged_when_sent", "outbox_removed_when_sent", "refresh_adopts_focus", "no_lock_while_pending", "substitute_bad_number", "send_without_lock", "orphan_sent_once", "disposed_desk_applies", "refusal_dropped", "pending_kept_after_answered_elsewhere", "copied_tab_kept", "no_wait_for_lock"];
   for (const fault of all) {
     test(fault, async () => {
       const found: string[] = [];

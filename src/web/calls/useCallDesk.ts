@@ -6,6 +6,17 @@ import { CallDesk, NoAnswer, Refused, type DeskSnapshot, type KeyValue, type Out
 /** How long an outcome waits for its answer before it counts as no answer and is sent again. */
 const ANSWER_TIMEOUT_MS = 20_000;
 
+/** Queues for the lock `name` until granted, or null once `signal` aborts (the desk left). Without Web Locks, granted at once. */
+function wait(name: string, signal: AbortSignal): Promise<(() => void) | null> {
+  const locks = typeof navigator === "undefined" ? undefined : navigator.locks;
+  if (!locks) return Promise.resolve(() => undefined);
+  return new Promise((resolve) => {
+    locks
+      .request(name, { signal }, () => new Promise<void>((release) => resolve(() => release())))
+      .catch(() => resolve(null));
+  });
+}
+
 /**
  * The browser's Web Locks: one exclusive lock per outbox entry across the user's tabs, asked for at
  * once and held until released; a closed tab's locks are released by the browser. Without Web Locks
@@ -97,10 +108,11 @@ async function post(taskId: string, body: OutcomeBody): Promise<CallOutcomeAnswe
   }
   const json: unknown = await response.json().catch(() => null);
   if (response.ok && json !== null) return json as CallOutcomeAnswer;
-  // A 4xx is the server's definite refusal; anything else may or may not have been logged.
+  // A 4xx carries the server's code; the desk counts only a refusal code as definite (isRefusal), so 408
+  // or 429 is sent again. Anything else may or may not have been logged.
   if (response.status >= 400 && response.status < 500) {
-    const message = (json as { error?: { message?: unknown } } | null)?.error?.message;
-    throw new Refused(response.status, typeof message === "string" ? message : `The server answered ${response.status}.`);
+    const error = (json as { error?: { message?: unknown; code?: unknown } } | null)?.error;
+    throw new Refused(response.status, typeof error?.message === "string" ? error.message : `The server answered ${response.status}.`, typeof error?.code === "string" ? error.code : null);
   }
   throw new NoAnswer();
 }
@@ -120,6 +132,7 @@ function browserDesk(): CallDesk {
       return () => clearTimeout(t);
     },
     claim,
+    wait,
   });
 }
 

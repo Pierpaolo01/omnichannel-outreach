@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { EngineHarness } from "../../../test/support/engine-harness.ts";
+import { FakeWebLocks } from "../../../test/support/fake-web-locks.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
 import type { ApiError, CallOutcomeAnswer, CallsView, CallTaskView } from "../../shared/api.ts";
@@ -59,7 +60,7 @@ async function world() {
   const local = new MapStore();
   /** Every POST the desks made, held until the test answers it. */
   const held: Held[] = [];
-  const locks = new Map<string, symbol>();
+  const locks = new FakeWebLocks();
   const timers: (() => void)[] = [];
   let ids = 0;
   const deliver = async (x: Held) => h.request<unknown>("POST", `/api/call-tasks/${x.taskId}/outcome`, x.body);
@@ -85,14 +86,8 @@ async function world() {
         timers.push(fire);
         return () => timers.splice(timers.indexOf(fire), 1);
       },
-      claim: (name) => {
-        if (locks.has(name)) return Promise.resolve(null);
-        const token = Symbol(name);
-        locks.set(name, token);
-        return Promise.resolve(() => {
-          if (locks.get(name) === token) locks.delete(name);
-        });
-      },
+      claim: locks.claim,
+      wait: locks.wait,
     } satisfies CallDeskPorts);
   const fireTimers = async () => {
     for (const fire of timers.splice(0)) fire();
@@ -281,5 +276,122 @@ describe("a refusal is never silent, and typed text is never discarded (verifier
     const { w, b } = await recoveredRefusal(new Set(["refusal_dropped"]));
     expect(w.outbox()).toEqual([]);
     expect(b.getSnapshot().refusedRecords).toEqual([]);
+  });
+});
+
+describe("pending is derived from the outbox, never stored on its own (council on b15a769, item 1)", () => {
+  test("a tab back on Calls while another tab resends its outcome learns the answer when that tab gets it, and is not left locked", async () => {
+    const w = await world();
+    const sessionA = new MapStore();
+    const a = w.desk(sessionA);
+    await a.start();
+    await w.fireTimers();
+    a.setDraft({ outcome: "no_answer", note: "Rang out twice." });
+    a.log();
+    await flush();
+    // A's request reaches the server; its answer is lost. The user opens Today in A.
+    await w.answer(w.held[0]!, true);
+    a.dispose();
+
+    // B, on Calls, claims A's entry and resends it; that answer is held for now.
+    const b = w.desk(new MapStore());
+    await b.start();
+    await flush();
+    const resend = w.held[0]!;
+    expect(b.getSnapshot().recovering).toHaveLength(1);
+
+    // The user returns to Calls in A: its outcome is pending, being sent from another tab.
+    const a2 = w.desk(sessionA);
+    await a2.start();
+    await flush();
+    expect(a2.getSnapshot().pending).toMatchObject({ body: { requestId: resend.body.requestId }, elsewhere: true });
+    expect(w.held).toHaveLength(1);
+
+    // B's resend is answered: the entry leaves the outbox, and A learns it was logged.
+    await w.answer(resend);
+    await a2.refresh();
+    await flush();
+    const snap = a2.getSnapshot();
+    expect(snap.pending).toBeNull();
+    expect(snap.locked).toBe(false);
+    expect(snap.logged).toMatchObject({ requestId: resend.body.requestId, body: { note: "Rang out twice." } });
+    expect(w.outbox()).toEqual([]);
+  });
+
+  test("a duplicated tab, whose sessionStorage the browser copied, is not the same desk: it takes an identity of its own", async () => {
+    const w = await world();
+    const sessionA = new MapStore();
+    const a = w.desk(sessionA);
+    await a.start();
+    await w.fireTimers();
+    a.setDraft({ outcome: "voicemail" });
+    a.log();
+    await flush();
+    // The tab is duplicated while A's outcome waits: the copy has A's tab id.
+    const copy = new MapStore();
+    for (const [k, v] of sessionA.map) copy.set(k, v);
+    const d = w.desk(copy);
+    await d.start();
+    await flush();
+    expect(d.getSnapshot().pending).toBeNull();
+    expect(copy.get("outreach.calls.tab")).not.toBe(sessionA.get("outreach.calls.tab"));
+    expect(a.getSnapshot().pending).not.toBeNull();
+  });
+});
+
+describe("only an answer that says the outcome was refused is a refusal (council on b15a769, item 4)", () => {
+  test("a 429 is no answer: the entry stays and is sent again", async () => {
+    const w = await world();
+    const a = w.desk(new MapStore());
+    await a.start();
+    await w.fireTimers();
+    a.setDraft({ outcome: "no_answer" });
+    a.log();
+    await flush();
+    const first = w.held.splice(0, 1)[0]!;
+    first.reject(new Refused(429, "Too many requests.", "rate_limited"));
+    await flush();
+    expect(w.outbox()).toHaveLength(1);
+    expect(a.getSnapshot().pending).toMatchObject({ unconfirmed: true });
+    await w.fireTimers();
+    expect(w.held.map((x) => x.body.requestId)).toEqual([first.body.requestId]);
+  });
+});
+
+describe("liveness: an outcome left in the outbox is taken over without a refresh (council on b15a769, item 9)", () => {
+  const abandoned = async (faults: ReadonlySet<DeskFault> = new Set()) => {
+    const w = await world();
+    const a = w.desk(new MapStore(), faults);
+    await a.start();
+    await w.fireTimers();
+    a.setDraft({ outcome: "interested" });
+    a.log();
+    await flush();
+    // A's request never reaches the server and A keeps the lock while it waits to retry.
+    const lost = w.held.splice(0, 1)[0]!;
+    lost.reject(new NoAnswer());
+    await flush();
+    const b = w.desk(new MapStore(), faults);
+    await b.start();
+    await flush();
+    expect(w.held).toEqual([]);
+    // A leaves Calls, releasing its lock. B gets no refresh, no storage event and no user action.
+    a.dispose();
+    await flush();
+    return { w, b, id: lost.body.requestId };
+  };
+
+  test("the desk still on Calls was queued for the lock, takes the entry when it is released, and sends it", async () => {
+    const { w, id } = await abandoned();
+    expect(w.held.map((x) => x.body.requestId)).toEqual([id]);
+    await w.answer(w.held[0]!);
+    expect(w.outbox()).toEqual([]);
+    expect(await w.stored(id)).toBe(true);
+  });
+
+  test("without waiting for the lock (the old behaviour) nothing is sent", async () => {
+    const { w } = await abandoned(new Set(["no_wait_for_lock"]));
+    expect(w.held).toEqual([]);
+    expect(w.outbox()).toHaveLength(1);
   });
 });
