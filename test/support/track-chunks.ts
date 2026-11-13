@@ -19,7 +19,9 @@ import { TRACK_MUTATIONS } from "./track-mutations.ts";
  * channels, reported late, between a claim and its handover and during a text, a second worker's handovers, claims
  * withdrawn by the guard and by age, and all three endings. Refresh it when the generator changes.
  */
-export const TRACK_FIXED_SEEDS: readonly number[] = [2, 3, 4, 61];
+// 29 and 78 (seeds 20261142, 20261191): regressions for the Activity check's record at the instant a
+// lead ends or a number goes bad (the search on 7401eb2, shards 6 and 7).
+export const TRACK_FIXED_SEEDS: readonly number[] = [2, 3, 4, 29, 61, 78];
 const SEARCH_SEEDS = 100;
 /** Seed offsets each mutation's search tries after its recorded seed. */
 const MAX_SEEDS = 30;

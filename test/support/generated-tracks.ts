@@ -689,11 +689,14 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
         const last = sends.at(-1);
         return last !== undefined && sends.every((d) => d !== undefined) && knownAt(t.channel, last) < badAtOf(rec, t.channel);
       };
-      // The lead ends first when its last channel goes bad (2.1), so a start or a failure at that very
-      // instant is never stored: only what comes strictly before the end is.
+      // The lead ends first when its last channel goes bad (2.1), so a start at that very instant is
+      // not stored, unless the track's own call to the provider is what found it bad, or the lead's
+      // reply came in that same instant after the call: the provider's log of calls (independent of the
+      // engine's store) shows the track started then (search on 7401eb2, seeds 20261142 and 20261191).
+      const called = (t: TrackDefinition) => ownCall(t).length > 0;
       const started = (t: TrackDefinition) => {
         const start = startOf(rec, t);
-        return start !== null && start < endLimitOf(rec) && start <= now ? start : null;
+        return start !== null && start <= now && (start < endLimitOf(rec) || (start === endLimitOf(rec) && called(t))) ? start : null;
       };
       for (const t of def.tracks) {
         if (t.channel === "call") continue;
@@ -729,6 +732,15 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
         // found it bad at that very instant (then it failed); ended on a bad detail with no failure or
         // bounce of its own: marked bad elsewhere.
         const own = owned.failure;
+        // A track that starts at the very instant another track's call finds the detail bad: the
+        // record does not model the order within that pass, so it is stored skipped (started after the
+        // detail went bad) or failed (started first, then found bad), and both are what the engine may
+        // store (check 20). Activity must say whichever it is (search on 7401eb2, seed 20261142).
+        if (!own && badAtOf(rec, t.channel) === start && !called(t)) {
+          const either = [`skipped|${t.channel}|${label}|-`, `address_bad|${t.channel}|${label}|-`];
+          expected.push(either.find((x) => shown.includes(x)) ?? either[0]!);
+          continue;
+        }
         const skipped = !own && !reachesAt(rec, t.channel, start);
         if (skipped) expected.push(`skipped|${t.channel}|${label}|-`);
         if (!skipped && !own && !completed(t) && badAtOf(rec, t.channel) < Math.min(now + 1, endLimitOf(rec))) expected.push(`address_bad|${t.channel}|${label}|-`);
