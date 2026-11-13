@@ -56,6 +56,8 @@ interface Case {
   readonly accounts: FakeAccount[];
   readonly zones: string[];
   readonly definition: CampaignDefinition;
+  /** The leads have mobiles and the harness an SMS number, for a campaign with an SMS track. */
+  readonly sms?: boolean;
 }
 
 function generate(seed: number): Case {
@@ -91,10 +93,26 @@ function generate(seed: number): Case {
   };
 }
 
+const SMS_NUMBER = "+447700900001";
+const smsNumbers = { numbers: [{ id: SMS_NUMBER, capacity: 500, gapMs: null, k: 1, healthy: true, resetZone: "Europe/London" }] };
+/** A fictitious UK mobile for lead `i`. */
+const mobileOf = (i: number) => `+4477009002${String(i).padStart(2, "0")}`;
+
+/** The case with an SMS track that starts after its email track, `delayDays` after it finishes. */
+const withSmsAfter = (c: Case, delayDays: number): Case => ({
+  ...c,
+  sms: true,
+  definition: {
+    ...c.definition,
+    smsPool: [SMS_NUMBER],
+    tracks: [...c.definition.tracks, { id: "t2", channel: "sms", branch: "main", window: c.definition.tracks[0]!.window, steps: [{ id: "m1", waitDays: 0, subject: "", body: "A short text.", threading: "new_subject", removed: false }], start: { kind: "after", trackId: "t1", delayDays }, removed: false }],
+  },
+});
+
 async function compare(c: Case) {
-  const h = new EngineHarness({ start: c.start, accounts: c.accounts });
+  const h = new EngineHarness({ start: c.start, accounts: c.accounts, ...(c.sms ? { sms: smsNumbers } : {}) });
   const businesses = c.zones.map((zone, i) => business({ business_id: `b${i}`, business_name: `Clinic ${i}`, timezone: zone }));
-  const people = c.zones.map((_, i) => person({ person_id: `p${i}`, business_id: `b${i}`, full_name: `Lead Person${i}`, email: `lead${i}@clinic${i}.example`, timezone: "" }));
+  const people = c.zones.map((_, i) => person({ person_id: `p${i}`, business_id: `b${i}`, full_name: `Lead Person${i}`, email: `lead${i}@clinic${i}.example`, timezone: "", ...(c.sms ? { dial_phone: mobileOf(i), dial_phone_type: "mobile" } : {}) }));
   const { campaign } = await h.createCampaign("Projection check", { businesses, people });
   await h.tick();
   await h.defineSequence(campaign.id, c.definition);
@@ -113,7 +131,7 @@ async function compare(c: Case) {
     perInboxDay: sends.map((s) => `${s.accountId}/${resetDayOf(s.at, resetOf.get(s.accountId) ?? "UTC")}`).sort(),
   });
   const kept = projected!.sends.filter((s) => s.at < until);
-  return { projected: kept, actual, view, daily: { projected: daily(kept), actual: daily(actual) } };
+  return { projected: kept, actual, view, daily: { projected: daily(kept), actual: daily(actual) }, texts: c.sms ? h.sms.deliveryLog.length : 0 };
 }
 
 describe("the Before launch projection makes exactly the engine's sends (PR 41 verification, B5)", () => {
@@ -145,6 +163,25 @@ describe("the Before launch projection makes exactly the engine's sends (PR 41 v
       expect(exact(projected)).toEqual(exact(actual));
     });
   }
+});
+
+describe("with an SMS track after the email track, the email sends are still exactly the engine's (merge of ticket 13a)", () => {
+  const SEEDS = Number(process.env["PROJECTION_SEEDS"] ?? 20);
+  const texted: number[] = [];
+  for (const seed of Array.from({ length: SEEDS }, (_, i) => 3000 + i)) {
+    test(`generated case ${seed}`, async () => {
+      const c = withSmsAfter(generate(seed), seed % 3);
+      const { projected, actual, daily, view, texts } = await compare(c);
+      texted.push(texts);
+      expect(view.load).toMatchObject({ leavesOutSms: true, otherTracksChangeTiming: null });
+      expect(daily.projected).toEqual(daily.actual);
+      const exact = (xs: typeof actual) => [...xs].sort((a, b) => a.at - b.at || (a.accountId < b.accountId ? -1 : 1));
+      expect(exact(projected)).toEqual(exact(actual));
+    });
+  }
+  test("the runs send texts alongside the emails, so the SMS track really runs", () => {
+    expect(texted.filter((n) => n > 0).length).toBeGreaterThan(SEEDS / 2);
+  });
 });
 
 describe("an inbox that cannot send now (PR 41 council, item 1)", () => {

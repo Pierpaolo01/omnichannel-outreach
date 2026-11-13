@@ -83,3 +83,5 @@ A ticket is complete when the coordinator has merged its pull request after veri
 ## Standing checks
 
 `pnpm check` and the CI workflow are the guardrail. When an agent makes a mistake that a deterministic check could have caught, add the check: a lint rule, a test, a scan over every screen. The accessibility and layout scans in `e2e/` and the typed mock responses came from exactly that.
+
+**Migration numbers** (added 13 November 2026, after pull request 43). Schema migrations are numbered exactly 1 to N with no gap; `src/server/persistence/migrations.test.ts` fails on any branch that skips or repeats a number, and `migrate` refuses a database whose recorded versions are not a prefix of the list. A migration applied above a gap would leave the gap unfilled for good on every database that passed it. So a branch takes the next number at merge time: if another branch merged a migration first, renumber yours when merging the integration branch tip.

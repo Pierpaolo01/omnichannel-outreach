@@ -4,7 +4,7 @@ import { z } from "zod";
 import { planImport } from "../domain/import-plan.ts";
 import { isOutreachStatus } from "../domain/outreach-status.ts";
 import { checkScraperFile, parseScraperExport } from "../domain/scraper-export.ts";
-import type { ApiError, Campaign, FileCheckResult } from "../shared/api.ts";
+import type { ApiError, Campaign, FileCheckResult, SmsProviderStatus } from "../shared/api.ts";
 import { CAMPAIGN_NAME_MAX, DEFINITION_MAX_BYTES, STEP_BODY_MAX, STEP_SUBJECT_MAX } from "../shared/limits.ts";
 import { checkApiRequest } from "./guard.ts";
 import type { OutreachStore } from "./persistence/store.ts";
@@ -12,7 +12,7 @@ import { launchCheck } from "../domain/sequence/blockers.ts";
 import { definitionProblems, emptyDefinition, liveTracks, type CampaignDefinition } from "../domain/sequence/definition.ts";
 import { Engine } from "./engine/engine.ts";
 import type { DefinitionSave, StoredDefinition } from "./engine/engine-store.ts";
-import { UnconnectedEmailPort } from "./engine/ports.ts";
+import { UnconnectedEmailPort, UnprovisionedSmsPort } from "./engine/ports.ts";
 import { accountView, needsAttention, progressView } from "./engine/views.ts";
 import type { CampaignDetail, CampaignListItem, CampaignSequenceSummary, SequenceView } from "../shared/api.ts";
 import { beforeLaunchView, copyPreview } from "./before-launch.ts";
@@ -28,6 +28,11 @@ export interface AppDependencies {
   readonly engine?: Pick<Engine, "launch">;
   /** The email provider's own description, for GET /api/email-provider; absent when none is connected. */
   readonly emailProvider?: EmailProviderSource | null;
+  /**
+   * The SMS provider behind the engine, for GET /api/sms-provider: `none` in the running app, since
+   * no SMS provider is provisioned (#28); `test-simulator` only in the test harness's fake.
+   */
+  readonly smsProvider?: "none" | "test-simulator";
 }
 
 const windowRule = z.object({ day: z.number().int().min(0).max(6), start: z.number().int().min(0).max(23), end: z.number().int().min(0).max(24) });
@@ -52,6 +57,7 @@ const definitionBody = z.object({
   timezone: z.string().trim().min(1),
   callSkipLimitDays: z.number().default(2),
   emailPool: z.array(z.string().min(1).max(200)).max(100),
+  smsPool: z.array(z.string().min(1).max(200)).max(100).default([]),
   tracks: z.array(trackBody).max(20),
   /** Who wrote the save (ADR 0003 1.1.1): its editing session, its number there, and the revision it last saw. */
   save: z.object({ session: z.string().min(1).max(100), seq: z.number().int().nonnegative(), base: z.number().int().nonnegative() }).optional(),
@@ -105,8 +111,8 @@ const importBody = z.object({
 const checkBody = z.object({ businessesCsv: z.string().optional(), peopleCsv: z.string().optional() });
 
 /** The HTTP interface. Every route is under /api; the web client is served separately. */
-export function createApp({ store, now, newId, engine: givenEngine, emailProvider }: AppDependencies): Hono {
-  const engine = givenEngine ?? new Engine({ store: store.engine, port: new UnconnectedEmailPort(), now: () => Date.parse(now()), newId });
+export function createApp({ store, now, newId, engine: givenEngine, emailProvider, smsProvider = "none" }: AppDependencies): Hono {
+  const engine = givenEngine ?? new Engine({ store: store.engine, port: new UnconnectedEmailPort(), smsPort: new UnprovisionedSmsPort(), now: () => Date.parse(now()), newId });
   const app = new Hono().basePath("/api");
   app.use(async (c, next) => {
     const verdict = checkApiRequest({
@@ -268,9 +274,8 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
 
   /** `written`: the row as the transaction that wrote it left it, so the answer is that write's (PR 41 council, item 4). */
   const sequenceView = async (campaignId: string, defaultZone: string | null, written?: StoredDefinition): Promise<SequenceView | null> => {
-    const read = written ? null : await store.engine.campaign(campaignId);
-    if (!written && !read) return null;
-    const row = written ?? { definition: read!.definition, definitionVersion: read!.definitionVersion, definitionEditedAt: read!.definitionEditedAt, launchedAt: read!.launchedAt };
+    const row = written ?? (await store.engine.campaign(campaignId));
+    if (!row) return null;
     const definition = row.definition ?? emptyDefinition(defaultZone ?? machineZone());
     const at = Date.parse(now());
     const { leads, accounts } = await store.engine.launchInputs(campaignId);
@@ -381,6 +386,15 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   });
 
   app.get("/needs-attention", async (c) => c.json(await needsAttention(store.engine, Date.parse(now()))));
+
+  // No SMS provider is provisioned or chosen (#28): the running app reports none, honestly.
+  app.get("/sms-provider", async (c) => {
+    if (smsProvider === "none") return c.json<SmsProviderStatus>({ provider: "none", message: "No SMS provider is connected, so SMS tracks cannot launch.", numbers: [] });
+    const at = Date.parse(now());
+    const labels = await store.engine.accountLabels();
+    const numbers = (await store.engine.accounts(at)).filter((a) => a.channel === "sms").map((a) => ({ id: a.id, label: labels[a.id] ?? a.id, healthy: a.healthy, capacity: a.capacity, usedToday: a.used }));
+    return c.json<SmsProviderStatus>({ provider: "test-simulator", message: "A test simulator, not an SMS provider: nothing is sent to anyone.", numbers });
+  });
 
   registerEmailProviderRoutes(app, { engine: store.engine, provider: emailProvider ?? null, now: () => Date.parse(now()) });
 

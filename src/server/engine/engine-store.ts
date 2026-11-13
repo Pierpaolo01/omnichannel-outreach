@@ -1,12 +1,12 @@
 import type { LaunchCheck, SenderAccountView } from "../../domain/sequence/blockers.ts";
 import type { MergeData } from "../../domain/sequence/copy.ts";
 import type { CampaignDefinition } from "../../domain/sequence/definition.ts";
-import type { AccountState, Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
+import type { AccountState, Attempt, ProviderWork, SmsBindingRecord, SubjectState } from "../../domain/sequence/state.ts";
 
 /** A sender account as the provider port reports it. */
 export interface SenderAccountConfig {
   readonly id: string;
-  readonly channel: "email";
+  readonly channel: "email" | "sms";
   readonly label: string;
   /** Daily capacity on the account's reset day. */
   readonly capacity: number;
@@ -15,6 +15,8 @@ export interface SenderAccountConfig {
   /** In-flight bound (ADR 0002's k). */
   readonly k: number;
   readonly healthy: boolean;
+  /** Why the provider says it cannot send, when not healthy, in the provider's own words (such as Instantly's "sending_off"). */
+  readonly problem?: string | null;
   readonly resetZone: string;
 }
 
@@ -143,6 +145,10 @@ export interface EngineStore {
   pendingReplies(): Promise<ReplyEvent[]>;
 
   upsertAccounts(accounts: readonly SenderAccountConfig[]): Promise<void>;
+  /** Marks unhealthy every account of `channel` its port no longer reports: it is disconnected. */
+  disconnectUnlisted(channel: "email" | "sms", listed: readonly string[]): Promise<void>;
+  /** Every SMS conversation binding of a mobile (E.164), from any number, oldest first (ADR 0003 4.5). */
+  smsBindingsOf(recipient: string): Promise<SmsBindingRecord[]>;
   accounts(now: number): Promise<AccountState[]>;
   accountLabels(): Promise<Record<string, string>>;
   /** Moves the account's next pacing slot to at least `callStart` plus its gap. */

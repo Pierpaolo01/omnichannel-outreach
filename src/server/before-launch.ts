@@ -11,7 +11,7 @@ import { leadNow, span } from "../domain/sequence/clock.ts";
 import { heldReason } from "../domain/sequence/dispatch.ts";
 import { mergeUses } from "../domain/sequence/copy.ts";
 import { liveSteps, liveTracks, ownSubject, type CampaignDefinition, type TrackDefinition } from "../domain/sequence/definition.ts";
-import { goodEmail, runs } from "../domain/sequence/progress.ts";
+import { goodEmail, progressOf, runs } from "../domain/sequence/progress.ts";
 import type { AccountState, SubjectState } from "../domain/sequence/state.ts";
 import type { BeforeLaunchView, ContactDetailView, CopyPreview, LeadRow, LoadProjectionView, PreviewLead } from "../shared/api.ts";
 import type { OutreachStore } from "./persistence/store.ts";
@@ -114,16 +114,45 @@ function cannotProject(a: AccountState, now: number): "cannot_send" | "quota" | 
   return null;
 }
 
+/**
+ * Whether a campaign's email sends can be projected alone: the projection simulates one email
+ * track, and SMS sends are not in it yet (ticket 13b adds them). Another track can change when the
+ * emails go: a text marks the lead touched, which moves its emails ahead in priority (4.3), and a
+ * track may start after another finishes. Neither can happen when the campaign's one email track
+ * starts at entry and every other live track starts, through its chain, after it.
+ */
+export function emailTimingAlone(def: CampaignDefinition): boolean {
+  const live = liveTracks(def, "main").filter((t) => t.channel !== "call");
+  const emails = live.filter((t) => t.channel === "email");
+  const email = emails[0];
+  if (!email) return true;
+  if (emails.length > 1 || email.start.kind !== "entry") return false;
+  const afterEmail = (t: TrackDefinition, depth: number): boolean => {
+    if (t.start.kind !== "after" || depth > live.length) return false;
+    if (t.start.trackId === email.id) return true;
+    const before = live.find((x) => x.id === (t.start as { trackId: string }).trackId);
+    return before !== undefined && afterEmail(before, depth + 1);
+  };
+  return live.every((t) => t === email || afterEmail(t, 0));
+}
+
+/** Whether the campaign has a live SMS track the estimate leaves out. */
+const hasSms = (def: CampaignDefinition): boolean => liveTracks(def, "main").some((t) => t.channel === "sms");
+
+type ProjectionResult = { readonly projection: Projection | null; readonly otherTracksChangeTiming: "this_campaign" | "other_campaign" | null };
+
 /** The projection's input, from the store: the same lead zones, inboxes, slots and counts sending reads. */
-async function projectionOf(store: OutreachStore, campaignId: string, definition: CampaignDefinition, leads: readonly CampaignLead[], now: number): Promise<Projection | null> {
+async function projectionOf(store: OutreachStore, campaignId: string, definition: CampaignDefinition, leads: readonly CampaignLead[], now: number): Promise<ProjectionResult> {
   const track: TrackDefinition | undefined = liveTracks(definition, "main").find((t) => t.channel === "email");
-  if (!track) return null;
+  if (!track) return { projection: null, otherTracksChangeTiming: null };
+  if (!emailTimingAlone(definition)) return { projection: null, otherTracksChangeTiming: "this_campaign" };
   const all = await store.engine.accounts(now);
   const pool = all.filter((a) => definition.emailPool.includes(a.id));
-  if (pool.some((a) => cannotProject(a, now) !== null)) return null;
-  const others = await otherWaitingWork(store, campaignId, definition, now);
+  if (pool.some((a) => cannotProject(a, now) !== null)) return { projection: null, otherTracksChangeTiming: null };
+  const { work: others, otherTracksChangeTiming } = await otherWaitingWork(store, campaignId, definition, now);
+  if (otherTracksChangeTiming) return { projection: null, otherTracksChangeTiming: "other_campaign" };
   const used = new Set([...definition.emailPool, ...others.flatMap((o) => [...o.pool, ...(o.sender ? [o.sender] : [])])]);
-  return projectLoad({
+  const projection = projectLoad({
     start: now,
     window: track.window,
     waits: liveSteps(track).map((s) => s.waitDays),
@@ -135,6 +164,7 @@ async function projectionOf(store: OutreachStore, campaignId: string, definition
     zone: definition.timezone,
     horizonDays: PROJECTION_HORIZON_DAYS,
   });
+  return { projection, otherTracksChangeTiming: null };
 }
 
 /**
@@ -142,16 +172,25 @@ async function projectionOf(store: OutreachStore, campaignId: string, definition
  * B10): each running lead's pending email step, with its due instant, window, remaining waits and
  * any claim it holds. A step already handed to the provider holds its reservation in the inbox's
  * count; its later steps are taken as due from now. Leads that do not run (paused, ended, held)
- * are left out, as the engine leaves them.
+ * are left out, as the engine leaves them. A lead whose campaign has another track that can change
+ * when its emails go (`emailTimingAlone`), and whose emails are not all sent, cannot be simulated
+ * by email alone: `otherTracksChangeTiming` says so, and nothing is projected.
  */
-async function otherWaitingWork(store: OutreachStore, campaignId: string, definition: CampaignDefinition, now: number): Promise<OtherLead[]> {
+async function otherWaitingWork(store: OutreachStore, campaignId: string, definition: CampaignDefinition, now: number): Promise<{ work: OtherLead[]; otherTracksChangeTiming: boolean }> {
   const ours = new Set(definition.emailPool);
   const out: OtherLead[] = [];
+  const alone = new Map<string, boolean>();
   for (const id of await store.engine.runningSubjectIds()) {
     const s = await store.engine.subject(id, now);
     if (!s || s.campaign.id === campaignId || !runs(s)) continue;
     const pool = s.campaign.definition.emailPool;
     if (s.subject.emailSender ? !ours.has(s.subject.emailSender) : !pool.some((a) => ours.has(a))) continue;
+    const timingAlone = alone.get(s.campaign.id) ?? emailTimingAlone(s.campaign.definition);
+    alone.set(s.campaign.id, timingAlone);
+    if (!timingAlone) {
+      const emailTracks = liveTracks(s.campaign.definition, "main").filter((t) => t.channel === "email");
+      if (emailTracks.some((t) => progressOf(s, t.id)?.finishedAt == null)) return { work: out, otherTracksChangeTiming: true };
+    }
     for (const p of s.tracks) {
       const other = s.campaign.definition.tracks.find((t) => t.id === p.trackId);
       if (!other || other.channel !== "email" || p.finishedAt !== null || p.nextStepId === null || p.dueAt === null || heldReason(s, p.trackId, now)) continue;
@@ -180,21 +219,23 @@ async function otherWaitingWork(store: OutreachStore, campaignId: string, defini
       });
     }
   }
-  return out;
+  return { work: out, otherTracksChangeTiming: false };
 }
 
 /** The projected sends for a campaign's leads, for tests that compare them with the engine's. */
 export async function projectedSends(store: OutreachStore, campaignId: string, now: number): Promise<Projection | null> {
   const row = await store.engine.campaign(campaignId);
   if (!row?.definition) return null;
-  return projectionOf(store, campaignId, row.definition, await campaignLeads(store, campaignId, row.definition, now), now);
+  return (await projectionOf(store, campaignId, row.definition, await campaignLeads(store, campaignId, row.definition, now), now)).projection;
 }
 
 async function loadProjection(store: OutreachStore, campaignId: string, definition: CampaignDefinition, leads: readonly CampaignLead[], now: number): Promise<LoadProjectionView> {
   const labels = await store.engine.accountLabels();
   const pool = (await store.engine.accounts(now)).filter((a) => definition.emailPool.includes(a.id));
-  const projection = await projectionOf(store, campaignId, definition, leads, now);
+  const { projection, otherTracksChangeTiming } = await projectionOf(store, campaignId, definition, leads, now);
   return {
+    otherTracksChangeTiming,
+    leavesOutSms: projection !== null && hasSms(definition),
     leadsWithEmail: leads.filter((l) => l.lead.email !== null).length,
     accounts: pool.map((a) => ({
       id: a.id,

@@ -514,7 +514,7 @@ function TimingAndSender({ track, editor, onWindow }: { track: TrackDefinition; 
   const days = track.window.map((w) => w.day);
   const locked = editor.launched;
   const zones = timeZones(editor.draft.timezone);
-  const accounts = editor.view.accounts;
+  const accounts = editor.view.accounts.filter((a) => a.channel === "email");
   return (
     <section aria-label="Timing and sender" className="flex flex-col gap-2">
       <h3 className="text-[13px] font-semibold text-muted">Timing and sender</h3>

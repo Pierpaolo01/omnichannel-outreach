@@ -141,7 +141,8 @@ describe("the engine through the Instantly adapter", () => {
     expect(view.launch.blockers.map((b) => b.kind)).toEqual(["no_sender"]);
     expect(port.status().inboxes.map((i) => i.reason)).toEqual(["sending_off"]);
     const attention = (await h.request<NeedsAttention>("GET", "/api/needs-attention")).body;
-    expect(attention.unhealthyInboxes).toEqual([{ accountId: "ada@sender.example" }]);
+    // Listed once, with the provider's own reason (council on 0f916b1, item 2).
+    expect(attention.senderProblems).toEqual([{ accountId: "ada@sender.example", channel: "email", label: "ada@sender.example", problem: "sending_off" }]);
     h.clock = MONDAY_9;
     expect((await h.launch(campaign.id)).status).toBe(409);
     await h.advanceTo(MONDAY_9 + 3 * DAY);
@@ -158,7 +159,7 @@ describe("the engine through the Instantly adapter", () => {
     fake.failWith = 500;
     h.clock = MONDAY_9 + 20 * 60_000;
     await h.tick();
-    expect((await h.request<NeedsAttention>("GET", "/api/needs-attention")).body.unhealthyInboxes).toEqual([{ accountId: "ada@sender.example" }]);
+    expect((await h.request<NeedsAttention>("GET", "/api/needs-attention")).body.senderProblems).toEqual([{ accountId: "ada@sender.example", channel: "email", label: "ada@sender.example", problem: "stale" }]);
     // Launch is refused while no inbox can send.
     expect((await h.launch(campaign.id)).status).toBe(409);
     fake.failWith = null;

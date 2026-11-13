@@ -41,6 +41,9 @@ export interface EditorDeps {
   session?: string;
 }
 
+/** The connected email inboxes: the email pool follows them; the engine's SMS numbers are not inboxes. */
+export const emailInboxIds = (view: SequenceView): string[] => view.accounts.filter((a) => a.channel === "email").map((a) => a.id);
+
 /** How long after an edit its save is sent. */
 export const SAVE_DELAY_MS = 600;
 
@@ -55,7 +58,7 @@ export class EditorStore {
     this.deps = deps;
     this.state = { view: initial, draft: initial.definition, save: { kind: "idle" }, unsaved: false, pending: null, problems: draftProblems(initial.definition) };
     this.queue = new SaveQueue({
-      read: () => ({ draft: this.state.draft, accountIds: this.state.view.accounts.map((a) => a.id), version: this.state.view.definitionVersion }),
+      read: () => ({ draft: this.state.draft, accountIds: emailInboxIds(this.state.view), version: this.state.view.definitionVersion }),
       put: (definition, options, save) => deps.put({ ...definition, save }, options),
       onStatus: (status) => this.set({ save: status, unsaved: status.kind !== "saved" && status.kind !== "idle" }),
       // Saves land in order, so each accepted view is the newest; the draft only if no edit came after.
@@ -177,7 +180,7 @@ export class EditorStore {
     const view = this.state.view;
     if (view.launchedAt !== null || !view.definition.tracks.some((t) => !t.removed && t.channel === "email")) return;
     const pool = [...view.definition.emailPool].sort().join("\n");
-    const connected = view.accounts.map((a) => a.id).sort().join("\n");
+    const connected = [...emailInboxIds(view)].sort().join("\n");
     if (pool === connected || this.queue.inConflict) return;
     this.queue.edited();
     void this.queue.save();

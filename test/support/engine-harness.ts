@@ -10,6 +10,7 @@ import type { Campaign, EnrollmentProgress, ImportRecord, PersonRecord, Sequence
 import { sequentialIds } from "./domain.ts";
 import { csvOf, type ExportRows } from "./export-builder.ts";
 import { FakeEmailPort, type FakeAccount, type FakeMode } from "./fake-email-port.ts";
+import { FakeSmsPort, type FakeNumber, type FakeSmsMode } from "./fake-sms-port.ts";
 
 /**
  * The real HTTP app and SQLite store with the engine over a fake email provider, on a clock the
@@ -27,6 +28,10 @@ export interface EngineHarnessOptions {
   readonly port?: Provider | ((store: OutreachStore, now: () => number) => Provider);
   /** Further engine dependencies, such as how port waits are bounded. */
   readonly engine?: Partial<EngineDependencies>;
+  /** A database file instead of an in-memory one, so a test can reopen it (migration tests). */
+  readonly databasePath?: string;
+  /** A fake SMS provider's numbers (ticket 13). Without them the engine has the unprovisioned SMS port. */
+  readonly sms?: { readonly numbers: readonly FakeNumber[]; readonly modes?: readonly FakeSmsMode[] };
 }
 
 /** A provider the harness can drive: it acts on its own at instants the harness advances to. */
@@ -54,6 +59,8 @@ export class EngineHarness {
   clock: number;
   readonly store: OutreachStore;
   readonly provider: Provider;
+  /** The fake SMS provider, when the harness has one. */
+  readonly smsProvider: FakeSmsPort | null;
   engine: Engine;
   readonly crashes: string[] = [];
   /** Engine ticks run so far. */
@@ -68,7 +75,7 @@ export class EngineHarness {
     this.options = options;
     this.hooks = options.hooks ?? {};
     this.clock = options.start;
-    this.store = openSqliteStore(":memory:");
+    this.store = openSqliteStore(options.databasePath ?? ":memory:");
     // Count the engine's subject writes: a deterministic measure of a run's work, the same on every machine.
     const store = this.store.engine;
     const update = store.update.bind(store);
@@ -86,6 +93,7 @@ export class EngineHarness {
     this.provider =
       typeof options.port === "function" ? options.port(this.store, () => this.clock)
       : options.port ?? new FakeEmailPort({ now: () => this.clock, random: options.random ?? (() => 0.5), accounts: options.accounts, modes: options.modes ?? ["honest"] });
+    this.smsProvider = options.sms ? new FakeSmsPort({ now: () => this.clock, random: options.random ?? (() => 0.5), numbers: options.sms.numbers, modes: options.sms.modes ?? ["honest"] }) : null;
     this.engine = this.newEngine();
     this.app = createApp({
       store: this.store,
@@ -93,12 +101,25 @@ export class EngineHarness {
       newId: sequentialIds(),
       engine: { launch: (id, expected) => this.engine.launch(id, expected) },
       emailProvider: "status" in this.provider ? (this.provider as Provider & EmailProviderSource) : null,
+      smsProvider: this.smsProvider ? "test-simulator" : "none",
     });
   }
 
   /** Answers one HTTP request with the app, as a server would: the browser tests serve it this way. */
   fetch(request: Request): Promise<Response> {
     return Promise.resolve(this.app.fetch(request));
+  }
+
+  /** The fake SMS provider. */
+  get sms(): FakeSmsPort {
+    if (!this.smsProvider) throw new Error("this harness has no SMS provider");
+    return this.smsProvider;
+  }
+
+  /** Both providers act on whatever is due by now. */
+  private advanceProviders(): void {
+    this.provider.advance();
+    this.smsProvider?.advance();
   }
 
   /** The generated test's fake provider. */
@@ -112,12 +133,14 @@ export class EngineHarness {
       ...this.options.engine,
       store: this.store.engine,
       port: this.provider,
+      ...(this.smsProvider ? { smsPort: this.smsProvider } : {}),
       now: () => this.clock,
       newId: this.engineIds,
       ...(this.options.rules ? { rules: this.options.rules } : {}),
       hooks: {
         beforeApplyEvaluation: async (id) => this.hooks.beforeApplyEvaluation?.(id),
         beforeHandover: async (id) => this.hooks.beforeHandover?.(id),
+        afterClaim: async (id) => this.hooks.afterClaim?.(id),
         beforeRetry: async (id) => this.hooks.beforeRetry?.(id),
         afterAuthorization: (id) => this.hooks.afterAuthorization?.(id),
         crashPoint: (point, id) => this.hooks.crashPoint?.(point, id),
@@ -152,7 +175,7 @@ export class EngineHarness {
   }
 
   async launch(campaignId: string): Promise<{ status: number; body: unknown }> {
-    this.provider.advance();
+    this.advanceProviders();
     return this.request("POST", `/api/campaigns/${campaignId}/launch`);
   }
 
@@ -171,7 +194,7 @@ export class EngineHarness {
     this.ticks++;
     // Yield to the event loop, so the test runner's worker can answer its RPC on long runs.
     await new Promise((resolve) => setImmediate(resolve));
-    this.provider.advance();
+    this.advanceProviders();
     try {
       await this.engine.tick();
     } catch (error) {
@@ -187,9 +210,9 @@ export class EngineHarness {
    * it applies an injected event at once, while the main engine is between two steps.
    */
   async otherWorker(): Promise<void> {
-    this.provider.advance();
+    this.advanceProviders();
     // Another process: its ticks do not queue behind this one's.
-    await new Engine({ ...this.options.engine, ticks: new TickQueue(), store: this.store.engine, port: this.provider, now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) }).tick();
+    await new Engine({ ...this.options.engine, ticks: new TickQueue(), store: this.store.engine, port: this.provider, ...(this.smsProvider ? { smsPort: this.smsProvider } : {}), now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) }).tick();
   }
 
   /** A fresh engine on the same store and provider, settling what the crash left open. */
@@ -197,7 +220,7 @@ export class EngineHarness {
     this.engine = this.newEngine();
     for (let i = 0; i < 20; i++) {
       try {
-        this.provider.advance();
+        this.advanceProviders();
         await this.engine.recover();
         return;
       } catch (error) {
@@ -226,7 +249,7 @@ export class EngineHarness {
   async advanceTo(target: number, onInstant?: () => Promise<void>): Promise<void> {
     await this.tick();
     for (let guard = 0; guard < 100_000 && this.clock < target && !this.stopped; guard++) {
-      const wakes = [await this.engine.nextWakeAt(), this.provider.nextActivityAt(), target].filter((t): t is number => t !== null && t > this.clock);
+      const wakes = [await this.engine.nextWakeAt(), this.provider.nextActivityAt(), this.smsProvider?.nextActivityAt() ?? null, target].filter((t): t is number => t !== null && t > this.clock);
       this.clock = Math.min(...wakes);
       await this.tick();
       await onInstant?.();

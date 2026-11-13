@@ -15,7 +15,7 @@ import {
   readyItems,
   retryFailures,
 } from "../../domain/sequence/dispatch.ts";
-import { applyBadDestination, applyReply, applyToAttempt, applyToWork, enterMain, evaluate, replyMatches } from "../../domain/sequence/progress.ts";
+import { applyBadDestination, applyReply, applyToAttempt, applyToWork, enterMain, evaluate, replyMatches, smsReplyOwner } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
 
 export interface Rules {
@@ -26,6 +26,8 @@ export interface Rules {
   /** Whether a reply outside a known thread falls back to a piece of provider work (2.4). */
   readonly replyMatches: typeof replyMatches;
   readonly applyReply: typeof applyReply;
+  /** Which subject an SMS reply belongs to, from the mobile's conversations and the number it reached (4.5). */
+  readonly smsReplyOwner: typeof smsReplyOwner;
   readonly applyBadDestination: typeof applyBadDestination;
   readonly sendPoint: typeof sendPoint;
   readonly readyItems: typeof readyItems;
@@ -51,6 +53,7 @@ export const DEFAULT_RULES: Rules = {
   applyToWork,
   replyMatches,
   applyReply,
+  smsReplyOwner,
   applyBadDestination,
   sendPoint,
   readyItems,

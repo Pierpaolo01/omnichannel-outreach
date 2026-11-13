@@ -1,7 +1,8 @@
 /**
  * A campaign's definition (ADR 0003 1.1) and the definitions refused at the boundary (7.1).
- * Ticket 12b runs one email track in the main branch; any other shape is refused with a plain
- * message until the ticket that builds it (ADR 0003 section 10).
+ * Ticket 13 runs email and SMS tracks in the main branch, connected together or after a delay;
+ * phone tracks and the win-back branch are refused with a plain message until the tickets that
+ * build them (ADR 0003 section 10).
  */
 import { isTimeZone, type WindowRule } from "./clock.ts";
 
@@ -13,9 +14,10 @@ export interface StepDefinition {
   readonly id: string;
   /** Whole calendar days before this step; none on a track's first step. */
   readonly waitDays: number;
-  /** Email subject; used on a `new_subject` step. */
+  /** Email subject; used on a `new_subject` step. An SMS step has none. */
   readonly subject: string;
   readonly body: string;
+  /** Email only: an SMS has no thread, so an SMS step's threading is not read. */
   readonly threading: Threading;
   readonly removed: boolean;
 }
@@ -39,14 +41,22 @@ export interface CampaignDefinition {
   readonly callSkipLimitDays: number;
   /** Sender accounts email tracks may use. */
   readonly emailPool: readonly string[];
+  /** Sender numbers SMS tracks may use. Absent in definitions saved before ticket 13: none. */
+  readonly smsPool?: readonly string[];
   readonly tracks: readonly TrackDefinition[];
 }
 
-export const ONE_EMAIL_TRACK_FOR_NOW = "One email track for now: SMS, phone and further tracks arrive with later tickets.";
+export const CALL_TRACKS_LATER = "Phone tracks arrive with a later release: use email and SMS tracks for now.";
+export const WIN_BACK_LATER = "The win-back branch arrives with a later release.";
 
 /** An empty definition for a new campaign. */
 export function emptyDefinition(timezone: string): CampaignDefinition {
-  return { timezone, callSkipLimitDays: 2, emailPool: [], tracks: [] };
+  return { timezone, callSkipLimitDays: 2, emailPool: [], smsPool: [], tracks: [] };
+}
+
+/** The sender accounts a track on `channel` may use. */
+export function poolOf(def: CampaignDefinition, channel: TrackChannel): readonly string[] {
+  return channel === "email" ? def.emailPool : channel === "sms" ? (def.smsPool ?? []) : [];
 }
 
 export const liveTracks = (def: CampaignDefinition, branch: Branch = "main"): TrackDefinition[] =>
@@ -71,7 +81,8 @@ export function definitionProblems(def: CampaignDefinition, previous: CampaignDe
   const problems: string[] = [];
   if (!isTimeZone(def.timezone)) problems.push(`The campaign's time zone "${def.timezone}" is not an IANA time zone such as Europe/London.`);
   if (!isWholeDays(def.callSkipLimitDays) || def.callSkipLimitDays === 0) problems.push("The call skip limit is a whole number of days, at least 1.");
-  if (new Set(def.emailPool).size !== def.emailPool.length) problems.push("A sender account is listed twice.");
+  const smsPool = def.smsPool ?? [];
+  if (new Set(def.emailPool).size !== def.emailPool.length || new Set(smsPool).size !== smsPool.length) problems.push("A sender account is listed twice.");
 
   const trackIds = new Set<string>();
   const stepIds = new Set<string>();
@@ -85,11 +96,25 @@ export function definitionProblems(def: CampaignDefinition, previous: CampaignDe
   }
 
   const live = def.tracks.filter((t) => !t.removed);
-  if (live.length > 1 || live.some((t) => t.channel !== "email" || t.branch !== "main")) problems.push(ONE_EMAIL_TRACK_FOR_NOW);
+  if (live.some((t) => t.channel === "call")) problems.push(CALL_TRACKS_LATER);
+  if (live.some((t) => t.branch !== "main")) problems.push(WIN_BACK_LATER);
+  if (problems.length > 0 && live.some((t) => t.channel === "call" || t.branch !== "main")) return problems;
+
+  const label = (track: TrackDefinition) => {
+    const same = live.filter((t) => t.channel === track.channel);
+    const channel = track.channel === "sms" ? "SMS" : track.channel;
+    return same.length === 1 ? `the ${channel} track` : `${channel[0]?.toUpperCase() ?? ""}${channel.slice(1)} track ${same.indexOf(track) + 1}`;
+  };
+  const capital = (text: string) => `${text[0]?.toUpperCase() ?? ""}${text.slice(1)}`;
+  const byId = new Map(live.map((t) => [t.id, t]));
 
   for (const track of live) {
-    const name = `The ${track.channel} track`;
-    if (track.start.kind !== "entry") problems.push(`${name} must start when the lead enters the sequence.`);
+    const name = capital(label(track));
+    if (track.start.kind === "after") {
+      const before = byId.get(track.start.trackId);
+      if (!before || before.branch !== track.branch) problems.push(`${name} starts after a track that is not in the sequence.`);
+      if (!isWholeDays(track.start.delayDays)) problems.push(`The delay before ${label(track)} is a whole number of days.`);
+    }
     if (track.window.length === 0) problems.push(`${name}'s sending window has no days.`);
     for (const w of track.window) {
       if (!Number.isInteger(w.day) || w.day < 0 || w.day > 6) problems.push(`${name}'s window names a day that does not exist.`);
@@ -98,12 +123,23 @@ export function definitionProblems(def: CampaignDefinition, previous: CampaignDe
     }
     const steps = liveSteps(track);
     steps.forEach((step, i) => {
-      const label = `Step ${i + 1}`;
-      if (i === 0 && step.waitDays !== 0) problems.push(`${label} is the first step, so it has no wait.`);
-      if (!isWholeDays(step.waitDays)) problems.push(`${label}'s wait is a whole number of days.`);
-      if (i === 0 && track.channel === "email" && step.threading === "continue_thread") problems.push(`${label} is the first email, so there is no thread to continue: give it a new subject.`);
+      const stepLabel = `Step ${i + 1}`;
+      if (i === 0 && step.waitDays !== 0) problems.push(`${stepLabel} is the first step, so it has no wait.`);
+      if (!isWholeDays(step.waitDays)) problems.push(`${stepLabel}'s wait is a whole number of days.`);
+      if (i === 0 && track.channel === "email" && step.threading === "continue_thread") problems.push(`${stepLabel} is the first email, so there is no thread to continue: give it a new subject.`);
     });
   }
+
+  // A cycle in start rules: following "after" from any track must reach a track that starts at entry.
+  const inCircle = live.some((track) => {
+    const seen = new Set<string>();
+    for (let t: TrackDefinition | undefined = track; t && t.start.kind === "after"; t = byId.get(t.start.trackId)) {
+      if (seen.has(t.id)) return true;
+      seen.add(t.id);
+    }
+    return false;
+  });
+  if (inCircle) problems.push("The tracks' connections go in a circle, so none of them could start.");
 
   if (previous) {
     const before = new Map(previous.tracks.map((t) => [t.id, t]));

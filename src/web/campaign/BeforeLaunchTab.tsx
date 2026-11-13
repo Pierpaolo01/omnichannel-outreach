@@ -209,7 +209,7 @@ function Warnings({ facts, editor }: { facts: BeforeLaunchView; editor: Sequence
   for (const a of facts.load?.accounts ?? []) {
     if (a.usedToday > 0) items.push({ title: `${a.label} has ${a.usedToday} of its ${a.capacity} sends a day used today`, detail: "Other campaigns sent or reserved them, so fewer first emails can go today." });
   }
-  for (const a of editor.view.accounts.filter((x) => !x.healthy)) {
+  for (const a of editor.view.accounts.filter((x) => x.channel === "email" && !x.healthy)) {
     items.push({ title: `${a.label} ${CANNOT_SEND}`, detail: "Its leads wait until it can send again." });
   }
   if (facts.load && facts.load.notStartedWithinHorizon > 0) {
@@ -305,7 +305,8 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
   if (editor.launched || !load) return <p className="text-[14px] text-muted">The projection is for before launch. Once running, leads waiting for sending capacity show in Needs attention.</p>;
   if (!emailTrackOf(editor.view.definition)) return <p className="text-[14px] text-muted">Add an email track to see the load it puts on each sender inbox.</p>;
   if (load.accounts.length === 0) return <p className="text-[14px] text-crit">No connected sender inbox, so there is no load to project.</p>;
-  const blocked = load.cannotProject.length > 0;
+  // No figure that could contradict the engine: an inbox with no known end, or a track the estimate does not simulate yet.
+  const blocked = load.cannotProject.length > 0 || load.otherTracksChangeTiming !== null;
   return (
     <>
       <table className="table text-[14px] max-[560px]:block">
@@ -341,7 +342,13 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
           ))}
         </tbody>
       </table>
-      {blocked ? (
+      {load.otherTracksChangeTiming !== null ? (
+        <p className="mt-2 text-[13px] text-ink-2">
+          {load.otherTracksChangeTiming === "this_campaign"
+            ? "Can’t project the load yet: another track in this campaign (an SMS track, or a second email track) can send before or alongside the emails and change when they go, and the estimate doesn’t include it yet. A track that starts after the email track keeps the estimate."
+            : "Can’t project the load yet: another running campaign on these inboxes has a track (an SMS track, or a second email track) that changes when its emails go, and the estimate doesn’t include it yet."}
+        </p>
+      ) : blocked ? (
         <p className="mt-2 text-[13px] text-ink-2">
           Can’t project the load while{" "}
           {load.cannotProject
@@ -357,6 +364,7 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
             ? "No lead has an email yet."
             : `${load.notStartedWithinHorizon} of ${load.leadsWithEmail} leads would not start within ${load.horizonDays} days.`}{" "}
         Follow-ups always go before first emails when an inbox is full. The emails other running campaigns have waiting on these inboxes are counted; every send is assumed to succeed, and replies, bounces and pauses are not foreseen.
+        {load.leavesOutSms ? " SMS sends are not in this estimate yet: it counts email only." : ""}
       </p>
       )}
     </>

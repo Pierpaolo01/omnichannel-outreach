@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { launchCheck } from "./blockers.ts";
 import { render } from "./copy.ts";
-import { definitionProblems, ONE_EMAIL_TRACK_FOR_NOW, ownSubject, type CampaignDefinition, type StepDefinition, type TrackDefinition } from "./definition.ts";
+import { CALL_TRACKS_LATER, definitionProblems, ownSubject, WIN_BACK_LATER, type CampaignDefinition, type StepDefinition, type TrackDefinition } from "./definition.ts";
 import { renderStep } from "./dispatch.ts";
 import { subjectState } from "../../../test/support/sequence-state.ts";
 
@@ -39,10 +39,37 @@ describe("definitions refused at the boundary (ADR 0003 7.1)", () => {
     expect(definitionProblems(definition())).toEqual([]);
   });
 
-  test("a second track, or a track on another channel, is refused with one email track for now", () => {
-    expect(definitionProblems(definition({ tracks: [emailTrack(), emailTrack({ id: "t2", steps: [step("s9", { threading: "new_subject" })] })] }))).toContain(ONE_EMAIL_TRACK_FOR_NOW);
-    expect(definitionProblems(definition({ tracks: [emailTrack({ channel: "sms" })] }))).toContain(ONE_EMAIL_TRACK_FOR_NOW);
-    expect(definitionProblems(definition({ tracks: [emailTrack({ branch: "win_back" })] }))).toContain(ONE_EMAIL_TRACK_FOR_NOW);
+  test("email and SMS tracks in the main sequence, together or after a delay, are accepted (ticket 13)", () => {
+    const sms = emailTrack({ id: "t2", channel: "sms", steps: [step("m1", { subject: "" }), step("m2", { waitDays: 1, subject: "" })], start: { kind: "after", trackId: "t1", delayDays: 2 } });
+    const together = emailTrack({ id: "t3", channel: "sms", steps: [step("m3", { subject: "" })] });
+    expect(definitionProblems(definition({ smsPool: ["+447700900001"], tracks: [emailTrack(), sms, together] }))).toEqual([]);
+    // An SMS step has no subject and no thread: its threading is not read.
+    expect(definitionProblems(definition({ tracks: [emailTrack({ channel: "sms", steps: [step("m1")] })] }))).toEqual([]);
+  });
+
+  test("phone tracks and the win-back branch are refused until the tickets that build them", () => {
+    expect(definitionProblems(definition({ tracks: [emailTrack(), emailTrack({ id: "t2", channel: "call", steps: [step("c1")] })] }))).toEqual([CALL_TRACKS_LATER]);
+    expect(definitionProblems(definition({ tracks: [emailTrack({ branch: "win_back" })] }))).toEqual([WIN_BACK_LATER]);
+  });
+
+  test("a start rule names a live track of the same branch, with a whole delay, and connections never go in a circle", () => {
+    const after = (trackId: string, delayDays = 1) => ({ kind: "after" as const, trackId, delayDays });
+    const second = (fields: Partial<TrackDefinition>) => emailTrack({ id: "t2", channel: "sms", steps: [step("m1")], ...fields });
+    expect(definitionProblems(definition({ tracks: [emailTrack(), second({ start: after("t9") })] }))).toEqual(["The SMS track starts after a track that is not in the sequence."]);
+    expect(definitionProblems(definition({ tracks: [emailTrack({ removed: true }), second({ start: after("t1") })] }))).toEqual(["The SMS track starts after a track that is not in the sequence."]);
+    expect(definitionProblems(definition({ tracks: [emailTrack(), second({ start: after("t1", 1.5) })] }))).toEqual(["The delay before the SMS track is a whole number of days."]);
+    expect(definitionProblems(definition({ tracks: [emailTrack(), second({ start: after("t1", -1) })] }))).toEqual(["The delay before the SMS track is a whole number of days."]);
+    expect(definitionProblems(definition({ tracks: [emailTrack({ start: after("t2") }), second({ start: after("t1") })] }))).toEqual(["The tracks' connections go in a circle, so none of them could start."]);
+    expect(definitionProblems(definition({ tracks: [emailTrack({ start: after("t1") })] }))).toEqual(["The tracks' connections go in a circle, so none of them could start."]);
+  });
+
+  test("two tracks on one channel are named by their order", () => {
+    const def = definition({ tracks: [emailTrack(), emailTrack({ id: "t2", window: [], steps: [step("s9", { threading: "new_subject" })] })] });
+    expect(definitionProblems(def)).toEqual(["Email track 2's sending window has no days."]);
+  });
+
+  test("an SMS sender is listed once", () => {
+    expect(definitionProblems(definition({ smsPool: ["+447700900001", "+447700900001"] }))).toEqual(["A sender account is listed twice."]);
   });
 
   test("a removed second track does not count", () => {
@@ -124,6 +151,24 @@ describe("exactly three launch blockers (ADR 0003 7.2)", () => {
     expect(launchCheck(definition(), [lead], [{ ...inbox, healthy: false }]).blockers.map((b) => b.message)).toEqual([
       "The email track has no connected sender inbox.",
     ]);
+  });
+
+  test("no connected sender is checked per channel: an SMS track needs a connected number in its pool (ticket 13)", () => {
+    const sms = emailTrack({ id: "t2", channel: "sms", steps: [step("m1", { subject: "", body: "Hi {{first_name|there}}" })] });
+    const number = { id: "+447700900001", channel: "sms" as const, healthy: true };
+    expect(launchCheck(definition({ smsPool: [number.id], tracks: [emailTrack(), sms] }), [lead], [inbox, number])).toEqual({ blockers: [], nothingToLaunch: false, canLaunch: true });
+    // No SMS provider: no number is connected, so the SMS track alone blocks launch.
+    expect(launchCheck(definition({ smsPool: [number.id], tracks: [emailTrack(), sms] }), [lead], [inbox]).blockers).toEqual([
+      { kind: "no_sender", trackId: "t2", channel: "sms", message: "The SMS track has no connected sender number." },
+    ]);
+    // An email inbox does not count for SMS, and an unhealthy number is not connected.
+    expect(launchCheck(definition({ smsPool: [inbox.id], tracks: [sms] }), [lead], [inbox]).blockers.map((b) => b.kind === "no_sender" && b.channel)).toEqual(["sms"]);
+    expect(launchCheck(definition({ smsPool: [number.id], tracks: [sms] }), [lead], [{ ...number, healthy: false }]).canLaunch).toBe(false);
+  });
+
+  test("an SMS step's empty message blocks launch; it has no subject to check", () => {
+    const sms = emailTrack({ channel: "sms", steps: [step("m1", { subject: "", body: " " })] });
+    expect(launchCheck(definition({ smsPool: ["n1"], tracks: [sms] }), [lead], [{ id: "n1", channel: "sms", healthy: true }]).blockers.map((b) => b.message)).toEqual(["Text 1 has no message."]);
   });
 
   test("a campaign with no track has nothing to launch, which is not a blocker", () => {

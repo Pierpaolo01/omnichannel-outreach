@@ -7,8 +7,8 @@
 import { ENGINE_PARAMS, isLive, isUncertain } from "./attempt.ts";
 import { leadNow, windowOpen } from "./clock.ts";
 import { render } from "./copy.ts";
-import { ownSubject } from "./definition.ts";
-import { progressOf, runs, trackHold, type HoldReason } from "./progress.ts";
+import { ownSubject, poolOf, type TrackChannel } from "./definition.ts";
+import { channelOf, progressOf, runs, trackHold, type HoldReason } from "./progress.ts";
 import type { AccountState, Attempt, ProviderWork, RenderedCopy, SubjectState } from "./state.ts";
 
 export interface ReadyItem {
@@ -31,11 +31,12 @@ export function comparePriority(a: ReadyItem, b: ReadyItem): number {
 const stepDef = (state: SubjectState, trackId: string, stepId: string) =>
   state.campaign.definition.tracks.find((t) => t.id === trackId)?.steps.find((s) => s.id === stepId);
 
-/** The copy for one step and lead, rendered from the current definition. */
+/** The copy for one step and lead, rendered from the current definition. A text has no subject. */
 export function renderStep(state: SubjectState, trackId: string, stepId: string): RenderedCopy | null {
   const step = stepDef(state, trackId, stepId);
   if (!step) return null;
-  const subject = render(ownSubject(step), state.lead.mergeData);
+  // A text has no subject; an email renders only a subject it starts (a continuing one has none).
+  const subject = render(channelOf(state, trackId) === "sms" ? "" : ownSubject(step), state.lead.mergeData);
   const body = render(step.body, state.lead.mergeData);
   return subject.ok && body.ok ? { subject: subject.text, body: body.text } : null;
 }
@@ -48,9 +49,42 @@ export function threadOf(state: SubjectState, trackId: string): string | null {
   return sent.at(-1)?.providerRef ?? null;
 }
 
-/** A continue-thread step with no thread to continue is held, not sent (ruling 1). */
+/** A continue-thread email with no thread to continue is held, not sent (ruling 1). A text has no thread. */
 export function lacksThread(state: SubjectState, trackId: string, stepId: string): boolean {
-  return stepDef(state, trackId, stepId)?.threading === "continue_thread" && threadOf(state, trackId) === null;
+  return channelOf(state, trackId) === "email" && stepDef(state, trackId, stepId)?.threading === "continue_thread" && threadOf(state, trackId) === null;
+}
+
+/** The subject's fixed sender on a channel (1.3). */
+export function senderOf(state: SubjectState, channel: TrackChannel): string | null {
+  return channel === "sms" ? state.subject.smsSender : channel === "email" ? state.subject.emailSender : null;
+}
+
+/**
+ * Whether `sender` may text `recipient` for this subject (4.5): the pair has no unreleased owner,
+ * or this subject owns it. An enrollment's binding is never transferred.
+ */
+export function pairFree(state: SubjectState, sender: string, recipient: string): boolean {
+  return state.smsBindings.every((b) => b.sender !== sender || b.recipient !== recipient || b.owner === state.subject.id);
+}
+
+/** The mobile an SMS track texts: its destination's key (E.164). */
+function recipientOf(state: SubjectState, trackId: string): string | null {
+  const id = progressOf(state, trackId)?.destinationDetailId;
+  const live = id ? state.lead.resolved[id]?.liveId : undefined;
+  return state.lead.details.find((d) => d.id === live)?.key ?? null;
+}
+
+/**
+ * The accounts a claim for a step on this track may choose from: the fixed sender, else the pool;
+ * for SMS, only numbers whose conversation with the mobile is free or this subject's (4.5).
+ */
+function candidatesFor(state: SubjectState, trackId: string): string[] {
+  const channel = channelOf(state, trackId) ?? "email";
+  const fixed = senderOf(state, channel);
+  const ids = fixed !== null ? [fixed] : [...poolOf(state.campaign.definition, channel)];
+  if (channel !== "sms") return ids;
+  const recipient = recipientOf(state, trackId);
+  return recipient === null ? ids : ids.filter((id) => pairFree(state, id, recipient));
 }
 
 /** A held track's reason (5.4), including a pending step whose copy cannot render for this lead. */
@@ -62,7 +96,10 @@ export function heldReason(state: SubjectState, trackId: string, now: number): H
   if (progress.dueAt > leadNow(state.subject.clock, now)) return null;
   if (state.attempts.some((a) => a.stepId === progress.nextStepId && isLive(a))) return null;
   if (lacksThread(state, trackId, progress.nextStepId)) return "no_thread";
-  return renderStep(state, trackId, progress.nextStepId) ? null : "render_failed";
+  if (!renderStep(state, trackId, progress.nextStepId)) return "render_failed";
+  // Every number this SMS track may use is in another subject's conversation with the mobile (4.5, Q7).
+  if (channelOf(state, trackId) === "sms" && candidatesFor(state, trackId).length === 0) return "sms_conversation_taken";
+  return null;
 }
 
 /** Pending steps that are due now (2.6 step 4), whatever their window. */
@@ -75,7 +112,9 @@ export function readyItems(state: SubjectState, now: number): ReadyItem[] {
     const stepId = p.nextStepId;
     if (state.results.some((r) => r.stepId === stepId)) return [];
     if (state.attempts.some((a) => a.stepId === stepId && isLive(a))) return [];
-    if (heldReason(state, p.trackId, now)) return [];
+    // A track whose conversation is taken stays ready: a number may join the pool, and the claim decides.
+    const held = heldReason(state, p.trackId, now);
+    if (held && held !== "sms_conversation_taken") return [];
     return [{ subjectId: state.subject.id, trackId: p.trackId, stepId, touched: state.subject.touched, dueWall: p.dueWall }];
   });
 }
@@ -127,8 +166,9 @@ export function inheritedWork(state: SubjectState, stepId: string): ProviderWork
  * can send soonest, then the one with most remaining capacity, then the lowest id.
  */
 export function chooseAccount(state: SubjectState, now: number, stepId: string | null = null): AccountState | null {
-  const fixed = state.subject.emailSender;
-  const candidates = fixed !== null ? [state.accounts[fixed]] : state.campaign.definition.emailPool.map((id) => state.accounts[id]);
+  const trackId = state.campaign.definition.tracks.find((t) => t.steps.some((st) => st.id === stepId))?.id ?? state.campaign.definition.tracks.find((t) => t.channel === "email")?.id ?? "";
+  const channel = channelOf(state, trackId) ?? "email";
+  const candidates = candidatesFor(state, trackId).map((id) => state.accounts[id]).filter((a) => a?.channel === channel);
   const inherited = stepId === null ? undefined : inheritedWork(state, stepId);
   return pickAccount(candidates, now, inherited?.accountId ?? null);
 }
@@ -157,6 +197,7 @@ export function claim(
   const p = progressOf(state, item.trackId);
   if (!p?.destinationDetailId) throw new Error("claim without a destination");
   const destination = state.lead.details.find((d) => d.id === state.lead.resolved[p.destinationDetailId ?? ""]?.liveId);
+  const sms = channelOf(state, item.trackId) === "sms";
   // Uncertain work on this account is carried on, with its key and reservation; otherwise new work.
   const found = inheritedWork(state, item.stepId);
   const inherited = found?.accountId === account.id ? found : undefined;
@@ -167,7 +208,8 @@ export function claim(
     stepId: item.stepId,
     accountId: account.id,
     destinationDetailId: p.destinationDetailId,
-    destination: destination?.value ?? "",
+    // A text goes to the mobile's E.164 form; an email to the address as written.
+    destination: (sms ? destination?.key : destination?.value) ?? "",
     state: "claimed",
     copy: null,
     threading: stepDef(state, item.trackId, item.stepId)?.threading ?? "new_subject",
@@ -256,8 +298,11 @@ export function handoverFailures(state: SubjectState, attempt: Attempt, account:
   const failed = currentStatePredicates(state, attempt, account, now);
   // 15. The attempt's reservation exists: its provider work is unsettled.
   if (state.work.find((w) => w.key === attempt.idempotencyKey)?.settled !== null) failed.push(15);
-  const fixed = state.subject.emailSender;
-  if (fixed !== null ? fixed !== account.id : !state.campaign.definition.emailPool.includes(account.id)) failed.push(10);
+  const channel = channelOf(state, attempt.trackId) ?? "email";
+  const fixed = senderOf(state, channel);
+  if (account.channel !== channel || (fixed !== null ? fixed !== account.id : !poolOf(state.campaign.definition, channel).includes(account.id))) failed.push(10);
+  // 11. For SMS, the pair is unbound, or bound to this subject.
+  if (channel === "sms" && !pairFree(state, account.id, attempt.destination)) failed.push(11);
   if (!presendFresh(attempt, now)) failed.push(14);
   if (!renderStep(state, attempt.trackId, attempt.stepId)) failed.push(5);
   if (lacksThread(state, attempt.trackId, attempt.stepId)) failed.push(17);
@@ -284,9 +329,13 @@ export function handOver(state: SubjectState, attempt: Attempt, account: Account
   };
   // The work is called: by its first attempt, or by an inheritor, which carries it on and attends
   // it again, so it is no longer unresolved (no attempt is called once unresolved, invariant 5).
+  // The sender is fixed here, and for SMS the conversation taken, in the same write (1.3, 4.5).
+  const sms = channelOf(state, attempt.trackId) === "sms";
+  const binds = sms && !state.smsBindings.some((b) => b.sender === account.id && b.recipient === attempt.destination);
   return {
     ...state,
-    subject: { ...state.subject, emailSender: state.subject.emailSender ?? account.id },
+    subject: sms ? { ...state.subject, smsSender: state.subject.smsSender ?? account.id } : { ...state.subject, emailSender: state.subject.emailSender ?? account.id },
+    smsBindings: binds ? [...state.smsBindings, { sender: account.id, recipient: attempt.destination, owner: state.subject.id, ownerCampaignId: state.campaign.id, ownerEnded: false }] : state.smsBindings,
     attempts: state.attempts.map((a) => (a.id === attempt.id ? handed : a)),
     work: state.work.map((w) => (w.key === attempt.idempotencyKey ? { ...w, calls: w.calls + 1, firstHandedWall: w.firstHandedWall ?? now, unresolvedSince: null } : w)),
     accounts: { ...state.accounts, [account.id]: { ...account, nextSlotAt: now + account.gapMs } },

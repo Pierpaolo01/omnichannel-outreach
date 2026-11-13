@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { EngineHarness } from "../../test/support/engine-harness.ts";
 import { business, person } from "../../test/support/export-builder.ts";
 import type { FakeAccount } from "../../test/support/fake-email-port.ts";
-import type { CampaignDefinition, StepDefinition } from "../domain/sequence/definition.ts";
+import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../domain/sequence/definition.ts";
 import type { ApiError, BeforeLaunchView, CampaignDetail, CampaignListItem, CopyPreview } from "../shared/api.ts";
 
 /**
@@ -197,6 +197,46 @@ describe("Before launch: projected daily load per sender inbox", () => {
     expect(load!.accounts[0]).toMatchObject({ usedToday: 8 });
     // Today: the other campaign's claimed lead, then 2 of 12. Tuesday: 10. All start on day 2.
     expect(load!.daysUntilAllStart).toBe(2);
+  });
+
+  describe("with an SMS track, which the estimate does not simulate yet (merge of ticket 13a)", () => {
+    const N1 = "+447700900001";
+    const text = (id: string): StepDefinition => step(id, { body: "A short text.", threading: "new_subject" });
+    const withSms = (start: TrackDefinition["start"]): CampaignDefinition => {
+      const email = emailTrack([step("s1", { subject: "Hi", threading: "new_subject" })]);
+      return { ...email, smsPool: [N1], tracks: [...email.tracks, { id: "t2", channel: "sms", branch: "main", window: weekdays, steps: [text("m1")], start, removed: false }] };
+    };
+    const smsWorld = async (n: number) => {
+      const h = new EngineHarness({ start: MONDAY_8, accounts: [inbox("inbox-a", { capacity: 10 })], sms: { numbers: [{ id: N1, capacity: 50, gapMs: null, k: 1, healthy: true, resetZone: "Europe/London" }] } });
+      const { campaign: c } = await h.createCampaign("Autumn physio", many(n));
+      await h.tick();
+      return { h, id: c.id };
+    };
+
+    test("an SMS track that starts with the emails can change when they go, so no daily load is projected, and the screen says why", async () => {
+      const { h, id } = await smsWorld(25);
+      await h.defineSequence(id, withSms({ kind: "entry" }));
+      const { load } = await beforeLaunch(h, id);
+      expect(load).toMatchObject({ otherTracksChangeTiming: "this_campaign", daysUntilAllStart: null, leavesOutSms: false });
+      expect(load!.accounts).toEqual([expect.objectContaining({ id: "inbox-a", busiestDay: 0 })]);
+    });
+
+    test("an SMS track that starts after the email track cannot move an email, so the email load is projected, leaving SMS out", async () => {
+      const { h, id } = await smsWorld(25);
+      await h.defineSequence(id, withSms({ kind: "after", trackId: "t1", delayDays: 1 }));
+      const { load } = await beforeLaunch(h, id);
+      expect(load).toMatchObject({ otherTracksChangeTiming: null, leavesOutSms: true, daysUntilAllStart: 3 });
+    });
+
+    test("another running campaign on the same inbox with an SMS track that can move its emails: no daily load is projected", async () => {
+      const { h, id } = await smsWorld(12);
+      const { campaign: other } = await h.createCampaign("Other", many(8));
+      await h.defineSequence(other.id, withSms({ kind: "entry" }));
+      expect((await h.launch(other.id)).status).toBe(200);
+      await h.defineSequence(id, emailTrack([step("s1", { subject: "Hi", threading: "new_subject" })]));
+      const { load } = await beforeLaunch(h, id);
+      expect(load).toMatchObject({ otherTracksChangeTiming: "other_campaign", daysUntilAllStart: null });
+    });
   });
 
   test("once launched, there is no before-launch projection", async () => {

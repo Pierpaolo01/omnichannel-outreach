@@ -137,3 +137,23 @@ describe("a conflict stays visible until the user resolves it (invariant 7)", ()
     expect([h.store.getSnapshot().save.kind, h.store.inConflict]).toEqual(["conflict", true]);
   });
 });
+
+describe("the email pool follows the connected email inboxes only", () => {
+  test("an SMS number the engine knows never enters the email pool (merge of ticket 13a)", async () => {
+    const puts: CampaignDefinition[] = [];
+    const account = (id: string, channel: "email" | "sms") => ({ id, label: id, channel, healthy: true, capacity: 30, gapSeconds: 0, usedToday: 0, waiting: null });
+    new EditorStore({ ...view("Stored", 1), accounts: [account("inbox-a", "email"), account("+447700900001", "sms")] }, {
+      session: "page",
+      put: (body) => {
+        puts.push(body);
+        return new Promise(() => undefined);
+      },
+      launch: () => new Promise(() => undefined),
+      load: () => new Promise(() => undefined),
+      setTimer: () => null,
+      clearTimer: () => undefined,
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(puts.map((p) => p.emailPool)).toEqual([["inbox-a"]]);
+  });
+});

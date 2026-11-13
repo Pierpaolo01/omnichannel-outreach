@@ -186,7 +186,7 @@ export type { LaunchBlocker } from "../domain/sequence/blockers.ts";
 export interface SenderAccountViewApi {
   readonly id: string;
   readonly label: string;
-  readonly channel: "email";
+  readonly channel: "email" | "sms";
   readonly healthy: boolean;
   readonly capacity: number;
   /** The pacing gap between two sends from this account, in seconds. */
@@ -214,7 +214,11 @@ export interface SequenceView {
 }
 
 export type FinishReasonApi = import("../domain/sequence/state.ts").FinishReason;
-export type HoldReasonApi = "unresolved" | "render_failed" | "provider_skipped" | "no_thread";
+/**
+ * Why a track waits for the user (ADR 0003 5.4). `sms_conversation_taken`: every number the SMS
+ * track may use is in another campaign's conversation with this mobile (4.5, question Q7).
+ */
+export type HoldReasonApi = "unresolved" | "render_failed" | "provider_skipped" | "no_thread" | "sms_conversation_taken";
 
 export interface SendView {
   readonly attemptId: string;
@@ -263,7 +267,10 @@ export interface EnrollmentProgress {
   readonly endedAt: string | null;
   /** "replied, automation stopped" with channel and date only. */
   readonly reply: { readonly channel: "email" | "sms"; readonly at: string } | null;
+  /** The lead's email inbox, fixed at its first email. */
   readonly sender: string | null;
+  /** The lead's SMS number, fixed at its first text (ticket 13). */
+  readonly smsSender: string | null;
   readonly zone: string;
   readonly tracks: readonly TrackProgressView[];
 }
@@ -273,8 +280,14 @@ export interface NeedsAttention {
   readonly stalledInboxes: readonly { readonly accountId: string; readonly holding: readonly string[] }[];
   readonly heldTracks: readonly { readonly enrollmentId: string; readonly trackId: string; readonly reason: HoldReasonApi }[];
   readonly accountWaits: readonly { readonly accountId: string; readonly reason: "quota" | "rate_limited"; readonly until: string | null }[];
-  /** Inboxes the provider reports unhealthy or disconnected: their leads wait on them. */
-  readonly unhealthyInboxes: readonly { readonly accountId: string }[];
+  /**
+   * Sender accounts on any channel that cannot send, each listed once (ticket 13; spec "Needs
+   * attention": sender account problems such as a disconnected SMS number). `problem` is the
+   * provider's own reason (for Instantly an `InboxHoldReasonApi`, for SMS "disconnected"),
+   * `not_listed` when the provider no longer lists the account, or `unhealthy` when no reason was
+   * given. Their leads wait on them; nothing is dropped. (Replaces 12b's `unhealthyInboxes`.)
+   */
+  readonly senderProblems: readonly { readonly accountId: string; readonly channel: "email" | "sms"; readonly label: string; readonly problem: string }[];
   /**
    * Inboxes some of whose daily sends are held by unresolved provider work (ADR 0003 4.2): how
    * many, and the work holding them, until the provider or the user settles it.
@@ -370,6 +383,15 @@ export interface LoadProjectionView {
    * projection, because none can be honest. A rate limit has an end, and the projection resumes there.
    */
   readonly cannotProject: readonly { readonly accountId: string; readonly label: string; readonly reason: "cannot_send" | "quota" }[];
+  /**
+   * Another track can change when emails go, which the estimate does not simulate yet (SMS sends
+   * arrive in it with ticket 13b): an SMS track, or a second email track, that does not start after
+   * this campaign's email track, here or in another running campaign on the same inboxes. While set
+   * there is no projection.
+   */
+  readonly otherTracksChangeTiming: "this_campaign" | "other_campaign" | null;
+  /** The projection counts email only: this campaign's SMS track, which starts after its emails, is left out. */
+  readonly leavesOutSms: boolean;
 }
 
 /** Rendered copy, in pieces, so a fallback the lead gets can be shown as one. */
@@ -420,6 +442,18 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
 
 export interface ActivityView {
   readonly entries: readonly ActivityEntry[];
+}
+
+/**
+ * GET /api/sms-provider (ticket 13). No SMS provider is provisioned or chosen (#28), so the running
+ * app reports `none` with no numbers, and every SMS track is blocked by "no connected sender".
+ * `test-simulator` appears only in the test harness and the scripted scenario: it is a fake, not
+ * a provider integration.
+ */
+export interface SmsProviderStatus {
+  readonly provider: "none" | "test-simulator";
+  readonly message: string;
+  readonly numbers: readonly { readonly id: string; readonly label: string; readonly healthy: boolean; readonly capacity: number; readonly usedToday: number }[];
 }
 
 /** Why a sender inbox of the email provider cannot send now. */
