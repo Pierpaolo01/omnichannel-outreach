@@ -24,9 +24,9 @@ export interface TestApi {
   importRun(campaignId: string, run: FixtureRun): Promise<ImportRecord>;
 }
 
-/** The real HTTP app over an in-memory SQLite store. */
-export function testApi(): TestApi {
-  const store = openSqliteStore(":memory:");
+/** The real HTTP app over an in-memory SQLite store, or over the store a test opens. */
+export function testApi(options: { store?: OutreachStore } = {}): TestApi {
+  const store = options.store ?? openSqliteStore(":memory:");
   const app = createApp({ store, now: steppingClock(), newId: sequentialIds() });
 
   const call = async <T>(path: string, init?: RequestInit): Promise<{ status: number; body: T }> => {

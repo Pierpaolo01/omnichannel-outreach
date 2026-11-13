@@ -4,7 +4,8 @@ import { digitsOf } from "./contact-details.ts";
 /**
  * Phone numbers. One number has one key however it is written: "+44 20 7946 0101",
  * "020 7946 0101" in Great Britain and "0044 20 7946 0101" all key to +442079460101.
- * National forms need the country the number belongs to (the company's country).
+ * National forms need the country the number belongs to: the company's two-letter country.
+ * Without one, a number written in national form is not read: it is kept as its digits.
  */
 export interface PhoneNumber {
   /** E.164 when the number can be read, otherwise its digits as written. */
@@ -47,15 +48,19 @@ export function displayPhone(key: string): string {
 }
 
 /**
- * The region to read a company's national numbers in: its country column when that is a
- * two-letter code, otherwise the region of its international main line (round 2, item 6).
+ * A business row's main line (ADR 0001, "Phone identity"). The `phone_e164` cell is international
+ * by definition, so it is read as international first, whatever the company's country, even
+ * without its plus sign when it is valid that way. Otherwise the line is read as any number is:
+ * in the company's two-letter country, or, without one, as written in international form or kept
+ * as its digits.
  */
-export function companyRegion(country: string | null, mainLines: readonly string[]): string | null {
-  const code = countryCode(country);
-  if (code) return code;
-  for (const raw of mainLines) {
-    const region = raw.trim().startsWith("+") ? parsePhone(raw, null)?.region : null;
-    if (region) return region;
-  }
-  return null;
+export function readMainLine(e164: string, original: string, country: string | null): PhoneNumber | null {
+  const written = e164.trim();
+  const digits = digitsOf(written);
+  const international = written.startsWith("+") || digits.startsWith("00");
+  const withoutPlus = !international && digits.length >= 6 && parsePhoneNumberFromString(`+${digits}`)?.isValid() === true;
+  const cell = international ? parsePhone(written, null) : withoutPlus ? parsePhone(`+${digits}`, null) : null;
+  if (cell) return cell;
+  const code = countryCode(country) ?? null;
+  return code ? (parsePhone(written, code) ?? parsePhone(original, code)) : (parsePhone(original, null) ?? parsePhone(written, null));
 }

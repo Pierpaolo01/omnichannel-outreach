@@ -134,6 +134,45 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE contact_details ADD COLUMN listed_shared INTEGER NOT NULL DEFAULT 0;
     `,
   },
+  {
+    version: 4,
+    name: "a merged contact detail keeps its row and points at the detail it was merged into",
+    // SQLite cannot drop a table constraint, so the table is rebuilt: one owner, channel and key
+    // is unique among live details only, and an absorbed row keeps the place it was merged from.
+    // Rows are copied in rowid order, which the detail lists use to break ties.
+    sql: `
+      CREATE TABLE contact_details_v4 (
+        id TEXT PRIMARY KEY,
+        owner_kind TEXT NOT NULL CHECK (owner_kind IN ('person', 'company')),
+        owner_id TEXT NOT NULL,
+        channel TEXT NOT NULL CHECK (channel IN ('email', 'phone')),
+        phone_kind TEXT CHECK (phone_kind IN ('direct', 'mobile', 'main_line')),
+        value TEXT NOT NULL,
+        key TEXT NOT NULL,
+        search_digits TEXT NOT NULL,
+        bad INTEGER NOT NULL DEFAULT 0 CHECK (bad IN (0, 1)),
+        added_at TEXT NOT NULL,
+        listed_shared INTEGER NOT NULL DEFAULT 0,
+        merged_into TEXT REFERENCES contact_details_v4(id) CHECK (merged_into IS NULL OR merged_into <> id)
+      );
+      INSERT INTO contact_details_v4 (id, owner_kind, owner_id, channel, phone_kind, value, key, search_digits, bad, added_at, listed_shared)
+        SELECT id, owner_kind, owner_id, channel, phone_kind, value, key, search_digits, bad, added_at, listed_shared
+        FROM contact_details ORDER BY rowid;
+      DROP TABLE contact_details;
+      ALTER TABLE contact_details_v4 RENAME TO contact_details;
+      CREATE UNIQUE INDEX one_live_detail_per_owner_channel_key ON contact_details(owner_kind, owner_id, channel, key) WHERE merged_into IS NULL;
+      CREATE INDEX contact_details_by_owner ON contact_details(owner_kind, owner_id);
+      CREATE INDEX contact_details_by_merged_into ON contact_details(merged_into);
+    `,
+  },
+  {
+    version: 5,
+    name: "live contact details: the one definition every reader uses",
+    // A view has no rowid, so it carries the row's insertion order as row_order.
+    sql: `
+      CREATE VIEW live_contact_details AS SELECT *, rowid AS row_order FROM contact_details WHERE merged_into IS NULL;
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string): void {

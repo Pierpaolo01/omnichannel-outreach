@@ -1,4 +1,5 @@
-import type { Directory, ImportPlan } from "../../domain/import-plan.ts";
+import type { Channel, PhoneKind } from "../../domain/contact-details.ts";
+import type { DetailOwner, Directory, ImportPlan } from "../../domain/import-plan.ts";
 import type { OutreachStatus } from "../../domain/outreach-status.ts";
 import type {
   Campaign,
@@ -18,6 +19,21 @@ export interface LeadQuery {
   /** Only this company's people and its company lead. */
   readonly companyId: string | null;
   readonly limit: number;
+}
+
+/** A live contact detail, as the records that reference detail ids read it. */
+export interface StoredContactDetail {
+  readonly id: string;
+  readonly owner: DetailOwner;
+  readonly channel: Channel;
+  readonly phoneKind: PhoneKind | null;
+  /** As written in the export that added it. */
+  readonly value: string;
+  /** One key per address or number: an email as written, a phone in E.164 form when it can be read. */
+  readonly key: string;
+  readonly bad: boolean;
+  /** A person's copy of an address their company lists as shared: kept, but no destination (ADR 0001). */
+  readonly listedShared: boolean;
 }
 
 /**
@@ -55,7 +71,15 @@ export interface OutreachStore {
   person(id: string): Promise<PersonRecord | null>;
   company(id: string): Promise<CompanyRecord | null>;
 
-  /** Marks one contact detail bad (wrong number, hard bounce). Imports never clear the mark. */
+  /**
+   * The live detail an issued id stands for: the detail itself, or, when it was merged into
+   * another, the detail at the end of that chain. Null only for an id that was never issued.
+   */
+  contactDetail(detailId: string): Promise<StoredContactDetail | null>;
+  /**
+   * Marks a contact detail bad (wrong number, hard bounce): the live detail the id stands for.
+   * Imports never clear the mark. False for an id that was never issued.
+   */
   markContactDetailBad(detailId: string): Promise<boolean>;
 
   close(): Promise<void>;
