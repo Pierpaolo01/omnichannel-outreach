@@ -14,6 +14,7 @@ import { Engine } from "./engine/engine.ts";
 import { UnconnectedEmailPort } from "./engine/ports.ts";
 import { accountView, needsAttention, progressView } from "./engine/views.ts";
 import type { SequenceView } from "../shared/api.ts";
+import { registerEmailProviderRoutes, type EmailProviderSource } from "./instantly/routes.ts";
 
 export interface AppDependencies {
   readonly store: OutreachStore;
@@ -22,6 +23,8 @@ export interface AppDependencies {
   readonly newId: () => string;
   /** The sequence engine. Without one, the app runs an engine with no connected email provider. */
   readonly engine?: Pick<Engine, "launch">;
+  /** The email provider's own description, for GET /api/email-provider; absent when none is connected. */
+  readonly emailProvider?: EmailProviderSource | null;
 }
 
 const windowRule = z.object({ day: z.number().int().min(0).max(6), start: z.number().int().min(0).max(23), end: z.number().int().min(0).max(24) });
@@ -97,7 +100,7 @@ const importBody = z.object({
 const checkBody = z.object({ businessesCsv: z.string().optional(), peopleCsv: z.string().optional() });
 
 /** The HTTP interface. Every route is under /api; the web client is served separately. */
-export function createApp({ store, now, newId, engine: givenEngine }: AppDependencies): Hono {
+export function createApp({ store, now, newId, engine: givenEngine, emailProvider }: AppDependencies): Hono {
   const engine = givenEngine ?? new Engine({ store: store.engine, port: new UnconnectedEmailPort(), now: () => Date.parse(now()), newId });
   const app = new Hono().basePath("/api");
   app.use(async (c, next) => {
@@ -306,6 +309,8 @@ export function createApp({ store, now, newId, engine: givenEngine }: AppDepende
   });
 
   app.get("/needs-attention", async (c) => c.json(await needsAttention(store.engine, Date.parse(now()))));
+
+  registerEmailProviderRoutes(app, { engine: store.engine, provider: emailProvider ?? null, now: () => Date.parse(now()) });
 
   app.notFound((c) => notFound(c, "route"));
   app.onError((error, c) => {

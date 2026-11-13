@@ -15,6 +15,7 @@ import type {
   Page,
 } from "./api.ts";
 import { WritesDisabled, type InstantlyClient, type InstantlyResult } from "./client.ts";
+import type { EmailProviderStatus, InboxHoldReasonApi } from "../../shared/api.ts";
 import type { DispatchCampaignRecord, DispatchedLead, InstantlyStore, SendContext } from "./store.ts";
 
 /**
@@ -75,24 +76,10 @@ export interface InstantlyPortDependencies {
   readonly followUps?: FollowUpTransport | null;
 }
 
-export type InboxHoldReason = "sending_off" | "not_active" | "no_daily_limit" | "stale";
+export type InboxHoldReason = InboxHoldReasonApi;
 
-/** What the provider status endpoint shows. */
-export interface InstantlyStatus {
-  readonly provider: "instantly";
-  readonly sending: "on" | "off";
-  readonly followUps: "unavailable" | "available";
-  readonly quota: "available" | "exhausted";
-  readonly lastPolledAt: string | null;
-  readonly inboxes: readonly {
-    readonly id: string;
-    readonly status: number;
-    readonly dailyLimit: number | null;
-    readonly capacity: number;
-    readonly healthy: boolean;
-    readonly reason: InboxHoldReason | null;
-  }[];
-}
+/** What the provider status endpoint shows, but the leads waiting on a follow-up, which the route adds. */
+export type InstantlyStatus = Omit<EmailProviderStatus, "provider" | "waitingFollowUps"> & { readonly provider: "instantly" };
 
 const MINUTE = 60_000;
 const DEFAULTS = { freshnessMs: 10 * MINUTE, pollIntervalMs: MINUTE, analyticsCacheMs: 5 * MINUTE, k: 1, quotaRecheckMs: 60 * MINUTE, overlapMs: 10 * MINUTE };
