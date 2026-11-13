@@ -1,5 +1,5 @@
 /** Read models for the HTTP interface, built from the engine's stored facts. */
-import { isLive } from "../../domain/sequence/attempt.ts";
+import { isLive, markable } from "../../domain/sequence/attempt.ts";
 import { leadNow } from "../../domain/sequence/clock.ts";
 import { heldReason, stalledAccounts } from "../../domain/sequence/dispatch.ts";
 import { deriveStatus, liveTracksFor } from "../../domain/sequence/progress.ts";
@@ -55,10 +55,10 @@ export function progressView(s: SubjectState, now: number): EnrollmentProgress {
                   destination: a.destination,
                   copy: a.copy,
                   handedAt: iso(a.handedWall),
-                  sentAt: iso(a.sentWall),
+                  sentAt: a.state === "sent" ? iso(s.work.find((w) => w.key === a.idempotencyKey)?.sentWall ?? null) : null,
                   endedBy: a.endedBy,
                   rejectReason: a.rejectReason,
-                  unresolved: isLive(a) && a.unresolvedSince !== null,
+                  unresolved: s.work.some((w) => w.key === a.idempotencyKey && markable(w)),
                 })),
             };
           }),
@@ -82,23 +82,31 @@ export function accountView(a: AccountState, label: string): SenderAccountViewAp
 
 export async function needsAttention(store: EngineStore, now: number): Promise<NeedsAttention> {
   const accounts = await store.accounts(now);
-  const all = await store.openAttempts();
-  const open = all.filter((a) => isLive(a));
+  const open = await store.openAttempts();
   // Unresolved provider work keeps its reservation; each inbox it holds is listed with how many of
-  // its daily sends are held, so a slowed inbox is never silent (review round 2, ruling 2).
-  const holding = all.filter((a) => a.holdsReservation && a.unresolvedSince !== null);
-  const heldCapacity = accounts.flatMap((acc) => {
-    // One entry per piece of provider work (its key): its latest attempt.
-    const byKey = new Map<string, (typeof holding)[number]>();
-    for (const a of holding) if (a.accountId === acc.id) byKey.set(a.idempotencyKey, a);
-    if (byKey.size === 0) return [];
-    return [{
-      accountId: acc.id,
-      held: byKey.size,
-      capacity: acc.capacity,
-      work: [...byKey.values()].map((a) => ({ attemptId: a.id, enrollmentId: a.subjectId, unresolvedSince: new Date(a.unresolvedSince ?? 0).toISOString() })),
-    }];
-  });
+  // its daily sends are held and the work holding them, so a slowed inbox is never silent and the
+  // user can settle the work (PR 37 review rounds 2 and 3).
+  const unresolved = await store.unresolvedWork();
+  const heldCapacity = [];
+  for (const acc of accounts) {
+    const held = unresolved.filter((w) => w.accountId === acc.id);
+    if (held.length === 0) continue;
+    const work = [];
+    for (const w of held) {
+      const carrying = (await store.subject(w.subjectId, now))?.attempts.filter((a) => a.idempotencyKey === w.key) ?? [];
+      work.push({
+        attemptId: (carrying.find(isLive) ?? carrying.at(-1))?.id ?? w.key,
+        enrollmentId: w.subjectId,
+        stepId: w.stepId,
+        destination: w.destination,
+        unresolvedSince: new Date(w.unresolvedSince ?? 0).toISOString(),
+        lookupAnswer: w.lookupAnswer,
+        // While the provider reports the work queued, "not sent" is refused (5.3).
+        canMarkNotSent: w.lookupAnswer !== "queued",
+      });
+    }
+    heldCapacity.push({ accountId: acc.id, held: held.length, capacity: acc.capacity, sentToday: await store.sentToday(acc.id, now), work });
+  }
   const heldTracks: NeedsAttention["heldTracks"][number][] = [];
   for (const id of await store.runningSubjectIds()) {
     const s = await store.subject(id, now);

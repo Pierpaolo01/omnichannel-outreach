@@ -4,11 +4,11 @@
  * the same-key retry authorization. Pure: the store runs each check against current state inside
  * the transaction that writes its result.
  */
-import { ENGINE_PARAMS, isLive } from "./attempt.ts";
+import { ENGINE_PARAMS, isLive, isUncertain } from "./attempt.ts";
 import { leadNow, windowOpen } from "./clock.ts";
 import { render } from "./copy.ts";
 import { progressOf, runs, trackHold, type HoldReason } from "./progress.ts";
-import type { AccountState, Attempt, RenderedCopy, SubjectState } from "./state.ts";
+import type { AccountState, Attempt, ProviderWork, RenderedCopy, SubjectState } from "./state.ts";
 
 export interface ReadyItem {
   readonly subjectId: string;
@@ -41,7 +41,9 @@ export function renderStep(state: SubjectState, trackId: string, stepId: string)
 
 /** The thread a continue-thread step continues: the provider reference of the track's latest send. */
 export function threadOf(state: SubjectState, trackId: string): string | null {
-  const sent = state.attempts.filter((a) => a.trackId === trackId && a.state === "sent").sort((a, b) => (a.sentWall ?? 0) - (b.sentWall ?? 0));
+  const sent = state.work
+    .filter((w) => w.trackId === trackId && (w.settled === "sent" || w.settled === "user_sent") && state.attempts.some((a) => a.idempotencyKey === w.key && a.state === "sent"))
+    .sort((a, b) => (a.sentWall ?? 0) - (b.sentWall ?? 0));
   return sent.at(-1)?.providerRef ?? null;
 }
 
@@ -110,9 +112,13 @@ export function accountHasRoom(account: AccountState, reservedAlready = false): 
   return (reservedAlready || account.used < account.capacity) && account.inFlight < account.k;
 }
 
-/** The step's uncertain work this claim inherits the key of, whose reservation it carries on (ruling 3). */
-export function inheritedWork(state: SubjectState, stepId: string): Attempt | undefined {
-  return state.attempts.find((a) => a.stepId === stepId && a.endedBy === "lookup_not_sent");
+/**
+ * The step's provider work a claim inherits the key of, whose reservation it carries on (ruling 3):
+ * only work still unsettled and uncertain, that no live attempt carries. Inheritance asks the
+ * work, so a key whose work has settled is never inherited (PR 37 review round 3).
+ */
+export function inheritedWork(state: SubjectState, stepId: string): ProviderWork | undefined {
+  return state.work.find((w) => w.stepId === stepId && isUncertain(w) && !state.attempts.some((a) => a.idempotencyKey === w.key && isLive(a)));
 }
 
 /**
@@ -125,7 +131,7 @@ export function chooseAccount(state: SubjectState, now: number, stepId: string |
   const inherited = stepId === null ? undefined : inheritedWork(state, stepId);
   return (
     candidates
-      .filter((a): a is AccountState => a !== undefined && accountAvailable(a, now) && accountHasRoom(a, inherited?.holdsReservation === true && inherited.accountId === a.id))
+      .filter((a): a is AccountState => a !== undefined && accountAvailable(a, now) && accountHasRoom(a, inherited?.accountId === a.id))
       .sort((a, b) => Math.max(a.nextSlotAt, now) - Math.max(b.nextSlotAt, now) || b.capacity - b.used - (a.capacity - a.used) || (a.id < b.id ? -1 : 1))[0] ?? null
   );
 }
@@ -140,8 +146,9 @@ export function claim(
   const p = progressOf(state, item.trackId);
   if (!p?.destinationDetailId) throw new Error("claim without a destination");
   const destination = state.lead.details.find((d) => d.id === state.lead.resolved[p.destinationDetailId ?? ""]?.liveId);
-  const inherited = inheritedWork(state, item.stepId);
-  const carriesReservation = inherited?.holdsReservation === true && inherited.accountId === account.id;
+  // Uncertain work on this account is carried on, with its key and reservation; otherwise new work.
+  const found = inheritedWork(state, item.stepId);
+  const inherited = found?.accountId === account.id ? found : undefined;
   const attempt: Attempt = {
     id: input.attemptId,
     subjectId: state.subject.id,
@@ -154,10 +161,9 @@ export function claim(
     copy: null,
     threading: stepDef(state, item.trackId, item.stepId)?.threading ?? "new_subject",
     threadRef: null,
-    providerRef: null,
     retryable: input.retryable,
     notSentIsFinal: input.notSentIsFinal,
-    idempotencyKey: inherited?.idempotencyKey ?? input.attemptId,
+    idempotencyKey: inherited?.key ?? input.attemptId,
     calls: 0,
     claimedWall: input.now,
     handedAt: null,
@@ -165,25 +171,36 @@ export function claim(
     lastCallWall: null,
     presendCheckedWall: null,
     presendFoundReply: false,
-    lookupAnswer: null,
-    queuedLookups: 0,
-    nextLookupWall: null,
-    unresolvedSince: null,
     endedBy: null,
     withdrawRequested: false,
     withdrawCalled: false,
     awaitingAnswer: false,
     retry: "none",
     rejectReason: null,
+  };
+  const work: ProviderWork = {
+    key: attempt.id,
+    subjectId: attempt.subjectId,
+    trackId: attempt.trackId,
+    stepId: attempt.stepId,
+    accountId: account.id,
+    destination: attempt.destination,
+    calls: 0,
+    firstHandedWall: null,
+    providerRef: null,
+    settled: null,
     sentWall: null,
     sentDay: null,
-    userMarkedNotSent: false,
-    holdsReservation: true,
+    nextLookupWall: null,
+    lookupAnswer: null,
+    queuedLookups: 0,
+    unresolvedSince: null,
   };
   return {
     ...state,
     attempts: [...state.attempts, attempt],
-    accounts: { ...state.accounts, [account.id]: { ...account, used: account.used + (carriesReservation ? 0 : 1), inFlight: account.inFlight + 1 } },
+    work: inherited ? state.work : [...state.work, work],
+    accounts: { ...state.accounts, [account.id]: { ...account, used: account.used + (inherited ? 0 : 1), inFlight: account.inFlight + 1 } },
   };
 }
 
@@ -216,7 +233,7 @@ function currentStatePredicates(state: SubjectState, attempt: Attempt, account: 
 /** A reply from `destination` to `inbox` is waiting for its thread to be known (2.4): sends between them pause. */
 export function replyPending(state: SubjectState, inbox: string, destination: string): boolean {
   const address = destination.toLowerCase();
-  return (state.pendingReplies ?? []).some((r) => r.inbox === inbox && r.address === address);
+  return state.pendingReplies.some((r) => r.inbox === inbox && r.address === address);
 }
 
 const presendFresh = (attempt: Attempt, now: number) =>
@@ -252,10 +269,13 @@ export function handOver(state: SubjectState, attempt: Attempt, account: Account
     lastCallWall: now,
     awaitingAnswer: true,
   };
+  // The work is called: by its first attempt, or by an inheritor, which carries it on and attends
+  // it again, so it is no longer unresolved (no attempt is called once unresolved, invariant 5).
   return {
     ...state,
     subject: { ...state.subject, emailSender: state.subject.emailSender ?? account.id },
     attempts: state.attempts.map((a) => (a.id === attempt.id ? handed : a)),
+    work: state.work.map((w) => (w.key === attempt.idempotencyKey ? { ...w, calls: w.calls + 1, firstHandedWall: w.firstHandedWall ?? now, unresolvedSince: null } : w)),
     accounts: { ...state.accounts, [account.id]: { ...account, nextSlotAt: now + account.gapMs } },
   };
 }
@@ -267,7 +287,8 @@ export function retryFailures(state: SubjectState, attempt: Attempt, account: Ac
   if (!attempt.retryable) failed.push("not retryable");
   if (attempt.calls >= ENGINE_PARAMS.MAX_CALLS) failed.push("no calls left");
   if (attempt.withdrawRequested) failed.push("withdraw requested");
-  if (attempt.unresolvedSince !== null) failed.push("unresolved");
+  const work = state.work.find((w) => w.key === attempt.idempotencyKey);
+  if (!work || work.unresolvedSince !== null || work.settled !== null) failed.push("unresolved");
   failed.push(...currentStatePredicates(state, attempt, account, now).map((n) => `predicate ${n}`));
   if (!presendFresh(attempt, now)) failed.push("predicate 14");
   if (now < account.nextSlotAt) failed.push("slot");
@@ -280,6 +301,7 @@ export function authorizeRetry(state: SubjectState, attempt: Attempt, account: A
   return {
     ...state,
     attempts: state.attempts.map((a) => (a.id === attempt.id ? retried : a)),
+    work: state.work.map((w) => (w.key === attempt.idempotencyKey ? { ...w, calls: w.calls + 1 } : w)),
     accounts: { ...state.accounts, [account.id]: { ...account, nextSlotAt: now + account.gapMs } },
   };
 }

@@ -4,12 +4,12 @@
  * retry write that authorizes the call has committed. One tick runs passes until nothing changes:
  * observe, expire claims, settle, withdraw, evaluate, claim, hand over.
  */
-import { ENGINE_PARAMS, isLive, isUncertain, type AttemptEvent, type CallAnswer } from "../../domain/sequence/attempt.ts";
+import { ENGINE_PARAMS, isLive, type AttemptEffect, type AttemptEvent, type CallAnswer, type WorkEvent } from "../../domain/sequence/attempt.ts";
 import { launchCheck, type LaunchCheck } from "../../domain/sequence/blockers.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
-import type { Attempt, SubjectState } from "../../domain/sequence/state.ts";
-import type { EngineStore } from "./engine-store.ts";
+import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
+import type { EngineStore, ReplyEvent } from "./engine-store.ts";
 import type { AttemptRef, HandoverRequest, ProviderEvent, SendPort } from "./ports.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 
@@ -166,15 +166,23 @@ export class Engine {
     });
   }
 
-  /** Section 6: settle what a crash left open, then run a normal tick. */
+  /**
+   * Section 6: settle what a crash left open, then run a normal tick. The time the application was
+   * not running is not counted as a held reply's wait; outstanding provider events are observed and
+   * uncertain work looked up before any held reply is evaluated (PR 37 review round 3).
+   */
   recover(): Promise<void> {
     return this.ticks.run(async () => {
+      const now = this.now();
+      for (const r of await this.store.pendingReplies()) await this.store.updateReplyEvent(r.eventId, { lastCountedWall: now });
       for (const a of await this.store.openAttempts()) {
         // The crash row of 5.3: a call whose answer was never recorded is an unknown answer.
         if ((a.state === "handed" || a.state === "accepted") && a.awaitingAnswer) {
           await this.applyAttempt(a, { kind: "call_answer", answer: { kind: "unknown" }, now: this.now() });
         }
       }
+      await this.observe();
+      await this.settle();
       await this.runTick();
     });
   }
@@ -187,11 +195,14 @@ export class Engine {
     await this.syncAccounts();
     for (let pass = 0; pass < MAX_PASSES; pass++) {
       let changed = false;
-      changed = (await this.observe()) || changed;
-      changed = (await this.correlate()) || changed;
+      const observed = await this.observe();
+      changed = observed.changed || changed;
+      changed = (await this.correlate(observed.ok, false)) || changed;
       changed = (await this.expireClaims()) || changed;
       changed = (await this.recoverStuckAnswers()) || changed;
       changed = (await this.settle()) || changed;
+      // A held reply falls back only after this pass's lookups have had their chance to attach its reference.
+      changed = (await this.correlate(false, true)) || changed;
       changed = (await this.withdraw()) || changed;
       changed = (await this.evaluateAll()) || changed;
       changed = (await this.claimAll()) || changed;
@@ -232,10 +243,10 @@ export class Engine {
       if (a.state === "claimed") times.push(a.claimedWall + ENGINE_PARAMS.SETTLING, slot);
       if (a.awaitingAnswer) times.push((a.lastCallWall ?? a.claimedWall) + ENGINE_PARAMS.CALL_TIMEOUT);
       if (a.retry === "wanted" || a.retry === "wanted_after_not_sent") times.push(slot);
-      if (a.nextLookupWall !== null) times.push(a.nextLookupWall);
     }
-    // A held reply falls back by address one settling period after it was received.
-    for (const r of await this.store.pendingReplies()) times.push(r.receivedWall + ENGINE_PARAMS.SETTLING);
+    for (const w of await this.store.openWork()) if (w.nextLookupWall !== null) times.push(w.nextLookupWall);
+    // A held reply falls back once it has waited one settling period of running time.
+    for (const r of await this.store.pendingReplies()) times.push(r.lastCountedWall + (ENGINE_PARAMS.SETTLING - r.waitedMs));
     for (const acc of accounts.values()) {
       if (acc.waitUntil !== null && acc.waitUntil !== QUOTA_WAIT) times.push(acc.waitUntil);
       // Capacity frees at the account's next reset day.
@@ -245,12 +256,12 @@ export class Engine {
     return future.length > 0 ? Math.min(...future) : null;
   }
 
-  /** ADR 0002 P3's resolution of an unresolved attempt. The controls arrive with ticket 20; the rule is here. */
+  /** ADR 0002 P3's resolution of unresolved work, by any attempt carrying it. The controls arrive with ticket 20; the rule is here. */
   markAttempt(attemptId: string, mark: "sent" | "not_sent"): Promise<boolean> {
     return this.ticks.run(async () => {
       const a = await this.store.attempt(attemptId);
       if (!a) return false;
-      return this.applyAttempt(a, { kind: mark === "sent" ? "mark_sent" : "mark_not_sent", now: this.now() });
+      return this.applyWork(a.subjectId, a.idempotencyKey, { kind: mark === "sent" ? "mark_sent" : "mark_not_sent", now: this.now() });
     });
   }
 
@@ -276,15 +287,36 @@ export class Engine {
 
   /** Applies one attempt event and its consequences in one transaction. True if anything changed. */
   private async applyAttempt(attempt: Pick<Attempt, "id" | "subjectId">, event: AttemptEvent): Promise<boolean> {
+    return this.applyChange(attempt.subjectId, attempt.id, (s, now) => {
+      if (!s.attempts.some((a) => a.id === attempt.id)) return null;
+      return { out: this.rules.applyToAttempt(s, attempt.id, event, now), accountId: s.attempts.find((a) => a.id === attempt.id)?.accountId ?? "" };
+    }, event.kind === "call_answer" && event.answer.kind === "accepted");
+  }
+
+  /** Applies one event about provider work, to the work and every attempt carrying it, in one transaction. */
+  private async applyWork(subjectId: string, key: string, event: WorkEvent): Promise<boolean> {
+    return this.applyChange(subjectId, null, (s, now) => {
+      const w = s.work.find((x) => x.key === key);
+      if (!w) return null;
+      return { out: this.rules.applyToWork(s, key, event, now, { resetDay: this.resetDay(s), point: this.rules.sendPoint }), accountId: w.accountId };
+    }, false);
+  }
+
+  private async applyChange(
+    subjectId: string,
+    attemptId: string | null,
+    decide: (s: SubjectState, now: number) => { out: { state: SubjectState; effects: readonly AttemptEffect[] }; accountId: string } | null,
+    accepted: boolean,
+  ): Promise<boolean> {
     const now = this.now();
     const anomalies: string[] = [];
-    const written = await this.store.update(attempt.subjectId, now, (s) => {
-      if (!s.attempts.some((a) => a.id === attempt.id)) return null;
-      const out = this.rules.applyToAttempt(s, attempt.id, event, now, { resetDay: this.resetDay(s), point: this.rules.sendPoint });
-      let next = out.state;
-      const accountId = s.attempts.find((a) => a.id === attempt.id)?.accountId ?? "";
+    const written = await this.store.update(subjectId, now, (s) => {
+      const decided = decide(s, now);
+      if (!decided) return null;
+      let next = decided.out.state;
+      const accountId = decided.accountId;
       const account = next.accounts[accountId];
-      for (const effect of out.effects) {
+      for (const effect of decided.out.effects) {
         if (effect.kind === "anomaly") anomalies.push(effect.what);
         if (effect.kind === "rejected" && account && effect.reason === "payment_required") {
           next = { ...next, accounts: { ...next.accounts, [accountId]: { ...account, waitUntil: QUOTA_WAIT, waitReason: "quota" } } };
@@ -294,19 +326,18 @@ export class Engine {
           next = { ...next, accounts: { ...next.accounts, [accountId]: { ...account, waitUntil: now + backoffMs, waitReason: "rate_limited", backoffMs } } };
         }
       }
-      if (event.kind === "call_answer" && event.answer.kind === "accepted" && account && account.backoffMs > 0) {
-        next = { ...next, accounts: { ...next.accounts, [accountId]: { ...account, backoffMs: 0 } } };
-      }
+      if (accepted && account && account.backoffMs > 0) next = { ...next, accounts: { ...next.accounts, [accountId]: { ...account, backoffMs: 0 } } };
       return same(next, s) ? null : next;
     });
-    for (const what of anomalies) await this.store.recordAnomaly(attempt.id, what, now);
+    for (const what of anomalies) await this.store.recordAnomaly(attemptId, what, now);
     return written !== null;
   }
 
-  private async observe(): Promise<boolean> {
+  /** Observes the provider; `ok` is false when it could not be observed. */
+  private async observe(): Promise<{ changed: boolean; ok: boolean }> {
     const checkpoint = await this.store.meta(OBSERVE_CHECKPOINT);
     const observed = await this.bounded(() => this.port.observe(checkpoint), null);
-    if (observed === null) return false;
+    if (observed === null) return { changed: false, ok: false };
     const { events, checkpoint: next } = observed;
     let changed = false;
     for (const event of events) {
@@ -314,18 +345,7 @@ export class Engine {
       this.hooks.crashPoint?.("after_observe_event", null);
     }
     if (next !== checkpoint) await this.store.setMeta(OBSERVE_CHECKPOINT, next);
-    return changed;
-  }
-
-  /**
-   * Matches a provider event to an attempt, in any state, by reference, else by idempotency key
-   * (ADR 0002 "Recovery"). The domain then settles it on the provider work that produced it.
-   */
-  private async attemptFor(event: { providerRef: string; key?: string }): Promise<Attempt | null> {
-    const byRef = await this.store.attemptByProviderRef(event.providerRef);
-    if (byRef || event.key === undefined) return byRef;
-    const withKey = await this.store.attemptsByKey(event.key);
-    return withKey.find((a) => isLive(a)) ?? withKey[0] ?? null;
+    return { changed, ok: true };
   }
 
   /** Records a reply on each subject it belongs to. */
@@ -343,63 +363,102 @@ export class Engine {
   }
 
   /**
-   * A reply outside every known thread, matched by the inbox it reached and the bare address it came
-   * from (ADR 0003 2.4): only work handed at or before it, sent or uncertain, to an address the
-   * lead still owns.
+   * The subjects a reply outside every known thread falls back to by the inbox it reached and the
+   * bare address it came from (2.4): the rule `replyMatches` decides, work by work.
    */
-  private async replyByAddress(reply: { id: string; at: number; inbox: string; from: string }): Promise<boolean> {
+  private async replyByAddress(reply: ReplyEvent): Promise<string[]> {
     const now = this.now();
-    const address = reply.from.toLowerCase();
-    const subjects: string[] = [];
-    for (const id of await this.store.subjectsReachedFrom(reply.inbox, address, reply.at)) {
-      const s = await this.store.subject(id, now);
-      if (s?.lead.details.some((d) => d.channel === "email" && d.value.toLowerCase() === address)) subjects.push(id);
+    const subjects = new Set<string>();
+    for (const w of await this.store.workReachedFrom(reply.inbox, reply.address)) {
+      if (subjects.has(w.subjectId)) continue;
+      const s = await this.store.subject(w.subjectId, now);
+      if (s && this.rules.replyMatches(s, w, { inbox: reply.inbox, address: reply.address, atWall: reply.atWall })) subjects.add(w.subjectId);
     }
+    return [...subjects];
+  }
+
+  /** Resolves a reply event on its subjects, or keeps it unmatched by its reference. */
+  private async resolveReply(reply: ReplyEvent, subjects: readonly string[]): Promise<void> {
     if (subjects.length === 0) {
-      await this.store.recordAnomaly(null, "a reply from an address the app never wrote to from that inbox", now);
-      return false;
+      await this.store.recordAnomaly(null, "a reply from an address the app never wrote to from that inbox", this.now());
+      await this.store.updateReplyEvent(reply.eventId, { state: "unmatched" });
+      return;
     }
-    return this.recordReply(subjects, reply);
+    await this.recordReply(subjects, { id: reply.eventId, at: reply.atWall });
+    await this.store.updateReplyEvent(reply.eventId, { state: "resolved" });
+  }
+
+  /**
+   * A reply's life (ADR 0003 2.4, PR 37 review round 3). It is identified by its event for good:
+   * an observation replay is a no-op. A reply on a known thread is recorded on that lead; one with
+   * no thread falls back at once; one on a thread not known yet is held, pausing sends from the
+   * inbox to the address, until its reference attaches or it has waited one settling period of
+   * running time, then falls back. One that matches nothing stays unmatched by its reference.
+   */
+  private async applyReplyEvent(event: Extract<ProviderEvent, { kind: "reply" }>): Promise<boolean> {
+    if (await this.store.replyEvent(event.id)) return false;
+    const now = this.now();
+    const reply: ReplyEvent = {
+      eventId: event.id,
+      providerRef: event.providerRef,
+      inbox: event.inbox,
+      address: event.from.toLowerCase(),
+      atWall: Math.min(event.at, now),
+      receivedWall: now,
+      state: "pending",
+      waitedMs: 0,
+      lastCountedWall: now,
+    };
+    await this.store.recordReplyEvent(reply);
+    const owner = event.providerRef === null ? null : await this.store.workByProviderRef(event.providerRef);
+    if (owner) await this.resolveReply(reply, [owner.subjectId]);
+    else if (event.providerRef === null) await this.resolveReply(reply, await this.replyByAddress(reply));
+    return true;
   }
 
   private async applyEvent(event: ProviderEvent): Promise<boolean> {
+    if (event.kind === "reply") return this.applyReplyEvent(event);
     const now = this.now();
-    if (event.kind === "reply") {
-      // A reply with no thread reference falls back to inbox and address at once.
-      if (event.providerRef === null) return this.replyByAddress(event);
-      const a = await this.attemptFor({ providerRef: event.providerRef });
-      if (a) return this.recordReply([a.subjectId], event);
-      // A thread the app does not know yet: held until the reference attaches to its work, or one
-      // settling period, while sends from that inbox to that address pause (2.4, review round 2).
-      await this.store.holdReply({ eventId: event.id, providerRef: event.providerRef, inbox: event.inbox, address: event.from.toLowerCase(), atWall: Math.min(event.at, now), receivedWall: now });
-      return true;
-    }
-    const a = await this.attemptFor(event);
-    if (!a) {
+    const w = (await this.store.workByProviderRef(event.providerRef)) ?? (await this.store.work(event.key));
+    if (!w) {
       await this.store.recordAnomaly(null, `a ${event.kind} event the app cannot match`, now);
       return false;
     }
-    if (event.kind === "sent") return this.applyAttempt(a, { kind: "sent_observed", providerTime: event.sentAt, providerRef: event.providerRef });
-    if (event.kind === "rejected") return this.applyAttempt(a, { kind: "provider_rejected", reason: event.reason });
+    if (event.kind === "sent") return this.applyWork(w.subjectId, w.key, { kind: "sent_observed", providerTime: event.sentAt, providerRef: event.providerRef });
+    if (event.kind === "rejected") return this.applyWork(w.subjectId, w.key, { kind: "provider_rejected", reason: event.reason });
     // A bounce after a send marks the address bad and fails the track if it is unfinished.
-    return (await this.store.update(a.subjectId, now, (s) => {
-      const current = s.attempts.find((x) => x.id === a.id);
-      if (!current) return null;
-      const next = this.rules.applyBadDestination(s, current, now);
+    return (await this.store.update(w.subjectId, now, (s) => {
+      const sentBy = s.attempts.filter((a) => a.idempotencyKey === w.key && a.handedWall !== null).sort((x, y) => (x.handedWall ?? 0) - (y.handedWall ?? 0))[0];
+      if (!sentBy) return null;
+      const next = this.rules.applyBadDestination(s, sentBy, now);
       return same(next, s) ? null : next;
     })) !== null;
   }
 
-  /** Resolves held replies: to the one lead whose work now carries the reference, else after SETTLING by address. */
-  private async correlate(): Promise<boolean> {
+  /**
+   * Held and unmatched replies. First (`attach`), every reply whose reference now belongs to work
+   * resolves to that lead, and a held reply counts this pass's running time when the provider
+   * could be observed. Then (`fallback`), after the pass's lookups, a held reply that has waited
+   * one settling period falls back by address.
+   */
+  private async correlate(countTime: boolean, fallback: boolean): Promise<boolean> {
+    const now = this.now();
     let changed = false;
-    for (const reply of await this.store.pendingReplies()) {
-      const a = await this.store.attemptByProviderRef(reply.providerRef);
-      const reply_ = { id: reply.eventId, at: reply.atWall, inbox: reply.inbox, from: reply.address };
-      if (a) await this.recordReply([a.subjectId], reply_);
-      else if (this.now() - reply.receivedWall >= ENGINE_PARAMS.SETTLING) await this.replyByAddress(reply_);
-      else continue;
-      await this.store.dropPendingReply(reply.eventId);
+    for (const reply of await this.store.openReplyEvents()) {
+      const owner = reply.providerRef === null ? null : await this.store.workByProviderRef(reply.providerRef);
+      if (owner) {
+        await this.resolveReply(reply, [owner.subjectId]);
+        changed = true;
+        continue;
+      }
+      if (reply.state !== "pending") continue;
+      if (!fallback) {
+        const waitedMs = reply.waitedMs + (countTime ? Math.max(0, now - reply.lastCountedWall) : 0);
+        if (waitedMs !== reply.waitedMs || reply.lastCountedWall !== now) await this.store.updateReplyEvent(reply.eventId, { waitedMs, lastCountedWall: now });
+        continue;
+      }
+      if (reply.waitedMs < ENGINE_PARAMS.SETTLING) continue;
+      await this.resolveReply(reply, await this.replyByAddress(reply));
       changed = true;
     }
     return changed;
@@ -431,30 +490,29 @@ export class Engine {
     return changed;
   }
 
-  private ref(a: Attempt): AttemptRef {
-    return { idempotencyKey: a.idempotencyKey, providerRef: a.providerRef, sender: a.accountId, destination: a.destination };
+  private ref(w: ProviderWork): AttemptRef {
+    return { idempotencyKey: w.key, providerRef: w.providerRef, sender: w.accountId, destination: w.destination };
   }
 
+  /** Looks up provider work whose lookup is due, one call per work (5.3, 5.6). */
   private async settle(): Promise<boolean> {
     let changed = false;
-    // One lookup per piece of provider work (its key) per pass, however many attempts share it.
-    const answers = new Map<string, Awaited<ReturnType<SendPort["lookup"]>>>();
-    for (const a of await this.store.openAttempts()) {
-      if (!(a.state === "handed" || a.state === "accepted" || isUncertain(a)) || a.awaitingAnswer) continue;
-      if (a.nextLookupWall === null || a.nextLookupWall > this.now()) continue;
+    for (const due of await this.store.openWork()) {
+      if (due.nextLookupWall === null || due.nextLookupWall > this.now()) continue;
+      const live = (await this.store.openAttempts()).find((a) => a.idempotencyKey === due.key);
+      if (live?.awaitingAnswer) continue;
       // Settlement runs on its own clock: a retry still waiting for its slot when the lookup is due
-      // is refused, and the attempt settles (ruling 5).
-      if (a.retry === "wanted" || a.retry === "wanted_after_not_sent") {
-        await this.applyAttempt(a, { kind: "retry_refused", now: this.now() });
+      // is refused, and the work settles (ruling 5).
+      if (live && (live.retry === "wanted" || live.retry === "wanted_after_not_sent")) {
+        await this.applyAttempt(live, { kind: "retry_refused", now: this.now() });
         changed = true;
-        const after = await this.store.attempt(a.id);
-        if (!after || after.state === "withdrawn" || after.nextLookupWall === null || after.nextLookupWall > this.now()) continue;
+        const after = await this.store.work(due.key);
+        if (!after || after.settled !== null || after.nextLookupWall === null || after.nextLookupWall > this.now()) continue;
       }
-      const known = answers.get(a.idempotencyKey);
-      const answer = known ?? (await this.bounded(() => this.port.lookup(this.ref(a)), { kind: "unknown" as const }));
-      answers.set(a.idempotencyKey, answer);
-      if (!known) this.hooks.crashPoint?.("after_lookup", a.id);
-      changed = (await this.applyAttempt(a, { kind: "lookup_answer", answer, now: this.now() })) || changed;
+      const w = (await this.store.work(due.key)) ?? due;
+      const answer = await this.bounded(() => this.port.lookup(this.ref(w)), { kind: "unknown" as const });
+      this.hooks.crashPoint?.("after_lookup", live?.id ?? null);
+      changed = (await this.applyWork(w.subjectId, w.key, { kind: "lookup_answer", answer, now: this.now() })) || changed;
     }
     return changed;
   }
@@ -463,7 +521,9 @@ export class Engine {
     let changed = false;
     for (const a of await this.store.openAttempts()) {
       if (!a.withdrawRequested || a.withdrawCalled || (a.state !== "handed" && a.state !== "accepted")) continue;
-      const answer = await this.bounded(() => this.port.withdraw(this.ref(a)), "unknown" as const);
+      const w = await this.store.work(a.idempotencyKey);
+      if (!w) continue;
+      const answer = await this.bounded(() => this.port.withdraw(this.ref(w)), "unknown" as const);
       changed = (await this.applyAttempt(a, { kind: "withdraw_answer", answer, now: this.now() })) || changed;
     }
     return changed;
@@ -588,7 +648,7 @@ export class Engine {
     const now = this.now();
     if (a.presendCheckedWall !== null && a.presendCheckedWall >= now - ENGINE_PARAMS.PRESEND_MAX_AGE && !a.presendFoundReply) return true;
     const subject = await this.store.subject(a.subjectId, now);
-    const threadRefs = (subject?.attempts ?? []).filter((x) => x.providerRef !== null).map((x) => x.providerRef ?? "");
+    const threadRefs = (subject?.work ?? []).flatMap((w) => (w.providerRef === null ? [] : [w.providerRef]));
     const result = await this.bounded(() => this.port.presendCheck({ sender: a.accountId, destination: a.destination, threadRefs }), { kind: "unavailable" as const });
     if (result.kind === "unavailable") return false;
     await this.store.update(a.subjectId, now, (s) => {
@@ -688,7 +748,7 @@ export class Engine {
             out.onlySlot = true;
             return null;
           }
-          return this.rules.applyToAttempt(s, current.id, { kind: "guard_failed" }, now, { resetDay: this.resetDay(s) }).state;
+          return this.rules.applyToAttempt(s, current.id, { kind: "guard_failed" }, now).state;
         });
         return out;
       },
@@ -731,7 +791,7 @@ export class Engine {
             out.onlySlot = true;
             return null;
           }
-          return this.rules.applyToAttempt(s, current.id, { kind: "retry_refused", now }, now, { resetDay: this.resetDay(s) }).state;
+          return this.rules.applyToAttempt(s, current.id, { kind: "retry_refused", now }, now).state;
         });
         return out;
       },

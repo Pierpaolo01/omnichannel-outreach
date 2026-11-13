@@ -24,9 +24,10 @@ export function inShard(index: number): boolean {
  * not-sent-then-sent capacity case: every behaviour a sweep of the seeds reported
  * (`RunResult.stats.features`) except the slow-slot profile, which the mutation seed for "retry blocks
  * settlement" covers. Chosen greedily from that sweep, preferring fast runs; refresh it when the
- * generator changes.
+ * generator changes. Offset 85 (seed 20261198) is the full search's case of a user's "not sent"
+ * on work an inheritor carried, which left an accepted attempt unsettled (PR 37 review round 3).
  */
-export const FIXED_SEEDS: readonly number[] = [5, 21, 43, 44, 50, 56, 72, 73, 83, 87];
+export const FIXED_SEEDS: readonly number[] = [5, 21, 43, 44, 50, 56, 72, 73, 83, 85, 87];
 
 const CHUNK = 10;
 

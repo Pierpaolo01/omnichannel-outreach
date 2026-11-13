@@ -13,13 +13,15 @@ import type {
   FinishReason,
   LeadDetail,
   LookupAnswer,
+  ProviderWork,
   RejectReason,
   StepOutcome,
   SubjectState,
   TrackProgress,
+  WorkSettlement,
 } from "../../domain/sequence/state.ts";
 import { isOutreachStatus } from "../../domain/outreach-status.ts";
-import type { CampaignEngineRow, EngineStore, LaunchOutcome, PendingReply, SenderAccountConfig } from "../engine/engine-store.ts";
+import type { CampaignEngineRow, EngineStore, LaunchOutcome, ReplyEvent, SenderAccountConfig } from "../engine/engine-store.ts";
 import { liveDetailRowOf } from "./sqlite-store.ts";
 
 type Row = Record<string, SQLOutputValue>;
@@ -159,13 +161,7 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   async openAttempts(): Promise<Attempt[]> {
-    // Live attempts, and withdrawn ones whose outcome the provider has not settled: they are still
-    // looked up (5.3 as amended), whatever they hold of their account's capacity.
-    return this.sql(
-      `SELECT * FROM attempts WHERE state IN ${LIVE_STATES} OR (state = 'withdrawn' AND next_lookup_wall IS NOT NULL AND sent_wall IS NULL AND calls > 0) ORDER BY claimed_wall, rowid`,
-    )
-      .all()
-      .map(toAttempt);
+    return this.sql(`SELECT * FROM attempts WHERE state IN ${LIVE_STATES} ORDER BY claimed_wall, rowid`).all().map(toAttempt);
   }
 
   async attempt(attemptId: string): Promise<Attempt | null> {
@@ -173,45 +169,63 @@ export class SqliteEngineStore implements EngineStore {
     return row ? toAttempt(row) : null;
   }
 
-  async attemptsByKey(key: string): Promise<Attempt[]> {
-    return this.sql("SELECT * FROM attempts WHERE idempotency_key = ? ORDER BY claimed_wall, rowid").all(key).map(toAttempt);
+  async openWork(): Promise<ProviderWork[]> {
+    return this.sql("SELECT * FROM provider_work WHERE settled IS NULL AND next_lookup_wall IS NOT NULL ORDER BY next_lookup_wall, rowid").all().map(toWork);
   }
 
-  async subjectsReachedFrom(inbox: string, address: string, atWall: number): Promise<string[]> {
-    // A reply outside any known thread is reconciled by the inbox it reached and the lead's address,
-    // only to work handed at or before it that was sent or whose outcome is uncertain: never work
-    // the provider refused or confirmed withdrawn, the user marked not sent, or handed after it (2.4).
-    return this.sql(
-      `SELECT DISTINCT a.subject_id FROM attempts a
-       WHERE a.account_id = ? AND lower(a.destination) = lower(?) AND a.calls > 0 AND a.handed_wall <= ?
-         AND (a.state = 'sent' OR a.sent_wall IS NOT NULL OR a.state IN ('handed', 'accepted')
-              OR (a.state = 'withdrawn' AND a.ended_by = 'lookup_not_sent' AND a.holds_reservation = 1))
-       ORDER BY a.subject_id`,
-    )
-      .all(inbox, address, atWall)
-      .map((r) => str(r, "subject_id"));
+  async work(key: string): Promise<ProviderWork | null> {
+    const row = this.sql("SELECT * FROM provider_work WHERE key = ?").get(key);
+    return row ? toWork(row) : null;
   }
 
-  async holdReply(reply: PendingReply): Promise<void> {
+  async workByProviderRef(providerRef: string): Promise<ProviderWork | null> {
+    const row = this.sql("SELECT * FROM provider_work WHERE provider_ref = ? ORDER BY rowid LIMIT 1").get(providerRef);
+    return row ? toWork(row) : null;
+  }
+
+  async workReachedFrom(inbox: string, address: string): Promise<ProviderWork[]> {
+    return this.sql("SELECT * FROM provider_work WHERE account_id = ? AND lower(destination) = lower(?) AND first_handed_wall IS NOT NULL ORDER BY subject_id, rowid")
+      .all(inbox, address)
+      .map(toWork);
+  }
+
+  async unresolvedWork(): Promise<ProviderWork[]> {
+    return this.sql("SELECT * FROM provider_work WHERE settled IS NULL AND unresolved_since IS NOT NULL ORDER BY account_id, unresolved_since, rowid").all().map(toWork);
+  }
+
+  async sentToday(accountId: string, now: number): Promise<number> {
+    const a = this.sql("SELECT reset_zone FROM sender_accounts WHERE id = ?").get(accountId);
+    if (!a) return 0;
+    return num(this.sql("SELECT COUNT(*) AS n FROM provider_work WHERE account_id = ? AND sent_day = ?").get(accountId, resetDayOf(now, str(a, "reset_zone"))) ?? {}, "n");
+  }
+
+  async replyEvent(eventId: string): Promise<ReplyEvent | null> {
+    const row = this.sql("SELECT * FROM reply_events WHERE event_id = ?").get(eventId);
+    return row ? toReplyEvent(row) : null;
+  }
+
+  async recordReplyEvent(reply: ReplyEvent): Promise<void> {
     this.run(
-      "INSERT OR IGNORE INTO pending_replies (event_id, provider_ref, inbox, address, at_wall, received_wall) VALUES (?, ?, ?, ?, ?, ?)",
-      [reply.eventId, reply.providerRef, reply.inbox, reply.address.toLowerCase(), reply.atWall, reply.receivedWall],
+      `INSERT OR IGNORE INTO reply_events (event_id, provider_ref, inbox, address, at_wall, received_wall, state, waited_ms, last_counted_wall)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [reply.eventId, reply.providerRef, reply.inbox, reply.address.toLowerCase(), reply.atWall, reply.receivedWall, reply.state, reply.waitedMs, reply.lastCountedWall],
     );
   }
 
-  async pendingReplies(): Promise<PendingReply[]> {
-    return this.sql("SELECT * FROM pending_replies ORDER BY received_wall, event_id")
-      .all()
-      .map((r) => ({ eventId: str(r, "event_id"), providerRef: str(r, "provider_ref"), inbox: str(r, "inbox"), address: str(r, "address"), atWall: num(r, "at_wall"), receivedWall: num(r, "received_wall") }));
+  async updateReplyEvent(eventId: string, change: Partial<Pick<ReplyEvent, "state" | "waitedMs" | "lastCountedWall">>): Promise<void> {
+    this.transaction(() => {
+      if (change.state !== undefined) this.run("UPDATE reply_events SET state = ? WHERE event_id = ?", [change.state, eventId]);
+      if (change.waitedMs !== undefined) this.run("UPDATE reply_events SET waited_ms = ? WHERE event_id = ?", [change.waitedMs, eventId]);
+      if (change.lastCountedWall !== undefined) this.run("UPDATE reply_events SET last_counted_wall = ? WHERE event_id = ?", [change.lastCountedWall, eventId]);
+    });
   }
 
-  async dropPendingReply(eventId: string): Promise<void> {
-    this.run("DELETE FROM pending_replies WHERE event_id = ?", [eventId]);
+  async openReplyEvents(): Promise<ReplyEvent[]> {
+    return this.sql("SELECT * FROM reply_events WHERE state <> 'resolved' ORDER BY received_wall, event_id").all().map(toReplyEvent);
   }
 
-  async attemptByProviderRef(providerRef: string): Promise<Attempt | null> {
-    const row = this.sql("SELECT * FROM attempts WHERE provider_ref = ? ORDER BY rowid LIMIT 1").get(providerRef);
-    return row ? toAttempt(row) : null;
+  async pendingReplies(): Promise<ReplyEvent[]> {
+    return this.sql("SELECT * FROM reply_events WHERE state = 'pending' ORDER BY received_wall, event_id").all().map(toReplyEvent);
   }
 
   async upsertAccounts(accounts: readonly SenderAccountConfig[]): Promise<void> {
@@ -276,13 +290,14 @@ export class SqliteEngineStore implements EngineStore {
     const resetZone = str(a, "reset_zone");
     // The ledger counts provider work (keys): sent on today's reset day, plus work not yet sent
     // that holds a reservation, live or withdrawn with its outcome uncertain (ADR 0003 4.2, ruling 3).
+    // The ledger counts provider work: sent on today's reset day, plus unsettled work not yet sent,
+    // which holds a reservation (ADR 0003 4.2).
     const counts =
       this.sql(
         `SELECT
            (SELECT COUNT(*) FROM attempts WHERE account_id = :id AND state IN ${LIVE_STATES}) AS live,
-           (SELECT COUNT(DISTINCT idempotency_key) FROM attempts WHERE account_id = :id AND sent_wall IS NOT NULL AND sent_day = :today) AS sent_today,
-           (SELECT COUNT(DISTINCT a.idempotency_key) FROM attempts a WHERE a.account_id = :id AND a.holds_reservation = 1
-              AND NOT EXISTS (SELECT 1 FROM attempts s WHERE s.idempotency_key = a.idempotency_key AND s.sent_wall IS NOT NULL)) AS reserved`,
+           (SELECT COUNT(*) FROM provider_work WHERE account_id = :id AND sent_day = :today) AS sent_today,
+           (SELECT COUNT(*) FROM provider_work WHERE account_id = :id AND settled IS NULL AND sent_wall IS NULL) AS reserved`,
       ).get({ id, today: resetDayOf(now, resetZone) }) ?? {};
     const capacity = num(a, "capacity");
     return {
@@ -423,6 +438,7 @@ export class SqliteEngineStore implements EngineStore {
           attemptId: strOrNull(r, "attempt_id"),
         })),
       attempts,
+      work: this.sql("SELECT * FROM provider_work WHERE subject_id = ? ORDER BY rowid").all(subjectId).map(toWork),
       freezes: this.sql("SELECT * FROM freezes WHERE subject_id = ? ORDER BY seq")
         .all(subjectId)
         .map((f) => ({ fromWall: num(f, "from_wall"), toWall: numOrNull(f, "to_wall") })),
@@ -430,9 +446,10 @@ export class SqliteEngineStore implements EngineStore {
         .all(subjectId)
         .map((r) => ({ channel: str(r, "channel") === "sms" ? ("sms" as const) : ("email" as const), atWall: num(r, "at_wall"), providerRef: str(r, "provider_ref") })),
       pendingReplies: this.sql(
-        `SELECT DISTINCT inbox, address FROM pending_replies
-         WHERE address IN (SELECT lower(destination) FROM attempts WHERE subject_id = ?)
-            OR address IN (SELECT lower(value) FROM live_contact_details WHERE owner_kind = ? AND owner_id = ? AND channel = 'email')`,
+        `SELECT DISTINCT inbox, address FROM reply_events
+         WHERE state = 'pending'
+           AND (address IN (SELECT lower(destination) FROM attempts WHERE subject_id = ?)
+             OR address IN (SELECT lower(value) FROM live_contact_details WHERE owner_kind = ? AND owner_id = ? AND channel = 'email'))`,
       )
         .all(subjectId, owner.kind, owner.id)
         .map((r) => ({ inbox: str(r, "inbox"), address: str(r, "address") })),
@@ -477,28 +494,41 @@ export class SqliteEngineStore implements EngineStore {
     }
     if (base.results.some((b) => !next.results.some((r) => r.stepId === b.stepId))) throw new Error("a step result is never deleted");
 
+    // Provider work first: attempts point at it.
+    for (const w of next.work) {
+      const before = base.work.find((b) => b.key === w.key);
+      if (same(before, w)) continue;
+      if (before?.settled && before.settled !== w.settled) throw new Error(`provider work is settled once (${w.key})`);
+      changed = true;
+      this.run(
+        `INSERT INTO provider_work (key, subject_id, track_id, step_id, account_id, destination, calls, first_handed_wall, provider_ref, settled,
+           sent_wall, sent_day, next_lookup_wall, lookup_answer, queued_lookups, unresolved_since)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET calls = excluded.calls, first_handed_wall = excluded.first_handed_wall, provider_ref = excluded.provider_ref,
+           settled = excluded.settled, sent_wall = excluded.sent_wall, sent_day = excluded.sent_day, next_lookup_wall = excluded.next_lookup_wall,
+           lookup_answer = excluded.lookup_answer, queued_lookups = excluded.queued_lookups, unresolved_since = excluded.unresolved_since`,
+        [w.key, id, w.trackId, w.stepId, w.accountId, w.destination, w.calls, w.firstHandedWall, w.providerRef, w.settled, w.sentWall, w.sentDay, w.nextLookupWall, w.lookupAnswer, w.queuedLookups, w.unresolvedSince],
+      );
+    }
+    if (base.work.some((b) => !next.work.some((w) => w.key === b.key))) throw new Error("provider work is never deleted");
     for (const a of next.attempts) {
       if (same(base.attempts.find((b) => b.id === a.id), a)) continue;
       changed = true;
       this.run(
-        `INSERT INTO attempts (id, subject_id, track_id, step_id, account_id, destination_detail_id, destination, state, copy, threading, thread_ref, provider_ref,
+        `INSERT INTO attempts (id, subject_id, track_id, step_id, account_id, destination_detail_id, destination, state, copy, threading, thread_ref,
            retryable, not_sent_final, idempotency_key, calls, claimed_wall, handed_at, handed_wall, last_call_wall, presend_checked_wall,
-           presend_found_reply, lookup_answer, queued_lookups, next_lookup_wall, unresolved_since, ended_by, withdraw_requested, withdraw_called,
-           awaiting_answer, retry, reject_reason, sent_wall, sent_day, user_marked_not_sent, holds_reservation)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           presend_found_reply, ended_by, withdraw_requested, withdraw_called, awaiting_answer, retry, reject_reason)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET state = excluded.state, copy = excluded.copy, thread_ref = excluded.thread_ref,
-           provider_ref = excluded.provider_ref, calls = excluded.calls, handed_at = excluded.handed_at, handed_wall = excluded.handed_wall,
+           calls = excluded.calls, handed_at = excluded.handed_at, handed_wall = excluded.handed_wall,
            last_call_wall = excluded.last_call_wall, presend_checked_wall = excluded.presend_checked_wall, presend_found_reply = excluded.presend_found_reply,
-           lookup_answer = excluded.lookup_answer, queued_lookups = excluded.queued_lookups, next_lookup_wall = excluded.next_lookup_wall,
-           unresolved_since = excluded.unresolved_since, ended_by = excluded.ended_by, withdraw_requested = excluded.withdraw_requested,
+           ended_by = excluded.ended_by, withdraw_requested = excluded.withdraw_requested,
            withdraw_called = excluded.withdraw_called, awaiting_answer = excluded.awaiting_answer, retry = excluded.retry,
-           reject_reason = excluded.reject_reason, sent_wall = excluded.sent_wall, sent_day = excluded.sent_day,
-           user_marked_not_sent = excluded.user_marked_not_sent, holds_reservation = excluded.holds_reservation`,
+           reject_reason = excluded.reject_reason`,
         [
-          a.id, id, a.trackId, a.stepId, a.accountId, a.destinationDetailId, a.destination, a.state, a.copy ? JSON.stringify(a.copy) : null, a.threading, a.threadRef, a.providerRef,
+          a.id, id, a.trackId, a.stepId, a.accountId, a.destinationDetailId, a.destination, a.state, a.copy ? JSON.stringify(a.copy) : null, a.threading, a.threadRef,
           a.retryable ? 1 : 0, a.notSentIsFinal ? 1 : 0, a.idempotencyKey, a.calls, a.claimedWall, a.handedAt, a.handedWall, a.lastCallWall, a.presendCheckedWall,
-          a.presendFoundReply ? 1 : 0, a.lookupAnswer, a.queuedLookups, a.nextLookupWall, a.unresolvedSince, a.endedBy, a.withdrawRequested ? 1 : 0, a.withdrawCalled ? 1 : 0,
-          a.awaitingAnswer ? 1 : 0, a.retry, a.rejectReason, a.sentWall, a.sentDay, a.userMarkedNotSent ? 1 : 0, a.holdsReservation ? 1 : 0,
+          a.presendFoundReply ? 1 : 0, a.endedBy, a.withdrawRequested ? 1 : 0, a.withdrawCalled ? 1 : 0, a.awaitingAnswer ? 1 : 0, a.retry, a.rejectReason,
         ],
       );
     }
@@ -604,7 +634,6 @@ function toAttempt(r: Row): Attempt {
     copy: r["copy"] == null ? null : (JSON.parse(str(r, "copy")) as Attempt["copy"]),
     threading: str(r, "threading") === "continue_thread" ? "continue_thread" : "new_subject",
     threadRef: strOrNull(r, "thread_ref"),
-    providerRef: strOrNull(r, "provider_ref"),
     retryable: num(r, "retryable") === 1,
     notSentIsFinal: num(r, "not_sent_final") === 1,
     idempotencyKey: str(r, "idempotency_key"),
@@ -615,20 +644,47 @@ function toAttempt(r: Row): Attempt {
     lastCallWall: numOrNull(r, "last_call_wall"),
     presendCheckedWall: numOrNull(r, "presend_checked_wall"),
     presendFoundReply: num(r, "presend_found_reply") === 1,
-    lookupAnswer: strOrNull(r, "lookup_answer") as LookupAnswer | null,
-    queuedLookups: num(r, "queued_lookups"),
-    nextLookupWall: numOrNull(r, "next_lookup_wall"),
-    unresolvedSince: numOrNull(r, "unresolved_since"),
     endedBy: strOrNull(r, "ended_by") as Attempt["endedBy"],
     withdrawRequested: num(r, "withdraw_requested") === 1,
     withdrawCalled: num(r, "withdraw_called") === 1,
     awaitingAnswer: num(r, "awaiting_answer") === 1,
     retry: str(r, "retry") as Attempt["retry"],
     rejectReason: strOrNull(r, "reject_reason") as RejectReason | null,
+  };
+}
+
+function toWork(r: Row): ProviderWork {
+  return {
+    key: str(r, "key"),
+    subjectId: str(r, "subject_id"),
+    trackId: str(r, "track_id"),
+    stepId: str(r, "step_id"),
+    accountId: str(r, "account_id"),
+    destination: str(r, "destination"),
+    calls: num(r, "calls"),
+    firstHandedWall: numOrNull(r, "first_handed_wall"),
+    providerRef: strOrNull(r, "provider_ref"),
+    settled: strOrNull(r, "settled") as WorkSettlement | null,
     sentWall: numOrNull(r, "sent_wall"),
     sentDay: strOrNull(r, "sent_day"),
-    userMarkedNotSent: num(r, "user_marked_not_sent") === 1,
-    holdsReservation: num(r, "holds_reservation") === 1,
+    nextLookupWall: numOrNull(r, "next_lookup_wall"),
+    lookupAnswer: strOrNull(r, "lookup_answer") as LookupAnswer | null,
+    queuedLookups: num(r, "queued_lookups"),
+    unresolvedSince: numOrNull(r, "unresolved_since"),
+  };
+}
+
+function toReplyEvent(r: Row): ReplyEvent {
+  return {
+    eventId: str(r, "event_id"),
+    providerRef: strOrNull(r, "provider_ref"),
+    inbox: str(r, "inbox"),
+    address: str(r, "address"),
+    atWall: num(r, "at_wall"),
+    receivedWall: num(r, "received_wall"),
+    state: str(r, "state") as ReplyEvent["state"],
+    waitedMs: num(r, "waited_ms"),
+    lastCountedWall: num(r, "last_counted_wall"),
   };
 }
 

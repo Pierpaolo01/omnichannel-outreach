@@ -4,10 +4,10 @@
  * it takes a `SubjectState` and the time, and returns the next `SubjectState`.
  */
 import type { OutreachStatus } from "../outreach-status.ts";
-import { applyAttemptEvent, isLive, markable, type AttemptEffect, type AttemptEvent } from "./attempt.ts";
+import { applyAttemptEvent, applyLookup, isLive, isUncertain, markable, withRef, type AttemptEffect, type AttemptEvent, type WorkEvent } from "./attempt.ts";
 import { leadNow, sendPoint, span, syncClock, wallOfLead, type Freeze, type LeadClock } from "./clock.ts";
 import { liveSteps, type TrackDefinition } from "./definition.ts";
-import type { Attempt, EndReason, FinishReason, LeadDetail, StepResult, SubjectState, TrackProgress } from "./state.ts";
+import type { Attempt, EndReason, FinishReason, LeadDetail, ProviderWork, StepResult, SubjectState, TrackProgress } from "./state.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Running, status and reach.
@@ -76,6 +76,18 @@ const withAttempt = (state: SubjectState, attempt: Attempt): SubjectState => ({
   attempts: state.attempts.map((a) => (a.id === attempt.id ? attempt : a)),
 });
 
+/** The provider work an attempt carries. */
+export function workOf(state: SubjectState, key: string): ProviderWork {
+  const w = state.work.find((x) => x.key === key);
+  if (!w) throw new Error(`no provider work ${key}`);
+  return w;
+}
+
+const withWork = (state: SubjectState, work: ProviderWork): SubjectState => ({
+  ...state,
+  work: state.work.map((w) => (w.key === work.key ? work : w)),
+});
+
 /** Brings the clock in line with `runs`, recording the freeze (3.2). */
 export function synced(state: SubjectState, now: number): SubjectState {
   const { clock, freezes } = syncClock(state.subject.clock, state.freezes, runs(state), now);
@@ -87,7 +99,8 @@ export function quiesce(state: SubjectState, trackId: string | null = null): Sub
   let next = state;
   for (const attempt of state.attempts) {
     if (!isLive(attempt) || (trackId !== null && attempt.trackId !== trackId)) continue;
-    next = withAttempt(next, applyAttemptEvent(attempt, { kind: "quiesce" }).attempt);
+    const step = applyAttemptEvent(attempt, workOf(next, attempt.idempotencyKey), { kind: "quiesce" });
+    next = withWork(withAttempt(next, step.attempt), step.work);
   }
   return next;
 }
@@ -228,7 +241,7 @@ export function evaluate(state: SubjectState, now: number): SubjectState {
     s = advanceTrack(s, track, latest?.at ?? progress.startedAt, latest?.atWall ?? wallAtLead(s.subject.clock, s.freezes, progress.startedAt, now));
   }
 
-  return checkEndings(s, now);
+  return attend(checkEndings(s, now), now);
 }
 
 function latestResult(state: SubjectState, trackId: string): StepResult | undefined {
@@ -251,7 +264,7 @@ export function applyReply(state: SubjectState, reply: { channel: "email" | "sms
   const recorded = { ...state, replies: [...state.replies, reply] };
   if (state.subject.ended === "replied" || state.subject.ended === "interested_on_call") return recorded;
   const ended = { ...recorded, subject: { ...recorded.subject, ended: "replied" as const, endedAt: leadNow(recorded.subject.clock, now), endedWall: now } };
-  return synced(quiesce(ended), now);
+  return attend(synced(quiesce(ended), now), now);
 }
 
 /** A bounce or invalid address after a send: the detail is marked bad, and an unfinished track fails (2.4). */
@@ -268,107 +281,126 @@ export function applyBadDestination(state: SubjectState, attempt: Attempt, now: 
   };
   const progress = progressOf(marked, attempt.trackId);
   if (!progress || progress.finishedAt !== null) return marked;
-  return checkEndings(finishTrack(marked, attempt.trackId, "failed_bad_destination", leadNow(marked.subject.clock, now), wallOfLead(marked.subject.clock, now)), now);
+  return attend(checkEndings(finishTrack(marked, attempt.trackId, "failed_bad_destination", leadNow(marked.subject.clock, now), wallOfLead(marked.subject.clock, now)), now), now);
+}
+
+/** The attempt the work's send settles on (PR 37 ruling 4): its first attempt handed over, unless that one was refused. */
+function carrierOf(state: SubjectState, key: string): Attempt | undefined {
+  const handed = state.attempts.filter((a) => a.idempotencyKey === key && a.handedWall !== null).sort((x, y) => (x.handedWall ?? 0) - (y.handedWall ?? 0));
+  return handed.find((a) => a.state !== "rejected") ?? handed[0];
 }
 
 /**
- * Applies one attempt event and its consequences for the step (2.4 "Sending"). A send is timed
- * by the provider's send time mapped onto the lead's clock, and the next step is resolved in the
- * same change whether or not the subject runs. A result on a finished track changes nothing else.
+ * Unsettled work the provider may hold that no live attempt carries any more is unresolved from
+ * then on (4.2, PR 37 review round 2 ruling 2), so it is listed until the provider or the user settles it.
  */
-export function applyToAttempt(
-  state: SubjectState,
-  attemptId: string,
-  event: AttemptEvent,
-  now: number,
-  options: { readonly resetDay: (accountId: string, t: number) => string; readonly point?: typeof sendPoint } = { resetDay: () => "" },
-): { state: SubjectState; effects: readonly AttemptEffect[] } {
-  const key = state.attempts.find((a) => a.id === attemptId)?.idempotencyKey;
-  const out = applyToAttemptOnce(state, attemptId, event, now, options);
-  if (key === undefined) return out;
-  return { state: settleKey(out.state, key, out.effects.some((e) => e.kind === "settled")), effects: out.effects };
-}
-
-/**
- * A reservation belongs to provider work, its idempotency key, and is released once, for every
- * attempt sharing the key, when the work settles: a send, or a settlement without one (review
- * round 2, ruling 2). Attempts of the key that are no longer live then hold nothing and are no
- * longer looked up; a live one keeps its own until it ends.
- */
-function settleKey(state: SubjectState, key: string, settled: boolean): SubjectState {
-  const sent = state.attempts.some((a) => a.idempotencyKey === key && (a.state === "sent" || a.sentWall !== null));
-  if (!sent && !settled) return state;
+export function attend(state: SubjectState, now: number): SubjectState {
   let s = state;
-  for (const a of state.attempts) {
-    if (a.idempotencyKey !== key || isLive(a) || (!a.holdsReservation && a.nextLookupWall === null)) continue;
-    s = withAttempt(s, { ...a, holdsReservation: false, nextLookupWall: null });
+  for (const w of state.work) {
+    if (!isUncertain(w) || w.unresolvedSince !== null) continue;
+    if (state.attempts.some((a) => a.idempotencyKey === w.key && isLive(a))) continue;
+    s = withWork(s, { ...w, unresolvedSince: now });
   }
   return s;
 }
 
-function applyToAttemptOnce(
-  state: SubjectState,
-  attemptId: string,
-  event: AttemptEvent,
-  now: number,
-  options: { readonly resetDay: (accountId: string, t: number) => string; readonly point?: typeof sendPoint },
-): { state: SubjectState; effects: readonly AttemptEffect[] } {
+/**
+ * Applies one event about an attempt, with its work, and its consequences for the step (2.4
+ * "Sending"). A result on a finished track changes nothing else.
+ */
+export function applyToAttempt(state: SubjectState, attemptId: string, event: AttemptEvent, now: number): { state: SubjectState; effects: readonly AttemptEffect[] } {
   const target = state.attempts.find((a) => a.id === attemptId);
   if (!target) throw new Error(`no attempt ${attemptId}`);
-  const sentFact = event.kind === "sent_observed" || (event.kind === "lookup_answer" && event.answer.kind === "sent");
-  if (event.kind === "mark_sent") {
-    // The user's "sent" cannot make a second sent attempt: for work already settled as sent it
-    // settles the live attempt; for a step sent by other work it is ignored.
-    const sentAlready = state.attempts.find((a) => a.stepId === target.stepId && a.state === "sent");
-    if (sentAlready) {
-      if (!isLive(target) && markable(target) && sentAlready.idempotencyKey !== target.idempotencyKey) {
-        // Uncertain work the user says was sent, though other work sent the step: counted on its
-        // day, its reservation released, never a second send of the step.
-        const s = withAttempt(state, { ...target, sentWall: now, sentDay: options.resetDay(target.accountId, now), holdsReservation: false, nextLookupWall: null });
-        return { state: s, effects: [{ kind: "sent_after_withdrawal", providerTime: now }] };
-      }
-      if (!isLive(target) || sentAlready.idempotencyKey !== target.idempotencyKey) return { state, effects: [{ kind: "ignored", what: "the step was already sent" }] };
-      const s = withAttempt(state, { ...target, state: "withdrawn", endedBy: "provider", holdsReservation: false, nextLookupWall: null, awaitingAnswer: false, retry: "refused" });
-      return { state: runs(s) ? evaluate(s, now) : s, effects: [] };
-    }
-  }
-  if (sentFact) {
-    const ref = event.kind === "sent_observed" ? event.providerRef : (event.answer.providerRef ?? null);
-    const sentAlready = state.attempts.find((a) => a.stepId === target.stepId && a.state === "sent");
-    if (sentAlready && sentAlready.idempotencyKey === target.idempotencyKey) {
-      // A later fact about work already settled as sent: attach a missing reference (ruling 1); an
-      // attempt still live for that same work is settled by the provider's statement (ruling 4).
-      let s = withAttempt(state, sentAlready.providerRef === null && ref ? { ...sentAlready, providerRef: ref } : sentAlready);
-      if (isLive(target)) s = withAttempt(s, { ...target, state: "withdrawn", endedBy: "provider", holdsReservation: false, nextLookupWall: null, awaitingAnswer: false, retry: "refused" });
-      return { state: runs(s) ? evaluate(s, now) : s, effects: [{ kind: "ignored", what: "the work was already settled as sent" }] };
-    }
-    // A provider send belongs to the provider work that produced it: the step's first attempt
-    // handed over under this key, with its own handover time, payload and send basis (ruling 4).
-    const work = state.attempts
-      .filter((a) => a.stepId === target.stepId && a.idempotencyKey === target.idempotencyKey && a.handedWall !== null)
-      .sort((x, y) => (x.handedWall ?? 0) - (y.handedWall ?? 0))[0];
-    if (work && work.id !== target.id) return applyToAttemptOnce(state, work.id, event, now, options);
-  }
-  const { attempt, effects } = applyAttemptEvent(target, event);
-  let s = withAttempt(state, attempt);
-  for (const effect of effects) {
-    if (effect.kind === "sent") {
-      s = recordSent(s, attempt, effect.providerTime, now, options);
-      // Its inheritors under the same key are quiesced, whether claimed or handed.
-      for (const other of s.attempts) {
-        if (other.id !== attempt.id && other.stepId === attempt.stepId && other.idempotencyKey === attempt.idempotencyKey && isLive(other)) {
-          s = withAttempt(s, applyAttemptEvent(other, { kind: "quiesce" }).attempt);
-        }
-      }
-    }
-    if (effect.kind === "sent_after_withdrawal") {
-      // Counted on its send day for capacity; it is never a second send of the step.
-      const at = Math.min(Math.max(effect.providerTime, attempt.handedWall ?? attempt.claimedWall), now);
-      s = withAttempt(s, { ...attempt, sentWall: at, sentDay: options.resetDay(attempt.accountId, at), holdsReservation: false });
-    }
-    if (effect.kind === "rejected") s = recordRejected(s, attempt, effect.reason, now);
-  }
+  const work = workOf(state, target.idempotencyKey);
+  const { attempt, work: nextWork, effects } = applyAttemptEvent(target, work, event);
+  let s = withWork(withAttempt(state, attempt), nextWork);
+  for (const effect of effects) if (effect.kind === "rejected") s = recordRejected(s, attempt, effect.reason, now);
+  s = attend(s, now);
   return { state: runs(s) ? evaluate(s, now) : s, effects };
+}
+
+/**
+ * Applies one event about provider work to the work and every attempt carrying it, in one change
+ * (PR 37 review round 3): a send, a lookup, a provider refusal, the user's mark. A send is timed
+ * by the provider's send time mapped onto the lead's clock, settles on the work's first attempt
+ * handed over (ruling 4), and resolves the next step in the same change whether or not the
+ * subject runs.
+ */
+export function applyToWork(
+  state: SubjectState,
+  key: string,
+  event: WorkEvent,
+  now: number,
+  options: { readonly resetDay: (accountId: string, t: number) => string; readonly point?: typeof sendPoint } = { resetDay: () => "" },
+): { state: SubjectState; effects: readonly AttemptEffect[] } {
+  const w = workOf(state, key);
+  const live = state.attempts.find((a) => a.idempotencyKey === key && isLive(a)) ?? null;
+  const carrier = carrierOf(state, key) ?? live ?? undefined;
+  const done = (s: SubjectState, effects: readonly AttemptEffect[]) => {
+    const attended = attend(s, now);
+    return { state: runs(attended) ? evaluate(attended, now) : attended, effects };
+  };
+  const sentFact = event.kind === "sent_observed" || (event.kind === "lookup_answer" && event.answer.kind === "sent") || event.kind === "mark_sent";
+  if (sentFact) {
+    const byUser = event.kind === "mark_sent";
+    if (byUser && !markable(w)) return { state, effects: [{ kind: "ignored", what: "mark sent is only for unresolved work" }] };
+    const ref = event.kind === "sent_observed" ? event.providerRef : event.kind === "lookup_answer" ? (event.answer.providerRef ?? null) : null;
+    const providerTime = event.kind === "sent_observed" ? event.providerTime : event.kind === "lookup_answer" ? (event.answer.sentAt ?? event.now) : event.now;
+    const referenced = withRef(event.kind === "lookup_answer" ? { ...w, lookupAnswer: "sent" } : w, ref);
+    if (w.settled === "sent" || w.settled === "user_sent") return { state: withWork(state, referenced), effects: [{ kind: "ignored", what: "the work was already settled as sent" }] };
+    const at = Math.min(Math.max(providerTime, w.firstHandedWall ?? providerTime), now);
+    if (w.settled !== null || !carrier) {
+      // Work already settled otherwise (refused, withdrawn, or marked not sent by the user): an
+      // anomaly, counted on its send day for capacity, never a second send of the step.
+      const counted = w.sentWall === null ? { ...referenced, sentWall: at, sentDay: options.resetDay(w.accountId, at) } : referenced;
+      return { state: withWork(state, counted), effects: [{ kind: "anomaly", what: `the provider sent work that was ${w.settled === "user_not_sent" ? "marked not sent" : (w.settled ?? "never handed over")}` }] };
+    }
+    const settled: ProviderWork = { ...referenced, settled: byUser ? "user_sent" : "sent", nextLookupWall: null, sentWall: at, sentDay: options.resetDay(w.accountId, at) };
+    const endedBy = byUser ? "user" : event.kind === "lookup_answer" ? "lookup" : "observed";
+    let s = withWork(state, settled);
+    // Every other live attempt carrying the work is settled by the same statement.
+    for (const a of s.attempts) {
+      if (a.idempotencyKey !== key || a.id === carrier.id || !isLive(a)) continue;
+      s = withAttempt(s, { ...a, state: "withdrawn", endedBy: byUser ? "user" : "provider", awaitingAnswer: false, retry: "refused" });
+    }
+    if (s.attempts.some((a) => a.stepId === carrier.stepId && a.state === "sent")) return done(s, [{ kind: "ignored", what: "the step was already sent" }]);
+    s = withAttempt(s, { ...carrier, state: "sent", endedBy, awaitingAnswer: false, retry: carrier.retry === "none" ? "none" : "refused" });
+    s = recordSent(s, s.attempts.find((a) => a.id === carrier.id) ?? carrier, providerTime, now, options);
+    return done(s, [{ kind: "sent", providerTime }]);
+  }
+  switch (event.kind) {
+    case "lookup_answer": {
+      const kind = event.answer.kind;
+      if (kind === "sent") throw new Error("unreachable");
+      const transport = live ?? carrier ?? { retryable: false, notSentIsFinal: false };
+      const out = applyLookup(w, live, transport, kind, event.now);
+      let s = withWork(state, out.work);
+      if (out.live) s = withAttempt(s, out.live);
+      return done(s, []);
+    }
+    case "provider_rejected": {
+      // Only a provider signal that it will not send moves accepted work (Instantly's skip, P4).
+      if (w.settled !== null) return { state, effects: [{ kind: "ignored", what: "a refusal of settled work" }] };
+      let s = withWork(state, { ...w, settled: "rejected", nextLookupWall: null });
+      const refused = live && live.state !== "claimed" ? live : carrier;
+      if (live && live.state !== "claimed") s = withAttempt(s, { ...live, state: "rejected", endedBy: "provider", rejectReason: event.reason, awaitingAnswer: false });
+      if (refused) s = recordRejected(s, s.attempts.find((a) => a.id === refused.id) ?? refused, event.reason, now);
+      return done(s, [{ kind: "rejected", reason: event.reason }]);
+    }
+    case "mark_not_sent": {
+      if (!markable(w)) return { state, effects: [{ kind: "ignored", what: "mark not sent is only for unresolved work" }] };
+      if (w.lookupAnswer === "queued") return { state, effects: [{ kind: "ignored", what: "the provider reports the work queued" }] };
+      // The user's decision settles the work: its reservation goes, it is no longer looked up, and
+      // every attempt still carrying it ends (PR 37 review round 3). A send observed later is still
+      // counted on its send day; the step's next attempt takes new work.
+      let s = withWork(state, { ...w, settled: "user_not_sent", nextLookupWall: null });
+      for (const a of s.attempts) {
+        if (a.idempotencyKey === key && isLive(a)) s = withAttempt(s, { ...a, state: "withdrawn", endedBy: "user", awaitingAnswer: false, retry: "refused" });
+      }
+      return done(s, []);
+    }
+  }
+  return { state, effects: [] };
 }
 
 function recordSent(
@@ -379,9 +411,7 @@ function recordSent(
   options: { readonly resetDay: (accountId: string, t: number) => string; readonly point?: typeof sendPoint },
 ): SubjectState {
   const point = (options.point ?? sendPoint)(state.subject.clock, state.freezes, providerTime, attempt.handedWall ?? attempt.claimedWall, now);
-  const sentWall = Math.min(Math.max(providerTime, attempt.handedWall ?? attempt.claimedWall), now);
-  let s = withAttempt(state, { ...attempt, sentWall, sentDay: options.resetDay(attempt.accountId, sentWall), holdsReservation: false });
-  s = { ...s, subject: { ...s.subject, touched: true } };
+  let s: SubjectState = { ...state, subject: { ...state.subject, touched: true } };
   if (s.results.some((r) => r.stepId === attempt.stepId)) return s;
   s = { ...s, results: [...s.results, { stepId: attempt.stepId, trackId: attempt.trackId, result: "sent", reason: null, at: point.at, atWall: point.atWall, attemptId: attempt.id }] };
   const progress = progressOf(s, attempt.trackId);
@@ -411,6 +441,21 @@ function recordRejected(state: SubjectState, attempt: Attempt, reason: Attempt["
   return state;
 }
 
+/**
+ * Whether a reply outside any known thread falls back to this provider work (2.4, PR 37 review
+ * rounds 2 and 3): work handed over from that inbox to that address at or before the reply, that
+ * was sent or is uncertain, counting work the user marked not sent (the mark settles capacity, not
+ * the facts); never work the provider refused or confirmed withdrawn, and only while the lead still
+ * owns the address.
+ */
+export function replyMatches(state: SubjectState, work: ProviderWork, reply: { readonly inbox: string; readonly address: string; readonly atWall: number }): boolean {
+  const address = reply.address.toLowerCase();
+  if (work.accountId !== reply.inbox || work.destination.toLowerCase() !== address) return false;
+  if (work.firstHandedWall === null || work.firstHandedWall > reply.atWall) return false;
+  const reached = work.settled === null || work.settled === "sent" || work.settled === "user_sent" || work.settled === "user_not_sent" || work.sentWall !== null;
+  return reached && state.lead.details.some((d) => d.channel === "email" && d.ownEmail && d.value.toLowerCase() === address);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Holds (5.4), derived.
 
@@ -421,7 +466,7 @@ export function trackHold(state: SubjectState, trackId: string): HoldReason | nu
   const progress = progressOf(state, trackId);
   if (!progress || progress.finishedAt !== null || progress.nextStepId === null) return null;
   const attempts = state.attempts.filter((a) => a.stepId === progress.nextStepId);
-  if (attempts.some((a) => isLive(a) && a.unresolvedSince !== null)) return "unresolved";
+  if (attempts.some((a) => isLive(a) && state.work.some((w) => w.key === a.idempotencyKey && w.unresolvedSince !== null && w.settled === null))) return "unresolved";
   const latest = attempts.at(-1);
   if (latest && latest.state === "rejected" && latest.rejectReason === "provider_skipped") return "provider_skipped";
   return null;

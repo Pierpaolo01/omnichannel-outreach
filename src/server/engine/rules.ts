@@ -15,13 +15,16 @@ import {
   readyItems,
   retryFailures,
 } from "../../domain/sequence/dispatch.ts";
-import { applyBadDestination, applyReply, applyToAttempt, enterMain, evaluate } from "../../domain/sequence/progress.ts";
+import { applyBadDestination, applyReply, applyToAttempt, applyToWork, enterMain, evaluate, replyMatches } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
 
 export interface Rules {
   readonly evaluate: typeof evaluate;
   readonly enterMain: typeof enterMain;
   readonly applyToAttempt: typeof applyToAttempt;
+  readonly applyToWork: typeof applyToWork;
+  /** Whether a reply outside a known thread falls back to a piece of provider work (2.4). */
+  readonly replyMatches: typeof replyMatches;
   readonly applyReply: typeof applyReply;
   readonly applyBadDestination: typeof applyBadDestination;
   readonly sendPoint: typeof sendPoint;
@@ -45,6 +48,8 @@ export const DEFAULT_RULES: Rules = {
   evaluate,
   enterMain,
   applyToAttempt,
+  applyToWork,
+  replyMatches,
   applyReply,
   applyBadDestination,
   sendPoint,

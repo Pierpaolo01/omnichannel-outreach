@@ -181,7 +181,8 @@ describe("settling against the fake's modes", () => {
     await h.advanceTo(MONDAY_9 + 3 * H + 30 * 60_000);
     const [attempt] = await h.store.engine.openAttempts();
     // Twelve queued answers make it unresolved at 3 h; it keeps being looked up every SETTLING after.
-    expect(attempt).toMatchObject({ state: "accepted", lookupAnswer: "queued", queuedLookups: 14, unresolvedSince: MONDAY_9 + 3 * H });
+    expect(attempt).toMatchObject({ state: "accepted" });
+    expect(await h.store.engine.work(attempt!.idempotencyKey)).toMatchObject({ lookupAnswer: "queued", queuedLookups: 14, unresolvedSince: MONDAY_9 + 3 * H });
     expect(await h.engine.markAttempt(attempt!.id, "not_sent")).toBe(false);
     expect((await h.request<{ heldTracks: unknown[] }>("GET", "/api/needs-attention")).body.heldTracks).toHaveLength(1);
     // The provider sends at last; the observation settles it and the track moves on.

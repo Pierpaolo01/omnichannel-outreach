@@ -268,7 +268,18 @@ export interface NeedsAttention {
     readonly accountId: string;
     readonly held: number;
     readonly capacity: number;
-    readonly work: readonly { readonly attemptId: string; readonly enrollmentId: string; readonly unresolvedSince: string }[];
+    /** Sends already counted on the inbox's current reset day. */
+    readonly sentToday: number;
+    readonly work: readonly {
+      readonly attemptId: string;
+      readonly enrollmentId: string;
+      readonly stepId: string;
+      readonly destination: string;
+      readonly unresolvedSince: string;
+      /** The latest lookup answer: while it is `queued`, "not sent" is refused. */
+      readonly lookupAnswer: "sent" | "queued" | "not-sent" | "unknown" | null;
+      readonly canMarkNotSent: boolean;
+    }[];
   }[];
   readonly anomalies: readonly { readonly what: string; readonly at: string }[];
 }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { account, attempt, definition, H, handed, MONDAY_9, step, subjectState } from "../../../test/support/sequence-state.ts";
+import { account, calledWork, definition, H, handed, MONDAY_9, step, subjectState, withAttempts } from "../../../test/support/sequence-state.ts";
 import {
   defaultGap,
   authorizeRetry,
@@ -76,10 +76,19 @@ describe("ready items and the claim (ADR 0003 2.6, 4.2)", () => {
     expect(claimRefusal(s, item(), MONDAY_9)).toBe("the step already has a live attempt");
   });
 
-  test("a step's attempts after a lookup said not sent inherit that attempt's key", () => {
-    const s = launched();
-    const withOld = { ...s, attempts: [attempt({ id: "a-0", idempotencyKey: "a-0", state: "withdrawn", endedBy: "lookup_not_sent" })] };
-    expect(claim(withOld, item(), account("inbox-a"), { attemptId: "a-9", retryable: true, notSentIsFinal: false, now: MONDAY_9 }).attempts[1]?.idempotencyKey).toBe("a-0");
+  test("a step's next attempt inherits the key of its uncertain work and carries its reservation; settled work is never inherited (PR 37 review round 3)", () => {
+    const old = handed({ id: "a-0", idempotencyKey: "a-0", state: "withdrawn", endedBy: "lookup_not_sent" });
+    const uncertain = withAttempts(launched(), [old], [calledWork({ key: "a-0", unresolvedSince: MONDAY_9 })]);
+    const inherited = claim(uncertain, item(), account("inbox-a", { used: 1 }), { attemptId: "a-9", retryable: true, notSentIsFinal: false, now: MONDAY_9 });
+    expect(inherited.attempts[1]?.idempotencyKey).toBe("a-0");
+    expect(inherited.work).toHaveLength(1);
+    expect(inherited.accounts["inbox-a"]?.used).toBe(1);
+    for (const settled of ["user_not_sent", "withdrawn", "not_sent", "rejected"] as const) {
+      const done = withAttempts(launched(), [old], [calledWork({ key: "a-0", settled })]);
+      const fresh = claim(done, item(), account("inbox-a"), { attemptId: "a-9", retryable: true, notSentIsFinal: false, now: MONDAY_9 });
+      expect(fresh.attempts[1]?.idempotencyKey).toBe("a-9");
+      expect(fresh.work.map((w) => w.key)).toEqual(["a-0", "a-9"]);
+    }
   });
 
   test("account choice: the fixed sender, else the one that can send soonest, then most room, then lowest id", () => {
@@ -139,7 +148,7 @@ describe("the same-key retry authorization (ADR 0003 5.6)", () => {
   function inFlight(fields = {}): SubjectState {
     const s = launched();
     const a = handed({ presendCheckedWall: MONDAY_9 + 5 * 60_000, retry: "wanted", ...fields });
-    return { ...s, subject: { ...s.subject, emailSender: "inbox-a" }, attempts: [a] };
+    return withAttempts({ ...s, subject: { ...s.subject, emailSender: "inbox-a" } }, [a]);
   }
   const now = MONDAY_9 + 5 * 60_000;
 
@@ -154,7 +163,8 @@ describe("the same-key retry authorization (ADR 0003 5.6)", () => {
   test("refused on a non-retryable transport, after a withdraw request, once unresolved, or with no calls left", () => {
     expect(retryFailures(inFlight({ retryable: false }), inFlight({ retryable: false }).attempts[0]!, account("inbox-a"), now)).toContain("not retryable");
     expect(retryFailures(inFlight(), handed({ withdrawRequested: true, presendCheckedWall: now }), account("inbox-a"), now)).toContain("withdraw requested");
-    expect(retryFailures(inFlight(), handed({ unresolvedSince: now, presendCheckedWall: now }), account("inbox-a"), now)).toContain("unresolved");
+    const unresolved = inFlight();
+    expect(retryFailures({ ...unresolved, work: unresolved.work.map((w) => ({ ...w, unresolvedSince: now })) }, unresolved.attempts[0]!, account("inbox-a"), now)).toContain("unresolved");
     expect(retryFailures(inFlight(), handed({ calls: 3, presendCheckedWall: now }), account("inbox-a"), now)).toContain("no calls left");
   });
 
@@ -189,7 +199,7 @@ describe("the default pacing gap (ADR 0003 4.1)", () => {
 describe("a continue-thread step with no thread (ruling 1)", () => {
   test("is held as no_thread, refused at the claim, and fails the handover", () => {
     const s = launched();
-    const sentNoRef = { ...s, attempts: [handed({ state: "sent", providerRef: null, sentWall: MONDAY_9 })], results: [{ stepId: "s1", trackId: "t1", result: "sent" as const, reason: null, at: 0, atWall: MONDAY_9, attemptId: "a-1" }] };
+    const sentNoRef = { ...withAttempts(s, [handed({ state: "sent" })], [calledWork({ settled: "user_sent", sentWall: MONDAY_9 })]), results: [{ stepId: "s1", trackId: "t1", result: "sent" as const, reason: null, at: 0, atWall: MONDAY_9, attemptId: "a-1" }] };
     const pending = { ...sentNoRef, tracks: sentNoRef.tracks.map((t) => ({ ...t, nextStepId: "s2", dueAt: 0, dueWall: MONDAY_9 })) };
     expect(heldReason(pending, "t1", MONDAY_9)).toBe("no_thread");
     expect(claimRefusal(pending, item({ stepId: "s2" }), MONDAY_9)).toBe("there is no thread to continue");

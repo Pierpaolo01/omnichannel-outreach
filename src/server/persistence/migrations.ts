@@ -260,6 +260,30 @@ export const MIGRATIONS: readonly Migration[] = [
         reset_zone TEXT NOT NULL DEFAULT 'UTC'
       );
 
+      -- One row per piece of provider work, by idempotency key (ADR 0003 1.3, PR 37 review
+      -- round 3): everything true of the work rather than of one attempt. Attempts point at it.
+      CREATE TABLE provider_work (
+        key TEXT PRIMARY KEY,
+        subject_id TEXT NOT NULL REFERENCES subjects(id),
+        track_id TEXT NOT NULL,
+        step_id TEXT NOT NULL,
+        account_id TEXT NOT NULL REFERENCES sender_accounts(id),
+        destination TEXT NOT NULL,
+        calls INTEGER NOT NULL DEFAULT 0,
+        first_handed_wall INTEGER,
+        provider_ref TEXT,
+        settled TEXT CHECK (settled IN ('sent', 'not_sent', 'withdrawn', 'rejected', 'never_called', 'user_sent', 'user_not_sent')),
+        sent_wall INTEGER,
+        sent_day TEXT,
+        next_lookup_wall INTEGER,
+        lookup_answer TEXT,
+        queued_lookups INTEGER NOT NULL DEFAULT 0,
+        unresolved_since INTEGER
+      );
+      CREATE INDEX provider_work_by_subject ON provider_work(subject_id);
+      CREATE INDEX provider_work_by_ref ON provider_work(provider_ref);
+      CREATE INDEX provider_work_by_account ON provider_work(account_id, settled);
+
       CREATE TABLE attempts (
         id TEXT PRIMARY KEY,
         subject_id TEXT NOT NULL REFERENCES subjects(id),
@@ -272,43 +296,32 @@ export const MIGRATIONS: readonly Migration[] = [
         copy TEXT,
         threading TEXT NOT NULL CHECK (threading IN ('new_subject', 'continue_thread')),
         thread_ref TEXT,
-        provider_ref TEXT,
         retryable INTEGER NOT NULL,
         not_sent_final INTEGER NOT NULL,
-        idempotency_key TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL REFERENCES provider_work(key),
         calls INTEGER NOT NULL,
         claimed_wall INTEGER NOT NULL,
         handed_at INTEGER, handed_wall INTEGER, last_call_wall INTEGER,
         presend_checked_wall INTEGER, presend_found_reply INTEGER NOT NULL DEFAULT 0,
-        lookup_answer TEXT, queued_lookups INTEGER NOT NULL DEFAULT 0, next_lookup_wall INTEGER,
-        unresolved_since INTEGER,
         ended_by TEXT,
         withdraw_requested INTEGER NOT NULL DEFAULT 0,
         withdraw_called INTEGER NOT NULL DEFAULT 0,
         awaiting_answer INTEGER NOT NULL DEFAULT 0,
         retry TEXT NOT NULL DEFAULT 'none',
-        reject_reason TEXT,
-        sent_wall INTEGER,
-        sent_day TEXT,
-        user_marked_not_sent INTEGER NOT NULL DEFAULT 0,
-        holds_reservation INTEGER NOT NULL DEFAULT 1
+        reject_reason TEXT
       );
       CREATE UNIQUE INDEX one_live_attempt_per_step ON attempts(subject_id, step_id) WHERE state IN ('claimed', 'handed', 'accepted');
       CREATE UNIQUE INDEX one_sent_attempt_per_step ON attempts(subject_id, step_id) WHERE state = 'sent';
       CREATE INDEX attempts_by_subject ON attempts(subject_id);
       CREATE INDEX attempts_by_account_state ON attempts(account_id, state);
-      CREATE INDEX attempts_by_provider_ref ON attempts(provider_ref);
       CREATE INDEX attempts_by_key ON attempts(idempotency_key);
 
-      -- ADR 0002's ledger, read off the attempts so it cannot drift from them, one entry per
-      -- provider work (idempotency key): a send counts on the reset day of its send; work that has
-      -- not been sent and still holds a reservation (live, or withdrawn with its outcome uncertain)
-      -- counts as reserved (ADR 0003 4.2 as amended).
+      -- ADR 0002's ledger, read off the provider work so it cannot drift from it: a send counts on
+      -- the reset day of its send; unsettled work not yet sent counts as reserved (ADR 0003 4.2).
       CREATE VIEW capacity_ledger AS
-        SELECT account_id, sent_day AS reset_day, idempotency_key AS work, 'sent' AS kind FROM attempts WHERE sent_wall IS NOT NULL
-        UNION
-        SELECT a.account_id, NULL, a.idempotency_key, 'reserved' FROM attempts a
-        WHERE a.holds_reservation = 1 AND NOT EXISTS (SELECT 1 FROM attempts s WHERE s.idempotency_key = a.idempotency_key AND s.sent_wall IS NOT NULL);
+        SELECT account_id, sent_day AS reset_day, key AS work, 'sent' AS kind FROM provider_work WHERE sent_wall IS NOT NULL
+        UNION ALL
+        SELECT account_id, NULL, key, 'reserved' FROM provider_work WHERE settled IS NULL AND sent_wall IS NULL;
 
       -- One reply may belong to several subjects: one outside every thread is reconciled to every
       -- lead the inbox wrote to at that address (ADR 0003 2.4 as amended).
@@ -321,16 +334,24 @@ export const MIGRATIONS: readonly Migration[] = [
       );
       CREATE INDEX replies_by_subject ON replies(subject_id);
 
-      -- A reply on a thread the app does not know yet waits here for its thread's reference to
-      -- attach, or for one settling period before it falls back to inbox and address (ADR 0003 2.4).
-      CREATE TABLE pending_replies (
+      -- Every reply event the provider reported, by its event id, for good (ADR 0003 2.4, PR 37
+      -- review round 3): an observation replay is a no-op. A reply on a thread the app does not
+      -- know yet is pending: sends from the inbox to the address pause until its reference attaches
+      -- to work, or until it has waited one settling period of running time, then it falls back to
+      -- inbox and address. One that matches nothing stays unmatched by its reference, without
+      -- pausing, and resolves if that reference later attaches.
+      CREATE TABLE reply_events (
         event_id TEXT PRIMARY KEY,
-        provider_ref TEXT NOT NULL,
+        provider_ref TEXT,
         inbox TEXT NOT NULL,
         address TEXT NOT NULL,
         at_wall INTEGER NOT NULL,
-        received_wall INTEGER NOT NULL
+        received_wall INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('pending', 'resolved', 'unmatched')),
+        waited_ms INTEGER NOT NULL DEFAULT 0,
+        last_counted_wall INTEGER NOT NULL
       );
+      CREATE INDEX reply_events_open ON reply_events(state) WHERE state <> 'resolved';
 
       CREATE TABLE provider_anomalies (
         seq INTEGER PRIMARY KEY AUTOINCREMENT,

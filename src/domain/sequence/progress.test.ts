@@ -1,8 +1,8 @@
 import { describe, expect, test } from "vitest";
-import { attempt, DAY, definition, H, handed, MONDAY_9, step, subjectState } from "../../../test/support/sequence-state.ts";
+import { attempt, calledWork, DAY, definition, H, handed, MONDAY_9, step, subjectState, withAttempts } from "../../../test/support/sequence-state.ts";
 import { leadNow } from "./clock.ts";
-import { applyBadDestination, applyReply, applyToAttempt, deriveStatus, enterMain, evaluate, runs } from "./progress.ts";
-import type { SubjectState } from "./state.ts";
+import { applyBadDestination, applyReply, applyToAttempt, applyToWork, deriveStatus, enterMain, evaluate, runs } from "./progress.ts";
+import type { ProviderWork, SubjectState } from "./state.ts";
 
 /** Launched at Monday 09:00 and evaluated then. */
 function launched(state: SubjectState = subjectState(), at = MONDAY_9): SubjectState {
@@ -60,8 +60,8 @@ describe("launch and the first step (ADR 0003 2.4, 2.6)", () => {
 describe("sending (ADR 0003 2.4)", () => {
   function sentFirst(providerTime = MONDAY_9 + 10 * 60_000, now = MONDAY_9 + 20 * 60_000): SubjectState {
     const s = launched();
-    const withAttempt = { ...s, attempts: [handed({ state: "accepted", providerRef: "p-1" })] };
-    return applyToAttempt(withAttempt, "a-1", { kind: "sent_observed", providerTime, providerRef: "p-1" }, now, opts).state;
+    const withAttempt = withAttempts(s, [handed({ state: "accepted" })], [calledWork({ providerRef: "p-1" })]);
+    return applyToWork(withAttempt, "a-1", { kind: "sent_observed", providerTime, providerRef: "p-1" }, now, opts).state;
   }
 
   test("a send records the step, touches the lead and resolves the next step from the provider's send time", () => {
@@ -80,14 +80,14 @@ describe("sending (ADR 0003 2.4)", () => {
 
   test("the last step sent completes the track and the lead finishes with no response", () => {
     const one = launched(subjectState({ campaign: { ...subjectState().campaign, definition: definition([step("s1", { threading: "new_subject" })]) } }));
-    const s = applyToAttempt({ ...one, attempts: [handed({ state: "accepted" })] }, "a-1", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p" }, MONDAY_9 + 2000, opts).state;
+    const s = applyToWork(withAttempts(one, [handed({ state: "accepted" })]), "a-1", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p" }, MONDAY_9 + 2000, opts).state;
     expect(s.tracks[0]).toMatchObject({ finishReason: "completed" });
     expect(s.subject.ended).toBe("sequence_finished_no_response");
   });
 
   test("a reply ends the lead as replied and quiesces its live attempts", () => {
     const s = launched();
-    const live = { ...s, attempts: [handed({ state: "accepted" })] };
+    const live = withAttempts(s, [handed({ state: "accepted" })]);
     const replied = applyReply(live, { channel: "email", atWall: MONDAY_9 + H, providerRef: "r-1" }, MONDAY_9 + H);
     expect(replied.subject.ended).toBe("replied");
     expect(replied.attempts[0]).toMatchObject({ state: "accepted", withdrawRequested: true });
@@ -106,7 +106,7 @@ describe("sending (ADR 0003 2.4)", () => {
 
   test("a bounce while the next step is handed marks the address bad, fails the track, quiesces the next attempt and ends the lead", () => {
     const sent = sentFirst();
-    const withNext = { ...sent, attempts: [...sent.attempts, handed({ id: "a-2", stepId: "s2", state: "accepted" })] };
+    const withNext = withAttempts(sent, [...sent.attempts, handed({ id: "a-2", idempotencyKey: "a-2", stepId: "s2", state: "accepted" })], sent.work);
     const bounced = applyBadDestination(withNext, withNext.attempts[0]!, MONDAY_9 + 3 * DAY);
     expect(bounced.markBad).toEqual(["d-email"]);
     expect(bounced.tracks[0]?.finishReason).toBe("failed_bad_destination");
@@ -125,7 +125,7 @@ describe("sending (ADR 0003 2.4)", () => {
       },
     };
     const s = launched(two);
-    const bounced = applyBadDestination({ ...s, attempts: [handed({ state: "sent" })] }, handed(), MONDAY_9 + H);
+    const bounced = applyBadDestination(withAttempts(s, [handed({ state: "sent" })], [calledWork({ settled: "sent" })]), handed(), MONDAY_9 + H);
     expect(bounced.tracks[0]?.finishReason).toBe("failed_bad_destination");
     expect(bounced.subject.ended).toBe("sequence_finished_no_response");
   });
@@ -135,17 +135,16 @@ describe("sending (ADR 0003 2.4)", () => {
     const finished = {
       ...s,
       tracks: s.tracks.map((t) => ({ ...t, finishedAt: 0, finishedWall: MONDAY_9, finishReason: "failed_bad_destination" as const })),
-      attempts: [handed({ state: "accepted", withdrawRequested: true })],
     };
-    const after = applyToAttempt(finished, "a-1", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p" }, MONDAY_9 + 2000, opts).state;
+    const after = applyToWork(withAttempts(finished, [handed({ state: "accepted", withdrawRequested: true })]), "a-1", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p" }, MONDAY_9 + 2000, opts).state;
     expect(after.results.map((r) => r.stepId)).toEqual(["s1"]);
     expect(after.tracks[0]).toMatchObject({ finishReason: "failed_bad_destination", nextStepId: "s1", dueAt: 0 });
   });
 
   test("an invalid address refused at the handover marks it bad and fails the track", () => {
     const s = launched();
-    const live = { ...s, attempts: [handed()] };
-    const after = applyToAttempt(live, "a-1", { kind: "call_answer", answer: { kind: "rejected", reason: "invalid_destination" }, now: MONDAY_9 + 1000 }, MONDAY_9 + 1000, opts).state;
+    const live = withAttempts(s, [handed()]);
+    const after = applyToAttempt(live, "a-1", { kind: "call_answer", answer: { kind: "rejected", reason: "invalid_destination" }, now: MONDAY_9 + 1000 }, MONDAY_9 + 1000).state;
     expect(after.markBad).toEqual(["d-email"]);
     expect(after.tracks[0]?.finishReason).toBe("failed_bad_destination");
     expect(after.subject.ended).toBe("finished_no_usable_channel");
@@ -153,7 +152,7 @@ describe("sending (ADR 0003 2.4)", () => {
 
   test("a block-listed address skips the track without marking it bad", () => {
     const s = launched();
-    const after = applyToAttempt({ ...s, attempts: [handed()] }, "a-1", { kind: "call_answer", answer: { kind: "rejected", reason: "blocklisted" }, now: MONDAY_9 + 1000 }, MONDAY_9 + 1000, opts).state;
+    const after = applyToAttempt(withAttempts(s, [handed()]), "a-1", { kind: "call_answer", answer: { kind: "rejected", reason: "blocklisted" }, now: MONDAY_9 + 1000 }, MONDAY_9 + 1000).state;
     expect(after.markBad).toEqual([]);
     expect(after.tracks[0]?.finishReason).toBe("skipped_missing_channel");
     expect(after.subject.ended).toBe("sequence_finished_no_response");
@@ -161,7 +160,7 @@ describe("sending (ADR 0003 2.4)", () => {
 
   test("a rate limit leaves the step pending with its deadline unchanged", () => {
     const s = launched();
-    const after = applyToAttempt({ ...s, attempts: [handed()] }, "a-1", { kind: "call_answer", answer: { kind: "rejected", reason: "rate_limited" }, now: MONDAY_9 + 1000 }, MONDAY_9 + 1000, opts).state;
+    const after = applyToAttempt(withAttempts(s, [handed()]), "a-1", { kind: "call_answer", answer: { kind: "rejected", reason: "rate_limited" }, now: MONDAY_9 + 1000 }, MONDAY_9 + 1000).state;
     expect(after.tracks).toEqual(s.tracks);
     expect(after.subject.ended).toBeNull();
   });
@@ -169,92 +168,107 @@ describe("sending (ADR 0003 2.4)", () => {
   test("an address marked bad elsewhere ends a lead with no other address at the next evaluation, withdrawing its claim", () => {
     const s = launched();
     const marked = { ...s, lead: { ...s.lead, details: s.lead.details.map((d) => ({ ...d, bad: true })), resolved: { "d-email": { liveId: "d-email", bad: true, owned: true } } } };
-    const after = evaluate({ ...marked, attempts: [attempt()] }, MONDAY_9 + H);
+    const after = evaluate(withAttempts(marked, [attempt()]), MONDAY_9 + H);
     expect(after.attempts[0]?.state).toBe("withdrawn");
     expect(after.subject.ended).toBe("finished_no_usable_channel");
   });
 });
 
 describe("a provider send belongs to the provider work that produced it (ruling 4; found by generated seed 20261117)", () => {
-  const opts2 = { resetDay: () => "2026-11-02" };
-  function inherited(inheritor: "accepted" | "claimed" = "accepted"): SubjectState {
-    const s = launched();
-    return {
-      ...s,
-      attempts: [
-        handed({ id: "a-1", idempotencyKey: "a-1", state: "withdrawn", endedBy: "lookup_not_sent", providerRef: "p-1", handedWall: MONDAY_9 }),
-        inheritor === "claimed"
-          ? attempt({ id: "a-2", idempotencyKey: "a-1", claimedWall: MONDAY_9 + H })
-          : handed({ id: "a-2", idempotencyKey: "a-1", state: "accepted", providerRef: "p-1", handedWall: MONDAY_9 + 2 * H }),
+  /** The original attempt withdrawn after a not-sent it could not trust; an inheritor carrying its work. */
+  function inherited(inheritor: "accepted" | "claimed" = "accepted", fields: Partial<ProviderWork> = {}): SubjectState {
+    return withAttempts(
+      launched(),
+      [
+        handed({ id: "a-1", state: "withdrawn", endedBy: "lookup_not_sent", handedWall: MONDAY_9 }),
+        inheritor === "claimed" ? attempt({ id: "a-2", idempotencyKey: "a-1", claimedWall: MONDAY_9 + H }) : handed({ id: "a-2", idempotencyKey: "a-1", state: "accepted", handedWall: MONDAY_9 + 2 * H }),
       ],
-    };
+      [calledWork({ providerRef: "p-1", calls: inheritor === "claimed" ? 1 : 2, nextLookupWall: MONDAY_9 + 2 * H, unresolvedSince: inheritor === "claimed" ? MONDAY_9 + H : null, ...fields })],
+    );
   }
 
-  test("a send reported against the inheritor settles on the original work, with its own handover time, and quiesces the inheritor", () => {
-    const after = applyToAttempt(inherited(), "a-2", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p-1" }, MONDAY_9 + 3 * H, opts2).state;
-    expect(after.attempts.map((a) => [a.id, a.state, a.withdrawRequested])).toEqual([["a-1", "sent", false], ["a-2", "accepted", true]]);
+  test("a send settles the work and records the step on its first attempt handed over, with that attempt's handover time; the inheritor is settled by the same statement", () => {
+    const after = applyToWork(inherited(), "a-1", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p-1" }, MONDAY_9 + 3 * H, opts).state;
+    expect(after.attempts.map((a) => [a.id, a.state, a.endedBy])).toEqual([["a-1", "sent", "observed"], ["a-2", "withdrawn", "provider"]]);
     // The original's handover (09:00) bounds the send time, not the inheritor's (11:00).
     expect(after.results).toEqual([expect.objectContaining({ stepId: "s1", attemptId: "a-1", atWall: MONDAY_9 + 1000 })]);
+    expect(after.work[0]).toMatchObject({ settled: "sent", sentWall: MONDAY_9 + 1000, nextLookupWall: null });
   });
 
   test("a claimed inheritor is withdrawn when the original work's send arrives", () => {
-    const after = applyToAttempt(inherited("claimed"), "a-1", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p-1" }, MONDAY_9 + 2 * H, opts2).state;
-    expect(after.attempts.map((a) => [a.id, a.state, a.endedBy])).toEqual([["a-1", "sent", "observed"], ["a-2", "withdrawn", "quiesce"]]);
+    const after = applyToWork(inherited("claimed"), "a-1", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p-1" }, MONDAY_9 + 2 * H, opts).state;
+    expect(after.attempts.map((a) => [a.id, a.state, a.endedBy])).toEqual([["a-1", "sent", "observed"], ["a-2", "withdrawn", "provider"]]);
   });
 
-  test("a step never gets a second sent attempt: a later sent fact for the same work settles the live inheritor by the provider's statement", () => {
-    const once = applyToAttempt(inherited(), "a-1", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p-1" }, MONDAY_9 + 3 * H, opts2).state;
-    const again = applyToAttempt(once, "a-2", { kind: "lookup_answer", answer: { kind: "sent", sentAt: MONDAY_9 + 1000, providerRef: "p-1" }, now: MONDAY_9 + 4 * H }, MONDAY_9 + 4 * H, opts2).state;
-    expect(again.attempts.map((a) => [a.id, a.state, a.endedBy])).toEqual([["a-1", "sent", "observed"], ["a-2", "withdrawn", "provider"]]);
+  test("a later sent fact for the same work changes nothing but a missing reference: a step never gets a second sent attempt", () => {
+    const once = applyToWork(inherited("accepted", { providerRef: null }), "a-1", { kind: "lookup_answer", answer: { kind: "sent", sentAt: MONDAY_9 + 1000, providerRef: "p-1" }, now: MONDAY_9 + 3 * H }, MONDAY_9 + 3 * H, opts).state;
+    expect(once.work[0]?.providerRef).toBe("p-1");
+    const again = applyToWork(once, "a-1", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p-1" }, MONDAY_9 + 4 * H, opts).state;
+    expect(again.attempts).toEqual(once.attempts);
+    expect(again.attempts.filter((a) => a.state === "sent")).toHaveLength(1);
   });
 
-  test("the user's \"mark sent\" on a live inheritor whose work is already sent settles it, never a second sent attempt (found by the extended generator, seed 20261124)", () => {
-    const once = applyToAttempt(inherited(), "a-1", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p-1" }, MONDAY_9 + 3 * H, opts2).state;
-    const unresolved = { ...once, attempts: once.attempts.map((a) => (a.id === "a-2" ? { ...a, unresolvedSince: MONDAY_9 + 3 * H } : a)) };
-    const marked = applyToAttempt(unresolved, "a-2", { kind: "mark_sent", now: MONDAY_9 + 4 * H }, MONDAY_9 + 4 * H, opts2).state;
-    expect(marked.attempts.filter((a) => a.state === "sent").map((a) => a.id)).toEqual(["a-1"]);
-    expect(marked.attempts.find((a) => a.id === "a-2")).toMatchObject({ state: "withdrawn", holdsReservation: false });
-  });
-
-  test("a sent fact attaches a missing provider reference to work already settled as sent (ruling 1)", () => {
-    const s = launched();
-    const state = { ...s, attempts: [handed({ id: "a-1", state: "sent", endedBy: "lookup", providerRef: null })] };
-    const after = applyToAttempt(state, "a-1", { kind: "sent_observed", providerTime: MONDAY_9, providerRef: "p-9" }, MONDAY_9 + H, opts2).state;
-    expect(after.attempts[0]?.providerRef).toBe("p-9");
+  test("the user's \"mark sent\" on work already sent is ignored (found by the extended generator, seed 20261124)", () => {
+    const once = applyToWork(inherited(), "a-1", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p-1" }, MONDAY_9 + 3 * H, opts).state;
+    const marked = applyToWork(once, "a-1", { kind: "mark_sent", now: MONDAY_9 + 4 * H }, MONDAY_9 + 4 * H, opts);
+    expect(marked.state).toEqual(once);
   });
 });
 
-describe("a reservation belongs to provider work and is released once, across every attempt sharing its key (review round 2, ruling 2)", () => {
-  const opts2 = { resetDay: () => "2026-11-02" };
-  /** The original work withdrawn after a not-sent it cannot trust, still holding and looked up; an inheritor under its key. */
-  function uncertainWithInheritor(): SubjectState {
-    const s = launched();
-    return {
-      ...s,
-      attempts: [
-        handed({ id: "a-1", idempotencyKey: "a-1", state: "withdrawn", endedBy: "lookup_not_sent", providerRef: "p-1", handedWall: MONDAY_9, holdsReservation: true, nextLookupWall: MONDAY_9 + 2 * H, unresolvedSince: MONDAY_9 + H }),
-        handed({ id: "a-2", idempotencyKey: "a-1", state: "accepted", providerRef: "p-1", handedWall: MONDAY_9 + 2 * H, holdsReservation: true, withdrawRequested: true }),
-      ],
-    };
+describe("provider work is one record: settlement, release, the user's mark and inheritance read and write it once (PR 37 review rounds 2 and 3)", () => {
+  const unresolvedWithInheritor = () => inheritedUnresolved();
+  function inheritedUnresolved(): SubjectState {
+    return withAttempts(
+      launched(),
+      [handed({ id: "a-1", state: "withdrawn", endedBy: "lookup_not_sent", handedWall: MONDAY_9 }), handed({ id: "a-2", idempotencyKey: "a-1", state: "accepted", handedWall: MONDAY_9 + 2 * H })],
+      [calledWork({ providerRef: "p-1", calls: 2, nextLookupWall: MONDAY_9 + 3 * H, unresolvedSince: MONDAY_9 + 2 * H + 1, lookupAnswer: "unknown" })],
+    );
   }
 
-  test("a confirmed withdrawal through the inheritor releases the original's reservation too, and ends its lookups", () => {
-    const after = applyToAttempt(uncertainWithInheritor(), "a-2", { kind: "withdraw_answer", answer: "withdrawn", now: MONDAY_9 + 3 * H }, MONDAY_9 + 3 * H, opts2).state;
-    expect(after.attempts.map((a) => [a.id, a.state, a.holdsReservation, a.nextLookupWall])).toEqual([["a-1", "withdrawn", false, null], ["a-2", "withdrawn", false, null]]);
+  test("a confirmed withdrawal through the inheritor settles the work: nothing of it holds a reservation or is looked up", () => {
+    const s = inheritedUnresolved();
+    const requested = { ...s, attempts: s.attempts.map((a) => (a.id === "a-2" ? { ...a, withdrawRequested: true } : a)) };
+    const after = applyToAttempt(requested, "a-2", { kind: "withdraw_answer", answer: "withdrawn", now: MONDAY_9 + 3 * H }, MONDAY_9 + 3 * H).state;
+    expect(after.work[0]).toMatchObject({ settled: "withdrawn", nextLookupWall: null });
   });
 
-  test("the user's \"not sent\" on uncertain work releases every attempt of its key that is no longer live", () => {
-    const s = uncertainWithInheritor();
-    const alone = { ...s, attempts: s.attempts.filter((a) => a.id === "a-1") };
-    const after = applyToAttempt(alone, "a-1", { kind: "mark_not_sent", now: MONDAY_9 + 3 * H }, MONDAY_9 + 3 * H, opts2).state;
-    expect(after.attempts[0]).toMatchObject({ state: "withdrawn", endedBy: "user", holdsReservation: false, nextLookupWall: null });
+  test("the user's \"not sent\" settles the work and ends every attempt still carrying it (GPT round 3 finding 2), whichever attempt it was given by", () => {
+    for (const by of ["a-1", "a-2"]) {
+      const s = unresolvedWithInheritor();
+      const key = s.attempts.find((a) => a.id === by)!.idempotencyKey;
+      const after = applyToWork(s, key, { kind: "mark_not_sent", now: MONDAY_9 + 3 * H }, MONDAY_9 + 3 * H, opts).state;
+      expect(after.work[0]).toMatchObject({ settled: "user_not_sent", nextLookupWall: null });
+      expect(after.attempts.map((a) => [a.id, a.state, a.endedBy])).toEqual([["a-1", "withdrawn", "lookup_not_sent"], ["a-2", "withdrawn", "user"]]);
+    }
   });
 
-  test("an inheritor quiesced after its key's send is proven holds nothing and is no longer looked up (review: Opus follow-up 4)", () => {
-    const s = uncertainWithInheritor();
-    // The inheritor had a not-sent of its own and wanted a retry when the original's send was proven.
-    const state = { ...s, attempts: [s.attempts[0]!, { ...s.attempts[1]!, state: "handed" as const, withdrawRequested: false, retry: "wanted_after_not_sent" as const, nextLookupWall: MONDAY_9 + 4 * H }] };
-    const after = applyToAttempt(state, "a-1", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p-1" }, MONDAY_9 + 3 * H, opts2).state;
-    expect(after.attempts.map((a) => [a.id, a.state, a.holdsReservation, a.nextLookupWall])).toEqual([["a-1", "sent", false, null], ["a-2", "withdrawn", false, null]]);
+  test("\"not sent\" is refused while the provider reports the work queued, and for work not unresolved", () => {
+    const queued = unresolvedWithInheritor();
+    const q = { ...queued, work: [{ ...queued.work[0]!, lookupAnswer: "queued" as const }] };
+    expect(applyToWork(q, "a-1", { kind: "mark_not_sent", now: MONDAY_9 + 3 * H }, MONDAY_9 + 3 * H, opts).state).toEqual(q);
+    const live = withAttempts(launched(), [handed()]);
+    expect(applyToWork(live, "a-1", { kind: "mark_not_sent", now: MONDAY_9 + 3 * H }, MONDAY_9 + 3 * H, opts).state).toEqual(live);
+  });
+
+  test("\"mark sent\" settles the work as sent, on its first attempt handed over", () => {
+    const after = applyToWork(unresolvedWithInheritor(), "a-1", { kind: "mark_sent", now: MONDAY_9 + 3 * H }, MONDAY_9 + 3 * H, opts).state;
+    expect(after.work[0]).toMatchObject({ settled: "user_sent", sentWall: MONDAY_9 + 3 * H });
+    expect(after.attempts.map((a) => [a.id, a.state, a.endedBy])).toEqual([["a-1", "sent", "user"], ["a-2", "withdrawn", "user"]]);
+  });
+
+  test("a send the provider makes after the work settled otherwise is an anomaly, counted on its send day, never a second send of the step", () => {
+    const s = unresolvedWithInheritor();
+    const marked = applyToWork(s, "a-1", { kind: "mark_not_sent", now: MONDAY_9 + 3 * H }, MONDAY_9 + 3 * H, opts).state;
+    const late = applyToWork(marked, "a-1", { kind: "sent_observed", providerTime: MONDAY_9 + 4 * H, providerRef: "p-1" }, MONDAY_9 + 5 * H, opts);
+    expect(late.effects.map((e) => e.kind)).toEqual(["anomaly"]);
+    expect(late.state.work[0]).toMatchObject({ settled: "user_not_sent", sentWall: MONDAY_9 + 4 * H, sentDay: "2026-11-02" });
+    expect(late.state.results).toEqual(marked.results);
+  });
+
+  test("uncertain work no live attempt carries is unresolved, so it is listed", () => {
+    const s = withAttempts(launched(), [handed({ state: "accepted" })], [calledWork({ nextLookupWall: MONDAY_9 + H })]);
+    const after = applyToWork(s, "a-1", { kind: "lookup_answer", answer: { kind: "not-sent" }, now: MONDAY_9 + H }, MONDAY_9 + H, opts).state;
+    expect(after.attempts[0]).toMatchObject({ state: "withdrawn", endedBy: "lookup_not_sent" });
+    expect(after.work[0]).toMatchObject({ settled: null, unresolvedSince: MONDAY_9 + H });
   });
 });

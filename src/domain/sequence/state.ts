@@ -94,6 +94,10 @@ export interface RenderedCopy {
   readonly body: string;
 }
 
+/**
+ * One provider attempt: a claim and the calls made for it. Its own lifecycle only (claimed,
+ * handed, accepted, terminal); what is true of the provider work it carries is on that work.
+ */
 export interface Attempt {
   readonly id: string;
   readonly subjectId: string;
@@ -108,10 +112,11 @@ export interface Attempt {
   /** The step's threading when claimed: with `retryable` and `notSentIsFinal`, the transport the payload travels by. */
   readonly threading: Threading;
   readonly threadRef: string | null;
-  readonly providerRef: string | null;
   readonly retryable: boolean;
   readonly notSentIsFinal: boolean;
+  /** The provider work it carries (its `ProviderWork.key`), sent to the provider as the idempotency key. */
   readonly idempotencyKey: string;
+  /** This attempt's own calls. */
   readonly calls: number;
   readonly claimedWall: number;
   readonly handedAt: number | null;
@@ -119,10 +124,6 @@ export interface Attempt {
   readonly lastCallWall: number | null;
   readonly presendCheckedWall: number | null;
   readonly presendFoundReply: boolean;
-  readonly lookupAnswer: LookupAnswer | null;
-  readonly queuedLookups: number;
-  readonly nextLookupWall: number | null;
-  readonly unresolvedSince: number | null;
   readonly endedBy: EndedBy | null;
   readonly withdrawRequested: boolean;
   /** The worker has asked the provider to withdraw; it is not asked again. */
@@ -132,18 +133,36 @@ export interface Attempt {
   /** A same-key retry the worker should try to authorize (5.6); `after_not_sent` withdraws if refused. */
   readonly retry: "none" | "wanted" | "wanted_after_not_sent" | "refused";
   readonly rejectReason: RejectReason | null;
-  /** The provider's send time, once sent. */
+}
+
+/** How provider work settled (ADR 0003 4.2): the user's mark settles it too. */
+export type WorkSettlement = "sent" | "not_sent" | "withdrawn" | "rejected" | "never_called" | "user_sent" | "user_not_sent";
+
+/**
+ * One piece of provider work, by idempotency key (ADR 0003 1.3, PR 37 review round 3): created
+ * by a claim, carried on by every attempt that inherits its key. Everything true of the work,
+ * not of one attempt, is here, so settlement, release, the user's mark, lookup, reply matching
+ * and inheritance read and write one record. It holds a capacity reservation while unsettled.
+ */
+export interface ProviderWork {
+  readonly key: string;
+  readonly subjectId: string;
+  readonly trackId: string;
+  readonly stepId: string;
+  readonly accountId: string;
+  readonly destination: string;
+  /** Calls made for it, across its attempts. */
+  readonly calls: number;
+  readonly firstHandedWall: number | null;
+  readonly providerRef: string | null;
+  readonly settled: WorkSettlement | null;
+  /** The provider's send time and the account's reset day it counted on, once sent (also a send after settlement). */
   readonly sentWall: number | null;
-  /** The account's reset day the send counted on. */
   readonly sentDay: string | null;
-  /** The user marked this attempt not sent (ADR 0002 P3): its step is excluded from at-most-once. */
-  readonly userMarkedNotSent: boolean;
-  /**
-   * The attempt holds a capacity reservation on its account (ADR 0003 4.2, ruling 3): from the
-   * claim until the provider never got the work, refused it, settled it as sent, or stated
-   * authoritatively that it will not send. Uncertain work keeps it through a withdrawal.
-   */
-  readonly holdsReservation: boolean;
+  readonly nextLookupWall: number | null;
+  readonly lookupAnswer: LookupAnswer | null;
+  readonly queuedLookups: number;
+  readonly unresolvedSince: number | null;
 }
 
 export interface Reply {
@@ -199,13 +218,15 @@ export interface SubjectState {
   readonly tracks: readonly TrackProgress[];
   readonly results: readonly StepResult[];
   readonly attempts: readonly Attempt[];
+  /** The provider work of the subject's attempts, one per key. */
+  readonly work: readonly ProviderWork[];
   readonly freezes: readonly Freeze[];
   readonly replies: readonly Reply[];
   /**
    * Replies waiting for their thread to be known, as inbox and lowercase address: while one
    * waits, nothing more goes from that inbox to that address (ADR 0003 2.4, review round 2).
    */
-  readonly pendingReplies?: readonly { readonly inbox: string; readonly address: string }[];
+  readonly pendingReplies: readonly { readonly inbox: string; readonly address: string }[];
   readonly lead: LeadFacts;
   /** Details this change marks bad. Imports never clear a bad mark. */
   readonly markBad: readonly string[];

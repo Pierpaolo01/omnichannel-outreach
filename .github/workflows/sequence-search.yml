@@ -4,7 +4,9 @@ name: sequence-search
 # each also in its unlimited-capacity variant, and a seed search per mutation that prints the seed
 # killing each. It runs before a merge of a change to the engine, not on every push: by hand, or
 # when a pull request gets the `sequence-search` label. `pnpm check` runs the fixed seeds and the
-# known killing seeds instead. Each shard runs every eighth seed and every eighth mutation.
+# known killing seeds instead. Each shard runs every eighth seed and every eighth mutation; a
+# mutation's seed search stops after six minutes (its named regression, if it has one, still runs),
+# so a shard of about four mutations and thirteen seeds finishes well inside the step's limit.
 
 on:
   workflow_dispatch:
@@ -18,7 +20,7 @@ jobs:
   search:
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'sequence-search'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 100
     strategy:
       fail-fast: false
       matrix:
@@ -32,7 +34,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm test:sequence-search
-        timeout-minutes: 60
+        timeout-minutes: 80
         env:
           CI: "true"
           SEQUENCE_SHARD: ${{ matrix.shard }}/8

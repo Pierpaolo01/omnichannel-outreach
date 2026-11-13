@@ -1,5 +1,5 @@
 import type { CampaignDefinition, StepDefinition } from "../../src/domain/sequence/definition.ts";
-import type { AccountState, Attempt, SubjectState } from "../../src/domain/sequence/state.ts";
+import type { AccountState, Attempt, ProviderWork, SubjectState } from "../../src/domain/sequence/state.ts";
 
 /** Builders for example tests of the pure sequence modules. Data is fictitious. */
 
@@ -66,8 +66,10 @@ export function subjectState(fields: Partial<SubjectState> = {}): SubjectState {
     tracks: [],
     results: [],
     attempts: [],
+    work: [],
     freezes: [{ fromWall: created, toWall: null }],
     replies: [],
+    pendingReplies: [],
     lead: {
       zone: "Europe/London",
       details: [{ id: "d-email", channel: "email", ownEmail: true, value: "pat@harbour.example", bad: false, order: 1 }],
@@ -93,7 +95,6 @@ export function attempt(fields: Partial<Attempt> = {}): Attempt {
     copy: null,
     threading: "new_subject",
     threadRef: null,
-    providerRef: null,
     retryable: true,
     notSentIsFinal: false,
     idempotencyKey: "a-1",
@@ -104,22 +105,53 @@ export function attempt(fields: Partial<Attempt> = {}): Attempt {
     lastCallWall: null,
     presendCheckedWall: null,
     presendFoundReply: false,
-    lookupAnswer: null,
-    queuedLookups: 0,
-    nextLookupWall: null,
-    unresolvedSince: null,
     endedBy: null,
     withdrawRequested: false,
     withdrawCalled: false,
     awaitingAnswer: false,
     retry: "none",
     rejectReason: null,
-    sentWall: null,
-    sentDay: null,
-    userMarkedNotSent: false,
-    holdsReservation: true,
     ...fields,
   };
+}
+
+/** The provider work of a claimed attempt, not yet called. */
+export function work(fields: Partial<ProviderWork> = {}): ProviderWork {
+  return {
+    key: "a-1",
+    subjectId: "lead-1",
+    trackId: "t1",
+    stepId: "s1",
+    accountId: "inbox-a",
+    destination: "pat@harbour.example",
+    calls: 0,
+    firstHandedWall: null,
+    providerRef: null,
+    settled: null,
+    sentWall: null,
+    sentDay: null,
+    nextLookupWall: null,
+    lookupAnswer: null,
+    queuedLookups: 0,
+    unresolvedSince: null,
+    ...fields,
+  };
+}
+
+/** The work of a handed attempt: called once at Monday 09:00. */
+export const calledWork = (fields: Partial<ProviderWork> = {}): ProviderWork => work({ calls: 1, firstHandedWall: MONDAY_9, ...fields });
+
+/** A subject state with these attempts and their work (one default work per key not given). */
+export function withAttempts(state: SubjectState, attempts: readonly Attempt[], works: readonly ProviderWork[] = []): SubjectState {
+  const keys = [...new Set(attempts.map((a) => a.idempotencyKey))];
+  const all = keys.map((key) => {
+    const given = works.find((w) => w.key === key);
+    if (given) return given;
+    const first = attempts.find((a) => a.idempotencyKey === key)!;
+    const called = attempts.filter((a) => a.idempotencyKey === key).reduce((n, a) => n + a.calls, 0);
+    return work({ key, subjectId: first.subjectId, trackId: first.trackId, stepId: first.stepId, accountId: first.accountId, destination: first.destination, calls: called, firstHandedWall: called > 0 ? (first.handedWall ?? MONDAY_9) : null });
+  });
+  return { ...state, attempts, work: [...all, ...works.filter((w) => !keys.includes(w.key))] };
 }
 
 export const handed = (fields: Partial<Attempt> = {}): Attempt =>

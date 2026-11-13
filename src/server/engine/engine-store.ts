@@ -1,7 +1,7 @@
 import type { LaunchCheck, SenderAccountView } from "../../domain/sequence/blockers.ts";
 import type { MergeData } from "../../domain/sequence/copy.ts";
 import type { CampaignDefinition } from "../../domain/sequence/definition.ts";
-import type { AccountState, Attempt, SubjectState } from "../../domain/sequence/state.ts";
+import type { AccountState, Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
 
 /** A sender account as the provider port reports it. */
 export interface SenderAccountConfig {
@@ -27,14 +27,23 @@ export interface CampaignEngineRow {
   readonly version: number;
 }
 
-export interface PendingReply {
+/**
+ * A reply event the provider reported, kept by its event id for good (ADR 0003 2.4): `pending`
+ * while its thread is unknown (sends from the inbox to the address pause), `unmatched` once its
+ * fallback matched nothing (kept by reference, without pausing), `resolved` once recorded on a lead.
+ */
+export interface ReplyEvent {
   readonly eventId: string;
-  readonly providerRef: string;
+  readonly providerRef: string | null;
   readonly inbox: string;
   /** Bare and lowercase. */
   readonly address: string;
   readonly atWall: number;
   readonly receivedWall: number;
+  readonly state: "pending" | "resolved" | "unmatched";
+  /** Running time it has waited for its thread (a restart's downtime is not counted). */
+  readonly waitedMs: number;
+  readonly lastCountedWall: number;
 }
 
 export type LaunchOutcome = { readonly ok: true } | { readonly ok: false; readonly check: LaunchCheck | null; readonly reason: "already_launched" | "blocked" | "no_definition" };
@@ -74,21 +83,28 @@ export interface EngineStore {
   runningSubjectIds(): Promise<string[]>;
   /** For each running subject, a key that changes whenever its state, its campaign's, or the lead facts it reads change. */
   runningSubjectVersions(): Promise<Map<string, string>>;
-  /** Every attempt that is not terminal, plus withdrawn ones whose outcome is still uncertain. */
+  /** Every attempt that is not terminal. */
   openAttempts(): Promise<Attempt[]>;
   attempt(attemptId: string): Promise<Attempt | null>;
-  attemptByProviderRef(providerRef: string): Promise<Attempt | null>;
-  /** Every attempt, in any state, that used this idempotency key. */
-  attemptsByKey(key: string): Promise<Attempt[]>;
-  /**
-   * Where a reply outside a known thread belongs (ADR 0003 2.4): subjects with work handed to
-   * `address` from `inbox` at or before `atWall` that was sent or whose outcome is uncertain.
-   */
-  subjectsReachedFrom(inbox: string, address: string, atWall: number): Promise<string[]>;
-  /** Holds a reply whose thread reference no attempt carries yet. */
-  holdReply(reply: PendingReply): Promise<void>;
-  pendingReplies(): Promise<PendingReply[]>;
-  dropPendingReply(eventId: string): Promise<void>;
+  /** Unsettled provider work with a lookup scheduled. */
+  openWork(): Promise<ProviderWork[]>;
+  work(key: string): Promise<ProviderWork | null>;
+  workByProviderRef(providerRef: string): Promise<ProviderWork | null>;
+  /** Provider work handed over to `address` (any case) from `inbox`: the candidates a reply outside a known thread may fall back to (2.4). */
+  workReachedFrom(inbox: string, address: string): Promise<ProviderWork[]>;
+  /** Unsettled provider work that is unresolved: it holds a reservation and is listed in Needs attention. */
+  unresolvedWork(): Promise<ProviderWork[]>;
+  /** Sends counted on the account's current reset day. */
+  sentToday(accountId: string, now: number): Promise<number>;
+
+  replyEvent(eventId: string): Promise<ReplyEvent | null>;
+  /** Records a reply event once; a second record of the same event id changes nothing. */
+  recordReplyEvent(reply: ReplyEvent): Promise<void>;
+  updateReplyEvent(eventId: string, change: Partial<Pick<ReplyEvent, "state" | "waitedMs" | "lastCountedWall">>): Promise<void>;
+  /** Reply events not yet resolved: pending and unmatched. */
+  openReplyEvents(): Promise<ReplyEvent[]>;
+  /** Reply events pending correlation. */
+  pendingReplies(): Promise<ReplyEvent[]>;
 
   upsertAccounts(accounts: readonly SenderAccountConfig[]): Promise<void>;
   accounts(now: number): Promise<AccountState[]>;

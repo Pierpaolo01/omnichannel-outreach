@@ -1,6 +1,6 @@
 import { ENGINE_PARAMS, isLive } from "../../src/domain/sequence/attempt.ts";
 import type { CampaignDefinition, StepDefinition } from "../../src/domain/sequence/definition.ts";
-import type { Attempt, SubjectState } from "../../src/domain/sequence/state.ts";
+import type { Attempt, ProviderWork, SubjectState } from "../../src/domain/sequence/state.ts";
 import type { Rules } from "../../src/server/engine/rules.ts";
 import type { CompanyRecord, EnrollmentProgress, LeadSearchResult, NeedsAttention, OutreachStatus, PersonRecord } from "../../src/shared/api.ts";
 import { Crash, EngineHarness, TransientError, quickWait } from "./engine-harness.ts";
@@ -132,6 +132,8 @@ export interface RunOptions {
   readonly events?: number;
   /** Run the drain phase (invariants 18 and 26 at the end). On by default. */
   readonly drain?: boolean;
+  /** A wall-clock instant (Date.now) after which the run stops early, as the search's time budget. */
+  readonly deadline?: number;
 }
 
 export interface RunResult {
@@ -235,6 +237,8 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
   const features = new Set<string>();
   /** Keys the user marked not sent, and when. */
   const markedNotSentKeys = new Map<string, number>();
+  /** When a simulated crash happened: the restart does not count the reply wait lost to it. */
+  const crashTimes: number[] = [];
   for (const p of people) {
     const address = p.emails[0]?.[1];
     if (!address) continue;
@@ -364,6 +368,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     crashPoint: (point: string) => {
       if (armed === point) {
         armed = null;
+        crashTimes.push(h.clock);
         throw new Crash(point);
       }
       if (transient === point) {
@@ -400,18 +405,24 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
   /** The user resolves unresolved attempts the provider never sent as "not sent" (ADR 0002 P3). */
   /** The user resolves unresolved attempts (ADR 0002 P3): "sent" when the provider did send, otherwise "not sent". */
   async function userMarks() {
-    for (const a of await h.store.engine.openAttempts()) {
-      // Live unresolved work, and withdrawn work whose outcome is uncertain, which Needs attention lists.
-      if (a.unresolvedSince === null) continue;
-      if (fake.deliveryLog.some((d) => d.key === a.idempotencyKey && d.at <= h.clock)) {
-        if (await h.engine.markAttempt(a.id, "sent")) markedSent.set(a.idempotencyKey, h.clock);
+    // The unresolved work Needs attention lists, by the attempt it names.
+    const listed = (await h.request<NeedsAttention>("GET", "/api/needs-attention")).body.heldCapacity.flatMap((x) => x.work);
+    for (const item of listed) {
+      const w = (await h.store.engine.unresolvedWork()).find((x) => x.subjectId === item.enrollmentId && x.stepId === item.stepId);
+      if (!w) continue;
+      if (fake.deliveryLog.some((d) => d.key === w.key && d.at <= h.clock)) {
+        if (await h.engine.markAttempt(item.attemptId, "sent")) markedSent.set(w.key, h.clock);
         continue;
       }
-      const accepted = await h.engine.markAttempt(a.id, "not_sent");
-      if (accepted && a.lookupAnswer === "queued") problem(`26: "mark not sent" accepted while the provider reports ${a.id} queued`);
+      const accepted = await h.engine.markAttempt(item.attemptId, "not_sent");
+      if (accepted && w.lookupAnswer === "queued") problem(`26: "mark not sent" accepted while the provider reports ${w.key} queued`);
+      if (accepted !== item.canMarkNotSent) problem(`26: Needs attention says "not sent" ${item.canMarkNotSent ? "is" : "is not"} allowed for ${w.key}, but it was ${accepted ? "accepted" : "refused"}`);
       if (accepted) {
-        markedNotSent.add(`${a.subjectId}/${a.stepId}`);
-        markedNotSentKeys.set(a.idempotencyKey, h.clock);
+        markedNotSent.add(`${w.subjectId}/${w.stepId}`);
+        markedNotSentKeys.set(w.key, h.clock);
+        // 27. The user's decision settles the work at once: it holds no reservation from then on.
+        const after = await h.store.engine.work(w.key);
+        if (after?.settled !== "user_not_sent") problem(`27: work ${w.key} the user marked not sent is ${after?.settled ?? "unsettled"}`);
       }
     }
   }
@@ -512,7 +523,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     h.advanceTo(h.clock + span, async () => {
       if (unlimited) return;
       // The user acts on Needs attention now and then, more often while something unresolved is listed there.
-      const listed = (await h.store.engine.openAttempts()).some((a) => a.unresolvedSince !== null);
+      const listed = (await h.store.engine.unresolvedWork()).length > 0;
       if (chance(listed ? 0.4 : 0.05)) await userMarks();
       // A lost response's acceptance arrives late, perhaps while a retry waits for its slot.
       if (fake.staleAnswers.length > 0 && chance(0.2)) {
@@ -576,6 +587,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     }
     await checkAll(false);
     if (problems.length > 0) break;
+    if (options.deadline !== undefined && Date.now() > options.deadline) return { problems, stats: { sends: fake.deliveryLog.length, calls: fake.handoverLog.length, crashes: h.crashes.length, subjects: subjects.size, ticks: h.ticks, modes, features: ["stopped-at-deadline"] } };
   }
 
   // Drain: every account restored, no new events, time passes.
@@ -615,9 +627,13 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
   for (const c of fake.handoverLog) features.add(`mode:${c.mode}`);
   for (const r of fake.refusals) features.add(`refused:${r.reason}`);
   for (const w of fake.withdrawLog) features.add(`withdraw:${w.answer}`);
+  const finalWork = (await Promise.all([...subjects.keys()].map((id) => h.store.engine.subject(id, h.clock)))).flatMap((x) => x?.work ?? []);
+  for (const w of finalWork) {
+    if (w.unresolvedSince !== null) features.add("unresolved");
+    if (w.settled) features.add(`settled:${w.settled}`);
+  }
   for (const a of finalAttempts) {
     if (a.endedBy) features.add(`ended-by:${a.endedBy}`);
-    if (a.unresolvedSince !== null) features.add("unresolved");
     if (a.endedBy === "observed" && fake.lookupLog.some((l) => l.key === a.idempotencyKey && l.answer === "not-sent")) features.add("sent-after-not-sent");
   }
   if (h.crashes.length > 0) features.add("crash");
@@ -647,6 +663,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       if (s) states.set(id, s);
     }
     const allAttempts = [...states.values()].flatMap((s) => s.attempts);
+    const allWork = [...states.values()].flatMap((s) => s.work);
 
     for (const [id, s] of states) {
       const rec = subjects.get(id)!;
@@ -731,13 +748,14 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       const firstCall = fake.handoverLog.find((c) => c.subjectId === id);
       if (s.subject.emailSender !== (firstHanded?.accountId ?? null)) problem(`1.3: ${id} has sender ${s.subject.emailSender ?? "none"}; its first handover committed on ${firstHanded?.accountId ?? "none"}`);
       if (firstCall && firstCall.sender !== s.subject.emailSender) problem(`1.3: ${id} was first called from ${firstCall.sender} but its sender is ${s.subject.emailSender ?? "none"}`);
-      // 26. An attempt becomes unresolved only on an unknown or unvouched not-sent, or after MAX_QUEUED_LOOKUPS queued answers.
-      for (const a of s.attempts) {
-        if (a.unresolvedSince === null) continue;
-        const answers = fake.lookupLog.filter((l) => l.key === a.idempotencyKey && l.at <= a.unresolvedSince!).map((l) => l.answer);
+      // 26. Work becomes unresolved only on an unknown or unvouched not-sent, after MAX_QUEUED_LOOKUPS queued answers, or when no attempt carries it.
+      for (const w of s.work) {
+        if (w.unresolvedSince === null) continue;
+        const answers = fake.lookupLog.filter((l) => l.key === w.key && l.at <= w.unresolvedSince!).map((l) => l.answer);
         let queued = 0;
         for (let i = answers.length - 1; i >= 0 && answers[i] === "queued"; i--) queued++;
-        if (answers.at(-1) === "queued" && queued < MAX_QUEUED_LOOKUPS) problem(`26: ${a.id} became unresolved after only ${queued} queued answers`);
+        const unattended = !s.attempts.some((a) => a.idempotencyKey === w.key && isLive(a));
+        if (answers.at(-1) === "queued" && queued < MAX_QUEUED_LOOKUPS && !unattended) problem(`26: work ${w.key} became unresolved after only ${queued} queued answers`);
       }
       // 20. Correct endings.
       if (s.subject.ended === "sequence_finished_no_response" && s.tracks.some((p) => p.finishedAt === null)) problem(`20: ${id} finished with a track still open`);
@@ -749,9 +767,21 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     for (const [key, list] of perStep) {
       if (list.filter(isLive).length > 1) problem(`3: ${key} has two live attempts`);
       if (list.filter((a) => a.state === "sent").length > 1) problem(`3: ${key} has two sent attempts`);
-      // 5. After a lookup said not sent, later attempts reuse its key.
+      // 5. After a lookup said not sent, later attempts reuse its key until the work settles, and
+      // never after (PR 37 review round 3): the record's settlement is a confirmed withdrawal or the user's mark.
+      for (const a of list) {
+        const settledAt = recordSettledAt(a.idempotencyKey);
+        if (a.claimedWall > settledAt) problem(`5: ${a.id} was claimed carrying work ${a.idempotencyKey}, which had settled`);
+      }
       const notSent = list.find((a) => a.endedBy === "lookup_not_sent");
-      if (notSent) for (const later of list.filter((a) => a.claimedWall > notSent.claimedWall)) if (later.idempotencyKey !== notSent.idempotencyKey) problem(`5: ${later.id} took a new key after a not-sent lookup`);
+      if (notSent) {
+        const settledAt = recordSettledAt(notSent.idempotencyKey);
+        for (const later of list.filter((a) => a.claimedWall > notSent.claimedWall)) {
+          const reused = later.idempotencyKey === notSent.idempotencyKey;
+          if (!reused && later.claimedWall < settledAt) problem(`5: ${later.id} took a new key after a not-sent lookup, before the work settled`);
+          if (reused && later.claimedWall > settledAt) problem(`5: ${later.id} inherited the key of work that had settled`);
+        }
+      }
     }
 
     // 4. Sent at most once, on the delivery log.
@@ -774,12 +804,12 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       if (a.state === "withdrawn" && handedOnce && !["provider", "lookup_not_sent", "user"].includes(a.endedBy ?? "")) problem(`5: ${a.id} was withdrawn by the app (${a.endedBy}) after it may have reached the provider`);
       history.set(a.id, { states: [...hist.states, a.state], withdrawRequested: hist.withdrawRequested || a.withdrawRequested, handedOnce });
     }
-    checkCallLog(allAttempts);
+    checkCallLog(allAttempts, allWork);
 
     // 10, from the provider's own delivery log: no inbox sends more than its capacity on any reset
     // day. The user's "not sent" releases the work's reservation (review round 2, ruling 2), so a
     // send the provider makes after that mark is the user's override, as for at-most-once (ruling 9).
-    const overridden = (d: { key: string; at: number }) => (markedNotSentKeys.get(d.key) ?? Infinity) <= d.at;
+    const overridden = (d: { key: string; at: number }) => markedBefore(d.key, d.at);
     for (const acc of accounts) {
       const perDay = new Map<number, number>();
       for (const d of fake.deliveryLog) if (d.sender === acc.id && !overridden(d)) perDay.set(local(d.at, acc.resetZone).day, (perDay.get(local(d.at, acc.resetZone).day) ?? 0) + 1);
@@ -797,8 +827,10 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     // 26. No attempt waits forever.
     for (const a of allAttempts) {
       if (a.state === "claimed" && now - a.claimedWall > SETTLING) problem(`26: ${a.id} has been claimed since ${new Date(a.claimedWall).toISOString()}`);
-      if ((a.state === "handed" || a.state === "accepted") && a.unresolvedSince === null && now - (a.lastCallWall ?? a.claimedWall) > SETTLING * (MAX_QUEUED_LOOKUPS + 2)) {
-        problem(`26: ${a.id} has been ${a.state} since ${new Date(a.lastCallWall ?? 0).toISOString()} without settling`);
+      const w = allWork.find((x) => x.key === a.idempotencyKey);
+      if ((a.state === "handed" || a.state === "accepted") && w?.unresolvedSince === null && now - (a.lastCallWall ?? a.claimedWall) > SETTLING * (MAX_QUEUED_LOOKUPS + 2)) {
+        const looked = fake.lookupLog.filter((l) => l.key === a.idempotencyKey).map((l) => `${new Date(l.at).toISOString().slice(5, 16)} ${l.answer}`);
+        problem(`26: ${a.id} has been ${a.state} since ${new Date(a.lastCallWall ?? 0).toISOString()} without settling (work ${w.settled ?? "unsettled"}, next lookup ${w.nextLookupWall === null ? "none" : new Date(w.nextLookupWall).toISOString()}, retry ${a.retry}, withdraw requested ${a.withdrawRequested}, lookups: ${looked.slice(-4).join(", ") || "none"} of ${looked.length})`);
       }
     }
     const attention = (await h.request<NeedsAttention>("GET", "/api/needs-attention")).body;
@@ -810,15 +842,17 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     }
 
     // 27. Every held reservation belongs to provider work that is live, or unresolved and listed in
-    // Needs attention with its inbox (review round 2, ruling 2); work sent holds none.
-    const listedKeys = new Set(attention.heldCapacity.flatMap((x) => x.work.map((w) => allAttempts.find((a) => a.id === w.attemptId)?.idempotencyKey)));
-    for (const a of allAttempts) {
-      if (!a.holdsReservation) continue;
-      const work = allAttempts.filter((o) => o.idempotencyKey === a.idempotencyKey);
-      if (work.some(isLive)) continue;
-      if (work.some((o) => o.state === "sent" || o.sentWall !== null)) problem(`27: ${a.id} holds a reservation of ${a.accountId} for work already sent`);
-      else if (!listedKeys.has(a.idempotencyKey)) problem(`27: ${a.id} holds a reservation of ${a.accountId} for work neither live nor listed in Needs attention`);
-      else if (!attention.heldCapacity.some((x) => x.accountId === a.accountId)) problem(`27: ${a.id}'s held reservation is listed under another inbox`);
+    // Needs attention under its inbox (review round 2, ruling 2); work the provider or the user
+    // settled, by the record, holds none (review round 3).
+    const listedKeys = new Set(attention.heldCapacity.flatMap((x) => x.work.map((item) => allAttempts.find((a) => a.id === item.attemptId)?.idempotencyKey)));
+    for (const w of allWork) {
+      const settledAt = recordSettledAt(w.key);
+      if (w.settled !== null) continue;
+      if (settledAt <= now) problem(`27: work ${w.key} still holds a reservation of ${w.accountId} though the record settled it at ${new Date(settledAt).toISOString()}`);
+      if (allAttempts.some((a) => a.idempotencyKey === w.key && isLive(a))) continue;
+      if (w.sentWall !== null) problem(`27: work ${w.key} holds a reservation of ${w.accountId} though it was sent`);
+      else if (!listedKeys.has(w.key)) problem(`27: work ${w.key} holds a reservation of ${w.accountId} but is neither live nor listed in Needs attention`);
+      else if (!attention.heldCapacity.some((x) => x.accountId === w.accountId && x.work.some((item) => item.enrollmentId === w.subjectId && item.stepId === w.stepId))) problem(`27: work ${w.key}'s held reservation is listed under another inbox`);
     }
     for (const acc of await h.store.engine.accounts(now)) {
       const holding = allAttempts.filter((a) => isLive(a) && a.accountId === acc.id);
@@ -843,7 +877,10 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
           allAttempts
             .filter((a) => isLive(a) && a.accountId === accountId)
             // A not-sent the transport cannot vouch for is read as unknown (5.3).
-            .every((a) => a.lookupAnswer === "unknown" || a.lookupAnswer === "queued" || (a.lookupAnswer === "not-sent" && !a.retryable && !a.notSentIsFinal));
+            .every((a) => {
+              const answer = allWork.find((w) => w.key === a.idempotencyKey)?.lookupAnswer;
+              return answer === "unknown" || answer === "queued" || (answer === "not-sent" && !a.retryable && !a.notSentIsFinal);
+            });
         // Or every inbox it may use has all its daily sends held by unresolved work Needs attention lists (ruling 2).
         const heldFull = new Set(attention.heldCapacity.filter((x) => x.held >= x.capacity).map((x) => x.accountId));
         const waitsOnStalled = usable.length > 0 && usable.every((a) => (stalled.has(a) && holdersUnsettled(a)) || heldFull.has(a));
@@ -888,9 +925,9 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     if (!step) return false;
     const data = mergeData(rec, fake.handoverLog.length);
     if (renderCopy(step.subject, data) === null || renderCopy(step.body, data) === null) return false;
-    if (step.threading === "continue_thread" && !st.attempts.some((o) => o.trackId === a.trackId && o.state === "sent" && o.providerRef !== null)) return false;
+    if (step.threading === "continue_thread" && !st.attempts.some((o) => o.trackId === a.trackId && o.state === "sent" && st.work.some((w) => w.key === o.idempotencyKey && w.providerRef !== null))) return false;
     // A reply from the address to the inbox is held for correlation (the stored fact): sends between them pause.
-    if ((st.pendingReplies ?? []).some((r) => r.inbox === a.accountId && r.address === a.destination.toLowerCase())) return false;
+    if (st.pendingReplies.some((r) => r.inbox === a.accountId && r.address === a.destination.toLowerCase())) return false;
     return true;
   }
 
@@ -918,8 +955,24 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
   }
 
   /** The step's send, by the record: its first delivery from work the user did not mark not sent. */
+  /**
+   * The user marked this work not sent at or before `at`, and the work was handed over before the
+   * mark: a delivery of it then is the user's override (ruling 9; review round 3, Opus).
+   */
+  function markedBefore(key: string, at: number): boolean {
+    const mark = markedNotSentKeys.get(key);
+    if (mark === undefined || mark > at) return false;
+    return (fake.handoverLog.find((c) => c.key === key)?.at ?? Infinity) <= mark;
+  }
+
+  /** When the record knows the work settled without a send: a confirmed withdrawal, or the user's mark. */
+  function recordSettledAt(key: string): number {
+    const withdrawn = fake.withdrawLog.find((x) => x.key === key && x.answer === "withdrawn")?.at ?? Infinity;
+    return Math.min(withdrawn, markedNotSentKeys.get(key) ?? Infinity, markedSent.get(key) ?? Infinity);
+  }
+
   function stepDelivery(subjectId: string, stepId: string) {
-    return fake.deliveryLog.find((d) => d.subjectId === subjectId && d.stepId === stepId && !markedNotSentKeys.has(d.key));
+    return fake.deliveryLog.find((d) => d.subjectId === subjectId && d.stepId === stepId && !markedBefore(d.key, d.at));
   }
 
   /** When the app could first know of a delivery: its event, a lookup that confirmed it, or the user's mark. */
@@ -972,8 +1025,8 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
    */
   function replyTimes(subjectId: string, attempts: readonly Attempt[] = []): { must: number | null; may: number | null } {
     const firstCall = (key: string) => fake.handoverLog.find((c) => c.key === key)?.at ?? Infinity;
+    // The user's "not sent" settles capacity, not the facts: such work still matches (review round 3).
     const settledWithout = (key: string) =>
-      markedNotSentKeys.has(key) ||
       fake.withdrawLog.some((w) => w.key === key && w.answer === "withdrawn") ||
       fake.refusals.some((r) => fake.handoverLog.some((c) => c.key === key && c.attemptId === r.attemptId));
     const must: number[] = [];
@@ -985,7 +1038,10 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
         const d = fake.deliveryLog.find((x) => x.providerRef === r.threadRef);
         if (d && d.subjectId === subjectId) {
           const refKnown = Math.min(d.visibleAt, fake.lookupLog.find((l) => l.key === d.key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity);
-          must.push(refKnown <= r.at ? r.at : observedBy(observedBy(r.at) + SETTLING));
+          // Held until its reference attaches or one settling period of running time; a crash in
+          // between restarts without counting the time it lost, so the record then only allows it.
+          const bound = refKnown <= r.at ? r.at : observedBy(observedBy(r.at) + SETTLING);
+          if (refKnown <= r.at || !crashTimes.some((t) => t >= r.at && t <= bound)) must.push(bound);
           may.push(r.at);
         } else if (fallbackMay(r)) may.push(r.at);
       } else {
@@ -1147,7 +1203,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     return record.enrollments.find((e) => e.id === id)?.status;
   }
 
-  function checkCallLog(allAttempts: Attempt[]): void {
+  function checkCallLog(allAttempts: Attempt[], allWork: readonly ProviderWork[]): void {
     const byAttempt = new Map<string, HandoverLogEntry[]>();
     for (const c of fake.handoverLog) byAttempt.set(c.attemptId, [...(byAttempt.get(c.attemptId) ?? []), c]);
     for (const [attemptId, calls] of byAttempt) {
@@ -1157,8 +1213,8 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       for (const c of calls.slice(1)) {
         if (c.key !== first.key || JSON.stringify(c.rendered) !== JSON.stringify(first.rendered)) problem(`5/8: a retry of ${attemptId} changed its key or payload`);
       }
-      const a = allAttempts.find((x) => x.id === attemptId);
-      if (a?.unresolvedSince != null && calls.some((c) => c.at > (a.unresolvedSince ?? Infinity))) problem(`5: ${attemptId} was called after it became unresolved`);
+      const unresolvedSince = allWork.find((w) => w.key === first.key)?.unresolvedSince ?? null;
+      if (unresolvedSince !== null && calls.some((c) => c.at > unresolvedSince)) problem(`5: ${attemptId} was called after its work became unresolved`);
       const withdrawn = fake.withdrawLog.find((w) => w.key === first.key);
       if (withdrawn && calls.some((c) => c.at > withdrawn.at)) problem(`5: ${attemptId} was called after a withdrawal was requested`);
     }
@@ -1265,6 +1321,8 @@ function probeAtCall(h: EngineHarness, problem: (what: string) => void, eligible
     const p = s.tracks.find((t) => t.nextStepId === call.stepId && t.finishedAt === null);
     if (!p) problem(`2: ${call.subjectId}/${call.stepId} was called but is not its track's pending step`);
     if (s.results.some((r) => r.stepId === call.stepId)) problem(`2: ${call.subjectId}/${call.stepId} was called after it had a result`);
+    // 2 (predicate 18). Nothing goes from an inbox to an address while a reply between them awaits correlation.
+    if (s.pendingReplies.some((r) => r.inbox === call.sender && r.address === call.destination.toLowerCase())) problem(`2: ${call.subjectId}/${call.stepId} was called from ${call.sender} while a reply from ${call.destination} awaited correlation`);
     const attempt = s.attempts.find((a) => a.id === call.attemptId);
     if (!attempt || attempt.calls > 1) return;
     // 12. No claimed attempt on this account that met every predicate but the slot had higher priority.

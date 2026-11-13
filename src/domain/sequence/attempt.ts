@@ -1,10 +1,15 @@
 /**
  * The attempt contract (ADR 0003 5.3, ruling 1): one forward-only state chain per provider
- * attempt, applied event by event. Results may arrive late, twice or out of order; a repeated or
- * backward event is ignored. Once the provider may have been called, the attempt is never
- * withdrawn or repeated without a provider signal or the user's decision.
+ * attempt, applied event by event, beside the provider work the attempt carries (PR 37 review
+ * round 3). Results may arrive late, twice or out of order; a repeated or backward event is
+ * ignored. Once the provider may have been called, the attempt is never withdrawn or repeated
+ * without a provider signal or the user's decision.
+ *
+ * Events about one attempt (its claim, its calls, its withdrawal) are applied here with its work.
+ * Events about the work itself (a send, a lookup, a provider refusal, the user's mark) are applied
+ * to the work and every attempt carrying it at once, in `progress.ts` `applyToWork`.
  */
-import type { Attempt, LookupAnswer, RejectReason } from "./state.ts";
+import type { Attempt, LookupAnswer, ProviderWork, RejectReason } from "./state.ts";
 
 /** The engine's parameters (ADR 0003 5.6), one value each. */
 export const ENGINE_PARAMS = {
@@ -24,223 +29,155 @@ export type CallAnswer =
   | { readonly kind: "rejected"; readonly reason: RejectReason; readonly retryAfterMs?: number }
   | { readonly kind: "unknown" };
 
+/** Events about one attempt. */
 export type AttemptEvent =
   | { readonly kind: "claim_expired"; readonly now: number }
   | { readonly kind: "guard_failed" }
   | { readonly kind: "call_answer"; readonly answer: CallAnswer; readonly now: number }
-  | { readonly kind: "sent_observed"; readonly providerTime: number; readonly providerRef: string | null }
-  | { readonly kind: "provider_rejected"; readonly reason: RejectReason }
   | { readonly kind: "quiesce" }
   | { readonly kind: "withdraw_answer"; readonly answer: "withdrawn" | "too-late" | "unknown"; readonly now: number }
+  | { readonly kind: "retry_refused"; readonly now: number };
+
+/** Events about provider work, whichever attempt carries it. */
+export type WorkEvent =
+  | { readonly kind: "sent_observed"; readonly providerTime: number; readonly providerRef: string | null }
   | { readonly kind: "lookup_answer"; readonly answer: { readonly kind: LookupAnswer; readonly sentAt?: number; readonly providerRef?: string | null }; readonly now: number }
-  | { readonly kind: "retry_refused"; readonly now: number }
+  | { readonly kind: "provider_rejected"; readonly reason: RejectReason }
   | { readonly kind: "mark_sent"; readonly now: number }
   | { readonly kind: "mark_not_sent"; readonly now: number };
 
-/** What the attempt's change means for its step, its account or the worker. */
+/** What a change means for the step, the account or the worker. */
 export type AttemptEffect =
   | { readonly kind: "sent"; readonly providerTime: number }
-  /** The provider sent work the app had already withdrawn without its statement: counted, never a second send of the step. */
-  | { readonly kind: "sent_after_withdrawal"; readonly providerTime: number }
   | { readonly kind: "rejected"; readonly reason: RejectReason; readonly retryAfterMs?: number }
   | { readonly kind: "call_withdraw" }
   | { readonly kind: "anomaly"; readonly what: string }
-  /**
-   * The provider work behind this attempt settled without a send: a confirmed withdrawal, a final
-   * not-sent, or the user's "not sent". Every attempt sharing its key releases its reservation
-   * (review round 2, ruling 2).
-   */
-  | { readonly kind: "settled" }
   | { readonly kind: "ignored"; readonly what: string };
 
 export interface AttemptStep {
   readonly attempt: Attempt;
+  readonly work: ProviderWork;
   readonly effects: readonly AttemptEffect[];
 }
 
-const same = (attempt: Attempt, what: string): AttemptStep => ({ attempt, effects: [{ kind: "ignored", what }] });
+/** Unsettled work the provider may hold: called at least once. It keeps its reservation. */
+export const isUncertain = (w: ProviderWork): boolean => w.settled === null && w.calls > 0;
 
-/** Schedules a `lookup` one SETTLING after the last call. */
-const settle = (a: Attempt): Attempt => ({ ...a, nextLookupWall: (a.lastCallWall ?? a.claimedWall) + ENGINE_PARAMS.SETTLING });
+/** Unresolved work the user may mark sent or not sent. */
+export const markable = (w: ProviderWork): boolean => isUncertain(w) && w.unresolvedSince !== null;
 
-/** The provider never got the work, refused it, or stated it will not send: the reservation goes. */
-const release = (a: Attempt): Attempt => ({ ...a, holdsReservation: false });
-const SETTLED: AttemptEffect = { kind: "settled" };
-
-/**
- * Work the app withdrew after a not-sent the transport cannot vouch for, with no retry left: it
- * keeps its reservation and is looked up, and it is unresolved from then on, so it is listed in
- * Needs attention until the provider or the user settles it (review round 2, ruling 2).
- */
-const uncertain = (a: Attempt, now: number, nextLookupWall: number): Attempt => ({
-  ...a,
-  state: "withdrawn",
-  endedBy: "lookup_not_sent",
-  retry: "refused",
-  nextLookupWall,
-  unresolvedSince: a.unresolvedSince ?? now,
-});
-
-/** A missing provider reference is attached from any later sent fact for the same work (ruling 1). */
-const withRef = (a: Attempt, ref: string | null | undefined): Attempt => (a.providerRef === null && ref ? { ...a, providerRef: ref } : a);
-
-/** Withdrawn work whose outcome the provider has not settled: it keeps being looked up (and, separately, its reservation). */
-export const isUncertain = (a: Attempt): boolean => a.state === "withdrawn" && a.nextLookupWall !== null && a.sentWall === null && a.calls > 0;
-
-/** Unresolved work the user may mark sent or not sent: a live attempt, or withdrawn work still uncertain. */
-export const markable = (a: Attempt): boolean => a.unresolvedSince !== null && (isLive(a) || isUncertain(a));
-
-/** Whether a same-key retry may still be attempted at all (the attempt's own conditions in 5.6). */
-export function retryPossible(a: Attempt): boolean {
-  return a.state === "handed" && a.retryable && a.calls < ENGINE_PARAMS.MAX_CALLS && !a.withdrawRequested && a.unresolvedSince === null;
+/** Whether a same-key retry may still be attempted at all (the attempt's own conditions in 5.6, its work unsettled and not unresolved). */
+export function retryPossible(a: Attempt, w: ProviderWork): boolean {
+  return a.state === "handed" && a.retryable && a.calls < ENGINE_PARAMS.MAX_CALLS && !a.withdrawRequested && w.unresolvedSince === null && w.settled === null;
 }
 
-/** A withdrawn attempt's later sent fact: a not-sent lookup was not a confirmed withdrawal; anything else is an anomaly. */
-function sentAfterWithdrawal(a: Attempt, providerTime: number, ref: string | null | undefined): AttemptStep {
-  if (a.endedBy === "lookup_not_sent") {
-    return { attempt: { ...withRef(a, ref), state: "sent", endedBy: "observed", awaitingAnswer: false, nextLookupWall: null }, effects: [{ kind: "sent", providerTime }] };
-  }
-  const anomaly = { kind: "anomaly" as const, what: `the provider sent an attempt that was ${a.endedBy === "user" ? "marked not sent" : "withdrawn"}` };
-  if (a.sentWall !== null || a.calls === 0) return { attempt: withRef(a, ref), effects: [anomaly] };
-  return { attempt: { ...withRef(a, ref), nextLookupWall: null }, effects: [anomaly, { kind: "sent_after_withdrawal", providerTime }] };
-}
+/** Schedules the work's next lookup one SETTLING after the attempt's last call, while the work is unsettled. */
+const settleAfter = (a: Attempt, w: ProviderWork): ProviderWork =>
+  w.settled === null ? { ...w, nextLookupWall: (a.lastCallWall ?? a.claimedWall) + ENGINE_PARAMS.SETTLING } : w;
 
-export function applyAttemptEvent(a: Attempt, event: AttemptEvent): AttemptStep {
+/** Work whose attempt ended before any call: the provider never got it, and the reservation goes. */
+const neverCalled = (w: ProviderWork): ProviderWork => (w.settled === null && w.calls === 0 ? { ...w, settled: "never_called", nextLookupWall: null } : w);
+
+/** A missing provider reference is attached from any later fact for the same work (ruling 1). */
+export const withRef = (w: ProviderWork, ref: string | null | undefined): ProviderWork => (w.providerRef === null && ref ? { ...w, providerRef: ref } : w);
+
+const ignored = (attempt: Attempt, work: ProviderWork, what: string): AttemptStep => ({ attempt, work, effects: [{ kind: "ignored", what }] });
+
+export function applyAttemptEvent(a: Attempt, w: ProviderWork, event: AttemptEvent): AttemptStep {
   switch (event.kind) {
     case "claim_expired":
-      if (a.state !== "claimed") return same(a, "claim age limit on an attempt past claimed");
-      if (event.now - a.claimedWall < ENGINE_PARAMS.SETTLING) return same(a, "claim not yet expired");
-      return { attempt: release({ ...a, state: "withdrawn", endedBy: "claim_expired" }), effects: [] };
+      if (a.state !== "claimed") return ignored(a, w, "claim age limit on an attempt past claimed");
+      if (event.now - a.claimedWall < ENGINE_PARAMS.SETTLING) return ignored(a, w, "claim not yet expired");
+      return { attempt: { ...a, state: "withdrawn", endedBy: "claim_expired" }, work: neverCalled(w), effects: [] };
 
     case "guard_failed":
       if (a.state !== "claimed") throw new Error(`the handover guard runs only on a claimed attempt, not ${a.state}`);
-      return { attempt: release({ ...a, state: "withdrawn", endedBy: "guard" }), effects: [] };
+      return { attempt: { ...a, state: "withdrawn", endedBy: "guard" }, work: neverCalled(w), effects: [] };
 
     case "call_answer": {
       if (a.state === "claimed") throw new Error("a call answer for an attempt that was never handed over");
-      if (isTerminal(a)) {
-        const answered = { ...a, awaitingAnswer: false };
-        return same(event.answer.kind === "accepted" ? withRef(answered, event.answer.providerRef) : answered, `call answer on a ${a.state} attempt`);
-      }
       const answered = { ...a, awaitingAnswer: false };
       const answer = event.answer;
+      if (isTerminal(a)) return ignored(answered, answer.kind === "accepted" ? withRef(w, answer.providerRef) : w, `call answer on a ${a.state} attempt`);
       if (answer.kind === "accepted") {
-        if (a.state === "accepted") return same(withRef(answered, answer.providerRef), "duplicate accepted");
+        if (a.state === "accepted") return ignored(answered, withRef(w, answer.providerRef), "duplicate accepted");
         // An acceptance ends any retry intent: the provider holds the work, and settlement goes on.
-        return { attempt: settle({ ...answered, state: "accepted", providerRef: answer.providerRef, retry: "none" }), effects: [] };
+        return { attempt: { ...answered, state: "accepted", retry: "none" }, work: settleAfter(a, withRef(w, answer.providerRef)), effects: [] };
       }
       if (answer.kind === "rejected") {
-        if (a.state === "accepted") return same(answered, "a refusal after the provider accepted the work");
+        if (a.state === "accepted") return ignored(answered, w, "a refusal after the provider accepted the work");
+        // A refusal of the work's only call settles it: the provider never took it. After earlier
+        // calls whose outcome is unknown the work stays uncertain, for the provider may hold it.
+        const work: ProviderWork = w.settled === null && w.calls <= 1 ? { ...w, settled: "rejected", nextLookupWall: null } : settleAfter(a, w);
         return {
-          attempt: release({ ...answered, state: "rejected", endedBy: "call", rejectReason: answer.reason }),
+          attempt: { ...answered, state: "rejected", endedBy: "call", rejectReason: answer.reason },
+          work,
           effects: [{ kind: "rejected", reason: answer.reason, ...(answer.retryAfterMs === undefined ? {} : { retryAfterMs: answer.retryAfterMs }) }],
         };
       }
       // unknown, a timeout, or a crash before the answer was recorded. Settlement is scheduled
       // whether or not a retry is wanted, so a retry waiting for its slot never delays it (ruling 5).
-      if (a.state === "accepted") return { attempt: settle(answered), effects: [] };
-      if (retryPossible(answered)) return { attempt: settle({ ...answered, retry: "wanted" }), effects: [] };
-      return { attempt: settle({ ...answered, retry: "refused" }), effects: [] };
+      if (a.state === "accepted") return { attempt: answered, work: settleAfter(a, w), effects: [] };
+      return { attempt: { ...answered, retry: retryPossible(answered, w) ? "wanted" : "refused" }, work: settleAfter(a, w), effects: [] };
     }
-
-    case "sent_observed": {
-      if (a.state === "claimed") return { attempt: a, effects: [{ kind: "anomaly", what: "a send observed for an attempt never handed over" }] };
-      if (a.state === "sent") return same(withRef(a, event.providerRef), "duplicate send");
-      if (a.state === "withdrawn") return sentAfterWithdrawal(a, event.providerTime, event.providerRef);
-      if (a.state === "rejected") return { attempt: withRef(a, event.providerRef), effects: [{ kind: "anomaly", what: "the provider sent an attempt it had refused" }] };
-      return {
-        attempt: { ...withRef(a, event.providerRef), state: "sent", endedBy: "observed", awaitingAnswer: false, nextLookupWall: null },
-        effects: [{ kind: "sent", providerTime: event.providerTime }],
-      };
-    }
-
-    case "provider_rejected":
-      // Only a provider signal that it will not send moves an accepted attempt (Instantly's skip, P4).
-      if (a.state !== "handed" && a.state !== "accepted") return same(a, `a refusal on a ${a.state} attempt`);
-      return { attempt: release({ ...a, state: "rejected", endedBy: "provider", rejectReason: event.reason, awaitingAnswer: false }), effects: [{ kind: "rejected", reason: event.reason }] };
 
     case "quiesce":
-      if (a.state === "claimed") return { attempt: release({ ...a, state: "withdrawn", endedBy: "quiesce" }), effects: [] };
+      if (a.state === "claimed") return { attempt: { ...a, state: "withdrawn", endedBy: "quiesce" }, work: neverCalled(w), effects: [] };
       if (a.state === "handed" || a.state === "accepted") {
-        if (a.withdrawRequested) return same(a, "already asked to withdraw");
-        if (a.retry === "wanted_after_not_sent") {
-          // The provider said not sent and the retry it wanted is now refused (5.3 not-sent row).
-          // Unresolved from the not-sent lookup that wanted the retry (it set the next lookup a SETTLING on).
-          const next = (a.lastCallWall ?? a.claimedWall) + ENGINE_PARAMS.SETTLING;
-          const notSentAt = (a.nextLookupWall ?? next) - ENGINE_PARAMS.SETTLING;
-          return { attempt: uncertain({ ...a, withdrawRequested: true }, notSentAt, next), effects: [] };
-        }
+        if (a.withdrawRequested) return ignored(a, w, "already asked to withdraw");
+        // The provider said not sent and the retry it wanted is now refused (5.3 not-sent row): the work stays uncertain.
+        if (a.retry === "wanted_after_not_sent") return { attempt: { ...a, withdrawRequested: true, retry: "refused", state: "withdrawn", endedBy: "lookup_not_sent" }, work: w, effects: [] };
         const requested = { ...a, withdrawRequested: true };
-        return { attempt: a.retry === "wanted" ? { ...requested, retry: "refused" } : requested, effects: [{ kind: "call_withdraw" }] };
+        return { attempt: a.retry === "wanted" ? { ...requested, retry: "refused" } : requested, work: w, effects: [{ kind: "call_withdraw" }] };
       }
-      return same(a, "quiesce on a terminal attempt");
+      return ignored(a, w, "quiesce on a terminal attempt");
 
     case "withdraw_answer":
-      if (a.state !== "handed" && a.state !== "accepted") return same({ ...a, withdrawCalled: true }, `withdraw answer on a ${a.state} attempt`);
-      if (event.answer === "withdrawn") return { attempt: release({ ...a, withdrawCalled: true, state: "withdrawn", endedBy: "provider", nextLookupWall: null }), effects: [SETTLED] };
-      return { attempt: { ...a, withdrawCalled: true, nextLookupWall: a.nextLookupWall ?? event.now + ENGINE_PARAMS.SETTLING }, effects: [] };
-
-    case "lookup_answer": {
-      const answer = event.answer;
-      if (a.state === "withdrawn" || a.state === "sent" || a.state === "rejected") {
-        if (answer.kind === "sent") {
-          if (a.state === "withdrawn") return sentAfterWithdrawal(a, answer.sentAt ?? event.now, answer.providerRef);
-          return same(withRef(a, answer.providerRef), `lookup on a ${a.state} attempt`);
-        }
-        if (isUncertain(a)) {
-          // Uncertain work keeps its reservation until the provider settles it (ruling 3), and stays unresolved.
-          if (answer.kind === "not-sent" && a.notSentIsFinal) return { attempt: release({ ...a, lookupAnswer: "not-sent", nextLookupWall: null }), effects: [SETTLED] };
-          return { attempt: { ...a, lookupAnswer: answer.kind, nextLookupWall: event.now + ENGINE_PARAMS.SETTLING, unresolvedSince: a.unresolvedSince ?? event.now }, effects: [] };
-        }
-        return same(a, `lookup on a ${a.state} attempt`);
+      if (a.state !== "handed" && a.state !== "accepted") return ignored({ ...a, withdrawCalled: true }, w, `withdraw answer on a ${a.state} attempt`);
+      if (event.answer === "withdrawn") {
+        // A confirmed withdrawal settles the work (4.2).
+        const work: ProviderWork = w.settled === null ? { ...w, settled: "withdrawn", nextLookupWall: null } : w;
+        return { attempt: { ...a, withdrawCalled: true, state: "withdrawn", endedBy: "provider", awaitingAnswer: false }, work, effects: [] };
       }
-      if (a.state === "claimed") return same(a, "lookup on a claimed attempt");
-      const looked = { ...a, lookupAnswer: answer.kind, nextLookupWall: event.now + ENGINE_PARAMS.SETTLING };
-      if (answer.kind === "sent") {
-        return {
-          attempt: { ...withRef(looked, answer.providerRef), queuedLookups: 0, state: "sent", endedBy: "lookup", nextLookupWall: null, awaitingAnswer: false },
-          effects: [{ kind: "sent", providerTime: answer.sentAt ?? event.now }],
-        };
-      }
-      if (answer.kind === "queued") {
-        const queuedLookups = a.queuedLookups + 1;
-        return {
-          attempt: {
-            ...looked,
-            state: "accepted",
-            queuedLookups,
-            unresolvedSince: a.unresolvedSince ?? (queuedLookups >= ENGINE_PARAMS.MAX_QUEUED_LOOKUPS ? event.now : null),
-          },
-          effects: [],
-        };
-      }
-      const counted = { ...looked, queuedLookups: 0 };
-      if (answer.kind === "not-sent" && a.retryable) {
-        // Also when already unresolved: a later not-sent still settles it, keeping when it became unresolved (ruling 6).
-        if (retryPossible(counted)) return { attempt: { ...counted, retry: "wanted_after_not_sent" }, effects: [] };
-        return { attempt: uncertain(counted, event.now, counted.nextLookupWall), effects: [] };
-      }
-      if (answer.kind === "not-sent" && a.notSentIsFinal) {
-        return { attempt: release({ ...counted, state: "withdrawn", endedBy: "provider", nextLookupWall: null }), effects: [SETTLED] };
-      }
-      // unknown, or a not-sent the transport cannot vouch for: unresolved, and keep looking.
-      return { attempt: { ...counted, unresolvedSince: a.unresolvedSince ?? event.now }, effects: [] };
-    }
+      return { attempt: { ...a, withdrawCalled: true }, work: w.settled === null ? { ...w, nextLookupWall: w.nextLookupWall ?? event.now + ENGINE_PARAMS.SETTLING } : w, effects: [] };
 
     case "retry_refused":
-      if (a.retry === "wanted_after_not_sent") return { attempt: uncertain(a, event.now, event.now + ENGINE_PARAMS.SETTLING), effects: [] };
-      if (a.retry === "wanted") return { attempt: { ...a, retry: "refused", nextLookupWall: a.nextLookupWall ?? event.now }, effects: [] };
-      return same(a, "no retry was wanted");
-
-    case "mark_sent":
-      if (!markable(a)) return same(a, "mark sent is only for unresolved work");
-      return { attempt: { ...a, state: "sent", endedBy: "user", nextLookupWall: null, awaitingAnswer: false }, effects: [{ kind: "sent", providerTime: event.now }] };
-
-    case "mark_not_sent":
-      if (!markable(a)) return same(a, "mark not sent is only for unresolved work");
-      if (a.lookupAnswer === "queued") return same(a, "the provider reports the work queued");
-      // The user's decision settles the work: its reservation goes, and it is no longer looked up
-      // (review round 2, ruling 2). A send observed later is still counted on its send day.
-      return { attempt: release({ ...a, state: "withdrawn", endedBy: "user", userMarkedNotSent: true, nextLookupWall: null, awaitingAnswer: false }), effects: [SETTLED] };
+      if (a.retry === "wanted_after_not_sent") {
+        return { attempt: { ...a, retry: "refused", state: "withdrawn", endedBy: "lookup_not_sent" }, work: w.settled === null ? { ...w, nextLookupWall: event.now + ENGINE_PARAMS.SETTLING } : w, effects: [] };
+      }
+      if (a.retry === "wanted") return { attempt: { ...a, retry: "refused" }, work: w.settled === null ? { ...w, nextLookupWall: w.nextLookupWall ?? event.now } : w, effects: [] };
+      return ignored(a, w, "no retry was wanted");
   }
+}
+
+/**
+ * A lookup's answer other than `sent`, for the work and the live attempt carrying it, if any
+ * (5.3 lookup rows). `sent` is a send, applied with the step in `progress.ts`.
+ */
+export function applyLookup(
+  w: ProviderWork,
+  live: Attempt | null,
+  transport: { readonly retryable: boolean; readonly notSentIsFinal: boolean },
+  answer: Exclude<LookupAnswer, "sent">,
+  now: number,
+): { work: ProviderWork; live: Attempt | null } {
+  if (w.settled !== null) return { work: w, live };
+  const looked: ProviderWork = { ...w, lookupAnswer: answer, nextLookupWall: now + ENGINE_PARAMS.SETTLING };
+  if (answer === "queued") {
+    const queuedLookups = w.queuedLookups + 1;
+    const work = { ...looked, queuedLookups, unresolvedSince: w.unresolvedSince ?? (queuedLookups >= ENGINE_PARAMS.MAX_QUEUED_LOOKUPS ? now : null) };
+    return { work, live: live?.state === "handed" ? { ...live, state: "accepted" } : live };
+  }
+  const counted = { ...looked, queuedLookups: 0 };
+  if (answer === "not-sent" && transport.notSentIsFinal) {
+    // A not-sent the transport vouches for settles the work.
+    return { work: { ...counted, settled: "not_sent", nextLookupWall: null }, live: live && live.state !== "claimed" ? { ...live, state: "withdrawn", endedBy: "provider", awaitingAnswer: false, retry: "refused" } : live };
+  }
+  if (answer === "not-sent" && transport.retryable && live && live.state !== "claimed") {
+    // Also when already unresolved: a later not-sent still settles the attempt, keeping when the work became unresolved (ruling 6).
+    if (retryPossible(live, counted)) return { work: counted, live: { ...live, retry: "wanted_after_not_sent" } };
+    return { work: counted, live: { ...live, state: "withdrawn", endedBy: "lookup_not_sent", retry: "refused" } };
+  }
+  // unknown, or a not-sent the transport cannot vouch for: unresolved, and keep looking.
+  return { work: { ...counted, unresolvedSince: w.unresolvedSince ?? now }, live };
 }
