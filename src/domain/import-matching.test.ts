@@ -788,3 +788,59 @@ describe("rows of one export that are the same person or company on weaker evide
     expect(summary.rowRecords.businesses[0]).not.toBe(summary.rowRecords.businesses[1]);
   });
 });
+
+// Review round 5.
+describe("each collapsed row is checked on its own evidence", () => {
+  const sams = (manager: Record<string, string>) => [
+    person({ person_id: "a", business_id: "b1", full_name: "Sam Lee", title: "Owner", direct_phone: "+44 20 7946 0303" }),
+    person({ business_id: "b1", full_name: "Sam Lee", title: "Practice manager", direct_phone: "+44 20 7946 0404", ...manager }),
+  ];
+
+  // GPT round 5, finding 1: the manager's row borrowed the owner's number through the shared ID.
+  for (const order of ["owner first", "manager first"] as const) {
+    test(`a row sharing a reused person ID whose number belongs to someone else changes nothing (${order})`, async () => {
+      const h = importHarness();
+      await h.import({ businesses: [harbour], people: sams({ person_id: "b" }) });
+      const before = await h.peopleNamed("Sam Lee");
+      const rows = sams({ person_id: "a", email: "manager@harbour.example" });
+      const summary = await h.import({ businesses: [harbour], people: order === "owner first" ? rows : [...rows].reverse() });
+      const managerRow = order === "owner first" ? 1 : 0;
+      expect(summary.rowRecords.people[managerRow]).toBeNull();
+      expect(entries(summary, "Sam Lee").find((e) => e.outcome === "not_enrolled" && e.reason === "ambiguous_match")).toMatchObject({ ...ambiguousPerson, conflict: "contradiction", disagreeing: ["person_id", "phone"] });
+      expect(await h.peopleNamed("Sam Lee")).toEqual(before);
+    });
+  }
+
+  // GPT round 5, finding 1: the south branch's main line was added to the north record.
+  for (const order of ["north first", "south first"] as const) {
+    test(`a business row sharing a reused business ID whose main line belongs to another branch changes nothing (${order})`, async () => {
+      const h = importHarness();
+      const branch = (id: string, line: string, street: string, postal: string) => business({ business_id: id, place_id: "", business_name: "City Physio", phone_e164: line, street, postal_code: postal });
+      await h.import({ businesses: [branch("a", "+442079460101", "1 North Street", "N1 1AA"), branch("b", "+442079460505", "9 South Road", "SE1 9ZZ")] });
+      const before = await h.companies("City Physio");
+      const rows = [branch("a", "+442079460101", "1 North Street", "N1 1AA"), branch("a", "+442079460505", "9 South Road", "SE1 9ZZ")];
+      const summary = await h.import({ businesses: order === "north first" ? rows : [...rows].reverse() });
+      const southRow = order === "north first" ? 1 : 0;
+      expect(summary.rowRecords.businesses[southRow]).toBeNull();
+      expect(entries(summary, "City Physio").find((e) => e.outcome === "not_enrolled" && e.reason === "ambiguous_match")).toMatchObject({ ...ambiguousCompany, conflict: "contradiction", disagreeing: ["business_id", "main_line"] });
+      expect(await h.companies("City Physio")).toEqual(before);
+    });
+  }
+});
+
+describe("the campaign safety net counts the details a row lists", () => {
+  // Opus round 5, probe Q1: the mobile stayed with Sam, so the renamed row's person was enrolled by email.
+  test("a row whose mobile an enrolled colleague holds is not enrolled, and says whose it is", async () => {
+    const h = importHarness();
+    await h.import({ businesses: [harbour], people: [person({ person_id: "p1", business_id: "b1", full_name: "Sam Lee", dial_phone: "+447700900101", dial_phone_type: "mobile" })] });
+    const rows = { businesses: [harbour], people: [person({ person_id: "p1", business_id: "b1", full_name: "Samuel Lee", email: "samuel@harbour.example", dial_phone: "+447700900101", dial_phone_type: "mobile" })] };
+    const second = await h.import(rows);
+    expect(entry(second, "Samuel Lee")).toMatchObject({
+      outcome: "not_enrolled",
+      reason: "shares_contact",
+      shared: { detail: { channel: "phone", phoneKind: "mobile", value: "+44 7700 900101" }, lead: "Sam Lee", companyName: "Harbour Lane Physio" },
+    });
+    expect((await h.import(rows)).counts).toMatchObject({ new: 0, updated: 0 });
+    expect((await h.peopleNamed("Samuel Lee")).map((p) => p.enrollments)).toEqual([0]);
+  });
+});

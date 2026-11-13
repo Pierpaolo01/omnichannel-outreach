@@ -1,5 +1,5 @@
 import { emailKey, foldText, nameKey, type Channel, type PhoneKind } from "./contact-details.ts";
-import { resolveMatches, type Conflict, type Evidence, type EvidenceKind } from "./matching.ts";
+import { resolveMatches, type Conflict, type Evidence, type EvidenceKind, type Resolution } from "./matching.ts";
 import { ENROLLED_BY_IMPORT, type OutreachStatus } from "./outreach-status.ts";
 import { companyRegion, displayPhone, parsePhone, type PhoneNumber } from "./phone.ts";
 import {
@@ -300,8 +300,16 @@ export function planImport(input: {
 
   // Businesses first: People rows join only to a business in this export. Rows that are one
   // company are collapsed, then each is matched against the companies already on record.
-  const businessGroups = groupBusinesses(scraped.businesses);
-  const companyMatches = crm.matchCompanies(businessGroups);
+  const settledCompanies = crm.matchCompanies(groupBusinesses(scraped.businesses));
+  const businessGroups = settledCompanies.groups;
+  const companyMatches = settledCompanies.matches;
+  // A business row whose own evidence contradicts its group's match changes nothing, and so do the
+  // People rows that share its business_id, since they could belong to either business.
+  const refusedBusinessId = new Map<string, { conflict: Conflict; disagreeing: readonly EvidenceKind[] }>();
+  for (const { row, why } of settledCompanies.refused) {
+    unapplied.push({ ...unmatched(row.row.name, row.row.city, "businesses", [row], "company", why), companyName: row.row.name });
+    if (row.row.sourceBusinessId) refusedBusinessId.set(row.row.sourceBusinessId, why);
+  }
   const groupsOfBusinessId = new Map<string, Set<number>>();
   const companyOfGroup: ({ companyId: string } | { conflict: Conflict; disagreeing: readonly EvidenceKind[] })[] = businessGroups.map((group, g) => {
     for (const { row } of group.rows) {
@@ -338,7 +346,10 @@ export function planImport(input: {
     const company = g === undefined || !row.sourceBusinessId ? undefined : companyOfGroup[g];
     const indexed = [{ row, index }];
     const companyName = businessGroups[g ?? 0]?.name ?? "";
-    if (!company) {
+    const refusedWith = refusedBusinessId.get(row.sourceBusinessId);
+    if (refusedWith) {
+      unapplied.push({ ...unmatched(name, row.title, "people", indexed, "company", refusedWith), companyName: row.sourceBusinessId ? companyName : "" });
+    } else if (!company) {
       unapplied.push({ outcome: "not_enrolled", reason: "company_not_in_export", lead: null, name, sourceBusinessId: row.sourceBusinessId });
     } else if (candidates.length > 1) {
       // Business rows sharing this business_id carry different place_ids: two companies.
@@ -353,8 +364,12 @@ export function planImport(input: {
 
   // Rows that are one person are collapsed, then each is matched against the people already on
   // record at its company. Same-name rows that differ stay separate people.
-  const groups = groupPeople(joined, crm);
-  const personMatches = crm.matchPeople(groups);
+  const settledPeople = crm.matchPeople(groupPeople(joined, crm));
+  const groups = settledPeople.groups;
+  const personMatches = settledPeople.matches;
+  for (const { row: r, why } of settledPeople.refused) {
+    unapplied.push({ ...unmatched(personDisplayName(fieldsOf(r.row)), r.row.title, "people", [r], "person", why), companyName: crm.company(r.companyId).fields.name });
+  }
   const peopleInExport: string[] = [];
   groups.forEach((group, g) => {
     const match = personMatches[g];
@@ -458,6 +473,45 @@ export function planImport(input: {
 export function personDisplayName(fields: Pick<PersonFields, "fullName" | "firstName" | "lastName">): string {
   const joined = [fields.firstName, fields.lastName].filter(Boolean).join(" ");
   return fields.fullName || joined || "Unnamed decision maker";
+}
+
+/**
+ * Matches groups of rows, then checks each row of a collapsed group on its own evidence. A row
+ * whose own evidence contradicts itself, or points to a different record than its group's match,
+ * leaves the group and changes nothing, as it would if imported alone; the rest are matched again
+ * without it (review round 5).
+ */
+function settleGroups<R, G extends { readonly rows: readonly R[] }>(
+  initial: readonly G[],
+  evidenceOf: (group: G) => Evidence,
+  withRows: (group: G, rows: readonly R[]) => G,
+): { groups: G[]; matches: Resolution[]; refused: { row: R; why: { conflict: Conflict; disagreeing: readonly EvidenceKind[] } }[] } {
+  let groups = [...initial];
+  const refused: { row: R; why: { conflict: Conflict; disagreeing: readonly EvidenceKind[] } }[] = [];
+  for (;;) {
+    const matches = resolveMatches(groups.map(evidenceOf));
+    const leaving = new Set<R>();
+    groups.forEach((group, g) => {
+      const match = matches[g];
+      if (group.rows.length < 2 || match?.kind !== "match") return;
+      const groupEvidence = evidenceOf(group);
+      for (const row of group.rows) {
+        const own = evidenceOf(withRows(group, [row]));
+        const [alone] = resolveMatches([{ ...own, byName: [] }]);
+        const deciding = (e: Evidence) => e.tiers.find((t) => t.ids.length > 0)?.kind;
+        if (alone?.kind === "ambiguous" && alone.conflict === "contradiction") {
+          refused.push({ row, why: { conflict: "contradiction", disagreeing: alone.disagreeing } });
+          leaving.add(row);
+        } else if (alone?.kind === "match" && alone.id !== match.id) {
+          const kinds = [deciding(groupEvidence), deciding(own) ?? own.holders?.kind].filter((k): k is EvidenceKind => k !== undefined);
+          refused.push({ row, why: { conflict: "contradiction", disagreeing: [...new Set(kinds)] } });
+          leaving.add(row);
+        }
+      }
+    });
+    if (leaving.size === 0) return { groups, matches, refused };
+    groups = groups.map((group) => withRows(group, group.rows.filter((r) => !leaving.has(r)))).filter((group) => group.rows.length > 0);
+  }
 }
 
 /** The summary entry of a row that could not be matched safely, without its company name. */
@@ -793,7 +847,7 @@ class WorkingDirectory {
   private readonly merged: DetailConsolidation[] = [];
   private readonly keptBad: { owner: DetailOwner; detail: MutableDetail }[] = [];
   private readonly upgraded: { owner: DetailOwner; detail: MutableDetail }[] = [];
-  private readonly heldElsewhere: { owner: DetailOwner; held: HeldElsewhere }[] = [];
+  private readonly heldElsewhere: { owner: DetailOwner; held: HeldElsewhere; holder: LeadRef }[] = [];
   private readonly now: string;
   private readonly newId: () => string;
 
@@ -886,9 +940,21 @@ class WorkingDirectory {
 
   /** What stops this lead being enrolled in this campaign: a destination an enrolled lead here already has. */
   sharedWithEnrolled(lead: LeadRef): { detail: DetailNote; lead: string; companyName: string } | null {
+    const shared = (detail: DetailNote, holder: LeadRef) => ({
+      detail,
+      lead: this.nameOf(holder),
+      companyName: this.company(holder.kind === "company" ? holder.companyId : this.person(holder.personId).companyId).fields.name,
+    });
     for (const { kind, detail } of this.destinations(lead)) {
       const holder = this.destinationHolder(lead, kind, detail.key, new Set([""]));
-      if (holder) return { detail: noteOf(detail), lead: this.nameOf(holder), companyName: this.company(holder.kind === "company" ? holder.companyId : this.person(holder.personId).companyId).fields.name };
+      if (holder) return shared(noteOf(detail), holder);
+    }
+    // A personal email or mobile (or a shared inbox) the row listed but that stayed with its holder
+    // counts too: the row is that destination's, whoever the detail is stored on (review round 5).
+    for (const h of this.heldElsewhere) {
+      if (leadKey(h.owner) !== leadKey(lead) || !this.isEnrolled(h.holder) || h.holder.kind !== lead.kind) continue;
+      const destination = h.held.detail.channel === "email" || h.held.detail.phoneKind === "mobile";
+      if (destination) return shared(h.held.detail, h.holder);
     }
     return null;
   }
@@ -909,9 +975,12 @@ class WorkingDirectory {
    * A company with a different place_id never matches. Called before any company is written.
    */
   matchCompanies(groups: readonly BusinessGroup[]) {
+    return settleGroups<Indexed<ScrapedBusiness>, BusinessGroup>(groups, (group) => this.companyEvidence(group), (group, rows) => ({ rows, name: group.name }));
+  }
+
+  private companyEvidence(group: BusinessGroup): Evidence {
     const known = [...this.companies.values()];
-    return resolveMatches(
-      groups.map((group): Evidence => {
+    return ((): Evidence => {
         const rows = group.rows.map((r) => r.row);
         const places = unique(rows.flatMap((r) => (r.placeId ? [r.placeId] : [])));
         const businessIds = unique(rows.flatMap((r) => (r.sourceBusinessId ? [r.sourceBusinessId] : [])));
@@ -945,8 +1014,7 @@ class WorkingDirectory {
           holders: { kind: "main_line", ids: ids(compatible.filter(sharesLine)) },
           byName: bare ? ids(named) : [],
         };
-      }),
-    );
+    })();
   }
 
   upsertCompany(group: BusinessGroup, existing: string | null): string {
@@ -996,8 +1064,11 @@ class WorkingDirectory {
    * 4. an agreeing name, when nobody else at the company has it.
    */
   matchPeople(groups: readonly PersonGroup[]) {
-    return resolveMatches(
-      groups.map((group): Evidence => {
+    return settleGroups<JoinedRow, PersonGroup>(groups, (group) => this.personEvidence(group), (group, rows) => ({ companyId: group.companyId, rows }));
+  }
+
+  private personEvidence(group: PersonGroup): Evidence {
+    return ((): Evidence => {
         const rows = group.rows.map((r) => r.row);
         const region = this.regionOf(group.companyId, "");
         const emails = unique(rows.flatMap((r) => emailKey(r.email) ?? [])).filter((e) => !this.companyHolds(group.companyId, "email", e));
@@ -1015,8 +1086,7 @@ class WorkingDirectory {
           ],
           byName: idsOf(named),
         };
-      }),
-    );
+    })();
   }
 
   /** The person on record before this import at the company who holds this personal email. */
@@ -1080,7 +1150,7 @@ class WorkingDirectory {
     if (!key) return;
     const holder = this.destinationHolder(owner, owner.kind === "company" ? "inbox" : "email", key, this.campaignsOf(owner));
     if (holder) {
-      this.noteHeldElsewhere(owner, { channel: "email", phoneKind: null, key, value: raw.trim() }, this.nameOf(holder));
+      this.noteHeldElsewhere(owner, { channel: "email", phoneKind: null, key, value: raw.trim() }, holder);
       return;
     }
     if (owner.kind === "company") {
@@ -1093,7 +1163,7 @@ class WorkingDirectory {
     if (this.companyHolds(companyId, "email", key)) return;
     const colleague = this.colleagueHolding(owner.personId, (details) => details.find((d) => d.channel === "email" && d.key === key));
     if (colleague) {
-      this.noteHeldElsewhere(owner, { channel: "email", phoneKind: null, key, value: raw.trim() }, personDisplayName(colleague.fields));
+      this.noteHeldElsewhere(owner, { channel: "email", phoneKind: null, key, value: raw.trim() }, { kind: "person", personId: colleague.id });
       return;
     }
     const existing = this.person(owner.personId).details.find((d) => d.channel === "email" && d.key === key);
@@ -1126,13 +1196,13 @@ class WorkingDirectory {
     }
     const colleague = this.colleagueHolding(owner.personId, (details) => this.findNumber(details, phone.key, region));
     if (colleague) {
-      this.noteHeldElsewhere(owner, { channel: "phone", phoneKind: kind, key: phone.key, value: raw.trim() }, personDisplayName(colleague.fields));
+      this.noteHeldElsewhere(owner, { channel: "phone", phoneKind: kind, key: phone.key, value: raw.trim() }, { kind: "person", personId: colleague.id });
       return;
     }
     const existing = this.findNumber(person.details, phone.key, region);
     const mobileHolder = kind === "mobile" && existing?.phoneKind !== "mobile" ? this.destinationHolder(owner, "mobile", phone.key, this.campaignsOf(owner)) : undefined;
     if (mobileHolder) {
-      this.noteHeldElsewhere(owner, { channel: "phone", phoneKind: kind, key: phone.key, value: raw.trim() }, this.nameOf(mobileHolder));
+      this.noteHeldElsewhere(owner, { channel: "phone", phoneKind: kind, key: phone.key, value: raw.trim() }, mobileHolder);
       if (existing) this.noteKeptBad(owner, existing);
       return;
     }
@@ -1301,11 +1371,11 @@ class WorkingDirectory {
     if (detail.bad && !this.keptBad.some((k) => k.detail.id === detail.id)) this.keptBad.push({ owner, detail });
   }
 
-  private noteHeldElsewhere(owner: DetailOwner, detail: { channel: Channel; phoneKind: PhoneKind | null; key: string; value: string }, holder: string): void {
+  private noteHeldElsewhere(owner: DetailOwner, detail: { channel: Channel; phoneKind: PhoneKind | null; key: string; value: string }, holder: LeadRef): void {
     const note = noteOf(detail);
     const same = (h: { owner: DetailOwner; held: HeldElsewhere }) =>
       leadKey(h.owner) === leadKey(owner) && h.held.detail.channel === note.channel && h.held.detail.value === note.value;
-    if (!this.heldElsewhere.some(same)) this.heldElsewhere.push({ owner, held: { detail: note, holder } });
+    if (!this.heldElsewhere.some(same)) this.heldElsewhere.push({ owner, held: { detail: note, holder: this.nameOf(holder) }, holder });
   }
 }
 
