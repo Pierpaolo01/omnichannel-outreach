@@ -165,6 +165,14 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX contact_details_by_merged_into ON contact_details(merged_into);
     `,
   },
+  {
+    version: 5,
+    name: "live contact details: the one definition every reader uses",
+    // A view has no rowid, so it carries the row's insertion order as row_order.
+    sql: `
+      CREATE VIEW live_contact_details AS SELECT *, rowid AS row_order FROM contact_details WHERE merged_into IS NULL;
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string): void {
