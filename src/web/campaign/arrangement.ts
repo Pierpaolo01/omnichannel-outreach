@@ -27,9 +27,12 @@ const isWholeDays = (n: number) => Number.isInteger(n) && n >= 0;
 /** Whether `track` waits, through its chain of `after` starts, on the track with id `on`. */
 function waitsOn(def: CampaignDefinition, track: TrackDefinition, on: string): boolean {
   const seen = new Set<string>();
-  for (let t: TrackDefinition | undefined = track; t && t.start.kind === "after" && !seen.has(t.id); t = def.tracks.find((x) => x.id === (t?.start as { trackId: string }).trackId)) {
+  let t: TrackDefinition | undefined = track;
+  while (t && t.start.kind === "after" && !seen.has(t.id)) {
     seen.add(t.id);
-    if (t.start.trackId === on) return true;
+    const before: string = t.start.trackId;
+    if (before === on) return true;
+    t = def.tracks.find((x) => x.id === before);
   }
   return false;
 }
@@ -39,7 +42,7 @@ const live = (def: CampaignDefinition) => def.tracks.filter((t) => !t.removed);
 export function arrange(def: CampaignDefinition, op: ArrangeOperation, broken: ReadonlySet<ArrangeMutation> = NONE): Arranged {
   const out = decide(def, op, broken);
   // Mutation only: a refusal that still applies the operation.
-  if (!out.ok && broken.has("refusal_changes_draft")) return { ok: false, reason: out.reason, ...{ definition: naive(def, op) } } as Arranged;
+  if (!out.ok && broken.has("refusal_changes_draft")) return { ok: false, reason: out.reason, ...{ definition: naive(def, op) } };
   return out;
 }
 

@@ -252,7 +252,7 @@ export async function copyPreview(store: OutreachStore, campaignId: string, enro
     startDay.set(t.id, start);
     return start;
   };
-  const steps: (CopyPreview["steps"][number] & { order: number })[] = [];
+  const steps: { step: CopyPreview["steps"][number]; order: number }[] = [];
   tracks.forEach((track, trackIndex) => {
     const skip = skipped(track);
     let day = 1 + startOf(track);
@@ -264,9 +264,9 @@ export async function copyPreview(store: OutreachStore, campaignId: string, enro
       const subject = email && step.threading === "continue_thread" ? [{ text: "Re: ", kind: "literal" as const }, ...threadSubject] : own;
       if (email && step.threading === "new_subject") threadSubject = own;
       const body = renderSegments(step.body, data);
-      steps.push({ trackId: track.id, stepId: step.id, channel: track.channel === "sms" ? "sms" : "email", number: i + 1, day, skipped: skip, threading: step.threading, subject, body, missing: missingFields([...own, ...body]), order: trackIndex * 10_000 + i });
+      steps.push({ step: { trackId: track.id, stepId: step.id, channel: track.channel === "sms" ? "sms" : "email", number: i + 1, day, skipped: skip, threading: step.threading, subject, body, missing: missingFields([...own, ...body]) }, order: trackIndex * 10_000 + i });
     });
   });
-  steps.sort((x, y) => x.day - y.day || x.order - y.order);
-  return { lead, steps: steps.map(({ order: _order, ...step }) => step) };
+  steps.sort((x, y) => x.step.day - y.step.day || x.order - y.order);
+  return { lead, steps: steps.map((x) => x.step) };
 }

@@ -175,7 +175,7 @@ describe("with an SMS track after the email track, the email sends are exactly t
   for (const seed of Array.from({ length: SEEDS }, (_, i) => 3000 + i)) {
     test(`generated case ${seed}`, async () => {
       const c = withSmsAfter(generate(seed), seed % 3);
-      const { projected, actual, daily, view, texts } = await compare(c);
+      const { projected, actual, daily, texts } = await compare(c);
       texted.push(texts);
       expect(daily.projected).toEqual(daily.actual);
       const exact = (xs: typeof actual) => [...xs].sort((a, b) => a.at - b.at || (a.accountId < b.accountId ? -1 : 1));

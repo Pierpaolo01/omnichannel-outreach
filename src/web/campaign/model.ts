@@ -143,3 +143,11 @@ export function threadSubjectOf(steps: readonly StepDefinition[], index: number)
   }
   return "";
 }
+
+/** What a launched campaign does on its own, by the channels its tracks use. */
+export function sendsOnItsOwn(def: CampaignDefinition): string {
+  const channels = new Set(def.tracks.filter((t) => !t.removed).map((t) => t.channel));
+  if (channels.has("email") && channels.has("sms")) return "Email and texts go out on their own, inside each lead’s sending window.";
+  if (channels.has("sms")) return "Texts go out on their own, inside each lead’s sending window.";
+  return "Email goes out on its own, inside each lead’s sending window.";
+}

@@ -71,39 +71,46 @@ export interface Projection {
 
 /** A tiny min-heap of (instant, subject) wake-ups; stale entries only cost an extra look. */
 class Wakes {
-  private readonly items: [number, string][] = [];
+  private readonly at: number[] = [];
+  private readonly ids: string[] = [];
+  private swap(i: number, j: number): void {
+    [this.at[i], this.at[j]] = [this.at[j] ?? 0, this.at[i] ?? 0];
+    [this.ids[i], this.ids[j]] = [this.ids[j] ?? "", this.ids[i] ?? ""];
+  }
+  private time(i: number): number {
+    return this.at[i] ?? Infinity;
+  }
   push(at: number, id: string): void {
     if (!Number.isFinite(at)) return;
-    const a = this.items;
-    a.push([at, id]);
-    for (let i = a.length - 1; i > 0; ) {
+    this.at.push(at);
+    this.ids.push(id);
+    for (let i = this.at.length - 1; i > 0; ) {
       const p = (i - 1) >> 1;
-      if (a[p]![0] <= a[i]![0]) break;
-      [a[p], a[i]] = [a[i]!, a[p]!];
+      if (this.time(p) <= this.time(i)) break;
+      this.swap(p, i);
       i = p;
     }
   }
   peek(): number {
-    return this.items[0]?.[0] ?? Infinity;
+    return this.time(0);
   }
-  pop(): [number, string] | undefined {
-    const a = this.items;
-    const top = a[0];
-    const last = a.pop();
-    if (a.length > 0 && last) {
-      a[0] = last;
-      for (let i = 0; ; ) {
-        const l = 2 * i + 1;
-        const r = l + 1;
-        let m = i;
-        if (l < a.length && a[l]![0] < a[m]![0]) m = l;
-        if (r < a.length && a[r]![0] < a[m]![0]) m = r;
-        if (m === i) break;
-        [a[m], a[i]] = [a[i]!, a[m]!];
-        i = m;
-      }
+  pop(): string | undefined {
+    if (this.at.length === 0) return undefined;
+    const id = this.ids[0];
+    this.swap(0, this.at.length - 1);
+    this.at.pop();
+    this.ids.pop();
+    for (let i = 0; ; ) {
+      const l = 2 * i + 1;
+      const r = l + 1;
+      let m = i;
+      if (l < this.at.length && this.time(l) < this.time(m)) m = l;
+      if (r < this.at.length && this.time(r) < this.time(m)) m = r;
+      if (m === i) break;
+      this.swap(m, i);
+      i = m;
     }
-    return top;
+    return id;
   }
 }
 
@@ -128,6 +135,11 @@ export function projectLoad(input: ProjectionInput): Projection {
 
   // ---- Subjects, and their contribution to the shared ledger, as the store counts it.
   const states = new Map<string, SubjectState>();
+  const stateOf = (id: string): SubjectState => {
+    const s = states.get(id);
+    if (!s) throw new Error(`projection: no subject ${id}`);
+    return s;
+  };
   const oursIds = new Set(input.ours.map((s) => s.subject.id));
   const reserved = new Map<string, number>();
   const sentOn = new Map<string, number>();
@@ -182,7 +194,7 @@ export function projectLoad(input: ProjectionInput): Projection {
   };
   /** The subject as the store would load it at `t`: current accounts and conversations. */
   const load = (id: string, t: number): SubjectState => {
-    const s = states.get(id)!;
+    const s = stateOf(id);
     const def = s.campaign.definition;
     const ids = new Set([...def.emailPool, ...poolOf(def, "sms"), ...s.attempts.map((a) => a.accountId), ...[s.subject.emailSender, s.subject.smsSender].filter((x): x is string => x !== null)]);
     const accounts: Record<string, AccountState> = {};
@@ -200,7 +212,7 @@ export function projectLoad(input: ProjectionInput): Projection {
   /** Writes a subject's change, as the store does: the ledger, the slot it took, the conversation it bound. */
   const write = (id: string, loaded: SubjectState, next: SubjectState) => {
     if (next === loaded) return false;
-    const before = states.get(id)!;
+    const before = stateOf(id);
     contribute(before, -1);
     const stored = { ...next };
     states.set(id, stored);
@@ -239,9 +251,17 @@ export function projectLoad(input: ProjectionInput): Projection {
     const merged: ReadyItem[] = [];
     let a = 0;
     let b = 0;
-    while (a < kept.length || b < fresh.length) {
-      if (b >= fresh.length || (a < kept.length && rules.claimOrder(kept[a]!, fresh[b]!) <= 0)) merged.push(kept[a++]!);
-      else merged.push(fresh[b++]!);
+    for (;;) {
+      const x = kept[a];
+      const y = fresh[b];
+      if (x === undefined && y === undefined) break;
+      if (y === undefined || (x !== undefined && rules.claimOrder(x, y) <= 0)) {
+        merged.push(x as ReadyItem);
+        a++;
+      } else {
+        merged.push(y);
+        b++;
+      }
     }
     gone.clear();
     added.length = 0;
@@ -286,8 +306,8 @@ export function projectLoad(input: ProjectionInput): Projection {
     if (oursIds.size === 0 || oursDone()) break;
     // Subjects whose time-driven change (a start, a due step) has come.
     while (wakes.peek() <= t) {
-      const w = wakes.pop();
-      if (w) dirty.add(w[1]);
+      const id = wakes.pop();
+      if (id !== undefined) dirty.add(id);
     }
 
     for (let pass = 0; pass < 10_000; pass++) {
@@ -315,7 +335,7 @@ export function projectLoad(input: ProjectionInput): Projection {
       // Evaluate every subject that changed or whose next start has come.
       const evaluatedAgain = new Set<string>();
       for (const id of [...dirty]) {
-        const s = states.get(id)!;
+        const s = stateOf(id);
         const known = evalUntil.get(id);
         if (known?.state === s && t < known.until) continue;
         const loaded = load(id, t);
@@ -336,7 +356,7 @@ export function projectLoad(input: ProjectionInput): Projection {
 
       // Ready items, cached per subject until it changes or its next step falls due.
       for (const id of dirty) {
-        const s = states.get(id)!;
+        const s = stateOf(id);
         const known = ready.get(id);
         if (known?.state === s && t < known.until) continue;
         const items = rules.readyItems(load(id, t), t);
@@ -365,7 +385,7 @@ export function projectLoad(input: ProjectionInput): Projection {
       const free = new Set(accountIds.filter(isFree));
       for (const item of items) {
         if (free.size === 0) break;
-        const s = states.get(item.subjectId)!;
+        const s = stateOf(item.subjectId);
         if (!ready.get(item.subjectId)?.items.includes(item)) continue;
         // Skipped only where the engine's own checks would refuse it with no write: no account
         // could take it now, or its window is closed (`claimRefusal`).
@@ -392,19 +412,24 @@ export function projectLoad(input: ProjectionInput): Projection {
           const waiting = [...(claimed.get(accountId) ?? [])].filter(([attemptId]) => !skipped.has(attemptId));
           if (waiting.length === 0) break;
           if (t < (slot.get(accountId) ?? 0)) break;
-          const order = waiting.map(([attemptId, id]) => {
-            const s = states.get(id)!;
-            const a = s.attempts.find((x) => x.id === attemptId)!;
-            return { attemptId, id, item: { subjectId: id, trackId: a.trackId, stepId: a.stepId, touched: s.subject.touched, dueWall: s.tracks.find((p) => p.trackId === a.trackId)?.dueWall ?? 0 } };
+          const order = waiting.flatMap(([attemptId, id]) => {
+            const s = stateOf(id);
+            const a = s.attempts.find((x) => x.id === attemptId);
+            return a ? [{ attemptId, id, item: { subjectId: id, trackId: a.trackId, stepId: a.stepId, touched: s.subject.touched, dueWall: s.tracks.find((p) => p.trackId === a.trackId)?.dueWall ?? 0 } }] : [];
           });
           order.sort((x, y) => rules.handoverOrder(x.item, y.item));
-          const next = order[0]!;
+          const next = order[0];
+          if (!next) break;
           // The pre-send check: the fake providers find nothing, so it is fresh and clear.
           let loaded = load(next.id, t);
           write(next.id, loaded, { ...loaded, attempts: loaded.attempts.map((x) => (x.id === next.attemptId ? { ...x, presendCheckedWall: t, presendFoundReply: false } : x)) });
           loaded = load(next.id, t);
-          const current = loaded.attempts.find((x) => x.id === next.attemptId)!;
-          const account = loaded.accounts[current.accountId]!;
+          const current = loaded.attempts.find((x) => x.id === next.attemptId);
+          const account = current ? loaded.accounts[current.accountId] : undefined;
+          if (!current || !account) {
+            skipped.add(next.attemptId);
+            continue;
+          }
           const failed = rules.handoverFailures(loaded, current, account, t);
           if (failed.length === 0) {
             const handed = rules.handOver(loaded, current, account, t);
@@ -452,7 +477,8 @@ export function projectLoad(input: ProjectionInput): Projection {
       }
     }
     for (const id of accountIds) {
-      const a = records.get(id)!;
+      const a = records.get(id);
+      if (!a) continue;
       if ((claimed.get(id)?.size ?? 0) > 0) {
         candidates.push(slot.get(id) ?? 0);
         for (const [attemptId, sid] of claimed.get(id) ?? []) {
@@ -478,7 +504,7 @@ export function projectLoad(input: ProjectionInput): Projection {
     busiest.set(id, Math.max(busiest.get(id) ?? 0, n));
   }
   const entered = launched.map((s) => s.subject.id).filter((id) => {
-    const s = states.get(id)!;
+    const s = stateOf(id);
     // A lead no live track can reach ends at launch, with the reason shown elsewhere.
     return !(s.subject.ended === "finished_no_usable_channel" && s.results.length === 0 && (s.subject.endedWall ?? now) <= now);
   });
