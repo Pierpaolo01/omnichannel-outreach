@@ -175,18 +175,27 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
   // Start between 19 and 30 October 2026, so London and New York change clocks inside the run.
   const start = Date.parse("2026-10-19T00:00:00Z") + Math.floor(rand() * 11 * DAY) + Math.floor(rand() * 24) * HOUR;
 
+  // A profile biases the configuration toward an event order a review finding needs; the run within
+  // it is as random as any other (PR 37 review round 1).
+  const profile = pick(["open", "open", "open", "lagging-capacity", "inherited-send", "slow-slot", "unknown-then-not-sent", "lookup-first"] as const);
+
   // Modes: one to three, drawn per call. The unlimited variant keeps to modes that do not hold work.
   const modes: FakeMode[] = unlimited
-    ? [pick(["honest", "late-send", "duplicate-and-reorder", "lost-response", "same-key-replays"] as const)]
+    ? [profile === "lookup-first" ? "lookup-before-event" : pick(["honest", "late-send", "duplicate-and-reorder", "lost-response", "same-key-replays"] as const)]
+    : profile === "lagging-capacity" || profile === "inherited-send" ? ["lookup-lags", ...(chance(0.5) ? (["lookup-lags", "honest"] as const) : [])]
+    : profile === "slow-slot" ? [pick(["5xx", "always-unknown", "silent-send"] as const), "always-unknown"]
+    : profile === "unknown-then-not-sent" ? ["lookup-unknown-then-not-sent", "honest"]
+    : profile === "lookup-first" ? ["lookup-before-event", ...(chance(0.5) ? (["honest"] as const) : [])]
     : [...new Set([pick(FAKE_MODES), pick(FAKE_MODES), ...(chance(0.5) ? [pick(FAKE_MODES)] : [])])];
 
-  const inboxCount = unlimited ? 8 : 1 + Math.floor(rand() * 3);
+  const single = profile === "lagging-capacity" || profile === "slow-slot" || profile === "unknown-then-not-sent";
+  const inboxCount = unlimited ? 8 : single ? 1 : 1 + Math.floor(rand() * 3);
   const accounts: FakeAccount[] = Array.from({ length: inboxCount }, (_, i) => ({
     id: `inbox-${String.fromCharCode(97 + i)}`,
-    capacity: unlimited ? 1000 : pick([1, 2, 3, 5, 8]),
+    capacity: unlimited ? 1000 : single ? 1 : pick([1, 2, 3, 5, 8]),
     // Null: the ADR's default gap from the windows the inbox serves (ruling 10).
-    gapMs: unlimited ? MINUTE : pick([null, null, MINUTE, 2 * MINUTE, 5 * MINUTE, 20 * MINUTE]),
-    k: unlimited ? 10 : pick([1, 2]),
+    gapMs: unlimited ? MINUTE : profile === "slow-slot" ? null : pick([null, null, MINUTE, 2 * MINUTE, 5 * MINUTE, 20 * MINUTE]),
+    k: unlimited ? 10 : single ? 1 : pick([1, 2]),
     healthy: true,
     quotaAvailable: true,
     resetZone: pick(["UTC", "UTC", "America/New_York"]),
@@ -214,7 +223,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
 
   const h = new EngineHarness({ start, accounts, modes, random: random(seed ^ 0x5eed), engine: { waitFor: quickWait }, ...(options.rules ? { rules: options.rules } : {}) });
   const fake = h.fake;
-  fake.withdrawAnswers = unlimited ? "honest" : pick(["honest", "unknown-cancels", "unknown-sends"] as const);
+  fake.withdrawAnswers = unlimited ? "honest" : profile === "lagging-capacity" ? "unknown-sends" : pick(["honest", "unknown-cancels", "unknown-sends"] as const);
   fake.overlapMs = pick([5, 15, 60]) * MINUTE;
   /** Each inbox's capacity over time, as the record knows it. */
   const capacityHistory = new Map(accounts.map((a) => [a.id, [[0, a.capacity]] as [number, number][]]));
@@ -259,14 +268,29 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
   });
   const lateEnrolled = new Set<string>();
 
-  const campaignCount = chance(0.6) ? 2 : 1;
+  const campaignCount = profile === "lagging-capacity" || chance(0.6) ? 2 : 1;
   const campaigns: CampaignRecord[] = [];
   for (let ci = 0; ci < campaignCount; ci++) {
     const definition: CampaignDefinition = {
       timezone: pick(["Europe/London", "America/New_York"]),
       callSkipLimitDays: 2,
       emailPool: accounts.filter((_, i) => ci === 0 || i > 0 || inboxCount === 1).map((a) => a.id),
-      tracks: [{ id: "t1", channel: "email", branch: "main", window: windowOf(rand, pick, campaigns[0]?.definition.tracks[0]?.window ?? null), steps: steps(rand, pick), start: { kind: "entry" }, removed: false }],
+      tracks: [
+        {
+          id: "t1",
+          channel: "email",
+          branch: "main",
+          window:
+            profile === "lagging-capacity"
+              ? [0, 1, 2, 3, 4, 5, 6].map((day) => (ci === 0 ? { day, start: 9, end: 10 } : { day, start: 10, end: 17 }))
+              : profile === "slow-slot" ? [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }))
+              : profile === "inherited-send" ? [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: pick([9, 10]), end: pick([10, 11]) + 1 }))
+              : windowOf(rand, pick, campaigns[0]?.definition.tracks[0]?.window ?? null),
+          steps: steps(rand, pick),
+          start: { kind: "entry" },
+          removed: false,
+        },
+      ],
     };
     campaigns.push({ id: "", definition, companies: ci === 0 ? [0, 1, 2] : [1, 2], launchedAt: null });
   }
@@ -591,6 +615,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
   if (accounts.some((a) => a.gapMs === null)) features.add("default-gap");
   if (accounts.some((a) => a.k > 1)) features.add("k2");
   if (campaigns.length > 1) features.add("two-campaigns");
+  features.add(`profile:${profile}`);
   if (fake.deliveryLog.some((d) => fake.bouncing.has(d.destination))) features.add("bounce");
   return {
     problems,
@@ -1111,7 +1136,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
         const prevStep = track.steps[i - 1];
         const prevDelivery = prevStep ? stepDelivery(rec.id, prevStep.id) : undefined;
         const due = i === 0 ? runStart : prevDelivery ? dueAfter(prevDelivery.at, step.waitDays, zone) : Infinity;
-        if (c.at < due) problem(`8: ${rec.id}/${step.id} handed over at ${new Date(c.at).toISOString()}, before it was due at ${new Date(due).toISOString()}`);
+        if (c.at < due) problem(`8: ${rec.id}/${step.id} handed over at ${new Date(c.at).toISOString()}, ${Number.isFinite(due) ? `before it was due at ${new Date(due).toISOString()}` : "though the step before it was never sent"}`);
         // The window is checked at the authorization, before any clock advance injected before the call.
         const authorizedAt = c.at - (injectedDelay.get(`${c.attemptId}@${c.at}`) ?? 0);
         if (!inWindow(track.window, zone, authorizedAt)) problem(`8: ${rec.id}/${step.id} handed over outside its window`);

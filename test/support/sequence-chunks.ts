@@ -10,7 +10,9 @@ export const FULL_SEARCH = process.env["SEQUENCE_SEARCH"] === "full";
  * The fixed seeds `pnpm check` runs, as offsets from SEED: together they exercise every fake mode,
  * crashes and transient errors at the outbox stages, both reply kinds, the user's marks, hanging
  * ports, clock advances between authorization and call, default gaps, k = 2, two campaigns and the
- * not-sent-then-sent capacity case. Chosen from a sweep of all 100 seeds by `scripts/choose-seeds.ts`.
+ * not-sent-then-sent capacity case. Chosen greedily from a sweep of all 100 seeds by the features
+ * each run reports (`RunResult.stats.features`), preferring fast runs; refresh it when the generator
+ * changes, from a `pnpm check:full` run.
  */
 export const FIXED_SEEDS: readonly number[] = [];
 

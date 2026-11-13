@@ -286,6 +286,16 @@ export function applyToAttempt(
   const target = state.attempts.find((a) => a.id === attemptId);
   if (!target) throw new Error(`no attempt ${attemptId}`);
   const sentFact = event.kind === "sent_observed" || (event.kind === "lookup_answer" && event.answer.kind === "sent");
+  if (event.kind === "mark_sent") {
+    // The user's "sent" cannot make a second sent attempt: for work already settled as sent it
+    // settles the live attempt; for a step sent by other work it is ignored.
+    const sentAlready = state.attempts.find((a) => a.stepId === target.stepId && a.state === "sent");
+    if (sentAlready) {
+      if (!isLive(target) || sentAlready.idempotencyKey !== target.idempotencyKey) return { state, effects: [{ kind: "ignored", what: "the step was already sent" }] };
+      const s = withAttempt(state, { ...target, state: "withdrawn", endedBy: "provider", holdsReservation: false, nextLookupWall: null, awaitingAnswer: false, retry: "refused" });
+      return { state: runs(s) ? evaluate(s, now) : s, effects: [] };
+    }
+  }
   if (sentFact) {
     const ref = event.kind === "sent_observed" ? event.providerRef : event.kind === "lookup_answer" ? (event.answer.providerRef ?? null) : null;
     const sentAlready = state.attempts.find((a) => a.stepId === target.stepId && a.state === "sent");

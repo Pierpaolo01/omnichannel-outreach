@@ -155,7 +155,11 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   async openAttempts(): Promise<Attempt[]> {
-    return this.sql(`SELECT * FROM attempts WHERE state IN ${LIVE_STATES} OR (state = 'withdrawn' AND ended_by = 'lookup_not_sent') ORDER BY claimed_wall, rowid`)
+    // Live attempts, and withdrawn ones whose outcome the provider has not settled: they are still
+    // looked up (5.3 as amended), whatever they hold of their account's capacity.
+    return this.sql(
+      `SELECT * FROM attempts WHERE state IN ${LIVE_STATES} OR (state = 'withdrawn' AND next_lookup_wall IS NOT NULL AND sent_wall IS NULL AND calls > 0) ORDER BY claimed_wall, rowid`,
+    )
       .all()
       .map(toAttempt);
   }

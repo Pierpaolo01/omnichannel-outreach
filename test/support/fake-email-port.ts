@@ -252,6 +252,7 @@ export class FakeEmailPort implements SendPort {
         mode === "late-send" ? Math.round(this.random() * 30 * MINUTE)
         : mode === "lookup-before-event" ? Math.round(SETTLING * (1.2 + this.random() * 3))
         : mode === "silent-send" ? Number.POSITIVE_INFINITY
+        : mode === "lookup-lags" ? Math.round((30 + this.random() * 60) * MINUTE)
         : 0,
     };
     this.work.push(w);
@@ -373,6 +374,8 @@ export class FakeEmailPort implements SendPort {
     const sent = all.find((w) => w.sentAt !== null && w.sentAt <= now);
     const w = all.at(-1);
     if (w?.lookupUnknown) return Promise.resolve({ kind: "unknown" });
+    // A lagging index says not sent for a while after it took the work, even once it has sent it.
+    if (w && now < w.lookupNotSentUntil) return Promise.resolve({ kind: "not-sent" });
     if (sent) return Promise.resolve({ kind: "sent", sentAt: sent.sentAt ?? now, providerRef: sent.providerRef });
     if (!w || w.cancelled || w.sendAt === null) return Promise.resolve({ kind: "not-sent" });
     if (now < w.lookupNotSentUntil) return Promise.resolve({ kind: "not-sent" });

@@ -63,8 +63,8 @@ const release = (a: Attempt): Attempt => ({ ...a, holdsReservation: false });
 /** A missing provider reference is attached from any later sent fact for the same work (ruling 1). */
 const withRef = (a: Attempt, ref: string | null | undefined): Attempt => (a.providerRef === null && ref ? { ...a, providerRef: ref } : a);
 
-/** Withdrawn work whose outcome the provider has not settled: it keeps its reservation and keeps being looked up. */
-export const isUncertain = (a: Attempt): boolean => a.state === "withdrawn" && a.holdsReservation && a.sentWall === null;
+/** Withdrawn work whose outcome the provider has not settled: it keeps being looked up (and, separately, its reservation). */
+export const isUncertain = (a: Attempt): boolean => a.state === "withdrawn" && a.nextLookupWall !== null && a.sentWall === null && a.calls > 0;
 
 /** Whether a same-key retry may still be attempted at all (the attempt's own conditions in 5.6). */
 export function retryPossible(a: Attempt): boolean {

@@ -208,6 +208,14 @@ describe("a provider send belongs to the provider work that produced it (ruling 
     expect(again.attempts.map((a) => [a.id, a.state, a.endedBy])).toEqual([["a-1", "sent", "observed"], ["a-2", "withdrawn", "provider"]]);
   });
 
+  test("the user's \"mark sent\" on a live inheritor whose work is already sent settles it, never a second sent attempt (found by the extended generator, seed 20261124)", () => {
+    const once = applyToAttempt(inherited(), "a-1", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p-1" }, MONDAY_9 + 3 * H, opts2).state;
+    const unresolved = { ...once, attempts: once.attempts.map((a) => (a.id === "a-2" ? { ...a, unresolvedSince: MONDAY_9 + 3 * H } : a)) };
+    const marked = applyToAttempt(unresolved, "a-2", { kind: "mark_sent", now: MONDAY_9 + 4 * H }, MONDAY_9 + 4 * H, opts2).state;
+    expect(marked.attempts.filter((a) => a.state === "sent").map((a) => a.id)).toEqual(["a-1"]);
+    expect(marked.attempts.find((a) => a.id === "a-2")).toMatchObject({ state: "withdrawn", holdsReservation: false });
+  });
+
   test("a sent fact attaches a missing provider reference to work already settled as sent (ruling 1)", () => {
     const s = launched();
     const state = { ...s, attempts: [handed({ id: "a-1", state: "sent", endedBy: "lookup", providerRef: null })] };
