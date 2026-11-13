@@ -55,7 +55,7 @@ export function liveDetailRowOf(db: DatabaseSync, detailId: string): Row | undef
          SELECT ?
          UNION
          SELECT d.merged_into FROM contact_details d JOIN chain ON d.id = chain.id WHERE d.merged_into IS NOT NULL)
-       SELECT live.* FROM chain JOIN live_contact_details live ON live.id = chain.id`,
+       SELECT live.* FROM chain CROSS JOIN live_contact_details live ON live.id = chain.id`,
     )
     .get(detailId);
 }
@@ -307,7 +307,8 @@ class SqliteStore implements OutreachStore {
   /**
    * The store's resolution of a detail id: its own row when live, or the live row at the end of
    * the chain of details it was merged into. Chains of any length are followed; UNION keeps each
-   * id once, so even a cycle, which merges cannot make, ends rather than loops.
+   * id once, so even a cycle, which merges cannot make, ends rather than loops. CROSS JOIN keeps
+   * the chain as the outer loop, so each id is one primary-key lookup, not a scan of live details.
    */
   private liveDetailRow(detailId: string): Row | undefined {
     return liveDetailRowOf(this.db, detailId);
@@ -604,7 +605,8 @@ class SqliteStore implements OutreachStore {
   /**
    * Whether two live details are one detail held twice: the same channel, held by the same owner
    * or a person's copy of their own company's detail, and the same key once a number stored by
-   * its digits is read in the company's region, as the planner reads it (ADR 0001).
+   * its digits is read in the region the planner's claim reads it in: the company's country, else
+   * the target number's own region, else its other main lines' (ADR 0001).
    */
   private isOneDetail(copy: Row, target: Row): boolean {
     if (str(copy, "channel") !== str(target, "channel")) return false;
@@ -618,7 +620,8 @@ class SqliteStore implements OutreachStore {
       .prepare("SELECT key FROM live_contact_details WHERE owner_kind = 'company' AND owner_id = ? AND phone_kind = 'main_line'")
       .all(companyId)
       .map((row) => str(row, "key"));
-    const region = companyRegion(company ? str(company, "country") : null, lines);
+    // The target's own number comes first, as in the planner's claim (regionOf with the claimed line).
+    const region = companyRegion(company ? str(company, "country") : null, [str(target, "key"), ...lines]);
     const read = (row: Row) => {
       const key = str(row, "key");
       if (str(row, "channel") !== "phone" || key.startsWith("+") || region === null) return key;

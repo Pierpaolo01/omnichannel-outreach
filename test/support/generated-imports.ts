@@ -24,7 +24,7 @@ const notJoined = (e: SummaryEntry) => e.outcome === "not_enrolled" && e.reason 
  * 5. a contact value has exactly one owner within a company, and personal reach uses only personal
  *    details; a bad mark survives every import;
  * 6. importing the same files again changes nothing;
- * 7. no import returns a server error;
+ * 7. no import returns a server error, and the store refuses nothing the planner asks of it;
  * 8. every contact detail id ever shown still resolves to exactly one live detail with the
  *    channel and value it had when first shown (a number read again once its company's region
  *    is known is still that number), and a detail shown on a page is live (resolves to itself).
@@ -661,25 +661,43 @@ function detailProblems(w: World, summary: ImportSummary, badMarks: BadMarks, hi
   return problems;
 }
 
+/** What a detail id was when the sequence first saw it: its value and who held it. */
+interface Issued {
+  readonly value: string;
+  /** `person <id>` or `company <id>`. */
+  readonly owner: string;
+  /** The company of the holder: a person's copy may fold into their company's detail. */
+  readonly company: string;
+}
+
 /**
  * Every detail id the sequence has seen on a page, from any import, must still resolve to one
- * live detail, and to the same address or number: merging two details keeps the absorbed one's
- * id, pointing at the detail it is (docs/adr/0001). `issued` maps each id to the value it was
- * first shown with, keyed as the generator keys values (phones read in Great Britain, so a
- * number stored by its digits and later read is still the same number).
+ * live detail, the same address or number, held by the same owner or, for a person's detail,
+ * their company: merging keeps the absorbed id, pointing at the detail it is (docs/adr/0001).
+ * Values are keyed as the generator keys them (phones read in Great Britain, so a number stored
+ * by its digits and later read is still the same number).
  */
-async function detailIdProblems(store: OutreachStore, w: World, issued: Map<string, string>): Promise<string[]> {
+async function detailIdProblems(store: OutreachStore, w: World, issued: Map<string, Issued>): Promise<string[]> {
   const problems: string[] = [];
-  for (const d of [...w.people, ...w.companies].flatMap((r) => r.contactDetails)) {
-    if (!issued.has(d.id)) issued.set(d.id, valueKey(d));
+  const shown = [
+    ...w.people.flatMap((p) => p.contactDetails.filter((d) => d.owner === "person").map((d) => ({ d, owner: `person ${p.id}`, company: p.company.id }))),
+    ...w.companies.flatMap((c) => c.contactDetails.map((d) => ({ d, owner: `company ${c.id}`, company: c.id }))),
+  ];
+  for (const { d, owner, company } of shown) {
+    if (!issued.has(d.id)) issued.set(d.id, { value: valueKey(d), owner, company });
     const resolved = await store.contactDetail(d.id);
     if (resolved?.id !== d.id) problems.push(`detail ${d.id} is shown on a page but resolves to ${resolved?.id ?? "nothing"}`);
   }
-  for (const [id, value] of [...issued].sort(([a], [b]) => a.localeCompare(b))) {
+  for (const [id, was] of [...issued].sort(([a], [b]) => a.localeCompare(b))) {
     const resolved = await store.contactDetail(id);
-    if (!resolved) problems.push(`detail ${id}, issued earlier, resolves to nothing`);
-    else if ((await store.contactDetail(resolved.id))?.id !== resolved.id) problems.push(`detail ${id} resolves to ${resolved.id}, which is not live`);
-    else if (valueKey({ channel: resolved.channel, value: resolved.key }) !== value) problems.push(`detail ${id}, first shown as ${value}, resolves to another detail, ${resolved.key}`);
+    if (!resolved) {
+      problems.push(`detail ${id}, issued earlier, resolves to nothing`);
+      continue;
+    }
+    const owner = resolved.owner.kind === "person" ? `person ${resolved.owner.personId}` : `company ${resolved.owner.companyId}`;
+    if ((await store.contactDetail(resolved.id))?.id !== resolved.id) problems.push(`detail ${id} resolves to ${resolved.id}, which is not live`);
+    else if (valueKey({ channel: resolved.channel, value: resolved.key }) !== was.value) problems.push(`detail ${id}, first shown as ${was.value}, resolves to another detail, ${resolved.key}`);
+    else if (owner !== was.owner && owner !== `company ${was.company}`) problems.push(`detail ${id}, first held by ${was.owner}, resolves to a detail held by ${owner}`);
   }
   return problems;
 }
@@ -718,7 +736,19 @@ export async function runSequence(seed: number, options: { shuffle?: boolean; st
   const rand = random(seed);
   const reorder = random(seed * 31 + 7);
   const api = testApi(options.store ? { store: options.store } : {});
-  const issuedDetails = new Map<string, string>();
+  const issuedDetails = new Map<string, Issued>();
+  // The store refuses a merge of two details that are not one; the planner must never ask for
+  // one. Record why an import was refused, so the seed fails with the reason, not a bare 500.
+  const refusals: string[] = [];
+  const importIntoCampaign = api.store.importIntoCampaign.bind(api.store);
+  api.store.importIntoCampaign = async (input) => {
+    try {
+      return await importIntoCampaign(input);
+    } catch (error) {
+      refusals.push(error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+  };
   const campaigns = [(await api.createCampaign("Generated A")).id, (await api.createCampaign("Generated B")).id];
   const ledger = new Ledger();
   const badMarks: BadMarks = new Set();
@@ -763,9 +793,10 @@ export async function runSequence(seed: number, options: { shuffle?: boolean; st
       await new Promise((resolve) => setImmediate(resolve));
       const before = await world(api);
       const expected = expectations(run, ledger);
+      refusals.length = 0;
       const res = await send();
       const summary = res.body.import?.summary;
-      if (res.status >= 500) return [`step ${step}, ${label}: the import answered ${res.status}`];
+      if (res.status >= 500) return [`step ${step}, ${label}: the import answered ${res.status}${refusals.length > 0 ? `; the store refused what the planner asked: ${refusals.join("; ")}` : ""}`];
       if (res.status !== 201 || !summary) return [`step ${step}, ${label}: the import answered ${res.status}`];
       ledger.record(summary, run);
       const after = await world(api);
