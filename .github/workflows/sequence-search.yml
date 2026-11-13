@@ -5,8 +5,10 @@ name: sequence-search
 # killing each. It runs before a merge of a change to the engine, not on every push: by hand, or
 # when a pull request gets the `sequence-search` label. `pnpm check` runs the fixed seeds and the
 # known killing seeds instead. Each shard runs every eighth seed and every eighth mutation; a
-# mutation's seed search stops after six minutes (its named regression, if it has one, still runs),
-# so a shard of about four mutations and thirteen seeds finishes well inside the step's limit.
+# mutation's seed search tries its recorded seed and at most 30 seed offsets (its named regression,
+# if it has one, still runs), and every mutation replay stops after 10,000 engine writes, with a
+# ten-minute wall-clock limit per replay only as a safety net. The unmutated seed runs carry neither
+# bound. A shard of about four mutations and thirteen seeds finishes well inside the step's limit.
 
 on:
   workflow_dispatch:
