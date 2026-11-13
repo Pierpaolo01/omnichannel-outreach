@@ -1,6 +1,6 @@
 # 0003. The sequence engine
 
-- **Date:** 2026-11-13. Revised the same day after review rounds 1, 2 and 3 (two reviewers each; coordinator rulings 1–14, 1–10 and items 1–7), and amended in PR 37 after its review round 1 (coordinator rulings 1–11, "Changes from PR 37 review round 1"), and by ticket 13a ("Changes from ticket 13a").
+- **Date:** 2026-11-13. Revised the same day after review rounds 1, 2 and 3 (two reviewers each; coordinator rulings 1–14, 1–10 and items 1–7), and amended in PR 37 after its review round 1 (coordinator rulings 1–11, "Changes from PR 37 review round 1"), by ticket 13a ("Changes from ticket 13a"), and by ticket 14a ("Changes from ticket 14a").
 - **Status:** Proposed. The council reviews it before ticket [12](https://github.com/Pierpaolo01/omnichannel-outreach/issues/12) starts.
 - **Consumers:** tickets [12](https://github.com/Pierpaolo01/omnichannel-outreach/issues/12) to [23](https://github.com/Pierpaolo01/omnichannel-outreach/issues/23).
 - **Builds on:** [ADR 0001](0001-application-foundation-and-import-model.md) (domain code never reads the clock; the closed outreach-status type; the store interface) and [ADR 0002](0002-email-through-instantly.md) (the application owns every clock; Instantly only carries email). This ADR is the "application owns every clock" half. The Instantly adapter, its experiments and its questions P1–P4 stay in ADR 0002.
@@ -42,7 +42,8 @@ The definition holds:
 - **Campaign inputs:**
   - the default time zone, which is required and defaults to the user's zone when the campaign is created;
   - the call skip limit in days, default 2 (spec "Unfinished call tasks");
-  - the email and SMS sender pools. A definition saved before ticket 13 has no SMS pool, which reads as empty.
+  - the email and SMS sender pools. A definition saved before ticket 13 has no SMS pool, which reads as empty;
+  - the call script or talking points, shown on every call task. A definition saved before ticket 14 has none, which reads as empty.
 - **Tracks.** Each track has:
   - a stable `track_id`, never reused;
   - a `channel`: `email`, `sms` or `call`;
@@ -51,7 +52,7 @@ The definition holds:
   - an ordered list of steps;
   - one **start rule**;
   - a `removed` marker;
-  - for a call track, its **declined path**: `stop`, `continue` or `win_back`.
+  - for a call track, its **declined path**: `stop`, `continue` or `win_back`, once the canvas sets one (ticket 16 reads it).
 - **Steps.** Each step has:
   - a stable `step_id`;
   - a wait in whole days before it (none on a track's first step);
@@ -142,9 +143,13 @@ Two partial unique indexes allow, per `(subject, step_id)`, at most one attempt 
 - `listed_once`;
 - `kind`: `call` or `callback`;
 - `callback_at` (wall time);
-- `open`.
+- `open`, and `closed_wall`, the instant it closed (ticket 14a);
+- `placed_wall`, the instant it was placed on the list (ticket 14a);
+- `skipped_wall`, the latest "skip for now" (ticket 14a).
 
 **Call attempts** `call_attempts(task_id, outcome, number_detail_id, note, at)` record each logged outcome. A redial or a callback changes the same task; a step never gets a second task.
+
+**Notes** `notes(owner_kind, owner_id, body, at_wall, subject_id, call_attempt_id)` (ticket 14a): a note on a person, or on a company, where it shows for everyone there. A call note is saved as one or the other in the transaction that logs its outcome; a company lead's notes are its company's. Notes are never read by decisions.
 
 **Replies** `replies(subject, channel, at, provider_ref)`, unique on `(subject, provider_ref)`: one reply may belong to several subjects when it falls back by inbox and address (2.4). They hold the channel and date only (spec "What the user sees and does"). **Reply events** `reply_events(event, provider_ref, inbox, address, at, received_wall, state, waited_ms, last_counted_wall)` keep every reply event the provider reported, by its event id, for good: `pending` while its thread is not known, `unmatched` when its fallback matched nothing, `resolved` once recorded on a lead (2.4, PR 37 review rounds 2 and 3).
 
@@ -479,9 +484,9 @@ Items that do not fit today wait for the next reset day and are never dropped. A
 
 The user has one daily call capacity, a positive integer.
 
-- **Committed tasks** count first: open tasks already placed (rolled over, redialed to today, callbacks due today). They are always listed, whatever the capacity.
-- **New tasks** are placed, by the same priority classes, while `new placed today < capacity − committed`. Placement creates the task with `due_at` set to the step's original due time and the skip deadline from 3.5.
-- **The queue.** "Ready now" means inside the prospect's calling hours, ordered oldest due first. "Later today" means the calling hours open later today, or a callback is due later today (spec "Working through today's list", ticket 14).
+- **Committed tasks** count first: open tasks already placed (rolled over, redialed to today, callbacks due today). They are always listed, whatever the capacity. As built (ticket 14a): a task placed before the current user day that was open at its start, for a lead that had not ended by then. The count is stable through the day, so working a carried call frees no room for another.
+- **New tasks** are placed, by the same priority classes, while `new placed today < capacity − committed`. Placement creates the task with `due_at` set to the step's original due time and the skip deadline from 3.5. A due call is placed only when the prospect's calling hours are open now or open later on the user's day, so a task takes the capacity of a day on which it can be called; one that does not fit or cannot be called today waits for the next user day and is never dropped.
+- **The queue.** "Ready now" means inside the prospect's calling hours, ordered oldest due first; a task skipped for now that day goes after the rest, in the order skipped. "Later today" means the calling hours open later today, or a callback is due later today (spec "Working through today's list", ticket 14). A listed task whose calling hours have closed for the day is in neither: it waits for its next calling hours, and an outcome logged on it is still accepted, because it is listed (2.3).
 
 ### 4.5 SMS conversations
 
@@ -1136,6 +1141,24 @@ Recorded on 13 November 2026 by the 13a implementer. Each change was built test-
 | No mutation proved an email reply stops SMS work | Mutation "an email reply stops only the email tracks" (14); the generator also replies by email while the lead's text is with the provider | 9.2 | `sequence-runs-tracks-oracle.test.ts` |
 
 Questions kept with their interim: Q7 (a mobile whose conversation from every pool number belongs to another campaign is held as `sms_conversation_taken`, listed in Needs attention; it is not skipped), and Q10 (a company lead has no SMS destination, so its SMS track is skipped). Q1 (one incoming connection per track) is unchanged.
+
+## Changes from ticket 14a (phone tracks and call tasks)
+
+Recorded on 13 November 2026 by the 14a implementer. Each change was built test-first; the generated test of 9.3's ticket 14 row runs from the pull request's first commit. No telephony provider exists or is chosen: the user dials on their own phone, and the application only lists calls and records outcomes.
+
+| Change | Sections | Test |
+| - | - | - |
+| The validator accepts phone tracks in the main branch: exactly one live step (a removed one does not count), no wait and no copy, the window as calling hours ("the phone track's calling hours have no days"), connected together or after like any track. A declined path of `win_back` is refused with the win-back branch until ticket 16. The definition gains `callScript`; a track gains an optional `declinedPath`, stored, not read. | 1.1, 7.1 | `definition.test.ts` |
+| A phone track starts when a good number exists (the lead's own direct or mobile, or its company's main line; a company lead's main line) and is otherwise skipped as missing. A started phone track whose lead has no good number left is skipped as missing, closing its open task (spec "Phone steps are skipped when no good number remains"). The call channel counts as reachable while a good number exists. | 2.1, 2.6 | `calls.test.ts` (engine) "a colleague's wrong number on the shared main line" |
+| Status rule 5, `waiting_on_call`, and the rule that a finishing track closes its open call task in the same change, whatever the reason. | 2.1, 2.3 | `calls.test.ts`; mutation "a track that finishes without closing its call task" |
+| Placement (4.4 as amended above): its own pass in each tick, after evaluation and before claims, in priority order, each in a transaction that re-reads the day's counts. The worker wakes at the next user day for a due call not yet placed. | 2.6, 4.4 | `calls.test.ts` "the user's daily call capacity"; mutations "daily call capacity ignored", "committed calls not counted", "a call placed on a day its calling hours have closed", "calls placed newest due first" |
+| Outcomes without redial, callback or not interested. A logged call is the call step's result `sent`, with the outcome as its reason, and the track completes; every outcome but skip for now touches the lead. A number is required for every outcome but skip for now, and must be one of the lead's numbers and good. A wrong number marks that number bad, everywhere it is used (a main line for every colleague, a mobile for texts too, which fails an SMS track on it). Interested completes its track, closes every other open task of the lead (`closed_on_interest`) and ends the lead in this campaign only; a phone track that has started but has no task yet stays unfinished, since the lead has ended. | 2.4 | `calls.test.ts`; mutations "outcome on an unlisted task", "interested closes only its own task", "skip for now finishes the call", "a wrong number leaves the number good", "an outcome on a bad number accepted" |
+| The user's call settings: one daily call capacity (a factory default of 50 until the user sets one) and the user's zone (the machine's until set), `GET`/`PUT /api/call-settings`. | 3.4, 4.4 | `calls.test.ts` |
+| Read models for part b: `GET /api/today`, `GET /api/calls`, `GET /api/call-tasks/:id`, `POST /api/call-tasks/:id/outcome`; the lead's progress shows each phone track's task and each call step's outcomes. Engagement on the task is the replies it lists: open and click tracking is off (ADR 0002) and outside the spec. | — | `calls.test.ts` |
+| **The ticket 14 generator is a third generator** (`test/support/generated-calls.ts`, `src/server/sequence-runs-calls*.test.ts`), with its own record, beside the ticket 12 and 13 ones, whose recorded seeds it leaves alone. It generates one or two campaigns of one to four email, SMS and phone tracks together or after (delay 0-2), calling hours on business days, every day or evenings, people with and without email, mobile or direct line, companies with and without a main line, a company lead, a user zone and a daily call capacity of 1 to 5; the generated user works the focused call with every outcome this ticket offers, attempts outcomes on tasks that are not listed and on numbers already marked bad, and the prospect replies by email and SMS. Each run ends with a drain in which the user works every call. Its record predicts each track's start and finish, which outcome must be accepted, each listed task's place in the queue, the numbers each task offers, when the lead stops and its status. It asserts after every event invariants 1, 2, 4, 6, 7, 8, 13, 16 (the ticket 14 part), 17, 19 and 20, priority at placement (12, for calls), and that a due email or text goes within an hour of its window opening while a call is open (18); and 18 after the drain. | 8, 9.2, 9.3 | — |
+| Mutations, each killed by its known seed in `pnpm check` (`test/support/call-mutations.ts`): the ADR's two ("outcome on an unlisted task", "interested closes only its own task"), 9.2's "a track that finishes without closing its call task", and one per further rule: "daily call capacity ignored", "committed calls not counted", "a call placed on a day its calling hours have closed", "an unworked call holds the parallel tracks", "the tracks after a call start when it is placed", "skip for now finishes the call", "a wrong number leaves the number good", "an outcome on a bad number accepted", "calls placed newest due first". Placing a call never touches the lead; the generated runs cannot see that while the task is open, so an example test guards it ("placing a call never counts as reaching the lead"). The queue's ready-now and later-today split is a read model the generated test checks after every event, but no engine rule decides it, so it has no mutation. | 9.2 | `sequence-runs-calls-oracle.test.ts` |
+
+Questions kept with their interim: Q4 (a wrong number finishes the phone track even when another good number remains; the next phone track, if any, offers what is left). Migration 10 adds `call_tasks`, `call_attempts` and `notes`; whichever of this pull request and pull request 41 merges second renumbers its migration.
 
 ## Consequences
 
