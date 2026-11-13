@@ -213,12 +213,23 @@ describe("openers through dispatch campaigns", () => {
   });
 
   test("an exhausted lead quota holds every inbox after the lead it created", async () => {
-    const { port, fake } = await setUp();
+    const { port, fake, advance } = await setUp();
     await port.observe(null);
     fake.remainingInPlan = 1;
     expect((await port.handover(request())).kind).toBe("accepted");
     expect((await port.accounts()).map((a) => a.quotaAvailable)).toEqual([false, false, false]);
     expect(port.status().quota).toBe("exhausted");
+    // While held, a handover is refused as Instantly's 402 would be, before any request, so the
+    // engine's workspace quota wait starts; after the recheck period one handover probes again.
+    const adds = () => fake.requests.filter((r) => r.path === "/api/v2/leads/add").length;
+    const before = adds();
+    expect(await port.handover(request({ destination: "nia@harbour.example" }))).toEqual({ kind: "rejected", reason: "payment_required" });
+    expect(adds()).toBe(before);
+    advance(61 * MINUTE);
+    await port.observe("c0");
+    expect((await port.accounts()).every((a) => a.quotaAvailable)).toBe(true);
+    await port.handover(request({ destination: "nia@harbour.example" }));
+    expect(adds()).toBe(before + 1);
   });
 });
 

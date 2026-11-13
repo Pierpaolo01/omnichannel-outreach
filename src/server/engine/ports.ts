@@ -1,7 +1,8 @@
 /**
  * The sending port (ADR 0003 5.3). Each sending channel has one; ticket 12b has email only. The
- * Instantly adapter (ticket 12c) implements this interface; until then the running app registers
- * `UnconnectedEmailPort`, which has no sender accounts, so every email track meets launch blocker 3.
+ * Instantly adapter (`src/server/instantly/port.ts`, ticket 12c) implements it when a key is
+ * configured; otherwise the running app registers `UnconnectedEmailPort`, which has no sender
+ * accounts, so every email track meets launch blocker 3.
  */
 import type { CallAnswer } from "../../domain/sequence/attempt.ts";
 import type { RenderedCopy, RejectReason } from "../../domain/sequence/state.ts";

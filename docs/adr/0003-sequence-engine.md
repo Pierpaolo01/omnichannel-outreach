@@ -1086,6 +1086,13 @@ Two reviewers, an independent verification and the review bot on `51d9503`, and 
 | Review bot on `0dc88ab` | Settling work withdraws its claimed attempts in the same change; the handover refuses settled work (predicate 15); a provider skip of work an inheritor was claimed for still holds the track | 5.3, 5.5 predicate 15, invariant 2 | `claimedInheritorRetired`; "handover of settled work" (2) |
 | Small items | `heldCapacity` lists the lookup answer, destination, step, today's sends and whether "not sent" is allowed; the checker exempts only deliveries of work handed over before a mark; `pendingReplies` required; the wait of a user action or a launch behind the running tick recorded as a known limit | 5.4, 5.5, 9.2 | — |
 
+## Changes from ticket 12c (the Instantly adapter)
+
+| Change | Sections | Test |
+| - | - | - |
+| A port's `Transport` may say `available: false`; the engine claims no step that travels by it, so it waits and nothing is sent. Instantly's continue-thread follow-ups use it until ADR 0002's X2 | 4.2, 5.3 | `src/server/instantly/engine-instantly.test.ts` (the follow-up waits unsent; fails without the rule) |
+| `HandoverRequest` carries the attempt's `trackId`, so the adapter names the dispatch campaign; it is read from the authorized attempt like every other field | 5.5 step 6 | `src/server/instantly/port.test.ts` |
+
 ## Consequences
 
 - **ADR 0001.** The merge that deletes a contact-detail row becomes a redirect in 12a. Enrollments gain the fields in 1.3. `status` stays the one stored status column.

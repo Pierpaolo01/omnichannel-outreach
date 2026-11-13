@@ -303,6 +303,9 @@ export class InstantlyEmailPort implements SendPort {
       return this.followUps.send(request, replyTo);
     }
     if (!this.client.writes) throw new WritesDisabled("POST", "/api/v2/leads/add");
+    // The lead quota is held workspace-wide: refused as Instantly's 402 would be, before any request,
+    // so the engine's quota wait starts (ADR 0002 "Quota exhausted").
+    if (this.quotaHeld()) return { kind: "rejected", reason: "payment_required" };
     const context = await this.subjectCampaign(request.subjectId);
     if (!context) throw new Error(`no campaign for subject ${request.subjectId}: nothing was sent.`);
     const inbox = (this.inboxes ?? (await this.readInboxes())).find((a) => a.email === request.sender);
