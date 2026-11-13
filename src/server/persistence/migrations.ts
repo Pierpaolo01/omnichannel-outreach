@@ -173,6 +173,196 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE VIEW live_contact_details AS SELECT *, rowid AS row_order FROM contact_details WHERE merged_into IS NULL;
     `,
   },
+  {
+    version: 6,
+    name: "the sequence engine: definitions, lead clocks, track progress, step results, attempts and sender accounts (ADR 0003)",
+    // Instants are integer milliseconds. An existing enrollment starts frozen at its enrollment
+    // instant, so its lead time is 0 until its campaign launches (ADR 0003 3.2).
+    sql: `
+      ALTER TABLE campaigns ADD COLUMN launched_at INTEGER;
+      ALTER TABLE campaigns ADD COLUMN paused_since INTEGER;
+      ALTER TABLE campaigns ADD COLUMN version INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE campaigns ADD COLUMN definition TEXT;
+      ALTER TABLE campaigns ADD COLUMN definition_version INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE campaigns ADD COLUMN definition_edited_at TEXT;
+
+      ALTER TABLE enrollments ADD COLUMN version INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE enrollments ADD COLUMN ended TEXT;
+      ALTER TABLE enrollments ADD COLUMN ended_at INTEGER;
+      ALTER TABLE enrollments ADD COLUMN ended_wall INTEGER;
+      ALTER TABLE enrollments ADD COLUMN lead_paused INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE enrollments ADD COLUMN branch TEXT NOT NULL DEFAULT 'main' CHECK (branch IN ('main', 'win_back'));
+      ALTER TABLE enrollments ADD COLUMN branch_entered_at INTEGER;
+      ALTER TABLE enrollments ADD COLUMN touched INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE enrollments ADD COLUMN no_more_calls INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE enrollments ADD COLUMN frozen_since INTEGER;
+      ALTER TABLE enrollments ADD COLUMN frozen_total INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE enrollments ADD COLUMN email_sender TEXT;
+      UPDATE enrollments SET
+        frozen_since = CAST(ROUND((julianday(enrolled_at) - 2440587.5) * 86400000) AS INTEGER),
+        frozen_total = CAST(ROUND((julianday(enrolled_at) - 2440587.5) * 86400000) AS INTEGER);
+      CREATE INDEX enrollments_by_campaign_status ON enrollments(campaign_id, status);
+
+      -- Every subject the engine runs: an enrollment, or (ticket 21) a test run. Progress tables
+      -- reference this, not enrollments (ADR 0003 1.2).
+      CREATE TABLE subjects (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL CHECK (kind IN ('enrollment', 'test_run'))
+      );
+      INSERT INTO subjects (id, kind) SELECT id, 'enrollment' FROM enrollments;
+
+      CREATE TABLE freezes (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        subject_id TEXT NOT NULL REFERENCES subjects(id),
+        from_wall INTEGER NOT NULL,
+        to_wall INTEGER
+      );
+      CREATE INDEX freezes_by_subject ON freezes(subject_id);
+      CREATE UNIQUE INDEX one_open_freeze ON freezes(subject_id) WHERE to_wall IS NULL;
+      INSERT INTO freezes (subject_id, from_wall, to_wall) SELECT id, frozen_since, NULL FROM enrollments;
+
+      CREATE TABLE track_progress (
+        subject_id TEXT NOT NULL REFERENCES subjects(id),
+        track_id TEXT NOT NULL,
+        start_at INTEGER, start_basis_at INTEGER, start_basis_wall INTEGER, start_zone TEXT,
+        started_at INTEGER,
+        destination_detail_id TEXT REFERENCES contact_details(id),
+        next_step_id TEXT, basis_at INTEGER, basis_wall INTEGER, due_at INTEGER, due_wall INTEGER, due_zone TEXT,
+        finished_at INTEGER, finished_wall INTEGER, finish_reason TEXT,
+        PRIMARY KEY (subject_id, track_id)
+      );
+
+      CREATE TABLE step_results (
+        subject_id TEXT NOT NULL REFERENCES subjects(id),
+        step_id TEXT NOT NULL,
+        track_id TEXT NOT NULL,
+        result TEXT NOT NULL CHECK (result IN ('sent', 'skipped', 'failed')),
+        reason TEXT,
+        at INTEGER NOT NULL,
+        at_wall INTEGER NOT NULL,
+        attempt_id TEXT,
+        PRIMARY KEY (subject_id, step_id)
+      );
+
+      CREATE TABLE sender_accounts (
+        id TEXT PRIMARY KEY,
+        channel TEXT NOT NULL CHECK (channel IN ('email', 'sms')),
+        label TEXT NOT NULL,
+        capacity INTEGER NOT NULL CHECK (capacity > 0),
+        -- Null: the default gap of ADR 0003 4.1, from the windows the account serves.
+        gap_ms INTEGER CHECK (gap_ms IS NULL OR gap_ms > 0),
+        k INTEGER NOT NULL CHECK (k > 0),
+        next_slot_at INTEGER NOT NULL DEFAULT 0,
+        healthy INTEGER NOT NULL DEFAULT 1,
+        wait_until INTEGER,
+        wait_reason TEXT,
+        backoff_ms INTEGER NOT NULL DEFAULT 0,
+        reset_zone TEXT NOT NULL DEFAULT 'UTC'
+      );
+
+      -- One row per piece of provider work, by idempotency key (ADR 0003 1.3, PR 37 review
+      -- round 3): everything true of the work rather than of one attempt. Attempts point at it.
+      CREATE TABLE provider_work (
+        key TEXT PRIMARY KEY,
+        subject_id TEXT NOT NULL REFERENCES subjects(id),
+        track_id TEXT NOT NULL,
+        step_id TEXT NOT NULL,
+        account_id TEXT NOT NULL REFERENCES sender_accounts(id),
+        destination TEXT NOT NULL,
+        calls INTEGER NOT NULL DEFAULT 0,
+        first_handed_wall INTEGER,
+        provider_ref TEXT,
+        settled TEXT CHECK (settled IN ('sent', 'not_sent', 'withdrawn', 'rejected', 'never_called', 'user_sent', 'user_not_sent')),
+        sent_wall INTEGER,
+        sent_day TEXT,
+        next_lookup_wall INTEGER,
+        lookup_answer TEXT,
+        queued_lookups INTEGER NOT NULL DEFAULT 0,
+        unresolved_since INTEGER
+      );
+      CREATE INDEX provider_work_by_subject ON provider_work(subject_id);
+      CREATE INDEX provider_work_by_ref ON provider_work(provider_ref);
+      CREATE INDEX provider_work_by_account ON provider_work(account_id, settled);
+
+      CREATE TABLE attempts (
+        id TEXT PRIMARY KEY,
+        subject_id TEXT NOT NULL REFERENCES subjects(id),
+        track_id TEXT NOT NULL,
+        step_id TEXT NOT NULL,
+        account_id TEXT NOT NULL REFERENCES sender_accounts(id),
+        destination_detail_id TEXT NOT NULL REFERENCES contact_details(id),
+        destination TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('claimed', 'handed', 'accepted', 'sent', 'rejected', 'withdrawn')),
+        copy TEXT,
+        threading TEXT NOT NULL CHECK (threading IN ('new_subject', 'continue_thread')),
+        thread_ref TEXT,
+        retryable INTEGER NOT NULL,
+        not_sent_final INTEGER NOT NULL,
+        idempotency_key TEXT NOT NULL REFERENCES provider_work(key),
+        calls INTEGER NOT NULL,
+        claimed_wall INTEGER NOT NULL,
+        handed_at INTEGER, handed_wall INTEGER, last_call_wall INTEGER,
+        presend_checked_wall INTEGER, presend_found_reply INTEGER NOT NULL DEFAULT 0,
+        ended_by TEXT,
+        withdraw_requested INTEGER NOT NULL DEFAULT 0,
+        withdraw_called INTEGER NOT NULL DEFAULT 0,
+        awaiting_answer INTEGER NOT NULL DEFAULT 0,
+        retry TEXT NOT NULL DEFAULT 'none',
+        reject_reason TEXT
+      );
+      CREATE UNIQUE INDEX one_live_attempt_per_step ON attempts(subject_id, step_id) WHERE state IN ('claimed', 'handed', 'accepted');
+      CREATE UNIQUE INDEX one_sent_attempt_per_step ON attempts(subject_id, step_id) WHERE state = 'sent';
+      CREATE INDEX attempts_by_subject ON attempts(subject_id);
+      CREATE INDEX attempts_by_account_state ON attempts(account_id, state);
+      CREATE INDEX attempts_by_key ON attempts(idempotency_key);
+
+      -- ADR 0002's ledger, read off the provider work so it cannot drift from it: a send counts on
+      -- the reset day of its send; unsettled work not yet sent counts as reserved (ADR 0003 4.2).
+      CREATE VIEW capacity_ledger AS
+        SELECT account_id, sent_day AS reset_day, key AS work, 'sent' AS kind FROM provider_work WHERE sent_wall IS NOT NULL
+        UNION ALL
+        SELECT account_id, NULL, key, 'reserved' FROM provider_work WHERE settled IS NULL AND sent_wall IS NULL;
+
+      -- One reply may belong to several subjects: one outside every thread is reconciled to every
+      -- lead the inbox wrote to at that address (ADR 0003 2.4 as amended).
+      CREATE TABLE replies (
+        provider_ref TEXT NOT NULL,
+        subject_id TEXT NOT NULL REFERENCES subjects(id),
+        channel TEXT NOT NULL CHECK (channel IN ('email', 'sms')),
+        at_wall INTEGER NOT NULL,
+        PRIMARY KEY (subject_id, provider_ref)
+      );
+      CREATE INDEX replies_by_subject ON replies(subject_id);
+
+      -- Every reply event the provider reported, by its event id, for good (ADR 0003 2.4, PR 37
+      -- review round 3): an observation replay is a no-op. A reply on a thread the app does not
+      -- know yet is pending: sends from the inbox to the address pause until its reference attaches
+      -- to work, or until it has waited one settling period of running time, then it falls back to
+      -- inbox and address. One that matches nothing stays unmatched by its reference, without
+      -- pausing, and resolves if that reference later attaches.
+      CREATE TABLE reply_events (
+        event_id TEXT PRIMARY KEY,
+        provider_ref TEXT,
+        inbox TEXT NOT NULL,
+        address TEXT NOT NULL,
+        at_wall INTEGER NOT NULL,
+        received_wall INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('pending', 'resolved', 'unmatched')),
+        waited_ms INTEGER NOT NULL DEFAULT 0,
+        last_counted_wall INTEGER NOT NULL
+      );
+      CREATE INDEX reply_events_open ON reply_events(state) WHERE state <> 'resolved';
+
+      CREATE TABLE provider_anomalies (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        attempt_id TEXT,
+        what TEXT NOT NULL,
+        at_wall INTEGER NOT NULL
+      );
+
+      CREATE TABLE engine_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string): void {

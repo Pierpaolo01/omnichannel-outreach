@@ -1,6 +1,7 @@
 import type { Channel, PhoneKind } from "../../domain/contact-details.ts";
 import type { DetailOwner, Directory, ImportPlan } from "../../domain/import-plan.ts";
 import type { OutreachStatus } from "../../domain/outreach-status.ts";
+import type { EngineStore } from "../engine/engine-store.ts";
 import type {
   Campaign,
   ImportFileNames,
@@ -81,6 +82,9 @@ export interface OutreachStore {
    * Imports never clear the mark. False for an id that was never issued.
    */
   markContactDetailBad(detailId: string): Promise<boolean>;
+
+  /** The sequence engine's persistence, in the same database (ADR 0003). */
+  readonly engine: EngineStore;
 
   close(): Promise<void>;
 }

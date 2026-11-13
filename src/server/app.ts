@@ -8,13 +8,49 @@ import type { ApiError, Campaign, FileCheckResult } from "../shared/api.ts";
 import { CAMPAIGN_NAME_MAX } from "../shared/limits.ts";
 import { checkApiRequest } from "./guard.ts";
 import type { OutreachStore } from "./persistence/store.ts";
+import { launchCheck } from "../domain/sequence/blockers.ts";
+import { definitionProblems, emptyDefinition, type CampaignDefinition } from "../domain/sequence/definition.ts";
+import { Engine } from "./engine/engine.ts";
+import { UnconnectedEmailPort } from "./engine/ports.ts";
+import { accountView, needsAttention, progressView } from "./engine/views.ts";
+import type { SequenceView } from "../shared/api.ts";
 
 export interface AppDependencies {
   readonly store: OutreachStore;
   /** Current time as an ISO-8601 string. */
   readonly now: () => string;
   readonly newId: () => string;
+  /** The sequence engine. Without one, the app runs an engine with no connected email provider. */
+  readonly engine?: Pick<Engine, "launch">;
 }
+
+const windowRule = z.object({ day: z.number().int().min(0).max(6), start: z.number().int().min(0).max(23), end: z.number().int().min(0).max(24) });
+const stepBody = z.object({
+  id: z.string().trim().min(1).max(100),
+  waitDays: z.number(),
+  subject: z.string().max(1_000).default(""),
+  body: z.string().max(20_000),
+  threading: z.enum(["new_subject", "continue_thread"]),
+  removed: z.boolean().default(false),
+});
+const trackBody = z.object({
+  id: z.string().trim().min(1).max(100),
+  channel: z.enum(["email", "sms", "call"]),
+  branch: z.enum(["main", "win_back"]).default("main"),
+  window: z.array(windowRule).max(14),
+  steps: z.array(stepBody).max(50),
+  start: z.union([z.object({ kind: z.literal("entry") }), z.object({ kind: z.literal("after"), trackId: z.string(), delayDays: z.number() })]).default({ kind: "entry" }),
+  removed: z.boolean().default(false),
+});
+const definitionBody = z.object({
+  timezone: z.string().trim().min(1),
+  callSkipLimitDays: z.number().default(2),
+  emailPool: z.array(z.string().min(1).max(200)).max(100),
+  tracks: z.array(trackBody).max(20),
+});
+
+/** The user's zone: the machine's, which a campaign's default zone starts from (ADR 0003 1.1). */
+const machineZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 const SEARCH_LIMIT_DEFAULT = 100;
 const SEARCH_LIMIT_MAX = 500;
@@ -61,7 +97,8 @@ const importBody = z.object({
 const checkBody = z.object({ businessesCsv: z.string().optional(), peopleCsv: z.string().optional() });
 
 /** The HTTP interface. Every route is under /api; the web client is served separately. */
-export function createApp({ store, now, newId }: AppDependencies): Hono {
+export function createApp({ store, now, newId, engine: givenEngine }: AppDependencies): Hono {
+  const engine = givenEngine ?? new Engine({ store: store.engine, port: new UnconnectedEmailPort(), now: () => Date.parse(now()), newId });
   const app = new Hono().basePath("/api");
   app.use(async (c, next) => {
     const verdict = checkApiRequest({
@@ -203,6 +240,72 @@ export function createApp({ store, now, newId }: AppDependencies): Hono {
     const company = await store.company(c.req.param("id"));
     return company ? c.json(company) : notFound(c, "company");
   });
+
+  // -------------------------------------------------------------------------------------------
+  // The sequence engine (ADR 0003), ticket 12b.
+
+  const sequenceView = async (campaignId: string, defaultZone: string | null): Promise<SequenceView | null> => {
+    const row = await store.engine.campaign(campaignId);
+    if (!row) return null;
+    const definition = row.definition ?? emptyDefinition(defaultZone ?? machineZone());
+    const at = Date.parse(now());
+    const { leads, accounts } = await store.engine.launchInputs(campaignId);
+    const labels = await store.engine.accountLabels();
+    return {
+      campaignId,
+      definition,
+      definitionVersion: row.definitionVersion,
+      editedAt: row.definitionEditedAt,
+      launchedAt: row.launchedAt === null ? null : new Date(row.launchedAt).toISOString(),
+      launch: launchCheck(definition, leads, accounts),
+      accounts: (await store.engine.accounts(at)).map((a) => accountView(a, labels[a.id] ?? a.id)),
+    };
+  };
+
+  app.get("/campaigns/:id/sequence", async (c) => {
+    const campaign = await store.campaign(c.req.param("id"));
+    const view = campaign ? await sequenceView(campaign.id, campaign.defaultTimezone) : null;
+    return view ? c.json(view) : notFound(c, "campaign");
+  });
+
+  app.put("/campaigns/:id/sequence", async (c) => {
+    const campaign = await store.campaign(c.req.param("id"));
+    if (!campaign) return notFound(c, "campaign");
+    const body = definitionBody.safeParse(await readJson(c));
+    if (!body.success) return invalid(c, body.error);
+    const definition: CampaignDefinition = body.data;
+    const previous = (await store.engine.campaign(campaign.id))?.definition ?? null;
+    const problems = definitionProblems(definition, previous);
+    if (problems.length > 0) return c.json<ApiError>({ error: { code: "invalid_sequence", message: problems.join(" ") } }, 400);
+    const saved = await store.engine.saveDefinition(campaign.id, definition, now());
+    if (saved === "launched") {
+      return c.json<ApiError>({ error: { code: "launched", message: "This campaign is running. Editing a running campaign arrives with a later release." } }, 409);
+    }
+    return c.json(await sequenceView(campaign.id, campaign.defaultTimezone));
+  });
+
+  app.post("/campaigns/:id/launch", async (c) => {
+    const campaign = await store.campaign(c.req.param("id"));
+    if (!campaign) return notFound(c, "campaign");
+    const outcome = await engine.launch(campaign.id);
+    if (!outcome.ok) {
+      const message =
+        outcome.reason === "already_launched" ? "This campaign has already launched."
+        : outcome.check?.nothingToLaunch ? "Add a track to launch."
+        : outcome.reason === "no_definition" ? "Add a track to launch."
+        : `Launch is blocked: ${outcome.check?.blockers.map((b) => b.message).join(" ") ?? ""}`;
+      return c.json<ApiError>({ error: { code: outcome.reason === "already_launched" ? "already_launched" : "launch_blocked", message } }, 409);
+    }
+    return c.json(await sequenceView(campaign.id, campaign.defaultTimezone));
+  });
+
+  app.get("/enrollments/:id", async (c) => {
+    const at = Date.parse(now());
+    const state = await store.engine.subject(c.req.param("id"), at);
+    return state ? c.json(progressView(state, at)) : notFound(c, "enrollment");
+  });
+
+  app.get("/needs-attention", async (c) => c.json(await needsAttention(store.engine, Date.parse(now()))));
 
   app.notFound((c) => notFound(c, "route"));
   app.onError((error, c) => {
