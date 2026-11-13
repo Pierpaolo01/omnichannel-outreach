@@ -3,7 +3,7 @@
  * task with everything the call screen shows. Built from the engine's stored facts and the CRM, so
  * the screens render them without recomputing anything.
  */
-import { bucketOf, CALL_OUTCOMES, callNumbers, isListed, reasonOf, type CallBucket } from "../../domain/sequence/calls.ts";
+import { bucketOf, CALL_OUTCOMES, callNumbers, isListed, numberOf, reasonOf, type CallBucket } from "../../domain/sequence/calls.ts";
 import { displayPhone } from "../../domain/phone.ts";
 import { localDayNumber } from "../../domain/sequence/clock.ts";
 import { liveTracks } from "../../domain/sequence/definition.ts";
@@ -145,7 +145,7 @@ export async function callTaskView(store: OutreachStore, taskId: string, now: nu
   for (const r of s.replies) touches.push({ touch: { kind: "reply", channel: r.channel, at: iso(r.atWall) }, t: r.atWall });
   for (const c of s.callAttempts) {
     if (c.outcome === "skip_for_now") continue;
-    const number = numbers.find((n) => n.id === c.numberDetailId);
+    const number = c.numberDetailId === null ? null : numberOf(s, c.numberDetailId);
     touches.push({ touch: { kind: "call", at: iso(c.atWall), outcome: c.outcome, number: number ? numberView(number) : null, note: c.note }, t: c.atWall });
   }
   touches.sort((a, b) => a.t - b.t);

@@ -494,8 +494,29 @@ export class SqliteEngineStore implements EngineStore {
 
     const tracks = this.sql("SELECT * FROM track_progress WHERE subject_id = ? ORDER BY track_id").all(subjectId).map(toTrack);
     const attempts = this.sql("SELECT * FROM attempts WHERE subject_id = ? ORDER BY claimed_wall, rowid").all(subjectId).map(toAttempt);
+    const callAttempts = this.sql("SELECT * FROM call_attempts WHERE subject_id = ? ORDER BY at_wall, rowid")
+      .all(subjectId)
+      .map((r): CallAttempt => ({ id: str(r, "id"), taskId: str(r, "task_id"), outcome: str(r, "outcome") as CallOutcome, numberDetailId: strOrNull(r, "number_detail_id"), note: str(r, "note"), at: num(r, "at"), atWall: num(r, "at_wall") }));
+    // Every id that can name one of the lead's numbers resolves through the merge pointer (ADR 0001, ticket 12a):
+    // the numbers recorded on its calls, and every detail a re-import folded into one of its numbers, so a
+    // screen read before the merge names the same number.
+    const mergedIntoPhones = this.sql(
+      `WITH RECURSIVE merged(id) AS (
+         SELECT d.id FROM contact_details d WHERE d.merged_into IN (SELECT value FROM json_each(?))
+         UNION
+         SELECT d.id FROM contact_details d JOIN merged m ON d.merged_into = m.id)
+       SELECT id FROM merged`,
+    )
+      .all(JSON.stringify(phones.map((p) => p.id)))
+      .map((r) => str(r, "id"));
     const referenced = new Set(
-      [...details.map((d) => d.id), ...tracks.map((t) => t.destinationDetailId), ...attempts.map((a) => a.destinationDetailId)].filter((id): id is string => id !== null),
+      [
+        ...details.map((d) => d.id),
+        ...tracks.map((t) => t.destinationDetailId),
+        ...attempts.map((a) => a.destinationDetailId),
+        ...callAttempts.map((c) => c.numberDetailId),
+        ...mergedIntoPhones,
+      ].filter((id): id is string => id !== null),
     );
     const resolved: Record<string, { liveId: string; bad: boolean; owned: boolean }> = {};
     for (const id of referenced) {
@@ -603,9 +624,7 @@ export class SqliteEngineStore implements EngineStore {
       markBad: [],
       accounts,
       callTasks: this.sql("SELECT * FROM call_tasks WHERE subject_id = ? ORDER BY placed_wall, rowid").all(subjectId).map(toCallTask),
-      callAttempts: this.sql("SELECT * FROM call_attempts WHERE subject_id = ? ORDER BY at_wall, rowid")
-        .all(subjectId)
-        .map((r): CallAttempt => ({ id: str(r, "id"), taskId: str(r, "task_id"), outcome: str(r, "outcome") as CallOutcome, numberDetailId: strOrNull(r, "number_detail_id"), note: str(r, "note"), at: num(r, "at"), atWall: num(r, "at_wall") })),
+      callAttempts,
       newNotes: [],
       callDay: this.callDayAt(now),
     };
@@ -730,6 +749,7 @@ export class SqliteEngineStore implements EngineStore {
       for (const n of next.newNotes) {
         if (base.newNotes.some((b) => b.id === n.id)) continue;
         changed = true;
+        // The user's choice; a company lead has no person, so its notes are its company's.
         const personId = e ? strOrNull(e, "person_id") : null;
         const owner = n.owner === "person" && personId !== null ? { kind: "person", id: personId } : { kind: "company", id: e ? str(e, "company_id") : "" };
         this.run("INSERT INTO notes (id, owner_kind, owner_id, body, at_wall, subject_id, call_attempt_id) VALUES (?, ?, ?, ?, ?, ?, ?)", [n.id, owner.kind, owner.id, n.body, n.atWall, id, n.callAttemptId]);

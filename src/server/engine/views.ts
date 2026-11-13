@@ -1,6 +1,6 @@
 /** Read models for the HTTP interface, built from the engine's stored facts. */
 import { isLive, markable } from "../../domain/sequence/attempt.ts";
-import { callNumbers, isListed } from "../../domain/sequence/calls.ts";
+import { isListed, numberOf as callNumberOf } from "../../domain/sequence/calls.ts";
 import { displayPhone } from "../../domain/phone.ts";
 import { leadNow } from "../../domain/sequence/clock.ts";
 import { heldReason, stalledAccounts } from "../../domain/sequence/dispatch.ts";
@@ -54,7 +54,7 @@ export function progressView(s: SubjectState, now: number): EnrollmentProgress {
               calls: s.callAttempts
                 .filter((c) => s.callTasks.some((t) => t.id === c.taskId && t.stepId === st.id))
                 .map((c) => {
-                  const n = callNumbers(s).find((x) => x.id === c.numberDetailId);
+                  const n = c.numberDetailId === null ? null : callNumberOf(s, c.numberDetailId);
                   return { outcome: c.outcome, at: new Date(c.atWall).toISOString(), number: n ? { detailId: n.id, kind: n.kind, owner: n.owner, value: displayPhone(n.key), bad: n.bad } : null, note: c.note };
                 }),
               reason: result?.reason ?? null,

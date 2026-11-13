@@ -19,6 +19,17 @@ export function callNumbers(state: SubjectState): CallNumber[] {
   return [...state.lead.phones].sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind] || b.order - a.order);
 }
 
+/**
+ * The lead's number a stored or submitted detail id stands for, following merges (ADR 0001 "Merged
+ * contact details", ticket 12a): a re-import may fold the dialled detail into another, and the id
+ * then points at it. Every read of a detail id about calls goes through here. Null when the id
+ * names none of the lead's numbers.
+ */
+export function numberOf(state: SubjectState, detailId: string): CallNumber | null {
+  const live = state.lead.resolved[detailId]?.liveId ?? detailId;
+  return state.lead.phones.find((n) => n.id === live) ?? null;
+}
+
 /** The numbers the user may dial now: not marked bad. */
 export function goodNumbers(state: SubjectState): CallNumber[] {
   return callNumbers(state).filter((n) => !n.bad);
@@ -135,7 +146,11 @@ export interface OutcomeInput {
   /** The number the user dialled; required for every outcome but skip for now. */
   readonly numberId: string | null;
   readonly note: string;
-  /** A person note, or a company note shown for everyone at the company. A company lead's notes are the company's. */
+  /**
+   * A person note, or a company note shown for everyone at the company: the user's choice, "person"
+   * when they make none (the HTTP default). A company lead has no person, so the store keeps its notes
+   * on its company.
+   */
   readonly noteScope: "person" | "company";
 }
 
@@ -163,7 +178,7 @@ export function logCallOutcome(
   if (!listed(state, task)) {
     return { ok: false, reason: state.subject.ended !== null ? "This lead's outreach has ended in this campaign, so its call is not on today's list." : "This call is not on today's list." };
   }
-  const number = input.numberId === null ? null : callNumbers(state).find((n) => n.id === input.numberId);
+  const number = input.numberId === null ? null : numberOf(state, input.numberId);
   if (input.outcome !== "skip_for_now") {
     if (!number) return { ok: false, reason: "Choose the number you dialled from the lead's numbers." };
     if (number.bad) return { ok: false, reason: "That number is marked bad: choose another of the lead's numbers." };
@@ -172,7 +187,8 @@ export function logCallOutcome(
   const atWall = wallOfLead(state.subject.clock, now);
   const note = input.note.trim();
   const attempt: CallAttempt = { id: ids.attempt, taskId, outcome: input.outcome, numberDetailId: number?.id ?? null, note, at, atWall: now };
-  const notes: NoteDraft[] = note === "" ? [] : [{ id: ids.note, owner: input.noteScope === "company" || state.lead.phones.every((p) => p.owner === "company") ? "company" : "person", callAttemptId: attempt.id, body: note, atWall: now }];
+  // The note belongs where the user put it; never inferred from the lead's numbers (review bot on a1399ce).
+  const notes: NoteDraft[] = note === "" ? [] : [{ id: ids.note, owner: input.noteScope, callAttemptId: attempt.id, body: note, atWall: now }];
   let s: SubjectState = { ...state, callAttempts: [...state.callAttempts, attempt], newNotes: [...state.newNotes, ...notes] };
 
   if (input.outcome === "skip_for_now") {

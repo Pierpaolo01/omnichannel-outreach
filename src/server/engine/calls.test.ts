@@ -393,3 +393,59 @@ describe("numbers shared across leads and channels", () => {
   });
 });
 
+describe("who a call record belongs to (review bot on a1399ce)", () => {
+  test("a note is the person's or the company's as the user chose, whatever numbers the person has; only a company lead's notes are its company's", async () => {
+    // Sam has no number of his own: his calls go to the company main line.
+    const SAM = person({ person_id: "p3", business_id: "b1", full_name: "Sam Lee", email: "sam@harbour.example" });
+    const ELM = business({ business_id: "b2", business_name: "Elm Street Clinic", phone_e164: "+442079460303", general_emails: "hello@elm.example" });
+    const { h, calls, task, log } = await world();
+    const { campaign: c } = await h.createCampaign("Notes", { businesses: [HARBOUR, ELM], people: [SAM] });
+    await h.defineSequence(c.id, definition([track("p1", "call", [call("c1")], { kind: "entry" }, WEEKDAYS_9_TO_17)], { emailPool: [] }));
+    h.clock = MONDAY_9;
+    expect((await h.launch(c.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + H);
+    const queue = (await calls()).readyNow;
+    const sam = await task(queue.find((x) => x.person?.name === "Sam Lee")?.taskId ?? "");
+    expect(sam.numbers.map((n) => n.kind)).toEqual(["main_line"]);
+    expect((await log(sam.taskId, { outcome: "gatekeeper", numberId: sam.numbers[0]?.detailId, note: "Sam prefers mornings.", noteScope: "person" })).status).toBe(200);
+    const after = await task(sam.taskId);
+    expect(after.personNotes.map((n) => n.body)).toEqual(["Sam prefers mornings."]);
+    expect(after.companyNotes).toEqual([]);
+
+    // A company lead has no person: its notes are its company's, the stated default for it.
+    const elm = await task(queue.find((x) => x.person === null)?.taskId ?? "");
+    expect((await log(elm.taskId, { outcome: "voicemail", numberId: elm.numbers[0]?.detailId, note: "Reception closes at 4.", noteScope: "person" })).status).toBe(200);
+    expect((await task(elm.taskId)).companyNotes.map((n) => n.body)).toEqual(["Reception closes at 4."]);
+  });
+
+  test("a re-import that merges a dialled number keeps it on the call's history, and a number id from before the merge still logs an outcome", async () => {
+    // No country and no main line at first: Zara's national number is kept as its digits.
+    const noCountry = business({ business_id: "b1", business_name: "Harbour Lane Physio", country: "" });
+    const YARA = person({ person_id: "p6", business_id: "b1", full_name: "Yara Haddad", direct_phone: "+442079460155" });
+    const ZARA = person({ person_id: "p7", business_id: "b1", full_name: "Zara Malik", direct_phone: "020 7946 0155" });
+    const { h, calls, task, log } = await world();
+    const { campaign: c } = await h.createCampaign("Merges", { businesses: [noCountry], people: [YARA, ZARA] });
+    await h.defineSequence(c.id, definition([track("p1", "call", [call("c1")], { kind: "entry" }, WEEKDAYS_9_TO_17), track("p2", "call", [call("c2")], after("p1", 0), WEEKDAYS_9_TO_17)], { emailPool: [] }));
+    h.clock = MONDAY_9;
+    expect((await h.launch(c.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + H);
+    const zara = await task((await calls()).readyNow.find((x) => x.person?.name === "Zara Malik")?.taskId ?? "");
+    const dialled = zara.numbers[0];
+    expect(dialled).toMatchObject({ kind: "direct" });
+    expect((await log(zara.taskId, { outcome: "no_answer", numberId: dialled?.detailId, note: "Rang out." })).status).toBe(200);
+
+    // The company's country and main line arrive: Zara's copy folds into the company's main line.
+    await h.reimport(c.id, { businesses: [business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460155" })], people: [YARA, ZARA] });
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    const history = await task(zara.taskId);
+    expect(history.touches).toEqual([expect.objectContaining({ kind: "call", outcome: "no_answer", number: expect.objectContaining({ kind: "main_line", value: "+44 20 7946 0155" }) })]);
+    const progress = await h.progress(zara.enrollmentId);
+    expect(progress.tracks.find((t) => t.trackId === "p1")?.steps[0]?.calls[0]?.number).toMatchObject({ kind: "main_line" });
+
+    // Her second call, logged from a screen read before the merge, names the old id: it is the same number.
+    const second = (await calls()).readyNow.find((x) => x.enrollmentId === zara.enrollmentId && x.track.id === "p2");
+    expect((await log(second?.taskId ?? "", { outcome: "voicemail", numberId: dialled?.detailId })).status).toBe(200);
+    expect((await task(second?.taskId ?? "")).touches.at(-1)).toMatchObject({ kind: "call", outcome: "voicemail", number: expect.objectContaining({ kind: "main_line" }) });
+  });
+});
+

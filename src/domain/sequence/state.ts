@@ -242,7 +242,10 @@ export interface CallAttempt {
   readonly atWall: number;
 }
 
-/** A note to store with an outcome: on the person, or shared with everyone at the company. */
+/**
+ * A note to store with an outcome: on the person, or shared with everyone at the company, as the user
+ * chose. The store keeps a company lead's notes on its company, since it has no person.
+ */
 export interface NoteDraft {
   readonly id: string;
   readonly owner: "person" | "company";

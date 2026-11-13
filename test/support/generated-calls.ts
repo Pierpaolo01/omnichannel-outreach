@@ -566,7 +566,9 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       // 19 and 2. Calls are logged on the lead's own numbers or its company's main line; nothing is sent after it stops.
       for (const a of st.callAttempts) {
         if (a.numberDetailId === null) continue;
-        const n = st.lead.phones.find((x) => x.id === a.numberDetailId);
+        // A recorded number id follows the merge pointer to the detail it stands for now (ADR 0001).
+        const live = st.lead.resolved[a.numberDetailId]?.liveId ?? a.numberDetailId;
+        const n = st.lead.phones.find((x) => x.id === live);
         if (!n || !phonesOf(s).some((p) => p.key === n.key)) problem(`19: ${id} logged a call on ${a.numberDetailId}, which is not one of its numbers`);
       }
       for (const ch of ["email", "sms"] as const) {
