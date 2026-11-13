@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { account, calledWork, definition, H, handed, MONDAY_9, step, subjectState, withAttempts } from "../../../test/support/sequence-state.ts";
+import { account, calledWork, definition, H, handed, MOBILE, MONDAY_9, multiTrackState, step, subjectState, track, withAttempts } from "../../../test/support/sequence-state.ts";
 import {
   defaultGap,
   authorizeRetry,
@@ -15,7 +15,7 @@ import {
   stalledAccounts,
   type ReadyItem,
 } from "./dispatch.ts";
-import { enterMain, evaluate } from "./progress.ts";
+import { enterMain, evaluate, smsReplyOwner } from "./progress.ts";
 import { ENGINE_PARAMS } from "./attempt.ts";
 import type { SubjectState } from "./state.ts";
 
@@ -203,5 +203,86 @@ describe("a continue-thread step with no thread (ruling 1)", () => {
     const pending = { ...sentNoRef, tracks: sentNoRef.tracks.map((t) => ({ ...t, nextStepId: "s2", dueAt: 0, dueWall: MONDAY_9 })) };
     expect(heldReason(pending, "t1", MONDAY_9)).toBe("no_thread");
     expect(claimRefusal(pending, item({ stepId: "s2" }), MONDAY_9)).toBe("there is no thread to continue");
+  });
+});
+
+describe("SMS dispatch and conversations (ADR 0003 4.5, ticket 13)", () => {
+  const N1 = "+447700900001";
+  const N2 = "+447700900002";
+  // An SMS track only; its second step's threading is never read.
+  const smsOnly = () => launched(multiTrackState([track("t2", "sms", [step("m1", { subject: "", body: "Hi {{first_name|there}}, {{company}} here." }), step("m2", { subject: "", waitDays: 1 })])]));
+  const smsItem = item({ trackId: "t2", stepId: "m1" });
+  const other = (sender: string, ownerEnded = false) => ({ sender, recipient: MOBILE.key, owner: "lead-in-another-campaign", ownerCampaignId: "camp-2", ownerEnded });
+
+  test("a due SMS step is ready, and its claim uses a number from the SMS pool, never an inbox, to the mobile's E.164 key", () => {
+    const s = smsOnly();
+    expect(readyItems(s, MONDAY_9)).toEqual([smsItem]);
+    expect(chooseAccount(s, MONDAY_9, "m1")?.id).toBe(N1);
+    const c = claim(s, smsItem, s.accounts[N1]!, { attemptId: "a-1", retryable: false, notSentIsFinal: false, now: MONDAY_9 });
+    expect(c.attempts[0]).toMatchObject({ accountId: N1, destinationDetailId: "d-mobile", destination: "+447700900101" });
+  });
+
+  test("a number whose conversation with this mobile belongs to another subject is not chosen; with none free the track is held", () => {
+    const s = smsOnly();
+    expect(chooseAccount({ ...s, smsBindings: [other(N1)] }, MONDAY_9, "m1")?.id).toBe(N2);
+    // An ended owner keeps its conversation: it is never transferred (ruling 8).
+    const taken = { ...s, smsBindings: [other(N1, true), other(N2)] };
+    expect(chooseAccount(taken, MONDAY_9, "m1")).toBeNull();
+    expect(heldReason(taken, "t2", MONDAY_9)).toBe("sms_conversation_taken");
+    // Its own binding is no obstacle.
+    expect(chooseAccount({ ...s, smsBindings: [{ sender: N1, recipient: MOBILE.key, owner: "lead-1", ownerCampaignId: "camp-1", ownerEnded: false }, other(N2)] }, MONDAY_9, "m1")?.id).toBe(N1);
+  });
+
+  test("the handover renders the text, fixes the SMS sender and takes the conversation; the email sender is untouched", () => {
+    const s = smsOnly();
+    const c = claim(s, smsItem, s.accounts[N1]!, { attemptId: "a-1", retryable: false, notSentIsFinal: false, now: MONDAY_9 });
+    const ready = { ...c, attempts: c.attempts.map((a) => ({ ...a, presendCheckedWall: MONDAY_9 })) };
+    const a = ready.attempts[0]!;
+    expect(handoverFailures(ready, a, ready.accounts[N1]!, MONDAY_9)).toEqual([]);
+    const h = handOver(ready, a, ready.accounts[N1]!, MONDAY_9);
+    expect(h.attempts[0]).toMatchObject({ state: "handed", copy: { subject: "", body: "Hi Pat, Harbour Lane Physio here." }, threadRef: null });
+    expect(h.subject).toMatchObject({ smsSender: N1, emailSender: null });
+    expect(h.smsBindings).toEqual([{ sender: N1, recipient: MOBILE.key, owner: "lead-1", ownerCampaignId: "camp-1", ownerEnded: false }]);
+  });
+
+  test("a conversation taken by another subject between the claim and the handover fails predicate 11; another fixed number fails 10", () => {
+    const s = smsOnly();
+    const c = claim(s, smsItem, s.accounts[N1]!, { attemptId: "a-1", retryable: false, notSentIsFinal: false, now: MONDAY_9 });
+    const ready = { ...c, attempts: c.attempts.map((a) => ({ ...a, presendCheckedWall: MONDAY_9 })) };
+    const a = ready.attempts[0]!;
+    expect(handoverFailures({ ...ready, smsBindings: [other(N1)] }, a, ready.accounts[N1]!, MONDAY_9)).toEqual([11]);
+    expect(handoverFailures({ ...ready, subject: { ...ready.subject, smsSender: N2 } }, a, ready.accounts[N1]!, MONDAY_9)).toEqual([10]);
+  });
+
+  test("the SMS sender, once fixed, is the only number its later texts use", () => {
+    const s = smsOnly();
+    expect(chooseAccount({ ...s, subject: { ...s.subject, smsSender: N2 } }, MONDAY_9, "m1")?.id).toBe(N2);
+  });
+
+  test("an SMS step is never held for want of a thread", () => {
+    const s = smsOnly();
+    const sentFirst = { ...s, tracks: s.tracks.map((t) => ({ ...t, nextStepId: "m2" })), results: [{ stepId: "m1", trackId: "t2", result: "sent" as const, reason: null, at: 0, atWall: MONDAY_9, attemptId: null }] };
+    expect(heldReason(sentFirst, "t2", MONDAY_9)).toBeNull();
+  });
+});
+
+describe("an SMS reply's owner (ADR 0003 4.5)", () => {
+  test("the reply goes to the owner of the conversation with the number it reached, never to the mobile's newest conversation", () => {
+    const bindings = [
+      { sender: "+447700900001", owner: "a", released: false },
+      { sender: "+447700900002", owner: "b", released: false },
+    ];
+    expect(smsReplyOwner(bindings, "+447700900001")).toBe("a");
+    expect(smsReplyOwner(bindings, "+447700900002")).toBe("b");
+    expect(smsReplyOwner(bindings, "+447700900003")).toBeNull();
+  });
+
+  test("with no unreleased owner, the most recent released owner (an ended test run) is named", () => {
+    const bindings = [
+      { sender: "n1", owner: "test-1", released: true },
+      { sender: "n1", owner: "test-2", released: true },
+    ];
+    expect(smsReplyOwner(bindings, "n1")).toBe("test-2");
+    expect(smsReplyOwner([...bindings, { sender: "n1", owner: "test-3", released: false }], "n1")).toBe("test-3");
   });
 });

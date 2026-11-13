@@ -281,7 +281,7 @@ export class InstantlyEmailPort implements SendPort {
     const quotaAvailable = !this.quotaHeld();
     return inboxes.map((a) => {
       const view = this.inboxView(a);
-      return { id: a.email, channel: "email" as const, label: a.email, capacity: view.capacity, gapMs: null, k: this.config.k, healthy: view.healthy, resetZone: this.config.resetZone, quotaAvailable };
+      return { id: a.email, channel: "email" as const, label: a.email, capacity: view.capacity, gapMs: null, k: this.config.k, healthy: view.healthy, problem: view.reason, resetZone: this.config.resetZone, quotaAvailable };
     });
   }
 

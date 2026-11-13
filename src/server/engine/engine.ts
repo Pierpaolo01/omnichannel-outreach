@@ -10,7 +10,7 @@ import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, sta
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
 import type { EngineStore, ReplyEvent } from "./engine-store.ts";
-import type { AttemptRef, HandoverRequest, ProviderEvent, SendPort } from "./ports.ts";
+import { UnprovisionedSmsPort, type AttemptRef, type HandoverRequest, type ProviderEvent, type SendPort } from "./ports.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 
 export type CrashPoint = "after_claim" | "after_presend" | "after_handover_commit" | "after_call" | "after_retry_commit" | "after_lookup" | "after_observe_event";
@@ -20,6 +20,8 @@ export interface EngineHooks {
   beforeApplyEvaluation?(subjectId: string): Promise<void>;
   /** Between the claim commit and the handover commit. */
   beforeHandover?(attemptId: string): Promise<void>;
+  /** Right after a claim commits, before the next claim (ADR 0003 invariant 12: the tests check priority at the claim). */
+  afterClaim?(attemptId: string): Promise<void>;
   /** Before a same-key retry is authorized (ADR 0003 9.2: retries racing a quiesce). */
   beforeRetry?(attemptId: string): Promise<void>;
   /**
@@ -84,7 +86,10 @@ export function waitWithTimer<T>(promise: Promise<T>, ms: number, timedOut: T): 
 
 export interface EngineDependencies {
   readonly store: EngineStore;
+  /** The email port. */
   readonly port: SendPort;
+  /** The SMS port (ticket 13); the unprovisioned one when absent, since no SMS provider exists (#28). */
+  readonly smsPort?: SendPort;
   /** Milliseconds since the epoch. */
   readonly now: () => number;
   readonly newId: () => string;
@@ -100,7 +105,9 @@ export interface EngineDependencies {
   readonly ticks?: TickQueue;
 }
 
-const OBSERVE_CHECKPOINT = "email_observe_checkpoint";
+type Channel = "email" | "sms";
+const OBSERVE_CHECKPOINT: Record<Channel, string> = { email: "email_observe_checkpoint", sms: "sms_observe_checkpoint" };
+const CHANNELS: readonly Channel[] = ["email", "sms"];
 const MAX_PASSES = 50;
 const QUOTA_WAIT = Number.MAX_SAFE_INTEGER;
 
@@ -108,7 +115,9 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 
 export class Engine {
   private readonly store: EngineStore;
-  private readonly port: SendPort;
+  private readonly ports: Record<Channel, SendPort>;
+  /** Each sender account's channel, so its attempts reach the right port. */
+  private readonly channels = new Map<string, Channel>();
   private readonly now: () => number;
   private readonly newId: () => string;
   private readonly rules: Rules;
@@ -130,7 +139,7 @@ export class Engine {
 
   constructor(deps: EngineDependencies) {
     this.store = deps.store;
-    this.port = deps.port;
+    this.ports = { email: deps.port, sms: deps.smsPort ?? new UnprovisionedSmsPort() };
     this.now = deps.now;
     this.newId = deps.newId;
     this.rules = { ...DEFAULT_RULES, ...deps.rules };
@@ -226,6 +235,8 @@ export class Engine {
           .filter((p) => p.finishedAt === null && p.nextStepId !== null && p.dueAt !== null)
           .filter((p) => !s.attempts.some((a) => a.stepId === p.nextStepId && isLive(a)))
           .map((p) => ({ wall: now + ((p.dueAt ?? 0) - leadNow(s.subject.clock, now)), window: windowOf(s, p.trackId), zone: s.lead.zone }));
+        // A track waiting to start after another (ticket 13) starts at its resolved instant; it has no window of its own to wait for then.
+        for (const p of s.tracks) if (p.startedAt === null && p.startAt !== null) due.push({ wall: now + (p.startAt - leadNow(s.subject.clock, now)), window: [], zone: s.lead.zone });
         cached = { version, due };
         this.wakeCache.set(id, cached);
       }
@@ -270,13 +281,28 @@ export class Engine {
   // Accounts.
 
   private async syncAccounts(): Promise<void> {
-    const statuses = await this.bounded(() => this.port.accounts(), null);
-    if (statuses === null) return;
-    await this.store.upsertAccounts(statuses);
-    const known = new Map((await this.store.accounts(this.now())).map((a) => [a.id, a]));
-    for (const s of statuses) {
-      if (s.quotaAvailable && known.get(s.id)?.waitReason === "quota") await this.store.updateAccount(s.id, { waitUntil: null, waitReason: null });
+    for (const channel of CHANNELS) {
+      const statuses = await this.bounded(() => this.ports[channel].accounts(), null);
+      if (statuses === null) continue;
+      await this.store.upsertAccounts(statuses);
+      // An account its provider no longer lists is disconnected: claims for it wait, and Needs attention lists it.
+      await this.store.disconnectUnlisted(channel, statuses.map((a) => a.id));
+      const known = new Map((await this.store.accounts(this.now())).map((a) => [a.id, a]));
+      for (const s of statuses) {
+        this.channels.set(s.id, channel);
+        if (s.quotaAvailable && known.get(s.id)?.waitReason === "quota") await this.store.updateAccount(s.id, { waitUntil: null, waitReason: null });
+      }
     }
+  }
+
+  /** The port an account's sends travel by. */
+  private async portOf(accountId: string): Promise<SendPort> {
+    let channel = this.channels.get(accountId);
+    if (channel === undefined) {
+      for (const a of await this.store.accounts(this.now())) this.channels.set(a.id, a.channel);
+      channel = this.channels.get(accountId) ?? "email";
+    }
+    return this.ports[channel];
   }
 
   // -------------------------------------------------------------------------------------------
@@ -334,28 +360,63 @@ export class Engine {
     return written !== null;
   }
 
-  /** Observes the provider; `ok` is false when it could not be observed. */
+  /**
+   * Observes every provider; `ok` is false when the email provider could not be observed, which is
+   * what a held email reply's running time depends on.
+   */
   private async observe(): Promise<{ changed: boolean; ok: boolean }> {
-    const checkpoint = await this.store.meta(OBSERVE_CHECKPOINT);
-    const observed = await this.bounded(() => this.port.observe(checkpoint), null);
-    if (observed === null) return { changed: false, ok: false };
-    const { events, checkpoint: next } = observed;
     let changed = false;
-    for (const event of events) {
-      changed = (await this.applyEvent(event)) || changed;
-      this.hooks.crashPoint?.("after_observe_event", null);
+    let ok = true;
+    for (const channel of CHANNELS) {
+      const checkpoint = await this.store.meta(OBSERVE_CHECKPOINT[channel]);
+      const observed = await this.bounded(() => this.ports[channel].observe(checkpoint), null);
+      if (observed === null) {
+        if (channel === "email") ok = false;
+        continue;
+      }
+      const { events, checkpoint: next } = observed;
+      for (const event of events) {
+        changed = (await (channel === "sms" ? this.applySmsEvent(event) : this.applyEvent(event))) || changed;
+        this.hooks.crashPoint?.("after_observe_event", null);
+      }
+      if (next !== checkpoint) await this.store.setMeta(OBSERVE_CHECKPOINT[channel], next);
     }
-    if (next !== checkpoint) await this.store.setMeta(OBSERVE_CHECKPOINT, next);
-    return { changed, ok: true };
+    return { changed, ok };
+  }
+
+  /**
+   * An SMS provider's event (ticket 13). A reply carries only the two numbers, so it is recorded on
+   * the subject that owns that conversation (ADR 0003 4.5), never matched by thread or address; it
+   * stops that lead in its campaign, and nothing else. It is applied before its event is kept, so a
+   * crash in between replays it harmlessly. Sends, failures and refusals are matched by their work.
+   */
+  private async applySmsEvent(event: ProviderEvent): Promise<boolean> {
+    const now = this.now();
+    if (event.kind === "reply") {
+      const eventId = `sms:${event.id}`;
+      if (await this.store.replyEvent(eventId)) return false;
+      const owner = this.rules.smsReplyOwner(await this.store.smsBindingsOf(event.from), event.inbox);
+      const reply: ReplyEvent = { eventId, providerRef: null, inbox: event.inbox, address: event.from, atWall: Math.min(event.at, now), receivedWall: now, state: owner ? "resolved" : "unmatched", waitedMs: 0, lastCountedWall: now };
+      if (owner) await this.recordReply([owner], { id: eventId, at: reply.atWall }, "sms");
+      else await this.store.recordAnomaly(null, "a text from a mobile no number of the app's has a conversation with", now);
+      await this.store.recordReplyEvent(reply);
+      return owner !== null;
+    }
+    const w = (await this.store.work(event.key)) ?? (await this.store.workByProviderRef(event.providerRef));
+    if (!w) {
+      await this.store.recordAnomaly(null, `an SMS ${event.kind} event the app cannot match`, now);
+      return false;
+    }
+    return this.applyEvent(event, w);
   }
 
   /** Records a reply on each subject it belongs to. */
-  private async recordReply(subjects: readonly string[], reply: { id: string; at: number }): Promise<boolean> {
+  private async recordReply(subjects: readonly string[], reply: { id: string; at: number }, channel: Channel = "email"): Promise<boolean> {
     const now = this.now();
     let changed = false;
     for (const subjectId of subjects) {
       const written = await this.store.update(subjectId, now, (s) => {
-        const next = this.rules.applyReply(s, { channel: "email", atWall: Math.min(reply.at, now), providerRef: reply.id }, now);
+        const next = this.rules.applyReply(s, { channel, atWall: Math.min(reply.at, now), providerRef: reply.id }, now);
         return same(next, s) ? null : next;
       });
       changed = changed || written !== null;
@@ -417,10 +478,10 @@ export class Engine {
     return true;
   }
 
-  private async applyEvent(event: ProviderEvent): Promise<boolean> {
+  private async applyEvent(event: ProviderEvent, matched: ProviderWork | null = null): Promise<boolean> {
     if (event.kind === "reply") return this.applyReplyEvent(event);
     const now = this.now();
-    const w = (await this.store.workByProviderRef(event.providerRef)) ?? (await this.store.work(event.key));
+    const w = matched ?? (await this.store.workByProviderRef(event.providerRef)) ?? (await this.store.work(event.key));
     if (!w) {
       await this.store.recordAnomaly(null, `a ${event.kind} event the app cannot match`, now);
       return false;
@@ -511,7 +572,8 @@ export class Engine {
         if (!after || after.settled !== null || after.nextLookupWall === null || after.nextLookupWall > this.now()) continue;
       }
       const w = (await this.store.work(due.key)) ?? due;
-      const answer = await this.bounded(() => this.port.lookup(this.ref(w)), { kind: "unknown" as const });
+      const port = await this.portOf(w.accountId);
+      const answer = await this.bounded(() => port.lookup(this.ref(w)), { kind: "unknown" as const });
       this.hooks.crashPoint?.("after_lookup", live?.id ?? null);
       changed = (await this.applyWork(w.subjectId, w.key, { kind: "lookup_answer", answer, now: this.now() })) || changed;
     }
@@ -524,7 +586,8 @@ export class Engine {
       if (!a.withdrawRequested || a.withdrawCalled || (a.state !== "handed" && a.state !== "accepted")) continue;
       const w = await this.store.work(a.idempotencyKey);
       if (!w) continue;
-      const answer = await this.bounded(() => this.port.withdraw(this.ref(w)), "unknown" as const);
+      const port = await this.portOf(w.accountId);
+      const answer = await this.bounded(() => port.withdraw(this.ref(w)), "unknown" as const);
       changed = (await this.applyAttempt(a, { kind: "withdraw_answer", answer, now: this.now() })) || changed;
     }
     return changed;
@@ -549,7 +612,14 @@ export class Engine {
         continue;
       }
       await this.hooks.beforeApplyEvaluation?.(id);
-      await this.store.update(id, now, (current) => (this.rules.versionsMatch(snapshot, current) ? { ...next, accounts: current.accounts } : null));
+      // Shared facts other subjects write are taken as they are now: the accounts, and the SMS
+      // bindings, which another process's first handover to the same mobile may have added since the
+      // snapshot (review bot on 5ca8c5e). An evaluation never removes a binding; one it added is kept.
+      await this.store.update(id, now, (current) =>
+        this.rules.versionsMatch(snapshot, current)
+          ? { ...next, accounts: current.accounts, smsBindings: [...current.smsBindings, ...next.smsBindings.filter((b) => !snapshot.smsBindings.some((x) => x.sender === b.sender && x.recipient === b.recipient) && !current.smsBindings.some((x) => x.sender === b.sender && x.recipient === b.recipient))] }
+          : null,
+      );
       // Written, or discarded as stale: either way another pass follows, so a discarded change is
       // re-evaluated on fresh state in this tick (2.5).
       changed = true;
@@ -578,11 +648,18 @@ export class Engine {
     }
     ready.sort((a, b) => this.rules.claimOrder(a.item, b.item));
     let changed = false;
-    for (const { item, snapshot } of ready) {
+    // A subject's own claims bump its version: its later items in this pass are checked against the
+    // state its claim wrote, not the snapshot it superseded, so a lead with items on two channels
+    // keeps each item's priority turn (found by ticket 13a's generated priority check).
+    const latest = new Map<string, SubjectState>();
+    for (const entry of ready) {
+      const { item } = entry;
+      const snapshot = latest.get(item.subjectId) ?? entry.snapshot;
       // Cheap refusals on the snapshot first; the transaction checks everything again on current state.
       if (this.rules.claimRefusal(snapshot, item, now) !== null) continue;
-      const step = snapshot.campaign.definition.tracks.find((t) => t.id === item.trackId)?.steps.find((s) => s.id === item.stepId);
-      const transport = this.port.transportFor({ threading: step?.threading ?? "new_subject" });
+      const track = snapshot.campaign.definition.tracks.find((t) => t.id === item.trackId);
+      const step = track?.steps.find((s) => s.id === item.stepId);
+      const transport = this.ports[track?.channel === "sms" ? "sms" : "email"].transportFor({ threading: step?.threading ?? "new_subject" });
       // A step the port cannot send yet is not claimed: it waits, and nothing is sent for it.
       if (transport.available === false) continue;
       const attemptId = this.newId();
@@ -595,6 +672,8 @@ export class Engine {
       });
       if (written) {
         changed = true;
+        latest.set(item.subjectId, written);
+        await this.hooks.afterClaim?.(attemptId);
         this.hooks.crashPoint?.("after_claim", attemptId);
       }
     }
@@ -652,11 +731,13 @@ export class Engine {
     if (a.presendCheckedWall !== null && a.presendCheckedWall >= now - ENGINE_PARAMS.PRESEND_MAX_AGE && !a.presendFoundReply) return true;
     const subject = await this.store.subject(a.subjectId, now);
     const threadRefs = (subject?.work ?? []).flatMap((w) => (w.providerRef === null ? [] : [w.providerRef]));
-    const result = await this.bounded(() => this.port.presendCheck({ sender: a.accountId, destination: a.destination, threadRefs }), { kind: "unavailable" as const });
+    const port = await this.portOf(a.accountId);
+    const channel = port === this.ports.sms ? "sms" : "email";
+    const result = await this.bounded(() => port.presendCheck({ sender: a.accountId, destination: a.destination, threadRefs }), { kind: "unavailable" as const });
     if (result.kind === "unavailable") return false;
     await this.store.update(a.subjectId, now, (s) => {
       let next: SubjectState = { ...s, attempts: s.attempts.map((x) => (x.id === a.id ? { ...x, presendCheckedWall: now, presendFoundReply: result.kind === "reply" } : x)) };
-      if (result.kind === "reply") next = this.rules.applyReply(next, { channel: "email", atWall: Math.min(result.at, now), providerRef: result.providerRef }, now);
+      if (result.kind === "reply") next = this.rules.applyReply(next, { channel, atWall: Math.min(result.at, now), providerRef: result.providerRef }, now);
       return next;
     });
     this.hooks.crashPoint?.("after_presend", a.id);
@@ -699,6 +780,7 @@ export class Engine {
     authorize: (now: number) => { authorized: Attempt | null; onlySlot: boolean; skip?: boolean },
     crashPoint: CrashPoint,
   ): Promise<{ outcome: "handed" | "withdrawn" | "waiting" | "skip"; answer?: CallAnswer; authorized?: Attempt }> {
+    const port = await this.portOf(a.accountId);
     return this.locks.run(a.accountId, async () => {
       const { authorized, onlySlot, skip } = authorize(this.now());
       if (!authorized) return { outcome: skip ? "skip" : onlySlot ? "waiting" : "withdrawn" };
@@ -709,7 +791,7 @@ export class Engine {
       this.locks.calling.add(a.id);
       let pending: Promise<CallAnswer>;
       try {
-        pending = this.port.handover(request);
+        pending = port.handover(request);
       } catch {
         pending = Promise.resolve({ kind: "unknown" });
       }

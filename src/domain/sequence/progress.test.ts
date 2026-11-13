@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { attempt, calledWork, DAY, definition, H, handed, MONDAY_9, step, subjectState, withAttempts } from "../../../test/support/sequence-state.ts";
+import { attempt, calledWork, DAY, definition, H, handed, MONDAY_9, MOBILE, multiTrackState, step, subjectState, track, withAttempts } from "../../../test/support/sequence-state.ts";
 import { leadNow } from "./clock.ts";
 import { applyBadDestination, applyReply, applyToAttempt, applyToWork, deriveStatus, enterMain, evaluate, runs } from "./progress.ts";
 import type { ProviderWork, SubjectState } from "./state.ts";
@@ -43,7 +43,7 @@ describe("launch and the first step (ADR 0003 2.4, 2.6)", () => {
   });
 
   test("a lead with no email ends with no usable channel at launch, before its track is started", () => {
-    const s = launched(subjectState({ lead: { ...subjectState().lead, details: [{ id: "d-phone", channel: "phone", ownEmail: false, value: "+447700900101", bad: false, order: 1 }], resolved: {} } }));
+    const s = launched(subjectState({ lead: { ...subjectState().lead, details: [{ id: "d-phone", channel: "phone", ownEmail: false, mobile: false, key: "+447700900101", value: "+447700900101", bad: false, order: 1 }], resolved: {} } }));
     expect(s.subject.ended).toBe("finished_no_usable_channel");
     expect(s.tracks).toEqual([]);
     expect(s.subject.clock.frozenSince).toBe(MONDAY_9);
@@ -51,7 +51,7 @@ describe("launch and the first step (ADR 0003 2.4, 2.6)", () => {
 
   test("the newest good email is the track's destination", () => {
     const base = subjectState();
-    const details = [...base.lead.details, { id: "d-new", channel: "email" as const, ownEmail: true, value: "p.oneil@mail.example", bad: false, order: 2 }];
+    const details = [...base.lead.details, { id: "d-new", channel: "email" as const, ownEmail: true, mobile: false, key: "p.oneil@mail.example", value: "p.oneil@mail.example", bad: false, order: 2 }];
     const s = launched({ ...base, lead: { ...base.lead, details, resolved: { ...base.lead.resolved, "d-new": { liveId: "d-new", bad: false, owned: true } } } });
     expect(s.tracks[0]?.destinationDetailId).toBe("d-new");
   });
@@ -120,7 +120,7 @@ describe("sending (ADR 0003 2.4)", () => {
       ...base,
       lead: {
         ...base.lead,
-        details: [...base.lead.details, { id: "d-old", channel: "email" as const, ownEmail: true, value: "old@harbour.example", bad: false, order: 0 }],
+        details: [...base.lead.details, { id: "d-old", channel: "email" as const, ownEmail: true, mobile: false, key: "old@harbour.example", value: "old@harbour.example", bad: false, order: 0 }],
         resolved: { ...base.lead.resolved, "d-old": { liveId: "d-old", bad: false, owned: true } },
       },
     };
@@ -270,5 +270,99 @@ describe("provider work is one record: settlement, release, the user's mark and 
     const after = applyToWork(s, "a-1", { kind: "lookup_answer", answer: { kind: "not-sent" }, now: MONDAY_9 + H }, MONDAY_9 + H, opts).state;
     expect(after.attempts[0]).toMatchObject({ state: "withdrawn", endedBy: "lookup_not_sent" });
     expect(after.work[0]).toMatchObject({ settled: null, unresolvedSince: MONDAY_9 + H });
+  });
+});
+
+describe("tracks together and after, on email and SMS (ADR 0003 2.6, ticket 13)", () => {
+  const opener = (id: string) => step(id, { threading: "new_subject" });
+  const text = (id: string, waitDays = 0) => step(id, { subject: "", body: "Hi {{first_name|there}}", waitDays });
+  const after = (trackId: string, delayDays: number) => ({ kind: "after" as const, trackId, delayDays });
+  /** The work of attempt `id` on `stepId` of `trackId`, sent at `t`. */
+  function sent(s: SubjectState, id: string, trackId: string, stepId: string, accountId: string, destinationDetailId: string, t: number, now = t + 1000): SubjectState {
+    const live = withAttempts(s, [...s.attempts, handed({ id, idempotencyKey: id, trackId, stepId, accountId, destinationDetailId, destination: "x", state: "accepted" })], s.work);
+    return applyToWork(live, id, { kind: "sent_observed", providerTime: t, providerRef: `p-${id}` }, now, opts).state;
+  }
+
+  test("tracks connected together start at launch; an SMS track goes to the lead's own mobile", () => {
+    const s = launched(multiTrackState([track("t1", "email", [opener("s1")]), track("t2", "sms", [text("m1"), text("m2", 1)])]));
+    expect(s.tracks).toEqual([
+      expect.objectContaining({ trackId: "t1", startedAt: 0, destinationDetailId: "d-email", nextStepId: "s1", dueAt: 0 }),
+      expect.objectContaining({ trackId: "t2", startedAt: 0, destinationDetailId: "d-mobile", nextStepId: "m1", dueAt: 0 }),
+    ]);
+  });
+
+  test("a track after another starts its delay in calendar days after the earlier track finished all its steps", () => {
+    const s = launched(multiTrackState([track("t1", "email", [opener("s1")]), track("t2", "sms", [text("m1")], after("t1", 2))]));
+    expect(s.tracks.map((t) => t.trackId)).toEqual(["t1"]);
+    // The email track's only step is sent Monday 10:00, so it finishes then; two days later is Wednesday 00:00 London.
+    const done = sent(s, "a-1", "t1", "s1", "inbox-a", "d-email", MONDAY_9 + H);
+    const wednesday = Date.parse("2026-11-04T00:00:00Z");
+    expect(done.tracks.find((t) => t.trackId === "t2")).toMatchObject({ startAt: wednesday - MONDAY_9, startBasisAt: H, startBasisWall: MONDAY_9 + H, startedAt: null });
+    expect(done.subject.ended).toBeNull();
+    const started = evaluate(done, wednesday);
+    expect(started.tracks.find((t) => t.trackId === "t2")).toMatchObject({ startedAt: wednesday - MONDAY_9, nextStepId: "m1", dueWall: wednesday });
+  });
+
+  test("a missing channel skips its track at its start, and the track after it counts its delay from then", () => {
+    const s = launched(multiTrackState([track("t1", "sms", [text("m1")]), track("t2", "email", [opener("s1")], after("t1", 1))], "email"));
+    expect(s.tracks[0]).toMatchObject({ trackId: "t1", startedAt: 0, finishedAt: 0, finishReason: "skipped_missing_channel" });
+    expect(s.tracks[1]).toMatchObject({ trackId: "t2", startAt: Date.parse("2026-11-03T00:00:00Z") - MONDAY_9, startBasisWall: MONDAY_9 });
+    expect(s.subject.ended).toBeNull();
+  });
+
+  test("a skipped track releases a chain at once when its delays are zero", () => {
+    const s = launched(multiTrackState([track("t1", "sms", [text("m1")]), track("t2", "sms", [text("m2")], after("t1", 0)), track("t3", "email", [opener("s1")], after("t2", 0))], "email"));
+    expect(s.tracks.map((t) => [t.trackId, t.finishReason, t.startedAt])).toEqual([["t1", "skipped_missing_channel", 0], ["t2", "skipped_missing_channel", 0], ["t3", null, 0]]);
+    expect(s.tracks[2]).toMatchObject({ nextStepId: "s1", dueAt: 0 });
+  });
+
+  test("an invalid SMS number marks it bad and fails its track; the track after it is released after its delay", () => {
+    const s = launched(multiTrackState([track("t1", "sms", [text("m1"), text("m2", 1)]), track("t2", "email", [opener("s1")], after("t1", 1))]));
+    const live = withAttempts(s, [handed({ trackId: "t1", stepId: "m1", accountId: "+447700900001", destinationDetailId: "d-mobile", destination: MOBILE.key })]);
+    const after1 = applyToAttempt(live, "a-1", { kind: "call_answer", answer: { kind: "rejected", reason: "invalid_destination" }, now: MONDAY_9 + H }, MONDAY_9 + H).state;
+    expect(after1.markBad).toEqual(["d-mobile"]);
+    expect(after1.results).toEqual([expect.objectContaining({ stepId: "m1", result: "failed", reason: "invalid number" })]);
+    expect(after1.tracks[0]).toMatchObject({ finishReason: "failed_bad_destination", finishedAt: H });
+    expect(after1.tracks[1]).toMatchObject({ trackId: "t2", startAt: Date.parse("2026-11-03T00:00:00Z") - MONDAY_9 });
+    expect(after1.subject.ended).toBeNull();
+  });
+
+  test("a lead whose last usable channel fails ends with no usable channel, whatever work is left", () => {
+    const s = launched(multiTrackState([track("t1", "sms", [text("m1")]), track("t2", "email", [opener("s1")], after("t1", 3))], "mobile"));
+    const bounced = applyBadDestination(withAttempts(s, [handed({ trackId: "t1", stepId: "m1", accountId: "+447700900001", destinationDetailId: "d-mobile", state: "sent" })], [calledWork({ trackId: "t1", stepId: "m1", accountId: "+447700900001", settled: "sent" })]), handed({ trackId: "t1", stepId: "m1", destinationDetailId: "d-mobile" }), MONDAY_9 + H);
+    expect(bounced.subject.ended).toBe("finished_no_usable_channel");
+  });
+
+  test("the sequence is finished only when every track has finished", () => {
+    const s = launched(multiTrackState([track("t1", "email", [opener("s1")]), track("t2", "sms", [text("m1"), text("m2", 2)])]));
+    const emailDone = sent(s, "a-1", "t1", "s1", "inbox-a", "d-email", MONDAY_9 + 60_000);
+    expect(emailDone.tracks[0]?.finishReason).toBe("completed");
+    expect(emailDone.subject.ended).toBeNull();
+    const m1 = sent(emailDone, "a-2", "t2", "m1", "+447700900001", "d-mobile", MONDAY_9 + 2 * 60_000);
+    const m2 = sent(evaluate(m1, MONDAY_9 + 3 * DAY), "a-3", "t2", "m2", "+447700900001", "d-mobile", MONDAY_9 + 3 * DAY);
+    expect(m2.subject.ended).toBe("sequence_finished_no_response");
+  });
+
+  test("a lead with only an email in an SMS-only campaign ends with no usable channel at launch", () => {
+    const s = launched(multiTrackState([track("t1", "sms", [text("m1")])], "email"));
+    expect(s.subject.ended).toBe("finished_no_usable_channel");
+    expect(s.tracks).toEqual([]);
+  });
+
+  test("a company lead has no SMS channel: a main line is not a mobile, so its SMS track is skipped", () => {
+    const base = multiTrackState([track("t1", "sms", [text("m1")]), track("t2", "email", [opener("s1")])], "email");
+    const mainLine = { id: "d-line", channel: "phone" as const, ownEmail: false, mobile: false, key: "+442079460101", value: "+44 20 7946 0101", bad: false, order: 3 };
+    const s = launched({ ...base, lead: { ...base.lead, details: [...base.lead.details, mainLine], resolved: { ...base.lead.resolved, "d-line": { liveId: "d-line", bad: false, owned: false } } } });
+    expect(s.tracks[0]).toMatchObject({ finishReason: "skipped_missing_channel" });
+  });
+
+  test("an SMS reply stops every track of the lead, the email track's live attempt included", () => {
+    const s = launched(multiTrackState([track("t1", "email", [opener("s1"), step("s2", { waitDays: 2 })]), track("t2", "sms", [text("m1")])]));
+    const live = withAttempts(s, [handed({ state: "accepted" })]);
+    const replied = applyReply(live, { channel: "sms", atWall: MONDAY_9 + H, providerRef: "sms-r1" }, MONDAY_9 + H);
+    expect(replied.subject.ended).toBe("replied");
+    expect(replied.replies).toEqual([{ channel: "sms", atWall: MONDAY_9 + H, providerRef: "sms-r1" }]);
+    expect(replied.attempts[0]).toMatchObject({ withdrawRequested: true });
+    expect(deriveStatus(replied)).toBe("replied");
   });
 });
