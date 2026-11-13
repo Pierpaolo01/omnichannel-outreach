@@ -106,7 +106,8 @@ function CampaignRow({ campaign }: { campaign: CampaignListItem }) {
             No sequence yet
           </p>
         ) : (
-          <p className="mt-2.5 flex items-center gap-1.5 text-[13px] text-muted">
+          // One icon per track; since ticket 13b a campaign can have any number, so the row wraps.
+          <p className="mt-2.5 flex flex-wrap items-center gap-1.5 text-[13px] text-muted">
             {campaign.sequence.tracks.map((channel, i) => (
               <span key={i} className="flex items-center gap-1.5">
                 {i > 0 && <span className="w-2 border-t border-line-strong" aria-hidden="true" />}
