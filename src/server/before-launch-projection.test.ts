@@ -359,6 +359,18 @@ describe("every inbox of every simulated campaign as the engine sees it (PR 41 c
     expect(out.view.load).toMatchObject({ daysUntilAllStart: 2, accounts: [expect.objectContaining({ id: "a", busiestDay: 2 })] });
   });
 
+  test("the reviewer's second case: the older lead's other inbox has room but is unhealthy, so it takes the shared inbox and the second new lead goes the next day", async () => {
+    // Inbox a sends 2 a day; b sends 30 but cannot send. The older campaign may use either, this one only a.
+    const start = Date.parse("2026-11-09T07:00:00Z");
+    const nine = [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 }));
+    const inbox = (id: string, capacity: number): FakeAccount => ({ id, capacity, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" });
+    const out = await compareWith({ accounts: [inbox("a", 2), inbox("b", 30)], start, a: track(["a", "b"], nine, [0]), b: track(["a"], nine, [0]), zones: { a: ["UTC"], b: ["UTC", "UTC"] }, unavailable: [{ id: "b", reason: "unhealthy" }], gapMs: MIN });
+    expect(out.launched).toBe(true);
+    expect(out.projected).toEqual(out.actual);
+    expect(out.actual.map((x) => new Date(x.at).toISOString().slice(0, 10))).toEqual(["2026-11-09", "2026-11-10"]);
+    expect(out.view.load).toMatchObject({ daysUntilAllStart: 2, accounts: [expect.objectContaining({ id: "a", busiestDay: 1 })] });
+  });
+
   const SEEDS = Number(process.env["PROJECTION_SEEDS"] ?? 40);
   for (const seed of Array.from({ length: SEEDS }, (_, i) => 9000 + i)) {
     test(`generated: each campaign its own inboxes, some unavailable, case ${seed}`, async () => {
