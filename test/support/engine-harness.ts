@@ -188,9 +188,17 @@ export class EngineHarness {
   }
 
   /** Advances the clock to `target`, ticking at every instant the engine or the provider has work. */
+  /** A wall-clock instant (Date.now) after which every advance stops at once: a run's time budget. */
+  stopAt: number | null = null;
+
+  /** Whether the run's time budget is spent. */
+  get stopped(): boolean {
+    return this.stopAt !== null && Date.now() > this.stopAt;
+  }
+
   async advanceTo(target: number, onInstant?: () => Promise<void>): Promise<void> {
     await this.tick();
-    for (let guard = 0; guard < 100_000 && this.clock < target; guard++) {
+    for (let guard = 0; guard < 100_000 && this.clock < target && !this.stopped; guard++) {
       const wakes = [await this.engine.nextWakeAt(), this.provider.nextActivityAt(), target].filter((t): t is number => t !== null && t > this.clock);
       this.clock = Math.min(...wakes);
       await this.tick();

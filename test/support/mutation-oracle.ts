@@ -11,6 +11,8 @@ const MAX_SEEDS = 60;
 const SEARCH_BUDGET_MS = 6 * 60_000;
 /** A single run a broken engine makes pathological stops this long after the budget. */
 const RUN_GRACE_MS = 3 * 60_000;
+/** `pnpm check` allows a mutation's recorded seed this long to kill it. */
+const CHECK_SEED_MS = 30_000;
 
 /** One line per mutation in the search's log and, in CI, the job summary: the seed that kills it, or none. */
 function report(line: string): void {
@@ -53,11 +55,13 @@ export function oracle(names: readonly string[]): void {
       if (mutation.seed === null && !mutation.regression) throw new Error(`mutation "${name}" has neither a known killing seed nor a regression`);
       const breaks = (problems: readonly string[]) => problems.some((p) => invariantsOf(p).includes(mutation.invariant));
       if (!FULL_SEARCH) {
-        if (mutation.seed !== null) {
-          const { problems } = await runSequence(SEED + mutation.seed, { rules: mutation.rules, unlimited: mutation.unlimited ?? false, drain: true });
-          expect(problems.filter((p) => invariantsOf(p).includes(mutation.invariant)), `seed ${SEED + mutation.seed} no longer breaks invariant ${mutation.invariant}; run the sequence-search workflow and update its seed. Problems: ${problems.join("; ")}`).not.toEqual([]);
-        }
+        // The fast named regression first; the recorded seed under a deadline, so a seed that
+        // became slow fails here instead of stretching the check.
         if (mutation.regression) expect(await regressionFails(name, mutation), `regression "${mutation.regression}" passes under "${name}"`).toBe(true);
+        if (mutation.seed !== null) {
+          const { problems } = await runSequence(SEED + mutation.seed, { rules: mutation.rules, unlimited: mutation.unlimited ?? false, drain: true, deadline: Date.now() + CHECK_SEED_MS });
+          expect(problems.filter((p) => invariantsOf(p).includes(mutation.invariant)), `seed ${SEED + mutation.seed} no longer breaks invariant ${mutation.invariant} within ${CHECK_SEED_MS / 1000} s; run the sequence-search workflow and update its seed. Problems: ${problems.join("; ")}`).not.toEqual([]);
+        }
         return;
       }
       // The search: seeds in order, each as generated and unlimited, within a time budget, so no
@@ -66,7 +70,7 @@ export function oracle(names: readonly string[]): void {
       let caught: string | null = null;
       // The recorded killing seed first, so the budget can never run out before a known seed.
       if (mutation.seed !== null) {
-        const { problems } = await runSequence(SEED + mutation.seed, { rules: mutation.rules, unlimited: mutation.unlimited ?? false, drain: true });
+        const { problems } = await runSequence(SEED + mutation.seed, { rules: mutation.rules, unlimited: mutation.unlimited ?? false, drain: true, deadline: started + SEARCH_BUDGET_MS });
         if (breaks(problems)) caught = `recorded seed offset ${mutation.seed}`;
         else report(`recorded seed offset ${mutation.seed} no longer breaks invariant ${mutation.invariant} for "${name}"`);
       }

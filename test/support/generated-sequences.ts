@@ -224,6 +224,8 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
   });
 
   const h = new EngineHarness({ start, accounts, modes, random: random(seed ^ 0x5eed), engine: { waitFor: quickWait }, ...(options.rules ? { rules: options.rules } : {}) });
+  // The search's time budget bounds every advance, the drain's included, so no run can postpone it.
+  h.stopAt = options.deadline ?? null;
   const fake = h.fake;
   fake.withdrawAnswers = unlimited ? "honest" : profile === "lagging-capacity" ? "unknown-sends" : pick(["honest", "unknown-cancels", "unknown-sends"] as const);
   fake.overlapMs = pick([5, 15, 60]) * MINUTE;
@@ -587,7 +589,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     }
     await checkAll(false);
     if (problems.length > 0) break;
-    if (options.deadline !== undefined && Date.now() > options.deadline) return { problems, stats: { sends: fake.deliveryLog.length, calls: fake.handoverLog.length, crashes: h.crashes.length, subjects: subjects.size, ticks: h.ticks, modes, features: ["stopped-at-deadline"] } };
+    if (h.stopped) return { problems, stats: { sends: fake.deliveryLog.length, calls: fake.handoverLog.length, crashes: h.crashes.length, subjects: subjects.size, ticks: h.ticks, modes, features: ["stopped-at-deadline"] } };
   }
 
   // Drain: every account restored, no new events, time passes.
@@ -620,7 +622,8 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       if (!waiting) break;
       await h.advanceTo(h.clock + 7 * DAY);
     }
-    await checkAll(true);
+    // A run stopped by its budget reports what it found before, not an unfinished drain.
+    if (!h.stopped) await checkAll(true);
   }
 
   const finalAttempts = (await Promise.all([...subjects.keys()].map((id) => h.store.engine.subject(id, h.clock)))).flatMap((x) => x?.attempts ?? []);

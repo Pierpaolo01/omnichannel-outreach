@@ -296,6 +296,9 @@ const RULES: Record<string, Partial<Rules>> = {
       if (!settled || !claimed || claimed.idempotencyKey !== claimed.id) return out;
       return { ...out, attempts: out.attempts.map((x) => (x.id === claimed.id ? { ...x, idempotencyKey: settled.key } : x)), work: out.work.filter((w) => w.key !== claimed.id) };
     },
+    // The broken engine does not refuse the handover of settled work either, so the inheritance
+    // reaches the provider instead of being claimed and withdrawn over and over.
+    handoverFailures: (s, a, acc, now) => R.handoverFailures(s, a, acc, now).filter((n) => n !== 15),
   },
 
   // Review bot on 0dc88ab: a claimed attempt outlives its work's settlement and is handed over.
