@@ -7,6 +7,17 @@ export const SEED = 20261113;
 export const FULL_SEARCH = process.env["SEQUENCE_SEARCH"] === "full";
 
 /**
+ * The search's shard, "i/n" (1-based) in `SEQUENCE_SHARD`: each shard runs every n-th seed and every
+ * n-th mutation, so every shard does a similar share and finishes well inside the job's timeout.
+ */
+const SHARD = /^(\d+)\/(\d+)$/.exec(process.env["SEQUENCE_SHARD"] ?? "");
+export function inShard(index: number): boolean {
+  if (!FULL_SEARCH || !SHARD) return true;
+  const [i, n] = [Number(SHARD[1]), Number(SHARD[2])];
+  return index % n === i - 1;
+}
+
+/**
  * The fixed seeds `pnpm check` runs, as offsets from SEED: together they exercise every fake mode,
  * crashes and transient errors at the outbox stages, both reply kinds, the user's marks, hanging
  * ports, clock advances between authorization and call, default gaps, k = 2, two campaigns and the
@@ -25,9 +36,9 @@ const CHUNK = 10;
  * range. The checks are described in generated-sequences.ts.
  */
 export function generatedChunks(from: number, to: number): void {
-  const offsets = FULL_SEARCH ? Array.from({ length: to - from }, (_, i) => from + i) : FIXED_SEEDS.filter((o) => o >= from && o < to);
+  const offsets = FULL_SEARCH ? Array.from({ length: to - from }, (_, i) => from + i).filter(inShard) : FIXED_SEEDS.filter((o) => o >= from && o < to);
   describe(`generated sequences keep the engine's invariants (${FULL_SEARCH ? "full search" : "fixed seeds"}, ${SEED + from} to ${SEED + to - 1})`, () => {
-    if (offsets.length === 0) test.skip("no fixed seed in this range", () => undefined);
+    if (offsets.length === 0) test.skip("no seed of this run in this range", () => undefined);
     for (let i = 0; i < offsets.length; i += CHUNK) {
       const chunk = offsets.slice(i, i + CHUNK);
       test(`seeds ${chunk.map((o) => SEED + o).join(", ")}`, async () => {
