@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { CampaignDefinition, SequenceView } from "../../shared/api.ts";
-import { NoAnswer, SaveQueue, type SaveStatus } from "./saveQueue.ts";
+import { NoAnswer, SaveQueue, draftProblems, type SaveStatus } from "./saveQueue.ts";
 
 /**
  * The editor's one ordered path to the server (review: useSequence.ts:76 and :133). Every save,
@@ -368,3 +368,26 @@ describe("PR 41 council, items 3, 4, 5 and 11", () => {
 });
 
 const subject = (d: CampaignDefinition) => d.tracks[0]?.steps[0]?.subject;
+
+describe("a draft that cannot be saved says which track and message (ticket 13b)", () => {
+  const week = [{ day: 1, start: 9, end: 17 }];
+  const track = (id: string, channel: "email" | "sms", waits: number[]): CampaignDefinition["tracks"][number] => ({
+    id,
+    channel,
+    branch: "main",
+    window: week,
+    start: { kind: "entry" },
+    removed: false,
+    steps: waits.map((w, i) => ({ id: `${id}-${i}`, waitDays: w, subject: channel === "email" && i === 0 ? "Hi" : "", body: "x", threading: "new_subject", removed: false })),
+  });
+  const d = (...tracks: CampaignDefinition["tracks"]): CampaignDefinition => ({ timezone: "Europe/London", callSkipLimitDays: 2, emailPool: [], smsPool: [], tracks });
+
+  test("with one track, its message names it as before; a text is a text", () => {
+    expect(draftProblems(d(track("e", "email", [0, Number.NaN])))).toEqual(["Email 2's wait is a whole number of days, 0 or more."]);
+    expect(draftProblems(d(track("m", "sms", [0, -1])))).toEqual(["Text 2's wait is a whole number of days, 0 or more."]);
+  });
+
+  test("with several tracks, each message names its track by channel and order", () => {
+    expect(draftProblems(d(track("e", "email", [0]), track("m1", "sms", [0]), track("m2", "sms", [0, 1.5])))).toEqual(["SMS track 2: Text 2's wait is a whole number of days, 0 or more."]);
+  });
+});

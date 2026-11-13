@@ -24,6 +24,7 @@
  */
 import type { CampaignDefinition, SequenceView } from "../../shared/api.ts";
 import { DEFINITION_MAX_BYTES, STEP_BODY_MAX, STEP_SUBJECT_MAX } from "../../shared/limits.ts";
+import { trackLabel } from "../../shared/track-label.ts";
 
 export type SaveStatus =
   | { readonly kind: "idle" | "saving" | "saved" }
@@ -83,20 +84,25 @@ export const saveSize = (def: CampaignDefinition): number => new TextEncoder().e
 /** Problems the server would refuse with, caught before sending so the user sees them in place. */
 export function draftProblems(def: CampaignDefinition): string[] {
   const problems: string[] = [];
-  for (const track of def.tracks.filter((t) => !t.removed)) {
-    if (track.window.length === 0) problems.push("Choose at least one sending day.");
-    if (track.window.some((w) => w.start === w.end)) problems.push("The sending window starts and ends at the same hour.");
+  const live = def.tracks.filter((t) => !t.removed);
+  for (const track of live) {
+    // Named by its own track and channel when the campaign has several tracks (ticket 13b).
+    const where = live.length > 1 ? `${trackLabel(def, track).label}: ` : "";
+    const noun = track.channel === "sms" ? "Text" : track.channel === "call" ? "Call" : "Email";
+    const first = track.channel === "sms" ? "text" : "email";
+    if (track.window.length === 0) problems.push(`${where}Choose at least one sending day.`);
+    if (track.window.some((w) => w.start === w.end)) problems.push(`${where}The sending window starts and ends at the same hour.`);
     track.steps
       .filter((s) => !s.removed)
       .forEach((s, i) => {
-        if (i === 0 && s.waitDays !== 0) problems.push("Email 1 is the first email, so it has no wait.");
-        if (i === 0 && s.threading === "continue_thread") problems.push("Email 1 is the first email, so it needs its own subject.");
-        if (i > 0 && !(Number.isInteger(s.waitDays) && s.waitDays >= 0)) problems.push(`Email ${i + 1}'s wait is a whole number of days, 0 or more.`);
-        if (s.body.length > STEP_BODY_MAX) problems.push(`Email ${i + 1} is longer than ${STEP_BODY_MAX.toLocaleString("en-GB")} characters.`);
-        if (s.subject.length > STEP_SUBJECT_MAX) problems.push(`Email ${i + 1}'s subject is longer than ${STEP_SUBJECT_MAX.toLocaleString("en-GB")} characters.`);
+        if (i === 0 && s.waitDays !== 0) problems.push(`${where}${noun} 1 is the first ${first}, so it has no wait.`);
+        if (i === 0 && track.channel === "email" && s.threading === "continue_thread") problems.push(`${where}Email 1 is the first email, so it needs its own subject.`);
+        if (i > 0 && !(Number.isInteger(s.waitDays) && s.waitDays >= 0)) problems.push(`${where}${noun} ${i + 1}'s wait is a whole number of days, 0 or more.`);
+        if (s.body.length > STEP_BODY_MAX) problems.push(`${where}${noun} ${i + 1} is longer than ${STEP_BODY_MAX.toLocaleString("en-GB")} characters.`);
+        if (s.subject.length > STEP_SUBJECT_MAX) problems.push(`${where}${noun} ${i + 1}'s subject is longer than ${STEP_SUBJECT_MAX.toLocaleString("en-GB")} characters.`);
       });
   }
-  if (saveSize(def) > DEFINITION_MAX_BYTES) problems.push(`The sequence is larger than ${DEFINITION_MAX_BYTES / 1024} KB, so it cannot be saved safely. Shorten the emails.`);
+  if (saveSize(def) > DEFINITION_MAX_BYTES) problems.push(`The sequence is larger than ${DEFINITION_MAX_BYTES / 1024} KB, so it cannot be saved safely. Shorten the messages.`);
   return problems;
 }
 
