@@ -50,4 +50,14 @@ describe("each blocker kind names its track and channel", () => {
       "Email track 2 has no connected sender inbox",
     ]);
   });
+
+  test("an SMS track with no number says why from the provider's status, never fixed text (council on 10121d3, item 3)", () => {
+    const d = def([track("m", "sms", "Hi.")], { sms: [] });
+    const none = { provider: "none" as const, message: "", numbers: [] };
+    const some = { provider: "test-simulator" as const, message: "", numbers: [{ id: "+447700900001", label: "Simulated SMS (not a provider) +44 7700 900001", healthy: true, capacity: 30, usedToday: 0 }] };
+    const blocker = launchCheck(d, [{}], senders).blockers[0]!;
+    expect(describeBlocker(blocker, d, none).detail).toBe("It can’t send until a number is connected. No SMS provider is set up, so no number can be connected yet. Remove the track to launch without it.");
+    expect(describeBlocker(blocker, d, some).detail).toBe("It can’t send until a number is connected. The SMS provider has numbers, but none is in this campaign’s SMS senders. Remove the track to launch without it.");
+    expect(describeBlocker(blocker, d, null).detail).toBe("It can’t send until a number is connected. Remove the track to launch without it.");
+  });
 });

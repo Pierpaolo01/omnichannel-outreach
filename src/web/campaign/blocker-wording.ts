@@ -4,8 +4,9 @@
  * (`trackId`, or for a merge field every message that uses it with no fallback), and by that track's
  * own channel and order ("the SMS track", "email track 2"), never by its position or a default channel.
  */
-import type { CampaignDefinition, LaunchBlocker, TrackDefinition } from "../../shared/api.ts";
+import type { CampaignDefinition, LaunchBlocker, SmsProviderStatus, TrackDefinition } from "../../shared/api.ts";
 import { fieldLabel, STEP_NOUN, trackName } from "./model.ts";
+import { whyNoSmsNumber } from "./sms-wording.ts";
 
 export interface BlockerAction {
   readonly label: string;
@@ -23,7 +24,7 @@ const capitalise = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const and = (items: readonly string[]): string => (items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items.at(-1) ?? ""}`);
 const channelOf = (track: TrackDefinition | undefined): "email" | "sms" | "call" => track?.channel ?? "email";
 
-export function describeBlocker(b: LaunchBlocker, def: CampaignDefinition): BlockerWording {
+export function describeBlocker(b: LaunchBlocker, def: CampaignDefinition, sms: SmsProviderStatus | null = null): BlockerWording {
   const trackOf = (id: string) => def.tracks.find((t) => t.id === id);
   const named = (track: TrackDefinition | undefined) => (track ? trackName(def, track) : "a track");
 
@@ -54,7 +55,7 @@ export function describeBlocker(b: LaunchBlocker, def: CampaignDefinition): Bloc
   }
   return {
     title: `${name} has no connected sender ${channel === "sms" ? "number" : "inbox"}`,
-    detail: channel === "sms" ? "It can’t send until a number is connected, and no SMS provider is set up yet. Remove the track to launch without it." : "It can’t send until an inbox is connected.",
+    detail: channel === "sms" ? ["It can’t send until a number is connected.", whyNoSmsNumber(sms), "Remove the track to launch without it."].filter((x) => x !== null).join(" ") : "It can’t send until an inbox is connected.",
     actions: [{ label: "Open track", trackId: b.trackId }],
   };
 }

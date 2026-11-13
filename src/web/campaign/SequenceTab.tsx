@@ -7,6 +7,7 @@ import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
 import { campaignPath } from "../pages/CampaignPage.tsx";
 import { arrange, type ArrangeOperation } from "./arrangement.ts";
+import { whyNoSmsNumber } from "./sms-wording.ts";
 import {
   STEP_NOUN,
   WEEK,
@@ -965,11 +966,11 @@ function StartsControl({ track, editor }: { track: TrackDefinition; editor: Sequ
 
 const capitalise = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
-/** Why no SMS number is connected, from GET /api/sms-provider: the running app has no SMS provider. */
+/** Why no SMS number is connected, from GET /api/sms-provider, in the one wording the launch blocker uses too. */
 function SmsProviderReason() {
   const { result } = useApi<SmsProviderStatus>("/api/sms-provider");
-  if (result.state !== "ready" || result.data.provider !== "none") return null;
-  return <div className="text-[12.5px] text-ink-2">No SMS provider is set up, so no number can be connected yet.</div>;
+  const why = whyNoSmsNumber(result.state === "ready" ? result.data : null);
+  return why ? <div className="text-[12.5px] text-ink-2">{why}</div> : null;
 }
 
 /** One line on why no inbox is connected, from GET /api/email-provider; nothing if it is unknown. */

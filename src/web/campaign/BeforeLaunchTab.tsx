@@ -1,6 +1,6 @@
 import { useId, useRef, useState, type ReactNode } from "react";
 import { Link, useLocation } from "wouter";
-import type { BeforeLaunchView, CampaignDefinition, CopyPreview, CopySegment, LoadProjectionView, PreviewLead } from "../../shared/api.ts";
+import type { BeforeLaunchView, CampaignDefinition, CopyPreview, CopySegment, LoadProjectionView, PreviewLead, SmsProviderStatus } from "../../shared/api.ts";
 import { useApi } from "../api.ts";
 import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
@@ -143,6 +143,7 @@ function Blockers({ campaignId, editor }: { campaignId: string; editor: Sequence
   const [, navigate] = useLocation();
   const { blockers, nothingToLaunch } = editor.view.launch;
   const def = editor.view.definition;
+  const sms = useApi<SmsProviderStatus>("/api/sms-provider").result;
   const open = (trackId: string, stepId?: string) => navigate(`${campaignPath(campaignId)}?track=${encodeURIComponent(trackId)}${stepId ? `&step=${encodeURIComponent(stepId)}` : ""}`);
   return (
     <section aria-labelledby="blocks-launch">
@@ -162,7 +163,7 @@ function Blockers({ campaignId, editor }: { campaignId: string; editor: Sequence
       ) : (
         <ul className="flex flex-col gap-2">
           {blockers.map((b) => {
-            const { title, detail, actions } = describeBlocker(b, def);
+            const { title, detail, actions } = describeBlocker(b, def, sms.state === "ready" ? sms.data : null);
             return (
               <li key={JSON.stringify(b)} className="flex flex-wrap items-start gap-x-2.5 gap-y-2 rounded-field bg-crit-soft px-3.5 py-3 text-[14px]">
                 <Icon name="bad" className="mt-0.5 size-[18px] text-crit" />
