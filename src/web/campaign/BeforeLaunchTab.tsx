@@ -8,6 +8,7 @@ import { campaignPath, longDate } from "../pages/CampaignPage.tsx";
 import { emailTrackOf, fieldLabel, STEP_NOUN, stepUsing, trackName } from "./model.ts";
 import { CANNOT_SEND, ConflictNotice } from "./SequenceTab.tsx";
 import type { SequenceEditor } from "./useSequence.ts";
+import { withheldExplanation } from "./withheld.ts";
 
 /**
  * Before launch: the three blockers, every other condition as a warning, coverage, missing merge
@@ -369,9 +370,8 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
       </table>
       {load.otherTracksChangeTiming !== null ? (
         <p className="mt-2 text-[13px] text-ink-2">
-          {load.otherTracksChangeTiming === "this_campaign"
-            ? thisCampaignsOtherTracks(editor.view.definition)
-            : "Can’t project the load yet: another running campaign on these inboxes has a track (an SMS track, or a second email track) that changes when its emails go, and the estimate doesn’t include it yet."}
+          {/* Worded from the tracks the server names, never guessed from this campaign's channels. */}
+          {load.withheldBy ? withheldExplanation(load.withheldBy) : "Can’t project the load yet: another track can change when the emails go."}
         </p>
       ) : blocked ? (
         <p className="mt-2 text-[13px] text-ink-2">
@@ -394,16 +394,6 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
       )}
     </>
   );
-}
-
-/** Why this campaign's load is not projected, naming the tracks it actually has. */
-function thisCampaignsOtherTracks(def: CampaignDefinition): string {
-  const live = def.tracks.filter((t) => !t.removed && t.branch === "main");
-  const sms = live.some((t) => t.channel === "sms");
-  const emails = live.filter((t) => t.channel === "email").length;
-  const has = [emails > 1 ? (emails === 2 ? "a second email track" : `${emails - 1} more email tracks`) : null, sms ? "an SMS track that doesn’t start after the email track" : null].filter((x) => x !== null).join(" and ");
-  if (has === "") return "Can’t project the load yet: the email track doesn’t start at launch, and the estimate covers only an email track that does.";
-  return `Can’t project the load yet: the estimate covers one email track, and this campaign also has ${has}, which can change when its emails go.${sms ? " An SMS track that starts after the email track keeps the estimate." : ""}`;
 }
 
 const gap = (seconds: number) => (seconds < 120 ? `${seconds} seconds` : `${Math.round(seconds / 60)} minutes`);

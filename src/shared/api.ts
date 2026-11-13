@@ -394,6 +394,12 @@ export interface LoadProjectionView {
    * there is no projection.
    */
   readonly otherTracksChangeTiming: "this_campaign" | "other_campaign" | null;
+  /**
+   * Which tracks withhold the figure, and why, whenever `otherTracksChangeTiming` is set: the screen
+   * words its reason from these alone (review bot on 8edc8dd). `campaign` is null for this campaign,
+   * else the running campaign whose tracks they are.
+   */
+  readonly withheldBy: WithheldBy | null;
   /** The projection counts email only: this campaign's SMS track, which starts after its emails, is left out. */
   readonly leavesOutSms: boolean;
 }
@@ -533,6 +539,24 @@ export interface CallQueueItem {
   readonly bucket: "ready_now" | "later_today";
   /** For later today: when the prospect's calling hours open. */
   readonly opensAt: string | null;
+}
+
+/** A track that can change when a campaign's emails go, so the load is not projected (Before launch). */
+export interface WithheldTrack {
+  readonly trackId: string;
+  readonly channel: "email" | "sms" | "call";
+  /** As the canvas names it: "the phone track", "SMS track 2". */
+  readonly label: string;
+  /**
+   * `not_after_the_email_track`: it starts with or before the email track; `another_email_track`: a
+   * second email track; `email_track_not_at_launch`: the email track itself starts after another.
+   */
+  readonly why: "not_after_the_email_track" | "another_email_track" | "email_track_not_at_launch";
+}
+
+export interface WithheldBy {
+  readonly campaign: { readonly id: string; readonly name: string } | null;
+  readonly tracks: readonly WithheldTrack[];
 }
 
 /** GET /api/today: the landing page's call part. Needs attention is GET /api/needs-attention. */
