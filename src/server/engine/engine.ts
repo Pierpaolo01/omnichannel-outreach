@@ -155,11 +155,11 @@ export class Engine {
   // Entry points.
 
   /** Launches a campaign if nothing blocks it, and runs a tick. */
-  launch(campaignId: string): Promise<{ ok: true } | { ok: false; reason: string; check: LaunchCheck | null }> {
+  launch(campaignId: string, expectedDefinitionVersion?: number): Promise<{ ok: true } | { ok: false; reason: string; check: LaunchCheck | null }> {
     return this.ticks.run(async () => {
       await this.syncAccounts();
       const now = this.now();
-      const outcome = await this.store.launch(campaignId, now, launchCheck, (s) => this.rules.evaluate(this.rules.enterMain(s, now), now));
+      const outcome = await this.store.launch(campaignId, now, launchCheck, (s) => this.rules.evaluate(this.rules.enterMain(s, now), now), expectedDefinitionVersion);
       if (!outcome.ok) return outcome;
       await this.runTick();
       return { ok: true as const };

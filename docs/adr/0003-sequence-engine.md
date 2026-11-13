@@ -37,7 +37,49 @@ Round 1 of review found six ways the first draft could double-send, burst, call 
 
 The campaign holds **one current definition**, plus `definition_version`, a counter bumped by every published edit. There is no revision history. Attempts store the copy they rendered, and no invariant needs older definitions; the generated test keeps its own copy of each definition it published. `definition_edited_at` serves ticket 21's "no test since the last edit" warning.
 
-**An older save never replaces a newer one (ticket 12c, PR 41 re-check B6).** The editor stamps every edit with an increasing number, and each save carries the stamp of the draft it sends. `campaigns.definition_stamp` (migration 10) holds the stored stamp. The `UPDATE` that stores a definition compares the stamps in the same statement (`definition_stamp IS NULL OR definition_stamp < ?`), so a save no newer than the stored one changes nothing and is answered `409 stale_edit`. This is what lets the editor send its newest draft with `keepalive` when the page is left, even while an older save is still in flight: if the older one lands later, it is refused. The same rule settles two tabs editing one campaign: the later edit wins, and the other tab is told its change was not saved. A save with no stamp (an API client, a test) is stored as before.
+#### 1.1.1 Saving the definition (ticket 12c, PR 41: a deep rule)
+
+Recorded on 13 November 2026 after four review rounds on saving (an unsaved launch, ordering, page leave, a lost answer and restore, two tabs, large drafts). It replaces the edit-stamp rule of the previous round.
+
+**The rule.** Each editor page is an editing **session** with a random id. Every edit it makes gets the next **sequence number** in that session. A save carries its session, its number, and the **base**: the definition revision (`definition_version`) the session last saw from the server. That is the revision it loaded, or the one its last accepted save returned. The server stores, with the definition, the session and number that wrote it (`definition_session`, `definition_seq`, migration 10). In one transaction, the server:
+
+| A save… | Answer | Stored definition |
+| - | - | - |
+| continues the stored session with a higher number | 200 with the sequence | Replaced; revision + 1 |
+| starts from the stored revision (base = stored revision) | 200 with the sequence | Replaced; revision + 1 |
+| repeats the stored session and number with the same content (a retry after a lost answer) | 200 with the sequence | Unchanged |
+| repeats the stored session with a lower number (an older save of the same page arriving late) | 409 `superseded` | Unchanged |
+| does anything else: another session's save based on an older revision, or the same session and number with other content | 409 `edit_conflict` | Unchanged |
+
+A save with no session (an API client, a test) is stored as before. Launch carries the revision the page shows and is refused with 409 `changed_elsewhere` if the stored revision is another (checked in the launch transaction).
+
+**Invariants** (asserted by the generated test after the network settles, and where noted after every step):
+
+1. The stored definition is the newest draft typed in the session that wrote it.
+2. No accepted save from one session is replaced by another session's save unless that session had seen it: a save based on a revision older than the stored one is refused, and its page shows the conflict.
+3. The page's status is never "Saving…" or "Not saved" when the server has accepted its newest draft, and never "Saved" when it has not (every step). Another page may later replace that draft, having seen it, under invariant 2; a page learns of that when it next saves.
+4. Launch never starts a definition other than the one on the page.
+5. A refused page keeps what the user typed until they choose to load the stored version.
+
+**The boundary.**
+- A definition is at most **56 KiB** (57,344 bytes) as the JSON body of a save. That bound is below the browser's 64 KiB budget for a request that outlives the page (`keepalive`), so a save sent on leaving can always carry the newest draft. The editor refuses a larger draft in place and sends nothing. The server refuses one with 413 `too_large`.
+- A save whose base is a revision the server never issued is a conflict, not an error.
+
+**By construction.**
+- The accept/refuse decision and the store happen in one `BEGIN IMMEDIATE` transaction. The stored session, number and revision are written with the definition, so a later decision reads what the last accepted save wrote, never a recomputation.
+- The client has one queue (`src/web/campaign/saveQueue.ts`) through which every save is sent and into which every outcome reports: the debounce, Try again, launch, the pool sync, leaving the page, and the page shown again from the back-forward cache. Chained saves run one at a time, each with the newest draft. Leaving sends the newest draft at once with `keepalive`. No answer is resent unchanged. `superseded` is not an error.
+
+**The generated test.** `src/web/campaign/saveQueue.generated.test.ts` runs the real queue against the real HTTP app. It covers edits, debounces, requests delivered late and out of order, lost answers, the queue's retries, leaving the page (kept for Back, or gone with a new page loaded), restores, two sessions editing at once, and drafts near the size bound. It asserts invariants 1 to 5. Mutations that break the rule (the server accepting a stale base; the same session and number with other content accepted; a leave-save that does not report) make it fail; the test file names them.
+
+| Stamp sent, against the stored one | Answer | Stored definition |
+| - | - | - |
+| Newer, or nothing stored yet | 200 with the sequence | Replaced; `definition_version` + 1 |
+| The same, with the same content | 200 with the sequence: the same edit again, a retry after a lost answer | Unchanged, no new version |
+| The same, with other content | 409 `stamp_conflict`: two writers used one stamp | Unchanged |
+| Older | 409 `stale_edit` | Unchanged |
+| None (an API client, a test) | Stored as before | Replaced |
+
+The editor's queue (`src/web/campaign/saveQueue.ts`) is the only sender, and every save reports its outcome into it: the debounce, Try again, launch, the pool sync, leaving the page, and the page shown again from the back-forward cache. Leaving the page sends the newest draft at once with `keepalive`, even while an older save is in flight; if the older one lands later, it is refused. No answer is resent with the same stamp. A `stale_edit` for a stamp older than the page's newest is superseded, not an error. `saveQueue.generated.test.ts` checks the queue and this rule together over generated runs with late and lost answers, leaves and restores. The same rule settles two tabs editing one campaign: the later edit wins, and the other tab is told its change was not saved.
 
 The definition holds:
 

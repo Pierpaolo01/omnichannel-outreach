@@ -226,6 +226,7 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
           header, the tabs and the main area's bottom padding. */}
       <div data-testid="inspector-body" className="relative flex min-h-0 flex-1 flex-col gap-[18px] px-[18px] pb-5 pt-4 min-[1020px]:overflow-y-auto">
         {editor.save.kind === "error" && <ErrorState title="Your last change wasn’t saved." message={editor.save.message} onRetry={editor.retrySave} />}
+        {editor.save.kind === "conflict" && <ConflictNotice editor={editor} />}
         {editor.problems.length > 0 && (
           <p role="alert" className="rounded-field bg-crit-soft px-3 py-2 text-[13.5px] text-crit">
             {editor.problems.join(" ")} Nothing is saved until this is fixed.
@@ -279,7 +280,7 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
 }
 
 function SaveStatus({ editor }: { editor: SequenceEditor }) {
-  const text = editor.launched ? "" : editor.save.kind === "saving" ? "Saving…" : editor.save.kind === "saved" ? "Saved" : "";
+  const text = editor.launched ? "" : editor.save.kind === "saving" ? "Saving…" : editor.save.kind === "saved" ? "Saved" : editor.save.kind === "conflict" ? "Not saved" : "";
   return (
     <span role="status" className="text-[12.5px] text-muted">
       {text}
@@ -604,4 +605,31 @@ function timeZones(current: string): string[] {
 
 export function Pill({ children }: { children: ReactNode }) {
   return <span className="rounded-full border border-line-strong bg-base-100 px-2 text-[12px] text-ink-2">{children}</span>;
+}
+
+/**
+ * Another page changed the campaign since this one loaded it (ADR 0003 1.1.1): what was typed here
+ * is kept, not saved, until the user loads the stored version.
+ */
+export function ConflictNotice({ editor }: { editor: SequenceEditor }) {
+  const [loading, setLoading] = useState(false);
+  return (
+    <div role="alert" className="flex flex-wrap items-center gap-3 rounded-box bg-crit-soft px-4 py-3 text-[14px]">
+      <span className="min-w-0 flex-[1_1_320px]">
+        <b className="font-semibold text-crit">This campaign was changed elsewhere since this page loaded it.</b>{" "}
+        <span className="text-ink-2">What you typed is still here, but it is not saved. Loading the saved version replaces it.</span>
+      </span>
+      <button
+        type="button"
+        className="btn btn-sm border-line-strong bg-base-100 font-medium"
+        disabled={loading}
+        onClick={() => {
+          setLoading(true);
+          void editor.loadStored().finally(() => setLoading(false));
+        }}
+      >
+        {loading ? "Loading…" : "Load the saved version"}
+      </button>
+    </div>
+  );
 }

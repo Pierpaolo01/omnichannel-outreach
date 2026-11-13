@@ -404,6 +404,36 @@ test.describe("review of pull request 41", () => {
     expect((await stored(id)).definition.tracks[0]!.steps[0]!.subject).toBe("Saved on the second try");
   });
 
+  test("a save stored on the server whose answer is lost is resent with the same stamp and ends Saved, with launch ready (review: stamp rule)", async ({ page }) => {
+    const id = await campaign(track([COPY.first, COPY.second]));
+    await page.goto(`${r.url}/campaigns/${id}?track=email&step=s1`);
+    let lost = false;
+    await page.route("**/api/campaigns/*/sequence", async (route) => {
+      if (route.request().method() !== "PUT" || lost) return route.continue();
+      lost = true;
+      await route.fetch(); // the server stores it
+      await route.abort(); // and the answer never reaches the page
+    });
+    await page.getByLabel("Email 1 subject").fill("Stored, answer lost");
+    await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
+    expect((await stored(id)).definition.tracks[0]!.steps[0]!.subject).toBe("Stored, answer lost");
+    await page.getByRole("link", { name: /Before launch/ }).click();
+    await expect(page.getByRole("button", { name: "Launch campaign" })).toBeEnabled();
+  });
+
+  test("a leave-save whose page the browser keeps, then shows again, reports its answer: the page says Saved (review: saveQueue.ts:76)", async ({ page }) => {
+    const id = await campaign(track([COPY.first, COPY.second]));
+    await page.goto(`${r.url}/campaigns/${id}?track=email&step=s1`);
+    await page.getByLabel("Email 1 subject").fill("Sent as the page was hidden");
+    // Inside the debounce: the page is hidden (kept for Back), the leave-save goes, and the page returns.
+    await page.evaluate(() => {
+      dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
+      dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+    });
+    await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
+    await expect.poll(async () => (await stored(id)).definition.tracks[0]!.steps[0]!.subject).toBe("Sent as the page was hidden");
+  });
+
   test("a follow-up that continues the thread names the subject of the nearest email that started one (SequenceTab.tsx:274)", async ({ page }) => {
     const id = await campaign(track([COPY.first, { ...COPY.second, threading: "new_subject", subject: "A second idea" }, { ...COPY.second, id: "s3", body: "Last note." }]));
     await page.goto(`${r.url}/campaigns/${id}?track=email&step=s3`);

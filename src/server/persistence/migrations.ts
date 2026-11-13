@@ -431,8 +431,11 @@ export const MIGRATIONS: readonly Migration[] = [
   },
   {
     version: 10,
-    name: "the editor's edit stamp: an older save never replaces a newer one (ticket 12c, PR 41 re-check B6)",
-    sql: `ALTER TABLE campaigns ADD COLUMN definition_stamp INTEGER;`,
+    name: "the editing session and number that wrote the definition (ticket 12c, ADR 0003 1.1.1)",
+    sql: `
+      ALTER TABLE campaigns ADD COLUMN definition_session TEXT;
+      ALTER TABLE campaigns ADD COLUMN definition_seq INTEGER;
+    `,
   },
 ];
 

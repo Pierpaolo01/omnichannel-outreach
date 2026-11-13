@@ -21,7 +21,7 @@ import type {
   WorkSettlement,
 } from "../../domain/sequence/state.ts";
 import { isOutreachStatus } from "../../domain/outreach-status.ts";
-import type { BounceEvent, CampaignEngineRow, EngineStore, LaunchOutcome, ReplyEvent, SenderAccountConfig } from "../engine/engine-store.ts";
+import type { BounceEvent, CampaignEngineRow, DefinitionSave, EngineStore, LaunchOutcome, ReplyEvent, SenderAccountConfig } from "../engine/engine-store.ts";
 import { liveDetailRowOf } from "./sqlite-store.ts";
 
 type Row = Record<string, SQLOutputValue>;
@@ -61,18 +61,28 @@ export class SqliteEngineStore implements EngineStore {
     };
   }
 
-  async saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, stamp: number | null = null): Promise<"saved" | "launched" | "missing" | "stale"> {
+  async saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save: DefinitionSave | null = null): Promise<"saved" | "unchanged" | "launched" | "missing" | "superseded" | "conflict"> {
     return this.transaction(() => {
-      const row = this.sql("SELECT launched_at FROM campaigns WHERE id = ?").get(campaignId);
+      const text = JSON.stringify(definition);
+      // ADR 0003 1.1.1, in the statement that stores: accepted if it continues the stored session
+      // with a higher number, or starts from the stored revision. A save with no session is stored.
+      const changed = this.sql(
+        `UPDATE campaigns SET definition = ?, definition_version = definition_version + 1, definition_edited_at = ?, version = version + 1,
+           definition_session = ?, definition_seq = ?
+         WHERE id = ? AND launched_at IS NULL
+           AND (? IS NULL OR (definition_session = ? AND definition_seq < ?) OR definition_version = ?)`,
+      ).run(text, editedAt, save?.session ?? null, save?.seq ?? null, campaignId, save?.session ?? null, save?.session ?? null, save?.seq ?? null, save?.base ?? null).changes;
+      if (Number(changed) > 0) return "saved";
+      // Not stored: say why, from the row as it stands in this transaction.
+      const row = this.sql("SELECT launched_at, definition, definition_session, definition_seq FROM campaigns WHERE id = ?").get(campaignId);
       if (!row) return "missing";
       if (row["launched_at"] != null) return "launched";
-      // The stamp is compared in the statement that stores: a save stamped no newer than the stored
-      // one changes nothing. An unstamped save (API clients, tests) is stored as before.
-      const changed = this.sql(
-        `UPDATE campaigns SET definition = ?, definition_version = definition_version + 1, definition_edited_at = ?, version = version + 1, definition_stamp = ?
-         WHERE id = ? AND (? IS NULL OR definition_stamp IS NULL OR definition_stamp < ?)`,
-      ).run(JSON.stringify(definition), editedAt, stamp, campaignId, stamp, stamp).changes;
-      return Number(changed) > 0 ? "saved" : "stale";
+      if (save && strOrNull(row, "definition_session") === save.session) {
+        const seq = numOrNull(row, "definition_seq") ?? 0;
+        if (seq > save.seq) return "superseded";
+        if (seq === save.seq && row["definition"] === text) return "unchanged";
+      }
+      return "conflict";
     });
   }
 
@@ -95,11 +105,13 @@ export class SqliteEngineStore implements EngineStore {
     now: number,
     decide: Parameters<EngineStore["launch"]>[2],
     enter: (state: SubjectState) => SubjectState,
+    expectedDefinitionVersion?: number,
   ): Promise<LaunchOutcome> {
     return this.transaction((): LaunchOutcome => {
       const row = this.sql("SELECT * FROM campaigns WHERE id = ?").get(campaignId);
       if (!row || row["definition"] == null) return { ok: false, check: null, reason: "no_definition" };
       if (row["launched_at"] != null) return { ok: false, check: null, reason: "already_launched" };
+      if (expectedDefinitionVersion !== undefined && num(row, "definition_version") !== expectedDefinitionVersion) return { ok: false, check: null, reason: "changed" };
       const { leads, accounts } = this.launchInputsNow(campaignId);
       const check = decide(parseDefinition(row), leads, accounts);
       if (!check.canLaunch) return { ok: false, check, reason: "blocked" };

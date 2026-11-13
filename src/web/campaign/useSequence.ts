@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CampaignDefinition, SequenceView } from "../../shared/api.ts";
-import { postJson, putJson, useApi } from "../api.ts";
+import { ApiRequestError, getJson, postJson, putJson, useApi } from "../api.ts";
 import { WEEK } from "./model.ts";
-import { SaveQueue, draftProblems, type SaveStatus } from "./saveQueue.ts";
+import { NoAnswer, SaveQueue, draftProblems, type SaveStatus } from "./saveQueue.ts";
 
 export { draftProblems } from "./saveQueue.ts";
 export type SaveState = SaveStatus;
@@ -20,11 +20,30 @@ export interface SequenceEditor {
   readonly launched: boolean;
   readonly update: (change: (draft: CampaignDefinition) => CampaignDefinition) => void;
   readonly retrySave: () => void;
-  /** Saves the draft through the same ordered path first, and launches only if that succeeded. */
+  /** After a conflict: replaces the draft with the stored version, setting aside what was typed. */
+  readonly loadStored: () => Promise<void>;
+  /** Saves the draft through the same ordered path first, and launches only if that succeeded and only the revision on the page. */
   readonly launch: () => Promise<void>;
 }
 
 const SAVE_DELAY_MS = 600;
+/** How long a save waits for its answer before it counts as no answer and is resent. */
+const ANSWER_TIMEOUT_MS = 20_000;
+
+/** One PUT of the sequence: no answer (network failure, timeout) is `NoAnswer`; a refusal carries the server's code. */
+async function putSequence(campaignId: string, body: unknown, options: { keepalive?: boolean }): Promise<SequenceView> {
+  const abort = new AbortController();
+  const timeout = setTimeout(() => abort.abort(), ANSWER_TIMEOUT_MS);
+  try {
+    return (await putJson(`/api/campaigns/${encodeURIComponent(campaignId)}/sequence`, body, { ...options, signal: abort.signal })) as SequenceView;
+  } catch (error) {
+    if (!(error instanceof ApiRequestError)) throw new NoAnswer();
+    const code = (error.body as { error?: { code?: unknown } } | null)?.error?.code;
+    throw Object.assign(new Error(error.message), { code: typeof code === "string" ? code : null });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 /**
  * The campaign's sequence, as the editor edits it. Before launch every change is saved on its
@@ -52,9 +71,9 @@ export function useSequence(campaignId: string) {
         read: () => {
           const current = latest.current;
           if (!current) throw new Error("The sequence has not loaded.");
-          return { draft: current.draft, accountIds: current.view.accounts.map((a) => a.id) };
+          return { draft: current.draft, accountIds: current.view.accounts.map((a) => a.id), version: current.view.definitionVersion };
         },
-        put: async (definition, options, stamp) => (await putJson(`/api/campaigns/${encodeURIComponent(campaignId)}/sequence`, { ...definition, stamp }, options)) as SequenceView,
+        put: (definition, options, save) => putSequence(campaignId, { ...definition, save }, options),
         onStatus: (status) => {
           setSave(status);
           setUnsaved(status.kind !== "saved" && status.kind !== "idle");
@@ -80,17 +99,23 @@ export function useSequence(campaignId: string) {
   );
 
   // Leaving the page sends the newest unsaved draft at once, with keepalive, even behind a save in
-  // flight: a queued save dies with the document (PR 41 re-check, B6). Leaving the campaign inside
-  // the app keeps the page alive, so its change goes through the ordered queue.
+  // flight: a queued save dies with the document (PR 41 re-check, B6). If the browser keeps the
+  // page for Back, it comes back with `pageshow` and the queue sends whatever is unconfirmed again.
+  // Leaving the campaign inside the app keeps the page alive, so its change goes through the queue.
   useEffect(() => {
     const leavePage = () => {
       clearTimeout(timer.current);
       timer.current = undefined;
       getQueue().sendNow();
     };
+    const back = (event: PageTransitionEvent) => {
+      if (event.persisted) void getQueue().restored();
+    };
     window.addEventListener("pagehide", leavePage);
+    window.addEventListener("pageshow", back);
     return () => {
       window.removeEventListener("pagehide", leavePage);
+      window.removeEventListener("pageshow", back);
       if (timer.current !== undefined) void saveNow();
     };
   }, [saveNow, getQueue]);
@@ -133,9 +158,21 @@ export function useSequence(campaignId: string) {
         saved.reason === "changed" ? "A newer change is still being saved. Launch again once it is saved." : `Your latest change isn’t saved, so nothing was launched. ${saved.message}`,
       );
     }
-    const launched = (await postJson(`/api/campaigns/${encodeURIComponent(campaignId)}/launch`, {})) as SequenceView;
+    // The revision on the page: the server refuses to launch any other (ADR 0003 1.1.1, invariant 4).
+    const shown = latest.current?.view.definitionVersion;
+    const launched = (await postJson(`/api/campaigns/${encodeURIComponent(campaignId)}/launch`, { definitionVersion: shown })) as SequenceView;
     setLocal({ view: launched, draft: launched.definition });
   }, [campaignId, saveNow]);
+
+  const loadStored = useCallback(async () => {
+    const view = (await getJson(`/api/campaigns/${encodeURIComponent(campaignId)}/sequence`)) as SequenceView;
+    clearTimeout(timer.current);
+    timer.current = undefined;
+    const next = { view, draft: view.definition };
+    latest.current = next;
+    setLocal(next);
+    getQueue().loadedStored();
+  }, [campaignId, getQueue]);
 
   const editor: SequenceEditor | null = state
     ? {
@@ -147,6 +184,7 @@ export function useSequence(campaignId: string) {
         launched: state.view.launchedAt !== null,
         update,
         retrySave: () => void saveNow(),
+        loadStored,
         launch,
       }
     : null;

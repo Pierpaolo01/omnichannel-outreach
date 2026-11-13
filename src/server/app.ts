@@ -5,12 +5,13 @@ import { planImport } from "../domain/import-plan.ts";
 import { isOutreachStatus } from "../domain/outreach-status.ts";
 import { checkScraperFile, parseScraperExport } from "../domain/scraper-export.ts";
 import type { ApiError, Campaign, FileCheckResult } from "../shared/api.ts";
-import { CAMPAIGN_NAME_MAX } from "../shared/limits.ts";
+import { CAMPAIGN_NAME_MAX, DEFINITION_MAX_BYTES, STEP_BODY_MAX, STEP_SUBJECT_MAX } from "../shared/limits.ts";
 import { checkApiRequest } from "./guard.ts";
 import type { OutreachStore } from "./persistence/store.ts";
 import { launchCheck } from "../domain/sequence/blockers.ts";
 import { definitionProblems, emptyDefinition, liveTracks, type CampaignDefinition } from "../domain/sequence/definition.ts";
 import { Engine } from "./engine/engine.ts";
+import type { DefinitionSave } from "./engine/engine-store.ts";
 import { UnconnectedEmailPort } from "./engine/ports.ts";
 import { accountView, needsAttention, progressView } from "./engine/views.ts";
 import type { CampaignDetail, CampaignListItem, CampaignSequenceSummary, SequenceView } from "../shared/api.ts";
@@ -33,8 +34,8 @@ const windowRule = z.object({ day: z.number().int().min(0).max(6), start: z.numb
 const stepBody = z.object({
   id: z.string().trim().min(1).max(100),
   waitDays: z.number(),
-  subject: z.string().max(1_000).default(""),
-  body: z.string().max(20_000),
+  subject: z.string().max(STEP_SUBJECT_MAX).default(""),
+  body: z.string().max(STEP_BODY_MAX),
   threading: z.enum(["new_subject", "continue_thread"]),
   removed: z.boolean().default(false),
 });
@@ -52,8 +53,8 @@ const definitionBody = z.object({
   callSkipLimitDays: z.number().default(2),
   emailPool: z.array(z.string().min(1).max(200)).max(100),
   tracks: z.array(trackBody).max(20),
-  /** The editor's edit stamp, increasing with every edit: a save no newer than the stored one is refused. */
-  stamp: z.number().int().nonnegative().optional(),
+  /** Who wrote the save (ADR 0003 1.1.1): its editing session, its number there, and the revision it last saw. */
+  save: z.object({ session: z.string().min(1).max(100), seq: z.number().int().nonnegative(), base: z.number().int().nonnegative() }).optional(),
 });
 
 /** The user's zone: the machine's, which a campaign's default zone starts from (ADR 0003 1.1). */
@@ -289,18 +290,26 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     return view ? c.json(view) : notFound(c, "campaign");
   });
 
-  app.put("/campaigns/:id/sequence", async (c) => {
+  const withinDefinitionLimit = bodyLimit({
+    maxSize: DEFINITION_MAX_BYTES,
+    onError: (c) => c.json<ApiError>({ error: { code: "too_large", message: `The sequence is larger than ${DEFINITION_MAX_BYTES / 1024} KB, so it cannot be saved safely. Shorten the emails.` } }, 413),
+  });
+
+  app.put("/campaigns/:id/sequence", withinDefinitionLimit, async (c) => {
     const campaign = await store.campaign(c.req.param("id"));
     if (!campaign) return notFound(c, "campaign");
     const body = definitionBody.safeParse(await readJson(c));
     if (!body.success) return invalid(c, body.error);
-    const { stamp, ...definition }: CampaignDefinition & { stamp?: number | undefined } = body.data;
+    const { save, ...definition }: CampaignDefinition & { save?: DefinitionSave | undefined } = body.data;
     const previous = (await store.engine.campaign(campaign.id))?.definition ?? null;
     const problems = definitionProblems(definition, previous);
     if (problems.length > 0) return c.json<ApiError>({ error: { code: "invalid_sequence", message: problems.join(" ") } }, 400);
-    const saved = await store.engine.saveDefinition(campaign.id, definition, now(), stamp ?? null);
-    if (saved === "stale") {
-      return c.json<ApiError>({ error: { code: "stale_edit", message: "A newer change to this sequence was already saved, so this older one was not. Reload to see it." } }, 409);
+    const saved = await store.engine.saveDefinition(campaign.id, definition, now(), save ?? null);
+    if (saved === "superseded") {
+      return c.json<ApiError>({ error: { code: "superseded", message: "A later change from this page was already saved." } }, 409);
+    }
+    if (saved === "conflict") {
+      return c.json<ApiError>({ error: { code: "edit_conflict", message: "This campaign’s sequence was changed elsewhere since this page loaded it, so this change was not saved." } }, 409);
     }
     if (saved === "launched") {
       return c.json<ApiError>({ error: { code: "launched", message: "This campaign is running. Editing a running campaign arrives with a later release." } }, 409);
@@ -311,7 +320,12 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   app.post("/campaigns/:id/launch", async (c) => {
     const campaign = await store.campaign(c.req.param("id"));
     if (!campaign) return notFound(c, "campaign");
-    const outcome = await engine.launch(campaign.id);
+    const asked = (await readJson(c)) as { definitionVersion?: unknown } | undefined;
+    const expected = typeof asked?.definitionVersion === "number" ? asked.definitionVersion : undefined;
+    const outcome = await engine.launch(campaign.id, expected);
+    if (!outcome.ok && outcome.reason === "changed") {
+      return c.json<ApiError>({ error: { code: "changed_elsewhere", message: "The sequence was changed elsewhere since this page loaded it, so nothing was launched. Load the saved version first." } }, 409);
+    }
     if (!outcome.ok) {
       const message =
         outcome.reason === "already_launched" ? "This campaign has already launched."

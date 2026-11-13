@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { CampaignDefinition, SequenceView } from "../../shared/api.ts";
-import { SaveQueue, type SaveStatus } from "./saveQueue.ts";
+import { NoAnswer, SaveQueue, type SaveStatus } from "./saveQueue.ts";
 
 /**
  * The editor's one ordered path to the server (review: useSequence.ts:76 and :133). Every save,
@@ -30,17 +30,21 @@ function harness() {
   let draft = def("First");
   let stored: CampaignDefinition | null = null;
   let version = 0;
-  const calls: { definition: CampaignDefinition; keepalive: boolean; stamp: number; resolve: () => void; reject: (e: Error) => void }[] = [];
+  const calls: { definition: CampaignDefinition; keepalive: boolean; stamp: number; base: number; session: string; resolve: () => void; reject: (e: Error) => void }[] = [];
   const statuses: SaveStatus[] = [];
   const accepted: { view: SequenceView; current: boolean }[] = [];
   const queue = new SaveQueue({
-    read: () => ({ draft, accountIds: ["inbox-a"] }),
-    put: (definition, options, stamp) =>
+    read: () => ({ draft, accountIds: ["inbox-a"], version }),
+    session: "page-1",
+    put: (definition, options, save) =>
       new Promise<SequenceView>((resolve, reject) => {
         calls.push({
           definition,
           keepalive: options.keepalive === true,
-          stamp,
+          // The save's number in the session, read as `stamp` by the tests below.
+          stamp: save.seq,
+          base: save.base,
+          session: save.session,
           resolve: () => {
             stored = definition;
             resolve(viewOf(definition, ++version));
@@ -144,7 +148,7 @@ describe("a save that cannot complete says so, and anything waiting on it (launc
 });
 
 describe("leaving the page with a save in flight (PR 41 re-check, B6)", () => {
-  test("every edit gets a newer stamp than the last, and each save carries its draft's stamp", async () => {
+  test("every edit takes the next number in the session, and each save carries its draft's number", async () => {
     const h = harness();
     h.edit("A");
     void h.queue.save();
@@ -157,7 +161,7 @@ describe("leaving the page with a save in flight (PR 41 re-check, B6)", () => {
     expect(h.calls[1]!.stamp).toBeGreaterThan(h.calls[0]!.stamp);
   });
 
-  test("the newest draft goes at once with keepalive, without waiting for the older save in flight, carrying the newer stamp", async () => {
+  test("the newest draft goes at once with keepalive, without waiting for the older save in flight, carrying the newer number", async () => {
     const h = harness();
     h.edit("Older delayed save");
     void h.queue.save();
@@ -175,6 +179,101 @@ describe("leaving the page with a save in flight (PR 41 re-check, B6)", () => {
 
   test("nothing is sent when the server already has the newest revision", () => {
     const h = harness();
+    h.queue.sendNow();
+    expect(h.calls).toHaveLength(0);
+  });
+});
+
+describe("every way a save is sent reports into the queue (review: saveQueue.ts:76)", () => {
+  test("a leave-save whose page survives (Back keeps it) updates the status when its answer comes", async () => {
+    const h = harness();
+    h.edit("Kept for Back");
+    h.queue.sendNow();
+    h.calls[0]!.resolve();
+    await h.settle();
+    expect(h.queue.upToDate).toBe(true);
+    expect(h.statuses.at(-1)).toEqual({ kind: "saved" });
+  });
+
+  test("restored from the back-forward cache with no answer, the queue sends the same edit again and ends saved", async () => {
+    const h = harness();
+    h.edit("Answer never came");
+    h.queue.sendNow(); // its answer is lost with the frozen page
+    const restored = h.queue.restored();
+    await h.settle();
+    expect(h.calls).toHaveLength(2);
+    expect(h.calls[1]!.stamp).toBe(h.calls[0]!.stamp);
+    h.calls[1]!.resolve();
+    expect(await restored).toEqual({ ok: true });
+    expect(h.statuses.at(-1)).toEqual({ kind: "saved" });
+  });
+
+  test("no answer is retried with the same number, then reported as not saved if it never comes", async () => {
+    const h = harness();
+    h.edit("A");
+    const saved = h.queue.save();
+    for (let i = 0; i < 3; i++) {
+      await h.settle();
+      h.calls[i]!.reject(new NoAnswer());
+    }
+    await h.settle();
+    h.calls[3]!.resolve();
+    expect(await saved).toEqual({ ok: true });
+    expect(new Set(h.calls.map((c) => c.stamp)).size).toBe(1);
+  });
+
+  test("an older save refused because a newer one was stored is not an error", async () => {
+    const h = harness();
+    h.edit("Older");
+    const older = h.queue.save();
+    await h.settle();
+    h.edit("Newer");
+    h.queue.sendNow();
+    h.calls[1]!.resolve();
+    await h.settle();
+    h.calls[0]!.reject(Object.assign(new Error("A later change from this page was already saved."), { code: "superseded" }));
+    expect(await older).toEqual({ ok: true });
+    expect(h.statuses.at(-1)).toEqual({ kind: "saved" });
+  });
+});
+
+describe("another page changed the campaign (ADR 0003 1.1.1, B7)", () => {
+  test("a conflict keeps the draft, says so, and sends nothing more until the stored version is loaded", async () => {
+    const h = harness();
+    h.edit("Mine");
+    const saved = h.queue.save();
+    await h.settle();
+    h.calls[0]!.reject(Object.assign(new Error("Changed elsewhere."), { code: "edit_conflict" }));
+    expect(await saved).toMatchObject({ ok: false, reason: "conflict" });
+    expect(h.statuses.at(-1)).toEqual({ kind: "conflict", message: "Changed elsewhere." });
+    h.edit("Mine, again");
+    expect(await h.queue.save()).toMatchObject({ ok: false, reason: "conflict" });
+    h.queue.sendNow();
+    expect(h.calls).toHaveLength(1);
+    h.queue.loadedStored();
+    expect(h.queue.inConflict).toBe(false);
+    expect(h.statuses.at(-1)).toEqual({ kind: "idle" });
+  });
+
+  test("each save is based on the revision the page last had from the server", async () => {
+    const h = harness();
+    h.edit("A");
+    void h.queue.save();
+    await h.settle();
+    expect(h.calls[0]!.base).toBe(0);
+    h.calls[0]!.resolve();
+    await h.settle();
+    h.edit("B");
+    void h.queue.save();
+    await h.settle();
+    expect(h.calls[1]!.base).toBe(1);
+  });
+
+  test("a draft larger than the leave-save can carry is refused in place and never sent (boundary)", async () => {
+    const h = harness();
+    const big = def("Big");
+    h.setDraft({ ...big, tracks: [{ ...big.tracks[0]!, steps: [{ ...big.tracks[0]!.steps[0]!, body: "x".repeat(60_000) }] }] });
+    expect(await h.queue.save()).toMatchObject({ ok: false, reason: "invalid" });
     h.queue.sendNow();
     expect(h.calls).toHaveLength(0);
   });

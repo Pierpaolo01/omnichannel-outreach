@@ -6,6 +6,7 @@ import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
 import { campaignPath, longDate } from "../pages/CampaignPage.tsx";
 import { emailTrackOf, fieldLabel, liveSteps } from "./model.ts";
+import { ConflictNotice } from "./SequenceTab.tsx";
 import type { SequenceEditor } from "./useSequence.ts";
 
 /**
@@ -68,6 +69,7 @@ function LaunchBar({ editor, facts }: { editor: SequenceEditor; facts: BeforeLau
   const withEmail = facts?.load?.leadsWithEmail ?? null;
   let text: ReactNode;
   if (launchedAt) text = <><b className="font-semibold">Launched {longDate(launchedAt)}.</b> Email goes out on its own, inside each lead’s sending window.</>;
+  else if (editor.save.kind === "conflict") text = null;
   else if (editor.unsaved && editor.save.kind !== "saving")
     text = (
       <>
@@ -92,7 +94,8 @@ function LaunchBar({ editor, facts }: { editor: SequenceEditor; facts: BeforeLau
         <button
           type="button"
           className="btn btn-primary font-semibold"
-          disabled={!launch.canLaunch || editor.unsaved || state.kind === "launching"}
+          // Only once the checks for the definition on the page have arrived (PR 41 re-check, F7).
+          disabled={!launch.canLaunch || editor.unsaved || !facts || state.kind === "launching"}
           onClick={() => {
             setState({ kind: "launching" });
             editor.launch().then(
@@ -104,7 +107,12 @@ function LaunchBar({ editor, facts }: { editor: SequenceEditor; facts: BeforeLau
           {state.kind === "launching" ? "Launching…" : "Launch campaign"}
         </button>
       )}
-      {failed && !launchedAt && (
+      {editor.save.kind === "conflict" && (
+        <div className="w-full">
+          <ConflictNotice editor={editor} />
+        </div>
+      )}
+      {failed && !launchedAt && editor.save.kind !== "conflict" && (
         <button type="button" className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={editor.retrySave}>
           Try again
         </button>

@@ -91,7 +91,7 @@ export class EngineHarness {
       store: this.store,
       now: () => new Date(this.clock).toISOString(),
       newId: sequentialIds(),
-      engine: { launch: (id) => this.engine.launch(id) },
+      engine: { launch: (id, expected) => this.engine.launch(id, expected) },
       emailProvider: "status" in this.provider ? (this.provider as Provider & EmailProviderSource) : null,
     });
   }

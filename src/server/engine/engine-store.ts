@@ -59,7 +59,14 @@ export interface BounceEvent {
   readonly receivedWall: number;
 }
 
-export type LaunchOutcome = { readonly ok: true } | { readonly ok: false; readonly check: LaunchCheck | null; readonly reason: "already_launched" | "blocked" | "no_definition" };
+export type LaunchOutcome = { readonly ok: true } | { readonly ok: false; readonly check: LaunchCheck | null; readonly reason: "already_launched" | "blocked" | "no_definition" | "changed" };
+
+/** Who wrote a save (ADR 0003 1.1.1): the editing session, its number in it, and the revision it last saw. */
+export interface DefinitionSave {
+  readonly session: string;
+  readonly seq: number;
+  readonly base: number;
+}
 
 /**
  * The sequence engine's persistence (ADR 0003 9.1). Every change to a subject goes through
@@ -70,11 +77,11 @@ export type LaunchOutcome = { readonly ok: true } | { readonly ok: false; readon
 export interface EngineStore {
   campaign(campaignId: string): Promise<CampaignEngineRow | null>;
   /**
-   * Saves a definition before launch. Editing a launched campaign arrives with ticket 19. With a
-   * stamp, the save is stored only if it is newer than the stored stamp ("stale" otherwise), so a
-   * late older save never replaces a newer one (ADR 0003, ticket 12c).
+   * Saves a definition before launch, by the rule of ADR 0003 1.1.1: decided and stored in one
+   * transaction. Without `save` (API clients, tests) it is stored as before. Editing a launched
+   * campaign arrives with ticket 19.
    */
-  saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, stamp?: number | null): Promise<"saved" | "launched" | "missing" | "stale">;
+  saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save?: DefinitionSave | null): Promise<"saved" | "unchanged" | "launched" | "missing" | "superseded" | "conflict">;
   /** The merge data of every enrollment of the campaign that has not ended, and the sender accounts. */
   launchInputs(campaignId: string): Promise<{ leads: MergeData[]; accounts: SenderAccountView[] }>;
   /**
@@ -86,6 +93,8 @@ export interface EngineStore {
     now: number,
     decide: (definition: CampaignDefinition, leads: MergeData[], accounts: SenderAccountView[]) => LaunchCheck,
     enter: (state: SubjectState) => SubjectState,
+    /** The revision the user is looking at: launch is refused ("changed") if the stored one is another. */
+    expectedDefinitionVersion?: number,
   ): Promise<LaunchOutcome>;
 
   subject(subjectId: string, now: number): Promise<SubjectState | null>;
