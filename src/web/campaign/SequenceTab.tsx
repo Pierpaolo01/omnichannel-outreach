@@ -238,8 +238,29 @@ function Canvas({ tracks, selectedId, editor, onSelect, onAdd }: { tracks: reado
   const area = useRef<HTMLDivElement>(null);
   const width = useWidth(area);
   const stacked = width !== null && needed > width;
-  const row = stacked ? "flex flex-col items-center" : "flex justify-center";
-  const joined = stacked ? "" : JOINED;
+  const row = "flex justify-center";
+  const joined = JOINED;
+  const afterLabel = (t: TrackDefinition) => `after · ${t.start.kind === "after" ? days(t.start.delayDays) : ""}`;
+  const node = (t: TrackDefinition) => <TrackNode track={t} def={editor.draft} selected={selectedId === t.id} blockers={editor.view.launch.blockers} launched={editor.launched} onSelect={() => onSelect(t.id)} />;
+  /**
+   * Stacked (council on 10121d3, item 2): an outline of the stored arrangement. Each track sits under
+   * the track it starts after, indented, on a connector line drawn down from that track; tracks that
+   * start at the same point share an indent and a line, so together never reads as a chain.
+   */
+  const outline = (list: readonly TrackDefinition[], label: (t: TrackDefinition) => string, depth: number, name: string): ReactNode => (
+    <ul aria-label={name} className="ml-[11px] flex flex-col gap-3 border-l-[1.5px] border-line-strong pl-3 pt-2">
+      {list.map((t) => {
+        const children = depth > tracks.length ? [] : childrenOf(t.id);
+        return (
+          <li key={t.id} className="flex flex-col items-start gap-1.5">
+            <Pill>{label(t)}</Pill>
+            {node(t)}
+            {children.length > 0 && outline(children, afterLabel, depth + 1, `Tracks after ${trackName(editor.draft, t)}`)}
+          </li>
+        );
+      })}
+    </ul>
+  );
   const branch = (track: TrackDefinition, label: string, depth: number): ReactNode => {
     const children = depth > tracks.length ? [] : childrenOf(track.id);
     return (
@@ -247,14 +268,14 @@ function Canvas({ tracks, selectedId, editor, onSelect, onAdd }: { tracks: reado
         <span className="h-3 border-l-[1.5px] border-line-strong" aria-hidden="true" />
         <Pill>{label}</Pill>
         <span className="h-4 border-l-[1.5px] border-line-strong" aria-hidden="true" />
-        <TrackNode track={track} def={editor.draft} selected={selectedId === track.id} blockers={editor.view.launch.blockers} launched={editor.launched} onSelect={() => onSelect(track.id)} />
+        {node(track)}
         {children.length > 0 && (
           <>
             <span className="h-4 border-l-[1.5px] border-line-strong" aria-hidden="true" />
             <ul aria-label={`Tracks after ${trackName(editor.draft, track)}`} className={row}>
               {children.map((c) => (
                 <li key={c.id} className={joined}>
-                  {branch(c, `after · ${c.start.kind === "after" ? days(c.start.delayDays) : ""}`, depth + 1)}
+                  {branch(c, afterLabel(c), depth + 1)}
                 </li>
               ))}
             </ul>
@@ -264,7 +285,7 @@ function Canvas({ tracks, selectedId, editor, onSelect, onAdd }: { tracks: reado
     );
   };
   return (
-    <div data-testid="canvas" className={`flex min-w-0 flex-col rounded-box border border-line bg-raised bg-[radial-gradient(var(--color-line-strong)_1px,transparent_1px)] bg-[length:18px_18px] h-[max(470px,calc(100dvh-306px))]`}>
+    <div data-testid="canvas" data-layout={stacked ? "stacked" : "row"} className={`flex min-w-0 flex-col rounded-box border border-line bg-raised bg-[radial-gradient(var(--color-line-strong)_1px,transparent_1px)] bg-[length:18px_18px] h-[max(470px,calc(100dvh-306px))]`}>
       <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
         <p className="flex items-center gap-2 text-[12.5px] text-muted">
           <span className="w-4 border-t-[1.5px] border-line-strong" aria-hidden="true" />
@@ -272,19 +293,31 @@ function Canvas({ tracks, selectedId, editor, onSelect, onAdd }: { tracks: reado
         </p>
         {!editor.launched && <AddTrackMenu disabled={editor.locked} onAdd={onAdd} />}
       </div>
-      {/* Centred while the tracks fit side by side; stacked in one column when they would not. */}
+      {/* A tree, centred, while the tracks fit side by side; an outline when they would not. Launch
+          stays in view as the canvas scrolls. */}
       <div ref={area} className="min-h-0 flex-1 overflow-auto px-1 pb-10 pt-4">
-        <div className={`mx-auto flex flex-col items-center ${stacked ? "" : "w-max"}`}>
-          <span className="rounded-full bg-base-content px-3.5 py-1 text-[12.5px] font-semibold text-base-100">Launch</span>
-          <span className="h-4 border-l-[1.5px] border-line-strong" aria-hidden="true" />
-          <ul aria-label="Tracks that start at launch" className={row}>
-            {roots.map((t) => (
-              <li key={t.id} className={joined}>
-                {branch(t, rootLabel, 0)}
-              </li>
-            ))}
-          </ul>
-        </div>
+        {stacked ? (
+          <div className="flex flex-col items-start px-3">
+            <span data-testid="launch-point" className="sticky top-0 z-[1] rounded-full bg-base-content px-3.5 py-1 text-[12.5px] font-semibold text-base-100">
+              Launch
+            </span>
+            {outline(roots, () => rootLabel, 0, "Tracks that start at launch")}
+          </div>
+        ) : (
+          <div className="mx-auto flex w-max flex-col items-center">
+            <span data-testid="launch-point" className="sticky top-0 z-[1] rounded-full bg-base-content px-3.5 py-1 text-[12.5px] font-semibold text-base-100">
+              Launch
+            </span>
+            <span className="h-4 border-l-[1.5px] border-line-strong" aria-hidden="true" />
+            <ul aria-label="Tracks that start at launch" className={row}>
+              {roots.map((t) => (
+                <li key={t.id} className={joined}>
+                  {branch(t, rootLabel, 0)}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
     </div>
   );
