@@ -209,6 +209,31 @@ describe("ruling 3: uncertain provider work keeps its capacity reservation", () 
   });
 });
 
+describe("ruling 3: the verification's reproduction (B1), through the HTTP interface with the generated test's fake", () => {
+  test("one inbox of capacity 1, windows 09-10 and 10-17, a lagging lookup: the provider sends once that day", async () => {
+    const h = new EngineHarness({
+      start: MONDAY_9 - H,
+      accounts: [{ id: "inbox-a", capacity: 1, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
+      modes: ["lookup-lags"],
+      random: () => 0.95,
+      engine: quickWaits,
+    });
+    const window = (start: number, end: number) => [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start, end }));
+    const campaignWith = (start: number, end: number): CampaignDefinition => ({ ...twoSteps(), tracks: [{ ...twoSteps().tracks[0]!, window: window(start, end) }] });
+    const a = await h.createCampaign("Campaign A", { businesses: [business({ business_id: "b1", business_name: "Harbour Lane Physio" })], people: [PEOPLE[0]!] });
+    const b = await h.createCampaign("Campaign B", { businesses: [business({ business_id: "b2", business_name: "Northgate Dental" })], people: [person({ person_id: "p9", business_id: "b2", full_name: "Grace Okafor", email: "grace@northgate.example" })] });
+    await h.tick();
+    await h.defineSequence(a.campaign.id, campaignWith(9, 10));
+    await h.defineSequence(b.campaign.id, campaignWith(10, 17));
+    h.clock = Date.parse("2026-11-02T09:59:00Z");
+    expect((await h.launch(a.campaign.id)).status).toBe(200);
+    expect((await h.launch(b.campaign.id)).status).toBe(200);
+    await h.advanceTo(Date.parse("2026-11-02T23:59:00Z"));
+    const monday = h.fake.deliveryLog.filter((d) => d.at < Date.parse("2026-11-03T00:00:00Z"));
+    expect(monday).toHaveLength(1);
+  });
+});
+
 describe("ruling 4: a provider send belongs to the provider work that produced it", () => {
   test("a send for a withdrawn attempt's key, arriving while its inheritor is claimed, settles on the original work (review: Opus 4, GPT P1)", async () => {
     const { h, port, start } = await launched([inbox("inbox-a")]);
@@ -326,5 +351,30 @@ describe("ruling 8: progress tables reference subjects", () => {
       expect([table, refs]).toEqual([table, ["subjects"]]);
     }
     db.close();
+  });
+});
+
+describe("ruling 1: an off-thread reply from one person in two campaigns (found by the extended generator, seed 20261117)", () => {
+  test("is recorded on every lead the inbox wrote to at that address, and stops each", async () => {
+    let clock = MONDAY_9 - H;
+    const port = new ScriptedEmailPort(() => clock, [inbox("inbox-a")]);
+    const h = new EngineHarness({ start: clock, accounts: [], port, engine: quickWaits });
+    Object.defineProperty(h, "clock", { get: () => clock, set: (v: number) => (clock = v) });
+    const rows = { businesses: [business({ business_id: "b1", business_name: "Harbour Lane Physio" })], people: [PEOPLE[0]!] };
+    const a = await h.createCampaign("Campaign A", rows);
+    const b = await h.createCampaign("Campaign B", rows);
+    await h.tick();
+    await h.defineSequence(a.campaign.id, twoSteps());
+    await h.defineSequence(b.campaign.id, twoSteps());
+    clock = MONDAY_9;
+    await h.launch(a.campaign.id);
+    await h.launch(b.campaign.id);
+    await h.advanceTo(MONDAY_9 + H);
+    port.reply("pat@harbour.example", false);
+    await h.advanceTo(MONDAY_9 + 3 * DAY);
+    for (const id of [...(await h.store.engine.subjectsOf(a.campaign.id)), ...(await h.store.engine.subjectsOf(b.campaign.id))]) {
+      expect((await h.progress(id)).status).toBe("replied");
+    }
+    expect(port.calls.filter((c) => c.request.stepId === "s2")).toEqual([]);
   });
 });

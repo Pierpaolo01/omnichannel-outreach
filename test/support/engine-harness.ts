@@ -37,6 +37,18 @@ export class Crash extends Error {
   }
 }
 
+/** An error the worker loop logs and carries on from, with the same engine (no restart). */
+export class TransientError extends Error {
+  constructor(point: string) {
+    super(`simulated transient error at ${point}`);
+  }
+}
+
+/** Bounded port waits for tests: a port call not answered by the next turn of the event loop has timed out. */
+export function quickWait<T>(promise: Promise<T>, _ms: number, timedOut: T): Promise<T> {
+  return Promise.race([promise, new Promise<T>((resolve) => setImmediate(() => resolve(timedOut)))]);
+}
+
 export class EngineHarness {
   clock: number;
   readonly store: OutreachStore;
@@ -140,6 +152,7 @@ export class EngineHarness {
     try {
       await this.engine.tick();
     } catch (error) {
+      if (error instanceof TransientError) return;
       if (!(error instanceof Crash)) throw error;
       this.crashes.push(error.message);
       await this.restart();
@@ -164,6 +177,7 @@ export class EngineHarness {
         await this.engine.recover();
         return;
       } catch (error) {
+        if (error instanceof TransientError) return;
         if (!(error instanceof Crash)) throw error;
         this.crashes.push(error.message);
         this.engine = this.newEngine();

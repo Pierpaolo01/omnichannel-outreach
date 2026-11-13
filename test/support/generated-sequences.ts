@@ -1,10 +1,9 @@
 import { ENGINE_PARAMS, isLive } from "../../src/domain/sequence/attempt.ts";
 import type { CampaignDefinition, StepDefinition } from "../../src/domain/sequence/definition.ts";
-import { handoverFailures } from "../../src/domain/sequence/dispatch.ts";
 import type { Attempt, SubjectState } from "../../src/domain/sequence/state.ts";
 import type { Rules } from "../../src/server/engine/rules.ts";
 import type { CompanyRecord, EnrollmentProgress, LeadSearchResult, NeedsAttention, OutreachStatus, PersonRecord } from "../../src/shared/api.ts";
-import { Crash, EngineHarness } from "./engine-harness.ts";
+import { Crash, EngineHarness, TransientError, quickWait } from "./engine-harness.ts";
 import { business, person, type ExportRows } from "./export-builder.ts";
 import { FAKE_MODES, type FakeAccount, type FakeMode, type HandoverLogEntry } from "./fake-email-port.ts";
 import { dueAfter, firstOpen, higherPriority, inWindow, leadTimeOf, local, renderCopy, zoneOf, type Hours } from "./sequence-model.ts";
@@ -103,9 +102,19 @@ function steps(rand: () => number, pick: Pick): StepDefinition[] {
   return out.map((s) => (s.threading === "new_subject" && !s.subject ? { ...s, subject: "Another thought" } : s));
 }
 
-function windowOf(rand: () => number, pick: Pick): Hours[] {
+function windowOf(rand: () => number, pick: Pick, after: readonly Hours[] | null = null): Hours[] {
+  // Sometimes this campaign's window opens where the other's closes, on the same days (the
+  // verification's capacity reproduction: windows 09-10 and 10-17 on one inbox).
+  if (after && after.length > 0 && after[0]!.start < after[0]!.end && after[0]!.end < 23 && rand() < 0.3) {
+    return after.map((w) => ({ day: w.day, start: w.end, end: Math.min(24, w.end + pick([1, 3, 7])) }));
+  }
   const kind = rand();
-  if (kind < 0.25) return [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
+  if (kind < 0.2) return [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
+  if (kind < 0.3) {
+    // A one-hour window: a retry or a recovered send often finds it closed.
+    const start = pick([8, 9, 10, 15]);
+    return [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start, end: start + 1 }));
+  }
   const days = [0, 1, 2, 3, 4, 5, 6].filter(() => rand() < 0.6);
   const chosen = days.length > 0 ? days : [pick([1, 2, 3, 4, 5])];
   if (kind < 0.4) return chosen.map((day) => ({ day, start: 20, end: 3 })); // overnight
@@ -127,15 +136,25 @@ export interface RunOptions {
 
 export interface RunResult {
   readonly problems: string[];
-  readonly stats: { sends: number; calls: number; crashes: number; subjects: number; ticks: number; modes: readonly FakeMode[] };
+  readonly stats: { sends: number; calls: number; crashes: number; subjects: number; ticks: number; modes: readonly FakeMode[]; features: readonly string[] };
 }
+
+/** The invariants a problem names: the numbers before its first colon ("1/20: ..." names 1 and 20). */
+export function invariantsOf(problem: string): string[] {
+  return (problem.split(":")[0] ?? "").split("/").map((x) => x.trim());
+}
+
+/** The store's forward-only guards: they refuse a write that would move stored progress backwards. */
+const FORWARD_ONLY = [/a step result is never (changed|deleted)/, /the freezes record is append-only/, /a closed freeze never reopens/, /UNIQUE constraint failed: freezes\.subject_id/];
 
 export async function runSequence(seed: number, options: RunOptions = {}): Promise<RunResult> {
   try {
     return await runSequenceUnguarded(seed, options);
   } catch (error) {
-    // A transaction the store refused (a unique index, a forward-only write) or any other throw fails the run.
-    return { problems: [`the engine threw: ${error instanceof Error ? error.message : String(error)}`], stats: { sends: 0, calls: 0, crashes: 0, subjects: 0, ticks: 0, modes: [] } };
+    const message = error instanceof Error ? error.message : String(error);
+    // A write computed from state that has since moved on is refused by construction (invariant 24).
+    const id = FORWARD_ONLY.some((r) => r.test(message)) ? "24" : "throw";
+    return { problems: [`${id}: the engine threw: ${message}`], stats: { sends: 0, calls: 0, crashes: 0, subjects: 0, ticks: 0, modes: [], features: [] } };
   }
 }
 
@@ -165,7 +184,8 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
   const accounts: FakeAccount[] = Array.from({ length: inboxCount }, (_, i) => ({
     id: `inbox-${String.fromCharCode(97 + i)}`,
     capacity: unlimited ? 1000 : pick([1, 2, 3, 5, 8]),
-    gapMs: unlimited ? MINUTE : pick([1, 2, 5, 20]) * MINUTE,
+    // Null: the ADR's default gap from the windows the inbox serves (ruling 10).
+    gapMs: unlimited ? MINUTE : pick([null, null, MINUTE, 2 * MINUTE, 5 * MINUTE, 20 * MINUTE]),
     k: unlimited ? 10 : pick([1, 2]),
     healthy: true,
     quotaAvailable: true,
@@ -192,8 +212,20 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     };
   });
 
-  const h = new EngineHarness({ start, accounts, modes, random: random(seed ^ 0x5eed), ...(options.rules ? { rules: options.rules } : {}) });
+  const h = new EngineHarness({ start, accounts, modes, random: random(seed ^ 0x5eed), engine: { waitFor: quickWait }, ...(options.rules ? { rules: options.rules } : {}) });
   const fake = h.fake;
+  fake.withdrawAnswers = unlimited ? "honest" : pick(["honest", "unknown-cancels", "unknown-sends"] as const);
+  fake.overlapMs = pick([5, 15, 60]) * MINUTE;
+  /** Each inbox's capacity over time, as the record knows it. */
+  const capacityHistory = new Map(accounts.map((a) => [a.id, [[0, a.capacity]] as [number, number][]]));
+  /** Clock advances injected between a send's authorization and its call, by attempt and call instant. */
+  const injectedDelay = new Map<string, number>();
+  /** Keys the user marked sent, and when. */
+  const markedSent = new Map<string, number>();
+  /** What this run exercised, for choosing a rule-covering fixed seed set (ruling 11). */
+  const features = new Set<string>();
+  /** Keys the user marked not sent, and when. */
+  const markedNotSentKeys = new Map<string, number>();
   for (const p of people) {
     const address = p.emails[0]?.[1];
     if (!address) continue;
@@ -234,7 +266,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       timezone: pick(["Europe/London", "America/New_York"]),
       callSkipLimitDays: 2,
       emailPool: accounts.filter((_, i) => ci === 0 || i > 0 || inboxCount === 1).map((a) => a.id),
-      tracks: [{ id: "t1", channel: "email", branch: "main", window: windowOf(rand, pick), steps: steps(rand, pick), start: { kind: "entry" }, removed: false }],
+      tracks: [{ id: "t1", channel: "email", branch: "main", window: windowOf(rand, pick, campaigns[0]?.definition.tracks[0]?.window ?? null), steps: steps(rand, pick), start: { kind: "entry" }, removed: false }],
     };
     campaigns.push({ id: "", definition, companies: ci === 0 ? [0, 1, 2] : [1, 2], launchedAt: null });
   }
@@ -268,6 +300,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
   // ------------------------------------------------------------------------------------------
   // Crashes and injected user events.
   let armed: string | null = null;
+  let transient: string | null = null;
   let inject = 0;
   /** A user or prospect event aimed at one lead, injected while the engine is between two steps. */
   const eventOn = async (subjectId: string | null, prefer: "any" | "title" = "any", concurrentWorker = true) => {
@@ -309,6 +342,24 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
         armed = null;
         throw new Crash(point);
       }
+      if (transient === point) {
+        transient = null;
+        // An error the worker loop logs and carries on from, with the same engine (ruling 5).
+        features.add("transient-error");
+        throw new TransientError(point);
+      }
+    },
+    // Between a send's authorization commit and its call: a clock advance, and a reply reaching the
+    // provider. Synchronous, as nothing asynchronous may happen there (ruling 2).
+    afterAuthorization: (attemptId: string) => {
+      if (unlimited || hookBudget <= 0 || !chance(0.3)) return;
+      hookBudget--;
+      const delay = pick([0, 30_000, 2 * MINUTE, 7 * MINUTE]);
+      h.clock += delay;
+      injectedDelay.set(`${attemptId}@${h.clock}`, delay);
+      fake.advance();
+      const delivered = fake.deliveryLog.filter((d) => d.at <= h.clock);
+      if (delivered.length > 0 && chance(0.5)) fake.prospectReplies(pick(delivered).destination, chance(0.7));
     },
     beforeApplyEvaluation: (subjectId: string) => {
       return maybeInject(subjectId);
@@ -323,13 +374,20 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
   h.hooks = hooks;
 
   /** The user resolves unresolved attempts the provider never sent as "not sent" (ADR 0002 P3). */
+  /** The user resolves unresolved attempts (ADR 0002 P3): "sent" when the provider did send, otherwise "not sent". */
   async function userMarks() {
     for (const a of await h.store.engine.openAttempts()) {
       if (!isLive(a) || a.unresolvedSince === null) continue;
-      if (fake.deliveryLog.some((d) => d.key === a.idempotencyKey)) continue;
+      if (fake.deliveryLog.some((d) => d.key === a.idempotencyKey && d.at <= h.clock)) {
+        if (await h.engine.markAttempt(a.id, "sent")) markedSent.set(a.idempotencyKey, h.clock);
+        continue;
+      }
       const accepted = await h.engine.markAttempt(a.id, "not_sent");
       if (accepted && a.lookupAnswer === "queued") problem(`26: "mark not sent" accepted while the provider reports ${a.id} queued`);
-      if (accepted) markedNotSent.add(`${a.subjectId}/${a.stepId}`);
+      if (accepted) {
+        markedNotSent.add(`${a.subjectId}/${a.stepId}`);
+        markedNotSentKeys.set(a.idempotencyKey, h.clock);
+      }
     }
   }
 
@@ -394,7 +452,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     await h.defineSequence(c.id, c.definition);
   }
   await discover();
-  const priorityProbe = probeAtCall(h, subjects, campaigns, problem);
+  const priorityProbe = probeAtCall(h, problem, eligibleForSlot);
   fake.onHandover = priorityProbe;
 
   for (const [ci, c] of campaigns.entries()) {
@@ -404,7 +462,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     const launched = await h.launch(c.id);
     if (launched.status !== 200) {
       problem(`launch refused: ${JSON.stringify(launched.body)}`);
-      return { problems, stats: { sends: 0, calls: 0, crashes: 0, subjects: subjects.size, ticks: h.ticks, modes } };
+      return { problems, stats: { sends: 0, calls: 0, crashes: 0, subjects: subjects.size, ticks: h.ticks, modes, features: [] } };
     }
     c.launchedAt = h.clock;
   }
@@ -437,7 +495,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       inject = 0;
     } else if (r < 0.55) {
       const delivered = fake.deliveryLog.filter((d) => d.at <= h.clock);
-      if (delivered.length > 0) fake.prospectReplies(pick(delivered).destination);
+      if (delivered.length > 0) fake.prospectReplies(pick(delivered).destination, chance(0.75));
       await h.tick();
     } else if (r < 0.62) {
       await reimport();
@@ -454,10 +512,16 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       else fake.rateLimitedUntil.set(a.id, h.clock + pick([30_000, 5 * MINUTE, HOUR]));
       await h.tick();
     } else if (r < 0.78 && !unlimited) {
-      fake.presendUnavailable = !fake.presendUnavailable;
+      if (chance(0.5)) fake.presendUnavailable = !fake.presendUnavailable;
+      else {
+        fake.portHangs = !fake.portHangs;
+        features.add("port-hangs");
+      }
       await h.tick();
     } else if (r < 0.87 && !unlimited) {
-      armed = pick(["after_claim", "after_presend", "after_handover_commit", "after_call", "after_retry_commit", "after_lookup", "after_observe_event"]);
+      const point = pick(["after_claim", "after_presend", "after_handover_commit", "after_call", "after_retry_commit", "after_lookup", "after_observe_event"]);
+      if (chance(0.7)) armed = point;
+      else transient = point;
       await advance(pick([MINUTE, 20 * MINUTE, 3 * HOUR]));
     } else if (r < 0.9) {
       const stale = fake.staleAnswers.splice(0);
@@ -465,9 +529,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       await h.tick();
     } else if (r < 0.94 && !unlimited) {
       await userMarks();
-      await h.advanceTo(h.clock + pick([HOUR, 6 * HOUR]), async () => {
-        if (chance(0.05)) await userMarks();
-      });
+      await advance(pick([HOUR, 6 * HOUR]));
     } else {
       inject = unlimited ? 0 : 2;
       await advance(pick([MINUTE, HOUR, DAY]));
@@ -483,21 +545,27 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     inject = 0;
     hookBudget = 0;
     fake.presendUnavailable = false;
+    fake.portHangs = false;
+    transient = null;
     fake.rateLimitedUntil.clear();
     // "With enough time and capacity": every inbox gets room for the whole backlog.
     for (const a of accounts) {
       a.healthy = true;
       a.quotaAvailable = true;
       a.capacity = Math.max(a.capacity, 100);
+      capacityHistory.get(a.id)?.push([h.clock, a.capacity]);
     }
-    // "Enough time": three weeks, then a week at a time while a running lead still waits for a
-    // deadline (a narrow window can space five steps a week apart), up to ten weeks.
+    // "Enough time": three weeks, then a week at a time while a running lead still has pending,
+    // unheld work (a narrow window can space five steps a week apart), up to ten weeks.
     await h.advanceTo(h.clock + 21 * DAY);
     for (let week = 0; week < 7; week++) {
       let waiting = false;
+      const stalled = new Set((await h.request<NeedsAttention>("GET", "/api/needs-attention")).body.stalledInboxes.map((x) => x.accountId));
       for (const id of await h.store.engine.runningSubjectIds()) {
-        const st = await h.store.engine.subject(id, h.clock);
-        if (st?.tracks.some((t) => t.finishedAt === null && t.dueWall !== null && t.dueAt !== null && t.dueAt > h.clock - st.subject.clock.frozenTotal)) waiting = true;
+        // Work still pending, not held and not waiting on a stalled inbox: a deadline or a window still to come.
+        const progress = (await h.request<EnrollmentProgress>("GET", `/api/enrollments/${id}`)).body;
+        if (progress.sender !== null && stalled.has(progress.sender)) continue;
+        if (progress.tracks.some((t) => t.finishReason === null && t.nextStep !== null && t.hold === null)) waiting = true;
       }
       if (!waiting) break;
       await h.advanceTo(h.clock + 7 * DAY);
@@ -505,9 +573,28 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     await checkAll(true);
   }
 
+  const finalAttempts = (await Promise.all([...subjects.keys()].map((id) => h.store.engine.subject(id, h.clock)))).flatMap((x) => x?.attempts ?? []);
+  for (const c of fake.handoverLog) features.add(`mode:${c.mode}`);
+  for (const r of fake.refusals) features.add(`refused:${r.reason}`);
+  for (const w of fake.withdrawLog) features.add(`withdraw:${w.answer}`);
+  for (const a of finalAttempts) {
+    if (a.endedBy) features.add(`ended-by:${a.endedBy}`);
+    if (a.unresolvedSince !== null) features.add("unresolved");
+    if (a.endedBy === "observed" && fake.lookupLog.some((l) => l.key === a.idempotencyKey && l.answer === "not-sent")) features.add("sent-after-not-sent");
+  }
+  if (h.crashes.length > 0) features.add("crash");
+  if (injectedDelay.size > 0) features.add("advance-between-authorization-and-call");
+  if (markedSent.size > 0) features.add("marked-sent");
+  if (markedNotSentKeys.size > 0) features.add("marked-not-sent");
+  if (fake.replyLog.some((r) => !r.onThread)) features.add("reply-off-thread");
+  if (fake.replyLog.some((r) => r.onThread)) features.add("reply-on-thread");
+  if (accounts.some((a) => a.gapMs === null)) features.add("default-gap");
+  if (accounts.some((a) => a.k > 1)) features.add("k2");
+  if (campaigns.length > 1) features.add("two-campaigns");
+  if (fake.deliveryLog.some((d) => fake.bouncing.has(d.destination))) features.add("bounce");
   return {
     problems,
-    stats: { sends: fake.deliveryLog.length, calls: fake.handoverLog.length, crashes: h.crashes.length, subjects: subjects.size, ticks: h.ticks, modes },
+    stats: { sends: fake.deliveryLog.length, calls: fake.handoverLog.length, crashes: h.crashes.length, subjects: subjects.size, ticks: h.ticks, modes, features: [...features] },
   };
 
   // ------------------------------------------------------------------------------------------
@@ -536,6 +623,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       if (column !== progress.status) problem(`1: ${id} stores ${column} but derives ${progress.status}`);
       const allowed = expectedStatuses(rec, s, now, runStart);
       if (!allowed.has(progress.status)) {
+        if ((globalThis as { DEBUG?: unknown }).DEBUG) console.info("STATUS", id, JSON.stringify({ runStart, enrolledAt: rec.enrolledAt, launchedAt: campaign.launchedAt, now, person: rec.person?.emails, inbox: rec.company.inbox, calls: fake.handoverLog.filter((c) => c.subjectId === id).map((c) => [c.at, c.destination, c.attemptId]), refusals: fake.refusals.filter((r) => fake.handoverLog.some((c) => c.subjectId === id && c.attemptId === r.attemptId)), replies: fake.replyLog, deliveries: fake.deliveryLog.filter((d) => d.subjectId === id), elsewhere: [...badElsewhere], tracks: s.tracks, ended: [s.subject.ended, s.subject.endedWall], bouncing: [...fake.bouncing] }));
         problem(`1/20: ${id} is ${progress.status}; the record allows ${[...allowed].join(" or ")} at ${new Date(now).toISOString()}`);
       }
 
@@ -570,10 +658,10 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       for (const result of s.results) {
         if (result.result !== "sent") continue;
         const attempt = s.attempts.find((a) => a.id === result.attemptId);
-        const delivery = fake.deliveryLog.find((d) => d.subjectId === id && d.stepId === result.stepId);
-        // A step the user marked not sent may have been delivered twice (5.3's one exception), so its
-        // lead's times are not the record's to predict.
-        if (!attempt || !delivery || attempt.userMarkedNotSent || [...markedNotSent].some((k) => k.startsWith(`${id}/`))) continue;
+        // The step's send, by the record: its first delivery from work the user did not mark not
+        // sent (that override exempts the step from at-most-once only, ruling 9).
+        const delivery = stepDelivery(id, result.stepId);
+        if (!attempt || !delivery || markedSent.has(attempt.idempotencyKey)) continue;
         const firstEnding = recordFirstEnding(rec, runStart, now);
         if (!firstEnding.certain) continue;
         const sentAt = Math.max(delivery.at, attempt.handedWall ?? 0);
@@ -597,7 +685,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
         const bad = badAtFor(a.destination);
         const markedAfterClaim =
           (badElsewhere.get(a.destination) === bad && attemptNumber(a.id) <= (badElsewhereAfter.get(a.destination) ?? Infinity)) ||
-          fake.refusals.some((r) => r.attemptId === a.id && r.reason === "invalid_destination");
+          fake.refusals.some((r) => r.reason === "invalid_destination" && (r.attemptId === a.id || (r.destination === a.destination && r.at === a.claimedWall)));
         if (bad !== null && bad <= a.claimedWall && !markedAfterClaim) problem(`19: ${a.id} claimed ${a.destination} at ${new Date(a.claimedWall).toISOString()} after it was marked bad at ${new Date(bad).toISOString()} (elsewhere ${String(badElsewhere.get(a.destination))}, bounce ${fake.bouncing.has(a.destination)}, invalid ${fake.invalid.has(a.destination)}; state ${a.state} ${a.endedBy ?? ""})`);
       }
       // 5.5 and 1.3: the sender is fixed by the first handover that commits, never by a claim.
@@ -650,15 +738,16 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     }
     checkCallLog(allAttempts);
 
-    // 10 and 11. Capacity, the in-flight bound.
-    for (const acc of await h.store.engine.accounts(now)) {
-      // Excluded, and reported as an ADR contradiction: a send observed on an attempt a lookup had
-      // withdrawn as not sent. Its reservation was released (ADR 0002) before the provider sent it.
-      const today = new Date(local(now, acc.resetZone).day * DAY).toISOString().slice(0, 10);
-      const revived = allAttempts.filter((a) => a.accountId === acc.id && a.state === "sent" && a.sentDay === today && fake.lookupLog.some((l) => l.key === a.idempotencyKey && l.answer === "not-sent")).length;
-      if (acc.used - revived > acc.capacity) problem(`10: ${acc.id} has ${acc.used} sends and reservations against a capacity of ${acc.capacity}`);
-      if (acc.inFlight > acc.k) problem(`11: ${acc.id} has ${acc.inFlight} attempts in flight against k = ${acc.k}`);
+    // 10, from the provider's own delivery log: no inbox sends more than its capacity on any reset day.
+    for (const acc of accounts) {
+      const perDay = new Map<number, number>();
+      for (const d of fake.deliveryLog) if (d.sender === acc.id) perDay.set(local(d.at, acc.resetZone).day, (perDay.get(local(d.at, acc.resetZone).day) ?? 0) + 1);
+      for (const [day, n] of perDay) {
+        const capacity = Math.max(...(capacityHistory.get(acc.id) ?? []).filter(([at]) => local(at, acc.resetZone).day <= day).map(([, c]) => c));
+        if (n > capacity) problem(`10: ${acc.id} sent ${n} times on reset day ${new Date(day * DAY).toISOString().slice(0, 10)} against a capacity of ${capacity}`);
+      }
     }
+    checkInFlight();
 
     // 26. No attempt waits forever.
     for (const a of allAttempts) {
@@ -684,11 +773,147 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       for (const [id, s] of states) {
         if (s.subject.ended !== null) continue;
         const progress = (await h.request<EnrollmentProgress>("GET", `/api/enrollments/${id}`)).body;
+        // Invariant 18 as amended: a running lead may wait on an inbox Needs attention lists, only
+        // while the attempts holding it have latest answers unknown or queued (ruling 9).
         const usable = s.subject.emailSender !== null ? [s.subject.emailSender] : s.campaign.definition.emailPool;
-        const waitsOnStalled = usable.length > 0 && usable.every((a) => stalled.has(a));
+        const holdersUnsettled = (accountId: string) =>
+          allAttempts
+            .filter((a) => isLive(a) && a.accountId === accountId)
+            // A not-sent the transport cannot vouch for is read as unknown (5.3).
+            .every((a) => a.lookupAnswer === "unknown" || a.lookupAnswer === "queued" || (a.lookupAnswer === "not-sent" && !a.retryable && !a.notSentIsFinal));
+        const waitsOnStalled = usable.length > 0 && usable.every((a) => stalled.has(a) && holdersUnsettled(a));
+        // A follow-up held for want of a thread is right only when the step before it was settled by
+        // the user's "sent" mark, so the provider gave no reference (ruling 1).
+        for (const t of progress.tracks) {
+          if (t.hold !== "no_thread" || !t.nextStep) continue;
+          const steps = campaigns[subjects.get(id)!.campaign]!.definition.tracks[0]!.steps;
+          const before = steps[steps.findIndex((x) => x.id === t.nextStep?.stepId) - 1];
+          const delivered = before ? stepDelivery(id, before.id) : undefined;
+          if (delivered && !markedSent.has(delivered.key)) problem(`18: ${id}/${t.nextStep.stepId} is held for want of a thread, though ${before?.id ?? ""} was sent with reference ${delivered.providerRef}`);
+        }
         if (!progress.tracks.some((t) => t.hold !== null) && !waitsOnStalled) problem(`18: ${id} is ${progress.status} after the drain with nothing held (${JSON.stringify(progress.tracks.map((t) => [t.finishReason, t.nextStep]))})`);
       }
     }
+  }
+
+  /**
+   * The checker's own reading of "met every handover predicate except the slot and the pre-send
+   * check" (invariant 12, ruling 9), from the stored facts and the record, not the engine's guard.
+   */
+  function eligibleForSlot(st: SubjectState, a: Attempt, now: number): boolean {
+    const rec = subjects.get(st.subject.id);
+    if (!rec || st.subject.ended !== null || st.subject.leadPaused || st.campaign.launchedAt === null) return false;
+    const def = campaigns[rec.campaign]!.definition;
+    const track = def.tracks[0]!;
+    const p = st.tracks.find((t) => t.trackId === a.trackId);
+    if (!p || p.startedAt === null || p.finishedAt !== null || p.nextStepId !== a.stepId || p.dueAt === null) return false;
+    if (st.results.some((r) => r.stepId === a.stepId)) return false;
+    if (st.attempts.some((o) => o.id !== a.id && o.stepId === a.stepId && !["sent", "rejected", "withdrawn"].includes(o.state))) return false;
+    const lead = (st.subject.clock.frozenSince ?? now) - st.subject.clock.frozenTotal;
+    if (p.dueAt > lead) return false;
+    if (!inWindow(track.window, zoneOf(rec.person?.zone ?? "", rec.company.zone, def.timezone), now)) return false;
+    const account = accounts.find((x) => x.id === a.accountId);
+    if (!account?.healthy || !account.quotaAvailable || (fake.rateLimitedUntil.get(a.accountId) ?? 0) > now) return false;
+    if (st.subject.emailSender !== null ? st.subject.emailSender !== a.accountId : !def.emailPool.includes(a.accountId)) return false;
+    const bad = badAtFor(a.destination);
+    if (bad !== null && bad <= now) return false;
+    const replied = replyTimes(st.subject.id).must;
+    if (replied !== null && replied <= now) return false;
+    const step = track.steps.find((x) => x.id === a.stepId);
+    if (!step) return false;
+    const data = mergeData(rec, fake.handoverLog.length);
+    if (renderCopy(step.subject, data) === null || renderCopy(step.body, data) === null) return false;
+    if (step.threading === "continue_thread" && !st.attempts.some((o) => o.trackId === a.trackId && o.state === "sent" && o.providerRef !== null)) return false;
+    return true;
+  }
+
+  /**
+   * The latest instant the app may first observe a fact the provider shows at `v`: a clock advance
+   * injected between an authorization and its call, later in the same pass, delays the next
+   * observation to its end, and such advances chain.
+   */
+  function observedBy(v: number): number {
+    const advances = [...injectedDelay].map(([key, delay]) => {
+      const end = Number(key.split("@")[1]);
+      return [end - delay, end] as const;
+    });
+    let t = v;
+    for (let changed = true; changed; ) {
+      changed = false;
+      for (const [start, end] of advances) {
+        if (start >= v && start <= t && end > t) {
+          t = end;
+          changed = true;
+        }
+      }
+    }
+    return t;
+  }
+
+  /** The step's send, by the record: its first delivery from work the user did not mark not sent. */
+  function stepDelivery(subjectId: string, stepId: string) {
+    return fake.deliveryLog.find((d) => d.subjectId === subjectId && d.stepId === stepId && !markedNotSentKeys.has(d.key));
+  }
+
+  /** When the app could first know of a delivery: its event, a lookup that confirmed it, or the user's mark. */
+  function knownAt(d: { key: string; at: number; visibleAt: number }): number {
+    const looked = fake.lookupLog.find((l) => l.key === d.key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity;
+    return Math.min(d.visibleAt, looked, markedSent.get(d.key) ?? Infinity);
+  }
+
+  /** The record's pacing gap (ADR 0003 4.1): configured, else the shortest window served over capacity, at least a minute. */
+  function recordGap(accountId: string, at: number): number {
+    const acc = accounts.find((a) => a.id === accountId);
+    if (!acc) return 0;
+    if (acc.gapMs !== null) return acc.gapMs;
+    const capacity = (capacityHistory.get(accountId) ?? []).filter(([t]) => t <= at).at(-1)?.[1] ?? acc.capacity;
+    const hours = campaigns
+      .filter((c) => c.definition.emailPool.includes(accountId))
+      .flatMap((c) => c.definition.tracks[0]!.window.map((w) => (w.start < w.end ? w.end - w.start : 24 - w.start + w.end)));
+    return hours.length === 0 ? MINUTE : Math.max(MINUTE, Math.floor((Math.min(...hours) * HOUR) / capacity));
+  }
+
+  /**
+   * 11, from the provider's logs: when a new piece of work reaches an inbox, the work it already
+   * holds whose outcome the app has not been told (no visible send, confirming or not-sent lookup,
+   * refusal, confirmed withdrawal or user mark) is fewer than k.
+   */
+  function checkInFlight(): void {
+    const firstCallOf = new Map<string, HandoverLogEntry>();
+    for (const c of fake.handoverLog) if (!firstCallOf.has(c.key)) firstCallOf.set(c.key, c);
+    const settledAt = (key: string): number => {
+      const delivered = fake.deliveryLog.filter((d) => d.key === key).map(knownAt);
+      const looked = fake.lookupLog.filter((l) => l.key === key && (l.answer === "sent" || l.answer === "not-sent")).map((l) => l.at);
+      const refused = fake.refusals.filter((r) => fake.handoverLog.some((c) => c.key === key && c.attemptId === r.attemptId)).map((r) => r.at);
+      const withdrawn = fake.withdrawLog.filter((w) => w.key === key && w.answer === "withdrawn").map((w) => w.at);
+      return Math.min(...delivered, ...looked, ...refused, ...withdrawn, markedSent.get(key) ?? Infinity, markedNotSentKeys.get(key) ?? Infinity);
+    };
+    for (const [key, c] of firstCallOf) {
+      const k = accounts.find((a) => a.id === c.sender)?.k ?? 1;
+      const holding = [...firstCallOf.values()].filter((o) => o.key !== key && o.sender === c.sender && o.at <= c.at && settledAt(o.key) > c.at);
+      if (holding.length >= k && (globalThis as { DEBUG?: unknown }).DEBUG) console.info("INFLIGHT", JSON.stringify({ c: [c.key, c.at, c.mode], holding: holding.map((o) => [o.key, o.at, o.mode, o.subjectId, settledAt(o.key)]), lookups: fake.lookupLog.filter((l) => holding.some((o) => o.key === l.key)), deliveries: fake.deliveryLog.filter((d) => holding.some((o) => o.key === d.key)).map((d) => [d.key, d.at, d.visibleAt]), refusals: fake.refusals, withdraws: fake.withdrawLog, crashes: h.crashes }));
+      if (holding.length >= k) problem(`11: ${c.sender} took new work for ${c.subjectId}/${c.stepId} while holding ${holding.length} unsettled against k = ${k}`);
+    }
+  }
+
+  /**
+   * When the record says the lead replied: a reply on a thread of its sends, or one outside every
+   * thread from its address to an inbox that wrote to it (ruling 1). `may` widens it to the app's
+   * own attempts to that address from that inbox, which include calls a crash ate.
+   */
+  function replyTimes(subjectId: string, attempts: readonly Attempt[] = []): { must: number | null; may: number | null } {
+    const must = fake.replyLog
+      .filter((r) =>
+        r.onThread
+          ? fake.deliveryLog.some((d) => d.providerRef === r.threadRef && d.subjectId === subjectId)
+          : fake.handoverLog.some((c) => c.subjectId === subjectId && c.sender === r.inbox && c.destination === r.destination && c.at <= r.at),
+      )
+      .map((r) => r.at);
+    // A reply whose thread the app does not know (off-thread, or on a send it never learned the
+    // reference of) is reconciled to every lead that inbox wrote to at that address: the built
+    // interim where several match, a product question for the coordinator.
+    const may = fake.replyLog.filter((r) => attempts.some((a) => a.subjectId === subjectId && a.accountId === r.inbox && a.destination === r.destination && a.calls > 0)).map((r) => r.at);
+    return { must: must.length > 0 ? Math.min(...must) : null, may: [...must, ...may].length > 0 ? Math.min(...must, ...may) : null };
   }
 
   function finishedBefore(p: { finishedAt: number | null }, result: { at: number }): boolean {
@@ -702,7 +927,8 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     if (elsewhere !== undefined) times.push(elsewhere);
     if (fake.bouncing.has(address)) {
       const first = fake.deliveryLog.find((d) => d.destination === address);
-      if (first) times.push(first.at + 5 * MINUTE);
+      // The app knows once it observes the bounce, which an injected advance can delay.
+      if (first) times.push(observedBy(first.at + 5 * MINUTE));
     }
     // An invalid address is known bad from the refusal of the call that tried it.
     const invalid = fake.refusals.find((r) => r.destination === address && r.reason === "invalid_destination");
@@ -726,7 +952,9 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     // have come just after, so the provider's first call settles it when there is one.
     const destination = fake.handoverLog.find((c) => c.subjectId === id)?.destination ?? own(runStart).at(-1) ?? null;
     if (destination === null) return { at: runStart, certain: true };
-    const replies = fake.replyLog.filter((r) => r.at <= now && fake.deliveryLog.some((d) => d.providerRef === r.threadRef && d.subjectId === id)).map((r) => r.at);
+    const replied = replyTimes(id).must;
+    const replies = replied !== null && replied <= now ? [replied] : [];
+
     const calls = fake.handoverLog.filter((c) => c.subjectId === id && c.at <= now);
     const blocked = fake.refusals.find((r) => r.reason === "blocklisted" && calls.some((c) => c.attemptId === r.attemptId));
     const bad = badAtFor(destination);
@@ -734,23 +962,32 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     const lost = own(now).length === 0 ? Math.max(...allAddresses.map((a) => badAtFor(a) ?? Infinity)) : Infinity;
     const known = Math.min(...replies, blocked?.at ?? Infinity, bad !== null && bad <= now ? bad : Infinity, lost <= now ? lost : Infinity);
     const steps = campaigns[rec.campaign]!.definition.tracks[0]!.steps;
-    const deliveries = fake.deliveryLog.filter((d) => d.subjectId === id && d.at <= now);
+    const deliveries = steps.map((st) => stepDelivery(id, st.id)).filter((d): d is NonNullable<typeof d> => d !== undefined && d.at <= now);
     if (steps.every((st) => deliveries.some((d) => d.stepId === st.id))) {
-      const lastSent = Math.max(...steps.map((st) => Math.min(...deliveries.filter((d) => d.stepId === st.id).map((d) => d.at))));
-      const lastVisible = Math.max(...steps.map((st) => Math.min(...deliveries.filter((d) => d.stepId === st.id).map((d) => d.visibleAt))));
+      const lastSent = Math.max(...deliveries.map((d) => d.at));
+      const lastVisible = Math.max(...deliveries.map(knownAt));
       if (lastSent < known) return lastSent === lastVisible ? { at: lastSent, certain: true } : { at: null, certain: false };
     }
+    if (known !== Infinity && observedBy(known) > known) return { at: null, certain: false };
     return { at: known === Infinity ? null : known, certain: true };
   }
 
   /** The statuses the record allows now (1, 20): replies first, then endings, then touched or not. */
   function expectedStatuses(rec: SubjectRecord, s: SubjectState, now: number, runStart: number): Set<OutreachStatus> {
+    // An address added at the very instant of a decision may have come just before or just after it.
+    // The track's start (its destination) and each later evaluation (its reach) may each fall on either side.
+    const out = new Set<OutreachStatus>();
+    for (const destinationAfter of [false, true]) for (const reachAfter of [false, true]) for (const x of statusesWith(rec, s, now, runStart, destinationAfter, reachAfter)) out.add(x);
+    return out;
+  }
+
+  function statusesWith(rec: SubjectRecord, s: SubjectState, now: number, runStart: number, destinationAfter: boolean, addedJustAfter: boolean): Set<OutreachStatus> {
     if (runStart > now) return new Set(["queued"]);
     const id = rec.id;
-    const replied = fake.replyLog.some((r) => r.at <= now && fake.deliveryLog.some((d) => d.providerRef === r.threadRef && d.subjectId === id));
-    if (replied) return new Set(["replied"]);
+    const reply = replyTimes(id, s.attempts);
+    if (reply.must !== null && reply.must <= now) return new Set(["replied"]);
     const own = (t: number): string[] => {
-      const all = rec.person ? rec.person.emails.filter(([at]) => at <= t).map(([, a]) => a) : rec.company.inbox ? [rec.company.inbox] : [];
+      const all = rec.person ? rec.person.emails.filter(([at]) => (addedJustAfter ? at < t : at <= t)).map(([, a]) => a) : rec.company.inbox ? [rec.company.inbox] : [];
       return all.filter((a) => {
         const bad = badAtFor(a);
         return bad === null || bad > t;
@@ -758,10 +995,15 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     };
     // The newest good address when the track started; an address added at that very instant may
     // have come just after, so the provider's first call settles it when there is one.
-    const destination = fake.handoverLog.find((c) => c.subjectId === id)?.destination ?? own(runStart).at(-1) ?? null;
+    // destinationAfter: the track started before every other change at that same instant.
+    const atStart = (rec.person ? rec.person.emails.filter(([at]) => (destinationAfter ? at < runStart : at <= runStart)).map(([, a]) => a) : rec.company.inbox ? [rec.company.inbox] : []).filter((a) => {
+      const bad = badAtFor(a);
+      return bad === null || bad > runStart || (destinationAfter && bad === runStart);
+    });
+    const destination = fake.handoverLog.find((c) => c.subjectId === id)?.destination ?? atStart.at(-1) ?? null;
     if (destination === null) return new Set(["finished_no_usable_channel"]);
     const steps = campaigns[rec.campaign]!.definition.tracks[0]!.steps;
-    const deliveries = fake.deliveryLog.filter((d) => d.subjectId === id && d.at <= now);
+    const deliveries = steps.map((st) => stepDelivery(id, st.id)).filter((d): d is NonNullable<typeof d> => d !== undefined && d.at <= now);
     const calls = fake.handoverLog.filter((c) => c.subjectId === id && c.at <= now);
     // When the track finished, by each cause the record can see, and when every step was sent.
     const finishes: number[] = [];
@@ -771,12 +1013,15 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     if (bad !== null && bad <= now) finishes.push(bad);
     const sentSteps = new Set(deliveries.map((d) => d.stepId));
     const allSent = steps.every((st) => sentSteps.has(st.id));
-    const lastVisible = Math.max(...steps.map((st) => Math.min(...deliveries.filter((d) => d.stepId === st.id).map((d) => d.visibleAt))));
-    const lastSent = Math.max(...steps.map((st) => Math.min(...deliveries.filter((d) => d.stepId === st.id).map((d) => d.at))));
+    const lastVisible = Math.max(...deliveries.map(knownAt));
+    const lastSent = Math.max(...deliveries.map((d) => d.at));
     const out = new Set<OutreachStatus>();
+    if (reply.may !== null && reply.may <= now) out.add("replied");
     // Reach at instant t. An address marked bad at that same instant may have been marked just
     // before or just after the track finished, so either ending is allowed then.
-    const ownBefore = (t: number) => own(t - 1).filter((a) => a !== destination && (badAtFor(a) ?? Infinity) >= t);
+    // The destination itself counts only when a mark elsewhere, not its own bounce or refusal, made it bad.
+    const causedByDestination = fake.bouncing.has(destination) || fake.invalid.has(destination);
+    const ownBefore = (t: number) => own(t - 1).filter((a) => (a !== destination || !causedByDestination) && (badAtFor(a) ?? Infinity) >= t);
     const endingsAt = (t: number): OutreachStatus[] => [
       ...(own(t).length > 0 || ownBefore(t).length > 0 ? (["sequence_finished_no_response"] as const) : []),
       ...(own(t).length === 0 ? (["finished_no_usable_channel"] as const) : []),
@@ -803,7 +1048,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       ended = true;
     }
     if (!ended) {
-      const touchedSure = deliveries.some((d) => d.visibleAt <= now);
+      const touchedSure = deliveries.some((d) => knownAt(d) <= now);
       out.add(touchedSure ? "active" : "queued");
       if (deliveries.length > 0) out.add("active");
     }
@@ -842,8 +1087,10 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     const bySender = new Map<string, number[]>();
     for (const c of fake.handoverLog) bySender.set(c.sender, [...(bySender.get(c.sender) ?? []), c.at]);
     for (const [sender, times] of bySender) {
-      const gap = accounts.find((a) => a.id === sender)?.gapMs ?? 0;
-      for (let i = 1; i < times.length; i++) if (times[i]! - times[i - 1]! < gap) problem(`11: ${sender} called ${times[i]! - times[i - 1]!} ms apart, under its gap of ${gap}`);
+      for (let i = 1; i < times.length; i++) {
+        const gap = recordGap(sender, times[i]!);
+        if (times[i]! - times[i - 1]! < gap) problem(`11: ${sender} called ${times[i]! - times[i - 1]!} ms apart, under its gap of ${gap}`);
+      }
     }
     // 8. Steps in order, on time, in the window, with the copy current at the handover.
     const firsts = new Map<string, HandoverLogEntry>();
@@ -862,10 +1109,12 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
         }
         if (previous === -1) problem(`8: ${rec.id}/${step.id} was handed over before an earlier step`);
         const prevStep = track.steps[i - 1];
-        const prevDelivery = prevStep ? fake.deliveryLog.find((d) => d.subjectId === rec.id && d.stepId === prevStep.id) : undefined;
+        const prevDelivery = prevStep ? stepDelivery(rec.id, prevStep.id) : undefined;
         const due = i === 0 ? runStart : prevDelivery ? dueAfter(prevDelivery.at, step.waitDays, zone) : Infinity;
-        if (c.at < due && !markedNotSent.has(`${rec.id}/${prevStep?.id ?? ""}`)) problem(`8: ${rec.id}/${step.id} handed over at ${new Date(c.at).toISOString()}, before it was due at ${new Date(due).toISOString()}`);
-        if (!inWindow(track.window, zone, c.at)) problem(`8: ${rec.id}/${step.id} handed over outside its window`);
+        if (c.at < due) problem(`8: ${rec.id}/${step.id} handed over at ${new Date(c.at).toISOString()}, before it was due at ${new Date(due).toISOString()}`);
+        // The window is checked at the authorization, before any clock advance injected before the call.
+        const authorizedAt = c.at - (injectedDelay.get(`${c.attemptId}@${c.at}`) ?? 0);
+        if (!inWindow(track.window, zone, authorizedAt)) problem(`8: ${rec.id}/${step.id} handed over outside its window`);
         const data = mergeData(rec, fake.handoverLog.indexOf(c));
         const expected = { subject: renderCopy(step.subject, data), body: renderCopy(step.body, data) };
         // A crash after the handover committed can eat the first call: the provider then first sees a
@@ -881,12 +1130,15 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
         const bad = badAtFor(c.destination);
         const calledBeforeMark = badElsewhere.get(c.destination) === bad && fake.handoverLog.indexOf(c) < (badElsewhereCalls.get(c.destination) ?? Infinity);
         const refusedItself = fake.invalid.has(c.destination) && fake.refusals.some((r) => r.attemptId === c.attemptId);
-        if (bad !== null && bad <= c.at && !calledBeforeMark && !refusedItself) problem(`2: ${rec.id}/${c.stepId} was called for ${c.destination} after it was marked bad`);
+        const authorizedAt = c.at - (injectedDelay.get(`${c.attemptId}@${c.at}`) ?? 0);
+        if (bad !== null && bad <= authorizedAt && !calledBeforeMark && !refusedItself) problem(`2: ${rec.id}/${c.stepId} was called for ${c.destination} after it was marked bad`);
       }
-      // 2. Nothing is called after the lead replied.
-      const replyAt = fake.replyLog.filter((r) => fake.deliveryLog.some((d) => d.providerRef === r.threadRef && d.subjectId === rec.id)).map((r) => r.at);
-      const firstReply = replyAt.length > 0 ? Math.min(...replyAt) : Infinity;
-      for (const c of fake.handoverLog) if (c.subjectId === rec.id && c.at > firstReply) problem(`2: ${rec.id}/${c.stepId} was called after the lead replied`);
+      // 2. Nothing is authorized after the lead replied (a call authorized just before may still go out).
+      const firstReply = replyTimes(rec.id).must ?? Infinity;
+      for (const c of fake.handoverLog) {
+        const authorizedAt = c.at - (injectedDelay.get(`${c.attemptId}@${c.at}`) ?? 0);
+        if (c.subjectId === rec.id && authorizedAt > firstReply) problem(`2: ${rec.id}/${c.stepId} was called after the lead replied`);
+      }
     }
   }
 
@@ -912,18 +1164,18 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       const track = def.tracks[0]!;
       const zone = zoneOf(rec.person?.zone ?? "", rec.company.zone, def.timezone);
       const i = track.steps.findIndex((st) => st.id === c.stepId);
-      const prev = i > 0 ? fake.deliveryLog.find((d) => d.subjectId === c.subjectId && d.stepId === track.steps[i - 1]!.id) : undefined;
+      const prev = i > 0 ? stepDelivery(c.subjectId, track.steps[i - 1]!.id) : undefined;
       const runStart = Math.max(rec.enrolledAt, campaigns[rec.campaign]!.launchedAt ?? Infinity);
       const due = i === 0 ? runStart : prev ? dueAfter(prev.at, track.steps[i]!.waitDays, zone) : Infinity;
-      const known = i === 0 ? runStart : prev ? Math.max(due, prev.visibleAt) : Infinity;
+      const known = i === 0 ? runStart : prev ? Math.max(due, knownAt(prev)) : Infinity;
       const opens = firstOpen(track.window, zone, known);
-      if (c.at > opens + MINUTE * (subjects.size + 1)) problem(`unlimited: ${key} handed over at ${new Date(c.at).toISOString()}, the window opened after it was due at ${new Date(opens).toISOString()}`);
+      if (c.at > opens + MINUTE * (subjects.size + 1)) problem(`8: unlimited variant: ${key} handed over at ${new Date(c.at).toISOString()}, the window opened after it was due at ${new Date(opens).toISOString()}`);
     }
   }
 }
 
 /** The probe at every send call (invariants 2 and 12): the app's state at the moment of the call. */
-function probeAtCall(h: EngineHarness, subjects: Map<string, SubjectRecord>, campaigns: CampaignRecord[], problem: (what: string) => void) {
+function probeAtCall(h: EngineHarness, problem: (what: string) => void, eligible: (s: SubjectState, a: Attempt, now: number) => boolean) {
   return async (call: HandoverLogEntry): Promise<void> => {
     const now = h.clock;
     const s = await h.store.engine.subject(call.subjectId, now);
@@ -939,10 +1191,7 @@ function probeAtCall(h: EngineHarness, subjects: Map<string, SubjectRecord>, cam
     for (const other of await h.store.engine.openAttempts()) {
       if (other.state !== "claimed" || other.accountId !== call.sender || other.id === call.attemptId) continue;
       const os = await h.store.engine.subject(other.subjectId, now);
-      const acc = os?.accounts[other.accountId];
-      if (!os || !acc) continue;
-      const failed = handoverFailures(os, other, acc, now).filter((n) => n !== 14 && n !== 16);
-      if (failed.length > 0) continue;
+      if (!os || !eligible(os, other, now)) continue;
       const theirs = { touched: os.subject.touched, dueWall: os.tracks.find((t) => t.trackId === other.trackId)?.dueWall ?? 0, subjectId: other.subjectId, stepId: other.stepId };
       if (higherPriority(theirs, mine)) problem(`12: ${call.subjectId}/${call.stepId} was handed over on ${call.sender} before ${other.subjectId}/${other.stepId}, which had priority`);
     }

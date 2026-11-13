@@ -310,11 +310,14 @@ export const MIGRATIONS: readonly Migration[] = [
         SELECT a.account_id, NULL, a.idempotency_key, 'reserved' FROM attempts a
         WHERE a.holds_reservation = 1 AND NOT EXISTS (SELECT 1 FROM attempts s WHERE s.idempotency_key = a.idempotency_key AND s.sent_wall IS NOT NULL);
 
+      -- One reply may belong to several subjects: one outside every thread is reconciled to every
+      -- lead the inbox wrote to at that address (ADR 0003 2.4 as amended).
       CREATE TABLE replies (
-        provider_ref TEXT PRIMARY KEY,
+        provider_ref TEXT NOT NULL,
         subject_id TEXT NOT NULL REFERENCES subjects(id),
         channel TEXT NOT NULL CHECK (channel IN ('email', 'sms')),
-        at_wall INTEGER NOT NULL
+        at_wall INTEGER NOT NULL,
+        PRIMARY KEY (subject_id, provider_ref)
       );
       CREATE INDEX replies_by_subject ON replies(subject_id);
 
