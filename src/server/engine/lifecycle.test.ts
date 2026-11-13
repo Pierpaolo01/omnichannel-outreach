@@ -378,3 +378,70 @@ describe("ruling 1: an off-thread reply from one person in two campaigns (found 
     expect(port.calls.filter((c) => c.request.stepId === "s2")).toEqual([]);
   });
 });
+
+describe("review bot findings on 1c2591f", () => {
+  test("engine.ts:223: a send settled by lookup before its event, then a reply: correlation survives and the lead stops (two new-subject steps)", async () => {
+    const definition: CampaignDefinition = { ...twoSteps(), tracks: [{ ...twoSteps().tracks[0]!, steps: [step("s1", { subject: "Hello", threading: "new_subject" }), step("s2", { subject: "Again", threading: "new_subject", waitDays: 1 })] }] };
+    const { h, port, start } = await launched([inbox("inbox-a")], [PEOPLE[0]!], definition);
+    // The answer is lost; the sent event is withheld until minute 20; lookup is available at minute 15.
+    port.onCall = () => ({ answer: "unknown", sendAfter: 0, eventDelay: 20 * MIN });
+    const call = port.handover.bind(port);
+    port.handover = async (request) => {
+      await call(request);
+      return { kind: "unknown" };
+    };
+    const lead = await start();
+    await h.advanceTo(MONDAY_9 + 20 * MIN);
+    port.reply("pat@harbour.example");
+    await h.advanceTo(MONDAY_9 + 2 * DAY);
+    expect((await h.progress(lead("Pat Oneil"))).status).toBe("replied");
+    expect(port.calls.filter((c) => c.request.stepId === "s2")).toEqual([]);
+    const s1 = (await h.store.engine.subject(lead("Pat Oneil"), h.clock))!.attempts.find((a) => a.stepId === "s1" && a.state === "sent");
+    expect(s1?.providerRef).toBe("msg-1");
+  });
+
+  test("attempt.ts:81: a late acceptance during a pending retry still reaches lookup and settles, freeing the inbox's in-flight place", async () => {
+    const { h, port, start } = await launched([inbox("inbox-a", { gapMs: 2 * MIN })]);
+    // The response is lost; nothing is observable; the work is queued at the provider.
+    port.onCall = () => ({ answer: "unknown", sendAfter: null });
+    port.lookupOverride = () => ({ kind: "queued" });
+    await start();
+    const [attempt] = await h.store.engine.openAttempts();
+    expect(attempt).toMatchObject({ state: "handed", retry: "wanted" });
+    h.clock += 1000;
+    await h.engine.receiveLateAnswer(attempt!.id, { kind: "accepted", providerRef: "msg-1" });
+    await h.advanceTo(MONDAY_9 + 4 * H);
+    const after = await h.store.engine.attempt(attempt!.id);
+    expect(after).toMatchObject({ state: "accepted", retry: "none" });
+    expect(after!.queuedLookups).toBeGreaterThan(10);
+  });
+
+  test("rules.ts:62: a re-import that gives a phone-only lead an email between evaluation and apply is not overwritten by the stale ending", async () => {
+    const h = new EngineHarness({ start: MONDAY_9 - H, accounts: [{ id: "inbox-a", capacity: 30, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }], engine: quickWaits });
+    const businesses = [business({ business_id: "b1", business_name: "Harbour Lane Physio" })];
+    const { campaign } = await h.createCampaign("Race", { businesses, people: [PEOPLE[0]!] });
+    await h.tick();
+    await h.defineSequence(campaign.id, twoSteps());
+    h.clock = MONDAY_9;
+    await h.launch(campaign.id);
+    // A phone-only person is enrolled after launch; while the engine evaluates them, a re-import gives them an email.
+    const omarPhone = person({ person_id: "p4", business_id: "b1", full_name: "Omar Reed", dial_phone: "+447700900104", dial_phone_type: "mobile" });
+    const omarEmail = person({ person_id: "p4", business_id: "b1", full_name: "Omar Reed", email: "omar@harbour.example" });
+    let raced = false;
+    h.hooks = {
+      beforeApplyEvaluation: async (subjectId) => {
+        if (raced || (await h.store.engine.subject(subjectId, h.clock))?.lead.details.some((d) => d.channel === "email")) return;
+        raced = true;
+        await h.reimport(campaign.id, { businesses, people: [PEOPLE[0]!, omarEmail] });
+      },
+    };
+    h.clock = MONDAY_9 + H;
+    await h.reimport(campaign.id, { businesses, people: [PEOPLE[0]!, omarPhone] });
+    await h.advanceTo(MONDAY_9 + DAY);
+    expect(raced).toBe(true);
+    const rows = (await h.request<{ rows: { name: string; enrollments: EnrollmentView[] }[] }>("GET", "/api/leads")).body.rows;
+    const omar = rows.find((r) => r.name === "Omar Reed")!.enrollments[0]!.id;
+    expect((await h.progress(omar)).status).not.toBe("finished_no_usable_channel");
+    expect(h.fake.deliveryLog.some((d) => d.subjectId === omar)).toBe(true);
+  });
+});

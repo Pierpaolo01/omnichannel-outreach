@@ -385,9 +385,9 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       const delivered = fake.deliveryLog.filter((d) => d.at <= h.clock);
       if (delivered.length > 0 && chance(0.5)) fake.prospectReplies(pick(delivered).destination, chance(0.7));
     },
-    beforeApplyEvaluation: (subjectId: string) => {
-      return maybeInject(subjectId);
-    },
+    // Between evaluate and apply: a concurrent worker's write, or a change to the lead's facts alone,
+    // such as a re-import giving them an address (review bot, rules.ts:62).
+    beforeApplyEvaluation: (subjectId: string) => maybeInject(subjectId, chance(0.5)),
     beforeHandover: async (attemptId: string) => maybeInject(await subjectOfAttempt(attemptId), chance(0.5)),
     beforeRetry: async (attemptId: string) => {
       if (armedNow()) {
@@ -451,6 +451,12 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       const p = pick(withEmail);
       p.emails.push([now, `${p.key}.new${++reimports}@mail.example`]);
     }
+    // A phone-only person gains an address.
+    const phoneOnly = people.filter((p) => p.emails.length === 0);
+    if (chance(0.3) && phoneOnly.length > 0) {
+      const p = pick(phoneOnly);
+      p.emails.push([now, `${p.key}.found${++reimports}@mail.example`]);
+    }
     if (chance(0.4)) for (const p of people.filter((x) => x.late)) lateEnrolled.add(p.key);
     const before = await progressSnapshot();
     for (const c of campaigns) if (c.id) await h.reimport(c.id, rowsFor(c));
@@ -507,6 +513,14 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       // The user acts on Needs attention now and then, more often while something unresolved is listed there.
       const listed = (await h.store.engine.openAttempts()).some((a) => isLive(a) && a.unresolvedSince !== null);
       if (chance(listed ? 0.4 : 0.05)) await userMarks();
+      // A lost response's acceptance arrives late, perhaps while a retry waits for its slot.
+      if (fake.staleAnswers.length > 0 && chance(0.2)) {
+        const late = fake.staleAnswers.splice(Math.floor(rand() * fake.staleAnswers.length), 1)[0];
+        if (late) {
+          features.add("late-acceptance");
+          await h.engine.receiveLateAnswer(late.attemptId, late.answer);
+        }
+      }
     });
 
   const eventCount = options.events ?? 22;

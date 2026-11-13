@@ -37,6 +37,15 @@ describe("the attempt table, row by row (ADR 0003 5.3)", () => {
     expect(applyAttemptEvent(handed(), { kind: "call_answer", answer: { kind: "unknown" }, now }).attempt).toMatchObject({ state: "handed", retry: "wanted" });
   });
 
+  test("a late acceptance while a same-key retry waits clears the retry intent and keeps settlement scheduled (review bot, attempt.ts:81)", () => {
+    for (const retry of ["wanted", "wanted_after_not_sent"] as const) {
+      const waiting = handed({ retry, awaitingAnswer: false, nextLookupWall: MONDAY_9 + SETTLING });
+      const accepted = applyAttemptEvent(waiting, { kind: "call_answer", answer: { kind: "accepted", providerRef: "msg-1" }, now }).attempt;
+      expect(accepted).toMatchObject({ state: "accepted", retry: "none", providerRef: "msg-1" });
+      expect(accepted.nextLookupWall).not.toBeNull();
+    }
+  });
+
   test("an unknown answer on a non-retryable attempt, or with no calls left, settles instead", () => {
     expect(applyAttemptEvent(handed({ retryable: false }), { kind: "call_answer", answer: { kind: "unknown" }, now }).attempt).toMatchObject({ retry: "refused", nextLookupWall: MONDAY_9 + SETTLING });
     expect(applyAttemptEvent(handed({ calls: MAX_CALLS }), { kind: "call_answer", answer: { kind: "unknown" }, now }).attempt.retry).toBe("refused");

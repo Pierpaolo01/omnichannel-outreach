@@ -102,7 +102,8 @@ export function applyAttemptEvent(a: Attempt, event: AttemptEvent): AttemptStep 
       const answer = event.answer;
       if (answer.kind === "accepted") {
         if (a.state === "accepted") return same(withRef(answered, answer.providerRef), "duplicate accepted");
-        return { attempt: settle({ ...answered, state: "accepted", providerRef: answer.providerRef }), effects: [] };
+        // An acceptance ends any retry intent: the provider holds the work, and settlement goes on.
+        return { attempt: settle({ ...answered, state: "accepted", providerRef: answer.providerRef, retry: "none" }), effects: [] };
       }
       if (answer.kind === "rejected") {
         if (a.state === "accepted") return same(answered, "a refusal after the provider accepted the work");

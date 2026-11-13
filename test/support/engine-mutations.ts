@@ -42,6 +42,8 @@ const EXPECTED: Record<string, { invariant: string; seed: number; unlimited?: bo
   "retry blocks settlement": { invariant: "26", seed: 0 },
   "unresolved ignores not-sent": { invariant: "18", seed: 0 },
   "lookup sent without reference": { invariant: "8", seed: 0 },
+  "acceptance keeps retry intent": { invariant: "26", seed: 0 },
+  "stale guard ignores lead facts": { invariant: "1", seed: 0 },
 };
 
 /** Wraps every rule that returns a new subject state with `fix(before, after, now)`. */
@@ -230,6 +232,20 @@ const RULES: Record<string, Partial<Rules>> = {
   "lookup sent without reference": {
     applyToAttempt: (s, id, event, now, options) =>
       R.applyToAttempt(s, id, event.kind === "lookup_answer" && event.answer.kind === "sent" ? { ...event, answer: { ...event.answer, providerRef: null } } : event, now, options),
+  },
+
+  // Review bot, round 1.
+  "acceptance keeps retry intent": {
+    applyToAttempt: (s, id, event, now, options) => {
+      const before = s.attempts.find((a) => a.id === id);
+      const out = R.applyToAttempt(s, id, event, now, options);
+      if (event.kind !== "call_answer" || event.answer.kind !== "accepted" || !before || (before.retry !== "wanted" && before.retry !== "wanted_after_not_sent")) return out;
+      return { ...out, state: mapAttempts(out.state, (a) => (a.id === id && a.state === "accepted" ? { ...a, retry: before.retry, nextLookupWall: null } : a), s) };
+    },
+  },
+
+  "stale guard ignores lead facts": {
+    versionsMatch: (a, b) => a.subject.version === b.subject.version && a.campaign.version === b.campaign.version && a.campaign.definitionVersion === b.campaign.definitionVersion,
   },
 };
 

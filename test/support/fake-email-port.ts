@@ -263,6 +263,8 @@ export class FakeEmailPort implements SendPort {
     this.advance();
 
     const accepted: CallAnswer = { kind: "accepted", providerRef };
+    // The lost response's acceptance can still arrive later (review bot, attempt.ts:81).
+    if (mode === "lost-response" || mode === "lookup-lags") this.staleAnswers.push({ attemptId: request.attemptId, answer: accepted });
     switch (mode) {
       case "lost-response":
       case "same-key-replays":

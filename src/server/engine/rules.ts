@@ -37,7 +37,7 @@ export interface Rules {
   readonly handOver: typeof handOver;
   readonly retryFailures: typeof retryFailures;
   readonly authorizeRetry: typeof authorizeRetry;
-  /** The version guard (2.5): a change computed from `computedFrom` applies only to unchanged state. */
+  /** The version guard (2.5): a change computed from `computedFrom` applies only if nothing it read has changed. */
   readonly versionsMatch: (computedFrom: SubjectState, current: SubjectState) => boolean;
 }
 
@@ -58,6 +58,12 @@ export const DEFAULT_RULES: Rules = {
   handOver,
   retryFailures,
   authorizeRetry,
+  // Everything an evaluation reads: the subject's and campaign's versions cover its progress and the
+  // definition; the lead's facts (contact details and their marks, zone, merge data) change without
+  // bumping them (an import, a mark elsewhere), so they are compared as they were read.
   versionsMatch: (a, b) =>
-    a.subject.version === b.subject.version && a.campaign.version === b.campaign.version && a.campaign.definitionVersion === b.campaign.definitionVersion,
+    a.subject.version === b.subject.version &&
+    a.campaign.version === b.campaign.version &&
+    a.campaign.definitionVersion === b.campaign.definitionVersion &&
+    JSON.stringify(a.lead) === JSON.stringify(b.lead),
 };
