@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { launchCheck } from "./blockers.ts";
 import { render } from "./copy.ts";
-import { CALL_TRACKS_LATER, definitionProblems, ownSubject, WIN_BACK_LATER, type CampaignDefinition, type StepDefinition, type TrackDefinition } from "./definition.ts";
+import { definitionProblems, ownSubject, WIN_BACK_LATER, type CampaignDefinition, type StepDefinition, type TrackDefinition } from "./definition.ts";
 import { renderStep } from "./dispatch.ts";
 import { subjectState } from "../../../test/support/sequence-state.ts";
 
@@ -47,9 +47,27 @@ describe("definitions refused at the boundary (ADR 0003 7.1)", () => {
     expect(definitionProblems(definition({ tracks: [emailTrack({ channel: "sms", steps: [step("m1")] })] }))).toEqual([]);
   });
 
-  test("phone tracks and the win-back branch are refused until the tickets that build them", () => {
-    expect(definitionProblems(definition({ tracks: [emailTrack(), emailTrack({ id: "t2", channel: "call", steps: [step("c1")] })] }))).toEqual([CALL_TRACKS_LATER]);
+  test("the win-back branch is refused until the ticket that builds it", () => {
     expect(definitionProblems(definition({ tracks: [emailTrack({ branch: "win_back" })] }))).toEqual([WIN_BACK_LATER]);
+  });
+
+  test("a phone track is exactly one call, with no wait and no copy, and connects together or after like any track (ticket 14)", () => {
+    const call = (fields: Partial<TrackDefinition> = {}) => emailTrack({ id: "t2", channel: "call", steps: [step("c1", { subject: "", body: "" })], ...fields });
+    const after = { kind: "after" as const, trackId: "t1", delayDays: 1 };
+    expect(definitionProblems(definition({ callScript: "Ask who handles bookings.", tracks: [emailTrack(), call(), call({ id: "t3", steps: [step("c2", { subject: "", body: "" })], start: after })] }))).toEqual([]);
+    // A call-only campaign is a campaign: its calling hours are the track's window.
+    expect(definitionProblems(definition({ emailPool: [], tracks: [call({ start: { kind: "entry" } })] }))).toEqual([]);
+    expect(definitionProblems(definition({ tracks: [emailTrack(), call({ steps: [step("c1", { subject: "", body: "" }), step("c2", { waitDays: 1, subject: "", body: "" })] })] }))).toEqual(["The phone track is one call with no follow-ups: give it exactly one step."]);
+    expect(definitionProblems(definition({ tracks: [emailTrack(), call({ steps: [] })] }))).toEqual(["The phone track is one call with no follow-ups: give it exactly one step."]);
+    // A removed step does not count, so a track may replace its call.
+    expect(definitionProblems(definition({ tracks: [emailTrack(), call({ steps: [step("c0", { removed: true }), step("c1", { subject: "", body: "" })] })] }))).toEqual([]);
+    expect(definitionProblems(definition({ tracks: [emailTrack(), call({ window: [] })] }))).toEqual(["The phone track's calling hours have no days."]);
+    // A call has no copy: the campaign's call script shows on every call task (verifier F2 on a1399ce).
+    expect(definitionProblems(definition({ tracks: [emailTrack(), call({ steps: [step("c1", { subject: "", body: "Ask for Pat." })] })] }))).toEqual(["The phone track's call has no copy of its own: write talking points in the campaign's call script."]);
+    expect(definitionProblems(definition({ tracks: [emailTrack(), call({ steps: [step("c1", { subject: "Hi", body: "" })] })] }))).toEqual(["The phone track's call has no copy of its own: write talking points in the campaign's call script."]);
+    // The declined path is set on the canvas; win-back arrives with its branch (ticket 16).
+    expect(definitionProblems(definition({ tracks: [emailTrack(), call({ declinedPath: "continue" })] }))).toEqual([]);
+    expect(definitionProblems(definition({ tracks: [emailTrack(), call({ declinedPath: "win_back" })] }))).toEqual([WIN_BACK_LATER]);
   });
 
   test("a start rule names a live track of the same branch, with a whole delay, and connections never go in a circle", () => {

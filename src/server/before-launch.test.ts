@@ -239,6 +239,64 @@ describe("Before launch: projected daily load per sender inbox", () => {
     });
   });
 
+  test("a phone track beside the email track can change when its emails go, so nothing is projected; one after it cannot (ticket 14a)", async () => {
+    const call = (start: TrackDefinition["start"]): TrackDefinition => ({ id: "p1", channel: "call", branch: "main", window: weekdays, steps: [step("c1", { body: "" })], start, removed: false });
+    const many = Array.from({ length: 25 }, (_, i) => person({ person_id: `c${i}`, business_id: "b1", full_name: `Caller Number${String(i).padStart(3, "0")}`, email: `caller${i}@harbour.example` }));
+    const { h, id } = await campaign([inbox("inbox-a", { capacity: 10 })], many, [HARBOUR]);
+    const email = emailTrack([step("s1", { subject: "Hi", threading: "new_subject" }), step("s2", { waitDays: 2 })]);
+    // Together: a logged call touches the lead, and touched leads' emails go first (4.3).
+    await h.defineSequence(id, { ...email, tracks: [...email.tracks, call({ kind: "entry" })] });
+    expect((await beforeLaunch(h, id)).load).toMatchObject({ otherTracksChangeTiming: "this_campaign", daysUntilAllStart: null });
+    // After the email track: every email has gone before a call is placed.
+    await h.defineSequence(id, { ...email, tracks: [...email.tracks, call({ kind: "after", trackId: "t1", delayDays: 1 })] });
+    expect((await beforeLaunch(h, id)).load).toMatchObject({ otherTracksChangeTiming: null, daysUntilAllStart: expect.any(Number) });
+  });
+
+  test("the withheld figure names each track that withholds it and its channel: a phone track, an SMS track and a second email track, alone and together (review bot on 8edc8dd)", async () => {
+    const N1 = "+447700900001";
+    const h = new EngineHarness({ start: MONDAY_8, accounts: [inbox("inbox-a", { capacity: 10 })], sms: { numbers: [{ id: N1, capacity: 50, gapMs: null, k: 1, healthy: true, resetZone: "Europe/London" }] } });
+    const { campaign: c } = await h.createCampaign("Autumn physio", { businesses: [HARBOUR], people: PEOPLE });
+    await h.tick();
+    const base = emailTrack([step("s1", { subject: "Hi", threading: "new_subject" })]);
+    const together = { kind: "entry" as const };
+    const phone: TrackDefinition = { id: "p1", channel: "call", branch: "main", window: weekdays, steps: [step("c1", { body: "" })], start: together, removed: false };
+    const sms: TrackDefinition = { id: "m1", channel: "sms", branch: "main", window: weekdays, steps: [step("x1", { body: "A short text.", threading: "new_subject" })], start: together, removed: false };
+    const secondEmail: TrackDefinition = { id: "e2", channel: "email", branch: "main", window: weekdays, steps: [step("s2", { subject: "Hello", threading: "new_subject" })], start: { kind: "after", trackId: "t1", delayDays: 1 }, removed: false };
+    const withheld = async (tracks: TrackDefinition[]) => {
+      await h.defineSequence(c.id, { ...base, smsPool: [N1], tracks: [...base.tracks, ...tracks] });
+      const { load } = await beforeLaunch(h, c.id);
+      expect(load).toMatchObject({ otherTracksChangeTiming: "this_campaign", daysUntilAllStart: null });
+      return load!.withheldBy;
+    };
+    expect(await withheld([phone])).toEqual({ campaign: null, tracks: [{ trackId: "p1", channel: "call", label: "the phone track", why: "not_after_the_email_track" }] });
+    expect(await withheld([sms])).toEqual({ campaign: null, tracks: [{ trackId: "m1", channel: "sms", label: "the SMS track", why: "not_after_the_email_track" }] });
+    expect(await withheld([secondEmail])).toEqual({ campaign: null, tracks: [{ trackId: "e2", channel: "email", label: "email track 2", why: "another_email_track" }] });
+    expect(await withheld([phone, sms, secondEmail])).toEqual({
+      campaign: null,
+      tracks: [
+        { trackId: "p1", channel: "call", label: "the phone track", why: "not_after_the_email_track" },
+        { trackId: "m1", channel: "sms", label: "the SMS track", why: "not_after_the_email_track" },
+        { trackId: "e2", channel: "email", label: "email track 2", why: "another_email_track" },
+      ],
+    });
+    // The email track itself starting later is named as that, not guessed.
+    await h.defineSequence(c.id, { ...base, tracks: [phone, { ...base.tracks[0]!, start: { kind: "after", trackId: "p1", delayDays: 0 } }] });
+    expect((await beforeLaunch(h, c.id)).load!.withheldBy).toEqual({ campaign: null, tracks: [{ trackId: "t1", channel: "email", label: "the email track", why: "email_track_not_at_launch" }] });
+    // With nothing withheld, nothing is named.
+    await h.defineSequence(c.id, { ...base, tracks: [...base.tracks, { ...phone, start: { kind: "after", trackId: "t1", delayDays: 0 } }] });
+    expect((await beforeLaunch(h, c.id)).load).toMatchObject({ otherTracksChangeTiming: null, withheldBy: null });
+
+    // Another running campaign on the same inbox: its name and its track.
+    const { campaign: other } = await h.createCampaign("Winter physio", { businesses: [HARBOUR], people: PEOPLE });
+    await h.defineSequence(other.id, { ...base, tracks: [...base.tracks, phone] });
+    expect((await h.launch(other.id)).status).toBe(200);
+    await h.defineSequence(c.id, base);
+    expect((await beforeLaunch(h, c.id)).load).toMatchObject({
+      otherTracksChangeTiming: "other_campaign",
+      withheldBy: { campaign: { id: other.id, name: "Winter physio" }, tracks: [{ trackId: "p1", channel: "call", label: "the phone track", why: "not_after_the_email_track" }] },
+    });
+  });
+
   test("once launched, there is no before-launch projection", async () => {
     const { h, id } = await campaign();
     await h.defineSequence(id, emailTrack([step("s1", { subject: "Hi", threading: "new_subject" })]));

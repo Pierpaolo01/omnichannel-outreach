@@ -9,9 +9,9 @@ name: sequence-search
 # if it has one, still runs), and every mutation replay stops after 10,000 engine writes, with a
 # ten-minute wall-clock limit per replay only as a safety net. The unmutated seed runs carry neither
 # bound. A shard of about four mutations and thirteen seeds finishes well inside the step's limit.
-# The same command runs the ticket 13 track generator (src/server/sequence-runs-tracks*.test.ts):
-# its 100 seeds and a seed search per track mutation, sharded the same way; each of its runs takes
-# a few seconds.
+# The same command runs the ticket 13 track generator (src/server/sequence-runs-tracks*.test.ts)
+# and the ticket 14 call generator (src/server/sequence-runs-calls*.test.ts): their 100 seeds and a
+# seed search per mutation, sharded the same way; each of their runs takes a few seconds.
 
 on:
   workflow_dispatch:

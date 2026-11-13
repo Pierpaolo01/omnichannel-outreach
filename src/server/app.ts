@@ -4,16 +4,19 @@ import { z } from "zod";
 import { planImport } from "../domain/import-plan.ts";
 import { isOutreachStatus } from "../domain/outreach-status.ts";
 import { checkScraperFile, parseScraperExport } from "../domain/scraper-export.ts";
-import type { ApiError, Campaign, FileCheckResult, SmsProviderStatus } from "../shared/api.ts";
+import type { ApiError, CallOutcomeAnswer, Campaign, FileCheckResult, SmsProviderStatus } from "../shared/api.ts";
 import { CAMPAIGN_NAME_MAX, DEFINITION_MAX_BYTES, STEP_BODY_MAX, STEP_SUBJECT_MAX } from "../shared/limits.ts";
 import { checkApiRequest } from "./guard.ts";
+import { invalidBodyMessage, requestObject } from "./request-body.ts";
 import type { OutreachStore } from "./persistence/store.ts";
 import { launchCheck } from "../domain/sequence/blockers.ts";
 import { definitionProblems, emptyDefinition, liveTracks, type CampaignDefinition } from "../domain/sequence/definition.ts";
 import { Engine } from "./engine/engine.ts";
-import type { DefinitionSave, StoredDefinition } from "./engine/engine-store.ts";
+import type { StoredDefinition } from "./engine/engine-store.ts";
 import { UnconnectedEmailPort, UnprovisionedSmsPort } from "./engine/ports.ts";
 import { accountView, needsAttention, progressView } from "./engine/views.ts";
+import { callsView, callTaskView, todayView } from "./engine/call-views.ts";
+import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
 import type { CampaignDetail, CampaignListItem, CampaignSequenceSummary, SequenceView } from "../shared/api.ts";
 import { beforeLaunchView, copyPreview } from "./before-launch.ts";
 import { activityOf } from "./activity.ts";
@@ -25,7 +28,7 @@ export interface AppDependencies {
   readonly now: () => string;
   readonly newId: () => string;
   /** The sequence engine. Without one, the app runs an engine with no connected email provider. */
-  readonly engine?: Pick<Engine, "launch">;
+  readonly engine?: Pick<Engine, "launch" | "logCallOutcome">;
   /** The email provider's own description, for GET /api/email-provider; absent when none is connected. */
   readonly emailProvider?: EmailProviderSource | null;
   /**
@@ -33,10 +36,12 @@ export interface AppDependencies {
    * no SMS provider is provisioned (#28); `test-simulator` only in the test harness's fake.
    */
   readonly smsProvider?: "none" | "test-simulator";
+  /** The engine's rules, as the read models use them; the tests' broken engines replace entries (ADR 0003 9.2). */
+  readonly rules?: Partial<Rules>;
 }
 
-const windowRule = z.object({ day: z.number().int().min(0).max(6), start: z.number().int().min(0).max(23), end: z.number().int().min(0).max(24) });
-const stepBody = z.object({
+const windowRule = requestObject({ day: z.number().int().min(0).max(6), start: z.number().int().min(0).max(23), end: z.number().int().min(0).max(24) });
+const stepBody = requestObject({
   id: z.string().trim().min(1).max(100),
   waitDays: z.number(),
   subject: z.string().max(STEP_SUBJECT_MAX).default(""),
@@ -44,27 +49,46 @@ const stepBody = z.object({
   threading: z.enum(["new_subject", "continue_thread"]),
   removed: z.boolean().default(false),
 });
-const trackBody = z.object({
+const trackBody = requestObject({
   id: z.string().trim().min(1).max(100),
   channel: z.enum(["email", "sms", "call"]),
   branch: z.enum(["main", "win_back"]).default("main"),
   window: z.array(windowRule).max(14),
   steps: z.array(stepBody).max(50),
-  start: z.union([z.object({ kind: z.literal("entry") }), z.object({ kind: z.literal("after"), trackId: z.string(), delayDays: z.number() })]).default({ kind: "entry" }),
+  start: z.union([requestObject({ kind: z.literal("entry") }), requestObject({ kind: z.literal("after"), trackId: z.string(), delayDays: z.number() })]).default({ kind: "entry" }),
   removed: z.boolean().default(false),
+  declinedPath: z.enum(["stop", "continue", "win_back"]).optional(),
 });
-const definitionBody = z.object({
+const definitionBody = requestObject({
   timezone: z.string().trim().min(1),
   callSkipLimitDays: z.number().default(2),
   emailPool: z.array(z.string().min(1).max(200)).max(100),
   smsPool: z.array(z.string().min(1).max(200)).max(100).default([]),
+  callScript: z.string().max(20_000).default(""),
   tracks: z.array(trackBody).max(20),
   /** Who wrote the save (ADR 0003 1.1.1): its editing session, its number there, and the revision it last saw. */
-  save: z.object({ session: z.string().min(1).max(100), seq: z.number().int().nonnegative(), base: z.number().int().nonnegative() }).optional(),
+  save: requestObject({ session: z.string().min(1).max(100), seq: z.number().int().nonnegative(), base: z.number().int().nonnegative() }).optional(),
 });
 
 /** The user's zone: the machine's, which a campaign's default zone starts from (ADR 0003 1.1). */
 const machineZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+const callSettingsBody = requestObject({
+  dailyCapacity: z.number().int("The daily call capacity is a whole number.").positive("The daily call capacity is at least 1.").max(1_000),
+  userZone: z.string().trim().refine((z) => isTimeZone(z), "Use an IANA time zone such as Europe/London."),
+});
+// Not interested, callback and redial arrive with tickets 15 and 16; they are refused here until then.
+const outcomeBody = requestObject({
+  /**
+   * The client's key for this one action: the same key answers with the first result and stores
+   * nothing again, so a retry or a double click never logs an outcome or a note twice (verifier B3).
+   */
+  requestId: z.string().trim().min(1, "Send a request id with each outcome.").max(200),
+  outcome: z.enum(["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "skip_for_now"], { message: "Choose one of the outcomes this release offers: no answer, voicemail left, gatekeeper or not reached, wrong or dead number, interested, or skip for now." }),
+  numberId: z.string().min(1).max(200).nullish(),
+  note: z.string().max(10_000).default(""),
+  noteScope: z.enum(["person", "company"]).default("person"),
+});
 
 const SEARCH_LIMIT_DEFAULT = 100;
 const SEARCH_LIMIT_MAX = 500;
@@ -79,8 +103,7 @@ const isTimeZone = (value: string): boolean => {
   }
 };
 
-const fileNames = z
-  .object({ people: z.string().max(300).nullish(), businesses: z.string().max(300).nullish() })
+const fileNames = requestObject({ people: z.string().max(300).nullish(), businesses: z.string().max(300).nullish() })
   .nullish();
 
 /** Both files or neither: a campaign can be created before its first import. */
@@ -90,28 +113,29 @@ const scraperFiles = {
   fileNames,
 };
 
-const newCampaignBody = z
-  .object({
-    name: z.string().trim().min(1, "Give the campaign a name.").max(CAMPAIGN_NAME_MAX, `Keep the campaign name to ${CAMPAIGN_NAME_MAX} characters or fewer.`),
-    defaultTimezone: z
-      .string()
-      .trim()
-      .refine(isTimeZone, "Use an IANA time zone such as Europe/London.")
-      .nullish(),
-    ...scraperFiles,
-  })
-  .refine((b) => (b.businessesCsv === undefined) === (b.peopleCsv === undefined), "Add both the People and Businesses files.");
+const newCampaignBody = requestObject({
+  name: z.string().trim().min(1, "Give the campaign a name.").max(CAMPAIGN_NAME_MAX, `Keep the campaign name to ${CAMPAIGN_NAME_MAX} characters or fewer.`),
+  defaultTimezone: z
+    .string()
+    .trim()
+    .refine(isTimeZone, "Use an IANA time zone such as Europe/London.")
+    .nullish(),
+  ...scraperFiles,
+}).refine((b) => (b.businessesCsv === undefined) === (b.peopleCsv === undefined), "Add both the People and Businesses files.");
 
-const importBody = z.object({
+const importBody = requestObject({
   businessesCsv: z.string().min(1, "Add the Businesses file."),
   peopleCsv: z.string().min(1, "Add the People file."),
   fileNames,
 });
 
-const checkBody = z.object({ businessesCsv: z.string().optional(), peopleCsv: z.string().optional() });
+const launchBody = requestObject({ definitionVersion: z.number().int().optional() });
+
+const checkBody = requestObject({ businessesCsv: z.string().optional(), peopleCsv: z.string().optional() });
 
 /** The HTTP interface. Every route is under /api; the web client is served separately. */
-export function createApp({ store, now, newId, engine: givenEngine, emailProvider, smsProvider = "none" }: AppDependencies): Hono {
+export function createApp({ store, now, newId, engine: givenEngine, emailProvider, smsProvider = "none", rules: givenRules }: AppDependencies): Hono {
+  const rules: Rules = { ...DEFAULT_RULES, ...givenRules };
   const engine = givenEngine ?? new Engine({ store: store.engine, port: new UnconnectedEmailPort(), smsPort: new UnprovisionedSmsPort(), now: () => Date.parse(now()), newId });
   const app = new Hono().basePath("/api");
   app.use(async (c, next) => {
@@ -307,7 +331,9 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     if (!campaign) return notFound(c, "campaign");
     const body = definitionBody.safeParse(await readJson(c));
     if (!body.success) return invalid(c, body.error);
-    const { save, ...definition }: CampaignDefinition & { save?: DefinitionSave | undefined } = body.data;
+    const { save, ...fields } = body.data;
+    // A declined path is stored only when the canvas set one; the phone track's fields travel in the same save (ADR 0003 1.1.1).
+    const definition: CampaignDefinition = { ...fields, tracks: fields.tracks.map(({ declinedPath, ...t }) => (declinedPath ? { ...t, declinedPath } : t)) };
     const previous = (await store.engine.campaign(campaign.id))?.definition ?? null;
     const problems = definitionProblems(definition, previous);
     if (problems.length > 0) return c.json<ApiError>({ error: { code: "invalid_sequence", message: problems.join(" ") } }, 400);
@@ -329,9 +355,10 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   app.post("/campaigns/:id/launch", async (c) => {
     const campaign = await store.campaign(c.req.param("id"));
     if (!campaign) return notFound(c, "campaign");
-    const asked = (await readJson(c)) as { definitionVersion?: unknown } | undefined;
-    const expected = typeof asked?.definitionVersion === "number" ? asked.definitionVersion : undefined;
-    const outcome = await engine.launch(campaign.id, expected);
+    // Launch takes one option, the revision the page last saw; any other field is refused, like any other.
+    const body = launchBody.safeParse((await readJson(c)) ?? {});
+    if (!body.success) return invalid(c, body.error);
+    const outcome = await engine.launch(campaign.id, body.data.definitionVersion);
     if (!outcome.ok && outcome.reason === "changed") {
       return c.json<ApiError>({ error: { code: "changed_elsewhere", message: "The sequence was changed elsewhere since this page loaded it, so nothing was launched. Load the saved version first." } }, 409);
     }
@@ -385,6 +412,42 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     return state ? c.json(progressView(state, at)) : notFound(c, "enrollment");
   });
 
+  // -------------------------------------------------------------------------------------------
+  // Calls (ticket 14). The user dials on their own phone; nothing here dials.
+
+  app.get("/call-settings", async (c) => c.json(await store.engine.callSettings()));
+
+  app.put("/call-settings", async (c) => {
+    const body = callSettingsBody.safeParse(await readJson(c));
+    if (!body.success) return invalid(c, body.error);
+    await store.engine.setCallSettings(body.data);
+    return c.json(await store.engine.callSettings());
+  });
+
+  app.get("/today", async (c) => c.json(await todayView(store, Date.parse(now()), rules)));
+
+  // `focus`: the call the user's screen is on. It stays the focus while it is listed.
+  app.get("/calls", async (c) => c.json(await callsView(store, Date.parse(now()), { focus: c.req.query("focus") || null, rules })));
+
+  app.get("/call-tasks/:id", async (c) => {
+    const view = await callTaskView(store, c.req.param("id"), Date.parse(now()));
+    return view ? c.json(view) : notFound(c, "call task");
+  });
+
+  app.post("/call-tasks/:id/outcome", async (c) => {
+    const body = outcomeBody.safeParse(await readJson(c));
+    if (!body.success) return invalid(c, body.error);
+    const id = c.req.param("id");
+    if ((await store.engine.callTaskSubject(id)) === null) return notFound(c, "call task");
+    const outcome = await engine.logCallOutcome(id, { requestId: body.data.requestId, outcome: body.data.outcome, numberId: body.data.numberId ?? null, note: body.data.note, noteScope: body.data.noteScope });
+    if (!outcome.ok) return c.json<ApiError>({ error: { code: "outcome_refused", message: outcome.reason } }, 409);
+    // The answer names the next focus: the queue moves on only now that an outcome is logged.
+    const at = Date.parse(now());
+    const task = await callTaskView(store, id, at);
+    if (!task) return notFound(c, "call task");
+    return c.json<CallOutcomeAnswer>({ task, nextFocusTaskId: (await callsView(store, at, { rules })).focusTaskId });
+  });
+
   app.get("/needs-attention", async (c) => c.json(await needsAttention(store.engine, Date.parse(now()))));
 
   // No SMS provider is provisioned or chosen (#28): the running app reports none, honestly.
@@ -416,8 +479,7 @@ async function readJson(c: Context): Promise<unknown> {
 }
 
 function invalid(c: Context, error: z.ZodError) {
-  const message = error.issues.map((issue) => issue.message).join(" ") || "The request body is not valid.";
-  return c.json<ApiError>({ error: { code: "invalid_request", message } }, 400);
+  return c.json<ApiError>({ error: { code: "invalid_request", message: invalidBodyMessage(error) } }, 400);
 }
 
 function notFound(c: Context, what: string) {

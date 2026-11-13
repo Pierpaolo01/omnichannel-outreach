@@ -67,7 +67,8 @@ export class EngineHarness {
   ticks = 0;
   /** Hooks every engine this harness starts calls through, so a test may set them at any time. */
   hooks: EngineHooks;
-  private readonly app;
+  /** The HTTP app, for tests that walk its routes. */
+  readonly app;
   private readonly options: EngineHarnessOptions;
   private readonly engineIds = sequentialIds("att");
 
@@ -99,9 +100,10 @@ export class EngineHarness {
       store: this.store,
       now: () => new Date(this.clock).toISOString(),
       newId: sequentialIds(),
-      engine: { launch: (id, expected) => this.engine.launch(id, expected) },
+      engine: { launch: (id, expected) => this.engine.launch(id, expected), logCallOutcome: (id, input) => this.engine.logCallOutcome(id, input) },
       emailProvider: "status" in this.provider ? (this.provider as Provider & EmailProviderSource) : null,
       smsProvider: this.smsProvider ? "test-simulator" : "none",
+      ...(options.rules ? { rules: options.rules } : {}),
     });
   }
 

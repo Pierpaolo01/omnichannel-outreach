@@ -24,6 +24,8 @@ export function deriveStatus(state: SubjectState): OutreachStatus {
   if (subject.ended !== null) return subject.ended;
   if (subject.leadPaused) return "paused";
   if (subject.branch === "win_back") return "in_win_back";
+  // Rule 5: an open call task, whatever today's listing (ticket 14).
+  if (state.callTasks.some((t) => t.open)) return "waiting_on_call";
   if (!subject.touched) return "queued";
   return "active";
 }
@@ -64,11 +66,21 @@ export function destinationFor(details: readonly LeadDetail[], channel: TrackCha
   return channel === "email" ? goodEmail(details) : channel === "sms" ? goodMobile(details) : null;
 }
 
+/** Whether the user has a good number to dial for the lead: its own, or the company main line (ADR 0001 "Usable channels"). */
+export function hasGoodNumber(state: SubjectState): boolean {
+  return state.lead.phones.some((p) => !p.bad);
+}
+
+/** Whether a track on `channel` can reach the lead now. */
+export function channelReaches(state: SubjectState, channel: TrackChannel): boolean {
+  return channel === "call" ? hasGoodNumber(state) : destinationFor(state.lead.details, channel) !== null;
+}
+
 /** Channels in the lead's branch that can reach the lead now (2.1). */
 export function reachable(state: SubjectState): Set<string> {
   const channels = new Set<string>();
   for (const track of liveTracksFor(state)) {
-    if (destinationFor(state.lead.details, track.channel)) channels.add(track.channel);
+    if (channelReaches(state, track.channel)) channels.add(track.channel);
   }
   return channels;
 }
@@ -115,14 +127,20 @@ export function quiesce(state: SubjectState, trackId: string | null = null): Sub
   return next;
 }
 
-/** A track finishes once and stays finished; finishing quiesces its live attempts (2.3). */
+/**
+ * A track finishes once and stays finished. Finishing quiesces its live attempts and closes its open
+ * call task in the same change (2.3), whatever the reason.
+ */
 export function finishTrack(state: SubjectState, trackId: string, reason: FinishReason, at: number, atWall: number): SubjectState {
   const progress = progressOf(state, trackId);
   if (!progress || progress.finishedAt !== null) return state;
-  return quiesce(withTrack(state, trackId, (t) => ({ ...t, finishedAt: at, finishedWall: atWall, finishReason: reason })), trackId);
+  const finished = withTrack(state, trackId, (t) => ({ ...t, finishedAt: at, finishedWall: atWall, finishReason: reason }));
+  const closed = { ...finished, callTasks: finished.callTasks.map((t) => (t.trackId === trackId && t.open ? { ...t, open: false, closedWall: atWall } : t)) };
+  return quiesce(closed, trackId);
 }
 
-function end(state: SubjectState, reason: EndReason, now: number): SubjectState {
+/** Ends the lead in this campaign: its outreach quiesces and its clock freezes. */
+export function end(state: SubjectState, reason: EndReason, now: number): SubjectState {
   const ended = { ...state, subject: { ...state.subject, ended: reason, endedAt: leadNow(state.subject.clock, now), endedWall: now } };
   return synced(quiesce(ended), now);
 }
@@ -234,6 +252,13 @@ export function evaluate(state: SubjectState, now: number, options: { readonly e
     else if (!dest.owned) s = finishTrack(s, track.id, "skipped_missing_channel", lead, wallOfLead(s.subject.clock, now));
   }
 
+  // A started phone track with no good number left is skipped (spec "Phone steps are skipped when no good number remains").
+  for (const track of liveTracksFor(s)) {
+    const progress = progressOf(s, track.id);
+    if (track.channel !== "call" || !progress || progress.startedAt === null || progress.finishedAt !== null || hasGoodNumber(s)) continue;
+    s = finishTrack(s, track.id, "skipped_missing_channel", lead, wallOfLead(s.subject.clock, now));
+  }
+
   // Next steps for started tracks with no pending step and no live attempt.
   for (const track of liveTracksFor(s)) {
     const progress = progressOf(s, track.id);
@@ -265,9 +290,10 @@ function startTrack(state: SubjectState, track: TrackDefinition, lead: number, n
   if (!progress || progress.startedAt !== null || progress.startAt === null || progress.startAt > lead) return s;
   const startAt = progress.startAt;
   const startWall = wallAtLead(s.subject.clock, s.freezes, startAt, now);
+  // A phone track has no single destination: the user chooses among the lead's numbers at each call.
   const destination = destinationFor(s.lead.details, track.channel);
   s = withTrack(s, track.id, (t) => ({ ...t, startedAt: startAt, destinationDetailId: destination?.id ?? null }));
-  return destination ? advanceTrack(s, track, startAt, startWall) : finishTrack(s, track.id, "skipped_missing_channel", startAt, startWall);
+  return channelReaches(s, track.channel) ? advanceTrack(s, track, startAt, startWall) : finishTrack(s, track.id, "skipped_missing_channel", startAt, startWall);
 }
 
 function resolveStart(s: SubjectState, track: TrackDefinition, now: number): Pick<TrackProgress, "startAt" | "startBasisAt" | "startBasisWall" | "startZone"> | null {
@@ -311,18 +337,24 @@ export function applyReply(state: SubjectState, reply: { channel: "email" | "sms
 /** A bounce or invalid address after a send: the detail is marked bad, and an unfinished track fails (2.4). */
 export function applyBadDestination(state: SubjectState, attempt: Attempt, now: number): SubjectState {
   const liveId = state.lead.resolved[attempt.destinationDetailId]?.liveId ?? attempt.destinationDetailId;
-  const marked: SubjectState = {
+  const marked = markDetailBad(state, liveId);
+  const progress = progressOf(marked, attempt.trackId);
+  if (!progress || progress.finishedAt !== null) return marked;
+  return attend(checkEndings(finishTrack(marked, attempt.trackId, "failed_bad_destination", leadNow(marked.subject.clock, now), wallOfLead(marked.subject.clock, now)), now), now);
+}
+
+/** Marks a live contact detail bad, in this change and in the store (ADR 0001: bad marks are never cleared). */
+export function markDetailBad(state: SubjectState, liveId: string): SubjectState {
+  return {
     ...state,
     markBad: [...new Set([...state.markBad, liveId])],
     lead: {
       ...state.lead,
       details: state.lead.details.map((d) => (d.id === liveId ? { ...d, bad: true } : d)),
+      phones: state.lead.phones.map((p) => (p.id === liveId ? { ...p, bad: true } : p)),
       resolved: Object.fromEntries(Object.entries(state.lead.resolved).map(([id, r]) => [id, r.liveId === liveId ? { ...r, bad: true } : r])),
     },
   };
-  const progress = progressOf(marked, attempt.trackId);
-  if (!progress || progress.finishedAt !== null) return marked;
-  return attend(checkEndings(finishTrack(marked, attempt.trackId, "failed_bad_destination", leadNow(marked.subject.clock, now), wallOfLead(marked.subject.clock, now)), now), now);
 }
 
 /** The attempt the work's send settles on (PR 37 ruling 4): its first attempt handed over, unless that one was refused. */

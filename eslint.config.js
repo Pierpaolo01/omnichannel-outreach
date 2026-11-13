@@ -46,6 +46,17 @@ export default tseslint.config(
     },
   },
   {
+    // Request bodies refuse unknown fields: every one is declared with requestObject (src/server/request-body.ts).
+    files: ["src/server/**/*.ts"],
+    ignores: ["src/server/**/*.test.ts", "src/server/request-body.ts"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        { selector: "CallExpression[callee.object.name='z'][callee.property.name=/^(object|looseObject|passthrough)$/]", message: "Declare a request body with requestObject from src/server/request-body.ts: it refuses unknown fields." },
+      ],
+    },
+  },
+  {
     // The SQLite adapter satisfies an asynchronous interface over a synchronous driver.
     files: ["src/server/persistence/sqlite-store.ts", "src/server/persistence/sqlite-engine-store.ts"],
     rules: { "@typescript-eslint/require-await": "off" },

@@ -1,5 +1,7 @@
 /** Read models for the HTTP interface, built from the engine's stored facts. */
 import { isLive, markable } from "../../domain/sequence/attempt.ts";
+import { isListed, recordedNumberOf } from "../../domain/sequence/calls.ts";
+import { recordedView } from "./call-views.ts";
 import { leadNow } from "../../domain/sequence/clock.ts";
 import { heldReason, stalledAccounts } from "../../domain/sequence/dispatch.ts";
 import { deriveStatus, liveTracksFor } from "../../domain/sequence/progress.ts";
@@ -29,9 +31,11 @@ export function progressView(s: SubjectState, now: number): EnrollmentProgress {
       .map((track) => {
         const p = s.tracks.find((x) => x.trackId === track.id);
         const numberOf = (stepId: string) => track.steps.filter((st) => !st.removed).findIndex((st) => st.id === stepId) + 1;
+        const task = s.callTasks.find((t) => t.trackId === track.id);
         return {
           trackId: track.id,
           channel: track.channel,
+          callTask: task ? { taskId: task.id, open: task.open, placedAt: new Date(task.placedWall).toISOString(), listed: isListed(s, task) } : null,
           started: p?.startedAt != null,
           finishReason: p?.finishReason ?? null,
           finishedAt: iso(p?.finishedWall ?? null),
@@ -47,6 +51,9 @@ export function progressView(s: SubjectState, now: number): EnrollmentProgress {
               number: i + 1,
               removed: st.removed,
               result: result?.result ?? null,
+              calls: s.callAttempts
+                .filter((c) => s.callTasks.some((t) => t.id === c.taskId && t.stepId === st.id))
+                .map((c) => ({ outcome: c.outcome, at: new Date(c.atWall).toISOString(), number: recordedView(recordedNumberOf(s, c.numberDetailId)), note: c.note })),
               reason: result?.reason ?? null,
               at: iso(result?.atWall ?? null),
               sends: s.attempts

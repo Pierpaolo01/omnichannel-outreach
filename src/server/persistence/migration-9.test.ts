@@ -45,14 +45,17 @@ const definition: CampaignDefinition = {
 const harness = (databasePath: string) =>
   new EngineHarness({ start: MONDAY_9 - H, databasePath, accounts: [{ id: "inbox-a", capacity: 50, gapMs: 60_000, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
 
-/** Takes a database back to just before migration 9, undoing the later 10 and 11 (ticket 12c) first. */
+/** Takes a database back to just before migration 9, undoing every later migration first (10 and 11, ticket 12c; 12, ticket 14a). */
 function beforeMigration9(file: string): void {
   const db = new DatabaseSync(file);
   db.exec(`
+    DROP TABLE notes;
+    DROP TABLE call_attempts;
+    DROP TABLE call_tasks;
     DROP TABLE bounce_events;
     ALTER TABLE campaigns DROP COLUMN definition_session;
     ALTER TABLE campaigns DROP COLUMN definition_seq;
-    DELETE FROM schema_migrations WHERE version IN (10, 11);
+    DELETE FROM schema_migrations WHERE version > 9;
     ALTER TABLE enrollments DROP COLUMN stop_reply_channel;
     ALTER TABLE enrollments DROP COLUMN stop_reply_at;
     ALTER TABLE enrollments DROP COLUMN sms_sender;
