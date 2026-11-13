@@ -174,3 +174,39 @@ describe("sending (ADR 0003 2.4)", () => {
     expect(after.subject.ended).toBe("finished_no_usable_channel");
   });
 });
+
+describe("one provider send under an inherited key (found by generated seed 20261117)", () => {
+  const opts2 = { resetDay: () => "2026-11-02" };
+  function inherited(): SubjectState {
+    const s = launched();
+    return {
+      ...s,
+      attempts: [
+        handed({ id: "a-1", idempotencyKey: "a-1", state: "withdrawn", endedBy: "lookup_not_sent", providerRef: "p-1" }),
+        handed({ id: "a-2", idempotencyKey: "a-1", state: "accepted", providerRef: "p-1" }),
+      ],
+    };
+  }
+
+  test("a send observed on the withdrawn attempt goes to the live attempt that inherited its key", () => {
+    const after = applyToAttempt(inherited(), "a-1", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p-1" }, MONDAY_9 + 2000, opts2).state;
+    expect(after.attempts.map((a) => a.state)).toEqual(["withdrawn", "sent"]);
+    expect(after.results).toEqual([expect.objectContaining({ stepId: "s1", attemptId: "a-2" })]);
+  });
+
+  test("a step never gets a second sent attempt: a later answer for the same work is a duplicate", () => {
+    const once = applyToAttempt(inherited(), "a-2", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p-1" }, MONDAY_9 + 2000, opts2).state;
+    const again = applyToAttempt(once, "a-1", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p-1" }, MONDAY_9 + 3000, opts2).state;
+    expect(again.attempts.filter((a) => a.state === "sent").map((a) => a.id)).toEqual(["a-2"]);
+  });
+
+  test("a live attempt whose key the step already sent under ends, settled by the provider's statement", () => {
+    const s = launched();
+    const state = {
+      ...s,
+      attempts: [handed({ id: "a-1", idempotencyKey: "k", state: "sent", endedBy: "observed" }), handed({ id: "a-2", idempotencyKey: "k", state: "accepted" })],
+    };
+    const after = applyToAttempt(state, "a-2", { kind: "lookup_answer", answer: { kind: "sent", sentAt: MONDAY_9 }, now: MONDAY_9 + 1000 }, MONDAY_9 + 1000, opts2).state;
+    expect(after.attempts.map((a) => [a.state, a.endedBy])).toEqual([["sent", "observed"], ["withdrawn", "provider"]]);
+  });
+});

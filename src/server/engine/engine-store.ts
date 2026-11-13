@@ -56,6 +56,8 @@ export interface EngineStore {
   update(subjectId: string, now: number, decide: (state: SubjectState) => SubjectState | null): Promise<SubjectState | null>;
   /** Enrollments of launched campaigns that have not ended. */
   runningSubjectIds(): Promise<string[]>;
+  /** For each running subject, a key that changes whenever its state, its campaign's, or the lead facts it reads change. */
+  runningSubjectVersions(): Promise<Map<string, string>>;
   /** Every attempt that is not terminal, plus withdrawn ones a lookup may still settle. */
   openAttempts(): Promise<Attempt[]>;
   attempt(attemptId: string): Promise<Attempt | null>;

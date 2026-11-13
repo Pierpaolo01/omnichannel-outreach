@@ -283,8 +283,26 @@ export function applyToAttempt(
   now: number,
   options: { readonly resetDay: (accountId: string, t: number) => string; readonly point?: typeof sendPoint } = { resetDay: () => "" },
 ): { state: SubjectState; effects: readonly AttemptEffect[] } {
-  const before = state.attempts.find((a) => a.id === attemptId);
-  if (!before) throw new Error(`no attempt ${attemptId}`);
+  const target = state.attempts.find((a) => a.id === attemptId);
+  if (!target) throw new Error(`no attempt ${attemptId}`);
+  // One provider work per idempotency key. A step's attempts after a not-sent lookup share their
+  // key (5.3), so a send under that key belongs to the step's live attempt, and a step never gets
+  // a second sent attempt (invariant 3).
+  const reportsSent = event.kind === "sent_observed" || (event.kind === "lookup_answer" && event.answer.kind === "sent") || event.kind === "mark_sent";
+  if (reportsSent) {
+    const others = state.attempts.filter((a) => a.id !== target.id && a.stepId === target.stepId);
+    const sentAlready = others.find((a) => a.state === "sent");
+    if (sentAlready) {
+      if (isLive(target) && target.idempotencyKey === sentAlready.idempotencyKey) {
+        const settled = withAttempt(state, { ...target, state: "withdrawn", endedBy: "provider", nextLookupWall: null, awaitingAnswer: false });
+        return { state: runs(settled) ? evaluate(settled, now) : settled, effects: [] };
+      }
+      return { state, effects: [{ kind: "ignored", what: "the step was already sent" }] };
+    }
+    const inheritor = target.state === "withdrawn" ? others.find((a) => isLive(a) && a.idempotencyKey === target.idempotencyKey) : undefined;
+    if (inheritor) return applyToAttempt(state, inheritor.id, event, now, options);
+  }
+  const before = target;
   const { attempt, effects } = applyAttemptEvent(before, event);
   let s = withAttempt(state, attempt);
   for (const effect of effects) {

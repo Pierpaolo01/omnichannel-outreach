@@ -1,4 +1,4 @@
-import { DatabaseSync, type SQLInputValue, type SQLOutputValue } from "node:sqlite";
+import { DatabaseSync, type SQLInputValue, type SQLOutputValue, type StatementSync } from "node:sqlite";
 import { digitsOf, foldText, isNewerDetail, type Channel, type PhoneKind } from "../../domain/contact-details.ts";
 import { companyRegion, displayPhone, parsePhone } from "../../domain/phone.ts";
 import {
@@ -48,16 +48,21 @@ export function openSqliteStore(path: string): OutreachStore {
  * end of the chain of details it was merged into. The engine store resolves through this too,
  * inside its own transactions.
  */
+const resolveStatements = new WeakMap<DatabaseSync, StatementSync>();
+
 export function liveDetailRowOf(db: DatabaseSync, detailId: string): Row | undefined {
-  return db
-    .prepare(
+  let statement = resolveStatements.get(db);
+  if (!statement) {
+    statement = db.prepare(
       `WITH RECURSIVE chain(id) AS (
          SELECT ?
          UNION
          SELECT d.merged_into FROM contact_details d JOIN chain ON d.id = chain.id WHERE d.merged_into IS NOT NULL)
        SELECT live.* FROM chain CROSS JOIN live_contact_details live ON live.id = chain.id`,
-    )
-    .get(detailId);
+    );
+    resolveStatements.set(db, statement);
+  }
+  return statement.get(detailId);
 }
 
 class SqliteStore implements OutreachStore {

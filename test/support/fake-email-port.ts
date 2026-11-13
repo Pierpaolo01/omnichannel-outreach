@@ -29,7 +29,7 @@ const SETTLING = 15 * MINUTE;
 
 export interface FakeAccount {
   readonly id: string;
-  readonly capacity: number;
+  capacity: number;
   readonly gapMs: number;
   readonly k: number;
   healthy: boolean;
@@ -60,6 +60,8 @@ export interface DeliveryLogEntry {
   readonly destination: string;
   readonly rendered: RenderedCopy;
   readonly providerRef: string;
+  /** When the provider's sent event becomes visible to the app. */
+  readonly visibleAt: number;
 }
 
 interface Work {
@@ -90,6 +92,10 @@ export class FakeEmailPort implements SendPort {
   readonly deliveryLog: DeliveryLogEntry[] = [];
   readonly replyLog: { at: number; destination: string; id: string; threadRef: string }[] = [];
   readonly withdrawLog: { at: number; key: string }[] = [];
+  /** Every lookup the fake answered. */
+  readonly lookupLog: { at: number; key: string; answer: LookupResult["kind"] }[] = [];
+  /** Every call the fake refused, with the reason it gave. */
+  readonly refusals: { at: number; attemptId: string; destination: string; reason: string }[] = [];
   /** Answers the duplicate-and-reorder mode will deliver again later. */
   readonly staleAnswers: { attemptId: string; answer: CallAnswer }[] = [];
   readonly accountsById: Map<string, FakeAccount>;
@@ -101,6 +107,8 @@ export class FakeEmailPort implements SendPort {
   /** Accounts answering 429 until the instant given. */
   readonly rateLimitedUntil = new Map<string, number>();
   presendUnavailable = false;
+  /** Runs at every send call before it is answered: the tests' probe of the app's state at that moment. */
+  onHandover: ((entry: HandoverLogEntry) => Promise<void>) | null = null;
 
   private readonly now: () => number;
   private readonly random: () => number;
@@ -147,11 +155,11 @@ export class FakeEmailPort implements SendPort {
     this.events.push({ visibleAt: Math.max(visibleAt, this.now()), event });
   }
 
-  handover(request: HandoverRequest): Promise<CallAnswer> {
+  async handover(request: HandoverRequest): Promise<CallAnswer> {
     const now = this.now();
     const mode = this.pick(this.modes);
     const retryable = request.threading === "new_subject" && !this.allNonRetryable;
-    this.handoverLog.push({
+    const entry: HandoverLogEntry = {
       at: now,
       attemptId: request.attemptId,
       key: request.idempotencyKey,
@@ -163,7 +171,21 @@ export class FakeEmailPort implements SendPort {
       threadRef: request.threadRef,
       mode,
       retryable,
+    };
+    this.handoverLog.push(entry);
+    await this.onHandover?.(entry);
+    return this.answer(request, mode, retryable);
+  }
+
+  private answer(request: HandoverRequest, mode: FakeMode, retryable: boolean): Promise<CallAnswer> {
+    return this.decide(request, mode, retryable).then((answer) => {
+      if (answer.kind === "rejected") this.refusals.push({ at: this.now(), attemptId: request.attemptId, destination: request.destination, reason: answer.reason });
+      return answer;
     });
+  }
+
+  private decide(request: HandoverRequest, mode: FakeMode, retryable: boolean): Promise<CallAnswer> {
+    const now = this.now();
     const account = this.accountsById.get(request.sender);
     if (!account?.quotaAvailable) return Promise.resolve({ kind: "rejected", reason: "payment_required" });
     const limited = this.rateLimitedUntil.get(request.sender);
@@ -237,6 +259,7 @@ export class FakeEmailPort implements SendPort {
         destination: w.request.destination,
         rendered: w.request.rendered,
         providerRef: w.providerRef,
+        visibleAt: w.sentAt + w.observeDelay,
       });
       const sent: ProviderEvent = { id: `sent-${w.providerRef}`, kind: "sent", key: w.key, providerRef: w.providerRef, sentAt: w.sentAt };
       this.emit(w.sentAt + w.observeDelay, sent);
@@ -289,6 +312,13 @@ export class FakeEmailPort implements SendPort {
   }
 
   lookup(attempt: AttemptRef): Promise<LookupResult> {
+    return this.lookupTruth(attempt).then((answer) => {
+      this.lookupLog.push({ at: this.now(), key: attempt.idempotencyKey, answer: answer.kind });
+      return answer;
+    });
+  }
+
+  private lookupTruth(attempt: AttemptRef): Promise<LookupResult> {
     const now = this.now();
     const all = this.work.filter((w) => w.key === attempt.idempotencyKey);
     const sent = all.find((w) => w.sentAt !== null && w.sentAt <= now);

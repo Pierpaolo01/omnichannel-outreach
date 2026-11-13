@@ -47,6 +47,15 @@ export class Engine {
   private readonly newId: () => string;
   private readonly rules: Rules;
   private readonly hooks: EngineHooks;
+  /**
+   * Subjects known to need nothing, by version key, until a wall instant: evaluated with no
+   * change, or with nothing ready to claim. A change to the subject, its campaign or its lead
+   * facts changes the key; the instant is the next time-driven change (a deadline or a start).
+   */
+  private readonly settled = new Map<string, { key: string; until: number }>();
+  private readonly nothingReady = new Map<string, { key: string; until: number }>();
+  /** Per subject and version: the wall instants its pending steps fall due, with their windows. */
+  private readonly wakeCache = new Map<string, { version: string; due: { wall: number; window: ReturnType<typeof windowOf>; zone: string }[] }>();
 
   constructor(deps: EngineDependencies) {
     this.store = deps.store;
@@ -100,16 +109,24 @@ export class Engine {
   async nextWakeAt(): Promise<number | null> {
     const now = this.now();
     const times: number[] = [];
-    for (const id of await this.store.runningSubjectIds()) {
-      const s = await this.store.subject(id, now);
-      if (!s) continue;
-      const lead = leadNow(s.subject.clock, now);
-      for (const p of s.tracks) {
-        if (p.finishedAt !== null || p.nextStepId === null || p.dueAt === null) continue;
-        if (s.attempts.some((a) => a.stepId === p.nextStepId && isLive(a))) continue;
-        if (p.dueAt > lead) times.push(now + (p.dueAt - lead));
+    for (const [id, version] of await this.store.runningSubjectVersions()) {
+      let cached = this.wakeCache.get(id);
+      if (cached?.version !== version) {
+        const state = await this.store.subject(id, now);
+        if (!state) continue;
+        const s = state;
+        // A running subject's lead time advances with the wall, so a deadline's wall instant is fixed.
+        const due = s.tracks
+          .filter((p) => p.finishedAt === null && p.nextStepId !== null && p.dueAt !== null)
+          .filter((p) => !s.attempts.some((a) => a.stepId === p.nextStepId && isLive(a)))
+          .map((p) => ({ wall: now + ((p.dueAt ?? 0) - leadNow(s.subject.clock, now)), window: windowOf(s, p.trackId), zone: s.lead.zone }));
+        cached = { version, due };
+        this.wakeCache.set(id, cached);
+      }
+      for (const d of cached.due) {
+        if (d.wall > now) times.push(d.wall);
         else {
-          const opens = nextWindowOpen(windowOf(s, p.trackId), s.lead.zone, now);
+          const opens = nextWindowOpen(d.window, d.zone, now);
           if (opens !== null && opens > now) times.push(opens);
         }
       }
@@ -288,12 +305,19 @@ export class Engine {
 
   private async evaluateAll(): Promise<boolean> {
     let changed = false;
-    for (const id of await this.store.runningSubjectIds()) {
+    for (const [id, version] of await this.store.runningSubjectVersions()) {
       const now = this.now();
+      const known = this.settled.get(id);
+      if (known?.key === version && now < known.until) continue;
       const snapshot = await this.store.subject(id, now);
       if (!snapshot) continue;
       const next = this.rules.evaluate(snapshot, now);
-      if (same(next, snapshot)) continue;
+      if (same(next, snapshot)) {
+        const lead = leadNow(snapshot.subject.clock, now);
+        const starts = snapshot.tracks.filter((p) => p.startedAt === null && p.startAt !== null).map((p) => now + ((p.startAt ?? 0) - lead));
+        this.settled.set(id, { key: version, until: Math.min(Infinity, ...starts.filter((t) => t > now)) });
+        continue;
+      }
       await this.hooks.beforeApplyEvaluation?.(id);
       const written = await this.store.update(id, now, (current) => (this.rules.versionsMatch(snapshot, current) ? { ...next, accounts: current.accounts } : null));
       changed = changed || written !== null;
@@ -307,13 +331,24 @@ export class Engine {
   private async claimAll(): Promise<boolean> {
     const now = this.now();
     const ready: { item: ReadyItem; snapshot: SubjectState }[] = [];
-    for (const id of await this.store.runningSubjectIds()) {
+    for (const [id, version] of await this.store.runningSubjectVersions()) {
+      const known = this.nothingReady.get(id);
+      if (known?.key === version && now < known.until) continue;
       const snapshot = await this.store.subject(id, now);
-      if (snapshot) for (const item of this.rules.readyItems(snapshot, now)) ready.push({ item, snapshot });
+      if (!snapshot) continue;
+      const items = this.rules.readyItems(snapshot, now);
+      if (items.length === 0) {
+        const lead = leadNow(snapshot.subject.clock, now);
+        const dues = snapshot.tracks.filter((p) => p.finishedAt === null && p.dueAt !== null).map((p) => now + ((p.dueAt ?? 0) - lead));
+        this.nothingReady.set(id, { key: version, until: Math.min(Infinity, ...dues.filter((t) => t > now)) });
+      }
+      for (const item of items) ready.push({ item, snapshot });
     }
     ready.sort((a, b) => this.rules.claimOrder(a.item, b.item));
     let changed = false;
     for (const { item, snapshot } of ready) {
+      // Cheap refusals on the snapshot first; the transaction checks everything again on current state.
+      if (this.rules.claimRefusal(snapshot, item, now) !== null) continue;
       const step = snapshot.campaign.definition.tracks.find((t) => t.id === item.trackId)?.steps.find((s) => s.id === item.stepId);
       const transport = this.port.transportFor({ threading: step?.threading ?? "new_subject" });
       const attemptId = this.newId();
@@ -337,7 +372,13 @@ export class Engine {
 
   private async handOverAll(): Promise<boolean> {
     let changed = false;
+    const waiting = new Set(
+      (await this.store.openAttempts())
+        .filter((a) => a.state === "claimed" || (a.state === "handed" && (a.retry === "wanted" || a.retry === "wanted_after_not_sent")))
+        .map((a) => a.accountId),
+    );
     for (const account of await this.store.accounts(this.now())) {
+      if (!waiting.has(account.id)) continue;
       const skipped = new Set<string>();
       for (let i = 0; i < 100; i++) {
         const now = this.now();

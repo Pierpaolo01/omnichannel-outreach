@@ -1,4 +1,4 @@
-import type { DatabaseSync, SQLInputValue, SQLOutputValue } from "node:sqlite";
+import type { DatabaseSync, SQLInputValue, SQLOutputValue, StatementSync } from "node:sqlite";
 import type { SenderAccountView } from "../../domain/sequence/blockers.ts";
 import { prospectZone, resetDayOf } from "../../domain/sequence/clock.ts";
 import type { MergeData } from "../../domain/sequence/copy.ts";
@@ -29,12 +29,24 @@ const LIVE_STATES = "('claimed', 'handed', 'accepted')";
 export class SqliteEngineStore implements EngineStore {
   private readonly db: DatabaseSync;
 
+  private readonly statements = new Map<string, StatementSync>();
+
   constructor(db: DatabaseSync) {
     this.db = db;
   }
 
+  /** A prepared statement, compiled once per store. */
+  private sql(text: string): StatementSync {
+    let statement = this.statements.get(text);
+    if (!statement) {
+      statement = this.db.prepare(text);
+      this.statements.set(text, statement);
+    }
+    return statement;
+  }
+
   async campaign(campaignId: string): Promise<CampaignEngineRow | null> {
-    const row = this.db.prepare("SELECT * FROM campaigns WHERE id = ?").get(campaignId);
+    const row = this.sql("SELECT * FROM campaigns WHERE id = ?").get(campaignId);
     if (!row) return null;
     return {
       id: campaignId,
@@ -48,7 +60,7 @@ export class SqliteEngineStore implements EngineStore {
 
   async saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string): Promise<"saved" | "launched" | "missing"> {
     return this.transaction(() => {
-      const row = this.db.prepare("SELECT launched_at FROM campaigns WHERE id = ?").get(campaignId);
+      const row = this.sql("SELECT launched_at FROM campaigns WHERE id = ?").get(campaignId);
       if (!row) return "missing";
       if (row["launched_at"] != null) return "launched";
       this.run(
@@ -82,14 +94,14 @@ export class SqliteEngineStore implements EngineStore {
     enter: (state: SubjectState) => SubjectState,
   ): Promise<LaunchOutcome> {
     return this.transaction((): LaunchOutcome => {
-      const row = this.db.prepare("SELECT * FROM campaigns WHERE id = ?").get(campaignId);
+      const row = this.sql("SELECT * FROM campaigns WHERE id = ?").get(campaignId);
       if (!row || row["definition"] == null) return { ok: false, check: null, reason: "no_definition" };
       if (row["launched_at"] != null) return { ok: false, check: null, reason: "already_launched" };
       const { leads, accounts } = this.launchInputsNow(campaignId);
       const check = decide(parseDefinition(row), leads, accounts);
       if (!check.canLaunch) return { ok: false, check, reason: "blocked" };
       this.run("UPDATE campaigns SET launched_at = ?, version = version + 1 WHERE id = ?", [now, campaignId]);
-      for (const e of this.db.prepare("SELECT id FROM enrollments WHERE campaign_id = ? ORDER BY enrolled_at, id").all(campaignId)) {
+      for (const e of this.sql("SELECT id FROM enrollments WHERE campaign_id = ? ORDER BY enrolled_at, id").all(campaignId)) {
         const base = this.load(str(e, "id"), now);
         if (base) this.write(base, enter(base));
       }
@@ -121,8 +133,27 @@ export class SqliteEngineStore implements EngineStore {
       .map((r) => str(r, "id"));
   }
 
+  async runningSubjectVersions(): Promise<Map<string, string>> {
+    // The subject's and campaign's versions, plus the lead facts decisions read that no subject
+    // write bumps: the lead's live details and their bad marks, and its records' last update.
+    return new Map(
+      this.sql(
+        `SELECT e.id, e.version || '/' || c.version || '/' || c.definition_version || '/' ||
+           COALESCE((SELECT group_concat(d.id || ':' || d.bad, ',') FROM live_contact_details d
+             WHERE (e.person_id IS NOT NULL AND d.owner_kind = 'person' AND d.owner_id = e.person_id)
+                OR (e.person_id IS NULL AND d.owner_kind = 'company' AND d.owner_id = e.company_id)), '') || '/' ||
+           COALESCE((SELECT p.updated_at FROM people p WHERE p.id = e.person_id), '') || '/' ||
+           (SELECT co.updated_at FROM companies co WHERE co.id = e.company_id) AS v
+         FROM enrollments e JOIN campaigns c ON c.id = e.campaign_id
+         WHERE c.launched_at IS NOT NULL AND e.ended IS NULL ORDER BY e.id`,
+      )
+        .all()
+        .map((r) => [str(r, "id"), str(r, "v")]),
+    );
+  }
+
   async subjectsOf(campaignId: string): Promise<string[]> {
-    return this.db.prepare("SELECT id FROM enrollments WHERE campaign_id = ? ORDER BY enrolled_at, id").all(campaignId).map((r) => str(r, "id"));
+    return this.sql("SELECT id FROM enrollments WHERE campaign_id = ? ORDER BY enrolled_at, id").all(campaignId).map((r) => str(r, "id"));
   }
 
   async openAttempts(): Promise<Attempt[]> {
@@ -133,12 +164,12 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   async attempt(attemptId: string): Promise<Attempt | null> {
-    const row = this.db.prepare("SELECT * FROM attempts WHERE id = ?").get(attemptId);
+    const row = this.sql("SELECT * FROM attempts WHERE id = ?").get(attemptId);
     return row ? toAttempt(row) : null;
   }
 
   async attemptByProviderRef(providerRef: string): Promise<Attempt | null> {
-    const row = this.db.prepare("SELECT * FROM attempts WHERE provider_ref = ? ORDER BY rowid LIMIT 1").get(providerRef);
+    const row = this.sql("SELECT * FROM attempts WHERE provider_ref = ? ORDER BY rowid LIMIT 1").get(providerRef);
     return row ? toAttempt(row) : null;
   }
 
@@ -156,11 +187,11 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   async accounts(now: number): Promise<AccountState[]> {
-    return this.db.prepare("SELECT id FROM sender_accounts ORDER BY id").all().map((r) => this.accountState(str(r, "id"), now)).filter((a): a is AccountState => a !== null);
+    return this.sql("SELECT id FROM sender_accounts ORDER BY id").all().map((r) => this.accountState(str(r, "id"), now)).filter((a): a is AccountState => a !== null);
   }
 
   async accountLabels(): Promise<Record<string, string>> {
-    return Object.fromEntries(this.db.prepare("SELECT id, label FROM sender_accounts").all().map((r) => [str(r, "id"), str(r, "label")]));
+    return Object.fromEntries(this.sql("SELECT id, label FROM sender_accounts").all().map((r) => [str(r, "id"), str(r, "label")]));
   }
 
   async updateAccount(accountId: string, change: Partial<Pick<AccountState, "healthy" | "waitUntil" | "waitReason" | "backoffMs">>): Promise<void> {
@@ -173,7 +204,7 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   async meta(key: string): Promise<string | null> {
-    const row = this.db.prepare("SELECT value FROM engine_meta WHERE key = ?").get(key);
+    const row = this.sql("SELECT value FROM engine_meta WHERE key = ?").get(key);
     return row ? str(row, "value") : null;
   }
 
@@ -195,7 +226,7 @@ export class SqliteEngineStore implements EngineStore {
   // -------------------------------------------------------------------------------------------
 
   private accountState(id: string, now: number): AccountState | null {
-    const a = this.db.prepare("SELECT * FROM sender_accounts WHERE id = ?").get(id);
+    const a = this.sql("SELECT * FROM sender_accounts WHERE id = ?").get(id);
     if (!a) return null;
     const resetZone = str(a, "reset_zone");
     const counts =
@@ -223,9 +254,22 @@ export class SqliteEngineStore implements EngineStore {
     };
   }
 
+  /** Parsed definitions, by campaign and definition version: a version is never rewritten. */
+  private readonly definitions = new Map<string, CampaignDefinition>();
+
+  private definitionOf(c: Row): CampaignDefinition {
+    const key = `${str(c, "id")}/${num(c, "definition_version")}`;
+    let def = this.definitions.get(key);
+    if (!def) {
+      def = parseDefinition(c);
+      this.definitions.set(key, def);
+    }
+    return def;
+  }
+
   private mergeDataOf(e: Row): MergeData {
-    const company = this.db.prepare("SELECT name, city FROM companies WHERE id = ?").get(str(e, "company_id"));
-    const person = e["person_id"] == null ? undefined : this.db.prepare("SELECT * FROM people WHERE id = ?").get(str(e, "person_id"));
+    const company = this.sql("SELECT name, city FROM companies WHERE id = ?").get(str(e, "company_id"));
+    const person = e["person_id"] == null ? undefined : this.sql("SELECT * FROM people WHERE id = ?").get(str(e, "person_id"));
     const data: Record<string, string> = { company: company ? str(company, "name") : "", city: company ? str(company, "city") : "" };
     if (person) {
       data["first_name"] = str(person, "first_name");
@@ -237,15 +281,15 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   private load(subjectId: string, now: number): SubjectState | null {
-    const e = this.db.prepare("SELECT * FROM enrollments WHERE id = ?").get(subjectId);
+    const e = this.sql("SELECT * FROM enrollments WHERE id = ?").get(subjectId);
     if (!e) return null;
-    const c = this.db.prepare("SELECT * FROM campaigns WHERE id = ?").get(str(e, "campaign_id"));
+    const c = this.sql("SELECT * FROM campaigns WHERE id = ?").get(str(e, "campaign_id"));
     if (!c) throw new Error(`enrollment ${subjectId} has no campaign`);
-    const definition = c["definition"] == null ? emptyDefinition(strOrNull(c, "default_timezone") ?? "UTC") : parseDefinition(c);
+    const definition = c["definition"] == null ? emptyDefinition(strOrNull(c, "default_timezone") ?? "UTC") : this.definitionOf(c);
     const personId = strOrNull(e, "person_id");
     const companyId = str(e, "company_id");
-    const person = personId === null ? undefined : this.db.prepare("SELECT timezone FROM people WHERE id = ?").get(personId);
-    const company = this.db.prepare("SELECT timezone FROM companies WHERE id = ?").get(companyId);
+    const person = personId === null ? undefined : this.sql("SELECT timezone FROM people WHERE id = ?").get(personId);
+    const company = this.sql("SELECT timezone FROM companies WHERE id = ?").get(companyId);
 
     const owner = personId === null ? { kind: "company", id: companyId } : { kind: "person", id: personId };
     const details: LeadDetail[] = this.db
@@ -260,8 +304,8 @@ export class SqliteEngineStore implements EngineStore {
         order: num(d, "row_order"),
       }));
 
-    const tracks = this.db.prepare("SELECT * FROM track_progress WHERE subject_id = ? ORDER BY track_id").all(subjectId).map(toTrack);
-    const attempts = this.db.prepare("SELECT * FROM attempts WHERE subject_id = ? ORDER BY claimed_wall, rowid").all(subjectId).map(toAttempt);
+    const tracks = this.sql("SELECT * FROM track_progress WHERE subject_id = ? ORDER BY track_id").all(subjectId).map(toTrack);
+    const attempts = this.sql("SELECT * FROM attempts WHERE subject_id = ? ORDER BY claimed_wall, rowid").all(subjectId).map(toAttempt);
     const referenced = new Set(
       [...details.map((d) => d.id), ...tracks.map((t) => t.destinationDetailId), ...attempts.map((a) => a.destinationDetailId)].filter((id): id is string => id !== null),
     );
@@ -444,7 +488,7 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   private run(sql: string, values: readonly SQLInputValue[]): void {
-    this.db.prepare(sql).run(...values);
+    this.sql(sql).run(...values);
   }
 
   private transaction<T>(work: () => T): T {
