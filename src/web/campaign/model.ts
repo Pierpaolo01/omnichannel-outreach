@@ -1,6 +1,7 @@
 /** The campaign editor's draft helpers (ticket 12c). Pure: no React, no requests. */
 import { mergeUses, rewriteMergeUses, type MergeUse } from "../../domain/sequence/copy.ts";
 import { ownSubject } from "../../domain/sequence/definition.ts";
+import { trackLabel } from "../../shared/track-label.ts";
 import type { CampaignDefinition, LaunchBlocker, StepDefinition, TrackDefinition, WindowRule } from "../../shared/api.ts";
 
 /** Days as the reference shows them, Monday first; the definition numbers Sunday 0. */
@@ -44,26 +45,29 @@ export const liveSteps = (track: TrackDefinition): StepDefinition[] => track.ste
 export const emailTrackOf = (def: CampaignDefinition): TrackDefinition | undefined =>
   def.tracks.find((t) => !t.removed && t.channel === "email" && t.branch === "main");
 
-const CHANNEL_WORD = { email: "email", sms: "SMS", call: "phone" } as const;
 /** What one step of a track on this channel is called: Email 1, Text 1, Call 1. */
 export const STEP_NOUN = { email: "Email", sms: "Text", call: "Call" } as const;
 
 /**
  * A track's name in messages, from its own channel and never its position among all tracks: "the
  * email track" when it is the only live one on its channel, otherwise "email track 2" by its order
- * among that channel's live tracks.
+ * among that channel's live tracks (`trackLabel`, shared with the server's Activity).
  */
 export function trackName(def: CampaignDefinition, track: TrackDefinition): string {
-  const same = def.tracks.filter((t) => !t.removed && t.channel === track.channel);
-  const word = CHANNEL_WORD[track.channel];
-  return same.length <= 1 ? `the ${word} track` : `${word} track ${same.findIndex((t) => t.id === track.id) + 1}`;
+  const { label, several } = trackLabel(def, track);
+  const lower = track.channel === "sms" ? label : label.charAt(0).toLowerCase() + label.slice(1);
+  return several ? lower : `the ${lower}`;
 }
+
+/** A track's title: "Email track", "SMS track 2". */
+export const trackTitle = (def: CampaignDefinition, track: TrackDefinition): string => trackLabel(def, track).label;
 
 export function trackSummary(track: TrackDefinition): string {
   const steps = liveSteps(track);
-  const days = steps.reduce((sum, s) => sum + s.waitDays, 0);
+  const days = steps.reduce((sum, s) => sum + (Number.isFinite(s.waitDays) ? s.waitDays : 0), 0);
   const n = steps.length;
-  return `${n} ${n === 1 ? "email" : "emails"}${n > 1 ? ` over ${days} ${days === 1 ? "day" : "days"}` : ""}`;
+  const [one, many] = track.channel === "sms" ? ["text", "texts"] : ["email", "emails"];
+  return `${n} ${n === 1 ? one : many}${n > 1 ? ` over ${days} ${days === 1 ? "day" : "days"}` : ""}`;
 }
 
 /** "first_name" as the user reads it: "first name". */

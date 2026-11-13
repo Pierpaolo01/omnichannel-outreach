@@ -184,3 +184,96 @@ describe("a bounce the engine does not apply is not recorded (PR 41 council, ite
     expect(await h.store.engine.bouncesOf(sam.enrollments[0]!.id)).toEqual([]);
   });
 });
+
+describe("SMS on the timeline (ticket 13b): texts sent, bad numbers, skipped and released tracks, a text reply", () => {
+  const N1 = "+447700900001";
+  const weekdays = [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 }));
+  const twoChannels: CampaignDefinition = {
+    timezone: "Europe/London",
+    callSkipLimitDays: 2,
+    emailPool: ["inbox-a"],
+    smsPool: [N1],
+    tracks: [
+      { id: "t1", channel: "email", branch: "main", window: weekdays, start: { kind: "entry" }, removed: false, steps: [step("s1", { subject: "Hi {{company}}", threading: "new_subject" })] },
+      { id: "t2", channel: "sms", branch: "main", window: weekdays, start: { kind: "after", trackId: "t1", delayDays: 1 }, removed: false, steps: [step("m1", { body: "Hi {{first_name|there}}, a text.", threading: "new_subject" }), step("m2", { waitDays: 1, body: "One more.", threading: "new_subject" })] },
+    ],
+  };
+  const people = [
+    person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example", dial_phone: "+447700900211", dial_phone_type: "mobile" }),
+    person({ person_id: "p2", business_id: "b1", full_name: "Ana Ruiz", dial_phone: "+447700900222", dial_phone_type: "mobile" }),
+    person({ person_id: "p3", business_id: "b1", full_name: "Lee Mott", direct_phone: "+44 20 7946 0303" }),
+    person({ person_id: "p4", business_id: "b1", full_name: "Kim Park", dial_phone: "+447700900244", dial_phone_type: "mobile" }),
+  ];
+
+  async function texted() {
+    const h = new EngineHarness({
+      start: MONDAY_8,
+      accounts: [{ id: "inbox-a", capacity: 30, gapMs: 60_000, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
+      sms: { numbers: [{ id: N1, capacity: 30, gapMs: 60_000, k: 1, healthy: true, resetZone: "Europe/London" }] },
+    });
+    const { campaign } = await h.createCampaign("Autumn physio", { businesses: [business({ business_id: "b1", business_name: "Harbour Lane Physio" })], people });
+    await h.tick();
+    await h.defineSequence(campaign.id, twoChannels);
+    // Ana's number is reported invalid after her first text; Kim's is refused at the call.
+    h.sms.invalidAfterSend.add("+447700900222");
+    h.sms.invalid.add("+447700900244");
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_8 + DAY + 4 * H);
+    expect(h.sms.prospectTexts("+447700900211", "STOP")).toBe(true);
+    await h.advanceTo(MONDAY_8 + 5 * DAY);
+    const rows = (await h.request<{ rows: { id: string; name: string }[] }>("GET", "/api/leads")).body.rows;
+    const activity = async (name: string) => (await h.request<ActivityView>("GET", `/api/people/${rows.find((r) => r.name === name)!.id}/activity`)).body.entries;
+    return { activity };
+  }
+  const brief = (entries: ActivityView["entries"]) => entries.map((e) => [e.kind, "channel" in e ? e.channel : null, "stepNumber" in e ? e.stepNumber : null]);
+
+  test("an SMS reply stops the lead: the text and the email show, the reply has channel and date only, and no second text goes", async () => {
+    const { activity } = await texted();
+    const pat = await activity("Pat Oneil");
+    expect(brief(pat)).toEqual([
+      ["replied", "sms", null],
+      ["sent", "sms", 1],
+      ["sent", "email", 1],
+    ]);
+    expect(pat[1]).toMatchObject({ kind: "sent", channel: "sms", track: { label: "SMS track", several: false }, to: "+44 7700 900211", copy: { subject: "", body: "Hi Pat, a text." } });
+    // The SMS track starts a day after the email track finished.
+    expect(pat[1]!.at.slice(0, 10)).toBe("2026-11-03");
+    expect(pat[0]).toEqual({ kind: "replied", channel: "sms", at: expect.any(String) as unknown, campaign: expect.any(Object) as unknown });
+  });
+
+  test("a number reported invalid after a text is marked bad and ends the track; a skipped email track releases the SMS track after it, said plainly", async () => {
+    const { activity } = await texted();
+    const ana = await activity("Ana Ruiz");
+    expect(brief(ana)).toEqual([
+      ["ended", null, null],
+      ["bounced", "sms", 1],
+      ["sent", "sms", 1],
+      ["released", "sms", null],
+      ["skipped", "email", null],
+    ]);
+    expect(ana[1]).toMatchObject({ to: "+44 7700 900222" });
+    expect(ana[3]).toMatchObject({ kind: "released", track: { label: "SMS track" }, after: { label: "Email track" }, because: "skipped", at: "2026-11-03T00:00:00.000Z" });
+    expect(ana[4]).toMatchObject({ reason: "no_email" });
+  });
+
+  test("a number refused at the send fails its text and ends the track", async () => {
+    const { activity } = await texted();
+    expect(brief(await activity("Kim Park"))).toEqual([
+      ["ended", null, null],
+      ["failed", "sms", 1],
+      ["released", "sms", null],
+      ["skipped", "email", null],
+    ]);
+  });
+
+  test("a lead with neither channel skips both tracks, each said once", async () => {
+    const { activity } = await texted();
+    const lee = await activity("Lee Mott");
+    expect(brief(lee)).toEqual([
+      ["ended", null, null],
+      ["skipped", "sms", null],
+      ["skipped", "email", null],
+    ]);
+    expect(lee[1]).toMatchObject({ reason: "no_mobile" });
+  });
+});

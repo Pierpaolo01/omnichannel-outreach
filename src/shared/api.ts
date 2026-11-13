@@ -181,6 +181,8 @@ export type {
 } from "../domain/sequence/definition.ts";
 export type { WindowRule } from "../domain/sequence/clock.ts";
 export type { LaunchBlocker } from "../domain/sequence/blockers.ts";
+export type { TrackLabel } from "./track-label.ts";
+import type { TrackLabel } from "./track-label.ts";
 
 /** A sender account the engine may send from, as the provider reports it. */
 export interface SenderAccountViewApi {
@@ -411,9 +413,17 @@ export interface CopyPreview {
   readonly steps: readonly {
     readonly trackId: string;
     readonly stepId: string;
+    readonly channel: "email" | "sms";
+    /** Its number within its track: Email 2, Text 1. */
     readonly number: number;
-    /** The earliest day it can go, counting the first email as day 1: one plus every wait before it. */
+    /**
+     * The earliest day it can go for this lead, counting launch day as day 1: its track's start (at
+     * launch, or after the track it follows has finished all its steps, plus the delay) and every
+     * wait before it. Sending windows can move it later.
+     */
     readonly day: number;
+    /** This lead lacks the track's channel (no email; no mobile of their own, or a company lead), so the track is skipped and the tracks after it start sooner. */
+    readonly skipped: boolean;
     readonly threading: "new_subject" | "continue_thread";
     /** The subject the step writes; on a continue-thread step, the subject of the thread it continues. */
     readonly subject: readonly CopySegment[];
@@ -425,19 +435,26 @@ export interface CopyPreview {
 
 /** One line of a person's or company lead's timeline (GET /api/people/:id/activity). Newest first. */
 export type ActivityEntry = { readonly campaign: { readonly id: string; readonly name: string }; readonly at: string } & (
-  | {
-      readonly kind: "sent";
-      readonly stepNumber: number;
-      readonly from: string;
-      readonly to: string;
-      readonly copy: { readonly subject: string; readonly body: string } | null;
-    }
-  | { readonly kind: "failed"; readonly stepNumber: number; readonly to: string; readonly reason: string }
-  | { readonly kind: "skipped"; readonly stepNumber: number | null; readonly reason: string }
-  /** A hard bounce the provider reported for an email of this campaign: the address is marked bad. */
-  | { readonly kind: "bounced"; readonly stepNumber: number | null; readonly to: string }
-  /** The track ended because its address is marked bad, with no bounce event of this campaign's: another campaign's bounce, or this campaign's observed before migration 10. */
-  | { readonly kind: "address_bad"; readonly to: string }
+  | ({ readonly channel: "email" | "sms"; readonly track: TrackLabel } & (
+      | {
+          readonly kind: "sent";
+          readonly stepNumber: number;
+          readonly from: string;
+          /** The address, or the mobile grouped for reading. */
+          readonly to: string;
+          /** A text's subject is empty. */
+          readonly copy: { readonly subject: string; readonly body: string } | null;
+        }
+      | { readonly kind: "failed"; readonly stepNumber: number; readonly to: string; readonly reason: string }
+      /** `no_email`, `no_mobile`, `company_lead` (a company lead is never texted, ADR 0003 Q10), `block_list`, or the step's reason. */
+      | { readonly kind: "skipped"; readonly stepNumber: number | null; readonly reason: string }
+      /** A hard bounce, or a number the carrier reported invalid after a text: the address or number is marked bad. */
+      | { readonly kind: "bounced"; readonly stepNumber: number | null; readonly to: string }
+      /** The track ended because its address or number is marked bad, with no bounce event of this campaign's. */
+      | { readonly kind: "address_bad"; readonly to: string }
+      /** The track started after `after`, which was skipped or failed for this lead (ticket 13b). */
+      | { readonly kind: "released"; readonly after: TrackLabel; readonly because: "skipped" | "failed" }
+    ))
   | { readonly kind: "replied"; readonly channel: "email" | "sms" }
   | { readonly kind: "ended"; readonly status: "sequence_finished_no_response" | "finished_no_usable_channel" }
 );

@@ -236,19 +236,37 @@ export async function copyPreview(store: OutreachStore, campaignId: string, enro
   const lead = (await campaignLeads(store, campaignId, definition, now)).find((l) => l.lead.id === enrollmentId)?.lead;
   if (!lead) return null;
   const data = state.lead.mergeData;
-  const steps: CopyPreview["steps"][number][] = [];
-  for (const track of [...liveTracks(definition, "main"), ...liveTracks(definition, "win_back")]) {
-    if (track.channel !== "email") continue;
-    let day = 1;
+  const tracks = liveTracks(definition, "main").filter((t) => t.channel !== "call");
+  // The lead skips a track whose channel it lacks; a skipped track finishes as it starts, so the
+  // tracks after it start then (spec "a skipped or failed track counts as finished").
+  const skipped = (t: (typeof tracks)[number]) => (t.channel === "email" ? lead.email === null : !lead.mobile);
+  const startDay = new Map<string, number>();
+  const startOf = (t: (typeof tracks)[number], depth = 0): number => {
+    const known = startDay.get(t.id);
+    if (known !== undefined) return known;
+    let start = 0;
+    if (t.start.kind === "after" && depth <= tracks.length) {
+      const before = tracks.find((x) => x.id === (t.start as { trackId: string }).trackId);
+      if (before) start = startOf(before, depth + 1) + (skipped(before) ? 0 : liveSteps(before).reduce((sum, st) => sum + st.waitDays, 0)) + t.start.delayDays;
+    }
+    startDay.set(t.id, start);
+    return start;
+  };
+  const steps: (CopyPreview["steps"][number] & { order: number })[] = [];
+  tracks.forEach((track, trackIndex) => {
+    const skip = skipped(track);
+    let day = 1 + startOf(track);
     let threadSubject: Segment[] = [];
     liveSteps(track).forEach((step, i) => {
-      day += step.waitDays;
-      const own = renderSegments(ownSubject(step), data);
-      const subject = step.threading === "continue_thread" ? [{ text: "Re: ", kind: "literal" as const }, ...threadSubject] : own;
-      if (step.threading === "new_subject") threadSubject = own;
+      if (!skip) day += step.waitDays;
+      const email = track.channel === "email";
+      const own = email ? renderSegments(ownSubject(step), data) : [];
+      const subject = email && step.threading === "continue_thread" ? [{ text: "Re: ", kind: "literal" as const }, ...threadSubject] : own;
+      if (email && step.threading === "new_subject") threadSubject = own;
       const body = renderSegments(step.body, data);
-      steps.push({ trackId: track.id, stepId: step.id, number: i + 1, day, threading: step.threading, subject, body, missing: missingFields([...own, ...body]) });
+      steps.push({ trackId: track.id, stepId: step.id, channel: track.channel === "sms" ? "sms" : "email", number: i + 1, day, skipped: skip, threading: step.threading, subject, body, missing: missingFields([...own, ...body]), order: trackIndex * 10_000 + i });
     });
-  }
-  return { lead, steps };
+  });
+  steps.sort((x, y) => x.day - y.day || x.order - y.order);
+  return { lead, steps: steps.map(({ order: _order, ...step }) => step) };
 }

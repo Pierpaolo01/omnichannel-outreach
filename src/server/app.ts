@@ -371,12 +371,12 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   // The timeline's campaign activity on a person or company-lead record (ticket 12c).
   app.get("/people/:id/activity", async (c) => {
     const person = await store.person(c.req.param("id"));
-    return person ? c.json({ entries: await activityOf(store, person.enrollments, Date.parse(now())) }) : notFound(c, "person");
+    return person ? c.json({ entries: await activityOf(store, person.enrollments, Date.parse(now()), "person") }) : notFound(c, "person");
   });
 
   app.get("/companies/:id/activity", async (c) => {
     const company = await store.company(c.req.param("id"));
-    return company ? c.json({ entries: await activityOf(store, company.enrollments, Date.parse(now())) }) : notFound(c, "company");
+    return company ? c.json({ entries: await activityOf(store, company.enrollments, Date.parse(now()), "company") }) : notFound(c, "company");
   });
 
   app.get("/enrollments/:id", async (c) => {
