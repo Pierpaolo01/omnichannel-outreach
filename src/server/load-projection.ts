@@ -40,8 +40,6 @@ export interface ProjectionInput {
   readonly others: readonly SubjectState[];
   /** The engine's own records of every account any simulated subject may use. */
   readonly accounts: readonly AccountState[];
-  /** Reservations and live attempts on each account held by subjects not simulated (`EngineStore.heldOnAccounts`). */
-  readonly heldElsewhere?: ReadonlyMap<string, { readonly reservations: number; readonly live: number }>;
   /** The zone launch days are counted in: the campaign's default zone. */
   readonly zone: string;
   readonly horizonDays: number;
@@ -197,11 +195,9 @@ export function projectLoad(input: ProjectionInput): Projection {
   }
   // The record counts every subject's sends today and open reservations; the simulation keeps
   // its own subjects' count, so theirs are taken out of the starting count once.
-  // What subjects it does not simulate hold (an ended lead's uncertain work, a paused campaign's
-  // attempt) stays as the store counts it: their reservations count every day until settled, their
-  // live attempts take in-flight places; nothing here settles them.
-  const held = (id: string) => input.heldElsewhere?.get(id) ?? { reservations: 0, live: 0 };
-  const baseToday = new Map(accountIds.map((id) => [id, (records.get(id)?.used ?? 0) - sendsBefore(id) - (reserved.get(id) ?? 0) - held(id).reservations]));
+  // Every subject holding work on these accounts is simulated (before-launch.ts), so what the record
+  // counts beyond the simulation's own work is sends made today by subjects that hold nothing now.
+  const baseToday = new Map(accountIds.map((id) => [id, (records.get(id)?.used ?? 0) - sendsBefore(id) - (reserved.get(id) ?? 0)]));
   const slot = new Map(accountIds.map((id) => [id, records.get(id)?.nextSlotAt ?? 0]));
 
   /** The account as the store would report it at `t`. */
@@ -209,12 +205,11 @@ export function projectLoad(input: ProjectionInput): Projection {
     const a = records.get(id);
     if (!a) return undefined;
     const day = resetDay(id, t);
-    const other = held(id);
     return {
       ...a,
       nextSlotAt: slot.get(id) ?? 0,
-      used: (day === today.get(id) ? (baseToday.get(id) ?? 0) : 0) + (sentOn.get(`${id}/${day}`) ?? 0) + (reserved.get(id) ?? 0) + other.reservations,
-      inFlight: (live.get(id) ?? 0) + other.live,
+      used: (day === today.get(id) ? (baseToday.get(id) ?? 0) : 0) + (sentOn.get(`${id}/${day}`) ?? 0) + (reserved.get(id) ?? 0),
+      inFlight: live.get(id) ?? 0,
     };
   };
   /** Bumped by every write: a loaded subject is reused until anything it could read has changed. */

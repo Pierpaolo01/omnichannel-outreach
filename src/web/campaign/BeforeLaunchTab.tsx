@@ -1,6 +1,6 @@
 import { useId, useRef, useState, type ReactNode } from "react";
 import { Link, useLocation } from "wouter";
-import type { BeforeLaunchView, CampaignDefinition, CopyPreview, CopySegment, PreviewLead } from "../../shared/api.ts";
+import type { BeforeLaunchView, CampaignDefinition, CopyPreview, CopySegment, LoadProjectionView, PreviewLead } from "../../shared/api.ts";
 import { useApi } from "../api.ts";
 import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
@@ -352,11 +352,7 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
         </p>
       ) : load.cannotProject.length > 0 ? (
         <p className="mt-2 text-[13px] text-ink-2">
-          Can’t project the load while{" "}
-          {load.cannotProject
-            .map((c) => (c.reason === "quota" ? `${c.label} waits for Instantly’s lead quota` : `${c.label} ${CANNOT_SEND}`))
-            .join(", and ")}
-          . Nothing says when that ends.
+          Can’t project the load while {and(load.cannotProject.map(heldSaid))}. Nothing says when that ends.
         </p>
       ) : (
         <p className="mt-2 text-[13px] text-muted">
@@ -366,11 +362,37 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
               ? `All ${load.leadsToStart} leads start within ${load.daysUntilAllStart} ${load.daysUntilAllStart === 1 ? "day" : "days"} of launch.`
               : `${load.notStartedWithinHorizon} of ${load.leadsToStart} leads would not start within ${load.horizonDays} days.`}{" "}
           Every email and text counts: tracks that start together and tracks that wait for another.{" "}
-          {calls ? `Calls are tasks on your list, not sends, so they are not counted, and the estimate assumes no call is logged${load.onlyCalled > 0 ? `; ${load.onlyCalled} ${load.onlyCalled === 1 ? "lead is" : "leads are"} reached only by your calls` : ""}. ` : ""} Follow-ups always go before first messages when a sender is full. What other running campaigns have waiting on these senders is counted; every send is assumed to succeed, and replies, bounces, bad numbers and pauses are not foreseen.
+          {callCaveat(calls, load.callsNotCounted, load.onlyCalled)} Follow-ups always go before first messages when a sender is full. What other running campaigns have waiting on these senders is counted; every send is assumed to succeed, and replies, bounces, bad numbers and pauses are not foreseen.
         </p>
       )}
     </>
   );
+}
+
+/** Why one sender keeps the figure from being projected (ADR 0003, ticket 13b): said with the sender. */
+function heldSaid(c: LoadProjectionView["cannotProject"][number]): string {
+  switch (c.reason) {
+    case "quota":
+      return `${c.label} waits for Instantly’s lead quota`;
+    case "cannot_send":
+      return `${c.label} ${CANNOT_SEND}`;
+    case "unsettled_work":
+      return `some of ${c.label}’s sends are held by work only the provider or you can settle (Needs attention lists it)`;
+    case "reply_being_matched":
+      return `a reply to ${c.label} is being matched to its lead, which may stop that lead`;
+  }
+}
+
+/**
+ * What the estimate leaves to the user's calls, here and in competing campaigns (council on 10121d3,
+ * item 1): calls are tasks, not sends, and it assumes none is logged, while a logged call touches the
+ * lead, whose emails and texts then go first.
+ */
+function callCaveat(here: boolean, elsewhere: readonly { readonly name: string }[], onlyCalled: number): string {
+  if (!here && elsewhere.length === 0) return "";
+  const where = and([...(here ? ["this campaign"] : []), ...elsewhere.map((c) => c.name)]);
+  const only = onlyCalled > 0 ? ` ${onlyCalled} ${onlyCalled === 1 ? "lead is" : "leads are"} reached only by your calls.` : "";
+  return `Calls are tasks on your list, not sends: they are not counted, and the estimate assumes no call is logged in ${where}, though a logged call moves that lead’s emails and texts ahead.${only} `;
 }
 
 const gap = (seconds: number) => (seconds < 120 ? `${seconds} seconds` : `${Math.round(seconds / 60)} minutes`);

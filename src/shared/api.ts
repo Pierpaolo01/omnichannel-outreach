@@ -399,7 +399,17 @@ export interface LoadProjectionView {
    * (stale, sending off, not active, disconnected), or the lead quota is held. While any is listed
    * there is no projection, because none can be honest. A rate limit has an end, and the projection resumes there.
    */
-  readonly cannotProject: readonly { readonly accountId: string; readonly label: string; readonly channel: "email" | "sms"; readonly reason: "cannot_send" | "quota" }[];
+  readonly cannotProject: readonly {
+    readonly accountId: string;
+    readonly label: string;
+    readonly channel: "email" | "sms";
+    /**
+     * `unsettled_work`: work whose outcome only the provider or the user can settle holds some of its
+     * sends (Needs attention lists it); `reply_being_matched`: a reply to it is being matched to its
+     * lead, which may stop that lead (ADR 0003, ticket 13b).
+     */
+    readonly reason: "cannot_send" | "quota" | "unsettled_work" | "reply_being_matched";
+  }[];
   /**
    * The tracks that withhold the figure, and why, whenever one does (ADR 0003, ticket 13b): a track
    * whose channel has no connected sender (launch blocker 3), or an email or SMS track that waits,
@@ -407,6 +417,11 @@ export interface LoadProjectionView {
    * words any "no figure because" from these alone (`src/web/campaign/withheld.ts`). Null when none does.
    */
   readonly withheldBy: WithheldBy | null;
+  /**
+   * Competing campaigns on these senders where a call can still be logged. The estimate assumes no call
+   * is logged anywhere: a logged call there touches that lead, whose emails and texts then go first.
+   */
+  readonly callsNotCounted: readonly { readonly id: string; readonly name: string }[];
 }
 
 /** Rendered copy, in pieces, so a fallback the lead gets can be shown as one. */
@@ -583,6 +598,8 @@ export interface WithheldTrack {
 }
 
 export interface WithheldBy {
+  /** Null for this campaign's own tracks; else the competing campaign whose tracks they are (ticket 14a; council on 10121d3). */
+  readonly campaign: { readonly id: string; readonly name: string } | null;
   readonly tracks: readonly WithheldTrack[];
 }
 

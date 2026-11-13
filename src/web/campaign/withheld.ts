@@ -2,7 +2,8 @@
  * Why the Before launch screen shows no projected load, worded only from the tracks the server names
  * (`LoadProjectionView.withheldBy`), never from which channels the campaign happens to have (review bot
  * on 8edc8dd). Two reasons remain since the projection runs the engine's own rules (ADR 0003, ticket
- * 13b): a track with no connected sender, and a track that waits on a phone track's call.
+ * 13b): a track with no connected sender, and a track that waits on a phone track's call, in this
+ * campaign or in a competing one, which is then named.
  */
 import type { WithheldBy } from "../../shared/api.ts";
 
@@ -10,6 +11,11 @@ const capitalise = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const and = (items: readonly string[]): string => (items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items.at(-1) ?? ""}`);
 
 export function withheldExplanation(withheld: WithheldBy): string {
+  if (withheld.campaign !== null) {
+    // A competing campaign's tracks that wait on calls not yet logged (council on 10121d3, item 1).
+    const what = withheld.tracks.map((t) => `${t.label} starts after ${t.phoneTrack ?? "a phone track"}`);
+    return `Can’t project the load: ${withheld.campaign.name}, also running on these senders, has leads whose ${and(what)}. Each call logged there releases those messages, which then go first, and no estimate can know when that is.`;
+  }
   const sentences: string[] = [];
   const noSender = withheld.tracks.filter((t) => t.why === "no_sender");
   if (noSender.length > 0) {

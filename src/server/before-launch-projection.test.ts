@@ -588,23 +588,26 @@ describe("generated: an older campaign's work in every provider state when the p
    * again: the projection's stated provider. The projected campaign's sends must be the engine's.
    */
   type Outcome = "sent" | "dropped" | "in_flight";
-  const SEEDS = Number(process.env["PROJECTION_SEEDS"] ?? 30);
+  const SEEDS = Number(process.env["PROJECTION_SEEDS"] ?? 40);
   for (const seed of Array.from({ length: SEEDS }, (_, i) => 21_000 + i)) {
     test(`case ${seed}`, { timeout: 120_000 }, async () => {
       const r = rng(seed);
       // Every fourth seed is free; the others pin the state they are for: a same-key retry waiting
       // for a 50-minute slot; uncertain work no attempt carries (a dropped call whose lookups said not
       // sent, hours later); accepted work the provider sends at the projection's instant.
-      const scenario = (["free", "retry_waiting", "uncertain", "in_flight"] as const)[seed % 4]!;
+      // Owner statuses too (review bot and council on 10121d3): a lead that replied while its follow-up
+      // was accepted; a paused campaign holding accepted work; a reply still being matched to its lead.
+      const scenario = (["free", "retry_waiting", "uncertain", "in_flight", "replied_holding", "paused", "pending_reply", "claim_waiting"] as const)[seed % 8]!;
       const start =
         scenario === "free" ? pick(r, [Date.parse("2026-11-02T08:50:00Z"), Date.parse("2026-11-02T09:30:00Z"), Date.parse("2026-11-02T16:40:00Z")])
         : scenario === "uncertain" ? Date.parse("2026-11-02T09:50:00Z")
+        : scenario === "replied_holding" ? Date.parse("2026-11-02T09:00:00Z")
         : Date.parse("2026-11-02T09:30:00Z");
       let clock = start;
       const ids = Array.from({ length: 1 + Math.floor(r() * 2) }, (_, i) => `inbox-${i}`);
       const port = new ScriptedEmailPort(
         () => clock,
-        ids.map((id) => scriptedInbox(id, { capacity: 1 + Math.floor(r() * 3), gapMs: scenario === "retry_waiting" ? 50 * MIN : pick(r, [MIN, 7 * MIN, 50 * MIN]), resetZone: pick(r, ["UTC", "America/Los_Angeles"]) })),
+        ids.map((id) => scriptedInbox(id, { capacity: 1 + Math.floor(r() * 3), gapMs: scenario === "retry_waiting" || scenario === "claim_waiting" ? 50 * MIN : pick(r, [MIN, 7 * MIN, 50 * MIN]), resetZone: pick(r, ["UTC", "America/Los_Angeles"]) })),
       );
       const h = new EngineHarness({ start, accounts: [], port, engine: quickWaits });
       Object.defineProperty(h, "clock", { get: () => clock, set: (v: number) => (clock = v) });
@@ -617,31 +620,60 @@ describe("generated: an older campaign's work in every provider state when the p
         return s.length > 0 ? s : [pick(r, ids)];
       };
       const always = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
-      const track = (pool: string[]): CampaignDefinition => {
-        const steps: StepDefinition[] = Array.from({ length: 1 + Math.floor(r() * 2) }, (_, i) => ({ id: `s${i + 1}`, waitDays: i === 0 ? 0 : 1 + Math.floor(r() * 2), subject: i === 0 ? "Hi" : "", body: "A note.", threading: i === 0 ? "new_subject" : "continue_thread", removed: false }));
+      const track = (pool: string[], stepCount = 1 + Math.floor(r() * 2)): CampaignDefinition => {
+        const steps: StepDefinition[] = Array.from({ length: stepCount }, (_, i) => ({ id: `s${i + 1}`, waitDays: i === 0 ? 0 : scenario === "replied_holding" ? 1 : 1 + Math.floor(r() * 2), subject: i === 0 ? "Hi" : "", body: "A note.", threading: i === 0 ? "new_subject" : "continue_thread", removed: false }));
         // Half the time open all day, so the older campaign's work is with the provider at the projection.
         // The uncertain case's window closes ten minutes after launch, so no retry follows the lookups.
         const window = scenario === "uncertain" ? [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 9, end: 10 })) : scenario !== "free" || r() < 0.5 ? always : pick(r, WINDOWS);
         return { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: pool, tracks: [{ id: "t1", channel: "email", branch: "main", window, steps, start: { kind: "entry" }, removed: false }] };
       };
-      const { campaign: older } = await h.createCampaign("Older", rows("a", 1 + Math.floor(r() * 4)));
+      const { campaign: older } = await h.createCampaign("Older", rows("a", scenario === "claim_waiting" ? 3 : 1 + Math.floor(r() * 4)));
       const { campaign: newer } = await h.createCampaign("Newer", rows("b", 1 + Math.floor(r() * 3)));
       await h.tick();
 
-      const projectAt = start + (scenario === "retry_waiting" ? 10 * MIN : scenario === "uncertain" ? 6 * H : pick(r, [10 * MIN, 20 * MIN, 50 * MIN, 3 * H, 7 * H]));
-      const retryable = scenario === "retry_waiting" || scenario === "uncertain" ? true : r() < 0.5;
+      const projectAt =
+        start +
+        (scenario === "retry_waiting" || scenario === "claim_waiting" ? 10 * MIN
+        : scenario === "uncertain" ? 6 * H
+        : scenario === "replied_holding" ? DAY + 10 * MIN
+        : scenario === "paused" ? 20 * MIN
+        // Before the engine's first lookup (the settling time after the call) learns the thread.
+        : scenario === "pending_reply" ? 12 * MIN
+        : pick(r, [10 * MIN, 20 * MIN, 50 * MIN, 3 * H, 7 * H]));
+      // A reply being matched needs a thread the app does not know yet: no retry tells it first.
+      const retryable = scenario === "retry_waiting" || scenario === "uncertain" ? true : scenario === "pending_reply" ? false : r() < 0.5;
       port.transportFor = () => ({ retryable, notSentIsFinal: false });
       const outcomes = new Map<string, Outcome>();
       port.onCall = (request) => {
-        const outcome = outcomes.get(request.destination) ?? (scenario === "retry_waiting" || scenario === "uncertain" ? "dropped" : scenario === "in_flight" ? "in_flight" : pick(r, ["sent", "dropped", "in_flight"] as const));
+        // A lead's follow-up is accepted and sends at the projection's instant; a reply has come first.
+        if (scenario === "replied_holding") return request.stepId === "s1" ? { answer: "accepted", sendAfter: 0 } : { answer: "accepted", sendAfter: Math.max(0, projectAt - clock) };
+        // The answer is lost and the sent event late, so a reply's thread is not yet known.
+        if (scenario === "pending_reply") return { answer: "unknown", sendAfter: 0, eventDelay: 3 * H };
+        const outcome =
+          outcomes.get(request.destination) ??
+          (scenario === "retry_waiting" || scenario === "uncertain" ? "dropped" : scenario === "in_flight" || scenario === "paused" ? "in_flight" : scenario === "claim_waiting" ? "sent" : pick(r, ["sent", "dropped", "in_flight"] as const));
         outcomes.set(request.destination, outcome);
         if (outcome === "dropped") return { answer: "unknown", sendAfter: null };
         if (outcome === "in_flight") return { answer: "accepted", sendAfter: Math.max(0, projectAt - clock) };
         return { answer: "accepted", sendAfter: 0 };
       };
       port.lookupOverride = (work) => (work && work.sendAt === null ? { kind: "not-sent" } : null);
-      await h.defineSequence(older.id, track(subset()));
+      port.withdrawAnswer = "unknown";
+      await h.defineSequence(older.id, track(subset(), scenario === "replied_holding" ? 2 : undefined));
       expect((await h.launch(older.id)).status).toBe(200);
+      // The owner's status changes shortly before the projection.
+      const before5 = projectAt - (scenario === "pending_reply" ? MIN : 9 * MIN);
+      if (scenario === "replied_holding" || scenario === "paused" || scenario === "pending_reply") {
+        await h.advanceTo(before5);
+        if (scenario === "paused") {
+          const db = (h.store.engine as unknown as { db: { prepare(sql: string): { run(...a: unknown[]): unknown } } }).db;
+          db.prepare("UPDATE campaigns SET paused_since = ?, version = version + 1 WHERE id = ?").run(clock, older.id);
+        } else {
+          const delivered = port.deliveries[0];
+          const destination = delivered ? port.works.find((w) => w.ref === delivered.ref)?.request.destination : port.works[0]?.request.destination;
+          if (destination) port.reply(destination);
+        }
+      }
       // Up to the projection's instant, without the tick there: work sending then is accepted and not
       // yet reported, as the projection finds it; the provider reports it just before the launch.
       await h.advanceTo(projectAt - 1);
@@ -651,13 +683,23 @@ describe("generated: an older campaign's work in every provider state when the p
       const projected = await projectedSends(h.store, newer.id, h.clock);
       for (const id of await h.store.engine.subjectsOf(older.id)) {
         const s = (await h.store.engine.subject(id, h.clock))!;
-        for (const w of s.work) if (w.settled === null && w.sentWall === null && !s.attempts.some((a) => a.idempotencyKey === w.key && ["claimed", "handed", "accepted"].includes(a.state))) seen.add("uncertain work no attempt carries");
+        const owner = s.subject.ended ?? (s.campaign.pausedSince !== null ? "paused" : "running");
+        for (const w of s.work) if (w.settled === null && w.sentWall === null && !s.attempts.some((a) => a.idempotencyKey === w.key && ["claimed", "handed", "accepted"].includes(a.state))) seen.add(`${owner}: uncertain work no attempt carries`);
         for (const a of s.attempts) {
-          if (a.state === "claimed") seen.add("a claim waiting for its slot");
-          if (a.state === "accepted") seen.add("accepted work not yet sent");
-          if (a.state === "handed" && (a.retry === "wanted" || a.retry === "wanted_after_not_sent")) seen.add("a same-key retry waiting");
-          if (a.state === "handed" && a.retry === "refused") seen.add("unresolved work an attempt still carries");
+          if (a.state === "claimed") seen.add(`${owner}: a claim waiting for its slot`);
+          if (a.state === "accepted") seen.add(`${owner}: accepted work not yet sent`);
+          if (a.state === "handed" && (a.retry === "wanted" || a.retry === "wanted_after_not_sent")) seen.add(`${owner}: a same-key retry waiting`);
+          if (a.state === "handed" && a.retry === "refused") seen.add(`${owner}: unresolved work an attempt still carries`);
         }
+      }
+      if ((await h.store.engine.pendingReplies()).length > 0) seen.add("a reply being matched to its lead");
+      if (projected === null) {
+        // What the engine cannot settle without the provider or the user withholds the figure, said with the account.
+        const view = (await h.request<BeforeLaunchView>("GET", `/api/campaigns/${newer.id}/before-launch`)).body;
+        const reasons = (view.load?.cannotProject ?? []).map((c) => c.reason).filter((x) => x === "unsettled_work" || x === "reply_being_matched");
+        expect(reasons.length).toBeGreaterThan(0);
+        for (const x of reasons) seen.add(`withheld: ${x}`);
+        return;
       }
       const before = port.deliveries.length;
       port.onCall = () => ({ answer: "accepted", sendAfter: 0 });
@@ -675,7 +717,7 @@ describe("generated: an older campaign's work in every provider state when the p
       const mine = new Set(await h.store.engine.subjectsOf(newer.id));
       const fields = (x: { leadId: string; accountId: string; stepId: string; at: number }) => `${x.at} ${x.accountId} ${x.leadId} ${x.stepId}`;
       const actual = port.deliveries.slice(before).filter((d) => mine.has(d.subjectId) && d.at < until).map((d) => fields({ leadId: d.subjectId, accountId: d.sender, stepId: d.stepId, at: d.at })).sort();
-      expect((projected?.sends ?? []).filter((s) => s.at < until).map(fields).sort()).toEqual(actual);
+      expect(projected.sends.filter((s) => s.at < until).map(fields).sort()).toEqual(actual);
       for (const id of await h.store.engine.subjectsOf(older.id)) {
         const s = (await h.store.engine.subject(id, h.clock))!;
         if (s.attempts.some((a) => a.idempotencyKey !== a.id)) seen.add("a claim that carried uncertain work on");
@@ -685,15 +727,91 @@ describe("generated: an older campaign's work in every provider state when the p
 
   const seen = new Set<string>();
   test("the cases reach every state they are for", () => {
-    expect([...seen].sort()).toEqual(
-      [
-        "a claim that carried uncertain work on",
-        "a claim waiting for its slot",
-        "a same-key retry waiting",
-        "accepted work not yet sent",
-        "uncertain work no attempt carries",
-        "unresolved work an attempt still carries",
-      ].filter((x) => SEEDS >= 30 || seen.has(x)),
-    );
+    const required = [
+      "a claim that carried uncertain work on",
+      "a reply being matched to its lead",
+      "paused: accepted work not yet sent",
+      "replied: accepted work not yet sent",
+      "running: a claim waiting for its slot",
+      "running: a same-key retry waiting",
+      "running: accepted work not yet sent",
+      "running: uncertain work no attempt carries",
+      "running: unresolved work an attempt still carries",
+      "withheld: reply_being_matched",
+      "withheld: unsettled_work",
+    ];
+    expect(required.filter((x) => !seen.has(x) && SEEDS >= 40)).toEqual([]);
+  });
+});
+
+describe("stored state the engine will go on to change, whoever owns it (review bot on 10121d3; council on 10121d3, item 9)", () => {
+  const always = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
+  const emails = (pool: string[], waits: number[]): CampaignDefinition => ({
+    timezone: "Europe/London",
+    callSkipLimitDays: 2,
+    emailPool: pool,
+    tracks: [{ id: "t1", channel: "email", branch: "main", window: always, start: { kind: "entry" }, removed: false, steps: waits.map((w, i) => ({ id: `s${i + 1}`, waitDays: w, subject: i === 0 ? "Hi" : "", body: "A note.", threading: i === 0 ? "new_subject" : "continue_thread", removed: false })) }],
+  });
+  const rowsOf = (prefix: string) => ({
+    businesses: [business({ business_id: `${prefix}b0`, business_name: `${prefix} Clinic`, timezone: "UTC" })],
+    people: [person({ person_id: `${prefix}p0`, business_id: `${prefix}b0`, full_name: `${prefix} Person`, email: `${prefix}0@clinic.example`, timezone: "" })],
+  });
+
+  test("a replied lead's accepted follow-up is sent as the projection assumes, so its in-flight place frees and the new campaign sends at once", async () => {
+    let clock = Date.parse("2026-11-02T09:00:00Z");
+    const port = new ScriptedEmailPort(() => clock, [scriptedInbox("inbox-a", { capacity: 2, gapMs: MIN, resetZone: "UTC" })]);
+    const h = new EngineHarness({ start: clock, accounts: [], port, engine: quickWaits });
+    Object.defineProperty(h, "clock", { get: () => clock, set: (v: number) => (clock = v) });
+    const { campaign: older } = await h.createCampaign("Older", rowsOf("a"));
+    const { campaign: newer } = await h.createCampaign("Newer", rowsOf("b"));
+    await h.tick();
+    const tuesday910 = Date.parse("2026-11-03T09:10:00Z");
+    // The opener sends at once; the follow-up is accepted and sends on Tuesday at 09:10.
+    port.onCall = (request) => (request.stepId === "s1" ? { answer: "accepted", sendAfter: 0 } : { answer: "accepted", sendAfter: tuesday910 - clock });
+    port.withdrawAnswer = "unknown";
+    await h.defineSequence(older.id, emails(["inbox-a"], [0, 1]));
+    expect((await h.launch(older.id)).status).toBe(200);
+    await h.advanceTo(Date.parse("2026-11-03T09:01:00Z"));
+    port.reply("a0@clinic.example");
+    await h.advanceTo(tuesday910 - 1);
+    clock = tuesday910;
+    const [replied] = await h.store.engine.subjectsOf(older.id);
+    const state = (await h.store.engine.subject(replied!, clock))!;
+    expect(state.subject.ended).toBe("replied");
+    expect(state.attempts.some((a) => a.state === "accepted")).toBe(true);
+
+    await h.defineSequence(newer.id, emails(["inbox-a"], [0]));
+    const projected = await projectedSends(h.store, newer.id, clock);
+    port.onCall = () => ({ answer: "accepted", sendAfter: 0 });
+    port.advance();
+    expect((await h.launch(newer.id)).status).toBe(200);
+    await h.advanceTo(tuesday910 + DAY);
+    const mine = new Set(await h.store.engine.subjectsOf(newer.id));
+    const actual = port.deliveries.filter((d) => mine.has(d.subjectId)).map((d) => d.at);
+    expect(actual).toEqual([tuesday910]);
+    expect(projected?.sends.map((x) => x.at)).toEqual(actual);
+  });
+
+  test("a reply still being matched to its lead may stop that lead: the figure is withheld and the screen says why", async () => {
+    let clock = Date.parse("2026-11-02T09:00:00Z");
+    const port = new ScriptedEmailPort(() => clock, [scriptedInbox("inbox-a", { capacity: 2, gapMs: H, resetZone: "UTC" })]);
+    const h = new EngineHarness({ start: clock, accounts: [], port, engine: quickWaits });
+    Object.defineProperty(h, "clock", { get: () => clock, set: (v: number) => (clock = v) });
+    const { campaign: older } = await h.createCampaign("Older", { businesses: [business({ business_id: "ab0", business_name: "A Clinic", timezone: "UTC" }), business({ business_id: "ab1", business_name: "A2 Clinic", timezone: "UTC" })], people: [person({ person_id: "ap0", business_id: "ab0", full_name: "A Person", email: "a0@clinic.example", timezone: "" }), person({ person_id: "ap1", business_id: "ab1", full_name: "A Other", email: "a1@clinic.example", timezone: "" })] });
+    const { campaign: newer } = await h.createCampaign("Newer", rowsOf("b"));
+    await h.tick();
+    // The 09:00 email goes, but its answer is lost and its sent event shows only two hours later, so
+    // the app does not yet know the thread a reply arrives on.
+    port.onCall = () => ({ answer: "unknown", sendAfter: 0, eventDelay: 2 * H });
+    await h.defineSequence(older.id, emails(["inbox-a"], [0]));
+    expect((await h.launch(older.id)).status).toBe(200);
+    await h.advanceTo(Date.parse("2026-11-02T09:10:00Z"));
+    port.reply(port.works[0]!.request.destination);
+    await h.tick();
+    expect((await h.store.engine.pendingReplies()).length).toBe(1);
+    await h.defineSequence(newer.id, emails(["inbox-a"], [0]));
+    expect(await projectedSends(h.store, newer.id, h.clock)).toBeNull();
+    const view = (await h.request<BeforeLaunchView>("GET", `/api/campaigns/${newer.id}/before-launch`)).body;
+    expect(view.load?.cannotProject).toEqual([expect.objectContaining({ accountId: "inbox-a", reason: "reply_being_matched" })]);
   });
 });

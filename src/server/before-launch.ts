@@ -5,10 +5,10 @@
  * the handover renders with; nothing here writes.
  */
 import { missingFields, renderSegments, type Segment } from "../domain/copy-preview.ts";
-import { isLive } from "../domain/sequence/attempt.ts";
+import { isLive, isUncertain } from "../domain/sequence/attempt.ts";
 import { mergeUses } from "../domain/sequence/copy.ts";
 import { liveSteps, liveTracks, ownSubject, poolOf, type CampaignDefinition, type TrackDefinition } from "../domain/sequence/definition.ts";
-import { goodEmail } from "../domain/sequence/progress.ts";
+import { goodEmail, progressOf, runs } from "../domain/sequence/progress.ts";
 import type { AccountState, SubjectState } from "../domain/sequence/state.ts";
 import type { BeforeLaunchView, ContactDetailView, CopyPreview, LeadRow, LoadProjectionView, PreviewLead, WithheldBy, WithheldTrack } from "../shared/api.ts";
 import { trackLabel, trackPhrase } from "../shared/track-label.ts";
@@ -130,28 +130,68 @@ function poolAccounts(definition: CampaignDefinition, all: readonly AccountState
 function withheldTracks(definition: CampaignDefinition, all: readonly AccountState[]): WithheldTrack[] {
   const live = liveTracks(definition, "main");
   const named = (t: TrackDefinition) => trackPhrase(definition, t);
-  const phoneBefore = (t: TrackDefinition): TrackDefinition | null => {
-    const seen = new Set<string>();
-    for (let x: TrackDefinition | undefined = t; x && x.start.kind === "after" && !seen.has(x.id); ) {
-      seen.add(x.id);
-      const before: string = x.start.trackId;
-      x = live.find((y) => y.id === before);
-      if (x?.channel === "call") return x;
-    }
-    return null;
-  };
   return live.flatMap((t): WithheldTrack[] => {
     if (t.channel === "call") return [];
     const connected = all.some((a) => a.channel === t.channel && poolOf(definition, t.channel).includes(a.id));
     if (!connected) return [{ trackId: t.id, channel: t.channel, label: named(t), why: "no_sender" }];
-    const phone = phoneBefore(t);
+    const phone = phoneBefore(definition, t);
     return phone ? [{ trackId: t.id, channel: t.channel, label: named(t), why: "after_a_phone_track", phoneTrack: named(phone) }] : [];
   });
+}
+
+/** The phone track an email or SMS track waits on through its chain of `after` starts, if any. */
+function phoneBefore(definition: CampaignDefinition, t: TrackDefinition): TrackDefinition | null {
+  const live = liveTracks(definition, "main");
+  const seen = new Set<string>();
+  for (let x: TrackDefinition | undefined = t; x && x.start.kind === "after" && !seen.has(x.id); ) {
+    seen.add(x.id);
+    const before: string = x.start.trackId;
+    x = live.find((y) => y.id === before);
+    if (x?.channel === "call") return x;
+  }
+  return null;
+}
+
+/**
+ * The same rule over a competing campaign's running leads (council on 10121d3, item 1): an email or
+ * SMS track there that still waits, for some lead, on a phone track whose call is not yet logged. Each
+ * logged call releases it, and no estimate can know when, so this campaign's figure is withheld too,
+ * naming that campaign. A lead whose phone track has finished (logged, or skipped for want of a number)
+ * waits on nothing, and is simulated like any other.
+ */
+function competingWithheld(others: readonly SubjectState[]): { campaignId: string; tracks: WithheldTrack[] } | null {
+  const byCampaign = new Map<string, SubjectState[]>();
+  for (const s of others) byCampaign.set(s.campaign.id, [...(byCampaign.get(s.campaign.id) ?? []), s]);
+  for (const [campaignId, subjects] of byCampaign) {
+    const definition = subjects[0]?.campaign.definition;
+    if (!definition) continue;
+    const tracks = liveTracks(definition, "main").flatMap((t): WithheldTrack[] => {
+      if (t.channel === "call") return [];
+      const phone = phoneBefore(definition, t);
+      if (!phone) return [];
+      const waiting = subjects.some((s) => runs(s) && progressOf(s, phone.id)?.finishedAt == null && progressOf(s, t.id)?.finishedAt == null);
+      return waiting ? [{ trackId: t.id, channel: t.channel, label: trackPhrase(definition, t), why: "after_a_phone_track", phoneTrack: trackPhrase(definition, phone) }] : [];
+    });
+    if (tracks.length > 0) return { campaignId, tracks };
+  }
+  return null;
+}
+
+/** Competing campaigns where a call can still be logged: the estimate assumes none is (the screen says so). */
+function callingCampaigns(others: readonly SubjectState[]): string[] {
+  const ids = new Set<string>();
+  for (const s of others) {
+    const calls = liveTracks(s.campaign.definition, "main").filter((t) => t.channel === "call");
+    if (runs(s) && calls.some((t) => progressOf(s, t.id)?.finishedAt == null)) ids.add(s.campaign.id);
+  }
+  return [...ids];
 }
 
 interface ProjectionResult {
   readonly projection: Projection | null;
   readonly withheldBy: WithheldBy | null;
+  readonly callsNotCounted: readonly { readonly id: string; readonly name: string }[];
+  readonly held: readonly { accountId: string; reason: "unsettled_work" | "reply_being_matched" }[];
 }
 
 /**
@@ -160,30 +200,39 @@ interface ProjectionResult {
  * with this one (closed over shared accounts), and the engine's own account records.
  */
 async function projectionOf(store: OutreachStore, campaignId: string, definition: CampaignDefinition, leads: readonly CampaignLead[], now: number): Promise<ProjectionResult> {
-  if (liveTracks(definition, "main").length === 0) return { projection: null, withheldBy: null };
+  if (liveTracks(definition, "main").length === 0) return { projection: null, withheldBy: null, callsNotCounted: [], held: [] };
   const all = await store.engine.accounts(now);
   const withheld = withheldTracks(definition, all);
-  if (withheld.length > 0) return { projection: null, withheldBy: { tracks: withheld } };
-  if (poolAccounts(definition, all).some((a) => cannotProject(a, now) !== null)) return { projection: null, withheldBy: null };
-  const others = await competingSubjects(store, campaignId, definition, now);
-  const simulated = new Set([...leads.map((l) => l.state.subject.id), ...others.map((o) => o.subject.id)]);
-  const heldElsewhere = new Map<string, { reservations: number; live: number }>();
-  for (const h of await store.engine.heldOnAccounts()) {
-    if (simulated.has(h.subjectId)) continue;
-    const sum = heldElsewhere.get(h.accountId) ?? { reservations: 0, live: 0 };
-    heldElsewhere.set(h.accountId, { reservations: sum.reservations + h.reservations, live: sum.live + h.live });
+  if (withheld.length > 0) return { projection: null, withheldBy: { campaign: null, tracks: withheld }, callsNotCounted: [], held: [] };
+  if (poolAccounts(definition, all).some((a) => cannotProject(a, now) !== null)) return { projection: null, withheldBy: null, callsNotCounted: [], held: [] };
+  const competing = await competingSubjects(store, campaignId, definition, now);
+  // Every subject holding work on these accounts is simulated, whatever its status (replied, stopped,
+  // finished, paused): its claims, calls in flight and retries move by the engine's own rules.
+  const known = new Set([...leads.map((l) => l.state.subject.id), ...competing.subjects.map((o) => o.subject.id)]);
+  const holders: SubjectState[] = [];
+  for (const held of await store.engine.heldOnAccounts()) {
+    if (known.has(held.subjectId) || !competing.reach.has(held.accountId)) continue;
+    known.add(held.subjectId);
+    const s = await store.engine.subject(held.subjectId, now);
+    if (s) holders.push(s);
   }
+  const others = [...competing.subjects, ...holders];
+  const held = await unsettled(store, [...others, ...leads.map((l) => l.state)], competing.reach);
+  if (held.length > 0) return { projection: null, withheldBy: null, callsNotCounted: [], held };
+  const nameOf = async (id: string) => ({ id, name: (await store.campaign(id))?.name ?? "" });
+  const callsNotCounted = await Promise.all(callingCampaigns(competing.subjects).map(nameOf));
+  const elsewhere = competingWithheld(competing.subjects);
+  if (elsewhere) return { projection: null, withheldBy: { campaign: await nameOf(elsewhere.campaignId), tracks: elsewhere.tracks }, callsNotCounted, held: [] };
   const projection = projectLoad({
     now,
     ours: leads.map((l) => l.state),
     definition,
     others,
     accounts: all,
-    heldElsewhere,
     zone: definition.timezone,
     horizonDays: PROJECTION_HORIZON_DAYS,
   });
-  return { projection, withheldBy: null };
+  return { projection, withheldBy: null, callsNotCounted, held: [] };
 }
 
 /** The accounts a running subject may use: its campaign's pools, its fixed senders and its live attempts'. */
@@ -199,7 +248,7 @@ const accountsOf = (s: SubjectState): string[] => [
  * account across every campaign, so a campaign sharing an account with one already included is
  * included too.
  */
-async function competingSubjects(store: OutreachStore, campaignId: string, definition: CampaignDefinition, now: number): Promise<SubjectState[]> {
+async function competingSubjects(store: OutreachStore, campaignId: string, definition: CampaignDefinition, now: number): Promise<{ subjects: SubjectState[]; reach: Set<string> }> {
   const byCampaign = new Map<string, SubjectState[]>();
   for (const id of await store.engine.runningSubjectIds()) {
     const s = await store.engine.subject(id, now);
@@ -219,7 +268,33 @@ async function competingSubjects(store: OutreachStore, campaignId: string, defin
       grew = true;
     }
   }
-  return [...included].flatMap((id) => byCampaign.get(id) ?? []);
+  return { subjects: [...included].flatMap((id) => byCampaign.get(id) ?? []), reach };
+}
+
+/**
+ * What the projection cannot advance by the engine's own rules (ADR 0003, ticket 13b, "Stored state
+ * the projection starts from"), on the accounts it simulates: work whose outcome only the provider or
+ * the user can settle, which no claim of its running lead will carry on; and a reply being matched to
+ * its lead (`reply_events` pending), which may stop a lead. Either withholds the figure, naming the account.
+ */
+async function unsettled(store: OutreachStore, subjects: readonly SubjectState[], reach: ReadonlySet<string>): Promise<{ accountId: string; reason: "unsettled_work" | "reply_being_matched" }[]> {
+  const out = new Map<string, "unsettled_work" | "reply_being_matched">();
+  for (const s of subjects) {
+    for (const w of s.work) {
+      if (!reach.has(w.accountId) || !isUncertain(w) || w.sentWall !== null) continue;
+      const carrier = s.attempts.find((a) => a.idempotencyKey === w.key && isLive(a));
+      // Settled by the projection's provider: an accepted call, or one still waiting for its answer, is sent at once.
+      if (carrier && (carrier.state === "accepted" || carrier.awaitingAnswer)) continue;
+      // A same-key retry the engine will make (its lead runs): made by the engine's retry rules.
+      if (carrier && (carrier.retry === "wanted" || carrier.retry === "wanted_after_not_sent") && runs(s)) continue;
+      // Uncertain work no attempt carries, on its running lead's pending step: carried on by the next claim.
+      const p = progressOf(s, w.trackId);
+      if (!carrier && runs(s) && p?.finishedAt == null && p?.nextStepId === w.stepId) continue;
+      out.set(w.accountId, "unsettled_work");
+    }
+  }
+  for (const r of await store.engine.pendingReplies()) if (reach.has(r.inbox)) out.set(r.inbox, "reply_being_matched");
+  return [...out].map(([accountId, reason]) => ({ accountId, reason }));
 }
 
 /** The projected sends for a campaign's leads, for tests that compare them with the engine's. */
@@ -231,8 +306,9 @@ export async function projectedSends(store: OutreachStore, campaignId: string, n
 
 async function loadProjection(store: OutreachStore, campaignId: string, definition: CampaignDefinition, leads: readonly CampaignLead[], now: number): Promise<LoadProjectionView> {
   const labels = await store.engine.accountLabels();
-  const pool = poolAccounts(definition, await store.engine.accounts(now));
-  const { projection, withheldBy } = await projectionOf(store, campaignId, definition, leads, now);
+  const all = await store.engine.accounts(now);
+  const pool = poolAccounts(definition, all);
+  const { projection, withheldBy, callsNotCounted, held } = await projectionOf(store, campaignId, definition, leads, now);
   return {
     leadsToStart: projection?.leadsToStart ?? null,
     onlyCalled: projection?.onlyCalled ?? 0,
@@ -248,11 +324,15 @@ async function loadProjection(store: OutreachStore, campaignId: string, definiti
     daysUntilAllStart: projection?.daysUntilAllStart ?? null,
     notStartedWithinHorizon: projection?.notStarted ?? 0,
     horizonDays: PROJECTION_HORIZON_DAYS,
-    cannotProject: pool.flatMap((a) => {
-      const reason = cannotProject(a, now);
-      return reason ? [{ accountId: a.id, label: labels[a.id] ?? a.id, channel: a.channel, reason }] : [];
-    }),
+    cannotProject: [
+      ...pool.flatMap((a) => {
+        const reason = cannotProject(a, now);
+        return reason ? [{ accountId: a.id, label: labels[a.id] ?? a.id, channel: a.channel, reason }] : [];
+      }),
+      ...held.map((h) => ({ accountId: h.accountId, label: labels[h.accountId] ?? h.accountId, channel: all.find((a) => a.id === h.accountId)?.channel ?? ("email" as const), reason: h.reason })),
+    ],
     withheldBy,
+    callsNotCounted,
   };
 }
 
