@@ -98,7 +98,12 @@ class SqliteStore implements OutreachStore {
       const campaignId = "create" in input.campaign ? input.campaign.create.id : input.campaign.id;
       if ("create" in input.campaign) this.insertCampaign(input.campaign.create);
       const plan = input.plan(this.directory(campaignId));
+      const sharedBefore = this.sharedDestinations();
       this.apply(plan, { campaignId, importId: input.importId, importedAt: input.importedAt, fileNames: input.fileNames });
+      // Safety net: the planner keeps one personal email, mobile or shared inbox to one enrolled
+      // lead per campaign. Should it ever fail to, nothing of the import is kept.
+      const broken = this.sharedDestinations().filter((d) => !sharedBefore.includes(d));
+      if (broken.length > 0) throw new Error(`the import would give ${broken.length} contact detail(s) to two enrolled leads in one campaign`);
       return {
         id: input.importId,
         campaignId,
@@ -335,7 +340,40 @@ class SqliteStore implements OutreachStore {
               ? { kind: "person", personId: str(row, "person_id") }
               : { kind: "company", companyId: str(row, "company_id") },
         })),
+      otherEnrollments: this.db
+        .prepare("SELECT lead_kind, person_id, company_id, campaign_id FROM enrollments WHERE campaign_id <> ?")
+        .all(campaignId)
+        .map((row) => ({
+          campaignId: str(row, "campaign_id"),
+          lead:
+            str(row, "lead_kind") === "person"
+              ? { kind: "person", personId: str(row, "person_id") }
+              : { kind: "company", companyId: str(row, "company_id") },
+        })),
     };
+  }
+
+  /**
+   * Each campaign and outreach destination that more than one enrolled lead has: a person's own
+   * email or mobile, or a company lead's shared inbox. Calls through a main line are not counted.
+   */
+  private sharedDestinations(): string[] {
+    return this.db
+      .prepare(
+        `WITH destinations AS (
+           SELECT e.campaign_id, e.id AS enrollment_id,
+             CASE WHEN d.channel = 'email' THEN 'email' ELSE 'mobile' END || '|' || d.key AS destination
+           FROM enrollments e JOIN contact_details d ON d.owner_kind = 'person' AND d.owner_id = e.person_id
+           WHERE e.lead_kind = 'person' AND (d.channel = 'email' OR d.phone_kind = 'mobile')
+           UNION ALL
+           SELECT e.campaign_id, e.id, 'inbox|' || d.key
+           FROM enrollments e JOIN contact_details d ON d.owner_kind = 'company' AND d.owner_id = e.company_id
+           WHERE e.lead_kind = 'company' AND d.channel = 'email')
+         SELECT campaign_id || ' ' || destination AS shared FROM destinations
+         GROUP BY campaign_id, destination HAVING COUNT(DISTINCT enrollment_id) > 1`,
+      )
+      .all()
+      .map((row) => str(row, "shared"));
   }
 
   private apply(

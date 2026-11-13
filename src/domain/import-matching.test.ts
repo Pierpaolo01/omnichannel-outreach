@@ -456,9 +456,9 @@ describe("phone identity and ownership", () => {
     const company = await onlyCompany(h, "Harbour Lane Physio");
     expect(company.people.flatMap((p) => p.details.filter((d) => d.value.startsWith("+")).map((d) => d.value))).toEqual(["+44 20 7946 0166"]);
     expect(entry(summary, "Zara Glen")).toMatchObject({
-      heldByColleague: [{ detail: { channel: "phone", phoneKind: "direct", value: "+44 20 7946 0166" }, colleague: "Yara Glen" }],
+      heldElsewhere: [{ detail: { channel: "phone", phoneKind: "direct", value: "+44 20 7946 0166" }, holder: "Yara Glen" }],
     });
-    expect(entry(summary, "Yara Glen")).toMatchObject({ heldByColleague: [] });
+    expect(entry(summary, "Yara Glen")).toMatchObject({ heldElsewhere: [] });
   });
 });
 
@@ -507,21 +507,8 @@ describe("company matching", () => {
     await h.import({ businesses: [north, south] });
     const before = await h.companies("City Physio");
     const mixed = business({ business_id: "bz-5", place_id: "", business_name: "City Physio", phone_original: "020 7946 0404" });
-    expect(entry(await h.import({ businesses: [mixed] }), "City Physio")).toMatchObject({ ...ambiguousCompany, conflict: "several_records" });
+    expect(entry(await h.import({ businesses: [mixed] }), "City Physio")).toMatchObject({ ...ambiguousCompany, conflict: "contradiction", disagreeing: ["business_id", "main_line"] });
     expect(await h.companies("City Physio")).toEqual(before);
-  });
-
-  test("a person row whose ID points to one person and number to another changes nothing", async () => {
-    const h = importHarness();
-    await h.import({
-      businesses: [harbour],
-      people: [
-        person({ person_id: "p1", business_id: "b1", full_name: "Sam Lee", title: "Owner", direct_phone: "+44 20 7946 0303" }),
-        person({ person_id: "p2", business_id: "b1", full_name: "Sam Lee", title: "Practice manager", direct_phone: "+44 20 7946 0404" }),
-      ],
-    });
-    const mixed = await h.import({ businesses: [harbour], people: [person({ person_id: "p1", business_id: "b1", full_name: "Sam Lee", direct_phone: "020 7946 0404" })] });
-    expect(entry(mixed, "Sam Lee")).toMatchObject({ ...ambiguousPerson, conflict: "several_records" });
   });
 
   test("a main line two companies share matches neither, and the row says so", async () => {
@@ -608,5 +595,196 @@ describe("the record each row landed in", () => {
       businesses: [amira.lead?.kind === "person" ? (await onlyCompany(h, "Harbour Lane Physio")).id : "?"],
       people: [amira.lead?.kind === "person" ? amira.lead.personId : "?", null],
     });
+  });
+});
+
+// Review round 4 (Opus, GPT) and verification round 5.
+describe("contradicting evidence changes nothing", () => {
+  const renamed = (name: string) =>
+    business({ business_id: "b1", place_id: "", business_name: name, phone_e164: "+442079460101", street: "1 Harbour Lane", postal_code: "N1 1AA" });
+  const ann = (businessId: string) => person({ person_id: "p1", business_id: businessId, full_name: "Ann Shaw", email: "ann@harbour.example" });
+
+  // Opus round 4, P1: the rename split the company and enrolled Ann twice.
+  test("a row whose business ID and main line belong to a company on record under another name changes nothing", async () => {
+    const h = importHarness();
+    await h.import({ businesses: [renamed("Harbour Lane Physio")], people: [ann("b1")] });
+    const rows = { businesses: [renamed("Harbour Lane Physiotherapy Clinic")], people: [ann("b1")] };
+    const second = await h.import(rows);
+    expect(entry(second, "Harbour Lane Physiotherapy Clinic")).toMatchObject({ ...ambiguousCompany, conflict: "contradiction", disagreeing: ["name", "main_line"] });
+    expect(entry(second, "Ann Shaw")).toMatchObject({ ...ambiguousCompany, conflict: "contradiction" });
+    expect(await h.companies("Harbour Lane Physiotherapy Clinic")).toEqual([]);
+    expect((await h.peopleNamed("Ann Shaw")).map((p) => p.enrollments)).toEqual([1]);
+    await expectRepeatChangesNothing(h, rows, ["Ann Shaw"]);
+  });
+
+  test("a main line on record under another name, with nothing else to go on, changes nothing", async () => {
+    const h = importHarness();
+    await h.import({ businesses: [business({ business_id: "b1", place_id: "", business_name: "Elm Street Chiro", phone_e164: "+442079460303" })] });
+    const other = await h.import({ businesses: [business({ business_id: "b2", place_id: "", business_name: "Oak Road Dental", phone_original: "020 7946 0303" })] });
+    expect(entry(other, "Oak Road Dental")).toMatchObject({ ...ambiguousCompany, conflict: "contradiction", disagreeing: ["name", "main_line"] });
+  });
+
+  // GPT round 4, item 1: weaker ID evidence chose between two email matches.
+  test("rows that share an ID but carry two known emails stay two people, each matched by email", async () => {
+    const h = importHarness();
+    await h.import({
+      businesses: [harbour],
+      people: [
+        person({ person_id: "a", business_id: "b1", full_name: "Sam Lee", title: "Owner", email: "sam@harbour.example" }),
+        person({ person_id: "b", business_id: "b1", full_name: "Sam Lee", title: "Practice manager", email: "lee@harbour.example" }),
+      ],
+    });
+    const before = await h.peopleNamed("Sam Lee");
+    const rows = {
+      businesses: [harbour],
+      people: [
+        person({ person_id: "a", business_id: "b1", full_name: "Sam Lee", title: "Owner", email: "sam@harbour.example" }),
+        person({ person_id: "a", business_id: "b1", full_name: "Sam Lee", title: "Practice manager", email: "lee@harbour.example" }),
+      ],
+    };
+    const summary = await h.import(rows);
+    expect(entries(summary, "Sam Lee").map((e) => e.outcome)).toEqual(["already_enrolled", "already_enrolled"]);
+    expect(new Set(summary.rowRecords.people)).toEqual(new Set(before.map((p) => p.id)));
+    expect((await h.peopleNamed("Sam Lee")).map((p) => p.title).sort()).toEqual(["Owner", "Practice manager"]);
+  });
+
+  // GPT round 4, item 1: rows sharing a business ID but not a place ID merged two branches.
+  test("business rows that share an ID but carry different place IDs stay two companies, and their people change nothing", async () => {
+    const h = importHarness();
+    const summary = await h.import({
+      businesses: [
+        business({ business_id: "b7", place_id: "P1", business_name: "City Physio", phone_e164: "+442079460101" }),
+        business({ business_id: "b7", place_id: "P2", business_name: "City Physio", phone_e164: "+442079460202" }),
+      ],
+      people: [person({ person_id: "p1", business_id: "b7", full_name: "Nia Cole", email: "nia@cityphysio.example" })],
+    });
+    const branches = await h.companies("City Physio");
+    expect(branches.map((c) => c.details.map((d) => d.value)).sort()).toEqual([["+44 20 7946 0101"], ["+44 20 7946 0202"]]);
+    expect(entry(summary, "Nia Cole")).toMatchObject({ ...ambiguousCompany, conflict: "contradiction", disagreeing: ["business_id", "place_id"] });
+    expect(await h.peopleNamed("Nia Cole")).toEqual([]);
+  });
+
+  test("a person row whose ID points to one person and number to another names both details", async () => {
+    const h = importHarness();
+    await h.import({
+      businesses: [harbour],
+      people: [
+        person({ person_id: "p1", business_id: "b1", full_name: "Sam Lee", title: "Owner", direct_phone: "+44 20 7946 0303" }),
+        person({ person_id: "p2", business_id: "b1", full_name: "Sam Lee", title: "Practice manager", direct_phone: "+44 20 7946 0404" }),
+      ],
+    });
+    const mixed = await h.import({ businesses: [harbour], people: [person({ person_id: "p1", business_id: "b1", full_name: "Sam Lee", direct_phone: "020 7946 0404" })] });
+    expect(entry(mixed, "Sam Lee")).toMatchObject({ ...ambiguousPerson, conflict: "contradiction", disagreeing: ["person_id", "phone"] });
+  });
+});
+
+describe("main lines compare by their key", () => {
+  // GPT round 4, item 2: learning the country duplicated the company and its enrollment.
+  test("a company first imported without a country is the same company once the country is known, and keeps its bad mark", async () => {
+    const h = importHarness();
+    const clinic = (country: string, line: string) =>
+      business({ business_id: "b1", place_id: "", business_name: "Harbour Clinic", country, phone_e164: line.startsWith("+") ? line : "", phone_original: line });
+    await h.import({ businesses: [clinic("", "020 7946 0101")] });
+    await h.markBad("02079460101");
+    const second = await h.import({ businesses: [clinic("GB", "+442079460101")] });
+    expect(entry(second, "Harbour Clinic")).toMatchObject({ outcome: "already_enrolled", stillBad: [{ value: "+44 20 7946 0101" }] });
+    const company = await onlyCompany(h, "Harbour Clinic");
+    expect(company.details).toEqual([expect.objectContaining({ value: "+44 20 7946 0101", phoneKind: "main_line", bad: true })]);
+    expect(company.companyLeadEnrollments).toBe(1);
+  });
+});
+
+describe("one personal email, mobile or shared inbox per enrolled lead in a campaign", () => {
+  const clinic = (id: string, name: string, line: string, inbox = "") => business({ business_id: id, place_id: "", business_name: name, phone_e164: line, general_emails: inbox });
+
+  test("a second person with an email an enrolled lead already has is not enrolled, and says whose it is", async () => {
+    const h = importHarness();
+    const rows = {
+      businesses: [clinic("b1", "Harbour Clinic", "+442079460101"), clinic("b2", "Elm Clinic", "+442079460202")],
+      people: [
+        person({ person_id: "p1", business_id: "b1", full_name: "Ann Shaw", email: "ann@mail.example" }),
+        person({ person_id: "p2", business_id: "b2", full_name: "Ann Shaw", email: "ann@mail.example" }),
+      ],
+    };
+    const summary = await h.import(rows);
+    expect(entries(summary, "Ann Shaw").map((e) => e.outcome)).toEqual(["new", "not_enrolled"]);
+    expect(entries(summary, "Ann Shaw")[1]).toMatchObject({
+      reason: "shares_contact",
+      shared: { detail: { channel: "email", value: "ann@mail.example" }, lead: "Ann Shaw", companyName: "Harbour Clinic" },
+    });
+    await expectRepeatChangesNothing(h, rows, ["Ann Shaw"]);
+    expect((await h.import(rows, "B")).counts).toMatchObject({ new: 1, not_enrolled: 1 });
+  });
+
+  test("the same holds for a mobile", async () => {
+    const h = importHarness();
+    const summary = await h.import({
+      businesses: [clinic("b1", "Harbour Clinic", ""), clinic("b2", "Elm Clinic", "")],
+      people: [
+        person({ person_id: "p1", business_id: "b1", full_name: "Ann Shaw", dial_phone: "+447700900111", dial_phone_type: "mobile" }),
+        person({ person_id: "p2", business_id: "b2", full_name: "Bea Shaw", dial_phone: "07700 900111", dial_phone_type: "mobile" }),
+      ],
+    });
+    expect(entry(summary, "Bea Shaw")).toMatchObject({ outcome: "not_enrolled", reason: "shares_contact" });
+  });
+
+  test("a second company lead with a shared inbox another company lead has is not enrolled", async () => {
+    const h = importHarness();
+    const summary = await h.import({ businesses: [clinic("b1", "Harbour Clinic", "", "office@group.example"), clinic("b2", "Elm Clinic", "", "office@group.example")] });
+    expect(entry(summary, "Harbour Clinic")).toMatchObject({ outcome: "new" });
+    expect(entry(summary, "Elm Clinic")).toMatchObject({ outcome: "not_enrolled", reason: "shares_contact" });
+  });
+
+  test("an enrolled lead does not gain an email another lead enrolled in the same campaign has", async () => {
+    const h = importHarness();
+    await h.import({
+      businesses: [clinic("b1", "Harbour Clinic", "+442079460101"), clinic("b2", "Elm Clinic", "+442079460202")],
+      people: [
+        person({ person_id: "p1", business_id: "b1", full_name: "Ann Shaw", email: "ann@mail.example" }),
+        person({ person_id: "p2", business_id: "b2", full_name: "Bea Moss" }),
+      ],
+    });
+    const second = await h.import({ businesses: [clinic("b2", "Elm Clinic", "+442079460202")], people: [person({ person_id: "p2", business_id: "b2", full_name: "Bea Moss", email: "ann@mail.example" })] });
+    expect(entry(second, "Bea Moss")).toMatchObject({ outcome: "already_enrolled", heldElsewhere: [{ detail: { value: "ann@mail.example" }, holder: "Ann Shaw" }] });
+    expect((await h.peopleNamed("Bea Moss"))[0]?.details).toEqual([]);
+  });
+});
+
+describe("rows of one export that are the same person or company on weaker evidence", () => {
+  // Opus round 4, P2.
+  test("rows with an agreeing name and the same personal number are one person", async () => {
+    const h = importHarness();
+    const run = (n: number) => ({
+      businesses: [harbour],
+      people: [
+        person({ person_id: `r${n}-a`, business_id: "b1", full_name: "Dan Price", title: "Owner", dial_phone: "+447700900222", dial_phone_type: "mobile" }),
+        person({ person_id: `r${n}-b`, business_id: "b1", full_name: "Dan Price", title: "Clinic director", dial_phone: "07700 900222", dial_phone_type: "mobile" }),
+      ],
+    });
+    expect((await h.import(run(1))).counts.new).toBe(1);
+    expect((await h.import(run(2))).counts).toMatchObject({ new: 0, already_enrolled: 1, not_enrolled: 0 });
+    expect((await h.peopleNamed("Dan Price")).map((p) => p.enrollments)).toEqual([1]);
+  });
+
+  // Opus round 4, P4.
+  test("company rows with an agreeing name and main line are one company, and its person is enrolled once", async () => {
+    const h = importHarness();
+    const listing = (id: string, website: string) => business({ business_id: id, place_id: "", business_name: "City Physio", phone_e164: "+442079460500", website });
+    const summary = await h.import({
+      businesses: [listing("b1", "https://cityphysio.example"), listing("b2", "https://www.cityphysio.example/home")],
+      people: [
+        person({ person_id: "p1", business_id: "b1", full_name: "Nia Cole", email: "nia@cityphysio.example" }),
+        person({ person_id: "p9", business_id: "b2", full_name: "Nia Cole", email: "nia@cityphysio.example" }),
+      ],
+    });
+    expect(summary.rowRecords.businesses[0]).toBe(summary.rowRecords.businesses[1]);
+    expect((await h.peopleNamed("Nia Cole")).map((p) => p.enrollments)).toEqual([1]);
+  });
+
+  test("company rows with an agreeing name and main line but different addresses stay two companies", async () => {
+    const h = importHarness();
+    const branch = (id: string, street: string, postal: string) => business({ business_id: id, place_id: "", business_name: "City Physio", phone_e164: "+442079460500", street, postal_code: postal });
+    const summary = await h.import({ businesses: [branch("b1", "1 North Street", "N1 1AA"), branch("b2", "9 South Road", "SE1 9ZZ")] });
+    expect(summary.rowRecords.businesses[0]).not.toBe(summary.rowRecords.businesses[1]);
   });
 });

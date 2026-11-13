@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { ContactRoute, DetailNote, ImportSummary, LeadOutcome, SummaryEntry } from "../shared/api.ts";
+import type { ContactRoute, DetailNote, EvidenceKind, ImportSummary, LeadOutcome, SummaryEntry } from "../shared/api.ts";
 
 /** Words for the import summary: outcomes, the routes a lead can be reached on, and what changed. */
 
@@ -49,24 +49,61 @@ function routesSentence(entry: Extract<SummaryEntry, { channels: unknown }>): st
   return `${sentenceCase(joinWords(words))}.`;
 }
 
-/** Why a row that could not be matched safely changed nothing. */
-function ambiguousSentence(entry: Extract<SummaryEntry, { reason: "ambiguous_match" }>): string {
-  if (entry.record === "person") {
-    return entry.conflict === "several_records"
-      ? `Matches more than one person on record at ${entry.companyName}, and nothing in the row tells them apart. Nothing was changed.`
-      : "Another row in this file fits the same person on record, so nothing was changed for this row.";
-  }
-  const what = entry.file === "businesses" ? "for this company or its people" : "for this person";
-  const subject = entry.file === "businesses" ? "This company" : "Their company";
-  return entry.conflict === "several_records"
-    ? `${subject} matches more than one company on record, and nothing in the row tells them apart. Nothing was changed ${what}.`
-    : `Another row in this file fits the same company on record, so nothing was changed ${what}.`;
+/** A row that could not be matched safely, and so changed nothing. */
+export type UnmatchedEntry = Extract<SummaryEntry, { reason: "ambiguous_match" }>;
+
+export function isUnmatched(entry: SummaryEntry): entry is UnmatchedEntry {
+  return entry.outcome === "not_enrolled" && entry.reason === "ambiguous_match";
 }
 
-/** A number or address the row listed that a colleague already holds, so it stayed theirs. */
-function heldSentences(entry: Extract<SummaryEntry, { heldByColleague: unknown }>): string {
-  return entry.heldByColleague
-    .map(({ detail, colleague }) => ` ${sentenceCase(detailWord(detail, "person"))} ${detail.value} is already ${colleague}’s, so it wasn’t added.`)
+/** The Result cell: a row that changed nothing is not matched, whatever its person's enrollments. */
+export function resultLabel(entry: SummaryEntry): string {
+  return isUnmatched(entry) ? "Not matched" : OUTCOME_LABEL[entry.outcome];
+}
+
+const EVIDENCE_WORD = {
+  place_id: "place ID",
+  business_id: "business ID",
+  main_line: "main line",
+  address: "address",
+  name: "name",
+  email: "email",
+  person_id: "person ID",
+  phone: "number",
+} as const satisfies Record<EvidenceKind, string>;
+
+/** Where the row is, so it can be found in the file: "People file, row 5". */
+export function rowReference(entry: UnmatchedEntry): string {
+  const file = entry.file === "people" ? "People file" : "Businesses file";
+  return `${file}, ${entry.rowNumbers.length === 1 ? "row" : "rows"} ${joinWords(entry.rowNumbers.map(String))}`;
+}
+
+/** Why a row that could not be matched safely changed nothing. */
+function unmatchedSentence(entry: UnmatchedEntry): string {
+  const kind = entry.record === "person" ? "person" : "company";
+  const scope = entry.file === "businesses" ? " for this company or its people" : entry.record === "company" ? " for this person" : "";
+  const subject = entry.record === "company" && entry.file === "people" ? "Their company’s row" : "The row";
+  if (entry.conflict === "contradiction") {
+    const [first, second] = entry.disagreeing;
+    if (first === "business_id" && second === "place_id") {
+      return `Their business ID is on two businesses with different place IDs in the Businesses file, so nothing was changed${scope}.`;
+    }
+    const other = entry.disagreeing.filter((d) => d !== "name").map((d) => EVIDENCE_WORD[d]);
+    if (entry.disagreeing.includes("name")) {
+      return `${subject}’s ${joinWords(other)} ${other.length === 1 ? "belongs" : "belong"} to a ${kind} on record with a different name, so nothing was changed${scope}.`;
+    }
+    return `${subject}’s ${joinWords(entry.disagreeing.map((d) => EVIDENCE_WORD[d]))} point to different ${kind === "person" ? "people" : "companies"} on record, so nothing was changed${scope}.`;
+  }
+  if (entry.conflict === "another_row") return `Another row in this file fits the same ${kind} on record, so nothing was changed${scope || " for this row"}.`;
+  return entry.record === "person"
+    ? `Matches more than one person on record at ${entry.companyName}, and nothing in the row tells them apart. Nothing was changed.`
+    : `${entry.file === "businesses" ? "This company" : "Their company"} matches more than one company on record, and nothing in the row tells them apart. Nothing was changed${scope}.`;
+}
+
+/** A number or address the row listed that a colleague or another enrolled lead already has, so it stayed theirs. */
+function heldSentences(entry: Extract<SummaryEntry, { heldElsewhere: unknown }>): string {
+  return entry.heldElsewhere
+    .map(({ detail, holder }) => ` ${sentenceCase(detailWord(detail, entry.lead.kind))} ${detail.value} is already ${holder}’s, so it wasn’t added.`)
     .join("");
 }
 
@@ -74,14 +111,21 @@ function heldSentences(entry: Extract<SummaryEntry, { heldByColleague: unknown }
 export function whatHappened(entry: SummaryEntry): ReactNode {
   if (entry.outcome === "not_enrolled") {
     if (entry.reason === "company_not_in_export") return "Their company isn’t in the Businesses file.";
-    if (entry.reason === "ambiguous_match") return ambiguousSentence(entry);
+    if (entry.reason === "ambiguous_match") return unmatchedSentence(entry);
+    if (entry.reason === "shares_contact") {
+      const { detail, lead, companyName } = entry.shared;
+      return `${sentenceCase(detailWord(detail, entry.lead.kind))} ${detail.value} is already ${lead}’s at ${companyName}, who is enrolled in this campaign, so this lead wasn’t enrolled.${heldSentences(entry)}`;
+    }
     return entry.lead.kind === "company"
       ? "No usable main line or shared inbox."
       : `No personal email or mobile, and ${entry.companyName} has no usable main line.${heldSentences(entry)}`;
   }
   const owner = entry.lead.kind;
   const held = heldSentences(entry);
-  const added = entry.added.map((d) => `Added ${detailWord(d, owner)} ${d.value}, marked newer.`).join(" ");
+  const added = [
+    ...entry.added.map((d) => `Added ${detailWord(d, owner)} ${d.value}, marked newer.`),
+    ...entry.becameMobile.map((d) => `Number ${d.value} is now known to be a mobile, so it can take SMS.`),
+  ].join(" ");
   const stillBad = entry.stillBad.map((d) => (
     <span key={`${d.channel}:${d.value}`}>
       {" "}
@@ -110,8 +154,11 @@ export function resultLede(summary: ImportSummary, firstImport: boolean): string
       parts.push(`${counts.already_enrolled} ${counts.already_enrolled === 1 ? "was already enrolled and carries" : "were already enrolled and carry"} on where they are.`);
     }
   }
-  if (counts.not_enrolled > 0) {
-    parts.push(`${counts.not_enrolled} ${counts.not_enrolled === 1 ? "row wasn’t" : "rows weren’t"} enrolled; the reasons are below.`);
+  const unmatched = entries.filter(isUnmatched).length;
+  const notEnrolled = counts.not_enrolled - unmatched;
+  if (notEnrolled > 0) parts.push(`${notEnrolled} ${notEnrolled === 1 ? "row wasn’t" : "rows weren’t"} enrolled; the reasons are below.`);
+  if (unmatched > 0) {
+    parts.push(`${unmatched} ${unmatched === 1 ? "row couldn’t" : "rows couldn’t"} be matched safely and changed nothing; anyone already enrolled carries on.`);
   }
   return parts.join(" ");
 }

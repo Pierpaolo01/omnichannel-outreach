@@ -4,7 +4,7 @@ import type { Campaign, ImportRecord, LeadOutcome, SummaryEntry } from "../../sh
 import { useApi } from "../api.ts";
 import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
-import { OUTCOME_LABEL, OUTCOME_ORDER, resultLede, whatHappened, whenImported } from "../importText.tsx";
+import { isUnmatched, OUTCOME_LABEL, OUTCOME_ORDER, resultLabel, resultLede, rowReference, whatHappened, whenImported } from "../importText.tsx";
 import { useNow } from "../time.ts";
 
 type Tab = "all" | LeadOutcome;
@@ -132,14 +132,22 @@ function Rows({ entries, tab, onShow }: { entries: readonly SummaryEntry[]; tab:
     }
     return rows.map((entry, i) => <EntryRow key={i} entry={entry} />);
   }
-  return OUTCOME_ORDER.map((outcome) => {
-    const rows = entries.filter((e) => e.outcome === outcome);
+  // In All, rows that changed nothing get their own group after the rows that weren't enrolled.
+  const groups = OUTCOME_ORDER.flatMap((outcome): { key: string; label: string; rows: SummaryEntry[] }[] =>
+    outcome === "not_enrolled"
+      ? [
+          { key: outcome, label: OUTCOME_LABEL[outcome], rows: entries.filter((e) => e.outcome === outcome && !isUnmatched(e)) },
+          { key: "unmatched", label: "Not matched", rows: entries.filter(isUnmatched) },
+        ]
+      : [{ key: outcome, label: OUTCOME_LABEL[outcome], rows: entries.filter((e) => e.outcome === outcome) }],
+  );
+  return groups.map(({ key: outcome, label, rows }) => {
     if (rows.length === 0) return null;
     const collapsed = outcome === "already_enrolled";
     return [
       <tr key={`${outcome}-head`} className="border-line max-[720px]:block">
         <td colSpan={4} className="max-[720px]:block bg-raised px-3.5 py-[9px] text-[13px] font-semibold text-muted">
-          {OUTCOME_LABEL[outcome]}, {rows.length}
+          {label}, {rows.length}
         </td>
       </tr>,
       ...(collapsed
@@ -161,8 +169,18 @@ function Rows({ entries, tab, onShow }: { entries: readonly SummaryEntry[]; tab:
 function EntryRow({ entry }: { entry: SummaryEntry }) {
   const href =
     entry.lead === null ? null : entry.lead.kind === "person" ? `/leads/people/${entry.lead.personId}` : `/leads/companies/${entry.lead.companyId}`;
-  const isCompany = entry.lead?.kind === "company" || ("file" in entry && entry.file === "businesses");
-  const sub = isCompany ? (entry.outcome === "not_enrolled" ? "Company" : "Company lead") : entry.lead === null ? "" : entry.title;
+  const unmatched = isUnmatched(entry) ? entry : null;
+  const isCompany = entry.lead?.kind === "company" || unmatched?.file === "businesses";
+  // A row that changed nothing names its title and where it is in the file, so it can be found.
+  const sub = unmatched
+    ? [unmatched.file === "people" ? unmatched.title : "", rowReference(unmatched)].filter(Boolean).join(" · ")
+    : isCompany
+      ? entry.outcome === "not_enrolled"
+        ? "Company"
+        : "Company lead"
+      : entry.lead === null
+        ? ""
+        : entry.title;
   return (
     <tr className="border-line align-top max-[720px]:grid max-[720px]:grid-cols-[minmax(0,1fr)_auto] max-[720px]:gap-x-3 max-[720px]:gap-y-1 max-[720px]:px-3.5 max-[720px]:py-3 max-[720px]:[&>td]:border-0 max-[720px]:[&>td]:p-0">
       <td className="px-3.5 py-3.5">
@@ -176,12 +194,14 @@ function EntryRow({ entry }: { entry: SummaryEntry }) {
         {sub && <div className="text-[13px] text-muted">{sub}</div>}
       </td>
       <td className="px-3.5 py-3.5 max-[720px]:order-3 max-[720px]:col-span-2">
-        {entry.lead === null ? (
-          entry.reason === "ambiguous_match" && entry.file === "people" ? (
-            entry.companyName
+        {unmatched ? (
+          unmatched.file === "people" ? (
+            unmatched.companyName
           ) : (
-            <span className="text-[13px] text-muted">{entry.reason === "ambiguous_match" ? "Not matched" : "Not in the Businesses file"}</span>
+            <span className="text-[13px] text-muted">{unmatched.title || "Company"}</span>
           )
+        ) : entry.lead === null ? (
+          <span className="text-[13px] text-muted">Not in the Businesses file</span>
         ) : isCompany ? (
           <span className="text-[13px] text-muted">
             {entry.peopleAtCompany > 0 ? `${entry.peopleAtCompany} on record, none reachable` : "No named decision maker"}
@@ -193,7 +213,7 @@ function EntryRow({ entry }: { entry: SummaryEntry }) {
         )}
       </td>
       <td className="whitespace-nowrap px-3.5 py-3.5 max-[720px]:order-2 max-[720px]:text-right">
-        <span className={`font-semibold ${entry.outcome === "not_enrolled" ? "text-muted" : ""}`}>{OUTCOME_LABEL[entry.outcome]}</span>
+        <span className={`font-semibold ${entry.outcome === "not_enrolled" ? "text-muted" : ""}`}>{resultLabel(entry)}</span>
       </td>
       <td className="px-3.5 py-3.5 text-ink-2 max-[720px]:order-4 max-[720px]:col-span-2">{whatHappened(entry)}</td>
     </tr>

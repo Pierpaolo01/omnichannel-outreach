@@ -7,7 +7,7 @@ import type { ImportSummary, LeadOutcome, NotEnrolledReason } from "../domain/im
 import type { FileCheck } from "../domain/scraper-export.ts";
 import type { OutreachStatus } from "../domain/outreach-status.ts";
 
-export type { DetailNote, ImportSummary, LeadOutcome, NotEnrolledReason, SummaryEntry } from "../domain/import-plan.ts";
+export type { DetailNote, EvidenceKind, ImportSummary, LeadOutcome, NotEnrolledReason, SummaryEntry } from "../domain/import-plan.ts";
 export type { ContactRoute } from "../domain/reach.ts";
 export type { FileCheck } from "../domain/scraper-export.ts";
 export type { OutreachStatus, StatusGroup } from "../domain/outreach-status.ts";

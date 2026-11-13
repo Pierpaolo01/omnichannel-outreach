@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
-import type { CompanyRecord, LeadSearchResult } from "../src/shared/api.ts";
+import type { LeadSearchResult } from "../src/shared/api.ts";
 import { refusedPair, respond, serverError } from "./mocks.ts";
+import { JUNIPER_LATER, JUNIPER_LATER_ROW } from "./screens.ts";
 import { fixture, nav } from "./support.ts";
 
 test("the four areas are reachable from the rail, and Today and Calls say honestly that nothing is due", async ({ page }) => {
@@ -168,37 +169,14 @@ test("a long campaign name is limited, says so, and wraps", async ({ page }) => 
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
 });
 
-/** A company lead whose decision maker a later import made reachable (enrolled in their own right). */
-const juniperLater = {
-  kind: "company",
-  id: "co-juniper",
-  name: "Juniper Pilates Studio",
-  city: "London",
-  timezone: "Europe/London",
-  contactDetails: [{ id: "d1", owner: "company", channel: "email", phoneKind: null, value: "studio@juniper.example", bad: false, newer: false }],
-  enrollments: [{ id: "e1", campaign: { id: "c1", name: "Pilates, London" }, status: "queued", enrolledAt: "2026-11-12T09:00:00.000Z" }],
-  unenrolledReason: null,
-  people: [
-    { id: "p1", name: "Marco Bianchi", title: "Studio owner", enrollments: [{ id: "e2", campaign: { id: "c1", name: "Pilates, London" }, status: "queued", enrolledAt: "2026-11-13T09:00:00.000Z" }], unenrolledReason: null },
-    { id: "p2", name: "Lucia Neri", title: "Manager", enrollments: [], unenrolledReason: "no_usable_channel" },
-  ],
-} satisfies CompanyRecord;
-
 test("a company lead's explanation stays true once a later import makes a decision maker reachable", async ({ page }) => {
-  await page.route("**/api/companies/co-juniper", (route) => respond(route, juniperLater));
+  await page.route("**/api/companies/co-juniper", (route) => respond(route, JUNIPER_LATER));
   await page.goto("/leads/companies/co-juniper");
   await expect(page.getByRole("heading", { name: "Juniper Pilates Studio", level: 1 })).toBeVisible();
   await expect(page.getByText("None of its decision makers can be reached", { exact: false })).toHaveCount(0);
   await expect(page.getByText("1 of its 2 decision makers can now be reached too", { exact: false })).toBeVisible();
 
-  const leads = {
-    rows: [{ kind: "company", id: "co-juniper", name: "Juniper Pilates Studio", city: "London", peopleOnRecord: 2, peopleReachable: 1, enrollments: juniperLater.enrollments, unenrolledReason: null }],
-    total: 1,
-    people: 0,
-    companies: 1,
-    limit: 100,
-  } satisfies LeadSearchResult;
-  await page.route("**/api/leads?*", (route) => respond(route, leads));
+  await page.route("**/api/leads?*", (route) => respond(route, JUNIPER_LATER_ROW));
   await page.goto("/leads?q=Juniper");
   const row = page.getByRole("row", { name: /^Juniper Pilates Studio/ });
   await expect(row).toContainText("1 of its 2 decision makers can now be reached");

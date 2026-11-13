@@ -1,7 +1,7 @@
 import type { APIRequestContext, Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { OUTREACH_STATUSES } from "../src/domain/outreach-status.ts";
-import type { ImportRecord, PersonRecord, SummaryEntry } from "../src/shared/api.ts";
+import type { CompanyRecord, ImportRecord, LeadSearchResult, PersonRecord, SummaryEntry } from "../src/shared/api.ts";
 import { refusedPair, respond, serverError } from "./mocks.ts";
 import { fixture } from "./support.ts";
 
@@ -142,7 +142,7 @@ async function readyForm(page: Page): Promise<void> {
 /** An import whose rows include the ones that changed nothing and a number a colleague holds. */
 function importWithUnmatchedRows(): { campaign: { id: string; name: string; defaultTimezone: null; createdAt: string }; imports: ImportRecord[] } {
   const reach = { email: false, sms: false, call: true };
-  const person = (name: string, title: string, outcome: "new" | "already_enrolled", id: string): SummaryEntry => ({
+  const person = (name: string, title: string, outcome: "new" | "already_enrolled" | "updated", id: string): Extract<SummaryEntry, { channels: unknown }> => ({
     outcome,
     lead: { kind: "person", personId: id },
     name,
@@ -155,14 +155,30 @@ function importWithUnmatchedRows(): { campaign: { id: string; name: string; defa
     added: [],
     becameMobile: [],
     stillBad: [],
-    heldByColleague: [{ detail: { channel: "phone", phoneKind: "direct", value: "+44 20 7946 0166" }, colleague: "Yara Glen" }],
+    heldElsewhere: [{ detail: { channel: "phone", phoneKind: "direct", value: "+44 20 7946 0166" }, holder: "Yara Glen" }],
   });
+  const unmatched = (name: string, title: string, file: "people" | "businesses", rowNumbers: number[], record: "person" | "company", companyName: string) =>
+    ({ outcome: "not_enrolled", reason: "ambiguous_match", lead: null, name, title, file, rowNumbers, record, companyName }) as const;
   const entries: SummaryEntry[] = [
-    { outcome: "not_enrolled", reason: "ambiguous_match", lead: null, name: "Sam Lee", file: "people", record: "person", conflict: "several_records", companyName: "Harbour Lane Physio" },
-    { outcome: "not_enrolled", reason: "ambiguous_match", lead: null, name: "Sam Lee", file: "people", record: "person", conflict: "another_row", companyName: "Harbour Lane Physio" },
-    { outcome: "not_enrolled", reason: "ambiguous_match", lead: null, name: "City Physio", file: "businesses", record: "company", conflict: "several_records", companyName: "City Physio" },
-    { outcome: "not_enrolled", reason: "ambiguous_match", lead: null, name: "Nia Cole", file: "people", record: "company", conflict: "several_records", companyName: "City Physio" },
+    {
+      outcome: "not_enrolled",
+      reason: "shares_contact",
+      lead: { kind: "person", personId: "p-ann" },
+      name: "Ann Shaw",
+      title: "Owner",
+      companyId: "co-elm",
+      companyName: "Elm Clinic",
+      peopleAtCompany: 1,
+      shared: { detail: { channel: "email", phoneKind: null, value: "ann@mail.example" }, lead: "Ann Shaw", companyName: "Harbour Lane Physio" },
+      heldElsewhere: [],
+    },
+    { ...unmatched("Sam Lee", "Owner", "people", [3], "person", "Harbour Lane Physio"), conflict: "several_records", disagreeing: [] },
+    { ...unmatched("Sam Lee", "Practice manager", "people", [4], "person", "Harbour Lane Physio"), conflict: "contradiction", disagreeing: ["person_id", "phone"] },
+    { ...unmatched("Harbour Lane Physiotherapy Clinic", "London", "businesses", [2], "company", "Harbour Lane Physiotherapy Clinic"), conflict: "contradiction", disagreeing: ["name", "main_line"] },
+    { ...unmatched("City Physio", "London", "businesses", [3, 4], "company", "City Physio"), conflict: "several_records", disagreeing: [] },
+    { ...unmatched("Nia Cole", "Clinical lead", "people", [6], "company", "City Physio"), conflict: "another_row", disagreeing: [] },
     person("Zara Glen", "Practice manager", "new", "p-zara"),
+    { ...person("Uma Dale", "Physiotherapist", "already_enrolled", "p-uma"), outcome: "updated", heldElsewhere: [], becameMobile: [{ channel: "phone", phoneKind: "mobile", value: "+44 7700 900254" }] },
     person("Yusuf Amin", "Physiotherapist", "already_enrolled", "p-yusuf"),
   ];
   return {
@@ -174,10 +190,10 @@ function importWithUnmatchedRows(): { campaign: { id: string; name: string; defa
         importedAt: "2026-11-13T09:00:00.000Z",
         fileNames: { people: "people-run3.csv", businesses: "businesses-run3.csv" },
         summary: {
-          rows: { businesses: 2, people: 5 },
-          counts: { new: 1, already_enrolled: 1, updated: 0, not_enrolled: 4 },
+          rows: { businesses: 4, people: 8 },
+          counts: { new: 1, already_enrolled: 1, updated: 1, not_enrolled: 6 },
           entries,
-          rowRecords: { businesses: ["co-harbour", null], people: [null, null, null, "p-zara", "p-yusuf"] },
+          rowRecords: { businesses: [null, null, null, "co-harbour"], people: ["p-ann", null, null, null, "p-zara", "p-uma", "p-yusuf", "p-ann"] },
         },
       },
       {
@@ -190,6 +206,30 @@ function importWithUnmatchedRows(): { campaign: { id: string; name: string; defa
     ],
   };
 }
+
+/** A company lead whose decision maker a later import made reachable, enrolled in their own right. */
+export const JUNIPER_LATER = {
+  kind: "company",
+  id: "co-juniper",
+  name: "Juniper Pilates Studio",
+  city: "London",
+  timezone: "Europe/London",
+  contactDetails: [{ id: "d1", owner: "company", channel: "email", phoneKind: null, value: "studio@juniperpilates.example", bad: false, newer: false }],
+  enrollments: [{ id: "e1", campaign: { id: "c1", name: "Physio clinics, London" }, status: "queued", enrolledAt: "2026-11-12T09:00:00.000Z" }],
+  unenrolledReason: null,
+  people: [
+    { id: "p1", name: "Marco Bianchi", title: "Studio owner", enrollments: [{ id: "e2", campaign: { id: "c1", name: "Physio clinics, London" }, status: "queued", enrolledAt: "2026-11-13T09:00:00.000Z" }], unenrolledReason: null },
+    { id: "p2", name: "Lucia Neri", title: "Studio manager", enrollments: [], unenrolledReason: "no_usable_channel" },
+  ],
+} satisfies CompanyRecord;
+
+export const JUNIPER_LATER_ROW = {
+  rows: [{ kind: "company", id: "co-juniper", name: "Juniper Pilates Studio", city: "London", peopleOnRecord: 2, peopleReachable: 1, enrollments: JUNIPER_LATER.enrollments, unenrolledReason: null }],
+  total: 1,
+  people: 0,
+  companies: 1,
+  limit: 100,
+} satisfies LeadSearchResult;
 
 export const SCREENS: readonly Screen[] = [
   { name: "today", open: async (page) => { await page.goto("/"); await settle(page, "Nothing to call right now."); } },
@@ -387,6 +427,22 @@ export const SCREENS: readonly Screen[] = [
       await readyImportAgain(page, data);
       await page.getByRole("button", { name: "Import", exact: true }).click();
       await page.getByRole("alert").waitFor();
+    },
+  },
+  {
+    name: "company lead after a later import made a decision maker reachable",
+    open: async (page) => {
+      await page.route("**/api/companies/co-juniper", (route) => respond(route, JUNIPER_LATER));
+      await page.goto("/leads/companies/co-juniper");
+      await settle(page, "can now be reached too");
+    },
+  },
+  {
+    name: "Leads row of a company lead whose decision maker can now be reached",
+    open: async (page) => {
+      await page.route("**/api/leads?*", (route) => respond(route, JUNIPER_LATER_ROW));
+      await page.goto("/leads?q=Juniper");
+      await settle(page, "can now be reached");
     },
   },
   {
