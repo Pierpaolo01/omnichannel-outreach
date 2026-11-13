@@ -1,4 +1,5 @@
 import { isSupportedCountry, parsePhoneNumberFromString, type CountryCode } from "libphonenumber-js/min";
+import metadata from "libphonenumber-js/min/metadata";
 import { digitsOf } from "./contact-details.ts";
 
 /**
@@ -37,6 +38,17 @@ export function parsePhone(raw: string, country: string | null): PhoneNumber | n
   }
   const key = written.startsWith("+") ? `+${digits}` : digits.startsWith("00") ? `+${digits.slice(2)}` : digits;
   return { key, display: written, searchDigits: digits, region: null };
+}
+
+/**
+ * The region a number in international form belongs to: the country it names, else the main
+ * region of its calling code (+44 7700 900xxx names no country, but is British). A number with a
+ * non-geographic calling code, such as +800, belongs to none.
+ */
+export function regionOfNumber(key: string): string | null {
+  const parsed = parsePhoneNumberFromString(key.trim());
+  if (!parsed) return null;
+  return parsed.country ?? metadata.country_calling_codes[parsed.countryCallingCode]?.[0] ?? null;
 }
 
 /** A stored phone key shown for reading. Keys that are not E.164 show as they are. */
