@@ -21,7 +21,7 @@ import type {
   WorkSettlement,
 } from "../../domain/sequence/state.ts";
 import { isOutreachStatus } from "../../domain/outreach-status.ts";
-import type { CampaignEngineRow, EngineStore, LaunchOutcome, ReplyEvent, SenderAccountConfig } from "../engine/engine-store.ts";
+import type { BounceEvent, CampaignEngineRow, EngineStore, LaunchOutcome, ReplyEvent, SenderAccountConfig } from "../engine/engine-store.ts";
 import { liveDetailRowOf } from "./sqlite-store.ts";
 
 type Row = Record<string, SQLOutputValue>;
@@ -270,6 +270,29 @@ export class SqliteEngineStore implements EngineStore {
 
   async setMeta(key: string, value: string): Promise<void> {
     this.run("INSERT INTO engine_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [key, value]);
+  }
+
+  async recordBounce(b: BounceEvent): Promise<void> {
+    this.run(
+      `INSERT OR IGNORE INTO bounce_events (event_id, subject_id, work_key, track_id, step_id, destination, at_wall, received_wall)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [b.eventId, b.subjectId, b.workKey, b.trackId, b.stepId, b.destination, b.atWall, b.receivedWall],
+    );
+  }
+
+  async bouncesOf(subjectId: string): Promise<BounceEvent[]> {
+    return this.sql("SELECT * FROM bounce_events WHERE subject_id = ? ORDER BY at_wall, event_id")
+      .all(subjectId)
+      .map((r) => ({
+        eventId: str(r, "event_id"),
+        subjectId: str(r, "subject_id"),
+        workKey: str(r, "work_key"),
+        trackId: str(r, "track_id"),
+        stepId: str(r, "step_id"),
+        destination: str(r, "destination"),
+        atWall: num(r, "at_wall"),
+        receivedWall: num(r, "received_wall"),
+      }));
   }
 
   async recordAnomaly(attemptId: string | null, what: string, atWall: number): Promise<void> {

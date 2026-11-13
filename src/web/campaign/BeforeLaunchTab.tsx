@@ -60,11 +60,20 @@ function LaunchBar({ editor, facts }: { editor: SequenceEditor; facts: BeforeLau
   const [state, setState] = useState<{ kind: "idle" | "launching" } | { kind: "error"; message: string }>({ kind: "idle" });
   const { launch, launchedAt } = editor.view;
   const n = launch.blockers.length;
-  const tone = launchedAt || launch.nothingToLaunch ? "bg-base-100 border-line" : n > 0 ? "bg-crit-soft border-transparent" : "bg-base-100 border-line";
+  const failed = editor.unsaved && editor.save.kind !== "saving";
+  const tone = launchedAt || (launch.nothingToLaunch && !failed) ? "bg-base-100 border-line" : n > 0 || failed ? "bg-crit-soft border-transparent" : "bg-base-100 border-line";
   const days = facts?.load?.daysUntilAllStart ?? null;
   const withEmail = facts?.load?.leadsWithEmail ?? null;
   let text: ReactNode;
   if (launchedAt) text = <><b className="font-semibold">Launched {longDate(launchedAt)}.</b> Email goes out on its own, inside each lead’s sending window.</>;
+  else if (editor.unsaved && editor.save.kind !== "saving")
+    text = (
+      <>
+        <b className="font-semibold text-crit">Your latest change isn’t saved, so launch waits.</b>{" "}
+        <span className="text-ink-2">{editor.save.kind === "error" ? editor.save.message : ""} The checks below are for the last saved version. Fix it in the sequence, or try again.</span>
+      </>
+    );
+  else if (editor.unsaved) text = <><b className="font-semibold">Saving your latest change…</b> Launch is ready once it is saved.</>;
   else if (launch.nothingToLaunch) text = <><b className="font-semibold">Nothing to launch yet.</b> Add a track in the sequence to launch.</>;
   else if (n > 0) text = <><b className="font-semibold text-crit">{n} {n === 1 ? "thing blocks" : "things block"} launch.</b> <span className="text-ink-2">Fix them here or in the sequence. The warnings below don’t block.</span></>;
   else
@@ -81,7 +90,7 @@ function LaunchBar({ editor, facts }: { editor: SequenceEditor; facts: BeforeLau
         <button
           type="button"
           className="btn btn-primary font-semibold"
-          disabled={!launch.canLaunch || state.kind === "launching"}
+          disabled={!launch.canLaunch || editor.unsaved || state.kind === "launching"}
           onClick={() => {
             setState({ kind: "launching" });
             editor.launch().then(
@@ -91,6 +100,11 @@ function LaunchBar({ editor, facts }: { editor: SequenceEditor; facts: BeforeLau
           }}
         >
           {state.kind === "launching" ? "Launching…" : "Launch campaign"}
+        </button>
+      )}
+      {failed && !launchedAt && (
+        <button type="button" className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={editor.retrySave}>
+          Try again
         </button>
       )}
       {state.kind === "error" && (

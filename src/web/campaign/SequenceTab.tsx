@@ -16,7 +16,9 @@ import {
   liveSteps,
   newEmailTrack,
   newStep,
+  removeStep,
   setWindow,
+  threadSubjectOf,
   stepBlockers,
   trackSummary,
   windowHours,
@@ -204,8 +206,8 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
         )}
         {locked && <p className="rounded-field bg-raised px-3 py-2 text-[13.5px] text-ink-2">This campaign is running. Editing a running campaign arrives with a later release.</p>}
         {factsFailed && <ErrorState title="Lead counts for the fallbacks didn’t load." message="The copy still saves." onRetry={onRetryFacts} />}
-        <fieldset disabled={locked} className="flex min-w-0 flex-col">
-          <legend className="sr-only">Emails</legend>
+        {/* Only the editing controls lock on a running campaign; every email still opens. */}
+        <div role="group" aria-label="Emails" className="flex min-w-0 flex-col">
           {steps.map((step, i) => (
             <StepBlock
               key={step.id}
@@ -217,7 +219,8 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
               editor={editor}
               onToggle={() => onOpenStep(openStep === step.id ? null : step.id)}
               onChange={(change) => changeStep(step.id, change)}
-              onRemove={() => changeTrack((t) => ({ ...t, steps: t.steps.filter((s) => s.id !== step.id) }))}
+              locked={locked}
+              onRemove={() => changeTrack((t) => removeStep(t, step.id))}
             />
           ))}
           {!locked && (
@@ -236,7 +239,7 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
               </button>
             </div>
           )}
-        </fieldset>
+        </div>
         <TimingAndSender track={track} editor={editor} onWindow={(window) => changeTrack((t) => ({ ...t, window }))} />
       </div>
     </aside>
@@ -262,16 +265,17 @@ interface StepProps {
   onToggle: () => void;
   onChange: (change: (s: StepDefinition) => StepDefinition) => void;
   onRemove: () => void;
+  locked: boolean;
 }
 
-function StepBlock({ step, index, steps, open, facts, editor, onToggle, onChange, onRemove }: StepProps) {
+function StepBlock({ step, index, steps, open, facts, editor, onToggle, onChange, onRemove, locked }: StepProps) {
   const name = `Email ${index + 1}`;
   const first = index === 0;
   const issues = stepBlockers(step, editor.view.launch.blockers).length;
   const bodyId = useId();
   const textarea = useRef<HTMLTextAreaElement>(null);
   const [waitText, setWaitText] = useState<string | null>(null);
-  const threadSubject = steps[0]?.subject ?? "";
+  const threadSubject = threadSubjectOf(steps, index);
   const summary = first ? step.subject || "No subject yet" : step.threading === "continue_thread" ? "Continues the thread" : `New subject: ${step.subject || "none yet"}`;
 
   const insertField = (field: string) => {
@@ -294,6 +298,7 @@ function StepBlock({ step, index, steps, open, facts, editor, onToggle, onChange
           <label className="flex items-center gap-2">
             Wait
             <input
+              disabled={locked}
               type="number"
               min={0}
               step={1}
@@ -321,7 +326,8 @@ function StepBlock({ step, index, steps, open, facts, editor, onToggle, onChange
           <Icon name="chevron" className={`size-4 text-muted ${open ? "rotate-180" : ""}`} />
         </button>
         {open && (
-          <div id={bodyId} className="flex flex-col gap-2.5 px-3 pb-3.5 pt-0.5">
+          <fieldset id={bodyId} disabled={locked} className="flex min-w-0 flex-col gap-2.5 px-3 pb-3.5 pt-0.5">
+            <legend className="sr-only">{name}</legend>
             {!first && (
               <div role="radiogroup" aria-label={`How ${name} is sent`} className="flex flex-wrap gap-1.5">
                 {(["continue_thread", "new_subject"] as const).map((mode) => (
@@ -351,7 +357,7 @@ function StepBlock({ step, index, steps, open, facts, editor, onToggle, onChange
             ) : (
               <div className="flex items-center gap-2 text-[14px]">
                 <span className="w-[54px] flex-none text-[13px] text-muted">Subject</span>
-                <span className="min-w-0 flex-1 rounded-field border border-dashed border-line-strong bg-raised px-2.5 py-1.5 text-muted [overflow-wrap:anywhere]">Re: {threadSubject || "the first email’s subject"}</span>
+                <span className="min-w-0 flex-1 rounded-field border border-dashed border-line-strong bg-raised px-2.5 py-1.5 text-muted [overflow-wrap:anywhere]">Re: {threadSubject || "the subject of the thread it continues"}</span>
               </div>
             )}
             <textarea
@@ -364,14 +370,14 @@ function StepBlock({ step, index, steps, open, facts, editor, onToggle, onChange
             />
             <MergeFieldMenu onPick={insertField} />
             <Fallbacks step={step} facts={facts} onChange={onChange} />
-            {steps.length > 1 && (
+            {steps.length > 1 && !locked && (
               <div>
                 <button type="button" className="btn btn-sm btn-ghost px-2 font-medium text-muted" onClick={onRemove}>
                   Remove {name}
                 </button>
               </div>
             )}
-          </div>
+          </fieldset>
         )}
       </div>
     </>

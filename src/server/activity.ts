@@ -2,7 +2,10 @@
  * The person and company-lead timeline's campaign activity (ticket 12c): built from each
  * enrollment's stored progress, the same facts GET /api/enrollments/:id reports. It shows only
  * what happened: emails the provider reported sent, failures and skips, a hard bounce, the reply
- * (channel and date only, never its content), and the lead's ending. Email has no delivered
+ * (channel and date only, never its content), and the lead's ending. A bounce is shown from the
+ * bounce event the engine stored, not inferred from how the track ended: a bounce can arrive after
+ * the track completed, and an address marked bad by another campaign is not a bounce here. Email
+ * has no delivered
  * state, because Instantly reports none (ADR 0002, "Delivered").
  */
 import type { ActivityEntry, EnrollmentView } from "../shared/api.ts";
@@ -20,6 +23,12 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
     if (!state) continue;
     const progress = progressView(state, now);
     const campaign = enrollment.campaign;
+    const bounces = await store.engine.bouncesOf(enrollment.id);
+    for (const b of bounces) {
+      const track = progress.tracks.find((t) => t.trackId === b.trackId);
+      const step = track?.steps.find((s) => s.stepId === b.stepId);
+      entries.push({ campaign, at: new Date(b.atWall).toISOString(), kind: "bounced", stepNumber: step?.number ?? null, to: b.destination });
+    }
     for (const track of progress.tracks) {
       if (track.channel !== "email") continue;
       let lastTo: string | null = null;
@@ -45,9 +54,9 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
       if (track.finishedAt === null) continue;
       if (track.finishReason === "skipped_missing_channel" && track.steps.every((s) => s.result === null)) {
         entries.push({ campaign, at: track.finishedAt, kind: "skipped", stepNumber: null, reason: "no_email" });
-      } else if (track.finishReason === "failed_bad_destination" && !track.steps.some((s) => s.result === "failed")) {
-        // A hard bounce after a send: the address is marked bad and the track ends.
-        entries.push({ campaign, at: track.finishedAt, kind: "bounced", to: lastTo ?? "" });
+      } else if (track.finishReason === "failed_bad_destination" && !track.steps.some((s) => s.result === "failed") && !bounces.some((b) => b.trackId === track.trackId)) {
+        // The address went bad with no bounce of this campaign's: another campaign's bounce marked it.
+        entries.push({ campaign, at: track.finishedAt, kind: "address_bad", to: lastTo ?? "" });
       }
     }
     if (progress.reply) entries.push({ campaign, at: progress.reply.at, kind: "replied", channel: progress.reply.channel });

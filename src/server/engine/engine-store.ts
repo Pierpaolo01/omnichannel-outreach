@@ -46,6 +46,19 @@ export interface ReplyEvent {
   readonly lastCountedWall: number;
 }
 
+/** A hard bounce the provider reported for one piece of provider work, kept for good by its event id. */
+export interface BounceEvent {
+  readonly eventId: string;
+  readonly subjectId: string;
+  readonly workKey: string;
+  readonly trackId: string;
+  readonly stepId: string;
+  readonly destination: string;
+  /** The provider's bounce time, clamped to now. */
+  readonly atWall: number;
+  readonly receivedWall: number;
+}
+
 export type LaunchOutcome = { readonly ok: true } | { readonly ok: false; readonly check: LaunchCheck | null; readonly reason: "already_launched" | "blocked" | "no_definition" };
 
 /**
@@ -112,6 +125,11 @@ export interface EngineStore {
   /** Moves the account's next pacing slot to at least `callStart` plus its gap. */
   pushSlot(accountId: string, callStart: number): Promise<void>;
   updateAccount(accountId: string, change: Partial<Pick<AccountState, "healthy" | "waitUntil" | "waitReason" | "backoffMs">>): Promise<void>;
+
+  /** Records a bounce once; a second record of the same event id changes nothing. */
+  recordBounce(bounce: BounceEvent): Promise<void>;
+  /** A subject's recorded bounces, oldest first. */
+  bouncesOf(subjectId: string): Promise<BounceEvent[]>;
 
   meta(key: string): Promise<string | null>;
   setMeta(key: string, value: string): Promise<void>;

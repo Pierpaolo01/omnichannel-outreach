@@ -766,6 +766,22 @@ export const SCREENS: readonly Screen[] = [
   },
   { name: "fake provider: running campaign", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}`); await settle(page, "Pausing, resuming and editing a running campaign arrive with later releases."); } },
   { name: "fake provider: running campaign's email track", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}?track=email`); await settle(page, "Editing a running campaign arrives with a later release."); } },
+  {
+    name: "fake provider: before launch with a change that isn't saved",
+    open: async (page) => {
+      const f = await fakeProviderApp();
+      await fake(page, `/campaigns/${f.ready}?track=email`);
+      await fail(page, "**/api/campaigns/*/sequence", "PUT");
+      await page.getByLabel("Email 1 subject").fill("Evening bookings");
+      await settle(page, "Your last change wasn’t saved.");
+      await page.getByRole("link", { name: /Before launch/ }).click();
+      await settle(page, "Your latest change isn’t saved, so launch waits.");
+    },
+  },
+  {
+    name: "fake provider: a running campaign's later email, read-only",
+    open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}?track=email&step=s2`); await settle(page, "Editing a running campaign arrives with a later release."); },
+  },
   { name: "fake provider: running campaign, before launch", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}/before-launch`); await settle(page, "The projection is for before launch."); } },
   {
     name: "fake provider: sent emails, the copy shown, and the sequence finished",
@@ -776,7 +792,7 @@ export const SCREENS: readonly Screen[] = [
       await settle(page, "Hide message");
     },
   },
-  { name: "fake provider: a hard bounce", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/leads/people/${f.person("Tom")}`); await settle(page, "Email bounced"); } },
+  { name: "fake provider: a hard bounce", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/leads/people/${f.person("Tom")}`); await settle(page, "Email 1 bounced"); } },
   { name: "fake provider: replied, automation stopped", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/leads/people/${f.person("Daniel Price")}`); await settle(page, "Replied by email"); } },
   { name: "fake provider: email skipped for a missing address", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/leads/people/${f.person("Grace Okafor")}`); await settle(page, "Email skipped"); } },
   { name: "fake provider: a company lead's activity", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/leads/companies/${f.company("Riverside Sports Clinic")}`); await settle(page, "Email 1 sent"); } },

@@ -426,7 +426,19 @@ export class Engine {
     }
     if (event.kind === "sent") return this.applyWork(w.subjectId, w.key, { kind: "sent_observed", providerTime: event.sentAt, providerRef: event.providerRef });
     if (event.kind === "rejected") return this.applyWork(w.subjectId, w.key, { kind: "provider_rejected", reason: event.reason });
-    // A bounce after a send marks the address bad and fails the track if it is unfinished.
+    // A bounce after a send marks the address bad and fails the track if it is unfinished. The
+    // bounce itself is kept first, by its event id, so the timeline shows it even on a track that
+    // had already completed; a repeat of the event, after a restart, records nothing new.
+    await this.store.recordBounce({
+      eventId: event.id,
+      subjectId: w.subjectId,
+      workKey: w.key,
+      trackId: w.trackId,
+      stepId: w.stepId,
+      destination: w.destination,
+      atWall: Math.min(event.at, now),
+      receivedWall: now,
+    });
     return (await this.store.update(w.subjectId, now, (s) => {
       const sentBy = s.attempts.filter((a) => a.idempotencyKey === w.key && a.handedWall !== null).sort((x, y) => (x.handedWall ?? 0) - (y.handedWall ?? 0))[0];
       if (!sentBy) return null;

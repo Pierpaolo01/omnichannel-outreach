@@ -81,3 +81,26 @@ export function setWindow(days: readonly number[], hours: { start: number; end: 
 }
 
 export const hourLabel = (h: number): string => `${String(h).padStart(2, "0")}:00`;
+
+/**
+ * The track without one email. When the first email goes, the next becomes a first email: it has
+ * no wait and starts its own thread, keeping its copy and any subject it had (PR 41 review).
+ */
+export function removeStep(track: TrackDefinition, stepId: string): TrackDefinition {
+  const wasFirst = liveSteps(track)[0]?.id === stepId;
+  const steps = track.steps.filter((s) => s.id !== stepId);
+  const first = steps.find((s) => !s.removed);
+  return {
+    ...track,
+    steps: wasFirst && first ? steps.map((s) => (s.id === first.id ? { ...s, waitDays: 0, threading: "new_subject" as const } : s)) : steps,
+  };
+}
+
+/** The subject a continue-thread email at `index` replies to: the nearest earlier email that started a thread. */
+export function threadSubjectOf(steps: readonly StepDefinition[], index: number): string {
+  for (let i = index - 1; i >= 0; i--) {
+    const s = steps[i];
+    if (s && (i === 0 || s.threading === "new_subject")) return s.subject;
+  }
+  return "";
+}

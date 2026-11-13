@@ -363,6 +363,24 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE TABLE engine_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     `,
   },
+  {
+    // Numbered after 7 and 8, which the Instantly adapter (pull request 40) adds.
+    version: 9,
+    name: "bounce events: each hard bounce the provider reported, kept by its event id for the timeline (ticket 12c)",
+    sql: `
+      CREATE TABLE bounce_events (
+        event_id TEXT PRIMARY KEY,
+        subject_id TEXT NOT NULL,
+        work_key TEXT NOT NULL,
+        track_id TEXT NOT NULL,
+        step_id TEXT NOT NULL,
+        destination TEXT NOT NULL,
+        at_wall INTEGER NOT NULL,
+        received_wall INTEGER NOT NULL
+      );
+      CREATE INDEX bounce_events_by_subject ON bounce_events (subject_id, at_wall);
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string): void {

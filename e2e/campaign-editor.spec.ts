@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
-import { expect, test, type Page } from "@playwright/test";
-import type { Campaign, EnrollmentView } from "../src/shared/api.ts";
-import { fakeProviderApp, type FakeProviderApp } from "./fake-provider.ts";
+import { expect, test, type Page, type Route } from "@playwright/test";
+import type { CampaignDefinition, StepDefinition } from "../src/domain/sequence/definition.ts";
+import type { Campaign, EnrollmentView, SequenceView } from "../src/shared/api.ts";
+import { COPY, FAKE_INBOX, fakeProviderApp, type FakeProviderApp } from "./fake-provider.ts";
+import { serverError } from "./mocks.ts";
 import { fixture } from "./support.ts";
 
 /**
@@ -140,7 +142,7 @@ test.describe("on the app over the fake email provider", () => {
     // A company lead's shared inbox bounces: the address is struck through and the track ends.
     await page.goto(`${demo.url}/leads/companies/${person("Riverside Sports Clinic")}`);
     await page.getByLabel("Show activity from").selectOption({ label: "Sports clinics, Exeter" });
-    await expect(page.getByText("Email bounced")).toBeVisible();
+    await expect(page.getByText("Email 1 bounced")).toBeVisible();
     await expect(page.getByText("info@riversidesports.example", { exact: true })).toHaveCSS("text-decoration-line", "line-through");
 
     await page.goto(`${demo.url}/leads/people/${person("Daniel Price")}`);
@@ -151,5 +153,108 @@ test.describe("on the app over the fake email provider", () => {
     await page.goto(`${demo.url}/leads/people/${person("Grace Okafor")}`);
     await page.getByLabel("Show activity from").selectOption({ label: "Sports clinics, Exeter" });
     await expect(page.getByText("Email skipped")).toBeVisible();
+  });
+});
+
+/** Regressions from the review of pull request 41, each on its own fake-provider app and campaign. */
+test.describe("review of pull request 41", () => {
+  let r: FakeProviderApp;
+  let n = 0;
+  test.beforeAll(async () => {
+    r = await fakeProviderApp("review");
+  });
+  const campaign = async (definition?: CampaignDefinition) => {
+    const csv = { businessesCsv: readFileSync(fixture("businesses-run1.csv"), "utf8"), peopleCsv: readFileSync(fixture("people-run1.csv"), "utf8") };
+    const id = (await r.harness.request<{ campaign: Campaign }>("POST", "/api/campaigns", { name: `Review ${++n}`, defaultTimezone: "Europe/London", ...csv })).body.campaign.id;
+    if (definition) await r.harness.defineSequence(id, definition);
+    return id;
+  };
+  const stored = async (id: string) => (await r.harness.request<SequenceView>("GET", `/api/campaigns/${id}/sequence`)).body;
+  const track = (steps: StepDefinition[]): CampaignDefinition => ({
+    timezone: "Europe/London",
+    callSkipLimitDays: 2,
+    emailPool: [FAKE_INBOX],
+    tracks: [{ id: "email", channel: "email", branch: "main", window: [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 })), steps, start: { kind: "entry" }, removed: false }],
+  });
+
+  test("a draft the server would refuse is not launched in place of the stored one (useSequence.ts:133)", async ({ page }) => {
+    const id = await campaign(track([COPY.first, COPY.second]));
+    let launches = 0;
+    await page.route("**/api/campaigns/*/launch", (route) => {
+      launches++;
+      return route.continue();
+    });
+    await page.goto(`${r.url}/campaigns/${id}?track=email&step=s2`);
+    await page.getByLabel("Days to wait before Email 2").fill("");
+    await page.getByRole("link", { name: /Before launch/ }).click();
+    await expect(page.getByText("Your latest change isn’t saved, so launch waits.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Launch campaign" })).toBeDisabled();
+    expect(launches).toBe(0);
+    expect((await stored(id)).launchedAt).toBeNull();
+  });
+
+  test("a save that failed blocks launch until it succeeds (useSequence.ts:133)", async ({ page }) => {
+    const id = await campaign(track([COPY.first, COPY.second]));
+    let launches = 0;
+    await page.route("**/api/campaigns/*/launch", (route) => {
+      launches++;
+      return route.continue();
+    });
+    await page.goto(`${r.url}/campaigns/${id}?track=email&step=s1`);
+    await page.route("**/api/campaigns/*/sequence", (route) => (route.request().method() === "PUT" ? serverError(route) : route.continue()));
+    await page.getByLabel("Email 1 subject").fill("A subject that never saved");
+    await expect(page.getByText("Your last change wasn’t saved.")).toBeVisible();
+    await page.getByRole("link", { name: /Before launch/ }).click();
+    await expect(page.getByText("Your latest change isn’t saved, so launch waits.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Launch campaign" })).toBeDisabled();
+    expect(launches).toBe(0);
+    expect((await stored(id)).launchedAt).toBeNull();
+  });
+
+  test("a delayed older save never overwrites a newer one, and the status ends on Saved (useSequence.ts:76)", async ({ page }) => {
+    const id = await campaign(track([COPY.first, COPY.second]));
+    await page.goto(`${r.url}/campaigns/${id}?track=email&step=s1`);
+    const held: Route[] = [];
+    await page.route("**/api/campaigns/*/sequence", (route) => {
+      if (route.request().method() !== "PUT" || held.length > 0) return route.continue();
+      held.push(route);
+      return undefined;
+    });
+    await page.getByLabel("Email 1 subject").fill("Older subject");
+    await expect.poll(() => held.length).toBe(1);
+    await page.getByLabel("Email 1 subject").fill("Newest subject");
+    // Give a second save every chance to overtake the first before the first is let through.
+    await page.waitForTimeout(1500);
+    await held[0]!.continue();
+    await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
+    await expect.poll(async () => (await stored(id)).definition.tracks[0]!.steps[0]!.subject).toBe("Newest subject");
+  });
+
+  test("removing Email 1 makes the next email a valid first email, which saves and survives a reload (SequenceTab.tsx:220)", async ({ page }) => {
+    const id = await campaign(track([COPY.first, COPY.second]));
+    await page.goto(`${r.url}/campaigns/${id}?track=email&step=s1`);
+    await page.getByRole("button", { name: "Remove Email 1" }).click();
+    await page.getByRole("button", { name: /^Email 1/ }).first().click();
+    await page.getByLabel("Email 1 subject").fill("A fresh subject for {{company}}");
+    await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
+    const saved = (await stored(id)).definition.tracks[0]!.steps;
+    expect(saved.map((s) => [s.id, s.waitDays, s.threading, s.subject])).toEqual([["s2", 0, "new_subject", "A fresh subject for {{company}}"]]);
+    await page.reload();
+    await expect(page.getByLabel("Email 1 copy")).toHaveValue(COPY.second.body);
+  });
+
+  test("a running campaign's emails still open, read-only (SequenceTab.tsx:207)", async ({ page }) => {
+    const id = await campaign(track([COPY.first, COPY.second]));
+    expect((await r.harness.launch(id)).status).toBe(200);
+    await page.goto(`${r.url}/campaigns/${id}?track=email`);
+    await page.getByRole("button", { name: /^Email 2/ }).click();
+    await expect(page.getByLabel("Email 2 copy")).toHaveValue(COPY.second.body);
+    await expect(page.getByLabel("Email 2 copy")).toBeDisabled();
+  });
+
+  test("a follow-up that continues the thread names the subject of the nearest email that started one (SequenceTab.tsx:274)", async ({ page }) => {
+    const id = await campaign(track([COPY.first, { ...COPY.second, threading: "new_subject", subject: "A second idea" }, { ...COPY.second, id: "s3", body: "Last note." }]));
+    await page.goto(`${r.url}/campaigns/${id}?track=email&step=s3`);
+    await expect(page.getByText("Re: A second idea")).toBeVisible();
   });
 });

@@ -77,7 +77,9 @@ function describe(entry: ActivityEntry): { icon: IconName; tone: string; title: 
     case "skipped":
       return { icon: "system", tone: PLAIN, title: entry.stepNumber === null ? "Email skipped" : `Email ${entry.stepNumber} skipped`, body: REASON[entry.reason] ?? entry.reason };
     case "bounced":
-      return { icon: "bad", tone: CRIT, title: "Email bounced", body: `${entry.to} is marked wrong, and the email track has ended.` };
+      return { icon: "bad", tone: CRIT, title: entry.stepNumber === null ? "Email bounced" : `Email ${entry.stepNumber} bounced`, body: `${entry.to} is marked wrong. Nothing more is sent to it.` };
+    case "address_bad":
+      return { icon: "system", tone: PLAIN, title: "Email track ended", body: `${entry.to} was marked wrong elsewhere, so nothing more is sent to it.` };
     case "replied":
       return {
         icon: "reply",
