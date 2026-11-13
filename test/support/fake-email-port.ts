@@ -205,7 +205,7 @@ export class FakeEmailPort implements SendPort {
     const delay =
       mode === "late-send" ? (1 + this.random() * 59) * MINUTE
       : mode === "withdraw-unknown" ? (5 + this.random() * 115) * MINUTE
-      : mode === "late-send-beyond-settling" ? SETTLING * (1.5 + this.random() * 12)
+      : mode === "late-send-beyond-settling" ? SETTLING * (1.5 + this.random() * 20)
       : mode === "lookup-lags" ? this.random() * 30 * MINUTE
       : 0;
     const skip = this.unexplainedSkip.has(request.destination);

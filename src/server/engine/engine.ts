@@ -20,6 +20,8 @@ export interface EngineHooks {
   beforeApplyEvaluation?(subjectId: string): Promise<void>;
   /** Between the claim commit and the handover commit. */
   beforeHandover?(attemptId: string): Promise<void>;
+  /** Before a same-key retry is authorized (ADR 0003 9.2: retries racing a quiesce). */
+  beforeRetry?(attemptId: string): Promise<void>;
   /** Named points at which a test may simulate a crash by throwing. */
   crashPoint?(point: CrashPoint, attemptId: string | null): void;
 }
@@ -383,9 +385,11 @@ export class Engine {
       for (let i = 0; i < 100; i++) {
         const now = this.now();
         const current = (await this.store.accounts(now)).find((a) => a.id === account.id);
-        if (!current || now < current.nextSlotAt) break;
         const next = await this.nextForSlot(account.id, skipped, now);
-        if (!next) break;
+        if (!current || !next) break;
+        // A claim waits for the slot before its pre-send check (5.5 steps 2-3); a retry's own
+        // authorization decides whether it waits (5.6).
+        if (!next.retry && now < current.nextSlotAt) break;
         const outcome = next.retry ? await this.tryRetry(next.attempt) : await this.tryHandover(next.attempt);
         if (outcome === "skip") skipped.add(next.attempt.id);
         else changed = true;
@@ -500,6 +504,13 @@ export class Engine {
   }
 
   private async tryRetry(a: Attempt): Promise<"handed" | "withdrawn" | "waiting" | "skip"> {
+    const snapshot = await this.store.subject(a.subjectId, this.now());
+    const account = snapshot?.accounts[a.accountId];
+    if (snapshot && account) {
+      const pending = this.rules.retryFailures(snapshot, a, account, this.now()).filter((f) => f !== "predicate 14");
+      if (pending.length > 0 && pending.every((f) => f === "slot")) return "waiting";
+    }
+    await this.hooks.beforeRetry?.(a.id);
     const fresh = await this.presend(a);
     const now = this.now();
     const out: { handed: Attempt | null; onlySlot: boolean } = { handed: null, onlySlot: false };

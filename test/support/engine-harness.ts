@@ -68,6 +68,7 @@ export class EngineHarness {
       hooks: {
         beforeApplyEvaluation: async (id) => this.hooks.beforeApplyEvaluation?.(id),
         beforeHandover: async (id) => this.hooks.beforeHandover?.(id),
+        beforeRetry: async (id) => this.hooks.beforeRetry?.(id),
         crashPoint: (point, id) => this.hooks.crashPoint?.(point, id),
       },
     });
@@ -125,6 +126,15 @@ export class EngineHarness {
       this.crashes.push(error.message);
       await this.restart();
     }
+  }
+
+  /**
+   * A second worker on the same store and provider, with the test's rules but none of its hooks:
+   * it applies an injected event at once, while the main engine is between two steps.
+   */
+  async otherWorker(): Promise<void> {
+    this.fake.advance();
+    await new Engine({ store: this.store.engine, port: this.fake, now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) }).tick();
   }
 
   /** A fresh engine on the same store and provider, settling what the crash left open. */

@@ -8,6 +8,8 @@ import { getRequestListener } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { createApp } from "./app.ts";
+import { Engine } from "./engine/engine.ts";
+import { UnconnectedEmailPort } from "./engine/ports.ts";
 import { DATABASE_FILE, resolveDataDir } from "./config.ts";
 import { checkHost, isLoopbackAddress } from "./guard.ts";
 import { openSqliteStore } from "./persistence/sqlite-store.ts";
@@ -33,7 +35,25 @@ const dataDir = resolveDataDir({
 });
 mkdirSync(dataDir, { recursive: true, mode: 0o700 });
 const store = openSqliteStore(path.join(dataDir, DATABASE_FILE));
-const api = getRequestListener(createApp({ store, now: () => new Date().toISOString(), newId: randomUUID }).fetch);
+// No email provider is connected until the Instantly adapter lands (ticket 12c), so every email
+// track meets launch blocker 3 here: the engine runs, honestly, with nothing to send through.
+const engine = new Engine({ store: store.engine, port: new UnconnectedEmailPort(), now: () => Date.now(), newId: randomUUID });
+const api = getRequestListener(createApp({ store, now: () => new Date().toISOString(), newId: randomUUID, engine }).fetch);
+
+/** The worker: restart settlement once (ADR 0003 section 6), then a tick on an interval. */
+const TICK_MS = 15_000;
+let ticking: ReturnType<typeof setTimeout> | undefined;
+let stopped = false;
+async function work(first: boolean): Promise<void> {
+  try {
+    if (first) await engine.recover();
+    else await engine.tick();
+  } catch (error) {
+    console.error(JSON.stringify({ level: "error", event: "engine_tick_failed", message: error instanceof Error ? error.message : String(error) }));
+  }
+  if (!stopped) ticking = setTimeout(() => void work(false), TICK_MS);
+}
+void work(true);
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => void;
 
@@ -72,6 +92,8 @@ server.listen(port, host, () => {
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
+    stopped = true;
+    clearTimeout(ticking);
     server.close();
     void store.close().finally(() => process.exit(0));
   });

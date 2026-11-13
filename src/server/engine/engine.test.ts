@@ -170,3 +170,23 @@ describe("one email track through the engine and a fake provider", () => {
     }
   });
 });
+
+describe("settling against the fake's modes", () => {
+  test("a send the provider holds past SETTLING is looked up until MAX_QUEUED_LOOKUPS queued answers, then unresolved, and cannot be marked not sent while queued", async () => {
+    const h = new EngineHarness({ start: MONDAY_9 - H, accounts: [inbox("inbox-a")], modes: ["late-send-beyond-settling"], random: () => 0.99 });
+    const { campaign } = await h.createCampaign("Held", { businesses: rows.businesses, people: [rows.people[0]!] });
+    await h.defineSequence(campaign.id, threeEmails());
+    h.clock = MONDAY_9;
+    await h.launch(campaign.id);
+    await h.advanceTo(MONDAY_9 + 3 * H + 30 * 60_000);
+    const [attempt] = await h.store.engine.openAttempts();
+    // Twelve queued answers make it unresolved at 3 h; it keeps being looked up every SETTLING after.
+    expect(attempt).toMatchObject({ state: "accepted", lookupAnswer: "queued", queuedLookups: 14, unresolvedSince: MONDAY_9 + 3 * H });
+    expect(await h.engine.markAttempt(attempt!.id, "not_sent")).toBe(false);
+    expect((await h.request<{ heldTracks: unknown[] }>("GET", "/api/needs-attention")).body.heldTracks).toHaveLength(1);
+    // The provider sends at last; the observation settles it and the track moves on.
+    await h.advanceTo(MONDAY_9 + 6 * H);
+    expect((await h.store.engine.attempt(attempt!.id))?.state).toBe("sent");
+    expect(h.fake.deliveryLog).toHaveLength(1);
+  });
+});
