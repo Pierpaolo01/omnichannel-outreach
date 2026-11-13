@@ -3,7 +3,7 @@
  * "nothing to launch" precondition (Q9). Everything else is a warning.
  */
 import { mergeUses, render, type MergeData } from "./copy.ts";
-import { liveSteps, liveTracks, poolOf, type CampaignDefinition } from "./definition.ts";
+import { liveSteps, liveTracks, ownSubject, poolOf, type CampaignDefinition } from "./definition.ts";
 
 export type LaunchBlocker =
   | { readonly kind: "empty_copy"; readonly trackId: string; readonly stepId: string; readonly stepNumber: number; readonly part: "subject" | "body"; readonly message: string }
@@ -48,7 +48,7 @@ export function launchCheck(def: CampaignDefinition, leads: readonly MergeData[]
   for (const track of tracks) {
     if (track.channel === "call") continue;
     for (const step of liveSteps(track)) {
-      for (const use of [...mergeUses(step.subject), ...mergeUses(step.body)]) if (use.fallback === null) fieldsWithoutFallback.add(use.field);
+      for (const use of [...mergeUses(track.channel === "sms" ? "" : ownSubject(step)), ...mergeUses(step.body)]) if (use.fallback === null) fieldsWithoutFallback.add(use.field);
     }
   }
   for (const field of [...fieldsWithoutFallback].sort()) {

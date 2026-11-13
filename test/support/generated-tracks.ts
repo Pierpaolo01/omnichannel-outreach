@@ -750,7 +750,8 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
           if (c.at < due) problem(`8: ${rec.id}/${step.id} handed over at ${new Date(c.at).toISOString()} before it was due at ${Number.isFinite(due) ? new Date(due).toISOString() : "never"}`);
           if (!inWindow(t.window, zone, c.at)) problem(`13: ${rec.id}/${step.id} handed over outside its window at ${new Date(c.at).toISOString()} (${zone})`);
           const data = mergeData(rec);
-          const expected = { subject: t.channel === "sms" ? "" : renderCopy(step.subject, data), body: renderCopy(step.body, data) };
+          // A text has no subject; a continue-thread email has none of its own (PR 41 council, item 3).
+          const expected = { subject: t.channel === "sms" || step.threading !== "new_subject" ? "" : renderCopy(step.subject, data), body: renderCopy(step.body, data) };
           if (expected.subject !== c.rendered.subject || expected.body !== c.rendered.body) problem(`8: ${rec.id}/${step.id} carried ${JSON.stringify(c.rendered)}; the copy was ${JSON.stringify(expected)}`);
           // 2. Nothing after the lead replied.
           if (c.at > replied) problem(`2: ${rec.id}/${step.id} was called at ${new Date(c.at).toISOString()} after the lead replied at ${new Date(replied).toISOString()}`);

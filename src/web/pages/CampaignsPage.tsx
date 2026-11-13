@@ -6,6 +6,9 @@ import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
 import { whenImported } from "../importText.tsx";
 import { useNow } from "../time.ts";
+import { LaunchBadge, campaignPath } from "./CampaignPage.tsx";
+
+const TRACK_NAME = { email: "Email track", sms: "SMS track", call: "Phone track" } as const;
 
 /** Campaigns: the list, with New campaign and Import again (guided import, chosen 12 November 2026). */
 export function CampaignsPage() {
@@ -77,10 +80,12 @@ function CampaignRow({ campaign }: { campaign: CampaignListItem }) {
     <li className="grid grid-cols-1 items-center gap-x-5 gap-y-3 rounded-box border border-line bg-base-100 px-5 py-[18px] sm:grid-cols-[minmax(0,1fr)_auto]">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-3">
-          <h2 className="min-w-0 text-[17px]">{campaign.name}</h2>
-          <span className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-[5px] bg-raised py-0.5 pl-[7px] pr-2 text-[13px] font-medium text-ink-2 shadow-[inset_0_0_0_1px_var(--color-line)] before:box-border before:size-2 before:rounded-full before:border-[1.5px] before:border-dashed before:border-current before:content-['']">
-            Not launched
-          </span>
+          <h2 className="min-w-0 text-[17px]">
+            <Link href={campaignPath(campaign.id)} className="no-underline hover:underline">
+              {campaign.name}
+            </Link>
+          </h2>
+          <LaunchBadge launchedAt={campaign.sequence.launchedAt} />
         </div>
         <p className="mt-1 text-[13.5px] text-muted">
           {campaign.leadCount} {campaign.leadCount === 1 ? "lead" : "leads"}.{" "}
@@ -95,19 +100,38 @@ function CampaignRow({ campaign }: { campaign: CampaignListItem }) {
             "Nothing imported yet."
           )}
         </p>
-        <p className="mt-2.5 flex items-center gap-2 text-[13px] text-faint">
-          <span className="w-[62px] border-t-[1.5px] border-dashed border-line-strong" aria-hidden="true" />
-          No sequence yet
-        </p>
+        {campaign.sequence.tracks.length === 0 ? (
+          <p className="mt-2.5 flex items-center gap-2 text-[13px] text-faint">
+            <span className="w-[62px] border-t-[1.5px] border-dashed border-line-strong" aria-hidden="true" />
+            No sequence yet
+          </p>
+        ) : (
+          <p className="mt-2.5 flex items-center gap-1.5 text-[13px] text-muted">
+            {campaign.sequence.tracks.map((channel, i) => (
+              <span key={i} className="flex items-center gap-1.5">
+                {i > 0 && <span className="w-2 border-t border-line-strong" aria-hidden="true" />}
+                <span className="grid size-7 place-items-center rounded-[7px] border border-line-strong bg-base-100 text-ink-2" title={TRACK_NAME[channel]}>
+                  <Icon name={channel === "call" ? "call" : channel} className="size-4" />
+                </span>
+              </span>
+            ))}
+            <span className="sr-only">Sequence: {campaign.sequence.tracks.map((c) => TRACK_NAME[c]).join(", ")}</span>
+          </p>
+        )}
       </div>
-      <Link
-        href={`/campaigns/${campaign.id}/import`}
-        className="btn gap-1.5 justify-self-start border-line-strong bg-base-100 font-medium no-underline sm:justify-self-end"
-        aria-label={`${last ? "Import again into" : "Import into"} ${campaign.name}`}
-      >
-        <Icon name="upload" className="size-4" />
-        {last ? "Import again" : "Import"}
-      </Link>
+      <div className="flex flex-wrap gap-2 justify-self-start sm:justify-self-end">
+        <Link
+          href={`/campaigns/${campaign.id}/import`}
+          className="btn gap-1.5 border-line-strong bg-base-100 font-medium no-underline"
+          aria-label={`${last ? "Import again into" : "Import into"} ${campaign.name}`}
+        >
+          <Icon name="upload" className="size-4" />
+          {last ? "Import again" : "Import"}
+        </Link>
+        <Link href={campaignPath(campaign.id)} className="btn border-line-strong bg-base-100 font-medium no-underline" aria-label={`Open ${campaign.name}`}>
+          Open
+        </Link>
+      </div>
     </li>
   );
 }

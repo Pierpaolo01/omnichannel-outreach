@@ -55,6 +55,22 @@ export async function postJson(path: string, body: unknown): Promise<unknown> {
   return json;
 }
 
+/** Replaces a resource with a JSON body and returns the parsed answer. A non-2xx answer throws with the server's message. */
+export async function putJson(path: string, body: unknown, options: { keepalive?: boolean; signal?: AbortSignal } = {}): Promise<unknown> {
+  const response = await fetch(path, {
+    method: "PUT",
+    ...(options.keepalive ? { keepalive: true } : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  const json: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new ApiRequestError(response.status, isApiError(json) ? json.error.message : `The server answered ${response.status}.`, json);
+  }
+  return json;
+}
+
 /**
  * Loads one resource. While a new path loads, the last result stays available as `previous`.
  * The server's JSON is trusted to match the shared API types: both sides compile from

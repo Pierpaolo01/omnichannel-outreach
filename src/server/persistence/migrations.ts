@@ -453,8 +453,34 @@ export const MIGRATIONS: readonly Migration[] = [
     `,
   },
   {
-    // Ticket 14a. Pull request 41 (ticket 12c) has not merged; whichever merges second renumbers.
+    // Numbered after the Instantly adapter's 7 and 8 and ticket 13a's 9.
     version: 10,
+    name: "bounce events: each hard bounce the provider reported, kept by its event id for the timeline (ticket 12c)",
+    sql: `
+      CREATE TABLE bounce_events (
+        event_id TEXT PRIMARY KEY,
+        subject_id TEXT NOT NULL,
+        work_key TEXT NOT NULL,
+        track_id TEXT NOT NULL,
+        step_id TEXT NOT NULL,
+        destination TEXT NOT NULL,
+        at_wall INTEGER NOT NULL,
+        received_wall INTEGER NOT NULL
+      );
+      CREATE INDEX bounce_events_by_subject ON bounce_events (subject_id, at_wall);
+    `,
+  },
+  {
+    version: 11,
+    name: "the editing session and number that wrote the definition (ticket 12c, ADR 0003 1.1.1)",
+    sql: `
+      ALTER TABLE campaigns ADD COLUMN definition_session TEXT;
+      ALTER TABLE campaigns ADD COLUMN definition_seq INTEGER;
+    `,
+  },
+  {
+    // Ticket 14a, numbered after pull request 41's 10 and 11.
+    version: 12,
     name: "call tasks, the outcomes logged on them, and person and company notes (ADR 0003 1.3; ticket 14)",
     // One task per call step, never a second; it closes once, when its track finishes. Outcomes
     // are kept for good. A note belongs to a person, or to a company and shows for everyone there.

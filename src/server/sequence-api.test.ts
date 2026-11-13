@@ -86,3 +86,113 @@ describe("the sequence interface (tickets 12b and 13)", () => {
     expect((await api.get<NeedsAttention>("/api/needs-attention")).body).toEqual({ stalledInboxes: [], heldTracks: [], accountWaits: [], senderProblems: [], heldCapacity: [], anomalies: [] });
   });
 });
+
+describe("saving the definition: sessions, numbers and the base revision (ADR 0003 1.1.1)", () => {
+  const body = (subject: string, save?: { session: string; seq: number; base: number }, bodyText = "Hello.") => ({
+    timezone: "Europe/London",
+    emailPool: [],
+    tracks: [track({ steps: [{ id: "s1", waitDays: 0, subject, body: bodyText, threading: "new_subject" }] })],
+    ...(save ? { save } : {}),
+  });
+  const code = async (res: Response) => ((await res.json()) as ApiError).error.code;
+  const subject = async (api: ReturnType<typeof testApi>, id: string) => (await api.get<SequenceView>(`/api/campaigns/${id}/sequence`)).body;
+
+  async function fresh() {
+    const api = testApi();
+    const campaign = await api.createCampaign("Autumn", "Europe/London");
+    return { api, id: campaign.id };
+  }
+
+  test("a session's first save starts from the stored revision; its later saves continue the session", async () => {
+    const { api, id } = await fresh();
+    expect((await put(api, id, body("One", { session: "A", seq: 1, base: 0 }))).status).toBe(200);
+    // Continuing the session: the base it last saw no longer matters, the number does.
+    expect((await put(api, id, body("Two", { session: "A", seq: 3, base: 0 }))).status).toBe(200);
+    expect((await subject(api, id)).definition.tracks[0]!.steps[0]!.subject).toBe("Two");
+  });
+
+  test("a later save of the same session that arrives first leaves the older one superseded (B6)", async () => {
+    const { api, id } = await fresh();
+    expect((await put(api, id, body("Newest", { session: "A", seq: 2, base: 0 }))).status).toBe(200);
+    const late = await put(api, id, body("Older", { session: "A", seq: 1, base: 0 }));
+    expect([late.status, await code(late)]).toEqual([409, "superseded"]);
+    expect((await subject(api, id)).definition.tracks[0]!.steps[0]!.subject).toBe("Newest");
+  });
+
+  test("the same session and number with the same content is a retry after a lost answer: it succeeds and changes nothing (B8)", async () => {
+    const { api, id } = await fresh();
+    expect((await put(api, id, body("Kept", { session: "A", seq: 1, base: 0 }))).status).toBe(200);
+    const retry = await put(api, id, body("Kept", { session: "A", seq: 1, base: 0 }));
+    expect(retry.status).toBe(200);
+    expect(((await retry.json()) as SequenceView).definitionVersion).toBe(1);
+  });
+
+  test("the same session and number with other content is a conflict", async () => {
+    const { api, id } = await fresh();
+    expect((await put(api, id, body("Kept", { session: "A", seq: 1, base: 0 }))).status).toBe(200);
+    const clash = await put(api, id, body("Other", { session: "A", seq: 1, base: 0 }));
+    expect([clash.status, await code(clash)]).toEqual([409, "edit_conflict"]);
+  });
+
+  test("a stale tab, based on a revision another tab has replaced, is refused and overwrites nothing (B7)", async () => {
+    const { api, id } = await fresh();
+    // Both tabs load revision 0. Tab B saves; tab A, still on revision 0, saves later.
+    expect((await put(api, id, body("Tab B protected subject", { session: "B", seq: 1, base: 0 }))).status).toBe(200);
+    const stale = await put(api, id, body("Old subject", { session: "A", seq: 9, base: 0 }, "Tab A later body"));
+    expect([stale.status, await code(stale)]).toEqual([409, "edit_conflict"]);
+    const stored = await subject(api, id);
+    expect([stored.definition.tracks[0]!.steps[0]!.subject, stored.definitionVersion]).toEqual(["Tab B protected subject", 1]);
+    // Once tab A has loaded revision 1, its save starts from the stored revision and is accepted.
+    expect((await put(api, id, body("Tab A after loading", { session: "A", seq: 10, base: 1 }))).status).toBe(200);
+  });
+
+  test("a save with no session (an API client, a test) is stored as before", async () => {
+    const { api, id } = await fresh();
+    expect((await put(api, id, body("Session", { session: "A", seq: 1, base: 0 }))).status).toBe(200);
+    expect((await put(api, id, body("No session"))).status).toBe(200);
+    expect((await subject(api, id)).definition.tracks[0]!.steps[0]!.subject).toBe("No session");
+  });
+
+  test("a definition larger than 56 KiB is refused, so a save on leaving can always carry one (boundary)", async () => {
+    const { api, id } = await fresh();
+    const big = { ...body("Big", { session: "A", seq: 1, base: 0 }), tracks: [track({ steps: [1, 2, 3, 4].map((n) => ({ id: `s${n}`, waitDays: n === 1 ? 0 : 1, subject: n === 1 ? "Big" : "", body: "x".repeat(15_000), threading: n === 1 ? "new_subject" : "continue_thread" })) })] };
+    const res = await put(api, id, big);
+    expect([res.status, await code(res)]).toEqual([413, "too_large"]);
+  });
+
+  test("launch starts only the revision the page shows", async () => {
+    const { api, id } = await fresh();
+    expect((await put(api, id, body("Shown", { session: "A", seq: 1, base: 0 }))).status).toBe(200);
+    const res = await api.post<ApiError>(`/api/campaigns/${id}/launch`, { definitionVersion: 0 });
+    expect([res.status, res.body.error.code]).toEqual([409, "changed_elsewhere"]);
+  });
+});
+
+describe("the answers are the rows written, not read afterwards (PR 41 council, item 4)", () => {
+  const body = (subject: string, save: { session: string; seq: number; base: number }) => ({
+    timezone: "Europe/London",
+    emailPool: [],
+    tracks: [track({ steps: [{ id: "s1", waitDays: 0, subject, body: "Hello.", threading: "new_subject" }] })],
+    save,
+  });
+
+  test("a save answers with the definition it stored, even if another tab's save commits right after it", async () => {
+    const api = testApi();
+    const campaign = await api.createCampaign("Autumn", "Europe/London");
+    const engine = api.store.engine;
+    const save = engine.saveDefinition.bind(engine);
+    let raced = false;
+    engine.saveDefinition = async (...args) => {
+      const out = await save(...args);
+      if (!raced) {
+        raced = true;
+        // Another tab's save, based on the revision just stored, commits before the answer is built.
+        await save(args[0], { ...args[1], tracks: [{ ...args[1].tracks[0]!, steps: [{ ...args[1].tracks[0]!.steps[0]!, subject: "Other tab" }] }] }, args[2], { session: "B", seq: 1, base: 1 });
+      }
+      return out;
+    };
+    const res = await put(api, campaign.id, body("Mine", { session: "A", seq: 1, base: 0 }));
+    const view = (await res.json()) as SequenceView;
+    expect([view.definition.tracks[0]!.steps[0]!.subject, view.definitionVersion]).toEqual(["Mine", 1]);
+  });
+});

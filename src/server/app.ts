@@ -5,18 +5,21 @@ import { planImport } from "../domain/import-plan.ts";
 import { isOutreachStatus } from "../domain/outreach-status.ts";
 import { checkScraperFile, parseScraperExport } from "../domain/scraper-export.ts";
 import type { ApiError, CallOutcomeAnswer, Campaign, FileCheckResult, SmsProviderStatus } from "../shared/api.ts";
-import { CAMPAIGN_NAME_MAX } from "../shared/limits.ts";
+import { CAMPAIGN_NAME_MAX, DEFINITION_MAX_BYTES, STEP_BODY_MAX, STEP_SUBJECT_MAX } from "../shared/limits.ts";
 import { checkApiRequest } from "./guard.ts";
 import { invalidBodyMessage, requestObject } from "./request-body.ts";
 import type { OutreachStore } from "./persistence/store.ts";
 import { launchCheck } from "../domain/sequence/blockers.ts";
-import { definitionProblems, emptyDefinition, type CampaignDefinition } from "../domain/sequence/definition.ts";
+import { definitionProblems, emptyDefinition, liveTracks, type CampaignDefinition } from "../domain/sequence/definition.ts";
 import { Engine } from "./engine/engine.ts";
+import type { StoredDefinition } from "./engine/engine-store.ts";
 import { UnconnectedEmailPort, UnprovisionedSmsPort } from "./engine/ports.ts";
 import { accountView, needsAttention, progressView } from "./engine/views.ts";
 import { callsView, callTaskView, todayView } from "./engine/call-views.ts";
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
-import type { SequenceView } from "../shared/api.ts";
+import type { CampaignDetail, CampaignListItem, CampaignSequenceSummary, SequenceView } from "../shared/api.ts";
+import { beforeLaunchView, copyPreview } from "./before-launch.ts";
+import { activityOf } from "./activity.ts";
 import { registerEmailProviderRoutes, type EmailProviderSource } from "./instantly/routes.ts";
 
 export interface AppDependencies {
@@ -41,8 +44,8 @@ const windowRule = requestObject({ day: z.number().int().min(0).max(6), start: z
 const stepBody = requestObject({
   id: z.string().trim().min(1).max(100),
   waitDays: z.number(),
-  subject: z.string().max(1_000).default(""),
-  body: z.string().max(20_000),
+  subject: z.string().max(STEP_SUBJECT_MAX).default(""),
+  body: z.string().max(STEP_BODY_MAX),
   threading: z.enum(["new_subject", "continue_thread"]),
   removed: z.boolean().default(false),
 });
@@ -63,6 +66,8 @@ const definitionBody = requestObject({
   smsPool: z.array(z.string().min(1).max(200)).max(100).default([]),
   callScript: z.string().max(20_000).default(""),
   tracks: z.array(trackBody).max(20),
+  /** Who wrote the save (ADR 0003 1.1.1): its editing session, its number there, and the revision it last saw. */
+  save: requestObject({ session: z.string().min(1).max(100), seq: z.number().int().nonnegative(), base: z.number().int().nonnegative() }).optional(),
 });
 
 /** The user's zone: the machine's, which a campaign's default zone starts from (ADR 0003 1.1). */
@@ -124,7 +129,7 @@ const importBody = requestObject({
   fileNames,
 });
 
-const launchBody = requestObject({});
+const launchBody = requestObject({ definitionVersion: z.number().int().optional() });
 
 const checkBody = requestObject({ businessesCsv: z.string().optional(), peopleCsv: z.string().optional() });
 
@@ -191,7 +196,20 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     return c.json({ campaign: await store.campaign(record.campaignId), import: record }, 201);
   };
 
-  app.get("/campaigns", async (c) => c.json({ campaigns: await store.listCampaigns() }));
+  /** Whether the campaign has launched and its live main-sequence tracks' channels (ticket 12c). */
+  const sequenceSummary = async (campaignId: string): Promise<CampaignSequenceSummary> => {
+    const row = await store.engine.campaign(campaignId);
+    return {
+      launchedAt: row?.launchedAt == null ? null : new Date(row.launchedAt).toISOString(),
+      tracks: row?.definition ? liveTracks(row.definition, "main").map((t) => t.channel) : [],
+    };
+  };
+
+  app.get("/campaigns", async (c) => {
+    const campaigns: CampaignListItem[] = [];
+    for (const item of await store.listCampaigns()) campaigns.push({ ...item, sequence: await sequenceSummary(item.id) });
+    return c.json({ campaigns });
+  });
 
   app.post("/campaigns", withinImportLimit, async (c) => {
     const parsed = newCampaignBody.safeParse(await readJson(c));
@@ -208,7 +226,8 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   app.get("/campaigns/:id", async (c) => {
     const campaign = await store.campaign(c.req.param("id"));
     if (!campaign) return notFound(c, "campaign");
-    return c.json({ campaign, imports: await store.listImports(campaign.id) });
+    const leadCount = (await store.listCampaigns()).find((item) => item.id === campaign.id)?.leadCount ?? 0;
+    return c.json<CampaignDetail>({ campaign, imports: await store.listImports(campaign.id), leadCount, sequence: await sequenceSummary(campaign.id) });
   });
 
   app.get("/campaigns/:id/imports", async (c) => {
@@ -277,8 +296,9 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   // -------------------------------------------------------------------------------------------
   // The sequence engine (ADR 0003), ticket 12b.
 
-  const sequenceView = async (campaignId: string, defaultZone: string | null): Promise<SequenceView | null> => {
-    const row = await store.engine.campaign(campaignId);
+  /** `written`: the row as the transaction that wrote it left it, so the answer is that write's (PR 41 council, item 4). */
+  const sequenceView = async (campaignId: string, defaultZone: string | null, written?: StoredDefinition): Promise<SequenceView | null> => {
+    const row = written ?? (await store.engine.campaign(campaignId));
     if (!row) return null;
     const definition = row.definition ?? emptyDefinition(defaultZone ?? machineZone());
     const at = Date.parse(now());
@@ -301,30 +321,47 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     return view ? c.json(view) : notFound(c, "campaign");
   });
 
-  app.put("/campaigns/:id/sequence", async (c) => {
+  const withinDefinitionLimit = bodyLimit({
+    maxSize: DEFINITION_MAX_BYTES,
+    onError: (c) => c.json<ApiError>({ error: { code: "too_large", message: `The sequence is larger than ${DEFINITION_MAX_BYTES / 1024} KB, so it cannot be saved safely. Shorten the emails.` } }, 413),
+  });
+
+  app.put("/campaigns/:id/sequence", withinDefinitionLimit, async (c) => {
     const campaign = await store.campaign(c.req.param("id"));
     if (!campaign) return notFound(c, "campaign");
     const body = definitionBody.safeParse(await readJson(c));
     if (!body.success) return invalid(c, body.error);
-    // A declined path is stored only when the canvas set one.
-    const definition: CampaignDefinition = { ...body.data, tracks: body.data.tracks.map(({ declinedPath, ...t }) => (declinedPath ? { ...t, declinedPath } : t)) };
+    const { save, ...fields } = body.data;
+    // A declined path is stored only when the canvas set one; the phone track's fields travel in the same save (ADR 0003 1.1.1).
+    const definition: CampaignDefinition = { ...fields, tracks: fields.tracks.map(({ declinedPath, ...t }) => (declinedPath ? { ...t, declinedPath } : t)) };
     const previous = (await store.engine.campaign(campaign.id))?.definition ?? null;
     const problems = definitionProblems(definition, previous);
     if (problems.length > 0) return c.json<ApiError>({ error: { code: "invalid_sequence", message: problems.join(" ") } }, 400);
-    const saved = await store.engine.saveDefinition(campaign.id, definition, now());
+    const result = await store.engine.saveDefinition(campaign.id, definition, now(), save ?? null);
+    const saved = result.outcome;
+    if (saved === "missing") return notFound(c, "campaign");
+    if (saved === "superseded") {
+      return c.json<ApiError>({ error: { code: "superseded", message: "A later change from this page was already saved." } }, 409);
+    }
+    if (saved === "conflict") {
+      return c.json<ApiError>({ error: { code: "edit_conflict", message: "This campaign’s sequence was changed elsewhere since this page loaded it, so this change was not saved." } }, 409);
+    }
     if (saved === "launched") {
       return c.json<ApiError>({ error: { code: "launched", message: "This campaign is running. Editing a running campaign arrives with a later release." } }, 409);
     }
-    return c.json(await sequenceView(campaign.id, campaign.defaultTimezone));
+    return c.json(await sequenceView(campaign.id, campaign.defaultTimezone, result.stored));
   });
 
   app.post("/campaigns/:id/launch", async (c) => {
     const campaign = await store.campaign(c.req.param("id"));
     if (!campaign) return notFound(c, "campaign");
-    // Launch takes no options: a field in its body is refused, like any other.
+    // Launch takes one option, the revision the page last saw; any other field is refused, like any other.
     const body = launchBody.safeParse((await readJson(c)) ?? {});
     if (!body.success) return invalid(c, body.error);
-    const outcome = await engine.launch(campaign.id);
+    const outcome = await engine.launch(campaign.id, body.data.definitionVersion);
+    if (!outcome.ok && outcome.reason === "changed") {
+      return c.json<ApiError>({ error: { code: "changed_elsewhere", message: "The sequence was changed elsewhere since this page loaded it, so nothing was launched. Load the saved version first." } }, 409);
+    }
     if (!outcome.ok) {
       const message =
         outcome.reason === "already_launched" ? "This campaign has already launched."
@@ -333,7 +370,40 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
         : `Launch is blocked: ${outcome.check?.blockers.map((b) => b.message).join(" ") ?? ""}`;
       return c.json<ApiError>({ error: { code: outcome.reason === "already_launched" ? "already_launched" : "launch_blocked", message } }, 409);
     }
-    return c.json(await sequenceView(campaign.id, campaign.defaultTimezone));
+    return c.json(await sequenceView(campaign.id, campaign.defaultTimezone, "stored" in outcome ? outcome.stored : undefined));
+  });
+
+  // The campaign editor's Before launch tab (ticket 12c): read models only.
+  const definitionOf = async (campaignId: string, defaultZone: string | null) => {
+    const row = await store.engine.campaign(campaignId);
+    return row ? { definition: row.definition ?? emptyDefinition(defaultZone ?? machineZone()), launched: row.launchedAt !== null } : null;
+  };
+
+  app.get("/campaigns/:id/before-launch", async (c) => {
+    const campaign = await store.campaign(c.req.param("id"));
+    const def = campaign ? await definitionOf(campaign.id, campaign.defaultTimezone) : null;
+    if (!campaign || !def) return notFound(c, "campaign");
+    // `load=0`: coverage and merge fields only, without the load projection (the Sequence and Leads tabs).
+    const withLoad = c.req.query("load") !== "0";
+    return c.json(await beforeLaunchView(store, campaign.id, def.definition, def.launched || !withLoad, Date.parse(now())));
+  });
+
+  app.get("/campaigns/:id/preview/:enrollmentId", async (c) => {
+    const campaign = await store.campaign(c.req.param("id"));
+    const def = campaign ? await definitionOf(campaign.id, campaign.defaultTimezone) : null;
+    const preview = campaign && def ? await copyPreview(store, campaign.id, c.req.param("enrollmentId"), def.definition, Date.parse(now())) : null;
+    return preview ? c.json(preview) : notFound(c, campaign ? "lead in this campaign" : "campaign");
+  });
+
+  // The timeline's campaign activity on a person or company-lead record (ticket 12c).
+  app.get("/people/:id/activity", async (c) => {
+    const person = await store.person(c.req.param("id"));
+    return person ? c.json({ entries: await activityOf(store, person.enrollments, Date.parse(now())) }) : notFound(c, "person");
+  });
+
+  app.get("/companies/:id/activity", async (c) => {
+    const company = await store.company(c.req.param("id"));
+    return company ? c.json({ entries: await activityOf(store, company.enrollments, Date.parse(now())) }) : notFound(c, "company");
   });
 
   app.get("/enrollments/:id", async (c) => {

@@ -2,6 +2,7 @@ import { useState, type ReactNode, type SyntheticEvent } from "react";
 import { Link, Route, Switch, useLocation } from "wouter";
 import { Icon, type IconName } from "./icons.tsx";
 import { CallsPage } from "./pages/CallsPage.tsx";
+import { CampaignPage } from "./pages/CampaignPage.tsx";
 import { CampaignsPage } from "./pages/CampaignsPage.tsx";
 import { CompanyPage } from "./pages/CompanyPage.tsx";
 import { ImportPage } from "./pages/ImportPage.tsx";
@@ -39,6 +40,11 @@ export function App() {
             <Route path="/campaigns" component={CampaignsPage} />
             <Route path="/campaigns/new">{() => <ImportPage />}</Route>
             <Route path="/campaigns/:id/import">{(params) => <ImportPage campaignId={params.id} />}</Route>
+            <Route path="/campaigns/:id">{(params) => <CampaignPage key={params.id} id={params.id} tab="sequence" />}</Route>
+            <Route path="/campaigns/:id/before-launch">{(params) => <CampaignPage key={params.id} id={params.id} tab="before-launch" />}</Route>
+            <Route path="/campaigns/:id/test-run">{(params) => <CampaignPage key={params.id} id={params.id} tab="test-run" />}</Route>
+            <Route path="/campaigns/:id/leads">{(params) => <CampaignPage key={params.id} id={params.id} tab="leads" />}</Route>
+            <Route path="/campaigns/:id/imports">{(params) => <CampaignPage key={params.id} id={params.id} tab="imports" />}</Route>
             <Route path="/campaigns/:id/imports/:importId">
               {(params) => <ImportResultPage campaignId={params.id} importId={params.importId} />}
             </Route>

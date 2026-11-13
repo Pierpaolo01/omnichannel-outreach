@@ -7,7 +7,7 @@
 import { ENGINE_PARAMS, isLive, isUncertain } from "./attempt.ts";
 import { leadNow, windowOpen } from "./clock.ts";
 import { render } from "./copy.ts";
-import { poolOf, type TrackChannel } from "./definition.ts";
+import { ownSubject, poolOf, type TrackChannel } from "./definition.ts";
 import { channelOf, progressOf, runs, trackHold, type HoldReason } from "./progress.ts";
 import type { AccountState, Attempt, ProviderWork, RenderedCopy, SubjectState } from "./state.ts";
 
@@ -35,7 +35,8 @@ const stepDef = (state: SubjectState, trackId: string, stepId: string) =>
 export function renderStep(state: SubjectState, trackId: string, stepId: string): RenderedCopy | null {
   const step = stepDef(state, trackId, stepId);
   if (!step) return null;
-  const subject = render(channelOf(state, trackId) === "sms" ? "" : step.subject, state.lead.mergeData);
+  // A text has no subject; an email renders only a subject it starts (a continuing one has none).
+  const subject = render(channelOf(state, trackId) === "sms" ? "" : ownSubject(step), state.lead.mergeData);
   const body = render(step.body, state.lead.mergeData);
   return subject.ok && body.ok ? { subject: subject.text, body: body.text } : null;
 }
@@ -171,9 +172,19 @@ export function chooseAccount(state: SubjectState, now: number, stepId: string |
   const channel = channelOf(state, trackId) ?? "email";
   const candidates = candidatesFor(state, trackId).map((id) => state.accounts[id]).filter((a) => a?.channel === channel);
   const inherited = stepId === null ? undefined : inheritedWork(state, stepId);
+  return pickAccount(candidates, now, inherited?.accountId ?? null);
+}
+
+/**
+ * Of the candidate accounts, the one a claim takes (4.2 step 2): available and with room, then
+ * the one that can send soonest, then the one with most remaining capacity, then the lowest id.
+ * `reservedOn` is the account whose reservation an inherited claim already holds. The Before
+ * launch projection calls this too, so it chooses as the engine does (ADR 0003, 12c).
+ */
+export function pickAccount(candidates: readonly (AccountState | undefined)[], now: number, reservedOn: string | null = null): AccountState | null {
   return (
     candidates
-      .filter((a): a is AccountState => a !== undefined && accountAvailable(a, now) && accountHasRoom(a, inherited?.accountId === a.id))
+      .filter((a): a is AccountState => a !== undefined && accountAvailable(a, now) && accountHasRoom(a, reservedOn === a.id))
       .sort((a, b) => Math.max(a.nextSlotAt, now) - Math.max(b.nextSlotAt, now) || b.capacity - b.used - (a.capacity - a.used) || (a.id < b.id ? -1 : 1))[0] ?? null
   );
 }

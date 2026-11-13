@@ -1,5 +1,6 @@
 import { Link } from "wouter";
 import type { PersonRecord } from "../../shared/api.ts";
+import { Activity } from "../activity.tsx";
 import { useApi } from "../api.ts";
 import { BackToLeads, CampaignRows, ContactRow, ErrorState, LocalTime, PeopleRows, RecordSkeleton, Section } from "../components.tsx";
 
@@ -58,6 +59,8 @@ function Person({ person }: { person: PersonRecord }) {
           <PeopleRows people={person.colleagues} />
         </Section>
       )}
+
+      <Activity path={`/api/people/${encodeURIComponent(person.id)}/activity`} />
     </article>
   );
 }

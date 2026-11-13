@@ -111,21 +111,21 @@ const RULES: Record<string, Partial<Rules>> = {
 
 /** The invariant each mutation must break, and the seed offset known to show it (refreshed by the CI search). */
 const EXPECTED: Record<string, { invariant: string; seed: number }> = {
-  "outcome on an unlisted task": { invariant: "16", seed: 7 },
-  "interested closes only its own task": { invariant: "16", seed: 16 },
+  "outcome on an unlisted task": { invariant: "16", seed: 4 },
+  "interested closes only its own task": { invariant: "16", seed: 4 },
   "daily call capacity ignored": { invariant: "17", seed: 0 },
   "committed calls not counted": { invariant: "17", seed: 1 },
   "a call placed on a day its calling hours have closed": { invariant: "17", seed: 1 },
   "an unworked call holds the parallel tracks": { invariant: "18", seed: 6 },
   "the tracks after a call start when it is placed": { invariant: "7", seed: 3 },
   "skip for now finishes the call": { invariant: "7", seed: 3 },
-  "a wrong number leaves the number good": { invariant: "19", seed: 10 },
-  "an outcome on a bad number accepted": { invariant: "16", seed: 6 },
+  "a wrong number leaves the number good": { invariant: "19", seed: 8 },
+  "an outcome on a bad number accepted": { invariant: "16", seed: 36 },
   "calls placed newest due first": { invariant: "12", seed: 3 },
   "a replayed action is logged again": { invariant: "16", seed: 0 },
   "a person note kept on the company": { invariant: "16", seed: 0 },
   "a track that finishes without closing its call task": { invariant: "16", seed: 0 },
-  "ready now newest due first": { invariant: "16", seed: 0 },
+  "ready now newest due first": { invariant: "16", seed: 6 },
   "the focus moves to the oldest ready call": { invariant: "16", seed: 0 },
 };
 
