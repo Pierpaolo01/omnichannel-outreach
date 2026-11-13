@@ -610,7 +610,14 @@ export class Engine {
         continue;
       }
       await this.hooks.beforeApplyEvaluation?.(id);
-      await this.store.update(id, now, (current) => (this.rules.versionsMatch(snapshot, current) ? { ...next, accounts: current.accounts } : null));
+      // Shared facts other subjects write are taken as they are now: the accounts, and the SMS
+      // bindings, which another process's first handover to the same mobile may have added since the
+      // snapshot (review bot on 5ca8c5e). An evaluation never removes a binding; one it added is kept.
+      await this.store.update(id, now, (current) =>
+        this.rules.versionsMatch(snapshot, current)
+          ? { ...next, accounts: current.accounts, smsBindings: [...current.smsBindings, ...next.smsBindings.filter((b) => !snapshot.smsBindings.some((x) => x.sender === b.sender && x.recipient === b.recipient) && !current.smsBindings.some((x) => x.sender === b.sender && x.recipient === b.recipient))] }
+          : null,
+      );
       // Written, or discarded as stale: either way another pass follows, so a discarded change is
       // re-evaluated on fresh state in this tick (2.5).
       changed = true;

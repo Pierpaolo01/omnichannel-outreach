@@ -1,9 +1,11 @@
 import { describe, expect, test } from "vitest";
-import { EngineHarness } from "../../../test/support/engine-harness.ts";
+import { EngineHarness, quickWait } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { FakeNumber } from "../../../test/support/fake-sms-port.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
 import type { LeadSearchResult, NeedsAttention, PersonRecord, SequenceView } from "../../shared/api.ts";
+import { Engine, TickQueue } from "./engine.ts";
+import { DEFAULT_RULES } from "./rules.ts";
 
 /**
  * SMS tracks beside email and the coordination between tracks (ticket 13), through the real HTTP
@@ -259,6 +261,44 @@ describe("SMS conversations are campaign-local (ADR 0003 4.5)", () => {
       holds.push((await h.progress(row.enrollments.find((e) => e.campaign.id === id)!.id)).tracks[0]?.hold ?? null);
     }
     expect(holds.filter((x) => x === "sms_conversation_taken")).toHaveLength(1);
+  });
+});
+
+describe("a conversation another worker takes while this one evaluates (review bot on 5ca8c5e)", () => {
+  test("the evaluation applies with the other campaign's new binding kept, the tick does not fail, and the lead texts from another number", async () => {
+    const { h, campaign, texts } = await world({ people: [PEOPLE[0]!], businesses: [BUSINESSES[0]!] });
+    h.clock = MONDAY_9;
+    // Campaign A: an email, then a text one day after it. Campaign B: a text, whose window opens on Tuesday.
+    const a = await campaign("A", [track("t1", "email", [email("s1")]), track("t2", "sms", [text("m1")], after("t1", 1))]);
+    const b = await campaign("B", [track("t1", "sms", [text("m1")], { kind: "entry" }, [{ day: 2, start: 0, end: 24 }])]);
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    // At Tuesday 00:00 A's text track starts. Between that evaluation and its commit, another process,
+    // which leaves A alone, claims and hands over B's text: B takes the conversation from N1.
+    let other = 0;
+    const otherProcess = new Engine({
+      store: h.store.engine,
+      port: h.provider,
+      smsPort: h.sms,
+      now: () => h.clock,
+      newId: () => `other-${++other}`,
+      ticks: new TickQueue(),
+      waitFor: quickWait,
+      rules: { evaluate: (s, now, options) => (s.subject.id === a("Pat Oneil") ? s : DEFAULT_RULES.evaluate(s, now, options)), readyItems: (s, now) => (s.subject.id === a("Pat Oneil") ? [] : DEFAULT_RULES.readyItems(s, now)) },
+    });
+    let raced = false;
+    h.hooks = {
+      beforeApplyEvaluation: async (id) => {
+        if (raced || id !== a("Pat Oneil")) return;
+        raced = true;
+        await otherProcess.tick();
+      },
+    };
+    await h.advanceTo(Date.parse("2026-11-03T06:00:00Z"));
+    expect(raced).toBe(true);
+    expect(texts(PAT_MOBILE).map((d) => [d.subjectId, d.sender])).toEqual([[b("Pat Oneil"), N1], [a("Pat Oneil"), N2]]);
+    const pat = await h.progress(a("Pat Oneil"));
+    expect(pat.tracks.find((t) => t.trackId === "t2")).toMatchObject({ started: true, finishReason: "completed" });
+    expect((await h.progress(b("Pat Oneil"))).smsSender).toBe(N1);
   });
 });
 
