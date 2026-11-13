@@ -26,6 +26,9 @@ import {
 } from "./model.ts";
 import type { SequenceEditor } from "./useSequence.ts";
 
+/** The address for every email collapsed. */
+const NO_STEP = "none";
+
 const LATER = "SMS and phone tracks, and connecting tracks together or after one another, arrive with later releases.";
 
 /** The Sequence tab: the canvas, and the selected track's inspector beside it. */
@@ -34,6 +37,7 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
   const params = new URLSearchParams(useSearch());
   const track = emailTrackOf(editor.draft);
   const selected = track && params.get("track") === track.id ? track : undefined;
+  // `step=none` is every email collapsed, apart from no `step` at all, which opens Email 1.
   const openStep = params.get("step");
   const select = (trackId: string | null, stepId?: string) =>
     navigate(trackId ? `${campaignPath(campaignId)}?track=${encodeURIComponent(trackId)}${stepId ? `&step=${encodeURIComponent(stepId)}` : ""}` : campaignPath(campaignId), { replace: true });
@@ -41,10 +45,10 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
   // closing the inspector returns it to the track, and adding the first track moves it to
   // Email 1's subject.
   const node = useRef<HTMLButtonElement>(null);
-  const [focusNext, setFocusNext] = useState<{ to: "node" } | { to: "subject"; stepId: string } | null>(null);
+  const [focusNext, setFocusNext] = useState<{ to: "node" } | { to: "subject" | "toggle"; stepId: string } | null>(null);
   useEffect(() => {
     if (!focusNext) return;
-    const target = focusNext.to === "node" ? node.current : document.getElementById(`subject-${focusNext.stepId}`);
+    const target = focusNext.to === "node" ? node.current : document.getElementById(`${focusNext.to === "subject" ? "subject" : "step-toggle"}-${focusNext.stepId}`);
     if (target) {
       target.focus();
       setFocusNext(null);
@@ -119,8 +123,9 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
           facts={facts}
           factsFailed={coverage.result.state === "error"}
           onRetryFacts={coverage.retry}
-          openStep={openStep ?? liveSteps(selected)[0]?.id ?? null}
-          onOpenStep={(stepId) => select(selected.id, stepId ?? undefined)}
+          openStep={openStep === NO_STEP ? null : (openStep ?? liveSteps(selected)[0]?.id ?? null)}
+          onOpenStep={(stepId) => select(selected.id, stepId ?? NO_STEP)}
+          onFocusStep={(stepId) => setFocusNext({ to: "toggle", stepId })}
           onClose={() => {
             select(null);
             setFocusNext({ to: "node" });
@@ -186,10 +191,11 @@ interface InspectorProps {
   onRetryFacts: () => void;
   openStep: string | null;
   onOpenStep: (stepId: string | null) => void;
+  onFocusStep: (stepId: string) => void;
   onClose: () => void;
 }
 
-function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, onOpenStep, onClose }: InspectorProps) {
+function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, onOpenStep, onFocusStep, onClose }: InspectorProps) {
   const steps = liveSteps(track);
   const titleId = useId();
   const locked = editor.launched;
@@ -241,7 +247,12 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
               onToggle={() => onOpenStep(openStep === step.id ? null : step.id)}
               onChange={(change) => changeStep(step.id, change)}
               locked={locked}
-              onRemove={() => changeTrack((t) => removeStep(t, step.id))}
+              onRemove={() => {
+                // Focus goes to the email that takes this one's place, or the one before the last.
+                const survivor = steps[i + 1] ?? steps[i - 1];
+                changeTrack((t) => removeStep(t, step.id));
+                if (survivor) onFocusStep(survivor.id);
+              }}
             />
           ))}
           {!locked && (
@@ -339,7 +350,7 @@ function StepBlock({ step, index, steps, open, facts, editor, onToggle, onChange
         </div>
       )}
       <div className={`rounded-field border bg-base-100 ${open ? "border-line-strong" : "border-line"} ${first ? "" : ""}`}>
-        <button type="button" className="flex w-full cursor-pointer items-center gap-2 px-3 py-2.5 text-left" aria-expanded={open} aria-controls={bodyId} onClick={onToggle}>
+        <button id={`step-toggle-${step.id}`} type="button" className="flex w-full cursor-pointer items-center gap-2 px-3 py-2.5 text-left" aria-expanded={open} aria-controls={bodyId} onClick={onToggle}>
           <span className="text-[14px] font-semibold">{name}</span>
           {!open && <span className="min-w-0 flex-1 truncate text-[13px] text-muted">{summary}</span>}
           {open && <span className="flex-1" />}

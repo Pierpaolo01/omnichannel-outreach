@@ -321,6 +321,33 @@ test.describe("review of pull request 41", () => {
     await expect(page.getByText(/leads? without one/)).toHaveCount(0);
   });
 
+  test("moving to another campaign in the app shows that campaign's sequence, not the last one's (council item 6)", async ({ page }) => {
+    const two = await campaign(track([COPY.first, COPY.second]));
+    const one = await campaign(track([COPY.first]));
+    await page.goto(`${r.url}/campaigns/${two}?track=email&step=s1`);
+    await page.getByLabel("Email 1 subject").fill("An edit to the first campaign");
+    await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^Email track: 2 emails/ })).toBeVisible();
+    // Client-side navigation, as Back and Forward do: the page stays mounted.
+    await page.evaluate((path) => {
+      history.pushState(null, "", path);
+      dispatchEvent(new PopStateEvent("popstate"));
+    }, `/campaigns/${one}`);
+    await expect(page.getByRole("button", { name: /^Email track: 1 email/ })).toBeVisible();
+  });
+
+  test("closing the open email leaves every email collapsed, also after a reload (council item 8)", async ({ page }) => {
+    const id = await campaign(track([COPY.first, COPY.second]));
+    await page.goto(`${r.url}/campaigns/${id}?track=email`);
+    const first = page.getByRole("button", { name: /^Email 1/ });
+    await expect(first).toHaveAttribute("aria-expanded", "true");
+    await first.click();
+    await expect(first).toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByRole("button", { name: /^Email 2/ })).toHaveAttribute("aria-expanded", "false");
+    await page.reload();
+    await expect(page.getByRole("button", { name: /^Email 1/ })).toHaveAttribute("aria-expanded", "false");
+  });
+
   test("a follow-up that continues the thread names the subject of the nearest email that started one (SequenceTab.tsx:274)", async ({ page }) => {
     const id = await campaign(track([COPY.first, { ...COPY.second, threading: "new_subject", subject: "A second idea" }, { ...COPY.second, id: "s3", body: "Last note." }]));
     await page.goto(`${r.url}/campaigns/${id}?track=email&step=s3`);

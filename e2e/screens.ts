@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { OUTREACH_STATUSES } from "../src/domain/outreach-status.ts";
 import type { CompanyRecord, ImportRecord, LeadSearchResult, PersonRecord, SummaryEntry } from "../src/shared/api.ts";
 import { refusedPair, respond, serverError } from "./mocks.ts";
-import { fakeProviderApp } from "./fake-provider.ts";
+import { FAKE_INBOX, fakeProviderApp } from "./fake-provider.ts";
 import { fixture } from "./support.ts";
 
 /** Opens a path on the app over the fake email provider. */
@@ -796,6 +796,17 @@ export const SCREENS: readonly Screen[] = [
     open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}?track=email&step=s2`); await settle(page, "Editing a running campaign arrives with a later release."); },
   },
   { name: "fake provider: a running campaign's leads, with their outreach status", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}/leads`); await settle(page, "Replied, automation stopped"); } },
+  {
+    name: "fake provider: before launch while an inbox cannot send, with no projection",
+    open: async (page) => {
+      // Its own app: the inbox the provider reports unable to send would block the shared campaigns.
+      const f = await fakeProviderApp("cannot-send");
+      f.harness.fake.accountsById.get(FAKE_INBOX)!.healthy = false;
+      await f.harness.tick();
+      await page.goto(`${f.url}/campaigns/${f.ready}/before-launch`);
+      await settle(page, "Can’t project the load while");
+    },
+  },
   { name: "fake provider: running campaign, before launch", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}/before-launch`); await settle(page, "The projection is for before launch."); } },
   {
     name: "fake provider: sent emails, the copy shown, and the sequence finished",
@@ -829,6 +840,19 @@ export interface FocusTransition {
 }
 
 export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
+  {
+    name: "removing an email moves focus to the email that takes its place",
+    open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.ready}?track=email&step=s2`); await settle(page, "Timing and sender"); },
+    act: async (page) => {
+      // Held, so the shared campaign keeps both emails.
+      await page.route("**/api/campaigns/*/sequence", (route) => (route.request().method() === "PUT" ? new Promise(() => undefined) : route.continue()));
+      const held = page.waitForRequest((r) => r.method() === "PUT");
+      await page.getByRole("button", { name: "Remove Email 2" }).focus();
+      await page.keyboard.press("Enter");
+      await held;
+    },
+    focused: (page) => page.getByRole("button", { name: /^Email 1/ }),
+  },
   {
     name: "adding the first email track moves focus into the inspector, to Email 1's subject",
     open: async (page, data) => { await page.goto(`/campaigns/${data.unimportedCampaignId}`); await settle(page, "Add the first channel track"); },
