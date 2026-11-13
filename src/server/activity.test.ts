@@ -236,6 +236,8 @@ describe("SMS on the timeline (ticket 13b): texts sent, bad numbers, skipped and
       ["sent", "email", 1],
     ]);
     expect(pat[1]).toMatchObject({ kind: "sent", channel: "sms", track: { label: "SMS track", several: false }, to: "+44 7700 900211", copy: { subject: "", body: "Hi Pat, a text." } });
+    // A sender number reads grouped, as every number does (council on 10121d3, item 5).
+    expect(pat[1]).toMatchObject({ from: "Simulated SMS (not a provider) +44 7700 900001" });
     // The SMS track starts a day after the email track finished.
     expect(pat[1]!.at.slice(0, 10)).toBe("2026-11-03");
     expect(pat[0]).toEqual({ kind: "replied", channel: "sms", at: expect.any(String) as unknown, campaign: expect.any(Object) as unknown });

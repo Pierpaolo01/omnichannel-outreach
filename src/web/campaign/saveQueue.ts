@@ -89,7 +89,7 @@ export function draftProblems(def: CampaignDefinition): string[] {
     // Named by its own track and channel when the campaign has several tracks (ticket 13b).
     const where = live.length > 1 ? `${trackLabel(def, track).label}: ` : "";
     const noun = track.channel === "sms" ? "Text" : track.channel === "call" ? "Call" : "Email";
-    const first = track.channel === "sms" ? "text" : "email";
+    const first = track.channel === "sms" ? "text" : track.channel === "call" ? "call" : "email";
     if (track.window.length === 0) problems.push(`${where}Choose at least one sending day.`);
     if (track.window.some((w) => w.start === w.end)) problems.push(`${where}The sending window starts and ends at the same hour.`);
     track.steps

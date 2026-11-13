@@ -1,4 +1,5 @@
 import type { DatabaseSync, SQLInputValue, SQLOutputValue, StatementSync } from "node:sqlite";
+import { displayPhone, displayPhonesIn } from "../../domain/phone.ts";
 import type { SenderAccountView } from "../../domain/sequence/blockers.ts";
 import { isTimeZone, localDayNumber, prospectZone, resetDayOf, startOfLocalDay, type WindowRule } from "../../domain/sequence/clock.ts";
 import { defaultGap } from "../../domain/sequence/dispatch.ts";
@@ -310,7 +311,8 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   async accountLabels(): Promise<Record<string, string>> {
-    return Object.fromEntries(this.sql("SELECT id, label FROM sender_accounts").all().map((r) => [str(r, "id"), str(r, "label")]));
+    // One formatter for a phone number wherever it is shown (council on 10121d3, item 5): a number in a label reads grouped.
+    return Object.fromEntries(this.sql("SELECT id, label FROM sender_accounts").all().map((r) => [str(r, "id"), displayPhonesIn(str(r, "label") || displayPhone(str(r, "id")))]));
   }
 
   async updateAccount(accountId: string, change: Partial<Pick<AccountState, "healthy" | "waitUntil" | "waitReason" | "backoffMs">>): Promise<void> {

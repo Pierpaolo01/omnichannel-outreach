@@ -390,4 +390,9 @@ describe("a draft that cannot be saved says which track and message (ticket 13b)
   test("with several tracks, each message names its track by channel and order", () => {
     expect(draftProblems(d(track("e", "email", [0]), track("m1", "sms", [0]), track("m2", "sms", [0, 1.5])))).toEqual(["SMS track 2: Text 2's wait is a whole number of days, 0 or more."]);
   });
+
+  test("a phone track's call is a call, not an email (council on 10121d3, item 5)", () => {
+    const call: CampaignDefinition["tracks"][number] = { ...track("p", "email", [0]), channel: "call", steps: [{ id: "p-0", waitDays: 2, subject: "", body: "", threading: "new_subject", removed: false }] };
+    expect(draftProblems(d(track("e", "email", [0]), call))).toEqual(["Phone track: Call 1 is the first call, so it has no wait."]);
+  });
 });

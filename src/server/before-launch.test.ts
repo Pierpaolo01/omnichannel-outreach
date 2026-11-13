@@ -279,7 +279,7 @@ describe("Before launch: projected daily load per sender inbox", () => {
       await h.defineSequence(id, withSms({ kind: "entry" }));
       const { load } = await beforeLaunch(h, id);
       expect(load).toMatchObject({ leadsToStart: 25, daysUntilAllStart: 1, withheldBy: null, cannotProject: [] });
-      expect(load!.accounts).toEqual([expect.objectContaining({ id: "inbox-a", channel: "email", busiestDay: 10 }), expect.objectContaining({ id: N1, channel: "sms", busiestDay: 25 })]);
+      expect(load!.accounts).toEqual([expect.objectContaining({ id: "inbox-a", channel: "email", busiestDay: 10 }), expect.objectContaining({ id: N1, channel: "sms", busiestDay: 25, label: "Simulated SMS (not a provider) +44 7700 900001" })]);
     });
 
     test("an SMS track after the email track starts each lead's texts a day after its emails finish, so texts follow the email days", async () => {
