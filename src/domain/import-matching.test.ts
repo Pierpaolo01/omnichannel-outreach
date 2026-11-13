@@ -1294,3 +1294,20 @@ describe("a company with no country and main lines from several countries", () =
     });
   }
 });
+
+// Found by the generated sequences (seed 20261212, review round 3): a person's row read the
+// company's line, stored by its digits, as their own international number, and the person kept
+// a copy of the line.
+test("a line stored by its digits that a person's row shows to be their number takes the person's copy", async () => {
+  const h = importHarness();
+  const atlantic = (country: string, e164: string, original: string) =>
+    business({ business_id: "b1", place_id: "P1", business_name: "Atlantic Physio", country, phone_e164: e164, phone_original: original });
+  await h.import({ businesses: [atlantic("", "+12025550606", "+12025550606")], people: [person({ person_id: "a", business_id: "b1", full_name: "Ada Moss", direct_phone: "+44 2079460606" })] });
+  const ada = person({ person_id: "a", business_id: "b1", full_name: "Ada Moss", direct_phone: "0044 2079460606" });
+  await h.import({ businesses: [atlantic("United Kingdom", "", "020 7946 0606")], people: [ada] });
+  const company = await onlyCompany(h, "Atlantic Physio");
+  expect(company.details.map((d) => d.value).sort()).toEqual(["+1 202 555 0606", "+44 20 7946 0606"]);
+  expect(company.people.flatMap((p) => p.details)).toEqual([]);
+  const again = await h.import({ businesses: [atlantic("United Kingdom", "", "020 7946 0606")], people: [ada] });
+  expect(again.counts).toMatchObject({ new: 0, updated: 0 });
+});

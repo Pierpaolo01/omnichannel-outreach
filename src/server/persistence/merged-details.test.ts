@@ -224,7 +224,7 @@ describe("the store keeps an absorbed detail out of everything that reads live d
     // The planner's claim names the region it read the copy in; the store uses that reading, never its own.
     test("a number stored by its digits that reads as the line only in another region than the claim's", () =>
       refused(
-        (s) => ({ fromId: "amira-digits", intoId: "harbour-0177", key: "+442079460177", region: "US" }),
+        () => ({ fromId: "amira-digits", intoId: "harbour-0177", key: "+442079460177", region: "US" }),
         (s) => [s.phone("amira-digits", s.amiraOwns, "020 7946 0177", "02079460177"), s.phone("harbour-0177", s.harbourOwns, "+44 20 7946 0177", "+442079460177", "main_line")],
       ));
     test("a detail already merged", async () => {

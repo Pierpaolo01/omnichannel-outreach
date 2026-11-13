@@ -1,7 +1,7 @@
 import { emailKey, foldText, nameKey, type Channel, type PhoneKind } from "./contact-details.ts";
 import { resolveMatches, type Conflict, type Evidence, type EvidenceKind, type Resolution } from "./matching.ts";
 import { ENROLLED_BY_IMPORT, type OutreachStatus } from "./outreach-status.ts";
-import { companyRegion, countryCode, displayPhone, parsePhone, type PhoneNumber } from "./phone.ts";
+import { companyRegion, countryCode, displayPhone, parsePhone, regionOfNumber, type PhoneNumber } from "./phone.ts";
 import {
   companyLeadReach,
   companyLeadRoutes,
@@ -1567,9 +1567,9 @@ class WorkingDirectory {
   regionsFor(companyId: string, key: string): string[] {
     const country = countryCode(this.company(companyId).fields.country);
     if (country) return [country];
-    const own = key.startsWith("+") ? parsePhone(key, null)?.region : null;
+    const own = key.startsWith("+") ? regionOfNumber(key) : null;
     if (own) return [own];
-    return [...new Set(this.internationalMainLines(companyId).flatMap((line) => parsePhone(line, null)?.region ?? []))].sort();
+    return [...new Set(this.internationalMainLines(companyId).flatMap((line) => regionOfNumber(line) ?? []))].sort();
   }
 
   /** The region in `regions` that reads the number written as `raw` as `key`, if any. */
@@ -1579,7 +1579,7 @@ class WorkingDirectory {
 
   /** The one region all the company's international main lines share, or none. Never their order. */
   private sharedRegion(companyId: string): string | null {
-    const regions = new Set(this.internationalMainLines(companyId).flatMap((key) => parsePhone(key, null)?.region ?? []));
+    const regions = new Set(this.internationalMainLines(companyId).flatMap((key) => regionOfNumber(key) ?? []));
     return regions.size === 1 ? ([...regions][0] ?? null) : null;
   }
 
@@ -1670,6 +1670,8 @@ class WorkingDirectory {
     const mainLine = this.findNumber(this.company(companyId).details, phone.key, regions);
     if (mainLine) {
       this.rekey(mainLine, { kind: "company", companyId }, phone);
+      // Read again, the line may now be a number its people hold: they fold into it, as in a claim.
+      this.claimForCompany(companyId, "phone", phone.key, "main_line");
       this.noteKeptBad({ kind: "company", companyId }, mainLine);
       return;
     }
@@ -1708,7 +1710,8 @@ class WorkingDirectory {
    * country (keyed by its digits), by reading what was written in the company's country now.
    */
   private findNumber(details: readonly MutableDetail[], key: string, regions: readonly string[]): MutableDetail | undefined {
-    return details.find((d) => d.channel === "phone" && (d.key === key || (!d.key.startsWith("+") && this.readingAs(d.value, key, regions) !== undefined)));
+    const phones = details.filter((d) => d.channel === "phone");
+    return phones.find((d) => d.key === key) ?? phones.find((d) => !d.key.startsWith("+") && this.readingAs(d.value, key, regions) !== undefined);
   }
 
   /** Gives a number first stored without a known country its proper key. */
@@ -1740,25 +1743,29 @@ class WorkingDirectory {
       target.key = key;
       this.recordChange(target, owner, { key, searchDigits });
     }
-    for (const person of this.peopleAt(companyId)) {
-      for (const copy of person.details.filter(holding)) {
-        person.details = person.details.filter((d) => d !== copy);
-        copy.listedShared = false;
-        if (!target) {
-          copy.phoneKind = phoneKind;
-          const rekeyed = copy.key === key ? null : { key, searchDigits };
-          copy.key = key;
-          company.details.push(copy);
-          this.recordChange(copy, owner, rekeyed);
-          target = copy;
-          continue;
-        }
-        target.bad ||= copy.bad;
-        const fresh = this.added.findIndex((d) => d.id === copy.id);
-        if (fresh >= 0) this.added.splice(fresh, 1);
-        else this.merged.push({ fromId: copy.id, intoId: target.id, key, region: readIn(copy) });
-        this.changed.delete(copy.id);
+    // Copies in a fixed order, never record or row order: those stored before this import first,
+    // then by their holder's normalised rows, then as written. The first one moves.
+    const fresh = new Set(this.added.map((d) => d.id));
+    const copies = this.peopleAt(companyId)
+      .flatMap((person) => person.details.filter(holding).map((copy) => ({ person, copy, order: [fresh.has(copy.id) ? "1" : "0", this.contentKey({ kind: "person", personId: person.id }), copy.value, copy.key] })))
+      .sort((a, b) => a.order.join("\u0000").localeCompare(b.order.join("\u0000")));
+    for (const { person, copy } of copies) {
+      person.details = person.details.filter((d) => d !== copy);
+      copy.listedShared = false;
+      if (!target) {
+        copy.phoneKind = phoneKind;
+        const rekeyed = copy.key === key ? null : { key, searchDigits };
+        copy.key = key;
+        company.details.push(copy);
+        this.recordChange(copy, owner, rekeyed);
+        target = copy;
+        continue;
       }
+      target.bad ||= copy.bad;
+      const added = this.added.findIndex((d) => d.id === copy.id);
+      if (added >= 0) this.added.splice(added, 1);
+      else this.merged.push({ fromId: copy.id, intoId: target.id, key, region: readIn(copy) });
+      this.changed.delete(copy.id);
     }
     return target;
   }
