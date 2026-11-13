@@ -1298,6 +1298,18 @@ Questions kept with their interim: Q4 (a wrong number finishes the phone track e
 
 **Merging pull request 41 (the campaign editor).** The phone track's fields (`callScript`, a track's `declinedPath`) travel in the same save as every other field of the definition (1.1.1), and its request body goes through `requestObject`, as launch's does (launch takes only `definitionVersion`). The load projection now counts a phone track as a track that can change when the campaign's emails go: a logged call touches the lead, whose emails then go first (4.3); a track after a phone track starts when the call is logged; and an interested call ends the lead. So a phone track beside the email track withholds the figure and says why (`otherTracksChangeTiming`), as an SMS track there does, while a phone track that starts after the email track leaves it projected (`before-launch.test.ts` "a phone track beside the email track"). Activity does not show calls yet: its entries are a closed union that the web timeline renders case by case, so a call entry needs part b's screen; the calls themselves are on the call task and on the lead's progress.
 
+## Changes from ticket 14b (Today and the call focus queue)
+
+Recorded on 13 November 2026 by the 14b implementer. The browser's side of calling is the deep rule in 4.4.1, written before its code. What the server gained is additive and read-only, each built test-first (`src/server/engine/calls-screen.test.ts`):
+
+| Change | Sections |
+| - | - |
+| `GET /api/call-tasks/:id` gains `offList`: why a call is not on today's list, from the stored task and its call records (an outcome logged on it first, then the lead's ending, then its track's finish), and `callingHours`, its phone track's window | 4.4.1 |
+| `GET /api/calls` and `GET /api/today` gain `capacityReached`, from `dayHasRoom`, the rule `callRoom` now calls (`calls.ts`), so the screen never compares counts itself; `GET /api/calls` gains `defaultDailyCapacity` | 4.4 |
+| Activity gains a `call` entry for every outcome logged on a call step, skip for now included, with the number dialled (`recordedNumberOf`) and the call's note. This replaces 14a's "Activity does not show calls yet" | — |
+
+No engine rule changed; `dayHasRoom` is `callRoom`'s body, moved so the read models share it.
+
 ## Consequences
 
 - **ADR 0001.** The merge that deletes a contact-detail row becomes a redirect in 12a. Enrollments gain the fields in 1.3. `status` stays the one stored status column.

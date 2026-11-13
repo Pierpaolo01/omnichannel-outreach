@@ -200,7 +200,7 @@ function Sheet({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sna
           </div>
           <div className="text-right">
             <div className="text-[34px] font-medium leading-none tracking-[-0.02em]">{task.localTime}</div>
-            <div className={`mt-1.5 text-[13px] ${clock.tone === "ok" ? "text-band-ok" : "text-band-warn"}`}>{clock.text}</div>
+            <div className={`mt-1.5 text-[13px] ${clock.tone === "ok" ? "text-band-ok" : clock.tone === "warn" ? "text-band-warn" : "text-band-muted"}`}>{clock.text}</div>
             <div className="mt-0.5 text-[13px] text-band-muted">Calling hours {callingHoursLine(task.callingHours)}</div>
           </div>
         </div>
@@ -380,7 +380,7 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
   const pending = snap.pending !== null;
   const canLog = draft.outcome !== null && !snap.noteTooLong && (draft.outcome === "skip_for_now" || dialled !== undefined);
   return (
-    <div className="sticky bottom-0 flex flex-col gap-3.5 border-t border-line bg-base-100 px-5 pb-[22px] pt-5 shadow-[0_-10px_24px_-18px_rgba(21,26,45,0.35)] min-[901px]:px-[30px]">
+    <div className="flex flex-col gap-3.5 min-[901px]:sticky min-[901px]:bottom-0 border-t border-line bg-base-100 px-5 pb-[22px] pt-5 shadow-[0_-10px_24px_-18px_rgba(21,26,45,0.35)] min-[901px]:px-[30px]">
       {away && (
         <div role="alert" className="flex flex-col gap-2.5 rounded-field bg-crit-soft px-4 py-3 text-[14px]">
           <p className="text-base-content">{offListLine(away.who, away.offList, away.message, userZone)}</p>
@@ -433,10 +433,10 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
           <button
             key={o}
             type="button"
-            aria-pressed={draft.outcome === o}
+            aria-pressed={!away && draft.outcome === o}
             disabled={locked}
             onClick={() => desk.setDraft({ outcome: o })}
-            className={`rounded-[20px] border px-3.5 py-[7px] text-[14px] font-medium ${draft.outcome === o ? "border-base-content bg-base-content text-base-200" : "border-line-strong bg-base-100 hover:border-ink-2"} disabled:cursor-not-allowed`}
+            className={`rounded-[20px] border px-3.5 py-[7px] text-[14px] font-medium ${!away && draft.outcome === o ? "border-base-content bg-base-content text-base-200" : "border-line-strong bg-base-100 hover:border-ink-2"} disabled:cursor-not-allowed disabled:border-line disabled:text-muted disabled:hover:border-line`}
           >
             {OUTCOME_LABEL[o]}
           </button>
@@ -450,7 +450,7 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
       <p id={later} className="-mt-2 text-[13px] text-muted">
         Callback requested, not interested and calling again tomorrow arrive with later releases.
       </p>
-      {draft.outcome && draft.outcome !== "skip_for_now" && (
+      {!away && draft.outcome && draft.outcome !== "skip_for_now" && (
         <div className="flex flex-col gap-2.5 rounded-field bg-raised px-4 py-3.5 text-[14px]">
           {draft.outcome === "wrong_number" ? (
             <p>{dialled ? `${dialled.value}, ${numberKind(dialled)}, the number you dial above, is marked wrong.` : "Choose the number you dialled above."}</p>

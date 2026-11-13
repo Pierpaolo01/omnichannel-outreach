@@ -217,8 +217,11 @@ export class CallDesk {
     this.disposed = true;
   }
 
-  /** Reloads the queue naming the focus, and the focused call. Never moves the focus. */
-  async refresh(): Promise<void> {
+  /**
+   * Reloads the queue naming the focus, and the focused call. Never moves a focus it names; with none
+   * named (the list was empty, or the user moved on) it takes the server's, as `adoptAs`.
+   */
+  async refresh(adoptAs: "focus" | "moved" = "focus"): Promise<void> {
     if (this.disposed) return;
     const named = this.state.focus;
     let view: CallsView;
@@ -231,7 +234,7 @@ export class CallDesk {
     if (this.state.focus !== named) return;
     this.set({ queue: { state: "ready", view } });
     if (named === null || this.fault("refresh_adopts_focus")) {
-      if (view.focusTaskId !== named) this.focusOn(view.focusTaskId, "focus");
+      if (view.focusTaskId !== named) this.focusOn(view.focusTaskId, adoptAs);
       else if (named !== null) await this.loadTask(named);
       return;
     }
@@ -288,7 +291,7 @@ export class CallDesk {
     this.ports.session.remove(FOCUS);
     this.loadGeneration++;
     this.set({ away: null, focus: null, task: null, draft: EMPTY_DRAFT, refusal: null }, "moved");
-    await this.refresh();
+    await this.refresh("moved");
   }
 
   private async send(entry: OutboxEntry): Promise<void> {
@@ -373,7 +376,7 @@ export class CallDesk {
     );
   }
 
-  private focusOn(taskId: string | null, kind: "logged" | "focus"): void {
+  private focusOn(taskId: string | null, kind: "logged" | "focus" | "moved"): void {
     this.loadGeneration++;
     if (taskId === null) this.ports.session.remove(FOCUS);
     else this.ports.session.set(FOCUS, taskId);

@@ -1,7 +1,7 @@
 import { Link } from "wouter";
 import type { CallQueueItem, NeedsAttention, TodayView } from "../../shared/api.ts";
 import { useApi } from "../api.ts";
-import { CAPACITY_USED, attentionItems, reasonLine, todayLede, zonePlace } from "../calls/wording.ts";
+import { CAPACITY_USED, attentionItems, dateHeading, reasonLine, todayLede, zonePlace } from "../calls/wording.ts";
 import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
 import { greeting, todayHeading, useNow } from "../time.ts";
@@ -19,7 +19,7 @@ export function TodayPage() {
     <div>
       <div className="flex flex-wrap items-end justify-between gap-6 border-b border-line pb-7">
         <div>
-          <p className="mb-1.5 text-[15px] text-muted">{todayHeading(now)}</p>
+          <p className="mb-1.5 text-[15px] text-muted">{view ? dateHeading(view.date, now, view.userZone) : todayHeading(now)}</p>
           <h1 className="text-[38px] leading-[1.15] tracking-[-0.02em]">{greeting(now)}</h1>
           {view ? (
             <p className="mt-2 max-w-[46ch] text-[18px] text-ink-2">
@@ -104,9 +104,7 @@ function Row({ item, userZone }: { item: CallQueueItem; userZone: string }) {
     <li className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-1 border-line py-3.5 [&+&]:border-t">
       <div className="min-w-0">
         <div className="font-semibold [overflow-wrap:anywhere]">{item.person?.name ?? item.company.name}</div>
-        <div className="text-[13px] text-muted [overflow-wrap:anywhere]">
-          {item.company.name}, {item.campaign.name}
-        </div>
+        <div className="text-[13px] text-muted [overflow-wrap:anywhere]">{item.company.name}</div>
         <div className={`mt-0.5 text-[13px] font-medium ${TONE[why.tone]}`}>{why.text}</div>
       </div>
       <div className="text-right text-[13px] text-muted">

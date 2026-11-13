@@ -52,6 +52,12 @@ export function reasonLine(item: CallQueueItem, userZone: string): { text: strin
   }
 }
 
+/** The user's date as the server counts it ("2026-11-09" is Monday 9 November), with the time now. */
+export function dateHeading(date: string, now: Date, userZone: string): string {
+  const day = new Intl.DateTimeFormat("en-GB", { timeZone: "UTC", weekday: "long", day: "numeric", month: "long" }).format(new Date(`${date}T12:00:00Z`)).replace(",", "");
+  return `${day}, ${new Intl.DateTimeFormat("en-GB", { timeZone: userZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(now)}`;
+}
+
 /** Today's lede. */
 export function todayLede(readyNow: number, laterToday: number): string {
   if (readyNow === 0) return laterToday === 0 ? "Nothing to call right now." : `Nothing to call right now. ${laterToday === 1 ? "One call opens" : `${laterToday} calls open`} later today.`;
@@ -93,7 +99,9 @@ export function callingHoursLine(rules: readonly WindowRule[]): string {
 }
 
 /** Under the prospect's clock on the call sheet. */
-export function clockLine(task: Pick<CallTaskView, "task" | "listed">, userZone: string): { text: string; tone: "ok" | "warn" } {
+export function clockLine(task: Pick<CallTaskView, "task" | "listed">, userZone: string): { text: string; tone: "ok" | "warn" | "plain" } {
+  // A call off the list says nothing about its calling hours now.
+  if (!task.listed) return { text: "Their time", tone: "plain" };
   if (task.task?.bucket === "ready_now") return { text: "Their time, inside calling hours", tone: "ok" };
   if (task.task?.bucket === "later_today" && task.task.opensAt) return { text: `Their time. Calling hours start at ${timeIn(userZone, task.task.opensAt)} your time`, tone: "warn" };
   return { text: "Their time, outside calling hours", tone: "warn" };
