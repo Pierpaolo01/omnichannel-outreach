@@ -57,6 +57,8 @@ export interface InstantlyStore {
   transaction(write: () => void): void;
   /** Whether anything was dispatched, or a lead add begun, so there is mail to poll. */
   anyDispatched(): boolean;
+  /** When the first lead add was begun or recorded: the first mail scan reads from there. */
+  earliestDispatchWall(): number | null;
   /** Send times of observed dispatch sends from `inbox` since `since`. */
   sentWallsSince(inbox: string, since: number): number[];
   saveDispatched(lead: DispatchedLead): void;

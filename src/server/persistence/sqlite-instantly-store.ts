@@ -109,6 +109,11 @@ export class SqliteInstantlyStore implements InstantlyStore {
     return this.db.prepare("SELECT 1 FROM instantly_dispatched UNION ALL SELECT 1 FROM instantly_intents LIMIT 1").get() !== undefined;
   }
 
+  earliestDispatchWall(): number | null {
+    const r = this.db.prepare("SELECT MIN(t) AS t FROM (SELECT added_wall AS t FROM instantly_dispatched UNION ALL SELECT intended_wall AS t FROM instantly_intents)").get();
+    return r?.["t"] === null || r?.["t"] === undefined ? null : Number(r["t"]);
+  }
+
   sentWallsSince(inbox: string, since: number): number[] {
     return this.db.prepare("SELECT sent_wall FROM instantly_dispatched WHERE inbox = ? AND sent_wall >= ?").all(inbox, since).map((r) => Number(r["sent_wall"]));
   }

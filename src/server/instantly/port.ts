@@ -112,6 +112,9 @@ const META = {
   analytics: (day: string, inbox: string) => `analytics_sent_max|${day}|${inbox}`,
 } as const;
 
+/** The most pages one thread is read to; a thread longer than that keeps its reply held. */
+const THREAD_PAGES = 1_000;
+
 const OPENER: Transport = { retryable: true, notSentIsFinal: false, available: true };
 const NO_FOLLOW_UP: Transport = { retryable: false, notSentIsFinal: false, available: false };
 
@@ -537,10 +540,10 @@ export class InstantlyEmailPort implements SendPort {
   }
 
   /** Reads pages from `start` until the end or the page budget; null when a page could not be read. */
-  private async readPages<T>(read: (after: string | undefined) => Promise<InstantlyResult<Page<T>>>, start?: string): Promise<{ items: T[]; complete: boolean; next: string | undefined } | null> {
+  private async readPages<T>(read: (after: string | undefined) => Promise<InstantlyResult<Page<T>>>, start?: string, maxPages = this.config.pagesPerPoll): Promise<{ items: T[]; complete: boolean; next: string | undefined } | null> {
     const items: T[] = [];
     let after = start;
-    for (let i = 0; i < this.config.pagesPerPoll; i++) {
+    for (let i = 0; i < maxPages; i++) {
       const page = await read(after);
       if (!page.ok) return null;
       items.push(...page.body.items);
@@ -557,7 +560,9 @@ export class InstantlyEmailPort implements SendPort {
     const saved = this.store.meta(META.mailScan);
     const previous = saved ? (JSON.parse(saved) as MailScan) : null;
     // A scan that has not read its first page yet begins now: freshness counts from here.
-    const scan: MailScan = previous?.after ? previous : { since: previous?.since ?? iso(now - this.config.overlapMs), after: null, startedWall: now, newest: null };
+    // The first scan ever reads from the first lead add, so mail that came before the first poll is read.
+    const firstSince = iso(Math.min(now, this.store.earliestDispatchWall() ?? now) - this.config.overlapMs);
+    const scan: MailScan = previous?.after ? previous : { since: previous?.since ?? firstSince, after: null, startedWall: now, newest: null };
     const query: ListEmailsQuery = { eaccount: inboxes.map((a) => a.email).join(","), mode: "emode_all", min_timestamp_created: scan.since, sort_order: "asc", preview_only: false, limit: this.config.pageSize };
     const read = await this.readPages<InstantlyEmail>((after) => this.client.get("/api/v2/emails", { ...query, starting_after: after }), scan.after ?? undefined);
     if (!read) throw new Error("Instantly emails could not be read");
@@ -673,7 +678,8 @@ export class InstantlyEmailPort implements SendPort {
   private async threadVerdict(h: HeldReply): Promise<DispatchedLead | "foreign" | "none" | "unavailable"> {
     if (h.threadId === null) return "none";
     const thread = h.threadId;
-    const read = await this.readPages<InstantlyEmail>((after) => this.client.get("/api/v2/emails", { search: `thread:${thread}`, eaccount: h.inbox, mode: "emode_all", limit: this.config.pageSize, starting_after: after }));
+    // One thread, read whole: its own bound, well beyond any real thread, not the scan's budget.
+    const read = await this.readPages<InstantlyEmail>((after) => this.client.get("/api/v2/emails", { search: `thread:${thread}`, eaccount: h.inbox, mode: "emode_all", limit: this.config.pageSize, starting_after: after }), undefined, THREAD_PAGES);
     if (!read?.complete) return "unavailable";
     const ours = new Set(this.store.dispatchCampaigns().flatMap((c) => (c.instantlyId === null ? [] : [c.instantlyId])));
     let foreign = false;
@@ -787,7 +793,7 @@ export class InstantlyEmailPort implements SendPort {
     if (threads.size === 0) return { kind: "clear" };
     // Each recorded thread is read whole: a reply in it need not carry the lead's metadata.
     for (const thread of threads) {
-      const read = await this.readPages<InstantlyEmail>((after) => this.client.get("/api/v2/emails", { search: `thread:${thread}`, eaccount: request.sender, mode: "emode_all", sort_order: "desc", limit: this.config.pageSize, starting_after: after }));
+      const read = await this.readPages<InstantlyEmail>((after) => this.client.get("/api/v2/emails", { search: `thread:${thread}`, eaccount: request.sender, mode: "emode_all", sort_order: "desc", limit: this.config.pageSize, starting_after: after }), undefined, THREAD_PAGES);
       if (!read) return { kind: "unavailable" };
       const reply = read.items.find((e) => e.ue_type === 2 && e.eaccount === request.sender && e.thread_id === thread && bare(e.from_address_email) === destination);
       if (reply) return { kind: "reply", providerRef: reply.id, at: emailTime(reply) };
