@@ -3,7 +3,7 @@
  * "nothing to launch" precondition (Q9). Everything else is a warning.
  */
 import { mergeUses, render, type MergeData } from "./copy.ts";
-import { liveSteps, liveTracks, type CampaignDefinition } from "./definition.ts";
+import { liveSteps, liveTracks, poolOf, type CampaignDefinition } from "./definition.ts";
 
 export type LaunchBlocker =
   | { readonly kind: "empty_copy"; readonly trackId: string; readonly stepId: string; readonly stepNumber: number; readonly part: "subject" | "body"; readonly message: string }
@@ -65,7 +65,8 @@ export function launchCheck(def: CampaignDefinition, leads: readonly MergeData[]
 
   for (const track of tracks) {
     if (track.channel === "call") continue;
-    const pool = track.channel === "email" ? def.emailPool : [];
+    // Per channel: an email inbox never counts for an SMS track, nor a number for an email track.
+    const pool = poolOf(def, track.channel);
     const connected = accounts.some((a) => a.channel === track.channel && a.healthy && pool.includes(a.id));
     if (!connected) {
       blockers.push({

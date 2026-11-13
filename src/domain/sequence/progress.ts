@@ -6,8 +6,8 @@
 import type { OutreachStatus } from "../outreach-status.ts";
 import { applyAttemptEvent, applyLookup, isLive, isUncertain, markable, withRef, type AttemptEffect, type AttemptEvent, type WorkEvent } from "./attempt.ts";
 import { leadNow, sendPoint, span, syncClock, wallOfLead, type Freeze, type LeadClock } from "./clock.ts";
-import { liveSteps, type TrackDefinition } from "./definition.ts";
-import type { Attempt, EndReason, FinishReason, LeadDetail, ProviderWork, StepResult, SubjectState, TrackProgress } from "./state.ts";
+import { liveSteps, type TrackChannel, type TrackDefinition } from "./definition.ts";
+import type { Attempt, EndReason, FinishReason, LeadDetail, ProviderWork, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Running, status and reach.
@@ -54,11 +54,21 @@ export function goodEmail(details: readonly LeadDetail[]): LeadDetail | null {
   return [...details].filter((d) => d.channel === "email" && d.ownEmail && !d.bad).sort((a, b) => b.order - a.order)[0] ?? null;
 }
 
+/** The newest good mobile the lead may be texted at, or null: a decision maker's own (ADR 0001). */
+export function goodMobile(details: readonly LeadDetail[]): LeadDetail | null {
+  return [...details].filter((d) => d.channel === "phone" && d.mobile && !d.bad).sort((a, b) => b.order - a.order)[0] ?? null;
+}
+
+/** The detail a track on `channel` starts with: the newest good one the lead may be sent to on it. */
+export function destinationFor(details: readonly LeadDetail[], channel: TrackChannel): LeadDetail | null {
+  return channel === "email" ? goodEmail(details) : channel === "sms" ? goodMobile(details) : null;
+}
+
 /** Channels in the lead's branch that can reach the lead now (2.1). */
 export function reachable(state: SubjectState): Set<string> {
   const channels = new Set<string>();
   for (const track of liveTracksFor(state)) {
-    if (track.channel === "email" && goodEmail(state.lead.details)) channels.add("email");
+    if (destinationFor(state.lead.details, track.channel)) channels.add(track.channel);
   }
   return channels;
 }
@@ -200,27 +210,19 @@ const emptyProgress = (trackId: string): TrackProgress => ({
  * What evaluation does for a running subject: endings first, track starts, next steps, then
  * endings again. Ready items are the dispatcher's (dispatch.ts). Reads no clock and no store.
  */
-export function evaluate(state: SubjectState, now: number): SubjectState {
+export function evaluate(state: SubjectState, now: number, options: { readonly endingsFirst?: boolean } = {}): SubjectState {
   if (!runs(state)) return state;
-  let s = checkEndings(state, now);
+  // `endingsFirst: false` exists only for the oracle's broken engine (ADR 0003 9.2, "ending check too late").
+  let s = options.endingsFirst === false ? state : checkEndings(state, now);
   if (!runs(s)) return s;
   const lead = leadNow(s.subject.clock, now);
 
-  for (const track of liveTracksFor(s)) {
-    let progress = progressOf(s, track.id);
-    if (progress?.startedAt == null && track.start.kind === "entry" && progress?.startAt == null && s.subject.branchEnteredAt !== null) {
-      const basisWall = wallAtLead(s.subject.clock, s.freezes, s.subject.branchEnteredAt, now);
-      const resolved = { startAt: s.subject.branchEnteredAt, startBasisAt: s.subject.branchEnteredAt, startBasisWall: basisWall, startZone: s.lead.zone };
-      s = progress ? withTrack(s, track.id, (t) => ({ ...t, ...resolved })) : { ...s, tracks: [...s.tracks, { ...emptyProgress(track.id), ...resolved }] };
-      progress = progressOf(s, track.id);
-    }
-    if (progress && progress.startedAt === null && progress.startAt !== null && progress.startAt <= lead) {
-      const startAt = progress.startAt;
-      const startWall = wallAtLead(s.subject.clock, s.freezes, startAt, now);
-      const destination = track.channel === "email" ? goodEmail(s.lead.details) : null;
-      s = withTrack(s, track.id, (t) => ({ ...t, startedAt: startAt, destinationDetailId: destination?.id ?? null }));
-      s = destination ? advanceTrack(s, track, startAt, startWall) : finishTrack(s, track.id, "skipped_missing_channel", startAt, startWall);
-    }
+  // Starts, until nothing more starts: a track skipped at its start finishes then, so a track
+  // after it with no delay starts at the same lead time (spec "a skipped or failed track counts as finished").
+  for (let round = 0; round <= s.campaign.definition.tracks.length; round++) {
+    const before = s;
+    for (const track of liveTracksFor(s)) s = startTrack(s, track, lead, now);
+    if (before === s) break;
   }
 
   // A started track whose destination went bad, or stopped being the lead's, finishes (2.4).
@@ -242,6 +244,42 @@ export function evaluate(state: SubjectState, now: number): SubjectState {
   }
 
   return attend(checkEndings(s, now), now);
+}
+
+/**
+ * Resolves a track's start once its rule is satisfied, and starts it once lead time reaches it
+ * (2.6 step 2). `entry` resolves to the branch entry; `after(P, d)` to d calendar days in the
+ * prospect's zone after P finished all its steps (3.3), from P's stored finish. A track whose
+ * channel cannot reach the lead starts and finishes `skipped_missing_channel` at that lead time.
+ */
+function startTrack(state: SubjectState, track: TrackDefinition, lead: number, now: number): SubjectState {
+  let s = state;
+  let progress = progressOf(s, track.id);
+  if (progress?.startedAt == null && progress?.startAt == null) {
+    const resolved = resolveStart(s, track, now);
+    if (resolved) {
+      s = progress ? withTrack(s, track.id, (t) => ({ ...t, ...resolved })) : { ...s, tracks: [...s.tracks, { ...emptyProgress(track.id), ...resolved }] };
+      progress = progressOf(s, track.id);
+    }
+  }
+  if (!progress || progress.startedAt !== null || progress.startAt === null || progress.startAt > lead) return s;
+  const startAt = progress.startAt;
+  const startWall = wallAtLead(s.subject.clock, s.freezes, startAt, now);
+  const destination = destinationFor(s.lead.details, track.channel);
+  s = withTrack(s, track.id, (t) => ({ ...t, startedAt: startAt, destinationDetailId: destination?.id ?? null }));
+  return destination ? advanceTrack(s, track, startAt, startWall) : finishTrack(s, track.id, "skipped_missing_channel", startAt, startWall);
+}
+
+function resolveStart(s: SubjectState, track: TrackDefinition, now: number): Pick<TrackProgress, "startAt" | "startBasisAt" | "startBasisWall" | "startZone"> | null {
+  const zone = s.lead.zone;
+  if (track.start.kind === "entry") {
+    const entered = s.subject.branchEnteredAt;
+    if (entered === null) return null;
+    return { startAt: entered, startBasisAt: entered, startBasisWall: wallAtLead(s.subject.clock, s.freezes, entered, now), startZone: zone };
+  }
+  const before = progressOf(s, track.start.trackId);
+  if (!before || before.finishedAt === null || before.finishedWall === null) return null;
+  return { startAt: before.finishedAt + span(before.finishedWall, track.start.delayDays, zone), startBasisAt: before.finishedAt, startBasisWall: before.finishedWall, startZone: zone };
 }
 
 function latestResult(state: SubjectState, trackId: string): StepResult | undefined {
@@ -434,7 +472,7 @@ function recordRejected(state: SubjectState, attempt: Attempt, reason: Attempt["
   const atWall = wallOfLead(state.subject.clock, now);
   if (reason === "invalid_destination") {
     const failed = progress && progress.finishedAt === null && !state.results.some((r) => r.stepId === attempt.stepId)
-      ? { ...state, results: [...state.results, { stepId: attempt.stepId, trackId: attempt.trackId, result: "failed" as const, reason: "invalid address", at, atWall, attemptId: attempt.id }] }
+      ? { ...state, results: [...state.results, { stepId: attempt.stepId, trackId: attempt.trackId, result: "failed" as const, reason: channelOf(state, attempt.trackId) === "sms" ? "invalid number" : "invalid address", at, atWall, attemptId: attempt.id }] }
       : state;
     return applyBadDestination(failed, attempt, now);
   }
@@ -464,10 +502,21 @@ export function replyMatches(state: SubjectState, work: ProviderWork, reply: { r
   return reached && state.lead.details.some((d) => d.channel === "email" && d.ownEmail && d.value.toLowerCase() === address);
 }
 
+/**
+ * The subject an SMS reply belongs to (ADR 0003 4.5): a reply carries only the mobile and the number
+ * it reached, so it goes to the owner of that pair's conversation: its unreleased owner, else its
+ * most recent released owner (always an ended test run), else nobody. Never to another number's
+ * conversation with the same mobile, however recent.
+ */
+export function smsReplyOwner(bindings: readonly SmsBindingRecord[], sender: string): string | null {
+  const pair = bindings.filter((b) => b.sender === sender);
+  return pair.find((b) => !b.released)?.owner ?? pair.filter((b) => b.released).at(-1)?.owner ?? null;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Holds (5.4), derived.
 
-export type HoldReason = "unresolved" | "render_failed" | "provider_skipped" | "no_thread";
+export type HoldReason = "unresolved" | "render_failed" | "provider_skipped" | "no_thread" | "sms_conversation_taken";
 
 /** Why a started, unfinished track cannot proceed without guessing or the user, or null. */
 export function trackHold(state: SubjectState, trackId: string): HoldReason | null {
@@ -482,6 +531,8 @@ export function trackHold(state: SubjectState, trackId: string): HoldReason | nu
   if (work?.settled === "rejected" && attempts.some((a) => a.idempotencyKey === work.key && a.rejectReason === "provider_skipped")) return "provider_skipped";
   return null;
 }
+
+export const channelOf = (state: SubjectState, trackId: string): TrackChannel | undefined => state.campaign.definition.tracks.find((t) => t.id === trackId)?.channel;
 
 export function stepsOf(state: SubjectState, trackId: string) {
   const track = state.campaign.definition.tracks.find((t) => t.id === trackId);

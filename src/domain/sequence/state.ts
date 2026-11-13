@@ -41,6 +41,8 @@ export interface SubjectRecord {
   readonly noMoreCalls: boolean;
   readonly clock: LeadClock;
   readonly emailSender: string | null;
+  /** The subject's SMS sender number, fixed at its first SMS handover (ADR 0003 1.3), never reassigned. */
+  readonly smsSender: string | null;
 }
 
 export interface CampaignState {
@@ -165,6 +167,27 @@ export interface ProviderWork {
   readonly unresolvedSince: number | null;
 }
 
+/**
+ * An SMS conversation's owner (ADR 0003 4.5): the subject whose first SMS handover from `sender` to
+ * `recipient` (an E.164 mobile) committed first. An enrollment's binding is never released or transferred.
+ */
+export interface SmsBinding {
+  readonly sender: string;
+  readonly recipient: string;
+  readonly owner: string;
+  /** The owner's campaign, for the held track's reason; null for a binding this change takes. */
+  readonly ownerCampaignId: string | null;
+  /** Whether the owner has ended. An ended owner keeps its binding all the same (ruling 8). */
+  readonly ownerEnded: boolean;
+}
+
+/** One row of a mobile's SMS conversations, as a reply's attribution reads them (oldest first). */
+export interface SmsBindingRecord {
+  readonly sender: string;
+  readonly owner: string;
+  readonly released: boolean;
+}
+
 export interface Reply {
   readonly channel: "email" | "sms";
   readonly atWall: number;
@@ -177,6 +200,13 @@ export interface LeadDetail {
   readonly channel: "email" | "phone";
   /** The lead may send to it: its own email, or a company lead's shared inbox. */
   readonly ownEmail: boolean;
+  /**
+   * The lead may text it: a decision maker's own mobile, read as an international number. A company
+   * lead has none, since a main line is not an SMS destination (ADR 0001 "Usable channels").
+   */
+  readonly mobile: boolean;
+  /** The detail's key: a lower-case address, or a number's E.164 form, which SMS is sent to. */
+  readonly key: string;
   readonly value: string;
   readonly bad: boolean;
   /** Ordering: later details are newer. */
@@ -187,14 +217,17 @@ export interface LeadFacts {
   /** The prospect's zone: the person's, else the company's, else the campaign default (3.4). */
   readonly zone: string;
   readonly details: readonly LeadDetail[];
-  /** Every detail id an attempt or track names, resolved to the live detail it stands for now. */
+  /**
+   * Every detail id an attempt or track names, resolved to the live detail it stands for now.
+   * `owned`: the lead may still send to it on its channel (its own email or shared inbox, or its own mobile).
+   */
   readonly resolved: Readonly<Record<string, { readonly liveId: string; readonly bad: boolean; readonly owned: boolean }>>;
   readonly mergeData: MergeData;
 }
 
 export interface AccountState {
   readonly id: string;
-  readonly channel: "email";
+  readonly channel: "email" | "sms";
   readonly capacity: number;
   readonly gapMs: number;
   readonly k: number;
@@ -227,6 +260,11 @@ export interface SubjectState {
    * waits, nothing more goes from that inbox to that address (ADR 0003 2.4, review round 2).
    */
   readonly pendingReplies: readonly { readonly inbox: string; readonly address: string }[];
+  /**
+   * The unreleased SMS bindings of the lead's mobiles, whoever owns them (4.5). A binding this
+   * subject's handover takes is added here, and the store inserts it in the same transaction.
+   */
+  readonly smsBindings: readonly SmsBinding[];
   readonly lead: LeadFacts;
   /** Details this change marks bad. Imports never clear a bad mark. */
   readonly markBad: readonly string[];

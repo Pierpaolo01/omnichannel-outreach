@@ -10,7 +10,9 @@ import type { EngineStore } from "./engine-store.ts";
 const iso = (t: number | null) => (t === null ? null : new Date(t).toISOString());
 
 export function progressView(s: SubjectState, now: number): EnrollmentProgress {
-  const reply = s.subject.ended === "replied" ? s.replies.at(-1) : undefined;
+  // The reply that stopped the lead: the latest one at or before its ending. A later text or email
+  // is kept on the record, but does not move the date the status shows.
+  const reply = s.subject.ended === "replied" ? [...s.replies].sort((a, b) => a.atWall - b.atWall).filter((r) => r.atWall <= (s.subject.endedWall ?? Infinity)).at(-1) ?? s.replies[0] : undefined;
   const lead = leadNow(s.subject.clock, now);
   const running = s.subject.clock.frozenSince === null;
   return {
@@ -20,6 +22,7 @@ export function progressView(s: SubjectState, now: number): EnrollmentProgress {
     endedAt: iso(s.subject.endedWall),
     reply: reply ? { channel: reply.channel, at: new Date(reply.atWall).toISOString() } : null,
     sender: s.subject.emailSender,
+    smsSender: s.subject.smsSender,
     zone: s.lead.zone,
     tracks: [...liveTracksFor(s), ...s.campaign.definition.tracks.filter((t) => t.removed && !liveTracksFor(s).includes(t))]
       .filter((t) => !t.removed || s.tracks.some((p) => p.trackId === t.id))
@@ -71,7 +74,7 @@ export function accountView(a: AccountState, label: string): SenderAccountViewAp
   return {
     id: a.id,
     label,
-    channel: "email",
+    channel: a.channel,
     healthy: a.healthy,
     capacity: a.capacity,
     gapSeconds: Math.round(a.gapMs / 1000),
@@ -124,8 +127,15 @@ export async function needsAttention(store: EngineStore, now: number): Promise<N
         ? [{ accountId: a.id, reason: a.waitReason, until: a.waitReason === "quota" ? null : iso(a.waitUntil) }]
         : [],
     ),
-    unhealthyInboxes: accounts.filter((a) => !a.healthy).map((a) => ({ accountId: a.id })),
+    unhealthyInboxes: accounts.filter((a) => !a.healthy && a.channel === "email").map((a) => ({ accountId: a.id })),
+    senderProblems: await senderProblems(store, accounts),
     heldCapacity,
     anomalies: (await store.anomalies()).map((x) => ({ what: x.what, at: new Date(x.atWall).toISOString() })),
   };
+}
+
+/** Sender accounts on any channel that cannot send: unhealthy, or no longer listed by their provider (ticket 13). */
+async function senderProblems(store: EngineStore, accounts: readonly AccountState[]): Promise<NeedsAttention["senderProblems"][number][]> {
+  const labels = await store.accountLabels();
+  return accounts.filter((a) => !a.healthy).map((a) => ({ accountId: a.id, channel: a.channel, label: labels[a.id] ?? a.id, problem: "disconnected" as const }));
 }

@@ -3,7 +3,7 @@ import type { SenderAccountView } from "../../domain/sequence/blockers.ts";
 import { prospectZone, resetDayOf, type WindowRule } from "../../domain/sequence/clock.ts";
 import { defaultGap } from "../../domain/sequence/dispatch.ts";
 import type { MergeData } from "../../domain/sequence/copy.ts";
-import { emptyDefinition, type CampaignDefinition } from "../../domain/sequence/definition.ts";
+import { emptyDefinition, poolOf, type CampaignDefinition } from "../../domain/sequence/definition.ts";
 import { deriveStatus } from "../../domain/sequence/progress.ts";
 import type {
   AccountState,
@@ -17,6 +17,7 @@ import type {
   RejectReason,
   StepOutcome,
   SubjectState,
+  SmsBindingRecord,
   TrackProgress,
   WorkSettlement,
 } from "../../domain/sequence/state.ts";
@@ -104,7 +105,7 @@ export class SqliteEngineStore implements EngineStore {
       this.run("UPDATE campaigns SET launched_at = ?, version = version + 1 WHERE id = ?", [now, campaignId]);
       for (const e of this.sql("SELECT id FROM enrollments WHERE campaign_id = ? ORDER BY enrolled_at, id").all(campaignId)) {
         const base = this.load(str(e, "id"), now);
-        if (base) this.write(base, enter(base));
+        if (base) this.write(base, enter(base), now);
       }
       return { ok: true };
     });
@@ -124,7 +125,7 @@ export class SqliteEngineStore implements EngineStore {
       if (!base) return null;
       const next = decide(base);
       if (!next) return null;
-      return this.write(base, next);
+      return this.write(base, next, now);
     });
   }
 
@@ -241,6 +242,20 @@ export class SqliteEngineStore implements EngineStore {
     });
   }
 
+  async disconnectUnlisted(channel: "email" | "sms", listed: readonly string[]): Promise<void> {
+    this.transaction(() => {
+      for (const r of this.sql("SELECT id FROM sender_accounts WHERE channel = ? AND healthy = 1").all(channel)) {
+        if (!listed.includes(str(r, "id"))) this.run("UPDATE sender_accounts SET healthy = 0 WHERE id = ?", [str(r, "id")]);
+      }
+    });
+  }
+
+  async smsBindingsOf(recipient: string): Promise<SmsBindingRecord[]> {
+    return this.sql("SELECT sender_number, owner_subject, released_at FROM sms_bindings WHERE recipient_key = ? ORDER BY COALESCE(released_at, created_at), seq")
+      .all(recipient)
+      .map((b) => ({ sender: str(b, "sender_number"), owner: str(b, "owner_subject"), released: b["released_at"] != null }));
+  }
+
   async accounts(now: number): Promise<AccountState[]> {
     return this.sql("SELECT id FROM sender_accounts ORDER BY id").all().map((r) => this.accountState(str(r, "id"), now)).filter((a): a is AccountState => a !== null);
   }
@@ -300,11 +315,12 @@ export class SqliteEngineStore implements EngineStore {
            (SELECT COUNT(*) FROM provider_work WHERE account_id = :id AND settled IS NULL AND sent_wall IS NULL) AS reserved`,
       ).get({ id, today: resetDayOf(now, resetZone) }) ?? {};
     const capacity = num(a, "capacity");
+    const channel = str(a, "channel") === "sms" ? ("sms" as const) : ("email" as const);
     return {
       id,
-      channel: "email",
+      channel,
       capacity,
-      gapMs: numOrNull(a, "gap_ms") ?? defaultGap(this.windowsServedBy(id), capacity),
+      gapMs: numOrNull(a, "gap_ms") ?? defaultGap(this.windowsServedBy(id, channel), capacity),
       k: num(a, "k"),
       nextSlotAt: num(a, "next_slot_at"),
       healthy: num(a, "healthy") === 1,
@@ -317,13 +333,13 @@ export class SqliteEngineStore implements EngineStore {
     };
   }
 
-  /** The windows of every live email track whose pool includes the account (ADR 0003 4.1's default gap). */
-  private windowsServedBy(accountId: string): WindowRule[][] {
+  /** The windows of every live track on the account's channel whose pool includes it (ADR 0003 4.1's default gap). */
+  private windowsServedBy(accountId: string, channel: "email" | "sms"): WindowRule[][] {
     return this.sql("SELECT * FROM campaigns WHERE definition IS NOT NULL")
       .all()
       .map((c) => this.definitionOf(c))
-      .filter((d) => d.emailPool.includes(accountId))
-      .flatMap((d) => d.tracks.filter((t) => !t.removed && t.channel === "email").map((t) => [...t.window]));
+      .filter((d) => poolOf(d, channel).includes(accountId))
+      .flatMap((d) => d.tracks.filter((t) => !t.removed && t.channel === channel).map((t) => [...t.window]));
   }
 
   /** Parsed definitions, by campaign and definition version: a version is never rewritten. */
@@ -370,6 +386,8 @@ export class SqliteEngineStore implements EngineStore {
         id: str(d, "id"),
         channel: str(d, "channel") === "email" ? ("email" as const) : ("phone" as const),
         ownEmail: str(d, "channel") === "email" && num(d, "listed_shared") === 0,
+        mobile: textable(d, owner.kind),
+        key: str(d, "key"),
         value: str(d, "value"),
         bad: num(d, "bad") === 1,
         order: num(d, "row_order"),
@@ -387,11 +405,21 @@ export class SqliteEngineStore implements EngineStore {
       resolved[id] = {
         liveId: str(live, "id"),
         bad: num(live, "bad") === 1,
-        owned: str(live, "owner_kind") === owner.kind && str(live, "owner_id") === owner.id && str(live, "channel") === "email" && num(live, "listed_shared") === 0,
+        // The lead may still send to it on its channel: its own email or shared inbox, or its own mobile.
+        owned:
+          str(live, "owner_kind") === owner.kind &&
+          str(live, "owner_id") === owner.id &&
+          (str(live, "channel") === "email" ? num(live, "listed_shared") === 0 : textable(live, owner.kind)),
       };
     }
 
-    const accountIds = new Set([...definition.emailPool, ...attempts.map((a) => a.accountId), ...(e["email_sender"] == null ? [] : [str(e, "email_sender")])]);
+    const accountIds = new Set([
+      ...definition.emailPool,
+      ...poolOf(definition, "sms"),
+      ...attempts.map((a) => a.accountId),
+      ...(e["email_sender"] == null ? [] : [str(e, "email_sender")]),
+      ...(e["sms_sender"] == null ? [] : [str(e, "sms_sender")]),
+    ]);
     const accounts: Record<string, AccountState> = {};
     for (const id of accountIds) {
       const a = this.accountState(id, now);
@@ -416,6 +444,7 @@ export class SqliteEngineStore implements EngineStore {
         noMoreCalls: num(e, "no_more_calls") === 1,
         clock: { frozenSince: numOrNull(e, "frozen_since"), frozenTotal: num(e, "frozen_total") },
         emailSender: strOrNull(e, "email_sender"),
+        smsSender: strOrNull(e, "sms_sender"),
       },
       campaign: {
         id: str(c, "id"),
@@ -453,6 +482,17 @@ export class SqliteEngineStore implements EngineStore {
       )
         .all(subjectId, owner.kind, owner.id)
         .map((r) => ({ inbox: str(r, "inbox"), address: str(r, "address") })),
+      // Every unreleased conversation of the lead's numbers and of the numbers its texts went to, whoever owns it (4.5).
+      smsBindings: this.sql(
+        `SELECT b.sender_number, b.recipient_key, b.owner_subject, e.campaign_id AS owner_campaign, e.ended AS owner_ended FROM sms_bindings b
+         LEFT JOIN enrollments e ON e.id = b.owner_subject
+         WHERE b.released_at IS NULL
+           AND (b.recipient_key IN (SELECT key FROM live_contact_details WHERE owner_kind = ? AND owner_id = ? AND channel = 'phone')
+             OR b.recipient_key IN (SELECT destination FROM attempts WHERE subject_id = ?))
+         ORDER BY b.seq`,
+      )
+        .all(owner.kind, owner.id, subjectId)
+        .map((b) => ({ sender: str(b, "sender_number"), recipient: str(b, "recipient_key"), owner: str(b, "owner_subject"), ownerCampaignId: strOrNull(b, "owner_campaign"), ownerEnded: b["owner_ended"] != null })),
       lead: {
         zone: prospectZone([strOrNull(person ?? {}, "timezone"), company ? strOrNull(company, "timezone") : null], definition.timezone),
         details,
@@ -465,7 +505,7 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   /** Writes what `next` changed relative to `base`, with the version bump and the derived status. */
-  private write(base: SubjectState, next: SubjectState): SubjectState {
+  private write(base: SubjectState, next: SubjectState, now: number): SubjectState {
     const id = base.subject.id;
     if (next.subject.id !== id) throw new Error("a change may not move to another subject");
     const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
@@ -550,6 +590,14 @@ export class SqliteEngineStore implements EngineStore {
       changed = true;
       this.run("INSERT INTO replies (provider_ref, subject_id, channel, at_wall) VALUES (?, ?, ?, ?)", [r.providerRef, id, r.channel, r.atWall]);
     }
+    for (const b of next.smsBindings) {
+      if (base.smsBindings.some((x) => x.sender === b.sender && x.recipient === b.recipient)) continue;
+      if (b.owner !== id) throw new Error("a subject takes SMS bindings only for itself");
+      changed = true;
+      // The partial unique index refuses a second unreleased owner of the pair (4.5).
+      this.run("INSERT INTO sms_bindings (sender_number, recipient_key, owner_subject, created_at) VALUES (?, ?, ?, ?)", [b.sender, b.recipient, id, now]);
+    }
+    if (base.smsBindings.some((b) => !next.smsBindings.some((x) => x.sender === b.sender && x.recipient === b.recipient))) throw new Error("an SMS binding is never removed by a subject's change");
     for (const detailId of next.markBad) {
       if (base.markBad.includes(detailId)) continue;
       const live = liveDetailRowOf(this.db, detailId);
@@ -571,8 +619,8 @@ export class SqliteEngineStore implements EngineStore {
     const version = base.subject.version + 1;
     this.run(
       `UPDATE enrollments SET version = ?, status = ?, ended = ?, ended_at = ?, ended_wall = ?, lead_paused = ?, branch = ?, branch_entered_at = ?,
-         touched = ?, no_more_calls = ?, frozen_since = ?, frozen_total = ?, email_sender = ? WHERE id = ? AND version = ?`,
-      [version, status, s.ended, s.endedAt, s.endedWall, s.leadPaused ? 1 : 0, s.branch, s.branchEnteredAt, s.touched ? 1 : 0, s.noMoreCalls ? 1 : 0, s.clock.frozenSince, s.clock.frozenTotal, s.emailSender, id, base.subject.version],
+         touched = ?, no_more_calls = ?, frozen_since = ?, frozen_total = ?, email_sender = ?, sms_sender = ? WHERE id = ? AND version = ?`,
+      [version, status, s.ended, s.endedAt, s.endedWall, s.leadPaused ? 1 : 0, s.branch, s.branchEnteredAt, s.touched ? 1 : 0, s.noMoreCalls ? 1 : 0, s.clock.frozenSince, s.clock.frozenTotal, s.emailSender, s.smsSender, id, base.subject.version],
     );
     return { ...next, subject: { ...s, status, version } };
   }
@@ -595,8 +643,17 @@ export class SqliteEngineStore implements EngineStore {
 }
 
 function parseDefinition(row: Row): CampaignDefinition {
-  // Written by this module from a validated CampaignDefinition.
-  return JSON.parse(str(row, "definition")) as CampaignDefinition;
+  // Written by this module from a validated CampaignDefinition. One saved before ticket 13 has no SMS pool.
+  const def = JSON.parse(str(row, "definition")) as CampaignDefinition;
+  return def.smsPool ? def : { ...def, smsPool: [] };
+}
+
+/**
+ * Whether a phone detail is an SMS destination of its owner (ADR 0001 "Usable channels"): a
+ * person's own mobile, read as an international number. A company's main line never is.
+ */
+function textable(d: Row, ownerKind: string): boolean {
+  return ownerKind === "person" && str(d, "channel") === "phone" && strOrNull(d, "phone_kind") === "mobile" && str(d, "key").startsWith("+");
 }
 
 function toTrack(r: Row): TrackProgress {

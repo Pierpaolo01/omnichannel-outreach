@@ -9,7 +9,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { createApp } from "./app.ts";
 import { Engine } from "./engine/engine.ts";
-import { UnconnectedEmailPort, type SendPort } from "./engine/ports.ts";
+import { UnconnectedEmailPort, UnprovisionedSmsPort, type SendPort } from "./engine/ports.ts";
 import { InstantlyClient } from "./instantly/client.ts";
 import { instantlyRuntime } from "./instantly/config.ts";
 import { InstantlyEmailPort } from "./instantly/port.ts";
@@ -57,7 +57,9 @@ const emailPort: SendPort = instantly
     })
   : new UnconnectedEmailPort();
 console.info(JSON.stringify({ level: "info", event: "email_provider", provider: instantly ? "instantly" : "none", sending: instantly?.writes ? "on" : "off" }));
-const engine = new Engine({ store: store.engine, port: emailPort, now: () => Date.now(), newId: randomUUID });
+// No SMS provider is provisioned or chosen (#28): SMS has no connected sender, so SMS tracks cannot launch.
+console.info(JSON.stringify({ level: "info", event: "sms_provider", provider: "none" }));
+const engine = new Engine({ store: store.engine, port: emailPort, smsPort: new UnprovisionedSmsPort(), now: () => Date.now(), newId: randomUUID });
 const api = getRequestListener(
   createApp({ store, now: () => new Date().toISOString(), newId: randomUUID, engine, emailProvider: emailPort instanceof InstantlyEmailPort ? emailPort : null }).fetch,
 );

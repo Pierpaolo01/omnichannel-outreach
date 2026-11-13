@@ -1,4 +1,4 @@
-import type { CampaignDefinition, StepDefinition } from "../../src/domain/sequence/definition.ts";
+import type { CampaignDefinition, StartRule, StepDefinition, TrackDefinition } from "../../src/domain/sequence/definition.ts";
 import type { AccountState, Attempt, ProviderWork, SubjectState } from "../../src/domain/sequence/state.ts";
 
 /** Builders for example tests of the pure sequence modules. Data is fictitious. */
@@ -38,6 +38,37 @@ export function definition(steps: StepDefinition[] = [step("s1", { threading: "n
   };
 }
 
+const EVERY_HOUR = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
+
+/** A track of the given channel, open every hour unless a test narrows it. */
+export function track(id: string, channel: "email" | "sms", steps: StepDefinition[], start: StartRule = { kind: "entry" }): TrackDefinition {
+  return { id, channel, branch: "main", window: EVERY_HOUR, steps, start, removed: false };
+}
+
+/** A definition of several tracks, with the email inboxes and SMS numbers of `subjectState`. */
+export function tracksDefinition(tracks: TrackDefinition[]): CampaignDefinition {
+  return { ...definition(), smsPool: ["+447700900001", "+447700900002"], tracks };
+}
+
+/** The lead's own mobile, an SMS destination. */
+export const MOBILE = { id: "d-mobile", channel: "phone" as const, ownEmail: false, mobile: true, key: "+447700900101", value: "+44 7700 900101", bad: false, order: 2 };
+
+/** `subjectState` with several tracks and the lead's mobile beside its email (or instead of it). */
+export function multiTrackState(tracks: TrackDefinition[], details: "both" | "email" | "mobile" = "both"): SubjectState {
+  const base = subjectState();
+  const email = base.lead.details[0]!;
+  const chosen = details === "both" ? [email, MOBILE] : details === "email" ? [email] : [MOBILE];
+  return subjectState({
+    campaign: { ...base.campaign, definition: tracksDefinition(tracks) },
+    lead: {
+      ...base.lead,
+      details: chosen,
+      resolved: Object.fromEntries(chosen.map((d) => [d.id, { liveId: d.id, bad: false, owned: true }])),
+    },
+    accounts: { ...base.accounts, "+447700900001": account("+447700900001", { channel: "sms" }), "+447700900002": account("+447700900002", { channel: "sms" }) },
+  });
+}
+
 export function account(id: string, fields: Partial<AccountState> = {}): AccountState {
   return { id, channel: "email", capacity: 30, gapMs: 120_000, k: 1, nextSlotAt: 0, healthy: true, waitUntil: null, waitReason: null, backoffMs: 0, resetZone: "UTC", used: 0, inFlight: 0, ...fields };
 }
@@ -61,6 +92,7 @@ export function subjectState(fields: Partial<SubjectState> = {}): SubjectState {
       noMoreCalls: false,
       clock: { frozenSince: created, frozenTotal: created },
       emailSender: null,
+      smsSender: null,
     },
     campaign: { id: "camp-1", launchedAt: null, pausedSince: null, version: 0, definitionVersion: 1, definition: definition() },
     tracks: [],
@@ -70,9 +102,10 @@ export function subjectState(fields: Partial<SubjectState> = {}): SubjectState {
     freezes: [{ fromWall: created, toWall: null }],
     replies: [],
     pendingReplies: [],
+    smsBindings: [],
     lead: {
       zone: "Europe/London",
-      details: [{ id: "d-email", channel: "email", ownEmail: true, value: "pat@harbour.example", bad: false, order: 1 }],
+      details: [{ id: "d-email", channel: "email", ownEmail: true, mobile: false, key: "pat@harbour.example", value: "pat@harbour.example", bad: false, order: 1 }],
       resolved: { "d-email": { liveId: "d-email", bad: false, owned: true } },
       mergeData: { first_name: "Pat", company: "Harbour Lane Physio" },
     },

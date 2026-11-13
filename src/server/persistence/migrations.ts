@@ -411,6 +411,27 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX instantly_intents_by_address ON instantly_intents(inbox, destination);
     `,
   },
+  {
+    // Numbered 11: 9 and 10 are the campaign editor's (pull request 41, ticket 12c).
+    version: 11,
+    name: "SMS tracks: the subject's fixed SMS sender and the SMS conversation bindings (ADR 0003 1.3, 4.5; ticket 13)",
+    // A binding names the subject that owns the conversation between a sender number and a mobile
+    // (E.164). One unreleased binding per pair; an enrollment's is never released or transferred,
+    // and rows are never deleted, so the table is its own history.
+    sql: `
+      ALTER TABLE enrollments ADD COLUMN sms_sender TEXT;
+      CREATE TABLE sms_bindings (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        sender_number TEXT NOT NULL,
+        recipient_key TEXT NOT NULL,
+        owner_subject TEXT NOT NULL REFERENCES subjects(id),
+        created_at INTEGER NOT NULL,
+        released_at INTEGER
+      );
+      CREATE UNIQUE INDEX one_unreleased_sms_binding ON sms_bindings(sender_number, recipient_key) WHERE released_at IS NULL;
+      CREATE INDEX sms_bindings_by_recipient ON sms_bindings(recipient_key);
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string): void {
