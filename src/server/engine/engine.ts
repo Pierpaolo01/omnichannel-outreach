@@ -582,6 +582,8 @@ export class Engine {
       if (this.rules.claimRefusal(snapshot, item, now) !== null) continue;
       const step = snapshot.campaign.definition.tracks.find((t) => t.id === item.trackId)?.steps.find((s) => s.id === item.stepId);
       const transport = this.port.transportFor({ threading: step?.threading ?? "new_subject" });
+      // A step the port cannot send yet is not claimed: it waits, and nothing is sent for it.
+      if (transport.available === false) continue;
       const attemptId = this.newId();
       const written = await this.store.update(item.subjectId, now, (s) => {
         if (!this.rules.versionsMatch(snapshot, s)) return null;
@@ -680,6 +682,7 @@ export class Engine {
       rendered: a.copy,
       threadRef: a.threadRef,
       subjectId: a.subjectId,
+      trackId: a.trackId,
       stepId: a.stepId,
     };
   }

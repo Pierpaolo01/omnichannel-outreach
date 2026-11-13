@@ -11,6 +11,12 @@ import type { SenderAccountConfig } from "./engine-store.ts";
 export interface Transport {
   readonly retryable: boolean;
   readonly notSentIsFinal: boolean;
+  /**
+   * False when the port has no way to send this kind of step yet, such as Instantly's continue-thread
+   * follow-ups before ADR 0002's experiment X2: the engine claims no such step, so it waits, and
+   * nothing is sent for it. Absent means available.
+   */
+  readonly available?: boolean;
 }
 
 export interface HandoverRequest {
@@ -24,6 +30,7 @@ export interface HandoverRequest {
   readonly threading: "new_subject" | "continue_thread";
   /** For the provider's own records (and the fakes' logs): which lead and step this is. */
   readonly subjectId: string;
+  readonly trackId: string;
   readonly stepId: string;
 }
 

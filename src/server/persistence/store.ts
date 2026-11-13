@@ -2,6 +2,7 @@ import type { Channel, PhoneKind } from "../../domain/contact-details.ts";
 import type { DetailOwner, Directory, ImportPlan } from "../../domain/import-plan.ts";
 import type { OutreachStatus } from "../../domain/outreach-status.ts";
 import type { EngineStore } from "../engine/engine-store.ts";
+import type { InstantlyStore } from "../instantly/store.ts";
 import type {
   Campaign,
   ImportFileNames,
@@ -85,6 +86,8 @@ export interface OutreachStore {
 
   /** The sequence engine's persistence, in the same database (ADR 0003). */
   readonly engine: EngineStore;
+  /** The Instantly adapter's records (ADR 0002). */
+  readonly instantly: InstantlyStore;
 
   close(): Promise<void>;
 }
