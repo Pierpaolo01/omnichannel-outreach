@@ -223,6 +223,19 @@ describe("the review sequences of round 4, in both row orders", () => {
         expect((await shownDetails(api)).filter((d) => d.holder === "Mixed Clinic").map((d) => d.value).sort()).toEqual(["+1 202 555 0199", "2025550155"]);
       },
     },
+    // Review round 5: the E.164 column is international by definition, whatever the company's country.
+    "a US company's E.164 cell without its plus sign, marked bad, then with it": {
+      steps: [
+        { rows: { businesses: [clinic({ country: "US", phone_e164: "442079460155" })], people: [cy] } },
+        { markBad: "+44 20 7946 0155" },
+        { rows: { businesses: [clinic({ country: "US", phone_e164: "+442079460155" })], people: [cy] } },
+      ],
+      marked: ["+44 20 7946 0155"],
+      check: async (api) => {
+        const lines = (await shownDetails(api)).filter((d) => d.holder === "Mixed Clinic");
+        expect(lines).toEqual([expect.objectContaining({ value: "+44 20 7946 0155", bad: true })]);
+      },
+    },
     // GPT finding 5: two spellings of one number become one when the company has a country.
     "two digits lines of one number, one marked bad, then country GB": {
       steps: [
