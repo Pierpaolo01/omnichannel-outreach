@@ -103,7 +103,9 @@ function Campaign({ detail, editor, tab }: { detail: CampaignDetail; editor: Seq
         </TabLink>
         <TabLink href={campaignPath(campaign.id, "before-launch")} current={tab === "before-launch"}>
           Before launch
-          {view.launch.nothingToLaunch ? null : blockers > 0 ? (
+          {editor.unsaved && editor.save.kind === "error" ? (
+            <span className="text-[12.5px] font-semibold text-crit">Not saved</span>
+          ) : view.launch.nothingToLaunch ? null : blockers > 0 ? (
             <span className="text-[12.5px] font-semibold text-crit">{blockers} to fix</span>
           ) : (
             <span className="text-[12.5px] font-semibold text-you">{editor.launched ? "Launched" : "Ready"}</span>
