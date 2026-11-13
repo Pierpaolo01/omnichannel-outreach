@@ -85,15 +85,15 @@ export function firstOpen(hours: readonly Hours[], zone: string, t: number): num
 
 /** Merge fields as the user writes them: {{field}} or {{field|fallback}}. Null when a field without fallback is missing. */
 export function renderCopy(text: string, data: Readonly<Record<string, string>>): string | null {
-  let missing = false;
+  const found = { missing: false };
   const out = text.replace(/\{\{\s*([^}|]*?)\s*(?:\|([^}]*))?\}\}/g, (_m, field: string, fallback: string | undefined) => {
     const v = (data[field.trim()] ?? "").trim();
     if (v) return v;
     if (fallback !== undefined) return fallback;
-    missing = true;
+    found.missing = true;
     return "";
   });
-  return missing ? null : out;
+  return found.missing ? null : out;
 }
 
 /** "Follow-ups go before first messages to new leads, oldest due first", then a fixed tie-break. */

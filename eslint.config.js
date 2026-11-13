@@ -47,7 +47,7 @@ export default tseslint.config(
   },
   {
     // The SQLite adapter satisfies an asynchronous interface over a synchronous driver.
-    files: ["src/server/persistence/sqlite-store.ts"],
+    files: ["src/server/persistence/sqlite-store.ts", "src/server/persistence/sqlite-engine-store.ts"],
     rules: { "@typescript-eslint/require-await": "off" },
   },
   {

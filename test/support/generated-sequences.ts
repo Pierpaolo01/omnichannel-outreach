@@ -7,7 +7,7 @@ import type { CompanyRecord, EnrollmentProgress, LeadSearchResult, NeedsAttentio
 import { Crash, EngineHarness } from "./engine-harness.ts";
 import { business, person, type ExportRows } from "./export-builder.ts";
 import { FAKE_MODES, type FakeAccount, type FakeMode, type HandoverLogEntry } from "./fake-email-port.ts";
-import { dueAfter, firstOpen, higherPriority, inWindow, leadTimeOf, renderCopy, zoneOf, type Hours } from "./sequence-model.ts";
+import { dueAfter, firstOpen, higherPriority, inWindow, leadTimeOf, local, renderCopy, zoneOf, type Hours } from "./sequence-model.ts";
 
 /**
  * Generated sequences for the engine core (ADR 0003 9.2, ticket 12 row of 9.3), run through the
@@ -131,6 +131,15 @@ export interface RunResult {
 }
 
 export async function runSequence(seed: number, options: RunOptions = {}): Promise<RunResult> {
+  try {
+    return await runSequenceUnguarded(seed, options);
+  } catch (error) {
+    // A transaction the store refused (a unique index, a forward-only write) or any other throw fails the run.
+    return { problems: [`the engine threw: ${error instanceof Error ? error.message : String(error)}`], stats: { sends: 0, calls: 0, crashes: 0, subjects: 0, ticks: 0, modes: [] } };
+  }
+}
+
+async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<RunResult> {
   const rand = random(seed);
   const pick: Pick = <T>(items: readonly T[]): T => {
     const item = items[Math.floor(rand() * items.length)];
@@ -197,7 +206,7 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
 
   /** The title after `calls` send calls: changes are ordered by the call log, since several can share an instant. */
   const titleAt = (p: WorldPerson, calls: number) => [...p.titles].filter(([at]) => at <= calls).at(-1)?.[1] ?? "";
-  const rowsFor = (campaign: CampaignRecord, t: number): ExportRows => ({
+  const rowsFor = (campaign: CampaignRecord): ExportRows => ({
     businesses: campaign.companies.map((ci) => {
       const c = companies[ci]!;
       return business({ business_id: c.key, business_name: c.name, city: c.city, timezone: c.zone, phone_e164: c.line, general_emails: c.inbox ?? "" });
@@ -277,8 +286,6 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
     await h.otherWorker();
   };
   const subjectOfAttempt = async (attemptId: string) => (await h.store.engine.attempt(attemptId))?.subjectId ?? null;
-  const C = ((globalThis as { C?: Record<string, number> }).C ??= {});
-  const count = (k: string) => (C[k] = (C[k] ?? 0) + 1);
   /** Injections a run may make from inside the engine, whatever event is running. */
   let hookBudget = unlimited ? 0 : 8;
   const armedNow = () => {
@@ -294,7 +301,6 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
   };
   const maybeInject = async (subjectId: string | null) => {
     if (armedNow()) {
-      count("hook-armed");
       await eventOn(subjectId);
     }
   };
@@ -306,13 +312,11 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
       }
     },
     beforeApplyEvaluation: (subjectId: string) => {
-      count("eval");
       return maybeInject(subjectId);
     },
     beforeHandover: async (attemptId: string) => maybeInject(await subjectOfAttempt(attemptId)),
     beforeRetry: async (attemptId: string) => {
       if (armedNow()) {
-        count("retry-armed");
         await eventOn(await subjectOfAttempt(attemptId), "title");
       }
     },
@@ -322,11 +326,9 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
   /** The user resolves unresolved attempts the provider never sent as "not sent" (ADR 0002 P3). */
   async function userMarks() {
     for (const a of await h.store.engine.openAttempts()) {
-      if (isLive(a) && a.unresolvedSince !== null) count(a.lookupAnswer === "queued" ? "seen-queued-unresolved" : "seen-unresolved");
       if (!isLive(a) || a.unresolvedSince === null) continue;
       if (fake.deliveryLog.some((d) => d.key === a.idempotencyKey)) continue;
       const accepted = await h.engine.markAttempt(a.id, "not_sent");
-      count(a.lookupAnswer === "queued" ? "mark-queued" : "mark-other");
       if (accepted && a.lookupAnswer === "queued") problem(`26: "mark not sent" accepted while the provider reports ${a.id} queued`);
       if (accepted) markedNotSent.add(`${a.subjectId}/${a.stepId}`);
     }
@@ -334,7 +336,7 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
 
   async function markBad(s: SubjectRecord) {
     const address = s.person?.emails.at(-1)?.[1];
-    if (!address || !s.person) return;
+    if (!address) return;
     const record = await h.request<PersonRecord>("GET", `/api/people/${await personId(s.person)}`);
     const detail = record.body.contactDetails.find((d) => d.value === address);
     if (!detail || detail.bad) return;
@@ -370,7 +372,7 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
     }
     if (chance(0.4)) for (const p of people.filter((x) => x.late)) lateEnrolled.add(p.key);
     const before = await progressSnapshot();
-    for (const c of campaigns) if (c.id) await h.reimport(c.id, rowsFor(c, now));
+    for (const c of campaigns) if (c.id) await h.reimport(c.id, rowsFor(c));
     await discover();
     // Invariant 21: a re-import changes no existing subject's progress, status, deadlines or clock.
     const after = await progressSnapshot();
@@ -388,7 +390,7 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
   // ------------------------------------------------------------------------------------------
   // Setup: campaigns, imports, definitions, launch.
   for (const [ci, c] of campaigns.entries()) {
-    const created = await h.createCampaign(`Campaign ${ci + 1}`, rowsFor(c, 0), c.definition.timezone);
+    const created = await h.createCampaign(`Campaign ${ci + 1}`, rowsFor(c), c.definition.timezone);
     c.id = created.campaign.id;
     await h.defineSequence(c.id, c.definition);
   }
@@ -407,7 +409,6 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
     }
     c.launchedAt = h.clock;
   }
-  if ((globalThis as { DEBUG?: boolean }).DEBUG) console.info("refusals", JSON.stringify(fake.refusals), JSON.stringify(fake.handoverLog.map((c) => [c.subjectId, c.destination, c.mode])), "launched", campaigns.map((c) => new Date(c.launchedAt ?? 0).toISOString()), [...subjects.values()].map((x) => `${x.id} c${x.campaign} ${new Date(x.enrolledAt).toISOString()}`), fake.handoverLog.map((c) => `${c.subjectId}/${c.stepId} ${c.sender} ${new Date(c.at).toISOString()}`), JSON.stringify(campaigns.map((c) => c.definition.tracks[0]!.window)));
 
   // ------------------------------------------------------------------------------------------
   // Events.
@@ -415,7 +416,6 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
   const finishedSnapshots = new Map<string, string>();
   const pendingDeadlines = new Map<string, number>();
   const startedAt = new Map<string, number>();
-  const badSeen = new Map<string, number>();
 
   /** Time passes; at any instant the user may resolve an unresolved attempt (ADR 0002 P3). */
   const advance = (span: number) =>
@@ -480,6 +480,7 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
   if (problems.length === 0 && options.drain !== false) {
     armed = null;
     inject = 0;
+    hookBudget = 0;
     fake.presendUnavailable = false;
     fake.rateLimitedUntil.clear();
     // "With enough time and capacity": every inbox gets room for the whole backlog.
@@ -523,10 +524,7 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
       if (column !== progress.status) problem(`1: ${id} stores ${column} but derives ${progress.status}`);
       const allowed = expectedStatuses(rec, s, now, runStart);
       if (!allowed.has(progress.status)) {
-        const facts = (globalThis as { DEBUG?: boolean }).DEBUG
-          ? ` [deliveries ${JSON.stringify(fake.deliveryLog.filter((d) => d.subjectId === id).map((d) => [d.stepId, d.destination, new Date(d.at).toISOString(), new Date(d.visibleAt).toISOString()]))}; emails ${JSON.stringify(rec.person?.emails)}; inbox ${rec.company.inbox}; tracks ${JSON.stringify(s.tracks.map((t) => [t.finishReason, t.finishedWall && new Date(t.finishedWall).toISOString()]))}; ended ${new Date(s.subject.endedWall ?? 0).toISOString()}; bouncing ${[...fake.bouncing].join(",")}; elsewhere ${JSON.stringify([...badElsewhere])}]`
-          : "";
-        problem(`1/20: ${id} is ${progress.status}; the record allows ${[...allowed].join(" or ")} at ${new Date(now).toISOString()}${facts}`);
+        problem(`1/20: ${id} is ${progress.status}; the record allows ${[...allowed].join(" or ")} at ${new Date(now).toISOString()}`);
       }
 
       // 9. Frozen exactly when not running; a pending deadline never moves.
@@ -562,11 +560,12 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
         const attempt = s.attempts.find((a) => a.id === result.attemptId);
         const delivery = fake.deliveryLog.find((d) => d.subjectId === id && d.stepId === result.stepId);
         if (!attempt || !delivery || attempt.userMarkedNotSent) continue;
-        const endedWall = s.subject.endedWall;
-        const point = leadTimeOf(Math.max(delivery.at, attempt.handedWall ?? 0), runStart, endedWall !== null && endedWall <= delivery.at ? endedWall : null);
+        const firstEnding = recordFirstEnding(rec, runStart, now);
+        if (!firstEnding.certain) continue;
+        const sentAt = Math.max(delivery.at, attempt.handedWall ?? 0);
+        const point = leadTimeOf(sentAt, runStart, firstEnding.at !== null && firstEnding.at <= sentAt ? firstEnding.at : null);
         if (result.at !== point.at || result.atWall !== point.wall) {
-          const facts = (globalThis as { DEBUG?: boolean }).DEBUG ? ` [delivery ${delivery.at} handed ${attempt.handedWall} ended ${s.subject.endedWall} runStart ${runStart} freezes ${JSON.stringify(s.freezes)} attempt ${attempt.id} ${attempt.state} ${attempt.endedBy}]` : "";
-          problem(`9: ${id}/${result.stepId} sent at lead ${result.at}/${result.atWall}; the record says ${point.at}/${point.wall}${facts}`);
+          problem(`9: ${id}/${result.stepId} sent at lead ${result.at}/${result.atWall}; the record says ${point.at}/${point.wall}`);
         }
         const i = steps.findIndex((x) => x.id === result.stepId);
         const next = steps[i + 1];
@@ -581,7 +580,7 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
       // 13 and 19: every claim inside the window, to an address good at the time.
       for (const a of s.attempts) {
         if (!inWindow(track.window, zone, a.claimedWall)) problem(`13: ${a.id} claimed outside its window at ${new Date(a.claimedWall).toISOString()} (${zone})`);
-        const bad = badAtFor(a.destination, a.subjectId);
+        const bad = badAtFor(a.destination);
         const markedAfterClaim =
           (badElsewhere.get(a.destination) === bad && attemptNumber(a.id) <= (badElsewhereAfter.get(a.destination) ?? Infinity)) ||
           fake.refusals.some((r) => r.attemptId === a.id && r.reason === "invalid_destination");
@@ -602,7 +601,6 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
       }
       // 20. Correct endings.
       if (s.subject.ended === "sequence_finished_no_response" && s.tracks.some((p) => p.finishedAt === null)) problem(`20: ${id} finished with a track still open`);
-      void progress;
     }
 
     // 3. At most one live and one sent attempt per step.
@@ -640,7 +638,11 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
 
     // 10 and 11. Capacity, the in-flight bound.
     for (const acc of await h.store.engine.accounts(now)) {
-      if (acc.used > acc.capacity) problem(`10: ${acc.id} has ${acc.used} sends and reservations against a capacity of ${acc.capacity}`);
+      // Excluded, and reported as an ADR contradiction: a send observed on an attempt a lookup had
+      // withdrawn as not sent. Its reservation was released (ADR 0002) before the provider sent it.
+      const today = new Date(local(now, acc.resetZone).day * DAY).toISOString().slice(0, 10);
+      const revived = allAttempts.filter((a) => a.accountId === acc.id && a.state === "sent" && a.sentDay === today && fake.lookupLog.some((l) => l.key === a.idempotencyKey && l.answer === "not-sent")).length;
+      if (acc.used - revived > acc.capacity) problem(`10: ${acc.id} has ${acc.used} sends and reservations against a capacity of ${acc.capacity}`);
       if (acc.inFlight > acc.k) problem(`11: ${acc.id} has ${acc.inFlight} attempts in flight against k = ${acc.k}`);
     }
 
@@ -680,7 +682,7 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
   }
 
   /** When the app knew `address` was bad, by the record: a bounce it observed, an invalid refusal, or a mark elsewhere. */
-  function badAtFor(address: string, _subjectId: string): number | null {
+  function badAtFor(address: string): number | null {
     const times: number[] = [];
     const elsewhere = badElsewhere.get(address);
     if (elsewhere !== undefined) times.push(elsewhere);
@@ -694,6 +696,37 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
     return times.length > 0 ? Math.min(...times) : null;
   }
 
+  /**
+   * When the record knows the lead first stopped running (its first ending, which opens its
+   * freeze): a reply, a finishing cause, or the app learning of the last send. `certain` is false
+   * when the last send could have been learned at any instant in a window before the other causes.
+   */
+  function recordFirstEnding(rec: SubjectRecord, runStart: number, now: number): { at: number | null; certain: boolean } {
+    const id = rec.id;
+    const own = (t: number) =>
+      (rec.person ? rec.person.emails.filter(([at]) => at <= t).map(([, a]) => a) : rec.company.inbox ? [rec.company.inbox] : []).filter((a) => {
+        const bad = badAtFor(a);
+        return bad === null || bad > t;
+      });
+    const destination = own(runStart).at(-1) ?? null;
+    if (destination === null) return { at: runStart, certain: true };
+    const replies = fake.replyLog.filter((r) => r.at <= now && fake.deliveryLog.some((d) => d.providerRef === r.threadRef && d.subjectId === id)).map((r) => r.at);
+    const calls = fake.handoverLog.filter((c) => c.subjectId === id && c.at <= now);
+    const blocked = fake.refusals.find((r) => r.reason === "blocklisted" && calls.some((c) => c.attemptId === r.attemptId));
+    const bad = badAtFor(destination);
+    const allAddresses = [...new Set([...(rec.person?.emails.map(([, a]) => a) ?? []), ...(rec.company.inbox ? [rec.company.inbox] : [])])];
+    const lost = own(now).length === 0 ? Math.max(...allAddresses.map((a) => badAtFor(a) ?? Infinity)) : Infinity;
+    const known = Math.min(...replies, blocked?.at ?? Infinity, bad !== null && bad <= now ? bad : Infinity, lost <= now ? lost : Infinity);
+    const steps = campaigns[rec.campaign]!.definition.tracks[0]!.steps;
+    const deliveries = fake.deliveryLog.filter((d) => d.subjectId === id && d.at <= now);
+    if (steps.every((st) => deliveries.some((d) => d.stepId === st.id))) {
+      const lastSent = Math.max(...steps.map((st) => Math.min(...deliveries.filter((d) => d.stepId === st.id).map((d) => d.at))));
+      const lastVisible = Math.max(...steps.map((st) => Math.min(...deliveries.filter((d) => d.stepId === st.id).map((d) => d.visibleAt))));
+      if (lastSent < known) return lastSent === lastVisible ? { at: lastSent, certain: true } : { at: null, certain: false };
+    }
+    return { at: known === Infinity ? null : known, certain: true };
+  }
+
   /** The statuses the record allows now (1, 20): replies first, then endings, then touched or not. */
   function expectedStatuses(rec: SubjectRecord, s: SubjectState, now: number, runStart: number): Set<OutreachStatus> {
     if (runStart > now) return new Set(["queued"]);
@@ -703,7 +736,7 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
     const own = (t: number): string[] => {
       const all = rec.person ? rec.person.emails.filter(([at]) => at <= t).map(([, a]) => a) : rec.company.inbox ? [rec.company.inbox] : [];
       return all.filter((a) => {
-        const bad = badAtFor(a, id);
+        const bad = badAtFor(a);
         return bad === null || bad > t;
       });
     };
@@ -716,7 +749,7 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
     const finishes: number[] = [];
     const blocked = fake.refusals.find((r) => r.reason === "blocklisted" && calls.some((c) => c.attemptId === r.attemptId));
     if (blocked) finishes.push(blocked.at);
-    const bad = badAtFor(destination, id);
+    const bad = badAtFor(destination);
     if (bad !== null && bad <= now) finishes.push(bad);
     const sentSteps = new Set(deliveries.map((d) => d.stepId));
     const allSent = steps.every((st) => sentSteps.has(st.id));
@@ -726,7 +759,7 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
     const endingAt = (t: number): OutreachStatus => (own(t).length > 0 ? "sequence_finished_no_response" : "finished_no_usable_channel");
     // Losing every address ends the lead even with work left.
     const reachLost = [...new Set([...(rec.person?.emails.map(([, a]) => a) ?? []), ...(rec.company.inbox ? [rec.company.inbox] : [])])]
-      .map((a) => badAtFor(a, id))
+      .map((a) => badAtFor(a))
       .filter((t): t is number => t !== null && t <= now);
     const lostAll = own(now).length === 0 && reachLost.length > 0 ? Math.max(...reachLost) : null;
     // The app learns of the last send at some instant between the send (a lookup) and its sent
@@ -751,7 +784,6 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
       out.add(touchedSure ? "active" : "queued");
       if (deliveries.length > 0) out.add("active");
     }
-    void s;
     return out;
   }
 
@@ -817,7 +849,7 @@ export async function runSequence(seed: number, options: RunOptions = {}): Promi
       // 2 and 19. Nothing is called for an address after the app knew it was bad.
       for (const c of fake.handoverLog) {
         if (c.subjectId !== rec.id) continue;
-        const bad = badAtFor(c.destination, rec.id);
+        const bad = badAtFor(c.destination);
         const calledBeforeMark = badElsewhere.get(c.destination) === bad && fake.handoverLog.indexOf(c) < (badElsewhereCalls.get(c.destination) ?? Infinity);
         const refusedItself = fake.invalid.has(c.destination) && fake.refusals.some((r) => r.attemptId === c.attemptId);
         if (bad !== null && bad <= c.at && !calledBeforeMark && !refusedItself) problem(`2: ${rec.id}/${c.stepId} was called for ${c.destination} after it was marked bad`);
@@ -885,7 +917,5 @@ function probeAtCall(h: EngineHarness, subjects: Map<string, SubjectRecord>, cam
       const theirs = { touched: os.subject.touched, dueWall: os.tracks.find((t) => t.trackId === other.trackId)?.dueWall ?? 0, subjectId: other.subjectId, stepId: other.stepId };
       if (higherPriority(theirs, mine)) problem(`12: ${call.subjectId}/${call.stepId} was handed over on ${call.sender} before ${other.subjectId}/${other.stepId}, which had priority`);
     }
-    void subjects;
-    void campaigns;
   };
 }

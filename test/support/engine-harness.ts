@@ -161,6 +161,8 @@ export class EngineHarness {
       const wakes = [await this.engine.nextWakeAt(), this.fake.nextActivityAt(), target].filter((t): t is number => t !== null && t > this.clock);
       this.clock = Math.min(...wakes);
       await this.tick();
+      // Let the test runner's worker breathe on long runs of synchronous SQLite work.
+      if (guard % 50 === 49) await new Promise((resolve) => setImmediate(resolve));
       await onInstant?.();
     }
   }
