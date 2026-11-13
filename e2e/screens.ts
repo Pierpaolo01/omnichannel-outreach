@@ -922,6 +922,25 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
     focused: (page) => page.getByLabel("Email 1 subject"),
   },
   {
+    name: "while a keyboard launch is pending, focus stays on the Launch button, which says it is launching (re-check 4, F8)",
+    open: async (page) => {
+      const f = await fakeProviderApp("focus");
+      const id = await f.freshCampaign(`Focus pending launch ${Date.now()}`);
+      await page.goto(`${f.url}/campaigns/${id}/before-launch`);
+      await page.getByRole("button", { name: "Launch campaign" }).and(page.locator(":enabled")).waitFor();
+    },
+    act: async (page) => {
+      // The launch never answers here: this is the moment between the press and the answer.
+      await page.route("**/api/campaigns/*/launch", () => undefined);
+      const asked = page.waitForRequest((r) => r.url().endsWith("/launch"));
+      await page.getByRole("button", { name: "Launch campaign" }).focus();
+      await page.keyboard.press("Enter");
+      await asked;
+      await page.getByRole("button", { name: "Launching…" }).waitFor();
+    },
+    focused: (page) => page.getByRole("button", { name: "Launching…" }),
+  },
+  {
     name: "launching from the keyboard moves focus to the launch line, which says it launched, as the button goes (re-check F8)",
     open: async (page) => {
       const f = await fakeProviderApp("focus");

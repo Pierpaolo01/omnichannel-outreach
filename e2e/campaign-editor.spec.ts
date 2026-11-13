@@ -538,6 +538,31 @@ test.describe("review of pull request 41", () => {
     return { a, context };
   };
 
+  test("after this page's change was saved and then replaced elsewhere, a refused launch says Changed elsewhere everywhere, never Not saved (re-check B13)", async ({ browser }) => {
+    const id = await campaign(track([COPY.first, COPY.second]));
+    const context = await browser.newContext();
+    const a = await context.newPage();
+    const b = await context.newPage();
+    await a.goto(`${r.url}/campaigns/${id}?track=email&step=s1`);
+    await a.getByLabel("Email 1 copy").fill("This page has confirmed saved copy");
+    await expect(a.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
+    await b.goto(`${r.url}/campaigns/${id}?track=email&step=s1`);
+    await b.getByLabel("Email 1 copy").fill("Other tab changed confirmed copy");
+    await expect(b.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
+    await a.getByRole("link", { name: /Before launch/ }).click();
+    await a.getByRole("button", { name: "Launch campaign" }).and(a.locator(":enabled")).click();
+    await expect(a.getByText("Your last change was saved, then changed there.")).toBeVisible();
+    const tabs = a.getByRole("navigation", { name: "Campaign" });
+    await expect(tabs.getByRole("link", { name: /Before launch/ })).toContainText("Changed elsewhere");
+    await expect(tabs).not.toContainText("Not saved");
+    await a.getByRole("link", { name: "Sequence" }).click();
+    await a.getByRole("button", { name: /^Email track: / }).click();
+    await expect(a.getByTestId("inspector").getByRole("status").filter({ hasText: "Changed elsewhere" })).toBeVisible();
+    await expect(tabs).not.toContainText("Not saved");
+    expect((await stored(id)).launchedAt).toBeNull();
+    await context.close();
+  });
+
   test("typing again after a conflict keeps the conflict and its way out, here and on Before launch (council item 10, re-check B11)", async ({ browser }) => {
     const id = await campaign(track([COPY.first, COPY.second]));
     const { a, context } = await conflicted(browser, id);

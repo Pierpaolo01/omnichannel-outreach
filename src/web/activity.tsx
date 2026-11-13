@@ -68,7 +68,8 @@ const PLAIN = "bg-raised text-muted shadow-[inset_0_0_0_1px_var(--color-line)]";
 const CRIT = "bg-crit-soft text-crit";
 const HAND = "bg-hand-soft text-hand";
 
-function describe(entry: ActivityEntry): { icon: IconName; tone: string; title: string; body: string | null } {
+/** What one timeline entry says. Exported for its tests. */
+export function describeEntry(entry: ActivityEntry): { icon: IconName; tone: string; title: string; body: string | null } {
   switch (entry.kind) {
     case "sent":
       return { icon: "email", tone: PLAIN, title: `Email ${entry.stepNumber} sent`, body: null };
@@ -79,7 +80,7 @@ function describe(entry: ActivityEntry): { icon: IconName; tone: string; title: 
     case "bounced":
       return { icon: "bad", tone: CRIT, title: entry.stepNumber === null ? "Email bounced" : `Email ${entry.stepNumber} bounced`, body: `${entry.to} is marked wrong. Nothing more is sent to it.` };
     case "address_bad":
-      return { icon: "system", tone: PLAIN, title: "Email track ended", body: `${entry.to} was marked wrong elsewhere, so nothing more is sent to it.` };
+      return { icon: "system", tone: PLAIN, title: "Email track ended", body: `${entry.to} is marked wrong, so nothing more is sent to it.` };
     case "replied":
       return {
         icon: "reply",
@@ -96,7 +97,7 @@ function describe(entry: ActivityEntry): { icon: IconName; tone: string; title: 
 
 function Line({ entry }: { entry: ActivityEntry }) {
   const now = useNow();
-  const { icon, tone, title, body } = describe(entry);
+  const { icon, tone, title, body } = describeEntry(entry);
   return (
     <li className="grid grid-cols-[32px_minmax(0,1fr)_auto] gap-x-3 gap-y-0.5 border-line py-3 [&+&]:border-t">
       <span className={`grid size-8 place-items-center rounded-full ${tone}`}>

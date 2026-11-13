@@ -434,7 +434,7 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
   | { readonly kind: "skipped"; readonly stepNumber: number | null; readonly reason: string }
   /** A hard bounce the provider reported for an email of this campaign: the address is marked bad. */
   | { readonly kind: "bounced"; readonly stepNumber: number | null; readonly to: string }
-  /** The track's address was marked bad elsewhere (another campaign's bounce), so the track ended. */
+  /** The track ended because its address is marked bad, with no bounce event of this campaign's: another campaign's bounce, or this campaign's observed before migration 10. */
   | { readonly kind: "address_bad"; readonly to: string }
   | { readonly kind: "replied"; readonly channel: "email" | "sms" }
   | { readonly kind: "ended"; readonly status: "sequence_finished_no_response" | "finished_no_usable_channel" }

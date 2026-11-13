@@ -4,6 +4,7 @@ import type { BeforeLaunchView, CampaignDetail, ImportRecord, LeadOutcome, LeadS
 import { useApi } from "../api.ts";
 import { BeforeLaunchTab } from "../campaign/BeforeLaunchTab.tsx";
 import { SequenceTab } from "../campaign/SequenceTab.tsx";
+import { saveWording } from "../campaign/saveWording.ts";
 import { useSequence, type SequenceEditor } from "../campaign/useSequence.ts";
 import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
@@ -55,6 +56,7 @@ function Campaign({ detail, editor, tab }: { detail: CampaignDetail; editor: Seq
   const { campaign, imports, leadCount } = detail;
   const { view } = editor;
   const blockers = view.launch.blockers.length;
+  const wording = saveWording(editor.save, editor.launched);
   const lastImport = imports[0];
   return (
     <div>
@@ -104,8 +106,8 @@ function Campaign({ detail, editor, tab }: { detail: CampaignDetail; editor: Seq
         </TabLink>
         <TabLink href={campaignPath(campaign.id, "before-launch")} current={tab === "before-launch"}>
           Before launch
-          {editor.unsaved && (editor.save.kind === "error" || editor.save.kind === "conflict") ? (
-            <span className="text-[12.5px] font-semibold text-crit">Not saved</span>
+          {wording.problem ? (
+            <span className="text-[12.5px] font-semibold text-crit">{wording.label}</span>
           ) : view.launch.nothingToLaunch ? null : blockers > 0 ? (
             <span className="text-[12.5px] font-semibold text-crit">{blockers} to fix</span>
           ) : (

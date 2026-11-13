@@ -24,6 +24,7 @@ import {
   windowHours,
   withFallback,
 } from "./model.ts";
+import { saveWording } from "./saveWording.ts";
 import type { SequenceEditor } from "./useSequence.ts";
 
 /** The address for every email collapsed. */
@@ -299,7 +300,7 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
 }
 
 function SaveStatus({ editor }: { editor: SequenceEditor }) {
-  const text = editor.launched ? "" : editor.save.kind === "saving" ? "Saving…" : editor.save.kind === "saved" ? "Saved" : editor.save.kind === "conflict" ? (editor.save.saved ? "Changed elsewhere" : "Not saved") : "";
+  const text = saveWording(editor.save, editor.launched).label ?? "";
   return (
     <span role="status" className="text-[12.5px] text-muted">
       {text}
@@ -640,11 +641,7 @@ export function ConflictNotice({ editor, onLoaded }: { editor: SequenceEditor; o
     <div role="alert" className="flex flex-wrap items-center gap-3 rounded-box bg-crit-soft px-4 py-3 text-[14px]">
       <span className="min-w-0 flex-[1_1_320px]">
         <b className="font-semibold text-crit">This campaign was changed elsewhere since this page loaded it.</b>{" "}
-        <span className="text-ink-2">
-          {editor.save.kind === "conflict" && editor.save.saved
-            ? "Your last change was saved, then changed there. Load the saved version to carry on."
-            : "What you typed is still here, but it is not saved. Loading the saved version replaces it."}
-        </span>
+        <span className="text-ink-2">{saveWording(editor.save, editor.launched).conflict}</span>
       </span>
       <button
         type="button"

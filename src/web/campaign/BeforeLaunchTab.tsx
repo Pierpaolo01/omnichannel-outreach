@@ -102,8 +102,12 @@ function LaunchBar({ editor, facts }: { editor: SequenceEditor; facts: BeforeLau
           type="button"
           className="btn btn-primary font-semibold"
           // Only once the checks for the definition on the page have arrived (PR 41 re-check, F7).
-          disabled={!launch.canLaunch || editor.unsaved || !facts || editor.launching}
+          disabled={!editor.launching && (!launch.canLaunch || editor.unsaved || !facts)}
+          // While the launch is pending the button stays focusable, so keyboard focus never falls to the
+          // page, and does nothing: it is marked disabled for assistive technology (re-check 4, F8).
+          aria-disabled={editor.launching}
           onClick={() => {
+            if (editor.launching) return;
             setError(null);
             editor.launch().then(
               () => said.current?.focus(),

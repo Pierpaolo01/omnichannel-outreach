@@ -4,7 +4,8 @@
  * what happened: emails the provider reported sent, failures and skips, a hard bounce, the reply
  * (channel and date only, never its content), and the lead's ending. A bounce is shown from the
  * bounce event the engine stored, not inferred from how the track ended: a bounce can arrive after
- * the track completed, and an address marked bad by another campaign is not a bounce here. Email
+ * the track completed, and an address marked bad by another campaign is not a bounce here. A bounce
+ * observed before migration 10 kept no event, so it shows only as the ending on a bad address. Email
  * has no delivered
  * state, because Instantly reports none (ADR 0002, "Delivered").
  */
@@ -55,7 +56,9 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
       if (track.finishReason === "skipped_missing_channel" && track.steps.every((s) => s.result === null)) {
         entries.push({ campaign, at: track.finishedAt, kind: "skipped", stepNumber: null, reason: "no_email" });
       } else if (track.finishReason === "failed_bad_destination" && !track.steps.some((s) => s.result === "failed") && !bounces.some((b) => b.trackId === track.trackId)) {
-        // The address went bad with no bounce of this campaign's: another campaign's bounce marked it.
+        // The track ended on a bad address with no bounce event of this campaign's: another campaign's
+        // bounce marked it, or this campaign's bounce was observed before migration 10, which kept no
+        // event (ADR 0003, bounce events). The entry says only what the stored ending says.
         entries.push({ campaign, at: track.finishedAt, kind: "address_bad", to: lastTo ?? "" });
       }
     }
