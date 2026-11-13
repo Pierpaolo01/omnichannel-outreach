@@ -256,7 +256,7 @@ describe("person matching", () => {
     expect((await h.peopleNamed("Sam Lee")).map((p) => p.enrollments)).toEqual([1, 1]);
   });
 
-  test("same-name colleagues with nothing to tell them apart are reported, not merged or duplicated, on every repeat", async () => {
+  test("same-name colleagues with nothing to tell them apart are never merged, and an identical repeat keeps each on its own record", async () => {
     const h = importHarness();
     const rows = {
       businesses: [harbour],
@@ -267,10 +267,11 @@ describe("person matching", () => {
     };
     expect((await h.import(rows)).counts.new).toBe(2);
     const again = await expectRepeatChangesNothing(h, rows, ["Sam Lee"]);
-    expect(entries(again, "Sam Lee")).toEqual([
-      expect.objectContaining({ ...ambiguousPerson, conflict: "several_records" }),
-      expect.objectContaining({ ...ambiguousPerson, conflict: "several_records" }),
-    ]);
+    // Provenance: each unchanged row returns to the record it was applied to.
+    expect(entries(again, "Sam Lee").map((e) => e.outcome)).toEqual(["already_enrolled", "already_enrolled"]);
+    // A new row with nothing but the name still fits both, and changes nothing.
+    const lone = await h.import({ businesses: [harbour], people: [person({ person_id: "", business_id: "b1", full_name: "Sam Lee", title: "Physiotherapist" })] });
+    expect(entry(lone, "Sam Lee")).toMatchObject({ ...ambiguousPerson, conflict: "several_records" });
   });
 
   // Shrunk from generated sequence seed 20261119: the colleague matched by email is not a candidate for the other row.
@@ -444,21 +445,50 @@ describe("phone identity and ownership", () => {
   });
 
   // Opus round 3, item 9.
-  test("a number a colleague already holds stays theirs, and the row that listed it says so", async () => {
-    const h = importHarness();
-    const summary = await h.import({
-      businesses: [noLine],
-      people: [
+  // Verification round 7: two new colleagues listing one number used to give it to whichever row came first.
+  for (const order of ["Yara first", "Zara first"] as const) {
+    test(`a number two new colleagues list in one import goes to neither, and each row names the other (${order})`, async () => {
+      const h = importHarness();
+      const people = [
         person({ person_id: "y", business_id: "b1", full_name: "Yara Glen", direct_phone: "+442079460166" }),
         person({ person_id: "z", business_id: "b1", full_name: "Zara Glen", direct_phone: "020 7946 0166", email: "zara@harbour.example" }),
-      ],
+      ];
+      const rows = { businesses: [noLine], people: order === "Yara first" ? people : [...people].reverse() };
+      const summary = await h.import(rows);
+      const company = await onlyCompany(h, "Harbour Lane Physio");
+      expect(company.people.flatMap((p) => p.details.filter((d) => d.value.startsWith("+")))).toEqual([]);
+      expect(entry(summary, "Zara Glen")).toMatchObject({ heldElsewhere: [{ detail: { value: "+44 20 7946 0166" }, holder: "Yara Glen", holderHasIt: false }] });
+      expect(entry(summary, "Yara Glen")).toMatchObject({ heldElsewhere: [{ detail: { value: "+44 20 7946 0166" }, holder: "Zara Glen", holderHasIt: false }] });
+      await expectRepeatChangesNothing(h, rows, ["Yara Glen", "Zara Glen"]);
+    });
+
+    // Verification round 7, P1: Alice-first enrolled Alice, Ben-first enrolled Ben.
+    test(`a mobile two new colleagues list in one import enrolls neither with it (${order})`, async () => {
+      const h = importHarness();
+      const people = [
+        person({ person_id: "a", business_id: "b1", full_name: "Alice Hart", email: "alice@harbour.example", dial_phone: "+447700900901", dial_phone_type: "mobile" }),
+        person({ person_id: "b", business_id: "b1", full_name: "Ben Cole", email: "ben@harbour.example", dial_phone: "07700 900901", dial_phone_type: "mobile" }),
+      ];
+      const rows = { businesses: [harbour], people: order === "Yara first" ? people : [...people].reverse() };
+      const summary = await h.import(rows);
+      for (const [name, other] of [["Alice Hart", "Ben Cole"], ["Ben Cole", "Alice Hart"]] as const) {
+        expect(entry(summary, name)).toMatchObject({ outcome: "not_enrolled", reason: "shares_contact", shared: { lead: other, enrolled: false } });
+      }
+      await expectRepeatChangesNothing(h, rows, ["Alice Hart", "Ben Cole"]);
+    });
+  }
+
+  test("a number a colleague held before this import stays theirs, and the row that listed it says so", async () => {
+    const h = importHarness();
+    const yara = person({ person_id: "y", business_id: "b1", full_name: "Yara Glen", direct_phone: "+442079460166" });
+    await h.import({ businesses: [noLine], people: [yara] });
+    const summary = await h.import({
+      businesses: [noLine],
+      people: [person({ person_id: "z", business_id: "b1", full_name: "Zara Glen", direct_phone: "020 7946 0166", email: "zara@harbour.example" }), yara],
     });
     const company = await onlyCompany(h, "Harbour Lane Physio");
     expect(company.people.flatMap((p) => p.details.filter((d) => d.value.startsWith("+")).map((d) => d.value))).toEqual(["+44 20 7946 0166"]);
-    expect(entry(summary, "Zara Glen")).toMatchObject({
-      heldElsewhere: [{ detail: { channel: "phone", phoneKind: "direct", value: "+44 20 7946 0166" }, holder: "Yara Glen" }],
-    });
-    expect(entry(summary, "Yara Glen")).toMatchObject({ heldElsewhere: [] });
+    expect(entry(summary, "Zara Glen")).toMatchObject({ heldElsewhere: [{ detail: { channel: "phone", phoneKind: "direct", value: "+44 20 7946 0166" }, holder: "Yara Glen", holderHasIt: true }] });
   });
 });
 
@@ -897,3 +927,105 @@ describe("the campaign safety net decides by evidence, not row order", () => {
     });
   }
 });
+
+// Review round 7: importing the same files again changes nothing, and the safety net is order-free.
+describe("importing the same files again changes nothing, whatever collapsed on the first import", () => {
+  const companyWithLine = business({ business_id: "b1", place_id: "P1", business_name: "Harbour Clinic", phone_e164: "+442079460101" });
+  const variants: [string, Record<string, string>, Record<string, string>][] = [
+    // GPT round 7: the two names and one number; a duplicate with blank name and contacts.
+    ["Sam Lee and Samuel Lee with one direct line", { full_name: "Sam Lee", direct_phone: "+442079460303" }, { full_name: "Samuel Lee", direct_phone: "+442079460303" }],
+    ["a duplicate with blank name and contact fields", { full_name: "Sam Lee", direct_phone: "+442079460303" }, { full_name: "", first_name: "", last_name: "", direct_phone: "" }],
+    // Opus round 7, finding 1: the split-off row with no detail, a direct line or a mobile.
+    ["the other row with no detail", { full_name: "Sam Lee" }, { full_name: "Samuel Lee", email: "samuel@harbour.example" }],
+    ["the other row with a direct line", { full_name: "Sam Lee", direct_phone: "+442079460404" }, { full_name: "Samuel Lee", email: "samuel@harbour.example" }],
+    ["the other row with a mobile", { full_name: "Sam Lee", dial_phone: "+447700900404", dial_phone_type: "mobile" }, { full_name: "Samuel Lee", email: "samuel@harbour.example" }],
+  ];
+  for (const [label, first, second] of variants) {
+    for (const order of ["in file order", "reversed"] as const) {
+      test(`two rows sharing a person ID: ${label} (${order})`, async () => {
+        const h = importHarness();
+        const people = [person({ person_id: "p1", business_id: "b1", ...first }), person({ person_id: "p1", business_id: "b1", ...second })];
+        const rows = { businesses: [companyWithLine], people: order === "in file order" ? people : [...people].reverse() };
+        const firstImport = await h.import(rows);
+        const before = await h.companies("Harbour Clinic");
+        const again = await h.import(rows);
+        expect(again.counts).toMatchObject({ new: 0, updated: 0 });
+        expect(again.rowRecords).toEqual(firstImport.rowRecords);
+        expect(await h.companies("Harbour Clinic")).toEqual(before);
+        expect((await h.import(rows)).counts).toEqual(again.counts);
+      });
+    }
+  }
+});
+
+describe("an enrolled lead's listed details are the strongest claims", () => {
+  const mobile = { dial_phone: "+447700900101", dial_phone_type: "mobile" };
+  const samuelBefore = person({ person_id: "p9", business_id: "b1", full_name: "Samuel Lee", email: "samuel@harbour.example" });
+  const samuel = person({ person_id: "p9", business_id: "b1", full_name: "Samuel Lee", email: "samuel@harbour.example", ...mobile });
+  const sam = person({ person_id: "p1", business_id: "b1", full_name: "Sam Lee", ...mobile });
+
+  for (const order of ["holder first", "lister first"] as const) {
+    // Opus round 7, finding 2.
+    test(`a lead enrolled in the campaign that lists a mobile stops the person who holds it (${order})`, async () => {
+      const h = importHarness();
+      await h.import({ businesses: [harbour], people: [samuelBefore] }, "B");
+      const summary = await h.import({ businesses: [harbour], people: order === "holder first" ? [sam, samuel] : [samuel, sam] }, "B");
+      expect(entry(summary, "Sam Lee")).toMatchObject({ outcome: "not_enrolled", reason: "shares_contact", shared: { lead: "Samuel Lee", enrolled: true } });
+    });
+
+    test(`... also when the holder got the mobile in another campaign (${order})`, async () => {
+      const h = importHarness();
+      await h.import({ businesses: [harbour], people: [sam] }, "A");
+      await h.import({ businesses: [harbour], people: [samuelBefore] }, "B");
+      const summary = await h.import({ businesses: [harbour], people: order === "holder first" ? [sam, samuel] : [samuel, sam] }, "B");
+      expect(entry(summary, "Sam Lee")).toMatchObject({ outcome: "not_enrolled", reason: "shares_contact", shared: { lead: "Samuel Lee", enrolled: true } });
+    });
+  }
+
+  // Opus round 7, finding 4: the reason must not call a lead enrolled when it is not.
+  test("a refusal says whether the other lead is enrolled in this campaign", async () => {
+    const h = importHarness();
+    const clinic = (id: string, name: string) => business({ business_id: id, place_id: "", business_name: name, phone_e164: id === "b1" ? "+442079460101" : "+442079460202" });
+    const summary = await h.import({
+      businesses: [clinic("b1", "Harbour Clinic"), clinic("b2", "Elm Clinic")],
+      people: [
+        person({ person_id: "p1", business_id: "b1", full_name: "Ann Shaw", email: "ann@mail.example" }),
+        person({ person_id: "p2", business_id: "b2", full_name: "Ann Shaw", email: "ann@mail.example" }),
+      ],
+    });
+    expect(entries(summary, "Ann Shaw").map((e) => (e.outcome === "not_enrolled" && e.reason === "shares_contact" ? e.shared.enrolled : null))).toEqual([false, false]);
+  });
+});
+
+// Shrunk from generated sequence seed 40000544 (round 7): a colleague's unchanged row returns to its
+// record by provenance, so the other same-name row may only be the other person.
+for (const order of ["owner first", "manager first"] as const) {
+  test(`a same-name colleague's unchanged row leaves the other row only one record to fit (${order})`, async () => {
+    const h = importHarness();
+    const owner = person({ person_id: "", business_id: "b1", full_name: "Sam Lee", title: "Owner" });
+    const manager = person({ person_id: "", business_id: "b1", full_name: "Sam Lee", title: "Practice manager" });
+    await h.import({ businesses: [harbour], people: [owner, manager] });
+    const before = await h.peopleNamed("Sam Lee");
+    const changed = { ...manager, direct_phone: "+44 20 7946 0404" };
+    const summary = await h.import({ businesses: [harbour], people: order === "owner first" ? [owner, changed] : [changed, owner] });
+    expect(summary.counts).toMatchObject({ new: 0, not_enrolled: 0 });
+    const after = await h.peopleNamed("Sam Lee");
+    expect(after.map((p) => p.id).sort()).toEqual(before.map((p) => p.id).sort());
+    expect(after.find((p) => p.title === "Practice manager")?.details.map((d) => d.value)).toEqual(["+44 20 7946 0404"]);
+  });
+}
+
+// Shrunk from generated sequence seed 50000273 (round 7): identical rows that leave a group together stay together.
+for (const order of ["named rows first", "blank row first"] as const) {
+  test(`identical rows that leave a blank row's group return to their own person together (${order})`, async () => {
+    const h = importHarness();
+    const grace = person({ person_id: "pp-3", business_id: "b1", full_name: "Grace Okafor", dial_phone: "+447700900104", dial_phone_type: "mobile" });
+    const blank = person({ person_id: "pp-3", business_id: "b1", full_name: "", first_name: "", last_name: "" });
+    await h.import({ businesses: [harbour], people: [grace, { ...grace, full_name: "Gracie Okafor", first_name: "Gracie", dial_phone: "", dial_phone_type: "" }, blank] });
+    const [record] = await h.peopleNamed("Grace Okafor");
+    const withEmail = { ...grace, email: "grace@harbour.example", dial_phone: "", dial_phone_type: "" };
+    const rows = order === "named rows first" ? [withEmail, withEmail, blank] : [blank, withEmail, withEmail];
+    const summary = await h.import({ businesses: [harbour], people: rows });
+    expect(entry(summary, "Grace Okafor")).toMatchObject({ outcome: "updated", lead: { kind: "person", personId: record?.id } });
+  });
+}

@@ -106,7 +106,11 @@ function unmatchedSentence(entry: UnmatchedEntry): string {
 /** A number or address the row listed that a colleague or another enrolled lead already has, so it stayed theirs. */
 function heldSentences(entry: Extract<SummaryEntry, { heldElsewhere: unknown }>): string {
   return entry.heldElsewhere
-    .map(({ detail, holder }) => ` ${sentenceCase(detailWord(detail, entry.lead.kind))} ${detail.value} is already ${holder}’s, so it wasn’t added.`)
+    .map(({ detail, holder, holderHasIt }) =>
+      holderHasIt
+        ? ` ${sentenceCase(detailWord(detail, entry.lead.kind))} ${detail.value} is already ${holder}’s, so it wasn’t added.`
+        : ` ${sentenceCase(detailWord(detail, entry.lead.kind))} ${detail.value} is also listed for ${holder}, so it was added for neither.`,
+    )
     .join("");
 }
 
@@ -116,8 +120,11 @@ export function whatHappened(entry: SummaryEntry): ReactNode {
     if (entry.reason === "company_not_in_export") return "Their company isn’t in the Businesses file.";
     if (entry.reason === "ambiguous_match") return unmatchedSentence(entry);
     if (entry.reason === "shares_contact") {
-      const { detail, lead, companyName } = entry.shared;
-      return `${sentenceCase(detailWord(detail, entry.lead.kind))} ${detail.value} is already ${lead}’s at ${companyName}, who is enrolled in this campaign, so this lead wasn’t enrolled.${heldSentences(entry)}`;
+      const { detail, lead, companyName, enrolled } = entry.shared;
+      const what = `${sentenceCase(detailWord(detail, entry.lead.kind))} ${detail.value}`;
+      return enrolled
+        ? `${what} is already ${lead}’s at ${companyName}, who is enrolled in this campaign, so this lead wasn’t enrolled.${heldSentences(entry)}`
+        : `${what} is also ${lead}’s at ${companyName}, and nothing shows whose it is, so neither lead was enrolled with it in this campaign.${heldSentences(entry)}`;
     }
     return entry.lead.kind === "company"
       ? "No usable main line or shared inbox."

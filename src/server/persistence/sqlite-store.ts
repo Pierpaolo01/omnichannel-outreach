@@ -283,6 +283,10 @@ class SqliteStore implements OutreachStore {
       "company_id",
       "source_business_id",
     );
+    const identities = (kind: "company" | "person") =>
+      groupBy(this.db.prepare("SELECT record_id, identity FROM row_identities WHERE record_kind = ?").all(kind), "record_id", "identity");
+    const companyIdentities = identities("company");
+    const personIdentities = identities("person");
     const sourcePersonIds = groupBy(
       this.db.prepare("SELECT person_id, source_person_id FROM person_source_ids").all(),
       "person_id",
@@ -297,6 +301,7 @@ class SqliteStore implements OutreachStore {
           id: str(row, "id"),
           placeId: strOrNull(row, "place_id"),
           sourceBusinessIds: sourceBusinessIds.get(str(row, "id")) ?? [],
+          rowIdentities: companyIdentities.get(str(row, "id")) ?? [],
           fields: {
             name: str(row, "name"),
             category: str(row, "category"),
@@ -319,6 +324,7 @@ class SqliteStore implements OutreachStore {
           id: str(row, "id"),
           companyId: str(row, "company_id"),
           sourcePersonIds: sourcePersonIds.get(str(row, "id")) ?? [],
+          rowIdentities: personIdentities.get(str(row, "id")) ?? [],
           fields: {
             fullName: str(row, "full_name"),
             firstName: str(row, "first_name"),
@@ -414,6 +420,9 @@ class SqliteStore implements OutreachStore {
           [...values, at, c.id],
         );
       }
+      for (const identity of c.newRowIdentities) {
+        this.run("INSERT OR IGNORE INTO row_identities (record_kind, record_id, identity) VALUES ('company', ?, ?)", [c.id, identity]);
+      }
       for (const sourceId of c.newSourceBusinessIds) {
         this.run("INSERT OR IGNORE INTO company_source_ids (source_business_id, company_id) VALUES (?, ?)", [
           sourceId,
@@ -451,6 +460,9 @@ class SqliteStore implements OutreachStore {
             title = ?, role_tier = ?, timezone = ?, linkedin_url = ?, source_row = ?, updated_at = ? WHERE id = ?`,
           [...values, at, p.id],
         );
+      }
+      for (const identity of p.newRowIdentities) {
+        this.run("INSERT OR IGNORE INTO row_identities (record_kind, record_id, identity) VALUES ('person', ?, ?)", [p.id, identity]);
       }
       for (const sourceId of p.newSourcePersonIds) {
         this.run("INSERT OR IGNORE INTO person_source_ids (person_id, source_person_id) VALUES (?, ?)", [p.id, sourceId]);

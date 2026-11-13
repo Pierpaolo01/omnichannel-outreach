@@ -11,6 +11,6 @@ vi.mock("../domain/matching.ts", () => ({
 
 test("the generated-sequence checks fail an importer that refuses every row", async () => {
   for (let seed = 20261113; seed < 20261113 + 10; seed++) {
-    expect(await runSequence(seed)).not.toEqual([]);
+    expect((await runSequence(seed)).problems).not.toEqual([]);
   }
 }, 120_000);

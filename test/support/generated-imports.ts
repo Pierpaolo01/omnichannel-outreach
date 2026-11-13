@@ -73,19 +73,24 @@ interface LogicalPerson {
   readonly mobile: string;
   /** Has a colleague of the same name, so lists only their own numbers. */
   readonly twin?: number;
+  /** A different name the scraper may put on a duplicate of this person's row. */
+  readonly alias?: string;
 }
 
 export const PEOPLE: readonly LogicalPerson[] = [
-  { company: 0, names: ["Pat O'Neil", "Pat ONeil", "Dr Pat O’Neil"], title: "Owner", emails: ["pat@harbour.example", "Pat@Harbour.example", "p.oneil@mail.example"], direct: "2079461001", mobile: "7700900101" },
+  { company: 0, names: ["Pat O'Neil", "Pat ONeil", "Dr Pat O’Neil"], alias: "Patrick O'Neil", title: "Owner", emails: ["pat@harbour.example", "Pat@Harbour.example", "p.oneil@mail.example"], direct: "2079461001", mobile: "7700900101" },
   { company: 0, names: ["Sam Lee"], title: "Owner", emails: ["sam@harbour.example"], direct: "2079461002", mobile: "7700900102", twin: 2 },
   { company: 0, names: ["Sam Lee"], title: "Practice manager", emails: ["s.lee@harbour.example"], direct: "2079461003", mobile: "7700900103", twin: 1 },
-  { company: 1, names: ["Grace Okafor", "Grace OKAFOR"], title: "Principal dentist", emails: ["grace@northgate.example"], direct: "2079461004", mobile: "7700900104" },
-  { company: 1, names: ["Ravi Patel"], title: "Practice owner", emails: ["ravi@northgate.example", "info@harbour.example"], direct: "2079461005", mobile: "7700900105" },
-  { company: 2, names: ["Daniel Price", "Daniel Price PhD"], title: "Clinic director", emails: ["daniel@elm.example", "contact@elm.example"], direct: "2079461006", mobile: "7700900106" },
-  { company: 3, names: ["Nia Cole"], title: "Owner", emails: ["nia@cityphysio.example"], direct: "2079461007", mobile: "7700900107" },
-  { company: 4, names: ["Omar Reed"], title: "Clinical lead", emails: ["omar@cityphysio.example"], direct: "2079461008", mobile: "7700900108" },
-  { company: 5, names: ["Lena Ward"], title: "Owner", emails: ["lena@unkeyed.example"], direct: "2079461009", mobile: "7700900109" },
+  { company: 1, names: ["Grace Okafor", "Grace OKAFOR"], alias: "Gracie Okafor", title: "Principal dentist", emails: ["grace@northgate.example"], direct: "2079461004", mobile: "7700900104" },
+  { company: 1, names: ["Ravi Patel"], alias: "Ravindra Patel", title: "Practice owner", emails: ["ravi@northgate.example", "info@harbour.example"], direct: "2079461005", mobile: "7700900105" },
+  { company: 2, names: ["Daniel Price", "Daniel Price PhD"], alias: "Dan Price", title: "Clinic director", emails: ["daniel@elm.example", "contact@elm.example"], direct: "2079461006", mobile: "7700900106" },
+  { company: 3, names: ["Nia Cole"], alias: "Niamh Cole", title: "Owner", emails: ["nia@cityphysio.example"], direct: "2079461007", mobile: "7700900107" },
+  { company: 4, names: ["Omar Reed"], alias: "Omari Reed", title: "Clinical lead", emails: ["omar@cityphysio.example"], direct: "2079461008", mobile: "7700900108" },
+  { company: 5, names: ["Lena Ward"], alias: "Helena Ward", title: "Owner", emails: ["lena@unkeyed.example"], direct: "2079461009", mobile: "7700900109" },
 ];
+
+/** A People row that belongs to no logical person. */
+export const NO_ONE = -1;
 
 export interface Generated {
   readonly rows: ExportRows;
@@ -99,6 +104,8 @@ export interface History {
   appeared(person: number): boolean;
   /** Whether another logical person or company with this name has carried the ID onto a record. */
   carriedBySameName(kind: "person" | "company", logical: number, id: string): boolean;
+  /** Whether anyone else has carried the ID onto a record. */
+  carriedByAnyoneElse(kind: "person" | "company", logical: number, id: string): boolean;
 }
 
 export function generateRun(rand: () => number, step: number, history: History): Generated {
@@ -164,6 +171,7 @@ export function generateRun(rand: () => number, step: number, history: History):
     return twin === undefined || appeared(i) || (!appeared(twin) && chosen.includes(twin));
   });
   const rows: Record<string, string>[] = [];
+  const extras: Record<string, string>[] = [];
   const personOfRow: number[] = [];
   for (const i of people) {
     const p = PEOPLE[i];
@@ -188,6 +196,20 @@ export function generateRun(rand: () => number, step: number, history: History):
       rows.push(row);
       personOfRow.push(i);
     }
+    // Duplicates that are not exact copies: the same ID under a different name with the same
+    // direct line, and the same ID with every other field blank. No rule says whose they are, so
+    // they belong to no logical person; they must still never break a repeat import.
+    // A blank-field copy only of a row whose ID nobody else has carried: with a blank name, the ID
+    // is evidence for whoever holds it.
+    const ownId = row["person_id"] === `pp-${i}` && !history.carriedByAnyoneElse("person", i, `pp-${i}`);
+    if (p.alias && row["person_id"]) {
+      if (chance(0.1)) extras.push({ ...row, full_name: p.alias, first_name: "", last_name: "", email: "", dial_phone: "", dial_phone_type: "" });
+      if (chance(0.1) && ownId) extras.push({ ...row, full_name: "", first_name: "", last_name: "", email: "", direct_phone: "", dial_phone: "", dial_phone_type: "" });
+    }
+  }
+  for (const extra of extras) {
+    rows.push(extra);
+    personOfRow.push(NO_ONE);
   }
   return { rows: { businesses, people: rows }, companyOfRow, personOfRow };
 }
@@ -220,14 +242,23 @@ class Ledger implements History {
   readonly recordsOfCompany = new Map<number, Set<string>>();
   readonly evidence = new Map<number, Set<string>>();
   private readonly carriers = new Map<string, Set<number>>();
+  /** Records that only rows belonging to no logical person landed in. */
+  readonly unattributed = new Set<string>();
+  /** Each logical person's applied rows, normalised: provenance returns an unchanged row to its record. */
+  readonly appliedRows = new Map<number, Set<string>>();
 
   record(summary: ImportSummary, run: Generated): void {
     run.personOfRow.forEach((logical, row) => {
       const record = summary.rowRecords.people[row];
+      if (logical === NO_ONE) {
+        if (record) this.unattributed.add(record);
+        return;
+      }
       link(this.recordsOfPerson, logical, record);
       const cells = run.rows.people?.[row];
       if (!record || !cells) return;
       this.carry("person", logical, cells["person_id"] ?? "");
+      this.appliedRows.set(logical, (this.appliedRows.get(logical) ?? new Set()).add(signatureOf(cells)));
       this.evidence.set(logical, new Set([...(this.evidence.get(logical) ?? []), ...evidenceOf(cells)]));
     });
     run.companyOfRow.forEach((logical, row) => {
@@ -241,6 +272,10 @@ class Ledger implements History {
     return (this.recordsOfPerson.get(person)?.size ?? 0) > 0;
   }
 
+  carriedByAnyoneElse(kind: "person" | "company", logical: number, id: string): boolean {
+    return [...(this.carriers.get(`${kind}|${id}`) ?? [])].some((other) => other !== logical);
+  }
+
   carriedBySameName(kind: "person" | "company", logical: number, id: string): boolean {
     const nameOf = (i: number) => (kind === "person" ? PEOPLE[i]?.names[0] : COMPANIES[i]?.names[0]);
     return [...(this.carriers.get(`${kind}|${id}`) ?? [])].some((other) => other !== logical && nameOf(other) === nameOf(logical));
@@ -251,6 +286,20 @@ class Ledger implements History {
     const key = `${kind}|${id}`;
     this.carriers.set(key, (this.carriers.get(key) ?? new Set()).add(logical));
   }
+}
+
+/** A People row as provenance sees it: the generator's own normalisation of every identifying field. */
+function signatureOf(cells: Readonly<Record<string, string>>): string {
+  const phone = (raw: string) => (raw ? (parsePhone(raw, "GB")?.key ?? raw) : "");
+  return JSON.stringify([
+    cells["person_id"] ?? "",
+    (cells["full_name"] ?? "").toLowerCase(),
+    (cells["email"] ?? "").trim().toLowerCase(),
+    phone(cells["direct_phone"] ?? ""),
+    phone(cells["dial_phone"] ?? ""),
+    /mobile|cell/i.test(cells["dial_phone_type"] ?? "") ? "mobile" : "direct",
+    cells["title"] ?? "",
+  ]);
 }
 
 /** A People row's identifying evidence: its ID, email and numbers, as the generator wrote them. */
@@ -270,7 +319,7 @@ function link(map: Map<number, Set<string>>, logical: number, record: string | n
 }
 
 /** What the generator's own record says should happen to a row. */
-type Expected = "applied" | "ambiguous" | "company_not_in_export";
+type Expected = "applied" | "ambiguous" | "company_not_in_export" | "no_one";
 
 /**
  * Predicts each People row from the ledger alone, before the import. Company rows always carry an
@@ -284,9 +333,11 @@ function expectations(run: Generated, ledger: Ledger): Expected[] {
   const ownEvidence = (row: number) => {
     const logical = run.personOfRow[row] ?? -1;
     const cells = people[row];
-    return cells !== undefined && evidenceOf(cells).some((e) => ledger.evidence.get(logical)?.has(e));
+    // The twin's record holds this row's ID, email or number, or the identical row was applied to it.
+    return cells !== undefined && (evidenceOf(cells).some((e) => ledger.evidence.get(logical)?.has(e)) || (ledger.appliedRows.get(logical)?.has(signatureOf(cells)) ?? false));
   };
   return run.personOfRow.map((logical, row) => {
+    if (logical === NO_ONE) return "no_one";
     if (!people[row]?.["business_id"]) return "company_not_in_export";
     const twin = PEOPLE[logical]?.twin;
     if (twin === undefined || !ledger.appeared(logical) || ownEvidence(row)) return "applied";
@@ -312,7 +363,7 @@ function identityProblems(ledger: Ledger, w: World): string[] {
   const personOf = oneToOne(ledger.recordsOfPerson, personLabel);
   const companyOf = oneToOne(ledger.recordsOfCompany, companyLabel);
   // Every record in the CRM belongs to exactly one logical person or company.
-  for (const p of w.people) if (!personOf.has(p.id)) problems.push(`person record ${p.id} (${p.name}) belongs to no logical person`);
+  for (const p of w.people) if (!personOf.has(p.id) && !ledger.unattributed.has(p.id)) problems.push(`person record ${p.id} (${p.name}) belongs to no logical person`);
   for (const c of w.companies) if (!companyOf.has(c.id)) problems.push(`company record ${c.id} (${c.name}) belongs to no logical company`);
 
   for (const [logical, records] of ledger.recordsOfPerson) {
@@ -350,6 +401,7 @@ function rowProblems(run: Generated, expected: readonly Expected[], summary: Imp
     const record = summary.rowRecords.people[row] ?? null;
     const want = expected[row];
     const label = `${personLabel(logical)}'s row ${row + 2}`;
+    if (want === "no_one") return;
     if (want === "company_not_in_export") {
       if (record !== null || !summary.entries.some((e) => notJoined(e) && e.name === people[row]?.["full_name"])) problems.push(`${label} should not join a company`);
       return;
@@ -481,35 +533,76 @@ function detailProblems(w: World, summary: ImportSummary, badMarks: BadMarks): s
   return problems;
 }
 
-/** One generated sequence; the problems it finds, empty when every check holds. */
-export async function runSequence(seed: number): Promise<string[]> {
+/** The CRM without its generated identifiers, so two runs that differ only in row order compare equal. */
+function canonical(w: World): string {
+  const details = (list: readonly ContactDetailView[]) => list.map((d) => [d.owner, d.channel, d.phoneKind, valueKey(d), d.bad, d.newer].join(" ")).sort();
+  const enrollments = (list: readonly { campaign: { name: string }; status: string }[]) => list.map((e) => `${e.campaign.name} ${e.status}`).sort();
+  return JSON.stringify({
+    companies: w.companies.map((c) => [c.name, c.city, details(c.contactDetails), enrollments(c.enrollments), c.people.map((p) => `${p.name}|${p.title}`).sort()]).map((x) => JSON.stringify(x)).sort(),
+    people: w.people.map((p) => [p.company.name, p.name, p.title, details(p.contactDetails), enrollments(p.enrollments)]).map((x) => JSON.stringify(x)).sort(),
+  });
+}
+
+/** Reorders a file's rows, keeping each row's logical identity with it. */
+function shuffled<T>(rand: () => number, rows: readonly Record<string, string>[], owners: readonly T[]): { rows: Record<string, string>[]; owners: T[] } {
+  const order = rows.map((_, i) => i);
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [order[i], order[j]] = [order[j] ?? i, order[i] ?? j];
+  }
+  return { rows: order.map((i) => rows[i] ?? {}), owners: order.map((i) => owners[i] as T) };
+}
+
+export interface SequenceResult {
+  readonly problems: string[];
+  /** The CRM and the import counts after every import, without generated identifiers. */
+  readonly snapshots: string[];
+}
+
+/**
+ * One generated sequence. With `shuffle`, every file's rows are reordered before it is imported;
+ * the outcome must be identical to the unshuffled run.
+ */
+export async function runSequence(seed: number, options: { shuffle?: boolean } = {}): Promise<SequenceResult> {
   const rand = random(seed);
+  const reorder = random(seed * 31 + 7);
   const api = testApi();
   const campaigns = [(await api.createCampaign("Generated A")).id, (await api.createCampaign("Generated B")).id];
   const ledger = new Ledger();
   const badMarks: BadMarks = new Set();
+  const snapshots: string[] = [];
+  const fail = (problems: string[]): SequenceResult => ({ problems, snapshots });
   const steps = 3 + Math.floor(rand() * 4);
   for (let step = 1; step <= steps; step++) {
     const start = await world(api);
     for (let k = Math.floor(rand() * 3); k > 0; k--) {
+      // Chosen in an order that does not depend on generated identifiers.
       const details = [
-        ...start.companies.flatMap((c) => c.contactDetails.map((d) => ({ d, companyId: c.id }))),
-        ...start.people.flatMap((p) => p.contactDetails.filter((d) => d.owner === "person").map((d) => ({ d, companyId: p.company.id }))),
-      ];
+        ...start.companies.flatMap((c) => c.contactDetails.map((d) => ({ d, companyId: c.id, sort: `${c.name} ${valueKey(d)}` }))),
+        ...start.people.flatMap((p) => p.contactDetails.filter((d) => d.owner === "person").map((d) => ({ d, companyId: p.company.id, sort: `${p.company.name} ${p.name} ${p.title} ${valueKey(d)}` }))),
+      ].sort((a, b) => a.sort.localeCompare(b.sort));
       const chosen = details[Math.floor(rand() * details.length)];
       if (!chosen) break;
       await api.store.markContactDetailBad(chosen.d.id);
       badMarks.add(`${chosen.companyId}#${valueKey(chosen.d)}`);
     }
-    const run = generateRun(rand, step, ledger);
+    const generated = generateRun(rand, step, ledger);
     const campaign = rand() < 0.3 ? campaigns[1] : campaigns[0];
+    const run: Generated = options.shuffle
+      ? (() => {
+          const b = shuffled(reorder, generated.rows.businesses, generated.companyOfRow);
+          const p = shuffled(reorder, generated.rows.people ?? [], generated.personOfRow);
+          return { rows: { businesses: b.rows, people: p.rows }, companyOfRow: b.owners, personOfRow: p.owners };
+        })()
+      : generated;
     const send = () => api.post<{ import?: { summary: ImportSummary }; error?: unknown }>(`/api/campaigns/${campaign ?? ""}/imports`, csvOf(run.rows));
 
     // A pair in which no person joins a business is refused whole, as the ticket requires.
     const people = run.rows.people ?? [];
     if (people.length > 0 && people.every((p) => !p["business_id"])) {
       const refused = await send();
-      if (refused.status !== 400) return [`step ${step}: a pair with no joining people answered ${refused.status}`];
+      if (refused.status !== 400) return fail([`step ${step}: a pair with no joining people answered ${refused.status}`]);
+      snapshots.push(`step ${step}: refused`);
       continue;
     }
     const importOnce = async (label: string): Promise<{ summary: ImportSummary; after: World } | string[]> => {
@@ -521,25 +614,38 @@ export async function runSequence(seed: number): Promise<string[]> {
       if (res.status !== 201 || !summary) return [`step ${step}, ${label}: the import answered ${res.status}`];
       ledger.record(summary, run);
       const after = await world(api);
+      const realRecords = new Set([...ledger.recordsOfPerson.values()].flatMap((r) => [...r]));
       const found = [
         ...rowProblems(run, expected, summary, after),
         ...writeProblems(before, after, summary),
         ...identityProblems(ledger, after),
         ...detailProblems(after, summary, badMarks),
         ...listedProblems(run, summary, after, campaign ?? ""),
+        // A duplicate under a different name is a different person by the rule, never merged in.
+        ...run.personOfRow.flatMap((logical, row) => {
+          const record = summary.rowRecords.people[row];
+          return logical === NO_ONE && people[row]?.["full_name"] && record && realRecords.has(record) ? [`row ${row + 2}, a duplicate under another name, landed on a person's record`] : [];
+        }),
       ];
+      snapshots.push(`step ${step} ${label}: ${JSON.stringify(summary.counts)} ${canonical(after)}`);
       return found.length > 0 ? found.map((f) => `step ${step}, ${label}: ${f}`) : { summary, after };
     };
 
     const first = await importOnce("first import");
-    if (Array.isArray(first)) return first;
+    if (Array.isArray(first)) return fail(first);
+    // Importing the identical files again, and again, changes nothing at all.
     const again = await importOnce("same files again");
-    if (Array.isArray(again)) return again;
+    if (Array.isArray(again)) return fail(again);
     if (again.summary.counts.new !== 0 || again.summary.counts.updated !== 0) {
       const changed = again.summary.entries.filter((e) => e.outcome === "new" || e.outcome === "updated");
-      return [`step ${step}: the same files again gave ${changed.map((e) => `${e.outcome} ${e.name}`).join(", ")}`];
+      return fail([`step ${step}: the same files again gave ${changed.map((e) => `${e.outcome} ${e.name}`).join(", ")}`]);
     }
-    if (JSON.stringify(again.after) !== JSON.stringify(first.after)) return [`step ${step}: the same files again changed the records`];
+    if (canonical(again.after) !== canonical(first.after)) return fail([`step ${step}: the same files again changed the records`]);
+    const third = await importOnce("same files a third time");
+    if (Array.isArray(third)) return fail(third);
+    if (JSON.stringify(third.summary.counts) !== JSON.stringify(again.summary.counts) || canonical(third.after) !== canonical(again.after)) {
+      return fail([`step ${step}: the same files a third time gave different counts or records`]);
+    }
   }
-  return [];
+  return { problems: [], snapshots };
 }

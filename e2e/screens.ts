@@ -155,7 +155,7 @@ function importWithUnmatchedRows(): { campaign: { id: string; name: string; defa
     added: [],
     becameMobile: [],
     stillBad: [],
-    heldElsewhere: [{ detail: { channel: "phone", phoneKind: "direct", value: "+44 20 7946 0166" }, holder: "Yara Glen" }],
+    heldElsewhere: [{ detail: { channel: "phone", phoneKind: "direct", value: "+44 20 7946 0166" }, holder: "Yara Glen", holderHasIt: true }],
   });
   const unmatched = (name: string, title: string, file: "people" | "businesses", rowNumbers: number[], record: "person" | "company", companyName: string) =>
     ({ outcome: "not_enrolled", reason: "ambiguous_match", lead: null, name, title, file, rowNumbers, record, companyName }) as const;
@@ -169,7 +169,7 @@ function importWithUnmatchedRows(): { campaign: { id: string; name: string; defa
       companyId: "co-elm",
       companyName: "Elm Clinic",
       peopleAtCompany: 1,
-      shared: { detail: { channel: "email", phoneKind: null, value: "ann@mail.example" }, lead: "Ann Shaw", companyName: "Harbour Lane Physio" },
+      shared: { detail: { channel: "email", phoneKind: null, value: "ann@mail.example" }, lead: "Ann Shaw", companyName: "Harbour Lane Physio", enrolled: true },
       heldElsewhere: [],
     },
     { ...unmatched("Sam Lee", "Owner", "people", [3], "person", "Harbour Lane Physio"), conflict: "several_records", disagreeing: [] },

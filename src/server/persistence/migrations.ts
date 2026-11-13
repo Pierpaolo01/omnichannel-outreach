@@ -114,6 +114,19 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE UNIQUE INDEX one_company_lead_per_campaign ON enrollments(campaign_id, company_id) WHERE lead_kind = 'company';
     `,
   },
+  {
+    version: 2,
+    name: "provenance: the normalised identity of every row applied to a company or person",
+    sql: `
+      CREATE TABLE row_identities (
+        record_kind TEXT NOT NULL CHECK (record_kind IN ('company', 'person')),
+        record_id TEXT NOT NULL,
+        identity TEXT NOT NULL,
+        PRIMARY KEY (record_kind, record_id, identity)
+      );
+      CREATE INDEX row_identities_by_identity ON row_identities(record_kind, identity);
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string): void {
