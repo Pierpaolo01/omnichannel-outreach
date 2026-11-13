@@ -194,3 +194,32 @@ test.describe("on the app over the fake providers", () => {
     });
   });
 });
+
+test.describe("the canvas is measured before it is painted (CI on 07bff24)", () => {
+  // Before the canvas knew its width it drew the tracks side by side for one frame, which at a
+  // phone's width crossed the panel; a slow machine's layout scan caught that frame. Every frame
+  // painted is recorded here, so the check does not depend on timing.
+  for (const width of [390, 1024] as const) {
+    test(`at ${width}px no frame draws tracks side by side that do not fit`, async ({ page }) => {
+      const f = await fakeProviderApp();
+      await page.setViewportSize({ width, height: 900 });
+      await page.addInitScript(() => {
+        const seen: string[] = [];
+        (window as unknown as { canvasFrames: string[] }).canvasFrames = seen;
+        const frame = () => {
+          const canvas = document.querySelector<HTMLElement>('[data-testid="canvas"]');
+          const area = canvas?.querySelector<HTMLElement>(".overflow-auto");
+          if (canvas && area) seen.push(`${canvas.dataset["layout"] ?? "?"}:${area.scrollWidth > area.clientWidth + 1 ? "overflows" : "fits"}`);
+          requestAnimationFrame(frame);
+        };
+        requestAnimationFrame(frame);
+      });
+      await page.goto(`${f.url}/campaigns/${f.twoChannels}?track=sms`);
+      await expect(page.getByRole("heading", { name: "SMS track" })).toBeVisible();
+      await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+      const frames = await page.evaluate(() => (window as unknown as { canvasFrames: string[] }).canvasFrames);
+      expect(frames.length).toBeGreaterThan(0);
+      expect(frames.filter((f) => f.endsWith("overflows"))).toEqual([]);
+    });
+  }
+});

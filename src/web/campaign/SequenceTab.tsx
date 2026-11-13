@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useLocation, useSearch } from "wouter";
 import { MERGE_FIELDS } from "../../domain/sequence/copy.ts";
 import type { BeforeLaunchView, CampaignDefinition, EmailProviderStatus, LaunchBlocker, SmsProviderStatus, StepDefinition, TrackDefinition } from "../../shared/api.ts";
@@ -195,9 +195,14 @@ const NODE_MIN = 176;
 /** An element's content width, kept current as it resizes; null until measured. */
 function useWidth(ref: RefObject<HTMLElement | null>): number | null {
   const [width, setWidth] = useState<number | null>(null);
-  useEffect(() => {
+  // Measured in a layout effect, so the first frame painted already has the width: measured after
+  // paint, the canvas drew its tracks side by side for a frame and crossed its panel on a phone (CI
+  // on 07bff24). The observer then follows every resize.
+  useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
+    const style = getComputedStyle(el);
+    setWidth(el.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight));
     const observer = new ResizeObserver(([entry]) => setWidth(entry ? entry.contentRect.width : null));
     observer.observe(el);
     return () => observer.disconnect();
