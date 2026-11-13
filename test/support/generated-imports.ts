@@ -739,13 +739,13 @@ export async function runSequence(seed: number, options: { shuffle?: boolean; st
   const issuedDetails = new Map<string, Issued>();
   // The store refuses a merge of two details that are not one; the planner must never ask for
   // one. Record why an import was refused, so the seed fails with the reason, not a bare 500.
-  let refusal: string | null = null;
+  const refusals: string[] = [];
   const importIntoCampaign = api.store.importIntoCampaign.bind(api.store);
   api.store.importIntoCampaign = async (input) => {
     try {
       return await importIntoCampaign(input);
     } catch (error) {
-      refusal = error instanceof Error ? error.message : String(error);
+      refusals.push(error instanceof Error ? error.message : String(error));
       throw error;
     }
   };
@@ -793,10 +793,10 @@ export async function runSequence(seed: number, options: { shuffle?: boolean; st
       await new Promise((resolve) => setImmediate(resolve));
       const before = await world(api);
       const expected = expectations(run, ledger);
-      refusal = null;
+      refusals.length = 0;
       const res = await send();
       const summary = res.body.import?.summary;
-      if (res.status >= 500) return [`step ${step}, ${label}: the import answered ${res.status}${refusal ? `; the store refused what the planner asked: ${refusal}` : ""}`];
+      if (res.status >= 500) return [`step ${step}, ${label}: the import answered ${res.status}${refusals.length > 0 ? `; the store refused what the planner asked: ${refusals.join("; ")}` : ""}`];
       if (res.status !== 201 || !summary) return [`step ${step}, ${label}: the import answered ${res.status}`];
       ledger.record(summary, run);
       const after = await world(api);
