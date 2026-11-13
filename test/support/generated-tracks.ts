@@ -710,24 +710,25 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
           const beforeStart = started(before);
           if (beforeStart !== null && (!reachesAt(rec, before.channel, beforeStart) || !completed(before))) expected.push(`released|${t.channel}|${label}|-`);
         }
-        let own = false;
+        const owned = { failure: false };
         t.steps.forEach((st, i) => {
           const d = deliveryOf(t.channel, rec.id, st.id);
           if (d && knownAt(t.channel, d) <= now) expected.push(`sent|${t.channel}|${label}|${i + 1}`);
           const refused = ownCall(t).some((c) => c.stepId === st.id && sms.refusals.some((r) => r.attemptId === c.attemptId && r.reason === "invalid_destination"));
           if (t.channel === "sms" && refused) {
             expected.push(`failed|sms|${label}|${i + 1}`);
-            own = true;
+            owned.failure = true;
           }
           const bad = t.channel === "sms" ? sms.invalidAfterSend : email.bouncing;
           if (d && bad.has(d.destination)) {
             expected.push(`bounced|${t.channel}|${label}|${i + 1}`);
-            own = true;
+            owned.failure = true;
           }
         });
         // Skipped when its detail was missing or already bad at its start, unless its own first call
         // found it bad at that very instant (then it failed); ended on a bad detail with no failure or
         // bounce of its own: marked bad elsewhere.
+        const own = owned.failure;
         const skipped = !own && !reachesAt(rec, t.channel, start);
         if (skipped) expected.push(`skipped|${t.channel}|${label}|-`);
         if (!skipped && !own && !completed(t) && badAtOf(rec, t.channel) < Math.min(now + 1, endLimitOf(rec))) expected.push(`address_bad|${t.channel}|${label}|-`);
