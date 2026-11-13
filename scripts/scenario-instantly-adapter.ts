@@ -48,7 +48,7 @@ async function run(writes: boolean): Promise<void> {
     port: (store, now) => {
       const fake = new FakeInstantly({ now, accounts: [{ email: "ada@sender.example", status: 1, daily_limit: 30 }] });
       built.fake = fake;
-      const client = new InstantlyClient({ apiKey: "test-key-not-real", fetch: fake.fetch, writes, now, timeoutMs: 1_000 });
+      const client = new InstantlyClient({ apiKey: "test-key-not-real", fetch: fake.fetch, writes, now, timeoutMs: 10_000 });
       // The script's clock jumps between events with no poll in between, so freshness is long here.
       const port = new InstantlyEmailPort({ client, store: store.instantly, now, config: { resetZone: "UTC", pollIntervalMs: 0, freshnessMs: 30 * DAY } });
       return Object.assign(port, { advance: () => fake.advance(), nextActivityAt: () => fake.nextActivityAt() }) satisfies Provider;

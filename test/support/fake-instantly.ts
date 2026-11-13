@@ -76,7 +76,7 @@ export class FakeInstantly {
   failWith: number | null = null;
   /** Answer only `bulkAddLeads` with this status. */
   failAddWith: number | null = null;
-  /** `bulkAddLeads` processes the lead but its response is lost (the call never answers). */
+  /** `bulkAddLeads` processes the lead, then the connection drops before its answer arrives. */
   loseAddResponses = false;
   /** `remaining_in_plan` (assumed to count down by one per created lead). */
   remainingInPlan = 1_000;
@@ -258,7 +258,7 @@ export class FakeInstantly {
     });
     result.remaining_in_plan = this.remainingInPlan;
     this.addResults.set(request.idempotency_key, result);
-    if (this.loseAddResponses) return new Promise<Response>(() => undefined);
+    if (this.loseAddResponses) return Promise.reject(new TypeError("fetch failed: the connection closed before the response"));
     return Promise.resolve(Response.json(result));
   }
 

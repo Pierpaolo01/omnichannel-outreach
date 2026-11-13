@@ -59,7 +59,7 @@ function setUp(writes: boolean, freshnessMs = 30 * DAY) {
     accounts: [],
     port: (store, now) => {
       const fake = new FakeInstantly({ now, accounts: INBOXES });
-      const client = new InstantlyClient({ apiKey: "test-key-not-real", fetch: fake.fetch, writes, now, timeoutMs: 50 });
+      const client = new InstantlyClient({ apiKey: "test-key-not-real", fetch: fake.fetch, writes, now, timeoutMs: 10_000 });
       const port = new InstantlyEmailPort({ client, store: store.instantly, now, config: { resetZone: "UTC", pollIntervalMs: 0, freshnessMs } });
       Object.assign(built, { fake, port });
       return Object.assign(port, { advance: () => fake.advance(), nextActivityAt: () => fake.nextActivityAt() }) satisfies Provider;

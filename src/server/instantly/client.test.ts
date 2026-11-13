@@ -11,8 +11,9 @@ function recordingFetch(answer: () => Promise<Response> = () => Promise.resolve(
   return { calls, fetch };
 }
 
-const client = (fetch: ReturnType<typeof recordingFetch>["fetch"], writes = false, now = () => 0) =>
-  new InstantlyClient({ apiKey: "test-key-not-real", fetch, writes, now, timeoutMs: 50 });
+/** A generous bound: no answer in these tests comes near it, so none depends on the machine's speed. */
+const client = (fetch: ReturnType<typeof recordingFetch>["fetch"], writes = false, now = () => 0, timeoutMs = 10_000) =>
+  new InstantlyClient({ apiKey: "test-key-not-real", fetch, writes, now, timeoutMs });
 
 describe("the Instantly client", () => {
   test("a read carries the bearer key and an explicit User-Agent, and encodes its query", async () => {
@@ -67,7 +68,8 @@ describe("the Instantly client", () => {
     const error = await client(recordingFetch(() => Promise.resolve(Response.json({ statusCode: 402, error: "Payment Required", message: "no plan" }, { status: 402 }))).fetch).get("/api/v2/accounts", {});
     expect(error).toEqual({ ok: false, status: 402, body: { statusCode: 402, error: "Payment Required", message: "no plan" } });
 
-    const hang = await client(recordingFetch(() => new Promise<Response>(() => undefined)).fetch).get("/api/v2/accounts", {});
+    // A request that never answers always loses to the bound, however fast or slow the machine is.
+    const hang = await client(recordingFetch(() => new Promise<Response>(() => undefined)).fetch, false, () => 0, 20).get("/api/v2/accounts", {});
     expect(hang).toEqual({ ok: false, status: "timeout" });
 
     const dropped = await client(recordingFetch(() => Promise.reject(new TypeError("fetch failed"))).fetch).get("/api/v2/accounts", {});

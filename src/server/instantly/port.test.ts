@@ -27,7 +27,7 @@ async function setUp(options: { writes?: boolean; accounts?: InstantlyAccount[];
   const store = openSqliteStore(":memory:");
   const campaign = { id: "camp-1", name: "Autumn physio", defaultTimezone: "Europe/London", createdAt: new Date(T0).toISOString() };
   await store.createCampaign(campaign);
-  const client = new InstantlyClient({ apiKey: "test-key-not-real", fetch: fake.fetch, writes: options.writes ?? true, now, timeoutMs: 50 });
+  const client = new InstantlyClient({ apiKey: "test-key-not-real", fetch: fake.fetch, writes: options.writes ?? true, now, timeoutMs: 10_000 });
   const port = new InstantlyEmailPort({ client, store: store.instantly, now, config: { resetZone: "UTC", pollIntervalMs: 0, ...options.config }, subjectCampaign: () => Promise.resolve({ kind: "enrollment", campaignId: campaign.id }) });
   return {
     fake,
@@ -181,7 +181,7 @@ describe("openers through dispatch campaigns", () => {
     await port.observe(null);
     fake.loseAddResponses = true;
     const r = request();
-    // The engine bounds the call; the adapter's own request timeout ends it here.
+    // Instantly created the lead, but its answer never reached the app.
     expect(await port.handover(r)).toEqual({ kind: "unknown" });
     fake.loseAddResponses = false;
     const again = await port.handover(r);
