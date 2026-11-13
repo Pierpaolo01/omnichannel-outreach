@@ -4,7 +4,7 @@
  * it takes a `SubjectState` and the time, and returns the next `SubjectState`.
  */
 import type { OutreachStatus } from "../outreach-status.ts";
-import { applyAttemptEvent, isLive, type AttemptEffect, type AttemptEvent } from "./attempt.ts";
+import { applyAttemptEvent, isLive, markable, type AttemptEffect, type AttemptEvent } from "./attempt.ts";
 import { leadNow, sendPoint, span, syncClock, wallOfLead, type Freeze, type LeadClock } from "./clock.ts";
 import { liveSteps, type TrackDefinition } from "./definition.ts";
 import type { Attempt, EndReason, FinishReason, LeadDetail, StepResult, SubjectState, TrackProgress } from "./state.ts";
@@ -283,6 +283,36 @@ export function applyToAttempt(
   now: number,
   options: { readonly resetDay: (accountId: string, t: number) => string; readonly point?: typeof sendPoint } = { resetDay: () => "" },
 ): { state: SubjectState; effects: readonly AttemptEffect[] } {
+  const key = state.attempts.find((a) => a.id === attemptId)?.idempotencyKey;
+  const out = applyToAttemptOnce(state, attemptId, event, now, options);
+  if (key === undefined) return out;
+  return { state: settleKey(out.state, key, out.effects.some((e) => e.kind === "settled")), effects: out.effects };
+}
+
+/**
+ * A reservation belongs to provider work, its idempotency key, and is released once, for every
+ * attempt sharing the key, when the work settles: a send, or a settlement without one (review
+ * round 2, ruling 2). Attempts of the key that are no longer live then hold nothing and are no
+ * longer looked up; a live one keeps its own until it ends.
+ */
+function settleKey(state: SubjectState, key: string, settled: boolean): SubjectState {
+  const sent = state.attempts.some((a) => a.idempotencyKey === key && (a.state === "sent" || a.sentWall !== null));
+  if (!sent && !settled) return state;
+  let s = state;
+  for (const a of state.attempts) {
+    if (a.idempotencyKey !== key || isLive(a) || (!a.holdsReservation && a.nextLookupWall === null)) continue;
+    s = withAttempt(s, { ...a, holdsReservation: false, nextLookupWall: null });
+  }
+  return s;
+}
+
+function applyToAttemptOnce(
+  state: SubjectState,
+  attemptId: string,
+  event: AttemptEvent,
+  now: number,
+  options: { readonly resetDay: (accountId: string, t: number) => string; readonly point?: typeof sendPoint },
+): { state: SubjectState; effects: readonly AttemptEffect[] } {
   const target = state.attempts.find((a) => a.id === attemptId);
   if (!target) throw new Error(`no attempt ${attemptId}`);
   const sentFact = event.kind === "sent_observed" || (event.kind === "lookup_answer" && event.answer.kind === "sent");
@@ -291,6 +321,12 @@ export function applyToAttempt(
     // settles the live attempt; for a step sent by other work it is ignored.
     const sentAlready = state.attempts.find((a) => a.stepId === target.stepId && a.state === "sent");
     if (sentAlready) {
+      if (!isLive(target) && markable(target) && sentAlready.idempotencyKey !== target.idempotencyKey) {
+        // Uncertain work the user says was sent, though other work sent the step: counted on its
+        // day, its reservation released, never a second send of the step.
+        const s = withAttempt(state, { ...target, sentWall: now, sentDay: options.resetDay(target.accountId, now), holdsReservation: false, nextLookupWall: null });
+        return { state: s, effects: [{ kind: "sent_after_withdrawal", providerTime: now }] };
+      }
       if (!isLive(target) || sentAlready.idempotencyKey !== target.idempotencyKey) return { state, effects: [{ kind: "ignored", what: "the step was already sent" }] };
       const s = withAttempt(state, { ...target, state: "withdrawn", endedBy: "provider", holdsReservation: false, nextLookupWall: null, awaitingAnswer: false, retry: "refused" });
       return { state: runs(s) ? evaluate(s, now) : s, effects: [] };
@@ -311,7 +347,7 @@ export function applyToAttempt(
     const work = state.attempts
       .filter((a) => a.stepId === target.stepId && a.idempotencyKey === target.idempotencyKey && a.handedWall !== null)
       .sort((x, y) => (x.handedWall ?? 0) - (y.handedWall ?? 0))[0];
-    if (work && work.id !== target.id) return applyToAttempt(state, work.id, event, now, options);
+    if (work && work.id !== target.id) return applyToAttemptOnce(state, work.id, event, now, options);
   }
   const { attempt, effects } = applyAttemptEvent(target, event);
   let s = withAttempt(state, attempt);

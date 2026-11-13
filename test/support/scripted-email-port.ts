@@ -24,7 +24,7 @@ export class ScriptedEmailPort implements SendPort {
   readonly events: { visibleAt: number; event: ProviderEvent }[] = [];
   accountList: AccountStatus[];
   /** What each first call for a key does: its answer, when it sends, and how late its event shows. */
-  onCall: (request: HandoverRequest) => { answer: "accepted" | "unknown"; sendAfter: number | null; eventDelay?: number } = () => ({ answer: "accepted", sendAfter: 0 });
+  onCall: (request: HandoverRequest) => { answer: "accepted" | "unknown" | "rejected"; sendAfter: number | null; eventDelay?: number } = () => ({ answer: "accepted", sendAfter: 0 });
   /** Overrides the lookup's truthful answer. */
   lookupOverride: ((work: ScriptedWork | undefined, now: number) => LookupResult | null) | null = null;
   withdrawAnswer: "withdrawn" | "too-late" | "unknown" = "unknown";
@@ -47,7 +47,7 @@ export class ScriptedEmailPort implements SendPort {
 
   presendCheck(request: { sender: string; destination: string; threadRefs: readonly string[] }) {
     // ADR 0002's pre-send check reads only the threads the app recorded for the lead.
-    const reply = this.events.find((e) => e.event.kind === "reply" && e.visibleAt <= this.now() && request.threadRefs.includes(e.event.providerRef));
+    const reply = this.events.find((e) => e.event.kind === "reply" && e.visibleAt <= this.now() && e.event.providerRef !== null && request.threadRefs.includes(e.event.providerRef));
     if (reply && reply.event.kind === "reply") return Promise.resolve({ kind: "reply" as const, providerRef: reply.event.id, at: reply.event.at });
     return this.presend();
   }
@@ -58,6 +58,8 @@ export class ScriptedEmailPort implements SendPort {
     const existing = this.works.find((w) => w.key === request.idempotencyKey);
     if (existing && request.threading === "new_subject") return Promise.resolve({ kind: "accepted", providerRef: existing.ref });
     const script = this.onCall(request);
+    // A refusal: the provider never takes the work.
+    if (script.answer === "rejected") return Promise.resolve({ kind: "rejected", reason: "provider_skipped" });
     const ref = `msg-${++this.nextRef}`;
     this.works.push({ key: request.idempotencyKey, request, ref, sendAt: script.sendAfter === null ? null : now + script.sendAfter, eventDelay: script.eventDelay ?? 0, cancelled: false });
     this.advance();
@@ -79,13 +81,19 @@ export class ScriptedEmailPort implements SendPort {
     return times.length > 0 ? Math.min(...times) : null;
   }
 
-  /** The prospect replies; `onThread` false sends it from their address to the inbox but outside any thread the app knows. */
-  reply(destination: string, onThread = true): void {
+  /** The prospect replies; `onThread` false starts a new conversation from their address to the inbox, with no thread. */
+  reply(destination: string, onThread = true, thread: string | null = null): void {
     const now = this.now();
     const last = this.deliveries.filter((d) => this.works.find((w) => w.ref === d.ref)?.request.destination === destination).at(-1);
     if (!last) throw new Error(`nothing was delivered to ${destination}`);
+    if (thread !== null) {
+      // A reply on the thread of one particular message.
+      const on = this.deliveries.find((d) => d.ref === thread) ?? last;
+      this.events.push({ visibleAt: now, event: { id: `reply-${this.events.length + 1}`, kind: "reply", providerRef: thread, at: now, inbox: on.sender, from: destination } });
+      return;
+    }
     const id = `reply-${this.events.length + 1}`;
-    this.events.push({ visibleAt: now, event: { id, kind: "reply", providerRef: onThread ? last.ref : `unknown-${id}`, at: now, inbox: last.sender, from: destination } });
+    this.events.push({ visibleAt: now, event: { id, kind: "reply", providerRef: onThread ? last.ref : null, at: now, inbox: last.sender, from: destination } });
   }
 
   withdraw(attempt: AttemptRef): Promise<"withdrawn" | "too-late" | "unknown"> {
@@ -94,7 +102,11 @@ export class ScriptedEmailPort implements SendPort {
     return Promise.resolve(this.withdrawAnswer);
   }
 
+  /** How many times the engine has observed. */
+  observeCalls = 0;
+
   observe(checkpoint: string | null): Promise<{ events: ProviderEvent[]; checkpoint: string }> {
+    this.observeCalls++;
     const now = this.now();
     const since = checkpoint === null ? -Infinity : Number(checkpoint) - 60 * 60_000;
     return Promise.resolve({ events: this.events.filter((e) => e.visibleAt > since && e.visibleAt <= now).map((e) => e.event), checkpoint: String(now) });

@@ -260,5 +260,15 @@ export interface NeedsAttention {
   readonly accountWaits: readonly { readonly accountId: string; readonly reason: "quota" | "rate_limited"; readonly until: string | null }[];
   /** Inboxes the provider reports unhealthy or disconnected: their leads wait on them. */
   readonly unhealthyInboxes: readonly { readonly accountId: string }[];
+  /**
+   * Inboxes some of whose daily sends are held by unresolved provider work (ADR 0003 4.2): how
+   * many, and the work holding them, until the provider or the user settles it.
+   */
+  readonly heldCapacity: readonly {
+    readonly accountId: string;
+    readonly held: number;
+    readonly capacity: number;
+    readonly work: readonly { readonly attemptId: string; readonly enrollmentId: string; readonly unresolvedSince: string }[];
+  }[];
   readonly anomalies: readonly { readonly what: string; readonly at: string }[];
 }

@@ -19,7 +19,7 @@ import type {
   TrackProgress,
 } from "../../domain/sequence/state.ts";
 import { isOutreachStatus } from "../../domain/outreach-status.ts";
-import type { CampaignEngineRow, EngineStore, LaunchOutcome, SenderAccountConfig } from "../engine/engine-store.ts";
+import type { CampaignEngineRow, EngineStore, LaunchOutcome, PendingReply, SenderAccountConfig } from "../engine/engine-store.ts";
 import { liveDetailRowOf } from "./sqlite-store.ts";
 
 type Row = Record<string, SQLOutputValue>;
@@ -113,6 +113,10 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   async update(subjectId: string, now: number, decide: (state: SubjectState) => SubjectState | null): Promise<SubjectState | null> {
+    return this.updateNow(subjectId, now, decide);
+  }
+
+  updateNow(subjectId: string, now: number, decide: (state: SubjectState) => SubjectState | null): SubjectState | null {
     return this.transaction(() => {
       const base = this.load(subjectId, now);
       if (!base) return null;
@@ -173,13 +177,36 @@ export class SqliteEngineStore implements EngineStore {
     return this.sql("SELECT * FROM attempts WHERE idempotency_key = ? ORDER BY claimed_wall, rowid").all(key).map(toAttempt);
   }
 
-  async subjectsReachedFrom(inbox: string, address: string): Promise<string[]> {
-    // A reply outside any known thread is reconciled by the inbox it reached and the lead's address (ruling 1).
+  async subjectsReachedFrom(inbox: string, address: string, atWall: number): Promise<string[]> {
+    // A reply outside any known thread is reconciled by the inbox it reached and the lead's address,
+    // only to work handed at or before it that was sent or whose outcome is uncertain: never work
+    // the provider refused or confirmed withdrawn, the user marked not sent, or handed after it (2.4).
     return this.sql(
-      `SELECT DISTINCT a.subject_id FROM attempts a WHERE a.account_id = ? AND lower(a.destination) = lower(?) AND a.calls > 0 ORDER BY a.subject_id`,
+      `SELECT DISTINCT a.subject_id FROM attempts a
+       WHERE a.account_id = ? AND lower(a.destination) = lower(?) AND a.calls > 0 AND a.handed_wall <= ?
+         AND (a.state = 'sent' OR a.sent_wall IS NOT NULL OR a.state IN ('handed', 'accepted')
+              OR (a.state = 'withdrawn' AND a.ended_by = 'lookup_not_sent' AND a.holds_reservation = 1))
+       ORDER BY a.subject_id`,
     )
-      .all(inbox, address)
+      .all(inbox, address, atWall)
       .map((r) => str(r, "subject_id"));
+  }
+
+  async holdReply(reply: PendingReply): Promise<void> {
+    this.run(
+      "INSERT OR IGNORE INTO pending_replies (event_id, provider_ref, inbox, address, at_wall, received_wall) VALUES (?, ?, ?, ?, ?, ?)",
+      [reply.eventId, reply.providerRef, reply.inbox, reply.address.toLowerCase(), reply.atWall, reply.receivedWall],
+    );
+  }
+
+  async pendingReplies(): Promise<PendingReply[]> {
+    return this.sql("SELECT * FROM pending_replies ORDER BY received_wall, event_id")
+      .all()
+      .map((r) => ({ eventId: str(r, "event_id"), providerRef: str(r, "provider_ref"), inbox: str(r, "inbox"), address: str(r, "address"), atWall: num(r, "at_wall"), receivedWall: num(r, "received_wall") }));
+  }
+
+  async dropPendingReply(eventId: string): Promise<void> {
+    this.run("DELETE FROM pending_replies WHERE event_id = ?", [eventId]);
   }
 
   async attemptByProviderRef(providerRef: string): Promise<Attempt | null> {
@@ -402,6 +429,13 @@ export class SqliteEngineStore implements EngineStore {
       replies: this.sql("SELECT * FROM replies WHERE subject_id = ? ORDER BY at_wall, rowid")
         .all(subjectId)
         .map((r) => ({ channel: str(r, "channel") === "sms" ? ("sms" as const) : ("email" as const), atWall: num(r, "at_wall"), providerRef: str(r, "provider_ref") })),
+      pendingReplies: this.sql(
+        `SELECT DISTINCT inbox, address FROM pending_replies
+         WHERE address IN (SELECT lower(destination) FROM attempts WHERE subject_id = ?)
+            OR address IN (SELECT lower(value) FROM live_contact_details WHERE owner_kind = ? AND owner_id = ? AND channel = 'email')`,
+      )
+        .all(subjectId, owner.kind, owner.id)
+        .map((r) => ({ inbox: str(r, "inbox"), address: str(r, "address") })),
       lead: {
         zone: prospectZone([strOrNull(person ?? {}, "timezone"), company ? strOrNull(company, "timezone") : null], definition.timezone),
         details,

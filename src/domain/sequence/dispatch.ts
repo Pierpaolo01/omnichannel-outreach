@@ -209,7 +209,14 @@ function currentStatePredicates(state: SubjectState, attempt: Attempt, account: 
   const dest = state.lead.resolved[attempt.destinationDetailId];
   if (!dest || dest.bad || !dest.owned) failed.push(12);
   if (state.replies.some((r) => r.atWall >= attempt.claimedWall)) failed.push(13);
+  if (replyPending(state, attempt.accountId, attempt.destination)) failed.push(18);
   return failed;
+}
+
+/** A reply from `destination` to `inbox` is waiting for its thread to be known (2.4): sends between them pause. */
+export function replyPending(state: SubjectState, inbox: string, destination: string): boolean {
+  const address = destination.toLowerCase();
+  return (state.pendingReplies ?? []).some((r) => r.inbox === inbox && r.address === address);
 }
 
 const presendFresh = (attempt: Attempt, now: number) =>

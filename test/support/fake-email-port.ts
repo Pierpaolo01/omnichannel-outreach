@@ -100,7 +100,7 @@ export class FakeEmailPort implements SendPort {
   readonly channel = "email";
   readonly handoverLog: HandoverLogEntry[] = [];
   readonly deliveryLog: DeliveryLogEntry[] = [];
-  readonly replyLog: { at: number; destination: string; id: string; threadRef: string; inbox: string; onThread: boolean; subjectId: string }[] = [];
+  readonly replyLog: { at: number; destination: string; id: string; threadRef: string | null; inbox: string; onThread: boolean; subjectId: string }[] = [];
   readonly withdrawLog: { at: number; key: string; answer: string }[] = [];
   /** Every lookup the fake answered. */
   readonly lookupLog: { at: number; key: string; answer: LookupResult["kind"] }[] = [];
@@ -160,7 +160,7 @@ export class FakeEmailPort implements SendPort {
   presendCheck(request: { sender: string; destination: string; threadRefs: readonly string[] }) {
     if (this.portHangs) return new Promise<never>(() => undefined);
     if (this.presendUnavailable) return Promise.resolve({ kind: "unavailable" as const });
-    const reply = this.replyLog.find((r) => r.destination === request.destination && request.threadRefs.includes(r.threadRef) && r.at <= this.now());
+    const reply = this.replyLog.find((r) => r.destination === request.destination && r.threadRef !== null && request.threadRefs.includes(r.threadRef) && r.at <= this.now());
     return Promise.resolve(reply ? { kind: "reply" as const, providerRef: reply.id, at: reply.at } : { kind: "clear" as const });
   }
 
@@ -328,8 +328,8 @@ export class FakeEmailPort implements SendPort {
     const last = this.deliveryLog.filter((d) => d.destination === destination && d.at <= now).at(-1);
     if (!last) return false;
     const id = `reply-${this.replyLog.length + 1}`;
-    // Off the thread: from the lead's address to the inbox, but as a new conversation.
-    const threadRef = onThread ? last.providerRef : `new-conversation-${id}`;
+    // Off the thread: from the lead's address to the inbox, as a new conversation with no thread.
+    const threadRef = onThread ? last.providerRef : null;
     this.replyLog.push({ at: now, destination, id, threadRef, inbox: last.sender, onThread, subjectId: last.subjectId });
     this.emit(now, { id, kind: "reply", providerRef: threadRef, at: now, inbox: last.sender, from: destination });
     return true;

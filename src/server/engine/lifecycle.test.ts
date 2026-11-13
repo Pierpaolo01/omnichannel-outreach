@@ -1,11 +1,13 @@
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, test } from "vitest";
 import { business, person } from "../../../test/support/export-builder.ts";
-import { EngineHarness } from "../../../test/support/engine-harness.ts";
+import { Crash, EngineHarness } from "../../../test/support/engine-harness.ts";
 import { ScriptedEmailPort } from "../../../test/support/scripted-email-port.ts";
-import { ENGINE_PARAMS } from "../../domain/sequence/attempt.ts";
+import { ENGINE_PARAMS, type CallAnswer } from "../../domain/sequence/attempt.ts";
+import { applyReply } from "../../domain/sequence/progress.ts";
+import type { SubjectState } from "../../domain/sequence/state.ts";
 import type { CampaignDefinition, StepDefinition } from "../../domain/sequence/definition.ts";
-import type { EnrollmentView } from "../../shared/api.ts";
+import type { EnrollmentView, NeedsAttention } from "../../shared/api.ts";
 import { migrate } from "../persistence/migrations.ts";
 import type { AccountStatus } from "./ports.ts";
 
@@ -471,5 +473,265 @@ describe("a discarded stale evaluation is redone on fresh state (ADR 0003 2.5; f
     expect(marked).toBe(true);
     const rows = (await h.request<{ rows: { name: string; enrollments: EnrollmentView[] }[] }>("GET", "/api/leads")).body.rows;
     expect((await h.progress(rows.find((r) => r.name === "Sam Lee")!.enrollments[0]!.id)).status).toBe("finished_no_usable_channel");
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Review round 2 on PR 37: the coordinator's rulings 1-3 and 5, each reproduced first.
+
+/**
+ * A second writer that commits a reply to a lead at every turn of the microtask queue after any
+ * store write that leaves an attempt awaiting its call's answer, until the call is made. Returns
+ * how many times it found an authorized attempt whose call had not yet been made.
+ */
+function replyInEveryGap(h: EngineHarness, port: ScriptedEmailPort): { gaps: () => number } {
+  const store = h.store.engine;
+  let gaps = 0;
+  const watching = new Map<string, { subjectId: string; calls: number }>();
+  const check = () => {
+    for (const [id, w] of watching) {
+      if (port.calls.filter((c) => c.request.attemptId === id).length >= w.calls) {
+        watching.delete(id);
+        continue;
+      }
+      gaps++;
+      // Another tick applies an observed reply here.
+      void store.update(w.subjectId, h.clock, (s) => applyReply(s, { channel: "email", atWall: h.clock, providerRef: `gap-reply-${gaps}` }, h.clock));
+    }
+  };
+  const probe = (n: number) =>
+    queueMicrotask(() => {
+      check();
+      if (n > 0) probe(n - 1);
+    });
+  const watch = (state: SubjectState | null) => {
+    for (const a of state?.attempts ?? []) if (a.awaitingAnswer) watching.set(a.id, { subjectId: a.subjectId, calls: a.calls });
+    probe(40);
+  };
+  const update = store.update.bind(store);
+  store.update = async (...args) => {
+    const result = await update(...args);
+    watch(result);
+    return result;
+  };
+  const updateNow = store.updateNow.bind(store);
+  store.updateNow = (...args) => {
+    const result = updateNow(...args);
+    watch(result);
+    return result;
+  };
+  return { gaps: () => gaps };
+}
+
+describe("review round 2, ruling 1: from the authorization commit to the port call is synchronous, and ticks run one at a time", () => {
+  test.each(["first handover", "retry", "recovery after restart"] as const)("no reply can commit between a send's authorization and its call: %s", async (path) => {
+    const { h, port, start } = await launched([inbox("inbox-a")]);
+    // The first call's answer is lost and nothing is sent yet, so a same-key retry is authorized and called.
+    if (path === "retry") port.onCall = () => ({ answer: "unknown", sendAfter: null });
+    if (path === "recovery after restart") {
+      // The follow-up's claim is cut short by a crash; the restarted engine hands it over.
+      let crashed = false;
+      h.hooks = {
+        crashPoint: (point) => {
+          if (point === "after_claim" && !crashed && h.clock > MONDAY_9 + H) {
+            crashed = true;
+            throw new Crash(point);
+          }
+        },
+      };
+    }
+    const probe = replyInEveryGap(h, port);
+    await start();
+    await h.advanceTo(path === "recovery after restart" ? MONDAY_9 + 2 * DAY : MONDAY_9 + 10 * MIN);
+    if (path === "retry") expect(port.calls.length).toBeGreaterThanOrEqual(2);
+    if (path === "recovery after restart") {
+      expect(h.crashes).toHaveLength(1);
+      expect(port.calls.map((c) => c.request.stepId)).toEqual(["s1", "s2"]);
+    }
+    expect(port.calls.length).toBeGreaterThanOrEqual(1);
+    expect(probe.gaps()).toBe(0);
+  });
+
+  test("a tick started while another runs waits for it: the timer, launch, recovery, the user's mark and a late answer all queue", async () => {
+    const { h, port, start } = await launched([inbox("inbox-a")], PEOPLE);
+    let release: (answer: CallAnswer) => void = () => undefined;
+    let hanging = false;
+    const answer = port.handover.bind(port);
+    port.handover = async (request) => {
+      const a = await answer(request);
+      if (hanging) return a;
+      hanging = true;
+      return new Promise<CallAnswer>((resolve) => (release = resolve));
+    };
+    // Port waits that never time out, so the first tick stays inside its call until released.
+    (h.engine as unknown as { waitFor: (p: Promise<unknown>) => Promise<unknown> }).waitFor = (p) => p;
+    const lead = start();
+    const started = () => hanging;
+    for (let i = 0; i < 20 && !started(); i++) await new Promise((resolve) => setImmediate(resolve));
+    expect(started()).toBe(true);
+    const observed = port.observeCalls;
+    const order: string[] = [];
+    const others = [
+      h.engine.tick().then(() => order.push("tick")),
+      h.engine.recover().then(() => order.push("recover")),
+      h.engine.markAttempt("none", "not_sent").then(() => order.push("mark")),
+      h.engine.receiveLateAnswer("none", { kind: "unknown" }).then(() => order.push("late answer")),
+    ];
+    let waited: string[] = [];
+    let observedMeanwhile = -1;
+    try {
+      for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
+      waited = [...order];
+      observedMeanwhile = port.observeCalls;
+    } finally {
+      release({ kind: "accepted", providerRef: "msg-1" });
+    }
+    expect(waited).toEqual([]);
+    expect(observedMeanwhile).toBe(observed);
+    await lead;
+    order.push("launch");
+    await Promise.all(others);
+    expect(order[0]).toBe("launch");
+    expect(port.observeCalls).toBeGreaterThan(observed);
+  });
+});
+
+describe("review round 2, ruling 2: a reservation belongs to provider work and is released once, when the work settles", () => {
+  test("attempt.ts:218: capacity 1, the work is unresolved and the user marks it not sent: the held capacity is listed, then freed, and the next lead sends that day", async () => {
+    const { h, port, start } = await launched([inbox("inbox-a", { capacity: 1 })], PEOPLE);
+    // Pat's first work is accepted and never sent; the lookup cannot say. Later work sends at once.
+    port.onCall = () => (port.calls.length === 1 ? { answer: "accepted", sendAfter: null } : { answer: "accepted", sendAfter: 0 });
+    port.lookupOverride = (work) => (work === port.works[0] ? { kind: "unknown" } : null);
+    const lead = await start();
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    const before = (await h.request<NeedsAttention>("GET", "/api/needs-attention")).body;
+    const pat = (await h.store.engine.subject(lead("Pat Oneil"), h.clock))!.attempts[0]!;
+    expect(before.heldCapacity).toEqual([{ accountId: "inbox-a", held: 1, capacity: 1, work: [{ attemptId: pat.id, enrollmentId: lead("Pat Oneil"), unresolvedSince: expect.any(String) }] }]);
+    expect(port.deliveries.map((d) => d.subjectId)).toEqual([]);
+    expect(await h.engine.markAttempt(pat.id, "not_sent")).toBe(true);
+    await h.advanceTo(MONDAY_9 + 3 * H);
+    // The freed daily send goes out that day: Pat's step again, under a new key, first by priority.
+    expect(port.deliveries.filter((d) => d.at < MONDAY_9 + 15 * H).map((d) => d.subjectId)).toEqual([lead("Pat Oneil")]);
+    expect((await h.request<NeedsAttention>("GET", "/api/needs-attention")).body.heldCapacity).toEqual([]);
+  });
+
+  test("the verification's reproduction (B2): uncertain work withdrawn after a re-import keeps its reservation visibly, and the next lead sends once the user resolves it", async () => {
+    const { h, port, start, campaign } = await launched([inbox("inbox-a", { capacity: 1 })], PEOPLE);
+    port.onCall = (request) => (request.destination === "pat@harbour.example" ? { answer: "accepted", sendAfter: null } : { answer: "accepted", sendAfter: 0 });
+    // Lookup: unknown at minute 15, then a not-sent the transport cannot vouch for.
+    port.lookupOverride = (work, now) => (work?.request.destination === "pat@harbour.example" ? (now < MONDAY_9 + 20 * MIN ? { kind: "unknown" } : { kind: "not-sent" }) : null);
+    port.withdrawAnswer = "unknown";
+    const lead = await start();
+    await h.advanceTo(MONDAY_9 + 20 * MIN);
+    // A re-import removes Pat's address: the lead has no usable channel and its work is withdrawn.
+    const businesses = [business({ business_id: "b1", business_name: "Harbour Lane Physio", general_emails: "pat@harbour.example" })];
+    await h.reimport(campaign.id, { businesses, people: [{ ...PEOPLE[0]!, email: "" }, PEOPLE[1]!] });
+    await h.advanceTo(MONDAY_9 + 2 * DAY);
+    expect((await h.progress(lead("Pat Oneil"))).status).toBe("finished_no_usable_channel");
+    const pat = (await h.store.engine.subject(lead("Pat Oneil"), h.clock))!.attempts[0]!;
+    expect(pat).toMatchObject({ state: "withdrawn", endedBy: "lookup_not_sent", holdsReservation: true });
+    const listed = (await h.request<NeedsAttention>("GET", "/api/needs-attention")).body.heldCapacity;
+    expect(listed).toEqual([{ accountId: "inbox-a", held: 1, capacity: 1, work: [{ attemptId: pat.id, enrollmentId: lead("Pat Oneil"), unresolvedSince: expect.any(String) }] }]);
+    expect(port.deliveries).toEqual([]);
+    expect(await h.engine.markAttempt(pat.id, "not_sent")).toBe(true);
+    await h.advanceTo(MONDAY_9 + 2 * DAY + H);
+    expect(port.deliveries.map((d) => d.subjectId)).toEqual([lead("Sam Lee")]);
+  });
+});
+
+describe("review round 2, ruling 3: a reply keeps its campaign's scope", () => {
+  test("engine.ts:304 and the verification's reproduction (B3): a threaded reply to campaign B's message, before its sent event, stops only B", async () => {
+    let clock = MONDAY_9 - H;
+    const port = new ScriptedEmailPort(() => clock, [inbox("inbox-a")]);
+    const h = new EngineHarness({ start: clock, accounts: [], port, engine: quickWaits });
+    Object.defineProperty(h, "clock", { get: () => clock, set: (v: number) => (clock = v) });
+    const rows = { businesses: [business({ business_id: "b1", business_name: "Harbour Lane Physio" })], people: [PEOPLE[0]!] };
+    const definition: CampaignDefinition = { ...twoSteps(), tracks: [{ ...twoSteps().tracks[0]!, steps: [step("s1", { subject: "Hello", threading: "new_subject" }), step("s2", { subject: "Again", threading: "new_subject", waitDays: 1 })] }] };
+    const a = await h.createCampaign("Campaign A", rows);
+    const b = await h.createCampaign("Campaign B", rows);
+    await h.tick();
+    await h.defineSequence(a.campaign.id, definition);
+    await h.defineSequence(b.campaign.id, definition);
+    const leadA = async () => (await h.store.engine.subjectsOf(a.campaign.id))[0]!;
+    const leadB = async () => (await h.store.engine.subjectsOf(b.campaign.id))[0]!;
+    // B's call (the second) loses its answer, and its sent event shows twenty minutes late.
+    port.onCall = () => (port.calls.length === 2 ? { answer: "unknown", sendAfter: 0, eventDelay: 20 * MIN } : { answer: "accepted", sendAfter: 0 });
+    const answer = port.handover.bind(port);
+    port.handover = async (request) => {
+      const result = await answer(request);
+      return port.calls.length === 2 ? { kind: "unknown" } : result;
+    };
+    clock = MONDAY_9;
+    await h.launch(a.campaign.id);
+    clock = MONDAY_9 + MIN;
+    await h.launch(b.campaign.id);
+    expect(port.calls.map((c) => c.request.subjectId)).toEqual([await leadA(), await leadB()]);
+    // A second later the prospect answers B's message, on its thread.
+    clock = MONDAY_9 + MIN + 1000;
+    port.reply("pat@harbour.example", true, port.deliveries.find((d) => d.at === MONDAY_9 + MIN)!.ref);
+    await h.advanceTo(MONDAY_9 + 3 * DAY);
+    expect((await h.progress(await leadB())).status).toBe("replied");
+    expect((await h.progress(await leadA())).status).not.toBe("replied");
+    const aLead = await leadA();
+    expect(port.calls.filter((c) => c.request.subjectId === aLead).map((c) => c.request.stepId)).toEqual(["s1", "s2"]);
+  });
+
+  test("a reply on a thread the app never learns falls back after one settling period to work sent at or before it, pausing that inbox's sends to the address meanwhile; refused work and work handed after the reply are not matched", async () => {
+    let clock = MONDAY_9 - H;
+    const port = new ScriptedEmailPort(() => clock, [inbox("inbox-a")]);
+    const h = new EngineHarness({ start: clock, accounts: [], port, engine: quickWaits });
+    Object.defineProperty(h, "clock", { get: () => clock, set: (v: number) => (clock = v) });
+    const rows = { businesses: [business({ business_id: "b1", business_name: "Harbour Lane Physio" })], people: [PEOPLE[0]!] };
+    const sent = await h.createCampaign("Sent", rows);
+    const refused = await h.createCampaign("Refused", rows);
+    const later = await h.createCampaign("Later", rows);
+    await h.tick();
+    for (const c of [sent, refused, later]) await h.defineSequence(c.campaign.id, twoSteps());
+    const leadOf = async (c: typeof sent) => (await h.store.engine.subjectsOf(c.campaign.id))[0]!;
+    port.onCall = (request) => (request.subjectId === refusedLead ? { answer: "rejected", sendAfter: null } : { answer: "accepted", sendAfter: 0 });
+    let refusedLead = "";
+    clock = MONDAY_9;
+    await h.launch(sent.campaign.id);
+    refusedLead = await leadOf(refused);
+    clock = MONDAY_9 + 2 * MIN;
+    await h.launch(refused.campaign.id);
+    expect(port.calls.map((c) => c.request.subjectId)).toEqual([await leadOf(sent), refusedLead]);
+    // At 10:00 a reply arrives on a thread no message of the app's has.
+    clock = MONDAY_9 + H;
+    port.events.push({ visibleAt: clock, event: { id: "reply-x", kind: "reply", providerRef: "thread-unknown", at: clock, inbox: "inbox-a", from: "pat@harbour.example" } });
+    await h.tick();
+    // A campaign launched while the reply is pending is paused for that inbox and address.
+    clock = MONDAY_9 + H + 5 * MIN;
+    await h.launch(later.campaign.id);
+    await h.advanceTo(MONDAY_9 + H + SETTLING - MIN);
+    const pausedLead = await leadOf(later);
+    expect(port.calls.filter((c) => c.request.subjectId === pausedLead)).toEqual([]);
+    await h.advanceTo(MONDAY_9 + 3 * DAY);
+    expect((await h.progress(await leadOf(sent))).status).toBe("replied");
+    expect((await h.progress(refusedLead)).status).not.toBe("replied");
+    expect((await h.progress(await leadOf(later))).status).not.toBe("replied");
+    const laterLead = await leadOf(later);
+    const laterCalls = port.calls.filter((c) => c.request.subjectId === laterLead);
+    expect(laterCalls.length).toBeGreaterThan(0);
+    expect(laterCalls[0]!.at).toBeGreaterThanOrEqual(MONDAY_9 + H + SETTLING);
+  });
+});
+
+describe("review round 2, ruling 5", () => {
+  test("lookup confirms a send whose sent event never arrives: the live attempt carries the reference at once, and the continue-thread follow-up is called with it", async () => {
+    const { h, port, start } = await launched([inbox("inbox-a")]);
+    port.onCall = () => ({ answer: "unknown", sendAfter: 0, eventDelay: Infinity });
+    const call = port.handover.bind(port);
+    port.handover = async (request) => {
+      await call(request);
+      return { kind: "unknown" };
+    };
+    const lead = await start();
+    // Retries take the three calls; the lookup a settling period after the last one confirms the send.
+    await h.advanceTo(MONDAY_9 + 2 * SETTLING);
+    const s1 = (await h.store.engine.subject(lead("Pat Oneil"), h.clock))!.attempts.find((a) => a.stepId === "s1");
+    expect(s1).toMatchObject({ state: "sent", endedBy: "lookup", providerRef: "msg-1" });
+    await h.advanceTo(MONDAY_9 + 3 * DAY);
+    expect(port.calls.filter((c) => c.request.stepId === "s2").map((c) => c.request.threadRef)).toEqual(["msg-1"]);
   });
 });

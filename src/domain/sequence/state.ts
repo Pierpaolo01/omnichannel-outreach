@@ -201,6 +201,11 @@ export interface SubjectState {
   readonly attempts: readonly Attempt[];
   readonly freezes: readonly Freeze[];
   readonly replies: readonly Reply[];
+  /**
+   * Replies waiting for their thread to be known, as inbox and lowercase address: while one
+   * waits, nothing more goes from that inbox to that address (ADR 0003 2.4, review round 2).
+   */
+  readonly pendingReplies?: readonly { readonly inbox: string; readonly address: string }[];
   readonly lead: LeadFacts;
   /** Details this change marks bad. Imports never clear a bad mark. */
   readonly markBad: readonly string[];

@@ -45,6 +45,12 @@ export type AttemptEffect =
   | { readonly kind: "rejected"; readonly reason: RejectReason; readonly retryAfterMs?: number }
   | { readonly kind: "call_withdraw" }
   | { readonly kind: "anomaly"; readonly what: string }
+  /**
+   * The provider work behind this attempt settled without a send: a confirmed withdrawal, a final
+   * not-sent, or the user's "not sent". Every attempt sharing its key releases its reservation
+   * (review round 2, ruling 2).
+   */
+  | { readonly kind: "settled" }
   | { readonly kind: "ignored"; readonly what: string };
 
 export interface AttemptStep {
@@ -59,12 +65,30 @@ const settle = (a: Attempt): Attempt => ({ ...a, nextLookupWall: (a.lastCallWall
 
 /** The provider never got the work, refused it, or stated it will not send: the reservation goes. */
 const release = (a: Attempt): Attempt => ({ ...a, holdsReservation: false });
+const SETTLED: AttemptEffect = { kind: "settled" };
+
+/**
+ * Work the app withdrew after a not-sent the transport cannot vouch for, with no retry left: it
+ * keeps its reservation and is looked up, and it is unresolved from then on, so it is listed in
+ * Needs attention until the provider or the user settles it (review round 2, ruling 2).
+ */
+const uncertain = (a: Attempt, now: number, nextLookupWall: number): Attempt => ({
+  ...a,
+  state: "withdrawn",
+  endedBy: "lookup_not_sent",
+  retry: "refused",
+  nextLookupWall,
+  unresolvedSince: a.unresolvedSince ?? now,
+});
 
 /** A missing provider reference is attached from any later sent fact for the same work (ruling 1). */
 const withRef = (a: Attempt, ref: string | null | undefined): Attempt => (a.providerRef === null && ref ? { ...a, providerRef: ref } : a);
 
 /** Withdrawn work whose outcome the provider has not settled: it keeps being looked up (and, separately, its reservation). */
 export const isUncertain = (a: Attempt): boolean => a.state === "withdrawn" && a.nextLookupWall !== null && a.sentWall === null && a.calls > 0;
+
+/** Unresolved work the user may mark sent or not sent: a live attempt, or withdrawn work still uncertain. */
+export const markable = (a: Attempt): boolean => a.unresolvedSince !== null && (isLive(a) || isUncertain(a));
 
 /** Whether a same-key retry may still be attempted at all (the attempt's own conditions in 5.6). */
 export function retryPossible(a: Attempt): boolean {
@@ -141,7 +165,10 @@ export function applyAttemptEvent(a: Attempt, event: AttemptEvent): AttemptStep 
         if (a.withdrawRequested) return same(a, "already asked to withdraw");
         if (a.retry === "wanted_after_not_sent") {
           // The provider said not sent and the retry it wanted is now refused (5.3 not-sent row).
-          return { attempt: { ...a, withdrawRequested: true, retry: "refused", state: "withdrawn", endedBy: "lookup_not_sent", nextLookupWall: (a.lastCallWall ?? a.claimedWall) + ENGINE_PARAMS.SETTLING }, effects: [] };
+          // Unresolved from the not-sent lookup that wanted the retry (it set the next lookup a SETTLING on).
+          const next = (a.lastCallWall ?? a.claimedWall) + ENGINE_PARAMS.SETTLING;
+          const notSentAt = (a.nextLookupWall ?? next) - ENGINE_PARAMS.SETTLING;
+          return { attempt: uncertain({ ...a, withdrawRequested: true }, notSentAt, next), effects: [] };
         }
         const requested = { ...a, withdrawRequested: true };
         return { attempt: a.retry === "wanted" ? { ...requested, retry: "refused" } : requested, effects: [{ kind: "call_withdraw" }] };
@@ -150,7 +177,7 @@ export function applyAttemptEvent(a: Attempt, event: AttemptEvent): AttemptStep 
 
     case "withdraw_answer":
       if (a.state !== "handed" && a.state !== "accepted") return same({ ...a, withdrawCalled: true }, `withdraw answer on a ${a.state} attempt`);
-      if (event.answer === "withdrawn") return { attempt: release({ ...a, withdrawCalled: true, state: "withdrawn", endedBy: "provider" }), effects: [] };
+      if (event.answer === "withdrawn") return { attempt: release({ ...a, withdrawCalled: true, state: "withdrawn", endedBy: "provider", nextLookupWall: null }), effects: [SETTLED] };
       return { attempt: { ...a, withdrawCalled: true, nextLookupWall: a.nextLookupWall ?? event.now + ENGINE_PARAMS.SETTLING }, effects: [] };
 
     case "lookup_answer": {
@@ -161,9 +188,9 @@ export function applyAttemptEvent(a: Attempt, event: AttemptEvent): AttemptStep 
           return same(withRef(a, answer.providerRef), `lookup on a ${a.state} attempt`);
         }
         if (isUncertain(a)) {
-          // Uncertain work keeps its reservation until the provider settles it (ruling 3).
-          if (answer.kind === "not-sent" && a.notSentIsFinal) return { attempt: release({ ...a, lookupAnswer: "not-sent", nextLookupWall: null }), effects: [] };
-          return { attempt: { ...a, lookupAnswer: answer.kind, nextLookupWall: event.now + ENGINE_PARAMS.SETTLING }, effects: [] };
+          // Uncertain work keeps its reservation until the provider settles it (ruling 3), and stays unresolved.
+          if (answer.kind === "not-sent" && a.notSentIsFinal) return { attempt: release({ ...a, lookupAnswer: "not-sent", nextLookupWall: null }), effects: [SETTLED] };
+          return { attempt: { ...a, lookupAnswer: answer.kind, nextLookupWall: event.now + ENGINE_PARAMS.SETTLING, unresolvedSince: a.unresolvedSince ?? event.now }, effects: [] };
         }
         return same(a, `lookup on a ${a.state} attempt`);
       }
@@ -191,30 +218,29 @@ export function applyAttemptEvent(a: Attempt, event: AttemptEvent): AttemptStep 
       if (answer.kind === "not-sent" && a.retryable) {
         // Also when already unresolved: a later not-sent still settles it, keeping when it became unresolved (ruling 6).
         if (retryPossible(counted)) return { attempt: { ...counted, retry: "wanted_after_not_sent" }, effects: [] };
-        return { attempt: { ...counted, state: "withdrawn", endedBy: "lookup_not_sent", retry: "refused" }, effects: [] };
+        return { attempt: uncertain(counted, event.now, counted.nextLookupWall), effects: [] };
       }
       if (answer.kind === "not-sent" && a.notSentIsFinal) {
-        return { attempt: release({ ...counted, state: "withdrawn", endedBy: "provider", nextLookupWall: null }), effects: [] };
+        return { attempt: release({ ...counted, state: "withdrawn", endedBy: "provider", nextLookupWall: null }), effects: [SETTLED] };
       }
       // unknown, or a not-sent the transport cannot vouch for: unresolved, and keep looking.
       return { attempt: { ...counted, unresolvedSince: a.unresolvedSince ?? event.now }, effects: [] };
     }
 
     case "retry_refused":
-      if (a.retry === "wanted_after_not_sent") {
-        return { attempt: { ...a, retry: "refused", state: "withdrawn", endedBy: "lookup_not_sent", nextLookupWall: event.now + ENGINE_PARAMS.SETTLING }, effects: [] };
-      }
+      if (a.retry === "wanted_after_not_sent") return { attempt: uncertain(a, event.now, event.now + ENGINE_PARAMS.SETTLING), effects: [] };
       if (a.retry === "wanted") return { attempt: { ...a, retry: "refused", nextLookupWall: a.nextLookupWall ?? event.now }, effects: [] };
       return same(a, "no retry was wanted");
 
     case "mark_sent":
-      if (isTerminal(a) || a.unresolvedSince === null) return same(a, "mark sent is only for an unresolved attempt");
-      return { attempt: { ...a, state: "sent", endedBy: "user", nextLookupWall: null }, effects: [{ kind: "sent", providerTime: event.now }] };
+      if (!markable(a)) return same(a, "mark sent is only for unresolved work");
+      return { attempt: { ...a, state: "sent", endedBy: "user", nextLookupWall: null, awaitingAnswer: false }, effects: [{ kind: "sent", providerTime: event.now }] };
 
     case "mark_not_sent":
-      if (isTerminal(a) || a.unresolvedSince === null) return same(a, "mark not sent is only for an unresolved attempt");
+      if (!markable(a)) return same(a, "mark not sent is only for unresolved work");
       if (a.lookupAnswer === "queued") return same(a, "the provider reports the work queued");
-      // The user's decision is not the provider's: the work keeps its reservation and is still looked up.
-      return { attempt: { ...a, state: "withdrawn", endedBy: "user", userMarkedNotSent: true, nextLookupWall: event.now + ENGINE_PARAMS.SETTLING }, effects: [] };
+      // The user's decision settles the work: its reservation goes, and it is no longer looked up
+      // (review round 2, ruling 2). A send observed later is still counted on its send day.
+      return { attempt: release({ ...a, state: "withdrawn", endedBy: "user", userMarkedNotSent: true, nextLookupWall: null, awaitingAnswer: false }), effects: [SETTLED] };
   }
 }

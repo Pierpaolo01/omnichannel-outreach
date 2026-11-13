@@ -57,6 +57,22 @@ export class InboxLocks {
 
 const PROCESS_LOCKS = new InboxLocks();
 
+/**
+ * Runs one engine tick at a time in a process (ruling 1 of review round 2): the timer, a launch,
+ * restart settlement, the user's mark and a late answer each queue behind the running one.
+ */
+export class TickQueue {
+  private tail: Promise<unknown> = Promise.resolve();
+
+  run<T>(work: () => Promise<T>): Promise<T> {
+    const result = this.tail.then(work);
+    this.tail = result.catch(() => undefined);
+    return result;
+  }
+}
+
+const PROCESS_TICKS = new TickQueue();
+
 /** Waits for a port call at most `ms`; the default uses a real timer. */
 export function waitWithTimer<T>(promise: Promise<T>, ms: number, timedOut: T): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -80,6 +96,8 @@ export interface EngineDependencies {
    */
   readonly waitFor?: <T>(promise: Promise<T>, ms: number, timedOut: T) => Promise<T>;
   readonly locks?: InboxLocks;
+  /** Where this engine's ticks queue; the process's by default. A test's second worker stands for another process. */
+  readonly ticks?: TickQueue;
 }
 
 const OBSERVE_CHECKPOINT = "email_observe_checkpoint";
@@ -97,6 +115,7 @@ export class Engine {
   private readonly hooks: EngineHooks;
   private readonly waitFor: <T>(promise: Promise<T>, ms: number, timedOut: T) => Promise<T>;
   private readonly locks: InboxLocks;
+  private readonly ticks: TickQueue;
   /**
    * Subjects known to need nothing, by version key, until a wall instant: evaluated with no
    * change, or with nothing ready to claim. A change to the subject, its campaign or its lead
@@ -118,6 +137,7 @@ export class Engine {
     this.hooks = deps.hooks ?? {};
     this.waitFor = deps.waitFor ?? waitWithTimer;
     this.locks = deps.locks ?? PROCESS_LOCKS;
+    this.ticks = deps.ticks ?? PROCESS_TICKS;
   }
 
   /** A port call bounded by CALL_TIMEOUT; a throw counts as the timed-out answer. */
@@ -135,31 +155,40 @@ export class Engine {
   // Entry points.
 
   /** Launches a campaign if nothing blocks it, and runs a tick. */
-  async launch(campaignId: string): Promise<{ ok: true } | { ok: false; reason: string; check: LaunchCheck | null }> {
-    await this.syncAccounts();
-    const now = this.now();
-    const outcome = await this.store.launch(campaignId, now, launchCheck, (s) => this.rules.evaluate(this.rules.enterMain(s, now), now));
-    if (!outcome.ok) return outcome;
-    await this.tick();
-    return { ok: true };
+  launch(campaignId: string): Promise<{ ok: true } | { ok: false; reason: string; check: LaunchCheck | null }> {
+    return this.ticks.run(async () => {
+      await this.syncAccounts();
+      const now = this.now();
+      const outcome = await this.store.launch(campaignId, now, launchCheck, (s) => this.rules.evaluate(this.rules.enterMain(s, now), now));
+      if (!outcome.ok) return outcome;
+      await this.runTick();
+      return { ok: true as const };
+    });
   }
 
   /** Section 6: settle what a crash left open, then run a normal tick. */
-  async recover(): Promise<void> {
-    for (const a of await this.store.openAttempts()) {
-      // The crash row of 5.3: a call whose answer was never recorded is an unknown answer.
-      if ((a.state === "handed" || a.state === "accepted") && a.awaitingAnswer) {
-        await this.applyAttempt(a, { kind: "call_answer", answer: { kind: "unknown" }, now: this.now() });
+  recover(): Promise<void> {
+    return this.ticks.run(async () => {
+      for (const a of await this.store.openAttempts()) {
+        // The crash row of 5.3: a call whose answer was never recorded is an unknown answer.
+        if ((a.state === "handed" || a.state === "accepted") && a.awaitingAnswer) {
+          await this.applyAttempt(a, { kind: "call_answer", answer: { kind: "unknown" }, now: this.now() });
+        }
       }
-    }
-    await this.tick();
+      await this.runTick();
+    });
   }
 
-  async tick(): Promise<void> {
+  tick(): Promise<void> {
+    return this.ticks.run(() => this.runTick());
+  }
+
+  private async runTick(): Promise<void> {
     await this.syncAccounts();
     for (let pass = 0; pass < MAX_PASSES; pass++) {
       let changed = false;
       changed = (await this.observe()) || changed;
+      changed = (await this.correlate()) || changed;
       changed = (await this.expireClaims()) || changed;
       changed = (await this.recoverStuckAnswers()) || changed;
       changed = (await this.settle()) || changed;
@@ -205,6 +234,8 @@ export class Engine {
       if (a.retry === "wanted" || a.retry === "wanted_after_not_sent") times.push(slot);
       if (a.nextLookupWall !== null) times.push(a.nextLookupWall);
     }
+    // A held reply falls back by address one settling period after it was received.
+    for (const r of await this.store.pendingReplies()) times.push(r.receivedWall + ENGINE_PARAMS.SETTLING);
     for (const acc of accounts.values()) {
       if (acc.waitUntil !== null && acc.waitUntil !== QUOTA_WAIT) times.push(acc.waitUntil);
       // Capacity frees at the account's next reset day.
@@ -215,10 +246,12 @@ export class Engine {
   }
 
   /** ADR 0002 P3's resolution of an unresolved attempt. The controls arrive with ticket 20; the rule is here. */
-  async markAttempt(attemptId: string, mark: "sent" | "not_sent"): Promise<boolean> {
-    const a = await this.store.attempt(attemptId);
-    if (!a) return false;
-    return this.applyAttempt(a, { kind: mark === "sent" ? "mark_sent" : "mark_not_sent", now: this.now() });
+  markAttempt(attemptId: string, mark: "sent" | "not_sent"): Promise<boolean> {
+    return this.ticks.run(async () => {
+      const a = await this.store.attempt(attemptId);
+      if (!a) return false;
+      return this.applyAttempt(a, { kind: mark === "sent" ? "mark_sent" : "mark_not_sent", now: this.now() });
+    });
   }
 
   // -------------------------------------------------------------------------------------------
@@ -295,26 +328,51 @@ export class Engine {
     return withKey.find((a) => isLive(a)) ?? withKey[0] ?? null;
   }
 
+  /** Records a reply on each subject it belongs to. */
+  private async recordReply(subjects: readonly string[], reply: { id: string; at: number }): Promise<boolean> {
+    const now = this.now();
+    let changed = false;
+    for (const subjectId of subjects) {
+      const written = await this.store.update(subjectId, now, (s) => {
+        const next = this.rules.applyReply(s, { channel: "email", atWall: Math.min(reply.at, now), providerRef: reply.id }, now);
+        return same(next, s) ? null : next;
+      });
+      changed = changed || written !== null;
+    }
+    return changed;
+  }
+
+  /**
+   * A reply outside every known thread, matched by the inbox it reached and the bare address it came
+   * from (ADR 0003 2.4): only work handed at or before it, sent or uncertain, to an address the
+   * lead still owns.
+   */
+  private async replyByAddress(reply: { id: string; at: number; inbox: string; from: string }): Promise<boolean> {
+    const now = this.now();
+    const address = reply.from.toLowerCase();
+    const subjects: string[] = [];
+    for (const id of await this.store.subjectsReachedFrom(reply.inbox, address, reply.at)) {
+      const s = await this.store.subject(id, now);
+      if (s?.lead.details.some((d) => d.channel === "email" && d.value.toLowerCase() === address)) subjects.push(id);
+    }
+    if (subjects.length === 0) {
+      await this.store.recordAnomaly(null, "a reply from an address the app never wrote to from that inbox", now);
+      return false;
+    }
+    return this.recordReply(subjects, reply);
+  }
+
   private async applyEvent(event: ProviderEvent): Promise<boolean> {
     const now = this.now();
     if (event.kind === "reply") {
+      // A reply with no thread reference falls back to inbox and address at once.
+      if (event.providerRef === null) return this.replyByAddress(event);
       const a = await this.attemptFor({ providerRef: event.providerRef });
-      // A reply outside every known thread is reconciled by the inbox it reached and the address it
-      // came from, before any further send to that lead: observation runs first in every pass (ruling 1).
-      const subjects = a ? [a.subjectId] : await this.store.subjectsReachedFrom(event.inbox, event.from);
-      if (subjects.length === 0) {
-        await this.store.recordAnomaly(null, "a reply from an address the app never wrote to from that inbox", now);
-        return false;
-      }
-      let changed = false;
-      for (const subjectId of subjects) {
-        const written = await this.store.update(subjectId, now, (s) => {
-          const next = this.rules.applyReply(s, { channel: "email", atWall: Math.min(event.at, now), providerRef: event.id }, now);
-          return same(next, s) ? null : next;
-        });
-        changed = changed || written !== null;
-      }
-      return changed;
+      if (a) return this.recordReply([a.subjectId], event);
+      // A thread the app does not know yet: held until the reference attaches to its work, or one
+      // settling period, while sends from that inbox to that address pause (2.4, review round 2).
+      await this.store.holdReply({ eventId: event.id, providerRef: event.providerRef, inbox: event.inbox, address: event.from.toLowerCase(), atWall: Math.min(event.at, now), receivedWall: now });
+      return true;
     }
     const a = await this.attemptFor(event);
     if (!a) {
@@ -330,6 +388,21 @@ export class Engine {
       const next = this.rules.applyBadDestination(s, current, now);
       return same(next, s) ? null : next;
     })) !== null;
+  }
+
+  /** Resolves held replies: to the one lead whose work now carries the reference, else after SETTLING by address. */
+  private async correlate(): Promise<boolean> {
+    let changed = false;
+    for (const reply of await this.store.pendingReplies()) {
+      const a = await this.store.attemptByProviderRef(reply.providerRef);
+      const reply_ = { id: reply.eventId, at: reply.atWall, inbox: reply.inbox, from: reply.address };
+      if (a) await this.recordReply([a.subjectId], reply_);
+      else if (this.now() - reply.receivedWall >= ENGINE_PARAMS.SETTLING) await this.replyByAddress(reply_);
+      else continue;
+      await this.store.dropPendingReply(reply.eventId);
+      changed = true;
+    }
+    return changed;
   }
 
   // -------------------------------------------------------------------------------------------
@@ -364,6 +437,8 @@ export class Engine {
 
   private async settle(): Promise<boolean> {
     let changed = false;
+    // One lookup per piece of provider work (its key) per pass, however many attempts share it.
+    const answers = new Map<string, Awaited<ReturnType<SendPort["lookup"]>>>();
     for (const a of await this.store.openAttempts()) {
       if (!(a.state === "handed" || a.state === "accepted" || isUncertain(a)) || a.awaitingAnswer) continue;
       if (a.nextLookupWall === null || a.nextLookupWall > this.now()) continue;
@@ -375,8 +450,10 @@ export class Engine {
         const after = await this.store.attempt(a.id);
         if (!after || after.state === "withdrawn" || after.nextLookupWall === null || after.nextLookupWall > this.now()) continue;
       }
-      const answer = await this.bounded(() => this.port.lookup(this.ref(a)), { kind: "unknown" as const });
-      this.hooks.crashPoint?.("after_lookup", a.id);
+      const known = answers.get(a.idempotencyKey);
+      const answer = known ?? (await this.bounded(() => this.port.lookup(this.ref(a)), { kind: "unknown" as const }));
+      answers.set(a.idempotencyKey, answer);
+      if (!known) this.hooks.crashPoint?.("after_lookup", a.id);
       changed = (await this.applyAttempt(a, { kind: "lookup_answer", answer, now: this.now() })) || changed;
     }
     return changed;
@@ -524,9 +601,11 @@ export class Engine {
   }
 
   /** A call answer that arrives after the call returned, such as a response delivered twice (5.3: ignored unless it moves forward). */
-  async receiveLateAnswer(attemptId: string, answer: CallAnswer): Promise<void> {
-    const a = await this.store.attempt(attemptId);
-    if (a && a.state !== "claimed") await this.applyAttempt(a, { kind: "call_answer", answer, now: this.now() });
+  receiveLateAnswer(attemptId: string, answer: CallAnswer): Promise<void> {
+    return this.ticks.run(async () => {
+      const a = await this.store.attempt(attemptId);
+      if (a && a.state !== "claimed") await this.applyAttempt(a, { kind: "call_answer", answer, now: this.now() });
+    });
   }
 
   /** The immutable send request, from the authorized attempt alone: nothing is read to build it (ruling 2). */
@@ -546,18 +625,19 @@ export class Engine {
   }
 
   /**
-   * Authorizes a send and calls the provider as one serialized step per inbox (ruling 2): the
-   * authorization commits, the request is already built, and the call starts with nothing
-   * asynchronous in between. The pacing slot then counts from the call's actual start.
+   * Authorizes a send and calls the provider as one serialized step per inbox (ruling 2; review
+   * round 2, ruling 1): `authorize` commits synchronously, the request is built from what it
+   * committed, and the call starts on the same synchronous run, so no other write in this process
+   * can land between the commit and the call. The pacing slot then counts from the call's start.
    */
   private async authorizeAndCall(
     a: Attempt,
-    authorize: (now: number) => Promise<{ authorized: Attempt | null; onlySlot: boolean }>,
+    authorize: (now: number) => { authorized: Attempt | null; onlySlot: boolean; skip?: boolean },
     crashPoint: CrashPoint,
-  ): Promise<{ outcome: "handed" | "withdrawn" | "waiting"; answer?: CallAnswer; authorized?: Attempt }> {
+  ): Promise<{ outcome: "handed" | "withdrawn" | "waiting" | "skip"; answer?: CallAnswer; authorized?: Attempt }> {
     return this.locks.run(a.accountId, async () => {
-      const { authorized, onlySlot } = await authorize(this.now());
-      if (!authorized) return { outcome: onlySlot ? "waiting" : "withdrawn" };
+      const { authorized, onlySlot, skip } = authorize(this.now());
+      if (!authorized) return { outcome: skip ? "skip" : onlySlot ? "waiting" : "withdrawn" };
       const request = this.request(authorized);
       this.hooks.crashPoint?.(crashPoint, a.id);
       this.hooks.afterAuthorization?.(a.id);
@@ -587,9 +667,9 @@ export class Engine {
     await this.hooks.beforeHandover?.(a.id);
     const result = await this.authorizeAndCall(
       a,
-      async (now) => {
-        const out: { authorized: Attempt | null; onlySlot: boolean } = { authorized: null, onlySlot: false };
-        await this.store.update(a.subjectId, now, (s) => {
+      (now) => {
+        const out: { authorized: Attempt | null; onlySlot: boolean; skip?: boolean } = { authorized: null, onlySlot: false };
+        this.store.updateNow(a.subjectId, now, (s) => {
           const current = s.attempts.find((x) => x.id === a.id);
           const account = current ? s.accounts[current.accountId] : undefined;
           if (!current || current.state !== "claimed" || !account) return null;
@@ -598,6 +678,11 @@ export class Engine {
             const next = this.rules.handOver(s, current, account, now);
             out.authorized = next.attempts.find((x) => x.id === a.id) ?? null;
             return next;
+          }
+          // A reply awaiting correlation pauses this inbox's sends to the address: the claim waits.
+          if (failed.every((f) => f === 16 || f === 18) && failed.includes(18)) {
+            out.skip = true;
+            return null;
           }
           if (failed.every((f) => f === 16)) {
             out.onlySlot = true;
@@ -626,13 +711,17 @@ export class Engine {
     const fresh = await this.presend(a);
     const result = await this.authorizeAndCall(
       a,
-      async (now) => {
-        const out: { authorized: Attempt | null; onlySlot: boolean } = { authorized: null, onlySlot: false };
-        await this.store.update(a.subjectId, now, (s) => {
+      (now) => {
+        const out: { authorized: Attempt | null; onlySlot: boolean; skip?: boolean } = { authorized: null, onlySlot: false };
+        this.store.updateNow(a.subjectId, now, (s) => {
           const current = s.attempts.find((x) => x.id === a.id);
           const acc = current ? s.accounts[current.accountId] : undefined;
           if (!current || !acc || (current.retry !== "wanted" && current.retry !== "wanted_after_not_sent")) return null;
           const failed = fresh ? this.rules.retryFailures(s, current, acc, now) : ["predicate 14"];
+          if (failed.includes("predicate 18")) {
+            out.skip = true;
+            return null;
+          }
           if (failed.length === 0) {
             const next = this.rules.authorizeRetry(s, current, acc, now);
             out.authorized = next.attempts.find((x) => x.id === a.id) ?? null;

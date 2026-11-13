@@ -27,6 +27,16 @@ export interface CampaignEngineRow {
   readonly version: number;
 }
 
+export interface PendingReply {
+  readonly eventId: string;
+  readonly providerRef: string;
+  readonly inbox: string;
+  /** Bare and lowercase. */
+  readonly address: string;
+  readonly atWall: number;
+  readonly receivedWall: number;
+}
+
 export type LaunchOutcome = { readonly ok: true } | { readonly ok: false; readonly check: LaunchCheck | null; readonly reason: "already_launched" | "blocked" | "no_definition" };
 
 /**
@@ -55,6 +65,11 @@ export interface EngineStore {
   subject(subjectId: string, now: number): Promise<SubjectState | null>;
   /** Loads, decides and writes in one transaction. A null decision writes nothing. */
   update(subjectId: string, now: number, decide: (state: SubjectState) => SubjectState | null): Promise<SubjectState | null>;
+  /**
+   * `update`, committed before it returns: a send's authorization uses it so that nothing
+   * asynchronous runs between the commit and the provider call (ADR 0003 5.5 step 6).
+   */
+  updateNow(subjectId: string, now: number, decide: (state: SubjectState) => SubjectState | null): SubjectState | null;
   /** Enrollments of launched campaigns that have not ended. */
   runningSubjectIds(): Promise<string[]>;
   /** For each running subject, a key that changes whenever its state, its campaign's, or the lead facts it reads change. */
@@ -65,8 +80,15 @@ export interface EngineStore {
   attemptByProviderRef(providerRef: string): Promise<Attempt | null>;
   /** Every attempt, in any state, that used this idempotency key. */
   attemptsByKey(key: string): Promise<Attempt[]>;
-  /** Subjects with work handed to `address` from `inbox`: where a reply outside a known thread belongs. */
-  subjectsReachedFrom(inbox: string, address: string): Promise<string[]>;
+  /**
+   * Where a reply outside a known thread belongs (ADR 0003 2.4): subjects with work handed to
+   * `address` from `inbox` at or before `atWall` that was sent or whose outcome is uncertain.
+   */
+  subjectsReachedFrom(inbox: string, address: string, atWall: number): Promise<string[]>;
+  /** Holds a reply whose thread reference no attempt carries yet. */
+  holdReply(reply: PendingReply): Promise<void>;
+  pendingReplies(): Promise<PendingReply[]>;
+  dropPendingReply(eventId: string): Promise<void>;
 
   upsertAccounts(accounts: readonly SenderAccountConfig[]): Promise<void>;
   accounts(now: number): Promise<AccountState[]>;

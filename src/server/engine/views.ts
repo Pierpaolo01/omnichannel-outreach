@@ -82,7 +82,23 @@ export function accountView(a: AccountState, label: string): SenderAccountViewAp
 
 export async function needsAttention(store: EngineStore, now: number): Promise<NeedsAttention> {
   const accounts = await store.accounts(now);
-  const open = (await store.openAttempts()).filter((a) => isLive(a));
+  const all = await store.openAttempts();
+  const open = all.filter((a) => isLive(a));
+  // Unresolved provider work keeps its reservation; each inbox it holds is listed with how many of
+  // its daily sends are held, so a slowed inbox is never silent (review round 2, ruling 2).
+  const holding = all.filter((a) => a.holdsReservation && a.unresolvedSince !== null);
+  const heldCapacity = accounts.flatMap((acc) => {
+    // One entry per piece of provider work (its key): its latest attempt.
+    const byKey = new Map<string, (typeof holding)[number]>();
+    for (const a of holding) if (a.accountId === acc.id) byKey.set(a.idempotencyKey, a);
+    if (byKey.size === 0) return [];
+    return [{
+      accountId: acc.id,
+      held: byKey.size,
+      capacity: acc.capacity,
+      work: [...byKey.values()].map((a) => ({ attemptId: a.id, enrollmentId: a.subjectId, unresolvedSince: new Date(a.unresolvedSince ?? 0).toISOString() })),
+    }];
+  });
   const heldTracks: NeedsAttention["heldTracks"][number][] = [];
   for (const id of await store.runningSubjectIds()) {
     const s = await store.subject(id, now);
@@ -101,6 +117,7 @@ export async function needsAttention(store: EngineStore, now: number): Promise<N
         : [],
     ),
     unhealthyInboxes: accounts.filter((a) => !a.healthy).map((a) => ({ accountId: a.id })),
+    heldCapacity,
     anomalies: (await store.anomalies()).map((x) => ({ what: x.what, at: new Date(x.atWall).toISOString() })),
   };
 }

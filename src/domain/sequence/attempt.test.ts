@@ -137,14 +137,18 @@ describe("the attempt table, row by row (ADR 0003 5.3)", () => {
     });
   });
 
-  test("reservations (ruling 3): released when the provider never got the work, refused it or said it will not send; kept while its outcome is uncertain", () => {
+  test("reservations (ruling 3; review round 2, ruling 2): released when the provider never got the work, refused it or said it will not send, or the user settles it; kept while its outcome is uncertain, which is unresolved", () => {
     expect(applyAttemptEvent(attempt(), { kind: "guard_failed" }).attempt.holdsReservation).toBe(false);
     expect(applyAttemptEvent(handed(), { kind: "call_answer", answer: { kind: "rejected", reason: "blocklisted" }, now }).attempt.holdsReservation).toBe(false);
     expect(applyAttemptEvent(handed({ withdrawRequested: true }), { kind: "withdraw_answer", answer: "withdrawn", now }).attempt.holdsReservation).toBe(false);
     const lookupNotSent = applyAttemptEvent(handed({ state: "accepted" }), { kind: "lookup_answer", answer: { kind: "not-sent" }, now }).attempt;
-    expect(lookupNotSent).toMatchObject({ state: "withdrawn", endedBy: "lookup_not_sent", holdsReservation: true, nextLookupWall: now + SETTLING });
-    const marked = applyAttemptEvent(handed({ unresolvedSince: now, lookupAnswer: "unknown" }), { kind: "mark_not_sent", now }).attempt;
-    expect(marked).toMatchObject({ state: "withdrawn", endedBy: "user", holdsReservation: true });
+    expect(lookupNotSent).toMatchObject({ state: "withdrawn", endedBy: "lookup_not_sent", holdsReservation: true, nextLookupWall: now + SETTLING, unresolvedSince: now });
+    const marked = applyAttemptEvent(handed({ unresolvedSince: now, lookupAnswer: "unknown" }), { kind: "mark_not_sent", now });
+    expect(marked.attempt).toMatchObject({ state: "withdrawn", endedBy: "user", holdsReservation: false, nextLookupWall: null });
+    expect(marked.effects).toEqual([{ kind: "settled" }]);
+    // The user may settle uncertain work too, sent or not sent.
+    expect(applyAttemptEvent(lookupNotSent, { kind: "mark_not_sent", now }).attempt).toMatchObject({ endedBy: "user", holdsReservation: false, nextLookupWall: null });
+    expect(applyAttemptEvent(lookupNotSent, { kind: "mark_sent", now }).attempt).toMatchObject({ state: "sent", endedBy: "user" });
     // Uncertain work is still looked up; only a later sent, or a not-sent the transport vouches for, settles it.
     expect(applyAttemptEvent(lookupNotSent, { kind: "lookup_answer", answer: { kind: "not-sent" }, now: now + SETTLING }).attempt).toMatchObject({ holdsReservation: true, nextLookupWall: now + 2 * SETTLING });
     expect(applyAttemptEvent({ ...lookupNotSent, notSentIsFinal: true }, { kind: "lookup_answer", answer: { kind: "not-sent" }, now }).attempt.holdsReservation).toBe(false);

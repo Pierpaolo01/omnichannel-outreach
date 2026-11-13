@@ -1,5 +1,5 @@
 import { createApp } from "../../src/server/app.ts";
-import { Engine, type EngineDependencies, type EngineHooks } from "../../src/server/engine/engine.ts";
+import { Engine, TickQueue, type EngineDependencies, type EngineHooks } from "../../src/server/engine/engine.ts";
 import type { SendPort } from "../../src/server/engine/ports.ts";
 import type { Rules } from "../../src/server/engine/rules.ts";
 import { openSqliteStore } from "../../src/server/persistence/sqlite-store.ts";
@@ -165,7 +165,8 @@ export class EngineHarness {
    */
   async otherWorker(): Promise<void> {
     this.provider.advance();
-    await new Engine({ ...this.options.engine, store: this.store.engine, port: this.provider, now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) }).tick();
+    // Another process: its ticks do not queue behind this one's.
+    await new Engine({ ...this.options.engine, ticks: new TickQueue(), store: this.store.engine, port: this.provider, now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) }).tick();
   }
 
   /** A fresh engine on the same store and provider, settling what the crash left open. */

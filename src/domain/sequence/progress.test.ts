@@ -223,3 +223,38 @@ describe("a provider send belongs to the provider work that produced it (ruling 
     expect(after.attempts[0]?.providerRef).toBe("p-9");
   });
 });
+
+describe("a reservation belongs to provider work and is released once, across every attempt sharing its key (review round 2, ruling 2)", () => {
+  const opts2 = { resetDay: () => "2026-11-02" };
+  /** The original work withdrawn after a not-sent it cannot trust, still holding and looked up; an inheritor under its key. */
+  function uncertainWithInheritor(): SubjectState {
+    const s = launched();
+    return {
+      ...s,
+      attempts: [
+        handed({ id: "a-1", idempotencyKey: "a-1", state: "withdrawn", endedBy: "lookup_not_sent", providerRef: "p-1", handedWall: MONDAY_9, holdsReservation: true, nextLookupWall: MONDAY_9 + 2 * H, unresolvedSince: MONDAY_9 + H }),
+        handed({ id: "a-2", idempotencyKey: "a-1", state: "accepted", providerRef: "p-1", handedWall: MONDAY_9 + 2 * H, holdsReservation: true, withdrawRequested: true }),
+      ],
+    };
+  }
+
+  test("a confirmed withdrawal through the inheritor releases the original's reservation too, and ends its lookups", () => {
+    const after = applyToAttempt(uncertainWithInheritor(), "a-2", { kind: "withdraw_answer", answer: "withdrawn", now: MONDAY_9 + 3 * H }, MONDAY_9 + 3 * H, opts2).state;
+    expect(after.attempts.map((a) => [a.id, a.state, a.holdsReservation, a.nextLookupWall])).toEqual([["a-1", "withdrawn", false, null], ["a-2", "withdrawn", false, null]]);
+  });
+
+  test("the user's \"not sent\" on uncertain work releases every attempt of its key that is no longer live", () => {
+    const s = uncertainWithInheritor();
+    const alone = { ...s, attempts: s.attempts.filter((a) => a.id === "a-1") };
+    const after = applyToAttempt(alone, "a-1", { kind: "mark_not_sent", now: MONDAY_9 + 3 * H }, MONDAY_9 + 3 * H, opts2).state;
+    expect(after.attempts[0]).toMatchObject({ state: "withdrawn", endedBy: "user", holdsReservation: false, nextLookupWall: null });
+  });
+
+  test("an inheritor quiesced after its key's send is proven holds nothing and is no longer looked up (review: Opus follow-up 4)", () => {
+    const s = uncertainWithInheritor();
+    // The inheritor had a not-sent of its own and wanted a retry when the original's send was proven.
+    const state = { ...s, attempts: [s.attempts[0]!, { ...s.attempts[1]!, state: "handed" as const, withdrawRequested: false, retry: "wanted_after_not_sent" as const, nextLookupWall: MONDAY_9 + 4 * H }] };
+    const after = applyToAttempt(state, "a-1", { kind: "sent_observed", providerTime: MONDAY_9 + 1000, providerRef: "p-1" }, MONDAY_9 + 3 * H, opts2).state;
+    expect(after.attempts.map((a) => [a.id, a.state, a.holdsReservation, a.nextLookupWall])).toEqual([["a-1", "sent", false, null], ["a-2", "withdrawn", false, null]]);
+  });
+});

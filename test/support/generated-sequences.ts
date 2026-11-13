@@ -401,7 +401,8 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
   /** The user resolves unresolved attempts (ADR 0002 P3): "sent" when the provider did send, otherwise "not sent". */
   async function userMarks() {
     for (const a of await h.store.engine.openAttempts()) {
-      if (!isLive(a) || a.unresolvedSince === null) continue;
+      // Live unresolved work, and withdrawn work whose outcome is uncertain, which Needs attention lists.
+      if (a.unresolvedSince === null) continue;
       if (fake.deliveryLog.some((d) => d.key === a.idempotencyKey && d.at <= h.clock)) {
         if (await h.engine.markAttempt(a.id, "sent")) markedSent.set(a.idempotencyKey, h.clock);
         continue;
@@ -511,7 +512,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     h.advanceTo(h.clock + span, async () => {
       if (unlimited) return;
       // The user acts on Needs attention now and then, more often while something unresolved is listed there.
-      const listed = (await h.store.engine.openAttempts()).some((a) => isLive(a) && a.unresolvedSince !== null);
+      const listed = (await h.store.engine.openAttempts()).some((a) => a.unresolvedSince !== null);
       if (chance(listed ? 0.4 : 0.05)) await userMarks();
       // A lost response's acceptance arrives late, perhaps while a retry waits for its slot.
       if (fake.staleAnswers.length > 0 && chance(0.2)) {
@@ -590,16 +591,11 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       a.healthy = true;
       a.quotaAvailable = true;
     }
-    // Three days at the configured capacity, where contention for it goes on; then "enough
-    // capacity": every inbox gets room for the whole backlog.
-    await h.advanceTo(h.clock + 3 * DAY);
-    for (const a of accounts) {
-      a.capacity = Math.max(a.capacity, 100);
-      capacityHistory.get(a.id)?.push([h.clock, a.capacity]);
-    }
-    // "Enough time": three weeks, then a week at a time while a running lead still has pending,
-    // unheld work (a narrow window can space five steps a week apart), up to ten weeks.
-    await h.advanceTo(h.clock + 18 * DAY);
+    // "Enough time" at the configured capacity, so a reservation that is never released shows as
+    // a lead that never sends (review round 2, ruling 2): three weeks, then a week at a time while
+    // a running lead still has pending, unheld work (a narrow window can space five steps a week
+    // apart, and capacity 1 a backlog a day apart), up to ten weeks.
+    await h.advanceTo(h.clock + 21 * DAY);
     for (let week = 0; week < 7; week++) {
       let waiting = false;
       const stalled = new Set((await h.request<NeedsAttention>("GET", "/api/needs-attention")).body.stalledInboxes.map((x) => x.accountId));
@@ -780,13 +776,20 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     }
     checkCallLog(allAttempts);
 
-    // 10, from the provider's own delivery log: no inbox sends more than its capacity on any reset day.
+    // 10, from the provider's own delivery log: no inbox sends more than its capacity on any reset
+    // day. The user's "not sent" releases the work's reservation (review round 2, ruling 2), so a
+    // send the provider makes after that mark is the user's override, as for at-most-once (ruling 9).
+    const overridden = (d: { key: string; at: number }) => (markedNotSentKeys.get(d.key) ?? Infinity) <= d.at;
     for (const acc of accounts) {
       const perDay = new Map<number, number>();
-      for (const d of fake.deliveryLog) if (d.sender === acc.id) perDay.set(local(d.at, acc.resetZone).day, (perDay.get(local(d.at, acc.resetZone).day) ?? 0) + 1);
+      for (const d of fake.deliveryLog) if (d.sender === acc.id && !overridden(d)) perDay.set(local(d.at, acc.resetZone).day, (perDay.get(local(d.at, acc.resetZone).day) ?? 0) + 1);
       for (const [day, n] of perDay) {
         const capacity = Math.max(...(capacityHistory.get(acc.id) ?? []).filter(([at]) => local(at, acc.resetZone).day <= day).map(([, c]) => c));
-        if (n > capacity) problem(`10: ${acc.id} sent ${n} times on reset day ${new Date(day * DAY).toISOString().slice(0, 10)} against a capacity of ${capacity}`);
+        if (n > capacity) {
+          const sends = fake.deliveryLog.filter((d) => d.sender === acc.id && !overridden(d) && local(d.at, acc.resetZone).day === day);
+          const detail = sends.map((d) => `${d.key}@${new Date(d.at).toISOString().slice(11, 16)}${markedNotSentKeys.has(d.key) ? ` marked not sent ${new Date(markedNotSentKeys.get(d.key)!).toISOString().slice(5, 16)}` : ""}`);
+          problem(`10: ${acc.id} sent ${n} times on reset day ${new Date(day * DAY).toISOString().slice(0, 10)} against a capacity of ${capacity} (${detail.join(", ")})`);
+        }
       }
     }
     checkInFlight();
@@ -799,6 +802,24 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       }
     }
     const attention = (await h.request<NeedsAttention>("GET", "/api/needs-attention")).body;
+
+    // 11, counted from the stored attempts: claimed, handed and accepted work, inheritors included, never exceeds k.
+    for (const acc of accounts) {
+      const live = allAttempts.filter((a) => a.accountId === acc.id && ["claimed", "handed", "accepted"].includes(a.state));
+      if (live.length > acc.k) problem(`11: ${acc.id} holds ${live.length} claimed, handed or accepted attempts against k = ${acc.k}`);
+    }
+
+    // 27. Every held reservation belongs to provider work that is live, or unresolved and listed in
+    // Needs attention with its inbox (review round 2, ruling 2); work sent holds none.
+    const listedKeys = new Set(attention.heldCapacity.flatMap((x) => x.work.map((w) => allAttempts.find((a) => a.id === w.attemptId)?.idempotencyKey)));
+    for (const a of allAttempts) {
+      if (!a.holdsReservation) continue;
+      const work = allAttempts.filter((o) => o.idempotencyKey === a.idempotencyKey);
+      if (work.some(isLive)) continue;
+      if (work.some((o) => o.state === "sent" || o.sentWall !== null)) problem(`27: ${a.id} holds a reservation of ${a.accountId} for work already sent`);
+      else if (!listedKeys.has(a.idempotencyKey)) problem(`27: ${a.id} holds a reservation of ${a.accountId} for work neither live nor listed in Needs attention`);
+      else if (!attention.heldCapacity.some((x) => x.accountId === a.accountId)) problem(`27: ${a.id}'s held reservation is listed under another inbox`);
+    }
     for (const acc of await h.store.engine.accounts(now)) {
       const holding = allAttempts.filter((a) => isLive(a) && a.accountId === acc.id);
       const old = holding.filter((a) => now - (a.lastCallWall ?? a.claimedWall) >= SETTLING);
@@ -823,7 +844,9 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
             .filter((a) => isLive(a) && a.accountId === accountId)
             // A not-sent the transport cannot vouch for is read as unknown (5.3).
             .every((a) => a.lookupAnswer === "unknown" || a.lookupAnswer === "queued" || (a.lookupAnswer === "not-sent" && !a.retryable && !a.notSentIsFinal));
-        const waitsOnStalled = usable.length > 0 && usable.every((a) => stalled.has(a) && holdersUnsettled(a));
+        // Or every inbox it may use has all its daily sends held by unresolved work Needs attention lists (ruling 2).
+        const heldFull = new Set(attention.heldCapacity.filter((x) => x.held >= x.capacity).map((x) => x.accountId));
+        const waitsOnStalled = usable.length > 0 && usable.every((a) => (stalled.has(a) && holdersUnsettled(a)) || heldFull.has(a));
         // A follow-up held for want of a thread is right only when the step before it was settled by
         // the user's "sent" mark, so the provider gave no reference (ruling 1).
         for (const t of progress.tracks) {
@@ -866,6 +889,8 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     const data = mergeData(rec, fake.handoverLog.length);
     if (renderCopy(step.subject, data) === null || renderCopy(step.body, data) === null) return false;
     if (step.threading === "continue_thread" && !st.attempts.some((o) => o.trackId === a.trackId && o.state === "sent" && o.providerRef !== null)) return false;
+    // A reply from the address to the inbox is held for correlation (the stored fact): sends between them pause.
+    if ((st.pendingReplies ?? []).some((r) => r.inbox === a.accountId && r.address === a.destination.toLowerCase())) return false;
     return true;
   }
 
@@ -938,22 +963,37 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
   }
 
   /**
-   * When the record says the lead replied: a reply on a thread of its sends, or one outside every
-   * thread from its address to an inbox that wrote to it (ruling 1). `may` widens it to the app's
-   * own attempts to that address from that inbox, which include calls a crash ate.
+   * When the record says the lead replied (ADR 0003 2.4 as amended in review round 2). A reply on
+   * a thread of its sends: at once when the app already knew that send's reference, else within
+   * one settling period, when the reference attaches or the reply falls back by address. A reply
+   * with no thread: at once, to every lead whose work from that inbox to that address was sent,
+   * first called at or before it and not settled otherwise. `may` widens it to the app's own work
+   * the fallback may match: handed at or before the reply, to that address, from that inbox.
    */
   function replyTimes(subjectId: string, attempts: readonly Attempt[] = []): { must: number | null; may: number | null } {
-    const must = fake.replyLog
-      .filter((r) =>
-        r.onThread
-          ? fake.deliveryLog.some((d) => d.providerRef === r.threadRef && d.subjectId === subjectId)
-          : fake.handoverLog.some((c) => c.subjectId === subjectId && c.sender === r.inbox && c.destination === r.destination && c.at <= r.at),
-      )
-      .map((r) => r.at);
-    // A reply whose thread the app does not know (off-thread, or on a send it never learned the
-    // reference of) is reconciled to every lead that inbox wrote to at that address: the built
-    // interim where several match, a product question for the coordinator.
-    const may = fake.replyLog.filter((r) => attempts.some((a) => a.subjectId === subjectId && a.accountId === r.inbox && a.destination === r.destination && a.calls > 0)).map((r) => r.at);
+    const firstCall = (key: string) => fake.handoverLog.find((c) => c.key === key)?.at ?? Infinity;
+    const settledWithout = (key: string) =>
+      markedNotSentKeys.has(key) ||
+      fake.withdrawLog.some((w) => w.key === key && w.answer === "withdrawn") ||
+      fake.refusals.some((r) => fake.handoverLog.some((c) => c.key === key && c.attemptId === r.attemptId));
+    const must: number[] = [];
+    const may: number[] = [];
+    const fallbackMay = (r: { at: number; inbox: string; destination: string }) =>
+      attempts.some((a) => a.subjectId === subjectId && a.accountId === r.inbox && a.destination === r.destination && a.calls > 0 && (a.handedWall ?? Infinity) <= r.at);
+    for (const r of fake.replyLog) {
+      if (r.onThread) {
+        const d = fake.deliveryLog.find((x) => x.providerRef === r.threadRef);
+        if (d && d.subjectId === subjectId) {
+          const refKnown = Math.min(d.visibleAt, fake.lookupLog.find((l) => l.key === d.key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity);
+          must.push(refKnown <= r.at ? r.at : observedBy(observedBy(r.at) + SETTLING));
+          may.push(r.at);
+        } else if (fallbackMay(r)) may.push(r.at);
+      } else {
+        const sent = fake.deliveryLog.some((x) => x.subjectId === subjectId && x.sender === r.inbox && x.destination === r.destination && firstCall(x.key) <= r.at && !settledWithout(x.key));
+        if (sent) must.push(r.at);
+        if (sent || fallbackMay(r)) may.push(r.at);
+      }
+    }
     return { must: must.length > 0 ? Math.min(...must) : null, may: [...must, ...may].length > 0 ? Math.min(...must, ...may) : null };
   }
 

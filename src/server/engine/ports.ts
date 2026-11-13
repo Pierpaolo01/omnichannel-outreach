@@ -38,12 +38,16 @@ export interface AttemptRef {
 export type ProviderEvent =
   | { readonly id: string; readonly kind: "sent"; readonly key: string; readonly providerRef: string; readonly sentAt: number }
   | { readonly id: string; readonly kind: "bounced"; readonly key: string; readonly providerRef: string; readonly at: number }
-  /** A reply: the thread it answers (`providerRef`), and the inbox it reached and the address it came from, for a reply outside any known thread. */
-  | { readonly id: string; readonly kind: "reply"; readonly providerRef: string; readonly at: number; readonly inbox: string; readonly from: string }
+  /**
+   * A reply: the thread it answers (`providerRef`, null when it starts a new conversation), the
+   * inbox it reached and the address it came from. The adapter reduces the sender to a bare,
+   * lower-case address ("Name <x@y>" becomes "x@y") before the engine matches it.
+   */
+  | { readonly id: string; readonly kind: "reply"; readonly providerRef: string | null; readonly at: number; readonly inbox: string; readonly from: string }
   | { readonly id: string; readonly kind: "rejected"; readonly key: string; readonly providerRef: string; readonly reason: RejectReason };
 
 /** A send confirmed by lookup carries the provider's reference, so its thread is known (ruling 1). */
-export type LookupResult = { readonly kind: "sent"; readonly sentAt: number; readonly providerRef: string | null } | { readonly kind: "queued" } | { readonly kind: "not-sent" } | { readonly kind: "unknown" };
+export type LookupResult = { readonly kind: "sent"; readonly sentAt: number; readonly providerRef: string } | { readonly kind: "queued" } | { readonly kind: "not-sent" } | { readonly kind: "unknown" };
 
 export interface AccountStatus extends SenderAccountConfig {
   /** False while the provider's quota is exhausted (402); a quota wait ends when it is confirmed again. */

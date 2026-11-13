@@ -321,6 +321,17 @@ export const MIGRATIONS: readonly Migration[] = [
       );
       CREATE INDEX replies_by_subject ON replies(subject_id);
 
+      -- A reply on a thread the app does not know yet waits here for its thread's reference to
+      -- attach, or for one settling period before it falls back to inbox and address (ADR 0003 2.4).
+      CREATE TABLE pending_replies (
+        event_id TEXT PRIMARY KEY,
+        provider_ref TEXT NOT NULL,
+        inbox TEXT NOT NULL,
+        address TEXT NOT NULL,
+        at_wall INTEGER NOT NULL,
+        received_wall INTEGER NOT NULL
+      );
+
       CREATE TABLE provider_anomalies (
         seq INTEGER PRIMARY KEY AUTOINCREMENT,
         attempt_id TEXT,
