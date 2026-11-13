@@ -571,7 +571,9 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
         if (result.result !== "sent") continue;
         const attempt = s.attempts.find((a) => a.id === result.attemptId);
         const delivery = fake.deliveryLog.find((d) => d.subjectId === id && d.stepId === result.stepId);
-        if (!attempt || !delivery || attempt.userMarkedNotSent) continue;
+        // A step the user marked not sent may have been delivered twice (5.3's one exception), so its
+        // lead's times are not the record's to predict.
+        if (!attempt || !delivery || attempt.userMarkedNotSent || [...markedNotSent].some((k) => k.startsWith(`${id}/`))) continue;
         const firstEnding = recordFirstEnding(rec, runStart, now);
         if (!firstEnding.certain) continue;
         const sentAt = Math.max(delivery.at, attempt.handedWall ?? 0);

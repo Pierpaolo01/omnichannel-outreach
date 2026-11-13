@@ -205,12 +205,14 @@ export class FakeEmailPort implements SendPort {
     const accept = !(mode === "5xx" || mode === "always-unknown") || this.random() < 0.5;
     if (!accept) return Promise.resolve({ kind: "unknown" });
     const providerRef = `msg-${++this.nextRef}`;
-    const delay =
+    // Whole milliseconds, like every instant the app stores.
+    const delay = Math.round(
       mode === "late-send" ? (1 + this.random() * 59) * MINUTE
       : mode === "withdraw-unknown" ? (5 + this.random() * 115) * MINUTE
       : mode === "late-send-beyond-settling" ? SETTLING * (1.5 + this.random() * 20)
       : mode === "lookup-lags" ? this.random() * 30 * MINUTE
-      : 0;
+      : 0,
+    );
     const skip = this.unexplainedSkip.has(request.destination);
     const w: Work = {
       key: request.idempotencyKey,
@@ -221,9 +223,9 @@ export class FakeEmailPort implements SendPort {
       sendAt: skip ? null : now + delay,
       sentAt: null,
       cancelled: false,
-      lookupNotSentUntil: mode === "lookup-lags" ? now + (20 + this.random() * 20) * MINUTE : 0,
+      lookupNotSentUntil: mode === "lookup-lags" ? now + Math.round((20 + this.random() * 20) * MINUTE) : 0,
       lookupUnknown: mode === "always-unknown",
-      observeDelay: mode === "late-send" ? this.random() * 30 * MINUTE : 0,
+      observeDelay: mode === "late-send" ? Math.round(this.random() * 30 * MINUTE) : 0,
     };
     this.work.push(w);
     if (skip) this.emit(now + 10 * MINUTE, { id: `rej-${providerRef}`, kind: "rejected", key: w.key, providerRef, reason: "provider_skipped" });
