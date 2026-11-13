@@ -1,6 +1,6 @@
 # 0003. The sequence engine
 
-- **Date:** 2026-11-13. Revised the same day after review rounds 1 and 2 (two reviewers each; coordinator rulings 1–14 for round 1 and 1–10 for round 2).
+- **Date:** 2026-11-13. Revised the same day after review rounds 1, 2 and 3 (two reviewers each; coordinator rulings 1–14, 1–10 and items 1–7).
 - **Status:** Proposed. The council reviews it before ticket [12](https://github.com/Pierpaolo01/omnichannel-outreach/issues/12) starts.
 - **Consumers:** tickets [12](https://github.com/Pierpaolo01/omnichannel-outreach/issues/12) to [23](https://github.com/Pierpaolo01/omnichannel-outreach/issues/23).
 - **Builds on:** [ADR 0001](0001-application-foundation-and-import-model.md) (domain code never reads the clock; the closed outreach-status type; the store interface) and [ADR 0002](0002-email-through-instantly.md) (the application owns every clock; Instantly only carries email). This ADR is the "application owns every clock" half. The Instantly adapter, its experiments and its questions P1–P4 stay in ADR 0002.
@@ -89,7 +89,7 @@ Every progress table below is keyed by `subject`. Wherever this ADR says "lead",
 | `no_more_calls` | Set by any declined call. Never cleared. |
 | `touched` | Set once the lead has actually been reached: an attempt observed `sent`, or a call outcome logged other than "skip for now" (ruling 6). Never cleared. |
 | `frozen_since`, `frozen_total` | The lead clock (3.2). |
-| `email_sender`, `sms_sender` | The sender account, fixed at the subject's first claim on that channel and never reassigned (spec "Email and Instantly": "A lead keeps one sender inbox for the whole campaign"; the same for SMS is a factory choice). |
+| `email_sender`, `sms_sender` | The sender account, fixed when the subject's first attempt on that channel is **handed over** (5.5), and never reassigned (spec "Email and Instantly": "A lead keeps one sender inbox for the whole campaign"; the same for SMS is a factory choice). A claim that is withdrawn before its handover fixes nothing. |
 
 The **campaign** row adds `launched_at`, `paused_since` (null unless the campaign is paused), `version` (bumped by pause, resume and edits) and `definition_version`.
 
@@ -101,23 +101,30 @@ The **campaign** row adds `launched_at`, `paused_since` (null unless the campaig
 | `started_at` | Set when lead time reaches `start_at` and the track actually starts. Set once. |
 | `destination_detail_id` | The good email or mobile chosen at start, for email and SMS tracks: the newest good one. |
 | `next_step_id`, `basis_at`, `basis_wall`, `due_at`, `due_wall`, `due_zone` | The **pending step** (ruling 5): which step is next; the lead time and wall time its wait counts from; its resolved due time in lead time; the wall instant it was resolved to; and the zone. These fields belong to the pending step, not to any attempt. They stay unchanged while the step is claimed, in flight or held, so a withdrawal leaves the same deadline in place. They change only when the step gets a result (the next step is then resolved) or when an edit reconciles it (5.2). |
-| `finished_at`, `finished_wall`, `finish_reason` | Set once, and the track stays finished. The reasons are `completed`, `skipped` (every step skipped), `skipped_missing_channel`, `skipped_declined`, `skipped_by_user`, `skipped_unworked` (the call skip limit), `failed_bad_destination` and `dropped_for_win_back`. |
+| `finished_at`, `finished_wall`, `finish_reason` | Set once, and the track stays finished. The reasons are `completed`, `skipped` (every step skipped), `skipped_missing_channel`, `skipped_declined`, `skipped_by_user`, `skipped_unworked` (the call skip limit), `failed_bad_destination`, `dropped_for_win_back` and `closed_on_interest`. |
 
 **Step results** `step_results(subject, step_id)`, unique on that pair. A step's resolution is a fact: `sent`, `skipped` (with a reason) or `failed`, plus `at` (lead time) and `at_wall`. It is never deleted or changed. A step with no result and no live attempt is not done. A result for an attempt that was live when its track finished is still recorded. It changes neither the finish reason nor any successor work (ruling 7).
 
 **Attempts** `attempts(id, subject, step_id, ...)`. Each holds:
 
-- the `account_id`;
+- the `account_id` reserved at the claim;
 - the destination detail id;
-- the copy, rendered in the handover transaction (5.5);
+- the copy, rendered in the first handover transaction (5.5) and never changed afterwards;
 - the provider reference;
 - `retryable`: whether its transport accepts a repeat call with the same idempotency key;
-- `retries`, the number of same-key repeat calls made;
-- `handed_at` and `handed_wall`, with `frozen_total_at_handover`;
+- `idempotency_key`: the attempt id, except where 5.3 makes a later attempt inherit an earlier one's key;
+- `calls`: the number of send calls made with this attempt, never more than `MAX_CALLS` (5.6);
+- `claimed_wall`, `handed_at`, `handed_wall`, `last_call_wall`;
+- `presend_checked_wall`;
+- `lookup_state`: the latest `lookup` answer, and the number of `queued` answers so far;
+- `unresolved_since`: set once the attempt is unresolved (5.3); a stored fact, not derived;
+- `ended_by`: how a terminal state was reached;
 - `state`, a forward-only chain (section 5.3);
 - the `withdraw_requested` flag.
 
-The attempt id is its idempotency key. Two partial unique indexes allow, per `(subject, step_id)`, at most one attempt that is not terminal, and at most one attempt in state `sent`.
+Two partial unique indexes allow, per `(subject, step_id)`, at most one attempt that is not terminal, and at most one attempt in state `sent`.
+
+**Freezes** `freezes(subject, from_wall, to_wall)` is an append-only record of the subject's frozen intervals. `syncClock` opens an interval when the subject stops running and closes it when the subject runs again, so `to_wall` is null while it is frozen. Intervals that ended before the `handed_wall` of the subject's oldest unsettled attempt may be pruned. It exists to map a provider's past send time exactly onto the lead's clock (3.3).
 
 **Call tasks** `call_tasks(subject, step_id)`, unique, one per call step. Each holds:
 
@@ -135,7 +142,7 @@ The attempt id is its idempotency key. Two partial unique indexes allow, per `(s
 
 **Capacity reservations** `capacity_ledger(account_id, reset_day, attempt_id)` follow ADR 0002 "Sender inbox and capacity", for SMS accounts too. Each sender account also stores `next_slot_at`, taken at handover (4.2, 5.5).
 
-**SMS bindings** `sms_bindings(sender_number, recipient_key, owner_subject, created_at)` name the subject that owns that conversation (4.5). A binding is never transferred, so the table is its own history.
+**SMS bindings** `sms_bindings(sender_number, recipient_key, owner_subject, created_at, released_at)` name the subject that owns that conversation (4.5). An enrollment's binding is never released or transferred. A test run's binding is released when the test run ends. A partial unique index allows one unreleased binding per pair. Rows are never deleted, so the table is its own history.
 
 ### 1.4 What is derived, not stored
 
@@ -211,9 +218,12 @@ The callback hold *is* the open callback task, so "hold ⇔ one open callback ta
 - it is not lead-paused;
 - its campaign is not paused (enrollments only);
 - the prospect's calling hours open at some point on the current user day;
-- either the subject has no callback hold, or this task is the callback task.
+- either the subject has no callback hold, or this task is the callback task;
+- **the task is due on the current user day** (date eligibility):
+  - for `kind = call`, `list_day` is today or earlier, so a redial moved to tomorrow is not listed today and no outcome is accepted on it today;
+  - for `kind = callback`, the user-local date of `callback_at` is today or earlier. A callback is not listed before its day. On its day it is "later today" until `callback_at` and "ready" from then. **An overdue callback stays listed every day**, flagged overdue, until an outcome is logged, and the calling-hours condition does not apply to it, because the prospect chose the time.
 
-When a callback is the subject's only hold, its callback task is therefore listed even though `runs` is false. A task **was listed on a user day** if it was listed at any moment of that day. Days on which the prospect's calling hours never open do not count as listed days (3.5).
+When a callback is the subject's only hold, its callback task is therefore listed on its day even though `runs` is false. A task **was listed on a user day** if it was listed at any moment of that day. Days on which the prospect's calling hours never open do not count as listed days (3.5).
 
 ### 2.4 Events and transitions
 
@@ -242,8 +252,8 @@ Abbreviations:
 | Event | Allowed in | Effect | Refused / impossible |
 | - | - | - | - |
 | Claim | R, with the campaign running | 4.2. | Anything else: the claim's guard refuses it. |
-| Attempt reaches `sent` | any but D | A `sent` step result. Its time is **when the provider sent it** (ruling 4): the provider's send timestamp `t` becomes `at_wall`, and `at` is `t` in the subject's lead time: `t − frozen_total` when `frozen_total` still equals `frozen_total_at_handover` and the subject has not frozen before `t`. Otherwise, when a freeze began between the handover and the send (a send that leaked through a pause), it is `handed_at + (t − handed_wall)` clamped to the range from `handed_at` to `leadNow`. `touched` is set, and the next step is resolved from that basis (2.6). On a track already finished, the result is recorded and nothing else changes (ruling 7). | D: impossible. Outside R it is only an attempt handed over while running and resolved later (ADR 0002's bounded handover); invariant 2 checks exactly that. |
-| Attempt reaches `rejected` | any but D | The reservation and in-flight place are released. Then by reason: a block-listed address skips the track; an invalid address or number marks the detail bad and fails the track; a temporary refusal leaves the step pending with its deadline unchanged, and it is claimed again later with a new attempt; Instantly's unexplained skip holds the track (5.4). On a finished track, only the detail mark applies. | D: impossible. |
+| Attempt reaches `sent` | any but D | A `sent` step result. Its time is **when the provider sent it** (ruling 4), mapped exactly onto the lead's clock by 3.3's `leadAt`. That gives `at = leadAt(t)` and `at_wall = wallOfPoint(t)`. `touched` is set. **In the same result transaction, whether or not the subject runs**, the track's next step is resolved from that basis, or the track finishes if no live step is left (2.6 step 3). On a track already finished, the result is recorded and nothing else changes (ruling 7). | D: impossible. Outside R it is only an attempt handed over while running and resolved later (ADR 0002's bounded handover); invariant 2 checks exactly that. |
+| Attempt reaches `rejected` | any but D | The reservation and in-flight place are released. Then by reason: a block-listed address skips the track; an invalid address or number marks the detail bad and fails the track; a refusal for payment required (402) or rate limit (429) puts the **account** into an account-level wait (5.4): until the quota is confirmed for 402, and for the provider's retry-after period, or an exponential backoff starting at one minute, for 429. No claim is made on that account until then, and the step stays pending with its deadline unchanged. Instantly's unexplained skip holds the track (5.4). On a finished track, only the detail mark applies. | D: impossible. |
 | Bounce or invalid number reported after a send | any but D | The detail is marked bad (ADR 0001: bad marks are never cleared). If the track is unfinished, it finishes `failed_bad_destination`, which quiesces its live attempt to the same address. On a finished track the finish reason stays. | D: impossible. |
 | Reply detected or marked | R, H, and every ending except `replied` and `interested_on_call` | `ended = replied`, with channel and date. The lead **quiesces** (2.5). No other subject changes (spec "What stops"; for SMS, 4.5). | `replied` or `interested_on_call`: recorded on the timeline only. D: impossible, there is no thread. |
 
@@ -255,7 +265,7 @@ Abbreviations:
 | …with redial | The task stays open with `list_day` set to the user's next day. `due_at` and `skip_deadline` are unchanged ("still counts from the original due date"). `touched` set. |
 | Wrong or dead number | The number is marked bad and `touched` set. Until Q4 is answered, the task closes and the track finishes `completed` (spec: "any other outcome… finishes the phone track"). Later phone tracks with no good number left are skipped as missing. |
 | Callback requested (date and time) | `kind = callback`, `callback_at` set: the callback hold. The lead quiesces. `touched` set. |
-| Interested | The task closes and its track finishes `completed` (ruling 7). `ended = interested_on_call`; the lead quiesces. `touched` set. |
+| Interested | The task closes and its track finishes `completed`. **Every other open call task of the lead closes too**, and its track finishes `closed_on_interest`. `ended = interested_on_call`; the lead quiesces. `touched` set. |
 | Not interested (stop, continue or win-back, preselected from the track, overridable) | `no_more_calls` is set. Every open call task of the lead closes and its track finishes: this one `completed`, others `skipped_declined`. That releases any callback hold. Then by path: **stop** gives `ended = declined_on_call`, and the lead quiesces. **Continue** leaves the lead running. **Win-back** enters win-back (below). `touched` set. |
 | Any of the above on a callback task | As in the matching row, after which the callback hold is gone (the task is closed or no longer a callback). A redial converts it back to `kind = call` for the next day, keeping its original `due_at` and `skip_deadline`, which have not advanced while frozen. A new callback time keeps the hold. |
 | Skip for now | The task moves to the end of today's queue. Nothing else changes: it is not a call made, and on a callback task the hold stays. |
@@ -302,7 +312,7 @@ Each live attempt in scope is handled by its state:
 - **`claimed`:** becomes `withdrawn` locally. The provider was never called.
 - **`handed` or `accepted`:** gets `withdraw_requested`, and the worker calls `port.withdraw`. Section 5.3 says how it resolves.
 
-**Changing pending work withdraws the claim** (ruling 1). A `claimed` attempt becomes `withdrawn` in the same transaction as any change to its track's pending step or that step's content. These changes are a skip, an insert, a removal, a reorder, a copy or wait edit on the step, and a change of the subject's sender. They apply to running and held tracks alike. A later claim creates a new attempt, which renders the current copy at its handover. An attempt past `claimed` is not withdrawn by an edit: it may already be with the provider, so it resolves under 5.3 with the copy it was handed.
+**Changing pending work withdraws the claim** (ruling 1). A `claimed` attempt becomes `withdrawn` in the same transaction as any change to its track's pending step or that step's content. These changes are a skip, an insert, a removal, a reorder, and a copy or wait edit on the step. A subject's sender is fixed at its first handover (1.3) and never changes afterwards, so there is no sender-change case. They apply to running and held tracks alike. A later claim creates a new attempt, which renders the current copy at its handover. An attempt past `claimed` is not withdrawn by an edit: it may already be with the provider, so it resolves under 5.3 with the copy it was handed.
 
 **Stale results** (ruling 4). `evaluate` and every user action compute a change from a snapshot. The store applies it only if the subject's `version` and the campaign's `version` (and `definition_version`) are unchanged. Otherwise nothing is written, and the subject is re-evaluated on fresh state. This makes these impossible:
 
@@ -360,6 +370,28 @@ span(w, N, z) = startOfLocalDay(localDate(w, z) + N days, z) − w      -- N ≥
 deadline      = b + span(w, N, z)                                       -- stored, in lead time; deadline_wall = w + span
 ```
 
+**A provider's send time** `t_p` is mapped exactly, from the `freezes` record (1.3):
+
+```
+t            = clamp(t_p, handed_wall, now)                  -- provider clock skew cannot move the basis before the handover or into the future
+overlap(t)   = total length of freezes ∩ [t, now]            -- an open interval counts up to now
+leadAt(t)    = leadNow − (now − t) + overlap(t)              -- lead time at wall instant t
+wallOfPoint(t) = t, unless t lies inside a frozen interval [f, g); then f
+```
+
+`wallOfPoint` returns the wall instant at which the lead's clock last stood at `leadAt(t)` while running. So `basis_at` and `basis_wall` always describe the same point, and the calendar arithmetic below starts from the right local date. `freezes` intervals before the oldest unsettled attempt's `handed_wall` are never needed, because `t ≥ handed_wall`.
+
+*Trace* (UTC; a two-day wait; lead time L at Monday 09:00; the next step's due wall instant is what matters):
+
+- **Pause between the handover and the send.** Handover Monday 09:00; pause Monday 10:00 to Tuesday 10:00; the provider sends Tuesday 11:00; the app observes it Thursday 11:00.
+  - `leadAt` = L + 2 h, and `wallOfPoint` = Tuesday 11:00.
+  - The span to Thursday 00:00 is 37 h, so the step is due at L + 39 h. That is Thursday 00:00 on the wall, already due when the send is observed.
+  - The round-2 fallback gave L + 26 h, so the step would have been due Friday 00:00.
+- **The same pause after the send.** Handover Monday 09:00; the provider sends Monday 11:00; pause Monday 12:00 to Tuesday 12:00; observed Thursday 11:00.
+  - `leadAt` = L + 2 h, and `wallOfPoint` = Monday 11:00.
+  - The span to Wednesday 00:00 is 37 h, so the step is due at L + 39 h. The 24-hour pause moves that to Thursday 00:00 on the wall.
+  - The stored totals at observation are identical in both orderings. Only the `freezes` record tells them apart. Both orderings are generated cases (9.2).
+
 Every editable timer stores its basis `b` and `w` and its zone `z` beside the deadline (ruling 5), so a deliberate edit can re-resolve it without reconstructing any pause history:
 
 - **A step's due time:** `b` and `w` are the latest step result's `at` and `at_wall`, which for a send is the provider's send time (2.4, ruling 4), or the track's start for its first step. They are stored as `basis_at`, `basis_wall`, `due_wall` and `due_zone`.
@@ -416,13 +448,13 @@ There is no spacing between touches to the same person from different campaigns 
 One transaction:
 
 1. Re-read the subject and campaign, and require the **step guard**: `runs(s)`; the versions the decision was computed from; the step is the track's pending step, live, with no result and no live attempt, and `due_at ≤ leadNow`; the track's window is open in the prospect's zone; the account is healthy; the destination is good and owned by the lead (ADR 0001's ownership rules); and the copy renders. A merge field with no fallback that this lead lacks refuses the claim and holds the track as `render_failed` (5.4), until an edit adds the fallback or the lead gains the field.
-2. Choose the account: the subject's fixed sender, or, on its first claim for the channel, the pool account that can send soonest, then the one with most remaining capacity, then the lowest id. For SMS, also the binding rule (4.5).
+2. Choose the account: the subject's fixed sender if it has one. Otherwise pick a candidate from the pool: the account that can send soonest, then the one with most remaining capacity, then the lowest id; for SMS, only accounts whose pair with this mobile is free (4.5). The candidate becomes the subject's sender, and an SMS pair its binding, only when this attempt's handover commits (5.5).
 3. Require both of these:
    - **capacity:** `sends counted + open reservations (+ other senders, ADR 0002) < capacity`;
    - **in-flight bound:** `attempts on this account in claimed, handed or accepted < k`. Unresolved attempts are still `handed` or `accepted`, so they count.
 4. Write the attempt (`claimed`, `retryable` from the transport), the capacity reservation and the subject's version bump. Commit.
 
-**Pacing is taken at the handover, not the claim** (ruling 2). The handover transaction (5.5) requires `now ≥ next_slot_at` and sets `next_slot_at = now + gap` in the same write that moves the attempt to `handed`. That covers new claims and claims recovered after a crash alike, so a claim that waited an hour cannot be handed over a second before the next one. Capacity and the in-flight bound at the claim stop a tick from piling up claims, and the slot at the handover spaces what the provider actually receives. Invariant 11 is asserted on the fake provider's handover log.
+**Pacing is taken at every send call, not at the claim.** Both the handover transaction (5.5) and the retry authorization (5.6) require `now ≥ next_slot_at` and set `next_slot_at = now + gap` in the same write that authorizes the call. That covers first handovers, same-key retries and anything recovered after a crash, so a claim that waited an hour cannot be handed over a second before the next one. Capacity and the in-flight bound at the claim stop a tick from piling up claims, and the slot at each call spaces what the provider actually receives. Invariant 11 is asserted on the fake provider's call log.
 
 ### 4.3 Priority
 
@@ -446,9 +478,10 @@ The user has one daily call capacity, a positive integer.
 
 An SMS conversation is one thread between a sender number and a recipient mobile, whatever campaign sent into it. A reply carries only that pair, so it cannot name a campaign by itself (both reviewers). The engine stores which subject owns each pair:
 
-- `sms_bindings(sender_number, recipient_key)`, unique, names the **owning subject**. A subject's first SMS claim to a mobile takes the binding if no subject owns that pair.
-- **Never transferred** (ruling 8). Once a pair has an owner, it keeps that owner for good, including after the owner ends, so a late reply always reaches the campaign that texted. The table is its own history.
-- A reply on the pair is attributed to its owner only, so invariant 14 holds by construction.
+- `sms_bindings(sender_number, recipient_key)` names the **owning subject**. A subject takes the binding in the transaction that commits its first SMS handover to that mobile, if no unreleased binding exists for the pair. If a concurrent handover took it first, the handover fails its predicates and the claim is withdrawn.
+- **An enrollment's binding is never transferred** (ruling 8). Once an enrollment owns a pair, it keeps it for good, including after it ends, so a late reply always reaches the campaign that texted. The table is its own history.
+- **A test run owns its pair only while it runs.** Ending the test run sets `released_at`, so a second test run with the same contacts can take the pair and complete. A test run whose pair is owned by an enrollment is held as `sms_conversation_taken`, like any other subject.
+- **Attribution.** A reply on a pair goes to its unreleased owner, which invariant 14 relies on. If the pair has no unreleased owner, the reply is recorded on the most recent released owner, which is always a test run, and changes nothing because that test run has ended. A reply that the user sent to an earlier test after a later one started goes to the running test run. That ambiguity exists only between the user's own test runs.
 - **Another subject** that needs the same mobile uses another sender number in its pool that has room, and keeps that number as its fixed SMS sender. If there is none, its SMS track is held with the reason `sms_conversation_taken`, "this mobile is in campaign X's SMS conversation from this number" (5.4). The held track drops nothing and is listed in Needs attention. It stays held until a free number joins the pool, or the user skips the step or stops the lead. Whether it should instead be skipped like a missing channel is question Q7; this is the interim.
 
 ## 5. Running edits and the provider boundary
@@ -483,8 +516,8 @@ The stored step and the rule always agree (invariant 22). The claim's step guard
 | Change a track's window | Nothing stored: windows apply at claim. |
 | Change the declined path | Nothing stored: it is read when an outcome is logged, and preselected on the screen. |
 | Change the skip limit | The `skip_deadline` of every open task is re-resolved from its `due_at`. |
-| Change the campaign's default zone | Pending due times and stored `start_at`s of subjects using the default zone are re-resolved from their basis. |
-| Remove a sender account from a pool | Subjects already fixed to it keep it ("one sender inbox for the whole campaign"). New subjects choose from the new pool. If the removed account is disconnected, its subjects' work waits in Needs attention. A fixed sender never changes. The handover guard still checks that the attempt's account is the subject's sender and is healthy; if not, it withdraws the `claimed` attempt (ruling 1). |
+| Change the campaign's default zone | For subjects using the default zone: pending due times are re-resolved from their basis, and `start_at` is re-resolved only for tracks that have not started. A started track's `start_at` is history and stays. |
+| Remove a sender account from a pool | Subjects already fixed to it keep it ("one sender inbox for the whole campaign"). New subjects choose from the new pool. If the removed account is disconnected, its subjects' work waits in Needs attention. A fixed sender never changes. |
 | Change capacity, gap or `k` | Nothing stored: they apply at the next claim. |
 
 ### 5.3 Ports and the attempt contract (ruling 1)
@@ -494,17 +527,19 @@ Each sending channel has one port:
 ```
 interface SendPort {
   readonly retryable: boolean            // a repeat call with the same key cannot send twice
-  handover(a: { attemptId, sender, destination, rendered, threadRef? }):
+  readonly notSentIsFinal: boolean       // lookup's "not-sent" is a documented final statement for this transport
+  handover(a: { idempotencyKey, sender, destination, rendered, threadRef? }):
     Promise<{ kind: "accepted", providerRef } | { kind: "rejected", reason, final: true } | { kind: "unknown" }>
     // "rejected" only for a documented refusal before processing (validation, block list, 402, 429);
     // a 5xx, a timeout or anything undocumented is "unknown"
   withdraw(a): Promise<"withdrawn" | "too-late" | "unknown">     // "withdrawn" only on a positive provider signal
-  observe(since): Promise<ProviderEvent[]>   // sent, delivered, failed, bounced, reply, unsubscribed, rejected
-  lookup(attemptId): Promise<"sent" | "not-sent" | "unknown">
+  observe(since): Promise<ProviderEvent[]>   // sent (with the provider's send time), delivered, failed, bounced, reply, unsubscribed, rejected
+  lookup(a): Promise<{ kind: "sent", sentAt } | { kind: "queued" } | { kind: "not-sent" } | { kind: "unknown" }>
+    // queued: the provider holds the work and has not sent it yet
 }
 ```
 
-**Email** is ADR 0002's Instantly adapter. The `/leads/add` opener is `retryable: true`, with the attempt id as its idempotency key. The reply and forward follow-up transports have no key, so they are `retryable: false`. `withdraw` returns `unknown` until ADR 0002's X5 adopts a signal.
+**Email** is ADR 0002's Instantly adapter. The `/leads/add` opener is `retryable: true`. The reply and forward follow-up transports have no key, so they are `retryable: false`. `withdraw` returns `unknown`, and `notSentIsFinal` is false, until ADR 0002's X5 shows otherwise. A `not-sent` that is not final is treated as `unknown`.
 
 **SMS:** no provider is provisioned (#28).
 
@@ -513,37 +548,45 @@ interface SendPort {
 
 **Calls** have no port (ruling 9). The user dials on their own phone, and a call counts as made only when the user logs an outcome. That refuses, by construction, to "pretend a call happened when it did not". A phone track needs no connected sender account.
 
-**The attempt state chain** runs `claimed` → `handed` → `accepted` → terminal (`sent`, `rejected`, `withdrawn`). `withdraw_requested` is a flag that only goes from false to true. Every event below only moves forward. A repeated event, or one that would move backwards, is ignored and logged. Results may arrive late, twice or out of order.
+**The attempt state chain** runs `claimed` → `handed` → `accepted` → terminal (`sent`, `rejected`, `withdrawn`). `withdraw_requested` is a flag that only goes from false to true, and `unresolved_since` is set once and never cleared. Every event below only moves forward. A repeated event, or one that would move backwards, is ignored and logged. Results may arrive late, twice or out of order. "Settle" in the table means: one `SETTLING` after the attempt's `last_call_wall`, call `lookup`.
 
 | Event \ state | `claimed` | `handed` | `accepted` | terminal |
 | - | - | - | - | - |
-| Handover transaction commits (5.5) | → `handed`, with the rendered copy, `handed_at`, `handed_wall` and the pacing slot, written and committed **before** the call | ignore | ignore | ignore |
-| Handover guard fails | → `withdrawn` (the provider was never called) | not possible: the guard runs only on `claimed` | — | — |
-| Handover returns `accepted` | impossible | → `accepted`, with its reference | ignore (duplicate) | ignore |
-| Handover returns `rejected` (final) | impossible | → `rejected` | → `rejected` only on a provider signal that it will not send (Instantly skipped the lead, P4) | ignore |
-| Handover returns `unknown`, times out, or the response is lost | impossible | stays `handed` | stays `accepted` | ignore |
-| Sent observed | impossible: no reference to match | → `sent` | → `sent` | `sent`: ignore. `rejected` or `withdrawn`: recorded as a provider anomaly in Needs attention, never as a second send of the step |
-| Quiesce | → `withdrawn` | set `withdraw_requested`, call `withdraw` | set `withdraw_requested`, call `withdraw` | ignore |
-| `withdraw` returns `withdrawn` (positive signal) | — | → `withdrawn` | → `withdrawn` | ignore |
-| `withdraw` returns `too-late` or `unknown` | — | unchanged, still waiting for observation | unchanged | ignore |
-| Retry after no answer to the call | — | only if `retryable`, `withdraw_requested` is false, the subject runs, and `retries` < 3: call again with the **same** key, `retries + 1` | no retry: the provider has the work | — |
-| Settling period passes without `sent` or a final result | — | `lookup`, on every transport | `lookup`, on every transport | — |
-| `lookup` returns `sent` | — | → `sent` | → `sent` | ignore |
-| `lookup` returns `not-sent` (the provider states it does not have the work) | — | → `withdrawn` | → `withdrawn` | ignore |
-| `lookup` returns `unknown` | — | **unresolved** (5.4) | **unresolved** | — |
-| User: "mark sent" or "mark not sent" (ADR 0002 P3) | — | unresolved only: → `sent` or `withdrawn` | unresolved only: same | ignore |
+| Handover transaction commits (5.5) | → `handed`, `calls = 1`; copy, `handed_at`, `handed_wall`, `last_call_wall` and the pacing slot written and committed **before** the call | ignore | ignore | ignore |
+| Handover predicates fail (5.5) | → `withdrawn`, `ended_by = guard`. The provider was never called | not possible: the guard runs only on `claimed` | — | — |
+| Claim older than `SETTLING` (5.5 step 5) | → `withdrawn`, `ended_by = claim_expired` | — | — | — |
+| Call returns `accepted` | impossible | → `accepted`, with its reference | ignore (duplicate) | ignore |
+| Call returns `rejected` (final) | impossible | → `rejected` | → `rejected` only on a provider signal that it will not send (Instantly skipped the lead, P4) | ignore |
+| Call returns `unknown`, times out after `CALL_TIMEOUT`, or the worker crashed before recording the answer | impossible | try the **retry authorization** (5.6); if it is refused, stay `handed` and settle | stays `accepted`; settle | ignore |
+| Sent observed (with send time) | impossible: no reference to match | → `sent` | → `sent` | `sent`: ignore. `withdrawn` with `ended_by = lookup_not_sent`: → `sent`, the one terminal state an observation may leave, because the provider's earlier "not sent" was not a confirmed withdrawal. Other terminal states: recorded as a provider anomaly in Needs attention, never as a second send of the step |
+| Quiesce | → `withdrawn`, `ended_by = quiesce` | set `withdraw_requested`, call `withdraw` | set `withdraw_requested`, call `withdraw` | ignore |
+| `withdraw` returns `withdrawn` (positive signal) | — | → `withdrawn`, `ended_by = provider` | → `withdrawn`, `ended_by = provider` | ignore |
+| `withdraw` returns `too-late` or `unknown` | — | unchanged; settle | unchanged; settle | ignore |
+| `lookup` returns `sent` | — | → `sent` at `sentAt` | → `sent` at `sentAt` | as "Sent observed" |
+| `lookup` returns `queued` | — | → `accepted`; look up again after each `SETTLING`; after `MAX_QUEUED_LOOKUPS` consecutive `queued` answers set `unresolved_since`, and keep looking up | same | — |
+| `lookup` returns `not-sent`, `retryable` | — | try the **retry authorization** (5.6) with the same key. If it is refused: → `withdrawn`, `ended_by = lookup_not_sent`; the step's next attempt **inherits this `idempotency_key`**, so no later attempt for the step uses a new key | same | — |
+| `lookup` returns `not-sent`, not `retryable`, `notSentIsFinal` | — | → `withdrawn`, `ended_by = provider` | same | — |
+| `lookup` returns `unknown`, or a `not-sent` that is not final | — | set `unresolved_since` (5.4); look up again after each `SETTLING` | same | — |
+| User: "mark sent" | — | unresolved only: → `sent` (`ended_by = user`) | same | ignore |
+| User: "mark not sent" | — | unresolved only, and **refused while the latest `lookup` answer is `queued`**: → `withdrawn` (`ended_by = user`) | same | ignore |
 
-**Every attempt leaves a waiting state in bounded time** (ruling 3). `claimed` is resolved by the handover guard on the next worker pass. `handed` and `accepted` either reach a terminal state, or become unresolved one settling period plus one `lookup` after their last call, whatever their transport. A late observation can still move an unresolved attempt to `sent`. Once `withdraw_requested` is set, the attempt is never called again: it settles by observation, `withdraw`, `lookup` or the user's mark. Only a terminal non-sent state frees the step for a new attempt.
+**Every attempt leaves a waiting state in bounded time** (rulings 3–4):
 
-The step's state is derived from its attempts: sent if one is `sent`; in flight if one is not terminal; otherwise pending. **Withdrawn without a provider statement happens only from `claimed`.** An attempt that may have reached the provider is never withdrawn by the app on its own, never repeated without its key, never repeated after a withdrawal request, never repeated more than three times, and never repeated while its subject is not running.
+- **`claimed`:** handed over, or withdrawn by its predicates, or withdrawn after `SETTLING`.
+- **`handed` and `accepted`:** terminal, or `unresolved_since` set, within `SETTLING × (MAX_QUEUED_LOOKUPS + 1)` after their last call, plus the latency of those lookups. The number of calls is at most `MAX_CALLS`.
+- **Unresolved attempts** keep being looked up each `SETTLING`, so a later `sent` or `not-sent` still settles them.
+- **After `withdraw_requested`** the attempt is never called again.
+- **A new attempt** for the step is possible only once the step's attempt is terminal and not `sent`.
 
-**The user's override is the one exception.** "Mark not sent" on an unresolved attempt is the user's explicit decision under ADR 0002 P3. If the provider did send it, the step can then be delivered twice. The at-most-once invariants (4, 5) therefore exclude steps whose earlier attempt the user marked not sent, and the screen warns about this before the user confirms.
+The step's state is derived from its attempts: sent if one is `sent`; in flight if one is not terminal; otherwise pending. **Withdrawn without a provider statement happens only from `claimed`.** An attempt that may have reached the provider is never withdrawn by the app on its own, never repeated without its key, never repeated after a withdrawal request or once unresolved, never called more than `MAX_CALLS` times, and never repeated while its subject is not running.
+
+**The user's override is the one exception.** "Mark not sent" on an unresolved attempt is the user's explicit decision under ADR 0002 P3, and it is refused while the provider reports the work queued. If the provider did send it, the step can then be delivered twice. The at-most-once invariants (4, 5) therefore exclude steps whose earlier attempt the user marked not sent, and the screen warns about this before the user confirms.
 
 ### 5.4 Held tracks
 
 A track is **held** when the engine cannot proceed without guessing or without the user. This is derived, not stored. A held track stops only itself and the tracks after it; other tracks and the lead's status are unchanged. Each hold shows in Needs attention with its reason:
 
-- **`unresolved`:** an attempt in `handed` or `accepted` past the settling period that may not be retried (5.3). The user resolves it.
+- **`unresolved`:** an attempt with `unresolved_since` set (5.3). The user resolves it, or a later lookup or observation settles it.
 - **`render_failed`:** the claim cannot render the copy (4.2).
 - **`provider_skipped`:** Instantly skipped the lead for no reason the API exposes (ADR 0002 P4): an attempt `rejected` with that reason, until the user skips the step or resumes it.
 - **`sms_conversation_taken`:** the mobile's SMS conversation from every free number belongs to another subject (4.5).
@@ -557,21 +600,72 @@ Account-level problems (disconnected, stale inbox, quota exhausted) hold no trac
 The outbox runs in this order:
 
 1. **Claim** (4.2) and commit.
-2. **Pre-send network check**, outside any transaction: for email, ADR 0002's pre-send reply check. A reply it finds is applied as a reply event, which quiesces the claim.
-3. **Handover transaction** (ruling 1). It is one conditional write, `UPDATE attempts SET state = 'handed' … WHERE id = ? AND state = 'claimed'`, together with these checks, all against current state:
-   - the claim's whole step guard (4.2): the subject and campaign run, the step is still the track's pending step with no result, it is live, and its `due_at ≤ leadNow`;
-   - the window is open;
-   - the attempt's account is the subject's sender, and it is healthy;
-   - no reply is recorded;
-   - the destination is good;
-   - the pacing slot is free: `now ≥ next_slot_at`.
+2. **Wait for the slot.** Each account hands over its `claimed` attempts **in 4.3 priority order**: when `next_slot_at` passes, the highest-priority claimed attempt on that account goes next.
+3. **Pre-send network check**, once the slot is free: for email, ADR 0002's pre-send reply check. Its time is stored as `presend_checked_wall`. A reply it finds is applied as a reply event, which quiesces the claim. Its result is valid for `PRESEND_MAX_AGE` (5.6); a handover that misses that age runs the check again.
+4. **Handover transaction** (ruling 1). It is one write, `UPDATE attempts SET state = 'handed', calls = 1 … WHERE id = :a AND state = 'claimed'`, committed only if every one of these **predicates on current state** holds. None of them compares versions: the claim bumped the subject's version itself, and the attempt is excluded from its own conditions.
+   1. The subject is not ended, not lead-paused, and has no open callback task. For an enrollment, its campaign is launched and not paused; for a test run, it is running.
+   2. The track has started and has not finished.
+   3. Its `next_step_id` is the attempt's step.
+   4. The step has no `step_results` row.
+   5. The step is not removed in the current definition.
+   6. `due_at ≤ leadNow`.
+   7. No other non-terminal attempt exists for this step (`id ≠ :a`).
+   8. The track's window is open now, in the prospect's zone.
+   9. The account is healthy and not in an account-level wait.
+   10. The account is the subject's fixed sender, or, when none is fixed, is in the track's pool.
+   11. For SMS, the pair is unbound, or bound to this subject.
+   12. The destination is good and still belongs to the lead.
+   13. No reply has been recorded for the subject since `claimed_wall`.
+   14. `presend_checked_wall ≥ now − PRESEND_MAX_AGE`, and the check found no reply.
+   15. The attempt's capacity reservation exists.
+   16. `now ≥ next_slot_at` on the account.
 
-   In the same write, the copy is rendered from the current definition and stored on the attempt, and `next_slot_at = now + gap` is set. The provider is called only if this row changed. If a check fails, the attempt becomes `withdrawn` and its reservation and in-flight place are released; the step stays pending with its deadline unchanged. If only the pacing slot is busy, the attempt stays `claimed` and the worker tries again when the slot opens.
-4. **Call** the provider, outside any transaction.
-5. **Apply the result** through the table in 5.3.
-6. **Apply observations** (sent, bounce, reply) through the same table. Each is matched by provider reference or thread (ADR 0002 "Recovery") and is idempotent by provider id.
+   In the same write:
+   - the copy is rendered from the current definition and stored on the attempt;
+   - `handed_at` and `handed_wall` are set;
+   - `next_slot_at = now + gap`;
+   - if not yet fixed, the subject's sender is fixed to this account and, for SMS, the binding is inserted.
+
+   The provider is called only if this row changed. If a predicate other than 16 fails, the attempt becomes `withdrawn` (`ended_by = guard`), and its reservation and in-flight place are released; the step stays pending with its deadline unchanged. If only predicate 16 fails, the attempt stays `claimed`.
+5. **The claim's age limit.** A `claimed` attempt not handed over within `SETTLING` of `claimed_wall` becomes `withdrawn` (`ended_by = claim_expired`), releasing its reservation and in-flight place. A later evaluation claims the step again. So a pre-send check that cannot run, or a slot that never frees, does not hold the place for ever.
+6. **Call** the provider, outside any transaction, with `idempotency_key` and the stored copy.
+7. **Apply the result** through the table in 5.3.
+8. **Apply observations** (sent, bounce, reply) through the same table. Each is matched by provider reference or thread (ADR 0002 "Recovery") and is idempotent by provider id.
 
 Because the handover re-checks the step, no change can slip in between the claim and the call (skip, edit, reply, pause, sender trouble). The window left for a change to race the provider is the call itself, which is ADR 0002's bounded handover.
+
+### 5.6 Same-key retries, and the engine's parameters
+
+**A same-key retry is its own atomic authorization** (ruling 1). It is one write, committed only if all its conditions hold:
+
+```
+UPDATE attempts SET calls = calls + 1, last_call_wall = :now
+ WHERE id = :a AND state = 'handed' AND retryable = 1
+   AND calls = :c AND calls < MAX_CALLS
+   AND withdraw_requested = 0 AND unresolved_since IS NULL
+```
+
+It is committed only together with:
+
+- the current-state predicates 1–9, 12 and 13 of 5.5, excluding its own attempt;
+- a fresh pre-send check (predicate 14);
+- the pacing slot (predicate 16), setting `next_slot_at = now + gap` in the same write.
+
+Predicates 10 and 11 were settled by the first handover.
+
+The call then resends the **identical `idempotency_key` and the identical stored payload**. The copy is not re-rendered: the copy-is-current check applies only to a first handover.
+
+If the slot is busy, the retry waits for it. If any other condition fails, there is no retry, and the attempt settles through `lookup` (5.3). Recovery after a crash reaches the provider again only through this authorization (section 6), so a retry is paced, guarded and counted like a first handover.
+
+**Parameters**, one value each, used everywhere in this ADR:
+
+| Name | Default | Meaning |
+| - | - | - |
+| `MAX_CALLS` | 3 | Send calls per attempt in total: the handover plus at most two same-key retries. |
+| `SETTLING` | 15 minutes, until ADR 0002's X1 measures the handover latency; then that latency plus a margin | The wait after a call before `lookup`; the maximum age of a `claimed` attempt; the interval between repeated lookups. |
+| `MAX_QUEUED_LOOKUPS` | 12 | Consecutive `queued` answers before an attempt is unresolved. |
+| `PRESEND_MAX_AGE` | 60 seconds | How old a pre-send check may be at the handover or retry it authorizes. |
+| `CALL_TIMEOUT` | 30 seconds | How long a send call may take before it counts as `unknown`. |
 
 ## 6. Restart and the interruption notice
 
@@ -579,9 +673,9 @@ On start, before the first evaluation:
 
 1. **Observe.** Apply provider events since the last checkpoint, with ADR 0002's overlap.
 2. **Settle open attempts** through the 5.3 table, with no separate path:
-   - `claimed`: the handover transaction of 5.5, which takes a fresh pacing slot;
-   - `handed`: a same-key retry only under the table's retry row; otherwise, once its settling period has passed, `lookup`;
-   - `accepted`: no call; `lookup` once its settling period has passed.
+   - `claimed`: 5.5 steps 2–5, in priority order: the slot, a fresh pre-send check, the handover transaction, the age limit;
+   - `handed` with no recorded answer: the crash row of the 5.3 table, that is, the retry authorization of 5.6 (paced and guarded), else settle;
+   - `accepted`, or `handed` once refused a retry: no call; `lookup` once `SETTLING` has passed since `last_call_wall`.
 3. **Evaluate,** which releases overdue work through pacing, the in-flight bound and capacity.
 4. **The interruption notice** (ruling 13).
    - **Detect.** An interruption happened if the last tick before stopping (`engine_heartbeat`, written each tick) is older than twice the tick interval.
@@ -628,30 +722,33 @@ The generated test asserts every one of these after every event.
 
 1. **One status.** Every enrollment has exactly one outreach status, and the stored column equals `deriveStatus` of the stored state.
 2. **Nothing reaches a provider for a subject that does not run.**
-   - No attempt is claimed, and no attempt moves from `claimed` to `handed`, unless the full guard of 4.2 and 5.5 held in that same transaction against current state. Retries obey the same rule.
-   - **Checked against the fake providers' handover logs:** every handover happened at a moment when its subject ran and the step was its track's pending step. Every delivery comes from such a handover, and at most `k` per account were outstanding when the subject stopped.
+   - No attempt is claimed unless 4.2's guard held. No attempt moves from `claimed` to `handed` unless 5.5's predicates held. No retry is called unless 5.6's authorization committed. Each check runs in the same transaction, against current state.
+   - **Checked against the fake providers' call logs** (handovers and retries alike): every call happened at a moment when its subject ran and the step was its track's pending step with no result. Every delivery comes from such a handover, and at most `k` per account were outstanding when the subject stopped.
 3. **At most one live attempt and one `sent` attempt per step**, by unique index.
 4. **Sent at most once, checked against the fake providers' delivery logs.** Each `(subject, step)` is delivered at most once, across resumes, win-back, edits, crashes, lost responses, retries and quiesces. This is not checked against the application's own records. The one exclusion is a step whose earlier attempt the user marked "not sent" (5.3).
 5. **Attempts only move forward.** No attempt leaves a terminal state, and `withdraw_requested` never clears.
    - Without a provider statement or the user's mark, `withdrawn` happens only from `claimed`.
+   - The one terminal state that an observation may leave is `withdrawn` with `ended_by = lookup_not_sent`, and only for `sent`.
    - No attempt with `retryable = false` is called twice.
-   - No attempt is called again after `withdraw_requested`, or more than three times in total.
+   - No attempt is called after `withdraw_requested` or `unresolved_since`, or more than `MAX_CALLS` times in total.
+   - Every call of one attempt carries the same `idempotency_key` and payload, and a step's attempts after a `lookup_not_sent` reuse that key.
 6. **A finished track never restarts.** Once `finished_at` is set, the track gets no new attempt and no new task, and `started_at` is written once. A result can still be added for an attempt that was live at the finish, but it changes neither the finish reason nor any successor (ruling 7).
 7. **Starts follow their rule.** A track starts at its stored `start_at`, which was resolved from the rule in force when it was resolved. For `after(P, d)` that is d calendar days after P's `finished_wall` (3.3). Tracks with the same rule and the same resolution start at the same lead time.
-8. **Steps go in order and on time, at handover.** Steps are resolved in the order of 5.1. **On the fake providers' handover logs**, no step is handed over before its `due_at` (as the reference model predicts it), out of order, after a result, after it was removed or skipped, or with copy other than the definition current at that handover.
+8. **Steps go in order and on time, at handover.** Steps are resolved in the order of 5.1. **On the fake providers' handover logs**, no step is handed over before its `due_at` (as the reference model predicts it), out of order, after a result, or after it was removed or skipped. A **first** handover carries the copy current at that handover. A retry carries exactly the payload of its attempt's first handover.
 9. **Clocks freeze exactly.**
    - `frozen_since` is set exactly when `runs(s)` is false, and `leadNow` is then constant.
    - Stored deadlines change only through their creation and the edits in 5.2. A withdrawal, a rejection or a temporary refusal leaves the pending deadline unchanged.
    - The wall instant at which a lead reaches any deadline moves by exactly the total frozen time.
-   - A next step's basis is its predecessor's provider send time, not the time the app observed it.
+   - A next step's basis is its predecessor's provider send time, clamped to between the handover and now and mapped exactly through the `freezes` record (3.3), not the time the app observed it. `basis_at` and `basis_wall` describe the same point.
 10. **Capacity.** For every account and reset day, counted sends plus open reservations never exceed capacity.
-11. **In-flight bound and pacing.** An account never has more than `k` attempts in `claimed`, `handed` or `accepted`. **On the fake providers' handover logs**, two handovers from one account are never closer together than its gap. That includes claims recovered after a crash, and test runs.
-12. **Priority.** When a slot is claimed, no item eligible for that account at that moment had a higher priority (4.3).
+11. **In-flight bound and pacing.** An account never has more than `k` attempts in `claimed`, `handed` or `accepted`. **On the fake providers' call logs**, two send calls from one account (first handovers and same-key retries alike) are never closer together than its gap. That includes anything recovered after a crash, and test runs.
+12. **Priority, at the handover.** When an attempt is handed over on an account, no other `claimed` attempt on that account that met every predicate except the slot had a higher priority (4.3). When a claim is made, no unclaimed item eligible for that account had a higher priority.
 13. **Windows.** Every claim happens inside its track's window in the prospect's zone. Every task listed as "ready now" is inside calling hours.
-14. **Campaign-local replies.** A reply changes only the subject that owns the thread or the SMS binding. Other campaigns, colleagues and company leads are unchanged. Each SMS binding has exactly one owner, the first subject that texted the pair, and that owner never changes.
+14. **Campaign-local replies.** A reply changes only the subject that owns the thread or the SMS binding. Other campaigns, colleagues and company leads are unchanged. Each pair has at most one unreleased binding. It belongs to the subject whose first SMS handover to that mobile committed first. An enrollment's binding never changes or is released. A test run's binding is released when the test run ends.
 15. **No call after a decline.** After any declined outcome, the enrollment has no open call task, and none is ever created again. Win-back never has a call task.
 16. **Call tasks.** These hold:
-    - an open task's track is unfinished, and a lead that ended `interested_on_call` has no open task;
+    - an open task's track is unfinished, and a lead that ended `interested_on_call` has no open call task at all;
+    - no outcome is accepted on a call task before its `list_day`, or on a callback task before the user-local day of `callback_at`, and an overdue callback is listed every day until its outcome;
     - a subject has at most one open callback task, and while it is open the subject does not run;
     - every call attempt was logged on a task listed at that moment under 2.3, and every outcome logged on a listed callback task is accepted;
     - a callback task is never expired by the skip limit;
@@ -669,7 +766,11 @@ The generated test asserts every one of these after every event.
 23. **Allowed controls match transitions.** Every control offered for a status is accepted, and every control not offered is refused.
 24. **Stale changes are never applied.** A change computed from a version that is no longer current writes nothing.
 25. **Tests stay out of lead counts.** Test runs appear in no lead search, status count or measure. Their sends do count in the ledger and in pacing.
-26. **No attempt waits forever.** Every attempt in `handed` or `accepted` is terminal, or shown as unresolved, within one settling period plus one `lookup` after its last call. Every account whose in-flight places are all held past the settling period is listed in Needs attention.
+26. **No attempt waits forever.**
+    - Every `claimed` attempt is handed over or withdrawn within `SETTLING` of `claimed_wall`.
+    - Every `handed` or `accepted` attempt is terminal, or has `unresolved_since` set, within `SETTLING × (MAX_QUEUED_LOOKUPS + 1)` after its last call, plus lookup latency.
+    - Every account whose in-flight places are all held past `SETTLING` is listed in Needs attention.
+    - "Mark not sent" is never accepted while the latest lookup says `queued`.
 
 ## 9. Test strategy
 
@@ -702,7 +803,9 @@ Each fake keeps a **handover log** (every call it received, with its time) and a
 - `same-key-replays`: a repeat call with the same key returns the old result and sends nothing new;
 - `always-unknown`: every call and `lookup` answers `unknown`;
 - `non-retryable`: no key, and a repeat call sends again;
-- `5xx`: answers that must be read as `unknown`.
+- `5xx`: answers that must be read as `unknown`;
+- `late-send-beyond-settling`: the provider holds the work longer than `SETTLING` before sending, and `lookup` answers `queued` meanwhile;
+- `lookup-lags`: `lookup` answers `not-sent` for a while after the provider has accepted the work.
 
 1. **Generate definitions.** One to three campaigns that share sender accounts. Each is a tree of tracks with random channels, steps, waits, delays, windows (including overnight ones) and declined paths, all within 7.1; refused definitions get their own example tests. Leads with varied reach and zones, including zones with daylight-saving changes in the test period.
 2. **Generate events** (ruling 14), interleaving:
@@ -718,11 +821,17 @@ Each fake keeps a **handover log** (every call it received, with its time) and a
    - an SMS pair whose owner ends, followed by a second campaign needing it and a late reply to the first;
    - replies during in-flight attempts and after endings;
    - one person in two campaigns sharing one SMS number;
+   - two consecutive test runs with the same contacts and one SMS number, and a late reply to the first;
+   - retries: a crash between the handover commit and the call on a retryable transport, recovered beside fresh claims on the same account with `k = 2`; retries racing a quiesce;
+   - a slot that stays busy, and a pre-send check that cannot run, past `SETTLING`;
+   - the Monday-to-Thursday trace of 3.3 in both orderings, and pauses that start before and end after a provider send;
+   - a redial today followed by an outcome attempt the same day; callbacks set for a later day; overdue callbacks over several days;
+   - interested on one call track while a second call track's task is open;
    - call outcomes chosen from what is listed;
    - user controls, including ones that should be refused;
    - re-imports and test runs.
 3. **Keep an independent record.** A reference model in the test support directory imports nothing from `src/domain/sequence/`. It is written from the spec's words, keeping wall time and an explicit list of frozen intervals per subject. It reads the fakes' delivery logs for send times. From those it predicts:
-   - each step's **due instant**, with its own calendar-day arithmetic counted from the delivered send time and stretched by the frozen intervals;
+   - each step's **due instant**, with its own calendar-day arithmetic counted from the delivered send time mapped through its own frozen-interval list (the same semantics as 3.3's `leadAt` and `wallOfPoint`, implemented separately);
    - its **window**;
    - which tracks start and finish;
    - which call outcomes must be accepted, from its own record of open callbacks and holds rather than the production guard;
@@ -751,7 +860,19 @@ Each fake keeps a **handover log** (every call it received, with its time) and a
    - "interested" leaving its task open;
    - callback outcomes refused while the callback is the only hold;
    - an SMS binding transferred after its owner ends;
-   - reconciliation skipping held tracks.
+   - reconciliation skipping held tracks;
+   - a same-key retry without a pacing slot, or without the predicates;
+   - a retry that re-renders the copy;
+   - `not-sent` creating an attempt with a new key;
+   - "mark not sent" accepted while queued;
+   - `queued` treated as unresolved at once;
+   - a claim with no age limit;
+   - the round-2 clamp fallback in place of `leadAt`;
+   - claims handed over out of priority order;
+   - the sender or the binding fixed at the claim;
+   - a redial listed on the same day;
+   - interested closing only its own task;
+   - a test-run binding never released.
 
 A failure the generator finds is shrunk into a named example test. Each run uses 100 seeds, ten to a chunk.
 
@@ -759,16 +880,16 @@ A failure the generator finds is shrunk into a named example test. Each run uses
 
 | Ticket | Generator adds | Invariants first asserted | Mutations added |
 | - | - | - | - |
-| 12 | One email track of 1–5 steps; waits and windows; leads with and without email, in zones with daylight-saving changes; 1–3 inboxes across 1–2 campaigns; every fake mode; quiesce on reply; crashes at every outbox stage, on both a retryable and a non-retryable transport; user events between evaluate and apply and between claim and handover; recovered claims beside fresh ones; a bounce while the next step is `handed`; re-imports; launch; a drain phase | 1–6, 8–13, 18–21, 24, 26 | withdraw `handed`, retry non-retryable, retry after withdraw, `accepted` never settles, stale apply, handover without re-check, pacing at claim, withdrawal clears deadline, basis from observation, late send resolves successor, capacity off by one, priority, window, touched at claim |
-| 13 | Trees of email and SMS tracks; missing and failing channels; cross-channel replies; one person in two campaigns on one SMS number, including after the first ends | 7, 14 | SMS reply to the newest campaign, binding transferred after an end, ending check too late |
-| 14 | Call tracks, call capacity, outcomes without redial or callback; interested | 16 (partial), 17 | outcome on an unlisted task, interested leaves its task open |
-| 15 | Redial, rollover, skip limit on weeks with and without calling hours, callbacks including overdue, callback outcomes as the only hold and under other holds | 9 with callbacks, 16 | redial resets the deadline, callback expires, a task never listed expires, callback outcome refused when the callback is the only hold |
+| 12 | One email track of 1–5 steps; waits and windows; leads with and without email, in zones with daylight-saving changes; 1–3 inboxes across 1–2 campaigns; every fake mode; quiesce on reply; crashes at every outbox stage, on both a retryable and a non-retryable transport; user events between evaluate and apply and between claim and handover; recovered claims and recovered retries beside fresh ones with `k = 2`; slots and pre-send checks blocked past `SETTLING`; late sends after the lead ended on a reply (the `freezes` mapping with an open interval); a bounce while the next step is `handed`; re-imports; launch; a drain phase | 1–6, 8–13, 18–21, 24, 26 | withdraw `handed`, retry non-retryable, retry after withdraw, retry without slot or predicates, retry re-renders, new key after `not-sent`, mark-not-sent while queued, queued unresolved at once, claim without age limit, `accepted` never settles, stale apply, handover without re-check, handover out of priority order, pacing at claim, sender fixed at claim, withdrawal clears deadline, basis from observation, clamp fallback, late send resolves successor, capacity off by one, window, touched at claim |
+| 13 | Trees of email and SMS tracks; missing and failing channels; cross-channel replies; one person in two campaigns on one SMS number, including after the first ends; two concurrent first handovers racing for one pair | 7, 14 | SMS reply to the newest campaign, binding transferred after an end, binding fixed at claim, ending check too late |
+| 14 | Call tracks, call capacity, outcomes without redial or callback; interested with a second call track's task open | 16 (partial), 17 | outcome on an unlisted task, interested closes only its own task |
+| 15 | Redial, rollover, skip limit on weeks with and without calling hours, callbacks including overdue and for later days, callback outcomes as the only hold and under other holds, an outcome attempted on a same-day redial | 9 with callbacks, 16 | redial resets the deadline, redial listed the same day, callback listed before its day, callback expires, a task never listed expires, callback outcome refused when the callback is the only hold |
 | 16 | Declined paths with overrides, win-back branches with a main step `handed` at entry; works without 15's events | 15 | open task survives a decline |
-| 17 | Lead and campaign pause, skip, stop, restart, move to win-back, nested holds in every order | 2, 9 and 23 in full | due recomputed from the current total |
+| 17 | Lead and campaign pause, skip, stop, restart, move to win-back, nested holds in every order; the Monday-to-Thursday trace in both orderings; pauses that begin and end around provider sends | 2, 9 and 23 in full | due recomputed from the current total, clamp fallback with a thaw |
 | 18 | Bulk sequences across campaigns | 23 across campaigns | — |
 | 19 | Every edit kind of 5.2, at random points, including while held and between claim and handover | 22, plus 6 and 8 under edits | edit leaves a stale pending step, edit leaves a stale claim, reconciliation skips held tracks |
 | 20 | Outages of random length; unresolved attempts and their resolution | the notice count equals the record's | count due-in-gap instead of rescheduled |
-| 21 | Test runs before and after launch, interleaved with leads | 25 | test exempt from pacing |
+| 21 | Test runs before and after launch, interleaved with leads; two consecutive test runs on one SMS pair, and a late reply to the first | 14 for test runs, 25 | test exempt from pacing, test-run binding never released |
 | 22 | — | measures equal the record's own counts | skip-for-now counted as a call |
 | 23 | Everything, at 300 seeds | all | all |
 
@@ -801,7 +922,7 @@ Each ticket implements its part completely. A later ticket's area shows an hones
 - **The canvas library and the editor's look** (`docs/agents/ui.md`).
 - **Social tracks.** A social port would plug in like SMS, and "the step waits while the laptop is off" becomes an account-health wait.
 - **The import questions in #32.** They change who is enrolled, not how an enrollment runs.
-- **Tuning values:** the tick interval, the default gap's 8-hour day, `k` beyond ADR 0002's X1, and the settling period. These are parameters with tests, not product behaviour.
+- **Tuning values:** the tick interval, and `k` beyond ADR 0002's X1. The defaults of the engine's other parameters are in 5.6. These are parameters with tests, not product behaviour.
 
 ## Questions for the human
 
@@ -874,8 +995,26 @@ Each fix names the invariant that states it, the fake mode or generated case tha
 
 **No finding rejected.** Every scenario in both reports reproduces from the text at `2bec5ee`.
 
+## Changes from round 3
+
+The coordinator's items 1–7. Both reports reproduce from `c3990ba`, and no finding was rejected.
+
+| Item | Fix | Invariant | Fake mode / generated case | Mutation |
+| - | - | - | - | - |
+| 1 Retries | 5.6 retry authorization: a conditional write, the 5.5 predicates excluding its own attempt, a fresh slot, an identical key and payload; recovery goes only through it; `MAX_CALLS` = 3 everywhere | 2, 5, 8, 11 (every send call) | crash between handover and call, recovered beside fresh claims with `k = 2`; retries racing a quiesce | retry without slot or predicates; retry re-renders |
+| 2 Historical send times | 1.3 `freezes` record; 3.3 `leadAt`, `wallOfPoint`, and the clamp of `t_p` to between the handover and now; the reference model keeps its own interval list | 9 | the Monday-to-Thursday trace in both orderings; late sends after a reply ended the lead | clamp fallback |
+| 3 Lookup | 5.3 `sent` (with time), `queued`, `not-sent`, `unknown`; `queued` re-looked-up up to `MAX_QUEUED_LOOKUPS`; `not-sent` retries with the same key and passes the key on; "mark not sent" refused while queued | 4, 5, 26 | `late-send-beyond-settling`, `lookup-lags` | new key after `not-sent`; mark-not-sent while queued; queued unresolved at once |
+| 4 Claimed is bounded | 5.5 steps 2–5: the pre-send check after the slot, `PRESEND_MAX_AGE`, the claim's age limit; section 6 recovery goes through the same steps | 26 | slot busy, and pre-send check unavailable, past `SETTLING` | claim without age limit |
+| 5 Handover predicates | 5.5 step 4's sixteen predicates, with no version comparison and excluding its own attempt; handover in priority order | 2, 12 (at handover) | user events between claim and handover; several claims waiting for one slot | handover out of priority order |
+| 6 Result transaction; 402 | 2.4: the next step resolved in the result transaction whether or not the subject runs; 402 and 429 go to the account-level wait | 8, 18 | sends observed while held; `5xx` and quota refusals | — |
+| 7a Listing dates | 2.3 date eligibility; overdue callbacks stay listed | 16 | same-day redial outcome; callbacks on later days; overdue callbacks | redial listed the same day; callback listed early |
+| 7b Interested | 2.4: closes every open call task (`closed_on_interest`) | 16 | interested with a second call track open | interested closes only its own task |
+| 7c Sender and binding | Fixed at the handover commit (1.3, 4.2, 4.5, 5.5); the sender-change case deleted (2.5, 5.2) | 14 | concurrent first handovers racing for one pair | sender or binding fixed at claim |
+| 7d Zone edit | 5.2: `start_at` re-resolved only for tracks that have not started | 7 | zone edits around track starts | — |
+| 7e Test-run SMS | 4.5: a test run's binding released at its end; late replies recorded on the last released owner | 14 | two consecutive test runs on one pair; a late reply to the first | test-run binding never released |
+
 ## Consequences
 
 - **ADR 0001.** The merge that deletes a contact-detail row becomes a redirect in 12a. Enrollments gain the fields in 1.3. `status` stays the one stored status column.
-- **ADR 0002.** Its attempt states are refined here: `adding` splits into `claimed` and `handed`, `added` becomes `accepted`, `withdraw-requested` becomes a flag, and `unresolved` is a derived hold that every attempt reaches in bounded time unless a provider settles it. Its pre-send check runs before the handover transaction, and its pacing is taken there. A stop does not abandon a pending step, so a resume finds it. Its frozen clocks for ticket 17 are met by lead time and stored deadlines. X5 adds the check that an idempotency key is still honoured after a long outage.
+- **ADR 0002.** Its attempt states are refined here: `adding` splits into `claimed` and `handed`, `added` becomes `accepted`, `withdraw-requested` becomes a flag, and `unresolved` is a derived hold that every attempt reaches in bounded time unless a provider settles it. Its pre-send check runs before the handover transaction, and its pacing is taken there and at every same-key retry. Its `lookup` gains the answers `queued` and a `sent` that carries the provider's send time. X5 must also establish whether a `not-sent` lookup is final for each transport (`notSentIsFinal`), and what a same-key re-add returns after a lagging add. A stop does not abandon a pending step, so a resume finds it. Its frozen clocks for ticket 17 are met by lead time and stored deadlines. X5 adds the check that an idempotency key is still honoured after a long outage.
 - **Every later ticket** reads this ADR before touching the engine, and changes it before changing a rule.
