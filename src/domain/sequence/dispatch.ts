@@ -7,6 +7,7 @@
 import { ENGINE_PARAMS, isLive, isUncertain } from "./attempt.ts";
 import { leadNow, windowOpen } from "./clock.ts";
 import { render } from "./copy.ts";
+import { ownSubject } from "./definition.ts";
 import { progressOf, runs, trackHold, type HoldReason } from "./progress.ts";
 import type { AccountState, Attempt, ProviderWork, RenderedCopy, SubjectState } from "./state.ts";
 
@@ -34,7 +35,7 @@ const stepDef = (state: SubjectState, trackId: string, stepId: string) =>
 export function renderStep(state: SubjectState, trackId: string, stepId: string): RenderedCopy | null {
   const step = stepDef(state, trackId, stepId);
   if (!step) return null;
-  const subject = render(step.subject, state.lead.mergeData);
+  const subject = render(ownSubject(step), state.lead.mergeData);
   const body = render(step.body, state.lead.mergeData);
   return subject.ok && body.ok ? { subject: subject.text, body: body.text } : null;
 }

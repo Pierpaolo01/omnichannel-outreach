@@ -1262,7 +1262,8 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
         const authorizedAt = c.at - (injectedDelay.get(`${c.attemptId}@${c.at}`) ?? 0);
         if (!inWindow(track.window, zone, authorizedAt)) problem(`8: ${rec.id}/${step.id} handed over outside its window`);
         const data = mergeData(rec, fake.handoverLog.indexOf(c));
-        const expected = { subject: renderCopy(step.subject, data), body: renderCopy(step.body, data) };
+        // A continue-thread email has no subject of its own (ADR 0003, 12c): it renders none.
+        const expected = { subject: step.threading === "new_subject" ? renderCopy(step.subject, data) : "", body: renderCopy(step.body, data) };
         // A crash after the handover committed can eat the first call: the provider then first sees a
         // retry, which carries the copy rendered at that commit, an instant the record cannot see.
         const app = allAttempts.find((a) => a.id === c.attemptId);

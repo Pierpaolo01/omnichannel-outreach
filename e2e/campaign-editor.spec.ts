@@ -311,6 +311,16 @@ test.describe("review of pull request 41", () => {
     await expect(page.getByText("Hi Amira,")).toHaveCount(0);
   });
 
+  test("once launched, the inspector shows no lead counts for the fallbacks, which would leave out ended leads (council item 4)", async ({ page }) => {
+    const id = await campaign(track([COPY.first]));
+    expect((await r.harness.launch(id)).status).toBe(200);
+    await r.harness.advanceTo(r.harness.clock + 3 * 24 * 3_600_000);
+    await page.goto(`${r.url}/campaigns/${id}?track=email&step=s1`);
+    await expect(page.getByLabel("Fallback for first name")).toHaveValue("there");
+    await expect(page.getByText("Every lead has it")).toHaveCount(0);
+    await expect(page.getByText(/leads? without one/)).toHaveCount(0);
+  });
+
   test("a follow-up that continues the thread names the subject of the nearest email that started one (SequenceTab.tsx:274)", async ({ page }) => {
     const id = await campaign(track([COPY.first, { ...COPY.second, threading: "new_subject", subject: "A second idea" }, { ...COPY.second, id: "s3", body: "Last note." }]));
     await page.goto(`${r.url}/campaigns/${id}?track=email&step=s3`);

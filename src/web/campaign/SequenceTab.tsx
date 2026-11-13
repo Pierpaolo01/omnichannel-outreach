@@ -391,7 +391,8 @@ function StepBlock({ step, index, steps, open, facts, editor, onToggle, onChange
               aria-label={`${name} copy`}
             />
             <MergeFieldMenu onPick={insertField} />
-            <Fallbacks step={step} facts={facts} onChange={onChange} />
+            {/* Once launched the counts would leave out leads that ended, so none is shown (PR 41 council, item 4). */}
+            <Fallbacks step={step} facts={locked ? null : facts} onChange={onChange} />
             {steps.length > 1 && !locked && (
               <div>
                 <button type="button" className="btn btn-sm btn-ghost px-2 font-medium text-muted" onClick={onRemove}>
@@ -449,7 +450,7 @@ function Fallbacks({ step, facts, onChange }: { step: StepDefinition; facts: Bef
         return (
           <li key={field} className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2.5 gap-y-0.5">
             <span className={`rounded-[5px] px-1.5 text-[12.5px] font-semibold ${blocks ? "bg-crit-soft text-crit" : "bg-hand-soft text-hand"}`}>{fieldLabel(field)}</span>
-            {missing === 0 ? (
+            {facts !== null && missing === 0 ? (
               <span className="text-muted">Every lead has it</span>
             ) : (
               <span className={`flex flex-wrap items-center gap-x-1.5 gap-y-1 ${blocks ? "text-crit" : "text-muted"}`}>

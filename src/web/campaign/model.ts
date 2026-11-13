@@ -1,5 +1,6 @@
 /** The campaign editor's draft helpers (ticket 12c). Pure: no React, no requests. */
 import { mergeUses } from "../../domain/sequence/copy.ts";
+import { ownSubject } from "../../domain/sequence/definition.ts";
 import type { CampaignDefinition, LaunchBlocker, StepDefinition, TrackDefinition, WindowRule } from "../../shared/api.ts";
 
 /** Days as the reference shows them, Monday first; the definition numbers Sunday 0. */
@@ -49,11 +50,11 @@ export function trackSummary(track: TrackDefinition): string {
 export const fieldLabel = (field: string): string => field.replace(/_/g, " ");
 
 /** The fields a step's copy uses, in order of first use. */
-export const fieldsOf = (step: StepDefinition): string[] => [...new Set([...mergeUses(step.subject), ...mergeUses(step.body)].map((u) => u.field))];
+export const fieldsOf = (step: StepDefinition): string[] => [...new Set([...mergeUses(ownSubject(step)), ...mergeUses(step.body)].map((u) => u.field))];
 
 /** The fallback this step gives `field` (the first one written), or "" when none. */
 export function fallbackIn(step: StepDefinition, field: string): string {
-  return [...mergeUses(step.subject), ...mergeUses(step.body)].find((u) => u.field === field && u.fallback !== null)?.fallback ?? "";
+  return [...mergeUses(ownSubject(step)), ...mergeUses(step.body)].find((u) => u.field === field && u.fallback !== null)?.fallback ?? "";
 }
 
 /** Rewrites every use of `field` in `text` with the fallback, or without one when it is blank. */
@@ -64,7 +65,7 @@ export function withFallback(text: string, field: string, fallback: string): str
 
 /** The launch blockers that name this step: empty copy, or a field with no fallback it uses. */
 export function stepBlockers(step: StepDefinition, blockers: readonly LaunchBlocker[]): LaunchBlocker[] {
-  const uses = [...mergeUses(step.subject), ...mergeUses(step.body)];
+  const uses = [...mergeUses(ownSubject(step)), ...mergeUses(step.body)];
   return blockers.filter((b) =>
     b.kind === "empty_copy" ? b.stepId === step.id : b.kind === "missing_merge_field" ? uses.some((u) => u.field === b.field && u.fallback === null) : false,
   );

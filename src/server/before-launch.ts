@@ -7,7 +7,7 @@
 import { missingFields, renderSegments, type Segment } from "../domain/copy-preview.ts";
 import { projectLoad, type Projection } from "../domain/load-projection.ts";
 import { mergeUses } from "../domain/sequence/copy.ts";
-import { liveSteps, liveTracks, type CampaignDefinition, type TrackDefinition } from "../domain/sequence/definition.ts";
+import { liveSteps, liveTracks, ownSubject, type CampaignDefinition, type TrackDefinition } from "../domain/sequence/definition.ts";
 import { goodEmail } from "../domain/sequence/progress.ts";
 import type { AccountState, SubjectState } from "../domain/sequence/state.ts";
 import type { BeforeLaunchView, ContactDetailView, CopyPreview, LeadRow, LoadProjectionView, PreviewLead } from "../shared/api.ts";
@@ -57,7 +57,7 @@ function previewLead(row: LeadRow, enrollmentId: string, channels: Pick<PreviewL
 function usedFields(definition: CampaignDefinition): Map<string, { fallbacks: Set<string>; without: boolean }> {
   const uses = new Map<string, { fallbacks: Set<string>; without: boolean }>();
   for (const { step } of copySteps(definition)) {
-    for (const use of [...mergeUses(step.subject), ...mergeUses(step.body)]) {
+    for (const use of [...mergeUses(ownSubject(step)), ...mergeUses(step.body)]) {
       const entry = uses.get(use.field) ?? { fallbacks: new Set<string>(), without: false };
       if (use.fallback === null) entry.without = true;
       else entry.fallbacks.add(use.fallback);
@@ -173,7 +173,7 @@ export async function copyPreview(store: OutreachStore, campaignId: string, enro
     let threadSubject: Segment[] = [];
     liveSteps(track).forEach((step, i) => {
       day += step.waitDays;
-      const own = renderSegments(step.subject, data);
+      const own = renderSegments(ownSubject(step), data);
       const subject = step.threading === "continue_thread" ? [{ text: "Re: ", kind: "literal" as const }, ...threadSubject] : own;
       if (step.threading === "new_subject") threadSubject = own;
       const body = renderSegments(step.body, data);

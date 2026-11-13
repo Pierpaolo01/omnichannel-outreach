@@ -1,7 +1,9 @@
 import { describe, expect, test } from "vitest";
 import { launchCheck } from "./blockers.ts";
 import { render } from "./copy.ts";
-import { definitionProblems, ONE_EMAIL_TRACK_FOR_NOW, type CampaignDefinition, type StepDefinition, type TrackDefinition } from "./definition.ts";
+import { definitionProblems, ONE_EMAIL_TRACK_FOR_NOW, ownSubject, type CampaignDefinition, type StepDefinition, type TrackDefinition } from "./definition.ts";
+import { renderStep } from "./dispatch.ts";
+import { subjectState } from "../../../test/support/sequence-state.ts";
 
 const step = (id: string, fields: Partial<StepDefinition> = {}): StepDefinition => ({
   id,
@@ -126,5 +128,22 @@ describe("exactly three launch blockers (ADR 0003 7.2)", () => {
 
   test("a campaign with no track has nothing to launch, which is not a blocker", () => {
     expect(launchCheck(definition({ tracks: [] }), [lead], [inbox])).toEqual({ blockers: [], nothingToLaunch: true, canLaunch: false });
+  });
+});
+
+describe("a continue-thread email has no subject of its own (PR 41 council, item 3)", () => {
+  // The subject is hidden in the editor once the email continues the thread, but may still be stored.
+  const hidden = step("s2", { waitDays: 2, subject: "About {{city}}", body: "Following up." });
+  const def = definition({ tracks: [emailTrack({ steps: [step("s1", { threading: "new_subject" }), hidden] })] });
+
+  test("its stored subject raises no blocker, even for a field with no fallback that a lead lacks", () => {
+    expect(launchCheck(def, [{ first_name: "Pat", company: "Harbour" }], [{ id: "inbox-1", channel: "email", healthy: true }]).blockers).toEqual([]);
+  });
+
+  test("it is not rendered: the handover carries an empty subject and the thread carries the conversation", () => {
+    const state = subjectState({ campaign: { ...subjectState().campaign, definition: def } });
+    expect(renderStep(state, "t1", "s2")).toEqual({ subject: "", body: "Following up." });
+    expect(ownSubject(hidden)).toBe("");
+    expect(ownSubject(step("s1", { threading: "new_subject", subject: "Hi" }))).toBe("Hi");
   });
 });

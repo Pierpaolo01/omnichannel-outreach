@@ -162,3 +162,25 @@ describe("a bounce is kept as a fact, whatever state the track was in (review: a
     expect(entries[0]).toMatchObject({ kind: "ended", status: "finished_no_usable_channel" });
   });
 });
+
+describe("a bounce the engine does not apply is not recorded (PR 41 council, item 5)", () => {
+  test("a bounce for provider work that was never handed over leaves no bounce on the timeline", async () => {
+    // A two-hour gap: Pat goes at 09:00; Sam's claim waits for the slot and expires after SETTLING, never handed over.
+    const h = new EngineHarness({ start: MONDAY_8, accounts: [{ id: "inbox-a", capacity: 30, gapMs: 2 * H, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+    const { campaign } = await h.createCampaign("Autumn physio", { businesses: [business({ business_id: "b1", business_name: "Harbour Lane Physio" })], people: PEOPLE.slice(0, 2) });
+    await h.tick();
+    await h.defineSequence(campaign.id, definition);
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_8 + H + 20 * 60_000);
+    const rows = (await h.request<{ rows: { id: string; name: string; enrollments: EnrollmentView[] }[] }>("GET", "/api/leads")).body.rows;
+    const sam = rows.find((r) => r.name === "Sam Lee")!;
+    const state = (await h.store.engine.subject(sam.enrollments[0]!.id, h.clock))!;
+    expect(state.attempts.every((a) => a.handedWall === null)).toBe(true);
+    const key = state.work[0]!.key;
+    (h.fake as unknown as { emit(at: number, e: unknown): void }).emit(h.clock, { id: "bounce-unapplied", kind: "bounced", key, providerRef: "ref-none", at: h.clock });
+    await h.advanceTo(h.clock + 60_000);
+    const entries = (await h.request<ActivityView>("GET", `/api/people/${sam.id}/activity`)).body.entries;
+    expect(entries.filter((e) => e.kind === "bounced")).toEqual([]);
+    expect(await h.store.engine.bouncesOf(sam.enrollments[0]!.id)).toEqual([]);
+  });
+});
