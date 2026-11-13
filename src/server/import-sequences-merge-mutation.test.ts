@@ -36,6 +36,8 @@ function storeDeletingMergedRows(): { store: OutreachStore; deleted: () => numbe
   return { store, deleted: () => deleted };
 }
 
+// The generator merges only when a company first seen without a region later gets one while a
+// person holds its line in international form, so every seed of the main test is run.
 test("the generated-sequence checks fail a store that deletes a merged detail's row", async () => {
   const lost: string[] = [];
   let deleted = 0;
@@ -43,7 +45,6 @@ test("the generated-sequence checks fail a store that deletes a merged detail's 
     const mutated = storeDeletingMergedRows();
     const { problems } = await runSequence(seed, { store: mutated.store });
     await mutated.store.close();
-    if (mutated.deleted() > 0) console.log(seed, mutated.deleted(), problems.slice(0, 2));
     deleted += mutated.deleted();
     lost.push(...problems.filter((p) => /resolves to nothing/.test(p)));
   }

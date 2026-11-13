@@ -171,7 +171,10 @@ export function generateRun(rand: () => number, step: number, history: History):
       business_id: businessId,
       place_id: c.anchor === "place" || (c.anchor !== "none" && chance(0.5)) ? `PL-${i}` : "",
       business_name: pick(c.names),
-      country: e164 ? pick(["GB", "GB", "United Kingdom", ""]) : "GB",
+      // A company first seen with no country and no international main line stores its numbers
+      // by their digits; a later import, always with a region, reads them again, merging any copy
+      // a person holds in international form into the company's line (ADR 0001).
+      country: e164 ? pick(["GB", "GB", "United Kingdom", ""]) : step === 1 && chance(0.4) ? "" : "GB",
       phone_e164: e164,
       phone_original: line,
       street: c.anchor === "address" || (c.anchor !== "none" && chance(0.5)) ? c.street : "",
@@ -614,7 +617,9 @@ function detailProblems(w: World, summary: ImportSummary, badMarks: BadMarks, hi
   for (const company of w.companies) {
     const owners = new Map<string, string>();
     for (const { d, owner } of atCompany(company.id)) {
-      const key = valueKey(d);
+      // A number stored while its company's region was unknown is keyed, and shown, by its digits
+      // until an import gives the company a region; until then it is a different number (ADR 0001).
+      const key = d.channel === "phone" && !d.value.startsWith("+") ? `unread|${d.value}` : valueKey(d);
       const other = owners.get(key);
       if (other && other !== owner) problems.push(`${d.value} at ${company.name} is held by ${other} and ${owner}`);
       owners.set(key, owner);
