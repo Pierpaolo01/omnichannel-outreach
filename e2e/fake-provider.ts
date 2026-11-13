@@ -46,6 +46,8 @@ export interface FakeProviderApp {
   readonly twoChannelsReady: string;
   /** Record ids of the two-channel campaigns' people, by name. */
   readonly smsPerson: (name: string) => string;
+  /** A new campaign of the two-channel campaigns' people, with no sequence yet, for a test that builds one. */
+  readonly freshTwoChannelCampaign: (name: string) => Promise<string>;
 }
 
 /** Ticket 13b's two-channel sequence: email and SMS together, then a second email track a day after the texts. */
@@ -184,11 +186,14 @@ async function start(): Promise<FakeProviderApp> {
   await harness.defineSequence(twoChannels, TWO_CHANNELS);
   await harness.defineSequence(twoChannelsReady, TWO_CHANNELS);
   harness.sms.invalidAfterSend.add("+447700900344");
+  const launchedAt = harness.clock;
   await harness.launch(twoChannels);
-  // Priya texts back after her first text, on Monday afternoon (the texts go from 10:00).
-  await harness.advanceTo(harness.clock + 6 * H);
+  // Priya texts back after her first text, that afternoon (the texts go from 10:00).
+  await harness.advanceTo(launchedAt + 6 * H);
   harness.sms.prospectTexts("+447700900311", "STOP");
-  await harness.advanceTo(harness.clock + 8 * 24 * H);
+  // A week on, the same weekday morning: the sequence has finished, and a story that launches next
+  // starts on a weekday, as the email story's tests expect.
+  await harness.advanceTo(launchedAt + 7 * 24 * H);
   const smsRows = (await harness.request<{ rows: { id: string; name: string }[] }>("GET", `/api/leads?campaign=${twoChannels}&limit=500`)).body.rows;
 
   const rows = (await harness.request<{ rows: { kind: string; id: string; name: string; enrollments: EnrollmentView[] }[] }>("GET", `/api/leads?campaign=${running}&limit=500`)).body.rows;
@@ -219,6 +224,7 @@ async function start(): Promise<FakeProviderApp> {
     twoChannels,
     twoChannelsReady,
     smsPerson: (name) => smsRows.find((r) => r.name === name)?.id ?? "",
+    freshTwoChannelCampaign: (name) => createRows(name, RIVERSIDE),
     freshCampaign: async (name) => {
       const id = await create(name);
       await harness.defineSequence(id, definition([COPY.first, COPY.second]));

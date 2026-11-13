@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useLocation, useSearch } from "wouter";
 import { MERGE_FIELDS } from "../../domain/sequence/copy.ts";
 import type { BeforeLaunchView, CampaignDefinition, EmailProviderStatus, LaunchBlocker, SmsProviderStatus, StepDefinition, TrackDefinition } from "../../shared/api.ts";
@@ -174,6 +174,21 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
 }
 
 const ADD_TRACK_ID = "add-track";
+/** The width one track node takes beside another: the node and the space around it. */
+const NODE_SPAN = 230 + 24;
+
+/** An element's content width, kept current as it resizes; null until measured. */
+function useWidth(ref: RefObject<HTMLElement | null>): number | null {
+  const [width, setWidth] = useState<number | null>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const observer = new ResizeObserver(([entry]) => setWidth(entry ? entry.contentRect.width : null));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [ref]);
+  return width;
+}
 /**
  * One of several tracks hanging from the same point: a line joins it to its neighbours at the top,
  * so tracks that start together read as one fork.
@@ -205,6 +220,15 @@ function Canvas({ tracks, selectedId, editor, onSelect, onAdd }: { tracks: reado
   const roots = tracks.filter((t) => t.start.kind === "entry" || !live.has(t.start.trackId));
   const childrenOf = (id: string) => tracks.filter((t) => t.start.kind === "after" && t.start.trackId === id);
   const rootLabel = roots.length > 1 ? "together" : editor.launched ? "at launch" : "starts at launch";
+  // Side by side while the widest row of tracks fits the canvas; stacked in one column otherwise,
+  // so nothing scrolls sideways or clips at any width (DESIGN.md, Layout).
+  const leaves = (t: TrackDefinition, depth = 0): number => (depth > tracks.length ? 1 : Math.max(1, childrenOf(t.id).reduce((n, c) => n + leaves(c, depth + 1), 0)));
+  const needed = roots.reduce((n, t) => n + leaves(t), 0) * NODE_SPAN + 16;
+  const area = useRef<HTMLDivElement>(null);
+  const width = useWidth(area);
+  const stacked = width !== null && needed > width;
+  const row = stacked ? "flex flex-col items-center" : "flex justify-center";
+  const joined = stacked ? "" : JOINED;
   const branch = (track: TrackDefinition, label: string, depth: number): ReactNode => {
     const children = depth > tracks.length ? [] : childrenOf(track.id);
     return (
@@ -216,9 +240,9 @@ function Canvas({ tracks, selectedId, editor, onSelect, onAdd }: { tracks: reado
         {children.length > 0 && (
           <>
             <span className="h-4 border-l-[1.5px] border-line-strong" aria-hidden="true" />
-            <ul aria-label={`Tracks after ${trackName(editor.draft, track)}`} className="flex justify-center">
+            <ul aria-label={`Tracks after ${trackName(editor.draft, track)}`} className={row}>
               {children.map((c) => (
-                <li key={c.id} className={JOINED}>
+                <li key={c.id} className={joined}>
                   {branch(c, `after · ${c.start.kind === "after" ? days(c.start.delayDays) : ""}`, depth + 1)}
                 </li>
               ))}
@@ -237,14 +261,14 @@ function Canvas({ tracks, selectedId, editor, onSelect, onAdd }: { tracks: reado
         </p>
         {!editor.launched && <AddTrackMenu disabled={editor.locked} onAdd={onAdd} />}
       </div>
-      {/* A wide sequence scrolls inside the canvas, never the page; centred while it fits. */}
-      <div className="min-h-0 flex-1 overflow-auto px-1 pb-10 pt-4">
-        <div className="mx-auto flex w-max flex-col items-center">
+      {/* Centred while the tracks fit side by side; stacked in one column when they would not. */}
+      <div ref={area} className="min-h-0 flex-1 overflow-auto px-1 pb-10 pt-4">
+        <div className={`mx-auto flex flex-col items-center ${stacked ? "" : "w-max"}`}>
           <span className="rounded-full bg-base-content px-3.5 py-1 text-[12.5px] font-semibold text-base-100">Launch</span>
           <span className="h-4 border-l-[1.5px] border-line-strong" aria-hidden="true" />
-          <ul aria-label="Tracks that start at launch" className="flex justify-center">
+          <ul aria-label="Tracks that start at launch" className={row}>
             {roots.map((t) => (
-              <li key={t.id} className={JOINED}>
+              <li key={t.id} className={joined}>
                 {branch(t, rootLabel, 0)}
               </li>
             ))}
@@ -548,7 +572,7 @@ function StepBlock({ channel, step, index, steps, open, facts, editor, onToggle,
       <div className={`rounded-field border bg-base-100 ${open ? "border-line-strong" : "border-line"} ${first ? "" : ""}`}>
         <button id={`step-toggle-${step.id}`} type="button" className="flex w-full cursor-pointer items-center gap-2 px-3 py-2.5 text-left" aria-expanded={open} aria-controls={bodyId} onClick={onToggle}>
           <span className="text-[14px] font-semibold">{name}</span>
-          {!open && <span className="min-w-0 flex-1 truncate text-[13px] text-muted">{summary}</span>}
+          {!open && <span className="line-clamp-1 min-w-0 flex-1 text-[13px] text-muted [overflow-wrap:anywhere]">{summary}</span>}
           {open && <span className="flex-1" />}
           {issues > 0 && <span className="whitespace-nowrap text-[12.5px] font-semibold text-crit">{issues} to fix</span>}
           <Icon name="chevron" className={`size-4 text-muted ${open ? "rotate-180" : ""}`} />

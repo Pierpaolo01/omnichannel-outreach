@@ -1,0 +1,149 @@
+import { readFileSync } from "node:fs";
+import { expect, test, type Page } from "@playwright/test";
+import type { Campaign, EnrollmentView } from "../src/shared/api.ts";
+import { fakeProviderApp } from "./fake-provider.ts";
+import { fixture } from "./support.ts";
+
+/**
+ * Ticket 13b, as the user uses it: SMS tracks and connections between tracks in the campaign
+ * editor, Before launch on both channels, and SMS on the person record. The running app has no SMS
+ * provider, so an SMS track is blocked by "no connected sender"; sends, bad numbers and replies run
+ * on the app over the fake providers, which is not provider proof. All data is fictitious.
+ */
+const H = 3_600_000;
+const DAY = 24 * H;
+
+async function writeText(page: Page, n: number, copy: string) {
+  await page.getByLabel(`Text ${n} message`).fill(copy);
+}
+
+test.describe("on the running app, with no SMS provider", () => {
+  test("an SMS track can be written and connected, and launch is blocked only because no SMS number is connected", async ({ page, request }) => {
+    const created = await request.post("/api/campaigns", { data: { name: "Texts, no provider", businessesCsv: readFileSync(fixture("businesses-run1.csv"), "utf8"), peopleCsv: readFileSync(fixture("people-run1.csv"), "utf8") } });
+    const id = ((await created.json()) as { campaign: Campaign }).campaign.id;
+    await page.goto(`/campaigns/${id}`);
+    await page.getByRole("button", { name: "SMS track" }).click();
+    await writeText(page, 1, "Hi {{first_name|there}}, a quick text about evening booking at {{company}}.");
+    await expect(page.getByText("No connected SMS number.")).toBeVisible();
+    await expect(page.getByText("No SMS provider is set up, so no number can be connected yet.")).toBeVisible();
+    await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
+    await page.reload();
+    await expect(page.getByLabel("Text 1 message")).toHaveValue(/a quick text about evening booking/);
+    await page.getByRole("link", { name: /Before launch/ }).click();
+    await expect(page.getByText("The SMS track has no connected sender number")).toBeVisible();
+    await expect(page.getByText("Can’t project the load until the SMS track has a connected SMS number", { exact: false })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Launch campaign" })).toBeDisabled();
+  });
+});
+
+test.describe("on the app over the fake providers", () => {
+  test("connections are saved through the one editor state: a track after another with a delay survives a reload, and a circle is refused", async ({ page }) => {
+    const f = await fakeProviderApp("sms-connections");
+    const id = await f.freshTwoChannelCampaign("Connections, Bristol");
+    await page.goto(`${f.url}/campaigns/${id}`);
+    await page.getByRole("button", { name: "Email track" }).click();
+    await page.getByRole("button", { name: "Add track" }).click();
+    await page.getByRole("button", { name: "SMS track", exact: true }).click();
+    await page.getByLabel("How this track starts").selectOption({ label: "After the email track" });
+    await page.getByLabel("Days after that track finishes").fill("2");
+    await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
+    await page.reload();
+    await expect(page.getByText("after · 2 days")).toBeVisible();
+    // The email track cannot now start after the SMS track: each would wait for the other.
+    await page.getByRole("button", { name: /^Email track: / }).click();
+    await page.getByLabel("How this track starts").selectOption({ label: "After the SMS track" });
+    await expect(page.getByText("The SMS track starts after this one, so this one can’t start after it: each would wait for the other.")).toBeVisible();
+    await expect(page.getByLabel("How this track starts")).toHaveValue("entry");
+    // Removing the email track is refused while the SMS track waits for it.
+    await page.getByRole("button", { name: "Remove this email track" }).click();
+    await expect(page.getByText("The SMS track starts after this one. Change how it starts first.")).toBeVisible();
+  });
+
+  test("demonstration: tracks together and after a delay, a missing and a failed channel releasing the track after them, and a text reply stopping later email and texts", async ({ page }) => {
+    test.setTimeout(180_000);
+    const demo = await fakeProviderApp("sms-demonstration");
+    const h = demo.harness;
+    const id = await demo.freshTwoChannelCampaign("Dental clinics, Clifton");
+
+    await test.step("write an email track and an SMS track that start together, and an email track a day after the texts", async () => {
+      await page.goto(`${demo.url}/campaigns/${id}`);
+      await page.getByRole("button", { name: "Email track" }).click();
+      await page.getByLabel("Email 1 subject").fill("Evening bookings at {{company}}");
+      await page.getByLabel("Email 1 copy").fill("Hi {{first_name|there}},\n\nOnline booking at {{company}} stops at 18:00.\n\nAlex");
+      await page.getByRole("button", { name: "Add track" }).click();
+      await page.getByRole("button", { name: "SMS track", exact: true }).click();
+      await writeText(page, 1, "Hi {{first_name|there}}, Alex from Northlight Bookings. I emailed about evening booking at {{company}}. OK if I call this week?");
+      await page.getByRole("button", { name: "Add follow-up" }).click();
+      await page.getByLabel("Days to wait before Text 2").fill("2");
+      await writeText(page, 2, "Should I send the two-minute video for {{company}}? A yes is enough.");
+      await page.getByRole("button", { name: "Add track" }).click();
+      await page.getByRole("button", { name: "Email track", exact: true }).click();
+      await page.getByLabel("Email 1 subject").fill("One more idea for {{company}}");
+      await page.getByLabel("Email 1 copy").fill("Hi {{first_name|there}},\n\nOne last note about evening booking.\n\nAlex");
+      await page.getByLabel("How this track starts").selectOption({ label: "After the SMS track" });
+      await page.getByLabel("Days after that track finishes").fill("1");
+      await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
+      await expect(page.getByText("together").first()).toBeVisible();
+      await expect(page.getByText("after · 1 day")).toBeVisible();
+    });
+
+    await test.step("Before launch: copy by track and day for a lead with both channels and one with no mobile, the load on both channels, then launch", async () => {
+      await page.getByRole("link", { name: "Launch…" }).click();
+      await expect(page.getByText("Ready to launch.")).toBeVisible();
+      await expect(page.getByText("Simulated SMS (not a provider)", { exact: false }).first()).toBeVisible();
+      await page.getByLabel("Preview as lead").selectOption({ label: "Priya Shah" });
+      await expect(page.getByText("Hi Priya, Alex from Northlight Bookings.", { exact: false })).toBeVisible();
+      await page.getByLabel("Preview as lead").selectOption({ label: "Lena Ford" });
+      await expect(page.getByText("Skipped: this lead has no mobile of their own to text.").first()).toBeVisible();
+      await page.getByRole("button", { name: "Launch campaign" }).click();
+      await expect(page.getByText(/^Launched .*\.$/)).toBeVisible();
+    });
+
+    await test.step("the days pass: Ben's number is reported invalid after his first text, and Priya texts back", async () => {
+      h.sms.invalidAfterSend.add("+447700900344");
+      const start = h.clock;
+      const mine = new Set(await h.store.engine.subjectsOf(id));
+      const toPriya = () => h.sms.deliveryLog.find((d) => mine.has(d.subjectId) && d.destination === "+447700900311");
+      // Texts go inside the window: wait for Priya's first text from this campaign, then she answers it.
+      for (let i = 0; i < 5 * 24 && !toPriya(); i++) await h.advanceTo(h.clock + H);
+      expect(h.sms.prospectTexts("+447700900311", "STOP", toPriya()?.sender ?? null)).toBe(true);
+      await h.advanceTo(start + 9 * DAY);
+    });
+
+    const rows = (await h.request<{ rows: { id: string; name: string; enrollments: EnrollmentView[] }[] }>("GET", `/api/leads?campaign=${id}&limit=500`)).body.rows;
+    const person = (name: string) => rows.find((r) => r.name === name)?.id ?? "";
+    const activity = async (name: string) => {
+      await page.goto(`${demo.url}/leads/people/${person(name)}`);
+      await page.getByLabel("Show activity from").selectOption({ label: "Dental clinics, Clifton" });
+    };
+
+    await test.step("Priya's text reply stops every track in this campaign: no second email, no second text, no later email track", async () => {
+      await activity("Priya Shah");
+      await expect(page.getByText("Replied by text")).toBeVisible();
+      await expect(page.getByText("Text 1 sent")).toBeVisible();
+      await expect(page.getByText("Text 2 sent")).toHaveCount(0);
+      await expect(page.getByText(/Email track 2/)).toHaveCount(0);
+      await page.getByText("Show message").first().click();
+      await expect(page.getByText("Hi Priya, Alex from Northlight Bookings.", { exact: false })).toBeVisible();
+    });
+
+    await test.step("Ben's bad number ends the SMS track, and the email track after it starts a day later", async () => {
+      await activity("Ben Cole");
+      await expect(page.getByText("Text 1: bad number")).toBeVisible();
+      await expect(page.getByText("It starts after the SMS track, which ended on a bad number.")).toBeVisible();
+      await expect(page.getByText("Email 1 sent").first()).toBeVisible();
+    });
+
+    await test.step("Lena has no mobile: her SMS track is skipped and the email track after it is released", async () => {
+      await activity("Lena Ford");
+      await expect(page.getByText("SMS track skipped")).toBeVisible();
+      await expect(page.getByText("It starts after the SMS track, which was skipped for this lead.")).toBeVisible();
+    });
+
+    await test.step("Owen runs the whole sequence: both texts, then the email track after them, then the end", async () => {
+      await activity("Owen Hale");
+      await expect(page.getByText("Text 2 sent")).toBeVisible();
+      await expect(page.getByText("Sequence finished with no response")).toBeVisible();
+    });
+  });
+});

@@ -394,7 +394,7 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
       )}
       {load.noSender.length > 0 ? (
         <p className={`${load.accounts.length > 0 ? "mt-2" : ""} text-[13.5px] text-crit`}>
-          Can’t project the load: {load.noSender.map((n) => `${named(n.trackId)} has no connected ${n.channel === "sms" ? "SMS number" : "sender inbox"}`).join(", and ")}. Its leads, and every track after it, would wait.
+          Can’t project the load until {load.noSender.map((n) => `${named(n.trackId)} has a connected ${n.channel === "sms" ? "SMS number" : "sender inbox"}`).join(", and ")}: its leads, and every track after it, would wait.
         </p>
       ) : load.cannotProject.length > 0 ? (
         <p className="mt-2 text-[13px] text-ink-2">

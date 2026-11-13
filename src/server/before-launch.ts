@@ -120,13 +120,14 @@ function poolAccounts(definition: CampaignDefinition, all: readonly AccountState
 }
 
 /**
- * Live tracks whose channel has no connected sender (launch blocker 3): their leads would wait on
- * them for ever, and so would every track after them, so nothing is projected.
+ * Live tracks whose channel has no sender in their pool at all (launch blocker 3): their leads
+ * would wait on them for ever, and so would every track after them, so nothing is projected.
  */
 function tracksWithoutSender(definition: CampaignDefinition, all: readonly AccountState[]): { trackId: string; channel: "email" | "sms" }[] {
   return liveTracks(definition, "main").flatMap((t) => {
     if (t.channel === "call") return [];
-    const connected = all.some((a) => a.channel === t.channel && a.healthy && poolOf(definition, t.channel).includes(a.id));
+    // An account that is connected but cannot send is `cannotProject`'s, said with its reason.
+    const connected = all.some((a) => a.channel === t.channel && poolOf(definition, t.channel).includes(a.id));
     return connected ? [] : [{ trackId: t.id, channel: t.channel }];
   });
 }
