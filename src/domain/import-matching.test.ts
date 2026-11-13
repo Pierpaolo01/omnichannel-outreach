@@ -1218,3 +1218,79 @@ for (const order of ["Elm first", "Harbour first"] as const) {
     expect((await h.peopleNamed("Alice Hart"))[0]?.details.map((d) => d.value)).toEqual(["alice@mail.example"]);
   });
 }
+
+/**
+ * A company with no country whose main lines come from several countries (review round 3). One
+ * rule says which region reads a number written in national form, and it never depends on the
+ * order the company's main lines were stored in: the store accepted every merge, and no import
+ * returned a server error, whatever the order of rows or imports.
+ */
+describe("a company with no country and main lines from several countries", () => {
+  const atlantic = (line: string, id = "b1") =>
+    business({ business_id: id, place_id: "P1", business_name: "Atlantic Physio", country: "", phone_e164: line, phone_original: line });
+  const staff = [
+    person({ person_id: "a", business_id: "b1", full_name: "Ada Moss", direct_phone: "+442079460155" }),
+    person({ person_id: "b", business_id: "b1", full_name: "Bea Moss", direct_phone: "+80012345678" }),
+    person({ person_id: "c", business_id: "b1", full_name: "Cy Moss", direct_phone: "011 800 1234 5678" }),
+  ];
+  const lines = async (h: ImportHarness) => (await onlyCompany(h, "Atlantic Physio")).details.map((d) => d.value).sort();
+  const personal = async (h: ImportHarness) => (await onlyCompany(h, "Atlantic Physio")).people.flatMap((p) => p.details.map((d) => `${p.name} ${d.value}`)).sort();
+
+  // GPT round 3: the store read Cy's number in the region of whichever line it stored first.
+  const sequences: Record<string, (h: ImportHarness) => Promise<void>> = {
+    "US line, then the UK and +800 lines in two rows (UK row first)": async (h) => {
+      await h.import({ businesses: [atlantic("+12025550199")] });
+      await h.import({ businesses: [atlantic("+442079460155"), atlantic("+80012345678", "b2")] });
+    },
+    "US line, then the UK and +800 lines in two rows (+800 row first)": async (h) => {
+      await h.import({ businesses: [atlantic("+12025550199")] });
+      await h.import({ businesses: [atlantic("+80012345678", "b2"), atlantic("+442079460155")] });
+    },
+    "US line, then the UK line, then the +800 line": async (h) => {
+      await h.import({ businesses: [atlantic("+12025550199")] });
+      await h.import({ businesses: [atlantic("+442079460155")] });
+      await h.import({ businesses: [atlantic("+80012345678")] });
+    },
+    "US line, then the +800 line, then the UK line": async (h) => {
+      await h.import({ businesses: [atlantic("+12025550199")] });
+      await h.import({ businesses: [atlantic("+80012345678")] });
+      await h.import({ businesses: [atlantic("+442079460155")] });
+    },
+    "all three lines in one import": async (h) => {
+      await h.import({ businesses: [atlantic("+442079460155"), atlantic("+12025550199", "b2"), atlantic("+80012345678", "b3")] });
+    },
+  };
+  for (const [name, then] of Object.entries(sequences)) {
+    test(`people's numbers fold into the lines without a server error: ${name}`, async () => {
+      const h = importHarness();
+      await h.import({ businesses: [atlantic("")], people: staff });
+      await then(h);
+      expect(await lines(h)).toEqual(["+1 202 555 0199", "+44 20 7946 0155", "+800 1234 5678"]);
+      // The +800 line has no region of its own, so a national number is compared with it in each
+      // region of the company's lines: Cy's "011 800 …" reads as it in the US line's, whatever
+      // order the lines arrived in. Every copy folds into a line.
+      expect(await personal(h)).toEqual([]);
+      // Importing the people again changes nothing.
+      const again = await h.import({ businesses: [atlantic("+12025550199")], people: staff });
+      expect(again.counts).toMatchObject({ new: 0, updated: 0 });
+      expect(await personal(h)).toEqual([]);
+    });
+  }
+
+  // Opus round 3: the claim read Bo's number in the new line's region, adding his phone in the first stored line's.
+  for (const order of ["US row first", "UK row first"] as const) {
+    test(`a person's national number that a later import's UK line claims stays the company's line (${order})`, async () => {
+      const h = importHarness();
+      const bo = person({ person_id: "bo", business_id: "b1", full_name: "Bo Lind", direct_phone: "020 7946 0155" });
+      await h.import({ businesses: [atlantic("+12025550199")], people: [bo] });
+      expect(await personal(h)).toEqual(["Bo Lind 02079460155"]);
+      const rows = [atlantic("+12025550199"), atlantic("+442079460155", "b2")];
+      await h.import({ businesses: order === "US row first" ? rows : [...rows].reverse(), people: [bo] });
+      expect(await lines(h)).toEqual(["+1 202 555 0199", "+44 20 7946 0155"]);
+      expect(await personal(h)).toEqual([]);
+      const again = await h.import({ businesses: rows, people: [bo] });
+      expect(again.counts).toMatchObject({ new: 0, updated: 0 });
+      expect(await lines(h)).toEqual(["+1 202 555 0199", "+44 20 7946 0155"]);
+    });
+  }
+});

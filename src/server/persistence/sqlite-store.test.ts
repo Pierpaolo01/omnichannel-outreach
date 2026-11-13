@@ -88,3 +88,30 @@ test("a database from before merged details were kept upgrades with every detail
   expect(await store.contactDetail("d2")).toMatchObject({ id: "d2", owner: { kind: "company", companyId: "c1" }, phoneKind: "main_line" });
   await store.close();
 });
+
+// Merges the import makes never chain more than a few links, but resolution has no hop limit.
+test("a chain of any length resolves to the live detail at its end", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "outreach-store-"));
+  dirs.push(dir);
+  const file = path.join(dir, "outreach.sqlite");
+  await openSqliteStoreClosed(file);
+  const db = new DatabaseSync(file);
+  const hops = 1_500;
+  const insert = db.prepare(
+    `INSERT INTO contact_details (id, owner_kind, owner_id, channel, phone_kind, value, key, search_digits, added_at, merged_into)
+     VALUES (?, 'company', 'c1', 'phone', 'main_line', '020 7946 0188', ?, '', '2026-11-13', ?)`,
+  );
+  db.exec("BEGIN");
+  for (let i = hops; i >= 0; i--) insert.run(`link-${i}`, `key-${i}`, i === hops ? null : `link-${i + 1}`);
+  db.exec("COMMIT");
+  db.close();
+  const store = openSqliteStore(file);
+  expect(await store.contactDetail("link-0")).toMatchObject({ id: `link-${hops}` });
+  expect(await store.markContactDetailBad("link-0")).toBe(true);
+  expect(await store.contactDetail(`link-${hops}`)).toMatchObject({ bad: true });
+  await store.close();
+});
+
+async function openSqliteStoreClosed(file: string): Promise<void> {
+  await openSqliteStore(file).close();
+}

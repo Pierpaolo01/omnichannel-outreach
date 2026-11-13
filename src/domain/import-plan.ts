@@ -1,7 +1,7 @@
 import { emailKey, foldText, nameKey, type Channel, type PhoneKind } from "./contact-details.ts";
 import { resolveMatches, type Conflict, type Evidence, type EvidenceKind, type Resolution } from "./matching.ts";
 import { ENROLLED_BY_IMPORT, type OutreachStatus } from "./outreach-status.ts";
-import { companyRegion, displayPhone, parsePhone, type PhoneNumber } from "./phone.ts";
+import { companyRegion, countryCode, displayPhone, parsePhone, type PhoneNumber } from "./phone.ts";
 import {
   companyLeadReach,
   companyLeadRoutes,
@@ -161,6 +161,13 @@ export interface DetailChange {
 export interface DetailConsolidation {
   readonly fromId: string;
   readonly intoId: string;
+  /** The key the claim gave the detail: the target's key. */
+  readonly key: string;
+  /**
+   * The region the claim read the copy in (ADR 0001, "Phone identity"), or null. The store checks
+   * the merge with this reading and never derives its own.
+   */
+  readonly region: string | null;
 }
 
 export interface CompanyWrite {
@@ -370,12 +377,17 @@ export function planImport(input: {
     appliedBusinessRows.flatMap(({ row, companyId }) => row.generalEmails.flatMap((e) => emailKey(e) ?? []).map((key) => ({ lead: { kind: "company", companyId } as const, kind: "email", key }))),
   );
   // Rows in a fixed order, so which spelling of an equivalent detail is stored never depends on row order.
+  // Every international main line the import lists counts towards a company's region before any is
+  // claimed, so how a number is read never depends on which line is stored first.
+  for (const { row, companyId } of appliedBusinessRows) {
+    const listed = row.mainPhone?.e164 ? parsePhone(row.mainPhone.e164, null) : null;
+    if (listed?.key.startsWith("+")) crm.noteListedMainLine(companyId, listed.key);
+  }
   for (const { row, companyId } of [...appliedBusinessRows].sort((a, b) => companyRowIdentity(a.row).localeCompare(companyRowIdentity(b.row)) || a.index - b.index)) {
     const owner: DetailOwner = { kind: "company", companyId };
     if (row.mainPhone) {
       const { e164, original } = row.mainPhone;
-      const region = crm.regionOf(companyId, e164);
-      crm.addPhone(owner, "main_line", e164 || original, parsePhone(e164, region) ?? parsePhone(original, region));
+      crm.addPhone(owner, "main_line", e164 || original, parsePhone(e164, null) ?? crm.readNumber(companyId, original));
     }
     for (const email of row.generalEmails) crm.addEmail(owner, email);
   }
@@ -437,7 +449,7 @@ export function planImport(input: {
     appliedRows.flatMap(({ row, personId, companyId }) => {
       const lead = { kind: "person", personId } as const;
       const email = emailKey(row.email);
-      const mobile = dialKindOf(row) === "mobile" ? parsePhone(row.dialPhone, crm.regionOf(companyId, ""))?.key : undefined;
+      const mobile = dialKindOf(row) === "mobile" ? crm.readNumber(companyId, row.dialPhone)?.key : undefined;
       return [
         ...(email && !crm.companyShares(companyId, email) ? [{ lead, kind: "email", key: email }] : []),
         ...(mobile ? [{ lead, kind: "mobile", key: mobile }] : []),
@@ -841,10 +853,8 @@ function groupPeople(joined: readonly JoinedRow[], crm: WorkingDirectory): Perso
     const email = emailKey(row.email);
     return email && !crm.companyShares(companyId, email) ? email : "";
   };
-  const phones = ({ row, companyId }: JoinedRow) => {
-    const region = crm.regionOf(companyId, "");
-    return [row.directPhone, row.dialPhone].flatMap((raw) => parsePhone(raw, region)?.key ?? []).filter((key) => !crm.companyHolds(companyId, "phone", key));
-  };
+  const phones = ({ row, companyId }: JoinedRow) =>
+    [row.directPhone, row.dialPhone].flatMap((raw) => crm.readNumber(companyId, raw)?.key ?? []).filter((key) => !crm.companyHolds(companyId, "phone", key));
   return groupRows(joined, {
     strong: (r) => {
       const { row, companyId } = r;
@@ -866,7 +876,6 @@ function groupPeople(joined: readonly JoinedRow[], crm: WorkingDirectory): Perso
 
 function addPersonDetails(crm: WorkingDirectory, row: ScrapedPerson, personId: string, companyId: string): void {
   const owner: DetailOwner = { kind: "person", personId };
-  const region = crm.regionOf(companyId, "");
 
   crm.addEmail(owner, row.email);
 
@@ -875,7 +884,7 @@ function addPersonDetails(crm: WorkingDirectory, row: ScrapedPerson, personId: s
     [dialKindOf(row), row.dialPhone],
     ["direct", row.directPhone],
   ];
-  for (const [kind, raw] of phones) crm.addPhone(owner, kind, raw, parsePhone(raw, region));
+  for (const [kind, raw] of phones) crm.addPhone(owner, kind, raw, crm.readNumber(companyId, raw));
 }
 
 /** dial_phone is a mobile only when dial_phone_type says mobile or cell. */
@@ -1025,6 +1034,8 @@ class WorkingDirectory {
   private readonly destinationListers = new Map<string, LeadRef[]>();
   /** Who lists each personal detail in this import, by company, channel and key. */
   private readonly listers = new Map<string, Set<string>>();
+  /** International main lines each company's rows list in this import. */
+  private readonly listedMainLines = new Map<string, Set<string>>();
   /** The other campaigns each lead is enrolled in. */
   private readonly campaignsElsewhere = new Map<string, Set<string>>();
   private readonly added: NewDetail[] = [];
@@ -1097,11 +1108,10 @@ class WorkingDirectory {
   /** Records who lists which personal details in this import, before any detail is stored. */
   noteListers(rows: readonly { row: ScrapedPerson; personId: string; companyId: string }[]): void {
     for (const { row, personId, companyId } of rows) {
-      const region = this.regionOf(companyId, "");
       const email = emailKey(row.email);
       const keys = [
         ...(email && !this.companyShares(companyId, email) ? [`email|${email}`] : []),
-        ...[row.directPhone, row.dialPhone].flatMap((raw) => parsePhone(raw, region)?.key ?? []).map((k) => `phone|${k}`),
+        ...[row.directPhone, row.dialPhone].flatMap((raw) => this.readNumber(companyId, raw)?.key ?? []).map((k) => `phone|${k}`),
       ];
       for (const key of keys) {
         const at = `${companyId}|${key}`;
@@ -1115,7 +1125,7 @@ class WorkingDirectory {
    * it before), the one the equal-claims rule gives it to; null when the rule gives it to nobody
    * else, undefined when there is no contest.
    */
-  private contested(personId: string, channel: Channel, key: string, region: string | null): { winner: string | undefined; others: string[] } | undefined {
+  private contested(personId: string, channel: Channel, key: string): { winner: string | undefined; others: string[] } | undefined {
     const companyId = this.person(personId).companyId;
     const listers = [...(this.listers.get(`${companyId}|${channel}|${key}`) ?? [])].sort((a, b) =>
       this.contentKey({ kind: "person", personId: a }).localeCompare(this.contentKey({ kind: "person", personId: b })),
@@ -1123,7 +1133,7 @@ class WorkingDirectory {
     if (listers.length < 2) return undefined;
     const fresh = new Set(this.added.map((d) => d.id));
     const heldBefore = this.peopleAt(companyId).some((p) => {
-      const detail = channel === "email" ? p.details.find((d) => d.channel === "email" && d.key === key) : this.findNumber(p.details, key, region);
+      const detail = channel === "email" ? p.details.find((d) => d.channel === "email" && d.key === key) : this.findNumber(p.details, key, this.regionsFor(companyId, key));
       return detail !== undefined && !fresh.has(detail.id);
     });
     if (heldBefore) return undefined;
@@ -1407,8 +1417,7 @@ class WorkingDirectory {
    * stores, and what "identical after normalising" means when rows of one file are collapsed.
    */
   personRowIdentity({ row, companyId }: JoinedRow): string {
-    const region = this.regionOf(companyId, "");
-    const phone = (raw: string) => parsePhone(raw, region)?.key ?? "";
+    const phone = (raw: string) => this.readNumber(companyId, raw)?.key ?? "";
     return JSON.stringify([
       row.sourcePersonId,
       personNameKey(fieldsOf(row)),
@@ -1423,11 +1432,10 @@ class WorkingDirectory {
   private personEvidence(group: PersonGroup): Evidence {
     return ((): Evidence => {
         const rows = group.rows.map((r) => r.row);
-        const region = this.regionOf(group.companyId, "");
         const emails = unique(rows.flatMap((r) => emailKey(r.email) ?? [])).filter((e) => !this.companyShares(group.companyId, e));
         const ids = unique(rows.flatMap((r) => (r.sourcePersonId ? [r.sourcePersonId] : [])));
         const names = unique(rows.map((r) => personNameKey(fieldsOf(r))).filter(Boolean));
-        const phones = unique(rows.flatMap((r) => [r.directPhone, r.dialPhone].flatMap((raw) => parsePhone(raw, region)?.key ?? [])));
+        const phones = unique(rows.flatMap((r) => [r.directPhone, r.dialPhone].flatMap((raw) => this.readNumber(group.companyId, raw)?.key ?? [])));
         const candidates = this.peopleAt(group.companyId).filter((p) => !p.isNew);
         const named = candidates.filter((p) => names.includes(personNameKey(p.fields)));
         // A blank name agrees with any name, but weighs less than a name that agrees: its ID and
@@ -1435,7 +1443,7 @@ class WorkingDirectory {
         const unnamed = names.length === 0 ? candidates : [];
         const idsOf = (list: readonly MutablePerson[]) => list.map((p) => p.id);
         const holdsId = (p: MutablePerson) => ids.some((id) => p.sourcePersonIds.has(id));
-        const holdsNumber = (p: MutablePerson) => phones.some((key) => this.findNumber(p.details, key, region) !== undefined);
+        const holdsNumber = (p: MutablePerson) => phones.some((key) => this.findNumber(p.details, key, this.regionsFor(group.companyId, key)) !== undefined);
         return {
           tiers: [
             { kind: "email", decisive: true, ids: idsOf(candidates.filter((p) => personal(p.details).some((d) => d.channel === "email" && emails.includes(d.key)))) },
@@ -1537,11 +1545,61 @@ class WorkingDirectory {
     return this.company(companyId).details.some((d) => d.channel === channel && d.key === key);
   }
 
-  /** The region the company's national numbers are read in. */
-  regionOf(companyId: string, incomingMainLine: string): string | null {
-    const company = this.company(companyId);
-    const lines = company.details.filter((d) => d.phoneKind === "main_line").map((d) => d.key);
-    return companyRegion(company.fields.country, [incomingMainLine, ...lines]);
+  /** Notes an international main line this import lists for the company, before any is claimed. */
+  noteListedMainLine(companyId: string, key: string): void {
+    this.listedMainLines.set(companyId, (this.listedMainLines.get(companyId) ?? new Set()).add(key));
+  }
+
+  /** The company's international main lines: stored, and listed by this import. */
+  private internationalMainLines(companyId: string): string[] {
+    const stored = this.company(companyId).details.filter((d) => d.phoneKind === "main_line" && d.key.startsWith("+")).map((d) => d.key);
+    return [...new Set([...stored, ...(this.listedMainLines.get(companyId) ?? [])])].sort();
+  }
+
+  /**
+   * The regions a number written in national form may be read in when it is compared with `key`,
+   * a number of the company's (ADR 0001, "Phone identity"): the company's country when that is a
+   * two-letter code; otherwise the key's own region; otherwise, for a number with no region of its
+   * own (+800), the regions of all the company's international main lines, in a fixed order. A
+   * national number is `key` when it reads as `key` in one of them; the claim of a main line reads
+   * its copies this way. Which lines were stored first never matters.
+   */
+  regionsFor(companyId: string, key: string): string[] {
+    const country = countryCode(this.company(companyId).fields.country);
+    if (country) return [country];
+    const own = key.startsWith("+") ? parsePhone(key, null)?.region : null;
+    if (own) return [own];
+    return [...new Set(this.internationalMainLines(companyId).flatMap((line) => parsePhone(line, null)?.region ?? []))].sort();
+  }
+
+  /** The region in `regions` that reads the number written as `raw` as `key`, if any. */
+  private readingAs(raw: string, key: string, regions: readonly string[]): string | undefined {
+    return regions.find((region) => parsePhone(raw, region)?.key === key);
+  }
+
+  /** The one region all the company's international main lines share, or none. Never their order. */
+  private sharedRegion(companyId: string): string | null {
+    const regions = new Set(this.internationalMainLines(companyId).flatMap((key) => parsePhone(key, null)?.region ?? []));
+    return regions.size === 1 ? ([...regions][0] ?? null) : null;
+  }
+
+  /**
+   * Reads a number written for a company: the one rule every place that keys a number uses (ADR
+   * 0001, "Phone identity"). In the company's country when that is a two-letter code. Otherwise,
+   * a number in national form that reads as exactly one of the company's international main lines,
+   * in one of the regions `regionsFor` gives that line, is that line; any other is read in the
+   * region the main lines share, or keeps its digits when they share none.
+   */
+  readNumber(companyId: string, raw: string): PhoneNumber | null {
+    const country = countryCode(this.company(companyId).fields.country);
+    if (country) return parsePhone(raw, country);
+    const lines = this.internationalMainLines(companyId).flatMap((line) => {
+      const region = this.readingAs(raw, line, this.regionsFor(companyId, line));
+      return region === undefined ? [] : [{ line, region }];
+    });
+    const [only] = lines;
+    if (only && lines.length === 1) return parsePhone(raw, only.region);
+    return parsePhone(raw, this.sharedRegion(companyId));
   }
 
   /**
@@ -1577,7 +1635,7 @@ class WorkingDirectory {
     }
     const companyId = this.person(owner.personId).companyId;
     if (this.companyShares(companyId, key)) return;
-    const contest = this.contested(owner.personId, "email", key, null);
+    const contest = this.contested(owner.personId, "email", key);
     if (contest && contest.winner !== owner.personId) {
       this.noteContested(owner, { channel: "email", phoneKind: null, key, value: raw.trim() }, contest.others);
       return;
@@ -1608,24 +1666,24 @@ class WorkingDirectory {
     }
     const person = this.person(owner.personId);
     const companyId = person.companyId;
-    const region = this.regionOf(companyId, "");
-    const mainLine = this.findNumber(this.company(companyId).details, phone.key, region);
+    const regions = this.regionsFor(companyId, phone.key);
+    const mainLine = this.findNumber(this.company(companyId).details, phone.key, regions);
     if (mainLine) {
       this.rekey(mainLine, { kind: "company", companyId }, phone);
       this.noteKeptBad({ kind: "company", companyId }, mainLine);
       return;
     }
-    const contest = this.contested(owner.personId, "phone", phone.key, region);
+    const contest = this.contested(owner.personId, "phone", phone.key);
     if (contest && contest.winner !== owner.personId) {
       this.noteContested(owner, { channel: "phone", phoneKind: kind, key: phone.key, value: raw.trim() }, contest.others);
       return;
     }
-    const colleague = this.colleagueHolding(owner.personId, (details) => this.findNumber(details, phone.key, region));
+    const colleague = this.colleagueHolding(owner.personId, (details) => this.findNumber(details, phone.key, regions));
     if (colleague) {
       this.noteHeldElsewhere(owner, { channel: "phone", phoneKind: kind, key: phone.key, value: raw.trim() }, { kind: "person", personId: colleague.id });
       return;
     }
-    const existing = this.findNumber(person.details, phone.key, region);
+    const existing = this.findNumber(person.details, phone.key, regions);
     const mobileHolder = kind === "mobile" && existing?.phoneKind !== "mobile" ? this.destinationHolder(owner, "mobile", phone.key, this.campaignsOf(owner)) : undefined;
     if (mobileHolder) {
       this.noteHeldElsewhere(owner, { channel: "phone", phoneKind: kind, key: phone.key, value: raw.trim() }, mobileHolder);
@@ -1649,10 +1707,8 @@ class WorkingDirectory {
    * The detail holding this number: by its key, or, for a number first stored without a known
    * country (keyed by its digits), by reading what was written in the company's country now.
    */
-  private findNumber(details: readonly MutableDetail[], key: string, region: string | null): MutableDetail | undefined {
-    return details.find(
-      (d) => d.channel === "phone" && (d.key === key || (region !== null && !d.key.startsWith("+") && parsePhone(d.value, region)?.key === key)),
-    );
+  private findNumber(details: readonly MutableDetail[], key: string, regions: readonly string[]): MutableDetail | undefined {
+    return details.find((d) => d.channel === "phone" && (d.key === key || (!d.key.startsWith("+") && this.readingAs(d.value, key, regions) !== undefined)));
   }
 
   /** Gives a number first stored without a known country its proper key. */
@@ -1674,10 +1730,11 @@ class WorkingDirectory {
   private claimForCompany(companyId: string, channel: Channel, key: string, phoneKind: PhoneKind | null): MutableDetail | null {
     const owner: DetailOwner = { kind: "company", companyId };
     const company = this.company(companyId);
-    const region = this.regionOf(companyId, channel === "phone" ? key : "");
-    const holding = (d: MutableDetail) =>
-      d.channel === channel && (d.key === key || (channel === "phone" && region !== null && !d.key.startsWith("+") && parsePhone(d.value, region)?.key === key));
-    const searchDigits = channel === "phone" ? (parsePhone(key, region)?.searchDigits ?? "") : "";
+    const regions = channel === "phone" ? this.regionsFor(companyId, key) : [];
+    // The region that read a copy stored by its digits as this key; the store checks the merge with it.
+    const readIn = (d: MutableDetail) => (channel === "phone" && d.key !== key && !d.key.startsWith("+") ? (this.readingAs(d.value, key, regions) ?? null) : null);
+    const holding = (d: MutableDetail) => d.channel === channel && (d.key === key || readIn(d) !== null);
+    const searchDigits = channel === "phone" ? (parsePhone(key, regions[0] ?? null)?.searchDigits ?? "") : "";
     let target = company.details.find(holding) ?? null;
     if (target && target.key !== key) {
       target.key = key;
@@ -1699,7 +1756,7 @@ class WorkingDirectory {
         target.bad ||= copy.bad;
         const fresh = this.added.findIndex((d) => d.id === copy.id);
         if (fresh >= 0) this.added.splice(fresh, 1);
-        else this.merged.push({ fromId: copy.id, intoId: target.id });
+        else this.merged.push({ fromId: copy.id, intoId: target.id, key, region: readIn(copy) });
         this.changed.delete(copy.id);
       }
     }

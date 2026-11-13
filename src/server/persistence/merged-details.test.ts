@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import type { Directory, ImportPlan, NewDetail } from "../../domain/import-plan.ts";
+import type { DetailConsolidation, Directory, ImportPlan, NewDetail } from "../../domain/import-plan.ts";
 import { business, csvOf, person } from "../../../test/support/export-builder.ts";
 import { testApi, type TestApi } from "../../../test/support/http.ts";
 import type { PersonRecord } from "../../shared/api.ts";
@@ -152,7 +152,7 @@ describe("the store keeps an absorbed detail out of everything that reads live d
   test("an absorbed detail is not in the directory the planner matches and claims against", async () => {
     const { ids, apply, inboxCopy } = await setUp();
     await apply({ details: [inboxCopy] });
-    await apply({ consolidations: [{ fromId: inboxCopy.id, intoId: ids.inbox }] });
+    await apply({ consolidations: [{ fromId: inboxCopy.id, intoId: ids.inbox, key: "info@harbour.example", region: null }] });
     let seen: string[] = [];
     await apply({}, (d) => {
       seen = [...d.people.flatMap((p) => p.details), ...d.companies.flatMap((c) => c.details)].map((x) => x.id);
@@ -166,7 +166,7 @@ describe("the store keeps an absorbed detail out of everything that reads live d
     const search = async () => (await api.store.searchLeads({ text: "info@harbour", campaignId: null, status: null, companyId: null, limit: 10 })).rows.map((r) => r.id);
     const found = await search();
     await apply({ details: [inboxCopy] });
-    await apply({ consolidations: [{ fromId: inboxCopy.id, intoId: ids.inbox }] });
+    await apply({ consolidations: [{ fromId: inboxCopy.id, intoId: ids.inbox, key: "info@harbour.example", region: null }] });
     const amira = await api.store.person(ids.amira);
     expect(amira?.contactDetails.filter((d) => d.owner === "person").map((d) => d.id)).toEqual([ids.amiraEmail]);
     expect(await search()).toEqual(found);
@@ -181,29 +181,18 @@ describe("the store keeps an absorbed detail out of everything that reads live d
     const line = phone("harbour-0177", harbourOwns, "+44 20 7946 0177", "+442079460177", "main_line");
     await apply({ details: [digits, read, line] });
     await api.store.markContactDetailBad(digits.id);
-    await apply({ consolidations: [{ fromId: digits.id, intoId: read.id }] });
-    await apply({ consolidations: [{ fromId: read.id, intoId: line.id }] });
+    await apply({ consolidations: [{ fromId: digits.id, intoId: read.id, key: "+442079460177", region: "GB" }] });
+    await apply({ consolidations: [{ fromId: read.id, intoId: line.id, key: "+442079460177", region: "GB" }] });
     for (const id of [digits.id, read.id, line.id]) {
       expect(await api.store.contactDetail(id)).toMatchObject({ id: line.id, owner: harbourOwns, key: "+442079460177", bad: true });
     }
     expect(await api.store.contactDetail(ids.inbox)).toMatchObject({ id: ids.inbox });
   });
 
-  test("a chain of any length resolves to its end", async () => {
-    const { api, apply, phone, harbourOwns } = await setUp();
-    // One number stored under 1,500 spellings of its digits, each merged into the next.
-    const hops = 1_500;
-    const spellings = Array.from({ length: hops + 1 }, (_, i) => phone(`spelling-${i}`, harbourOwns, "020 7946 0188", `0207946018800${i}`));
-    await apply({ details: spellings, consolidations: spellings.slice(0, -1).map((d, i) => ({ fromId: d.id, intoId: `spelling-${i + 1}` })) });
-    expect(await api.store.contactDetail("spelling-0")).toMatchObject({ id: `spelling-${hops}` });
-    expect(await api.store.markContactDetailBad("spelling-0")).toBe(true);
-    expect(await api.store.contactDetail(`spelling-${hops}`)).toMatchObject({ bad: true });
-  });
-
   test("an absorbed detail holds no place: its owner can hold the same value live again", async () => {
     const { api, ids, apply, inboxCopy } = await setUp();
     await apply({ details: [inboxCopy] });
-    await apply({ consolidations: [{ fromId: inboxCopy.id, intoId: ids.inbox }] });
+    await apply({ consolidations: [{ fromId: inboxCopy.id, intoId: ids.inbox, key: "info@harbour.example", region: null }] });
     await apply({ details: [{ ...inboxCopy, id: "again" }] });
     expect(await api.store.contactDetail("again")).toMatchObject({ id: "again", bad: false });
     expect(await api.store.contactDetail(inboxCopy.id)).toMatchObject({ id: ids.inbox });
@@ -212,30 +201,38 @@ describe("the store keeps an absorbed detail out of everything that reads live d
   test("the campaign safety net does not count an absorbed detail as its old owner's destination", async () => {
     const { api, ids, apply, email, inboxCopy } = await setUp();
     await apply({ details: [inboxCopy] });
-    await apply({ consolidations: [{ fromId: inboxCopy.id, intoId: ids.inbox }] });
+    await apply({ consolidations: [{ fromId: inboxCopy.id, intoId: ids.inbox, key: "info@harbour.example", region: null }] });
     // Ben, enrolled in the same campaign as Amira, now holds the address her absorbed copy carried.
     await apply({ details: [email("bens-copy", { kind: "person", personId: ids.ben }, "info@harbour.example")] });
     expect(await api.store.contactDetail("bens-copy")).toMatchObject({ owner: { kind: "person", personId: ids.ben } });
   });
 
   describe("the store refuses a merge of two details that are not one, and keeps nothing of the import", () => {
-    const refused = async (merge: (s: Awaited<ReturnType<typeof setUp>>) => { fromId: string; intoId: string }, extra: (s: Awaited<ReturnType<typeof setUp>>) => NewDetail[] = () => []) => {
+    const refused = async (merge: (s: Awaited<ReturnType<typeof setUp>>) => DetailConsolidation, extra: (s: Awaited<ReturnType<typeof setUp>>) => NewDetail[] = () => []) => {
       const s = await setUp();
       const before = await s.api.store.person(s.ids.amira);
       await expect(s.apply({ details: extra(s), consolidations: [merge(s)] })).rejects.toThrow(/cannot be merged/);
       expect(await s.api.store.person(s.ids.amira)).toEqual(before);
     };
 
-    test("another channel", () => refused((s) => ({ fromId: s.ids.amiraEmail, intoId: s.ids.quayLine })));
-    test("another address", () => refused((s) => ({ fromId: s.ids.amiraEmail, intoId: s.ids.inbox })));
+    test("another channel", () => refused((s) => ({ fromId: s.ids.amiraEmail, intoId: s.ids.quayLine, key: "+442079460199", region: "GB" })));
+    test("another address", () => refused((s) => ({ fromId: s.ids.amiraEmail, intoId: s.ids.inbox, key: "info@harbour.example", region: null })));
     test("the same number at another company", () =>
-      refused((s) => ({ fromId: "amira-0199", intoId: s.ids.quayLine }), (s) => [s.phone("amira-0199", s.amiraOwns, "+44 20 7946 0199", "+442079460199")]));
-    test("a company's detail into a person's", () => refused((s) => ({ fromId: s.ids.inbox, intoId: s.inboxCopy.id }), (s) => [s.inboxCopy]));
+      refused((s) => ({ fromId: "amira-0199", intoId: s.ids.quayLine, key: "+442079460199", region: "GB" }), (s) => [s.phone("amira-0199", s.amiraOwns, "+44 20 7946 0199", "+442079460199")]));
+    test("a company's detail into a person's", () => refused((s) => ({ fromId: s.ids.inbox, intoId: s.inboxCopy.id, key: "info@harbour.example", region: null }), (s) => [s.inboxCopy]));
+    test("a target that does not hold the claim's key", () => refused((s) => ({ fromId: s.inboxCopy.id, intoId: s.ids.inbox, key: "office@harbour.example", region: null }), (s) => [s.inboxCopy]));
+    // The planner's claim names the region it read the copy in; the store uses that reading, never its own.
+    test("a number stored by its digits that reads as the line only in another region than the claim's", () =>
+      refused(
+        (s) => ({ fromId: "amira-digits", intoId: "harbour-0177", key: "+442079460177", region: "US" }),
+        (s) => [s.phone("amira-digits", s.amiraOwns, "020 7946 0177", "02079460177"), s.phone("harbour-0177", s.harbourOwns, "+44 20 7946 0177", "+442079460177", "main_line")],
+      ));
     test("a detail already merged", async () => {
       const s = await setUp();
       await s.apply({ details: [s.inboxCopy] });
-      await s.apply({ consolidations: [{ fromId: s.inboxCopy.id, intoId: s.ids.inbox }] });
-      await expect(s.apply({ consolidations: [{ fromId: s.inboxCopy.id, intoId: s.ids.inbox }] })).rejects.toThrow(/cannot be merged/);
+      const merge = { fromId: s.inboxCopy.id, intoId: s.ids.inbox, key: "info@harbour.example", region: null };
+      await s.apply({ consolidations: [merge] });
+      await expect(s.apply({ consolidations: [merge] })).rejects.toThrow(/cannot be merged/);
     });
   });
 });

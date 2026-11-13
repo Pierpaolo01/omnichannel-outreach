@@ -1,8 +1,9 @@
 import { DatabaseSync, type SQLInputValue, type SQLOutputValue } from "node:sqlite";
 import { digitsOf, foldText, isNewerDetail, type Channel, type PhoneKind } from "../../domain/contact-details.ts";
-import { companyRegion, displayPhone, parsePhone } from "../../domain/phone.ts";
+import { displayPhone, parsePhone } from "../../domain/phone.ts";
 import {
   personDisplayName,
+  type DetailConsolidation,
   type Directory,
   type ImportPlan,
   type ImportSummary,
@@ -544,10 +545,11 @@ class SqliteStore implements OutreachStore {
     // A personal copy of a company detail folds into it; a bad mark on either side survives. The
     // copy keeps its row and id and points at its target, so an id once issued always resolves
     // to one live detail, and to the same address or number (docs/adr/0001).
-    for (const { fromId, intoId } of plan.consolidations) {
+    for (const consolidation of plan.consolidations) {
+      const { fromId, intoId } = consolidation;
       const copy = this.db.prepare("SELECT * FROM live_contact_details WHERE id = ?").get(fromId);
       const target = this.db.prepare("SELECT * FROM live_contact_details WHERE id = ?").get(intoId);
-      if (!copy || !target || fromId === intoId || !this.isOneDetail(copy, target)) {
+      if (!copy || !target || fromId === intoId || !this.isOneDetail(copy, target, consolidation)) {
         throw new Error(`contact detail ${fromId} cannot be merged into ${intoId}: only a live detail held twice at one company is merged`);
       }
       this.run("UPDATE contact_details SET bad = MAX(bad, ?) WHERE id = ?", [num(copy, "bad"), intoId]);
@@ -580,31 +582,21 @@ class SqliteStore implements OutreachStore {
   }
 
   /**
-   * Whether two live details are one detail held twice: the same channel, held by the same owner
-   * or a person's copy of their own company's detail, and the same key once a number stored by
-   * its digits is read in the region the planner's claim reads it in: the company's country, else
-   * the target number's own region, else its other main lines' (ADR 0001).
+   * Whether two live details are one detail held twice, as the planner's claim read them: the
+   * same channel; held by the same owner, or a person's copy of their own company's detail; the
+   * target holding the claim's key; and the copy holding it too, or, for a number stored by its
+   * digits, reading as it in the claim's region. The store never derives a reading of its own.
    */
-  private isOneDetail(copy: Row, target: Row): boolean {
+  private isOneDetail(copy: Row, target: Row, claim: DetailConsolidation): boolean {
     if (str(copy, "channel") !== str(target, "channel")) return false;
     const companyOf = (row: Row) => (str(row, "owner_kind") === "company" ? str(row, "owner_id") : this.companyIdOfPerson(str(row, "owner_id")));
     const sameOwner = str(copy, "owner_kind") === str(target, "owner_kind") && str(copy, "owner_id") === str(target, "owner_id");
     const copyOfOwnCompany = str(copy, "owner_kind") === "person" && str(target, "owner_kind") === "company" && companyOf(copy) === str(target, "owner_id");
     if (!sameOwner && !copyOfOwnCompany) return false;
-    const companyId = companyOf(target);
-    const company = this.companyRow(companyId);
-    const lines = this.db
-      .prepare("SELECT key FROM live_contact_details WHERE owner_kind = 'company' AND owner_id = ? AND phone_kind = 'main_line'")
-      .all(companyId)
-      .map((row) => str(row, "key"));
-    // The target's own number comes first, as in the planner's claim (regionOf with the claimed line).
-    const region = companyRegion(company ? str(company, "country") : null, [str(target, "key"), ...lines]);
-    const read = (row: Row) => {
-      const key = str(row, "key");
-      if (str(row, "channel") !== "phone" || key.startsWith("+") || region === null) return key;
-      return parsePhone(str(row, "value"), region)?.key ?? key;
-    };
-    return read(copy) === read(target);
+    if (str(target, "key") !== claim.key) return false;
+    const copyKey = str(copy, "key");
+    if (copyKey === claim.key) return true;
+    return str(copy, "channel") === "phone" && claim.region !== null && !copyKey.startsWith("+") && parsePhone(str(copy, "value"), claim.region)?.key === claim.key;
   }
 
   private companyIdOfPerson(personId: string): string {
