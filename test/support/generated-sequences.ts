@@ -708,7 +708,9 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
         const bad = badAtFor(a);
         return bad === null || bad > t;
       });
-    const destination = own(runStart).at(-1) ?? null;
+    // The newest good address when the track started; an address added at that very instant may
+    // have come just after, so the provider's first call settles it when there is one.
+    const destination = fake.handoverLog.find((c) => c.subjectId === id)?.destination ?? own(runStart).at(-1) ?? null;
     if (destination === null) return { at: runStart, certain: true };
     const replies = fake.replyLog.filter((r) => r.at <= now && fake.deliveryLog.some((d) => d.providerRef === r.threadRef && d.subjectId === id)).map((r) => r.at);
     const calls = fake.handoverLog.filter((c) => c.subjectId === id && c.at <= now);
@@ -740,7 +742,9 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
         return bad === null || bad > t;
       });
     };
-    const destination = own(runStart).at(-1) ?? null;
+    // The newest good address when the track started; an address added at that very instant may
+    // have come just after, so the provider's first call settles it when there is one.
+    const destination = fake.handoverLog.find((c) => c.subjectId === id)?.destination ?? own(runStart).at(-1) ?? null;
     if (destination === null) return new Set(["finished_no_usable_channel"]);
     const steps = campaigns[rec.campaign]!.definition.tracks[0]!.steps;
     const deliveries = fake.deliveryLog.filter((d) => d.subjectId === id && d.at <= now);
@@ -756,7 +760,13 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     const lastVisible = Math.max(...steps.map((st) => Math.min(...deliveries.filter((d) => d.stepId === st.id).map((d) => d.visibleAt))));
     const lastSent = Math.max(...steps.map((st) => Math.min(...deliveries.filter((d) => d.stepId === st.id).map((d) => d.at))));
     const out = new Set<OutreachStatus>();
-    const endingAt = (t: number): OutreachStatus => (own(t).length > 0 ? "sequence_finished_no_response" : "finished_no_usable_channel");
+    // Reach at instant t. An address marked bad at that same instant may have been marked just
+    // before or just after the track finished, so either ending is allowed then.
+    const ownBefore = (t: number) => own(t - 1).filter((a) => a !== destination && (badAtFor(a) ?? Infinity) >= t);
+    const endingsAt = (t: number): OutreachStatus[] => [
+      ...(own(t).length > 0 || ownBefore(t).length > 0 ? (["sequence_finished_no_response"] as const) : []),
+      ...(own(t).length === 0 ? (["finished_no_usable_channel"] as const) : []),
+    ];
     // Losing every address ends the lead even with work left.
     const reachLost = [...new Set([...(rec.person?.emails.map(([, a]) => a) ?? []), ...(rec.company.inbox ? [rec.company.inbox] : [])])]
       .map((a) => badAtFor(a))
@@ -765,18 +775,17 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     // The app learns of the last send at some instant between the send (a lookup) and its sent
     // event becoming visible; a bounce, refusal or bad mark ends the track at a known instant.
     const cause = Math.min(...finishes, ...(lostAll !== null ? [lostAll] : []));
-    const causeEnding: OutreachStatus = lostAll !== null && lostAll <= Math.min(...finishes) ? "finished_no_usable_channel" : endingAt(cause);
+    const causeEndings: OutreachStatus[] = lostAll !== null && lostAll < Math.min(...finishes) ? ["finished_no_usable_channel"] : endingsAt(cause);
     let ended = false;
     if (allSent && lastSent <= now) {
       const latest = Math.min(lastVisible, cause, now);
       if (lastSent <= cause) {
-        out.add(endingAt(lastSent));
-        out.add(endingAt(latest));
+        for (const e of [...endingsAt(lastSent), ...endingsAt(latest)]) out.add(e);
       }
       if (lastVisible <= now) ended = true;
     }
     if (cause <= now) {
-      if (!(allSent && lastVisible < cause)) out.add(causeEnding);
+      if (!(allSent && lastVisible < cause)) for (const e of causeEndings) out.add(e);
       ended = true;
     }
     if (!ended) {
@@ -843,7 +852,11 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
         if (!inWindow(track.window, zone, c.at)) problem(`8: ${rec.id}/${step.id} handed over outside its window`);
         const data = mergeData(rec, fake.handoverLog.indexOf(c));
         const expected = { subject: renderCopy(step.subject, data), body: renderCopy(step.body, data) };
-        if (expected.subject !== c.rendered.subject || expected.body !== c.rendered.body) problem(`8: ${rec.id}/${step.id} carried copy ${JSON.stringify(c.rendered)}; current copy was ${JSON.stringify(expected)}`);
+        // A crash after the handover committed can eat the first call: the provider then first sees a
+        // retry, which carries the copy rendered at that commit, an instant the record cannot see.
+        const app = allAttempts.find((a) => a.id === c.attemptId);
+        const unseenFirstCall = app !== undefined && app.calls > fake.handoverLog.filter((x) => x.attemptId === c.attemptId).length;
+        if (!unseenFirstCall && (expected.subject !== c.rendered.subject || expected.body !== c.rendered.body)) problem(`8: ${rec.id}/${step.id} carried copy ${JSON.stringify(c.rendered)}; current copy was ${JSON.stringify(expected)}`);
         previous = c.at;
       });
       // 2 and 19. Nothing is called for an address after the app knew it was bad.

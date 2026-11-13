@@ -19,6 +19,7 @@ export function generatedChunks(from: number, to: number): void {
             if (problems.length > 0) failures.push(`seed ${SEED + i}${unlimited ? " (unlimited)" : ""}: ${problems.join("; ")}`);
           }
         }
+        for (const failure of failures) console.error(failure);
         expect(failures).toEqual([]);
       }, 900_000);
     }
