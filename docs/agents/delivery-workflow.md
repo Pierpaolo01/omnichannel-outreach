@@ -9,6 +9,16 @@ Set by the coordinator on 12 November 2026 from the principal's build request. R
 - Bring a branch up to date by merging the integration branch into it. History is append-only: no rebase, no force-push.
 - Only the coordinator merges, and only into the integration branch.
 
+## Machine limits
+
+Added on 13 November 2026, after pull request 37. The workstation is shared and small.
+
+- Run at most two test processes at once.
+- Never run the full sequence search locally. It runs in CI, through the `sequence-search` label on the pull request.
+- A check that runs on every push must not depend on wall-clock speed. Bound it by a count, as the mutation oracle bounds each run by engine writes.
+- When several agents work in parallel worktrees, each runs the browser suite on its own port through `E2E_PORT`, for example `E2E_PORT=4321 pnpm test:e2e`. The port also gives it its own throwaway database.
+- The disk is small. Install with `pnpm install --frozen-lockfile` only, and download nothing extra.
+
 ## Roles
 
 A slice passes through separate contexts. No agent grades its own work.

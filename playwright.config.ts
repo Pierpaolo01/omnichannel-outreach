@@ -3,8 +3,8 @@ import path from "node:path";
 import { defineConfig, devices } from "@playwright/test";
 
 /** Browser tests run against the production build, with a throwaway database outside the repo. */
-const port = 4320;
-const dataDir = path.join(os.tmpdir(), "omnichannel-outreach-e2e");
+const port = Number(process.env["E2E_PORT"] ?? 4320);
+const dataDir = path.join(os.tmpdir(), `omnichannel-outreach-e2e-${port}`);
 
 export default defineConfig({
   testDir: "e2e",
