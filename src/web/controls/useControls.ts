@@ -1,7 +1,25 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { ApiError, LeadControlApi } from "../../shared/api.ts";
 import { browserStorage } from "../calls/storage.ts";
-import { ControlRequests, NoControlAnswer, controlKey, isControlKey, type ControlResult, type ControlTarget, type PressEntry, type SendAnswer } from "./requests.ts";
+import { ControlRequests, NoControlAnswer, controlKey, isControlKey, type ControlResult, type ControlTarget, type LockPort, type PressEntry, type PressOutcome, type SendAnswer } from "./requests.ts";
+
+/**
+ * The browser's Web Locks, shared by the user's tabs of this origin (requests.ts, "one press per lead or campaign at a
+ * time"). Every browser the app supports has them; without them a press runs unlocked, and the stored press is the only guard.
+ */
+const webLock: LockPort = async (name, mode, fn) => {
+  if (typeof navigator === "undefined" || !("locks" in navigator)) {
+    await fn();
+    return true;
+  }
+  let ran = false;
+  await navigator.locks.request(name, mode === "ifAvailable" ? { ifAvailable: true } : {}, async (lock) => {
+    if (!lock) return;
+    ran = true;
+    await fn();
+  });
+  return ran;
+};
 
 /** A 4xx whose code says the server refused the request is definite; anything else is no answer (as the call desk reads it). */
 const DEFINITE = new Set(["control_refused", "not_found", "invalid_request"]);
@@ -24,7 +42,7 @@ async function sendControl(entry: PressEntry): Promise<SendAnswer> {
 }
 
 export interface Controls {
-  press(target: ControlTarget, action: LeadControlApi): { ok: true } | { ok: false; why: "busy" | "unstored" };
+  press(target: ControlTarget, action: LeadControlApi): Promise<PressOutcome>;
   /** The press stored for a target, whichever tab made it. */
   pending(target: ControlTarget): PressEntry | null;
   /** Its last send from this page had no answer. */
@@ -51,6 +69,7 @@ export function useControls(targets: readonly ControlTarget[], refresh: () => Pr
     () =>
       new ControlRequests({
         local: browserStorage(() => window.localStorage),
+        lock: webLock,
         newId: () => crypto.randomUUID(),
         now: () => Date.now(),
         setTimer: (fire, ms) => {
@@ -74,6 +93,9 @@ export function useControls(targets: readonly ControlTarget[], refresh: () => Pr
   }, [requests, key]);
 
   useEffect(() => {
+    // Set up again after a cleanup (React does so in development): the requests run again (review bot on 07fab27, P2).
+    requests.start();
+    requests.watch(targetsRef.current);
     const onStorage = (e: StorageEvent) => {
       if (isControlKey(e.key)) requests.storageChanged(targetsRef.current);
     };
@@ -94,8 +116,7 @@ export function useControls(targets: readonly ControlTarget[], refresh: () => Pr
         next.delete(controlKey(target));
         return next;
       });
-      const out = requests.press(target, action);
-      return out.ok ? ({ ok: true } as const) : out;
+      return requests.press(target, action);
     },
     [requests],
   );

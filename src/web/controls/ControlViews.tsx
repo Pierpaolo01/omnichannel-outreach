@@ -150,6 +150,7 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
   const triggers = useRef(new Map<LeadControlApi, HTMLButtonElement>());
   const firstControl = useRef<HTMLButtonElement | null>(null);
   const focusNext = useRef<"status" | null>(null);
+  const [refocus, setRefocus] = useState(false);
   const offered = offeredControls(lead);
   const busy = controls.pending(target) !== null;
   const sentence = nextStepSentence(lead, userZone);
@@ -157,17 +158,19 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
   const reasons = lead.campaignState.launched ? [...new Set(EXPECTED[lead.status].map((a) => refusalOf(lead, a)).filter((r): r is string => r !== null && r !== sentence))] : [];
   const control = confirming ? (offered.find((c) => c.action === confirming) ?? null) : null;
 
-  // A confirmation whose control the read no longer allows (another tab, the worker) is not shown; focus stays in the row.
-  const lost = confirming !== null && control === null;
+  // A confirmation whose control the read no longer allows (another tab, the worker) closes, and focus stays in the row.
+  if (confirming !== null && control === null) {
+    setConfirming(null);
+    setRefocus(true);
+  }
   useEffect(() => {
-    if (lost) firstControl.current?.focus();
-  }, [lost]);
+    if (refocus) firstControl.current?.focus();
+  }, [refocus]);
 
   const confirm = (c: AllowedControl) => {
     setConfirming(null);
-    const out = controls.press(target, c.action);
-    setUnstored(!out.ok && out.why === "unstored");
     focusNext.current = "status";
+    void controls.press(target, c.action).then((out) => setUnstored(!out.ok && out.why === "unstored"));
   };
   const placeStatus = (el: HTMLElement | null) => {
     if (el && focusNext.current === "status") {
@@ -217,6 +220,7 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
               onClick={() => {
                 controls.dismiss(target);
                 setUnstored(false);
+                setRefocus(false);
                 setConfirming(c.action);
               }}
             >
@@ -303,6 +307,9 @@ export function CampaignPauseControl({
   const allowed = read.controls.find((c) => c.allowed);
   const action = allowed?.action ?? null;
   const busy = controls.pending(target) !== null;
+  // A confirmation of an action the read no longer allows (another tab paused or resumed the campaign) closes, so the
+  // action the read allows now is never left disabled behind it (review bot on 07fab27, P2).
+  if (confirming !== null && confirming !== action) setConfirming(null);
   const button = action ? (
     <button
       type="button"
@@ -333,10 +340,10 @@ export function CampaignPauseControl({
           text={campaignConfirmText(confirming, name, read)}
           action={confirming === "pause" ? "Pause campaign" : "Resume campaign"}
           onConfirm={() => {
-            const out = controls.press(target, confirming);
-            setUnstored(!out.ok && out.why === "unstored");
+            const action = confirming;
             setConfirming(null);
             focusNext.current = "status";
+            void controls.press(target, action).then((out) => setUnstored(!out.ok && out.why === "unstored"));
           }}
           onCancel={() => {
             setConfirming(null);

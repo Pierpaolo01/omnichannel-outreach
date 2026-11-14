@@ -1,18 +1,21 @@
 /**
  * The controls' requests (ticket 17b): pause, resume, skip, stop and the restarts of a lead, and a campaign's pause and
  * resume. The server binds a request id to its first answer and its body (ADR 0003 "Ticket 17a", "Requests are
- * idempotent"), so the page keeps the call desk's rule (4.4.1) and almost nothing else:
+ * idempotent"), so a request sent twice under one id applies once. What the page must prevent is two ids for one press,
+ * or two presses in flight on one lead from two tabs. The rule:
  *
- * - A press makes its request id once, and is stored in shared storage (`localStorage`) before its first send. A press
- *   storage will not take is not sent: a request the page could not track could be neither retried nor reconciled after a
- *   reload, and the user would believe it on its way.
- * - Every send of a press, a retry, a send after a reload or another tab's, reads the stored press: the same id and body,
- *   so the server applies it once. Any page showing the lead or campaign sends a press it sees, once on first sight and then
- *   only on that press's own backoff (1, 2, 4, 8 seconds, then every 8).
- * - One press per lead or campaign is on its way at a time, across the user's tabs: a press while another is stored for
- *   the same target is refused here ("busy"). A definite answer (accepted, or refused with the server's reason) removes it.
- * - Nothing else is kept: what the page shows comes from the server's read, refreshed after each answer and on every
- *   storage event, and from the answer this page got.
+ * - **One press per lead or campaign at a time, across the user's tabs, by a lock.** A press takes the target's
+ *   exclusive Web Lock if it is free (`ifAvailable`) and holds it until the press has a definite answer or the page
+ *   goes; while it is held, a press on that target from any tab is refused here ("busy"). localStorage has no
+ *   compare-and-set and another tab may see a write late (review bot on 07fab27, P1), so the lock, not the stored entry,
+ *   decides who may create a request id.
+ * - **A press is stored before its first send**, under the request id made at the press, in shared storage. A press
+ *   storage will not take is not sent: one the page could not track could not be recovered after a reload.
+ * - **Every send reads the stored press**: the same id and body on a retry, after a reload, from another tab. While its
+ *   lock is held, only its holder sends it (1, 2, 4, 8 seconds, then every 8); another tab that sees it queues for the
+ *   lock, and sends it, with its id, only if it is still stored once the holder is gone (the page closed or reloaded).
+ * - **A definite answer removes it** (accepted, or refused with the server's reason). Nothing else is kept: what the
+ *   page shows comes from the server's read, refreshed after each answer and on every storage event.
  */
 import type { LeadControlApi } from "../../shared/api.ts";
 import type { KeyValue } from "../calls/callDesk.ts";
@@ -33,6 +36,8 @@ export type SendAnswer = { readonly kind: "accepted"; readonly body: unknown } |
 
 export type ControlResult = { readonly kind: "accepted"; readonly entry: PressEntry; readonly body: unknown } | { readonly kind: "refused"; readonly entry: PressEntry; readonly message: string };
 
+export type PressOutcome = { readonly ok: true; readonly entry: PressEntry } | { readonly ok: false; readonly why: "busy" | "unstored" };
+
 /** No definite answer: the request may or may not have reached the server. */
 export class NoControlAnswer extends Error {
   constructor() {
@@ -43,9 +48,16 @@ export class NoControlAnswer extends Error {
 /** Backoff after a send with no answer, in milliseconds; the last repeats. */
 export const CONTROL_RETRY_MS = [1_000, 2_000, 4_000, 8_000] as const;
 
+/**
+ * An exclusive lock shared by the user's tabs (the Web Locks API): runs `fn` holding `name` and resolves true, or, with
+ * `ifAvailable`, resolves false at once without running it while another holder has it. A page that goes releases its locks.
+ */
+export type LockPort = (name: string, mode: "ifAvailable" | "wait", fn: () => Promise<void>) => Promise<boolean>;
+
 export interface ControlRequestPorts {
   /** Shared by the user's tabs (localStorage), through the call desk's adapter: storage is the only truth. */
   readonly local: KeyValue;
+  readonly lock: LockPort;
   newId(): string;
   now(): number;
   setTimer(fire: () => void, ms: number): () => void;
@@ -73,9 +85,10 @@ function parse(text: string | null): PressEntry | null {
 
 export class ControlRequests {
   private readonly ports: ControlRequestPorts;
-  /** Per request id: a send in flight, and the timer of its next send. */
-  private readonly inFlight = new Set<string>();
-  private readonly timers = new Map<string, () => void>();
+  /** Targets whose lock this page holds or waits for. */
+  private readonly driving = new Set<string>();
+  /** Per target: cuts its backoff wait short (try again now, stop). */
+  private readonly wakers = new Map<string, () => void>();
   private readonly attempts = new Map<string, number>();
   /** Request ids whose last send here had no answer. */
   private readonly unanswered = new Set<string>();
@@ -96,44 +109,69 @@ export class ControlRequests {
     return entry !== null && this.unanswered.has(entry.requestId);
   }
 
-  /** Stores a press under a new request id, then sends it. Refused while a press is stored for the target, or when storage will not take it. */
-  press(target: ControlTarget, action: LeadControlApi): { ok: true; entry: PressEntry } | { ok: false; why: "busy" | "unstored" } {
-    if (this.pendingFor(target)) return { ok: false, why: "busy" };
-    const entry: PressEntry = { v: 1, requestId: this.ports.newId(), target, action, pressedAt: this.ports.now() };
-    if (!this.ports.local.set(controlKey(target), JSON.stringify(entry))) return { ok: false, why: "unstored" };
-    this.ports.onChange();
-    void this.send(entry);
-    return { ok: true, entry };
+  /** Stores a press under a new request id, then sends it until it has a definite answer, holding the target's lock. */
+  press(target: ControlTarget, action: LeadControlApi): Promise<PressOutcome> {
+    const key = controlKey(target);
+    if (this.halted() || this.driving.has(key) || this.pendingFor(target)) return Promise.resolve({ ok: false, why: "busy" });
+    this.driving.add(key);
+    return new Promise<PressOutcome>((resolve) => {
+      void this.ports
+        .lock(key, "ifAvailable", async () => {
+          // Under the lock: a press still stored is one whose page went unanswered; it is sent, never replaced.
+          if (this.pendingFor(target)) {
+            resolve({ ok: false, why: "busy" });
+            return this.drive(target);
+          }
+          const entry: PressEntry = { v: 1, requestId: this.ports.newId(), target, action, pressedAt: this.ports.now() };
+          if (!this.ports.local.set(key, JSON.stringify(entry))) {
+            resolve({ ok: false, why: "unstored" });
+            return;
+          }
+          resolve({ ok: true, entry });
+          this.ports.onChange();
+          return this.drive(target);
+        })
+        .then((ran) => {
+          this.driving.delete(key);
+          if (!ran) resolve({ ok: false, why: "busy" });
+          this.ports.onChange();
+        });
+    });
   }
 
-  /** The targets a page shows: a stored press for any of them that is not on its way from here is sent now. */
+  /** The targets a page shows: a press stored for any of them is sent, with its id, once this page holds its lock. */
   watch(targets: readonly ControlTarget[]): void {
     for (const target of targets) {
-      const entry = this.pendingFor(target);
-      if (entry && !this.inFlight.has(entry.requestId) && !this.timers.has(entry.requestId)) void this.send(entry);
+      const key = controlKey(target);
+      if (this.halted() || this.driving.has(key) || !this.pendingFor(target)) continue;
+      this.driving.add(key);
+      void this.ports.lock(key, "wait", () => this.drive(target)).then(() => {
+        this.driving.delete(key);
+        this.ports.onChange();
+      });
     }
   }
 
-  /** Another tab changed a press: show it, and send what is stored for these targets on its first sight. */
+  /** Another tab changed a press: show it, and take up what is stored for these targets. */
   storageChanged(targets: readonly ControlTarget[]): void {
     this.watch(targets);
     this.ports.onChange();
   }
 
-  /** Try again now: every press waiting on its timer is sent at once, with its own id. */
+  /** Try again now: every press waiting out its backoff here is sent at once, with its own id. */
   retryNow(): void {
-    for (const [id, cancel] of [...this.timers]) {
-      cancel();
-      this.timers.delete(id);
-      const entry = this.storedById(id);
-      if (entry) void this.send(entry);
-    }
+    for (const wake of [...this.wakers.values()]) wake();
   }
 
+  /** The page shows these controls again (React sets an effect up again after its cleanup in development; review bot on 07fab27, P2). */
+  start(): void {
+    this.stopped = false;
+  }
+
+  /** The page stops: every press it holds is let go with its lock, still stored, for the next page to send. */
   stop(): void {
     this.stopped = true;
-    for (const cancel of this.timers.values()) cancel();
-    this.timers.clear();
+    for (const wake of [...this.wakers.values()]) wake();
   }
 
   /** Read through a method: `stop` may run while a send is awaited. */
@@ -141,48 +179,48 @@ export class ControlRequests {
     return this.stopped;
   }
 
-  private storedById(requestId: string): PressEntry | null {
-    for (const key of this.ports.local.keys()) {
-      if (!isControlKey(key)) continue;
-      const entry = parse(this.ports.local.get(key));
-      if (entry?.requestId === requestId) return entry;
-    }
-    return null;
-  }
-
-  private async send(entry: PressEntry): Promise<void> {
-    if (this.stopped || this.inFlight.has(entry.requestId)) return;
-    // Sent only while it is still the stored press: an answer another tab got removed it.
-    if (this.pendingFor(entry.target)?.requestId !== entry.requestId) return;
-    this.inFlight.add(entry.requestId);
-    let answer: SendAnswer | null = null;
-    try {
-      answer = await this.ports.send(entry);
-    } catch {
-      answer = null;
-    }
-    this.inFlight.delete(entry.requestId);
-    if (this.halted()) return;
-    if (answer === null) {
-      this.unanswered.add(entry.requestId);
-      const n = this.attempts.get(entry.requestId) ?? 0;
-      this.attempts.set(entry.requestId, n + 1);
-      const ms = CONTROL_RETRY_MS[Math.min(n, CONTROL_RETRY_MS.length - 1)] ?? 8_000;
-      this.timers.set(
-        entry.requestId,
-        this.ports.setTimer(() => {
-          this.timers.delete(entry.requestId);
-          void this.send(entry);
-        }, ms),
-      );
+  /** Holding the target's lock: sends the stored press until it has a definite answer, or the page stops. */
+  private async drive(target: ControlTarget): Promise<void> {
+    const key = controlKey(target);
+    for (;;) {
+      if (this.halted()) return;
+      const entry = this.pendingFor(target);
+      if (!entry) return;
+      let answer: SendAnswer | null = null;
+      try {
+        answer = await this.ports.send(entry);
+      } catch {
+        answer = null;
+      }
+      if (this.halted()) return;
+      if (answer === null) {
+        this.unanswered.add(entry.requestId);
+        const n = this.attempts.get(entry.requestId) ?? 0;
+        this.attempts.set(entry.requestId, n + 1);
+        this.ports.onChange();
+        await this.wait(key, CONTROL_RETRY_MS[Math.min(n, CONTROL_RETRY_MS.length - 1)] ?? 8_000);
+        continue;
+      }
+      this.unanswered.delete(entry.requestId);
+      this.attempts.delete(entry.requestId);
+      // Removed only if it is still this press: a newer press on the target is never removed by an older answer.
+      if (this.pendingFor(target)?.requestId === entry.requestId) this.ports.local.remove(key);
+      this.ports.onResult(answer.kind === "accepted" ? { kind: "accepted", entry, body: answer.body } : { kind: "refused", entry, message: answer.message });
       this.ports.onChange();
       return;
     }
-    this.unanswered.delete(entry.requestId);
-    this.attempts.delete(entry.requestId);
-    // Removed only if it is still this press: a newer press on the target is never removed by an older answer.
-    if (this.pendingFor(entry.target)?.requestId === entry.requestId) this.ports.local.remove(controlKey(entry.target));
-    this.ports.onResult(answer.kind === "accepted" ? { kind: "accepted", entry, body: answer.body } : { kind: "refused", entry, message: answer.message });
-    this.ports.onChange();
+  }
+
+  private wait(key: string, ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      let cancel = (): void => undefined;
+      const done = () => {
+        cancel();
+        this.wakers.delete(key);
+        resolve();
+      };
+      cancel = this.ports.setTimer(done, ms);
+      this.wakers.set(key, done);
+    });
   }
 }
