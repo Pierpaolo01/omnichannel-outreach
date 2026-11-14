@@ -17,15 +17,16 @@
  * has no delivered
  * state, because Instantly reports none (ADR 0002, "Delivered").
  */
-import type { ActivityEntry, DependentTrackState, EnrollmentView } from "../shared/api.ts";
+import type { ActivityEntry, EnrollmentView } from "../shared/api.ts";
 import { displayPhone } from "../domain/phone.ts";
 import { goodNumbers, skipLimitOf, userDayOf } from "../domain/sequence/calls.ts";
 import { localDayNumber } from "../domain/sequence/clock.ts";
-import { goodEmail, goodMobile, runs, wallAtLead } from "../domain/sequence/progress.ts";
+import { goodEmail, goodMobile, wallAtLead } from "../domain/sequence/progress.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
 import { trackLabel } from "../shared/track-label.ts";
 import { callRecordView, dateOfDay, firstListedDay, type CallViewRules } from "./engine/call-views.ts";
-import type { CallTask, FinishReason } from "../domain/sequence/state.ts";
+import type { CallTask } from "../domain/sequence/state.ts";
+import { afterDeclineTracks, dependentStateOf } from "./engine/track-states.ts";
 import { progressView } from "./engine/views.ts";
 import type { OutreachStore } from "./persistence/store.ts";
 
@@ -125,48 +126,7 @@ function releasedBecause(finish: string | null): "skipped" | "failed" | "unworke
   return finish === "failed_bad_destination" ? "failed" : null;
 }
 
-/**
- * A finished track's state as Activity says it (verifier on 2027f24): every finish reason the engine stores, in one
- * exhaustive switch, so a reason a later ticket adds fails typecheck until it has a state here.
- */
-export function finishedStateOf(reason: FinishReason): Exclude<DependentTrackState["state"], "waiting"> {
-  switch (reason) {
-    case "completed":
-    case "failed_bad_destination":
-    case "closed_on_interest":
-      return "finished";
-    case "skipped_declined":
-      return "skipped_declined";
-    case "skipped_unworked":
-      return "skipped_unworked";
-    case "skipped_missing_channel":
-      return "skipped_no_channel";
-    case "skipped":
-    case "skipped_by_user":
-      return "skipped";
-    case "dropped_for_win_back":
-      return "dropped_for_win_back";
-    default: {
-      const unhandled: never = reason;
-      throw new Error(`A finish reason Activity has no state for: ${String(unhandled)}`);
-    }
-  }
-}
-
-/**
- * The state of a track that starts after another, from the engine's stored progress at the read (`live`), never from
- * how the track before it ended: a finished track by its stored finish; a started one is started; one not started
- * will not start once the lead has ended; with its start resolved it waits out its delay, or waits while the lead is
- * held (council on 32454ea, D; verifier on 2027f24).
- */
-export function dependentStateOf(live: SubjectState, p: SubjectState["tracks"][number] | undefined, now: number): DependentTrackState {
-  if (p?.finishReason) return { state: finishedStateOf(p.finishReason), startsAt: null };
-  if (p && p.startedAt !== null) return { state: "started", startsAt: null };
-  if (live.subject.ended !== null) return { state: "stopped", startsAt: null };
-  if (!p || p.startAt === null) return { state: "not_started", startsAt: null };
-  if (!runs(live)) return { state: "held", startsAt: null };
-  return { state: "waiting", startsAt: new Date(wallAtLead(live.subject.clock, live.freezes, p.startAt, now)).toISOString() };
-}
+export { dependentStateOf, finishedStateOf } from "./engine/track-states.ts";
 
 /** The wall instant a track started, or null if it has not. */
 function startedWall(state: SubjectState, trackId: string, now: number): number | null {
@@ -239,6 +199,8 @@ function callEntries(
         redialListedFrom: record.redial ? redialListedFrom(live, liveTask ?? task, c.atWall, rules) : null,
         callbackOpen: record.callbackAt !== null && record.callbackAt === openCallback,
         declinedPath: record.declinedPath,
+        // What the decline did to each remaining track, each as it stands at this read (ticket 16c).
+        afterDecline: c.declinedPath === null ? [] : afterDeclineTracks(live, task.trackId, c.atWall, c.declinedPath, now),
       });
       if (c.outcome !== "skip_for_now") askedFor = c.outcome === "callback_requested" ? record.callbackAt : null;
     }
@@ -266,7 +228,7 @@ function callEntries(
     // Each track after it, as its stored progress stands now: never a start that has not happened (verifier on eac9f6c, F2).
     const after = def.tracks
       .filter((t) => !t.removed && t.start.kind === "after" && t.start.trackId === track.trackId)
-      .map((t) => ({ track: labelOf(t.id), ...dependentStateOf(live, live.tracks.find((x) => x.trackId === t.id), now) }));
+      .map((t) => ({ track: labelOf(t.id), ...dependentStateOf(live, t, now) }));
     entries.push({ campaign, at: track.finishedAt, kind: "skipped", channel: "call", track: label, stepNumber: null, reason: "unworked", dueDate: dateOfDay(localDayNumber(unworked.dueWall, live.callDay.userZone)), limitDays: skipLimitOf(def, track.trackId), after });
   }
 }

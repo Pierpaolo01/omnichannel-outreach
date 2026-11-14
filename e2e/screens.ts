@@ -185,6 +185,7 @@ export function galleryRecord(id: string): PersonRecord & RecordCalls {
   return {
     calls,
     today: "2026-11-10",
+    declines: [],
     kind: "person",
     id,
     name: "Status Gallery",
@@ -385,6 +386,7 @@ export const JUNIPER_LATER = {
   ],
   calls: [],
   today: "2026-11-13",
+  declines: [],
 } satisfies CompanyRecord & RecordCalls;
 
 export const JUNIPER_LATER_ROW = {
@@ -624,6 +626,47 @@ export const SCREENS: readonly Screen[] = [
     name: "calls, three kept refusals",
     open: async (page) => {
       await openWithKeptRefusals(page, "screen-three-refusals");
+    },
+  },
+  // Ticket 16c: not interested on the call sheet, and the declined lead on the record.
+  {
+    name: "calls, not interested with win back preselected",
+    open: async (page) => {
+      await calls(page, "win-back", "/calls");
+      await page.getByText(/^Calling hours /).waitFor();
+      await page.getByRole("button", { name: "Not interested", exact: true }).click();
+      await settle(page, "Preselected from the phone track’s setting.");
+    },
+  },
+  {
+    name: "calls, not interested with no path set and no win-back branch",
+    open: async (page) => {
+      await calls(page, "ready", "/calls");
+      await page.getByText(/^Calling hours /).waitFor();
+      await page.getByRole("button", { name: "Not interested", exact: true }).click();
+      await settle(page, "(this campaign has none)");
+    },
+  },
+  {
+    name: "calls, not interested on a path the campaign no longer offers",
+    open: async (page) => {
+      const f = await fakeCallsApp("continue");
+      const t = await focused(f);
+      // A draft kept in this tab from when the path was offered (a running edit removed the branch since, ticket 19).
+      await page.addInitScript(([id, n]) => window.sessionStorage.setItem(`outreach.calls.draft.${id}`, JSON.stringify({ outcome: "not_interested", numberId: n, note: "", noteScope: "person", redial: false, callbackDay: null, callbackTime: "", callbackAt: null, declinedPath: "win_back", pressId: null })), [t.taskId, t.numberId] as const);
+      await page.clock.setFixedTime(f.harness.clock);
+      await page.goto(`${f.url}/calls`);
+      await settle(page, "This campaign has no win-back branch now");
+    },
+  },
+  {
+    name: "a person's record declined into win-back",
+    open: async (page) => {
+      const f = await calls(page, "win-back", "/calls", "screen-record-win-back");
+      const t = await focused(f);
+      await f.harness.request("POST", `/api/call-tasks/${t.taskId}/outcome`, { requestId: "screen-win-back", outcome: "not_interested", numberId: t.numberId });
+      await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
+      await settle(page, "moved to this campaign’s win-back branch");
     },
   },
   // Ticket 15b: redials and callbacks on the call sheet, carried and overdue calls on Today and Calls.

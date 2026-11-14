@@ -598,6 +598,8 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
           readonly callbackOpen: boolean;
           /** With not interested: the declined path taken, the track's or the user's override for the lead (ticket 16). */
           readonly declinedPath: DeclinedPathApi | null;
+          /** With not interested: each track the decline left unfinished or finished, in its state at this read (ticket 16c). Empty otherwise. */
+          readonly afterDecline: readonly DeclineTrackView[];
         }
       | { readonly kind: "skipped"; readonly stepNumber: null; readonly reason: "no_number" }
       /**
@@ -635,9 +637,41 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
 export type DependentTrackState =
   | { readonly state: "waiting"; readonly startsAt: string }
   | {
-      readonly state: "started" | "finished" | "skipped_declined" | "skipped_unworked" | "skipped_no_channel" | "skipped" | "dropped_for_win_back" | "held" | "stopped" | "not_started";
+      readonly state:
+        | "started"
+        | "finished"
+        | "skipped_declined"
+        | "skipped_unworked"
+        | "skipped_no_channel"
+        | "skipped"
+        | "dropped_for_win_back"
+        | "held"
+        | "stopped"
+        | "stopped_after_start"
+        | "started_held"
+        | "no_more_calls"
+        | "not_started";
       readonly startsAt: null;
     };
+
+/**
+ * One track a decline leaves unfinished or finishes (ticket 16c), in its state at a read: every main track other than
+ * the declined call's own that had not finished before the decline, then the win-back branch's tracks once the lead
+ * entered it. The same selection and the same mapping (`dependentStateOf`) for the preview before Log and for Activity.
+ */
+export type DeclineTrackView = { readonly track: TrackLabel } & DependentTrackState;
+
+/** What logging not interested on one path would do (ticket 16c): the engine's own outcome on a copy of the lead, stored nowhere. */
+export interface DeclinePreviewView {
+  readonly path: DeclinedPathApi;
+  /** The lead's outreach status after it. */
+  readonly status: OutreachStatus;
+  readonly tracks: readonly DeclineTrackView[];
+  /** No call is made to the lead again in this campaign once this is logged: the engine's `noMoreCalls` on the copy. */
+  readonly noMoreCalls: boolean;
+  /** Emails or texts already handed to a provider that the decline asks to withdraw: each may still go (ADR 0003 2.5). */
+  readonly withProvider: number;
+}
 
 export interface ActivityView {
   readonly entries: readonly ActivityEntry[];
@@ -821,6 +855,11 @@ export interface RecordCalls {
   readonly calls: readonly RecordCallView[];
   /** The user's date as the server counts it, YYYY-MM-DD: the day the calls' list dates are read against. */
   readonly today: string;
+  /**
+   * Each enrollment's decline on a call (ticket 16c): the user's date it was logged on, as the engine counts the day
+   * (YYYY-MM-DD), and the declined path taken. A record says it beside the enrollment's status.
+   */
+  readonly declines: readonly { readonly enrollmentId: string; readonly date: string; readonly path: DeclinedPathApi }[];
 }
 
 /** A track whose channel has no connected sender, so the load is not projected (Before launch). */
@@ -994,6 +1033,14 @@ export interface CallTaskView {
   readonly declinedPath: DeclinedPathApi;
   /** The paths the user may choose for this lead: win back only while the campaign has a win-back branch. */
   readonly declinedPaths: readonly DeclinedPathApi[];
+  /** Whether the phone track's definition sets a declined path; false: `declinedPath` is the engine's interim for an unset track (Q14). */
+  readonly declinedPathSet: boolean;
+  /**
+   * What not interested logged now would do on each path in `declinedPaths`, in that order (ticket 16c): the engine's own
+   * outcome applied to a copy of the lead as of this read, storing nothing. Null while the call is not listed or no number
+   * can be logged on.
+   */
+  readonly declines: readonly DeclinePreviewView[] | null;
   /**
    * The request id of every outcome stored on this task, skips for now included: the server's word on
    * whether a press was logged, whoever received its answer (ADR 0003 4.4.1, "One reconciliation").

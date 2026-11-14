@@ -3,7 +3,7 @@
  * reads only what the server reported (the queue, the call task, an outcome's answer, Needs
  * attention); none decides anything about order, counts, hours, capacity or an outcome's effect.
  */
-import type { CallNumberView, CallOffListView, CallOutcomeApi, DeclinedPathApi, CallQueueItem, CallsView, CallTaskView, NeedsAttention, RecordCallView, RecordedNumberView, TodayView, WindowRule } from "../../shared/api.ts";
+import type { CallNumberView, CallOffListView, CallOutcomeApi, DeclinedPathApi, DeclinePreviewView, DeclineTrackView, CallQueueItem, CallsView, CallTaskView, FinishReasonApi, NeedsAttention, OutreachStatus, RecordCallView, RecordCalls, RecordedNumberView, TodayView, WindowRule } from "../../shared/api.ts";
 import { STATUS_LABEL } from "../status.tsx";
 import type { DeskSnapshot } from "./callDesk.ts";
 import { dayLabel, zonedInstants, type CallbackChoice } from "./callbackTime.ts";
@@ -15,7 +15,6 @@ export const OUTCOME_LABEL = {
   gatekeeper: "Didn’t reach them",
   wrong_number: "Wrong number",
   interested: "Interested",
-  // Logged over HTTP for now: the page offers no control for it yet (ticket 16's screens are part b); its pill stays disabled.
   not_interested: "Not interested",
   callback_requested: "Callback requested",
   skip_for_now: "Skip for now",
@@ -36,7 +35,8 @@ export const OUTCOME_TITLE = {
 /** What a declined call did, from the path the server stored with it (ticket 16). */
 export const DECLINED_PATH_LINE = {
   stop: "Stopped in this campaign.",
-  continue: "No more calls in this campaign; the other channels continue.",
+  // History: whether the other channels still run is the lead's status and its tracks' states at the read (ticket 16c).
+  continue: "No more calls in this campaign; the other channels were kept going.",
   win_back: "Moved to this campaign’s win-back branch, with no more calls.",
 } as const satisfies Record<DeclinedPathApi, string>;
 
@@ -199,6 +199,11 @@ export function loggedLine(logged: NonNullable<DeskSnapshot["logged"]>, userZone
     if (task.open && task.kind === "callback" && task.callbackAt === stored.callbackAt) parts.push(`Their automated outreach in ${task.campaign.name} is held until you log how the callback went.`);
     return withNote(parts, body, task, who);
   }
+  // Not interested (ticket 16c): the path the server stored with this press, and the lead's status as the read gives it.
+  if (stored?.outcome === "not_interested" && stored.declinedPath !== null) {
+    // The status said lower-case after "Now", so a campaign name with a comma or an apostrophe never reads as part of it (council on 4fd9ca4, item 4).
+    return withNote([`${who}: not interested logged.`, DECLINED_PATH_LINE[stored.declinedPath], `Now ${lowerFirst(STATUS_LABEL[task.status])}, in ${task.campaign.name}.`], body, task, who);
+  }
   if (stored?.redial) {
     const parts = [`${who}: ${OUTCOME_LABEL[stored.outcome].toLowerCase()} logged, with a redial.`];
     if (task.open && !task.listed && task.listedFrom !== null) parts.push(`The call is on the list for ${dayLabel(task.listedFrom)}, and the ${task.track.label.toLowerCase()} stays open.`);
@@ -231,11 +236,37 @@ export function offListLine(who: string, off: CallOffListView | null, message: s
     case "lead_ended":
       if (off.status === "replied") return `${who} replied, so automation stopped and the call left the list.`;
       if (off.status === "interested_on_call") return `${who} was marked interested on another call, so automation stopped and the call left the list.`;
+      if (off.status === "declined_on_call") return `${who} declined on a call, so their outreach in this campaign stopped and the call left the list.`;
       return `${who}’s outreach in this campaign has ended (${STATUS_LABEL[off.status].toLowerCase()}), so the call left the list.`;
     case "track_finished":
-      return off.finish === "skipped_missing_channel" ? `No good number is left for ${who}, so the phone track was skipped.` : `${who}’s phone track has finished, so the call left the list.`;
+      return trackFinishedLine(who, off.finish);
     case "not_listed_today":
       return `${who}’s call is not on today’s list.`;
+  }
+}
+
+/** Why a call whose phone track finished left the list: every finish reason the engine stores, in one exhaustive switch. */
+function trackFinishedLine(who: string, finish: FinishReasonApi | null): string {
+  if (finish === null) return `${who}’s phone track has finished, so the call left the list.`;
+  switch (finish) {
+    case "skipped_missing_channel":
+      return `No good number is left for ${who}, so the phone track was skipped.`;
+    case "skipped_declined":
+      return `${who} declined on another call, so no call is made to them again in this campaign and this call left the list.`;
+    case "dropped_for_win_back":
+      return `${who} moved to this campaign’s win-back branch, which makes no calls, so this call left the list.`;
+    case "skipped_unworked":
+      return `${who}’s call wasn’t made within its skip limit, so it was skipped and left the list.`;
+    case "completed":
+    case "skipped":
+    case "skipped_by_user":
+    case "failed_bad_destination":
+    case "closed_on_interest":
+      return `${who}’s phone track has finished, so the call left the list.`;
+    default: {
+      const unhandled: never = finish;
+      throw new Error(`A finish reason with no sentence: ${String(unhandled)}`);
+    }
   }
 }
 
@@ -358,11 +389,12 @@ export function recoveringLine(who: string): string {
 
 /** A kept refusal: what was not logged, and why, from the server's `offList` when it said. */
 export function refusedRecordLine(
-  record: { readonly who: string; readonly body: { readonly outcome: CallOutcomeApi; readonly redial?: true; readonly callbackAt?: string }; readonly refused: { readonly message: string; readonly offList: CallOffListView | null } },
+  record: { readonly who: string; readonly body: { readonly outcome: CallOutcomeApi; readonly redial?: true; readonly callbackAt?: string; readonly declinedPath?: DeclinedPathApi }; readonly refused: { readonly message: string; readonly offList: CallOffListView | null } },
   zone: string,
 ): string {
   const { body } = record;
-  const extra = body.redial ? " with a redial" : body.callbackAt ? ` for ${dateIn(zone, body.callbackAt)} at ${timeIn(zone, body.callbackAt)} your time` : "";
+  // The press's own choices: a redial, a callback's time, or the declined path pressed (ticket 16c).
+  const extra = body.redial ? " with a redial" : body.callbackAt ? ` for ${dateIn(zone, body.callbackAt)} at ${timeIn(zone, body.callbackAt)} your time` : body.declinedPath ? ` (“${DECLINED_PATH_CHOICE[body.declinedPath]}”)` : "";
   const what = body.outcome === "skip_for_now" ? `skip for now on ${record.who}` : `${OUTCOME_LABEL[body.outcome].toLowerCase()}${extra} for ${record.who}`;
   // The server's own message, unless it refused because the call was already logged, which the off-list facts say with what and when.
   const why = record.refused.offList?.reason === "logged" ? offListLine(record.who, record.refused.offList, null, zone) : record.refused.message;
@@ -494,4 +526,163 @@ export function recordCallLine(call: RecordCallView, today: string): { lead: str
   }
   if (call.listedFor > today) return plain(`Their call is on the list for ${dayLabel(call.listedFor)}.${limit}`);
   return plain(`Their call waits for a day their calling hours open.${limit}`);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Not interested (ticket 16c). What a decline does, said before Log from the call read's `declines` (the engine's own
+// outcome on a copy), after Log from the server's stored path and the lead's status, and on the record and in Activity
+// from the server's read at that instant. Nothing here decides a path, a status or a track's state.
+
+/** The not-interested radios, as the approved prototype words them. */
+export const DECLINED_PATH_CHOICE = {
+  stop: "Stop all outreach in this campaign",
+  continue: "Keep the email and SMS steps going",
+  win_back: "Move to the win-back messages",
+} as const satisfies Record<DeclinedPathApi, string>;
+
+/** Beside a path the call's read does not offer: the read offers win back only while the campaign has a win-back branch. */
+export const PATH_NOT_OFFERED = "(this campaign has none)";
+
+/**
+ * Under the radios: where the preselected path comes from, from the read's `declinedPathSet` (never inferred), and, when
+ * the user chose another path for this lead, what the track holds. A track with no path set is said as unset, with the
+ * path logging uses without a choice as the read gives it (`declinedPath`); no setting is claimed for it (review bot on
+ * d478d6d), and Q14 is not answered here. One exhaustive switch, so a third source a later ticket adds needs its sentence.
+ */
+export function declinedPathSourceLine(task: Pick<CallTaskView, "declinedPath" | "declinedPathSet"> & { readonly track: { readonly label: string } }, chosen: DeclinedPathApi | null, who: string): string {
+  const track = task.track.label.toLowerCase();
+  const overridden = chosen !== null && chosen !== task.declinedPath;
+  const source: "set" | "unset" = task.declinedPathSet ? "set" : "unset";
+  switch (source) {
+    case "set":
+      return overridden ? `For ${who} only: the ${track} is set to “${DECLINED_PATH_CHOICE[task.declinedPath]}”.` : `Preselected from the ${track}’s setting.`;
+    case "unset":
+      return overridden
+        ? `For ${who} only: no path is set on the ${track}, so without a choice logging uses “${DECLINED_PATH_CHOICE[task.declinedPath]}”.`
+        : `No path is set on the ${track} for a declined call, so the one logging uses without a choice is preselected.`;
+    default: {
+      const unhandled: never = source;
+      throw new Error(`A preselection source with no sentence: ${String(unhandled)}`);
+    }
+  }
+}
+
+/** A chosen path the call's read does not offer (the boundary, ticket 16c): Log sends nothing. */
+export const PATH_NOT_OFFERED_LINE = "This campaign has no win-back branch now, so that path can’t be logged. Choose another.";
+
+/** What logging not interested on a path does to the lead as a whole, from the preview's status after it. */
+/** "In win-back" as "in win-back": a status label inside a sentence. */
+const lowerFirst = (label: string): string => label.charAt(0).toLowerCase() + label.slice(1);
+
+/**
+ * What logging not interested on a path does to the lead as a whole, from the preview's status after it. Said of "this
+ * campaign", as the logged line and the record say it, never with the campaign's name, which may itself hold a comma or
+ * an apostrophe (council on 4fd9ca4, item 4).
+ */
+function declineLeadLine(status: OutreachStatus): string {
+  switch (status) {
+    case "declined_on_call":
+      return "Logging this stops their outreach in this campaign only. Their other campaigns and colleagues are not affected.";
+    case "in_win_back":
+      return "Logging this moves them to this campaign’s win-back branch: its tracks replace the main sequence’s remaining ones.";
+    case "active":
+    case "queued":
+    case "waiting_on_call":
+      return "Logging this keeps their remaining tracks in this campaign going.";
+    case "finished_no_usable_channel":
+      return "Logging this ends their outreach in this campaign: nothing is left to reach them on without a call (finished, no usable channel).";
+    case "sequence_finished_no_response":
+      return "Logging this ends their outreach in this campaign: nothing is left to send (sequence finished, no response).";
+    case "callback_scheduled":
+    case "paused":
+    case "replied":
+    case "interested_on_call":
+    case "stopped_manually":
+      return `Logging this leaves them ${lowerFirst(STATUS_LABEL[status])} in this campaign.`;
+    default: {
+      const unhandled: never = status;
+      throw new Error(`A status with no sentence: ${String(unhandled)}`);
+    }
+  }
+}
+
+/**
+ * One track a decline leaves unfinished or finishes, said from its state: `preview`, what logging will do (before Log,
+ * from the call read's copy); `record`, as the server's read at this instant holds it (Activity), so stored facts are
+ * said in the past and only the read's present state in the present. One exhaustive switch for both, so a state a
+ * later ticket adds fails typecheck until it has both sentences.
+ */
+export function declineTrackLine(a: DeclineTrackView, mode: "preview" | "record", userZone: string): string {
+  const name = a.track.label;
+  const preview = mode === "preview";
+  switch (a.state) {
+    case "started":
+      if (a.track.branch === "win_back") return preview ? `${name} starts now.` : `${name} started, and is running.`;
+      return preview ? `${name} carries on.` : `${name} carried on, and is running.`;
+    case "started_held":
+      // Started, while a hold stops the lead (a callback now; a pause from ticket 17): never said as running.
+      return preview ? `${name} has started, and waits while their outreach is held.` : `${name} has started, and is waiting while their outreach is held.`;
+    case "finished":
+      return `${name} has finished.`;
+    case "waiting":
+      // The day the server's read resolves its start to, if the lead keeps running: the same in both modes.
+      return `${name} starts after its delay, on ${dateIn(userZone, a.startsAt)}.`;
+    case "held":
+      return `${name} starts after its delay, once their outreach is no longer held.`;
+    case "not_started":
+      return preview ? `${name} starts when the track before it finishes.` : `${name} has not started.`;
+    case "dropped_for_win_back":
+      return preview ? `${name} is dropped for the win-back branch.` : `${name} was dropped for the win-back branch.`;
+    case "skipped_declined":
+      return preview ? `${name} is skipped: no call is made to them again.` : `${name} was skipped: no call is made to them again.`;
+    case "no_more_calls":
+      return `${name} will not call them: no call is made to them again.`;
+    case "skipped_unworked":
+      return `${name} was skipped: its call wasn’t made within its skip limit.`;
+    case "skipped_no_channel":
+      return preview ? `${name} is skipped: there is nothing to reach them on for it.` : `${name} was skipped: there is nothing to reach them on for it.`;
+    case "skipped":
+      return `${name} was skipped.`;
+    case "stopped":
+      return preview ? `${name} will not start.` : `${name} did not start: their outreach in this campaign stopped.`;
+    case "stopped_after_start":
+      return preview ? `${name} stops.` : `${name} stopped: their outreach in this campaign stopped.`;
+    default: {
+      const unhandled: never = a;
+      throw new Error(`A track state with no sentence: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+/** Every path says it, as the prototype does under the radios, from the preview's own fact (council on 4fd9ca4, item 3). */
+export const NO_MORE_CALLS_LINE = "No call is made to them again.";
+
+/**
+ * Before Log, for the path shown on the radios: the lead, whether a call is ever made to them again (the read's
+ * `noMoreCalls`), each track, and the work already with a provider (the read's `declines`).
+ */
+export function declinePreviewLines(preview: DeclinePreviewView, userZone: string): { lead: string; noMoreCalls: string | null; tracks: string[]; provider: string | null } {
+  const n = preview.withProvider;
+  const provider = n === 0 ? null : `${n === 1 ? "One email or text is" : `${n} emails or texts are`} already with the provider: logging this asks it to withdraw ${n === 1 ? "it" : "them"}, and ${n === 1 ? "it" : "they"} may still go.`;
+  return { lead: declineLeadLine(preview.status), noMoreCalls: preview.noMoreCalls ? NO_MORE_CALLS_LINE : null, tracks: preview.tracks.map((t) => declineTrackLine(t, "preview", userZone)), provider };
+}
+
+/**
+ * A decline on the record, beside the enrollment's status (ticket 16c): when it was logged and the path it took, as
+ * history; a present state only as the status the server reads now says it.
+ */
+export function declinedRecordLine(decline: RecordCalls["declines"][number], status: OutreachStatus): string {
+  const day = dayLabel(decline.date);
+  switch (decline.path) {
+    case "stop":
+      return `Declined on a call on ${day}. Their outreach in this campaign stopped there.`;
+    case "continue":
+      return status === "active" || status === "queued" ? `Declined on a call on ${day}. No call is made to them again in this campaign; their other channels continue.` : `Declined on a call on ${day}. No call is made to them again in this campaign.`;
+    case "win_back":
+      return status === "in_win_back" ? `Declined on a call on ${day}, and moved to this campaign’s win-back branch, which is running. No call is made to them again.` : `Declined on a call on ${day}, and moved to this campaign’s win-back branch. No call is made to them again.`;
+    default: {
+      const unhandled: never = decline.path;
+      throw new Error(`A declined path with no sentence: ${String(unhandled)}`);
+    }
+  }
 }

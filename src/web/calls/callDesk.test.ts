@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
-import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
+import type { CampaignDefinition, DeclinedPath, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
 import type { ApiError, CallOutcomeRefusal, CallOutcomeAnswer, CallsView, CallTaskView } from "../../shared/api.ts";
 import { CallDesk, NoAnswer, Refused, type CallDeskPorts, type DeskFault, type KeyValue, type OutcomeBody } from "./callDesk.ts";
 import { loggedLine, refusedRecordLine } from "./wording.ts";
@@ -45,7 +45,7 @@ const flush = async () => {
   for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve));
 };
 
-async function world() {
+async function world(definition: CampaignDefinition = DEFINITION) {
   const h = new EngineHarness({ start: MONDAY_10 - 2 * 60 * MIN, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
   await h.tick();
   await h.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "Europe/London" });
@@ -58,7 +58,7 @@ async function world() {
       person({ person_id: "p3", business_id: "b1", full_name: "Sam Lee", email: "sam@harbour.example", direct_phone: "+442079460333" }),
     ],
   });
-  await h.defineSequence(campaign.id, DEFINITION);
+  await h.defineSequence(campaign.id, definition);
   expect((await h.launch(campaign.id)).status).toBe(200);
   await h.advanceTo(MONDAY_10);
 
@@ -112,7 +112,14 @@ async function world() {
   };
   const outbox = () => local.keys().filter((k) => k.startsWith("outreach.calls.outbox."));
   const stored = async (requestId: string) => (await h.store.engine.callRequestTask(requestId)) !== null;
-  return { h, desk, held, answer, fireTimers, outbox, stored, local, failTaskReads: (n: number) => (failTaskReads = n), posts: () => posts };
+  /** Ticket 19 will publish running edits; here the stored phone track's declined path changes directly, as as-of-the-instant.test.ts edits a launched skip limit. */
+  const setConfiguredPath = (path: DeclinedPath | undefined) => {
+    const db = (h.store.engine as unknown as { db: { prepare(sql: string): { get(...a: unknown[]): Record<string, unknown> | undefined; run(...a: unknown[]): unknown } } }).db;
+    const def = JSON.parse(String(db.prepare("SELECT definition FROM campaigns WHERE id = ?").get(campaign.id)?.["definition"])) as CampaignDefinition;
+    const tracks = def.tracks.map((t) => (t.channel === "call" ? { ...t, declinedPath: path } : t));
+    db.prepare("UPDATE campaigns SET definition = ?, version = version + 1, definition_version = definition_version + 1 WHERE id = ?").run(JSON.stringify({ ...def, tracks }), campaign.id);
+  };
+  return { h, desk, held, answer, fireTimers, outbox, stored, local, setConfiguredPath, failTaskReads: (n: number) => (failTaskReads = n), posts: () => posts };
 }
 
 describe("what the user chose is never replaced for them (review bot on e6872eb, finding 1)", () => {
@@ -1001,5 +1008,141 @@ describe("the callback instant chosen is kept in the draft: a reload and a retry
     await w.answer(first!, true);
     await w.fireTimers();
     expect(w.held[0]?.body).toEqual(first?.body);
+  });
+});
+
+describe("the declined path is part of the press, like the outcome (ticket 16c; ADR 0003 4.4.1)", () => {
+  const email: StepDefinition = { id: "w1", waitDays: 0, subject: "One more idea", body: "One more idea for {{company}}.", threading: "new_subject", removed: false };
+  /** The phone track configured to win back, with a win-back branch of two emails two days apart. */
+  const WIN_BACK: CampaignDefinition = { ...DEFINITION, tracks: [{ ...phone, declinedPath: "win_back" }, { id: "w1", channel: "email", branch: "win_back", window: WEEKDAYS_9_TO_17, steps: [email, { ...email, id: "w2", waitDays: 2 }], start: { kind: "entry" }, removed: false }] };
+  const ready = async (w: Awaited<ReturnType<typeof world>>, faults: ReadonlySet<DeskFault> = new Set()) => {
+    const d = w.desk(new MapStore(), faults);
+    await d.start();
+    await w.fireTimers();
+    const snap = d.getSnapshot();
+    if (snap.task?.state !== "ready") throw new Error("no call on screen");
+    return { d, view: snap.task.view };
+  };
+
+  test("untouched, the radios show the path the read preselects, and the press carries it; sent again unchanged after no answer; said as the server stored it", async () => {
+    const w = await world(WIN_BACK);
+    const { d, view } = await ready(w);
+    expect(view).toMatchObject({ declinedPath: "win_back", declinedPathSet: true, declinedPaths: ["stop", "continue", "win_back"] });
+    d.setDraft({ outcome: "not_interested", note: "Happy with their agency." });
+    expect(d.getSnapshot().draft.declinedPath).toBeNull();
+    expect(d.getSnapshot().declined).toEqual({ path: "win_back", chosen: false, offered: true });
+    d.log();
+    await flush();
+    const first = w.held[0];
+    expect(first?.body).toMatchObject({ outcome: "not_interested", declinedPath: "win_back" });
+    await w.answer(first!, true);
+    await w.fireTimers();
+    expect(w.held[0]?.body).toEqual(first?.body);
+    await w.answer(w.held[0]!);
+    await flush();
+    expect(loggedLine(d.getSnapshot().logged!, "Europe/London")).toBe("Pat Oneil: not interested logged. Moved to this campaign’s win-back branch, with no more calls. Now in win-back, in Desk. The note is saved on Pat Oneil.");
+  });
+
+  test("the user's own path for this lead is the press's; it stays in the draft whatever the outcome, and goes only with not interested", async () => {
+    const w = await world(WIN_BACK);
+    const { d } = await ready(w);
+    d.setDraft({ outcome: "not_interested", declinedPath: "continue" });
+    expect(d.getSnapshot().declined).toEqual({ path: "continue", chosen: true, offered: true });
+    d.setDraft({ outcome: "no_answer" });
+    expect(d.getSnapshot().draft).toMatchObject({ outcome: "no_answer", declinedPath: "continue" });
+    expect(d.getSnapshot().declined).toBeNull();
+    d.log();
+    await flush();
+    expect(w.held[0]?.body).not.toHaveProperty("declinedPath");
+    w.held.splice(0);
+    w.local.map.clear();
+
+    const v = await world(WIN_BACK);
+    const e = await ready(v);
+    e.d.setDraft({ outcome: "not_interested", declinedPath: "stop" });
+    e.d.log();
+    await flush();
+    expect(v.held[0]?.body).toMatchObject({ outcome: "not_interested", declinedPath: "stop" });
+    await v.answer(v.held[0]!);
+    await flush();
+    expect(e.d.getSnapshot().logged?.task.storedCalls.at(-1)?.declinedPath).toBe("stop");
+  });
+
+  test("a path the call's read does not offer (win back, with no win-back branch) is refused in place: nothing is sent and the draft keeps it", async () => {
+    const w = await world();
+    const { d, view } = await ready(w);
+    // No path set on the track (Q14): the read preselects what the engine does, stop.
+    expect(view).toMatchObject({ declinedPath: "stop", declinedPathSet: false, declinedPaths: ["stop", "continue"] });
+    d.setDraft({ outcome: "not_interested", declinedPath: "win_back" });
+    expect(d.getSnapshot().declined).toEqual({ path: "win_back", chosen: true, offered: false });
+    d.log();
+    await flush();
+    expect(w.posts()).toBe(0);
+    expect(w.outbox()).toEqual([]);
+    expect(d.getSnapshot().draft).toMatchObject({ outcome: "not_interested", declinedPath: "win_back" });
+  });
+
+  test("a press untouched before the track's path changes carries the path it was pressed with, whenever and from wherever it is sent", async () => {
+    const w = await world(WIN_BACK);
+    const { d } = await ready(w);
+    d.setDraft({ outcome: "not_interested" });
+    d.log();
+    await flush();
+    // The request never reaches the server.
+    w.held.splice(0)[0]?.reject(new NoAnswer());
+    await flush();
+    // The track's path changes (a running edit, ticket 19), and a later read preselects stop.
+    w.setConfiguredPath("stop");
+    await d.refresh();
+    await flush();
+    await w.fireTimers();
+    expect(w.held[0]?.body).toMatchObject({ declinedPath: "win_back" });
+    await w.answer(w.held[0]!);
+    await flush();
+    expect(d.getSnapshot().logged?.task.storedCalls.at(-1)?.declinedPath).toBe("win_back");
+  });
+
+  test("an answer never resets the path the user chose on a draft being edited", async () => {
+    const w = await world(WIN_BACK);
+    const a = await ready(w);
+    const b = await ready(w);
+    a.d.setDraft({ outcome: "skip_for_now" });
+    a.d.log();
+    await flush();
+    b.d.setDraft({ outcome: "not_interested", declinedPath: "stop" });
+    await w.answer(w.held[0]!);
+    await flush();
+    expect(b.d.getSnapshot().draft).toMatchObject({ outcome: "not_interested", declinedPath: "stop" });
+  });
+
+  test("the faults that drop the user's path at the press, lose it on a resend, or read the preselected path again at send time are each seen", async () => {
+    const dropped = await world(WIN_BACK);
+    const a = await ready(dropped, new Set(["declined_path_dropped_at_press"]));
+    a.d.setDraft({ outcome: "not_interested", declinedPath: "continue" });
+    a.d.log();
+    await flush();
+    expect(dropped.held[0]?.body).toMatchObject({ declinedPath: "win_back" });
+
+    const lost = await world(WIN_BACK);
+    const b = await ready(lost, new Set(["declined_path_lost_on_resend"]));
+    b.d.setDraft({ outcome: "not_interested", declinedPath: "continue" });
+    b.d.log();
+    await flush();
+    await lost.answer(lost.held[0]!, true);
+    await lost.fireTimers();
+    expect(lost.held[0]?.body).not.toHaveProperty("declinedPath");
+
+    const reread = await world(WIN_BACK);
+    const c = await ready(reread, new Set(["preselected_path_read_at_send"]));
+    c.d.setDraft({ outcome: "not_interested" });
+    c.d.log();
+    await flush();
+    reread.held.splice(0)[0]?.reject(new NoAnswer());
+    await flush();
+    reread.setConfiguredPath("stop");
+    await c.d.refresh();
+    await flush();
+    await reread.fireTimers();
+    expect(reread.held[0]?.body).toMatchObject({ declinedPath: "stop" });
   });
 });

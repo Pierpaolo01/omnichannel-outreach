@@ -12,14 +12,34 @@ export interface TrackLabel {
   readonly label: string;
   /** The campaign has more than one track on this channel, so the label carries a number. */
   readonly several: boolean;
+  /** The main sequence, or the campaign's win-back branch (ticket 16): what a step of the track is called says it. */
+  readonly branch: "main" | "win_back";
 }
 
 export function trackLabel(def: CampaignDefinition, track: Pick<TrackDefinition, "id" | "channel">): TrackLabel {
   const branch = def.tracks.find((t) => t.id === track.id)?.branch ?? "main";
   const same = def.tracks.filter((t) => t.channel === track.channel && t.branch === branch && (!t.removed || t.id === track.id));
   const word = branch === "win_back" ? `Win-back ${WORD[track.channel] === "SMS" ? "SMS" : WORD[track.channel].toLowerCase()}` : WORD[track.channel];
-  if (same.length <= 1) return { label: `${word} track`, several: false };
-  return { label: `${word} track ${same.findIndex((t) => t.id === track.id) + 1}`, several: true };
+  if (same.length <= 1) return { label: `${word} track`, several: false, branch };
+  return { label: `${word} track ${same.findIndex((t) => t.id === track.id) + 1}`, several: true, branch };
+}
+
+/**
+ * What one step of a track is called in a title (council on 4fd9ca4, item 5): "Email" or "Text" in the main sequence,
+ * "Win-back email" or "Win-back text" in the win-back branch, so a step of the branch never reads as the main sequence's.
+ */
+export function stepNoun(track: Pick<TrackLabel, "branch">, channel: "email" | "sms"): string {
+  const noun = channel === "sms" ? "Text" : "Email";
+  switch (track.branch) {
+    case "main":
+      return noun;
+    case "win_back":
+      return `Win-back ${noun.toLowerCase()}`;
+    default: {
+      const unhandled: never = track.branch;
+      throw new Error(`A branch with no name: ${String(unhandled)}`);
+    }
+  }
 }
 
 /** A track's name inside a sentence: "the email track", "the SMS track", "email track 2", "SMS track 2", "the phone track", "the win-back SMS track". */
