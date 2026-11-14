@@ -72,7 +72,7 @@ describe("pausing a campaign", () => {
     const pat = c.lead("Pat Oneil");
     await h.advanceTo(MONDAY_9 + H);
     expect(sent(pat)).toEqual(["s1"]);
-    const dueBefore = (await read(pat)).tracks.find((t) => t.trackId === "e1")?.steps.find((s) => s.stepId === "s2")?.dueAt;
+    const dueBefore = (await read(pat)).tracks.find((t) => t.trackId === "e1")?.nextStep?.dueAt;
     const q0 = (await h.request<CallsView>("GET", "/api/calls")).body;
     expect(q0.readyNow.length, JSON.stringify(q0).slice(0, 800)).toBe(2);
 
@@ -90,8 +90,9 @@ describe("pausing a campaign", () => {
     expect((await campaignControl(c.id, "pause")).body.error?.message).toMatch(/already paused/);
 
     expect((await campaignControl(c.id, "resume")).status).toBe(200);
-    const dueAfter = (await read(pat)).tracks.find((t) => t.trackId === "e1")?.steps.find((s) => s.stepId === "s2")?.dueAt;
-    expect(Date.parse(dueAfter ?? "")).toBe(Date.parse(dueBefore ?? "") + 7 * DAY);
+    const dueAfter = (await read(pat)).tracks.find((t) => t.trackId === "e1")?.nextStep?.dueAt;
+    expect(dueBefore).toBe("2026-11-04T00:00:00.000Z");
+    expect(dueAfter).toBe("2026-11-11T00:00:00.000Z");
     expect((await h.request<CallsView>("GET", "/api/calls")).body.readyNow.length).toBe(2);
   });
 
@@ -234,4 +235,27 @@ describe("one lead's controls", () => {
     expect(after.tracks.find((t) => t.trackId === "p1")).toMatchObject({ finishReason: "skipped_unworked", finishedAt: new Date(rollover).toISOString() });
     expect(after.status).toBe("paused");
   });
+
+  test("a call of a lead paused at the day's start takes no room that day; resumed later that day, it is listed all the same (P12)", async () => {
+    const callOnly: CampaignDefinition = { ...DEFINITION, tracks: [track("p1", "call", [{ ...email("c1"), subject: "", body: "" }])] };
+    const { h, campaign, control } = await world(callOnly);
+    expect((await h.request("PUT", "/api/call-settings", { dailyCapacity: 1, userZone: "Europe/London" })).status).toBe(200);
+    const c = await campaign("Clinics");
+    const pat = c.lead("Pat Oneil");
+    const nia = c.lead("Nia Cole");
+    await h.advanceTo(MONDAY_9 + H);
+    const listed = async () => (await h.request<CallsView>("GET", "/api/calls")).body.readyNow.map((x) => x.enrollmentId).sort();
+    // Capacity 1: one of them is placed on Monday.
+    const first = (await listed())[0]!;
+    const other = first === pat ? nia : pat;
+    expect(await listed()).toEqual([first]);
+    expect((await control(first, "pause")).status).toBe(200);
+    // Tuesday: the paused lead's carried call is not committed, so the other lead's call is placed.
+    await h.advanceTo(MONDAY_9 + DAY + H);
+    expect(await listed()).toEqual([other]);
+    // Resumed at noon: its call is listed again, rolled over, beside the one placed today.
+    expect((await control(first, "resume")).status).toBe(200);
+    expect(await listed()).toEqual([pat, nia].sort());
+  });
 });
+
