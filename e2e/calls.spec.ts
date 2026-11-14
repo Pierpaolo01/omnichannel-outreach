@@ -540,15 +540,13 @@ test.describe("the sheet's calling-hours label says the server's fact about the 
   });
 });
 
-test("not interested has no control here yet (ticket 16b): the page shows its not-yet pill, and a call declined elsewhere is off the list with the server's reason", async ({ page }) => {
+test("not interested is a working outcome (ticket 16c), and a call declined elsewhere is off the list with the server's reason", async ({ page }) => {
   const f = await freshCalls("ready", "declined-elsewhere");
   await page.goto(`${f.url}/calls`);
   await expect(page.getByRole("heading", { name: "Amira Hassan" })).toBeVisible();
-  // The server offers not interested (the task read lists it), but this page has no working control for it.
-  const notInterested = outcome(page, "Not interested");
-  await expect(notInterested).toBeDisabled();
-  // Ticket 15b built callback requested and the redial: only not interested waits for a later release.
-  await expect(page.getByText("Not interested arrives with a later release.")).toBeVisible();
+  // The server offers not interested (the task read lists it), and so does the page; the not-yet sentence is gone.
+  await expect(outcome(page, "Not interested")).toBeEnabled();
+  await expect(page.getByText("Not interested arrives with a later release.")).toHaveCount(0);
   const t = await focused(f);
   await logElsewhere(f, t.taskId, "not_interested", t.numberId);
   await logWithMouse(page, "No answer", "Typed here.");
