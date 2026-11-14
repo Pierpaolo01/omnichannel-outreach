@@ -272,7 +272,7 @@ function Sheet({ desk, snap, task, userZone, today, placeFocus }: { desk: CallDe
     <section aria-label={`Call with ${who}`} className="overflow-clip rounded-box border border-line bg-base-100">
       <div className="bg-band px-5 pb-7 pt-[26px] text-band-ink min-[901px]:px-[30px]">
         <div className="flex flex-wrap items-start justify-between gap-6">
-          <div className="min-w-0">
+          <div className="min-w-0 flex-[1_1_20rem]">
             <p className="text-[13px] font-medium text-band-muted [overflow-wrap:anywhere]">
               {task.campaign.name}, {task.track.label.toLowerCase()}
             </p>
@@ -294,7 +294,7 @@ function Sheet({ desk, snap, task, userZone, today, placeFocus }: { desk: CallDe
             {/* Why the call is on the list, as the server gives it: a redial or a callback included, which this page has no control for yet. */}
             {task.task && <p className="mt-1 text-[13px] text-band-muted">{reasonLine(task.task, userZone, today).text}</p>}
           </div>
-          <div className="text-right">
+          <div className="shrink-0 text-right">
             <div className="text-[34px] font-medium leading-none tracking-[-0.02em]">{task.localTime}</div>
             <div className={`mt-1.5 text-[13px] ${clock.tone === "ok" ? "text-band-ok" : clock.tone === "warn" ? "text-band-warn" : "text-band-muted"}`}>{clock.text}</div>
             <div className="mt-0.5 text-[13px] text-band-muted">Calling hours {callingHoursLine(task.callingHours)}</div>
