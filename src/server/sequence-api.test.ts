@@ -161,6 +161,27 @@ describe("saving the definition: sessions, numbers and the base revision (ADR 00
     expect((await put(api, id, body("Tab A after loading", { session: "A", seq: 10, base: 1 }))).status).toBe(200);
   });
 
+  test("a page's save that another page replaced, having seen it, is still known as saved: its late older save is superseded, and a retry of it is 'replaced', not a conflict (generated seeds 7369 and 7729)", async () => {
+    const { api, id } = await fresh();
+    // Tab A saves #1 and #2; tab B, which loaded revision 2, saves over them.
+    expect((await put(api, id, body("A one", { session: "A", seq: 1, base: 0 }))).status).toBe(200);
+    expect((await put(api, id, body("A two", { session: "A", seq: 2, base: 0 }))).status).toBe(200);
+    expect((await put(api, id, body("B on top", { session: "B", seq: 1, base: 2 }))).status).toBe(200);
+    // A's #1 arrives late: older than a save of A's already accepted, so superseded (seed 7729).
+    const late = await put(api, id, body("A one", { session: "A", seq: 1, base: 0 }));
+    expect([late.status, await code(late)]).toEqual([409, "superseded"]);
+    // A retries #2 after a lost answer: it was saved, then replaced by a page that had seen it (seed 7369).
+    const retry = await put(api, id, body("A two", { session: "A", seq: 2, base: 0 }));
+    expect([retry.status, await code(retry)]).toEqual([409, "replaced"]);
+    // The same number with other content was never saved: a conflict, as before.
+    const other = await put(api, id, body("A two, changed", { session: "A", seq: 2, base: 0 }));
+    expect([other.status, await code(other)]).toEqual([409, "edit_conflict"]);
+    // A newer number from A, still based on an old revision: a conflict, as before (invariant 2).
+    const newer = await put(api, id, body("A three", { session: "A", seq: 3, base: 0 }));
+    expect([newer.status, await code(newer)]).toEqual([409, "edit_conflict"]);
+    expect((await subject(api, id)).definition.tracks[0]!.steps[0]!.subject).toBe("B on top");
+  });
+
   test("a save with no session (an API client, a test) is stored as before", async () => {
     const { api, id } = await fresh();
     expect((await put(api, id, body("Session", { session: "A", seq: 1, base: 0 }))).status).toBe(200);

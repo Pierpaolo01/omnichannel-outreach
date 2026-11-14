@@ -27,6 +27,9 @@ export function saveWording(save: SaveStatus, launched: boolean): SaveWording {
       return { label: "Saved", problem: false, conflict: null };
     case "error":
       return { label: "Not saved", problem: true, conflict: null };
+    case "invalid":
+      // The draft cannot be saved as it stands, and nothing of it is being sent: not "Saving…".
+      return { label: "Not saved", problem: true, conflict: null };
     case "conflict":
       return save.saved
         ? { label: "Changed elsewhere", problem: true, conflict: "Your last change was saved, then changed there. Load the saved version to carry on." }

@@ -81,7 +81,7 @@ function LaunchBar({ editor, facts }: { editor: SequenceEditor; facts: BeforeLau
     text = (
       <>
         <b className="font-semibold text-crit">Your latest change isn’t saved, so launch waits.</b>{" "}
-        <span className="text-ink-2">{editor.save.kind === "error" ? editor.save.message : ""} The checks below are for the last saved version. Fix it in the sequence, or try again.</span>
+        <span className="text-ink-2">{editor.save.kind === "error" || editor.save.kind === "invalid" ? editor.save.message : ""} The checks below are for the last saved version. {editor.save.kind === "invalid" ? "Fix it in the sequence." : "Fix it in the sequence, or try again."}</span>
       </>
     );
   else if (editor.unsaved) text = <><b className="font-semibold">Saving your latest change…</b> Launch is ready once it is saved.</>;
@@ -125,7 +125,8 @@ function LaunchBar({ editor, facts }: { editor: SequenceEditor; facts: BeforeLau
           <ConflictNotice editor={editor} onLoaded={() => said.current?.focus()} />
         </div>
       )}
-      {failed && !launchedAt && editor.save.kind !== "conflict" && (
+      {/* Trying again cannot help a draft that cannot be saved as it stands. */}
+      {failed && !launchedAt && editor.save.kind !== "conflict" && editor.save.kind !== "invalid" && (
         <button type="button" className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={editor.retrySave}>
           Try again
         </button>

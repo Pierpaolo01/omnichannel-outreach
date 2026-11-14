@@ -11,6 +11,8 @@ const STATES = {
   saving: [[{ kind: "saving" }, { label: "Saving…", problem: false, conflict: null }]],
   saved: [[{ kind: "saved" }, { label: "Saved", problem: false, conflict: null }]],
   error: [[{ kind: "error", message: "The server refused it." }, { label: "Not saved", problem: true, conflict: null }]],
+  // A draft that cannot be saved as it stands: nothing is being sent, so never "Saving…".
+  invalid: [[{ kind: "invalid", message: "Choose at least one sending day." }, { label: "Not saved", problem: true, conflict: null }]],
   conflict: [
     [{ kind: "conflict", message: "Changed elsewhere.", saved: false }, { label: "Not saved", problem: true, conflict: "What you typed is still here, but it is not saved. Loading the saved version replaces it." }],
     // This page's change was accepted, then replaced by another page: never "Not saved" (invariant 3).

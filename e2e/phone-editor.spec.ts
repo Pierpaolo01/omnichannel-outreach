@@ -84,12 +84,25 @@ test.describe("the phone track on the canvas and in its inspector", () => {
     await expect(page.getByText("2 days is the default", { exact: false })).toHaveCount(0);
   });
 
-  test("a skip limit below 1 is said in place and nothing is saved until it is fixed", async ({ page }) => {
+  test("a skip limit below 1 is said in place, once, as Not saved with its reason and no Try again, and nothing is saved until it is fixed (with the save rule of pull request 49)", async ({ page }) => {
     const id = await newCampaign(page, "Skip limit refused");
     await page.request.put(`/api/campaigns/${id}/sequence`, { data: WITH_A_CALL });
     await page.goto(`/campaigns/${id}?track=call`);
+    let puts = 0;
+    await page.route("**/api/campaigns/*/sequence", (route) => {
+      if (route.request().method() === "PUT") puts++;
+      return route.continue();
+    });
     await page.getByLabel("Days before an unworked call is skipped").fill("0");
-    await expect(page.getByRole("alert").filter({ hasText: "Phone track: The call skip limit is a whole number of days, at least 1. Nothing is saved until this is fixed." })).toBeVisible();
+    const inspector = page.getByTestId("inspector");
+    await expect(inspector.getByRole("status").filter({ hasText: "Not saved" })).toBeVisible();
+    // One message: the reason, in place; no generic failure and nothing to try again.
+    await expect(inspector.getByRole("alert")).toHaveCount(1);
+    await expect(inspector.getByRole("alert")).toHaveText("Phone track: The call skip limit is a whole number of days, at least 1. Nothing is saved until this is fixed.");
+    await expect(page.getByText("Your last change wasn’t saved.")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Try again" })).toHaveCount(0);
+    await expect(page.getByText("Saving…")).toHaveCount(0);
+    expect(puts).toBe(0);
     await page.getByLabel("Days before an unworked call is skipped").fill("4");
     await saved(page);
     expect((await stored(page, id)).tracks.find((t) => t.id === "call")?.callSkipLimitDays).toBe(4);

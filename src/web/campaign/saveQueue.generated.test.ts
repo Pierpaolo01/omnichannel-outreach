@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import { describe, expect, test } from "vitest";
 import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
@@ -32,15 +33,73 @@ import { NoAnswer, draftProblems, type SaveStatus } from "./saveQueue.ts";
  * 6. No answer (save, launch or load) replaces a draft newer than the one it answered.
  * 7. A conflict stays visible until the user resolves it, however much they type.
  *
+ * 3b. A page whose newest draft cannot be sent never shows "Saving…" or "Saved" (after every step).
+ * 6 also covers an answer to a save sent before its page loaded the saved version: it changes nothing
+ *    the page shows (status, conflict, draft), checked after every such answer.
+ *
+ * How many runs (recorded in docs/agents/delivery-workflow.md): `pnpm check` runs 200 fixed seeds (7000
+ * to 7199), every seed that once failed (REGRESSIONS), and a window of 100 seeds that moves with each
+ * commit (printed; SAVE_QUEUE_WINDOW_FROM reruns it); the full search, in the `sequence-search`
+ * workflow's eight shards (`pnpm test:save-search`), runs 2,000 seeds, a quarter of a thousand per
+ * shard. All bounded by count, never by time. The five regressions were found by one run of
+ * 1,000 seeds (14 November 2026) when `pnpm check` ran 60 and no search ran this test at all.
+ *
  * Mutations that make it fail, each checked by hand when this was written:
  * - the server accepting a save whatever its base (sqlite-engine-store.ts): invariant 2;
  * - the server treating a repeat of the same session and number as a conflict: invariant 3;
  * - a leave-save that does not report into the queue, with restore doing nothing: invariant 3;
  * - no lock while a launch or a load is pending, and its answer replacing the draft regardless
  *   (editorStore.ts `update` and `answer`; council item 9, re-check B12): invariant 6;
- * - typing in conflict showing "Saving…" (editorStore.ts `update`; council item 10): invariant 7.
+ * - typing in conflict showing "Saving…" (editorStore.ts `update`; council item 10): invariant 7;
+ * - no generation gate, so an answer, or a queued save, from before the page loaded the saved version
+ *   still changes it (saveQueue.ts `send`, `save` and `step`; council on aebeb80, item 2): invariant 6.
  */
-const SEEDS = Number(process.env["SAVE_QUEUE_SEEDS"] ?? 60);
+/** The full search (`pnpm test:save-search`, in the `sequence-search` workflow), sharded by `SEQUENCE_SHARD`, "i/n". */
+const FULL_SEARCH = process.env["SAVE_QUEUE_SEARCH"] === "full";
+const SEEDS = Number(process.env["SAVE_QUEUE_SEEDS"] ?? (FULL_SEARCH ? 2_000 : 200));
+const SHARD = /^(\d+)\/(\d+)$/.exec(process.env["SEQUENCE_SHARD"] ?? "");
+const inShard = (index: number) => !FULL_SEARCH || !SHARD || index % Number(SHARD[2]) === Number(SHARD[1]) - 1;
+/**
+ * Seeds that once failed, run on every push. 7369, 7412, 7642 and 7889: a retry of a save the server
+ * had accepted, after another page that had seen it saved over it, was refused as a conflict, and the
+ * page said "Not saved". 7729: an older save of a page arriving after its newer one was accepted and
+ * then replaced, the same. Both because the server forgot a session's accepted saves once another
+ * session wrote (ADR 0003 1.1.1, migration 13). 845691, from the first moving window: a save asked for
+ * before the page loaded the saved version, queued behind the old request, then ran and said "Saved"
+ * over the page's idle state (council on aebeb80, item 2). 463057, from the next window: after the
+ * load, the pool sync's save of the new draft waited behind the old request and started only on its
+ * late answer; a new generation's saves no longer queue behind the old one's.
+ */
+const REGRESSIONS = [7369, 7412, 7642, 7729, 7889, 845691, 463057];
+/** The commit the moving window is derived from: CI's, else the checkout's HEAD, else none. */
+function commitOf(): string {
+  if (process.env["GITHUB_SHA"]) return process.env["GITHUB_SHA"];
+  try {
+    return execSync("git rev-parse HEAD", { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+  } catch {
+    return "0";
+  }
+}
+/**
+ * A window of seeds that moves with each commit (council on aebeb80, item 6): `pnpm check` also runs
+ * WINDOW seeds starting at a number derived from the commit, so pushes over time try seeds the fixed
+ * set never reaches. It is printed, and SAVE_QUEUE_WINDOW_FROM reruns it. The full search runs its own
+ * 2,000 and no window.
+ */
+const WINDOW = FULL_SEARCH ? 0 : Number(process.env["SAVE_QUEUE_WINDOW"] ?? 100);
+const COMMIT = commitOf();
+const WINDOW_FROM = process.env["SAVE_QUEUE_WINDOW_FROM"] ? Number(process.env["SAVE_QUEUE_WINDOW_FROM"]) : 100_000 + (Number.parseInt(COMMIT.slice(0, 8), 16) || 0) % 900_000;
+if (WINDOW > 0) console.info(`The save test's moving window: seeds ${WINDOW_FROM} to ${WINDOW_FROM + WINDOW - 1}, from commit ${COMMIT.slice(0, 12)}. Rerun it with SAVE_QUEUE_WINDOW_FROM=${WINDOW_FROM}.`);
+const RUN_SEEDS = [
+  ...new Set([
+    ...Array.from({ length: SEEDS }, (_, i) => 7000 + i).filter((_, i) => inShard(i)),
+    ...(FULL_SEARCH && SHARD ? [] : REGRESSIONS),
+    ...Array.from({ length: WINDOW }, (_, i) => WINDOW_FROM + i),
+  ]),
+];
+/** The coverage checks below hold over many runs, not over a few (council on aebeb80, item 5). */
+const ENOUGH_FOR_COVERAGE = SEEDS >= 100;
+const coverage = { lateAfterLoad: 0 };
 const STEPS = 60;
 
 function rng(seed: number): () => number {
@@ -101,6 +160,10 @@ interface Request {
   readonly kind: "put" | "launch" | "load";
   readonly body: Record<string, unknown> & { save?: { session: string; seq: number; base: number }; definitionVersion?: number };
   readonly keepalive: boolean;
+  /** How many times the page had loaded the saved version when the request was sent. */
+  readonly loads: number;
+  /** Held back, unanswered, until its page has loaded the saved version more times than this (a late answer after a load). */
+  heldPastLoads?: number;
   answer: { status: number; json: unknown } | null;
   readonly resolve: (view: SequenceView) => void;
   readonly reject: (error: Error) => void;
@@ -114,6 +177,9 @@ const flush = async () => {
 
 async function run(seed: number) {
   const r = rng(seed);
+  // A second stream for what was added later (the late answer after a load), so the first stream's
+  // choices, and the recorded seeds, stay as they were until it first acts.
+  const r2 = rng(seed ^ 0x5eed_c0de);
   const h = new EngineHarness({ start: Date.parse("2026-11-02T10:00:00Z"), accounts: [inbox("inbox-a")], sms: { numbers: [] } });
   const { campaign } = await h.createCampaign("Generated", {
     businesses: [business({ business_id: "b1", business_name: "Harbour Lane Physio" })],
@@ -127,15 +193,15 @@ async function run(seed: number) {
   const writerNow = (): string | null => server.writer;
   /** Every save the server accepted, as session/number. */
   const accepted = new Set<string>();
-  const coverage = { phoneSaved: false, phoneAny: false };
+  const phoneCoverage = { phoneSaved: false, phoneAny: false };
   const putRaw = async (body: Request["body"]) => {
     const out = await h.request<unknown>("PUT", path, body);
     if (out.status === 200) {
       const view = out.body as SequenceView;
       if (body.save) accepted.add(`${body.save.session}/${body.save.seq}`);
       const tracks = (body as unknown as CampaignDefinition).tracks;
-      if (tracks.some((t) => !t.removed && t.channel === "call" && t.callSkipLimitDays !== undefined && t.callSkipLimitDays !== 2)) coverage.phoneSaved = true;
-      if (tracks.some((t) => !t.removed && t.channel === "call")) coverage.phoneAny = true;
+      if (tracks.some((t) => !t.removed && t.channel === "call" && t.callSkipLimitDays !== undefined && t.callSkipLimitDays !== 2)) phoneCoverage.phoneSaved = true;
+      if (tracks.some((t) => !t.removed && t.channel === "call")) phoneCoverage.phoneAny = true;
       if (view.definitionVersion > server.version) {
         const session = body.save?.session ?? null;
         // Invariant 2: another session replaces a save only if it had seen it.
@@ -195,7 +261,7 @@ async function run(seed: number) {
   const pages: Page[] = [];
   const held = (page: Page, kind: Request["kind"], body: Request["body"], keepalive = false, draftAtLaunch?: CampaignDefinition) =>
     new Promise<SequenceView>((resolve, reject) => {
-      requests.push({ page, kind, body, keepalive, answer: null, resolve, reject, ...(draftAtLaunch ? { draftAtLaunch } : {}) });
+      requests.push({ page, kind, body, keepalive, loads: page.store.loads, answer: null, resolve, reject, ...(draftAtLaunch ? { draftAtLaunch } : {}) });
     });
 
   const openPage = async (): Promise<Page> => {
@@ -233,9 +299,18 @@ async function run(seed: number) {
       }
     }
   };
+  /** Whether a request is held back until its page's load answers. */
+  const heldBack = (x: Request) => x.heldPastLoads !== undefined && x.page.store.loads <= x.heldPastLoads && !x.page.gone;
+  /** Answers to a save sent before its page loaded the saved version, with what the page showed before them (invariant 6). */
+  const late: { page: Page; shown: string }[] = [];
+  const shownBy = (page: Page) => JSON.stringify([page.store.getSnapshot().save, page.store.inConflict, page.store.getSnapshot().draft]);
   const answer = (req: Request, lost: boolean) => {
     requests.splice(requests.indexOf(req), 1);
     if (req.page.gone) return;
+    if (req.kind === "put" && req.loads < req.page.store.loads && !req.page.frozen) {
+      late.push({ page: req.page, shown: shownBy(req.page) });
+      coverage.lateAfterLoad++;
+    }
     // Only a save is retried after no answer; a launch or a load gets its answer.
     if ((lost && req.kind === "put") || !req.answer) return req.reject(new NoAnswer());
     if (req.answer.status === 200) return req.resolve(req.answer.json as SequenceView);
@@ -255,7 +330,9 @@ async function run(seed: number) {
     const status = page.store.getSnapshot().save;
     // A conflict says whether this page's own newest edit was saved before the other change.
     const says = status.kind === "conflict" ? (status.saved ? "saved" : "not saved") : status.kind;
-    if (newestAccepted && (says === "error" || says === "not saved" || (settled && says === "saving"))) problems.push(`3: ${page.session} shows ${says} though its newest edit was accepted`);
+    if (newestAccepted && (says === "error" || says === "invalid" || says === "not saved" || (settled && says === "saving"))) problems.push(`3: ${page.session} shows ${says} though its newest edit was accepted`);
+    // 3b. A draft that cannot be sent is never "Saving…" or "Saved": nothing of it is being sent.
+    if (page.newestSendable === null && !page.store.inConflict && (status.kind === "saving" || status.kind === "saved")) problems.push(`3b: ${page.session} shows ${status.kind} for "${page.newestTyped}", which cannot be saved`);
     if (!newestAccepted && says === "saved") problems.push(`3: ${page.session} shows ${status.kind} saved though "${page.newestTyped}" was not accepted`);
   };
 
@@ -294,13 +371,15 @@ async function run(seed: number) {
       const req = pending[Math.floor(r() * pending.length)];
       if (req) await deliver(req);
     } else if (roll < 0.68) {
-      const req = requests.find((x) => x.answer !== null && !x.page.frozen);
+      const req = requests.find((x) => x.answer !== null && !x.page.frozen && !heldBack(x));
       if (req) answer(req, r() < 0.3);
     } else if (roll < 0.73 && live && kindOf(page.store) === "conflict" && page.store.getSnapshot().pending === null) {
       // Invariant 5: until now the refused page still held what was typed.
       if (page.newestTyped !== null && subjectOf(page.store.getSnapshot().draft) !== page.newestTyped) problems.push(`5: ${page.session} lost its draft before loading the stored version`);
       // Loading sets aside what was typed before choosing it, never what was typed after.
       const chosenOver = page.newestTyped;
+      // Often the page's saves still out are answered only after the load (council on aebeb80, item 2).
+      if (r2() < 0.7) for (const x of requests) if (x.page === page && x.kind === "put") x.heldPastLoads = page.store.loads;
       void page.store.loadStored().then(() => {
         if (!page.store.inConflict && page.newestTyped === chosenOver) {
           page.newestTyped = null;
@@ -328,6 +407,8 @@ async function run(seed: number) {
       tabs[t] = await openPage();
     }
     await flush();
+    // 6. An answer to a save sent before the user loaded the saved version changes nothing on the page.
+    for (const l of late.splice(0)) if (shownBy(l.page) !== l.shown) problems.push(`6: ${l.page.session} changed on a late answer to a save sent before it loaded the saved version`);
     for (const p of tabs) check(p, false);
   }
 
@@ -345,10 +426,12 @@ async function run(seed: number) {
   }
   for (let guard = 0; guard < 2_000; guard++) {
     await flush();
-    const req = requests[0];
+    const req = requests.find((x) => !heldBack(x)) ?? requests[0];
     if (!req) break;
     if (req.answer === null) await deliver(req);
     answer(req, false);
+    await flush();
+    for (const l of late.splice(0)) if (shownBy(l.page) !== l.shown) problems.push(`6: ${l.page.session} changed on a late answer to a save sent before it loaded the saved version`);
   }
   await flush();
   for (const p of tabs) check(p, true);
@@ -367,14 +450,14 @@ async function run(seed: number) {
   }
   const stored = (await h.request<SequenceView>("GET", path)).body.definition;
   const smsSaved = stored.tracks.some((t) => !t.removed && t.channel === "sms") && (stored.smsPool ?? []).length > 0;
-  return { problems, pending: requests.length, launchedOnce: launchedOnce(), smsSaved, phoneSaved: coverage.phoneSaved, phoneAny: coverage.phoneAny };
+  return { problems, pending: requests.length, launchedOnce: launchedOnce(), smsSaved, phoneSaved: phoneCoverage.phoneSaved, phoneAny: phoneCoverage.phoneAny };
 }
 
 describe("saving the definition, generated over the real editor state (ADR 0003 1.1.1)", () => {
   const launched: boolean[] = [];
   const smsSaved: boolean[] = [];
   const phoneSaved: boolean[] = [];
-  for (const seed of Array.from({ length: SEEDS }, (_, i) => 7000 + i)) {
+  for (const seed of RUN_SEEDS) {
     test(`run ${seed}`, async () => {
       const out = await run(seed);
       launched.push(out.launchedOnce);
@@ -384,13 +467,16 @@ describe("saving the definition, generated over the real editor state (ADR 0003 
       expect(out.problems).toEqual([]);
     });
   }
-  test("the runs include launches that start, not only refused ones", () => {
-    expect(launched.filter(Boolean).length).toBeGreaterThan(SEEDS / 10);
+  test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs include launches that start, not only refused ones", () => {
+    expect(launched.filter(Boolean).length).toBeGreaterThan(RUN_SEEDS.length / 10);
   });
-  test("the runs save arranged SMS tracks with the numbers that connected (ticket 13b)", () => {
-    expect(smsSaved.filter(Boolean).length).toBeGreaterThan(SEEDS / 20);
+  test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs answer saves sent before their page loaded the saved version, late (council on aebeb80, item 2)", () => {
+    expect(coverage.lateAfterLoad).toBeGreaterThan(0);
   });
-  test("the runs save phone tracks with their own calling hours and skip limits (ticket 14c)", () => {
+  test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs save arranged SMS tracks with the numbers that connected (ticket 13b)", () => {
+    expect(smsSaved.filter(Boolean).length).toBeGreaterThan(RUN_SEEDS.length / 20);
+  });
+  test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs save phone tracks with their own calling hours and skip limits (ticket 14c)", () => {
     expect(phoneSaved.filter(Boolean).length).toBeGreaterThan(0);
   });
 });
