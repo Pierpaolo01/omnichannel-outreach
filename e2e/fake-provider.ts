@@ -269,7 +269,38 @@ export const callsDefinition = (afterCallDelayDays = 0): CampaignDefinition => (
   ],
 });
 
-export type CallsScenario = "ready" | "early" | "full" | "delayed" | "after-skip";
+export type CallsScenario = "ready" | "early" | "full" | "delayed" | "after-skip" | "win-back" | "continue";
+
+/**
+ * Ticket 16c's scenarios: `win-back`, the phone track set to win back, with a win-back branch of two emails two days
+ * apart; `continue`, the phone track set to continue on the other channels, with no win-back branch. (`ready` has no
+ * path set and no branch: a declined call stops the lead, question Q14.)
+ */
+export const declinedDefinition = (path: "win_back" | "continue"): CampaignDefinition => {
+  const base = callsDefinition(1);
+  return {
+    ...base,
+    tracks: [
+      ...base.tracks.map((t) => (t.channel === "call" ? { ...t, declinedPath: path } : t)),
+      ...(path === "win_back"
+        ? [
+            {
+              id: "win-back",
+              channel: "email" as const,
+              branch: "win_back" as const,
+              window: WEEKDAYS_9_TO_17,
+              steps: [
+                step("w1", { subject: "One more idea for {{company}}", body: "Hi {{first_name|there}},\n\nUnderstood, and thanks for your time on the phone. One idea I’ll leave with you: a booking link for evenings only.\n\nAlex", threading: "new_subject" }),
+                step("w2", { waitDays: 2, body: "Hi {{first_name|there}},\n\nLast note from me. If evenings ever get busy at {{company}}, the offer stands.\n\nAlex" }),
+              ],
+              start: { kind: "entry" as const },
+              removed: false,
+            },
+          ]
+        : []),
+    ],
+  };
+};
 
 /**
  * The verifier's reproduction on 2027f24 (`after-skip`): two phone tracks with skip limits 2 and 8, the email after the
@@ -322,7 +353,7 @@ async function startCalls(scenario: CallsScenario): Promise<FakeCallsApp> {
   const csv = { businessesCsv: readFileSync(fixture("businesses-run1.csv"), "utf8"), peopleCsv: readFileSync(fixture("people-run1.csv"), "utf8") };
   const campaign = (await harness.request<{ campaign: Campaign }>("POST", "/api/campaigns", { name: "Clinics, London", defaultTimezone: "Europe/London", ...csv })).body.campaign.id;
   await harness.tick();
-  await harness.defineSequence(campaign, scenario === "after-skip" ? afterSkipDefinition() : callsDefinition(scenario === "delayed" ? 2 : 0));
+  await harness.defineSequence(campaign, scenario === "after-skip" ? afterSkipDefinition() : scenario === "win-back" ? declinedDefinition("win_back") : scenario === "continue" ? declinedDefinition("continue") : callsDefinition(scenario === "delayed" ? 2 : 0));
   harness.clock = MONDAY_8 - H;
   const launched = await harness.launch(campaign);
   if (launched.status !== 200) throw new Error(`the calls campaign did not launch: ${JSON.stringify(launched.body)}`);

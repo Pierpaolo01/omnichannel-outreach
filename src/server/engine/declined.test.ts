@@ -228,11 +228,11 @@ describe("Activity says what was declined and which path was taken", () => {
     const activity = (await h.request<ActivityView>("GET", `/api/people/${pat.id}/activity`)).body;
     // A decline is a call outcome, an entry like any other, with the path it took.
     expect(activity.entries.filter((e) => e.kind === "call")).toEqual([
-      expect.objectContaining({ campaign: { id: c.id, name: "Spring physio" }, at: new Date(MONDAY_9 + H).toISOString(), channel: "call", track: { label: "Phone track 1", several: true }, outcome: "not_interested", declinedPath: "win_back" }),
+      expect.objectContaining({ campaign: { id: c.id, name: "Spring physio" }, at: new Date(MONDAY_9 + H).toISOString(), channel: "call", track: { label: "Phone track 1", several: true, branch: "main" }, outcome: "not_interested", declinedPath: "win_back" }),
     ]);
     await h.advanceTo(MONDAY_9 + 2 * H);
     // The branch's emails are named as the branch's tracks.
-    expect((await h.request<ActivityView>("GET", `/api/people/${pat.id}/activity`)).body.entries.find((e) => e.kind === "sent" && e.stepNumber === 1 && e.at >= new Date(MONDAY_9 + H).toISOString())).toMatchObject({ track: { label: "Win-back email track 1", several: true } });
+    expect((await h.request<ActivityView>("GET", `/api/people/${pat.id}/activity`)).body.entries.find((e) => e.kind === "sent" && e.stepNumber === 1 && e.at >= new Date(MONDAY_9 + H).toISOString())).toMatchObject({ track: { label: "Win-back email track 1", several: true, branch: "win_back" } });
   });
 });
 
