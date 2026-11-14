@@ -116,6 +116,15 @@ const RULES: Record<string, Partial<Rules>> = {
   "a control applied after its precondition changed": {
     controlPrecondition: () => null,
   },
+  // The search on 54f3a73: the precondition judged before the action's own rule, so a request on an ended lead is refused
+  // with another reason than its read gives (P11).
+  "the precondition checked before the lead's state": {
+    judgeControl: (stored, before, action, now, expected, rules) => {
+      const out = rules.applyControl(before, action, now);
+      const changed = rules.controlPrecondition(stored, before, action, out.ok ? out.state : null, expected);
+      return changed !== null ? { ok: false, reason: changed } : out;
+    },
+  },
   "a reply the record holds clears the pre-send check": {
     presendAnswer: (answer, known) => (answer.kind === "reply" && "providerRef" in answer && known.includes(String(answer.providerRef)) ? { kind: "clear" as const } : answer),
   },
@@ -148,6 +157,7 @@ const EXPECTED: Record<string, { invariant: string; seed: number; options?: Part
   // With the provider answering the first thread's reply, as the adapter did on ca8baee: the defect restored.
   "a reply the record holds clears the pre-send check": { invariant: "P1", seed: 24, options: { presendFirstReply: true } },
   "a control applied after its precondition changed": { invariant: "P13", seed: 0 },
+  "the precondition checked before the lead's state": { invariant: "P11", seed: 85 },
 };
 
 export const CONTROL_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number; readonly options?: Partial<ControlRunOptions> }> = Object.fromEntries(

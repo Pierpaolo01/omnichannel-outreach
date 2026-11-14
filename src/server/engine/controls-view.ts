@@ -38,7 +38,8 @@ function newlyWithdrawn(before: SubjectState, after: SubjectState): number {
 
 export function controlView(stored: SubjectState, action: LeadControl, now: number, rules: Rules): ControlView {
   const before = rules.previewAsOf(stored, now, rules.evaluate);
-  const out = rules.applyControl(before, action, now);
+  // The action's own refusal order (`judgeControl`), with no expectation: a request confirmed on this read is judged the same.
+  const out = rules.judgeControl(stored, before, action, now, null, rules);
   if (!out.ok) return { action, allowed: false, reason: out.reason };
   return effectOf(before, action, out.state, now);
 }

@@ -98,9 +98,10 @@ describe("a control applies only on what it was confirmed on", () => {
     const running = await read();
     expect((await control("stop", expectOf(running, "stop"))).status).toBe(200);
     // A Pause confirmed while they were running, sent after the stop.
+    // A Pause confirmed while they were running, sent after the stop: refused for the state, with the read's own reason.
     const pause = await control("pause", expectOf(running, "pause"));
     expect(pause.status).toBe(409);
-    expect(pause.body.error?.message).toBe("This lead changed since you confirmed this, so nothing was changed. Look at the row again and confirm what it shows now.");
+    expect(pause.body.error?.message).toBe("Outreach to them has ended in this campaign.");
     const stopped = await read();
     expect(stopped.status).toBe("stopped_manually");
     // A restart naming a step other than the one it would resume at is refused; naming the right one, accepted.
@@ -110,6 +111,22 @@ describe("a control applies only on what it was confirmed on", () => {
     const right = await control("move_to_win_back", expectOf(stopped, "move_to_win_back"));
     expect(right.status).toBe(200);
     expect(right.body.effect).toMatchObject({ next: { stepId: "w1s1" } });
+  });
+
+  test("a request on an ended lead gets the read's own reason: the lead's state is judged before the precondition, as the read judges it (the search on 54f3a73, seeds 17085 and 17093)", async () => {
+    const { read, expectOf, control } = await world();
+    expect((await control("stop", expectOf(await read(), "stop"))).status).toBe(200);
+    const stopped = await read();
+    const offered = stopped.controls.find((c) => c.action === "skip");
+    expect(offered).toMatchObject({ allowed: false });
+    const reason = offered && !offered.allowed ? offered.reason : "";
+    // The confirmation's precondition from this read names no step; the lead still has steps pending.
+    const sent = await control("skip", expectOf(stopped, "skip"));
+    expect(sent.status).toBe(409);
+    expect(sent.body.error?.message).toBe(reason);
+    // A pause confirmed while they were running, sent now: the ended state's reason too.
+    const pause = stopped.controls.find((c) => c.action === "pause");
+    expect((await control("pause", { status: "active", step: null })).body.error?.message).toBe(pause && !pause.allowed ? pause.reason : "");
   });
 
   test("a request id is bound to its precondition too: the same id with another precondition is refused", async () => {

@@ -792,11 +792,9 @@ export class Engine {
       const record = await this.store.controlSubject(subjectId, now, { id: requestId, action, body }, this.rules.requestStanding, (stored) => {
         const s = this.rules.asOfAction(stored, now, this.rules.evaluate);
         const caughtUp = same(s, stored) ? null : s;
-        const out = this.rules.applyControl(s, action, now);
-        // Judged in the transaction that checks the request id: a control confirmed on a state that no longer holds is
-        // refused, whichever tab or process sent first (coordinator's ruling on the verifier's B1 at 8a1732a).
-        const changed = this.rules.controlPrecondition(stored, s, action, out.ok ? out.state : null, expected);
-        if (changed !== null) return { write: caughtUp, answer: "refused", reason: changed, effect: null };
+        // Judged in the transaction that checks the request id, in the one order the read uses (`judgeControl`): the lead's
+        // state first, then whether it still applies as confirmed, whichever tab or process sent first (ticket 17b).
+        const out = this.rules.judgeControl(stored, s, action, now, expected, this.rules);
         if (!out.ok) return { write: caughtUp, answer: "refused", reason: out.reason, effect: null };
         // The answer's effect is the read's preview at this instant: the same transition on the same state (verifier B4).
         return { write: out.state, answer: "accepted", reason: null, effect: JSON.stringify(effectOf(s, action, out.state, now)) };

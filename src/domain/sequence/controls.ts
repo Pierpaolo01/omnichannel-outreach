@@ -248,3 +248,24 @@ export function campaignPrecondition(row: { readonly pausedSince: number | null 
   if (expected === null || row === null) return null;
   return row.pausedSince === expected.pausedSince ? null : CAMPAIGN_CHANGED_SINCE_CONFIRMED;
 }
+
+/**
+ * The one refusal order, for the read and the action alike (the search on 54f3a73, seeds 17085 and 17093): the action's own
+ * rule on the lead's state first (ended, paused, nothing waiting…), so a request on an ended lead gets the reason the read
+ * gives it; then, for an action that would apply, whether it still applies as confirmed. The read passes no expectation, so
+ * its preview and refusals are the action's for a request confirmed on that read. `stored` is the lead as stored (its
+ * status is the read's), `before` the lead as of the action's instant.
+ */
+export function judgeControl(
+  stored: SubjectState,
+  before: SubjectState,
+  action: LeadControl,
+  now: number,
+  expected: LeadExpectation | null,
+  rules: { readonly applyControl: typeof applyControl; readonly controlPrecondition: typeof controlPrecondition },
+): ControlResult {
+  const out = rules.applyControl(before, action, now);
+  if (!out.ok) return out;
+  const changed = rules.controlPrecondition(stored, before, action, out.state, expected);
+  return changed === null ? out : { ok: false, reason: changed };
+}
