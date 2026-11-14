@@ -17,7 +17,10 @@
  *   such a request can always carry; a larger one is refused here and never sent.
  * - No answer is resent unchanged, a few times. `superseded` (an older save of this page arriving
  *   late) is not an error. `edit_conflict` means another page changed the campaign: the draft is
- *   kept and the status says so until the user loads the stored version.
+ *   kept and the status says so until the user loads the stored version. `replaced` is the same,
+ *   for a save the server had accepted before another page that had seen it saved over it (a retry
+ *   after a lost answer): the status says this page's change was saved.
+ * - A draft that cannot be saved is never "Saving…": nothing of it is being sent (`invalid`).
  *
  * The status is "saved" exactly when the server has confirmed the newest number. Tested on its own
  * and, with the server rule, by saveQueue.generated.test.ts.
@@ -29,6 +32,11 @@ import { trackLabel } from "../../shared/track-label.ts";
 export type SaveStatus =
   | { readonly kind: "idle" | "saving" | "saved" }
   | { readonly kind: "error"; readonly message: string }
+  /**
+   * The newest draft cannot be saved as it stands (`draftProblems`): nothing of it is being sent,
+   * and trying again cannot help until it is changed.
+   */
+  | { readonly kind: "invalid"; readonly message: string }
   /**
    * Another page changed the campaign since this one loaded it: the draft is kept. `saved` when this
    * page's newest edit was saved before the other change replaced it (a refused launch finds that),
@@ -142,20 +150,35 @@ export class SaveQueue {
   private leaveSave: AbortController | null = null;
   /** Ends a backoff wait early: the browser came back online. */
   private wakeUp: (() => void) | null = null;
+  /**
+   * Advances when the user loads the saved version, setting aside every draft typed before. An
+   * answer to a request sent in an earlier generation answers a draft no longer on the page, so it
+   * changes nothing (invariant 6; council on aebeb80, item 2).
+   */
+  private generation = 0;
+  /** The newest draft that could be saved, with its number: what leaving sends when the newest cannot be (item 3). */
+  private lastValid: { readonly seq: number; readonly draft: CampaignDefinition } | null = null;
 
   constructor(deps: SaveQueueDeps) {
     this.deps = deps;
     this.session = deps.session ?? crypto.randomUUID();
   }
 
-  /** The draft changed: the next save sends it. */
+  /** The draft changed (call it once the new draft is readable): the next save sends it under the next number. */
   edited(): void {
     this.seq++;
+    const { draft } = this.deps.read();
+    if (draftProblems(draft).length === 0) this.lastValid = { seq: this.seq, draft };
   }
 
   /** The newest edit's number: the identity of the draft on the page, which an answer must match to replace it. */
   get edit(): number {
     return this.seq;
+  }
+
+  /** How many times the user has loaded the saved version: with `edit`, the identity of the draft an answer must match. */
+  get loads(): number {
+    return this.generation;
   }
 
   /** Whether the server has confirmed the newest edit. */
@@ -171,6 +194,12 @@ export class SaveQueue {
   /** A method, not the getter, inside `step`: the answer changes across each await. */
   private confirmed(): boolean {
     return this.acceptedSeq >= this.seq;
+  }
+
+  /** The status while the newest draft is not yet confirmed: being saved, or one that cannot be saved as it stands. */
+  pendingStatus(): SaveStatus {
+    const problems = draftProblems(this.deps.read().draft);
+    return problems.length > 0 ? { kind: "invalid", message: problems.join(" ") } : { kind: "saving" };
   }
 
   /** Another page changed the campaign, as a refused launch reports: the conflict state. */
@@ -193,24 +222,32 @@ export class SaveQueue {
     });
   }
 
-  /** The body for the newest number: built when it is first sent, then reused unchanged. */
-  private bodyFor(seq: number): CampaignDefinition {
+  /** The body for a number: built when it is first sent (from the newest draft, or the one given), then reused unchanged. */
+  private bodyFor(seq: number, from?: CampaignDefinition): CampaignDefinition {
     if (this.sentBody?.seq === seq) return this.sentBody.definition;
     const { draft, accountIds, smsNumberIds } = this.deps.read();
-    const definition = { ...draft, emailPool: [...accountIds], ...(smsNumberIds ? { smsPool: [...smsNumberIds] } : {}) };
+    const definition = { ...(from ?? draft), emailPool: [...accountIds], ...(smsNumberIds ? { smsPool: [...smsNumberIds] } : {}) };
     this.sentBody = { seq, definition };
     return definition;
   }
 
   /** The user loaded the stored version: what was typed before is set aside, and saving starts again from it. */
   loadedStored(): void {
+    this.generation++;
+    // A save of the new generation never waits behind a request of the drafts set aside: those steps
+    // run on, report nothing, and their answers pass the gate as stale.
+    this.chain = Promise.resolve();
     this.conflictSeq = null;
     this.acceptedSeq = this.seq;
+    this.lastValid = null;
     this.deps.onStatus({ kind: "idle" });
   }
 
   save(options: { readonly keepalive?: boolean } = {}): Promise<SaveOutcome> {
-    const run = this.chain.then(() => this.step(options));
+    // The generation it was asked in: a save asked before the user loaded the saved version, still
+    // queued when the load arrives, saves and reports nothing once it runs (invariant 6).
+    const generation = this.generation;
+    const run = this.chain.then(() => this.step(options, generation));
     this.chain = run.catch(() => undefined);
     return run;
   }
@@ -223,12 +260,16 @@ export class SaveQueue {
   sendNow(): void {
     if (this.confirmed() || this.inConflict) return;
     const { draft, version } = this.deps.read();
-    if (draftProblems(draft).length > 0) return;
+    // The newest draft cannot be saved as it stands: the newest one that could, if the server has not
+    // confirmed it, goes instead, under its own number, so a valid edit in flight is not lost with the
+    // page (ADR 0003 1.1.1; council on aebeb80, item 3). The status already says the newest is not saved.
+    const valid = draftProblems(draft).length === 0 ? { seq: this.seq, draft } : this.lastValid;
+    if (!valid || valid.seq <= this.acceptedSeq) return;
     // At most one request that outlives the page: the newest carries everything, so the older one goes.
     this.leaveSave?.abort();
     const abort = new AbortController();
     this.leaveSave = abort;
-    void this.send(this.bodyFor(this.seq), { keepalive: true, signal: abort.signal }, { session: this.session, seq: this.seq, base: version }).finally(() => {
+    void this.send(this.bodyFor(valid.seq, valid.draft), { keepalive: true, signal: abort.signal }, { session: this.session, seq: valid.seq, base: version }).finally(() => {
       if (this.leaveSave === abort) this.leaveSave = null;
     });
   }
@@ -243,27 +284,51 @@ export class SaveQueue {
   restored(): Promise<SaveOutcome> {
     this.leaveSave?.abort();
     this.leaveSave = null;
-    if (!this.confirmed() && !this.inConflict) this.deps.onStatus({ kind: "saving" });
+    if (!this.confirmed() && !this.inConflict) this.deps.onStatus(this.pendingStatus());
     return this.save();
   }
 
   /** One request, whose outcome always reports into the queue. */
   private async send(definition: CampaignDefinition, options: { readonly keepalive?: boolean; readonly signal?: AbortSignal }, save: SaveIdentity): Promise<Sent> {
+    const generation = this.generation;
+    let answer: { readonly ok: true; readonly view: SequenceView } | { readonly ok: false; readonly error: unknown };
     try {
-      const view = await this.deps.put(definition, options, save);
+      answer = { ok: true, view: await this.deps.put(definition, options, save) };
+    } catch (error) {
+      answer = { ok: false, error };
+    }
+    // The one gate every answer passes, whatever its kind (invariant 6): an answer to a request sent
+    // before the user loaded the saved version answers a draft set aside, so it changes nothing.
+    if (generation !== this.generation) return { kind: "superseded" };
+    return this.apply(answer, save);
+  }
+
+  /** Applies an answer that still speaks for the draft on the page. */
+  private apply(answer: { readonly ok: true; readonly view: SequenceView } | { readonly ok: false; readonly error: unknown }, save: SaveIdentity): Sent {
+    try {
+      if (!answer.ok) throw answer.error;
+      const view = answer.view;
       if (save.seq > this.acceptedSeq) {
         this.acceptedSeq = save.seq;
         this.deps.onAccepted(view, save.seq);
       }
       // A later save of this page got in: an older one's conflict no longer counts.
       if (this.conflictSeq !== null && save.seq > this.conflictSeq) this.conflictSeq = null;
-      if (!this.inConflict) this.deps.onStatus(this.confirmed() ? { kind: "saved" } : { kind: "saving" });
+      if (!this.inConflict) this.deps.onStatus(this.confirmed() ? { kind: "saved" } : this.pendingStatus());
       return { kind: "accepted" };
     } catch (error) {
       if (error instanceof NoAnswer) return { kind: "no_answer" };
       const code = (error as { code?: unknown }).code;
       const message = error instanceof Error ? error.message : "The change wasn’t saved.";
       if (code === "superseded") return { kind: "superseded" };
+      if (code === "replaced") {
+        // The server had accepted this number, then another page that had seen it saved over it
+        // (ADR 0003 1.1.1): the conflict state, and this page's change counts as saved.
+        this.acceptedSeq = Math.max(this.acceptedSeq, save.seq);
+        this.conflictSeq = Math.max(this.conflictSeq ?? 0, save.seq);
+        this.deps.onStatus({ kind: "conflict", message, saved: this.confirmed() });
+        return { kind: "conflict", message };
+      }
       if (code === "edit_conflict") {
         // An older save than one already accepted: superseded, whatever it collided with.
         if (save.seq <= this.acceptedSeq) return { kind: "superseded" };
@@ -276,8 +341,11 @@ export class SaveQueue {
     }
   }
 
-  private async step(options: { readonly keepalive?: boolean }): Promise<SaveOutcome> {
+  private async step(options: { readonly keepalive?: boolean }, generation: number): Promise<SaveOutcome> {
     for (let tries = 0; ; tries++) {
+      // The user loaded the saved version meanwhile: the page holds what the server stores, and this
+      // save of a draft set aside reports nothing (invariant 6).
+      if (generation !== this.generation) return { ok: true };
       if (this.inConflict) {
         return { ok: false, reason: "conflict", message: "This campaign was changed elsewhere. Load the saved version to carry on." };
       }
@@ -291,7 +359,7 @@ export class SaveQueue {
       const problems = draftProblems(draft);
       if (problems.length > 0) {
         const message = problems.join(" ");
-        this.deps.onStatus({ kind: "error", message });
+        this.deps.onStatus({ kind: "invalid", message });
         return { ok: false, reason: "invalid", message };
       }
       this.deps.onStatus({ kind: "saving" });
@@ -301,6 +369,13 @@ export class SaveQueue {
       if (sent.kind === "refused") return { ok: false, reason: "failed", message: sent.message };
       if (sent.kind === "no_answer" && tries >= NO_ANSWER_RETRIES) {
         if (this.confirmed()) return { ok: true };
+        // Worded from the newest draft: one that cannot be saved is said so, not offered a Try again
+        // that could not help (council on aebeb80, item 4).
+        const pending = this.pendingStatus();
+        if (pending.kind === "invalid") {
+          this.deps.onStatus(pending);
+          return { ok: false, reason: "invalid", message: pending.message };
+        }
         const message = "No answer from the server, so the change may not be saved. Try again.";
         this.deps.onStatus({ kind: "error", message });
         return { ok: false, reason: "failed", message };

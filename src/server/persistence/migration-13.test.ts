@@ -4,66 +4,86 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { EngineHarness } from "../../../test/support/engine-harness.ts";
-import { business, person } from "../../../test/support/export-builder.ts";
-import type { CampaignDefinition } from "../../domain/sequence/definition.ts";
-import type { CallsView, CallTaskView, EnrollmentProgress, LeadSearchResult } from "../../shared/api.ts";
+import type { ApiError } from "../../shared/api.ts";
 
 /**
- * Migration 13 (ticket 15a): call records gain whether the user asked for a redial and the time a
- * prospect asked to be called back, and call tasks how far their skip limit has been judged. A database written before it holds calls logged by ticket 14,
- * which had neither: after the upgrade they read as no redial and no callback time, and the lead's
- * open call carries on under the new rules. Fictitious data only.
+ * Migration 13 (each editing session's newest accepted save; ADR 0003 1.1.1) on a database written
+ * before it (council on aebeb80, item 1): the session that wrote last is known from the campaign row,
+ * and so is what it stored. The backfill keeps the hash of that stored definition, so a retry of the
+ * writer's save after another page replaced it is still answered `replaced`, never a conflict, on an
+ * upgraded database. Fictitious data only.
  */
-const H = 3_600_000;
-const MONDAY_9 = Date.parse("2026-11-02T09:00:00Z");
 const dirs: string[] = [];
 afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
-const ALWAYS = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
-const call = (id: string) => ({ id: `p${id}`, channel: "call" as const, branch: "main" as const, window: ALWAYS, steps: [{ id: `c${id}`, waitDays: 0, subject: "", body: "", threading: "new_subject" as const, removed: false }], start: { kind: "entry" as const }, removed: false });
-const definition: CampaignDefinition = { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: [], smsPool: [], callScript: "", tracks: [call("1"), call("2")] };
+const body = (subject: string, save: { session: string; seq: number; base: number }) => ({
+  timezone: "Europe/London",
+  emailPool: [],
+  tracks: [
+    {
+      id: "t1",
+      channel: "email",
+      branch: "main",
+      window: [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 })),
+      steps: [{ id: "s1", waitDays: 0, subject, body: "A note.", threading: "new_subject" }],
+    },
+  ],
+  save,
+});
 
-const harness = (databasePath: string) => new EngineHarness({ start: MONDAY_9, databasePath, accounts: [] });
+/** Takes a database back to just before migration 13: no sessions' saves, and none of migration 14's call fields (ticket 15a). */
+function beforeMigration13(file: string): void {
+  const db = new DatabaseSync(file);
+  db.exec(`
+    DROP TABLE definition_saves;
+    DROP INDEX call_tasks_open_callbacks;
+    ALTER TABLE call_attempts DROP COLUMN redial;
+    ALTER TABLE call_attempts DROP COLUMN callback_at;
+    ALTER TABLE call_tasks DROP COLUMN reckoned_through;
+    DELETE FROM schema_migrations WHERE version > 12;
+  `);
+  db.close();
+}
 
-describe("migration 13 on a database with calls logged before it", () => {
-  test("earlier calls read as no redial and no callback time, and a callback can be logged after the upgrade", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "migration-13-"));
+describe("migration 13 on a database written before it (council on aebeb80, item 1)", () => {
+  test("A's save accepted, the application upgrades, B saves over it, A retries its save: replaced, not a conflict", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "outreach-migration-"));
     dirs.push(dir);
-    const file = path.join(dir, "app.db");
-    const before = harness(file);
-    expect((await before.request("PUT", "/api/call-settings", { dailyCapacity: 10, userZone: "Europe/London" })).status).toBe(200);
-    const { campaign } = await before.createCampaign("Before 13", { businesses: [business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101" })], people: [person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", direct_phone: "+442079460111" })] });
-    await before.defineSequence(campaign.id, definition);
-    expect((await before.launch(campaign.id)).status).toBe(200);
-    const [first, second] = (await before.request<CallsView>("GET", "/api/calls")).body.readyNow;
-    const number = (await before.request<CallTaskView>("GET", `/api/call-tasks/${first?.taskId}`)).body.numbers[0]?.detailId;
-    expect((await before.request("POST", `/api/call-tasks/${first?.taskId}/outcome`, { requestId: "r1", outcome: "no_answer", numberId: number, note: "Rang out." })).status).toBe(200);
+    const file = path.join(dir, "outreach.sqlite");
+    const harness = () => new EngineHarness({ start: Date.parse("2026-11-02T09:00:00Z"), databasePath: file, accounts: [] });
+
+    const before = harness();
+    const { campaign } = await before.createCampaign("Before 13", { businesses: [], people: [] });
+    expect((await before.request("PUT", `/api/campaigns/${campaign.id}/sequence`, body("A one", { session: "A", seq: 1, base: 0 }))).status).toBe(200);
     await before.store.close();
+    beforeMigration13(file);
 
-    // Back to just before migration 13.
-    const db = new DatabaseSync(file);
-    db.exec(`
-      DROP INDEX call_tasks_open_callbacks;
-      ALTER TABLE call_attempts DROP COLUMN redial;
-      ALTER TABLE call_attempts DROP COLUMN callback_at;
-      ALTER TABLE call_tasks DROP COLUMN reckoned_through;
-      DELETE FROM schema_migrations WHERE version >= 13;
-    `);
-    db.close();
-
-    const after = harness(file);
-    after.clock = MONDAY_9 + H;
-    await after.tick();
-    const enrollment = (await after.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows[0]?.enrollments[0]?.id ?? "";
-    const progress = (await after.request<EnrollmentProgress>("GET", `/api/enrollments/${enrollment}`)).body;
-    expect(progress.tracks.find((t) => t.trackId === "p1")?.steps[0]?.calls).toEqual([expect.objectContaining({ outcome: "no_answer", note: "Rang out.", redial: false, callbackAt: null })]);
-    // An open task is judged from its placement: no day of it had been judged before the skip limit existed.
-    const open = (await after.store.engine.subject(enrollment, after.clock))?.callTasks.find((t) => t.open);
-    expect(open?.reckonedThrough).toBe(open?.placedWall);
-    expect((await after.request("POST", `/api/call-tasks/${second?.taskId}/outcome`, { requestId: "r2", outcome: "callback_requested", callbackAt: "2026-11-03T10:00:00Z", numberId: number })).status).toBe(200);
-    expect((await after.request<EnrollmentProgress>("GET", `/api/enrollments/${enrollment}`)).body.status).toBe("callback_scheduled");
+    const after = harness();
+    expect((await after.request("PUT", `/api/campaigns/${campaign.id}/sequence`, body("B on top", { session: "B", seq: 1, base: 1 }))).status).toBe(200);
+    const retry = await after.request<ApiError>("PUT", `/api/campaigns/${campaign.id}/sequence`, body("A one", { session: "A", seq: 1, base: 0 }));
+    expect([retry.status, retry.body.error.code]).toEqual([409, "replaced"]);
     await after.store.close();
+  });
+});
+
+describe("the sessions' saves are kept only while the campaign can be edited (council on aebeb80, item 7)", () => {
+  test("launch deletes the campaign's rows in its own transaction; another campaign's stay", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "outreach-migration-"));
+    dirs.push(dir);
+    const file = path.join(dir, "outreach.sqlite");
+    const h = new EngineHarness({ start: Date.parse("2026-11-02T09:00:00Z"), databasePath: file, accounts: [] });
+    const { campaign: one } = await h.createCampaign("One", { businesses: [], people: [] });
+    const { campaign: two } = await h.createCampaign("Two", { businesses: [], people: [] });
+    const call = { id: "p1", channel: "call", branch: "main", window: [{ day: 1, start: 9, end: 17 }], steps: [{ id: "c1", waitDays: 0, subject: "", body: "", threading: "new_subject" }] };
+    for (const [id, session] of [[one.id, "A"], [two.id, "B"]] as const) {
+      expect((await h.request("PUT", `/api/campaigns/${id}/sequence`, { timezone: "Europe/London", emailPool: [], tracks: [call], save: { session, seq: 1, base: 0 } })).status).toBe(200);
+    }
+    const rows = () => new DatabaseSync(file).prepare("SELECT campaign_id FROM definition_saves ORDER BY campaign_id").all().map((r) => String(r["campaign_id"]));
+    expect(rows()).toEqual([one.id, two.id].sort());
+    expect((await h.launch(one.id)).status).toBe(200);
+    expect(rows()).toEqual([two.id]);
+    await h.store.close();
   });
 });

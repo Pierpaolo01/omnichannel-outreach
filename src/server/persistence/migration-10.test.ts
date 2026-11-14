@@ -46,10 +46,11 @@ const definition: CampaignDefinition = {
 const harness = (databasePath: string) =>
   new EngineHarness({ start: MONDAY_9 - H, databasePath, accounts: [{ id: "inbox-a", capacity: 50, gapMs: 60_000, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
 
-/** Takes a database back to just before migration 10: no bounce events table, no save-rule columns (11), no call tables (12, ticket 14a). */
+/** Takes a database back to just before migration 10: no bounce events table, no save-rule columns (11), no call tables (12, ticket 14a), no sessions' saves (13). */
 function beforeMigration10(file: string): void {
   const db = new DatabaseSync(file);
   db.exec(`
+    DROP TABLE definition_saves;
     DROP TABLE notes;
     DROP TABLE call_attempts;
     DROP TABLE call_tasks;
@@ -93,9 +94,9 @@ describe("migration 10 on a database with a bounce observed before it (re-check 
     expect(entries.filter((e) => e.kind === "bounced")).toEqual([]);
     expect(entries[0]).toMatchObject({ kind: "ended", status: "finished_no_usable_channel" });
     expect(entries[1]).toMatchObject({ kind: "address_bad", to: "sam@harbour.example" });
-    // The upgrade itself ran 10 and 11 (and 12, ticket 14a's call tables, and 13, ticket 15a's redial and callback fields), and later bounces are recorded again.
+    // The upgrade itself ran 10 and 11 (and 12, ticket 14a's call tables, 13, pull request 49's sessions' saves, and 14, ticket 15a's redial, callback and skip-limit fields), and later bounces are recorded again.
     const versions = new DatabaseSync(file).prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((r) => Number(r["version"]));
-    expect(versions.filter((v) => v >= 9)).toEqual([9, 10, 11, 12, 13]);
+    expect(versions.filter((v) => v >= 9)).toEqual([9, 10, 11, 12, 13, 14]);
     await after.store.close();
   });
 });

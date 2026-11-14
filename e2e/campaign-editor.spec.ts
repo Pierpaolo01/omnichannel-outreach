@@ -195,6 +195,24 @@ test.describe("review of pull request 41", () => {
     expect((await stored(id)).launchedAt).toBeNull();
   });
 
+  test("a draft that cannot be saved says Not saved at once, never Saving…, and offers no Try again (save status, invariant 8)", async ({ page }) => {
+    const id = await campaign(track([COPY.first, COPY.second]));
+    let puts = 0;
+    await page.goto(`${r.url}/campaigns/${id}?track=email&step=s2`);
+    await page.route("**/api/campaigns/*/sequence", (route) => {
+      if (route.request().method() === "PUT") puts++;
+      return route.continue();
+    });
+    await page.getByLabel("Days to wait before Email 2").fill("");
+    await expect(page.getByTestId("inspector").getByRole("status").filter({ hasText: "Not saved" })).toBeVisible();
+    await expect(page.getByText("Saving…")).toHaveCount(0);
+    await expect(page.getByText("Nothing is saved until this is fixed.", { exact: false })).toBeVisible();
+    await page.getByRole("link", { name: /Before launch/ }).click();
+    await expect(page.getByText("Your latest change isn’t saved, so launch waits.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Try again" })).toHaveCount(0);
+    expect(puts).toBe(0);
+  });
+
   test("a save that failed blocks launch until it succeeds (useSequence.ts:133)", async ({ page }) => {
     const id = await campaign(track([COPY.first, COPY.second]));
     let launches = 0;

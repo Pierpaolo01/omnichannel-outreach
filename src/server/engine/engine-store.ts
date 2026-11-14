@@ -97,7 +97,11 @@ export interface StoredDefinition {
   readonly launchedAt: number | null;
 }
 
-export type SaveResult = { readonly outcome: "saved" | "unchanged" | "launched" | "superseded" | "conflict"; readonly stored: StoredDefinition } | { readonly outcome: "missing" };
+/**
+ * `replaced`: this session's save was accepted before, then another page that had seen it saved over
+ * it (ADR 0003 1.1.1): its retry is not a conflict of its own, and its page's change was saved.
+ */
+export type SaveResult = { readonly outcome: "saved" | "unchanged" | "launched" | "superseded" | "replaced" | "conflict"; readonly stored: StoredDefinition } | { readonly outcome: "missing" };
 
 /** Who wrote a save (ADR 0003 1.1.1): the editing session, its number in it, and the revision it last saw. */
 export interface DefinitionSave {

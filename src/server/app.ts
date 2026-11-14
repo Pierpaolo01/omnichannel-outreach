@@ -360,6 +360,9 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     if (saved === "superseded") {
       return c.json<ApiError>({ error: { code: "superseded", message: "A later change from this page was already saved." } }, 409);
     }
+    if (saved === "replaced") {
+      return c.json<ApiError>({ error: { code: "replaced", message: "This page’s change was saved, then the sequence was changed on another page." } }, 409);
+    }
     if (saved === "conflict") {
       return c.json<ApiError>({ error: { code: "edit_conflict", message: "This campaign’s sequence was changed elsewhere since this page loaded it, so this change was not saved." } }, 409);
     }
