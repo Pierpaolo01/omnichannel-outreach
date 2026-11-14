@@ -1,0 +1,55 @@
+
+## 2026-11-02T08:00Z: launch three emails (s2 two days after s1, s3 three days after s2)
+POST /api/campaigns/id-1/launch
+  -> 200 {"campaignId":"id-1","definition":{"timezone":"Europe/London","callSkipLimitDays":2,"emailPool":["inbox-a"],"smsPool":[],"callScript":"","tracks":[{"id":"email","channel":"email","branch":"main","window":[{"day":0,"start":0,"end":24},{"day":1,"start":0,"end":24},{"day":2,"start":0,"end":24},{"day":3,"start":0,"end":24},{"day":4,"start":0,"end":24},{"day":5,"start":0,"end":24},{"day":6,"start":0,"e
+Lena Park: sent ["s1@2026-11-03T12:00Z"], status active
+Pat Oneil: sent ["s1@2026-11-02T08:00Z","s2@2026-11-04T00:00Z"], status active
+Nia Cole: sent ["s1@2026-11-02T08:01Z","s2@2026-11-04T00:01Z"], status active
+Omar Reed: sent ["s1@2026-11-02T08:02Z"], status replied
+
+## 2026-11-04T01:00Z: Lena is before Email 2, Pat and Nia are past it and before Email 3, Omar is past everything. The draft changes Email 2's copy, removes Email 3 and adds Email 4
+POST /api/campaigns/id-1/sequence/impact {"definition":{"timezone":"Europe/London","callSkipLimitDays":2,"emailPool":["inbox-a"],"smsPool":[],"callScript":"","tracks":[{"id":"email","channel":"email","…
+  -> 200 {"asOf":"2026-11-04T01:00:00.000Z","definitionVersion":2,"leads":4,"changes":[{"kind":"step_copy","trackId":"email","stepId":"s2","reaches":1,"skips":0,"inFlight":0,"untouched":3},{"kind":"step_removed","trackId":"email","stepId":"s3","reaches":0,"skips":3,"inFlight":0,"untouched":1},{"kind":"step_added","trackId":"email","stepId":"s4","reaches":3,"skips":0,"inFlight":0,"untouched":1}],"problems":
+PUT /api/campaigns/id-1/sequence {"timezone":"Europe/London","callSkipLimitDays":2,"emailPool":["inbox-a"],"smsPool":[],"callScript":"","tracks":[{"id":"email","channel":"email","branch":"main"…
+  -> 200 {"campaignId":"id-1","definition":{"timezone":"Europe/London","callSkipLimitDays":2,"emailPool":["inbox-a"],"smsPool":[],"callScript":"","tracks":[{"id":"email","channel":"email","branch":"main","window":[{"day":0,"start":0,"end":24},{"day":1,"start":0,"end":24},{"day":2,"start":0,"end":24},{"day":3,"start":0,"end":24},{"day":4,"start":0,"end":24},{"day":5,"start":0,"end":24},{"day":6,"start":0,"e
+Lena Park: sent ["s1@2026-11-03T12:00Z","s2@2026-11-05T00:02Z","s4@2026-11-06T00:00Z"], status sequence_finished_no_response; tracks [["email","completed"]]
+Pat Oneil: sent ["s1@2026-11-02T08:00Z","s2@2026-11-04T00:00Z","s4@2026-11-05T00:00Z"], status sequence_finished_no_response; tracks [["email","completed"]]
+Nia Cole: sent ["s1@2026-11-02T08:01Z","s2@2026-11-04T00:01Z","s4@2026-11-05T00:01Z"], status sequence_finished_no_response; tracks [["email","completed"]]
+Omar Reed: sent ["s1@2026-11-02T08:02Z"], status replied; tracks [["email",null]]
+
+## an edit the save must refuse changes nothing
+PUT /api/campaigns/id-1/sequence {"timezone":"Europe/London","callSkipLimitDays":2,"emailPool":["inbox-a"],"smsPool":[],"callScript":"","tracks":[{"id":"email","channel":"email","branch":"main"…
+  -> 400 {"error":{"code":"invalid_sequence","message":"A step leads may have reached cannot be deleted on a running campaign: it is marked removed instead. A step leads may have reached cannot be deleted on a running campaign: it is marked removed instead."}}
+PUT /api/campaigns/id-1/sequence {"timezone":"Europe/London","callSkipLimitDays":2,"emailPool":["inbox-a"],"smsPool":[],"callScript":"","tracks":[{"id":"email","channel":"email","branch":"main"…
+  -> 409 {"error":{"code":"blocked","message":"This change was not applied: Email 2 has no message."}}
+
+## a paused campaign: edited while paused, followed on resume
+POST /api/campaigns/id-18/launch
+  -> 200 {"campaignId":"id-18","definition":{"timezone":"Europe/London","callSkipLimitDays":2,"emailPool":["inbox-a"],"smsPool":[],"callScript":"","tracks":[{"id":"email","channel":"email","branch":"main","window":[{"day":0,"start":0,"end":24},{"day":1,"start":0,"end":24},{"day":2,"start":0,"end":24},{"day":3,"start":0,"end":24},{"day":4,"start":0,"end":24},{"day":5,"start":0,"end":24},{"day":6,"start":0,"
+POST /api/campaigns/id-18/pause {"requestId":"scenario-pause"}
+  -> 200 {"pause":{"paused":true,"pausedSince":"2026-11-10T01:00:00.000Z"},"statusCounts":{"queued":0,"active":1,"in_win_back":0,"waiting_on_call":0,"callback_scheduled":0,"replied":0,"interested_on_call":0,"paused":0,"declined_on_call":0,"stopped_manually":0,"sequence_finished_no_response":0,"finished_no_usable_channel":0},"controls":[{"action":"pause","allowed":false,"reason":"This campaign is already pa
+PUT /api/campaigns/id-18/sequence {"timezone":"Europe/London","callSkipLimitDays":2,"emailPool":["inbox-a"],"smsPool":[],"callScript":"","tracks":[{"id":"email","channel":"email","branch":"main"…
+  -> 200 {"campaignId":"id-18","definition":{"timezone":"Europe/London","callSkipLimitDays":2,"emailPool":["inbox-a"],"smsPool":[],"callScript":"","tracks":[{"id":"email","channel":"email","branch":"main","window":[{"day":0,"start":0,"end":24},{"day":1,"start":0,"end":24},{"day":2,"start":0,"end":24},{"day":3,"start":0,"end":24},{"day":4,"start":0,"end":24},{"day":5,"start":0,"end":24},{"day":6,"start":0,"
+GET /api/enrollments/id-24
+  -> 200 {"id":"id-24","campaignId":"id-18","status":"active","endedAt":null,"reply":null,"sender":"inbox-a","smsSender":null,"zone":"Europe/London","branch":"main","winBackEnteredAt":null,"declined":null,"tracks":[{"trackId":"email","channel":"email","branch":"main","callTask":null,"started":true,"finishReason":null,"finishedAt":null,"hold":null,"nextStep":{"stepId":"s2","number":2,"dueAt":"2026-11-11T00:
+Sam's next step while paused: {"stepId":"s2","number":2,"dueAt":"2026-11-11T00:00:00.000Z"}
+POST /api/campaigns/id-18/resume {"requestId":"scenario-resume"}
+  -> 200 {"pause":{"paused":false,"pausedSince":null},"statusCounts":{"queued":0,"active":1,"in_win_back":0,"waiting_on_call":0,"callback_scheduled":0,"replied":0,"interested_on_call":0,"paused":0,"declined_on_call":0,"stopped_manually":0,"sequence_finished_no_response":0,"finished_no_usable_channel":0},"controls":[{"action":"pause","allowed":true},{"action":"resume","allowed":false,"reason":"This campaign
+Sam's next step after the resume (the one-day wait, moved by the two days paused): {"stepId":"s2","number":2,"dueAt":"2026-11-13T00:00:00.000Z"}
+Sam: sent ["s1@2026-11-10T00:00Z","s2@2026-11-13T00:00Z"]
+
+## changed copy reaches the fake Instantly with the next lead handed over (no real Instantly request)
+POST /api/campaigns/id-1/launch
+  -> 200 {"campaignId":"id-1","definition":{"timezone":"Europe/London","callSkipLimitDays":2,"emailPool":["ada@sender.example"],"smsPool":[],"callScript":"","tracks":[{"id":"email","channel":"email","branch":"main","window":[{"day":0,"start":0,"end":24},{"day":1,"start":0,"end":24},{"day":2,"start":0,"end":24},{"day":3,"start":0,"end":24},{"day":4,"start":0,"end":24},{"day":5,"start":0,"end":24},{"day":6,"
+dispatch campaign oo·id-1·email·s1·ada@sender.example; template [{"steps":[{"type":"email","delay":0,"delay_unit":"minutes","variants":[{"subject":"{{oo_subject}}","body":"{{oo_body}}"}]}]}]
+someone edits the template in Instantly: [{"steps":[{"type":"email","delay":0,"delay_unit":"minutes","variants":[{"subject":"Edited in Instantly","body":"Edited in Instantly"}]}]}]
+PUT /api/campaigns/id-1/sequence {"timezone":"Europe/London","callSkipLimitDays":2,"emailPool":["ada@sender.example"],"smsPool":[],"callScript":"","tracks":[{"id":"email","channel":"email","bra…
+  -> 200 {"campaignId":"id-1","definition":{"timezone":"Europe/London","callSkipLimitDays":2,"emailPool":["ada@sender.example"],"smsPool":[],"callScript":"","tracks":[{"id":"email","channel":"email","branch":"main","window":[{"day":0,"start":0,"end":24},{"day":1,"start":0,"end":24},{"day":2,"start":0,"end":24},{"day":3,"start":0,"end":24},{"day":4,"start":0,"end":24},{"day":5,"start":0,"end":24},{"day":6,"
+fake Instantly POST /api/v2/campaigns {"name":"oo·id-1·email·s1·ada@sender.example","campaign_schedule":{"schedules":[{"name":"oo always open","timing":{"from":"00:00","to":"23:59"},"days":{"0":true,"1":true,"2":true,"3":true,"4":true,"5":true,"6":true},"tim
+fake Instantly POST /api/v2/campaigns/camp-000001/activate {}
+fake Instantly POST /api/v2/leads/add {"campaign_id":"camp-000001","idempotency_key":"att-1","leads":[{"email":"nia@harbour.example","custom_variables":{"oo_subject":"Evening bookings (s1)","oo_body":"Hi Nia, booking at Harbour Lane Physio stops at 18:00."}}
+fake Instantly PATCH /api/v2/campaigns/camp-000001 {"name":"oo·id-1·email·s1·ada@sender.example","campaign_schedule":{"schedules":[{"name":"oo always open","timing":{"from":"00:00","to":"23:59"},"days":{"0":true,"1":true,"2":true,"3":true,"4":true,"5":true,"6":true},"tim
+fake Instantly POST /api/v2/leads/add {"campaign_id":"camp-000001","idempotency_key":"att-9","leads":[{"email":"pat@harbour.example","custom_variables":{"oo_subject":"Evening bookings (s1)","oo_body":"A changed note for Harbour Lane Physio."}}]}
+delivered from ada@sender.example to nia@harbour.example: "Hi Nia, booking at Harbour Lane Physio stops at 18:00."
+delivered from ada@sender.example to pat@harbour.example: "A changed note for Harbour Lane Physio."
+template after the next handover: [{"steps":[{"type":"email","delay":0,"delay_unit":"minutes","variants":[{"subject":"{{oo_subject}}","body":"{{oo_body}}"}]}]}]
