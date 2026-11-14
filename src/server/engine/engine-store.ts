@@ -4,6 +4,13 @@ import type { CampaignDefinition } from "../../domain/sequence/definition.ts";
 import type { AccountState, Attempt, ProviderWork, SmsBindingRecord, SubjectState } from "../../domain/sequence/state.ts";
 
 /** A sender account as the provider port reports it. */
+/** The process that runs the worker on a database (ticket 20a): a random id, its process id, and when it last renewed. */
+export interface WorkerLease {
+  readonly id: string;
+  readonly pid: number;
+  readonly renewedWall: number;
+}
+
 /** One accepted control request, as `control_requests` keeps it: its target, the action, the effect it answered with (lead controls) and when. */
 export interface AcceptedControl {
   readonly target: string;
@@ -279,8 +286,21 @@ export interface EngineStore {
 
   meta(key: string): Promise<string | null>;
   setMeta(key: string, value: string): Promise<void>;
+  /** Writes several meta values in one transaction: the interruption notice and the heartbeat together (ADR 0003 "Ticket 20a"). */
+  setMetas(values: Readonly<Record<string, string>>): Promise<void>;
+  /**
+   * Takes or renews the worker's lease on this database in one BEGIN IMMEDIATE transaction (ticket 20a): refused, with
+   * the holder, when another owner holds it, renewed it within `staleMs` and `alive` says its process runs.
+   */
+  takeLease(owner: WorkerLease, now: number, staleMs: number, alive: (pid: number) => boolean): Promise<{ readonly ok: true } | { readonly ok: false; readonly holder: WorkerLease }>;
+  /** Whether this owner holds the lease at `now` (synchronous: read inside the authorizing transaction and before each call). */
+  holdsLease(ownerId: string, now: number, staleMs: number): boolean;
+  /** Releases the lease if this owner holds it. */
+  releaseLease(ownerId: string): Promise<void>;
   recordAnomaly(attemptId: string | null, what: string, atWall: number): Promise<void>;
   anomalies(): Promise<{ attemptId: string | null; what: string; atWall: number }[]>;
+  /** Enrollments that ended for `reason`, most recently ended first (ticket 20a: Needs attention's no-usable-channel list). */
+  endedSubjectIds(reason: import("../../domain/sequence/state.ts").EndReason): Promise<string[]>;
   /** Subject ids of a campaign, launched or not, oldest enrollment first. */
   subjectsOf(campaignId: string): Promise<string[]>;
 

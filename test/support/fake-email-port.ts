@@ -156,9 +156,12 @@ export class FakeEmailPort implements SendPort {
     return this.modes.includes("non-retryable");
   }
 
+  /** Continue-thread follow-ups cannot be sent yet, as Instantly's until ADR 0002's X2 (follow-up 42 item 12). */
+  continueThreadUnavailable = false;
+
   transportFor(step: { readonly threading: "new_subject" | "continue_thread" }): Transport {
     // Openers go through the keyed add; follow-ups through a reply transport with no key (ADR 0002).
-    return { retryable: step.threading === "new_subject" && !this.allNonRetryable, notSentIsFinal: false };
+    return { retryable: step.threading === "new_subject" && !this.allNonRetryable, notSentIsFinal: false, ...(this.continueThreadUnavailable && step.threading === "continue_thread" ? { available: false } : {}) };
   }
 
   accounts(): Promise<AccountStatus[]> {

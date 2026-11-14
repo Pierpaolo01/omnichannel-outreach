@@ -73,4 +73,14 @@ describe("resolveDataDir", () => {
     const env = { OUTREACH_DATA_DIR: "/srv/outreach", OUTREACH_DEV_DATA_DIR: "/srv/outreach/dev" };
     expect(() => resolveDataDir({ env, home: "/h", projectRoot: project, profile: "development" })).toThrow(/app's data directory/);
   });
+
+  test("OUTREACH_DATA_DIR set but empty or blank is refused, never the default folder; only unset means the default (ticket 20a)", () => {
+    const home = "/Users/someone";
+    expect(resolveDataDir({ env: {}, home, projectRoot: project })).toBe("/Users/someone/.local/share/omnichannel-outreach");
+    expect(() => resolveDataDir({ env: { OUTREACH_DATA_DIR: "" }, home, projectRoot: project })).toThrow(/OUTREACH_DATA_DIR is set but empty/);
+    expect(() => resolveDataDir({ env: { OUTREACH_DATA_DIR: "  \t " }, home, projectRoot: project })).toThrow(/OUTREACH_DATA_DIR is set but empty/);
+    expect(resolveDataDir({ env: { OUTREACH_DATA_DIR: "/tmp/outreach-real" }, home, projectRoot: project })).toBe(path.resolve("/tmp/outreach-real"));
+    // The development folder's variable too.
+    expect(() => resolveDataDir({ env: { OUTREACH_DEV_DATA_DIR: " " }, home, projectRoot: project, profile: "development" })).toThrow(/OUTREACH_DEV_DATA_DIR is set but empty/);
+  });
 });

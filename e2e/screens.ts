@@ -61,6 +61,10 @@ const NEEDS_ATTENTION = {
   ],
   heldCapacity: [],
   anomalies: [],
+  waitingForCapacity: [],
+  noUsableChannel: [],
+  waitingOnTransport: [],
+  waitingOnProvider: [],
   overdueCallbacks: [],
 } as const;
 

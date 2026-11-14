@@ -31,7 +31,7 @@ import type {
   BulkRowRef,
 } from "../../shared/api.ts";
 import type { EngineStore } from "../engine/engine-store.ts";
-import { migrate } from "./migrations.ts";
+import { migrate, MIGRATIONS, type Migration } from "./migrations.ts";
 import type { LeadRowEnrollments } from "./store.ts";
 import { SqliteEngineStore } from "./sqlite-engine-store.ts";
 import { SqliteInstantlyStore } from "./sqlite-instantly-store.ts";
@@ -40,14 +40,47 @@ import type { LeadQuery, OutreachStore, StoredContactDetail } from "./store.ts";
 
 type Row = Record<string, SQLOutputValue>;
 
+/**
+ * Switches a database to WAL. SQLite does not consult the busy timeout for this switch, so when another process opening
+ * the same new database holds the lock, it is tried again every 20 ms for up to five seconds (ticket 20a: two
+ * applications started at once on an empty data folder; the second is then refused by the worker's lease).
+ */
+function toWal(db: DatabaseSync): void {
+  const until = Date.now() + 5000;
+  for (;;) {
+    try {
+      db.exec("PRAGMA journal_mode = WAL");
+      return;
+    } catch (error) {
+      if (!(error instanceof Error && /locked|busy/i.test(error.message)) || Date.now() >= until) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+  }
+}
+
 /** Opens (creating if needed) the SQLite database at `path` and applies pending migrations. */
 export function openSqliteStore(path: string): OutreachStore {
-  const db = new DatabaseSync(path);
-  db.exec("PRAGMA foreign_keys = ON");
-  if (path !== ":memory:") db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA busy_timeout = 5000");
-  migrate(db, () => new Date().toISOString());
+  return openStoreOn(openDatabase(path));
+}
+
+/**
+ * The store on a database opened by `openDatabase`, its pending migrations applied first (ticket 20a, council F: `main.ts`
+ * takes the worker's lease between the two, so a refused process never migrates). `migrations` is for tests.
+ */
+export function openStoreOn(db: DatabaseSync, migrations: readonly Migration[] = MIGRATIONS): OutreachStore {
+  migrate(db, () => new Date().toISOString(), migrations);
   return new SqliteStore(db);
+}
+
+/** Opens (creating if needed) the SQLite database at `path`, with its settings, and migrates nothing. */
+export function openDatabase(path: string): DatabaseSync {
+  const db = new DatabaseSync(path);
+  // The busy timeout first: switching a new database to WAL takes a lock, and two applications started at once on an empty
+  // data folder must wait for each other there, not fail (ticket 20a; the second is then refused by the worker's lease).
+  db.exec("PRAGMA busy_timeout = 5000");
+  db.exec("PRAGMA foreign_keys = ON");
+  if (path !== ":memory:") toWal(db);
+  return db;
 }
 
 /**

@@ -480,6 +480,37 @@ export interface NeedsAttention {
     }[];
   }[];
   readonly anomalies: readonly { readonly what: string; readonly at: string }[];
+  /**
+   * Leads waiting for sending capacity (ticket 20a; spec "Needs attention"): each email or text that is due and could
+   * be claimed now, but every account it may use is full for its reset day. It goes when the first of them resets.
+   */
+  readonly waitingForCapacity: readonly {
+    readonly enrollmentId: string;
+    readonly campaignId: string;
+    readonly trackId: string;
+    readonly stepId: string;
+    readonly channel: "email" | "sms";
+    readonly dueAt: string;
+    readonly accountIds: readonly string[];
+    readonly resetsAt: string;
+  }[];
+  /**
+   * Leads left with no usable channel, from any cause (ticket 20a; follow-up 42 item 50), most recently ended first, with
+   * why each channel of their branch cannot reach them. They stay listed: the ending is final (question Q20).
+   */
+  readonly noUsableChannel: readonly {
+    readonly enrollmentId: string;
+    readonly campaignId: string;
+    readonly endedAt: string;
+    readonly channels: readonly { readonly channel: "email" | "sms" | "call"; readonly why: "missing" | "bad" | "declined" }[];
+  }[];
+  /**
+   * While sending is interrupted, the providers the dispatch gate waits on (ticket 20a, council B): each not answering,
+   * since its last contact, and how many due sends wait on it, decided by the gate's own function (`waitingOn`).
+   */
+  readonly waitingOnProvider: readonly { readonly channel: "email" | "sms"; readonly since: string | null; readonly sends: number }[];
+  /** Due steps waiting for a transport the provider cannot use yet, such as continue-thread follow-ups (follow-up 42 item 12). */
+  readonly waitingOnTransport: readonly { readonly enrollmentId: string; readonly trackId: string; readonly stepId: string; readonly channel: "email" | "sms"; readonly dueAt: string }[];
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -855,6 +886,12 @@ export interface EmailProviderStatus {
   /** "exhausted" after a 402 or an exhausted lead quota: every dispatch handover waits. */
   readonly quota: "available" | "exhausted";
   readonly lastPolledAt: string | null;
+  /**
+   * The last poll that failed, and the part of its round trip that failed (ticket 20a): `inboxes`, `emails` (the
+   * observation that carries replies, bounces and sends), `lead_statuses` or `commit`. A partial answer is not contact
+   * with the provider. Null when none has failed since the application started.
+   */
+  readonly lastPollFailure: { readonly at: string; readonly part: "inboxes" | "emails" | "lead_statuses" | "commit" } | null;
   readonly inboxes: readonly {
     readonly id: string;
     /** Instantly's account status: 1 Active, 2 Paused, 3 maintenance, -1 to -3 errors. */
@@ -1054,6 +1091,33 @@ export interface TodayView {
   readonly carriedOverLastDay: number;
   /** Paused campaigns whose leads wait on a call: their calls are off the list while paused (ticket 17b). */
   readonly pausedCampaigns: readonly PausedCampaignCalls[];
+  /**
+   * The one-line notice of the latest sending interruption (ticket 20a): "sending was interrupted from `from` to `to`;
+   * `rescheduled` sends rescheduled". Kept until a newer interruption replaces it (question Q18); null when none happened.
+   */
+  readonly interruption: InterruptionNoticeView | null;
+  /** While sending is interrupted now: since when, and why. Due sends and calls may be waiting (follow-up 42 item 45). */
+  readonly sendingInterrupted: SendingInterruptedView | null;
+}
+
+/** A sending interruption that has ended (ADR 0003 "Ticket 20a"). */
+export interface InterruptionNoticeView {
+  readonly from: string;
+  readonly to: string;
+  /** The sends the interruption made late: email and texts that could have gone during it and had not gone by its end. */
+  readonly rescheduled: number;
+}
+
+/**
+ * Sending interrupted now (ADR 0003 "Ticket 20a"): no tick has completed with every provider answering for more than five
+ * minutes. `ticks_failing`: the worker's ticks throw; `providers_unreachable`: they run, but a provider does not answer;
+ * `not_running`: no tick has ended since and no provider read failed: the worker is stopped, asleep or stalled.
+ */
+export interface SendingInterruptedView {
+  readonly since: string;
+  readonly cause: "ticks_failing" | "providers_unreachable" | "not_running";
+  /** The provider read that failed last since then, and which part of the round: a partial answer is not contact. */
+  readonly lastFailedRead: { readonly channel: "email" | "sms"; readonly part: "accounts" | "observation" | "call"; readonly at: string } | null;
 }
 
 /** GET /api/calls: the focus queue. The focused task is the first ready now; the queue moves on only after an outcome. */
@@ -1081,6 +1145,8 @@ export interface CallsView {
    * listed, so the queue moves on only after an outcome. With none, the first call ready now.
    */
   readonly focusTaskId: string | null;
+  /** As on TodayView: while sending is interrupted now, due calls may be waiting to be placed (follow-up 42 item 45). */
+  readonly sendingInterrupted: SendingInterruptedView | null;
   /** As on TodayView: paused campaigns whose calls are off the list (ticket 17b). */
   readonly pausedCampaigns: readonly PausedCampaignCalls[];
 }
