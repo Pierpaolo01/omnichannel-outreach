@@ -288,10 +288,11 @@ describe("a read and the worker's placements: a completed-tick marker (ADR 0003 
     w.release();
     await read;
     expect(answered!.readyNow.map((x) => x.person?.name)).toEqual(["Nia Cole"]);
+    expect(answered!.behind).toBe(false);
     w.worker.stop();
   });
 
-  test("a tick that never finishes: the read answers within the 30-second bound, with what is stored and the worker's next tick as its next change, never tomorrow", async () => {
+  test("a tick that never finishes: the read answers within the 3-second bound, with what is stored, marked behind, and the worker's next tick as its next change, never tomorrow", async () => {
     const w = await heldWorld();
     w.hold();
     w.h.clock = Date.parse("2026-11-03T00:00:00Z");
@@ -302,13 +303,15 @@ describe("a read and the worker's placements: a completed-tick marker (ADR 0003 
     const read = w.h.request<CallsView>("GET", `/api/calls?expected=${encodeURIComponent("2026-11-03T00:00:00.000Z")}`).then((x) => (answered = x.body));
     await w.settle();
     expect(answered).toBeNull();
-    w.h.clock = Date.parse("2026-11-03T00:00:31Z");
+    w.h.clock = Date.parse("2026-11-03T00:00:04Z");
     w.fireDue();
     await read;
     expect(answered!.readyNow).toEqual([]);
+    expect(answered!.behind).toBe(true);
     expect(Date.parse(answered!.nextChangeAt ?? "")).toBeLessThanOrEqual(w.h.clock + TICK_MS);
     // An ordinary read meanwhile never advertises a far-off change while the call is due and unplaced.
     const ordinary = (await w.h.request<TodayView>("GET", "/api/today")).body;
+    expect(ordinary.behind).toBe(true);
     expect(Date.parse(ordinary.nextChangeAt ?? "")).toBeLessThanOrEqual(w.h.clock + TICK_MS);
     w.worker.stop();
   });

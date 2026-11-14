@@ -201,11 +201,16 @@ describe("a desk that is no longer on screen writes nothing but the outbox (revi
     const namedByStale = staleAnswer.body.nextFocusTaskId;
     old.dispose();
 
-    // The page is opened again in the same tab: it sends the entry again and moves on through two calls.
+    // The page is opened again in the same tab: it sends the entry again; the server says the call is logged; the user moves on through two calls.
     const live = w.desk(session);
     await live.start();
     await flush();
     await w.answer(w.held[0]!);
+    await flush();
+    await live.refresh();
+    await flush();
+    expect(live.getSnapshot().away).toMatchObject({ offList: { reason: "logged" } });
+    await live.moveOn();
     await flush();
     expect(live.getSnapshot().task?.state).toBe("ready");
     live.setDraft({ outcome: "voicemail" });

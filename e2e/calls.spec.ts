@@ -129,7 +129,9 @@ test("leaving the page while an outcome is pending loses nothing: the next Calls
   await page.unroute("**/api/call-tasks/*/outcome");
   await page.goto(`${f.url}/leads`);
   await page.goto(`${f.url}/calls`);
-  await expect(outcomeStatus(page)).toContainText("Amira Hassan: left voicemail logged.");
+  // The reopened page sends it again and learns the outcome from the server's read of the call.
+  await expect(page.getByRole("alert")).toContainText("Amira Hassan’s call is already logged: left voicemail at 10:00.");
+  await page.getByRole("button", { name: "Open the next call" }).click();
   await expect(page.getByRole("heading", { name: "Tom" })).toBeVisible();
   const calls = (await activity(f, "Amira Hassan")).filter((e) => e.kind === "call");
   expect(calls).toEqual([expect.objectContaining({ outcome: "voicemail", note: "Left a short message about evening bookings." })]);
@@ -146,7 +148,7 @@ test("a second tab on the same call is told it was logged there, keeps its unsav
   await logWithMouse(page, "No answer");
   await expect(page.getByRole("heading", { name: "Tom" })).toBeVisible();
   // The other tab learns it from the outbox change, says so, and keeps the call and the note on screen.
-  await expect(other.getByRole("alert")).toContainText("Amira Hassan’s call was already logged elsewhere, perhaps in another tab: no answer at 10:00.");
+  await expect(other.getByRole("alert")).toContainText("Amira Hassan’s call is already logged: no answer at 10:00.");
   await expect(other.getByRole("alert")).toContainText("Your note wasn’t saved: Typed in the second tab.");
   await expect(other.getByRole("heading", { name: "Amira Hassan" })).toBeVisible();
   await expect(outcome(other, "Interested")).toBeDisabled();
@@ -161,7 +163,7 @@ test("a call logged from another window is refused here, explained, and the queu
   const t = await focused(f);
   await logElsewhere(f, t.taskId, "interested", t.numberId);
   await logWithMouse(page, "Left voicemail", "Typed here.");
-  await expect(page.getByRole("alert")).toContainText("already logged elsewhere, perhaps in another tab: interested at 10:00.");
+  await expect(page.getByRole("alert")).toContainText("Amira Hassan’s call is already logged: interested at 10:00.");
   await expect(outcomeStatus(page)).not.toContainText("logged.");
   await page.getByRole("button", { name: "Open the next call" }).click();
   await expect(page.getByRole("heading", { name: "Tom" })).toBeVisible();
@@ -349,7 +351,7 @@ test("an outcome left by a closed tab and refused on recovery is listed with its
 
   await page.goto(`${f.url}/calls`);
   const notLogged = page.getByRole("list", { name: "Outcomes not logged" });
-  await expect(notLogged).toContainText("Not logged: no answer for Amira Hassan. Amira Hassan’s call was already logged elsewhere, perhaps in another tab: interested at 10:00.");
+  await expect(notLogged).toContainText("Not logged: no answer for Amira Hassan. Amira Hassan’s call is already logged: interested at 10:00.");
   await expect(notLogged).toContainText("Your note wasn’t saved: Orphan refusal note must remain visible");
   await notLogged.getByRole("button", { name: "Dismiss" }).click();
   await expect(notLogged).toHaveCount(0);

@@ -128,13 +128,14 @@ function nextChange(changes: readonly number[], nextWake: number | null, now: nu
  * The focus queue. `focus` is the call the user's screen is on: it keeps the focus while it is listed,
  * so the queue moves on only after an outcome (or a skip for now) is logged on it.
  */
-export async function callsView(store: OutreachStore, now: number, options: { readonly focus?: string | null; readonly rules?: CallViewRules; readonly nextWake?: number | null } = {}): Promise<CallsView> {
+export async function callsView(store: OutreachStore, now: number, options: { readonly focus?: string | null; readonly rules?: CallViewRules; readonly nextWake?: number | null; readonly behind?: boolean } = {}): Promise<CallsView> {
   const { day, readyNow, laterToday, listed, changes } = await callList(store, now, options.rules);
   const focus = options.focus ?? null;
   return {
     date: dateIn(day.userZone, now),
     asOf: iso(now),
     nextChangeAt: nextChange(changes, options.nextWake ?? null, now),
+    behind: options.behind ?? false,
     userZone: day.userZone,
     dailyCapacity: day.capacity,
     defaultDailyCapacity: DEFAULT_DAILY_CALL_CAPACITY,
@@ -153,9 +154,9 @@ export async function callsView(store: OutreachStore, now: number, options: { re
 /** How many calls Up next shows on Today. */
 const UP_NEXT = 5;
 
-export async function todayView(store: OutreachStore, now: number, rules?: CallViewRules, nextWake: number | null = null): Promise<TodayView> {
+export async function todayView(store: OutreachStore, now: number, rules?: CallViewRules, nextWake: number | null = null, behind = false): Promise<TodayView> {
   const { day, readyNow, laterToday, changes } = await callList(store, now, rules);
-  return { date: dateIn(day.userZone, now), asOf: iso(now), nextChangeAt: nextChange(changes, nextWake, now), userZone: day.userZone, readyNow: readyNow.length, laterToday: laterToday.length, capacityReached: !dayHasRoom(day), upNext: [...readyNow, ...laterToday].slice(0, UP_NEXT) };
+  return { date: dateIn(day.userZone, now), asOf: iso(now), nextChangeAt: nextChange(changes, nextWake, now), behind, userZone: day.userZone, readyNow: readyNow.length, laterToday: laterToday.length, capacityReached: !dayHasRoom(day), upNext: [...readyNow, ...laterToday].slice(0, UP_NEXT) };
 }
 
 /**

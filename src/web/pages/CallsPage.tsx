@@ -6,6 +6,7 @@ import { CallDesk, NOTE_MAX, whoOf, type DeskSnapshot } from "../calls/callDesk.
 import { useCallDesk } from "../calls/useCallDesk.ts";
 import { useFocusRescue } from "../focusRescue.ts";
 import {
+  BEHIND_LINE,
   CAPACITY_USED,
   OUTCOME_LABEL,
   OUTCOME_TITLE,
@@ -140,6 +141,7 @@ function Queue({ snap }: { snap: DeskSnapshot }) {
       <h2 className="mb-1.5 ml-2.5 text-[13px] font-semibold text-muted">Later today, {view ? view.laterToday.length : "…"}</h2>
       {view && view.laterToday.length > 0 ? <ol className="mb-[22px] flex flex-col gap-0.5">{view.laterToday.map(item)}</ol> : <p className="mb-[22px] px-2.5 text-[12.5px] leading-[1.45] text-faint">{view ? "Nothing else today." : "Loading the list."}</p>}
       <p className="px-2.5 text-[12.5px] leading-[1.45] text-faint">Calls inside the prospect’s calling hours come first, oldest first. The next call opens when you log an outcome.</p>
+      {view?.behind && <p className="mt-2 px-2.5 text-[12.5px] leading-[1.45] text-faint">{BEHIND_LINE}</p>}
       {view && (
         <p className="mt-2 px-2.5 text-[12.5px] leading-[1.45] text-faint">
           {capacityLine(view)}

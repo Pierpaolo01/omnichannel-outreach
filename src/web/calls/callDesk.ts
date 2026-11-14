@@ -474,12 +474,16 @@ export class CallDesk {
     if (this.sending.get(id) === s) this.sending.delete(id);
     this.unanswered.delete(id);
     if (!this.onScreen()) return;
-    if (this.state.focus === entry.taskId) {
-      // An answer this desk received, on screen, for the call it is on: shown as logged, and the focus moves on.
+    if (this.state.focus === entry.taskId && this.pressedHere.has(id)) {
+      // An answer to this desk's own press, received on screen, for the call it is on: shown as logged, and the focus moves on.
+      // Any other desk only refreshes: the server's read then says the call is logged, and its own typed note stays on screen.
       this.ports.session.remove(DRAFT + entry.taskId);
       this.set({ logged: { requestId: id, who: entry.who, body, task: answer.task }, refusal: null, away: null });
       this.focusOn(answer.nextFocusTaskId, "logged");
-    } else this.set({});
+    } else {
+      this.set({});
+      void this.refresh();
+    }
   }
 
   /** A refusal: the entry is rewritten as refused, in one write, with the off-list facts the server gives. */

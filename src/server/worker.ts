@@ -7,8 +7,8 @@
  * finished covers nothing yet.
  */
 export const TICK_MS = 15_000;
-/** How long a read waits for the worker before it answers with what is stored: two intervals. */
-export const READ_WAIT_MS = 2 * TICK_MS;
+/** How long a read waits for the worker before it answers with what is stored, marked `behind`. */
+export const READ_WAIT_MS = 3_000;
 
 export interface WorkerDeps {
   recover(): Promise<void>;

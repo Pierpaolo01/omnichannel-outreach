@@ -230,3 +230,6 @@ export function outcomeNumberLine(outcome: CallOutcomeApi, number: { readonly va
 export function numberProblemLine(problem: { readonly kind: "bad" | "gone"; readonly value: string | null }): string {
   return problem.kind === "bad" ? `The number you chose, ${problem.value ?? ""}, is now marked wrong. Choose the number you dial.` : "The number you chose is no longer one of this lead’s. Choose the number you dial.";
 }
+
+/** When the server says its worker has work due that it has not finished (ADR 0003 4.4). */
+export const BEHIND_LINE = "Calls that have just fallen due may still be being placed. This page updates when they are.";

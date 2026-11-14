@@ -624,6 +624,11 @@ export interface TodayView {
    * or closing, a call falling due, the engine's next wake, or the user's next day. Screens refresh then.
    */
   readonly nextChangeAt: string | null;
+  /**
+   * The worker has work due at or before now that it has not finished (ADR 0003 4.4): what this
+   * shows may lag by up to one tick, and `nextChangeAt` is no later than the worker's next tick.
+   */
+  readonly behind: boolean;
   readonly userZone: string;
   readonly readyNow: number;
   readonly laterToday: number;
@@ -640,6 +645,8 @@ export interface CallsView {
   readonly asOf: string;
   /** As on TodayView: when the queue next changes by the clock alone. */
   readonly nextChangeAt: string | null;
+  /** As on TodayView: the worker is behind, so the queue may lag by up to one tick. */
+  readonly behind: boolean;
   readonly userZone: string;
   readonly dailyCapacity: number;
   /** The capacity the user has until they set one. */

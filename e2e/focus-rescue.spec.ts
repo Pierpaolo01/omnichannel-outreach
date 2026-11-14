@@ -49,7 +49,7 @@ const SETUPS: readonly Setup[] = [
       await logElsewhere(f, t.taskId, "interested", t.numberId);
       await page.addInitScript(([taskId, numberId]) => {
         const body = { requestId: "left-by-a-closed-tab", outcome: "no_answer", numberId, note: "Front desk.", noteScope: "person" };
-        window.localStorage.setItem("outreach.calls.outbox.left-by-a-closed-tab", JSON.stringify({ v: 1, tab: "closed-tab", taskId, who: "Amira Hassan", body }));
+        window.localStorage.setItem("outreach.calls.outbox.left-by-a-closed-tab", JSON.stringify({ v: 2, taskId, who: "Amira Hassan", body }));
       }, [t.taskId, t.numberId] as const);
       await page.goto(`${f.url}/calls`);
       await page.getByRole("button", { name: "Dismiss" }).waitFor();

@@ -407,7 +407,7 @@ export const SCREENS: readonly Screen[] = [
       const t = await focused(f);
       await logElsewhere(f, t.taskId, "voicemail", t.numberId);
       await logWithMouse(page, "No answer", "Spoke to the front desk.");
-      await settle(page, "already logged elsewhere");
+      await settle(page, "already logged:");
     },
   },
   {
@@ -445,7 +445,7 @@ export const SCREENS: readonly Screen[] = [
       // What a closed tab left: its entry, refused when this page sends it.
       await page.addInitScript(([taskId, numberId]) => {
         const body = { requestId: "left-by-a-closed-tab", outcome: "no_answer", numberId, note: "Spoke to the front desk; call back after 3.", noteScope: "person" };
-        window.localStorage.setItem("outreach.calls.outbox.left-by-a-closed-tab", JSON.stringify({ v: 1, tab: "closed-tab", taskId, who: "Amira Hassan", body }));
+        window.localStorage.setItem("outreach.calls.outbox.left-by-a-closed-tab", JSON.stringify({ v: 2, taskId, who: "Amira Hassan", body }));
       }, [t.taskId, t.numberId] as const);
       await page.clock.setFixedTime(f.harness.clock);
       await page.goto(`${f.url}/calls`);
@@ -1249,7 +1249,7 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
       await logElsewhere(f, t.taskId, "interested", t.numberId);
       await page.addInitScript(([taskId, numberId]) => {
         const body = { requestId: "left-by-a-closed-tab", outcome: "no_answer", numberId, note: "Front desk.", noteScope: "person" };
-        window.localStorage.setItem("outreach.calls.outbox.left-by-a-closed-tab", JSON.stringify({ v: 1, tab: "closed-tab", taskId, who: "Amira Hassan", body }));
+        window.localStorage.setItem("outreach.calls.outbox.left-by-a-closed-tab", JSON.stringify({ v: 2, taskId, who: "Amira Hassan", body }));
       }, [t.taskId, t.numberId] as const);
       await page.goto(`${f.url}/calls`);
       await page.getByRole("button", { name: "Dismiss" }).waitFor();
@@ -1334,7 +1334,7 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
       await page.keyboard.press("Enter");
       await page.getByRole("button", { name: "Log and open next call" }).focus();
       await page.keyboard.press("Enter");
-      await page.getByText("already logged elsewhere").waitFor();
+      await page.getByText(/already logged:/).waitFor();
     },
     focused: (page) => page.getByRole("button", { name: "Open the next call" }),
   },
