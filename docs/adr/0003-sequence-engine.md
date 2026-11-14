@@ -894,7 +894,7 @@ The canvas cannot produce these, and the server refuses them with a plain messag
 - A declined path of `win_back` when the win-back branch has no live track.
 - A declined path on a track that is not a phone track (ticket 16a).
 
-Each is said in plain words, naming the track within its branch ("the win-back email track", "Win-back SMS track 2"; `trackLabel` names it the same way): "The win-back branch cannot hold a phone track: a lead who declined is never called again in this campaign", "The phone track's declined path is win back, but the campaign has no win-back branch: add a track to the win-back branch, or choose stop or continue", "The win-back email track starts after a track of the main sequence: connect it inside the win-back branch, which starts when a lead declines".
+Each is said in plain words, naming the track within its branch ("the win-back email track", "Win-back SMS track 2"; `trackLabel` names it the same way): "The win-back branch cannot hold a phone track: a lead who declined is never called again in this campaign", "The phone track's declined path is win back, but the win-back branch has no tracks: add a track to it, or choose stop or continue., "The win-back email track starts after a track of the main sequence: connect it inside the win-back branch, which starts when a lead declines".
 - A wait on a first step. A negative or fractional wait or delay.
 - A `continue_thread` step as the first email step: there is no thread to continue.
 - A window with no days, or with equal start and end.
@@ -904,7 +904,7 @@ Each is said in plain words, naming the track within its branch ("the win-back e
 
 ### 7.1.1 Outcomes refused at the boundary (ticket 15a)
 
-An outcome request is refused, with a plain reason and no change, when it asks for a redial with an outcome other than no answer, voicemail or gatekeeper; a callback requested with no time, or with a time not after now; or a callback time with any other outcome; a declined path with any outcome but not interested ("A declined path goes with not interested only"); or not interested whose path, the track's or the override, is win back in a campaign with no live win-back track ("This campaign has no win-back branch: choose stop or continue"; ticket 16a). A callback time that is not an ISO 8601 instant with its offset, or any field the release does not know, is a 400 (`requestObject`). Every refusal stores nothing, so the action can be sent again with its request id; every accepted action, a redial and a callback included, is logged once per request id (verifier B3 on `a1399ce`).
+An outcome request is refused, with a plain reason and no change, when it asks for a redial with an outcome other than no answer, voicemail or gatekeeper; a callback requested with no time, or with a time not after now; or a callback time with any other outcome; a declined path with any outcome but not interested ("A declined path goes with not interested only"); or not interested whose path, the track's or the override, is win back in a campaign with no live win-back track ("The win-back branch has no tracks: choose stop or continue"; ticket 16a). A callback time that is not an ISO 8601 instant with its offset, or any field the release does not know, is a 400 (`requestObject`). Every refusal stores nothing, so the action can be sent again with its request id; every accepted action, a redial and a callback included, is logged once per request id (verifier B3 on `a1399ce`).
 
 ### 7.2 Exactly three launch blockers
 
@@ -1673,7 +1673,7 @@ Recorded on 14 November 2026 by the 14c implementer, before the code. Three chan
 | The call skip limit (3.5) | **the track's `callSkipLimitDays`** (new, optional) | the phone track's inspector |
 | How it starts | the track's start rule (1.1) | the phone track's inspector, through the arrangement rule |
 | The call script | the campaign's `callScript` (1.1): one per campaign, shown on every call task | every phone track's inspector, which says it is the campaign's one script |
-| The declined path | the track's `declinedPath`, read from ticket 16 | not edited here: the inspector says it arrives with a later release |
+| The declined path | the track's `declinedPath`, read from ticket 16 | not edited here: the inspector said it arrives with a later release. Since ticket 16b, the phone track's inspector ("Ticket 16b" below) |
 
 **The skip limit on each phone track.** The coordinator's recorded reading is that calling hours and the skip limit are set on each phone track, and the reference puts "Skip it if unworked for N days" in the phone track's inspector. Until now the definition held one limit for the campaign. So:
 
@@ -1893,6 +1893,50 @@ The hold facts, the deadlines and the frozen intervals are stored and read, neve
 - **Coverage lists.** Each generator's behaviours are named in its coverage list; a name in neither the kept nor the retired list fails the check.
 
 Questions put to the human, each with the interim built: Q15 and Q16 below. Q3 (which step "skip" skips) and Q6 (restarting interested or declined leads) keep their interims.
+
+## Ticket 16b: the declined path and the win-back branch in the editor
+
+Recorded on 14 November 2026 by the 16b implementer. No change to the engine, the store, the validator's rule or any invariant of section 8; one read gains an additive field. Each change was built test-first.
+
+### The arrangement rule, with the branch (amends "The arrangement rule" of ticket 13b and 14c)
+
+- **add** takes a branch: an email or SMS track added to the win-back branch starts at `entry`, which there means when the lead enters the branch. A phone track is never added to the branch; the editor offers none, and the operation refuses it.
+- **declined** (new): sets a phone track's declined path to stop, continue or win back. Win back is refused while the branch has no live track (`winBackAvailable`), and a path on a track that is not a phone track is refused.
+- **remove** of the branch's last live track is refused while a phone track's declined path is win back.
+- **start** after a track of the other branch is refused.
+
+Each of these refusals is the validator's own sentence (7.1): the operation applies the change naively and refuses with the first problem the result has that the draft did not, so the editor says what the server would. **A problem is new by its identity, never its sentence** (council on `aaf82b7`): `definitionIssues` returns each problem with its `kind` and the ids of the track and step it is about, and `definitionProblems` is their sentences. A sentence names a track as it is called now, so removing or adding a track renames its siblings, and comparing sentences refused a removal for a problem a sibling already had ("The win-back email track's sending window has no days.", which was "Win-back email track 2's…" before). The clause the win-back refusal ends with is exported (`NO_WIN_BACK_BRANCH`) and shown under win back while it cannot be chosen; the problem text is unchanged.
+
+Invariants 1 to 5 are unchanged, stated by identity: from any draft, an operation's result has no problem (by `issueKey`) the draft did not have, and a refused operation applied naively has one. A sixth: a refusal never names a problem the draft already had. Half the generated drafts already have problems a user can leave while editing (an empty window, a wait that is not a whole number, a message with no copy), and a fifth mutation, "problems compared by sentence", must fail the test, and does. `arrangement.generated.test.ts` now generates drafts with a branch of one to three email and SMS tracks arranged inside it and phone tracks with a declined path (sometimes unset), and operations that add to the branch (a phone track among them), set paths (win back with no branch among them), connect across branches and remove the branch's tracks. Four further mutations must fail it, and do (invariant 1 kills each): "phone track in the branch", "win back without a branch", "remove ignores win back", "after across branches".
+
+### Saving (1.1.1)
+
+The declined path and the branch's tracks are edits like any other, through the one editor state and save queue; no control saves on its own. `saveQueue.generated.test.ts` gains a third random stream (none on the recorded seeds, which replay the trajectories they were recorded with) with which the generated user sets declined paths and adds, arranges and removes branch tracks through the arrangement operations, one to three per draft. Each page keeps its own record of what it chose (each live phone track's path, each branch track's channel and start), built from the operations it applied, never read back from the editor. After every step the page's draft must have the record's paths and branch (invariant 6), and once settled the stored definition must have the writer's (invariant 1). Two faults in the editor's save (`SaveFault` in `editorStore.ts`, test-only) must fail it, each on its recorded fixed seed: a save whose body leaves out the declined paths (seed 7003) and one that leaves out the branch's tracks (seed 7004). Coverage over the fixed and recorded seeds requires runs that save win back beside a branch, stop or continue, and a branch track arranged after another.
+
+### Copy for a lead (amends "Calls in the projection")
+
+`GET /api/campaigns/:id/preview/:enrollmentId` gains `winBackEntry` (council on `aaf82b7`): how a lead can enter the branch, from the definition alone (`winBackEntry` in `definition.ts`): `declined_path` when a live main-sequence phone track's `declinedPathOf` is win back; `chosen_for_a_lead` when the branch and a phone track are live but no path is win back, so only the per-lead path chosen when a declined call is logged enters it (ticket 16a offers win back for one lead whenever `winBackAvailable`); `never` with no live branch track or no live phone track. Copy for a lead words the branch's messages from it. The estimate's `winBackNotCounted` reads the same function (true only when the entry is not `never`), so the two cannot disagree. It also gains `winBack`: the branch's messages, rendered for the lead in track order, each with no day (`noDay` `win_back`, or `skipped` for a channel the lead lacks, by the same rule as the main sequence). They are listed apart from `steps`, whose order is the order messages can go: the projection never enters the branch (`winBackNotCounted`), so no day is ever worked out for them. `before-launch.test.ts` "copy for a lead in the win-back branch".
+
+### The canvas
+
+The branch is drawn in its own box below the main sequence, its tracks hanging from the point a lead enters it, with a dashed "if declined" edge from each phone track whose path, as `declinedPathOf` reads it, is win back. `e2e/layout.spec.ts` now also checks, at every width, that every branch track is inside the box and below its parent, that the box is below the main sequence, and that each edge ends on the box without crossing any track node.
+
+### Council on `aaf82b7` (each reproduced first as a failing test)
+
+| Item | Change | Test |
+| - | - | - |
+| 1. A removal refused for a problem a sibling already had, renamed by the removal | Problems compared by identity (`definitionIssues`, `issueKey`), for every refusal the arrangement takes from the validator | `arrangement.test.ts` (the reviewers' case); `definition.test.ts` (identity and sentences); the generated test's drafts with problems, invariant 6 and the mutation "problems compared by sentence" |
+| 2. Copy for a lead showed branch messages as "Only if they decline" when no path led there | `winBackEntry` on the read, from the definition's functions, shared with `winBackNotCounted`; the page says "Only if chosen for them" or "Never sent", with one sentence above them. The messages stay listed, marked, rather than hidden | `before-launch.test.ts` (the read and the note agree); `before-launch-projection.test.ts`'s record of when the note shows; `win-back-editor.spec.ts` (rendered, three cases) |
+| 3. Focus after removing the branch's last track | The branch's Add menu and the empty branch's button have their own ids; a removal moves focus to the control the definition it produced has: the branch's Add, the empty branch's button, or Add track when the branch goes | Two focus transitions (the branch goes beside main tracks; the canvas empties), failing before |
+| 4. The save test did not record the branch's copy | Copy edits in branch tracks (bodies, subjects, threading, waits, new follow-ups) from a fourth stream, recorded as chosen and checked like the paths; coverage of copy typed beside an unanswered save; the fault `stale_win_back_copy`, killed by fixed seed 7016 | `saveQueue.generated.test.ts` |
+| 5. Copy and fills | One clause, `WIN_BACK_HAS_NO_TRACKS` ("the win-back branch has no tracks"), says it everywhere: the definition's refusal ("…: add a track to it, or choose stop or continue.", which the editor shows beside win back), and since the merge of ticket 16c the outcome's refusal (`logCallOutcome`: "The win-back branch has no tracks: choose stop or continue.") and the Calls page's reasons ("(the win-back branch has no tracks)", "The win-back branch has no tracks now, so that path can’t be logged. Choose another."), with their tests; the chips say what they count ("1 email"); the box and the chosen path blend `hand-soft` as the reference does (55% and 50%) | The tests that quote the sentence and the chip; the accessibility scan |
+
+### Review bot on `8147ba6` (each reproduced first as a failing test)
+
+| Finding | Change | Test |
+| - | - | - |
+| The save test's new coverage bar failed CI shard 6 of the full search (4 arranged branches against 6.25): in a shard, the coverage seeds are that shard's own, so a share of them is chance | **The rule, for every coverage bar in the file:** a share of the coverage seeds is required only where they are `pnpm check`'s fixed and recorded seeds, the same on every run; in a full-search shard each behaviour must be reached at least once (`atLeast`) | `SAVE_QUEUE_SEARCH=full SEQUENCE_SHARD=6/8` failed before the change and passes after it |
+| Side by side, the win-back box could draw wider than the width the canvas chose its layout by (its name, Add and empty text, about 494px, against a 320px budget), so the canvas scrolled sideways between 1040 and 1220px with the inspector open, a width the layout scan does not visit | The box takes exactly its budgeted width, or the main sequence's when wider (`contain: inline-size`); its contents wrap. **The rule:** the layout scan checks that a side-by-side canvas never draws wider than its budget (`data-needed`), which does not depend on the window, so it holds at every width once it holds at one | `win-back-editor.spec.ts` sweeps 1020 to 1440px in 20px steps (failed by up to 166px before); a screen with one phone track and an empty branch, which the budget check failed (494 against 320) without the change |
 
 ## Consequences
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { definitionProblems, type CampaignDefinition, type TrackDefinition } from "../../domain/sequence/definition.ts";
+import { definitionIssues, definitionProblems, issueKey, type CampaignDefinition, type TrackDefinition } from "../../domain/sequence/definition.ts";
 import { arrange, naive, type ArrangeMutation, type ArrangeOperation } from "./arrangement.ts";
 
 /**
@@ -8,7 +8,11 @@ import { arrange, naive, type ArrangeMutation, type ArrangeOperation } from "./a
  * since ticket 14c), then
  * generated sequences of every operation the editor offers, including ones the rule must refuse.
  * After each operation it asserts the rule's five invariants. Each named mutation of the rule must
- * make it fail.
+ * make it fail. Since ticket 16b the drafts often have a win-back branch of email and SMS tracks,
+ * arranged inside it, and phone tracks with a declined path (win back only with a live branch track);
+ * the operations add tracks to the branch (a phone track among them, which must be refused), set
+ * declined paths (win back with no branch among them), connect tracks across branches and remove the
+ * branch's last track.
  */
 function rng(seed: number): () => number {
   let a = seed >>> 0;
@@ -23,11 +27,12 @@ function rng(seed: number): () => number {
 const pick = <T,>(r: () => number, items: readonly T[]): T => items[Math.floor(r() * items.length)]!;
 const week = [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 }));
 
-function track(id: string, channel: "email" | "sms" | "call", start: TrackDefinition["start"], removed = false): TrackDefinition {
+function track(id: string, channel: "email" | "sms" | "call", start: TrackDefinition["start"], removed = false, branch: TrackDefinition["branch"] = "main"): TrackDefinition {
   // A phone track (defined over HTTP since ticket 14a) is one call with no copy.
   const step = channel === "call" ? { subject: "", body: "" } : { subject: "Hi", body: "Hello." };
-  return { id, channel, branch: "main", window: week, steps: [{ id: `${id}-s1`, waitDays: 0, ...step, threading: "new_subject", removed: false }], start, removed };
+  return { id, channel, branch, window: week, steps: [{ id: `${id}-s1`, waitDays: 0, ...step, threading: "new_subject", removed: false }], start, removed };
 }
+const PATHS = ["stop", "continue", "win_back"] as const;
 
 /** One to five tracks, each at launch or after an earlier live one (so no cycle), and some removed ones. */
 function generateDefinition(r: () => number): CampaignDefinition {
@@ -39,26 +44,69 @@ function generateDefinition(r: () => number): CampaignDefinition {
     tracks.push(track(`t${i}`, pick(r, ["email", "sms", "call"] as const), start));
   }
   if (r() < 0.4) tracks.push(track("gone", "email", { kind: "entry" }, true));
-  return { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: [], smsPool: [], tracks };
+  // The win-back branch (ticket 16b): none, or one to three email and SMS tracks arranged inside it.
+  const branch = r() < 0.6 ? 1 + Math.floor(r() * 3) : 0;
+  for (let i = 0; i < branch; i++) {
+    const earlier = tracks.filter((t) => !t.removed && t.branch === "win_back");
+    const start: TrackDefinition["start"] = earlier.length > 0 && r() < 0.5 ? { kind: "after", trackId: pick(r, earlier).id, delayDays: Math.floor(r() * 3) } : { kind: "entry" };
+    tracks.push(track(`w${i}`, pick(r, ["email", "sms"] as const), start, false, "win_back"));
+  }
+  // Each phone track's declined path, sometimes unset (question Q14), win back only with a branch.
+  const paths = branch > 0 ? PATHS : (["stop", "continue"] as const);
+  const withPaths = tracks.map((t) => (t.channel === "call" && r() < 0.7 ? { ...t, declinedPath: pick(r, paths) } : t));
+  return { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: [], smsPool: [], tracks: withPaths };
+}
+
+/**
+ * Problems a user can leave in a draft while editing, which the editor shows and does not save (council on
+ * aaf82b7): an email or SMS track with no sending days, a follow-up whose wait is not a whole number, a
+ * message with no copy. Drawn from their own stream, so the draft is the one `generateDefinition` made.
+ */
+function withProblems(r: () => number, def: CampaignDefinition): CampaignDefinition {
+  return {
+    ...def,
+    tracks: def.tracks.map((t) => {
+      if (t.removed || t.channel === "call" || r() > 0.35) return t;
+      const roll = r();
+      if (roll < 0.4) return { ...t, window: [] };
+      const first = t.steps[0]!;
+      if (roll < 0.75) return { ...t, steps: [...t.steps, { ...first, id: `${t.id}-s2`, waitDays: 1.5, threading: "continue_thread" as const }] };
+      return { ...t, steps: t.steps.map((st) => ({ ...st, body: "" })) };
+    }),
+  };
 }
 
 /** An operation the editor offers for this draft: on live tracks only, with good and bad values. */
 function generateOperation(r: () => number, def: CampaignDefinition): ArrangeOperation {
   const live = def.tracks.filter((t) => !t.removed);
   const after = live.filter((t) => t.start.kind === "after");
-  const kinds = live.length === 0 ? ["add"] : ["add", "remove", "start", "start", "start", ...(after.length > 0 ? ["delay"] : [])];
+  const calls = live.filter((t) => t.channel === "call");
+  const branch = live.filter((t) => t.branch === "win_back");
+  const kinds = live.length === 0 ? ["add"] : ["add", "add_win_back", "remove", "start", "start", "start", ...(after.length > 0 ? ["delay"] : []), ...(calls.length > 0 ? ["declined", "declined"] : []), ...(branch.length > 0 ? ["remove_win_back"] : [])];
   const kind = pick(r, kinds);
+  if (kind === "add_win_back") return { kind: "add", channel: pick(r, ["email", "sms", "email", "sms", "call"] as const), branch: "win_back" };
   if (kind === "add" || live.length === 0) return { kind: "add", channel: pick(r, ["email", "sms", "call"] as const) };
+  if (kind === "declined") return { kind: "declined", trackId: pick(r, r() < 0.9 ? calls : live).id, path: pick(r, PATHS) };
+  if (kind === "remove_win_back") return { kind: "remove", trackId: pick(r, branch).id };
   if (kind === "remove") return { kind: "remove", trackId: pick(r, live).id };
   if (kind === "delay") return { kind: "delay", trackId: pick(r, after).id, days: pick(r, [0, 1, 2, 3, -1, 1.5, Number.NaN]) };
   const subject = pick(r, live);
   return r() < 0.25 ? { kind: "start", trackId: subject.id, start: { kind: "entry" } } : { kind: "start", trackId: subject.id, start: { kind: "after", trackId: pick(r, live).id, delayDays: pick(r, [0, 1, 2, 3, -2, 0.5]) } };
 }
 
+/** The problems `next` has that `def` did not, by identity. */
+const newIssues = (def: CampaignDefinition, next: CampaignDefinition) => {
+  const before = new Set(definitionIssues(def).map(issueKey));
+  return definitionIssues(next).filter((i) => !before.has(issueKey(i)));
+};
+
 function runSeed(seed: number, broken?: ReadonlySet<ArrangeMutation>): void {
   const r = rng(seed);
-  let def = generateDefinition(r);
-  expect(definitionProblems(def)).toEqual([]);
+  const clean = generateDefinition(r);
+  expect(definitionProblems(clean)).toEqual([]);
+  // Half the drafts already have problems, from a stream of their own.
+  const rp = rng(seed ^ 0x0c0f_fee5);
+  let def = rp() < 0.5 ? withProblems(rp, clean) : clean;
   const everId = new Set(def.tracks.map((t) => t.id));
   for (let i = 0; i < 25; i++) {
     const op = generateOperation(r, def);
@@ -67,13 +115,17 @@ function runSeed(seed: number, broken?: ReadonlySet<ArrangeMutation>): void {
       // 2. A refusal leaves the draft identical and says why.
       expect(out.reason.length).toBeGreaterThan(0);
       expect((out as { definition?: CampaignDefinition }).definition ?? def).toBe(def);
-      // 3. Nothing is refused that the validator would accept.
-      expect(definitionProblems(naive(def, op))).not.toEqual([]);
+      // 3. Nothing is refused that the validator would accept: applied naively, it adds a problem the draft did not have.
+      const added = newIssues(def, naive(def, op));
+      expect(added).not.toEqual([]);
+      // 6. A refusal never names a problem the draft already had, under whatever name its track has now.
+      const named = definitionIssues(naive(def, op)).filter((i) => i.text === out.reason);
+      if (named.length > 0) expect([op, out.reason, named.some((i) => added.some((a) => issueKey(a) === issueKey(i)))]).toEqual([op, out.reason, true]);
       continue;
     }
     const next = out.definition;
-    // 1. The result is a draft the validator accepts.
-    expect(definitionProblems(next)).toEqual([]);
+    // 1. The result adds no problem the draft did not have (none at all, from a draft the validator accepts).
+    expect(newIssues(def, next).map((i) => i.text)).toEqual([]);
     // 4. Only what the operation names changes.
     const others = (d: CampaignDefinition, except: string | null) => d.tracks.filter((t) => t.id !== except);
     if (op.kind === "add") {
@@ -95,7 +147,18 @@ describe("the arrangement rule, generated (ADR 0003, ticket 13b)", () => {
     for (let seed = 1; seed <= SEEDS; seed++) runSeed(seed);
   });
 
-  const mutations: ArrangeMutation[] = ["no_cycle_check", "remove_ignores_dependants", "refusal_changes_draft", "refuse_every_after", "phone_track_with_a_follow_up"];
+  const mutations: ArrangeMutation[] = [
+    "no_cycle_check",
+    "remove_ignores_dependants",
+    "refusal_changes_draft",
+    "refuse_every_after",
+    "phone_track_with_a_follow_up",
+    "phone_track_in_the_branch",
+    "win_back_without_a_branch",
+    "remove_ignores_win_back",
+    "after_across_branches",
+    "problems_compared_by_sentence",
+  ];
   for (const mutation of mutations) {
     test(`the mutation "${mutation}" fails it`, () => {
       let failed = 0;

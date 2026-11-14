@@ -598,10 +598,13 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
     const target = ids.at(-1)!;
     const projected = await projectedSends(h.store, target, h.clock);
     const view = (await h.request<BeforeLaunchView>("GET", `/api/campaigns/${target}/before-launch`)).body;
-    // The branch's sends are not counted, and the screen says so whenever the campaign has one (ticket 16).
-    const hasBranch = w.campaigns.at(-1)!.definition.tracks.some((t) => t.branch === "win_back");
+    // The branch's sends are not counted, and the screen says so whenever the campaign has one (ticket 16) that a lead
+    // can enter: a live branch track and a live phone track to decline on (council on aaf82b7).
+    const tracksOf = w.campaigns.at(-1)!.definition.tracks;
+    const hasBranch = tracksOf.some((t) => t.branch === "win_back" && !t.removed);
+    const enterable = hasBranch && tracksOf.some((t) => t.branch === "main" && t.channel === "call" && !t.removed);
     // From the finished run's result: shown with a figure only.
-    if (view.load) expect(view.load.winBackNotCounted).toBe(hasBranch && view.load.leadsToStart !== null);
+    if (view.load) expect(view.load.winBackNotCounted).toBe(enterable && view.load.leadsToStart !== null);
     if (hasBranch && view.load?.withheldBy === null) ticket16.projectedWithABranch++;
     const inWinBack = new Set<string>();
     for (const id of ids.slice(0, -1)) for (const sid of await h.store.engine.subjectsOf(id)) if ((await h.store.engine.subject(sid, h.clock))?.subject.branch === "win_back") inWinBack.add(sid);

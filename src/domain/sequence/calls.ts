@@ -6,7 +6,7 @@
  * current state inside the transaction that writes it.
  */
 import { leadNow, localDayNumber, nextWindowOpen, span, startOfLocalDay, wallOfLead, windowOpen, type WindowRule } from "./clock.ts";
-import { declinedPathOf, winBackAvailable, type CampaignDefinition, type DeclinedPath } from "./definition.ts";
+import { WIN_BACK_HAS_NO_TRACKS, declinedPathOf, winBackAvailable, type CampaignDefinition, type DeclinedPath } from "./definition.ts";
 import type { ReadyItem } from "./dispatch.ts";
 import { advanceTrack, callbackHold, decline, end, evaluate, finishTrack, markDetailBad, progressOf, quiesce, runs, synced } from "./progress.ts";
 import type { CallAttempt, CallDay, CallNumber, CallOutcome, CallTask, NoteDraft, RecordedNumber, SubjectState } from "./state.ts";
@@ -379,7 +379,7 @@ export function logCallOutcome(
   if (override !== null && input.outcome !== "not_interested") return { ok: false, reason: "A declined path goes with not interested only." };
   const trackDef = state.campaign.definition.tracks.find((t) => t.id === task.trackId);
   const path: DeclinedPath | null = input.outcome === "not_interested" ? (override ?? declinedPathOf(trackDef)) : null;
-  if (path === "win_back" && !winBackAvailable(state.campaign.definition)) return { ok: false, reason: "This campaign has no win-back branch: choose stop or continue." };
+  if (path === "win_back" && !winBackAvailable(state.campaign.definition)) return { ok: false, reason: `${WIN_BACK_HAS_NO_TRACKS.charAt(0).toUpperCase()}${WIN_BACK_HAS_NO_TRACKS.slice(1)}: choose stop or continue.` };
   const number = input.numberId === null ? null : numberOf(state, input.numberId);
   if (input.outcome !== "skip_for_now") {
     if (!number) return { ok: false, reason: "Choose the number you dialled from the lead's numbers." };

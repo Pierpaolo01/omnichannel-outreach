@@ -44,8 +44,17 @@ test.describe("the phone track on the canvas and in its inspector", () => {
     // The callback hold lasts until its outcome is logged, not until the time asked for (review bot on 72b7252; ADR 0003 2.3).
     await expect(inspector.getByText("pauses this lead’s other outreach in the campaign until you log the callback’s outcome; a missed callback stays on your list, overdue, until you do.", { exact: false })).toBeVisible();
     await expect(inspector.getByText("until the time the prospect asked for", { exact: false })).toHaveCount(0);
-    // No declined path is set on a new phone track: said as the engine reads it (question Q14), with the choice a later release.
-    await expect(inspector.getByText("No path is set, so a declined call stops the lead in this campaign. Choosing stop, continue on the other channels, or the win-back branch here arrives with a later release.", { exact: false })).toBeVisible();
+    // No declined path is chosen on a new phone track: none is checked, and what a declined call does meanwhile is
+    // said as the engine reads it (question Q14). Win back waits for a win-back track, in the definition's words.
+    const paths = inspector.getByRole("radiogroup", { name: "If they decline on the call" });
+    await expect(paths.getByRole("radio", { checked: true })).toHaveCount(0);
+    await expect(inspector.getByText("No path is chosen yet, so a declined call stops the lead in this campaign.")).toBeVisible();
+    await expect(paths.getByRole("radio", { name: /^Win back/ })).toBeDisabled();
+    await expect(inspector.getByText("The win-back branch has no tracks: add a track to it, or choose stop or continue.")).toBeVisible();
+    await expect(page.getByRole("button", { name: /^Phone track: .*If declined: stop, not chosen yet\./ })).toBeVisible();
+    // The per-lead path is chosen on the Calls page since ticket 16c, and the hint says so.
+    await expect(inspector.getByText("No path calls the lead again. When you log a declined call on the Calls page, you can choose another path for that one lead.")).toBeVisible();
+    await expect(inspector.getByText("choosing another path there for one lead, arrives with a later release", { exact: false })).toHaveCount(0);
     // Together with the email track: both hang from Launch.
     await expect(page.getByRole("list", { name: "Tracks that start at launch" }).getByRole("button")).toHaveCount(2);
 
@@ -69,17 +78,20 @@ test.describe("the phone track on the canvas and in its inspector", () => {
     await expect(page.getByLabel("Call script")).toHaveValue("Ask who books the evening appointments.");
   });
 
-  test("a declined path and a win-back branch set over HTTP are said truthfully, and kept when an edit is saved here (ticket 16a)", async ({ page }) => {
+  test("a declined path and a win-back branch set over HTTP are drawn and kept when an edit is saved here (ticket 16a, drawn since 16b)", async ({ page }) => {
     const id = await newCampaign(page, "A branch set over HTTP");
     const branch = { id: "wb-1", channel: "email" as const, branch: "win_back" as const, window: [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 })), steps: [{ id: "wb-1-s1", waitDays: 0, subject: "No pressure", body: "Understood, {{first_name|there}}.", threading: "new_subject" as const, removed: false }], start: { kind: "entry" as const }, removed: false };
     const def = { ...WITH_A_CALL, tracks: [...WITH_A_CALL.tracks.map((t) => (t.id === "call" ? { ...t, declinedPath: "win_back" as const } : t)), branch] };
     expect((await page.request.put(`/api/campaigns/${id}/sequence`, { data: def })).status()).toBe(200);
     await page.goto(`/campaigns/${id}?track=call`);
     const inspector = page.getByTestId("inspector");
-    await expect(inspector.getByText("A declined call moves the lead to this campaign’s win-back branch, with no more calls.", { exact: false })).toBeVisible();
-    await expect(inspector.getByText("This campaign has a win-back branch of one track, for leads who decline on a call. It is kept as it is when you save here; showing and editing it here arrives with a later release.")).toBeVisible();
-    // The branch is not drawn on the canvas as part of the main sequence.
-    await expect(page.getByRole("button", { name: /No pressure/ })).toHaveCount(0);
+    await expect(inspector.getByRole("radio", { name: /^Win back/ })).toBeChecked();
+    await expect(inspector.getByRole("list", { name: "The win-back branch’s tracks" })).toContainText("Win-back email track · 1 email");
+    // The branch is drawn in its own box, not as part of the main sequence, and nothing says it is not shown.
+    const box = page.getByTestId("win-back-branch");
+    await expect(box.getByRole("button", { name: /^Win-back email track: / })).toBeVisible();
+    await expect(page.getByRole("list", { name: "Tracks that start at launch" }).getByRole("button", { name: /^Win-back/ })).toHaveCount(0);
+    await expect(page.getByText("arrives with a later release", { exact: false }).filter({ hasText: "win-back" })).toHaveCount(0);
     await page.getByLabel("Call script").fill("Ask who looks after new patient bookings.");
     await saved(page);
     const after = await stored(page, id);

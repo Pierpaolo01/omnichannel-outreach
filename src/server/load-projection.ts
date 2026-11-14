@@ -23,7 +23,7 @@ import { ENGINE_PARAMS } from "../domain/sequence/attempt.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, startOfLocalDay, windowOpen, type WindowRule } from "../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../domain/sequence/dispatch.ts";
 import { callableOnDay, callRoom, callWindow, goodNumbers } from "../domain/sequence/calls.ts";
-import { liveSteps, liveTracks, poolOf, winBackAvailable, type CampaignDefinition, type TrackChannel } from "../domain/sequence/definition.ts";
+import { liveSteps, liveTracks, poolOf, winBackEntry, type CampaignDefinition, type TrackChannel } from "../domain/sequence/definition.ts";
 import { channelReaches } from "../domain/sequence/progress.ts";
 import type { AccountState, Attempt, CallDay, SmsBinding, SubjectState } from "../domain/sequence/state.ts";
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
@@ -881,6 +881,8 @@ export function projectLoad(input: ProjectionInput): Projection {
     steps,
     stop: stopped,
     // Read from the run's own end state, by the engine's own facts: the branch is live, and no lead entered it.
-    winBackNotCounted: winBackAvailable(input.definition) && launched.every((s) => stateOf(s.subject.id).subject.branch === "main"),
+    // The branch counts as a branch here only if a lead can enter it at all, by the same function the copy preview
+    // says it with (`winBackEntry`; council on aaf82b7): with no phone track there is nothing to explain.
+    winBackNotCounted: winBackEntry(input.definition) !== "never" && launched.every((s) => stateOf(s.subject.id).subject.branch === "main"),
   };
 }

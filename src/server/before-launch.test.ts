@@ -280,6 +280,85 @@ describe("Before launch: copy for one lead across both channels, by track, dated
   });
 });
 
+describe("Before launch: copy for a lead in the win-back branch (ticket 16b)", () => {
+  const text = (id: string, fields: Partial<StepDefinition> = {}): StepDefinition => step(id, { threading: "new_subject", ...fields });
+  const def: CampaignDefinition = {
+    timezone: "Europe/London",
+    callSkipLimitDays: 2,
+    emailPool: ["inbox-a"],
+    smsPool: [],
+    callScript: "Ask who books.",
+    tracks: [
+      { id: "t1", channel: "email", branch: "main", window: weekdays, start: { kind: "entry" }, removed: false, steps: [step("s1", { subject: "Hi", threading: "new_subject" })] },
+      { id: "p1", channel: "call", branch: "main", window: weekdays, start: { kind: "after", trackId: "t1", delayDays: 1 }, removed: false, declinedPath: "win_back", steps: [step("c1", { subject: "", body: "" })] },
+      {
+        id: "w1",
+        channel: "email",
+        branch: "win_back",
+        window: weekdays,
+        start: { kind: "entry" },
+        removed: false,
+        steps: [step("ws1", { subject: "Another way, {{company}}", body: "Hello {{first_name|there}}.", threading: "new_subject" }), step("ws2", { waitDays: 7, body: "Last note." })],
+      },
+      { id: "w2", channel: "sms", branch: "win_back", window: weekdays, start: { kind: "after", trackId: "w1", delayDays: 2 }, removed: false, steps: [text("wm1", { body: "A win-back text." })] },
+    ],
+  };
+  const preview = async (name: string) => {
+    const { h, id } = await campaign([inbox("inbox-a")]);
+    await h.defineSequence(id, def);
+    const lead = (await beforeLaunch(h, id)).leads.find((l) => l.name === name)!;
+    return (await h.request<CopyPreview>("GET", `/api/campaigns/${id}/preview/${lead.id}`)).body;
+  };
+
+  test("the branch's messages are listed apart from the main sequence's, rendered for the lead, in track order, with no day: they go only to a lead who declines on a call", async () => {
+    const pat = await preview("Pat Oneil");
+    expect(pat.steps.map((s) => s.stepId)).toEqual(["s1"]);
+    expect(pat.winBack.map((s) => [s.trackId, s.stepId, s.channel, s.number, s.day, s.noDay, s.skipped, s.waitsOnCall])).toEqual([
+      ["w1", "ws1", "email", 1, null, "win_back", false, null],
+      ["w1", "ws2", "email", 2, null, "win_back", false, null],
+      ["w2", "wm1", "sms", 1, null, "win_back", false, null],
+    ]);
+    const [first, second] = pat.winBack;
+    expect(first!.subject.map((x) => x.text).join("")).toBe("Another way, Harbour Lane Physio");
+    expect(first!.body.map((x) => x.text).join("")).toBe("Hello Pat.");
+    // A continue-thread email in the branch replies to the branch's own thread.
+    expect(second!.subject.map((x) => x.text).join("")).toBe("Re: Another way, Harbour Lane Physio");
+  });
+
+  test("a lead who lacks a branch track's channel skips it there too: a company lead is never texted", async () => {
+    const northgate = await preview("Northgate Dental");
+    expect(northgate.winBack.map((s) => [s.stepId, s.noDay, s.skipped])).toEqual([
+      ["ws1", "win_back", false],
+      ["ws2", "win_back", false],
+      ["wm1", "skipped", true],
+    ]);
+    // A field the lead lacks takes its fallback, as in the main sequence.
+    expect(northgate.winBack[0]!.body.find((x) => x.kind === "fallback")?.text).toBe("there");
+  });
+
+  test("the read says how a lead can enter the branch, and the estimate's note agrees: never without a phone track (council on aaf82b7)", async () => {
+    const entry = async (tracks: readonly TrackDefinition[]) => {
+      const { h, id } = await campaign([inbox("inbox-a")]);
+      await h.defineSequence(id, { ...def, tracks });
+      const lead = (await beforeLaunch(h, id)).leads.find((l) => l.name === "Pat Oneil")!;
+      const copy = (await h.request<CopyPreview>("GET", `/api/campaigns/${id}/preview/${lead.id}`)).body;
+      return [copy.winBackEntry, (await beforeLaunch(h, id)).load?.winBackNotCounted];
+    };
+    const [main, call, branchEmail, branchSms] = def.tracks as [TrackDefinition, TrackDefinition, TrackDefinition, TrackDefinition];
+    expect(await entry(def.tracks)).toEqual(["declined_path", true]);
+    expect(await entry([main, { ...call, declinedPath: "continue" }, branchEmail, branchSms])).toEqual(["chosen_for_a_lead", true]);
+    // With no phone track the branch can never be entered, so the estimate says nothing of it either.
+    expect(await entry([main, branchEmail, branchSms])).toEqual(["never", false]);
+  });
+
+  test("a campaign with no win-back branch lists none", async () => {
+    const { h, id } = await campaign([inbox("inbox-a")]);
+    await h.defineSequence(id, emailTrack([step("s1", { subject: "Hi", threading: "new_subject" })]));
+    const lead = (await beforeLaunch(h, id)).leads[0]!;
+    expect((await h.request<CopyPreview>("GET", `/api/campaigns/${id}/preview/${lead.id}`)).body.winBack).toEqual([]);
+  });
+});
+
 describe("Before launch: projected daily load per sender inbox", () => {
   const many = (n: number) => ({
     businesses: [HARBOUR],

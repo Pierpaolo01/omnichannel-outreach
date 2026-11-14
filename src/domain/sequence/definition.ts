@@ -66,8 +66,37 @@ export interface CampaignDefinition {
  */
 export const declinedPathOf = (track: Pick<TrackDefinition, "declinedPath"> | undefined): DeclinedPath => track?.declinedPath ?? "stop";
 
+/**
+ * The one way the product says the win-back branch cannot be entered (council on aaf82b7; ticket 16c): it has no
+ * live track. The validator's refusal (7.1), the editor beside win back, the outcome's refusal (`logCallOutcome`)
+ * and the Calls page's reason all say it with these words.
+ */
+export const WIN_BACK_HAS_NO_TRACKS = "the win-back branch has no tracks";
+/**
+ * What to do when a phone track's declined path is win back and the branch has no live track: the clause the
+ * validator's refusal ends with (7.1), which the editor also shows beside win back while it cannot be chosen.
+ */
+export const NO_WIN_BACK_BRANCH = `${WIN_BACK_HAS_NO_TRACKS}: add a track to it, or choose stop or continue.`;
+
 /** Whether a lead can enter the campaign's win-back branch: it has a live track. */
 export const winBackAvailable = (def: CampaignDefinition): boolean => def.tracks.some((t) => !t.removed && t.branch === "win_back");
+
+/**
+ * How a lead can enter the campaign's win-back branch (council on aaf82b7), from the definition alone:
+ * - `declined_path`: some live phone track of the main sequence has win back as its declined path
+ *   (`declinedPathOf`), so a declined call there moves the lead in;
+ * - `chosen_for_a_lead`: the branch has a live track and the main sequence a live phone track, but no
+ *   path is win back, so a lead enters it only when win back is chosen for them as their declined call is
+ *   logged (the outcome's per-lead path, ticket 16a: offered whenever `winBackAvailable`);
+ * - `never`: the branch has no live track, or the main sequence has no live phone track to decline on.
+ * The copy preview says it, and the estimate's `winBackNotCounted` reads it, so the two cannot disagree.
+ */
+export type WinBackEntry = "declined_path" | "chosen_for_a_lead" | "never";
+export function winBackEntry(def: CampaignDefinition): WinBackEntry {
+  const calls = liveTracks(def, "main").filter((t) => t.channel === "call");
+  if (!winBackAvailable(def) || calls.length === 0) return "never";
+  return calls.some((t) => declinedPathOf(t) === "win_back") ? "declined_path" : "chosen_for_a_lead";
+}
 
 /** An empty definition for a new campaign. */
 export function emptyDefinition(timezone: string): CampaignDefinition {
@@ -95,23 +124,37 @@ const isWholeDays = (n: number) => Number.isInteger(n) && n >= 0;
 
 
 /**
- * Plain messages for a definition that cannot be saved (ADR 0003 7.1). Empty when it can.
- * `previous` is the stored definition an edit replaces, if any.
+ * One reason a definition cannot be saved (ADR 0003 7.1), with a stable identity: its `kind` and the track
+ * and step it is about, by id. Its sentence names the track as it is called now, which changes when a
+ * sibling is added or removed, so whether two problems are the same one is decided by identity, never
+ * by their sentences (council on aaf82b7).
  */
-export function definitionProblems(def: CampaignDefinition, previous: CampaignDefinition | null = null): string[] {
-  const problems: string[] = [];
-  if (!isTimeZone(def.timezone)) problems.push(`The campaign's time zone "${def.timezone}" is not an IANA time zone such as Europe/London.`);
-  if (!isWholeDays(def.callSkipLimitDays) || def.callSkipLimitDays === 0) problems.push("The call skip limit is a whole number of days, at least 1.");
+export interface DefinitionIssue {
+  readonly kind: string;
+  readonly trackId?: string;
+  readonly stepId?: string;
+  readonly text: string;
+}
+
+/** A problem's identity: the same problem before and after an edit, however its track is named. */
+export const issueKey = (issue: DefinitionIssue): string => `${issue.kind} ${issue.trackId ?? ""} ${issue.stepId ?? ""}`;
+
+/** The reasons a definition cannot be saved (ADR 0003 7.1), each with its identity. Empty when it can. */
+export function definitionIssues(def: CampaignDefinition, previous: CampaignDefinition | null = null): DefinitionIssue[] {
+  const problems: DefinitionIssue[] = [];
+  const add = (kind: string, text: string, about: { readonly trackId?: string; readonly stepId?: string } = {}) => problems.push({ kind, text, ...about });
+  if (!isTimeZone(def.timezone)) add("timezone", `The campaign's time zone "${def.timezone}" is not an IANA time zone such as Europe/London.`);
+  if (!isWholeDays(def.callSkipLimitDays) || def.callSkipLimitDays === 0) add("campaign_skip_limit", "The call skip limit is a whole number of days, at least 1.");
   const smsPool = def.smsPool ?? [];
-  if (new Set(def.emailPool).size !== def.emailPool.length || new Set(smsPool).size !== smsPool.length) problems.push("A sender account is listed twice.");
+  if (new Set(def.emailPool).size !== def.emailPool.length || new Set(smsPool).size !== smsPool.length) add("sender_twice", "A sender account is listed twice.");
 
   const trackIds = new Set<string>();
   const stepIds = new Set<string>();
   for (const track of def.tracks) {
-    if (trackIds.has(track.id)) problems.push(`Two tracks share the id ${track.id}.`);
+    if (trackIds.has(track.id)) add("track_id_twice", `Two tracks share the id ${track.id}.`, { trackId: track.id });
     trackIds.add(track.id);
     for (const step of track.steps) {
-      if (stepIds.has(step.id)) problems.push(`Two steps share the id ${step.id}.`);
+      if (stepIds.has(step.id)) add("step_id_twice", `Two steps share the id ${step.id}.`, { trackId: track.id, stepId: step.id });
       stepIds.add(step.id);
     }
   }
@@ -130,12 +173,12 @@ export function definitionProblems(def: CampaignDefinition, previous: CampaignDe
   // The win-back branch (ticket 16): no call in it (spec "no cold call"), and a phone track enters it only
   // when it has a live track. The declined path is the only branch point, so no connection crosses branches.
   if (live.some((t) => t.branch === "win_back" && t.channel === "call")) {
-    problems.push("The win-back branch cannot hold a phone track: a lead who declined is never called again in this campaign. Remove the phone track from the win-back branch.");
+    add("phone_in_win_back", "The win-back branch cannot hold a phone track: a lead who declined is never called again in this campaign. Remove the phone track from the win-back branch.");
   }
   for (const track of live) {
-    if (track.declinedPath !== undefined && track.channel !== "call") problems.push(`Only a phone track has a declined path: ${label(track)} has one.`);
+    if (track.declinedPath !== undefined && track.channel !== "call") add("declined_path_not_phone", `Only a phone track has a declined path: ${label(track)} has one.`, { trackId: track.id });
     if (track.channel === "call" && track.branch === "main" && track.declinedPath === "win_back" && !winBackAvailable(def)) {
-      problems.push(`${capital(label(track))}'s declined path is win back, but the campaign has no win-back branch: add a track to the win-back branch, or choose stop or continue.`);
+      add("win_back_without_branch", `${capital(label(track))}'s declined path is win back, but ${NO_WIN_BACK_BRANCH}`, { trackId: track.id });
     }
   }
 
@@ -143,36 +186,38 @@ export function definitionProblems(def: CampaignDefinition, previous: CampaignDe
     const name = capital(label(track));
     if (track.start.kind === "after") {
       const before = byId.get(track.start.trackId);
-      if (!before) problems.push(`${name} starts after a track that is not in the sequence.`);
+      if (!before) add("after_missing", `${name} starts after a track that is not in the sequence.`, { trackId: track.id });
       else if (before.branch !== track.branch) {
-        problems.push(
+        add(
+          "after_other_branch",
           track.branch === "win_back"
             ? `${name} starts after a track of the main sequence: connect it inside the win-back branch, which starts when a lead declines.`
             : `${name} starts after a track of the win-back branch: connect it inside the main sequence.`,
+          { trackId: track.id },
         );
       }
-      if (!isWholeDays(track.start.delayDays)) problems.push(`The delay before ${label(track)} is a whole number of days.`);
+      if (!isWholeDays(track.start.delayDays)) add("delay_not_whole", `The delay before ${label(track)} is a whole number of days.`, { trackId: track.id });
     }
-    if (track.window.length === 0) problems.push(`${name}'s ${track.channel === "call" ? "calling hours have" : "sending window has"} no days.`);
+    if (track.window.length === 0) add("window_empty", `${name}'s ${track.channel === "call" ? "calling hours have" : "sending window has"} no days.`, { trackId: track.id });
     for (const w of track.window) {
-      if (!Number.isInteger(w.day) || w.day < 0 || w.day > 6) problems.push(`${name}'s window names a day that does not exist.`);
-      if (!Number.isInteger(w.start) || !Number.isInteger(w.end) || w.start < 0 || w.start > 23 || w.end < 0 || w.end > 24) problems.push(`${name}'s window hours are whole hours from 0 to 24.`);
-      else if (w.start === w.end) problems.push(`${name}'s window starts and ends at the same hour.`);
+      if (!Number.isInteger(w.day) || w.day < 0 || w.day > 6) add("window_day", `${name}'s window names a day that does not exist.`, { trackId: track.id });
+      if (!Number.isInteger(w.start) || !Number.isInteger(w.end) || w.start < 0 || w.start > 23 || w.end < 0 || w.end > 24) add("window_hours", `${name}'s window hours are whole hours from 0 to 24.`, { trackId: track.id });
+      else if (w.start === w.end) add("window_same_hour", `${name}'s window starts and ends at the same hour.`, { trackId: track.id });
     }
     if (track.callSkipLimitDays !== undefined) {
-      if (track.channel !== "call") problems.push("Only a phone track has a call skip limit.");
-      else if (!isWholeDays(track.callSkipLimitDays) || track.callSkipLimitDays === 0) problems.push(`${name}'s call skip limit is a whole number of days, at least 1.`);
+      if (track.channel !== "call") add("skip_limit_not_phone", "Only a phone track has a call skip limit.", { trackId: track.id });
+      else if (!isWholeDays(track.callSkipLimitDays) || track.callSkipLimitDays === 0) add("track_skip_limit", `${name}'s call skip limit is a whole number of days, at least 1.`, { trackId: track.id });
     }
     const steps = liveSteps(track);
     // A phone track is one call with no follow-ups (spec "Phone tracks"); the call has no copy.
-    if (track.channel === "call" && steps.length !== 1) problems.push(`${name} is one call with no follow-ups: give it exactly one step.`);
+    if (track.channel === "call" && steps.length !== 1) add("call_steps", `${name} is one call with no follow-ups: give it exactly one step.`, { trackId: track.id });
     // A call has no copy: the campaign's call script shows on every call task (verifier F2 on a1399ce).
-    if (track.channel === "call" && steps.some((st) => st.subject.trim() !== "" || st.body.trim() !== "")) problems.push(`${capital(label(track))}'s call has no copy of its own: write talking points in the campaign's call script.`);
+    if (track.channel === "call" && steps.some((st) => st.subject.trim() !== "" || st.body.trim() !== "")) add("call_copy", `${capital(label(track))}'s call has no copy of its own: write talking points in the campaign's call script.`, { trackId: track.id });
     steps.forEach((step, i) => {
       const stepLabel = `Step ${i + 1}`;
-      if (i === 0 && step.waitDays !== 0) problems.push(`${stepLabel} is the first step, so it has no wait.`);
-      if (!isWholeDays(step.waitDays)) problems.push(`${stepLabel}'s wait is a whole number of days.`);
-      if (i === 0 && track.channel === "email" && step.threading === "continue_thread") problems.push(`${stepLabel} is the first email, so there is no thread to continue: give it a new subject.`);
+      if (i === 0 && step.waitDays !== 0) add("first_step_wait", `${stepLabel} is the first step, so it has no wait.`, { trackId: track.id, stepId: step.id });
+      if (!isWholeDays(step.waitDays)) add("wait_not_whole", `${stepLabel}'s wait is a whole number of days.`, { trackId: track.id, stepId: step.id });
+      if (i === 0 && track.channel === "email" && step.threading === "continue_thread") add("first_email_continues", `${stepLabel} is the first email, so there is no thread to continue: give it a new subject.`, { trackId: track.id, stepId: step.id });
     });
   }
 
@@ -185,19 +230,27 @@ export function definitionProblems(def: CampaignDefinition, previous: CampaignDe
     }
     return false;
   });
-  if (inCircle) problems.push("The tracks' connections go in a circle, so none of them could start.");
+  if (inCircle) add("circle", "The tracks' connections go in a circle, so none of them could start.");
 
   if (previous) {
     const before = new Map(previous.tracks.map((t) => [t.id, t]));
     const stepTrack = new Map(previous.tracks.flatMap((t) => t.steps.map((s) => [s.id, t.id] as const)));
     for (const track of def.tracks) {
       const old = before.get(track.id);
-      if (old && old.channel !== track.channel) problems.push("A track cannot change channel: remove it and add a new one.");
+      if (old && old.channel !== track.channel) add("channel_changed", "A track cannot change channel: remove it and add a new one.", { trackId: track.id });
       for (const step of track.steps) {
         const was = stepTrack.get(step.id);
-        if (was !== undefined && was !== track.id) problems.push("A step cannot move to another track: remove it and add a new one.");
+        if (was !== undefined && was !== track.id) add("step_moved", "A step cannot move to another track: remove it and add a new one.", { trackId: track.id, stepId: step.id });
       }
     }
   }
   return problems;
+}
+
+/**
+ * Plain messages for a definition that cannot be saved (ADR 0003 7.1). Empty when it can.
+ * `previous` is the stored definition an edit replaces, if any. The sentences of `definitionIssues`.
+ */
+export function definitionProblems(def: CampaignDefinition, previous: CampaignDefinition | null = null): string[] {
+  return definitionIssues(def, previous).map((issue) => issue.text);
 }

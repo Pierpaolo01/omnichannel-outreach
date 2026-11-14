@@ -6,7 +6,8 @@ import type { FakeAccount } from "../../../test/support/fake-email-port.ts";
 import type { ApiError, CampaignDefinition, SequenceView } from "../../shared/api.ts";
 import { DEFINITION_MAX_BYTES } from "../../shared/limits.ts";
 import { arrange, type ArrangeOperation } from "./arrangement.ts";
-import { EditorStore } from "./editorStore.ts";
+import { newStep } from "./model.ts";
+import { EditorStore, type SaveFault } from "./editorStore.ts";
 import { NoAnswer, draftProblems, type SaveStatus } from "./saveQueue.ts";
 
 /**
@@ -19,7 +20,11 @@ import { NoAnswer, draftProblems, type SaveStatus } from "./saveQueue.ts";
  * tab (kept for Back, or gone with a new page and session), restores, typing while a launch or a
  * load is in flight and while in conflict. Since ticket 13b the edits also arrange tracks (an SMS or
  * email track added, started after another with a delay, its delay changed, removed: the editor's
- * arrangement operations) and SMS numbers connect, which the SMS pool follows. Requests are never lost; answers may be.
+ * arrangement operations) and SMS numbers connect, which the SMS pool follows. Since ticket 16b the
+ * generated user also sets phone tracks' declined paths and adds, arranges and removes win-back branch
+ * tracks, through the same operations, from a stream of its own; each page keeps its own record of
+ * what it chose (`Shape`), and the draft on the page and the stored definition are checked against it.
+ * Requests are never lost; answers may be.
  *
  * Invariants (3, 6 and 7 after every step; the rest once the network settles):
  * 1. The stored definition is the newest draft typed in the session that wrote it, when that draft
@@ -36,6 +41,9 @@ import { NoAnswer, draftProblems, type SaveStatus } from "./saveQueue.ts";
  * 3b. A page whose newest draft cannot be sent never shows "Saving…" or "Saved" (after every step).
  * 6 also covers an answer to a save sent before its page loaded the saved version: it changes nothing
  *    the page shows (status, conflict, draft), checked after every such answer.
+ * 1 and 6 also hold for the declined paths and the win-back branch (ticket 16b): after every step the
+ *    page's draft has the phone tracks' declined paths and the branch's tracks the page's record says it
+ *    chose, and once settled the stored definition has the writer's.
  *
  * How many runs (recorded in docs/agents/delivery-workflow.md): `pnpm check` runs 200 fixed seeds (7000
  * to 7199), every seed that once failed (REGRESSIONS), and a window of 100 seeds that moves with each
@@ -53,6 +61,10 @@ import { NoAnswer, draftProblems, type SaveStatus } from "./saveQueue.ts";
  * - typing in conflict showing "Saving…" (editorStore.ts `update`; council item 10): invariant 7;
  * - no generation gate, so an answer, or a queued save, from before the page loaded the saved version
  *   still changes it (saveQueue.ts `send`, `save` and `step`; council on aebeb80, item 2): invariant 6.
+ *
+ * Faults injected on every push (ticket 16b; `SaveFault` in editorStore.ts), each killed by its recorded
+ * fixed seed (FAULT_SEEDS): a save that leaves out each phone track's declined path, and a save that leaves
+ * out the win-back branch's tracks; and (council on aaf82b7) a save that sends the branch's copy of the save before it.
  */
 /** The full search (`pnpm test:save-search`, in the `sequence-search` workflow), sharded by `SEQUENCE_SHARD`, "i/n". */
 const FULL_SEARCH = process.env["SAVE_QUEUE_SEARCH"] === "full";
@@ -71,6 +83,12 @@ const inShard = (index: number) => !FULL_SEARCH || !SHARD || index % Number(SHAR
  * late answer; a new generation's saves no longer queue behind the old one's.
  */
 const REGRESSIONS = [7369, 7412, 7642, 7729, 7889, 845691, 463057];
+/**
+ * The fixed seed known to kill each fault (ticket 16b), found by `SAVE_QUEUE_FAULT_SEARCH=1` over the fixed
+ * seeds. The recorded seeds above replay the trajectories they were recorded with, so the generated user
+ * makes no declined-path or branch edit on them.
+ */
+const FAULT_SEEDS: Record<SaveFault, number> = { declined_path_not_sent: 7003, win_back_tracks_not_sent: 7004, stale_win_back_copy: 7016 };
 /** The commit the moving window is derived from: CI's, else the checkout's HEAD, else none. */
 function commitOf(): string {
   if (process.env["GITHUB_SHA"]) return process.env["GITHUB_SHA"];
@@ -99,6 +117,14 @@ const RUN_SEEDS = [
 ];
 /** The coverage checks below hold over many runs, not over a few (council on aebeb80, item 5). */
 const ENOUGH_FOR_COVERAGE = SEEDS >= 100;
+/**
+ * How many coverage runs a behaviour must be reached in. In `pnpm check` the coverage seeds are the fixed and
+ * recorded ones, the same on every run, so a share of them is a fixed bar a change can only fail by changing
+ * what the generator reaches. One shard of the full search runs other seeds, a different set per shard, where
+ * a share is a matter of chance (CI shard 6 on 8147ba6: 4 arranged branches against 6.25), so there each
+ * behaviour must be reached at least once; the search is for broken invariants (review bot on 8147ba6).
+ */
+const atLeast = (share: number): number => (FULL_SEARCH && SHARD ? 0 : COVERAGE_SEEDS.size * share);
 /**
  * The seeds the coverage checks count over: the fixed and recorded ones, the same on every commit. The moving
  * window runs every invariant on its seeds but takes no part in coverage counts, so they cannot depend on the
@@ -159,6 +185,8 @@ interface Page {
   newestTyped: string | null;
   /** The same, if it can be sent (within the size bound); null once one that cannot is typed. */
   newestSendable: string | null;
+  /** What this page chose for the declined paths and the win-back branch in its newest typed draft (ticket 16b). */
+  shape: Shape;
 }
 
 interface Request {
@@ -181,8 +209,40 @@ const flush = async () => {
   for (let i = 0; i < 30; i++) await Promise.resolve();
 };
 
-async function run(seed: number) {
+/**
+ * What a page chose for the declined paths and the win-back branch (ticket 16b): each live main phone
+ * track's declined path (null when none is set), and each live branch track's channel and start. Kept by
+ * the generated user from the operations it applied, never read back from the editor, except as the base
+ * when the page shows a definition it did not type (a load).
+ */
+interface Shape {
+  readonly paths: Readonly<Record<string, string | null>>;
+  readonly branch: Readonly<Record<string, string>>;
+  /** Each live branch track's live steps in order, as "id:subject|body|threading|wait" (council on aaf82b7). */
+  readonly copy: Readonly<Record<string, readonly string[]>>;
+}
+const stepKey = (st: { id: string; subject: string; body: string; threading: string; waitDays: number }) => `${st.id}:${st.subject}|${st.body}|${st.threading}|${st.waitDays}`;
+const startKey = (start: CampaignDefinition["tracks"][number]["start"]) => (start.kind === "entry" ? "entry" : `after ${start.trackId} ${start.delayDays}`);
+/** The shape a definition has, to compare with a record. */
+function shapeOf(def: CampaignDefinition): Shape {
+  const live = def.tracks.filter((t) => !t.removed);
+  return {
+    paths: Object.fromEntries(live.filter((t) => t.channel === "call" && t.branch === "main").map((t) => [t.id, t.declinedPath ?? null])),
+    branch: Object.fromEntries(live.filter((t) => t.branch === "win_back").map((t) => [t.id, `${t.channel} ${startKey(t.start)}`])),
+    copy: Object.fromEntries(live.filter((t) => t.branch === "win_back").map((t) => [t.id, t.steps.filter((st) => !st.removed).map(stepKey)])),
+  };
+}
+const shapeText = (a: Shape) => JSON.stringify([Object.entries(a.paths).sort(), Object.entries(a.branch).sort(), Object.entries(a.copy).sort()]);
+const sameShape = (a: Shape, b: Shape) => shapeText(a) === shapeText(b);
+const NO_SHAPE: Shape = { paths: {}, branch: {}, copy: {} };
+
+async function run(seed: number, faults?: ReadonlySet<SaveFault>) {
   const r = rng(seed);
+  // A third stream for the declined paths and the win-back branch (ticket 16b); none on a recorded seed.
+  const r3 = rng(seed ^ 0x16b0_16b0);
+  const branchEdits = !REGRESSIONS.includes(seed);
+  // A fourth for the branch's copy (council on aaf82b7), so the third stream's draws stay as they were.
+  const r4 = rng(seed ^ 0x0aaf_82b7);
   // A second stream for what was added later (the late answer after a load), so the first stream's
   // choices, and the recorded seeds, stay as they were until it first acts.
   const r2 = rng(seed ^ 0x5eed_c0de);
@@ -199,7 +259,7 @@ async function run(seed: number) {
   const writerNow = (): string | null => server.writer;
   /** Every save the server accepted, as session/number. */
   const accepted = new Set<string>();
-  const phoneCoverage = { phoneSaved: false, phoneAny: false };
+  const phoneCoverage = { phoneSaved: false, phoneAny: false, winBackSaved: false, declinedSaved: false, branchArranged: false, branchCopySaved: false };
   const putRaw = async (body: Request["body"]) => {
     const out = await h.request<unknown>("PUT", path, body);
     if (out.status === 200) {
@@ -208,6 +268,10 @@ async function run(seed: number) {
       const tracks = (body as unknown as CampaignDefinition).tracks;
       if (tracks.some((t) => !t.removed && t.channel === "call" && t.callSkipLimitDays !== undefined && t.callSkipLimitDays !== 2)) phoneCoverage.phoneSaved = true;
       if (tracks.some((t) => !t.removed && t.channel === "call")) phoneCoverage.phoneAny = true;
+      if (tracks.some((t) => !t.removed && t.channel === "call" && t.declinedPath === "win_back") && tracks.some((t) => !t.removed && t.branch === "win_back")) phoneCoverage.winBackSaved = true;
+      if (tracks.some((t) => !t.removed && t.branch === "win_back" && t.start.kind === "after")) phoneCoverage.branchArranged = true;
+      if (tracks.some((t) => !t.removed && t.branch === "win_back" && t.steps.some((st) => st.body.startsWith("wb") || st.subject.startsWith("ws")))) phoneCoverage.branchCopySaved = true;
+      if (tracks.some((t) => !t.removed && t.channel === "call" && (t.declinedPath === "stop" || t.declinedPath === "continue"))) phoneCoverage.declinedSaved = true;
       if (view.definitionVersion > server.version) {
         const session = body.save?.session ?? null;
         // Invariant 2: another session replaces a save only if it had seen it.
@@ -222,6 +286,7 @@ async function run(seed: number) {
   server.writer = null;
 
   let typed = 0;
+  let copyBesideInFlight = false;
   let inboxes = 1;
   let numbers = 0;
   /**
@@ -231,8 +296,122 @@ async function run(seed: number) {
    * a call keeps none. A skip limit of 0 is a draft that cannot be saved, as a bad wait is.
    */
   const pick = <T,>(xs: readonly T[]): T => xs[Math.floor(r() * xs.length)]!;
-  const arranged = (before: CampaignDefinition, subject: string): CampaignDefinition => {
+  const pick3 = <T,>(xs: readonly T[]): T => xs[Math.floor(r3() * xs.length)]!;
+  /**
+   * A declined path or a win-back branch edit (ticket 16b), through the editor's operations, from its own
+   * stream: what the inspector's path choice and the branch's add, starts, delays and remove do. Refused
+   * ones (win back with no branch track, the branch's last track under win back, a connection across
+   * branches, a phone track in the branch) leave the draft as it was. Returns the draft and the record.
+   */
+  let copies = 0;
+  /**
+   * A copy edit in a win-back track (council on aaf82b7): a body, a subject (where the email writes one), the
+   * threading of a follow-up email, a follow-up's wait, or a new follow-up. The values are the generated user's,
+   * recorded as chosen; the editor's draft is not read back.
+   */
+  const copyEdit = (before: CampaignDefinition, shape: Shape, track: CampaignDefinition["tracks"][number]): { definition: CampaignDefinition; shape: Shape; copy: true } => {
+    const steps = track.steps.filter((st) => !st.removed);
+    const k = Math.floor(r4() * steps.length);
+    const step = steps[k]!;
+    const email = track.channel === "email";
+    const roll = r4();
+    let next: typeof track.steps;
+    if (roll < 0.35) next = track.steps.map((st) => (st.id === step.id ? { ...st, body: `wb${++copies}` } : st));
+    else if (roll < 0.55 && email && (k === 0 || step.threading === "new_subject")) next = track.steps.map((st) => (st.id === step.id ? { ...st, subject: `ws${++copies}` } : st));
+    else if (roll < 0.65 && email && k > 0) next = track.steps.map((st) => (st.id === step.id ? { ...st, threading: st.threading === "new_subject" ? ("continue_thread" as const) : ("new_subject" as const) } : st));
+    else if (roll < 0.8 && k > 0) next = track.steps.map((st) => (st.id === step.id ? { ...st, waitDays: Math.floor(r4() * 4) } : st));
+    else {
+      // A follow-up, as the inspector adds one (an SMS has no thread), with copy of its own.
+      const added = { ...newStep(false), body: `wb${++copies}` };
+      next = [...track.steps, email ? added : { ...added, threading: "new_subject" as const }];
+    }
+    const edited = { ...track, steps: next };
+    return {
+      definition: { ...before, tracks: before.tracks.map((t) => (t.id === track.id ? edited : t)) },
+      shape: { ...shape, copy: { ...shape.copy, [track.id]: next.filter((st) => !st.removed).map(stepKey) } },
+      copy: true,
+    };
+  };
+  const branchEdit = (before: CampaignDefinition, shape: Shape): { definition: CampaignDefinition; shape: Shape } | null => {
     const live = before.tracks.filter((t) => !t.removed);
+    const calls = live.filter((t) => t.channel === "call" && t.branch === "main");
+    const branch = live.filter((t) => t.branch === "win_back");
+    const roll = r3();
+    let op: ArrangeOperation;
+    // The branch is entered from a phone track's declined path, so a draft with none gets one first.
+    if (calls.length === 0) op = { kind: "add", channel: "call" };
+    // Win back mostly once the branch has a track; sometimes before, which is refused.
+    else if (roll < 0.3) op = { kind: "declined", trackId: pick3(calls).id, path: pick3(branch.length > 0 ? (["stop", "continue", "win_back", "win_back", "win_back"] as const) : (["stop", "continue", "win_back"] as const)) };
+    else if (branch.length === 0 || roll < (branch.length > 1 ? 0.45 : 0.6)) op = { kind: "add", channel: pick3(["email", "sms", "sms", "call"] as const), branch: "win_back" };
+    else if (roll < 0.75) {
+      // After another track of the branch, mostly; sometimes at its entry, or after a main track (refused).
+      const subject = pick3(branch);
+      const others = branch.filter((t) => t.id !== subject.id);
+      const target = r3() < 0.15 || others.length === 0 ? pick3(live) : pick3(others);
+      op = { kind: "start", trackId: subject.id, start: r3() < 0.2 ? { kind: "entry" } : { kind: "after", trackId: target.id, delayDays: Math.floor(r3() * 3) } };
+    }
+    else if (roll < 0.85) op = { kind: "delay", trackId: pick3(branch).id, days: Math.floor(r3() * 4) };
+    else op = { kind: "remove", trackId: pick3(branch).id };
+    const arrangedOut = arrange(before, op);
+    if (!arrangedOut.ok) return null;
+    // A new branch track gets its first message's copy at once (a body, and a subject on an email), so a copy edit
+    // later in the same draft starts from what the record says.
+    const fresh = op.kind === "add" && op.branch === "win_back" ? arrangedOut.added : undefined;
+    const out = fresh
+      ? { ...arrangedOut, definition: { ...arrangedOut.definition, tracks: arrangedOut.definition.tracks.map((t) => (t.id === fresh.id ? { ...t, steps: t.steps.map((st) => ({ ...st, body: "Text.", subject: t.channel === "email" ? "Hi" : "" })) } : t)) } }
+      : arrangedOut;
+    // The record: what this operation chose, kept apart from the editor's draft.
+    const paths = { ...shape.paths };
+    const without = (record: Readonly<Record<string, string>>, id: string) => Object.fromEntries(Object.entries(record).filter(([k]) => k !== id));
+    let kept: Record<string, string> = { ...shape.branch };
+    let copy: Record<string, readonly string[]> = { ...shape.copy };
+    if (op.kind === "declined") paths[op.trackId] = op.path;
+    else if (op.kind === "add" && out.added && op.branch !== "win_back") paths[out.added.id] = null;
+    else if (op.kind === "add" && out.added) {
+      kept[out.added.id] = `${op.channel} entry`;
+      // A new track's first message, as the generated user's draft fills it in (below): a body, and a subject on an email.
+      const first = out.added.steps[0]!;
+      copy[out.added.id] = [stepKey({ ...first, subject: op.channel === "email" ? "Hi" : "", body: "Text." })];
+    }
+    else if (op.kind === "start") kept[op.trackId] = `${kept[op.trackId]?.split(" ")[0] ?? ""} ${startKey(op.start)}`;
+    else if (op.kind === "delay") kept[op.trackId] = (kept[op.trackId] ?? "").replace(/ \d+$/, ` ${op.days}`);
+    else if (op.kind === "remove") {
+      kept = without(kept, op.trackId);
+      copy = Object.fromEntries(Object.entries(copy).filter(([id]) => id !== op.trackId));
+    }
+    return { definition: out.definition, shape: { paths, branch: kept, copy } };
+  };
+  /** The record after an edit of the main sequence: a phone track added has no path; one removed has none. */
+  const mainShape = (shape: Shape, op: ArrangeOperation, added: string | null): Shape => {
+    const paths: Record<string, string | null> = Object.fromEntries(Object.entries(shape.paths).filter(([id]) => op.kind !== "remove" || id !== op.trackId));
+    if (op.kind === "add" && op.channel === "call" && added) paths[added] = null;
+    return { paths, branch: shape.branch, copy: shape.copy };
+  };
+  const arranged = (before: CampaignDefinition, subject: string, shape: Shape): { definition: CampaignDefinition; shape: Shape; copy?: boolean } => {
+    const finish = (base: CampaignDefinition, next: Shape, copy = false) => ({
+      copy,
+      definition: {
+        ...base,
+        callScript: subject,
+        tracks: base.tracks.map((t) => (t.channel === "call" ? t : { ...t, steps: t.steps.map((st, k) => ({ ...st, body: st.body || "Text.", subject: t.channel === "email" && k === 0 && !st.subject ? "Hi" : st.subject })) })),
+      },
+      shape: next,
+    });
+    if (branchEdits && r3() < (before.tracks.some((t) => !t.removed && t.channel === "call") ? 0.85 : 0.5)) {
+      // One to three of them before the save goes, as a user does in the inspector within the debounce.
+      let edited: { definition: CampaignDefinition; shape: Shape; copy?: true } = { definition: before, shape };
+      let copy = false;
+      for (let n = 1 + Math.floor(r3() * 3); n > 0; n--) edited = branchEdit(edited.definition, edited.shape) ?? edited;
+      // Then often copy in the branch, wholly from a stream of its own, so the arrangement draws stay as they were.
+      const branch = edited.definition.tracks.filter((t) => !t.removed && t.branch === "win_back");
+      if (branch.length > 0 && r4() < 0.5) {
+        edited = copyEdit(edited.definition, edited.shape, branch[Math.floor(r4() * branch.length)]!);
+        copy = true;
+      }
+      return finish(edited.definition, edited.shape, copy);
+    }
+    // The main sequence's own edits never name a branch track (ticket 16b): the branch has its own.
+    const live = before.tracks.filter((t) => !t.removed && t.branch === "main");
     const any = () => live[Math.floor(r() * live.length)]!;
     const calls = live.filter((t) => t.channel === "call");
     const phoneEdit = (): Partial<CampaignDefinition["tracks"][number]> =>
@@ -240,7 +419,7 @@ async function run(seed: number) {
     if (calls.length > 0 && r() < 0.4) {
       const call = calls[Math.floor(r() * calls.length)]!;
       const change = phoneEdit();
-      return { ...before, callScript: subject, tracks: before.tracks.map((t) => (t.id === call.id ? { ...t, ...change } : t)) };
+      return { definition: { ...before, callScript: subject, tracks: before.tracks.map((t) => (t.id === call.id ? { ...t, ...change } : t)) }, shape };
     }
     const roll = r();
     const op: ArrangeOperation =
@@ -254,11 +433,7 @@ async function run(seed: number) {
     // inspector it opens in invites; most drafts are replaced before their save goes.
     const added = out.ok && out.added?.channel === "call" && r() < 0.6 ? { id: out.added.id, change: phoneEdit() } : null;
     const base = out.ok ? { ...out.definition, tracks: out.definition.tracks.map((t) => (t.id === added?.id ? { ...t, ...added.change } : t)) } : before;
-    return {
-      ...base,
-      callScript: subject,
-      tracks: base.tracks.map((t) => (t.channel === "call" ? t : { ...t, steps: t.steps.map((st, k) => ({ ...st, body: st.body || "Text.", subject: t.channel === "email" && k === 0 && !st.subject ? "Hi" : st.subject })) })),
-    };
+    return finish(base, out.ok ? mainShape(shape, op, out.added?.id ?? null) : shape);
   };
   // Held in an object and read through a function: a closure sets it, which the checker cannot see.
   const flags = { launched: false };
@@ -273,7 +448,7 @@ async function run(seed: number) {
   const openPage = async (): Promise<Page> => {
     const view = (await h.request<SequenceView>("GET", path)).body;
     const session = `s${pages.length}`;
-    const page = { session, frozen: false, gone: false, timer: null, newestTyped: null, newestSendable: null } as Omit<Page, "store"> as Page;
+    const page = { session, frozen: false, gone: false, timer: null, newestTyped: null, newestSendable: null, shape: NO_SHAPE } as Omit<Page, "store"> as Page;
     (page as { store: EditorStore }).store = new EditorStore(view, {
       session,
       put: (body, options) => held(page, "put", body as unknown as Request["body"], options.keepalive === true),
@@ -283,6 +458,7 @@ async function run(seed: number) {
       clearTimer: () => (page.timer = null),
       // The backoff is counted by tries, never waited.
       wait: () => Promise.resolve(),
+      ...(faults ? { faults } : {}),
     });
     pages.push(page);
     return page;
@@ -331,6 +507,10 @@ async function run(seed: number) {
     const snap = page.store.getSnapshot();
     // Invariant 6: the draft on the page is the newest the user typed, unless they loaded the stored one.
     if (page.newestTyped !== null && subjectOf(snap.draft) !== page.newestTyped) problems.push(`6: ${page.session}'s draft "${subjectOf(snap.draft)}" replaced "${page.newestTyped}"`);
+    // 6, ticket 16b: the draft has the declined paths and branch tracks the page chose.
+    if (page.newestTyped !== null && subjectOf(snap.draft) === page.newestTyped && !sameShape(shapeOf(snap.draft), page.shape)) {
+      problems.push(`6: ${page.session}'s draft has paths and branch ${JSON.stringify(shapeOf(snap.draft))}, not the chosen ${JSON.stringify(page.shape)}`);
+    }
     // Invariant 7: a conflict stays shown while it holds.
     if (page.store.inConflict && kindOf(page.store) !== "conflict") problems.push(`7: ${page.session} hides its conflict behind ${kindOf(page.store)}`);
     if (page.newestTyped === null || launchedOnce()) return;
@@ -357,11 +537,21 @@ async function run(seed: number) {
       // What the page shows as locked is what refuses an edit: no authoring control is enabled while locked.
       const lockedBefore = page.store.getSnapshot().locked;
       const pool = before.emailPool;
-      const next =
-        size < 0.08 ? definitionWith(subject, pool, 4, 18_000)
-        : size < 0.2 ? definitionWith(subject, pool, 3, Math.floor((DEFINITION_MAX_BYTES - 2_000) / 3))
-        : size < 0.55 ? arranged(before, subject)
-        : definitionWith(subject, pool);
+      // The record starts from what the page shows when it has typed nothing since loading it.
+      const shapeBefore = page.newestTyped === null ? shapeOf(before) : page.shape;
+      // Once the draft holds branch work, the generated user mostly carries on with it (ticket 16b), so
+      // declined paths and an arranged branch are saved, not replaced at once by a fresh draft.
+      const branchWork = branchEdits && before.tracks.some((t) => !t.removed && (t.branch === "win_back" || t.channel === "call"));
+      const carryOn = branchEdits && r3() < (branchWork ? 0.75 : 0.2);
+      const edit =
+        carryOn ? arranged(before, subject, shapeBefore)
+        : size < 0.08 ? { definition: definitionWith(subject, pool, 4, 18_000), shape: NO_SHAPE }
+        : size < 0.2 ? { definition: definitionWith(subject, pool, 3, Math.floor((DEFINITION_MAX_BYTES - 2_000) / 3)), shape: NO_SHAPE }
+        : size < 0.55 ? arranged(before, subject, shapeBefore)
+        : { definition: definitionWith(subject, pool), shape: NO_SHAPE };
+      const next = edit.definition;
+      // Newer branch copy typed while an older save of this page is still unanswered (council on aaf82b7).
+      const inFlight = requests.some((x) => x.page === page && x.kind === "put" && x.answer === null);
       page.store.update(() => next);
       // Typing is refused once launched and while a launch or a load is in flight: nothing was typed.
       if (page.store.getSnapshot().draft === before && !lockedBefore) problems.push(`6: ${page.session} refused an edit while editing was shown open`);
@@ -369,6 +559,8 @@ async function run(seed: number) {
         if (lockedBefore) problems.push(`6: ${page.session} took an edit while editing was shown locked`);
         page.newestTyped = subject;
         page.newestSendable = draftProblems(next).length === 0 ? subject : null;
+        page.shape = edit.shape;
+        if ("copy" in edit && edit.copy && inFlight) copyBesideInFlight = true;
       }
     } else if (roll < 0.36 && live && page.timer) {
       const fire = page.timer;
@@ -449,6 +641,11 @@ async function run(seed: number) {
     const holder = pages.find((p) => p.session === writerNow());
     // Invariant 1: the stored definition is the newest sendable draft of the session that wrote it.
     if (holder?.newestSendable != null && holder.newestSendable === holder.newestTyped && stored !== holder.newestSendable && !holder.store.inConflict) problems.push(`1: stored "${stored}" is not ${holder.session}'s newest "${holder.newestSendable}"`);
+    // 1, ticket 16b: the stored declined paths and branch tracks are the ones the writer chose.
+    const storedDefinition = (await h.request<SequenceView>("GET", path)).body.definition;
+    if (holder?.newestSendable != null && holder.newestSendable === holder.newestTyped && stored === holder.newestSendable && !sameShape(shapeOf(storedDefinition), holder.shape)) {
+      problems.push(`1: stored paths and branch ${JSON.stringify(shapeOf(storedDefinition))} are not ${holder.session}'s chosen ${JSON.stringify(holder.shape)}`);
+    }
     // Invariant 2's other half: a live page whose newest sendable draft lost to another session shows the conflict.
     for (const p of tabs) {
       if (p.newestSendable !== null && p.newestSendable === p.newestTyped && !accepted.has(`${p.session}/${p.store.edit}`) && writerNow() !== p.session && kindOf(p.store) !== "conflict") {
@@ -458,31 +655,60 @@ async function run(seed: number) {
   }
   const stored = (await h.request<SequenceView>("GET", path)).body.definition;
   const smsSaved = stored.tracks.some((t) => !t.removed && t.channel === "sms") && (stored.smsPool ?? []).length > 0;
-  return { problems, pending: requests.length, launchedOnce: launchedOnce(), smsSaved, phoneSaved: phoneCoverage.phoneSaved, phoneAny: phoneCoverage.phoneAny, lateAfterLoad };
+  return { problems, pending: requests.length, launchedOnce: launchedOnce(), smsSaved, phoneSaved: phoneCoverage.phoneSaved, phoneAny: phoneCoverage.phoneAny, lateAfterLoad, winBackSaved: phoneCoverage.winBackSaved, declinedSaved: phoneCoverage.declinedSaved, branchArranged: phoneCoverage.branchArranged, branchCopySaved: phoneCoverage.branchCopySaved, copyBesideInFlight };
 }
 
 describe("saving the definition, generated over the real editor state (ADR 0003 1.1.1)", () => {
   // What each coverage seed's run reached; the window's runs are checked for every invariant and counted for nothing.
-  const reached: { launched: boolean; smsSaved: boolean; phoneSaved: boolean; lateAfterLoad: number }[] = [];
+  const reached: { launched: boolean; smsSaved: boolean; phoneSaved: boolean; lateAfterLoad: number; winBackSaved: boolean; declinedSaved: boolean; branchArranged: boolean; branchCopySaved: boolean; copyBesideInFlight: boolean }[] = [];
   for (const seed of RUN_SEEDS) {
     test(`run ${seed}`, async () => {
       const out = await run(seed);
-      if (COVERAGE_SEEDS.has(seed)) reached.push({ launched: out.launchedOnce, smsSaved: out.smsSaved, phoneSaved: out.phoneSaved, lateAfterLoad: out.lateAfterLoad });
+      if (COVERAGE_SEEDS.has(seed)) reached.push({ launched: out.launchedOnce, smsSaved: out.smsSaved, phoneSaved: out.phoneSaved, lateAfterLoad: out.lateAfterLoad, winBackSaved: out.winBackSaved, declinedSaved: out.declinedSaved, branchArranged: out.branchArranged, branchCopySaved: out.branchCopySaved, copyBesideInFlight: out.copyBesideInFlight });
       expect(out.pending).toBe(0);
       expect(out.problems).toEqual([]);
     });
   }
   const count = (f: (r: (typeof reached)[number]) => boolean) => reached.filter(f).length;
   test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs include launches that start, not only refused ones", () => {
-    expect(count((r) => r.launched)).toBeGreaterThan(COVERAGE_SEEDS.size / 10);
+    expect(count((r) => r.launched)).toBeGreaterThan(atLeast(1 / 10));
   });
   test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs answer saves sent before their page loaded the saved version, late (council on aebeb80, item 2)", () => {
     expect(count((r) => r.lateAfterLoad > 0)).toBeGreaterThan(0);
   });
   test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs save arranged SMS tracks with the numbers that connected (ticket 13b)", () => {
-    expect(count((r) => r.smsSaved)).toBeGreaterThan(COVERAGE_SEEDS.size / 20);
+    expect(count((r) => r.smsSaved)).toBeGreaterThan(atLeast(1 / 20));
   });
   test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs save phone tracks with their own calling hours and skip limits (ticket 14c)", () => {
     expect(count((r) => r.phoneSaved)).toBeGreaterThan(0);
+  });
+  test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs save phone tracks with a declined path of win back beside the win-back branch, with stop or continue, and branch tracks arranged after one another (ticket 16b)", () => {
+    expect(count((r) => r.winBackSaved)).toBeGreaterThan(atLeast(1 / 20));
+    expect(count((r) => r.declinedSaved)).toBeGreaterThan(atLeast(1 / 20));
+    expect(count((r) => r.branchArranged)).toBeGreaterThan(atLeast(1 / 40));
+  });
+  test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs save the branch's copy, subjects, threading and waits, some typed while an older save was unanswered (council on aaf82b7)", () => {
+    expect(count((r) => r.branchCopySaved)).toBeGreaterThan(atLeast(1 / 20));
+    expect(count((r) => r.copyBesideInFlight)).toBeGreaterThan(atLeast(1 / 40));
+  });
+  // Each fault in the editor's saving is killed by its recorded fixed seed (ticket 16b).
+  for (const fault of Object.keys(FAULT_SEEDS) as SaveFault[]) {
+    test(`the fault "${fault}" fails run ${FAULT_SEEDS[fault]}`, async () => {
+      const { problems } = await run(FAULT_SEEDS[fault], new Set([fault]));
+      expect(problems).not.toEqual([]);
+    });
+  }
+  // Finds each fault's first killing seed among the fixed seeds, to record in FAULT_SEEDS.
+  test.skipIf(!process.env["SAVE_QUEUE_FAULT_SEARCH"])("search: the first fixed seed that kills each fault", { timeout: 600_000 }, async () => {
+    for (const fault of Object.keys(FAULT_SEEDS) as SaveFault[]) {
+      let found: number | null = null;
+      for (const seed of FIXED_SEEDS) {
+        if ((await run(seed, new Set([fault]))).problems.length > 0) {
+          found = seed;
+          break;
+        }
+      }
+      console.info(`fault ${fault}: killed by seed ${found ?? "none"}`);
+    }
   });
 });

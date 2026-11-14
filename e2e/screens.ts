@@ -247,6 +247,18 @@ export const WITH_A_CALL: CampaignDefinition = {
   tracks: [...TWO_CHANNELS.tracks.map((t) => (t.id === "email-2" ? { ...t, start: { kind: "after" as const, trackId: "call", delayDays: 1 } } : t)), phoneTrack("call", { kind: "after", trackId: "email", delayDays: 1 })],
 };
 
+/** A track of the win-back branch (ticket 16b): an email or SMS track like the main sequence's, in the branch. */
+export function winBackTrack(id: string, channel: "email" | "sms", start: CampaignDefinition["tracks"][number]["start"] = { kind: "entry" }): CampaignDefinition["tracks"][number] {
+  const like = TWO_CHANNELS.tracks.find((t) => t.channel === channel)!;
+  return { ...like, id, branch: "win_back", start, steps: like.steps.slice(0, channel === "email" ? 2 : 1).map((st, i) => ({ ...st, id: `${id}-s${i + 1}` })) };
+}
+
+/** WITH_A_CALL, with win back as the phone track's declined path and a branch of an email track and an SMS track after it. */
+export const WITH_A_BRANCH: CampaignDefinition = {
+  ...WITH_A_CALL,
+  tracks: [...WITH_A_CALL.tracks.map((t) => (t.id === "call" ? { ...t, declinedPath: "win_back" as const } : t)), winBackTrack("wb-email", "email"), winBackTrack("wb-sms", "sms", { kind: "after", trackId: "wb-email", delayDays: 2 })],
+};
+
 /** A launched campaign over the fake providers with a phone track after its email track, made once per app. */
 const runningCalls = new WeakMap<FakeProviderApp, Promise<string>>();
 export function runningWithACall(f: FakeProviderApp): Promise<string> {
@@ -632,7 +644,7 @@ export const SCREENS: readonly Screen[] = [
       await calls(page, "ready", "/calls");
       await page.getByText(/^Calling hours /).waitFor();
       await page.getByRole("button", { name: "Not interested", exact: true }).click();
-      await settle(page, "(this campaign has none)");
+      await settle(page, "(the win-back branch has no tracks)");
     },
   },
   {
@@ -644,7 +656,7 @@ export const SCREENS: readonly Screen[] = [
       await page.addInitScript(([id, n]) => window.sessionStorage.setItem(`outreach.calls.draft.${id}`, JSON.stringify({ outcome: "not_interested", numberId: n, note: "", noteScope: "person", redial: false, callbackDay: null, callbackTime: "", callbackAt: null, declinedPath: "win_back", pressId: null })), [t.taskId, t.numberId] as const);
       await page.clock.setFixedTime(f.harness.clock);
       await page.goto(`${f.url}/calls`);
-      await settle(page, "This campaign has no win-back branch now");
+      await settle(page, "The win-back branch has no tracks now");
     },
   },
   {
@@ -1420,12 +1432,90 @@ export const SCREENS: readonly Screen[] = [
     },
   },
   {
-    name: "a phone track with a declined path, in a campaign with a win-back branch set over HTTP",
+    name: "a phone track with win back as its declined path, beside its win-back branch of one track",
     open: async (page) => {
       const branch = { id: "wb-1", channel: "email" as const, branch: "win_back" as const, window: [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 })), steps: [{ id: "wb-1-s1", waitDays: 0, subject: "No pressure", body: "Understood, {{first_name|there}}.", threading: "new_subject" as const, removed: false }], start: { kind: "entry" as const }, removed: false };
       const id = await campaignWith(page, "A call with a win-back branch", { ...WITH_A_CALL, tracks: [...WITH_A_CALL.tracks.map((t) => (t.id === "call" ? { ...t, declinedPath: "win_back" as const } : t)), branch] });
       await page.goto(`/campaigns/${id}?track=call`);
-      await settle(page, "A declined call moves the lead to this campaign’s win-back branch");
+      await settle(page, "Edit branch");
+    },
+  },
+  // Ticket 16b: the declined path and the win-back branch in the editor.
+  {
+    name: "a phone track whose declined path is stop, on its node and in its inspector",
+    open: async (page) => {
+      const id = await campaignWith(page, "A call that stops", { ...WITH_A_CALL, tracks: WITH_A_CALL.tracks.map((t) => (t.id === "call" ? { ...t, declinedPath: "stop" as const } : t)) });
+      await page.goto(`/campaigns/${id}?track=call`);
+      await settle(page, "If declined: stop");
+    },
+  },
+  {
+    name: "a phone track whose declined path is continue, with no win-back track, so win back cannot be chosen",
+    open: async (page) => {
+      const id = await campaignWith(page, "A call that continues", { ...WITH_A_CALL, tracks: WITH_A_CALL.tracks.map((t) => (t.id === "call" ? { ...t, declinedPath: "continue" as const } : t)) });
+      await page.goto(`/campaigns/${id}?track=call`);
+      await settle(page, "The win-back branch has no tracks: add a track to it, or choose stop or continue.");
+    },
+  },
+  {
+    name: "the win-back branch empty, below a phone track, on the canvas",
+    open: async (page) => {
+      const id = await campaignWith(page, "Two channels and a call, no branch yet", WITH_A_CALL);
+      await page.goto(`/campaigns/${id}`);
+      await settle(page, "No tracks yet. A lead who declines on a call can move here");
+    },
+  },
+  {
+    name: "a campaign whose main sequence is one phone track, with its inspector open and the win-back branch empty",
+    open: async (page) => {
+      const id = await campaignWith(page, "Only a call, no branch yet", { ...WITH_A_CALL, tracks: [phoneTrack("call", { kind: "entry" })] });
+      await page.goto(`/campaigns/${id}?track=call`);
+      await settle(page, "No tracks yet. A lead who declines on a call can move here");
+    },
+  },
+  {
+    name: "the win-back branch with an email track and an SMS track after it, and the dashed edge from the phone track",
+    open: async (page) => {
+      const id = await campaignWith(page, "A call with an arranged win-back branch", WITH_A_BRANCH);
+      await page.goto(`/campaigns/${id}`);
+      await page.getByTestId("declined-label").first().waitFor();
+    },
+  },
+  {
+    name: "a win-back SMS track in the inspector, starting after the win-back email track",
+    open: async (page) => {
+      const id = await campaignWith(page, "A win-back track in the inspector", WITH_A_BRANCH);
+      await page.goto(`/campaigns/${id}?track=wb-sms`);
+      await settle(page, "Counted from when that track has sent its last step");
+    },
+  },
+  {
+    name: "removing the win-back branch's last track while a phone track's path is win back, refused in the definition's words",
+    open: async (page) => {
+      const id = await campaignWith(page, "The branch's last track", { ...WITH_A_BRANCH, tracks: WITH_A_BRANCH.tracks.filter((t) => t.id !== "wb-sms") });
+      await page.goto(`/campaigns/${id}?track=wb-email&step=none`);
+      await page.getByRole("button", { name: "Remove this win-back email track" }).click();
+      await settle(page, "declined path is win back, but the win-back branch has no tracks");
+    },
+  },
+  {
+    name: "a save the server still refuses, with the server's sentence",
+    open: async (page) => {
+      const id = await campaignWith(page, "A save the server refuses", WITH_A_BRANCH);
+      await page.route("**/api/campaigns/*/sequence", (route) =>
+        route.request().method() === "PUT" ? respond(route, { error: { code: "invalid_sequence", message: "The win-back SMS track starts after a track of the main sequence: connect it inside the win-back branch, which starts when a lead declines." } }, 400) : route.continue(),
+      );
+      await page.goto(`/campaigns/${id}?track=call`);
+      await page.getByRole("radio", { name: /^Continue/ }).check();
+      await settle(page, "connect it inside the win-back branch, which starts when a lead declines");
+    },
+  },
+  {
+    name: "before launch with a win-back branch, its messages in Copy for a lead",
+    open: async (page) => {
+      const id = await campaignWith(page, "Copy with a win-back branch", WITH_A_BRANCH);
+      await page.goto(`/campaigns/${id}/before-launch`);
+      await settle(page, "If they decline: the win-back branch");
     },
   },
   {
@@ -2025,6 +2115,98 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
     },
     act: (page) => page.keyboard.press("Escape"),
     focused: (page) => page.getByRole("button", { name: "Add track" }),
+  },
+  // Ticket 16b: the win-back branch.
+  {
+    name: "adding a win-back email track from the empty branch moves focus to its first email's subject",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: first win-back track", WITH_A_CALL);
+      await page.goto(`/campaigns/${id}`);
+      await page.getByRole("button", { name: "Add a win-back email track" }).focus();
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByLabel("Email 1 subject"),
+  },
+  {
+    name: "the win-back branch's Add menu offers email and SMS tracks only, and adding an SMS track moves focus to its text",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: add a win-back SMS track", WITH_A_BRANCH);
+      await page.goto(`/campaigns/${id}`);
+      await page.getByRole("button", { name: "Add win-back track" }).focus();
+      await page.keyboard.press("ArrowUp");
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByLabel("Text 1 message"),
+  },
+  {
+    name: "removing a win-back track moves focus to the branch's Add",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: remove a win-back track", WITH_A_BRANCH);
+      await page.goto(`/campaigns/${id}?track=wb-sms&step=none`);
+      await page.getByRole("button", { name: "Remove this win-back SMS track" }).focus();
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByRole("button", { name: "Add win-back track" }),
+  },
+  {
+    name: "removing the branch's last track, once no phone track's path is win back, moves focus to the empty branch's Add",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: remove the last win-back track", { ...WITH_A_CALL, tracks: [...WITH_A_CALL.tracks, winBackTrack("wb-email", "email")] });
+      await page.goto(`/campaigns/${id}?track=wb-email&step=none`);
+      await page.getByRole("button", { name: "Remove this win-back email track" }).focus();
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByRole("button", { name: "Add a win-back email track" }),
+  },
+  {
+    name: "removing the branch's last track when no phone track is left, so the branch goes, moves focus to Add track",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: the branch goes", { ...TWO_CHANNELS, emailPool: [], smsPool: [], tracks: [...TWO_CHANNELS.tracks, winBackTrack("wb-email", "email")] });
+      await page.goto(`/campaigns/${id}?track=wb-email&step=none`);
+      await page.getByRole("button", { name: "Remove this win-back email track" }).focus();
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByRole("button", { name: "Add track" }),
+  },
+  {
+    name: "removing the branch's last track when nothing else is left, so the canvas is empty, moves focus to its first Add",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: the canvas empties", { ...TWO_CHANNELS, emailPool: [], smsPool: [], tracks: [winBackTrack("wb-email", "email")] });
+      await page.goto(`/campaigns/${id}?track=wb-email&step=none`);
+      await page.getByRole("button", { name: "Remove this win-back email track" }).focus();
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByRole("button", { name: "Email track", exact: true }),
+  },
+  {
+    name: "a refused removal of the branch's last track keeps focus on Remove, which the definition's sentence describes",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: last win-back track refused", { ...WITH_A_BRANCH, tracks: WITH_A_BRANCH.tracks.filter((t) => t.id !== "wb-sms") });
+      await page.goto(`/campaigns/${id}?track=wb-email&step=none`);
+      await page.getByRole("button", { name: "Remove this win-back email track" }).focus();
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByRole("button", { name: "Remove this win-back email track", description: /declined path is win back, but the win-back branch has no tracks/ }),
+  },
+  {
+    name: "Edit branch on the phone track opens the branch's first track and moves focus to it",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: edit branch", WITH_A_BRANCH);
+      await page.goto(`/campaigns/${id}?track=call`);
+      await page.getByRole("button", { name: "Edit branch" }).focus();
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByRole("button", { name: /^Win-back email track: / }),
+  },
+  {
+    name: "choosing a declined path by keyboard keeps focus on the chosen path",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: choose a path", WITH_A_CALL);
+      await page.goto(`/campaigns/${id}?track=call`);
+      await page.getByRole("radio", { name: /^Stop/ }).focus();
+    },
+    act: (page) => page.keyboard.press("ArrowDown"),
+    focused: (page) => page.getByRole("radio", { name: /^Continue/, checked: true }),
   },
   {
     name: "removing a track moves focus to Add track",

@@ -1,6 +1,7 @@
 import { useId, useRef, useState, type ReactNode } from "react";
 import { Link, useLocation } from "wouter";
 import type { BeforeLaunchView, CampaignDefinition, CopyPreview, CopySegment, LoadProjectionView, PreviewLead, SmsProviderStatus } from "../../shared/api.ts";
+import { stepNoun, trackLabel } from "../../shared/track-label.ts";
 import { useApi } from "../api.ts";
 import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
@@ -215,7 +216,9 @@ function Warnings({ facts, editor }: { facts: BeforeLaunchView; editor: Sequence
   for (const a of facts.load?.accounts ?? []) {
     if (a.usedToday > 0) items.push({ title: `${a.label} has ${a.usedToday} of its ${a.capacity} sends a day used today`, detail: `Other campaigns sent or reserved them, so fewer first ${a.channel === "sms" ? "texts" : "emails"} can go today.` });
   }
-  for (const a of editor.view.accounts.filter((x) => !x.healthy && live.some((t) => t.channel === x.channel))) {
+  // A sender the win-back branch uses counts too: its emails and texts go from the same pools (ticket 16b).
+  const sending = editor.view.definition.tracks.filter((t) => !t.removed);
+  for (const a of editor.view.accounts.filter((x) => !x.healthy && sending.some((t) => t.channel === x.channel))) {
     items.push({ title: `${a.label} ${CANNOT_SEND}`, detail: "Its leads wait until it can send again." });
   }
   if (facts.load?.someNotStartedWithinHorizon) {
@@ -504,7 +507,7 @@ function Preview({ campaignId, editor, leads, horizonDays }: { campaignId: strin
 }
 
 /** When a message goes, as Copy for a lead heads it: the estimate's day, or why it has none. One source for every day shown. */
-function whenSent(s: CopyPreview["steps"][number], horizonDays: number | null): string {
+function whenSent(s: CopyPreview["steps"][number], horizonDays: number | null, entry: CopyPreview["winBackEntry"] = "declined_path"): string {
   if (s.day !== null) return s.waitsOnCall ? `Day ${s.day}, after ${s.waitsOnCall}’s call` : `Day ${s.day}`;
   switch (s.noDay) {
     case "skipped":
@@ -513,6 +516,9 @@ function whenSent(s: CopyPreview["steps"][number], horizonDays: number | null): 
       return horizonDays === null ? "After the estimate ends" : `After the estimate’s ${horizonDays} days`;
     case "not_sent":
       return "Not sent";
+    case "win_back":
+      // How a lead can enter the branch, from the server's read (`winBackEntry`; council on aaf82b7).
+      return entry === "chosen_for_a_lead" ? "Only if chosen for them" : entry === "never" ? "Never sent" : "Only if they decline";
     default:
       return "No day: no estimate";
   }
@@ -531,48 +537,77 @@ function LeadCopy({ campaignId, enrollmentId, version, def, horizonDays }: { cam
     );
   const several = def.tracks.filter((t) => !t.removed && t.branch === "main").length > 1;
   return (
-    <ol className="flex flex-col gap-3" aria-label="The messages, in the order they can go">
-      {preview.steps.map((s) => {
-        const track = def.tracks.find((t) => t.id === s.trackId);
-        const sms = s.channel === "sms";
-        const noun = `${sms ? "Text" : "Email"} ${s.number}`;
-        return (
-          <li key={s.stepId} className="overflow-hidden rounded-field border border-line">
-            <div className="flex items-center justify-between gap-3 border-b border-line bg-raised px-3.5 py-2 text-[13px]">
-              <span className="flex min-w-0 items-center gap-1.5 font-semibold">
-                <Icon name={sms ? "sms" : "email"} className="size-4 flex-none text-muted" />
-                <span className="[overflow-wrap:anywhere]">
-                  {noun}
-                  {several && track ? <span className="font-normal text-muted"> · {trackTitle(def, track)}</span> : null}
-                </span>
-              </span>
-              <span className="whitespace-nowrap text-muted">{whenSent(s, horizonDays)}</span>
-            </div>
-            <div className="px-3.5 py-3 text-[14px] leading-[1.55]">
-              {s.skipped ? (
-                <p className="text-muted">{sms ? "Skipped: this lead has no mobile of their own to text." : "Skipped: this lead has no email."}</p>
-              ) : (
-                <>
-                  {!sms && (
-                    <p className="mb-2 font-semibold [overflow-wrap:anywhere]">
-                      <Segments segments={s.subject} empty="No subject yet" />
-                    </p>
-                  )}
-                  <p className={`whitespace-pre-wrap text-ink-2 [overflow-wrap:anywhere] ${sms ? "w-fit max-w-[42ch] rounded-[14px_14px_14px_4px] bg-raised px-3 py-2 shadow-[inset_0_0_0_1px_var(--color-line)]" : ""}`}>
-                    <Segments segments={s.body} empty={`No copy yet. Launch is blocked until this ${sms ? "text" : "email"} has copy.`} />
-                  </p>
-                  {s.missing.length > 0 && (
-                    <p className="mt-2 text-[13px] font-medium text-crit">
-                      This lead has no {s.missing.map(fieldLabel).join(" or ")} and the field has no fallback, so this {sms ? "text" : "email"} can’t be sent to them.
-                    </p>
-                  )}
-                </>
-              )}
-            </div>
-          </li>
-        );
-      })}
-    </ol>
+    <>
+      <ol className="flex flex-col gap-3" aria-label="The messages, in the order they can go">
+        {preview.steps.map((s) => (
+          <PreviewMessage key={s.stepId} s={s} def={def} named={several} horizonDays={horizonDays} />
+        ))}
+      </ol>
+      {/* The win-back branch (ticket 16b), from the server's read: only for a lead who declines on a call, so undated. */}
+      {preview.winBack.length > 0 && (
+        <section aria-labelledby="win-back-copy" className="flex flex-col gap-2.5">
+          <h3 id="win-back-copy" className="text-[15px] font-semibold">
+            If they decline: the win-back branch
+          </h3>
+          <p className="-mt-1 text-[13px] text-muted">{WIN_BACK_ENTRY[preview.winBackEntry]}</p>
+          <ol className="flex flex-col gap-3" aria-label="The win-back branch’s messages">
+            {preview.winBack.map((s) => (
+              <PreviewMessage key={s.stepId} s={s} def={def} named={trackLabel(def, { id: s.trackId, channel: s.channel }).several} horizonDays={horizonDays} entry={preview.winBackEntry} />
+            ))}
+          </ol>
+        </section>
+      )}
+    </>
+  );
+}
+
+/** How a lead can enter the win-back branch, as the server reads it (`winBackEntry`; council on aaf82b7): one sentence above its messages. */
+const WIN_BACK_ENTRY: Record<CopyPreview["winBackEntry"], string> = {
+  declined_path: "These go only if this lead declines on a call and moves to the branch, which the estimate never assumes, so none has a day.",
+  chosen_for_a_lead: "No phone track’s declined path is win back, so these go only if win back is chosen for this lead when their declined call is logged. None has a day.",
+  never: "The campaign has no phone track to decline on, so no lead can enter the win-back branch: these are never sent.",
+};
+
+/** One message of Copy for a lead: its heading with the day it goes, or why it has none, and its copy rendered for the lead. */
+function PreviewMessage({ s, def, named, horizonDays, entry }: { s: CopyPreview["steps"][number]; def: CampaignDefinition; named: boolean; horizonDays: number | null; entry?: CopyPreview["winBackEntry"] }) {
+  const track = def.tracks.find((t) => t.id === s.trackId);
+  const sms = s.channel === "sms";
+  // A step of the win-back branch is named for it, as the shared label says (ticket 16c): "Win-back email 1".
+  const noun = `${stepNoun(trackLabel(def, { id: s.trackId, channel: s.channel }), sms ? "sms" : "email")} ${s.number}`;
+  return (
+    <li className="overflow-hidden rounded-field border border-line">
+      <div className="flex items-center justify-between gap-3 border-b border-line bg-raised px-3.5 py-2 text-[13px]">
+        <span className="flex min-w-0 items-center gap-1.5 font-semibold">
+          <Icon name={sms ? "sms" : "email"} className="size-4 flex-none text-muted" />
+          <span className="[overflow-wrap:anywhere]">
+            {noun}
+            {named && track ? <span className="font-normal text-muted"> · {trackTitle(def, track)}</span> : null}
+          </span>
+        </span>
+        <span className="whitespace-nowrap text-muted">{whenSent(s, horizonDays, entry)}</span>
+      </div>
+      <div className="px-3.5 py-3 text-[14px] leading-[1.55]">
+        {s.skipped ? (
+          <p className="text-muted">{sms ? "Skipped: this lead has no mobile of their own to text." : "Skipped: this lead has no email."}</p>
+        ) : (
+          <>
+            {!sms && (
+              <p className="mb-2 font-semibold [overflow-wrap:anywhere]">
+                <Segments segments={s.subject} empty="No subject yet" />
+              </p>
+            )}
+            <p className={`whitespace-pre-wrap text-ink-2 [overflow-wrap:anywhere] ${sms ? "w-fit max-w-[42ch] rounded-[14px_14px_14px_4px] bg-raised px-3 py-2 shadow-[inset_0_0_0_1px_var(--color-line)]" : ""}`}>
+              <Segments segments={s.body} empty={`No copy yet. Launch is blocked until this ${sms ? "text" : "email"} has copy.`} />
+            </p>
+            {s.missing.length > 0 && (
+              <p className="mt-2 text-[13px] font-medium text-crit">
+                This lead has no {s.missing.map(fieldLabel).join(" or ")} and the field has no fallback, so this {sms ? "text" : "email"} can’t be sent to them.
+              </p>
+            )}
+          </>
+        )}
+      </div>
+    </li>
   );
 }
 
