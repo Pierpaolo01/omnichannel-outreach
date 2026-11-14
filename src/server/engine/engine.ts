@@ -6,7 +6,7 @@
  */
 import { ENGINE_PARAMS, isLive, type AttemptEffect, type AttemptEvent, type CallAnswer, type WorkEvent } from "../../domain/sequence/attempt.ts";
 import { launchCheck, type LaunchCheck } from "../../domain/sequence/blockers.ts";
-import { REQUEST_ID_REUSED, type OutcomeInput } from "../../domain/sequence/calls.ts";
+import { REQUEST_ID_DIFFERENT, REQUEST_ID_REUSED, type OutcomeInput } from "../../domain/sequence/calls.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
 import { runs } from "../../domain/sequence/progress.ts";
@@ -19,6 +19,11 @@ import type { ControlRecord, EngineStore, ReplyEvent, StoredDefinition } from ".
 /** A control's answer. `effect`: the control's own effect, which the read previewed at that instant; null for a campaign's. */
 export type ControlAnswer = { readonly ok: true; readonly replayed: boolean; readonly effect: ControlView | null } | { readonly ok: false; readonly reason: string };
 export const CONTROL_REQUEST_REUSED = "This request id was already used for another action: send a new one.";
+
+/** An outcome request's body as stored with its id (council I on 56d599c): the same id with another body is refused. */
+function outcomeBody(input: OutcomeInput): string {
+  return JSON.stringify({ outcome: input.outcome, redial: input.redial, callbackAt: input.callbackAt, declinedPath: input.declinedPath, numberId: input.numberId, note: input.note, noteScope: input.noteScope });
+}
 import { UnprovisionedSmsPort, type AttemptRef, type HandoverRequest, type ProviderEvent, type SendPort } from "./ports.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 
@@ -750,7 +755,7 @@ export class Engine {
       try {
         // The request id is read, the outcome judged and applied, and the answer recorded in one transaction (review bot
         // and council on 56d599c, item E): two requests with one id, in any process, give one execution and one answer.
-        record = await this.store.controlSubject(subjectId, now, { id: input.requestId, action: "call_outcome", target: taskId }, this.rules.requestStanding, (stored) => {
+        record = await this.store.controlSubject(subjectId, now, { id: input.requestId, action: "call_outcome", target: taskId, body: outcomeBody(input) }, this.rules.requestStanding, (stored) => {
           // Judged as of the action's instant: what fell due since the last tick (an expiry at the rollover)
           // is applied first, in this transaction, and stands whatever the answer (ADR 0003 2.4).
           const s = this.rules.asOfAction(stored, now, this.rules.evaluate);
@@ -765,6 +770,7 @@ export class Engine {
         throw error;
       }
       if (record.kind === "reused") return { ok: false as const, reason: REQUEST_ID_REUSED };
+      if (record.kind === "different") return { ok: false as const, reason: REQUEST_ID_DIFFERENT };
       if (record.answer === "refused") return { ok: false as const, reason: record.reason ?? "Refused." };
       if (record.kind === "answered") await this.runTick();
       return { ok: true as const };
@@ -778,7 +784,7 @@ export class Engine {
   controlLead(subjectId: string, action: LeadControl, requestId: string): Promise<ControlAnswer> {
     return this.ticks.run(async () => {
       const now = this.now();
-      const record = await this.store.controlSubject(subjectId, now, { id: requestId, action }, this.rules.requestStanding, (stored) => {
+      const record = await this.store.controlSubject(subjectId, now, { id: requestId, action, body: JSON.stringify({ action }) }, this.rules.requestStanding, (stored) => {
         const s = this.rules.asOfAction(stored, now, this.rules.evaluate);
         const caughtUp = same(s, stored) ? null : s;
         const out = this.rules.applyControl(s, action, now);
@@ -811,7 +817,7 @@ export class Engine {
 
   /** A request's answer: its first answer, refused or accepted, whether given now or replayed (verifier B5). */
   private async answerOf(record: ControlRecord): Promise<ControlAnswer> {
-    if (record.kind === "reused") return { ok: false, reason: CONTROL_REQUEST_REUSED };
+    if (record.kind === "reused" || record.kind === "different") return { ok: false, reason: CONTROL_REQUEST_REUSED };
     if (record.answer === "refused") return { ok: false, reason: record.reason ?? "Refused." };
     if (record.kind === "answered") await this.runTick();
     return { ok: true, replayed: record.kind === "replayed", effect: record.effect === null ? null : (JSON.parse(record.effect) as ControlView) };

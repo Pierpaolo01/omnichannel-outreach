@@ -78,7 +78,7 @@ const RULES: Record<string, Partial<Rules>> = {
     previewAsOf: (s) => s,
   },
   "a refused request runs when sent again": {
-    requestStanding: (stored, target, action) => (stored === null || stored.answer === "refused" ? "new" : stored.target === target && stored.action === action ? "replay" : "reused"),
+    requestStanding: (stored, request) => (stored === null || stored.answer === "refused" ? "new" : R.requestStanding(stored, request)),
   },
   // Pacing is held twice by construction (the slot taken in the handover transaction, and moved after the call), so no
   // one rule removes it: this runs the engine with a one-second gap while the record expects five minutes (options below).

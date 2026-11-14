@@ -70,7 +70,7 @@ export interface Rules {
   /** Whether a piece of work's withdrawal is to be asked now (ticket 17a; council A): its own intent and schedule. */
   readonly withdrawalDue: typeof withdrawalDue;
   /** How a request id stands against its stored first answer (verifier B5): new, a replay of it, or reused. */
-  readonly requestStanding: (stored: StoredRequest | null, target: string, action: string) => RequestStanding;
+  readonly requestStanding: (stored: StoredRequest | null, request: { readonly target: string; readonly action: string; readonly body: string }) => RequestStanding;
   /** What the engine makes of the pre-send check's answer (ADR 0002): as given; the mutation of ca8baee's defect clears a known reply. */
   readonly presendAnswer: <T extends { readonly kind: string }>(answer: T, knownReplies: readonly string[]) => T | { readonly kind: "clear" };
   /** What the reads apply first when they preview a control: what fell due by the read's instant, as the action does. */
@@ -112,7 +112,7 @@ export const DEFAULT_RULES: Rules = {
   campaignPaused,
   campaignResumed,
   withdrawalDue,
-  requestStanding: (stored, target, action) => (stored === null ? "new" : stored.target === target && stored.action === action ? "replay" : "reused"),
+  requestStanding: (stored, request) => (stored === null ? "new" : stored.target !== request.target || stored.action !== request.action ? "reused" : stored.body !== request.body ? "different" : "replay"),
   previewAsOf: asOfAction,
   presendAnswer: (answer) => answer,
   // Everything an evaluation reads: the subject's and campaign's versions cover its progress and the

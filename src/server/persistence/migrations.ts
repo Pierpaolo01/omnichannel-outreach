@@ -616,6 +616,8 @@ export const MIGRATIONS: readonly Migration[] = [
         target TEXT NOT NULL,
         action TEXT NOT NULL,
         answer TEXT NOT NULL CHECK (answer IN ('accepted', 'refused')),
+        -- The request's body as JSON: an id is bound to it too, and the same id with another body is refused.
+        body TEXT NOT NULL DEFAULT '',
         reason TEXT,
         effect TEXT,
         at_wall INTEGER NOT NULL

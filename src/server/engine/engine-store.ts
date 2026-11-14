@@ -38,18 +38,21 @@ export interface CampaignEngineRow {
 export interface StoredRequest {
   readonly target: string;
   readonly action: string;
+  /** The request's body as JSON (council I on 56d599c): the id is bound to it as well as to its answer. */
+  readonly body: string;
   readonly answer: "accepted" | "refused";
   readonly reason: string | null;
   readonly effect: string | null;
 }
 
-/** How a request id stands against its stored first answer: new, a repeat of it, or reused for something else. */
-export type RequestStanding = "new" | "replay" | "reused";
+/** How a request id stands against its stored first answer: new, a repeat of it, reused for another target or action, or sent again with another body. */
+export type RequestStanding = "new" | "replay" | "reused" | "different";
 
 /** What a control's transaction did: answered now, the first answer replayed, or refused as a reused id. */
 export type ControlRecord =
   | { readonly kind: "answered" | "replayed"; readonly answer: "accepted" | "refused"; readonly reason: string | null; readonly effect: string | null }
-  | { readonly kind: "reused" };
+  | { readonly kind: "reused" }
+  | { readonly kind: "different" };
 
 /** A control's decision on the state it read: what to write (null for nothing), and its answer. */
 export interface ControlDecision<S> {
@@ -179,9 +182,9 @@ export interface EngineStore {
   controlSubject(
     subjectId: string,
     now: number,
-    /** `target`: what the id is bound to, the lead by default (a call task for an outcome). */
-    request: { readonly id: string; readonly action: string; readonly target?: string },
-    standing: (stored: StoredRequest | null, target: string, action: string) => RequestStanding,
+    /** `target`: what the id is bound to, the lead by default (a call task for an outcome). `body`: the request as JSON. */
+    request: { readonly id: string; readonly action: string; readonly target?: string; readonly body: string },
+    standing: (stored: StoredRequest | null, request: { readonly target: string; readonly action: string; readonly body: string }) => RequestStanding,
     decide: (state: SubjectState) => ControlDecision<SubjectState>,
   ): Promise<ControlRecord>;
   /**
@@ -194,7 +197,7 @@ export interface EngineStore {
     campaignId: string,
     now: number,
     request: { readonly id: string; readonly pause: boolean },
-    standing: (stored: StoredRequest | null, target: string, action: string) => RequestStanding,
+    standing: (stored: StoredRequest | null, request: { readonly target: string; readonly action: string; readonly body: string }) => RequestStanding,
     refusal: (row: { readonly launchedAt: number | null; readonly pausedSince: number | null }) => string | null,
     perLead: (state: SubjectState) => SubjectState,
   ): Promise<ControlRecord>;

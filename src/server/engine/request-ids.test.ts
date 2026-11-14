@@ -134,4 +134,29 @@ describe("one request id, two processes at once: one execution, one answer", () 
     const skipped = (await h.store.engine.subject(pat, h.clock))?.results.filter((r) => r.reason === "by_user") ?? [];
     expect(skipped.length).toBeGreaterThan(1);
   });
+
+  test("a request id is bound to its body too: the same id with another body is refused plainly and changes nothing, on every route (council I)", async () => {
+    const { h, campaign, pat, engines } = await world();
+    const [e] = engines;
+    // Enrollment controls: the id's body is its action.
+    expect((await e!.controlLead(pat, "pause", "c-body")).ok).toBe(true);
+    expect(await e!.controlLead(pat, "stop", "c-body")).toEqual({ ok: false, reason: "This request id was already used for another action: send a new one." });
+    expect((await h.store.engine.subject(pat, h.clock))?.subject.ended).toBeNull();
+    // Campaign pause and resume.
+    expect((await e!.setCampaignPause(campaign.id, true, "k-body")).ok).toBe(true);
+    expect(await e!.setCampaignPause(campaign.id, false, "k-body")).toEqual({ ok: false, reason: "This request id was already used for another action: send a new one." });
+    expect((await e!.setCampaignPause(campaign.id, false, "k-resume")).ok).toBe(true);
+    expect((await e!.controlLead(pat, "resume", "c-resume")).ok).toBe(true);
+    // Call outcomes: the verifier's case, no answer then interested under one id.
+    const taskId = (await h.request<CallsView>("GET", "/api/calls")).body.readyNow[0]!.taskId;
+    const numberId = (await h.request<CallTaskView>("GET", `/api/call-tasks/${taskId}`)).body.numbers.find((n) => !n.bad)!.detailId;
+    const base = { requestId: "call-accepted", outcome: "no_answer" as const, redial: true, callbackAt: null, declinedPath: null, numberId, note: "Rang out.", noteScope: "person" as const };
+    expect(await e!.logCallOutcome(taskId, base)).toEqual({ ok: true });
+    for (const other of [{ outcome: "interested" as const, redial: false }, { note: "Spoke to reception." }, { redial: false }]) {
+      expect(await e!.logCallOutcome(taskId, { ...base, ...other })).toEqual({ ok: false, reason: "This request id was already used with a different outcome: send a new id for this one." });
+    }
+    expect(await e!.logCallOutcome(taskId, base)).toEqual({ ok: true });
+    expect((await h.store.engine.subject(pat, h.clock))?.callAttempts.map((a) => a.outcome)).toEqual(["no_answer"]);
+  });
 });
+
