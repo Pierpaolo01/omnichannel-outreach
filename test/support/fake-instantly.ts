@@ -379,7 +379,7 @@ export class FakeInstantly {
    * thread, such as a delivery notice. `withLead: false` leaves out `lead_id` and `campaign_id`,
    * which the documentation gives only "if any".
    */
-  reply(from: string, options: { onThread?: boolean; inbox?: string; inThreadOf?: string; withLead?: boolean } = {}): InstantlyEmail {
+  reply(from: string, options: { onThread?: boolean; inbox?: string; inThreadOf?: string; withLead?: boolean; threadId?: string } = {}): InstantlyEmail {
     const address = (/<([^>]+)>/.exec(from)?.[1] ?? from).toLowerCase();
     const threadOf = options.inThreadOf?.toLowerCase() ?? address;
     const last = this.emails.filter((e) => e.ue_type === 1 && e.lead === threadOf).at(-1);
@@ -396,7 +396,7 @@ export class FakeInstantly {
       lead_id: withLead ? (last?.lead_id ?? null) : null,
       eaccount: inbox,
       ue_type: 2,
-      thread_id: options.onThread === false || !last ? this.id("thread") : last.thread_id,
+      thread_id: options.threadId ?? (options.onThread === false || !last ? this.id("thread") : last.thread_id),
     };
     this.emails.push(email);
     return email;

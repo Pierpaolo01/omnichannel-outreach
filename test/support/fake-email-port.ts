@@ -1,6 +1,6 @@
 import type { CallAnswer } from "../../src/domain/sequence/attempt.ts";
 import type { RenderedCopy } from "../../src/domain/sequence/state.ts";
-import type { AccountStatus, AttemptRef, HandoverRequest, LookupResult, ProviderEvent, SendPort, Transport } from "../../src/server/engine/ports.ts";
+import type { AccountStatus, AttemptRef, HandoverRequest, LookupResult, PresendRequest, ProviderEvent, SendPort, Transport } from "../../src/server/engine/ports.ts";
 
 /**
  * A fake email provider for the engine's tests and the scripted scenario (ADR 0003 9.2). It keeps
@@ -102,6 +102,8 @@ export class FakeEmailPort implements SendPort {
   readonly deliveryLog: DeliveryLogEntry[] = [];
   /** `at`: when the reply's event became visible; `providerAt`: the reply's own time as the provider reports it. */
   readonly replyLog: { at: number; providerAt: number; destination: string; id: string; threadRef: string | null; inbox: string; onThread: boolean; subjectId: string }[] = [];
+  /** Every pre-send check asked, with its instant (ticket 17a). */
+  readonly presendLog: { at: number; destination: string }[] = [];
   readonly withdrawLog: { at: number; key: string; answer: string }[] = [];
   /** Every lookup the fake answered. */
   readonly lookupLog: { at: number; key: string; answer: LookupResult["kind"] }[] = [];
@@ -158,11 +160,12 @@ export class FakeEmailPort implements SendPort {
     );
   }
 
-  presendCheck(request: { sender: string; destination: string; threadRefs: readonly string[] }) {
+  presendCheck(request: PresendRequest) {
     if (this.portHangs) return new Promise<never>(() => undefined);
     if (this.presendUnavailable) return Promise.resolve({ kind: "unavailable" as const });
-    // The newest reply in the lead's threads, as the adapter reads a thread (newest first).
-    const reply = this.replyLog.filter((r) => r.destination === request.destination && r.threadRef !== null && request.threadRefs.includes(r.threadRef) && r.at <= this.now()).at(-1);
+    // Any reply in the lead's threads that its record does not hold, as the adapter reads every thread (ticket 17a).
+    this.presendLog.push({ at: this.now(), destination: request.destination });
+    const reply = this.replyLog.find((r) => r.destination === request.destination && r.threadRef !== null && request.threadRefs.includes(r.threadRef) && r.at <= this.now() && !request.knownReplies.includes(r.id));
     return Promise.resolve(reply ? { kind: "reply" as const, providerRef: reply.id, at: reply.at } : { kind: "clear" as const });
   }
 

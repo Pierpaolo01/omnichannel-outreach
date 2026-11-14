@@ -910,15 +910,11 @@ export class Engine {
     const threadRefs = (subject?.work ?? []).flatMap((w) => (w.providerRef === null ? [] : [w.providerRef]));
     const port = await this.portOf(a.accountId);
     const channel = port === this.ports.sms ? "sms" : "email";
-    const result = await this.bounded(() => port.presendCheck({ sender: a.accountId, destination: a.destination, threadRefs }), { kind: "unavailable" as const });
+    // The replies the lead's record holds are not news (a restart after an auto-reply): the port reports any other reply,
+    // in any of the lead's threads (ticket 17a; review bot on ca8baee, item 1; ADR 0002's correlation rules).
+    const knownReplies = (subject?.replies ?? []).filter((r) => r.channel === channel).map((r) => r.providerRef);
+    const result = await this.bounded(() => port.presendCheck({ sender: a.accountId, destination: a.destination, threadRefs, knownReplies }), { kind: "unavailable" as const });
     if (result.kind === "unavailable") return false;
-    // A reply the lead's record already holds on this channel (at or before its latest recorded one) is not new:
-    // the user resumed the lead after it (ticket 17a, restart after an auto-reply). Only a later reply stops it.
-    if (result.kind === "reply" && subject?.replies.some((r) => r.channel === channel && r.atWall >= result.at)) {
-      await this.store.update(a.subjectId, now, (s) => ({ ...s, attempts: s.attempts.map((x) => (x.id === a.id ? { ...x, presendCheckedWall: now, presendFoundReply: false } : x)) }));
-      this.hooks.crashPoint?.("after_presend", a.id);
-      return true;
-    }
     await this.store.update(a.subjectId, now, (s) => {
       let next: SubjectState = { ...s, attempts: s.attempts.map((x) => (x.id === a.id ? { ...x, presendCheckedWall: now, presendFoundReply: result.kind === "reply" } : x)) };
       if (result.kind === "reply") next = this.rules.applyReply(next, { channel, atWall: Math.min(result.at, now), providerRef: result.providerRef }, now);
