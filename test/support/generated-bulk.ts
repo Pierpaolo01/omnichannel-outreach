@@ -55,7 +55,6 @@ const PEOPLE = [
 ];
 /** On record, never reachable: no email or mobile, and Fernhill Rooms has no main line. */
 const ODA = person({ person_id: "p9", business_id: "b4", full_name: "Oda Finch" });
-const COMPANY_LEAD = "Quayside Clinic";
 
 /** `ended`: outreach ended other than by the user's stop (no usable channel here); no control of these runs applies to it. */
 type State = "running" | "paused" | "stopped" | "ended";
@@ -103,6 +102,8 @@ interface StoredPress {
 export async function runBulk(seed: number, options: BulkRunOptions = {}): Promise<{ problems: string[]; stats: { features: string[] } }> {
   const rnd = random(seed);
   const pick = <T>(xs: readonly T[]): T => xs[Math.floor(rnd() * xs.length)] as T;
+  /** As `pick`, drawing the same number, for a list that may be empty. */
+  const maybe = <T>(xs: readonly T[]): T | undefined => xs[Math.floor(rnd() * xs.length)];
   const chance = (p: number) => rnd() < p;
   const problems: string[] = [];
   const features = new Set<string>();
@@ -130,7 +131,7 @@ export async function runBulk(seed: number, options: BulkRunOptions = {}): Promi
 
   // The rows Leads shows, and the record's enrollments as the imports made them.
   const search = async () => (await h.request<LeadSearchResult>("GET", "/api/leads")).body.rows;
-  const rows = (await search()).map((r) => ({ ref: { kind: r.kind, id: r.id } as BulkRowRef, name: r.name, key: `${r.kind}:${r.id}` }));
+  const rows = (await search()).map((r) => ({ ref: { kind: r.kind, id: r.id }, name: r.name, key: `${r.kind}:${r.id}` }));
   const record: RecordEnrollment[] = (await search()).flatMap((r) => r.enrollments.map((e) => ({ id: e.id, campaignId: e.campaign.id, rowKey: `${r.kind}:${r.id}`, state: stateOf(e.status) })));
   const odaKey = rows.find((r) => r.name === "Oda Finch")?.key ?? "";
   // The import's company-lead rule, for these companies: a company with people on record (all reachable here but Oda,
@@ -324,7 +325,7 @@ export async function runBulk(seed: number, options: BulkRunOptions = {}): Promi
     outbox.push(stored);
     // Now and then a lead changes between the confirmation's read and the press.
     if (c.kind === "control" && chance(0.3)) {
-      const item = pick(c.preview.items.filter((i) => i.control.allowed));
+      const item = maybe(c.preview.items.filter((i) => i.control.allowed));
       const mine = item ? record.find((e) => e.id === item.enrollmentId) : undefined;
       if (mine) await elsewhere(mine, pick(["pause", "resume", "stop", "resume_from_next_step"] as const));
     }
@@ -332,7 +333,7 @@ export async function runBulk(seed: number, options: BulkRunOptions = {}): Promi
   };
 
   const resend = async () => {
-    const stored = pick(outbox);
+    const stored = maybe(outbox);
     if (!stored) return;
     // A press whose answer was lost: now and then one of its leads is put back by another tab first (B2).
     if (stored.arrived && stored.confirmation.kind === "control" && chance(0.5)) {
