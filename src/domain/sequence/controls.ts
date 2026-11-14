@@ -8,7 +8,7 @@
 import { leadNow, wallOfLead } from "./clock.ts";
 import type { TrackDefinition } from "./definition.ts";
 import { advanceTrack, end, enterMain, enterWinBack, evaluate, finishTrack, hasWorkLeft, liveTracksFor, progressOf, quiesce, reachable, runs, synced } from "./progress.ts";
-import { isLive } from "./attempt.ts";
+import { isLive, isUncertain } from "./attempt.ts";
 import type { SubjectState } from "./state.ts";
 
 export const LEAD_CONTROLS = ["pause", "resume", "skip", "stop", "resume_from_next_step", "move_to_win_back"] as const;
@@ -70,6 +70,11 @@ function noStepReason(state: SubjectState): string {
   return waiting ? "No step is waiting: the next track has not started yet." : "No step is waiting: every track has finished.";
 }
 
+/** Whether a step's provider work may still be sent: an attempt past its claim, or called work not yet settled. */
+export function withProvider(state: SubjectState, stepId: string): boolean {
+  return state.attempts.some((a) => a.stepId === stepId && isLive(a) && a.state !== "claimed") || state.work.some((w) => w.stepId === stepId && isUncertain(w));
+}
+
 const PROVIDER_NAME = { email: "email provider", sms: "SMS provider", call: "call list" } as const;
 
 /** Skip the current step (ADR 0003 "Ticket 17a", "Skip step"): exactly one step, never sent. */
@@ -77,8 +82,12 @@ function skip(state: SubjectState, now: number): ControlResult {
   const current = currentStep(state);
   if (!current) return refuse(noStepReason(state));
   const { track, stepId } = current;
-  if (state.attempts.some((a) => a.stepId === stepId && isLive(a) && a.state !== "claimed")) {
-    return refuse(`This step is already with the ${PROVIDER_NAME[track.channel]} and may be sent, so it cannot be skipped.`);
+  // Refused while the provider may still send it: an attempt past its claim, or provider work that was called and
+  // has not settled, whether or not a live attempt carries it (a non-final "not sent" withdraws the attempt and keeps
+  // the work uncertain; a new claim may inherit it). A skip never sends the skipped step (P4), so it waits for the
+  // provider's final word (review bot on ca8baee, item 2).
+  if (withProvider(state, stepId)) {
+    return refuse(`This step is already with the ${PROVIDER_NAME[track.channel]} and may still be sent, so it cannot be skipped until the provider says whether it was sent.`);
   }
   let s = state;
   // On a callback, the hold is released first, as an outcome's is (2.4 "Calls"): the result sits on a running clock.

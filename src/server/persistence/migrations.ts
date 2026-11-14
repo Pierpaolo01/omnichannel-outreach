@@ -589,7 +589,7 @@ export const MIGRATIONS: readonly Migration[] = [
     // Ticket 17a.
     version: 16,
     name: "the hold history and the controls' request ids (ADR 0003, ticket 17a)",
-    // Each campaign pause, lead pause and ending later undone by a restart, as an interval: the committed-call
+    // Each campaign pause, lead pause and ending (from the lead's first ending to its restart), as an interval: the committed-call
     // count reads whether a lead was held at a day's start (P12). And each accepted control by its request id,
     // so a retry is answered with the first answer and applies nothing twice (P7). Nothing set a pause before
     // this migration; a database that holds one anyway gets an open interval from now.
@@ -606,6 +606,9 @@ export const MIGRATIONS: readonly Migration[] = [
       INSERT INTO hold_intervals (scope, owner_id, from_wall, to_wall) SELECT 'campaign', id, paused_since, NULL FROM campaigns WHERE paused_since IS NOT NULL;
       INSERT INTO hold_intervals (scope, owner_id, from_wall, to_wall)
         SELECT 'lead', id, COALESCE(frozen_since, 0), NULL FROM enrollments WHERE lead_paused = 1;
+      -- Every lead that has ended holds an open ended interval from its ending (a restart closes it).
+      INSERT INTO hold_intervals (scope, owner_id, from_wall, to_wall)
+        SELECT 'ended', id, COALESCE(ended_wall, 0), NULL FROM enrollments WHERE ended IS NOT NULL;
       CREATE TABLE control_requests (
         request_id TEXT PRIMARY KEY,
         target TEXT NOT NULL,

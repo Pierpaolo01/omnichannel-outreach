@@ -257,5 +257,57 @@ describe("one lead's controls", () => {
     expect((await control(first, "resume")).status).toBe(200);
     expect(await listed()).toEqual([pat, nia].sort());
   });
+
+  test("a reply after a stop keeps the stop's held interval: the next day's committed calls stay as they stood at its start (review bot on ca8baee, item 3)", async () => {
+    const { h, campaign, control } = await world();
+    const c = await campaign("Clinics");
+    const pat = c.lead("Pat Oneil");
+    await h.advanceTo(MONDAY_9 + H);
+    const committed = async () => (await h.store.engine.callDay(h.clock)).committed;
+    // Stopped on Monday with its call open (its skip limit is days away): Tuesday's list does not carry it.
+    expect((await control(pat, "stop")).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + DAY + H);
+    expect(await committed()).toBe(1);
+    // A reply on Tuesday turns the stop into replied, and a restart follows: Tuesday's count is as it stood at its start.
+    expect(h.fake.prospectReplies("pat@harbour.example")).toBe(true);
+    await h.tick();
+    expect(await committed()).toBe(1);
+    expect((await control(pat, "resume_from_next_step")).status).toBe(200);
+    expect(await committed()).toBe(1);
+    // Wednesday: Pat ran at its start, so its carried call counts; Nia's, unworked since Monday with a two-day limit,
+    // was skipped at that rollover. Pat's clock stood still while stopped, so its own limit has not run out.
+    await h.advanceTo(MONDAY_9 + 2 * DAY + H);
+    expect(await committed()).toBe(1);
+    expect((await h.request<EnrollmentRead>("GET", `/api/enrollments/${pat}`)).body.tracks.find((t) => t.trackId === "p1")?.finishReason).toBeNull();
+  });
+
+  test("skip waits for the provider's final word: refused while work it was handed may still be sent, in the read and the action (review bot on ca8baee, item 2)", async () => {
+    // Every email is accepted and sent 27 minutes later; until 38 minutes a lookup lags and answers "not sent".
+    const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: 10 * MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }], modes: ["lookup-lags"], random: () => 0.9 });
+    h.fake.withdrawAnswers = "unknown-sends";
+    await h.tick();
+    const emailOnly: CampaignDefinition = { ...DEFINITION, tracks: [DEFINITION.tracks[0]!] };
+    const { campaign } = await h.createCampaign("Clinics", { businesses: [HARBOUR], people: [PAT] });
+    await h.defineSequence(campaign.id, emailOnly);
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    const pat = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows[0]!.enrollments[0]!.id;
+    await h.advanceTo(MONDAY_9 + MIN);
+    // Paused with email 1 at the provider: the withdrawal answers unknown, and the provider keeps it.
+    expect((await h.request("POST", `/api/enrollments/${pat}/controls`, { requestId: "p", action: "pause" })).status).toBe(200);
+    // At the first lookup the provider still says "not sent", which is not final: the attempt is withdrawn, the work stays uncertain.
+    await h.advanceTo(MONDAY_9 + 16 * MIN);
+    const st = await h.store.engine.subject(pat, h.clock);
+    expect(st?.attempts.find((a) => a.stepId === "s1")).toMatchObject({ state: "withdrawn", endedBy: "lookup_not_sent" });
+    expect(st?.work.find((w) => w.stepId === "s1")?.settled).toBeNull();
+    const read = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${pat}`)).body;
+    expect(controlOf(read, "skip")).toMatchObject({ allowed: false, reason: expect.stringMatching(/may still be sent/) });
+    const skip = await h.request<{ error?: { message: string } }>("POST", `/api/enrollments/${pat}/controls`, { requestId: "s", action: "skip" });
+    expect(skip.status).toBe(409);
+    // The provider sends it: it is recorded once, as sent, and email 2 waits for the resume.
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    expect(h.fake.deliveryLog.map((d) => d.stepId)).toEqual(["s1"]);
+    expect((await h.request<EnrollmentRead>("GET", `/api/enrollments/${pat}`)).body.tracks[0]?.steps[0]?.result).toBe("sent");
+    expect(h.fake.handoverLog.filter((c) => c.stepId === "s2")).toEqual([]);
+  });
 });
 

@@ -1007,9 +1007,15 @@ export class SqliteEngineStore implements EngineStore {
       if (next.subject.leadPaused) this.run("INSERT INTO hold_intervals (scope, owner_id, from_wall) VALUES ('lead', ?, ?)", [id, now]);
       else this.run("UPDATE hold_intervals SET to_wall = ? WHERE scope = 'lead' AND owner_id = ? AND to_wall IS NULL", [now, id]);
     }
+    // An ending's interval opens when the lead first ends and closes at a restart. A later ending event (a reply to a
+    // stopped lead) changes the reason and the ending's own time, never this interval (review bot on ca8baee, item 3).
+    if (base.subject.ended === null && next.subject.ended !== null) {
+      changed = true;
+      this.run("INSERT INTO hold_intervals (scope, owner_id, from_wall) VALUES ('ended', ?, ?)", [id, next.subject.endedWall ?? now]);
+    }
     if (base.subject.ended !== null && next.subject.ended === null) {
       changed = true;
-      this.run("INSERT INTO hold_intervals (scope, owner_id, from_wall, to_wall) VALUES ('ended', ?, ?, ?)", [id, base.subject.endedWall ?? now, now]);
+      this.run("UPDATE hold_intervals SET to_wall = ? WHERE scope = 'ended' AND owner_id = ? AND to_wall IS NULL", [now, id]);
     }
 
     const s = next.subject;

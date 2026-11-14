@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { attempt, DAY, H, handed, MONDAY_9, subjectState, withAttempts } from "../../../test/support/sequence-state.ts";
+import { attempt, DAY, H, handed, MONDAY_9, subjectState, withAttempts, work } from "../../../test/support/sequence-state.ts";
 import { leadNow } from "./clock.ts";
 import { applyControl, campaignPaused, campaignResumed } from "./controls.ts";
 import { deriveStatus, enterMain, evaluate, runs } from "./progress.ts";
@@ -122,6 +122,18 @@ describe("skip step", () => {
     expect(skipped.attempts[0]).toMatchObject({ state: "withdrawn" });
     expect(skipped.tracks[0]).toMatchObject({ nextStepId: "s2", basisWall: at });
     expect(skipped.tracks[0]!.dueAt! - leadNow(skipped.subject.clock, at)).toBe(Date.parse("2026-11-04T00:00:00Z") - at);
+  });
+
+  test("a step whose provider work is uncertain cannot be skipped, even with no live attempt or with a new claim inheriting it (review bot on ca8baee, item 2)", () => {
+    // A non-final "not sent" lookup withdrew the attempt; its work was called and has not settled.
+    const withdrawn = attempt({ state: "withdrawn", endedBy: "lookup_not_sent", calls: 1, handedWall: MONDAY_9, handedAt: 0 });
+    const uncertain = withAttempts(launched(), [withdrawn], [work({ calls: 1, firstHandedWall: MONDAY_9 })]);
+    expect(reason(applyControl(uncertain, "skip", MONDAY_9 + H))).toMatch(/with the email provider/);
+    const inheritor = withAttempts(launched(), [withdrawn, attempt({ id: "a-2", idempotencyKey: "a-1" })], [work({ calls: 1, firstHandedWall: MONDAY_9 })]);
+    expect(reason(applyControl(inheritor, "skip", MONDAY_9 + H))).toMatch(/with the email provider/);
+    // Settled without a send (a confirmed withdrawal), it can be skipped.
+    const settled = withAttempts(launched(), [{ ...withdrawn, endedBy: "provider" }], [work({ calls: 1, firstHandedWall: MONDAY_9, settled: "withdrawn" })]);
+    expect(reason(applyControl(settled, "skip", MONDAY_9 + H))).toBe("accepted");
   });
 
   test("a step already with the provider cannot be skipped; a lead with no pending step says why", () => {
