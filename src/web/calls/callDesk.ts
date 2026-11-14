@@ -13,7 +13,7 @@
  * - Reads are serial per resource (refresher.ts), and every failure counts toward the page's freshness.
  */
 import type { CallNumberView, CallOffListView, CallOutcomeAnswer, CallOutcomeApi, CallsView, CallTaskView } from "../../shared/api.ts";
-import { callbackChoice, isoWithOffset, type CallbackProblem } from "./callbackTime.ts";
+import { callbackChoice, isoWithOffset, type CallbackChoice } from "./callbackTime.ts";
 import { FRESH, REFRESH_INTERVAL_MS, Refresher, type Freshness } from "./refresher.ts";
 
 /** The server's limit on a call note (POST /api/call-tasks/:id/outcome). */
@@ -125,7 +125,10 @@ export type DeskFault =
   // Ticket 15b: the redial and the callback time are part of the press like the outcome.
   | "redial_lost_on_resend"
   | "answer_resets_callback_draft"
-  | "past_callback_sent";
+  | "past_callback_sent"
+  // Council on 32454ea, A: the body corrupted where it is first built.
+  | "callback_offset_of_user_zone"
+  | "redial_dropped_at_press";
 
 export interface Draft {
   readonly outcome: CallOutcomeApi | null;
@@ -138,6 +141,11 @@ export interface Draft {
   /** A callback's day and time as the user entered them, in the prospect's own zone: YYYY-MM-DD and HH:MM. */
   readonly callbackDay: string | null;
   readonly callbackTime: string;
+  /**
+   * The instant chosen for that day and time when the user entered it: in the hour the clocks repeat, its earliest
+   * occurrence after the call's read then. Kept, so a reload or a retry sends the same occurrence (council on 32454ea, B).
+   */
+  readonly callbackAt: number | null;
   /** The request id of the press made from this draft, until it is found stored or settled as not stored. */
   readonly pressId: string | null;
   /** The count of call reads started when this press's entry was found gone: a read started after it settles it. */
@@ -248,7 +256,7 @@ export interface DeskSnapshot {
    * With callback requested chosen: the instant entered, or why there is none the server would take
    * (nothing entered, a time the clocks skip, a time already passed as of the call's read). Log sends nothing without one.
    */
-  readonly callback: { readonly at: number | null; readonly problem: CallbackProblem | null } | null;
+  readonly callback: CallbackChoice | null;
   /** The draft's copy in this tab's storage failed: the note is not kept if the user leaves the page. */
   readonly draftNotKept: boolean;
   /** Counts transitions that replace the controls under the user's keyboard focus, so the page can place it. */
@@ -261,7 +269,7 @@ const FOCUS = "outreach.calls.focus";
 /** Backoff after no answer, in milliseconds; the last repeats. */
 export const RETRY_MS = [1_000, 2_000, 4_000, 8_000] as const;
 
-const EMPTY_DRAFT: Draft = { outcome: null, numberId: null, note: "", noteScope: "person", redial: false, callbackDay: null, callbackTime: "", pressId: null, goneAtRead: null };
+const EMPTY_DRAFT: Draft = { outcome: null, numberId: null, note: "", noteScope: "person", redial: false, callbackDay: null, callbackTime: "", callbackAt: null, pressId: null, goneAtRead: null };
 
 export const whoOf = (view: Pick<CallTaskView, "person" | "company">): string => view.person?.name ?? view.company.name;
 
@@ -290,6 +298,7 @@ function readDraft(raw: string | null): Draft | null {
       redial: d.redial === true,
       callbackDay: typeof d.callbackDay === "string" ? d.callbackDay : null,
       callbackTime: typeof d.callbackTime === "string" ? d.callbackTime : "",
+      callbackAt: typeof d.callbackAt === "number" ? d.callbackAt : null,
       pressId: typeof d.pressId === "string" ? d.pressId : null,
       goneAtRead: null,
     };
@@ -573,7 +582,14 @@ export class CallDesk {
   /** The user changes the draft of the call on screen; refused while locked. An edit is no longer a press. */
   setDraft(patch: Partial<Pick<Draft, "outcome" | "numberId" | "note" | "noteScope" | "redial" | "callbackDay" | "callbackTime">>): void {
     if (!this.live || this.state.locked || this.state.focus === null) return;
-    this.keepDraft({ ...this.state.draft, ...patch, pressId: null, goneAtRead: null }, { notQueued: false });
+    let draft: Draft = { ...this.state.draft, ...patch, pressId: null, goneAtRead: null };
+    // Entering a day or a time chooses its instant now, against the call's read: in the hour the clocks repeat, the
+    // earliest occurrence still to come. The draft keeps it (council on 32454ea, B).
+    if (patch.callbackDay !== undefined || patch.callbackTime !== undefined) {
+      const task = this.state.task;
+      draft = { ...draft, callbackAt: task?.state === "ready" ? callbackChoice({ ...draft, callbackAt: null }, task.view).at : null };
+    }
+    this.keepDraft(draft, { notQueued: false });
   }
 
   /** The user presses Log: the draft becomes one entry, stored before it is sent, and the draft remembers its id. */
@@ -584,12 +600,14 @@ export class CallDesk {
     if (needsNumber && (draft.numberId === null || this.state.numberProblem !== null)) return;
     // The boundary (ticket 15b): a callback with no time, a time the clocks skip, or one already passed as of the
     // call's read is refused in place, and nothing is sent. A time between the read and the server's now is the server's to refuse.
-    const callback = draft.outcome === "callback_requested" ? callbackChoice(draft, task.view) : null;
+    // The fault reads the time in the user's zone, the queue's, instead of the prospect's (council on 32454ea, A).
+    const callbackZone = this.fault("callback_offset_of_user_zone") && this.state.queue.state === "ready" ? this.state.queue.view.userZone : task.view.zone;
+    const callback = draft.outcome === "callback_requested" ? callbackChoice(this.fault("callback_offset_of_user_zone") ? { ...draft, callbackAt: null } : draft, { zone: callbackZone, asOf: task.view.asOf }) : null;
     if (callback && callback.at === null && !(this.fault("past_callback_sent") && callback.problem === "past")) return;
     const pastAt = callback?.problem === "past" && draft.callbackDay !== null ? Date.parse(task.view.asOf) : null;
     const at = callback?.at ?? pastAt;
     // A redial goes only with an outcome the call offers it for; the choice stays in the draft whatever the outcome.
-    const redial = draft.redial && task.view.redialOutcomes.includes(draft.outcome);
+    const redial = draft.redial && task.view.redialOutcomes.includes(draft.outcome) && !this.fault("redial_dropped_at_press");
     const body: OutcomeBody = {
       requestId: this.ports.newId(),
       outcome: draft.outcome,
@@ -597,7 +615,7 @@ export class CallDesk {
       note: draft.note,
       noteScope: task.view.person === null ? "company" : draft.noteScope,
       ...(redial ? { redial: true as const } : {}),
-      ...(at !== null ? { callbackAt: isoWithOffset(at, task.view.zone) } : {}),
+      ...(at !== null ? { callbackAt: isoWithOffset(at, callbackZone) } : {}),
     };
     const entry: OutboxEntry = { v: 2, taskId: focus, who: whoOf(task.view), body, pressedAt: this.ports.now() };
     // The boundary: an outcome is not pressed until its entry is stored. If storage refuses it, nothing is

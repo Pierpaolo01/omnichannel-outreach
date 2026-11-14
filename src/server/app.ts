@@ -4,7 +4,7 @@ import { z } from "zod";
 import { planImport } from "../domain/import-plan.ts";
 import { isOutreachStatus } from "../domain/outreach-status.ts";
 import { checkScraperFile, parseScraperExport } from "../domain/scraper-export.ts";
-import type { ApiError, CallOutcomeAnswer, CallOutcomeRefusal, Campaign, CompanyRecord, FileCheckResult, PersonRecord, RecordCalls, SmsProviderStatus } from "../shared/api.ts";
+import type { ActivityView, ApiError, CallOutcomeAnswer, CallOutcomeRefusal, Campaign, CompanyRecord, FileCheckResult, PersonRecord, RecordCalls, SmsProviderStatus } from "../shared/api.ts";
 import { CAMPAIGN_NAME_MAX, DEFINITION_MAX_BYTES, STEP_BODY_MAX, STEP_SUBJECT_MAX } from "../shared/limits.ts";
 import { checkApiRequest } from "./guard.ts";
 import { invalidBodyMessage, requestObject } from "./request-body.ts";
@@ -421,12 +421,12 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   // The timeline's campaign activity on a person or company-lead record (ticket 12c).
   app.get("/people/:id/activity", async (c) => {
     const person = await store.person(c.req.param("id"));
-    return person ? c.json({ entries: await activityOf(store, person.enrollments, Date.parse(now()), "person") }) : notFound(c, "person");
+    return person ? c.json<ActivityView>({ entries: await activityOf(store, person.enrollments, Date.parse(now()), "person", rules), userZone: (await store.engine.callSettings()).userZone }) : notFound(c, "person");
   });
 
   app.get("/companies/:id/activity", async (c) => {
     const company = await store.company(c.req.param("id"));
-    return company ? c.json({ entries: await activityOf(store, company.enrollments, Date.parse(now()), "company") }) : notFound(c, "company");
+    return company ? c.json<ActivityView>({ entries: await activityOf(store, company.enrollments, Date.parse(now()), "company", rules), userZone: (await store.engine.callSettings()).userZone }) : notFound(c, "company");
   });
 
   app.get("/enrollments/:id", async (c) => {

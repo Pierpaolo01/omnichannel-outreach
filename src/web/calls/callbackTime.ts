@@ -25,19 +25,19 @@ function wallAsUtc(t: number, zone: string): number {
 }
 
 /**
- * The instant at which the wall clock in `zone` reads `day` (YYYY-MM-DD) at `time` (HH:MM); the earlier of
- * two when the clocks go back; null when the clocks skip that time, or the input is not a day and a time.
+ * Every instant at which the wall clock in `zone` reads `day` (YYYY-MM-DD) at `time` (HH:MM), earliest first:
+ * one; two inside the hour the clocks repeat; none when the clocks skip that time, or the input is not a day and a time.
  */
-export function zonedInstant(day: string, time: string, zone: string): number | null {
+export function zonedInstants(day: string, time: string, zone: string): number[] {
   const d = DATE.exec(day);
   const m = TIME.exec(time);
-  if (!d || !m) return null;
+  if (!d || !m) return [];
   const target = Date.UTC(Number(d[1]), Number(d[2]) - 1, Number(d[3]), Number(m[1]), Number(m[2]));
-  if (Number.isNaN(target) || Number(m[1]) > 23 || Number(m[2]) > 59) return null;
-  // Every offset in use near the target: the instant is the target less one of them, if that instant reads the target there.
+  if (Number.isNaN(target) || Number(m[1]) > 23 || Number(m[2]) > 59) return [];
+  // Every offset in use near the target: an instant is the target less one of them, if that instant reads the target there.
   const offsets = new Set([-DAY_MS, 0, DAY_MS].map((shift) => wallAsUtc(target + shift, zone) - (target + shift)));
-  const found = [...offsets].map((offset) => target - offset).filter((t) => wallAsUtc(t, zone) === target);
-  return found.length === 0 ? null : Math.min(...found);
+  const found = new Set([...offsets].map((offset) => target - offset).filter((t) => wallAsUtc(t, zone) === target));
+  return [...found].sort((a, b) => a - b);
 }
 
 /** "Thu 5 Nov" for a YYYY-MM-DD date. */
@@ -54,13 +54,25 @@ export function callbackDays(asOf: string, zone: string, count: number = CALLBAC
 
 export type CallbackProblem = "missing" | "no_such_time" | "past";
 
-/** The instant entered, or why there is none the server would accept. */
-export function callbackChoice(draft: { readonly callbackDay: string | null; readonly callbackTime: string }, view: { readonly zone: string; readonly asOf: string }): { at: number; problem: null } | { at: null; problem: CallbackProblem } {
-  if (draft.callbackDay === null || draft.callbackTime === "") return { at: null, problem: "missing" };
-  const at = zonedInstant(draft.callbackDay, draft.callbackTime, view.zone);
-  if (at === null) return { at: null, problem: "no_such_time" };
-  if (at <= Date.parse(view.asOf)) return { at: null, problem: "past" };
-  return { at, problem: null };
+/** Which occurrence of the time entered was chosen: the only one, or, in the hour the clocks repeat, the first or the second. */
+export type CallbackOccurrence = "only" | "first" | "second";
+
+export type CallbackChoice = { at: number; problem: null; occurrence: CallbackOccurrence } | { at: null; problem: CallbackProblem; occurrence: null };
+
+/**
+ * The instant entered, or why there is none the server would accept (council on 32454ea, B). A time the clocks
+ * repeat means its earliest occurrence after the call's read; refused only when both are past. The draft keeps the
+ * instant chosen (`callbackAt`), so a reload or a retry sends the same occurrence while it is still to come.
+ */
+export function callbackChoice(draft: { readonly callbackDay: string | null; readonly callbackTime: string; readonly callbackAt: number | null }, view: { readonly zone: string; readonly asOf: string }): CallbackChoice {
+  if (draft.callbackDay === null || draft.callbackTime === "") return { at: null, problem: "missing", occurrence: null };
+  const occurrences = zonedInstants(draft.callbackDay, draft.callbackTime, view.zone);
+  if (occurrences.length === 0) return { at: null, problem: "no_such_time", occurrence: null };
+  const asOf = Date.parse(view.asOf);
+  const kept = draft.callbackAt !== null && occurrences.includes(draft.callbackAt) && draft.callbackAt > asOf ? draft.callbackAt : null;
+  const at = kept ?? occurrences.find((t) => t > asOf);
+  if (at === undefined) return { at: null, problem: "past", occurrence: null };
+  return { at, problem: null, occurrence: occurrences.length === 1 ? "only" : at === occurrences[0] ? "first" : "second" };
 }
 
 /** Whether the time asked for is inside the prospect's calling hours, outside them, or on a day they never open. Accepted in every case. */

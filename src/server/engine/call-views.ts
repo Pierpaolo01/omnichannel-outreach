@@ -124,7 +124,7 @@ const RECORD_LOOKAHEAD_DAYS = 60;
  * none: the lead has ended (a reply, a stop: its tasks are kept for a restart, 2.3), is paused, or the task
  * is a call held by the lead's callback. The rule is applied to a copy whose user day is moved; nothing is written.
  */
-function firstListedDay(s: SubjectState, task: CallTask, rules: CallViewRules): number | null {
+export function firstListedDay(s: SubjectState, task: CallTask, rules: CallViewRules): number | null {
   const today = s.callDay.day;
   for (let d = today; d < today + RECORD_LOOKAHEAD_DAYS; d++) if (rules.isListed({ ...s, callDay: { ...s.callDay, day: d } }, task)) return d;
   return null;

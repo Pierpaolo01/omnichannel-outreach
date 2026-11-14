@@ -5,7 +5,7 @@ import { when } from "../activity.tsx";
 import { CallDesk, NOTE_MAX, whoOf, type DeskSnapshot } from "../calls/callDesk.ts";
 import { useCallDesk } from "../calls/useCallDesk.ts";
 import { useFocusRescue } from "../focusRescue.ts";
-import { callbackAdvice, callbackDays } from "../calls/callbackTime.ts";
+import { callbackAdvice, callbackDays, dayLabel } from "../calls/callbackTime.ts";
 import {
   CALLBACK_RELEASE_LINE,
   callbackHoldLine,
@@ -180,13 +180,14 @@ function RecordItem({ desk, snap, record: r, zone, placeFocus }: { desk: CallDes
 
 function Queue({ snap }: { snap: DeskSnapshot }) {
   const view = snap.queue.state === "ready" ? snap.queue.view : null;
-  const item = (x: CallQueueItem) => <QueueItem key={x.taskId} item={x} current={x.taskId === snap.focus} userZone={view?.userZone ?? "UTC"} today={view?.date} />;
+  // Rows exist only in a loaded queue, whose read gives the user's zone and date.
+  const item = (v: CallsView) => (x: CallQueueItem) => <QueueItem key={x.taskId} item={x} current={x.taskId === snap.focus} userZone={v.userZone} today={v.date} />;
   return (
     <aside aria-label="Call queue" className="min-[901px]:sticky min-[901px]:top-6">
       <h2 className="mb-1.5 ml-2.5 text-[13px] font-semibold text-muted">Ready now, {view ? view.readyNow.length : "…"}</h2>
-      {view && view.readyNow.length > 0 ? <ol className="mb-[22px] flex flex-col gap-0.5">{view.readyNow.map(item)}</ol> : <p className="mb-[22px] px-2.5 text-[12.5px] leading-[1.45] text-faint">{view ? "Nothing to call right now." : "Loading the list."}</p>}
+      {view && view.readyNow.length > 0 ? <ol className="mb-[22px] flex flex-col gap-0.5">{view.readyNow.map(item(view))}</ol> : <p className="mb-[22px] px-2.5 text-[12.5px] leading-[1.45] text-faint">{view ? "Nothing to call right now." : "Loading the list."}</p>}
       <h2 className="mb-1.5 ml-2.5 text-[13px] font-semibold text-muted">Later today, {view ? view.laterToday.length : "…"}</h2>
-      {view && view.laterToday.length > 0 ? <ol className="mb-[22px] flex flex-col gap-0.5">{view.laterToday.map(item)}</ol> : <p className="mb-[22px] px-2.5 text-[12.5px] leading-[1.45] text-faint">{view ? "Nothing else today." : "Loading the list."}</p>}
+      {view && view.laterToday.length > 0 ? <ol className="mb-[22px] flex flex-col gap-0.5">{view.laterToday.map(item(view))}</ol> : <p className="mb-[22px] px-2.5 text-[12.5px] leading-[1.45] text-faint">{view ? "Nothing else today." : "Loading the list."}</p>}
       <p className="px-2.5 text-[12.5px] leading-[1.45] text-faint">Calls inside the prospect’s calling hours come first, oldest first. The next call opens when you log an outcome.</p>
       {view && (
         <p className="mt-2 px-2.5 text-[12.5px] leading-[1.45] text-faint">
@@ -198,7 +199,7 @@ function Queue({ snap }: { snap: DeskSnapshot }) {
   );
 }
 
-function QueueItem({ item, current, userZone, today }: { item: CallQueueItem; current: boolean; userZone: string; today: string | undefined }) {
+function QueueItem({ item, current, userZone, today }: { item: CallQueueItem; current: boolean; userZone: string; today: string }) {
   const why = reasonLine(item, userZone, today);
   return (
     <li
@@ -330,8 +331,8 @@ function Sheet({ desk, snap, task, userZone, today, placeFocus }: { desk: CallDe
               })}
             </div>
           )}
-          {task.kind === "callback" && task.listed && task.numbers.every((n) => n.bad) && (
-            <p role="note" className="mt-3 max-w-[70ch] text-[14px] font-medium text-band-warn">
+          {noGoodNumberOn(task) && (
+            <p id={q13Id(task)} role="note" className="mt-3 max-w-[70ch] text-[14px] font-medium text-band-warn">
               {noGoodNumberText(who).full}
             </p>
           )}
@@ -347,7 +348,7 @@ function Sheet({ desk, snap, task, userZone, today, placeFocus }: { desk: CallDe
       </div>
       <div className="grid grid-cols-1 xl:grid-cols-2">
         <section className="min-w-0 px-5 py-6 min-[901px]:px-[30px]">
-          <Colleagues task={task} />
+          <Colleagues task={task} userZone={userZone} />
           {task.companyNotes.map((n) => (
             <p key={n.id} className="mt-3.5 rounded-field bg-raised px-3 py-2.5 text-[13.5px] [overflow-wrap:anywhere]">
               <b className="font-semibold">Company note.</b> {n.body}
@@ -363,7 +364,7 @@ function Sheet({ desk, snap, task, userZone, today, placeFocus }: { desk: CallDe
         </section>
         <section className="min-w-0 border-line px-5 py-6 max-xl:border-t min-[901px]:px-[30px] xl:border-l">
           <h2 className="mb-2.5 text-[13px] font-semibold text-muted">What they’ve had so far</h2>
-          <Touches touches={task.touches} notes={task.personNotes} />
+          <Touches touches={task.touches} notes={task.personNotes} userZone={userZone} />
           <Link href={recordHref} className="mt-2 inline-block text-[13px] text-muted underline decoration-line-strong underline-offset-[3px] hover:text-base-content">
             Open {who}’s full record
           </Link>
@@ -374,7 +375,7 @@ function Sheet({ desk, snap, task, userZone, today, placeFocus }: { desk: CallDe
   );
 }
 
-function Colleagues({ task }: { task: CallTaskView }) {
+function Colleagues({ task, userZone }: { task: CallTaskView; userZone: string }) {
   const people: { key: string; name: ReactNode; title: string; aside: ReactNode; note: CallColleagueView["lastCallNote"] }[] = [];
   if (task.person) people.push({ key: task.person.id, name: task.person.name, title: task.person.title, aside: <span className="text-[12px] text-muted">this call</span>, note: null });
   for (const c of task.colleagues) {
@@ -414,7 +415,7 @@ function Colleagues({ task }: { task: CallTaskView }) {
                 {p.aside}
               </div>
               {p.title && <div className="text-[13.5px] text-muted">{p.title}</div>}
-              {p.note && <LastNote note={p.note} />}
+              {p.note && <LastNote note={p.note} userZone={userZone} />}
             </li>
           ))}
         </ul>
@@ -423,17 +424,17 @@ function Colleagues({ task }: { task: CallTaskView }) {
   );
 }
 
-function LastNote({ note }: { note: NonNullable<CallColleagueView["lastCallNote"]> }) {
+function LastNote({ note, userZone }: { note: NonNullable<CallColleagueView["lastCallNote"]>; userZone: string }) {
   const now = useNow();
   return (
     <p className="mt-[3px] border-l-2 border-line-strong pl-2.5 text-[13.5px] text-ink-2 [overflow-wrap:anywhere]">
-      {when(note.at, now)}: {note.note}
+      {when(note.at, now, userZone)}: {note.note}
     </p>
   );
 }
 
 /** Earlier touches and notes, newest first, in the prototype's compact timeline. A call's note is shown once, on the call. */
-function Touches({ touches, notes }: { touches: readonly TouchView[]; notes: readonly NoteView[] }) {
+function Touches({ touches, notes, userZone }: { touches: readonly TouchView[]; notes: readonly NoteView[]; userZone: string }) {
   const now = useNow();
   const onCall = new Set(touches.flatMap((t) => (t.kind === "call" && t.note ? [`${t.at}|${t.note}`] : [])));
   const rows = [
@@ -450,7 +451,7 @@ function Touches({ touches, notes }: { touches: readonly TouchView[]; notes: rea
           </span>
           <span className="min-w-0 pt-0.5 text-[14px] font-medium">{row.title}</span>
           <time dateTime={at} className="whitespace-nowrap pt-[3px] text-right text-[13px] text-muted">
-            {when(at, now)}
+            {when(at, now, userZone)}
           </time>
           {row.body && <span className="col-start-2 col-end-4 text-[14px] text-ink-2 [overflow-wrap:anywhere]">{row.body}</span>}
         </li>
@@ -486,6 +487,7 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
   const pending = snap.pending !== null;
   const canLog = draft.outcome !== null && !snap.noteTooLong && (draft.outcome === "skip_for_now" || (dialled !== undefined && snap.numberProblem === null)) && (draft.outcome !== "callback_requested" || snap.callback?.at != null);
   const days = callbackDays(task.asOf, task.zone);
+  const noGood = noGoodNumberOn(task);
   return (
     <div className="flex flex-col gap-3.5 min-[901px]:sticky min-[901px]:bottom-0 border-t border-line bg-base-100 px-5 pb-[22px] pt-5 shadow-[0_-10px_24px_-18px_rgba(21,26,45,0.35)] min-[901px]:px-[30px]">
       {away && (
@@ -538,7 +540,15 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
       </div>
       <div role="group" aria-label="Call outcome" aria-describedby={later} className="flex flex-wrap gap-2">
         {OFFERED.map((o) => (
-          <OutcomePill key={o} label={OUTCOME_LABEL[o]} pressed={!away && draft.outcome === o} locked={locked} onPress={() => desk.setDraft({ outcome: o, ...(o === "callback_requested" && draft.callbackDay === null ? { callbackDay: days[0]?.value ?? null } : {}) })} />
+          <OutcomePill
+            key={o}
+            label={OUTCOME_LABEL[o]}
+            pressed={!away && draft.outcome === o}
+            // With no good number left (the server's `noGoodNumber`, Q13), only skip for now can be logged: the others are disabled, described by that sentence.
+            locked={locked || noGood}
+            describedBy={noGood ? q13Id(task) : undefined}
+            onPress={() => desk.setDraft({ outcome: o, ...(o === "callback_requested" && draft.callbackDay === null ? { callbackDay: days[0]?.value ?? null } : {}) })}
+          />
         ))}
         <button type="button" disabled aria-describedby={later} className="cursor-not-allowed rounded-[20px] border border-dashed border-line-strong bg-base-100 px-3.5 py-[7px] text-[14px] font-medium text-muted">
           Not interested
@@ -613,11 +623,16 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
   );
 }
 
-function OutcomePill({ label, pressed, locked, onPress }: { label: string; pressed: boolean; locked: boolean; onPress: () => void }) {
+/** Q13, from the server's read: a callback on today's list whose lead has no good number left (`noGoodNumber`). */
+const noGoodNumberOn = (task: CallTaskView): boolean => task.kind === "callback" && task.listed && task.task?.noGoodNumber === true;
+const q13Id = (task: CallTaskView): string => `q13-${task.taskId}`;
+
+function OutcomePill({ label, pressed, locked, onPress, describedBy }: { label: string; pressed: boolean; locked: boolean; onPress: () => void; describedBy?: string | undefined }) {
   return (
     <button
       type="button"
       aria-pressed={pressed}
+      aria-describedby={describedBy}
       disabled={locked}
       onClick={onPress}
       className={`rounded-[20px] border px-3.5 py-[7px] text-[14px] font-medium ${pressed ? "border-base-content bg-base-content text-base-200" : "border-line-strong bg-base-100 hover:border-ink-2"} disabled:cursor-not-allowed disabled:border-line disabled:text-muted disabled:hover:border-line`}
@@ -653,10 +668,10 @@ function CallbackFields({ desk, snap, task, userZone, days, who }: { desk: CallD
   const timeId = useId();
   const lineId = useId();
   const { draft, locked } = snap;
-  const callback = snap.callback ?? { at: null, problem: "missing" as const };
+  const callback = snap.callback ?? { at: null, problem: "missing" as const, occurrence: null };
   const line = callbackLine(callback, callback.at === null ? null : callbackAdvice(callback.at, task), task, userZone);
   // A day chosen before the prospect's today moved on stays listed, so the select shows what the draft holds.
-  const options = draft.callbackDay !== null && !days.some((d) => d.value === draft.callbackDay) ? [{ value: draft.callbackDay, label: draft.callbackDay }, ...days] : days;
+  const options = draft.callbackDay !== null && !days.some((d) => d.value === draft.callbackDay) ? [{ value: draft.callbackDay, label: dayLabel(draft.callbackDay) }, ...days] : days;
   return (
     <>
       <div className="flex flex-wrap items-end gap-x-4 gap-y-2.5">

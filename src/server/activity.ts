@@ -19,17 +19,19 @@
  */
 import type { ActivityEntry, EnrollmentView } from "../shared/api.ts";
 import { displayPhone } from "../domain/phone.ts";
-import { goodNumbers, isListed, skipLimitOf } from "../domain/sequence/calls.ts";
+import { goodNumbers, skipLimitOf, userDayOf } from "../domain/sequence/calls.ts";
+import { localDayNumber } from "../domain/sequence/clock.ts";
 import { goodEmail, goodMobile, runs, wallAtLead } from "../domain/sequence/progress.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
 import { trackLabel } from "../shared/track-label.ts";
-import { callRecordView } from "./engine/call-views.ts";
+import { callRecordView, dateOfDay, firstListedDay, type CallViewRules } from "./engine/call-views.ts";
+import type { CallTask } from "../domain/sequence/state.ts";
 import { progressView } from "./engine/views.ts";
 import type { OutreachStore } from "./persistence/store.ts";
 
 const SKIP_REASON: Readonly<Record<string, string>> = { "address on the provider's block list": "block_list" };
 
-export async function activityOf(store: OutreachStore, enrollments: readonly EnrollmentView[], now: number, kind: "person" | "company"): Promise<ActivityEntry[]> {
+export async function activityOf(store: OutreachStore, enrollments: readonly EnrollmentView[], now: number, kind: "person" | "company", rules: CallViewRules): Promise<ActivityEntry[]> {
   const labels = await store.engine.accountLabels();
   const entries: ActivityEntry[] = [];
   for (const enrollment of enrollments) {
@@ -55,7 +57,7 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
     const endedAtLaunch = progress.status === "finished_no_usable_channel" && !progress.tracks.some((t) => t.started);
     for (const track of progress.tracks) {
       if (track.channel === "call") {
-        callEntries(track, state, progress, campaign, labelOf, endedAtLaunch, now, entries);
+        callEntries(track, state, rules.asOfAction(state, now, rules.evaluate), progress, campaign, labelOf, endedAtLaunch, now, rules, entries);
         continue;
       }
       if (track.channel !== "email" && track.channel !== "sms") continue;
@@ -135,14 +137,34 @@ function startedWall(state: SubjectState, trackId: string, now: number): number 
  * number, from its finish reason `skipped_missing_channel` (or, for a lead ended at launch, the same
  * exception the other channels have); and its release after a track that was skipped or failed.
  */
+/**
+ * The day a redial logged at `atWall` was listed from: the engine's redial rule moves the call to the user's next day,
+ * and the listing rule (`isListed`) lists it from the first day on or after that whose calling hours open. Judged on a
+ * copy holding only that call, as it stood after the redial, so later events (a reply, another outcome) do not move it.
+ */
+function redialListedFrom(live: SubjectState, task: CallTask, atWall: number, rules: CallViewRules): string | null {
+  const listDay = userDayOf(atWall, live.callDay.userZone) + 1;
+  const redialed: CallTask = { ...task, open: true, kind: "call", callbackAt: null, listDay };
+  const copy: SubjectState = { ...live, subject: { ...live.subject, ended: null, leadPaused: false }, campaign: { ...live.campaign, pausedSince: null }, callTasks: [redialed] };
+  for (let d = listDay; d < listDay + 60; d++) if (rules.isListed({ ...copy, callDay: { ...copy.callDay, day: d } }, redialed)) return dateOfDay(d);
+  return null;
+}
+
+/**
+ * Activity is history, and every present-tense fact in it comes from the lead's state as of the read (`live`, the
+ * record's own), by the same listing rule (council on 32454ea, C; verifier re-check, H): whether a callback is still
+ * open and holding outreach, whether one is overdue, and what the tracks after an unworked skip have done.
+ */
 function callEntries(
   track: ReturnType<typeof progressView>["tracks"][number],
   state: SubjectState,
+  live: SubjectState,
   progress: ReturnType<typeof progressView>,
   campaign: ActivityEntry["campaign"],
   labelOf: (trackId: string) => ReturnType<typeof trackLabel>,
   endedAtLaunch: boolean,
   now: number,
+  rules: CallViewRules,
   entries: ActivityEntry[],
 ): void {
   const def = state.campaign.definition;
@@ -152,15 +174,33 @@ function callEntries(
   const tasks = state.callTasks.filter((t) => t.trackId === track.trackId);
   for (const task of tasks) {
     let askedFor: string | null = null;
+    const liveTask = live.callTasks.find((t) => t.id === task.id);
+    // The callback asked for that is open now, listed today or later by the listing rule: the one the record shows.
+    const openCallback = liveTask?.open && liveTask.kind === "callback" && liveTask.callbackAt !== null && firstListedDay(live, liveTask, rules) !== null ? new Date(liveTask.callbackAt).toISOString() : null;
     for (const c of state.callAttempts.filter((a) => a.taskId === task.id)) {
       const record = callRecordView(state, c);
-      entries.push({ campaign, at: record.at, kind: "call", channel: "call", track: label, outcome: record.outcome, number: record.number, note: record.note, redial: record.redial, callbackAt: record.callbackAt, onCallback: askedFor, zone: state.lead.zone });
+      entries.push({
+        campaign,
+        at: record.at,
+        kind: "call",
+        channel: "call",
+        track: label,
+        outcome: record.outcome,
+        number: record.number,
+        note: record.note,
+        redial: record.redial,
+        callbackAt: record.callbackAt,
+        onCallback: askedFor,
+        zone: state.lead.zone,
+        redialListedFrom: record.redial ? redialListedFrom(live, liveTask ?? task, c.atWall, rules) : null,
+        callbackOpen: record.callbackAt !== null && record.callbackAt === openCallback,
+      });
       if (c.outcome !== "skip_for_now") askedFor = c.outcome === "callback_requested" ? record.callbackAt : null;
     }
     // A callback still listed after the time asked for is overdue (Q12): shown at that time until its outcome. The
     // listing rule decides, so a lead that replied or was stopped (its task kept for a restart) shows none.
-    if (task.kind === "callback" && task.callbackAt !== null && task.callbackAt <= now && isListed(state, task)) {
-      const at = new Date(task.callbackAt).toISOString();
+    if (liveTask?.kind === "callback" && liveTask.callbackAt !== null && liveTask.callbackAt <= now && rules.isListed(live, liveTask)) {
+      const at = new Date(liveTask.callbackAt).toISOString();
       entries.push({ campaign, at, kind: "callback_overdue", channel: "call", track: label, callbackAt: at, zone: state.lead.zone });
     }
   }
@@ -182,13 +222,15 @@ function callEntries(
     const after = def.tracks
       .filter((t) => !t.removed && t.start.kind === "after" && t.start.trackId === track.trackId)
       .flatMap((t): Extract<ActivityEntry, { reason: "unworked" }>["after"][number][] => {
-        const p = state.tracks.find((x) => x.trackId === t.id);
+        const p = live.tracks.find((x) => x.trackId === t.id);
         if (!p) return [];
         if (p.startedAt !== null) return [{ track: labelOf(t.id), state: "started" as const, startsAt: null }];
+        // Ended (a reply, a stop): it will not start; held (a callback, a pause): no day can be named (council on 32454ea, D).
+        if (live.subject.ended !== null) return [{ track: labelOf(t.id), state: "stopped" as const, startsAt: null }];
         if (p.startAt === null) return [];
-        if (!runs(state)) return [{ track: labelOf(t.id), state: "held" as const, startsAt: null }];
-        return [{ track: labelOf(t.id), state: "waiting" as const, startsAt: new Date(wallAtLead(state.subject.clock, state.freezes, p.startAt, now)).toISOString() }];
+        if (!runs(live)) return [{ track: labelOf(t.id), state: "held" as const, startsAt: null }];
+        return [{ track: labelOf(t.id), state: "waiting" as const, startsAt: new Date(wallAtLead(live.subject.clock, live.freezes, p.startAt, now)).toISOString() }];
       });
-    entries.push({ campaign, at: track.finishedAt, kind: "skipped", channel: "call", track: label, stepNumber: null, reason: "unworked", dueAt: new Date(unworked.dueWall).toISOString(), limitDays: skipLimitOf(def, track.trackId), after });
+    entries.push({ campaign, at: track.finishedAt, kind: "skipped", channel: "call", track: label, stepNumber: null, reason: "unworked", dueDate: dateOfDay(localDayNumber(unworked.dueWall, live.callDay.userZone)), limitDays: skipLimitOf(def, track.trackId), after });
   }
 }

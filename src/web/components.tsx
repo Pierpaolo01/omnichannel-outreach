@@ -145,11 +145,16 @@ export function CampaignRows({
             {sentence && <p className="text-[14px] text-ink-2">{sentence}</p>}
             {calls?.calls
               .filter((c) => c.enrollmentId === enrollment.id)
-              .map((c) => (
-                <p key={c.taskId} className={`text-[14px] [overflow-wrap:anywhere] ${c.reason === "overdue" ? "text-crit" : "text-ink-2"}`}>
-                  {recordCallLine(c, calls.today)}
-                </p>
-              ))}
+              .map((c) => {
+                // Only the first sentence of an overdue callback is in the critical colour (council on 32454ea, F).
+                const line = recordCallLine(c, calls.today);
+                return (
+                  <p key={c.taskId} className="text-[14px] text-ink-2 [overflow-wrap:anywhere]">
+                    <span className={c.reason === "overdue" ? "text-crit" : ""}>{line.lead}</span>
+                    {line.rest ? ` ${line.rest}` : ""}
+                  </p>
+                );
+              })}
           </li>
         );
       })}

@@ -6,7 +6,7 @@
 import type { CallNumberView, CallOffListView, CallOutcomeApi, CallQueueItem, CallsView, CallTaskView, NeedsAttention, RecordCallView, RecordedNumberView, TodayView, WindowRule } from "../../shared/api.ts";
 import { STATUS_LABEL } from "../status.tsx";
 import type { DeskSnapshot } from "./callDesk.ts";
-import { dayLabel, type CallbackProblem } from "./callbackTime.ts";
+import { dayLabel, zonedInstants, type CallbackChoice } from "./callbackTime.ts";
 
 /** The outcome buttons, as the approved prototype labels them. */
 export const OUTCOME_LABEL = {
@@ -46,14 +46,28 @@ export const dateIn = (zone: string, iso: string): string => new Intl.DateTimeFo
 const isoDateIn = (zone: string, iso: string): string => new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(iso));
 
 /**
- * A callback's time as the prospect asked for it, in their time, and in the user's when the zones read differently:
- * "Thu 5 Nov at 14:30 their time" or "Thu 5 Nov at 14:30 their time, 15:30 your time".
+ * A callback's time, the one way every page says it (council on 32454ea, C): in the prospect's time, with their date
+ * unless it is `today` (the user's date as the server counts it; null to always give it); in the hour the clocks
+ * repeat, which occurrence ("after the clocks go back"); and the user's time when it reads differently, with the
+ * user's date when that differs from theirs. `yours` is null when both read the same.
  */
+export function callbackTimes(iso: string, zone: string, userZone: string, today: string | null): { theirs: string; yours: string | null; dated: boolean } {
+  const theirDate = isoDateIn(zone, iso);
+  const theirTime = timeIn(zone, iso);
+  const dated = theirDate !== today;
+  const occurrences = zonedInstants(theirDate, theirTime, zone);
+  const clock = occurrences.length > 1 ? (Date.parse(iso) === occurrences[0] ? ", before the clocks go back" : ", after the clocks go back") : "";
+  const theirs = `${dated ? `${dateIn(zone, iso)} at ` : ""}${theirTime} their time${clock}`;
+  const yourDate = isoDateIn(userZone, iso);
+  const yourTime = timeIn(userZone, iso);
+  if (yourDate === theirDate && yourTime === theirTime) return { theirs, yours: null, dated };
+  return { theirs, yours: `${yourDate === theirDate ? "" : `${dateIn(userZone, iso)} at `}${yourTime} your time`, dated };
+}
+
+/** "Thu 5 Nov at 14:30 their time, 15:30 your time", or "…, the same as yours": always dated. */
 export function callbackWhen(iso: string, zone: string, userZone: string): string {
-  const theirs = `${dateIn(zone, iso)} at ${timeIn(zone, iso)} their time`;
-  const yours = `${dateIn(userZone, iso)} at ${timeIn(userZone, iso)}`;
-  if (yours === `${dateIn(zone, iso)} at ${timeIn(zone, iso)}`) return `${theirs}, the same as yours`;
-  return `${theirs}, ${dateIn(userZone, iso) === dateIn(zone, iso) ? timeIn(userZone, iso) : yours} your time`;
+  const t = callbackTimes(iso, zone, userZone, null);
+  return `${t.theirs}, ${t.yours ?? "the same as yours"}`;
 }
 
 /** "the end of Tue 3 Nov", from a user date. */
@@ -67,7 +81,7 @@ export const zonePlace = (zone: string): string => (zone.split("/").at(-1) ?? zo
  * original due date of a carried call, a callback's time in the prospect's and the user's time, and the
  * server's word that an unworked call is skipped tonight. `today` is the user's date as the server counts it.
  */
-export function reasonLine(item: CallQueueItem, userZone: string, today?: string): { text: string; tone: "muted" | "pause" | "crit" } {
+export function reasonLine(item: CallQueueItem, userZone: string, today: string): { text: string; tone: "muted" | "pause" | "crit" } {
   const tonight = item.skippedTonight ? ", last day before it’s skipped" : "";
   // A callback waits for the time the prospect asked for, not for calling hours: said as a callback.
   if (item.bucket === "later_today" && item.opensAt && item.reason !== "callback" && item.reason !== "overdue") return { text: `Their calling hours start at ${timeIn(userZone, item.opensAt)} your time${tonight}`, tone: "muted" };
@@ -79,18 +93,13 @@ export function reasonLine(item: CallQueueItem, userZone: string, today?: string
       return { text: `Redial, due ${due}${tonight}`, tone: "pause" };
     case "callback": {
       if (!item.callbackAt) return { text: "Callback", tone: "pause" };
-      const yours = timeIn(userZone, item.callbackAt);
-      const theirs = timeIn(item.zone, item.callbackAt);
-      return { text: `Callback they asked for at ${theirs} their time${theirs === yours ? "" : `, ${yours} yours`}${item.noGoodNumber ? `; ${noGoodNumberText(null).short}` : ""}`, tone: "pause" };
+      const t = callbackTimes(item.callbackAt, item.zone, userZone, today);
+      return { text: `Callback they asked for ${t.dated ? "" : "at "}${t.theirs}${t.yours ? `, ${t.yours}` : ""}${item.noGoodNumber ? `; ${noGoodNumberText(null).short}` : ""}`, tone: "pause" };
     }
     case "overdue": {
       if (!item.callbackAt) return { text: "Callback overdue", tone: "crit" };
-      // "today" only when it is today for the prospect and for the user alike.
-      const isToday = today !== undefined && isoDateIn(item.zone, item.callbackAt) === today && isoDateIn(userZone, item.callbackAt) === today;
-      const day = isToday ? "today" : dateIn(item.zone, item.callbackAt);
-      const theirs = timeIn(item.zone, item.callbackAt);
-      const yours = timeIn(userZone, item.callbackAt);
-      return { text: `Callback overdue since ${day} at ${theirs} their time${theirs === yours ? "" : `, ${yours} yours`}${item.noGoodNumber ? `; ${noGoodNumberText(null).short}` : ""}`, tone: "crit" };
+      const t = callbackTimes(item.callbackAt, item.zone, userZone, today);
+      return { text: `Callback overdue since ${t.dated ? "" : "today at "}${t.theirs}${t.yours ? `, ${t.yours}` : ""}${item.noGoodNumber ? `; ${noGoodNumberText(null).short}` : ""}`, tone: "crit" };
     }
     case "due":
       return { text: `Due today${tonight}`, tone: "muted" };
@@ -295,7 +304,7 @@ export function carriedItem(today: Pick<TodayView, "carriedOver" | "carriedOverL
 }
 
 /** Everything Needs attention reports, each once; with Today's read, overdue callbacks first, then calls carried over. */
-export function attentionItems(n: NeedsAttention, userZone: string, today?: Pick<TodayView, "overdueCallbacks" | "userZone" | "date" | "carriedOver" | "carriedOverLastDay"> | null): AttentionItem[] {
+export function attentionItems(n: NeedsAttention, userZone: string, today: Pick<TodayView, "overdueCallbacks" | "userZone" | "date" | "carriedOver" | "carriedOverLastDay"> | null): AttentionItem[] {
   const items: AttentionItem[] = [];
   const overdue = today ? overdueItem(today) : null;
   if (overdue) items.push(overdue);
@@ -399,7 +408,7 @@ export function redialLines(task: Pick<CallTaskView, "track"> & { readonly redia
 
 /** What the callback controls say about the time entered: shown back in both times, and what the engine will make of it. */
 export function callbackLine(
-  callback: { readonly at: number | null; readonly problem: CallbackProblem | null },
+  callback: CallbackChoice,
   advice: "inside" | "outside" | "closed_day" | null,
   task: Pick<CallTaskView, "zone" | "callingHours">,
   userZone: string,
@@ -420,8 +429,9 @@ export function callbackLine(
 
 /** What a callback does to the lead, before Log (ADR 0003 2.3, Q12): the hold, and that nothing ends it but an outcome. */
 export function callbackHoldLine(task: Pick<CallTaskView, "kind" | "campaign">, who: string): string {
+  // Held now only when the server's read shows the callback; before Log, what logging will do (council on 32454ea, E).
   if (task.kind === "callback") return `A new time keeps the hold: ${who}’s automated outreach in ${task.campaign.name} stays held until you log how the callback went.`;
-  return `${who}’s automated outreach in ${task.campaign.name} is held from now until you log how the callback went. The call stays open: it is never skipped, and nothing resumes by itself.`;
+  return `Logging this holds ${who}’s automated outreach in ${task.campaign.name} until you log how the callback went. The call then stays open: it is never skipped, and nothing resumes by itself.`;
 }
 
 /** Any other outcome on a callback ends its hold (ADR 0003 2.4: the hold is released first, then the outcome is logged). */
@@ -437,31 +447,41 @@ export function skipLine(task: Pick<CallTaskView, "kind">): string {
  * Only skip for now can be logged, and it keeps the callback open. The one sentence for the call sheet, the queue
  * and Up next (`short`), Needs attention and the record, so they cannot disagree.
  */
-export function noGoodNumberText(who: string | null): { short: string; full: string } {
+export function noGoodNumberText(who: string | null): { short: string; full: string; afterOverdue: string } {
   const whose = who === null ? "Every number" : `Every number for ${who}`;
+  const logging = `${whose} is marked wrong, so only skip for now can be logged on this callback, and it keeps the callback open.`;
+  const until = "a new number arrives by import or they reply";
+  const later = "Pausing them or skipping the step arrives with a later release.";
   return {
     short: "no good number left, only skip for now can be logged",
-    full: `${whose} is marked wrong, so only skip for now can be logged on this callback, and it keeps the callback open. It stays on the call list, flagged overdue once its time has passed, and their other outreach in this campaign stays held until a new number arrives by import or they reply. Pausing them or skipping the step arrives with a later release.`,
+    full: `${logging} It stays on the call list, flagged overdue once its time has passed, and their other outreach in this campaign stays held until ${until}. ${later}`,
+    // After a sentence that already says the callback stays listed and holds outreach: each fact once (council on 32454ea, F).
+    afterOverdue: `${logging} That lasts until ${until}. ${later}`,
   };
 }
 
-/** One sentence per open call on the person and company-lead record (ticket 15b), from the server's read as of `today`. */
-export function recordCallLine(call: RecordCallView, today: string): string {
+/**
+ * What the record says of one open call (ticket 15b), from the server's read as of `today`: `lead`, said in the
+ * critical colour when the callback is overdue, then `rest`; each fact once.
+ */
+export function recordCallLine(call: RecordCallView, today: string): { lead: string; rest: string } {
   const limit = call.skipLimit
     ? ` It was due ${dayLabel(call.skipLimit.dueDate)}${call.skipLimit.ifUnworked ? `; if it isn’t worked, it is skipped at ${endOf(call.skipLimit.ifUnworked)}` : ""}.`
     : "";
   if (call.kind === "callback") {
     const at = call.callbackAt ? `${dateIn(call.zone, call.callbackAt)} at ${timeIn(call.zone, call.callbackAt)} their time` : "at the time they asked for";
     const overdue = call.reason === "overdue";
-    const lines = [overdue ? `Callback ${at}, now overdue. It stays on your call list until you log what happened, and their automated outreach in this campaign stays held until then.` : `Callback ${at}. Their automated outreach in this campaign is held until you log how it went.`];
-    if (call.noGoodNumber) lines.push(noGoodNumberText(null).full);
-    return lines.join(" ");
+    const lead = overdue
+      ? `Callback ${at}, now overdue. It stays on your call list until you log what happened, and their automated outreach in this campaign stays held until then.`
+      : `Callback ${at}. Their automated outreach in this campaign is held until you log how it went.`;
+    return { lead, rest: call.noGoodNumber ? noGoodNumberText(null).afterOverdue : "" };
   }
-  if (call.heldByCallback) return `Their call on the ${call.track.label.toLowerCase()} waits while their callback is open: only the callback is on the list.`;
+  const plain = (lead: string) => ({ lead, rest: "" });
+  if (call.heldByCallback) return plain(`Their call on the ${call.track.label.toLowerCase()} waits while their callback is open: only the callback is on the list.`);
   if (call.listed) {
     const why = call.reason === "rolled_over" ? "Their call rolled over to today’s list." : call.reason === "redial" ? "Their call is back on today’s list: you asked for a redial." : "Their call is on today’s list.";
-    return `${why}${limit}`;
+    return plain(`${why}${limit}`);
   }
-  if (call.listedFor > today) return `Their call is on the list for ${dayLabel(call.listedFor)}.${limit}`;
-  return `Their call waits for a day their calling hours open.${limit}`;
+  if (call.listedFor > today) return plain(`Their call is on the list for ${dayLabel(call.listedFor)}.${limit}`);
+  return plain(`Their call waits for a day their calling hours open.${limit}`);
 }

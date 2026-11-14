@@ -3,6 +3,7 @@ import type { ActivityEntry, ActivityView } from "../shared/api.ts";
 import { useApi } from "./api.ts";
 import { ErrorState, Section } from "./components.tsx";
 import { OUTCOME_TITLE, dateIn, dialledLine } from "./calls/wording.ts";
+import { dayLabel } from "./calls/callbackTime.ts";
 import { Icon, type IconName } from "./icons.tsx";
 import { useNow } from "./time.ts";
 
@@ -17,6 +18,8 @@ export function Activity({ path }: { path: string }) {
   const [campaign, setCampaign] = useState("");
   const filterId = useId();
   const entries = result.state === "ready" ? result.data.entries : null;
+  // Every day and time Activity says is in the user's zone as the server reads it, never the browser's (council on 32454ea, C).
+  const userZone = result.state === "ready" ? result.data.userZone : null;
   const campaigns = entries ? [...new Map(entries.map((e) => [e.campaign.id, e.campaign.name])).entries()] : [];
   const shown = entries?.filter((e) => campaign === "" || e.campaign.id === campaign) ?? [];
   return (
@@ -52,7 +55,7 @@ export function Activity({ path }: { path: string }) {
       ) : (
         <ul>
           {shown.map((entry, i) => (
-            <Line key={`${entry.at}-${i}`} entry={entry} />
+            userZone !== null && <Line key={`${entry.at}-${i}`} entry={entry} userZone={userZone} />
           ))}
         </ul>
       )}
@@ -81,7 +84,7 @@ const inSentence = (label: { label: string; several: boolean }) => (label.severa
  * What one timeline entry says. `track` names the entry's track when its campaign has several on
  * that channel, so two email tracks never read alike (ticket 13b). Exported for its tests.
  */
-export function describeEntry(entry: ActivityEntry): { icon: IconName; tone: string; title: string; body: string | null; track: string | null } {
+export function describeEntry(entry: ActivityEntry, userZone: string): { icon: IconName; tone: string; title: string; body: string | null; track: string | null } {
   if (entry.kind === "replied")
     return {
       icon: "reply",
@@ -104,10 +107,21 @@ export function describeEntry(entry: ActivityEntry): { icon: IconName; tone: str
         if (entry.reason === "unworked") {
           const limit = entry.limitDays === 1 ? "a day" : `${entry.limitDays} days`;
           // What each track after it has done at this read, from the server: never a start that has not happened (verifier on eac9f6c, F2).
-          const after = entry.after.map((a) =>
-            a.state === "started" ? `${a.track.label} started after it.` : a.state === "waiting" && a.startsAt ? `${a.track.label} starts after its delay, on ${dateIn(localZone(), a.startsAt)}.` : `${a.track.label} starts after its delay, once their outreach is no longer held.`,
-          );
-          return { icon: "system", tone: PLAIN, title: `${entry.track.label} skipped, not called`, body: [`Not called within ${limit} of its due date, ${dateIn(localZone(), entry.dueAt)}, so the call was skipped.`, ...after].join(" "), track: null };
+          // An ended lead's track never starts; a held one has no day yet (council on 32454ea, D).
+          const after = entry.after.map((a) => {
+            switch (a.state) {
+              case "started":
+                return `${a.track.label} started after it.`;
+              case "stopped":
+                return `${a.track.label} did not start: their outreach in this campaign stopped.`;
+              case "waiting":
+                return a.startsAt ? `${a.track.label} starts after its delay, on ${dateIn(userZone, a.startsAt)}.` : `${a.track.label} starts after its delay.`;
+              case "held":
+                return `${a.track.label} starts after its delay, once their outreach is no longer held.`;
+            }
+          });
+          // The engine's own calendar date, said as a date: never re-derived from an instant (council on 32454ea, C).
+          return { icon: "system", tone: PLAIN, title: `${entry.track.label} skipped, not called`, body: [`Not called within ${limit} of its due date, ${dayLabel(entry.dueDate)}, so the call was skipped.`, ...after].join(" "), track: null };
         }
         return { icon: "system", tone: PLAIN, title: `${entry.track.label} skipped`, body: "No good number to call: every number is missing or marked wrong.", track: null };
       case "released":
@@ -150,7 +164,6 @@ export function describeEntry(entry: ActivityEntry): { icon: IconName; tone: str
   }
 }
 
-const localZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 const timeIn = (zone: string, iso: string) => new Intl.DateTimeFormat("en-GB", { timeZone: zone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(iso));
 /** "Thu 5 Nov at 14:30" in the prospect's zone. */
 const at = (iso: string, zone: string) => `${dateIn(zone, iso)} at ${timeIn(zone, iso)}`;
@@ -160,21 +173,26 @@ function releasedWhy(because: "skipped" | "failed" | "unworked", after: string):
   return because === "skipped" ? "was skipped for this lead" : `ended on a bad ${after.startsWith("SMS") ? "number" : "address"}`;
 }
 
-/** What a logged call did to the lead's calls (ticket 15b): a redial, a callback asked for, or the callback it answered. */
+/**
+ * What a logged call did to the lead's calls (ticket 15b): a redial, a callback asked for, or the callback it answered.
+ * History, in the past tense; a present state (a callback still open and holding outreach) only when the server's read
+ * says so (`callbackOpen`, verifier re-check H), and a day only from the server (`redialListedFrom`, council C).
+ */
 function callMeaning(entry: Extract<ActivityEntry, { kind: "call"; channel: "call" }>): string | null {
   if (entry.outcome === "callback_requested" && entry.callbackAt !== null) {
-    const lead = entry.onCallback === null ? "Call back" : "Callback moved to";
-    return `${lead} ${at(entry.callbackAt, entry.zone)} their time; automated outreach in this campaign is held until its outcome is logged`;
+    const asked = `${entry.onCallback === null ? "Callback asked for" : "Callback moved to"}, ${at(entry.callbackAt, entry.zone)} their time`;
+    return entry.callbackOpen ? `${asked}; their automated outreach in this campaign is held until you log how it went` : asked;
   }
   if (entry.onCallback !== null) {
-    return entry.outcome === "skip_for_now" ? `The callback for ${at(entry.onCallback, entry.zone)} their time stays open` : `The callback they asked for, ${at(entry.onCallback, entry.zone)} their time; its hold on automated outreach ended`;
+    return entry.outcome === "skip_for_now" ? `Skipped for now on the callback for ${at(entry.onCallback, entry.zone)} their time` : `The callback they asked for, ${at(entry.onCallback, entry.zone)} their time; its hold on automated outreach ended`;
   }
-  return entry.redial ? "Redial asked for: back on the next day’s list, with its skip limit still counted from its due date" : null;
+  if (!entry.redial) return null;
+  return entry.redialListedFrom ? `Redial asked for: listed again from ${dayLabel(entry.redialListedFrom)}` : "Redial asked for";
 }
 
-function Line({ entry }: { entry: ActivityEntry }) {
+function Line({ entry, userZone }: { entry: ActivityEntry; userZone: string }) {
   const now = useNow();
-  const { icon, tone, title, body, track } = describeEntry(entry);
+  const { icon, tone, title, body, track } = describeEntry(entry, userZone);
   return (
     <li className="grid grid-cols-[32px_minmax(0,1fr)_auto] gap-x-3 gap-y-0.5 border-line py-3 [&+&]:border-t">
       <span className={`grid size-8 place-items-center rounded-full ${tone}`}>
@@ -187,7 +205,7 @@ function Line({ entry }: { entry: ActivityEntry }) {
         </span>
       </div>
       <time dateTime={entry.at} className="whitespace-nowrap pt-1.5 text-right text-[13px] text-muted">
-        {when(entry.at, now)}
+        {when(entry.at, now, userZone)}
       </time>
       {(body || (entry.kind === "sent" && entry.copy)) && (
         <div className="col-start-2 col-end-4 min-w-0">
@@ -213,10 +231,11 @@ function Line({ entry }: { entry: ActivityEntry }) {
   );
 }
 
-export function when(iso: string, now: Date): string {
+/** "Today, 10:00" or "Mon 9 Nov, 10:00", in `zone`: the user's, as the server reads it (council on 32454ea, C). */
+export function when(iso: string, now: Date, zone: string): string {
+  const date = (d: Date) => new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
   const at = new Date(iso);
-  const time = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(at);
-  if (at.toDateString() === now.toDateString()) return `Today, ${time}`;
-  const day = new Intl.DateTimeFormat("en-GB", { weekday: "short", day: "numeric", month: "short" }).format(at).replace(",", "");
-  return `${day}, ${time}`;
+  const time = new Intl.DateTimeFormat("en-GB", { timeZone: zone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(at);
+  if (date(at) === date(now)) return `Today, ${time}`;
+  return `${dateIn(zone, iso)}, ${time}`;
 }

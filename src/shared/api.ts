@@ -552,6 +552,13 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
           readonly onCallback: string | null;
           /** The prospect's zone, in which a callback's time is said. */
           readonly zone: string;
+          /** With a redial: the user's date the engine listed the call from (its next day whose calling hours open). */
+          readonly redialListedFrom: string | null;
+          /**
+           * With a callback requested: that callback is open now, listed today or later by the listing rule, and holds the
+           * lead's outreach (the record shows it). False after its outcome, a new time, a reply, a stop or an ending.
+           */
+          readonly callbackOpen: boolean;
         }
       | { readonly kind: "skipped"; readonly stepNumber: null; readonly reason: "no_number" }
       /**
@@ -562,14 +569,15 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
           readonly kind: "skipped";
           readonly stepNumber: null;
           readonly reason: "unworked";
-          readonly dueAt: string;
+          /** The call's original due date, the user's calendar date the engine counted the limit from (YYYY-MM-DD). */
+          readonly dueDate: string;
           readonly limitDays: number;
           /**
            * Each track that starts after this phone track, as its stored progress stands at the read (verifier on
-           * eac9f6c, F2): `started`; `waiting` out its delay, to start at `startsAt` if the lead keeps running; or
-           * `held` while the lead's outreach is held, so no day can be named.
+           * eac9f6c, F2): `started`; `waiting` out its delay, to start at `startsAt` if the lead keeps running; `held`
+           * while the lead's outreach is held, so no day can be named; or `stopped`, never to start, the lead having ended.
            */
-          readonly after: readonly { readonly track: TrackLabel; readonly state: "started" | "waiting" | "held"; readonly startsAt: string | null }[];
+          readonly after: readonly { readonly track: TrackLabel; readonly state: "started" | "waiting" | "held" | "stopped"; readonly startsAt: string | null }[];
         }
       | { readonly kind: "released"; readonly after: TrackLabel; readonly because: "skipped" | "failed" | "unworked" }
       /**
@@ -582,6 +590,8 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
 
 export interface ActivityView {
   readonly entries: readonly ActivityEntry[];
+  /** The user's zone, in which Activity's times and days are said (council on 32454ea, C). */
+  readonly userZone: string;
 }
 
 /**

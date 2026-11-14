@@ -408,12 +408,14 @@ export async function openWithKeptRefusals(page: Page, name: string): Promise<Fa
 // ---------------------------------------------------------------------------------------------
 // Ticket 15b: redials, callbacks, rolled-over and overdue calls, set up over HTTP as another window would.
 
-interface QueueRead { readyNow: { taskId: string; person: { name: string } | null }[]; laterToday: { taskId: string; person: { name: string } | null }[] }
+interface QueueRow { taskId: string; person: { name: string } | null; company: { name: string } }
+interface QueueRead { readyNow: QueueRow[]; laterToday: QueueRow[] }
 
 /** The task of a lead on today's list, and its numbers by kind. */
 export async function callOf(f: FakeCallsApp, who: string): Promise<{ taskId: string; number: (kind: "mobile" | "main_line" | "direct") => string | null }> {
   const list = (await f.harness.request<QueueRead>("GET", "/api/calls")).body;
-  const taskId = [...list.readyNow, ...list.laterToday].find((x) => x.person?.name === who)?.taskId ?? "";
+  // A company lead's call has no person: it is found by the company's name.
+  const taskId = [...list.readyNow, ...list.laterToday].find((x) => (x.person?.name ?? x.company.name) === who)?.taskId ?? "";
   const numbers = (await f.harness.request<{ numbers: { detailId: string; kind: string }[] }>("GET", `/api/call-tasks/${taskId}`)).body.numbers;
   return { taskId, number: (kind) => numbers.find((n) => n.kind === kind)?.detailId ?? null };
 }

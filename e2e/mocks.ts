@@ -8,6 +8,7 @@ import type {
   FileCheckResult,
   ImportRecord,
   LeadSearchResult,
+  CallTaskView,
   NeedsAttention,
   PersonRecord,
   RecordCalls,
@@ -27,7 +28,8 @@ export type MockBody =
   | (CompanyRecord & RecordCalls)
   | FileCheckResult
   | BeforeLaunchView
-  | NeedsAttention;
+  | NeedsAttention
+  | CallTaskView;
 
 export function respond(route: Route, body: MockBody, status = 200): Promise<void> {
   // eslint-disable-next-line no-restricted-syntax -- the one typed entry point

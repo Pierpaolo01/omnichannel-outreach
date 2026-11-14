@@ -120,7 +120,7 @@ describe("when an unworked call is skipped, as the engine's skip limit decides i
     const entries = await activity("Pat Oneil");
     // The redial in Activity, then the skip at the end of Tuesday with its original due date, then the release.
     expect(entries.find((e) => e.kind === "call")).toMatchObject({ outcome: "no_answer", redial: true, callbackAt: null, onCallback: null });
-    expect(entries.find((e) => e.kind === "skipped" && e.channel === "call")).toEqual(expect.objectContaining({ kind: "skipped", channel: "call", reason: "unworked", at: "2026-11-04T00:00:00.000Z", dueAt: "2026-11-02T09:00:00.000Z", limitDays: 2 }));
+    expect(entries.find((e) => e.kind === "skipped" && e.channel === "call")).toEqual(expect.objectContaining({ kind: "skipped", channel: "call", reason: "unworked", at: "2026-11-04T00:00:00.000Z", dueDate: "2026-11-02", limitDays: 2 }));
     expect(entries.find((e) => e.kind === "released")).toMatchObject({ channel: "email", track: { label: "Email track 2" }, after: { label: "Phone track" }, because: "unworked" });
   });
 });
@@ -384,5 +384,87 @@ describe("an unworked skip says what each track after it has done at the read: s
     }
     await h.advanceTo(Date.parse("2026-11-06T10:00:00Z"));
     for (const skip of await skips()) expect(skip).toMatchObject({ reason: "unworked", after: [{ track: { label: "Email track 2" }, state: "started", startsAt: null }] });
+  });
+});
+
+describe("Activity says a day, a time or a present state only from the server's read (council on 32454ea, C, D; verifier re-check, H)", () => {
+  test("Activity serves the user's zone, and a Friday redial's entry names Monday, the day the engine lists it", async () => {
+    const w = await world(Date.parse("2026-11-06T09:00:00Z"));
+    const id = await w.taskOf("Pat Oneil");
+    expect((await w.log(id, { outcome: "no_answer", redial: true, numberId: await w.numberOf(id, "direct") })).status).toBe(200);
+    const view = (await w.h.request<ActivityView>("GET", `/api/people/${w.personId("Pat Oneil")}/activity`)).body;
+    expect(view.userZone).toBe("Europe/London");
+    expect(view.entries.find((e) => e.kind === "call")).toMatchObject({ redial: true, redialListedFrom: "2026-11-09" });
+  });
+
+  test("an unworked skip carries the engine's calendar due date, in the user's zone (a Honolulu user: Sunday 1 November)", async () => {
+    const h = new EngineHarness({ start: MONDAY_9 - H, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+    await h.tick();
+    await h.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "Pacific/Honolulu" });
+    h.clock = MONDAY_9;
+    const { campaign: c } = await h.createCampaign("Honolulu", { businesses: [HARBOUR], people: [PAT] });
+    await h.defineSequence(c.id, definition([track("p1", "call", [call("c1")], ALWAYS)]));
+    expect((await h.launch(c.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + 4 * DAY);
+    const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${c.id}`)).body.rows;
+    const skip = (await h.request<ActivityView>("GET", `/api/people/${rows[0]?.id ?? ""}/activity`)).body.entries.find((e) => e.kind === "skipped" && e.channel === "call");
+    // Due Monday 09:00 UTC is Sunday 1 November, 23:00 in Honolulu: the engine counts the limit from that date.
+    expect(skip).toMatchObject({ reason: "unworked", dueDate: "2026-11-01" });
+  });
+
+  test("a reply before the delay after an unworked skip ends: the track after it did not start because outreach stopped, not held", async () => {
+    const h = new EngineHarness({ start: MONDAY_9 - H, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+    await h.tick();
+    await h.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "Europe/London" });
+    h.clock = MONDAY_9;
+    const { campaign: c } = await h.createCampaign("Stopped", { businesses: [HARBOUR], people: [PAT] });
+    await h.defineSequence(c.id, definition([track("e1", "email", [email("s1")]), track("p1", "call", [call("c1")], WEEKDAYS_9_TO_17), track("e2", "email", [email("a1")], ALWAYS, { kind: "after", trackId: "p1", delayDays: 2 })]));
+    expect((await h.launch(c.id)).status).toBe(200);
+    await h.advanceTo(Date.parse("2026-11-04T10:00:00Z"));
+    expect(h.fake.prospectReplies("pat@harbour.example", true, null)).toBe(true);
+    await h.advanceTo(Date.parse("2026-11-04T10:01:00Z"));
+    const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${c.id}`)).body.rows;
+    const skip = (await h.request<ActivityView>("GET", `/api/people/${rows[0]?.id ?? ""}/activity`)).body.entries.find((e) => e.kind === "skipped" && e.channel === "call");
+    expect(skip).toMatchObject({ after: [{ track: { label: "Email track 2" }, state: "stopped", startsAt: null }] });
+  });
+
+  /** For every Activity entry about a call, the present-tense facts agree with the record's `calls` at the same read. */
+  async function agrees(activity: ActivityView, rec: RecordCalls): Promise<void> {
+    for (const e of activity.entries) {
+      if (e.kind === "call" && e.outcome === "callback_requested") {
+        const open = rec.calls.some((c) => c.kind === "callback" && c.callbackAt === e.callbackAt);
+        expect(e.callbackOpen, `callback entry for ${e.callbackAt ?? ""}`).toBe(open);
+      }
+      if (e.kind === "callback_overdue") expect(rec.calls.some((c) => c.kind === "callback" && c.reason === "overdue" && c.callbackAt === e.callbackAt)).toBe(true);
+    }
+  }
+
+  test("a reply during a callback, before and after its time, for a person and a company lead: the callback's entry is history, with no hold, and agrees with the record", async () => {
+    for (const late of [false, true]) {
+      const w = await world();
+      const pat = await w.taskOf("Pat Oneil");
+      const elm = await w.taskOfCompany();
+      expect((await w.log(pat, { outcome: "callback_requested", callbackAt: "2026-11-02T15:00:00+00:00", numberId: await w.numberOf(pat, "direct") })).status).toBe(200);
+      expect((await w.log(elm, { outcome: "callback_requested", callbackAt: "2026-11-02T15:00:00+00:00", numberId: await w.numberOf(elm, "main_line") })).status).toBe(200);
+      const companyId = (await w.companyRecord()).id;
+      const reads = async () => [
+        { activity: (await w.h.request<ActivityView>("GET", `/api/people/${w.personId("Pat Oneil")}/activity`)).body, rec: await w.record("Pat Oneil") },
+        { activity: (await w.h.request<ActivityView>("GET", `/api/companies/${companyId}/activity`)).body, rec: await w.companyRecord() },
+      ];
+      if (late) await w.h.advanceTo(Date.parse("2026-11-02T15:30:00Z"));
+      for (const { activity, rec } of await reads()) {
+        await agrees(activity, rec);
+        expect(activity.entries.find((e) => e.kind === "call" && e.outcome === "callback_requested")).toMatchObject({ callbackOpen: true });
+      }
+      expect(w.h.fake.prospectReplies("pat@harbour.example", true, null)).toBe(true);
+      expect(w.h.fake.prospectReplies("front@elmstreet.example", true, null)).toBe(true);
+      await w.h.advanceTo(w.h.clock + MIN);
+      for (const { activity, rec } of await reads()) {
+        expect(rec.calls).toEqual([]);
+        await agrees(activity, rec);
+        expect(activity.entries.find((e) => e.kind === "call" && e.outcome === "callback_requested")).toMatchObject({ callbackOpen: false });
+        expect(activity.entries.some((e) => e.kind === "callback_overdue")).toBe(false);
+      }
+    }
   });
 });

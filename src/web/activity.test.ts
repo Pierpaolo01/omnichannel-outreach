@@ -11,7 +11,7 @@ describe("what the timeline says of a track that ended on a bad address (re-chec
     // Stored: the email track failed on a bad destination, with no bounce event of this campaign's.
     // That is true of another campaign's bounce, and of this campaign's bounce observed before
     // migration 10, which kept no event. The entry claims neither.
-    const said = describeEntry({ campaign, at, kind: "address_bad", channel: "email", track: one("Email track"), to: "sam@harbour.example" });
+    const said = describeEntry({ campaign, at, kind: "address_bad", channel: "email", track: one("Email track"), to: "sam@harbour.example" }, "Europe/London");
     expect(said.title).toBe("Email track ended");
     expect(said.body).toBe("sam@harbour.example is marked wrong, so nothing more is sent to it.");
   });
@@ -19,7 +19,7 @@ describe("what the timeline says of a track that ended on a bad address (re-chec
 
 describe("what the timeline says of SMS, skipped and released tracks (ticket 13b)", () => {
   const say = (entry: ActivityEntry) => {
-    const { title, body, track } = describeEntry(entry);
+    const { title, body, track } = describeEntry(entry, "Europe/London");
     return [title, body, track];
   };
 
@@ -38,5 +38,45 @@ describe("what the timeline says of SMS, skipped and released tracks (ticket 13b
     expect(say({ campaign, at, kind: "skipped", channel: "sms", track: one("SMS track"), stepNumber: null, reason: "company_lead" })).toEqual(["SMS track skipped", "A company lead is never texted: a main line isn’t a mobile.", null]);
     expect(say({ campaign, at, kind: "released", channel: "sms", track: one("SMS track"), after: one("Email track"), because: "skipped" })).toEqual(["SMS track started", "It starts after the email track, which was skipped for this lead.", null]);
     expect(say({ campaign, at, kind: "released", channel: "email", track: { label: "Email track 2", several: true }, after: one("SMS track"), because: "failed" })).toEqual(["Email track 2 started", "It starts after the SMS track, which ended on a bad number.", null]);
+  });
+});
+
+describe("Activity is history; a present state or a day only from the server's read (council on 32454ea, C and D; verifier re-check, H)", () => {
+  const call = (fields: Partial<Extract<ActivityEntry, { kind: "call"; channel: "call" }>>): ActivityEntry => ({
+    campaign,
+    at,
+    kind: "call",
+    channel: "call",
+    track: one("Phone track"),
+    outcome: "callback_requested",
+    number: null,
+    note: "",
+    redial: false,
+    callbackAt: "2026-11-02T15:00:00.000Z",
+    onCallback: null,
+    zone: "Europe/London",
+    redialListedFrom: null,
+    callbackOpen: false,
+    ...fields,
+  });
+  const body = (entry: ActivityEntry, zone = "Europe/London") => describeEntry(entry, zone).body;
+
+  test("a callback asked for says the hold only while the server says it is open", () => {
+    expect(body(call({ callbackOpen: true }))).toBe("Callback asked for, Mon 2 Nov at 15:00 their time; their automated outreach in this campaign is held until you log how it went");
+    expect(body(call({ callbackOpen: false }))).toBe("Callback asked for, Mon 2 Nov at 15:00 their time");
+  });
+
+  test("a redial names the day the engine listed it from; a skip for now on a callback is history", () => {
+    expect(body(call({ outcome: "no_answer", callbackAt: null, redial: true, redialListedFrom: "2026-11-09" }))).toBe("Redial asked for: listed again from Mon 9 Nov");
+    expect(body(call({ outcome: "skip_for_now", callbackAt: null, onCallback: "2026-11-02T15:00:00.000Z" }))).toBe("Skipped for now on the callback for Mon 2 Nov at 15:00 their time");
+  });
+
+  test("an unworked skip prints the engine's calendar due date as a date, and each track after it as it stands", () => {
+    const skip = (after: Extract<ActivityEntry, { reason: "unworked" }>["after"]): ActivityEntry => ({ campaign, at, kind: "skipped", channel: "call", track: one("Phone track"), stepNumber: null, reason: "unworked", dueDate: "2026-11-01", limitDays: 2, after });
+    // A Honolulu user: the due date is the server's 1 November, whatever the browser's zone.
+    expect(body(skip([]), "Pacific/Honolulu")).toBe("Not called within 2 days of its due date, Sun 1 Nov, so the call was skipped.");
+    expect(body(skip([{ track: one("Email track 2"), state: "stopped", startsAt: null }]))).toBe("Not called within 2 days of its due date, Sun 1 Nov, so the call was skipped. Email track 2 did not start: their outreach in this campaign stopped.");
+    expect(body(skip([{ track: one("Email track 2"), state: "held", startsAt: null }]))).toContain("Email track 2 starts after its delay, once their outreach is no longer held.");
+    expect(body(skip([{ track: one("Email track 2"), state: "waiting", startsAt: "2026-11-06T00:00:00.000Z" }]), "Pacific/Honolulu")).toContain("Email track 2 starts after its delay, on Thu 5 Nov.");
   });
 });

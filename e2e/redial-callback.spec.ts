@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import type { CallTaskView } from "../src/shared/api.ts";
 import { respond } from "./mocks.ts";
 import { SCREENS, callbackWithNoGoodNumber, callOf, carriedAndOverdue, carriedOnly, freshCalls, galleryRecord, openCalls, seedData } from "./screens.ts";
 
@@ -79,7 +80,7 @@ test("a redial: the page says where the call goes and when its skip limit still 
   await expect(upNext.getByRole("listitem").filter({ hasText: "Grace Okafor" })).toContainText("Rolled over, due Mon 9 Nov, last day before it’s skipped");
   await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
   await expect(page.getByText("Their call is back on today’s list: you asked for a redial. It was due Mon 9 Nov; if it isn’t worked, it is skipped at the end of Tue 10 Nov.")).toBeVisible();
-  await expect(page.getByText(/Redial asked for: back on the next day’s list/)).toBeVisible();
+  await expect(page.getByText(/Redial asked for: listed again from Tue 10 Nov/)).toBeVisible();
 
   // Wednesday: not worked on Tuesday, so it was skipped at midnight, and the email after the call started.
   await at(page, f, "2026-11-11T11:00:00Z");
@@ -115,7 +116,7 @@ test("a callback: entered in their time, said back in both, judged before Log as
   await dayField(page).selectOption("2026-11-09");
   await timeField(page).fill("15:30");
   await expect(page.getByText("Callback on Mon 9 Nov at 15:30 their time, the same as yours. Inside their calling hours.")).toBeVisible();
-  await expect(page.getByText("Amira Hassan’s automated outreach in Clinics, London is held from now until you log how the callback went. The call stays open: it is never skipped, and nothing resumes by itself.")).toBeVisible();
+  await expect(page.getByText("Logging this holds Amira Hassan’s automated outreach in Clinics, London until you log how the callback went. The call then stays open: it is never skipped, and nothing resumes by itself.")).toBeVisible();
   await page.getByLabel("Notes from this call").fill("Asked for a call after clinic.");
   await shot(page, "calls-callback-entered", true);
   await logButton(page).click();
@@ -127,7 +128,7 @@ test("a callback: entered in their time, said back in both, judged before Log as
   await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
   await expect(page.getByText("Callback scheduled")).toBeVisible();
   await expect(page.getByText("Callback Mon 9 Nov at 15:30 their time. Their automated outreach in this campaign is held until you log how it went.")).toBeVisible();
-  await expect(page.getByText(/Call back Mon 9 Nov at 15:30 their time; automated outreach in this campaign is held until its outcome is logged/)).toBeVisible();
+  await expect(page.getByText(/Callback asked for, Mon 9 Nov at 15:30 their time; their automated outreach in this campaign is held until you log how it went/)).toBeVisible();
 
   // Missed: overdue from the time asked for, on Today's Needs attention and first on the list, until an outcome.
   await at(page, f, "2026-11-09T15:45:00Z");
@@ -222,8 +223,11 @@ test("a callback whose lead has no good number left is said the same way on the 
   await expect(page.getByRole("heading", { name: "Tom" })).toBeVisible();
   await expect(page.getByText(full)).toBeVisible();
   await expect(page.getByRole("complementary", { name: "Call queue" }).getByRole("listitem").first()).toContainText(short);
-  await outcome(page, "No answer").click();
-  await expect(logButton(page)).toBeDisabled();
+  // Every outcome but skip for now is disabled, described by the Q13 sentence (council on 32454ea, F).
+  for (const name of ["No answer", "Left voicemail", "Didn’t reach them", "Wrong number", "Callback requested", "Interested"]) {
+    await expect(outcome(page, name)).toBeDisabled();
+    await expect(outcome(page, name)).toHaveAccessibleDescription(full);
+  }
   await outcome(page, "Skip for now").click();
   await expect(page.getByText("The callback goes to the end of today’s list and stays open; their outreach stays held.")).toBeVisible();
   await expect(logButton(page)).toBeEnabled();
@@ -232,7 +236,9 @@ test("a callback whose lead has no good number left is said the same way on the 
   await expect(page.getByRole("region", { name: "Needs attention" })).toContainText(full);
   await expect(page.getByRole("region", { name: "Up next" }).getByRole("listitem").first()).toContainText(short);
   await page.goto(`${f.url}/leads/people/${f.person("Tom")}`);
-  await expect(page.getByText(full.replace("Every number for Tom", "Every number"), { exact: false })).toBeVisible();
+  // The record says each fact once: the overdue sentence (critical), then only what Q13 adds.
+  await expect(page.getByText("Every number is marked wrong, so only skip for now can be logged on this callback, and it keeps the callback open. That lasts until a new number arrives by import or they reply. Pausing them or skipping the step arrives with a later release.", { exact: false })).toBeVisible();
+  await expect(page.getByText("flagged overdue once its time has passed", { exact: false })).toHaveCount(0);
   await expect(page.getByText("nothing can be logged", { exact: false })).toHaveCount(0);
   // Skip for now is accepted and keeps the callback open and held.
   await openCalls(page, f);
@@ -350,15 +356,15 @@ test.describe("a user in another zone than the prospect (review bot on eac9f6c, 
     await expect(outcomeStatus(page)).toHaveText("Amira Hassan: callback requested for Mon 9 Nov at 15:30 their time, 10:30 your time. Their automated outreach in Clinics, London is held until you log how the callback went.");
     await expect(page.getByText("the same as yours")).toHaveCount(0);
     const queue = page.getByRole("complementary", { name: "Call queue" });
-    await expect(queue.getByRole("listitem").filter({ hasText: "Amira Hassan" })).toContainText("Callback they asked for at 15:30 their time, 10:30 yours");
+    await expect(queue.getByRole("listitem").filter({ hasText: "Amira Hassan" })).toContainText("Callback they asked for at 15:30 their time, 10:30 your time");
     await page.goto(f.url);
-    await expect(page.getByText(/Amira Hassan \(callback they asked for at 15:30 their time, 10:30 yours\)/)).toBeVisible();
+    await expect(page.getByText(/Amira Hassan \(callback they asked for at 15:30 their time, 10:30 your time\)/)).toBeVisible();
     await shot(page, "today-new-york-later-today");
 
     await at(page, f, "2026-11-09T15:45:00Z");
     await page.reload();
     await expect(page.getByRole("region", { name: "Needs attention" })).toContainText("Amira Hassan asked for Mon 9 Nov at 15:30 their time, 10:30 your time.");
-    await expect(page.getByRole("region", { name: "Up next" }).getByRole("listitem").first()).toContainText("Callback overdue since today at 15:30 their time, 10:30 yours");
+    await expect(page.getByRole("region", { name: "Up next" }).getByRole("listitem").first()).toContainText("Callback overdue since today at 15:30 their time, 10:30 your time");
     await expect(page.getByText("the same as yours")).toHaveCount(0);
     await shot(page, "today-new-york-overdue");
     await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
@@ -429,6 +435,67 @@ test("after a reply, the record shows no call and no hold for the tasks kept for
     for (const said of ["held until you log", "Their call", "waits for a day", "Callback Mon"]) await expect(page.getByText(said, { exact: false })).toHaveCount(0);
   }
   await shot(page, "record-company-replied");
+});
+
+test("a time inside the hour the clocks repeat: the earliest occurrence after the call's read, said as such, and refused only when both are past (council on 32454ea, B)", async ({ page }) => {
+  const f = await freshCalls("ready", "repeated-hour");
+  const amira = await callOf(f, "Amira Hassan");
+  // The call's read, as of 01:05 GMT on Sunday 31 October 2027, inside the hour London's clocks repeat (01:00 to 02:00).
+  await page.route(`**/api/call-tasks/${amira.taskId}`, async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    const view = (await (await route.fetch()).json()) as CallTaskView;
+    await respond(route, { ...view, asOf: "2027-10-31T01:05:00.000Z" });
+  });
+  await openCalls(page, f);
+  await outcome(page, "Callback requested").click();
+  await expect(dayField(page)).toHaveValue("2027-10-31");
+  // 01:30 came once at 00:30 GMT, already past; it comes again at 01:30 GMT, still to come.
+  await timeField(page).fill("01:30");
+  await expect(page.getByText(/^Callback on Sun 31 Oct at 01:30 their time, after the clocks go back, the same as yours\./)).toBeVisible();
+  await expect(logButton(page)).toBeEnabled();
+  await shot(page, "calls-callback-repeated-hour");
+  // 00:50 comes once, before the read: past.
+  await timeField(page).fill("00:50");
+  await expect(page.getByText("That time has passed. Choose a time still to come; a callback in the past isn’t accepted.")).toBeVisible();
+  await expect(logButton(page)).toBeDisabled();
+});
+
+test("a callback day restored from an earlier session is said as a date, not as its raw value (council on 32454ea, G)", async ({ page }) => {
+  const f = await freshCalls("ready", "restored-day");
+  const amira = await callOf(f, "Amira Hassan");
+  await page.addInitScript(([taskId, numberId]) => {
+    window.sessionStorage.setItem("outreach.calls.focus", taskId);
+    window.sessionStorage.setItem(`outreach.calls.draft.${taskId}`, JSON.stringify({ outcome: "callback_requested", numberId, note: "", noteScope: "person", redial: false, callbackDay: "2026-11-08", callbackTime: "10:00", callbackAt: null, pressId: null }));
+  }, [amira.taskId, amira.number("mobile")] as const);
+  await openCalls(page, f);
+  await expect(dayField(page).locator("option:checked")).toHaveText("Sun 8 Nov");
+  await expect(page.getByText("2026-11-08")).toHaveCount(0);
+  await expect(page.getByText("That time has passed.", { exact: false })).toBeVisible();
+});
+
+test("after a reply, a callback's Activity entry is history: what was asked for and when, with no hold and no overdue flag, before and after its time, on a person's and a company lead's record (verifier re-check, H)", async ({ page }) => {
+  for (const late of [false, true]) {
+    const f = await freshCalls("ready", `reply-history-${String(late)}`);
+    const amira = await callOf(f, "Amira Hassan");
+    const riverside = await callOf(f, "Riverside Sports Clinic");
+    for (const [taskId, numberId] of [[amira.taskId, amira.number("mobile")], [riverside.taskId, riverside.number("main_line")]] as const) {
+      expect((await f.harness.request("POST", `/api/call-tasks/${taskId}/outcome`, { requestId: `cb-${taskId}`, outcome: "callback_requested", callbackAt: "2026-11-09T15:00:00+00:00", numberId })).status).toBe(200);
+    }
+    if (late) await f.harness.advanceTo(Date.parse("2026-11-09T15:30:00Z"));
+    for (const address of ["amira@harbourlanephysio.example", "info@riversidesports.example"]) expect(f.harness.fake.prospectReplies(address, true, null)).toBe(true);
+    await f.harness.advanceTo(f.harness.clock + 60_000);
+    await page.clock.setFixedTime(f.harness.clock);
+    for (const path of [`/leads/people/${f.person("Amira Hassan")}`, `/leads/companies/${f.company("Riverside Sports Clinic")}`]) {
+      await page.goto(f.url + path);
+      await expect(page.getByText("Replied, automation stopped").first()).toBeVisible();
+      const entry = page.getByRole("listitem").filter({ hasText: /^Call: callback requested/ });
+      await expect(entry).toContainText("Callback asked for, Mon 9 Nov at 15:00 their time");
+      await expect(entry).not.toContainText("held");
+      await expect(page.getByRole("listitem").filter({ hasText: /^Callback overdue/ })).toHaveCount(0);
+      await expect(page.getByText("held until", { exact: false })).toHaveCount(0);
+    }
+    if (late) await shot(page, "record-company-replied-after-callback-time");
+  }
 });
 
 /** EVIDENCE_DIR only: the changed pages' states from the standing screen list (each loading, empty, error and success state), light and dark. */

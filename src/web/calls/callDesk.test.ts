@@ -921,7 +921,7 @@ describe("a redial and a callback's date and time are part of the press, like th
     const w = await world();
     const { d } = await ready(w);
     d.setDraft({ outcome: "callback_requested", callbackDay: "2026-11-02", callbackTime: "15:30", note: "After clinic." });
-    expect(d.getSnapshot().callback).toEqual({ at: Date.parse("2026-11-02T15:30:00Z"), problem: null });
+    expect(d.getSnapshot().callback).toEqual({ at: Date.parse("2026-11-02T15:30:00Z"), problem: null, occurrence: "only" });
     d.log();
     await flush();
     expect(w.held[0]?.body).toMatchObject({ outcome: "callback_requested", callbackAt: "2026-11-02T15:30:00+00:00" });
@@ -934,10 +934,10 @@ describe("a redial and a callback's date and time are part of the press, like th
     const w = await world();
     const { d } = await ready(w);
     d.setDraft({ outcome: "callback_requested", callbackDay: "2026-11-02" });
-    expect(d.getSnapshot().callback).toEqual({ at: null, problem: "missing" });
+    expect(d.getSnapshot().callback).toEqual({ at: null, problem: "missing", occurrence: null });
     d.log();
     d.setDraft({ callbackTime: "09:45" });
-    expect(d.getSnapshot().callback).toEqual({ at: null, problem: "past" });
+    expect(d.getSnapshot().callback).toEqual({ at: null, problem: "past", occurrence: null });
     d.log();
     await flush();
     expect(w.posts()).toBe(0);
@@ -976,5 +976,30 @@ describe("a redial and a callback's date and time are part of the press, like th
     b.d.log();
     await flush();
     expect(past.posts()).toBe(1);
+  });
+});
+
+describe("the callback instant chosen is kept in the draft: a reload and a retry send the same one (council on 32454ea, B)", () => {
+  test("entering the day and time chooses the instant; a reloaded desk finds it in the draft; a lost answer is retried with it", async () => {
+    const w = await world();
+    const session = new MapStore();
+    const a = w.desk(session);
+    await a.start();
+    await w.fireTimers();
+    a.setDraft({ outcome: "callback_requested", callbackDay: "2026-11-02", callbackTime: "16:15" });
+    expect(a.getSnapshot().draft.callbackAt).toBe(Date.parse("2026-11-02T16:15:00Z"));
+    a.dispose();
+    // The tab reloads: the draft comes back from this tab's storage with the instant chosen.
+    const b = w.desk(session);
+    await b.start();
+    await w.fireTimers();
+    expect(b.getSnapshot().draft).toMatchObject({ callbackDay: "2026-11-02", callbackTime: "16:15", callbackAt: Date.parse("2026-11-02T16:15:00Z") });
+    b.log();
+    await flush();
+    const first = w.held[0];
+    expect(first?.body.callbackAt).toBe("2026-11-02T16:15:00+00:00");
+    await w.answer(first!, true);
+    await w.fireTimers();
+    expect(w.held[0]?.body).toEqual(first?.body);
   });
 });

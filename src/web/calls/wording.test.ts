@@ -56,9 +56,8 @@ describe("calls carried over from earlier days, in Needs attention (review bot o
 describe("a callback's time in the user's zone and the prospect's, across the March clock change (review bot and verifier on eac9f6c)", () => {
   test("a New York user and a London prospect, Sunday 28 March 2027 at 18:30 their time: 13:30 yours, on the preview and the logged line", async () => {
     const { callbackWhen, loggedLine } = await import("./wording.ts");
-    const { zonedInstant } = await import("./callbackTime.ts");
-    const at = zonedInstant("2027-03-28", "18:30", "Europe/London");
-    expect(new Date(at ?? 0).toISOString()).toBe("2027-03-28T17:30:00.000Z");
+    const { zonedInstants } = await import("./callbackTime.ts");
+    expect(zonedInstants("2027-03-28", "18:30", "Europe/London").map((t) => new Date(t).toISOString())).toEqual(["2027-03-28T17:30:00.000Z"]);
     expect(callbackWhen("2027-03-28T17:30:00.000Z", "Europe/London", "America/New_York")).toBe("Sun 28 Mar at 18:30 their time, 13:30 your time");
     const task = {
       zone: "Europe/London",
@@ -73,5 +72,23 @@ describe("a callback's time in the user's zone and the prospect's, across the Ma
     } as unknown as CallTaskView;
     const logged = { requestId: "r1", who: "Ada Example", body: { requestId: "r1", outcome: "callback_requested" as const, numberId: "n", note: "", noteScope: "person" as const }, task };
     expect(loggedLine(logged, "America/New_York")).toBe("Ada Example: callback requested for Sun 28 Mar at 18:30 their time, 13:30 your time. Their automated outreach in Clinics, London is held until you log how the callback went.");
+  });
+});
+
+describe("a callback's time on the queue, with the user's date when it differs, and the occurrence in a repeated hour (council on 32454ea, B and C)", () => {
+  test("a Sydney user and a Los Angeles prospect: the user's day is already the next", async () => {
+    const { reasonLine } = await import("./wording.ts");
+    const item = { reason: "callback", bucket: "later_today", opensAt: null, callbackAt: "2026-11-09T23:00:00.000Z", zone: "America/Los_Angeles", dueAt: "2026-11-09T17:00:00.000Z", skippedTonight: false, noGoodNumber: false } as unknown as CallQueueItem;
+    expect(reasonLine(item, "Australia/Sydney", "2026-11-10").text).toBe("Callback they asked for Mon 9 Nov at 15:00 their time, Tue 10 Nov at 10:00 your time");
+    expect(reasonLine({ ...item, reason: "overdue" }, "Australia/Sydney", "2026-11-10").text).toBe("Callback overdue since Mon 9 Nov at 15:00 their time, Tue 10 Nov at 10:00 your time");
+    // Today for both: no date.
+    expect(reasonLine({ ...item, zone: "Europe/London", callbackAt: "2026-11-10T15:00:00.000Z" }, "Europe/London", "2026-11-10").text).toBe("Callback they asked for at 15:00 their time");
+  });
+
+  test("a time inside the hour the clocks repeat says which occurrence, before Log and once logged", async () => {
+    const { callbackLine, callbackWhen } = await import("./wording.ts");
+    const task = { zone: "Europe/London", callingHours: [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 })) };
+    expect(callbackLine({ at: Date.parse("2027-10-31T01:30:00Z"), problem: null, occurrence: "second" }, "inside", task, "Europe/London").text).toBe("Callback on Sun 31 Oct at 01:30 their time, after the clocks go back, the same as yours. Inside their calling hours.");
+    expect(callbackWhen("2027-10-31T00:30:00.000Z", "Europe/London", "Europe/London")).toBe("Sun 31 Oct at 01:30 their time, before the clocks go back, the same as yours");
   });
 });
