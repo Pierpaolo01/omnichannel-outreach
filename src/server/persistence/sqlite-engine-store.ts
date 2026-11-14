@@ -1,4 +1,5 @@
 import type { DatabaseSync, SQLInputValue, SQLOutputValue, StatementSync } from "node:sqlite";
+import { displayPhone, displayPhonesIn } from "../../domain/phone.ts";
 import type { SenderAccountView } from "../../domain/sequence/blockers.ts";
 import { isTimeZone, localDayNumber, prospectZone, resetDayOf, startOfLocalDay, type WindowRule } from "../../domain/sequence/clock.ts";
 import { defaultGap } from "../../domain/sequence/dispatch.ts";
@@ -201,6 +202,19 @@ export class SqliteEngineStore implements EngineStore {
     return row ? toAttempt(row) : null;
   }
 
+  async heldOnAccounts(): Promise<{ readonly accountId: string; readonly subjectId: string; readonly reservations: number; readonly live: number }[]> {
+    // The same two counts `accountState` adds: reserved work (unsettled, not sent) and live attempts.
+    return this.sql(
+      `SELECT account_id, subject_id, SUM(reserved) AS reservations, SUM(live) AS live FROM (
+         SELECT account_id, subject_id, 1 AS reserved, 0 AS live FROM provider_work WHERE settled IS NULL AND sent_wall IS NULL
+         UNION ALL
+         SELECT account_id, subject_id, 0, 1 FROM attempts WHERE state IN ${LIVE_STATES}
+       ) GROUP BY account_id, subject_id ORDER BY account_id, subject_id`,
+    )
+      .all()
+      .map((r) => ({ accountId: str(r, "account_id"), subjectId: str(r, "subject_id"), reservations: num(r, "reservations"), live: num(r, "live") }));
+  }
+
   async openWork(): Promise<ProviderWork[]> {
     return this.sql("SELECT * FROM provider_work WHERE settled IS NULL AND next_lookup_wall IS NOT NULL ORDER BY next_lookup_wall, rowid").all().map(toWork);
   }
@@ -297,7 +311,8 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   async accountLabels(): Promise<Record<string, string>> {
-    return Object.fromEntries(this.sql("SELECT id, label FROM sender_accounts").all().map((r) => [str(r, "id"), str(r, "label")]));
+    // One formatter for a phone number wherever it is shown (council on 10121d3, item 5): a number in a label reads grouped.
+    return Object.fromEntries(this.sql("SELECT id, label FROM sender_accounts").all().map((r) => [str(r, "id"), displayPhonesIn(str(r, "label") || displayPhone(str(r, "id")))]));
   }
 
   async updateAccount(accountId: string, change: Partial<Pick<AccountState, "healthy" | "waitUntil" | "waitReason" | "backoffMs">>): Promise<void> {

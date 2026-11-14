@@ -102,9 +102,27 @@ describe("calls in the record's Activity (ticket 14: the person and company-lead
     const activity = (await h.request<ActivityView>("GET", `/api/people/${personId("Pat Oneil")}/activity`)).body.entries;
     const calls = activity.filter((e) => e.kind === "call");
     expect(calls).toEqual([
-      { kind: "call", campaign: expect.objectContaining({ name: "Calls" }), at: "2026-11-02T10:30:00.000Z", outcome: "wrong_number", number: { detailId: direct?.detailId, kind: "direct", owner: "person", value: direct?.value }, note: "Disconnected tone." },
-      { kind: "call", campaign: expect.objectContaining({ name: "Calls" }), at: "2026-11-02T10:00:00.000Z", outcome: "skip_for_now", number: null, note: "In clinic, try after lunch." },
+      { kind: "call", channel: "call", track: { label: "Phone track", several: false }, campaign: expect.objectContaining({ name: "Calls" }), at: "2026-11-02T10:30:00.000Z", outcome: "wrong_number", number: { detailId: direct?.detailId, kind: "direct", owner: "person", value: direct?.value }, note: "Disconnected tone." },
+      { kind: "call", channel: "call", track: { label: "Phone track", several: false }, campaign: expect.objectContaining({ name: "Calls" }), at: "2026-11-02T10:00:00.000Z", outcome: "skip_for_now", number: null, note: "In clinic, try after lunch." },
     ]);
+  });
+});
+
+describe("a phone track's skip and release in Activity, from its stored finish (merge of ticket 13b's Activity rule)", () => {
+  test("a lead with no number skips the phone track, and the email after it says it started because of that", async () => {
+    const SAM = person({ person_id: "p3", business_id: "b2", full_name: "Sam Lee", email: "sam@elm.example" });
+    const ELM = business({ business_id: "b2", business_name: "Elm Street Clinic" });
+    const h = new EngineHarness({ start: MONDAY_9 - H, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+    await h.tick();
+    h.clock = MONDAY_9;
+    const { campaign: c } = await h.createCampaign("No number", { businesses: [ELM], people: [SAM] });
+    await h.defineSequence(c.id, definition([track("p1", "call", [call("c1")], WEEKDAYS_9_TO_17), { ...track("e1", "email", [email("s1")]), start: { kind: "after", trackId: "p1", delayDays: 0 } }]));
+    expect((await h.launch(c.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${c.id}`)).body.rows;
+    const entries = (await h.request<ActivityView>("GET", `/api/people/${rows.find((r) => r.name === "Sam Lee")?.id}/activity`)).body.entries;
+    expect(entries.map((e) => `${e.kind}|${"channel" in e ? e.channel : ""}|${"track" in e ? e.track.label : ""}`)).toEqual(expect.arrayContaining(["skipped|call|Phone track", "released|email|Email track", "sent|email|Email track"]));
+    expect(entries.filter((e) => e.kind === "call")).toEqual([]);
   });
 });
 

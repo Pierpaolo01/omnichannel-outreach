@@ -1,9 +1,9 @@
 import type { APIRequestContext, Locator, Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { OUTREACH_STATUSES } from "../src/domain/outreach-status.ts";
-import type { CompanyRecord, ImportRecord, LeadSearchResult, PersonRecord, SequenceView, SummaryEntry } from "../src/shared/api.ts";
+import type { CampaignDefinition, CompanyRecord, ImportRecord, LeadSearchResult, PersonRecord, SequenceView, SummaryEntry } from "../src/shared/api.ts";
 import { refusedPair, respond, serverError } from "./mocks.ts";
-import { FAKE_INBOX, fakeCallsApp, fakeProviderApp, type CallsScenario, type FakeCallsApp } from "./fake-provider.ts";
+import { FAKE_INBOX, FAKE_NUMBERS, TWO_CHANNELS, fakeCallsApp, fakeProviderApp, type CallsScenario, type FakeCallsApp } from "./fake-provider.ts";
 import { fixture } from "./support.ts";
 
 /** Opens a path on the app over the fake email provider. */
@@ -183,6 +183,32 @@ function galleryRecord(id: string): PersonRecord {
       { id: "p2", name: "Colleague Two", title: "Manager", enrollments: statuses.slice(5, 8).map((status, i) => ({ id: `ce${i}`, campaign: { id: `c${i}`, name: `Campaign ${i + 1}` }, status, enrolledAt: "2026-11-12T09:00:00.000Z" })), unenrolledReason: null },
     ],
   };
+}
+
+/**
+ * A campaign of the fixture leads on the running app with `definition` saved through the API
+ * (ticket 13b): the running app has no email or SMS provider, so its tracks have no sender.
+ */
+async function campaignWith(page: Page, name: string, definition: CampaignDefinition = { ...TWO_CHANNELS, emailPool: [], smsPool: [] }): Promise<string> {
+  const created = await page.request.post("/api/campaigns", { data: { name, businessesCsv: readFileSync(fixture("businesses-run1.csv"), "utf8"), peopleCsv: readFileSync(fixture("people-run1.csv"), "utf8") } });
+  const id = ((await created.json()) as { campaign: { id: string } }).campaign.id;
+  await page.request.put(`/api/campaigns/${id}/sequence`, { data: definition });
+  return id;
+}
+
+/** n tracks, email and SMS in turn, each after the one before: the deepest arrangement of n tracks. */
+function chainOf(n: number): CampaignDefinition {
+  const template = (channel: "email" | "sms") => TWO_CHANNELS.tracks.find((t) => t.channel === channel)!;
+  const tracks = Array.from({ length: n }, (_, i) => {
+    const like = template(i % 2 === 0 ? "email" : "sms");
+    return {
+      ...like,
+      id: `t${i}`,
+      start: i === 0 ? { kind: "entry" as const } : { kind: "after" as const, trackId: `t${i - 1}`, delayDays: i % 3 },
+      steps: like.steps.map((st) => ({ ...st, id: `t${i}-${st.id}` })),
+    };
+  });
+  return { ...TWO_CHANNELS, emailPool: [], smsPool: [], tracks };
 }
 
 async function settle(page: Page, text: string | RegExp): Promise<void> {
@@ -962,16 +988,15 @@ export const SCREENS: readonly Screen[] = [
     },
   },
   {
-    // The editor builds no SMS track yet (ticket 13 part b); a campaign defined through the API can have one.
-    name: "fake provider: before launch, an SMS track that can move the emails",
+    name: "fake provider: before launch, an email track and an SMS track that start together",
     open: async (page) => {
       const f = await fakeProviderApp("sms-screen");
       const id = await f.freshCampaign("Podiatrists, Exeter");
       const email = (await f.harness.request<SequenceView>("GET", `/api/campaigns/${id}/sequence`)).body.definition;
       const sms = { id: "sms", channel: "sms" as const, branch: "main" as const, window: email.tracks[0]!.window, steps: [{ id: "m1", waitDays: 0, subject: "", body: "Hi {{first_name|there}}, a quick text about evening booking.", threading: "new_subject" as const, removed: false }], start: { kind: "entry" as const }, removed: false };
-      await f.harness.defineSequence(id, { ...email, tracks: [...email.tracks, sms] });
+      await f.harness.defineSequence(id, { ...email, smsPool: [...FAKE_NUMBERS], tracks: [...email.tracks, sms] });
       await page.goto(`${f.url}/campaigns/${id}/before-launch`);
-      await settle(page, "Can’t project the load yet");
+      await settle(page, "start within");
     },
   },
   { name: "fake provider: running campaign", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}`); await settle(page, "Pausing, resuming and editing a running campaign arrive with later releases."); } },
@@ -1029,8 +1054,136 @@ export const SCREENS: readonly Screen[] = [
   },
   { name: "fake provider: a hard bounce", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/leads/people/${f.person("Tom")}`); await settle(page, "Email 1 bounced"); } },
   { name: "fake provider: replied, automation stopped", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/leads/people/${f.person("Daniel Price")}`); await settle(page, "Replied by email"); } },
-  { name: "fake provider: email skipped for a missing address", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/leads/people/${f.person("Grace Okafor")}`); await settle(page, "Email skipped"); } },
+  { name: "fake provider: email skipped for a missing address", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/leads/people/${f.person("Grace Okafor")}`); await settle(page, "Email track skipped"); } },
   { name: "fake provider: a company lead's activity", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/leads/companies/${f.company("Riverside Sports Clinic")}`); await settle(page, "Email 1 sent"); } },
+  // Ticket 13b: every track on the canvas, SMS tracks and connections, Before launch and Activity on
+  // both channels. On the running app there is no SMS provider, so SMS tracks have no sender.
+  {
+    name: "campaign with email and SMS tracks, and no SMS provider",
+    open: async (page) => {
+      const id = await campaignWith(page, "Two channels, no provider");
+      await page.goto(`/campaigns/${id}?track=sms&step=m1`);
+      await settle(page, "No SMS provider is set up, so no number can be connected yet.");
+    },
+  },
+  {
+    name: "before launch with an SMS track and no SMS provider",
+    open: async (page) => {
+      const id = await campaignWith(page, "Two channels, no provider");
+      await page.goto(`/campaigns/${id}/before-launch`);
+      await settle(page, "The SMS track has no connected sender number");
+    },
+  },
+  {
+    name: "a track that starts after another, in the inspector",
+    open: async (page) => {
+      const id = await campaignWith(page, "Two channels, no provider");
+      await page.goto(`/campaigns/${id}?track=email-2&step=none`);
+      await settle(page, "Counted from when that track has sent its last step");
+    },
+  },
+  {
+    name: "a connection refused because it would go in a circle",
+    open: async (page) => {
+      const id = await campaignWith(page, "Two channels, no provider");
+      await page.goto(`/campaigns/${id}?track=sms&step=none`);
+      await page.getByLabel("How this track starts").selectOption({ label: "After email track 2" });
+      await settle(page, "each would wait for the other");
+    },
+  },
+  {
+    name: "removing a track another starts after, refused",
+    open: async (page) => {
+      const id = await campaignWith(page, "Two channels, no provider");
+      await page.goto(`/campaigns/${id}?track=sms&step=none`);
+      await page.getByRole("button", { name: "Remove this SMS track" }).click();
+      await settle(page, "Change how it starts first.");
+    },
+  },
+  {
+    name: "a phone track, which this editor cannot edit yet",
+    open: async (page) => {
+      const id = await campaignWith(page, "Two channels and a call", {
+        ...TWO_CHANNELS,
+        emailPool: [],
+        smsPool: [],
+        tracks: [...TWO_CHANNELS.tracks, { id: "call", channel: "call", branch: "main", window: [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 })), start: { kind: "after", trackId: "email", delayDays: 1 }, removed: false, steps: [{ id: "c1", waitDays: 0, subject: "", body: "", threading: "new_subject", removed: false }] }],
+      });
+      await page.goto(`/campaigns/${id}?track=call`);
+      await settle(page, "Phone tracks are edited with a later release.");
+    },
+  },
+  {
+    // Over the fake providers, so every track has a sender and only the call holds the figure back.
+    name: "fake provider: before launch with a track that waits on a call",
+    open: async (page) => {
+      const f = await fakeProviderApp("a-track-after-a-call");
+      const id = await f.freshTwoChannelCampaign("A track after a call");
+      const call = { id: "call", channel: "call" as const, branch: "main" as const, window: [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 })), start: { kind: "after" as const, trackId: "email", delayDays: 1 }, removed: false, steps: [{ id: "c1", waitDays: 0, subject: "", body: "", threading: "new_subject" as const, removed: false }] };
+      const definition = { ...TWO_CHANNELS, tracks: [...TWO_CHANNELS.tracks.map((t) => (t.id === "email-2" ? { ...t, start: { kind: "after" as const, trackId: "call", delayDays: 0 } } : t)), call] };
+      await page.request.put(`${f.url}/api/campaigns/${id}/sequence`, { data: definition });
+      await page.goto(`${f.url}/campaigns/${id}/before-launch`);
+      await settle(page, "which finishes only when you log the call");
+    },
+  },
+  // Chains the outline must fit at every width (review bot on 7401eb2): four tracks deep, as the bot
+  // reported, and twelve, deeper than any width indents, so every deeper chain is drawn alike.
+  ...([4, 12] as const).flatMap((n) =>
+    [true, false].map((open) => ({
+      name: `a chain of ${n} tracks, ${open ? "the last one in the inspector" : "the inspector closed"}`,
+      open: async (page: Page) => {
+        const id = await campaignWith(page, `A chain of ${n}`, chainOf(n));
+        await page.goto(`/campaigns/${id}${open ? `?track=t${n - 1}&step=none` : ""}`);
+        await settle(page, open ? "Counted from when that track has sent its last step" : "together or after");
+      },
+    })),
+  ),
+  {
+    name: "the Add track menu",
+    open: async (page) => {
+      const id = await campaignWith(page, "Two channels, no provider");
+      await page.goto(`/campaigns/${id}`);
+      await page.getByRole("button", { name: "Add track" }).click();
+      await settle(page, "Phone tracks arrive with a later release.");
+    },
+  },
+  { name: "fake provider: every track on the canvas, running", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.twoChannels}`); await settle(page, "Email track 2"); } },
+  { name: "fake provider: a running campaign's SMS track, read-only", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.twoChannels}?track=sms`); await settle(page, "Editing a running campaign arrives with a later release."); } },
+  { name: "fake provider: an SMS track with its numbers, in the inspector", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.twoChannelsReady}?track=sms`); await settle(page, "texts a day across campaigns"); } },
+  { name: "fake provider: before launch on both channels", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.twoChannelsReady}/before-launch`); await settle(page, "Simulated SMS"); await settle(page, "Text 1"); } },
+  {
+    name: "fake provider: copy for a lead with no mobile, its SMS track skipped",
+    open: async (page) => {
+      const f = await fakeProviderApp();
+      await fake(page, `/campaigns/${f.twoChannelsReady}/before-launch`);
+      await page.getByLabel("Preview as lead").selectOption({ label: "Hugo Grant" });
+      await settle(page, "Skipped: this lead has no mobile of their own to text.");
+    },
+  },
+  {
+    name: "fake provider: before launch while an SMS number is disconnected",
+    open: async (page) => {
+      // Its own app: a disconnected number would change the shared campaigns.
+      const f = await fakeProviderApp("number-disconnected");
+      const n = f.harness.sms.numbers.get(FAKE_NUMBERS[1]);
+      if (n) n.healthy = false;
+      await f.harness.tick();
+      await page.goto(`${f.url}/campaigns/${f.twoChannelsReady}/before-launch`);
+      await settle(page, "Can’t project the load while");
+    },
+  },
+  { name: "fake provider: a text reply stops email and SMS", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/leads/people/${f.smsPerson("Priya Shah")}`); await settle(page, "Replied by text"); } },
+  { name: "fake provider: a bad number, and the track after it released", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/leads/people/${f.smsPerson("Ben Cole")}`); await settle(page, "Text 1: bad number"); } },
+  { name: "fake provider: an SMS track skipped for want of a mobile", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/leads/people/${f.smsPerson("Lena Ford")}`); await settle(page, "SMS track skipped"); } },
+  {
+    name: "fake provider: a sent text, shown",
+    open: async (page) => {
+      const f = await fakeProviderApp();
+      await fake(page, `/leads/people/${f.smsPerson("Owen Hale")}`);
+      await page.getByRole("listitem").filter({ hasText: "Text 2 sent" }).getByText("Show message").click();
+      await settle(page, "A yes is enough.");
+    },
+  },
   { name: "record not found", open: async (page) => { await page.goto("/leads/people/nobody"); await settle(page, "No one found"); } },
   { name: "page not found", open: async (page) => { await page.goto("/nowhere"); await settle(page, "Page not found"); } },
 ];
@@ -1300,5 +1453,112 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
       await page.keyboard.press("Enter");
     },
     focused: (page) => page.getByRole("button", { name: /^Email track: / }),
+  },
+  // Ticket 13b: adding, removing and connecting tracks.
+  {
+    name: "adding an SMS track from the empty canvas moves focus to Text 1's message",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: first SMS track", { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: [], smsPool: [], tracks: [] });
+      await page.goto(`/campaigns/${id}`);
+      await page.getByRole("button", { name: "SMS track" }).focus();
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByLabel("Text 1 message"),
+  },
+  {
+    name: "adding a track from the Add track menu moves focus into the new track",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: add a track");
+      await page.goto(`/campaigns/${id}`);
+      await page.getByRole("button", { name: "Add track" }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByRole("menuitem", { name: "SMS track" }).focus();
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByLabel("Text 1 message"),
+  },
+  {
+    name: "Down on Add track opens its menu on the first item (menu button pattern, council on 10121d3, item 4)",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: menu opens");
+      await page.goto(`/campaigns/${id}`);
+      await page.getByRole("button", { name: "Add track" }).focus();
+    },
+    act: (page) => page.keyboard.press("ArrowDown"),
+    focused: (page) => page.getByRole("menuitem", { name: "Email track" }),
+  },
+  {
+    name: "Up on Add track opens its menu on the last item, the disabled phone track that says why",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: menu opens on last");
+      await page.goto(`/campaigns/${id}`);
+      await page.getByRole("button", { name: "Add track" }).focus();
+    },
+    act: (page) => page.keyboard.press("ArrowUp"),
+    focused: (page) => page.getByRole("menuitem", { name: /^Phone track/, description: "Phone tracks arrive with a later release." }),
+  },
+  {
+    name: "Down and Up move between the menu's items, wrapping",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: menu moves");
+      await page.goto(`/campaigns/${id}`);
+      await page.getByRole("button", { name: "Add track" }).focus();
+      await page.keyboard.press("Enter");
+      await page.keyboard.press("ArrowUp");
+    },
+    act: (page) => page.keyboard.press("ArrowDown"),
+    focused: (page) => page.getByRole("menuitem", { name: "Email track" }),
+  },
+  {
+    name: "Escape closes the Add track menu and returns focus to Add track",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: add track menu");
+      await page.goto(`/campaigns/${id}`);
+      await page.getByRole("button", { name: "Add track" }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByRole("menuitem", { name: "Email track" }).focus();
+    },
+    act: (page) => page.keyboard.press("Escape"),
+    focused: (page) => page.getByRole("button", { name: "Add track" }),
+  },
+  {
+    name: "removing a track moves focus to Add track",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: remove a track");
+      await page.goto(`/campaigns/${id}?track=email-2&step=none`);
+      await page.getByRole("button", { name: "Remove email track 2" }).focus();
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByRole("button", { name: "Add track" }),
+  },
+  {
+    name: "a refused removal keeps focus on Remove, which the reason describes",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: removal refused");
+      await page.goto(`/campaigns/${id}?track=sms&step=none`);
+      await page.getByRole("button", { name: "Remove this SMS track" }).focus();
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByRole("button", { name: "Remove this SMS track", description: "Email track 2 starts after this one. Change how it starts first." }),
+  },
+  {
+    name: "a connection refused as a circle keeps focus on the Starts control, which the reason describes",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: circle refused");
+      await page.goto(`/campaigns/${id}?track=sms&step=none`);
+      await page.getByLabel("How this track starts").focus();
+    },
+    act: (page) => page.getByLabel("How this track starts").selectOption({ label: "After email track 2" }).then(() => undefined),
+    focused: (page) => page.getByRole("combobox", { name: "How this track starts", description: /each would wait for the other/ }),
+  },
+  {
+    name: "closing an SMS track's inspector returns focus to its track",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: close SMS track");
+      await page.goto(`/campaigns/${id}?track=sms&step=none`);
+      await page.getByRole("button", { name: "Close the SMS track" }).focus();
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByRole("button", { name: /^SMS track: / }),
   },
 ];

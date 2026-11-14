@@ -152,6 +152,12 @@ export interface EngineStore {
   attempt(attemptId: string): Promise<Attempt | null>;
   /** Unsettled provider work with a lookup scheduled. */
   openWork(): Promise<ProviderWork[]>;
+  /**
+   * What holds each account's capacity and in-flight places now, by subject, counted exactly as
+   * `accounts` counts them: unsettled work not yet sent (a reservation) and live attempts. Read by
+   * the Before launch projection for the subjects it does not simulate (ADR 0003, ticket 13b).
+   */
+  heldOnAccounts(): Promise<{ readonly accountId: string; readonly subjectId: string; readonly reservations: number; readonly live: number }[]>;
   work(key: string): Promise<ProviderWork | null>;
   workByProviderRef(providerRef: string): Promise<ProviderWork | null>;
   /** Provider work handed over to `address` (any case) from `inbox`: the candidates a reply outside a known thread may fall back to (2.4). */

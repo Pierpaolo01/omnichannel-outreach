@@ -4,6 +4,7 @@ import { business, person } from "../../../test/support/export-builder.ts";
 import type { FakeAccount } from "../../../test/support/fake-email-port.ts";
 import type { ApiError, CampaignDefinition, SequenceView } from "../../shared/api.ts";
 import { DEFINITION_MAX_BYTES } from "../../shared/limits.ts";
+import { arrange, type ArrangeOperation } from "./arrangement.ts";
 import { EditorStore } from "./editorStore.ts";
 import { NoAnswer, draftProblems, type SaveStatus } from "./saveQueue.ts";
 
@@ -15,7 +16,9 @@ import { NoAnswer, draftProblems, type SaveStatus } from "./saveQueue.ts";
  * over the size bound), the debounce firing, saves, launches and loads delivered late and out of
  * order, lost answers and the queue's retries, inboxes connecting (the pool follows), leaving a
  * tab (kept for Back, or gone with a new page and session), restores, typing while a launch or a
- * load is in flight and while in conflict. Requests are never lost; answers may be.
+ * load is in flight and while in conflict. Since ticket 13b the edits also arrange tracks (an SMS or
+ * email track added, started after another with a delay, its delay changed, removed: the editor's
+ * arrangement operations) and SMS numbers connect, which the SMS pool follows. Requests are never lost; answers may be.
  *
  * Invariants (3, 6 and 7 after every step; the rest once the network settles):
  * 1. The stored definition is the newest draft typed in the session that wrote it, when that draft
@@ -106,7 +109,7 @@ const flush = async () => {
 
 async function run(seed: number) {
   const r = rng(seed);
-  const h = new EngineHarness({ start: Date.parse("2026-11-02T10:00:00Z"), accounts: [inbox("inbox-a")] });
+  const h = new EngineHarness({ start: Date.parse("2026-11-02T10:00:00Z"), accounts: [inbox("inbox-a")], sms: { numbers: [] } });
   const { campaign } = await h.createCampaign("Generated", {
     businesses: [business({ business_id: "b1", business_name: "Harbour Lane Physio" })],
     people: [person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example" })],
@@ -139,6 +142,32 @@ async function run(seed: number) {
 
   let typed = 0;
   let inboxes = 1;
+  let numbers = 0;
+  /**
+   * An arrangement edit through the editor's own operations (ticket 13b), with the edit's marker in
+   * the first step's subject so invariants 1, 5 and 6 can tell which draft is which. New texts get
+   * copy, so a launch can start.
+   */
+  const arranged = (before: CampaignDefinition, subject: string): CampaignDefinition => {
+    const live = before.tracks.filter((t) => !t.removed);
+    const any = () => live[Math.floor(r() * live.length)]!;
+    const roll = r();
+    const op: ArrangeOperation =
+      live.length === 0 || roll < 0.35 ? { kind: "add", channel: r() < 0.6 ? "sms" : "email" }
+      : roll < 0.65 ? { kind: "start", trackId: any().id, start: r() < 0.3 ? { kind: "entry" } : { kind: "after", trackId: any().id, delayDays: Math.floor(r() * 3) } }
+      : roll < 0.85 ? { kind: "delay", trackId: any().id, days: Math.floor(r() * 4) }
+      : live.length > 1 ? { kind: "remove", trackId: any().id }
+      : { kind: "add", channel: "sms" };
+    const out = arrange(before, op);
+    const base = out.ok ? out.definition : before;
+    return {
+      ...base,
+      tracks: base.tracks.map((t, i) => ({
+        ...t,
+        steps: t.steps.map((st, k) => ({ ...st, body: st.body || "Text.", subject: i === 0 && k === 0 ? subject : t.channel === "email" && k === 0 && !st.subject ? "Hi" : st.subject })),
+      })),
+    };
+  };
   // Held in an object and read through a function: a closure sets it, which the checker cannot see.
   const flags = { launched: false };
   const launchedOnce = (): boolean => flags.launched;
@@ -223,7 +252,11 @@ async function run(seed: number) {
       // What the page shows as locked is what refuses an edit: no authoring control is enabled while locked.
       const lockedBefore = page.store.getSnapshot().locked;
       const pool = before.emailPool;
-      const next = size < 0.08 ? definitionWith(subject, pool, 4, 18_000) : size < 0.2 ? definitionWith(subject, pool, 3, Math.floor((DEFINITION_MAX_BYTES - 2_000) / 3)) : definitionWith(subject, pool);
+      const next =
+        size < 0.08 ? definitionWith(subject, pool, 4, 18_000)
+        : size < 0.2 ? definitionWith(subject, pool, 3, Math.floor((DEFINITION_MAX_BYTES - 2_000) / 3))
+        : size < 0.55 ? arranged(before, subject)
+        : definitionWith(subject, pool);
       page.store.update(() => next);
       // Typing is refused once launched and while a launch or a load is in flight: nothing was typed.
       if (page.store.getSnapshot().draft === before && !lockedBefore) problems.push(`6: ${page.session} refused an edit while editing was shown open`);
@@ -257,8 +290,9 @@ async function run(seed: number) {
     } else if (roll < 0.77 && live && !launchedOnce() && page.store.getSnapshot().pending === null) {
       void page.store.launch().catch(() => undefined);
     } else if (roll < 0.79 && !launchedOnce()) {
-      // Another inbox connects: the pages learn it with their next answer, and save the pool.
-      h.fake.accountsById.set(`inbox-${++inboxes}`, inbox(`inbox-${inboxes}`));
+      // Another inbox or SMS number connects: the pages learn it with their next answer, and save the pool.
+      if (r() < 0.5) h.fake.accountsById.set(`inbox-${++inboxes}`, inbox(`inbox-${inboxes}`));
+      else h.sms.numbers.set(`+4477009005${String(++numbers).padStart(2, "0")}`, { id: `+4477009005${String(numbers).padStart(2, "0")}`, capacity: 30, gapMs: null, k: 1, healthy: true, resetZone: "Europe/London" });
       await h.tick();
     } else if (roll < 0.85 && live) {
       page.store.leavePage();
@@ -311,20 +345,27 @@ async function run(seed: number) {
       }
     }
   }
-  return { problems, pending: requests.length, launchedOnce: launchedOnce() };
+  const stored = (await h.request<SequenceView>("GET", path)).body.definition;
+  const smsSaved = stored.tracks.some((t) => !t.removed && t.channel === "sms") && (stored.smsPool ?? []).length > 0;
+  return { problems, pending: requests.length, launchedOnce: launchedOnce(), smsSaved };
 }
 
 describe("saving the definition, generated over the real editor state (ADR 0003 1.1.1)", () => {
   const launched: boolean[] = [];
+  const smsSaved: boolean[] = [];
   for (const seed of Array.from({ length: SEEDS }, (_, i) => 7000 + i)) {
     test(`run ${seed}`, async () => {
       const out = await run(seed);
       launched.push(out.launchedOnce);
+      smsSaved.push(out.smsSaved);
       expect(out.pending).toBe(0);
       expect(out.problems).toEqual([]);
     });
   }
   test("the runs include launches that start, not only refused ones", () => {
     expect(launched.filter(Boolean).length).toBeGreaterThan(SEEDS / 10);
+  });
+  test("the runs save arranged SMS tracks with the numbers that connected (ticket 13b)", () => {
+    expect(smsSaved.filter(Boolean).length).toBeGreaterThan(SEEDS / 20);
   });
 });

@@ -1,11 +1,12 @@
 import { useId, useRef, useState, type ReactNode } from "react";
 import { Link, useLocation } from "wouter";
-import type { BeforeLaunchView, CampaignDefinition, CopyPreview, CopySegment, LaunchBlocker, PreviewLead } from "../../shared/api.ts";
+import type { BeforeLaunchView, CampaignDefinition, CopyPreview, CopySegment, LoadProjectionView, PreviewLead, SmsProviderStatus } from "../../shared/api.ts";
 import { useApi } from "../api.ts";
 import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
 import { campaignPath, longDate } from "../pages/CampaignPage.tsx";
-import { emailTrackOf, fieldLabel, STEP_NOUN, stepUsing, trackName } from "./model.ts";
+import { fieldLabel, sendsOnItsOwn, trackName, trackTitle } from "./model.ts";
+import { describeBlocker } from "./blocker-wording.ts";
 import { CANNOT_SEND, ConflictNotice } from "./SequenceTab.tsx";
 import type { SequenceEditor } from "./useSequence.ts";
 import { withheldExplanation } from "./withheld.ts";
@@ -70,9 +71,9 @@ function LaunchBar({ editor, facts }: { editor: SequenceEditor; facts: BeforeLau
   const failed = editor.unsaved && editor.save.kind !== "saving";
   const tone = launchedAt || (launch.nothingToLaunch && !failed) ? "bg-base-100 border-line" : n > 0 || failed ? "bg-crit-soft border-transparent" : "bg-base-100 border-line";
   const days = facts?.load?.daysUntilAllStart ?? null;
-  const withEmail = facts?.load?.leadsWithEmail ?? null;
+  const starting = facts?.load?.leadsToStart ?? null;
   let text: ReactNode;
-  if (launchedAt) text = <><b className="font-semibold">Launched {longDate(launchedAt)}.</b> Email goes out on its own, inside each lead’s sending window.</>;
+  if (launchedAt) text = <><b className="font-semibold">Launched {longDate(launchedAt)}.</b> {sendsOnItsOwn(editor.view.definition)}</>;
   else if (editor.save.kind === "conflict") text = null;
   // The checks for the definition on the page are still on their way (PR 41 council, item 6).
   else if (!facts) text = <><b className="font-semibold">Checking the sequence…</b> Launch is ready once the checks have arrived.</>;
@@ -90,7 +91,7 @@ function LaunchBar({ editor, facts }: { editor: SequenceEditor; facts: BeforeLau
     text = (
       <>
         <b className="font-semibold">Ready to launch.</b>{" "}
-        {withEmail !== null && days !== null ? `${withEmail} ${withEmail === 1 ? "lead starts" : "leads start"} within ${days} ${days === 1 ? "day" : "days"}.` : ""}
+        {starting !== null && days !== null ? `${starting} ${starting === 1 ? "lead starts" : "leads start"} within ${days} ${days === 1 ? "day" : "days"}.` : ""}
       </>
     );
   return (
@@ -141,9 +142,9 @@ function LaunchBar({ editor, facts }: { editor: SequenceEditor; facts: BeforeLau
 function Blockers({ campaignId, editor }: { campaignId: string; editor: SequenceEditor }) {
   const [, navigate] = useLocation();
   const { blockers, nothingToLaunch } = editor.view.launch;
-  const track = emailTrackOf(editor.view.definition);
-  const open = (stepId?: string) => navigate(`${campaignPath(campaignId)}${track ? `?track=${encodeURIComponent(track.id)}${stepId ? `&step=${encodeURIComponent(stepId)}` : ""}` : ""}`);
-  const firstUsing = (field: string) => (track ? stepUsing(track, field)?.id : undefined);
+  const def = editor.view.definition;
+  const sms = useApi<SmsProviderStatus>("/api/sms-provider").result;
+  const open = (trackId: string, stepId?: string) => navigate(`${campaignPath(campaignId)}?track=${encodeURIComponent(trackId)}${stepId ? `&step=${encodeURIComponent(stepId)}` : ""}`);
   return (
     <section aria-labelledby="blocks-launch">
       <h3 id="blocks-launch" className="mb-2 text-[15px] font-semibold">
@@ -155,26 +156,28 @@ function Blockers({ campaignId, editor }: { campaignId: string; editor: Sequence
           <span>
             <b className="font-semibold">{nothingToLaunch ? "No track yet." : "Nothing blocks launch."}</b>
             <span className="block text-ink-2">
-              {nothingToLaunch ? "With a track, launch is blocked only by empty copy, a merge field with no fallback that a lead lacks, or no connected sender." : "Every email has copy, every merge field has a fallback where a lead lacks it, and the track has a sender."}
+              {nothingToLaunch ? "With a track, launch is blocked only by empty copy, a merge field with no fallback that a lead lacks, or no connected sender." : "Every message has copy, every merge field has a fallback where a lead lacks it, and every track has a sender."}
             </span>
           </span>
         </div>
       ) : (
         <ul className="flex flex-col gap-2">
           {blockers.map((b) => {
-            const { title, detail, action, stepId } = describeBlocker(b, firstUsing, editor.view.definition, track?.id ?? null);
+            const { title, detail, actions } = describeBlocker(b, def, sms.state === "ready" ? sms.data : null);
             return (
               <li key={JSON.stringify(b)} className="flex flex-wrap items-start gap-x-2.5 gap-y-2 rounded-field bg-crit-soft px-3.5 py-3 text-[14px]">
                 <Icon name="bad" className="mt-0.5 size-[18px] text-crit" />
-                <span className="min-w-0 flex-[1_1_240px]">
+                <span className="min-w-0 flex-[1_1_240px] [overflow-wrap:anywhere]">
                   <b className="font-semibold">{title}</b>
                   <span className="block text-ink-2">{detail}</span>
                 </span>
-                {action !== null && (
-                  <button type="button" className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={() => open(stepId)}>
-                    {action}
-                  </button>
-                )}
+                <span className="flex flex-wrap gap-1.5">
+                  {actions.map((a) => (
+                    <button key={`${a.trackId}/${a.stepId ?? ""}`} type="button" className="btn btn-sm h-auto min-h-7 border-line-strong bg-base-100 py-1 font-medium" onClick={() => open(a.trackId, a.stepId)}>
+                      {a.label}
+                    </button>
+                  ))}
+                </span>
               </li>
             );
           })}
@@ -184,62 +187,30 @@ function Blockers({ campaignId, editor }: { campaignId: string; editor: Sequence
   );
 }
 
-/**
- * What a blocker says, and where it is fixed. A blocker is named by the track it belongs to, by
- * that track's own channel (email, SMS, phone), never by its position. This editor opens one email
- * track (`emailTrackOf`). A blocker on any other track says which track it is and that it cannot be
- * edited here yet, with nothing to open: a campaign can have such tracks since ticket 13a, defined
- * outside this editor.
- */
-function describeBlocker(b: LaunchBlocker, firstUsing: (field: string) => string | undefined, def: CampaignDefinition, editableId: string | null): { title: string; detail: ReactNode; action: string | null; stepId?: string } {
-  if (b.kind === "missing_merge_field") {
-    const stepId = firstUsing(b.field);
-    return {
-      title: `${capitalise(fieldLabel(b.field))} has no fallback`,
-      detail: `${b.leadsMissing} ${b.leadsMissing === 1 ? "lead has" : "leads have"} no ${fieldLabel(b.field)}. Add a fallback or remove the field.${stepId ? "" : " It is used only in a track this editor can’t open yet."}`,
-      action: stepId ? "Add fallback" : null,
-      ...(stepId ? { stepId } : {}),
-    };
-  }
-  const track = def.tracks.find((t) => t.id === b.trackId);
-  const channel = track?.channel ?? (b.kind === "no_sender" && (b.channel === "sms" || b.channel === "call") ? b.channel : "email");
-  const editable = b.trackId === editableId;
-  const name = track ? capitalise(trackName(def, track)) : "A track";
-  const several = track !== undefined && def.tracks.filter((t) => !t.removed && t.channel === channel).length > 1;
-  const cannot = channel === "email" ? `This editor opens one email track, so ${name} can’t be edited here yet.` : `Editing ${channel === "sms" ? "SMS" : "phone"} tracks arrives with a later release.`;
-  if (b.kind === "empty_copy") {
-    const noun = `${STEP_NOUN[channel]} ${b.stepNumber}`;
-    const what = b.part === "subject" ? `${noun} has no subject` : `${noun} has no ${channel === "email" ? "copy" : "message"}`;
-    if (!editable) return { title: `${name}: ${what}`, detail: cannot, action: null };
-    return {
-      title: several ? `${name}: ${what}` : what,
-      detail: b.part === "subject" ? "Give it a subject, or let it continue the thread." : "Write it, or remove the email.",
-      action: "Write it",
-      stepId: b.stepId,
-    };
-  }
-  const sender = channel === "email" ? "inbox" : "number";
-  const title = `${name} has no connected sender ${sender}`;
-  if (!editable) return { title, detail: `It can’t send until ${channel === "email" ? "an inbox" : "a number"} is connected. ${cannot}`, action: null };
-  return { title, detail: "It can’t send until an inbox is connected.", action: "Open track" };
-}
-
-const capitalise = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+const and = (items: readonly string[]): string => (items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items.at(-1) ?? ""}`);
 
 function Warnings({ facts, editor }: { facts: BeforeLaunchView; editor: SequenceEditor }) {
   const items: { title: string; detail: string }[] = [];
+  const live = editor.view.definition.tracks.filter((t) => !t.removed && t.branch === "main");
   const noEmail = facts.coverage.leads - facts.coverage.email;
-  if (emailTrackOf(editor.view.definition) && noEmail > 0) {
-    items.push({ title: `${noEmail} ${noEmail === 1 ? "lead has" : "leads have"} no email`, detail: "They skip the email track." });
+  const noMobile = facts.coverage.leads - facts.coverage.mobile;
+  const after = (channel: "email" | "sms") => live.some((t) => t.start.kind === "after" && live.find((x) => x.id === (t.start as { trackId: string }).trackId)?.channel === channel);
+  // Each warning names the tracks it is about, by their own channel and order.
+  const tracksOn = (channel: "email" | "sms") => and(live.filter((t) => t.channel === channel).map((t) => trackName(editor.view.definition, t)));
+  if (live.some((t) => t.channel === "email") && noEmail > 0) {
+    items.push({ title: `${noEmail} ${noEmail === 1 ? "lead has" : "leads have"} no email`, detail: `They skip ${tracksOn("email")}${after("email") ? ", and the tracks after it start sooner" : ""}.` });
+  }
+  if (live.some((t) => t.channel === "sms") && noMobile > 0) {
+    items.push({ title: `${noMobile} ${noMobile === 1 ? "lead has" : "leads have"} no mobile of their own`, detail: `They skip ${tracksOn("sms")}${after("sms") ? ", and the tracks after it start sooner" : ""}. Company leads are never texted.` });
   }
   for (const a of facts.load?.accounts ?? []) {
-    if (a.usedToday > 0) items.push({ title: `${a.label} has ${a.usedToday} of its ${a.capacity} sends a day used today`, detail: "Other campaigns sent or reserved them, so fewer first emails can go today." });
+    if (a.usedToday > 0) items.push({ title: `${a.label} has ${a.usedToday} of its ${a.capacity} sends a day used today`, detail: `Other campaigns sent or reserved them, so fewer first ${a.channel === "sms" ? "texts" : "emails"} can go today.` });
   }
-  for (const a of editor.view.accounts.filter((x) => x.channel === "email" && !x.healthy)) {
+  for (const a of editor.view.accounts.filter((x) => !x.healthy && live.some((t) => t.channel === x.channel))) {
     items.push({ title: `${a.label} ${CANNOT_SEND}`, detail: "Its leads wait until it can send again." });
   }
   if (facts.load && facts.load.notStartedWithinHorizon > 0) {
-    items.push({ title: `${facts.load.notStartedWithinHorizon} leads would not start within ${facts.load.horizonDays} days`, detail: "The inboxes’ daily capacity is too small for this many leads." });
+    items.push({ title: `${facts.load.notStartedWithinHorizon} leads would not start within ${facts.load.horizonDays} days`, detail: "The senders’ daily capacity is too small for this many leads, or their texts wait for a free number." });
   }
   return (
     <section aria-labelledby="warnings">
@@ -313,7 +284,7 @@ function MissingFields({ facts }: { facts: BeforeLaunchView }) {
                 {f.leadsMissing === 0 ? (
                   <span className="text-muted">Every lead has it</span>
                 ) : blocks ? (
-                  <span className="font-medium text-crit">{f.fallbacks.length > 0 ? `“${f.fallbacks.join("”, “")}” in some emails; one has no fallback. Blocks launch.` : "No fallback. Blocks launch."}</span>
+                  <span className="font-medium text-crit">{f.fallbacks.length > 0 ? `“${f.fallbacks.join("”, “")}” in some messages; one has no fallback. Blocks launch.` : "No fallback. Blocks launch."}</span>
                 ) : (
                   `“${f.fallbacks.join("”, “")}”`
                 )}
@@ -328,72 +299,101 @@ function MissingFields({ facts }: { facts: BeforeLaunchView }) {
 
 function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: SequenceEditor }) {
   const load = facts.load;
+  const def = editor.view.definition;
   if (editor.launched || !load) return <p className="text-[14px] text-muted">The projection is for before launch. Once running, leads waiting for sending capacity show in Needs attention.</p>;
-  if (!emailTrackOf(editor.view.definition)) return <p className="text-[14px] text-muted">Add an email track to see the load it puts on each sender inbox.</p>;
-  if (load.accounts.length === 0) return <p className="text-[14px] text-crit">No connected sender inbox, so there is no load to project.</p>;
-  // No figure that could contradict the engine: an inbox with no known end, or a track the estimate does not simulate yet.
-  const blocked = load.cannotProject.length > 0 || load.otherTracksChangeTiming !== null;
+  if (!def.tracks.some((t) => !t.removed && t.branch === "main")) return <p className="text-[14px] text-muted">Add a track to see the load it puts on each sender.</p>;
+  // No figure that could contradict the engine: a track the server names (no sender, or after a
+  // call), or a sender with no known end.
+  const blocked = load.withheldBy !== null || load.cannotProject.length > 0;
+  const calls = def.tracks.some((t) => !t.removed && t.branch === "main" && t.channel === "call");
   return (
     <>
-      <table className="table text-[14px] max-[560px]:block">
-        <thead className="max-[560px]:sr-only">
-          <tr className="border-b border-line text-[13px] text-muted">
-            <th className="px-0 py-2 font-medium">Sender inbox</th>
-            <th className="py-2 font-medium">Busiest day, this campaign</th>
-            <th className="py-2 font-medium">Used today, all campaigns</th>
-          </tr>
-        </thead>
-        <tbody className="max-[560px]:block">
-          {load.accounts.map((a) => (
-            <tr key={a.id} className="border-line max-[560px]:flex max-[560px]:flex-col max-[560px]:gap-1 max-[560px]:py-2 [&+&]:border-t">
-              <td className="px-0 py-2.5 max-[560px]:p-0">
-                <span className="flex items-start gap-1.5 [overflow-wrap:anywhere]">
-                  <Icon name="email" className="mt-0.5 size-4 text-muted" />
-                  <span>
-                    {a.label}
-                    <span className="block text-[12.5px] text-muted">At most one email every {gap(a.gapSeconds)}</span>
-                  </span>
-                </span>
-              </td>
-              <td className="py-2.5 max-[560px]:p-0">{blocked ? "—" : `${a.busiestDay} a day`}</td>
-              <td className="py-2.5 max-[560px]:p-0">
-                <span className={a.usedToday >= a.capacity ? "font-medium text-pause" : ""}>
-                  {a.usedToday} of {a.capacity}
-                </span>
-                <span className="mt-1 block h-1 w-24 overflow-hidden rounded-sm bg-line" aria-hidden="true">
-                  <span className={`block h-full ${a.usedToday >= a.capacity ? "bg-pause" : "bg-base-content"}`} style={{ width: `${Math.min(100, (a.usedToday / Math.max(1, a.capacity)) * 100)}%` }} />
-                </span>
-              </td>
+      {load.accounts.length > 0 && (
+        <table className="table text-[14px] max-[560px]:block">
+          <thead className="max-[560px]:sr-only">
+            <tr className="border-b border-line text-[13px] text-muted">
+              <th className="px-0 py-2 font-medium">Sender</th>
+              <th className="py-2 font-medium">Busiest day, this campaign</th>
+              <th className="py-2 font-medium">Used today, all campaigns</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-      {load.otherTracksChangeTiming !== null ? (
-        <p className="mt-2 text-[13px] text-ink-2">
+          </thead>
+          <tbody className="max-[560px]:block">
+            {load.accounts.map((a) => (
+              <tr key={a.id} className="border-line max-[560px]:flex max-[560px]:flex-col max-[560px]:gap-1 max-[560px]:py-2 [&+&]:border-t">
+                <td className="px-0 py-2.5 max-[560px]:p-0">
+                  <span className="flex items-start gap-1.5 [overflow-wrap:anywhere]">
+                    <Icon name={a.channel} className="mt-0.5 size-4 text-muted" />
+                    <span>
+                      <span className="sr-only">{a.channel === "sms" ? "SMS number " : "Email inbox "}</span>
+                      {a.label}
+                      <span className="block text-[12.5px] text-muted">
+                        At most one {a.channel === "sms" ? "text" : "email"} every {gap(a.gapSeconds)}
+                      </span>
+                    </span>
+                  </span>
+                </td>
+                <td className="py-2.5 max-[560px]:p-0">{blocked ? "—" : `${a.busiestDay} a day`}</td>
+                <td className="py-2.5 max-[560px]:p-0">
+                  <span className={a.usedToday >= a.capacity ? "font-medium text-pause" : ""}>
+                    {a.usedToday} of {a.capacity}
+                  </span>
+                  <span className="mt-1 block h-1 w-24 overflow-hidden rounded-sm bg-line" aria-hidden="true">
+                    <span className={`block h-full ${a.usedToday >= a.capacity ? "bg-pause" : "bg-base-content"}`} style={{ width: `${Math.min(100, (a.usedToday / Math.max(1, a.capacity)) * 100)}%` }} />
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {load.withheldBy !== null ? (
+        <p className={`${load.accounts.length > 0 ? "mt-2" : ""} text-[13.5px] ${load.withheldBy.tracks.some((t) => t.why === "no_sender") ? "text-crit" : "text-ink-2"}`}>
           {/* Worded from the tracks the server names, never guessed from this campaign's channels. */}
-          {load.withheldBy ? withheldExplanation(load.withheldBy) : "Can’t project the load yet: another track can change when the emails go."}
+          {withheldExplanation(load.withheldBy)}
         </p>
-      ) : blocked ? (
+      ) : load.cannotProject.length > 0 ? (
         <p className="mt-2 text-[13px] text-ink-2">
-          Can’t project the load while{" "}
-          {load.cannotProject
-            .map((c) => (c.reason === "quota" ? `${c.label} waits for Instantly’s lead quota` : `${c.label} ${CANNOT_SEND}`))
-            .join(", and ")}
-          . Nothing says when that ends.
+          Can’t project the load while {and(load.cannotProject.map(heldSaid))}. Nothing says when that ends.
         </p>
       ) : (
-      <p className="mt-2 text-[13px] text-muted">
-        {load.daysUntilAllStart !== null
-          ? `All ${load.leadsWithEmail} leads with an email start within ${load.daysUntilAllStart} ${load.daysUntilAllStart === 1 ? "day" : "days"} of launch.`
-          : load.leadsWithEmail === 0
-            ? "No lead has an email yet."
-            : `${load.notStartedWithinHorizon} of ${load.leadsWithEmail} leads would not start within ${load.horizonDays} days.`}{" "}
-        Follow-ups always go before first emails when an inbox is full. The emails other running campaigns have waiting on these inboxes are counted; every send is assumed to succeed, and replies, bounces and pauses are not foreseen.
-        {load.leavesOutSms ? " SMS sends are not in this estimate yet: it counts email only." : ""}
-      </p>
+        <p className="mt-2 text-[13px] text-muted">
+          {load.leadsToStart === 0
+            ? "No lead has a channel these tracks use yet."
+            : load.daysUntilAllStart !== null
+              ? `All ${load.leadsToStart} leads start within ${load.daysUntilAllStart} ${load.daysUntilAllStart === 1 ? "day" : "days"} of launch.`
+              : `${load.notStartedWithinHorizon} of ${load.leadsToStart} leads would not start within ${load.horizonDays} days.`}{" "}
+          Every email and text counts: tracks that start together and tracks that wait for another.{" "}
+          {callCaveat(calls, load.callsNotCounted, load.onlyCalled)} Follow-ups always go before first messages when a sender is full. What other running campaigns have waiting on these senders is counted; every send is assumed to succeed, and replies, bounces, bad numbers and pauses are not foreseen.
+        </p>
       )}
     </>
   );
+}
+
+/** Why one sender keeps the figure from being projected (ADR 0003, ticket 13b): said with the sender. */
+function heldSaid(c: LoadProjectionView["cannotProject"][number]): string {
+  switch (c.reason) {
+    case "quota":
+      return `${c.label} waits for Instantly’s lead quota`;
+    case "cannot_send":
+      return `${c.label} ${CANNOT_SEND}`;
+    case "unsettled_work":
+      return `some of ${c.label}’s sends are held by work only the provider or you can settle (Needs attention lists it)`;
+    case "reply_being_matched":
+      return `a reply to ${c.label} is being matched to its lead, which may stop that lead`;
+  }
+}
+
+/**
+ * What the estimate leaves to the user's calls, here and in competing campaigns (council on 10121d3,
+ * item 1): calls are tasks, not sends, and it assumes none is logged, while a logged call touches the
+ * lead, whose emails and texts then go first.
+ */
+function callCaveat(here: boolean, elsewhere: readonly { readonly name: string }[], onlyCalled: number): string {
+  if (!here && elsewhere.length === 0) return "";
+  const where = and([...(here ? ["this campaign"] : []), ...elsewhere.map((c) => c.name)]);
+  const only = onlyCalled > 0 ? ` ${onlyCalled} ${onlyCalled === 1 ? "lead is" : "leads are"} reached only by your calls.` : "";
+  return `Calls are tasks on your list, not sends: they are not counted, and the estimate assumes no call is logged in ${where}, though a logged call moves that lead’s emails and texts ahead.${only} `;
 }
 
 const gap = (seconds: number) => (seconds < 120 ? `${seconds} seconds` : `${Math.round(seconds / 60)} minutes`);
@@ -402,8 +402,15 @@ function Preview({ campaignId, editor, leads }: { campaignId: string; editor: Se
   const [chosen, setChosen] = useState<string | null>(null);
   const index = Math.max(0, leads.findIndex((l) => l.id === chosen));
   const lead = leads[index];
-  const track = emailTrackOf(editor.view.definition);
+  const def = editor.view.definition;
+  const live = def.tracks.filter((t) => !t.removed && t.branch === "main");
   const selectId = useId();
+  const reach = (l: PreviewLead) => {
+    const parts: string[] = [];
+    if (live.some((t) => t.channel === "email")) parts.push(l.email ? `Email to ${l.email}.` : "No email, so the email track is skipped for them.");
+    if (live.some((t) => t.channel === "sms")) parts.push(l.mobile ? "Texts to their own mobile." : l.kind === "company" ? "A company lead is never texted, so the SMS track is skipped." : "No mobile of their own, so the SMS track is skipped for them.");
+    return parts.join(" ");
+  };
   return (
     <section aria-labelledby="copy-for-a-lead" className="flex min-w-0 flex-col gap-3.5 rounded-box border border-line bg-base-100 px-5 pb-5 pt-4 min-[1240px]:sticky min-[1240px]:top-4">
       <h2 id="copy-for-a-lead" className="text-[19px]">
@@ -413,8 +420,8 @@ function Preview({ campaignId, editor, leads }: { campaignId: string; editor: Se
         <p className="text-[14px] text-ink-2">
           No leads yet. <Link href={`/campaigns/${campaignId}/import`} className="underline">Import a scraper run</Link> to preview the copy for a real lead.
         </p>
-      ) : !track ? (
-        <p className="text-[14px] text-ink-2">Add an email track to preview its copy.</p>
+      ) : live.length === 0 ? (
+        <p className="text-[14px] text-ink-2">Add a track to preview its copy.</p>
       ) : lead ? (
         <>
           <div className="flex flex-wrap items-center gap-2">
@@ -442,20 +449,19 @@ function Preview({ campaignId, editor, leads }: { campaignId: string; editor: Se
             </span>
           </div>
           <p className="-mt-1 text-[13px] text-muted [overflow-wrap:anywhere]">
-            {lead.kind === "company" ? "Company lead" : `${lead.title ? `${lead.title}, ` : ""}${lead.company}`}.{" "}
-            {lead.email ? `Email to ${lead.email}.` : "No email, so the email track is skipped for them."}
+            {lead.kind === "company" ? "Company lead" : `${lead.title ? `${lead.title}, ` : ""}${lead.company}`}. {reach(lead)}
           </p>
           <p className="text-[12.5px] text-muted">
-            <mark className="bg-transparent text-inherit underline decoration-hand decoration-dotted decoration-2 underline-offset-[3px]">dotted</mark> fallback text, because this lead lacks the field
+            <mark className="bg-transparent text-inherit underline decoration-hand decoration-dotted decoration-2 underline-offset-[3px]">dotted</mark> fallback text, because this lead lacks the field. Days count from launch day, day 1; a sending window can move a message later.
           </p>
-          <LeadCopy campaignId={campaignId} enrollmentId={lead.id} version={editor.view.definitionVersion} hasEmail={lead.email !== null} />
+          <LeadCopy campaignId={campaignId} enrollmentId={lead.id} version={editor.view.definitionVersion} def={def} />
         </>
       ) : null}
     </section>
   );
 }
 
-function LeadCopy({ campaignId, enrollmentId, version, hasEmail }: { campaignId: string; enrollmentId: string; version: number; hasEmail: boolean }) {
+function LeadCopy({ campaignId, enrollmentId, version, def }: { campaignId: string; enrollmentId: string; version: number; def: CampaignDefinition }) {
   const { result, retry } = useApi<CopyPreview>(`/api/campaigns/${encodeURIComponent(campaignId)}/preview/${encodeURIComponent(enrollmentId)}?v=${version}`);
   if (result.state === "error") return <ErrorState title="This lead’s copy didn’t load." message={result.message} onRetry={retry} />;
   // Only copy for this lead and this version: never the previous lead's copy under this name.
@@ -466,38 +472,49 @@ function LeadCopy({ campaignId, enrollmentId, version, hasEmail }: { campaignId:
         <div className="skeleton h-40 w-full" />
       </div>
     );
+  const several = def.tracks.filter((t) => !t.removed && t.branch === "main").length > 1;
   return (
-    <ol className="flex flex-col gap-3" aria-label="The emails, in order">
-      {preview.steps.map((s) => (
-        <li key={s.stepId} className="overflow-hidden rounded-field border border-line">
-          <div className="flex items-center justify-between gap-3 border-b border-line bg-raised px-3.5 py-2 text-[13px]">
-            <span className="flex items-center gap-1.5 font-semibold">
-              <Icon name="email" className="size-4 text-muted" />
-              Email {s.number}
-            </span>
-            <span className="whitespace-nowrap text-muted">Day {s.day}</span>
-          </div>
-          <div className="px-3.5 py-3 text-[14px] leading-[1.55]">
-            {!hasEmail ? (
-              <p className="text-muted">Skipped: this lead has no email.</p>
-            ) : (
-              <>
-                <p className="mb-2 font-semibold [overflow-wrap:anywhere]">
-                  <Segments segments={s.subject} empty="No subject yet" />
-                </p>
-                <p className="whitespace-pre-wrap text-ink-2 [overflow-wrap:anywhere]">
-                  <Segments segments={s.body} empty="No copy yet. Launch is blocked until this email has copy." />
-                </p>
-                {s.missing.length > 0 && (
-                  <p className="mt-2 text-[13px] font-medium text-crit">
-                    This lead has no {s.missing.map(fieldLabel).join(" or ")} and the field has no fallback, so this email can’t be sent to them.
+    <ol className="flex flex-col gap-3" aria-label="The messages, in the order they can go">
+      {preview.steps.map((s) => {
+        const track = def.tracks.find((t) => t.id === s.trackId);
+        const sms = s.channel === "sms";
+        const noun = `${sms ? "Text" : "Email"} ${s.number}`;
+        return (
+          <li key={s.stepId} className="overflow-hidden rounded-field border border-line">
+            <div className="flex items-center justify-between gap-3 border-b border-line bg-raised px-3.5 py-2 text-[13px]">
+              <span className="flex min-w-0 items-center gap-1.5 font-semibold">
+                <Icon name={sms ? "sms" : "email"} className="size-4 flex-none text-muted" />
+                <span className="[overflow-wrap:anywhere]">
+                  {noun}
+                  {several && track ? <span className="font-normal text-muted"> · {trackTitle(def, track)}</span> : null}
+                </span>
+              </span>
+              <span className="whitespace-nowrap text-muted">{s.day !== null ? `Day ${s.day}` : `After ${s.waitsOnCall ?? "a call"}’s call`}</span>
+            </div>
+            <div className="px-3.5 py-3 text-[14px] leading-[1.55]">
+              {s.skipped ? (
+                <p className="text-muted">{sms ? "Skipped: this lead has no mobile of their own to text." : "Skipped: this lead has no email."}</p>
+              ) : (
+                <>
+                  {!sms && (
+                    <p className="mb-2 font-semibold [overflow-wrap:anywhere]">
+                      <Segments segments={s.subject} empty="No subject yet" />
+                    </p>
+                  )}
+                  <p className={`whitespace-pre-wrap text-ink-2 [overflow-wrap:anywhere] ${sms ? "w-fit max-w-[42ch] rounded-[14px_14px_14px_4px] bg-raised px-3 py-2 shadow-[inset_0_0_0_1px_var(--color-line)]" : ""}`}>
+                    <Segments segments={s.body} empty={`No copy yet. Launch is blocked until this ${sms ? "text" : "email"} has copy.`} />
                   </p>
-                )}
-              </>
-            )}
-          </div>
-        </li>
-      ))}
+                  {s.missing.length > 0 && (
+                    <p className="mt-2 text-[13px] font-medium text-crit">
+                      This lead has no {s.missing.map(fieldLabel).join(" or ")} and the field has no fallback, so this {sms ? "text" : "email"} can’t be sent to them.
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+          </li>
+        );
+      })}
     </ol>
   );
 }

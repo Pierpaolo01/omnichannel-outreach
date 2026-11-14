@@ -1220,7 +1220,7 @@ Recorded on 13 November 2026 by the 12c implementer. The projection changes no e
 
   Not read, and so not foreseen: a provider state the engine has not met yet (a quota or rate limit on an inbox no send has tried), provider failures, replies, bounces and pauses. The generated two-campaign test gives each campaign its own subset of three inboxes, makes some unavailable for each reason, and lifts only the states the engine has not met.
 - **Cost.** Measured on 13 November 2026, on this workstation: about 0.3–0.5 s for 500 leads with 500 waiting in another campaign, and about 4–5 s for 2,000 with 2,000 waiting. The Sequence and Leads tabs ask for coverage and fields without the projection (`load=0`). Before launch shows its loading state while it runs.
-- **SMS tracks (merged with ticket 13a, 13 November 2026).** The projection simulates one email track; SMS sends are not in it yet (ticket 13 part b adds them). Another track can change when emails go: a text marks the lead touched, which moves its emails ahead in priority (4.3), and a track can start after another finishes (1.1). Neither can happen when the campaign's one email track starts at entry and every other live track starts, through its chain of start rules, after it (`emailTimingAlone` in `before-launch.ts`). Then the email load is projected, and the screen says SMS sends are not in the estimate (`leavesOutSms`). Otherwise (an SMS track or a second email track that does not wait for the email track, in this campaign or in another running campaign whose emails on these inboxes are not all sent) nothing is projected and the screen says why (`otherTracksChangeTiming`), as for an inbox with no known end. `before-launch-projection.test.ts` runs 20 generated cases with an SMS track after the email track, with texts sent, and requires the email sends to match the engine's exactly. With the rule switched off, 2 of 20 cases with an SMS track at entry contradict the engine.
+- **SMS tracks (merged with ticket 13a, 13 November 2026; replaced by ticket 13b, below).** The projection simulated one email track; SMS sends are not in it yet (ticket 13 part b adds them). Another track can change when emails go: a text marks the lead touched, which moves its emails ahead in priority (4.3), and a track can start after another finishes (1.1). Neither can happen when the campaign's one email track starts at entry and every other live track starts, through its chain of start rules, after it (`emailTimingAlone` in `before-launch.ts`). Then the email load is projected, and the screen says SMS sends are not in the estimate (`leavesOutSms`). Otherwise (an SMS track or a second email track that does not wait for the email track, in this campaign or in another running campaign whose emails on these inboxes are not all sent) nothing is projected and the screen says why (`otherTracksChangeTiming`), as for an inbox with no known end. `before-launch-projection.test.ts` runs 20 generated cases with an SMS track after the email track, with texts sent, and requires the email sends to match the engine's exactly. With the rule switched off, 2 of 20 cases with an SMS track at entry contradict the engine.
 - **What it does not model.** Provider failures, retries, lookups, replies, bounces and pauses: every send is assumed to succeed at once. The screen says so. Production ticks every 15 seconds, not at the exact instants, so a real send can land up to one tick later than projected.
 - **What it reports.** Each pool inbox's busiest day for this campaign, the sends used today across campaigns, and its pacing gap. Also the days until every lead with an email has had its first email, counting launch day as 1, in the campaign's zone.
 
@@ -1274,6 +1274,143 @@ Recorded on 13 November 2026 by the 13a implementer. Each change was built test-
 
 Questions kept with their interim: Q7 (a mobile whose conversation from every pool number belongs to another campaign is held as `sms_conversation_taken`, listed in Needs attention; it is not skipped), and Q10 (a company lead has no SMS destination, so its SMS track is skipped). Q1 (one incoming connection per track) is unchanged.
 
+## Ticket 13b: arranging tracks in the editor, and the projection with every track
+
+Recorded on 13 November 2026 by the 13b implementer, before the code. Two rules: one new (the editor's arrangement operations), one replaced (the Before launch projection). Neither changes the engine, the validator (7.1) or any invariant in section 8.
+
+### The arrangement rule (a deep rule: it decides the draft across every edit)
+
+**The rule.** The editor changes a campaign's arrangement only through four pure operations, `arrange(definition, operation)` in `src/web/campaign/arrangement.ts`:
+
+- **add** a track on a channel (email or SMS). It is new, with an id never used in the definition, and starts at launch (`entry`);
+- **remove** a track;
+- **start** a track at launch (`entry`), or **after** another live track of the same branch with a delay in whole days (`after(X, d)`);
+- **delay**: change the days of an `after` start.
+
+Each returns either the new definition or a **refusal**, a plain sentence. A refused operation leaves the draft as it was; the sentence is shown beside the control that asked for it, and focus stays on that control. Every operation goes through the editor's one state and save queue (1.1.1) like any other edit: none saves on its own. Before launch only; a running campaign's arrangement is read-only until ticket 19.
+
+"Together" is not stored (1.1: "together from X to Y gives Y the same rule as X"). The canvas draws the tracks that share a start rule as together: every track that starts at launch hangs from the Launch point, and every track `after(X, d)` hangs from X with the label "after · d days". The inspector's Starts control offers "At launch" or "After" a track with a delay; two tracks are together when both start at launch, or both after the same track with the same delay.
+
+**Refused, in plain words, at the control:**
+
+- starting a track after itself, or after a track that starts after it through its chain (a cycle): "SMS track starts after this one, so this one can't start after it: each would wait for the other.";
+- starting a track after a track that is removed, in the other branch, or not in the definition;
+- removing a track that another live track starts after: "Email track 2 starts after this one. Change how it starts first.";
+- a delay that is negative or not a whole number: "The delay is a whole number of days, 0 or more." The field keeps what was typed and says so; the draft keeps the last whole delay;
+- a delay on a track that starts at launch, which has none.
+
+The editor offers operations on live tracks only; an operation naming a track that is gone is refused ("That track is no longer in the sequence.").
+
+**Invariants** (asserted after every operation by the generated test):
+
+1. From a draft the validator accepts, every operation's result is a draft the validator accepts (`definitionProblems` is empty): the editor cannot produce what 7.1 refuses. This holds by construction rather than by recovery.
+2. A refusal leaves the draft identical, and says why in a non-empty sentence.
+3. Of the operations the editor offers, nothing is refused that the validator would accept: applying a refused operation naively makes `definitionProblems` non-empty.
+4. An operation changes only what it names. Removing a track removes that track and nothing else; no other track's start rule is rewritten.
+5. An added track's id has never been used in the definition, live or removed.
+
+**The boundary.** The server's validator (7.1) still refuses any such definition from any client; this rule only keeps the editor from producing one.
+
+**The generated test.** `src/web/campaign/arrangement.generated.test.ts` starts from generated valid definitions (one to five email and SMS tracks, chains and fans of `after`, delays 0 to 3, removed tracks) and applies generated sequences of operations, including ones that should be refused, asserting invariants 1 to 5 after each. Its mutations, each of which must fail it: no cycle check; removal that ignores dependants; a refusal that still changes the draft; refusing every `after`.
+
+**Saving the new edits.** The arrangement operations, an SMS track's copy, waits and window, and the SMS pool are edits like any other, so 1.1.1's rule and its generated test cover them: `saveQueue.generated.test.ts` adds them to its generated edits, and SMS numbers connecting to its pool sync.
+
+**The SMS pool** follows the connected SMS numbers, as the email pool follows the connected email inboxes (1.1.1): one pool sync for both channels, counted as one edit. In the running app there is no SMS provider, so the SMS pool stays empty and every SMS track meets launch blocker 3.
+
+### The projection with every track (replaces "SMS tracks" in "Ticket 12c: the Before launch projection")
+
+**The rule.** The projection is the engine's own decisions run forward without a provider. It takes every subject it simulates as the engine's own `SubjectState` (`EngineStore.subject`) and moves it only with the engine's own rules object (`DEFAULT_RULES` in `src/server/engine/rules.ts`, the one the engine uses):
+
+- this campaign's leads enter as launch enters them: `evaluate(enterMain(s))` on the definition being projected;
+- each instant runs the engine's passes until nothing changes, in the engine's order: observe the sends of the previous pass (`applyToWork` with the send at its handover instant), expire claims older than the settling time (`applyToAttempt`, `claim_expired`), `evaluate`, claim every `readyItems` item in `claimOrder` with `claimRefusal`, `chooseAccount` and `claim`, then hand over per account in `handoverOrder` with `handoverFailures` and `handOver`, then the provider's acceptance (`applyToAttempt`, `call_answer accepted`);
+- time moves to the next instant at which anything can change, as `Engine.nextWakeAt` computes it: a due step or its window's next opening, a resolved track start, a claim's slot or expiry, an account's wait ending, a reset day.
+
+So track starts, `after` delays counted from the earlier track's finish, a missing channel skipping its track and releasing the tracks after it, touched leads going first across channels, windows, capacity per account across campaigns, pacing, a lead's fixed sender per channel and the SMS conversation rule (4.5) are the engine's, not a second implementation.
+
+What the projection supplies itself, because the store supplies it to the engine: each account's state (`used` on its reset day, counting the simulation's sends and open reservations; `inFlight`; `nextSlotAt`), starting from the engine's own `AccountState` records, and the SMS bindings, starting from the stored ones, shared by every simulated subject as the store shares them. And the provider: every handover is accepted and sent at once, and observed in the next pass, as the fake providers do in tests.
+
+**Which subjects it simulates.** This campaign's leads that have not ended, and every running subject of another campaign whose pools (or fixed senders) share an account with this campaign, or with a campaign already included (the closure: capacity is shared transitively). Their stored progress, claims and bindings are taken as they are; work already with a provider is taken as sent at the instant of the projection, as before.
+
+**When it shows no figure, and says why.**
+
+- An account in a live track's pool cannot send, with no known end (unhealthy, or a quota held), as before.
+- A live track's channel has no connected sender (launch blocker 3): its leads would wait on it for ever, and so would every track after it. In the running app this is every campaign with an SMS track, since no SMS provider exists. The screen names the track.
+
+**What it reports.** For each account in a live track's pool, on either channel: its busiest day for this campaign, the sends used today across campaigns, and its pacing gap. The days until every lead that has a channel some live track uses has had its first message on any channel, counting launch day as day 1, in the campaign's zone.
+
+**What it still does not model.** Provider failures, retries, replies, bounces, invalid numbers found at the send, pauses, and a port's transport that cannot send a step yet (Instantly's continue-thread follow-ups before ADR 0002's X2). Every send is assumed to succeed at once. Production ticks every 15 seconds, so a real send can land up to one tick later.
+
+**Phone tracks (merge of pull request 44).** A call is a task on the user's list, not a send. Nothing the engine decides about a send reads a call task or the user's call day (`readyItems`, `claimRefusal`, `chooseAccount`, `claim`, `handoverFailures` and `handOver` read neither; only the status does), so the projection leaves due calls unplaced and every email and text it projects is still the engine's own. What a call changes is the user's to decide: a logged call touches the lead, a track after a phone track starts only when the call is logged, and an interested call ends the lead. The engine has no expiry for an unworked call yet, so it holds the tracks after it until the user logs it. Therefore:
+
+- the estimate counts emails and texts, and assumes no call outcome is logged, as it assumes no reply; the screen says both when the campaign has a phone track;
+- an email or SMS track that starts, through its chain, after a phone track withholds the figure, named in `withheldBy` (`after_a_phone_track`, with the phone track it waits on): its sends begin when the user logs a call, which no estimate can know;
+- a lead only a phone track can reach is not counted as one that would not start: it is left to the user's calls (`onlyCalled`);
+- copy for a lead on a track after a phone track carries no day, and names the call it waits on.
+
+This replaces 14a's rule that a phone track beside the email track withholds the figure (its paragraph "Merging pull request 41" below): the engine's rules now decide, and only the user's logging of a call is left out. `withheldBy` is the one source of any "no figure because" about tracks; `src/web/campaign/withheld.ts` words it, and an account that cannot send keeps its own reason (`cannotProject`). The engine-versus-projection test generates phone tracks together with and after the other tracks (without logging any call, as the engine runs with no user): cases where no send track waits on a call must match the engine exactly, and cases where one does must withhold the figure, name that track, and the engine must indeed send nothing on it.
+
+**Every input it reads**, replacing the 12c table:
+
+| Input | The projection reads it from | The engine reads it in |
+| - | - | - |
+| A subject's progress, lead facts, zone, merge data, fixed senders, touched, claims and work | `EngineStore.subject`, the `SubjectState` unchanged | `EngineStore.subject` in every pass |
+| Every decision on a subject | `DEFAULT_RULES` | `Engine.rules`, `DEFAULT_RULES` unless a test swaps one |
+| An account's health, waits, capacity, count with reservations, in-flight bound, gap, slot, reset zone, channel | `EngineStore.accounts(now)`, then the simulation's ledger | `EngineStore.accounts` / `SubjectState.accounts` |
+| SMS conversations | the stored bindings for each simulated mobile, then the simulation's own | `SubjectState.smsBindings` |
+| Reservations and live attempts of subjects it does not simulate | `EngineStore.heldOnAccounts`, counted as `accounts` counts them, kept as they are | `EngineStore.accounts`' `used` and `inFlight` |
+| Which other subjects compete | `runningSubjectIds`, closed over shared accounts | `runningSubjectVersions` in `evaluateAll` and `claimAll` |
+| When to look next | the same instants as `Engine.nextWakeAt` | `Engine.nextWakeAt` |
+
+**Every condition that decides whether or when something is claimed or sent** (review bot on `c1e215e`, the fifth projection-versus-engine finding across pull requests 41 and 45; each earlier one was a condition written beside the engine's rule). Each row is a call into the engine's own function for that decision, on the subject as the store would load it at that instant; nothing is pre-filtered or short-circuited before the call. The bot's finding was exactly such a filter: the claim pass skipped every item whose accounts were full by `accountHasRoom` without the item's inherited reservation, so `chooseAccount`'s exemption for uncertain work a claim carries on never ran.
+
+| Decision | The projection (`src/server/load-projection.ts`) | The engine (`src/server/engine/engine.ts`) |
+| - | - | - |
+| Launch: a lead enters the main branch | `rules.evaluate(rules.enterMain(s))` | `store.launch` with the same two |
+| Tracks start, wait, are skipped or fail, finish; the lead ends | `rules.evaluate` | `evaluateAll`: `rules.evaluate` |
+| Which steps are ready (due, not held but for a taken conversation, not a call) | `rules.readyItems` | `claimAll`: `rules.readyItems` |
+| The order claims are tried in | `rules.claimOrder` over every ready item | `claimAll`: `rules.claimOrder` |
+| Whether a ready step may be claimed now (runs, pending, due, window open, good destination, copy renders, thread) | `rules.claimRefusal` | `claimAll`: `rules.claimRefusal` |
+| Which account takes it (fixed sender or pool, conversation free, available, room counting an inherited reservation, in-flight bound, soonest slot) | `rules.chooseAccount` | `claimAll`: `rules.chooseAccount` |
+| The claim (reservation, inherited key) | `rules.claim` | `claimAll`: `rules.claim` |
+| A claim older than the settling time lapses | `rules.applyToAttempt(claim_expired)` for a claim with `now − claimedWall ≥ SETTLING` | `expireClaims`, the same condition |
+| Which waiting attempt an account's slot goes to | retries first, then `rules.handoverOrder` | `nextForSlot`, the same |
+| A claim waits for its account's slot | `now < nextSlotAt` | `handOverAll`, the same check |
+| Whether a claim is handed over, waits, is skipped or withdrawn | `rules.handoverFailures`, then `rules.handOver` or `rules.applyToAttempt(guard_failed)` | `tryHandover`, the same |
+| A same-key retry: waits, is authorized, or is refused | `rules.retryFailures`, then `rules.authorizeRetry` or `rules.applyToAttempt(retry_refused)` | `tryRetry`, the same |
+| A send is recorded and the next step timed | `rules.applyToWork(sent_observed)` with `rules.sendPoint` | `observe`, the same |
+| When to look again | the instants `Engine.nextWakeAt` uses: a due step or its window's next opening, a track's resolved start, a claim's slot and expiry, a retry's slot, an account wait's end, every account's next reset day | `nextWakeAt` |
+
+Two orders differ from the engine's, and neither changes an answer: `chooseAccount` is called before `claimRefusal` (both are pure and a claim needs both; the account choice is the cheaper), and a subject's evaluation, readiness and loaded view are remembered until it, the accounts or the conversations change (the engine remembers evaluation and empty readiness the same way, by version). `localParts` in `clock.ts` now remembers the instants it was last asked for, a pure function's answers kept, which the engine benefits from too.
+
+**Stored state the projection starts from (review bot and council on `10121d3`).** The rule, once: every piece of work that occupies a sender when the projection is taken, whoever owns it and whatever that owner's status (running, replied, stopped, finished, paused, another campaign), is either advanced by the engine's own rules or the figure is withheld with the reason said; it is never held for ever. So the projection simulates every subject that holds work on an account it simulates (`EngineStore.heldOnAccounts`), not only running ones: a claim of a lead that no longer runs fails the handover's guard and is withdrawn (`handoverFailures`, predicate 1), accepted work is sent at the projection's instant under its stated provider, and a retry for a lead that no longer runs is refused (`retryFailures`). What the engine itself cannot settle without the provider or the user withholds the figure: uncertain work that no claim of its running lead will carry on (only a lookup or the user's mark settles it: `unsettled_work`), and a reply still being matched to its lead, which may stop that lead (`reply_being_matched`).
+
+**Every table and stored field the engine reads to decide a claim, a handover, a settlement, a stop or a wake-up, and how the projection treats it.** Anything not on this list is a defect by definition.
+
+| Table or field | The engine reads it in | The projection |
+| - | - | - |
+| `campaigns`: `launched_at`, `paused_since`, `definition` (tracks, windows, pools), `version`, `definition_version` | `runs`, `evaluate`, `readyItems`, `poolOf`, the version guard | Read as stored; this campaign launched at the projection's instant (`enterMain`). A paused campaign's leads do not run (`runs`), so nothing of theirs is claimed; what they hold moves by the attempt rules |
+| `enrollments`: `ended`, `lead_paused`, `branch`, `branch_entered_at`, `touched`, `frozen_since`, `frozen_total`, `email_sender`, `sms_sender`, `stop_reply_*`, `version` | `runs`, `evaluate`, `comparePriority`, `chooseAccount`, `handOver` | Read as stored; changed only by `DEFAULT_RULES` |
+| `track_progress` (starts, pending step, due and basis instants, finish and reason) | `evaluate`, `readyItems`, `claimRefusal`, `handoverFailures`, `nextWakeAt` | Changed only by `DEFAULT_RULES`; the wake instants are `nextWakeAt`'s |
+| `step_results`, `freezes` | `evaluate`, `advanceTrack`, `wallAtLead` | By `DEFAULT_RULES` |
+| `attempts`: `state`, `retry`, `awaiting_answer`, `claimed_wall`, `handed_wall`, pre-send fields, withdraw flags, transport | `claimAll`, `expireClaims`, `handOverAll`, `tryHandover`, `tryRetry`, `withdraw`, `nextWakeAt` | Claimed: expiry and handover by the engine's rules. Handed and awaiting an answer, or accepted: the provider answers accepted and sends at the projection's instant (`applyToAttempt`, `applyToWork`). A retry wanted: the engine's retry rules. A withdrawal asked of an attempt the provider already holds: the provider has sent it (the same model) |
+| `provider_work`: `settled`, `calls`, `sent_wall`, `sent_day`, `next_lookup_wall`, `lookup_answer`, `unresolved_since`, `provider_ref` | the store's account counts, `inheritedWork`, `settle` (lookups), `attend`, `correlate` | Sends and reservations counted from it as the store counts them. Uncertain work a claim of its running lead will carry on: by `inheritedWork` and `claim`. Any other uncertain work (only a lookup or the user settles it): **withheld**, `unsettled_work` |
+| `replies` | `applyReply`, handover predicate 13 | As stored; a future reply is not foreseen (said on the screen) |
+| `reply_events` pending (a reply whose thread is not yet known), with its running wait | `correlate`, `nextWakeAt`, `pendingReplies` on the subject (handover predicate 18) | **Withheld**, `reply_being_matched`, naming the inbox |
+| `sms_bindings` | `pairFree`, `candidatesFor`, `handOver`, `smsReplyOwner` | Shared by every simulated subject; added only by `handOver` |
+| `live_contact_details` (good or bad, owner, kind, key), `people` and `companies` (zone, merge data) | `destinationFor`, `claimRefusal`, `renderStep`, `evaluate` | Read as stored; a future bounce, bad number or mark is not foreseen |
+| `sender_accounts`: `capacity`, `gap_ms`, `k`, `next_slot_at`, `healthy`, `problem`, `wait_until`, `wait_reason`, `backoff_ms`, `reset_zone` | `pickAccount`, `accountAvailable`, `accountHasRoom`, `handoverFailures`, `nextWakeAt` | Read as stored. Unhealthy, or a quota held with no end: **withheld**, `cannot_send` or `quota`. A rate limit's wait: a wake-up at its end. The slot: moved only by `handOver` |
+| The accounts' counts: sends on the reset day, reservations, live attempts | `EngineStore.accounts` | From the simulated subjects' work (every holder on these accounts is simulated), plus today's sends of subjects holding nothing now |
+| `call_tasks`, `call_attempts`, the call settings and day | `placeCallsAll`, `logCallOutcome`, status rule 5 | No send decision reads them, so calls are left unplaced. A track that waits on an unlogged call, here or in a competing campaign: **withheld**, `after_a_phone_track` (with the campaign). A call that may yet be logged in a competing campaign: said on the screen (`callsNotCounted`) |
+| The providers' observation checkpoints (`engine_meta`) | `observe` | Provider events after the projection's instant are not foreseen, beyond the stated provider |
+| `bounce_events`, `notes`, `imports` | nothing that decides | — |
+
+**What the projection supplies itself, by stated rule:** the store's counts (each account's sends on its reset day, reservations and live attempts, its slot, from `EngineStore.accounts`; what subjects it does not simulate hold, from `EngineStore.heldOnAccounts`, kept as they are) and the provider. The provider: every call the projection makes is accepted and sent at once; work in the provider's hands when the projection is taken is treated so: an accepted attempt sends at that instant, a call still waiting for its answer is answered accepted and sends then, a same-key retry waiting for its slot is made by the retry rules above and sends, and uncertain work no attempt carries stays reserved until a claim carries it on. Lookups, refusals, bounces and replies are not foreseen.
+
+**The test of that state.** `before-launch-projection.test.ts` "an older campaign's work in every provider state" generates 30 cases (`PROJECTION_SEEDS` raises it) whose older campaign, at the projection's instant, has claims waiting for a slot, same-key retries waiting, accepted work about to send, unresolved work an attempt carries, and uncertain work no attempt carries; afterwards a claim carries that work on. The provider then behaves as stated above, and this campaign's sends must be the engine's exactly. A coverage check fails unless every one of those states occurs. Four of the 30 fail on `c1e215e`; the bot's own case is a regression beside them, failing first.
+
+**Cost.** Measured on 13 November 2026, on this workstation, with one email track of three emails and an SMS track of two texts after it: about 1.4 s for 500 leads and 12.9 s for 2,000, of which about 4 s is reading the leads (`campaignLeads`, follow-up 17 on #42); before the review bot's finding the pre-filtered claim pass took 0.9 s and 4.1 s. Every waiting lead now meets the engine's own guard at every instant, as in the engine itself; the simulation keeps waiting items sorted between passes and remembers loaded subjects until something changes.
+
+**The test.** `src/server/before-launch-projection.test.ts` keeps every earlier comparison (all 148 pass unchanged on the new simulation) and adds generated cases with one to four email and SMS tracks connected together or after (delays 0 to 3), leads with and without an email or a mobile, one to three campaigns sharing inboxes and numbers, the same mobile in two campaigns, and other campaigns launched earlier with work in progress. The projection taken just before launch must list exactly the engine's sends over the fake providers, on both channels: the same lead, track, step, account and instant. 40 worlds run in `pnpm check` (`PROJECTION_SEEDS` raises it). A broken simulation is caught: with its claim order reversed, 17 of the 40 worlds fail. A mutation of the engine's rules themselves changes the engine and the projection together, which is the point: they cannot disagree.
 ## Changes from ticket 14a (phone tracks and call tasks)
 
 Recorded on 13 November 2026 by the 14a implementer. Each change was built test-first; the generated test of 9.3's ticket 14 row runs from the pull request's first commit. No telephony provider exists or is chosen: the user dials on their own phone, and the application only lists calls and records outcomes.
@@ -1325,7 +1462,7 @@ Recorded on 13 November 2026 by the 14a implementer. Each change was built test-
 
 Questions kept with their interim: Q4 (a wrong number finishes the phone track even when another good number remains; the next phone track, if any, offers what is left), and Q11 (a wrong-number mark is on the dialled detail of one person or company). Migration 12 adds `call_tasks`, `call_attempts` and `notes`, numbered after pull request 41's 10 (bounce events) and 11 (the save rule's session and number).
 
-**Merging pull request 41 (the campaign editor).** The phone track's fields (`callScript`, a track's `declinedPath`) travel in the same save as every other field of the definition (1.1.1), and its request body goes through `requestObject`, as launch's does (launch takes only `definitionVersion`). The load projection now counts a phone track as a track that can change when the campaign's emails go: a logged call touches the lead, whose emails then go first (4.3); a track after a phone track starts when the call is logged; and an interested call ends the lead. So a phone track beside the email track withholds the figure and says why (`otherTracksChangeTiming`), as an SMS track there does, while a phone track that starts after the email track leaves it projected (`before-launch.test.ts` "a phone track beside the email track"). Activity does not show calls yet: its entries are a closed union that the web timeline renders case by case, so a call entry needs part b's screen; the calls themselves are on the call task and on the lead's progress.
+**Merging pull request 41 (the campaign editor).** The phone track's fields (`callScript`, a track's `declinedPath`) travel in the same save as every other field of the definition (1.1.1), and its request body goes through `requestObject`, as launch's does (launch takes only `definitionVersion`). The load projection now counts a phone track as a track that can change when the campaign's emails go: a logged call touches the lead, whose emails then go first (4.3); a track after a phone track starts when the call is logged; and an interested call ends the lead. So a phone track beside the email track withholds the figure and says why (`otherTracksChangeTiming`), as an SMS track there does, while a phone track that starts after the email track leaves it projected (`before-launch.test.ts` "a phone track beside the email track"). *Replaced at the merge with ticket 13b, whose projection runs the engine's own rules: see "Phone tracks (merge of pull request 44)" in its section.* Activity does not show calls yet: its entries are a closed union that the web timeline renders case by case, so a call entry needs part b's screen; the calls themselves are on the call task and on the lead's progress.
 
 ## Changes from ticket 14b (Today and the call focus queue)
 

@@ -160,3 +160,39 @@ describe("the email pool follows the connected email inboxes only", () => {
     expect(puts.map((p) => p.emailPool)).toEqual([["inbox-a"]]);
   });
 });
+
+describe("the SMS pool follows the connected SMS numbers, in the same one pool sync (ticket 13b)", () => {
+  const account = (id: string, channel: "email" | "sms") => ({ id, label: id, channel, healthy: true, capacity: 30, gapSeconds: 0, usedToday: 0, waiting: null });
+  const withSms = (): CampaignDefinition => {
+    const d = def("Stored");
+    return { ...d, smsPool: [], tracks: [...d.tracks, { ...d.tracks[0]!, id: "t2", channel: "sms", steps: [{ ...d.tracks[0]!.steps[0]!, id: "m1", subject: "" }] }] };
+  };
+  const open = (accounts: ReturnType<typeof account>[], definition: CampaignDefinition) => {
+    const puts: CampaignDefinition[] = [];
+    new EditorStore({ ...view("Stored", 1), definition, accounts }, {
+      session: "page",
+      put: (body) => {
+        puts.push(body);
+        return new Promise(() => undefined);
+      },
+      launch: () => new Promise(() => undefined),
+      load: () => new Promise(() => undefined),
+      setTimer: () => null,
+      clearTimer: () => undefined,
+    });
+    return puts;
+  };
+
+  test("with an SMS track, the connected numbers are saved as its pool, once, with the email pool, and an inbox never enters it", async () => {
+    const puts = open([account("inbox-a", "email"), account("+447700900001", "sms")], { ...withSms(), emailPool: ["inbox-a"] });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(puts.map((p) => [p.emailPool, p.smsPool])).toEqual([[["inbox-a"], ["+447700900001"]]]);
+  });
+
+  test("with no SMS number connected (the running app), nothing is saved for the pool", async () => {
+    const puts = open([account("inbox-a", "email")], { ...withSms(), emailPool: ["inbox-a"] });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(puts).toEqual([]);
+  });
+});
+

@@ -124,7 +124,24 @@ interface LocalParts {
   readonly asUtc: number;
 }
 
+/**
+ * The parts of the instants most recently asked for, by zone: the dispatcher asks the same instant
+ * for many leads in a few zones (every window check in one pass). A pure function remembered, so
+ * every answer is the one it would compute.
+ */
+const recentParts = new Map<string, LocalParts>();
+
 function localParts(t: number, zone: string): LocalParts {
+  const key = `${t}|${zone}`;
+  const known = recentParts.get(key);
+  if (known) return known;
+  const computed = computeLocalParts(t, zone);
+  if (recentParts.size >= 256) recentParts.clear();
+  recentParts.set(key, computed);
+  return computed;
+}
+
+function computeLocalParts(t: number, zone: string): LocalParts {
   const parts: Record<string, number> = {};
   for (const p of formatter(zone).formatToParts(t)) if (p.type !== "literal") parts[p.type] = Number(p.value);
   const asUtc = Date.UTC(parts["year"] ?? 1970, (parts["month"] ?? 1) - 1, parts["day"] ?? 1, parts["hour"] ?? 0, parts["minute"] ?? 0, parts["second"] ?? 0);
