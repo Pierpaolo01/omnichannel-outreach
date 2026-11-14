@@ -1,6 +1,6 @@
 # 0003. The sequence engine
 
-- **Date:** 2026-11-13. Revised the same day after review rounds 1, 2 and 3 (two reviewers each; coordinator rulings 1–14, 1–10 and items 1–7), and amended in PR 37 after its review round 1 (coordinator rulings 1–11, "Changes from PR 37 review round 1"), by ticket 13a ("Changes from ticket 13a"), and by ticket 14a ("Changes from ticket 14a").
+- **Date:** 2026-11-13. Revised the same day after review rounds 1, 2 and 3 (two reviewers each; coordinator rulings 1–14, 1–10 and items 1–7), and amended in PR 37 after its review round 1 (coordinator rulings 1–11, "Changes from PR 37 review round 1"), by ticket 13a ("Changes from ticket 13a"), by ticket 14a ("Changes from ticket 14a"), and by ticket 14c ("Ticket 14c").
 - **Status:** Proposed. The council reviews it before ticket [12](https://github.com/Pierpaolo01/omnichannel-outreach/issues/12) starts.
 - **Consumers:** tickets [12](https://github.com/Pierpaolo01/omnichannel-outreach/issues/12) to [23](https://github.com/Pierpaolo01/omnichannel-outreach/issues/23).
 - **Builds on:** [ADR 0001](0001-application-foundation-and-import-model.md) (domain code never reads the clock; the closed outreach-status type; the store interface) and [ADR 0002](0002-email-through-instantly.md) (the application owns every clock; Instantly only carries email). This ADR is the "application owns every clock" half. The Instantly adapter, its experiments and its questions P1–P4 stay in ADR 0002.
@@ -80,7 +80,7 @@ The definition holds:
 
 - **Campaign inputs:**
   - the default time zone, which is required and defaults to the user's zone when the campaign is created;
-  - the call skip limit in days, default 2 (spec "Unfinished call tasks");
+  - the call skip limit in days, default 2 (spec "Unfinished call tasks"). Since ticket 14c each phone track holds its own (below); the campaign's value is read only for a phone track saved without one;
   - the email and SMS sender pools. A definition saved before ticket 13 has no SMS pool, which reads as empty;
   - the call script or talking points, shown on every call task. A definition saved before ticket 14 has none, which reads as empty.
 - **Tracks.** Each track has:
@@ -91,7 +91,8 @@ The definition holds:
   - an ordered list of steps;
   - one **start rule**;
   - a `removed` marker;
-  - for a call track, its **declined path**: `stop`, `continue` or `win_back`, once the canvas sets one (ticket 16 reads it).
+  - for a call track, its **declined path**: `stop`, `continue` or `win_back`, once the canvas sets one (ticket 16 reads it);
+  - for a call track, its **call skip limit** in whole days, at least 1 (ticket 14c; "Ticket 14c" below).
 - **Steps.** Each step has:
   - a stable `step_id`;
   - a wait in whole days before it (none on a track's first step);
@@ -766,6 +767,7 @@ The canvas cannot produce these, and the server refuses them with a plain messag
 - A call track with more than one step (spec: a phone track is "one call with no follow-ups").
 - A call step with copy (ticket 14a, verifier F2): a call has no copy of its own; the campaign's call script shows on every call task.
 - A call track in the win-back branch (spec: "no cold call").
+- A call skip limit that is not a whole number of days, at least 1, on the campaign or on a phone track; a skip limit on an email or SMS track (ticket 14c).
 - A declined path of `win_back` when the win-back branch has no live track.
 - A wait on a first step. A negative or fractional wait or delay.
 - A `continue_thread` step as the first email step: there is no thread to continue.
@@ -1342,7 +1344,7 @@ Two orders differ from the engine's, and neither changes an answer: `chooseAccou
 | `live_contact_details` (good or bad, owner, kind, key), `people` and `companies` (zone, merge data) | `destinationFor`, `claimRefusal`, `renderStep`, `evaluate` | Read as stored; a future bounce, bad number or mark is not foreseen |
 | `sender_accounts`: `capacity`, `gap_ms`, `k`, `next_slot_at`, `healthy`, `problem`, `wait_until`, `wait_reason`, `backoff_ms`, `reset_zone` | `pickAccount`, `accountAvailable`, `accountHasRoom`, `handoverFailures`, `nextWakeAt` | Read as stored. Unhealthy, or a quota held with no end: **withheld**, `cannot_send` or `quota`. A rate limit's wait: a wake-up at its end. The slot: moved only by `handOver` |
 | The accounts' counts: sends on the reset day, reservations, live attempts | `EngineStore.accounts` | From the simulated subjects' work (every holder on these accounts is simulated), plus today's sends of subjects holding nothing now |
-| `call_tasks`, `call_attempts`, the call settings and day | `placeCallsAll`, `logCallOutcome`, status rule 5 | No send decision reads them, so calls are left unplaced. A track that waits on an unlogged call, here or in a competing campaign: **withheld**, `after_a_phone_track` (with the campaign). A call that may yet be logged in a competing campaign: said on the screen (`callsNotCounted`) |
+| `call_tasks`, `call_attempts`, the call settings and day | `placeCallsAll`, `logCallOutcome`, status rule 5 | *Replaced by ticket 14c* ("Calls in the projection" below): due calls are placed by the engine's own placement rules on a call day the projection supplies; no outcome is applied. A track that waits on an unlogged call, here or in a competing campaign: **withheld**, `after_a_phone_track` (with the campaign). A call that may yet be logged in a competing campaign: said on the screen (`callsNotCounted`) |
 | The providers' observation checkpoints (`engine_meta`) | `observe` | Provider events after the projection's instant are not foreseen, beyond the stated provider |
 | `bounce_events`, `notes`, `imports` | nothing that decides | — |
 
@@ -1405,6 +1407,75 @@ Recorded on 13 November 2026 by the 14a implementer. Each change was built test-
 Questions kept with their interim: Q4 (a wrong number finishes the phone track even when another good number remains; the next phone track, if any, offers what is left), and Q11 (a wrong-number mark is on the dialled detail of one person or company). Migration 12 adds `call_tasks`, `call_attempts` and `notes`, numbered after pull request 41's 10 (bounce events) and 11 (the save rule's session and number).
 
 **Merging pull request 41 (the campaign editor).** The phone track's fields (`callScript`, a track's `declinedPath`) travel in the same save as every other field of the definition (1.1.1), and its request body goes through `requestObject`, as launch's does (launch takes only `definitionVersion`). The load projection now counts a phone track as a track that can change when the campaign's emails go: a logged call touches the lead, whose emails then go first (4.3); a track after a phone track starts when the call is logged; and an interested call ends the lead. So a phone track beside the email track withholds the figure and says why (`otherTracksChangeTiming`), as an SMS track there does, while a phone track that starts after the email track leaves it projected (`before-launch.test.ts` "a phone track beside the email track"). *Replaced at the merge with ticket 13b, whose projection runs the engine's own rules: see "Phone tracks (merge of pull request 44)" in its section.* Activity does not show calls yet: its entries are a closed union that the web timeline renders case by case, so a call entry needs part b's screen; the calls themselves are on the call task and on the lead's progress.
+
+## Ticket 14c: the phone track in the editor, and calls in the projection
+
+Recorded on 14 November 2026 by the 14c implementer, before the code. Three changes: where each part of a phone track lives (one field added to the definition), the arrangement rule extended to phone tracks, and the Before launch projection extended to place calls. None changes how the engine claims, hands over, places or logs anything; the one engine-facing change is which skip limit a placed task's deadline is resolved from.
+
+### What a phone track holds, and where each part is edited
+
+| Part | Where it is stored | Where the editor shows it |
+| - | - | - |
+| Calling hours: days and hours in the prospect's local time | the track's `window` (1.1), as before | the phone track's inspector |
+| The call skip limit (3.5) | **the track's `callSkipLimitDays`** (new, optional) | the phone track's inspector |
+| How it starts | the track's start rule (1.1) | the phone track's inspector, through the arrangement rule |
+| The call script | the campaign's `callScript` (1.1): one per campaign, shown on every call task | every phone track's inspector, which says it is the campaign's one script |
+| The declined path | the track's `declinedPath`, read from ticket 16 | not edited here: the inspector says it arrives with a later release |
+
+**The skip limit on each phone track.** The coordinator's recorded reading is that calling hours and the skip limit are set on each phone track, and the reference puts "Skip it if unworked for N days" in the phone track's inspector. Until now the definition held one limit for the campaign. So:
+
+- a call track may hold `callSkipLimitDays`, a whole number of days, at least 1; an email or SMS track may not (7.1: "The call skip limit is a whole number of days, at least 1." / "Only a phone track has a call skip limit.");
+- the limit of a phone track is `skipLimitOf(definition, track)`: its own, else the campaign's `callSkipLimitDays` (a phone track saved over HTTP before ticket 14c has none of its own);
+- placement resolves the task's skip deadline (3.5) from `skipLimitOf`, and nothing else reads the limit yet. Expiry is ticket 15's. The editor writes the limit on every phone track it adds (2, the spec's default) and never reads the campaign's value for a track that has its own.
+
+Invariant (asserted in `calls.test.ts` and by the ticket 14 generator, which now gives its phone tracks limits of 1 to 3): a placed task's `skipDeadline` is `dueAt + span(dueWall, skipLimitOf(definition, track), userZone)`.
+
+**The call script** is the campaign's (ticket 14a: "the campaign's call script shows on every call task"). The call task shows it as written: no merge field is filled in on it, so the inspector offers no merge fields for it. An empty script is a warning, never a blocker (7.2).
+
+### The arrangement rule, with phone tracks (amends "The arrangement rule" of ticket 13b)
+
+**add** accepts the channel `call`. The new phone track is one call: one step with no wait, no subject and no copy; calling hours Monday to Friday, 09:00 to 17:00 in the prospect's time; a skip limit of 2 days; it starts at launch. **remove**, **start** and **delay** are unchanged and apply to phone tracks as to any track: a phone track can start at launch or after another track with a delay, other tracks can start after it, and it cannot be removed while another starts after it. A second call attempt is a second phone track the user adds.
+
+Invariants 1 to 5 are unchanged; the generated test now generates drafts with phone tracks and adds phone tracks among its operations. A further mutation, "a phone track added with a follow-up", must fail it (invariant 1: the validator refuses a phone track with two steps).
+
+**Saving.** A phone track's calling hours, its skip limit, the campaign's call script, and adding, starting and removing phone tracks are edits like any other, through the one editor state and save queue (1.1.1). `saveQueue.generated.test.ts` adds them to its generated edits.
+
+### Calls in the projection (amends "Phone tracks (merge of pull request 44)" of ticket 13b)
+
+**The rule.** When the campaign has a live phone track, the projection also runs the engine's call placement pass, in the engine's order (after evaluation, before claims, as `Engine.runTick`): every simulated subject's `rules.readyCalls`, sorted by `rules.callOrder`, each placed by `rules.placeCall` on the subject as the store would load it at that instant. `placeCall` decides, with `callRoom`, whether the day has room, so capacity is the engine's own check.
+
+What the projection supplies, because the store supplies it to the engine, is the user's call day (`CallDay`, 4.4):
+
+- `capacity` and `userZone`: the stored call settings;
+- `day`: the user day of the instant;
+- `placedToday`: on the current user day, the store's count (every campaign) plus the simulation's placements; on a later day, the simulation's placements that day;
+- `committed`: on the current user day, the store's count; on a later day, the stored open tasks that are listed for the first time that day (placed before the projection, not callable on any day since), and nothing the simulation placed.
+
+**The one assumption about the user.** No estimate can know which calls the user will log, or when. The projection assumes the user works through each day's list: every call on it is dealt with that day, so none is carried into the next day's room. It applies no outcome: a placed task stays on its subject, so its step is never placed twice, and nothing a call's outcome changes is foreseen (the lead is not touched, its phone track does not finish, an interested call does not end it), exactly as no reply is foreseen. The email and text estimate is therefore unchanged: it still assumes no call outcome is logged. The screen says both.
+
+**Which subjects it simulates.** The user's call list is one capacity shared by every campaign (spec "Pace, capacity and timing": limits per account across all campaigns; for calls, the user's daily call capacity). So when this campaign has a live phone track, every running subject of another campaign with a live phone track that has not finished joins the competitors, and the closure over shared sender accounts continues from them. A campaign that competes only for the call list can therefore withhold the whole figure for the same reasons as any competitor (a track of its own that waits on an unlogged call, work only the provider or the user can settle on an account it uses). That loses a figure in such cases; it never shows one the engine contradicts.
+
+**When it shows no figure, and says why** (added to 13b's list): a phone track that starts, through its chain of `after` starts, after a phone track goes on the list only once the earlier call is logged, which no estimate can know. It withholds the figure, named in `withheldBy` as `after_a_phone_track`, like an email or SMS track after a phone track.
+
+**What it reports** (`LoadProjectionView.calls`, present when the campaign has a live phone track):
+
+- the user's daily call capacity, and the calls on today's list across every campaign (the store's placed today plus committed), from the stored call day;
+- this campaign's busiest user day of new calls placed;
+- `daysUntilAllStart` now counts a lead as started at its first email or text, or when its first call is placed on the user's list, whichever comes first; `leadsToStart` counts leads any live track can reach, phone tracks included (`channelReaches`). `onlyCalled` still counts the leads only a phone track reaches, which are now in the figure.
+
+Days count from launch day as day 1, in the campaign's zone, as before.
+
+**Invariants** (asserted by `before-launch-projection.test.ts`):
+
+1. In generated worlds where no track waits on a call, with a test user who logs every listed call before each user day ends, the projected placements (lead, phone track, user day) are exactly the engine's.
+2. In generated worlds where nothing is logged and the day's room never binds, the projected sends and placements are both exactly the engine's.
+3. A world with a phone track after a phone track withholds the figure and names that track.
+
+A mutation of the projection alone, placing ready calls in reversed `callOrder`, must fail invariant 1 in some world; so must leaving out the stored committed tasks.
+
+**Inputs** (the 13b table's `call_tasks` row is replaced): `call_tasks` of every simulated subject, as stored, and the store's call day (`EngineStore.callDay`) at the projection's instant; the call settings. `call_attempts` and notes decide nothing the projection reads.
+
+**What it still does not foresee.** Call outcomes, and so anything they change; redials, callbacks and the skip limit's expiry (ticket 15); a number marked wrong.
 
 ## Consequences
 
