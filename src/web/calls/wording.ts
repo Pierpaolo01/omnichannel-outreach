@@ -388,11 +388,12 @@ export function recoveringLine(who: string): string {
 
 /** A kept refusal: what was not logged, and why, from the server's `offList` when it said. */
 export function refusedRecordLine(
-  record: { readonly who: string; readonly body: { readonly outcome: CallOutcomeApi; readonly redial?: true; readonly callbackAt?: string }; readonly refused: { readonly message: string; readonly offList: CallOffListView | null } },
+  record: { readonly who: string; readonly body: { readonly outcome: CallOutcomeApi; readonly redial?: true; readonly callbackAt?: string; readonly declinedPath?: DeclinedPathApi }; readonly refused: { readonly message: string; readonly offList: CallOffListView | null } },
   zone: string,
 ): string {
   const { body } = record;
-  const extra = body.redial ? " with a redial" : body.callbackAt ? ` for ${dateIn(zone, body.callbackAt)} at ${timeIn(zone, body.callbackAt)} your time` : "";
+  // The press's own choices: a redial, a callback's time, or the declined path pressed (ticket 16c).
+  const extra = body.redial ? " with a redial" : body.callbackAt ? ` for ${dateIn(zone, body.callbackAt)} at ${timeIn(zone, body.callbackAt)} your time` : body.declinedPath ? ` (“${DECLINED_PATH_CHOICE[body.declinedPath]}”)` : "";
   const what = body.outcome === "skip_for_now" ? `skip for now on ${record.who}` : `${OUTCOME_LABEL[body.outcome].toLowerCase()}${extra} for ${record.who}`;
   // The server's own message, unless it refused because the call was already logged, which the off-list facts say with what and when.
   const why = record.refused.offList?.reason === "logged" ? offListLine(record.who, record.refused.offList, null, zone) : record.refused.message;
@@ -546,7 +547,7 @@ export function declinedPathSourceLine(task: Pick<CallTaskView, "declinedPath" |
   const track = task.track.label.toLowerCase();
   const source = task.declinedPathSet ? `Preselected from the ${track}’s setting.` : `No path is set on the ${track} for a declined call, so the one logging uses without a choice is preselected.`;
   if (chosen === null || chosen === task.declinedPath) return source;
-  return `For ${who} only: the ${track} is set to “${DECLINED_PATH_CHOICE[task.declinedPath].toLowerCase()}”.`;
+  return `For ${who} only: the ${track} is set to “${DECLINED_PATH_CHOICE[task.declinedPath]}”.`;
 }
 
 /** A chosen path the call's read does not offer (the boundary, ticket 16c): Log sends nothing. */

@@ -1,6 +1,6 @@
 import { useId, useRef, type ReactNode } from "react";
 import { Link } from "wouter";
-import type { CallColleagueView, CallOutcomeApi, CallQueueItem, CallsView, CallTaskView, NoteView, TouchView } from "../../shared/api.ts";
+import type { CallColleagueView, CallOutcomeApi, CallQueueItem, CallsView, CallTaskView, DeclinedPathApi, NoteView, TouchView } from "../../shared/api.ts";
 import { when } from "../activity.tsx";
 import { CallDesk, NOTE_MAX, whoOf, type DeskSnapshot } from "../calls/callDesk.ts";
 import { useCallDesk } from "../calls/useCallDesk.ts";
@@ -25,7 +25,12 @@ import {
   callingHoursLine,
   capacityLine,
   clockLine,
+  DECLINED_PATH_CHOICE,
   DECLINED_PATH_LINE,
+  PATH_NOT_OFFERED,
+  PATH_NOT_OFFERED_LINE,
+  declinedPathSourceLine,
+  declinePreviewLines,
   dialledLine,
   loggedLine,
   numberKind,
@@ -42,8 +47,11 @@ import { Icon } from "../icons.tsx";
 import { StatusBadge } from "../status.tsx";
 import { useNow } from "../time.ts";
 
-/** The outcomes this release offers, in the prototype's order; not interested (ticket 16) sits before skip for now as a not-yet pill. */
-const OFFERED: readonly CallOutcomeApi[] = ["no_answer", "voicemail", "gatekeeper", "wrong_number", "callback_requested", "interested"];
+/** The outcomes, in the prototype's order; skip for now follows them. */
+const OFFERED: readonly CallOutcomeApi[] = ["no_answer", "voicemail", "gatekeeper", "wrong_number", "callback_requested", "interested", "not_interested"];
+
+/** The declined paths, in the prototype's order. */
+const PATHS: readonly DeclinedPathApi[] = ["stop", "continue", "win_back"];
 
 const TONE = { muted: "text-muted", pause: "text-pause", crit: "text-crit" } as const;
 
@@ -480,13 +488,13 @@ function touchRow(t: TouchView): { icon: "email" | "sms" | "reply" | "call"; ton
 function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; snap: DeskSnapshot; task: CallTaskView; userZone: string; placeFocus: ReturnType<typeof useKeyboardFocus> }) {
   const noteId = useId();
   const hintId = useId();
-  const later = useId();
   const { draft, locked } = snap;
   const who = whoOf(task);
   const dialled = task.numbers.find((n) => n.detailId === draft.numberId);
   const away = snap.away;
   const pending = snap.pending !== null;
-  const canLog = draft.outcome !== null && !snap.noteTooLong && (draft.outcome === "skip_for_now" || (dialled !== undefined && snap.numberProblem === null)) && (draft.outcome !== "callback_requested" || snap.callback?.at != null);
+  const pathRefused = snap.declined !== null && !snap.declined.offered;
+  const canLog = draft.outcome !== null && !snap.noteTooLong && (draft.outcome === "skip_for_now" || (dialled !== undefined && snap.numberProblem === null)) && (draft.outcome !== "callback_requested" || snap.callback?.at != null) && !pathRefused;
   const days = callbackDays(task.asOf, task.zone);
   const noGood = noGoodNumberOn(task);
   return (
@@ -539,7 +547,7 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
           <p className="text-[13px] text-muted">Notes on a company lead are company notes, shown for everyone at {task.company.name}.</p>
         )}
       </div>
-      <div role="group" aria-label="Call outcome" aria-describedby={later} className="flex flex-wrap gap-2">
+      <div role="group" aria-label="Call outcome" className="flex flex-wrap gap-2">
         {OFFERED.map((o) => (
           <OutcomePill
             key={o}
@@ -551,14 +559,8 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
             onPress={() => desk.setDraft({ outcome: o, ...(o === "callback_requested" && draft.callbackDay === null ? { callbackDay: days[0]?.value ?? null } : {}) })}
           />
         ))}
-        <button type="button" disabled aria-describedby={later} className="cursor-not-allowed rounded-[20px] border border-dashed border-line-strong bg-base-100 px-3.5 py-[7px] text-[14px] font-medium text-muted">
-          Not interested
-        </button>
         <OutcomePill label={OUTCOME_LABEL.skip_for_now} pressed={!away && draft.outcome === "skip_for_now"} locked={locked} onPress={() => desk.setDraft({ outcome: "skip_for_now" })} />
       </div>
-      <p id={later} className="-mt-2 text-[13px] text-muted">
-        Not interested arrives with a later release.
-      </p>
       {!away && draft.outcome && (
         <div className="flex flex-col gap-2.5 rounded-field bg-raised px-4 py-3.5 text-[14px]">
           {draft.outcome === "wrong_number" ? (
@@ -572,6 +574,8 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
             </>
           ) : draft.outcome === "callback_requested" ? (
             <CallbackFields desk={desk} snap={snap} task={task} userZone={userZone} days={days} who={who} />
+          ) : draft.outcome === "not_interested" ? (
+            <DeclinedPathFields desk={desk} snap={snap} task={task} userZone={userZone} who={who} />
           ) : draft.outcome === "skip_for_now" ? (
             <p className="text-[13px] text-muted">{skipLine(task)}</p>
           ) : (
@@ -595,7 +599,9 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
               : !canLog && !snap.noteTooLong
                 ? draft.outcome !== "skip_for_now" && (dialled === undefined || snap.numberProblem !== null)
                   ? "Choose the number you dial above."
-                  : snap.callback?.problem === "missing"
+                  : pathRefused
+                    ? "Choose another path."
+                    : snap.callback?.problem === "missing"
                     ? "Enter the time they asked for."
                     : "Choose a callback time still to come."
                 : ""}
@@ -702,6 +708,68 @@ function CallbackFields({ desk, snap, task, userZone, days, who }: { desk: CallD
         {line.text}
       </p>
       <p className="text-[13px] text-muted">{callbackHoldLine(task, who)}</p>
+    </>
+  );
+}
+
+/**
+ * Not interested (ticket 16c, the prototype's outcome box): the three paths as radios, the phone track's path (or, unset,
+ * what the engine does, Q14) preselected from the call's read and overridable for this lead, a path the read does not
+ * offer disabled with its reason; then what logging does on the path shown, from the read's `declines`.
+ */
+function DeclinedPathFields({ desk, snap, task, userZone, who }: { desk: CallDesk; snap: DeskSnapshot; task: CallTaskView; userZone: string; who: string }) {
+  const name = useId();
+  const sourceId = useId();
+  const declined = snap.declined;
+  if (declined === null) return null;
+  const preview = task.declines?.find((d) => d.path === declined.path) ?? null;
+  const lines = preview ? declinePreviewLines(preview, task.campaign.name, userZone) : null;
+  return (
+    <>
+      <fieldset className="flex flex-col gap-1.5" aria-describedby={sourceId}>
+        <legend className="mb-1 font-medium">What happens next for {who}</legend>
+        {PATHS.map((path) => {
+          const offered = task.declinedPaths.includes(path);
+          return (
+            <label key={path} className={`flex items-start gap-2.5 ${offered && !snap.locked ? "cursor-pointer" : "cursor-not-allowed"} ${offered ? "" : "text-muted"}`}>
+              <input
+                type="radio"
+                name={name}
+                value={path}
+                className="mt-[3px] size-4 shrink-0 accent-[var(--color-call)]"
+                checked={declined.path === path}
+                disabled={snap.locked || (!offered && declined.path !== path)}
+                onChange={() => desk.setDraft({ declinedPath: path })}
+              />
+              <span>
+                {DECLINED_PATH_CHOICE[path]}
+                {offered ? "" : ` ${PATH_NOT_OFFERED}`}
+              </span>
+            </label>
+          );
+        })}
+      </fieldset>
+      <p id={sourceId} className="text-[13px] text-muted">
+        {declinedPathSourceLine(task, declined.chosen ? declined.path : null, who)}
+      </p>
+      {!declined.offered ? (
+        <p className="font-medium text-crit">{PATH_NOT_OFFERED_LINE}</p>
+      ) : (
+        lines && (
+          <div aria-live="polite" className="flex flex-col gap-1.5">
+            <p>{lines.lead}</p>
+            {lines.tracks.length > 0 && (
+              <ul aria-label="What logging does to each track" className="flex flex-col gap-0.5 text-[13px] text-ink-2">
+                {lines.tracks.map((line) => (
+                  <li key={line}>{line}</li>
+                ))}
+              </ul>
+            )}
+            {lines.provider && <p className="text-[13px] text-pause">{lines.provider}</p>}
+          </div>
+        )
+      )}
+      <p className="text-[13px] text-muted">{outcomeNumberLine("not_interested", task.numbers.find((n) => n.detailId === snap.draft.numberId && !n.bad) ?? null, snap.pending !== null)}</p>
     </>
   );
 }

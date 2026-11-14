@@ -85,7 +85,7 @@ async function world(modes: readonly FakeMode[] = ["honest"]) {
     return log(id, { outcome: "not_interested", numberId: direct, ...(path ? { declinedPath: path } : {}) });
   };
   const activity = async (campaignId: string) => (await h.request<ActivityView>("GET", `/api/people/${personId}/activity`)).body.entries.filter((e) => e.campaign.id === campaignId);
-  const declineEntry = async (campaignId: string) => (await activity(campaignId)).find((e): e is Extract<ActivityEntry, { kind: "call"; channel: "call" }> => e.kind === "call" && e.channel === "call" && e.outcome === "not_interested");
+  const declineEntry = async (campaignId: string) => (await activity(campaignId)).find((e): e is Extract<ActivityEntry, { kind: "call"; channel: "call" }> => e.kind === "call" && e.outcome === "not_interested");
   const record = async () => (await h.request<PersonRecord & RecordCalls>("GET", `/api/people/${personId}`)).body;
   return { h, campaign, task, taskOf, decline, activity, declineEntry, record };
 }

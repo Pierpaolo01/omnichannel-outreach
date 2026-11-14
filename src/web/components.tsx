@@ -1,7 +1,7 @@
 import { useId, type ReactNode } from "react";
 import { Link } from "wouter";
 import type { ColleagueView, ContactDetailView, EnrollmentView, RecordCalls, UnenrolledReason } from "../shared/api.ts";
-import { recordCallLine } from "./calls/wording.ts";
+import { declinedRecordLine, recordCallLine } from "./calls/wording.ts";
 import { Icon } from "./icons.tsx";
 import { StatusBadge, enrollmentSentence } from "./status.tsx";
 import { clockIn, useNow } from "./time.ts";
@@ -143,6 +143,14 @@ export function CampaignRows({
               <StatusBadge status={enrollment.status} />
             </div>
             {sentence && <p className="text-[14px] text-ink-2">{sentence}</p>}
+            {/* A decline on a call and the path it took (ticket 16c), beside the status the server reads now. */}
+            {calls?.declines
+              .filter((d) => d.enrollmentId === enrollment.id)
+              .map((d) => (
+                <p key={`declined-${d.enrollmentId}`} className="text-[14px] text-ink-2 [overflow-wrap:anywhere]">
+                  {declinedRecordLine(d, enrollment.status)}
+                </p>
+              ))}
             {calls?.calls
               .filter((c) => c.enrollmentId === enrollment.id)
               .map((c) => {
