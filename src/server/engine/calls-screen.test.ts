@@ -319,6 +319,40 @@ describe("a read and the worker's placements: the completed-placement marker is 
     });
   }
 
+  test("a read that waited is as of the instant it answers: its marker, wakes and view are all taken then (review bot on 12f0303, audit)", async () => {
+    // An engine whose next wake is 00:00:01 until then, and 00:01:00 after; the worker's tick ends at 00:00:02.
+    const T0 = Date.parse("2026-11-03T00:00:00Z");
+    let clock = T0;
+    let marker = T0 - TICK_MS;
+    const ended: (() => void)[] = [];
+    const worker = { tickEnded: () => new Promise<void>((resolve) => ended.push(resolve)), nextTickAt: () => T0 + TICK_MS };
+    const h = new EngineHarness({ start: T0, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+    const app = (await import("../app.ts")).createApp({
+      store: h.store,
+      now: () => new Date(clock).toISOString(),
+      newId: () => `n${Math.random()}`,
+      engine: {
+        launch: () => Promise.reject(new Error("no")),
+        logCallOutcome: () => Promise.reject(new Error("no")),
+        nextWakeAt: async (at?: number) => ((at ?? clock) < T0 + 1_000 ? T0 + 1_000 : T0 + MIN),
+        callsPlacedThrough: async () => marker,
+        nextCallWakeAt: async () => null,
+      },
+      worker,
+    });
+    let answered: CallsView | null = null;
+    const read = Promise.resolve(app.request(`/api/calls?expected=${encodeURIComponent(new Date(T0).toISOString())}`)).then(async (r: Response) => (answered = (await r.json()) as CallsView));
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+    expect(answered).toBeNull();
+    clock = T0 + 2_000;
+    marker = T0 + 2_000;
+    ended.shift()?.();
+    await read;
+    expect(answered!.asOf).toBe("2026-11-03T00:00:02.000Z");
+    // The engine's next wake after the read's own instant: not the one it had before the wait, now past.
+    expect(answered!.nextChangeAt).toBe("2026-11-03T00:01:00.000Z");
+  });
+
   test("a read at the advertised instant waits at most 3 seconds for the marker, then answers what is stored, marked behind", async () => {
     const timers: { at: number; fire: () => void }[] = [];
     const box: { h: EngineHarness | null } = { h: null };
@@ -338,7 +372,7 @@ describe("a read and the worker's placements: the completed-placement marker is 
     const h = await midnight("throws before placing");
     box.h = h;
     let answered: CallsView | null = null;
-    const app = (await import("../app.ts")).createApp({ store: h.store, now: () => new Date(h.clock).toISOString(), newId: () => `n${Math.random()}`, engine: { launch: () => Promise.reject(new Error("no")), logCallOutcome: () => Promise.reject(new Error("no")), nextWakeAt: () => h.engine.nextWakeAt(), callsPlacedThrough: () => h.engine.callsPlacedThrough(), nextCallWakeAt: (a) => h.engine.nextCallWakeAt(a) }, worker });
+    const app = (await import("../app.ts")).createApp({ store: h.store, now: () => new Date(h.clock).toISOString(), newId: () => `n${Math.random()}`, engine: { launch: () => Promise.reject(new Error("no")), logCallOutcome: () => Promise.reject(new Error("no")), nextWakeAt: (at) => h.engine.nextWakeAt(at), callsPlacedThrough: () => h.engine.callsPlacedThrough(), nextCallWakeAt: (a, at) => h.engine.nextCallWakeAt(a, at) }, worker });
     const read = Promise.resolve(app.request(`/api/calls?expected=${encodeURIComponent("2026-11-03T00:00:00.000Z")}`)).then(async (r: Response) => (answered = (await r.json()) as CallsView));
     for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
     expect(answered).toBeNull();

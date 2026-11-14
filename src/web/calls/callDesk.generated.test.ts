@@ -138,8 +138,14 @@ interface Tab {
   readonly label: string;
   readonly session: MapStore;
   instance: Instance;
-  /** What the user chose on each call's draft in this tab (invariant 7): number, outcome and note. */
-  readonly choices: Map<string, { numberId: string | null; outcome: string | null; note: string }>;
+  /** What the user chose on each call's draft in this tab (invariant 7): number, outcome and note; a new object for each edit. */
+  readonly choices: Map<string, Choice>;
+}
+
+interface Choice {
+  readonly numberId: string | null;
+  readonly outcome: string | null;
+  readonly note: string;
 }
 
 interface Request {
@@ -173,6 +179,11 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
   const requests: Request[] = [];
   const presses: Press[] = [];
   const pressOf = new Map<string, Press>();
+  /** The draft (the tab's choice object) each press was made from: only it may be cleared by the press's answer. */
+  const captured = new Map<string, Choice | undefined>();
+  /** Whether an accepted answer to `req` meets the draft its press captured, still the user's latest on that call in that tab. */
+  const metCaptured = new Set<string>();
+  const meetsCaptured = (req: Request) => !req.from.disposed && captured.has(req.body.requestId) && req.from.tab.choices.get(req.taskId) === captured.get(req.body.requestId);
   const problems: string[] = [];
   /** Every id some desk was refused for, and accepted for, across reloads. */
   const refusedIds = new Set<string>();
@@ -254,8 +265,12 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
     if (req.answer.status === 200) {
       req.from.ok.add(req.body.requestId);
       okIds.add(req.body.requestId);
-      // A logged action consumes its draft: the call's next draft is made afresh.
-      if (!req.from.disposed) req.from.tab.choices.delete(req.taskId);
+      // A logged action consumes the draft its press captured, and only that one: anything typed since is kept.
+      if (meetsCaptured(req)) {
+        req.from.tab.choices.delete(req.taskId);
+        metCaptured.add(req.body.requestId);
+      }
+      else if (!req.from.disposed && req.from.tab.instance.desk.getSnapshot().focus === req.taskId && captured.has(req.body.requestId)) seen.lateAfterEdit++;
       return req.resolve(req.answer.json as CallOutcomeAnswer);
     }
     if (req.answer.status >= 500) return req.reject(new NoAnswer());
@@ -320,6 +335,8 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
       }
       if (snap.focus !== i.lastFocus && i.lastFocus !== null) tab.choices.delete(i.lastFocus);
       const newlyLogged = snap.logged !== null && snap.logged.requestId !== i.lastLogged;
+      // An answer shows as logged here, and moves the focus, only on the draft its press captured, untouched since.
+      if (snap.logged !== null && newlyLogged && !metCaptured.has(snap.logged.requestId)) problems.push(`6: ${tab.label} shows ${snap.logged.requestId} logged and moves on, though the call's draft was edited after that press`);
       i.lastLogged = snap.logged?.requestId ?? null;
       if (snap.focus !== i.lastFocus && i.lastFocus !== null && !moved.has(i) && !newlyLogged) problems.push(`4: ${tab.label}'s focus moved from ${i.lastFocus} to ${snap.focus} without an outcome or moving on`);
       i.lastFocus = snap.focus;
@@ -335,7 +352,7 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
 
   /** Refusals a desk showed on the call and the user moved on from (acknowledged). */
   const movedOnFrom = new Set<string>();
-  const seen = { refusedShown: 0, foundGone: 0, unconfirmed: 0, blocked: 0, recovered: 0, dismissed: 0, records: 0, leftWithPending: 0, notQueued: 0, refusalFocus: new Set<string>() };
+  const seen = { lateAfterEdit: 0, refusedShown: 0, foundGone: 0, unconfirmed: 0, blocked: 0, recovered: 0, dismissed: 0, records: 0, leftWithPending: 0, notQueued: 0, refusalFocus: new Set<string>() };
   let storageFullUntil = -1;
   const tabs: Tab[] = [];
   tabs.push(await newTab("a"), await newTab("b"));
@@ -366,6 +383,12 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
         const numberId = roll2 < 0.3 ? (numbers.find((n) => n.kind === "main_line")?.detailId ?? snap.draft.numberId) : roll2 < 0.45 ? (numbers[Math.floor(r() * numbers.length)]?.detailId ?? null) : snap.draft.numberId;
         desk.setDraft({ outcome, note, numberId, noteScope: r() < 0.3 ? "company" : "person" });
         if (snap.focus !== null) tab.choices.set(snap.focus, { numberId, outcome, note });
+        // Now and then the user only edits the draft, and presses nothing.
+        if (r() < 0.2) {
+          await flush();
+          await check(moved);
+          continue;
+        }
         const blocked = outcome !== "skip_for_now" && desk.getSnapshot().numberProblem !== null;
         const sentBefore = requests.length;
         pressing = true;
@@ -387,6 +410,7 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
           const press = { tab: tab.label, note, ids: new Set([id]) };
           presses.push(press);
           pressOf.set(id, press);
+          if (snap.focus !== null) captured.set(id, tab.choices.get(snap.focus));
         }
       }
     } else if (roll < 0.38) {
@@ -397,7 +421,8 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
       const done = requests.filter((q) => q.answer !== null);
       const req = done[Math.floor(r() * done.length)];
       if (req) {
-        if (req.answer?.status === 200) moved.add(req.from);
+        // The focus may move only on an answer that meets the draft its press captured.
+        if (req.answer?.status === 200 && meetsCaptured(req)) moved.add(req.from);
         answer(req, r() < 0.3);
       }
     } else if (roll < 0.6) {
@@ -438,6 +463,8 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
       // The browser duplicates a tab: the copy starts with the same sessionStorage, tab id included.
       const copy = { label: `${tab.label}+`, session: new MapStore(), choices: new Map() } as Omit<Tab, "instance"> as Tab;
       for (const [k, v] of tab.session.map) copy.session.set(k, v);
+      // The copy holds the same drafts: the same choices, not new ones.
+      for (const [k, v] of tab.choices) copy.choices.set(k, v);
       await open(copy);
       tabs.push(copy);
     } else if (roll < 0.83) {
@@ -502,7 +529,7 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
     await flush();
     for (const req of [...requests]) {
       if (req.answer === null) await deliver(req);
-      const moved = new Set<Instance>(req.answer?.status === 200 ? [req.from] : []);
+      const moved = new Set<Instance>(req.answer?.status === 200 && meetsCaptured(req) ? [req.from] : []);
       answer(req, false);
       await flush();
       await check(moved);
@@ -529,8 +556,9 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
 }
 
 describe("working the call list in the browser, generated over the real call desk (ADR 0003 4.4.1)", () => {
-  const counts: { presses: number; logged: number; seen: { refusedShown: number; foundGone: number; unconfirmed: number; blocked: number; recovered: number; dismissed: number; records: number; leftWithPending: number; notQueued: number; refusalFocus: Set<string> } }[] = [];
-  for (const seed of Array.from({ length: SEEDS }, (_, i) => 9100 + i)) {
+  const counts: { presses: number; logged: number; seen: { lateAfterEdit: number; refusedShown: number; foundGone: number; unconfirmed: number; blocked: number; recovered: number; dismissed: number; records: number; leftWithPending: number; notQueued: number; refusalFocus: Set<string> } }[] = [];
+  // And 9217, which reaches the bot's ordering: another desk's answer first, an edit on the same call, then the late original answer.
+  for (const seed of [...Array.from({ length: SEEDS }, (_, i) => 9100 + i), 9217]) {
     test(`run ${seed}`, async () => {
       const out = await run(seed);
       counts.push(out);
@@ -547,6 +575,8 @@ describe("working the call list in the browser, generated over the real call des
     expect(counts.filter((c) => c.seen.recovered > 0).length).toBeGreaterThan(0);
     expect(counts.filter((c) => c.seen.records > 0).length).toBeGreaterThan(0);
     expect(counts.filter((c) => c.seen.notQueued > 0).length).toBeGreaterThan(0);
+    // A late answer arrives at a desk on that call after a later edit there.
+    expect(counts.filter((c) => c.seen.lateAfterEdit > 0).length).toBeGreaterThan(0);
     // A refusal is recovered by a desk on that same call, on another call, and on none.
     for (const where of ["same", "other", "none"]) expect(counts.some((c) => c.seen.refusalFocus.has(where)), where).toBe(true);
   });
@@ -559,13 +589,14 @@ describe("each desk fault is caught by its known seed (ADR 0003 4.4.1)", () => {
     ["outbox_removed_when_sent", 9100, "7:"],
     ["refresh_adopts_focus", 9100, "4:"],
     ["no_lock_while_pending", 9100, "5:"],
-    ["substitute_bad_number", 9100, "6:"],
+    ["substitute_bad_number", 9103, "6:"],
     ["pending_kept_after_answer", 9100, "7:"],
     ["disposed_desk_applies", 9101, "8:"],
-    ["only_own_entries_retried", 9105, "9:"],
-    ["refusal_dropped", 9100, "3:"],
-    ["focused_refusal_hidden", 9100, "3:"],
+    ["only_own_entries_retried", 9103, "9:"],
+    ["refusal_dropped", 9111, "3:"],
+    ["focused_refusal_hidden", 9113, "3:"],
     ["stale_copy_written_back", 9101, "3:"],
+    ["answer_clears_newer_draft", 9217, "6:"],
   ];
   for (const [fault, seed, invariant] of KILLING) {
     test(`${fault}, seed ${seed}, invariant ${invariant}`, async () => {
@@ -577,11 +608,12 @@ describe("each desk fault is caught by its known seed (ADR 0003 4.4.1)", () => {
 
 /** By hand: CALL_DESK_FAULT_SEARCH=1 prints the first seeds that catch each fault, to fill KILLING above. */
 describe.skipIf(!process.env["CALL_DESK_FAULT_SEARCH"])("fault search (by hand)", () => {
-  const all: DeskFault[] = ["new_id_on_resend", "logged_when_sent", "outbox_removed_when_sent", "refresh_adopts_focus", "no_lock_while_pending", "substitute_bad_number", "pending_kept_after_answer", "disposed_desk_applies", "only_own_entries_retried", "refusal_dropped", "focused_refusal_hidden", "stale_copy_written_back"];
+  // refusal_resent_at_once needs storage full while answers keep coming; callDesk.test.ts kills it by a count of requests.
+  const all: DeskFault[] = ["new_id_on_resend", "logged_when_sent", "outbox_removed_when_sent", "refresh_adopts_focus", "no_lock_while_pending", "substitute_bad_number", "pending_kept_after_answer", "disposed_desk_applies", "only_own_entries_retried", "refusal_dropped", "focused_refusal_hidden", "stale_copy_written_back", "answer_clears_newer_draft"];
   for (const fault of all) {
     test(fault, async () => {
       const found: string[] = [];
-      for (let seed = 9100; seed < 9180 && found.length < 2; seed++) {
+      for (let seed = 9100; seed < Number(process.env["CALL_DESK_FAULT_SEARCH_TO"] ?? 9180) && found.length < 2; seed++) {
         const out = await run(seed, new Set([fault]));
         if (out.problems.length > 0) found.push(`${seed}: ${out.problems[0]}`);
       }

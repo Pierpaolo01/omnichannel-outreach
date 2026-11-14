@@ -238,4 +238,13 @@ export function numberProblemLine(problem: { readonly kind: "bad" | "gone"; read
 export const BEHIND_LINE = "Calls that have just fallen due may still be being placed. This page updates when they are.";
 
 /** A press this device's storage refused (ADR 0003 4.4.1, the boundary): nothing was sent. */
+/**
+ * A kept refusal says only what is true of it: that outcome was not logged, why, and the note typed
+ * with it. Whether that text is saved anywhere is not its to say (re-check on 12f0303, R2).
+ */
+export const REFUSED_NOTE_LEAD = "The note typed with it:";
+
+/** A refusal this device's storage would not record: shown from the page, its write retried. */
+export const UNSTORED_REFUSAL_LINE = "This device’s storage is full or blocked, so this refusal could not be recorded on it.";
+
 export const NOT_QUEUED_LINE = "This outcome couldn’t be queued on this device: its storage is full or blocked, so nothing was sent. Your choice and note are kept. Free some space, or allow this site to store data, then press Log again.";

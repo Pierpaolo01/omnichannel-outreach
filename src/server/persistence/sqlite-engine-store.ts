@@ -30,7 +30,7 @@ import type {
   WorkSettlement,
 } from "../../domain/sequence/state.ts";
 import { isOutreachStatus } from "../../domain/outreach-status.ts";
-import type { BounceEvent, CallNoteRecord, CallSettings, CampaignEngineRow, DefinitionSave, EngineStore, LaunchOutcome, ReplyEvent, SaveResult, SenderAccountConfig, StoredDefinition, StoredNote } from "../engine/engine-store.ts";
+import type { BounceEvent, CallNoteRecord, CallSettings, CampaignEngineRow, DefinitionSave, EngineStore, LaunchOutcome, PlacementTransaction, ReplyEvent, SaveResult, SenderAccountConfig, StoredDefinition, StoredNote } from "../engine/engine-store.ts";
 import { liveDetailRowOf } from "./sqlite-store.ts";
 
 type Row = Record<string, SQLOutputValue>;
@@ -164,10 +164,9 @@ export class SqliteEngineStore implements EngineStore {
     return this.write(base, next, now);
   }
 
-  async placeCalls(through: number, now: number, decisions: readonly { readonly subjectId: string; readonly decide: (state: SubjectState) => SubjectState | null }[]): Promise<number> {
+  async placeCalls(through: number, plan: (tx: PlacementTransaction) => number): Promise<number> {
     return this.transaction(() => {
-      let placed = 0;
-      for (const d of decisions) if (this.applyNow(d.subjectId, now, d.decide)) placed++;
+      const placed = plan({ subject: (id) => this.load(id, through), apply: (id, decide) => this.applyNow(id, through, decide) });
       // The marker is written with the placements it vouches for, never lowered.
       this.run(
         "INSERT INTO engine_meta (key, value) VALUES ('calls_placed_through', ?) ON CONFLICT(key) DO UPDATE SET value = CAST(MAX(CAST(engine_meta.value AS INTEGER), CAST(excluded.value AS INTEGER)) AS TEXT)",

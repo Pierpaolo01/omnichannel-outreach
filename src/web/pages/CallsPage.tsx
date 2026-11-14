@@ -8,6 +8,8 @@ import { useFocusRescue } from "../focusRescue.ts";
 import {
   BEHIND_LINE,
   NOT_QUEUED_LINE,
+  REFUSED_NOTE_LEAD,
+  UNSTORED_REFUSAL_LINE,
   CAPACITY_USED,
   OUTCOME_LABEL,
   OUTCOME_TITLE,
@@ -115,10 +117,11 @@ function Records({ desk, snap, placeFocus }: { desk: CallDesk; snap: DeskSnapsho
         <li key={r.body.requestId} className="flex flex-col gap-2 rounded-field bg-crit-soft px-4 py-3 text-[14px]">
           <p role="alert" className="text-base-content [overflow-wrap:anywhere]">
             {refusedRecordLine(r, zone)}
+            {r.unstored && ` ${UNSTORED_REFUSAL_LINE}`}
           </p>
           {r.body.note.trim() !== "" && (
             <p className="text-ink-2 [overflow-wrap:anywhere]">
-              Your note wasn’t saved: <q className="whitespace-pre-wrap">{r.body.note}</q>
+              {REFUSED_NOTE_LEAD} <q className="whitespace-pre-wrap">{r.body.note}</q>
             </p>
           )}
           <div>

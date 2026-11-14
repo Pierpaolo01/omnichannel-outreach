@@ -102,7 +102,7 @@ export class EngineHarness {
       store: this.store,
       now: () => new Date(this.clock).toISOString(),
       newId: sequentialIds(),
-      engine: { launch: (id, expected) => this.engine.launch(id, expected), logCallOutcome: (id, input) => this.engine.logCallOutcome(id, input), nextWakeAt: () => this.engine.nextWakeAt(), callsPlacedThrough: () => this.engine.callsPlacedThrough(), nextCallWakeAt: (after) => this.engine.nextCallWakeAt(after) },
+      engine: { launch: (id, expected) => this.engine.launch(id, expected), logCallOutcome: (id, input) => this.engine.logCallOutcome(id, input), nextWakeAt: (at) => this.engine.nextWakeAt(at), callsPlacedThrough: () => this.engine.callsPlacedThrough(), nextCallWakeAt: (after, at) => this.engine.nextCallWakeAt(after, at) },
       emailProvider: "status" in this.provider ? (this.provider as Provider & EmailProviderSource) : null,
       smsProvider: this.smsProvider ? "test-simulator" : "none",
       ...(options.rules ? { rules: options.rules } : {}),
@@ -149,6 +149,7 @@ export class EngineHarness {
         beforeRetry: async (id) => this.hooks.beforeRetry?.(id),
         afterAuthorization: (id) => this.hooks.afterAuthorization?.(id),
         crashPoint: (point, id) => this.hooks.crashPoint?.(point, id),
+        afterStep: (step) => this.hooks.afterStep?.(step),
       },
     });
   }

@@ -68,6 +68,7 @@ async function world() {
   const held: Held[] = [];
   const timers: (() => void)[] = [];
   let ids = 0;
+  let posts = 0;
   const deliver = async (x: Held) => h.request<unknown>("POST", `/api/call-tasks/${x.taskId}/outcome`, x.body);
   /** Delivers a held POST and passes its answer back, or loses the answer. */
   const answer = async (x: Held, lost = false) => {
@@ -89,7 +90,10 @@ async function world() {
         }
         return (await h.request<CallTaskView>("GET", `/api/call-tasks/${id}`)).body;
       },
-      post: (taskId, body) => new Promise((resolve, reject) => held.push({ taskId, body, resolve, reject })),
+      post: (taskId, body) => {
+        posts++;
+        return new Promise((resolve, reject) => held.push({ taskId, body, resolve, reject }));
+      },
       local,
       session,
       newId: () => `id-${++ids}`,
@@ -104,7 +108,7 @@ async function world() {
   };
   const outbox = () => local.keys().filter((k) => k.startsWith("outreach.calls.outbox."));
   const stored = async (requestId: string) => (await h.store.engine.callRequestTask(requestId)) !== null;
-  return { h, desk, held, answer, fireTimers, outbox, stored, local, failTaskReads: (n: number) => (failTaskReads = n) };
+  return { h, desk, held, answer, fireTimers, outbox, stored, local, failTaskReads: (n: number) => (failTaskReads = n), posts: () => posts };
 }
 
 describe("what the user chose is never replaced for them (review bot on e6872eb, finding 1)", () => {
@@ -214,17 +218,14 @@ describe("a desk that is no longer on screen writes nothing but the outbox (revi
     const namedByStale = staleAnswer.body.nextFocusTaskId;
     old.dispose();
 
-    // The page is opened again in the same tab: it sends the entry again; the server says the call is logged; the user moves on through two calls.
+    // The page is opened again in the same tab: it sends the entry again and its answer clears the draft
+    // that press captured, still this tab's, so it shows as logged and the next call opens; the user works two calls.
     const live = w.desk(session);
     await live.start();
     await flush();
     await w.answer(w.held[0]!);
     await flush();
-    await live.refresh();
-    await flush();
-    expect(live.getSnapshot().away).toMatchObject({ offList: { reason: "logged" } });
-    await live.moveOn();
-    await flush();
+    expect(live.getSnapshot().logged?.requestId).toBe(stale.body.requestId);
     expect(live.getSnapshot().task?.state).toBe("ready");
     live.setDraft({ outcome: "voicemail" });
     live.log();
@@ -427,9 +428,11 @@ describe("whether a note was saved is the server's fact (review bot on 9c3ad27)"
     await flush();
     await back.refresh();
     await flush();
-    const away = back.getSnapshot().away;
-    expect(away).toMatchObject({ offList: { reason: "logged", outcome: "voicemail" } });
-    expect(away?.note).toBe("");
+    // The same tab's draft was that press's: the answer shows it logged, with the note as the server stored it.
+    const logged = back.getSnapshot().logged;
+    expect(logged?.body.outcome).toBe("voicemail");
+    expect(logged?.task.personNotes.map((n) => n.body)).toContain("Left a message about evening bookings.");
+    expect(back.getSnapshot().away?.note ?? "").toBe("");
   });
 });
 
@@ -518,5 +521,127 @@ describe("storage is the only truth: a dismissal is final, and a press storage r
     await flush();
     expect(w.held).toHaveLength(1);
     expect(a.getSnapshot().notQueued).toBe(false);
+  });
+});
+
+describe("an answer clears only the draft its press captured (review bot on 12f0303; ADR 0003 4.4.1)", () => {
+  // Every outcome: those that keep the call on screen (skip for now) let the user type again before the late answer.
+  for (const outcome of ["skip_for_now", "no_answer", "voicemail", "gatekeeper", "interested", "wrong_number"] as const) {
+    test(`${outcome}: another tab replays the press first; the original answer, arriving after a later edit, keeps that edit and the focus`, async () => {
+      const w = await world();
+      const sessionA = new MapStore();
+      const a = w.desk(sessionA);
+      await a.start();
+      await w.fireTimers();
+      const focus = a.getSnapshot().focus;
+      a.setDraft({ outcome, note: "Typed with the press." });
+      a.log();
+      await flush();
+      const original = w.held[0]!;
+      // Another tab opens Calls, sends the same entry, and its answer comes first: the entry goes.
+      const b = w.desk(new MapStore());
+      await b.start();
+      await flush();
+      const replay = w.held.find((x) => x !== original && x.body.requestId === original.body.requestId)!;
+      await w.answer(replay);
+      // The pressing tab hears of it as a storage change and reads the server.
+      await a.refresh();
+      await flush();
+      const snap = a.getSnapshot();
+      if (snap.locked) {
+        // The call is off the list: the page says why and keeps the call; nothing can be typed on it.
+        expect(snap.away?.offList.reason).toBe("logged");
+        expect(outcome).not.toBe("skip_for_now");
+        // The late answer is to the draft its press captured, untouched since: shown as logged, and the focus moves on.
+        await w.answer(original);
+        expect(a.getSnapshot().logged?.requestId).toBe(original.body.requestId);
+        return;
+      }
+      // Still listed (skip for now): the call is unlocked and the user types again.
+      expect(outcome).toBe("skip_for_now");
+      a.setDraft({ note: "Typed after the skip was logged." });
+      await w.answer(original);
+      expect(a.getSnapshot().focus).toBe(focus);
+      expect(a.getSnapshot().draft.note).toBe("Typed after the skip was logged.");
+      expect(JSON.parse(sessionA.get(`outreach.calls.draft.${focus}`) ?? "{}")).toMatchObject({ note: "Typed after the skip was logged." });
+      expect(a.getSnapshot().logged).toBeNull();
+    });
+  }
+
+  test("the fault that lets any answer to this desk's press clear the draft is caught", async () => {
+    const w = await world();
+    const sessionA = new MapStore();
+    const a = w.desk(sessionA, new Set(["answer_clears_newer_draft"]));
+    await a.start();
+    await w.fireTimers();
+    a.setDraft({ outcome: "skip_for_now", note: "Typed with the press." });
+    a.log();
+    await flush();
+    const original = w.held[0]!;
+    const b = w.desk(new MapStore());
+    await b.start();
+    await flush();
+    await w.answer(w.held.find((x) => x !== original)!);
+    await a.refresh();
+    await flush();
+    a.setDraft({ note: "Typed after the skip was logged." });
+    await w.answer(original);
+    expect(a.getSnapshot().draft.note).not.toBe("Typed after the skip was logged.");
+  });
+});
+
+describe("a refusal this device cannot record is shown, never a reason to ask again (review bot on 12f0303; ADR 0003 4.4.1)", () => {
+  async function refusedWhileFull(faults: ReadonlySet<DeskFault> = new Set()) {
+    const w = await world();
+    const a = w.desk(new MapStore(), faults);
+    await a.start();
+    await w.fireTimers();
+    const snap = a.getSnapshot();
+    const view = snap.task?.state === "ready" ? snap.task.view : null;
+    const mainLine = view?.numbers.find((n) => n.kind === "main_line");
+    a.setDraft({ numberId: mainLine?.detailId ?? null, outcome: "no_answer", note: "Typed with the refused press." });
+    a.log();
+    await flush();
+    // The main line is marked wrong on a colleague's call before the press arrives; the device's storage is full from now.
+    const other = (await w.h.request<CallsView>("GET", "/api/calls")).body.readyNow.find((x) => x.taskId !== snap.focus);
+    expect((await w.h.request("POST", `/api/call-tasks/${other?.taskId}/outcome`, { requestId: "elsewhere-main", outcome: "wrong_number", numberId: mainLine?.detailId })).status).toBe(200);
+    w.local.full = true;
+    // A second tab is open too. Every request is answered as soon as it is made, for a long while: refresh, storage events, timers, Try again.
+    const b = w.desk(new MapStore(), faults);
+    await b.start();
+    for (let i = 0; i < 30 && w.posts() < 50; i++) {
+      for (const x of [...w.held]) await w.answer(x);
+      await a.refresh();
+      await b.refresh();
+      if (i % 10 === 9) await w.fireTimers();
+      await flush();
+    }
+    return { w, a, b };
+  }
+
+  test("each desk sends the entry once; the refusal is shown with its note from memory; its write is retried on the backoff, and stored once there is room", async () => {
+    const { w, a, b } = await refusedWhileFull();
+    // One send from the pressing desk and one from the other desk when it first saw the entry: no more.
+    expect(w.posts()).toBe(2);
+    for (const d of [a, b]) {
+      const shown = d.getSnapshot().refusedRecords;
+      expect(shown).toHaveLength(1);
+      expect(shown[0]).toMatchObject({ unstored: true, body: { note: "Typed with the refused press." } });
+      expect(d.getSnapshot().pending).toBeNull();
+    }
+    // Storage has room again: the next try on the backoff records the refusal; nothing is sent.
+    w.local.full = false;
+    await w.fireTimers();
+    expect(w.posts()).toBe(2);
+    const kept = w.outbox().map((k) => w.local.get(k) ?? "");
+    expect(kept).toHaveLength(1);
+    expect(kept[0]).toContain('"refused"');
+    expect(kept[0]).not.toContain("unstored");
+    expect(a.getSnapshot().refusedRecords[0]?.unstored).toBeUndefined();
+  });
+
+  test("the fault that sends again at once when the refusal cannot be recorded is caught by the count of requests", async () => {
+    const { w } = await refusedWhileFull(new Set(["refusal_resent_at_once"]));
+    expect(w.posts()).toBeGreaterThan(2);
   });
 });

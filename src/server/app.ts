@@ -437,33 +437,34 @@ export function createApp({ store, now, newId, engine: givenEngine, worker, emai
    * A read whose list is behind (a call wake after the marker and at or before now) is marked `behind`
    * and advertises no later than the worker's next tick, so due work is never announced as far off.
    */
-  const readWake = async (expected: string | undefined): Promise<{ wake: number | null; behind: boolean }> => {
-    const wake = await engine.nextWakeAt();
-    const at = expected ? Date.parse(expected) : Number.NaN;
+  const readWake = async (expected: string | undefined): Promise<{ at: number; wake: number | null; behind: boolean }> => {
+    const asked = expected ? Date.parse(expected) : Number.NaN;
     // The stored marker, written with the placements it vouches for, is the only progress a read trusts.
-    if (worker && !Number.isNaN(at) && at <= Date.parse(now())) {
+    if (worker && !Number.isNaN(asked) && asked <= Date.parse(now())) {
       const until = Date.parse(now()) + READ_WAIT_MS;
-      while (((await engine.callsPlacedThrough()) ?? Number.NEGATIVE_INFINITY) < at && Date.parse(now()) < until) await worker.tickEnded(until - Date.parse(now()));
+      while (((await engine.callsPlacedThrough()) ?? Number.NEGATIVE_INFINITY) < asked && Date.parse(now()) < until) await worker.tickEnded(until - Date.parse(now()));
     }
-    const t = Date.parse(now());
+    // Then the read is as of one instant: the marker, the wakes and the view are all taken at `at`.
+    const at = Date.parse(now());
+    const wake = await engine.nextWakeAt(at);
     const through = await engine.callsPlacedThrough();
-    const due = through === null ? t : await engine.nextCallWakeAt(through);
-    if (due === null || due > t) return { wake, behind: false };
+    const due = through === null ? at : await engine.nextCallWakeAt(through, at);
+    if (due === null || due > at) return { at, wake, behind: false };
     const next = worker?.nextTickAt() ?? null;
-    const soon = next !== null && next > t ? next : t + TICK_MS;
-    return { wake: wake === null ? soon : Math.min(wake, soon), behind: true };
+    const soon = next !== null && next > at ? next : at + TICK_MS;
+    return { at, wake: wake === null ? soon : Math.min(wake, soon), behind: true };
   };
 
   // `nextChangeAt` includes the engine's next wake: a call can be placed or a track start then (ADR 0003 4.4.1).
   app.get("/today", async (c) => {
-    const { wake, behind } = await readWake(c.req.query("expected"));
-    return c.json(await todayView(store, Date.parse(now()), rules, wake, behind));
+    const { at, wake, behind } = await readWake(c.req.query("expected"));
+    return c.json(await todayView(store, at, rules, wake, behind));
   });
 
   // `focus`: the call the user's screen is on. It stays the focus while it is listed.
   app.get("/calls", async (c) => {
-    const { wake, behind } = await readWake(c.req.query("expected"));
-    return c.json(await callsView(store, Date.parse(now()), { focus: c.req.query("focus") || null, rules, nextWake: wake, behind }));
+    const { at, wake, behind } = await readWake(c.req.query("expected"));
+    return c.json(await callsView(store, at, { focus: c.req.query("focus") || null, rules, nextWake: wake, behind }));
   });
 
   app.get("/call-tasks/:id", async (c) => {

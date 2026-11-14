@@ -129,9 +129,8 @@ test("leaving the page while an outcome is pending loses nothing: the next Calls
   await page.unroute("**/api/call-tasks/*/outcome");
   await page.goto(`${f.url}/leads`);
   await page.goto(`${f.url}/calls`);
-  // The reopened page sends it again and learns the outcome from the server's read of the call.
-  await expect(page.getByRole("alert")).toContainText("Amira Hassan’s call is already logged: left voicemail at 10:00.");
-  await page.getByRole("button", { name: "Open the next call" }).click();
+  // The reopened page sends it again; the tab's draft is still the one that press captured, so its answer shows it logged and the next call opens.
+  await expect(outcomeStatus(page)).toContainText("left voicemail logged");
   await expect(page.getByRole("heading", { name: "Tom" })).toBeVisible();
   const calls = (await activity(f, "Amira Hassan")).filter((e) => e.kind === "call");
   expect(calls).toEqual([expect.objectContaining({ outcome: "voicemail", note: "Left a short message about evening bookings." })]);
@@ -166,7 +165,8 @@ test("a call logged from another window is refused here, explained, and the queu
   // One path for the refusal: kept with its note, and the call says why it is off the list.
   const notLogged = page.getByRole("list", { name: "Outcomes not logged" });
   await expect(notLogged).toContainText("Not logged: left voicemail for Amira Hassan.");
-  await expect(notLogged).toContainText("Your note wasn’t saved: Typed here.");
+  await expect(notLogged).toContainText("The note typed with it: Typed here.");
+  await expect(notLogged).not.toContainText("saved");
   await expect(page.getByRole("alert").filter({ hasText: "Open the next call" })).toContainText("Amira Hassan’s call is already logged: interested at 10:00.");
   await expect(outcomeStatus(page)).not.toContainText("logged.");
   await page.getByRole("button", { name: "Open the next call" }).click();
@@ -356,7 +356,7 @@ test("an outcome left by a closed tab and refused on recovery is listed with its
   await page.goto(`${f.url}/calls`);
   const notLogged = page.getByRole("list", { name: "Outcomes not logged" });
   await expect(notLogged).toContainText("Not logged: no answer for Amira Hassan. Amira Hassan’s call is already logged: interested at 10:00.");
-  await expect(notLogged).toContainText("Your note wasn’t saved: Orphan refusal note must remain visible");
+  await expect(notLogged).toContainText("The note typed with it: Orphan refusal note must remain visible");
   await notLogged.getByRole("button", { name: "Dismiss" }).click();
   await expect(notLogged).toHaveCount(0);
 });
@@ -385,15 +385,45 @@ test("what the page says was saved, logged or sent comes from the server, with a
   });
   await page.goto(`${f.url}/calls`);
   await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
-  await expect(page.getByRole("alert")).toContainText("Amira Hassan’s call is already logged: left voicemail at 10:00.");
-  // The note is stored with that call: nothing on the page says it was not saved.
+  // The tab's draft is still the one that press captured: the answer to its resend shows it logged, with the note where the server stored it.
+  await expect(outcomeStatus(page)).toContainText("left voicemail logged");
+  await expect(outcomeStatus(page)).toContainText("The note is saved on Amira Hassan.");
   await expect(page.getByText("wasn’t saved")).toHaveCount(0);
-  await page.getByRole("button", { name: "Open the next call" }).click();
   await expect(page.getByRole("heading", { name: "Tom" })).toBeVisible();
   // A note logged here is said to be saved where the server's answer stores it.
   await page.getByRole("checkbox", { name: /company note/ }).check();
   await logWithMouse(page, "No answer", "Tom is in on Thursdays.");
   await expect(outcomeStatus(page)).toContainText("The note is saved for everyone at Harbour Lane Physio.");
+});
+
+test("a kept refusal says what was not logged, why, and the note typed with it, never whether that note is saved (re-check on 12f0303, R2)", async ({ page }) => {
+  const f = await freshCalls("ready", "refused-then-relogged");
+  await page.goto(`${f.url}/calls`);
+  await expect(page.getByRole("heading", { name: "Amira Hassan" })).toBeVisible();
+  await numberGroup(page).getByRole("radio", { name: /7946 0101/ }).check();
+  // The press reaches the server just after the company main line is marked wrong on Tom's call.
+  const tom = (await f.harness.request<{ readyNow: { taskId: string; person: { name: string } | null }[] }>("GET", "/api/calls")).body.readyNow.find((x) => x.person?.name === "Tom");
+  const main = (await f.harness.request<{ numbers: { detailId: string; kind: string }[] }>("GET", `/api/call-tasks/${tom?.taskId}`)).body.numbers.find((n) => n.kind === "main_line");
+  let first = true;
+  await page.route("**/api/call-tasks/*/outcome", async (route) => {
+    if (first) {
+      first = false;
+      await logElsewhere(f, tom?.taskId ?? "", "wrong_number", main?.detailId ?? null);
+    }
+    return route.continue();
+  });
+  await logWithMouse(page, "No answer", "Same note, logged again on the mobile.");
+  const notLogged = page.getByRole("list", { name: "Outcomes not logged" });
+  await expect(notLogged).toContainText("Not logged: no answer for Amira Hassan.");
+  // The user picks the good mobile and logs the outcome again with the same note; the server stores it.
+  await numberGroup(page).getByRole("radio", { name: /7700 900101/ }).check();
+  await logButton(page).click();
+  await expect(outcomeStatus(page)).toContainText("The note is saved on Amira Hassan.");
+  // The kept refusal is about that refused outcome only: not logged, why, and the note typed with it.
+  await expect(notLogged).toContainText("Not logged: no answer for Amira Hassan.");
+  await expect(notLogged).toContainText("The note typed with it: Same note, logged again on the mobile.");
+  await expect(notLogged).not.toContainText("saved");
+  await expect(page.getByText("wasn’t saved")).toHaveCount(0);
 });
 
 test("a press this device cannot store sends nothing, says so, and keeps the draft; Log works once storage has room (re-check on 9c3ad27, B3)", async ({ page }) => {
