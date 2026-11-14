@@ -110,17 +110,17 @@ function Records({ desk, snap }: { desk: CallDesk; snap: DeskSnapshot }) {
   return (
     <ul aria-label="Outcomes not logged" className="flex flex-col gap-2">
       {snap.refusedRecords.map((r) => (
-        <li key={r.entry.body.requestId} className="flex flex-col gap-2 rounded-field bg-crit-soft px-4 py-3 text-[14px]">
+        <li key={r.body.requestId} className="flex flex-col gap-2 rounded-field bg-crit-soft px-4 py-3 text-[14px]">
           <p role="alert" className="text-base-content [overflow-wrap:anywhere]">
             {refusedRecordLine(r, zone)}
           </p>
-          {r.entry.body.note.trim() !== "" && (
+          {r.body.note.trim() !== "" && (
             <p className="text-ink-2 [overflow-wrap:anywhere]">
-              Your note wasn’t saved: <q className="whitespace-pre-wrap">{r.entry.body.note}</q>
+              Your note wasn’t saved: <q className="whitespace-pre-wrap">{r.body.note}</q>
             </p>
           )}
           <div>
-            <button type="button" data-rescue="2" className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={() => desk.dismiss(r.entry.body.requestId)}>
+            <button type="button" data-rescue="2" className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={() => desk.dismiss(r.body.requestId)}>
               Dismiss
             </button>
           </div>
@@ -525,7 +525,7 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
           {pending ? "" : draft.outcome === null ? "Pick what happened to finish this call." : !canLog && !snap.noteTooLong ? "Choose the number you dial above." : ""}
         </span>
         <span className="flex flex-wrap items-center gap-2">
-          {snap.pending?.unconfirmed && !snap.pending.elsewhere && (
+          {snap.pending?.unconfirmed && (
             <button type="button" className="btn border-line-strong bg-base-100 font-medium" onClick={() => desk.retryNow()}>
               Try again now
             </button>

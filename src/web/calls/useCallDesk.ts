@@ -6,38 +6,6 @@ import { CallDesk, NoAnswer, Refused, type DeskSnapshot, type KeyValue, type Out
 /** How long an outcome waits for its answer before it counts as no answer and is sent again. */
 const ANSWER_TIMEOUT_MS = 20_000;
 
-/** Queues for the lock `name` until granted, or null once `signal` aborts (the desk left). Without Web Locks, granted at once. */
-function wait(name: string, signal: AbortSignal): Promise<(() => void) | null> {
-  const locks = typeof navigator === "undefined" ? undefined : navigator.locks;
-  if (!locks) return Promise.resolve(() => undefined);
-  return new Promise((resolve) => {
-    locks
-      .request(name, { signal }, () => new Promise<void>((release) => resolve(() => release())))
-      .catch(() => resolve(null));
-  });
-}
-
-/**
- * The browser's Web Locks: one exclusive lock per outbox entry across the user's tabs, asked for at
- * once and held until released; a closed tab's locks are released by the browser. Without Web Locks
- * every claim succeeds: two tabs may then both send an entry, which the request id keeps logged once.
- */
-function claim(name: string): Promise<(() => void) | null> {
-  const locks = typeof navigator === "undefined" ? undefined : navigator.locks;
-  if (!locks) return Promise.resolve(() => undefined);
-  return new Promise((resolve) => {
-    locks
-      .request(name, { ifAvailable: true }, (lock) => {
-        if (!lock) {
-          resolve(null);
-          return undefined;
-        }
-        return new Promise<void>((release) => resolve(() => release()));
-      })
-      .catch(() => resolve(() => undefined));
-  });
-}
-
 /** Browser storage that never throws: private windows and blocked storage fall back to memory. */
 function storage(pick: () => Storage): KeyValue {
   const memory = new Map<string, string>();
@@ -137,8 +105,6 @@ function browserDesk(): CallDesk {
       const t = setTimeout(fire, ms);
       return () => clearTimeout(t);
     },
-    claim,
-    wait,
   });
 }
 

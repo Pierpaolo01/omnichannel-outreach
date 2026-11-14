@@ -1,6 +1,5 @@
 import { describe, expect, test } from "vitest";
 import { EngineHarness } from "../../../test/support/engine-harness.ts";
-import { FakeWebLocks } from "../../../test/support/fake-web-locks.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
 import type { ApiError, CallOutcomeAnswer, CallsView, CallTaskView } from "../../shared/api.ts";
@@ -60,7 +59,6 @@ async function world() {
   const local = new MapStore();
   /** Every POST the desks made, held until the test answers it. */
   const held: Held[] = [];
-  const locks = new FakeWebLocks();
   const timers: (() => void)[] = [];
   let ids = 0;
   const deliver = async (x: Held) => h.request<unknown>("POST", `/api/call-tasks/${x.taskId}/outcome`, x.body);
@@ -86,8 +84,6 @@ async function world() {
         timers.push(fire);
         return () => timers.splice(timers.indexOf(fire), 1);
       },
-      claim: locks.claim,
-      wait: locks.wait,
     } satisfies CallDeskPorts);
   const fireTimers = async () => {
     for (const fire of timers.splice(0)) fire();
@@ -135,8 +131,8 @@ describe("what the user chose is never replaced for them (review bot on e6872eb,
   });
 });
 
-describe("every outbox entry is retried until a definite answer, by one sender (review bot on e6872eb, finding 2)", () => {
-  test("a tab closes with its outcome unanswered; another tab's first recovery fails, and it keeps retrying without reopening until the server answers", async () => {
+describe("any desk sends any entry it sees until the server answers (ADR 0003 4.4.1; review bot on e6872eb, finding 2)", () => {
+  test("a tab closes with its outcome unanswered; another tab's first attempt fails, and it keeps retrying without reopening until the server answers", async () => {
     const w = await world();
     const a = w.desk(new MapStore());
     await a.start();
@@ -144,54 +140,51 @@ describe("every outbox entry is retried until a definite answer, by one sender (
     a.setDraft({ outcome: "interested" });
     a.log();
     await flush();
-    const first = w.held[0];
-    expect(first).toBeDefined();
-    await w.answer(first!, true);
-    // Tab A closes: its lock goes with it.
+    const first = w.held[0]!;
+    await w.answer(first, true);
     a.dispose();
 
     const b = w.desk(new MapStore());
     await b.start();
     await flush();
-    const recovery = w.held.find((x) => x.body.requestId === first!.body.requestId);
-    expect(recovery).toBeDefined();
-    expect(b.getSnapshot().recovering.map((e) => e.body.requestId)).toEqual([first!.body.requestId]);
-    // The first recovery is lost too (the request reached the server, its answer did not).
-    w.held.splice(w.held.indexOf(recovery!), 1);
-    recovery!.reject(new NoAnswer());
+    const recovery = w.held.find((x) => x.body.requestId === first.body.requestId)!;
+    expect(b.getSnapshot().recovering.map((e) => e.body.requestId)).toEqual([first.body.requestId]);
+    w.held.splice(w.held.indexOf(recovery), 1);
+    recovery.reject(new NoAnswer());
     await flush();
     expect(w.outbox()).toHaveLength(1);
 
-    // Back online and the backoff: no reopening.
-    b.retryNow();
-    await flush();
-    const again = w.held.find((x) => x.body.requestId === first!.body.requestId);
-    expect(again).toBeDefined();
-    await w.answer(again!);
+    // Its own backoff, with no reopening and no user action.
+    await w.fireTimers();
+    const again = w.held.find((x) => x.body.requestId === first.body.requestId)!;
+    await w.answer(again);
     expect(w.outbox()).toEqual([]);
-    expect(await w.stored(first!.body.requestId)).toBe(true);
+    expect(await w.stored(first.body.requestId)).toBe(true);
     expect(b.getSnapshot().recovering).toEqual([]);
   });
 
-  test("two tabs on screen never both send one entry", async () => {
+  test("two tabs sending one entry store it once: the server answers a repeated request id with its first result", async () => {
     const w = await world();
     const a = w.desk(new MapStore());
     await a.start();
     await w.fireTimers();
-    a.setDraft({ outcome: "no_answer" });
+    a.setDraft({ outcome: "no_answer", note: "Twice sent, once logged." });
     a.log();
     await flush();
     const b = w.desk(new MapStore());
     await b.start();
-    await b.refresh();
     await flush();
-    expect(w.held).toHaveLength(1);
-    expect(b.getSnapshot().recovering).toEqual([]);
+    const sends = w.held.filter((x) => x.body.requestId === w.held[0]!.body.requestId);
+    expect(sends).toHaveLength(2);
+    for (const x of [...sends]) await w.answer(x);
+    const calls = (await w.h.request<CallTaskView>("GET", `/api/call-tasks/${sends[0]!.taskId}`)).body.touches.filter((t) => t.kind === "call");
+    expect(calls).toHaveLength(1);
+    expect(w.outbox()).toEqual([]);
   });
 });
 
-describe("a desk that is no longer on screen writes nothing (review bot on e6872eb, finding 3)", () => {
-  test("a late answer to a desk left behind changes neither the tab's saved focus nor its drafts", async () => {
+describe("a desk that is no longer on screen writes nothing but the outbox (review bot on e6872eb, finding 3; on c8fe609)", () => {
+  test("a late answer to a desk left behind changes neither the tab's saved focus nor the draft of the call the user has moved on to", async () => {
     const w = await world();
     const session = new MapStore();
     const old = w.desk(session);
@@ -208,12 +201,11 @@ describe("a desk that is no longer on screen writes nothing (review bot on e6872
     const namedByStale = staleAnswer.body.nextFocusTaskId;
     old.dispose();
 
-    // The page is opened again in the same tab: it sends the action again and moves on through two calls.
+    // The page is opened again in the same tab: it sends the entry again and moves on through two calls.
     const live = w.desk(session);
     await live.start();
     await flush();
-    const replay = w.held[0]!;
-    await w.answer(replay);
+    await w.answer(w.held[0]!);
     await flush();
     expect(live.getSnapshot().task?.state).toBe("ready");
     live.setDraft({ outcome: "voicemail" });
@@ -235,7 +227,7 @@ describe("a desk that is no longer on screen writes nothing (review bot on e6872
   });
 });
 
-describe("a refusal is never silent, and typed text is never discarded (verifier on e6872eb, item 5)", () => {
+describe("a refusal is kept, with its note, until acknowledged (verifier on e6872eb, item 5)", () => {
   const recoveredRefusal = async (faults: ReadonlySet<DeskFault> = new Set()) => {
     const w = await world();
     const a = w.desk(new MapStore(), faults);
@@ -246,12 +238,12 @@ describe("a refusal is never silent, and typed text is never discarded (verifier
     a.setDraft({ outcome: "no_answer", note: "Orphan refusal note must remain visible" });
     a.log();
     await flush();
-    // The request never reaches the server.
+    // The request never reaches the server, and the tab closes.
     const lost = w.held.splice(0, 1)[0]!;
     lost.reject(new NoAnswer());
     await flush();
-    // The tab closes; the call is worked from another window before another tab opens, so the recovery is refused.
     a.dispose();
+    // The call is worked from another window before another tab opens, so the next attempt is refused.
     const closed = await w.h.request("POST", `/api/call-tasks/${taskId}/outcome`, { requestId: "elsewhere-2", outcome: "interested", numberId: snap.draft.numberId });
     expect(closed.status).toBe(200);
     const b = w.desk(new MapStore(), faults);
@@ -262,25 +254,26 @@ describe("a refusal is never silent, and typed text is never discarded (verifier
     return { w, b };
   };
 
-  test("a closed tab's outcome refused on recovery is listed on the next Calls page with its note and the server's reason, until dismissed", async () => {
+  test("an outcome refused for a call the page is not on is listed with its note and the server's reason, in the same outbox entry, until dismissed", async () => {
     const { w, b } = await recoveredRefusal();
-    expect(w.outbox()).toEqual([]);
     const records = b.getSnapshot().refusedRecords;
     expect(records).toHaveLength(1);
-    expect(records[0]).toMatchObject({ entry: { body: { outcome: "no_answer", note: "Orphan refusal note must remain visible" } }, message: expect.stringContaining("no longer on the list") });
-    b.dismiss(records[0]!.entry.body.requestId);
+    expect(records[0]).toMatchObject({ body: { outcome: "no_answer", note: "Orphan refusal note must remain visible" }, refused: { offList: { reason: "logged", outcome: "interested" } } });
+    expect(w.outbox()).toHaveLength(1);
+    b.dismiss(records[0]!.body.requestId);
     expect(b.getSnapshot().refusedRecords).toEqual([]);
+    expect(w.outbox()).toEqual([]);
   });
 
-  test("the old behaviour, dropping it, leaves nothing to show (the check above fails on it)", async () => {
+  test("dropping a refusal (the fault) leaves nothing to show", async () => {
     const { w, b } = await recoveredRefusal(new Set(["refusal_dropped"]));
     expect(w.outbox()).toEqual([]);
     expect(b.getSnapshot().refusedRecords).toEqual([]);
   });
 });
 
-describe("pending is derived from the outbox, never stored on its own (council on b15a769, item 1)", () => {
-  test("a tab back on Calls while another tab resends its outcome learns the answer when that tab gets it, and is not left locked", async () => {
+describe("what a desk shows is derived from the server and the outbox (council on b15a769, item 1; review bot on c8fe609)", () => {
+  test("a tab back on Calls while another tab sends its outcome shows it pending, then, when the server has it, what the server says", async () => {
     const w = await world();
     const sessionA = new MapStore();
     const a = w.desk(sessionA);
@@ -289,53 +282,49 @@ describe("pending is derived from the outbox, never stored on its own (council o
     a.setDraft({ outcome: "no_answer", note: "Rang out twice." });
     a.log();
     await flush();
-    // A's request reaches the server; its answer is lost. The user opens Today in A.
     await w.answer(w.held[0]!, true);
     a.dispose();
 
-    // B, on Calls, claims A's entry and resends it; that answer is held for now.
     const b = w.desk(new MapStore());
     await b.start();
     await flush();
     const resend = w.held[0]!;
-    expect(b.getSnapshot().recovering).toHaveLength(1);
 
-    // The user returns to Calls in A: its outcome is pending, being sent from another tab.
     const a2 = w.desk(sessionA);
     await a2.start();
     await flush();
-    expect(a2.getSnapshot().pending).toMatchObject({ body: { requestId: resend.body.requestId }, elsewhere: true });
-    expect(w.held).toHaveLength(1);
+    expect(a2.getSnapshot().pending).toMatchObject({ body: { requestId: resend.body.requestId } });
+    expect(a2.getSnapshot().locked).toBe(true);
 
-    // B's resend is answered: the entry leaves the outbox, and A learns it was logged.
-    await w.answer(resend);
+    // B gets the answer; A learns the outcome only from the server, on its next read.
+    for (const x of [...w.held]) await w.answer(x);
     await a2.refresh();
     await flush();
     const snap = a2.getSnapshot();
     expect(snap.pending).toBeNull();
-    expect(snap.locked).toBe(false);
-    expect(snap.logged).toMatchObject({ requestId: resend.body.requestId, body: { note: "Rang out twice." } });
+    // Its own resend got the server's replayed answer (shown as logged), or the server's read says it is logged.
+    expect(snap.logged?.requestId === resend.body.requestId || snap.away?.offList?.reason === "logged").toBe(true);
     expect(w.outbox()).toEqual([]);
   });
 
-  test("a duplicated tab, whose sessionStorage the browser copied, is not the same desk: it takes an identity of its own", async () => {
+  test("a read of the call that fails once loses nothing: the next read shows the stored outcome (review bot on c8fe609)", async () => {
     const w = await world();
-    const sessionA = new MapStore();
-    const a = w.desk(sessionA);
+    const session = new MapStore();
+    const a = w.desk(session);
     await a.start();
     await w.fireTimers();
     a.setDraft({ outcome: "voicemail" });
     a.log();
     await flush();
-    // The tab is duplicated while A's outcome waits: the copy has A's tab id.
-    const copy = new MapStore();
-    for (const [k, v] of sessionA.map) copy.set(k, v);
-    const d = w.desk(copy);
-    await d.start();
+    const sent = w.held.splice(0, 1)[0]!;
+    // Another desk got the answer; this desk's reads of the call fail once.
+    expect((await w.h.request("POST", `/api/call-tasks/${sent.taskId}/outcome`, sent.body)).status).toBe(200);
+    w.local.remove(`outreach.calls.outbox.${sent.body.requestId}`);
+    sent.reject(new NoAnswer());
     await flush();
-    expect(d.getSnapshot().pending).toBeNull();
-    expect(copy.get("outreach.calls.tab")).not.toBe(sessionA.get("outreach.calls.tab"));
-    expect(a.getSnapshot().pending).not.toBeNull();
+    await a.refresh();
+    await flush();
+    expect(a.getSnapshot().away).toMatchObject({ offList: { reason: "logged", outcome: "voicemail" } });
   });
 });
 
@@ -358,39 +347,41 @@ describe("only an answer that says the outcome was refused is a refusal (council
   });
 });
 
-describe("liveness: an outcome left in the outbox is taken over without a refresh (council on b15a769, item 9)", () => {
+describe("liveness: an outcome left by a tab that leaves is sent by a tab still open, with no user action (council on b15a769, item 9)", () => {
   const abandoned = async (faults: ReadonlySet<DeskFault> = new Set()) => {
     const w = await world();
+    const b = w.desk(new MapStore(), faults);
+    await b.start();
+    await flush();
     const a = w.desk(new MapStore(), faults);
     await a.start();
     await w.fireTimers();
     a.setDraft({ outcome: "interested" });
     a.log();
     await flush();
-    // A's request never reaches the server and A keeps the lock while it waits to retry.
-    const lost = w.held.splice(0, 1)[0]!;
-    lost.reject(new NoAnswer());
+    // B learns of the entry from the storage event, as the page does.
+    await b.refresh();
     await flush();
-    const b = w.desk(new MapStore(), faults);
-    await b.start();
+    // Every attempt so far is lost; A leaves Calls.
+    for (const x of w.held.splice(0)) x.reject(new NoAnswer());
     await flush();
-    expect(w.held).toEqual([]);
-    // A leaves Calls, releasing its lock. B gets no refresh, no storage event and no user action.
     a.dispose();
-    await flush();
-    return { w, b, id: lost.body.requestId };
+    return { w, b };
   };
 
-  test("the desk still on Calls was queued for the lock, takes the entry when it is released, and sends it", async () => {
-    const { w, id } = await abandoned();
-    expect(w.held.map((x) => x.body.requestId)).toEqual([id]);
+  test("the tab still on Calls keeps sending it on its own backoff", async () => {
+    const { w } = await abandoned();
+    await w.fireTimers();
+    expect(w.held).toHaveLength(1);
+    const id = w.held[0]!.body.requestId;
     await w.answer(w.held[0]!);
     expect(w.outbox()).toEqual([]);
     expect(await w.stored(id)).toBe(true);
   });
 
-  test("without waiting for the lock (the old behaviour) nothing is sent", async () => {
-    const { w } = await abandoned(new Set(["no_wait_for_lock"]));
+  test("a desk that retries only the entries it pressed itself (the fault) leaves it unsent", async () => {
+    const { w } = await abandoned(new Set(["only_own_entries_retried"]));
+    await w.fireTimers();
     expect(w.held).toEqual([]);
     expect(w.outbox()).toHaveLength(1);
   });

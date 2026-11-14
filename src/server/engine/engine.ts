@@ -224,9 +224,14 @@ export class Engine {
     }
   }
 
-  /** The next instant at which a tick could change something, for the worker loop and the tests' clock. */
-  async nextWakeAt(): Promise<number | null> {
+  /**
+   * The next instant at which a tick could change something, for the worker loop and the tests' clock.
+   * With `after`, the earliest such instant after it, which may be at or before now: work that fell
+   * due since then (ticket 14b, the read models' completed-tick marker, ADR 0003 4.4).
+   */
+  async nextWakeAt(after?: number): Promise<number | null> {
     const now = this.now();
+    const from = after ?? now;
     const times: number[] = [];
     for (const [id, version] of await this.store.runningSubjectVersions()) {
       let cached = this.wakeCache.get(id);
@@ -248,11 +253,11 @@ export class Engine {
         this.wakeCache.set(id, cached);
       }
       for (const d of cached.due) {
-        if (d.wall > now) times.push(d.wall);
-        else if (d.window === null) times.push(await this.nextUserDay(now));
+        if (d.wall > from) times.push(d.wall);
+        else if (d.window === null) times.push(await this.nextUserDay(from));
         else {
-          const opens = nextWindowOpen(d.window, d.zone, now);
-          if (opens !== null && opens > now) times.push(opens);
+          const opens = nextWindowOpen(d.window, d.zone, from);
+          if (opens !== null && opens > from) times.push(opens);
         }
       }
     }
@@ -270,9 +275,9 @@ export class Engine {
     for (const acc of accounts.values()) {
       if (acc.waitUntil !== null && acc.waitUntil !== QUOTA_WAIT) times.push(acc.waitUntil);
       // Capacity frees at the account's next reset day.
-      times.push(startOfLocalDay(localDayNumber(now, acc.resetZone) + 1, acc.resetZone));
+      times.push(startOfLocalDay(localDayNumber(from, acc.resetZone) + 1, acc.resetZone));
     }
-    const future = times.filter((t) => t > now);
+    const future = times.filter((t) => t > from);
     return future.length > 0 ? Math.min(...future) : null;
   }
 

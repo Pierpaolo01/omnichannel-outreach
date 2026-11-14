@@ -16,7 +16,7 @@ import type { StoredDefinition } from "./engine/engine-store.ts";
 import { UnconnectedEmailPort, UnprovisionedSmsPort } from "./engine/ports.ts";
 import { accountView, needsAttention, progressView } from "./engine/views.ts";
 import { callsView, callTaskView, todayView } from "./engine/call-views.ts";
-import type { WorkerProgress } from "./worker.ts";
+import { READ_WAIT_MS, TICK_MS, type WorkerProgress } from "./worker.ts";
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
 import type { CampaignDetail, CampaignListItem, CampaignSequenceSummary, SequenceView } from "../shared/api.ts";
 import { beforeLaunchView, copyPreview } from "./before-launch.ts";
@@ -431,27 +431,36 @@ export function createApp({ store, now, newId, engine: givenEngine, worker, emai
   });
 
   /**
-   * A read at the instant the server advertised (`expected`, its own `nextChangeAt`) must show the
-   * change (ADR 0003 4.4.1): if the worker has not started a tick since that instant, the read waits
-   * for the end of its next one, so placing calls and starting tracks are done before it answers.
+   * A read and the worker's placements (ADR 0003 4.4): the worker's completed-tick marker says what
+   * the stored state covers. A read at the instant the server advertised (`expected`) waits, at most
+   * READ_WAIT_MS, for a finished tick that began at or after it. Any read whose state is behind (the
+   * engine has a wake after the marker and at or before now) advertises no later than the worker's
+   * next tick, so due work is never announced as far off. Returns the engine wake to use.
    */
-  const caughtUp = async (expected: string | undefined): Promise<void> => {
+  const readWake = async (expected: string | undefined): Promise<number | null> => {
+    const wake = await engine.nextWakeAt();
+    if (!worker) return wake;
     const at = expected ? Date.parse(expected) : Number.NaN;
-    if (!worker || Number.isNaN(at) || at > Date.parse(now())) return;
-    const last = worker.lastTickStartedAt();
-    if (last === null || last < at) await worker.caughtUp();
+    if (!Number.isNaN(at) && at <= Date.parse(now())) await worker.caughtUpTo(at, READ_WAIT_MS);
+    const t = Date.parse(now());
+    const done = worker.completedThrough();
+    const missed = done === null ? t : await engine.nextWakeAt(done);
+    if (missed === null || missed > t) return wake;
+    const next = worker.nextTickAt();
+    const soon = next !== null && next > t ? next : t + TICK_MS;
+    return wake === null ? soon : Math.min(wake, soon);
   };
 
   // `nextChangeAt` includes the engine's next wake: a call can be placed or a track start then (ADR 0003 4.4.1).
   app.get("/today", async (c) => {
-    await caughtUp(c.req.query("expected"));
-    return c.json(await todayView(store, Date.parse(now()), rules, await engine.nextWakeAt()));
+    const wake = await readWake(c.req.query("expected"));
+    return c.json(await todayView(store, Date.parse(now()), rules, wake));
   });
 
   // `focus`: the call the user's screen is on. It stays the focus while it is listed.
   app.get("/calls", async (c) => {
-    await caughtUp(c.req.query("expected"));
-    return c.json(await callsView(store, Date.parse(now()), { focus: c.req.query("focus") || null, rules, nextWake: await engine.nextWakeAt() }));
+    const wake = await readWake(c.req.query("expected"));
+    return c.json(await callsView(store, Date.parse(now()), { focus: c.req.query("focus") || null, rules, nextWake: wake }));
   });
 
   app.get("/call-tasks/:id", async (c) => {

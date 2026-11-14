@@ -110,7 +110,6 @@ export function clockLine(task: Pick<CallTaskView, "task" | "listed">, userZone:
 /** While an action is on its way. */
 export function pendingLine(pending: NonNullable<DeskSnapshot["pending"]>): string {
   const what = pending.body.outcome === "skip_for_now" ? `Skipping ${pending.who} for now` : `Logging ${OUTCOME_LABEL[pending.body.outcome].toLowerCase()} for ${pending.who}`;
-  if (pending.elsewhere) return `${what}: another Calls tab is sending it. It is logged only once.`;
   return pending.unconfirmed ? `${what}: not confirmed yet. It is being sent again, and it is logged only once.` : `${what}…`;
 }
 
@@ -132,7 +131,7 @@ export function offListLine(who: string, off: CallOffListView | null, message: s
   if (off === null) return message ?? `${who}’s call is no longer on the list.`;
   switch (off.reason) {
     case "logged":
-      return `${who}’s call was already logged elsewhere, perhaps in another tab: ${OUTCOME_LABEL[off.outcome].toLowerCase()} at ${timeIn(zone, off.at)}.`;
+      return `${who}’s call is already logged: ${OUTCOME_LABEL[off.outcome].toLowerCase()} at ${timeIn(zone, off.at)}.`;
     case "lead_ended":
       if (off.status === "replied") return `${who} replied, so automation stopped and the call left the list.`;
       if (off.status === "interested_on_call") return `${who} was marked interested on another call, so automation stopped and the call left the list.`;
@@ -204,18 +203,18 @@ export function attentionItems(n: NeedsAttention, userZone: string): AttentionIt
   return items;
 }
 
-/** While this page sends again an outcome another tab left behind. */
+/** While this page sends an outcome for another call, logged here or in another tab, that has no answer yet. */
 export function recoveringLine(who: string): string {
-  return `Sending again an outcome logged for ${who} in a tab that closed before the server answered. It is logged only once.`;
+  return `Sending an outcome logged for ${who} that has no answer yet. It is logged only once.`;
 }
 
 /** A refusal no page showed on its call: what was not logged, and why, from the server's `offList` when it said. */
 export function refusedRecordLine(
-  record: { readonly entry: { readonly who: string; readonly body: { readonly outcome: CallOutcomeApi } }; readonly message: string; readonly offList?: CallOffListView | null },
+  record: { readonly who: string; readonly body: { readonly outcome: CallOutcomeApi }; readonly refused: { readonly message: string; readonly offList: CallOffListView | null } },
   zone: string,
 ): string {
-  const what = record.entry.body.outcome === "skip_for_now" ? `skip for now on ${record.entry.who}` : `${OUTCOME_LABEL[record.entry.body.outcome].toLowerCase()} for ${record.entry.who}`;
-  const why = record.offList ? offListLine(record.entry.who, record.offList, null, zone) : record.message;
+  const what = record.body.outcome === "skip_for_now" ? `skip for now on ${record.who}` : `${OUTCOME_LABEL[record.body.outcome].toLowerCase()} for ${record.who}`;
+  const why = record.refused.offList ? offListLine(record.who, record.refused.offList, null, zone) : record.refused.message;
   return `Not logged: ${what}. ${why}`;
 }
 

@@ -195,10 +195,103 @@ describe("the instant the server advertises is one at which its answer shows the
   });
 
   test("an ordinary read never waits for the worker", async () => {
-    const worker = { lastTickStartedAt: () => 0, caughtUp: () => new Promise<void>(() => undefined) };
+    const worker = { completedThrough: () => Date.parse("2026-11-02T09:00:00Z"), caughtUpTo: () => new Promise<boolean>(() => undefined), nextTickAt: () => null };
     const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }], worker });
     await h.tick();
     expect((await h.request<CallsView>("GET", "/api/calls")).status).toBe(200);
     expect((await h.request<TodayView>("GET", "/api/today")).status).toBe(200);
+  });
+});
+
+describe("a read and the worker's placements: a completed-tick marker (ADR 0003 4.4; review bot on 36232cd)", () => {
+  /** The midnight world of the test above, with a worker whose tick the test can hold open after it starts. */
+  async function heldWorld() {
+    const timers: { at: number; fire: () => void }[] = [];
+    const box: { h: EngineHarness | null } = { h: null };
+    let gate: (() => void) | null = null;
+    let holding = false;
+    const worker = new Worker({
+      recover: async () => undefined,
+      tick: async () => {
+        // Started, and nothing committed yet: the case both earlier fixes missed.
+        if (holding) await new Promise<void>((resolve) => (gate = resolve));
+        await box.h?.tick();
+      },
+      now: () => box.h?.clock ?? 0,
+      setTimer: (fire, ms) => {
+        const t = { at: (box.h?.clock ?? 0) + ms, fire };
+        timers.push(t);
+        return () => {
+          const i = timers.indexOf(t);
+          if (i >= 0) timers.splice(i, 1);
+        };
+      },
+    });
+    const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }], worker });
+    box.h = h;
+    await h.tick();
+    await h.request("PUT", "/api/call-settings", { dailyCapacity: 1, userZone: "Europe/London" });
+    const { campaign: c } = await h.createCampaign("Held", { businesses: [HARBOUR], people: [PAT, NIA] });
+    await h.defineSequence(c.id, definition([track("p1", "call", [call("c1")], ALWAYS)]));
+    expect((await h.launch(c.id)).status).toBe(200);
+    await h.tick();
+    const monday = (await h.request<CallsView>("GET", "/api/calls")).body;
+    const first = (await h.request<CallTaskView>("GET", `/api/call-tasks/${monday.focusTaskId}`)).body;
+    expect((await h.request("POST", `/api/call-tasks/${first.taskId}/outcome`, { requestId: "r1", outcome: "no_answer", numberId: first.numbers[0]?.detailId })).status).toBe(200);
+    // The worker's last finished tick began at 23:59:45; its next is due at 00:00:00.
+    h.clock = Date.parse("2026-11-02T23:59:45Z");
+    worker.start();
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    const fireDue = () => {
+      const due = timers.filter((t) => t.at <= h.clock);
+      for (const t of due) {
+        timers.splice(timers.indexOf(t), 1);
+        t.fire();
+      }
+    };
+    const settle = async () => {
+      for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+    };
+    return { h, worker, timers, fireDue, settle, hold: () => (holding = true), release: () => gate?.() };
+  }
+
+  test("a read at the advertised instant while the tick that will place the call has started and not finished waits for it to finish", async () => {
+    const w = await heldWorld();
+    w.hold();
+    w.h.clock = Date.parse("2026-11-03T00:00:00Z");
+    w.fireDue();
+    await w.settle();
+    // The tick began at 00:00:00 and is held before its placements commit.
+    w.h.clock = Date.parse("2026-11-03T00:00:01Z");
+    let answered: CallsView | null = null;
+    const read = w.h.request<CallsView>("GET", `/api/calls?expected=${encodeURIComponent("2026-11-03T00:00:00.000Z")}`).then((x) => (answered = x.body));
+    await w.settle();
+    expect(answered).toBeNull();
+    w.release();
+    await read;
+    expect(answered!.readyNow.map((x) => x.person?.name)).toEqual(["Nia Cole"]);
+    w.worker.stop();
+  });
+
+  test("a tick that never finishes: the read answers within the 30-second bound, with what is stored and the worker's next tick as its next change, never tomorrow", async () => {
+    const w = await heldWorld();
+    w.hold();
+    w.h.clock = Date.parse("2026-11-03T00:00:00Z");
+    w.fireDue();
+    await w.settle();
+    w.h.clock = Date.parse("2026-11-03T00:00:01Z");
+    let answered: CallsView | null = null;
+    const read = w.h.request<CallsView>("GET", `/api/calls?expected=${encodeURIComponent("2026-11-03T00:00:00.000Z")}`).then((x) => (answered = x.body));
+    await w.settle();
+    expect(answered).toBeNull();
+    w.h.clock = Date.parse("2026-11-03T00:00:31Z");
+    w.fireDue();
+    await read;
+    expect(answered!.readyNow).toEqual([]);
+    expect(Date.parse(answered!.nextChangeAt ?? "")).toBeLessThanOrEqual(w.h.clock + TICK_MS);
+    // An ordinary read meanwhile never advertises a far-off change while the call is due and unplaced.
+    const ordinary = (await w.h.request<TodayView>("GET", "/api/today")).body;
+    expect(Date.parse(ordinary.nextChangeAt ?? "")).toBeLessThanOrEqual(w.h.clock + TICK_MS);
+    w.worker.stop();
   });
 });
