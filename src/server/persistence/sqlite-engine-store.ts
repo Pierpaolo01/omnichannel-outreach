@@ -633,7 +633,10 @@ export class SqliteEngineStore implements EngineStore {
   /** An account's in-flight places in use: its provider work by key, by the engine's own definition (council B on 56d599c). */
   private occupancy(accountId: string): number {
     const live = this.sql(`SELECT idempotency_key FROM attempts WHERE account_id = ? AND state IN ${LIVE_STATES}`).all(accountId).map((r) => str(r, "idempotency_key"));
-    const work = this.sql("SELECT key, settled, calls, went_wall FROM provider_work WHERE account_id = ? AND settled IS NULL").all(accountId).map((r) => ({ key: str(r, "key"), settled: null, calls: num(r, "calls"), wentWall: numOrNull(r, "went_wall") }));
+    // Unsettled work, and the work of every live attempt whatever its settlement (`occupyingKeys` needs both).
+    const work = this.sql(`SELECT key, settled, calls, went_wall FROM provider_work WHERE account_id = ? AND (settled IS NULL OR key IN (SELECT idempotency_key FROM attempts WHERE account_id = ? AND state IN ${LIVE_STATES}))`)
+      .all(accountId, accountId)
+      .map((r) => ({ key: str(r, "key"), settled: strOrNull(r, "settled") as WorkSettlement | null, calls: num(r, "calls"), wentWall: numOrNull(r, "went_wall") }));
     return occupyingKeys(live, work).size;
   }
 

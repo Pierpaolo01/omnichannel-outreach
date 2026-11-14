@@ -66,6 +66,8 @@ export class FakeSmsPort implements SendPort {
    * out of `bounced`.
    */
   readonly invalidAfterSend = new Set<string>();
+  /** Texts that go but are never reported: no sent event, and every lookup answers unknown (as the email fake's silent-send). */
+  silentSends = false;
   onHandover: ((entry: HandoverLogEntry) => Promise<void>) | null = null;
 
   private readonly now: () => number;
@@ -134,7 +136,7 @@ export class FakeSmsPort implements SendPort {
     if (mode === "5xx" && this.random() < 0.5) return { kind: "unknown" };
     const providerRef = `sms-${++this.nextRef}`;
     const delay = mode === "late-send" ? Math.round((1 + this.random() * 59) * MINUTE) : 0;
-    this.texts.push({ key: request.idempotencyKey, request, providerRef, sendAt: now + delay, sentAt: null, cancelled: false, observeDelay: mode === "late-send" ? Math.round(this.random() * 30 * MINUTE) : 0 });
+    this.texts.push({ key: request.idempotencyKey, request, providerRef, sendAt: now + delay, sentAt: null, cancelled: false, observeDelay: this.silentSends ? Number.POSITIVE_INFINITY : mode === "late-send" ? Math.round(this.random() * 30 * MINUTE) : 0 });
     this.advance();
     return mode === "lost-response" || mode === "5xx" ? { kind: "unknown" } : { kind: "accepted", providerRef };
   }
@@ -212,7 +214,7 @@ export class FakeSmsPort implements SendPort {
   lookup(attempt: AttemptRef): Promise<LookupResult> {
     const now = this.now();
     const t = this.texts.find((x) => x.key === attempt.idempotencyKey);
-    const answer: LookupResult = !t || t.cancelled ? { kind: "not-sent" } : t.sentAt !== null && t.sentAt <= now ? { kind: "sent", sentAt: t.sentAt, providerRef: t.providerRef } : { kind: "queued" };
+    const answer: LookupResult = t && this.silentSends ? { kind: "unknown" } : !t || t.cancelled ? { kind: "not-sent" } : t.sentAt !== null && t.sentAt <= now ? { kind: "sent", sentAt: t.sentAt, providerRef: t.providerRef } : { kind: "queued" };
     this.lookupLog.push({ at: now, key: attempt.idempotencyKey, answer: answer.kind });
     return Promise.resolve(answer);
   }

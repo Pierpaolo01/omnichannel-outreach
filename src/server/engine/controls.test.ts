@@ -454,12 +454,20 @@ describe("one lead's controls", () => {
     { channel: "email", answer: "sent, observed later", pauseAt: MIN, check: 50 * MIN },
     { channel: "sms", answer: "withdrawn", pauseAt: MIN, check: 2 * MIN },
     { channel: "sms", answer: "too-late", pauseAt: 31 * MIN, check: 32 * MIN },
+    // Sent at 09:30:30 though asked to withdraw, then bounced: the bounce is final too (council, after 612aa05).
+    { channel: "email", answer: "bounced", pauseAt: MIN, check: 50 * MIN },
+    // A text is withdrawn while it waits, so no pause here: it is sent at 09:30:30 and bounces at 09:32:30.
+    { channel: "sms", answer: "bounced", pauseAt: null, check: 50 * MIN },
   ] as const;
   for (const c of finalAnswers) {
     test(`mayStillSend falls to 0 on a final answer: ${c.channel}, ${c.answer} (council J)`, async () => {
       // Sent at 09:30:30, observed at 09:45:30 (random 0.5); unknown-sends keeps what an "unknown" withdrawal asks for.
       const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }], modes: ["late-send"], random: () => 0.5, sms: { numbers: [{ id: "+447700900010", capacity: 50, gapMs: MIN, k: 1, healthy: true, resetZone: "Europe/London" }], modes: ["late-send"] } });
-      if (c.answer === "sent, observed later") h.fake.withdrawAnswers = "unknown-sends";
+      if (c.answer === "sent, observed later" || c.answer === "bounced") h.fake.withdrawAnswers = "unknown-sends";
+      if (c.answer === "bounced") {
+        h.fake.bouncing.add("pat@harbour.example");
+        h.sms.invalidAfterSend.add("+447700900101");
+      }
       await h.tick();
       const withMobile = person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example", dial_phone: "+447700900101", dial_phone_type: "mobile" });
       const { campaign } = await h.createCampaign("Clinics", { businesses: [HARBOUR], people: [withMobile] });
@@ -467,15 +475,125 @@ describe("one lead's controls", () => {
       await h.defineSequence(campaign.id, { ...DEFINITION, smsPool: ["+447700900010"], tracks: [track] });
       expect((await h.launch(campaign.id)).status).toBe(200);
       const pat = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows[0]!.enrollments[0]!.id;
-      await h.advanceTo(MONDAY_9 + c.pauseAt);
-      const paused = await h.request<{ enrollment: EnrollmentRead }>("POST", `/api/enrollments/${pat}/controls`, { requestId: "p", action: "pause" });
-      expect(paused.status).toBe(200);
+      if (c.pauseAt !== null) {
+        await h.advanceTo(MONDAY_9 + c.pauseAt);
+        const paused = await h.request<{ enrollment: EnrollmentRead }>("POST", `/api/enrollments/${pat}/controls`, { requestId: "p", action: "pause" });
+        expect(paused.status).toBe(200);
+      }
       await h.advanceTo(MONDAY_9 + c.check);
       expect((await h.request<EnrollmentRead>("GET", `/api/enrollments/${pat}`)).body.mayStillSend).toBe(0);
       expect((await h.request<CampaignDetail>("GET", `/api/campaigns/${campaign.id}`)).body.mayStillSend).toBe(0);
       const log = c.channel === "email" ? h.fake.withdrawLog.map((w) => w.answer) : null;
-      if (log) expect(log[0]).toBe(c.answer === "sent, observed later" ? "unknown" : c.answer);
+      if (log) expect(log[0]).toBe(c.answer === "sent, observed later" || c.answer === "bounced" ? "unknown" : c.answer);
+      if (c.answer === "bounced") {
+        const st = await h.store.engine.subject(pat, h.clock);
+        expect([...(st?.lead.details ?? []), ...(st?.lead.phones ?? [])].some((d) => d.bad)).toBe(true);
+      }
     });
   }
 });
 
+/**
+ * Council on 612aa05 (review bot, attempt.ts): an in-flight place is held only by work that may still be sent and by
+ * claims not yet handed over. Whatever final answer the first lead's work gets, the next lead on that sender (k = 1)
+ * is handed over. The too-late case with its send time not yet known held the place for good before the fix.
+ */
+describe("a place is freed at every final answer", () => {
+  const cases = [
+    { channel: "email", answer: "withdrawn" },
+    { channel: "email", answer: "too-late, send time unknown" },
+    { channel: "email", answer: "sent" },
+    { channel: "email", answer: "not sent (rejected)" },
+    { channel: "email", answer: "bounced" },
+    { channel: "sms", answer: "withdrawn" },
+    { channel: "sms", answer: "too-late, send time unknown" },
+    { channel: "sms", answer: "sent" },
+    { channel: "sms", answer: "not sent (rejected)" },
+    { channel: "sms", answer: "bounced" },
+  ] as const;
+  for (const c of cases) {
+    test(`${c.channel}, ${c.answer}: the next lead on the sender is handed over`, async () => {
+      const number = "+447700900010";
+      const silent = c.answer === "too-late, send time unknown";
+      const mode = c.answer === "withdrawn" ? "late-send" : silent ? "silent-send" : "honest";
+      const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }], modes: [mode], random: () => 0.5, sms: { numbers: [{ id: number, capacity: 50, gapMs: MIN, k: 1, healthy: true, resetZone: "Europe/London" }], modes: [mode === "late-send" ? "late-send" : "honest"] } });
+      h.sms.silentSends = silent;
+      await h.tick();
+      const people = [
+        person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example", dial_phone: "+447700900101", dial_phone_type: "mobile" }),
+        person({ person_id: "p2", business_id: "b1", full_name: "Nia Cole", email: "nia@harbour.example", dial_phone: "+447700900102", dial_phone_type: "mobile" }),
+      ];
+      const destinations = c.channel === "email" ? ["pat@harbour.example", "nia@harbour.example"] : ["+447700900101", "+447700900102"];
+      if (c.answer === "not sent (rejected)") for (const d of destinations) (c.channel === "email" ? h.fake.invalid : h.sms.invalid).add(d);
+      if (c.answer === "bounced") for (const d of destinations) (c.channel === "email" ? h.fake.bouncing : h.sms.invalidAfterSend).add(d);
+      const { campaign } = await h.createCampaign("Clinics", { businesses: [HARBOUR], people });
+      const one = c.channel === "email" ? { ...DEFINITION.tracks[0]!, steps: [email("s1")] } : track("x1", "sms", [{ ...email("x1s1"), subject: "" }], { window: ALWAYS });
+      await h.defineSequence(campaign.id, { ...DEFINITION, smsPool: [number], tracks: [one] });
+      expect((await h.launch(campaign.id)).status).toBe(200);
+      const log = () => (c.channel === "email" ? h.fake.handoverLog : h.sms.handoverLog);
+      await h.advanceTo(MONDAY_9 + 30_000);
+      const first = log()[0]!.subjectId;
+      expect(new Set(log().map((x) => x.subjectId)).size).toBe(1);
+      if (c.answer === "withdrawn" || silent) {
+        // Paused at 09:01: before its send (withdrawn), or after a send the provider never reports (too late).
+        await h.advanceTo(MONDAY_9 + MIN);
+        expect((await h.request("POST", `/api/enrollments/${first}/controls`, { requestId: "p", action: "pause" })).status).toBe(200);
+        const withdrawals = c.channel === "email" ? h.fake.withdrawLog : h.sms.withdrawLog;
+        expect(withdrawals.map((w) => w.answer)).toEqual([silent ? "too-late" : "withdrawn"]);
+      }
+      // Every final answer is in by 09:06 (a bounce shows five minutes after its send); the next lead goes by 09:10.
+      await h.advanceTo(MONDAY_9 + 10 * MIN);
+      expect(new Set(log().map((x) => x.subjectId)).size).toBe(2);
+      if (silent) {
+        // The send time is still unknown: the step is not claimed again, and the work is still reconciled.
+        const st = await h.store.engine.subject(first, h.clock);
+        expect(st?.work[0]).toMatchObject({ settled: null });
+        expect(st?.work[0]?.wentWall).not.toBeNull();
+        // Same-key retries before the pause are one piece of work; no new work is made for the step.
+        expect(new Set(log().filter((x) => x.subjectId === first).map((x) => x.key)).size).toBe(1);
+      }
+    });
+  }
+});
+
+/**
+ * The verifier's R2-1 on 612aa05, exactly: two leads, one place (k = 1), a two-step track. Lead A's first step is accepted
+ * and sent; A is paused; the withdrawal answers too late, a final answer; every lookup of A's send time answers unknown
+ * from then on. A's step 2 waits for that send time, mayStillSend is 0, and lead B is handed over all the same.
+ */
+describe("a too-late answer frees the place while every lookup of the send time answers unknown (verifier R2-1)", () => {
+  for (const channel of ["email", "sms"] as const) {
+    test(channel, async () => {
+      const number = "+447700900010";
+      const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 100, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }], modes: ["honest"], sms: { numbers: [{ id: number, capacity: 100, gapMs: MIN, k: 1, healthy: true, resetZone: "Europe/London" }] } });
+      h.fake.silentSends = true;
+      h.sms.silentSends = true;
+      await h.tick();
+      const people = [
+        person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example", dial_phone: "+447700900101", dial_phone_type: "mobile" }),
+        person({ person_id: "p2", business_id: "b1", full_name: "Nia Cole", email: "nia@harbour.example", dial_phone: "+447700900102", dial_phone_type: "mobile" }),
+      ];
+      const { campaign } = await h.createCampaign("Clinics", { businesses: [HARBOUR], people });
+      const two = channel === "email" ? { ...DEFINITION.tracks[0]!, steps: [email("s1"), email("s2", 1)] } : track("x1", "sms", [{ ...email("x1s1"), subject: "" }, { ...email("x1s2", 1), subject: "" }], { window: ALWAYS });
+      await h.defineSequence(campaign.id, { ...DEFINITION, smsPool: [number], tracks: [two] });
+      expect((await h.launch(campaign.id)).status).toBe(200);
+      const log = () => (channel === "email" ? h.fake.handoverLog : h.sms.handoverLog);
+      await h.advanceTo(MONDAY_9 + 30_000);
+      expect(new Set(log().map((x) => x.key)).size).toBe(1);
+      const a = log()[0]!.subjectId;
+      await h.advanceTo(MONDAY_9 + MIN);
+      expect((await h.request("POST", `/api/enrollments/${a}/controls`, { requestId: "p", action: "pause" })).status).toBe(200);
+      expect((channel === "email" ? h.fake.withdrawLog : h.sms.withdrawLog).map((w) => w.answer)).toEqual(["too-late"]);
+      await h.advanceTo(MONDAY_9 + H);
+      const lookups = channel === "email" ? h.fake.lookupLog : h.sms.lookupLog;
+      expect(lookups.length).toBeGreaterThan(0);
+      expect(lookups.every((l) => l.answer === "unknown")).toBe(true);
+      expect((await h.request<EnrollmentRead>("GET", `/api/enrollments/${a}`)).body.mayStillSend).toBe(0);
+      // Lead B was handed over; A's step 2 was not (it waits for the real send time, and A is paused).
+      expect(new Set(log().map((x) => x.subjectId)).size).toBe(2);
+      expect(log().filter((x) => x.subjectId === a).every((x) => x.stepId === (channel === "email" ? "s1" : "x1s1"))).toBe(true);
+      const st = await h.store.engine.subject(a, h.clock);
+      expect(st?.attempts.find((x) => x.stepId === (channel === "email" ? "s1" : "x1s1"))?.state).toMatch(/accepted|handed/);
+    });
+  }
+});

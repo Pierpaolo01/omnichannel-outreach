@@ -127,6 +127,10 @@ export class FakeEmailPort implements SendPort {
   /** How a withdrawal is answered: honestly, or "unknown" with the work cancelled or not. */
   /** `unknown-once`: the first withdrawal of a piece of work answers unknown and cancels nothing; a later one is honest. */
   withdrawAnswers: "honest" | "unknown-cancels" | "unknown-sends" | "unknown-once" = "honest";
+  /** Every send, whatever its mode, is never reported: no sent event, and every lookup answers unknown. */
+  silentSends = false;
+  /** For silent-send: after this long the send shows (its event, and lookups), instead of never. */
+  silentRevealAfterMs: number | null = null;
   /** How far back each observation reaches (ADR 0002's overlap). */
   overlapMs = 60 * MINUTE;
   /** Runs at every send call before it is answered: the tests' probe of the app's state at that moment. */
@@ -261,9 +265,10 @@ export class FakeEmailPort implements SendPort {
       lookupNotSentUntil: mode === "lookup-lags" ? now + Math.round((20 + this.random() * 20) * MINUTE) : 0,
       lookupUnknown: mode === "always-unknown" || mode === "silent-send",
       observeDelay:
-        mode === "late-send" ? Math.round(this.random() * 30 * MINUTE)
+        this.silentSends ? Number.POSITIVE_INFINITY
+        : mode === "late-send" ? Math.round(this.random() * 30 * MINUTE)
         : mode === "lookup-before-event" ? Math.round(SETTLING * (1.2 + this.random() * 3))
-        : mode === "silent-send" ? Number.POSITIVE_INFINITY
+        : mode === "silent-send" ? (this.silentRevealAfterMs ?? Number.POSITIVE_INFINITY)
         : mode === "lookup-lags" ? Math.round((30 + this.random() * 60) * MINUTE)
         : 0,
     };
@@ -398,7 +403,8 @@ export class FakeEmailPort implements SendPort {
     const all = this.work.filter((w) => w.key === attempt.idempotencyKey);
     const sent = all.find((w) => w.sentAt !== null && w.sentAt <= now);
     const w = all.at(-1);
-    if (w?.lookupUnknown) return Promise.resolve({ kind: "unknown" });
+    if (w && this.silentSends) return Promise.resolve({ kind: "unknown" });
+    if (w?.lookupUnknown && (w.mode !== "silent-send" || this.silentRevealAfterMs === null || now < w.acceptedAt + this.silentRevealAfterMs)) return Promise.resolve({ kind: "unknown" });
     // A lagging index says not sent for a while after it took the work, even once it has sent it.
     if (w && now < w.lookupNotSentUntil) return Promise.resolve({ kind: "not-sent" });
     if (sent) return Promise.resolve({ kind: "sent", sentAt: sent.sentAt ?? now, providerRef: sent.providerRef });

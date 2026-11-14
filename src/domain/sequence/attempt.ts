@@ -79,13 +79,21 @@ export const isUncertain = (w: Pick<ProviderWork, "settled" | "calls">): boolean
 export const maySend = (w: Pick<ProviderWork, "settled" | "calls" | "wentWall">): boolean => isUncertain(w) && w.wentWall === null;
 
 /**
- * The provider work holding an account's in-flight places (4.2's `k`; council B on 56d599c): every live attempt's work,
- * a claim's included, and every piece of unsettled work, counted once per key, so an inheritor of uncertain work does
- * not count twice and work a non-final "not sent" left without an attempt still holds its place.
+ * The provider work holding an account's in-flight places (4.2's `k`; council B on 56d599c, and the review bot on
+ * 612aa05): work the provider may still send (`maySend`), and claims not yet called, counted once per key. Nothing else:
+ * a live attempt whose work has any final answer (withdrawn, too late, sent, not sent, bounced) holds no place, so a
+ * too-late answer frees its place while the send time is still being reconciled; an inheritor of uncertain work does
+ * not count twice; and work a non-final "not sent" left without an attempt still holds its place. `work` must hold the
+ * work of every live attempt given, settled or not.
  */
 export function occupyingKeys(liveAttemptKeys: Iterable<string>, work: Iterable<Pick<ProviderWork, "key" | "settled" | "calls" | "wentWall">>): Set<string> {
-  const keys = new Set(liveAttemptKeys);
-  for (const w of work) if (maySend(w)) keys.add(w.key);
+  const byKey = new Map([...work].map((w) => [w.key, w]));
+  const keys = new Set<string>();
+  for (const key of liveAttemptKeys) {
+    const w = byKey.get(key);
+    if (!w || w.calls === 0) keys.add(key);
+  }
+  for (const w of byKey.values()) if (maySend(w)) keys.add(w.key);
   return keys;
 }
 
