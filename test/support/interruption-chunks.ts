@@ -13,7 +13,9 @@ import { FULL_SEARCH, inShard } from "./sequence-chunks.ts";
 
 export const INTERRUPTION_SEED = 20_000;
 /** Offsets from INTERRUPTION_SEED, chosen from a sweep of all 100 (14 November 2026), cheapest first, to reach every behaviour below. */
-export const INTERRUPTION_FIXED_SEEDS: readonly number[] = [11, 16, 19, 23, 27, 34, 40, 70, 88];
+export const INTERRUPTION_FIXED_SEEDS: readonly number[] = [2, 16, 19, 23, 54, 61, 67, 88];
+/** The scripted run's seed offset: one in which the paused lead's email is still at the provider when it stops (verifier on 2f7cd20). */
+const SCRIPTED_SEED = 3;
 const SEARCH_SEEDS = 100;
 const MAX_SEEDS = 30;
 const RUN_WRITES = 10_000;
@@ -25,7 +27,10 @@ export const INTERRUPTION_FEATURES: readonly string[] = [
   "a-notice-with-none-rescheduled",
   "a-notice-with-sends-rescheduled",
   "a-observe-answer-held-across-midnight",
+  "a-recovery-tick-that-sleeps",
+  "a-withdrawal-asked-across-a-recovery",
   "a-reply-during-an-outage",
+  "a-sleep-in-the-middle-of-a-tick",
   "app-stopped-across-a-rollover",
   "app-stopped-across-the-clock-change",
   "app-stopped-for-days",
@@ -47,6 +52,7 @@ export const INTERRUPTION_FEATURES: readonly string[] = [
   "providers-cut-off-for-minutes",
   "providers-cut-off-while-paused",
   "providers-cut-off-with-work-unsettled",
+  "providers-answering-from-a-cache",
 ];
 
 export const RETIRED_INTERRUPTION_FEATURES: Readonly<Record<string, string>> = {
@@ -55,7 +61,7 @@ export const RETIRED_INTERRUPTION_FEATURES: Readonly<Record<string, string>> = {
 };
 
 /** The names of this family: everything the interruption events add. Other names the runs reach belong to the control runs' lists. */
-const OURS = /^(app-stopped|providers-cut-off|a-notice|a-gap|a-crash-during|a-(observe|lookup)-answer|a-reply-during-an-outage)/;
+const OURS = /^(a-withdrawal-asked-across-a-recovery|app-stopped|providers-cut-off|providers-answering-from-a-cache|a-sleep-in-the-middle-of-a-tick|a-recovery-tick-that-sleeps|a-notice|a-gap|a-crash-during|a-(observe|lookup)-answer|a-reply-during-an-outage)/;
 /** Whether a behaviour name is the interruption family's: the control runs' own lists leave these to this file's. */
 export const isInterruptionFeature = (name: string): boolean => OURS.test(name);
 const known = (name: string) => INTERRUPTION_FEATURES.includes(name) || name in RETIRED_INTERRUPTION_FEATURES;
@@ -81,6 +87,12 @@ export function interruptionChunks(): void {
         expect(failures).toEqual([]);
       }, 1_800_000);
     }
+    test(`the scripted run: a withdrawal asked again after a recovery (seed ${INTERRUPTION_SEED + SCRIPTED_SEED})`, async () => {
+      const { problems, stats } = await runControls(INTERRUPTION_SEED + SCRIPTED_SEED, { interruptions: true, withdrawalAcrossARecovery: true });
+      for (const f of stats.features.filter((x) => OURS.test(x))) reached.add(f);
+      expect(problems).toEqual([]);
+      expect(stats.features).toContain("a-withdrawal-asked-across-a-recovery");
+    }, 600_000);
     if (!FULL_SEARCH) {
       test("the fixed seeds reach every behaviour they were chosen for", () => {
         expect(INTERRUPTION_FEATURES.filter((f) => !reached.has(f))).toEqual([]);
@@ -100,14 +112,15 @@ export function interruptionOracle(): void {
     const run = inShard(index) ? test : test.skip;
     run(`the generated runs with interruptions fail ${mutation.invariant} for an engine with "${name}"`, async () => {
       const breaks = (problems: readonly string[]) => problems.some((p) => controlInvariantsOf(p).includes(mutation.invariant));
-      const options = { ...mutation.options, interruptions: true, rules: mutation.rules, maxWrites: RUN_WRITES };
+      // A mutation with state of its own is built afresh for each run.
+      const options = () => ({ ...mutation.options, interruptions: true, rules: mutation.fresh?.() ?? mutation.rules, maxWrites: RUN_WRITES });
       if (!FULL_SEARCH) {
-        const { problems } = await runControls(INTERRUPTION_SEED + mutation.seed, options);
+        const { problems } = await runControls(INTERRUPTION_SEED + mutation.seed, options());
         expect(breaks(problems), `seed ${INTERRUPTION_SEED + mutation.seed} no longer breaks ${mutation.invariant}; run the sequence-search workflow and update its seed. Problems: ${problems.join("; ")}`).toBe(true);
         return;
       }
-      let caught: number | null = breaks((await runControls(INTERRUPTION_SEED + mutation.seed, options)).problems) ? mutation.seed : null;
-      for (let o = 0; o < MAX_SEEDS && caught === null; o++) if (breaks((await runControls(INTERRUPTION_SEED + o, options)).problems)) caught = o;
+      let caught: number | null = breaks((await runControls(INTERRUPTION_SEED + mutation.seed, options())).problems) ? mutation.seed : null;
+      for (let o = 0; o < MAX_SEEDS && caught === null; o++) if (breaks((await runControls(INTERRUPTION_SEED + o, options())).problems)) caught = o;
       console.info(`killing seed: interruption mutation "${name}" (${mutation.invariant}): ${caught ?? "none"}; recorded ${mutation.seed}`);
       expect(caught).not.toBeNull();
     }, 1_800_000);

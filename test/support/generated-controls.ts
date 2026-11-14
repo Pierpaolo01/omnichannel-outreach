@@ -62,6 +62,13 @@ export interface ControlRunOptions {
    * campaigns; a world starting in the week of the 25 October 2026 clock change.
    */
   readonly interruptions?: boolean;
+  /**
+   * A fixed run of the family (verifier on 2f7cd20): emails the provider sends up to an hour late and keeps when asked to
+   * withdraw them, a lead paused with its email at the provider (its withdrawal answered unknown), then the
+   * application stopped for six minutes: after recovery the withdrawal must be asked again a settling period after the
+   * last ask (check A).
+   */
+  readonly withdrawalAcrossARecovery?: boolean;
 }
 
 export interface ControlRunResult {
@@ -107,7 +114,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   const r20 = random(seed ^ 0x20a);
   const start = interrupting ? Date.parse("2026-10-21T00:00:00Z") + Math.floor(r20() * 7) * DAY + Math.floor(r20() * 24) * HOUR : usual;
   const CAPACITY = interrupting ? 3 : 50;
-  const lateSends = chance(0.5);
+  const lateSends = chance(0.5) || options.withdrawalAcrossARecovery === true;
   if (lateSends) features.add("late-sends");
   const keepsSending = lateSends && chance(0.4);
   if (keepsSending) features.add("withdrawals-answered-unknown-and-sent");
@@ -122,7 +129,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   if (lookupLags) features.add("lookups-lag");
   // Review bot on 612aa05, from a stream of its own: emails the provider sends but never reports (no event, lookups
   // unknown), so a pause meets a too-late answer whose send time stays unknown.
-  const silentSends = random(seed ^ 0x17f)() < 0.3;
+  const silentSends = random(seed ^ 0x17f)() < 0.3 && options.withdrawalAcrossARecovery !== true;
   if (silentSends) features.add("sends-never-reported");
   // Verifier R2-2 on 612aa05, from a stream of its own: texts the provider sends late, so a pause can withdraw one.
   const lateTexts = random(seed ^ 0x180)() < 0.5;
@@ -132,7 +139,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   if (silentSends) h.fake.silentRevealAfterMs = DAY;
   // A provider that keeps what it was asked to withdraw: in the runs whose lookups lag too, so a pause meets work withdrawn
   // on a non-final "not sent" while still uncertain (the reviewer's reproduction, review bot on ca8baee, item 2).
-  if (keepsSending || lookupLags) h.fake.withdrawAnswers = "unknown-sends";
+  if (keepsSending || lookupLags || options.withdrawalAcrossARecovery === true) h.fake.withdrawAnswers = "unknown-sends";
   if (options.presendFirstReply === true) h.fake.presendFirstReply = true;
   if (options.occupancyCountsAttempts === true) {
     // The mutation replaces the store's own count (`occupancy`) with live attempts only.
@@ -262,11 +269,6 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     for (const d of [...downs].sort((a, b) => a.from - b.from)) if (d.from < at && at < d.to) at = d.to;
     return h.providersDownUntil !== null && at > (outageFrom ?? Infinity) ? Infinity : at;
   };
-  /** The deadline for a provider request due at `t`: when the app is up again, and if a down interval swallowed an ask, one settling period after it ended. */
-  const askedBy = (asked: number, t: number, now: number) => {
-    const swallowed = downs.filter((d) => d.to > asked && d.from < now).map((d) => d.to);
-    return swallowed.length > 0 ? Math.max(upFrom(t), Math.max(...swallowed) + 15 * MINUTE) : upFrom(t);
-  };
   let outageFrom: number | null = null;
   let cut: { readonly email: { readonly h: number; readonly d: number }; readonly sms: { readonly h: number; readonly d: number }; readonly presend: number } | null = null;
   /**
@@ -275,6 +277,8 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
    * crash point named; the record reads only which lead and step it was for.
    */
   const committedUncalled: string[] = [];
+  /** The same handovers, by provider work, kept for good: with the provider, as the app knows, until a final answer. */
+  const uncalledHandovers: { channel: "email" | "sms"; key: string; subjectId: string; stepId: string; at: number }[] = [];
   const deliveries = (ch: "email" | "sms") => {
     const log = ch === "sms" ? sms.deliveryLog : email.deliveryLog;
     return cut ? log.slice(0, cut[ch].d) : log;
@@ -398,7 +402,9 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     // Sent, but not known to the app yet, is still with the provider as far as the app can tell.
     const port = ch === "sms" ? sms : email;
     const known = (d: { key: string; at: number; visibleAt: number }) => upFrom(Math.min(d.visibleAt, port.lookupLog.find((l) => l.key === d.key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity)) <= h.clock;
-    return handovers(ch).some((c) => c.subjectId === s.id && c.stepId === stepId && !deliveries(ch).some((d) => d.key === c.key && known(d)) && !port.withdrawLog.some((w) => w.key === c.key && w.answer === "withdrawn"));
+    // A send call an outage swallowed is with the provider as far as the app can tell (ticket 20a), until a final answer.
+    const swallowed = [...h.swallowedHandovers, ...uncalledHandovers].filter((c) => c.channel === ch && c.at <= h.clock);
+    return [...handovers(ch), ...swallowed].some((c) => c.subjectId === s.id && c.stepId === stepId && !deliveries(ch).some((d) => d.key === c.key && known(d)) && !port.withdrawLog.some((w) => w.key === c.key && w.answer === "withdrawn"));
   }
   /**
    * Ticket 20a, R7: the sends the interruption [x, y) rescheduled, by the record, at y (the clock), as the app knows them
@@ -415,7 +421,10 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
         if (!p || inFlight(t, s, p.stepId) || uncalled.has(`${s.id}/${p.stepId}`)) continue;
         const from = Math.max(x, p.due);
         const instants = [from, ...holdsOf(s).map((hold) => hold.to).filter((at) => at > from && at < y)];
-        if (instants.some((at) => at < y && !heldAt(s, at) && !endedAt(s, at))) n++;
+        if (instants.some((at) => at < y && !heldAt(s, at) && !endedAt(s, at))) {
+          n++;
+          if (process.env["CONTROLS_DEBUG"]) console.info(`counted y=${isoOf(y)} cut=${JSON.stringify(cut)} logs=${email.handoverLog.length}/${sms.handoverLog.length} ${s.id}/${p.stepId} due ${isoOf(p.due)} handovers ${JSON.stringify(handovers(t.channel === "sms" ? "sms" : "email").filter((c) => c.subjectId === s.id && c.stepId === p.stepId).map((c) => [c.key, isoOf(c.at)]))} withdrawals ${JSON.stringify((t.channel === "sms" ? sms : email).withdrawLog.filter((w) => handovers(t.channel === "sms" ? "sms" : "email").some((c) => c.key === w.key && c.subjectId === s.id && c.stepId === p.stepId)).map((w) => [isoOf(w.at), w.answer]))}`);
+        }
       }
     }
     return n;
@@ -504,10 +513,14 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     // Council A on 56d599c: a withdrawal answered "unknown" is asked again one settling period on, while the work has no
     // final answer by the record (not known sent, not withdrawn), whether or not an attempt still carries it.
     const SETTLING = 15 * MINUTE;
+    // Exact across interruptions (verifier on 2f7cd20): the last ask is the provider's or one an outage swallowed (the
+    // engine asked; to it, an unknown answer), and the next is due one settling period later, moved only when that instant
+    // falls while the application could not act: never forgiving time it could.
+    const swallowedAsks = h.swallowedWithdrawals.filter((w) => w.channel === "email").map((w) => ({ key: w.key, at: w.at, answer: "unknown" as const }));
     for (const key of new Set(email.withdrawLog.map((w) => w.key))) {
-      const asks = email.withdrawLog.filter((w) => w.key === key);
+      const asks = [...email.withdrawLog.filter((w) => w.key === key), ...swallowedAsks.filter((w) => w.key === key)].sort((a, b) => a.at - b.at);
       const last = asks.at(-1)!;
-      const deadline = askedBy(last.at, last.at + SETTLING, now);
+      const deadline = upFrom(last.at + SETTLING);
       if (last.answer !== "unknown" || now < deadline + MINUTE) continue;
       const d = email.deliveryLog.find((x) => x.key === key);
       const known = d ? Math.min(d.visibleAt, email.lookupLog.find((l) => l.key === key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity) : Infinity;
@@ -753,7 +766,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     const expected = accepts(s, action, now);
     const read = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${s.id}`)).body;
     const offered = read.controls.find((c) => c.action === action);
-    if (!offered || offered.allowed !== expected) problem(`P11: ${s.id}'s read ${offered?.allowed ? "offers" : "refuses"} ${action} at ${isoOf(now)}; the record says it must be ${expected ? "accepted" : "refused"}${offered && !offered.allowed ? ` ("${offered.reason}")` : ""}${process.env["CONTROLS_DEBUG"] ? ` [current ${currentStep(s, now)?.stepId ?? "none"}; starts ${JSON.stringify(def(s).tracks.map((x) => [x.id, JSON.stringify(x.start), isoOf(startOf(s, x)), finishOf(s, x)]))}; lookups ${JSON.stringify(email.lookupLog.filter((l) => l.key === "att-122").map((l) => [isoOf(l.at), l.answer]))}; engineTracks ${JSON.stringify((await h.store.engine.subject(s.id, now))?.tracks.map((p) => [p.trackId, p.startAt, p.startedAt, p.finishReason, isoOf(p.finishedWall)]))}; clock ${JSON.stringify((await h.store.engine.subject(s.id, now))?.subject.clock)}; work ${JSON.stringify((await h.store.engine.subject(s.id, now))?.work.map((w) => [w.stepId, w.key, w.calls, w.settled, w.lookupAnswer]))}; attempts ${JSON.stringify((await h.store.engine.subject(s.id, now))?.attempts.map((a) => [a.stepId, a.idempotencyKey, a.state, a.endedBy]))}; handovers ${JSON.stringify(email.handoverLog.filter((c) => c.subjectId === s.id).map((c) => [c.stepId, c.key, isoOf(c.at), c.mode]))}; deliveries ${JSON.stringify(email.deliveryLog.filter((c) => c.subjectId === s.id).map((c) => [c.stepId, c.key, isoOf(c.at)]))}; withdrawals ${JSON.stringify(email.withdrawLog)}]` : ""}`);
+    if (!offered || offered.allowed !== expected) problem(`P11: ${s.id}'s read ${offered?.allowed ? "offers" : "refuses"} ${action} at ${isoOf(now)}; the record says it must be ${expected ? "accepted" : "refused"}${offered && !offered.allowed ? ` ("${offered.reason}")` : ""}${process.env["CONTROLS_DEBUG"] ? ` [holds ${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))}; pauses ${JSON.stringify([...leadPauses.filter((p) => p.subjectId === s.id), ...campaignPauses.filter((p) => p.campaign === s.campaign)].map((p) => [isoOf(p.from), isoOf(p.to)]))}; endings ${JSON.stringify(endings.filter((e) => e.subjectId === s.id).map((e) => [e.kind, isoOf(e.at), isoOf(e.restartedAt)]))}; downs ${JSON.stringify(downs.map((x) => [isoOf(x.from), isoOf(x.to)]))}; freezes ${JSON.stringify((await h.store.engine.subject(s.id, now))?.freezes.map((f) => [isoOf(f.fromWall), isoOf(f.toWall)]))}; current ${currentStep(s, now)?.stepId ?? "none"}; starts ${JSON.stringify(def(s).tracks.map((x) => [x.id, JSON.stringify(x.start), isoOf(startOf(s, x)), finishOf(s, x)]))}; lookups ${JSON.stringify(email.lookupLog.filter((l) => l.key === "att-122").map((l) => [isoOf(l.at), l.answer]))}; engineTracks ${JSON.stringify((await h.store.engine.subject(s.id, now))?.tracks.map((p) => [p.trackId, p.startAt, p.startedAt, p.finishReason, isoOf(p.finishedWall)]))}; clock ${JSON.stringify((await h.store.engine.subject(s.id, now))?.subject.clock)}; work ${JSON.stringify((await h.store.engine.subject(s.id, now))?.work.map((w) => [w.stepId, w.key, w.calls, w.settled, w.lookupAnswer]))}; attempts ${JSON.stringify((await h.store.engine.subject(s.id, now))?.attempts.map((a) => [a.stepId, a.idempotencyKey, a.state, a.endedBy]))}; handovers ${JSON.stringify(email.handoverLog.filter((c) => c.subjectId === s.id).map((c) => [c.stepId, c.key, isoOf(c.at), c.mode]))}; deliveries ${JSON.stringify(email.deliveryLog.filter((c) => c.subjectId === s.id).map((c) => [c.stepId, c.key, isoOf(c.at)]))}; withdrawals ${JSON.stringify(email.withdrawLog)}]` : ""}`);
     const current = action === "skip" ? (skipTargetOf(s, now) ?? currentStep(s, now)) : currentStep(s, now);
     if (action === "skip" && offered?.allowed && current && (offered.skips?.trackId !== current.track.id || offered.skips.stepId !== current.stepId)) problem(`P11: ${s.id}'s read would skip ${offered.skips?.stepId ?? "nothing"}; the record's current step is ${current.stepId}${process.env["CONTROLS_DEBUG"] ? ` [pending ${JSON.stringify(tracksIn(s, branchOf(s, now)).map((t) => [t.id, pendingOf(s, t, now)]).map(([id, p]) => [id, p && typeof p === "object" ? [p.stepId, isoOf(p.due), isoOf(p.unheld)] : null]))}; holds ${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))}; engine ${JSON.stringify((read.tracks).map((t) => [t.trackId, t.nextStep]))}]` : ""}`);
     if (action === "skip" && current && inFlight(current.track, s, current.stepId)) features.add("skip-refused-with-work-at-the-provider");
@@ -1019,11 +1032,11 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     downs.push({ from: x, to: y });
     outageFrom = null;
     settleHidden();
-    const uncalled = new Set<string>();
     for (const id of committedUncalled.splice(0)) {
       const a = await h.store.engine.attempt(id);
-      if (a) uncalled.add(`${a.subjectId}/${a.stepId}`);
+      if (a) uncalledHandovers.push({ channel: a.accountId.startsWith("+") ? "sms" : "email", key: a.idempotencyKey, subjectId: a.subjectId, stepId: a.stepId, at: a.handedWall ?? x });
     }
+    const uncalled = new Set<string>();
     if (y - x > GAP) {
       const rescheduled = rescheduledByRecord(x, y, uncalled);
       expectedNotice = { from: isoOf(x), to: isoOf(y), rescheduled };
@@ -1044,6 +1057,16 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     }
   }
   if (interrupting) {
+    // Half the runs' providers answer from a cache while cut off, as the Instantly adapter does between polls (PR 56).
+    h.cachedPolls = random(seed ^ 0x20b)() < 0.5;
+    if (h.cachedPolls) features.add("providers-answering-from-a-cache");
+    // A machine asleep in the middle of a tick: the interruption is the record's from the instant the answer was asked to
+    // the instant it arrived, and the logs are cut there, before anything the resumed tick dispatches.
+    h.onHeldAnswer = (asked, answered) => {
+      // A sleep inside a recovery under way extends that interruption: one notice, from its start (verifier on 2f7cd20).
+      pending = pending ? { ...pending, y: answered, what: `${pending.what}, its recovery asleep until ${isoOf(answered)}` } : { x: asked, y: answered, what: `an answer held from ${isoOf(asked)} to ${isoOf(answered)}` };
+      takeCut();
+    };
     h.onStop = (from, to) => {
       pending = { x: from, y: to, what: `a stop from ${isoOf(from)} to ${isoOf(to)}` };
       takeCut();
@@ -1110,7 +1133,15 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
         h.downAfterCrash = null;
       }
       await h.tick();
+      // Sometimes the recovery's own first observation sleeps too (verifier on 2f7cd20, "long recovery"): the interruption
+      // runs on to the end of that sleep, one notice.
+      const sleepy = random(seed ^ 0x20c ^ Math.floor(h.clock / 60_000));
+      if (sleepy() < 0.3) {
+        h.heldAnswer = { kind: "observe", ms: Math.round((1 + sleepy() * 6) * HOUR) };
+        features.add("a-recovery-tick-that-sleeps");
+      }
       await h.stopFor(ms);
+      h.heldAnswer = null;
       return;
     }
     if (kind < 0.7) {
@@ -1140,12 +1171,33 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
       return;
     }
     features.add(`a-${answer.kind}-answer-held-across-midnight`);
-    pending = { x: asked, y: answer.answeredAt, what: `an answer held from ${isoOf(asked)} to ${isoOf(answer.answeredAt)}` };
+    if (answer.answeredAt - asked > GAP) features.add("a-sleep-in-the-middle-of-a-tick");
     await h.tick();
   }
 
   const eventCount = options.events ?? 22;
   await checkAll();
+  if (options.withdrawalAcrossARecovery === true) {
+    // The scripted prelude: a lead whose email is at the provider is paused (its withdrawal answered unknown), the
+    // application stops for six minutes, and runs on for an hour after its recovery.
+    // An email at the provider and not seen sent: its withdrawal is answered unknown while the provider keeps it.
+    const unseen = (s: Subject) => email.handoverLog.some((c) => c.subjectId === s.id && c.mode === "late-send" && !email.deliveryLog.some((d) => d.key === c.key));
+    let atProvider: Subject | undefined;
+    for (let i = 0; i < 120 && !atProvider; i++) {
+      await h.advanceTo(h.clock + MINUTE);
+      atProvider = [...subjects.values()].find((s) => unseen(s) && !endedAt(s, h.clock) && !heldAt(s, h.clock));
+    }
+    if (atProvider) {
+      await control(atProvider, "pause");
+      await h.advanceTo(h.clock + 2 * MINUTE);
+      await h.tick();
+      // Six minutes: longer than the gap, and over before the withdrawal's next ask falls due.
+      await h.stopFor(6 * MINUTE);
+      features.add("a-withdrawal-asked-across-a-recovery");
+      await h.advanceTo(h.clock + HOUR);
+      await checkAll();
+    }
+  }
   for (let e = 0; e < eventCount && problems.length === 0 && !h.stopped; e++) {
     const r = rand();
     await h.advanceTo(h.clock + (r < 0.5 ? MINUTE : pick([10 * MINUTE, HOUR, 5 * HOUR, 12 * HOUR, DAY])));

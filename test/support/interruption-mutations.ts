@@ -62,8 +62,32 @@ const RULES: Record<string, Partial<Rules>> = {
   "a gap of any length is an interruption": {
     interruptionOf: (last, now) => (last === null || now <= last ? null : { from: last, to: now }),
   },
+  // R7, the same rule (PR 56 review bot): the dispatch judged at the tick's start, so a sleep in the middle of a tick
+  // dispatches overdue work before the interruption is counted.
+  "a dispatch is judged at the tick's start": { dispatchInstant: (started) => started },
   // R9 (follow-up 42 item 39): a provider answer applied at the instant its request was made.
   "a late answer is applied at the instant its request was made": { answerInstant: (asked) => asked },
+};
+
+/**
+ * Mutations with state of their own, built afresh for each run (verifier on 2f7cd20): after the first recovery, no
+ * withdrawal is asked again (check A).
+ */
+const FRESH: Record<string, () => Partial<Rules>> = {
+  "no withdrawal retries after recovery": () => {
+    let recovered = false;
+    return {
+      afterInterruption: (s, gap, now) => {
+        recovered = true;
+        return R.afterInterruption(s, gap, now);
+      },
+      rescheduled: (s, gap, now) => {
+        recovered = true;
+        return R.rescheduled(s, gap, now);
+      },
+      withdrawalDue: (w, now, carried) => !recovered && R.withdrawalDue(w, now, carried),
+    };
+  },
 };
 
 /** The invariant each mutation must break, and the seed offset known to show it (refreshed by the CI search). */
@@ -77,12 +101,15 @@ const EXPECTED: Record<string, { invariant: string; seed: number; options?: Part
   "the count is the steps due during the interruption": { invariant: "R7", seed: 0 },
   "a gap of any length is an interruption": { invariant: "R7", seed: 2 },
   "a late answer is applied at the instant its request was made": { invariant: "P12", seed: 16 },
+  "a dispatch is judged at the tick's start": { invariant: "R7", seed: 0 },
+  "no withdrawal retries after recovery": { invariant: "A", seed: 3, options: { withdrawalAcrossARecovery: true } },
 };
 
-export const INTERRUPTION_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number; readonly options?: Partial<ControlRunOptions> }> = Object.fromEntries(
+export const INTERRUPTION_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly fresh?: () => Partial<Rules>; readonly invariant: string; readonly seed: number; readonly options?: Partial<ControlRunOptions> }> = Object.fromEntries(
   Object.entries(EXPECTED).map(([name, e]) => {
-    const rules = RULES[name];
+    const fresh = FRESH[name];
+    const rules = RULES[name] ?? fresh?.();
     if (!rules) throw new Error(`no mutation named ${name}`);
-    return [name, { rules, ...e }];
+    return [name, { rules, ...(fresh ? { fresh } : {}), ...e }];
   }),
 );
