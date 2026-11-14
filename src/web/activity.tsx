@@ -2,7 +2,7 @@ import { useId, useState } from "react";
 import type { ActivityEntry, ActivityView } from "../shared/api.ts";
 import { useApi } from "./api.ts";
 import { ErrorState, Section } from "./components.tsx";
-import { OUTCOME_TITLE, dialledLine } from "./calls/wording.ts";
+import { OUTCOME_TITLE, dateIn, dialledLine } from "./calls/wording.ts";
 import { Icon, type IconName } from "./icons.tsx";
 import { useNow } from "./time.ts";
 
@@ -98,12 +98,24 @@ export function describeEntry(entry: ActivityEntry): { icon: IconName; tone: str
     const track = entry.track.several ? entry.track.label : null;
     switch (entry.kind) {
       case "call":
-        // The number dialled and the call's note; a skip for now has no number.
-        return { icon: "call", tone: CALL, title: OUTCOME_TITLE[entry.outcome], body: [dialledLine(entry.number), entry.note.trim()].filter(Boolean).join(". ") || null, track };
+        // The number dialled and the call's note, after what the call did to the lead's calls (ticket 15b); a skip for now has no number.
+        return { icon: "call", tone: CALL, title: OUTCOME_TITLE[entry.outcome], body: [callMeaning(entry), dialledLine(entry.number), entry.note.trim()].filter(Boolean).join(". ") || null, track };
       case "skipped":
+        if (entry.reason === "unworked") {
+          const limit = entry.limitDays === 1 ? "a day" : `${entry.limitDays} days`;
+          return { icon: "system", tone: PLAIN, title: `${entry.track.label} skipped, not called`, body: `Not called within ${limit} of its due date, ${dateIn(localZone(), entry.dueAt)}, so the call was skipped. The tracks after it started.`, track: null };
+        }
         return { icon: "system", tone: PLAIN, title: `${entry.track.label} skipped`, body: "No good number to call: every number is missing or marked wrong.", track: null };
       case "released":
-        return { icon: "system", tone: PLAIN, title: `${entry.track.label} started`, body: `It starts after ${inSentence(entry.after)}, which ${entry.because === "skipped" ? "was skipped for this lead" : `ended on a bad ${entry.after.label.startsWith("SMS") ? "number" : "address"}`}.`, track: null };
+        return { icon: "system", tone: PLAIN, title: `${entry.track.label} started`, body: `It starts after ${inSentence(entry.after)}, which ${releasedWhy(entry.because, entry.after.label)}.`, track: null };
+      case "callback_overdue":
+        return {
+          icon: "bad",
+          tone: CRIT,
+          title: "Callback overdue",
+          body: `They asked for ${at(entry.callbackAt, entry.zone)} their time. It stays on your call list, flagged overdue, and their automated outreach in this campaign stays held until you log what happened.`,
+          track,
+        };
     }
   }
   const sms = entry.channel === "sms";
@@ -128,10 +140,32 @@ export function describeEntry(entry: ActivityEntry): { icon: IconName; tone: str
         icon: "system",
         tone: PLAIN,
         title: `${entry.track.label} started`,
-        body: `It starts after ${inSentence(entry.after)}, which ${entry.because === "skipped" ? "was skipped for this lead" : `ended on a bad ${entry.after.label.startsWith("SMS") ? "number" : "address"}`}.`,
+        body: `It starts after ${inSentence(entry.after)}, which ${releasedWhy(entry.because, entry.after.label)}.`,
         track: null,
       };
   }
+}
+
+const localZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
+const timeIn = (zone: string, iso: string) => new Intl.DateTimeFormat("en-GB", { timeZone: zone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(iso));
+/** "Thu 5 Nov at 14:30" in the prospect's zone. */
+const at = (iso: string, zone: string) => `${dateIn(zone, iso)} at ${timeIn(zone, iso)}`;
+
+function releasedWhy(because: "skipped" | "failed" | "unworked", after: string): string {
+  if (because === "unworked") return "was skipped: its call wasn’t made within its skip limit";
+  return because === "skipped" ? "was skipped for this lead" : `ended on a bad ${after.startsWith("SMS") ? "number" : "address"}`;
+}
+
+/** What a logged call did to the lead's calls (ticket 15b): a redial, a callback asked for, or the callback it answered. */
+function callMeaning(entry: Extract<ActivityEntry, { kind: "call"; channel: "call" }>): string | null {
+  if (entry.outcome === "callback_requested" && entry.callbackAt !== null) {
+    const lead = entry.onCallback === null ? "Call back" : "Callback moved to";
+    return `${lead} ${at(entry.callbackAt, entry.zone)} their time; automated outreach in this campaign is held until its outcome is logged`;
+  }
+  if (entry.onCallback !== null) {
+    return entry.outcome === "skip_for_now" ? `The callback for ${at(entry.onCallback, entry.zone)} their time stays open` : `The callback they asked for, ${at(entry.onCallback, entry.zone)} their time; its hold on automated outreach ended`;
+  }
+  return entry.redial ? "Redial asked for: back on the next day’s list, with its skip limit still counted from its due date" : null;
 }
 
 function Line({ entry }: { entry: ActivityEntry }) {

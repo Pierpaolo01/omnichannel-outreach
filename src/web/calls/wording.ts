@@ -3,9 +3,10 @@
  * reads only what the server reported (the queue, the call task, an outcome's answer, Needs
  * attention); none decides anything about order, counts, hours, capacity or an outcome's effect.
  */
-import type { CallNumberView, CallOffListView, CallOutcomeApi, CallQueueItem, CallsView, CallTaskView, NeedsAttention, RecordedNumberView, WindowRule } from "../../shared/api.ts";
+import type { CallNumberView, CallOffListView, CallOutcomeApi, CallQueueItem, CallsView, CallTaskView, NeedsAttention, RecordCallView, RecordedNumberView, TodayView, WindowRule } from "../../shared/api.ts";
 import { STATUS_LABEL } from "../status.tsx";
 import type { DeskSnapshot } from "./callDesk.ts";
+import { dayLabel, type CallbackProblem } from "./callbackTime.ts";
 
 /** The outcome buttons, as the approved prototype labels them. */
 export const OUTCOME_LABEL = {
@@ -14,7 +15,6 @@ export const OUTCOME_LABEL = {
   gatekeeper: "Didn’t reach them",
   wrong_number: "Wrong number",
   interested: "Interested",
-  // Logged over HTTP for now: the page offers no control for it yet (ticket 15's screens are a later part).
   callback_requested: "Callback requested",
   skip_for_now: "Skip for now",
 } as const satisfies Record<CallOutcomeApi, string>;
@@ -39,25 +39,57 @@ export const dialledLine = (n: RecordedNumberView | null): string | null => (n ?
 
 const timeIn = (zone: string, iso: string): string => new Intl.DateTimeFormat("en-GB", { timeZone: zone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(iso));
 
+/** "Thu 5 Nov": the date of an instant in a zone. */
+export const dateIn = (zone: string, iso: string): string => new Intl.DateTimeFormat("en-GB", { timeZone: zone, weekday: "short", day: "numeric", month: "short" }).format(new Date(iso)).replace(",", "");
+
+/** YYYY-MM-DD of an instant in a zone. */
+const isoDateIn = (zone: string, iso: string): string => new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(iso));
+
+/**
+ * A callback's time as the prospect asked for it, in their time, and in the user's when the zones read differently:
+ * "Thu 5 Nov at 14:30 their time" or "Thu 5 Nov at 14:30 their time, 15:30 your time".
+ */
+export function callbackWhen(iso: string, zone: string, userZone: string): string {
+  const theirs = `${dateIn(zone, iso)} at ${timeIn(zone, iso)} their time`;
+  const yours = `${dateIn(userZone, iso)} at ${timeIn(userZone, iso)}`;
+  if (yours === `${dateIn(zone, iso)} at ${timeIn(zone, iso)}`) return `${theirs}, the same as yours`;
+  return `${theirs}, ${dateIn(userZone, iso) === dateIn(zone, iso) ? timeIn(userZone, iso) : yours} your time`;
+}
+
+/** "the end of Tue 3 Nov", from a user date. */
+const endOf = (date: string): string => `the end of ${dayLabel(date)}`;
+
 /** The place a zone names, for the local time under a call: "Europe/London" is London. */
 export const zonePlace = (zone: string): string => (zone.split("/").at(-1) ?? zone).replaceAll("_", " ");
 
-/** Why a call is on the list, or when it opens, as Up next and the queue say it. */
-export function reasonLine(item: CallQueueItem, userZone: string): { text: string; tone: "muted" | "pause" | "crit" } {
+/**
+ * Why a call is on the list, or when it opens, as Up next and the queue say it: the server's reason, the
+ * original due date of a carried call, a callback's time in the prospect's and the user's time, and the
+ * server's word that an unworked call is skipped tonight. `today` is the user's date as the server counts it.
+ */
+export function reasonLine(item: CallQueueItem, userZone: string, today?: string): { text: string; tone: "muted" | "pause" | "crit" } {
+  const tonight = item.skippedTonight ? ", last day before it’s skipped" : "";
   // A callback waits for the time the prospect asked for, not for calling hours: said as a callback.
-  if (item.bucket === "later_today" && item.opensAt && item.reason !== "callback" && item.reason !== "overdue") return { text: `Their calling hours start at ${timeIn(userZone, item.opensAt)} your time`, tone: "muted" };
-  // Every reason the server gives is said, including those the page has no control for yet (redials and callbacks are logged over HTTP for now).
+  if (item.bucket === "later_today" && item.opensAt && item.reason !== "callback" && item.reason !== "overdue") return { text: `Their calling hours start at ${timeIn(userZone, item.opensAt)} your time${tonight}`, tone: "muted" };
+  const due = dateIn(userZone, item.dueAt);
   switch (item.reason) {
     case "rolled_over":
-      return { text: "Rolled over from an earlier day", tone: "pause" };
+      return { text: `Rolled over, due ${due}${tonight}`, tone: "pause" };
     case "redial":
-      return { text: "A redial from an earlier day", tone: "pause" };
-    case "callback":
-      return { text: item.callbackAt ? `Callback asked for at ${timeIn(userZone, item.callbackAt)}` : "Callback", tone: "pause" };
-    case "overdue":
-      return { text: item.callbackAt ? `Callback overdue, asked for at ${timeIn(userZone, item.callbackAt)}` : "Callback overdue", tone: "crit" };
+      return { text: `Redial, due ${due}${tonight}`, tone: "pause" };
+    case "callback": {
+      if (!item.callbackAt) return { text: "Callback", tone: "pause" };
+      const yours = timeIn(userZone, item.callbackAt);
+      const theirs = timeIn(item.zone, item.callbackAt);
+      return { text: `Callback they asked for at ${theirs} their time${theirs === yours ? "" : `, ${yours} yours`}`, tone: "pause" };
+    }
+    case "overdue": {
+      if (!item.callbackAt) return { text: "Callback overdue", tone: "crit" };
+      const day = today !== undefined && isoDateIn(item.zone, item.callbackAt) === today ? "today" : dateIn(item.zone, item.callbackAt);
+      return { text: `Callback overdue since ${day} at ${timeIn(item.zone, item.callbackAt)} their time${item.noGoodNumber ? ", no good number left" : ""}`, tone: "crit" };
+    }
     case "due":
-      return { text: "Due today", tone: "muted" };
+      return { text: `Due today${tonight}`, tone: "muted" };
   }
 }
 
@@ -122,7 +154,7 @@ export function clockLine(task: Pick<CallTaskView, "task" | "listed" | "callingH
 
 /** While an action is on its way. */
 export function pendingLine(pending: NonNullable<DeskSnapshot["pending"]>): string {
-  const what = pending.body.outcome === "skip_for_now" ? `Skipping ${pending.who} for now` : `Logging ${OUTCOME_LABEL[pending.body.outcome].toLowerCase()} for ${pending.who}`;
+  const what = pending.body.outcome === "skip_for_now" ? `Skipping ${pending.who} for now` : `Logging ${OUTCOME_LABEL[pending.body.outcome].toLowerCase()}${pending.body.redial ? " with a redial" : ""} for ${pending.who}`;
   // Another window's press: nothing has failed, it is simply being logged there (council on b8c65f9, item 5).
   if (!pending.own) return `${what} from another window. It is logged only once.`;
   return pending.unconfirmed ? `${what}: not confirmed yet. It is being sent again, and it is logged only once.` : `${what}…`;
@@ -134,15 +166,32 @@ export function confirmingLine(who: string): string {
 }
 
 /** What the server did with the last accepted action, read from its answer. */
-export function loggedLine(logged: NonNullable<DeskSnapshot["logged"]>): string {
+export function loggedLine(logged: NonNullable<DeskSnapshot["logged"]>, userZone: string = logged.task.zone): string {
   const { body, task, who } = logged;
-  if (body.outcome === "skip_for_now") return `${who} skipped for now.${task.listed ? " The call stays on today’s list." : ""}`;
+  if (body.outcome === "skip_for_now") return `${who} skipped for now.${task.listed ? (task.kind === "callback" ? " The callback stays on today’s list, and their outreach stays held." : " The call stays on today’s list.") : ""}`;
+  // What the server stored for this press: its outcome, redial and callback time (ticket 15b), never the draft's.
+  const stored = task.storedCalls.find((c) => c.requestId === logged.requestId);
+  if (stored?.outcome === "callback_requested" && stored.callbackAt !== null) {
+    const parts = [`${who}: callback requested for ${callbackWhen(stored.callbackAt, task.zone, userZone)}.`];
+    if (task.open && task.kind === "callback" && task.callbackAt === stored.callbackAt) parts.push(`Their automated outreach in ${task.campaign.name} is held until you log how the callback went.`);
+    return withNote(parts, body, task, who);
+  }
+  if (stored?.redial) {
+    const parts = [`${who}: ${OUTCOME_LABEL[stored.outcome].toLowerCase()} logged, with a redial.`];
+    if (task.open && !task.listed) parts.push(`The call is on the list for ${dayLabel(task.listedFor)}, and the ${task.track.label.toLowerCase()} stays open.`);
+    if (task.open && task.skipLimit?.ifUnworked) parts.push(`If it isn’t worked, it is skipped at ${endOf(task.skipLimit.ifUnworked)}.`);
+    return withNote(parts, body, task, who);
+  }
   const parts = [`${who}: ${OUTCOME_LABEL[body.outcome].toLowerCase()} logged.`];
   const dialled = task.numbers.find((n) => n.detailId === body.numberId);
   if (body.outcome === "wrong_number" && dialled?.bad) parts.push(`${dialled.value} is marked wrong.`);
   if (task.status === "interested_on_call") parts.push(`${STATUS_LABEL.interested_on_call} in ${task.campaign.name}. Nothing else is recorded.`);
   else if (!task.open) parts.push(`The ${task.track.label.toLowerCase()} is finished.`);
-  // Where the note is, as the server's answer stores it: never from what was asked.
+  return withNote(parts, body, task, who);
+}
+
+/** Where the note is, as the server's answer stores it: never from what was asked. */
+function withNote(parts: string[], body: { readonly note: string }, task: CallTaskView, who: string): string {
   const note = body.note.trim();
   if (note !== "" && task.companyNotes.some((n) => n.body === note)) parts.push(`The note is saved for everyone at ${task.company.name}.`);
   else if (note !== "" && task.personNotes.some((n) => n.body === note)) parts.push(`The note is saved on ${who}.`);
@@ -191,11 +240,39 @@ export interface AttentionItem {
   readonly tone: "crit" | "pause" | "end";
   readonly title: string;
   readonly body: string;
+  /** Where to act: Calls for an overdue callback, Campaigns otherwise. */
+  readonly action?: { readonly label: string; readonly href: string };
 }
 
-/** Everything Needs attention reports, each once. */
-export function attentionItems(n: NeedsAttention, userZone: string): AttentionItem[] {
+/**
+ * Overdue callbacks first, as the prototype puts them (ticket 15b), from Today's read, which names whose
+ * they are; GET /api/needs-attention reports the same callbacks without names, so they are said once.
+ */
+function overdueItem(today: Pick<TodayView, "overdueCallbacks" | "userZone" | "date">): AttentionItem | null {
+  const od = today.overdueCallbacks;
+  const first = od[0];
+  if (!first) return null;
+  const name = (x: CallQueueItem) => x.person?.name ?? x.company.name;
+  const asked = od.map((x) => `${name(x)} asked for ${x.callbackAt ? callbackWhen(x.callbackAt, x.zone, today.userZone) : "a callback"}.`).join(" ");
+  const stuck = od.filter((x) => x.noGoodNumber);
+  const q13 =
+    stuck.length === 0
+      ? ""
+      : ` Every number for ${stuck.map(name).join(" and ")} is marked wrong, so nothing can be logged on ${stuck.length === 1 ? "that callback" : "those callbacks"} until a new number arrives by import or they reply.`;
+  return {
+    key: "overdue-callbacks",
+    tone: "crit",
+    title: od.length === 1 ? `${name(first)}’s callback is overdue` : `${od.length} callbacks are overdue`,
+    body: `${asked} ${od.length === 1 ? "It stays" : "They stay"} on your call list, flagged overdue, and automated outreach to ${od.length === 1 ? "them" : "each"} stays held until you log what happened.${q13}`,
+    action: { label: "Open Calls", href: "/calls" },
+  };
+}
+
+/** Everything Needs attention reports, each once; with Today's read, overdue callbacks first. */
+export function attentionItems(n: NeedsAttention, userZone: string, today?: Pick<TodayView, "overdueCallbacks" | "userZone" | "date"> | null): AttentionItem[] {
   const items: AttentionItem[] = [];
+  const overdue = today ? overdueItem(today) : null;
+  if (overdue) items.push(overdue);
   for (const p of n.senderProblems) {
     items.push({
       key: `sender-${p.accountId}`,
@@ -234,10 +311,12 @@ export function recoveringLine(who: string): string {
 
 /** A kept refusal: what was not logged, and why, from the server's `offList` when it said. */
 export function refusedRecordLine(
-  record: { readonly who: string; readonly body: { readonly outcome: CallOutcomeApi }; readonly refused: { readonly message: string; readonly offList: CallOffListView | null } },
+  record: { readonly who: string; readonly body: { readonly outcome: CallOutcomeApi; readonly redial?: true; readonly callbackAt?: string }; readonly refused: { readonly message: string; readonly offList: CallOffListView | null } },
   zone: string,
 ): string {
-  const what = record.body.outcome === "skip_for_now" ? `skip for now on ${record.who}` : `${OUTCOME_LABEL[record.body.outcome].toLowerCase()} for ${record.who}`;
+  const { body } = record;
+  const extra = body.redial ? " with a redial" : body.callbackAt ? ` for ${dateIn(zone, body.callbackAt)} at ${timeIn(zone, body.callbackAt)} your time` : "";
+  const what = body.outcome === "skip_for_now" ? `skip for now on ${record.who}` : `${OUTCOME_LABEL[body.outcome].toLowerCase()}${extra} for ${record.who}`;
   // The server's own message, unless it refused because the call was already logged, which the off-list facts say with what and when.
   const why = record.refused.offList?.reason === "logged" ? offListLine(record.who, record.refused.offList, null, zone) : record.refused.message;
   return `Not logged: ${what}. ${why}`;
@@ -271,3 +350,78 @@ export const UNSTORED_REFUSAL_LINE = "This device’s storage is full or blocked
 export const DRAFT_NOT_KEPT_LINE = "This note is not being kept on this device if you leave the page.";
 
 export const NOT_QUEUED_LINE = "This outcome couldn’t be queued on this device: its storage is full or blocked, so nothing was sent. Your choice and note are kept. Free some space, or allow this site to store data, then press Log again.";
+
+// ---------------------------------------------------------------------------------------------
+// Redials and callbacks (ticket 15b). What the engine does, said from the server's read of the call before
+// Log (its `redial` and `skipLimit` facts) and from its answer after; nothing here computes a date.
+
+/** Under "Call again tomorrow", from the call's read: where a redial puts the call, and when the skip limit still ends it. */
+export function redialLines(task: Pick<CallTaskView, "redial" | "skipLimit" | "track">): { checked: string; unchecked: string } {
+  const track = task.track.label.toLowerCase();
+  const moves = task.redial ? `The call moves to the list for ${dayLabel(task.redial.listedFor)}, and the ${track} stays open, so the tracks after it keep waiting.` : `The call moves to tomorrow’s list, and the ${track} stays open.`;
+  const limit = task.skipLimit
+    ? ` The skip limit still counts from ${dayLabel(task.skipLimit.dueDate)}, its original due date${task.redial?.ifUnworked ? `: if it isn’t worked, it is skipped at ${endOf(task.redial.ifUnworked)}` : ""}.`
+    : "";
+  return { checked: `${moves}${limit}`, unchecked: `Without a redial, this call is done: the ${track} finishes, and nothing calls them again unless you ask.` };
+}
+
+/** What the callback controls say about the time entered: shown back in both times, and what the engine will make of it. */
+export function callbackLine(
+  callback: { readonly at: number | null; readonly problem: CallbackProblem | null },
+  advice: "inside" | "outside" | "closed_day" | null,
+  task: Pick<CallTaskView, "zone" | "callingHours">,
+  userZone: string,
+): { text: string; tone: "plain" | "crit" } {
+  if (callback.problem === "missing") return { text: "Enter the day and time they asked for, in their time.", tone: "plain" };
+  if (callback.problem === "no_such_time") return { text: "That time doesn’t exist in their time zone on that day: the clocks change. Choose another time.", tone: "crit" };
+  if (callback.problem === "past" || callback.at === null) return { text: "That time has passed. Choose a time still to come; a callback in the past isn’t accepted.", tone: "crit" };
+  const when = callbackWhen(new Date(callback.at).toISOString(), task.zone, userZone);
+  const hours = callingHoursLine(task.callingHours);
+  const note =
+    advice === "inside"
+      ? "Inside their calling hours."
+      : advice === "outside"
+        ? `Outside their calling hours (${hours}), and still accepted: a callback is listed at the time they asked for.`
+        : `Their calling hours never open on that day (${hours}), and it is still accepted: a callback is listed at the time they asked for.`;
+  return { text: `Callback on ${when}. ${note}`, tone: "plain" };
+}
+
+/** What a callback does to the lead, before Log (ADR 0003 2.3, Q12): the hold, and that nothing ends it but an outcome. */
+export function callbackHoldLine(task: Pick<CallTaskView, "kind" | "campaign">, who: string): string {
+  if (task.kind === "callback") return `A new time keeps the hold: ${who}’s automated outreach in ${task.campaign.name} stays held until you log how the callback went.`;
+  return `${who}’s automated outreach in ${task.campaign.name} is held from now until you log how the callback went. The call stays open: it is never skipped, and nothing resumes by itself.`;
+}
+
+/** Any other outcome on a callback ends its hold (ADR 0003 2.4: the hold is released first, then the outcome is logged). */
+export const CALLBACK_RELEASE_LINE = "Logging this ends the callback’s hold on their automated outreach in this campaign.";
+
+/** Skip for now, before Log. */
+export function skipLine(task: Pick<CallTaskView, "kind">): string {
+  return task.kind === "callback" ? "The callback goes to the end of today’s list and stays open; their outreach stays held." : "The call goes to the end of today’s list. Nothing else changes.";
+}
+
+/** Question Q13's interim, said plainly: a callback whose lead has no good number left. */
+export function noGoodNumberLine(who: string): string {
+  return `Every number for ${who} is marked wrong, so nothing but skip for now can be logged on this callback. It stays on your list, flagged overdue once its time passes, and their other outreach in this campaign stays held until a new number arrives by import or they reply. Pausing them or skipping the step arrives with a later release.`;
+}
+
+/** One sentence per open call on the person and company-lead record (ticket 15b), from the server's read as of `today`. */
+export function recordCallLine(call: RecordCallView, today: string): string {
+  const limit = call.skipLimit
+    ? ` It was due ${dayLabel(call.skipLimit.dueDate)}${call.skipLimit.ifUnworked ? `; if it isn’t worked, it is skipped at ${endOf(call.skipLimit.ifUnworked)}` : ""}.`
+    : "";
+  if (call.kind === "callback") {
+    const at = call.callbackAt ? `${dateIn(call.zone, call.callbackAt)} at ${timeIn(call.zone, call.callbackAt)} their time` : "at the time they asked for";
+    const overdue = call.reason === "overdue";
+    const lines = [overdue ? `Callback ${at}, now overdue. It stays on your call list until you log what happened, and their automated outreach in this campaign stays held until then.` : `Callback ${at}. Their automated outreach in this campaign is held until you log how it went.`];
+    if (call.noGoodNumber) lines.push("Every number is marked wrong, so nothing can be logged on it until a new number arrives by import or they reply. Pausing them or skipping the step arrives with a later release.");
+    return lines.join(" ");
+  }
+  if (call.heldByCallback) return `Their ${call.track.label.toLowerCase()} call waits while their callback is open.`;
+  if (call.listed) {
+    const why = call.reason === "rolled_over" ? "Their call rolled over to today’s list." : call.reason === "redial" ? "Their call is back on today’s list: you asked for a redial." : "Their call is on today’s list.";
+    return `${why}${limit}`;
+  }
+  if (call.listedFor > today) return `Their call is on the list for ${dayLabel(call.listedFor)}.${limit}`;
+  return `Their call waits for a day their calling hours open.${limit}`;
+}

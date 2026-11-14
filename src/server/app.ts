@@ -4,7 +4,7 @@ import { z } from "zod";
 import { planImport } from "../domain/import-plan.ts";
 import { isOutreachStatus } from "../domain/outreach-status.ts";
 import { checkScraperFile, parseScraperExport } from "../domain/scraper-export.ts";
-import type { ApiError, CallOutcomeAnswer, CallOutcomeRefusal, Campaign, FileCheckResult, SmsProviderStatus } from "../shared/api.ts";
+import type { ApiError, CallOutcomeAnswer, CallOutcomeRefusal, Campaign, CompanyRecord, FileCheckResult, PersonRecord, RecordCalls, SmsProviderStatus } from "../shared/api.ts";
 import { CAMPAIGN_NAME_MAX, DEFINITION_MAX_BYTES, STEP_BODY_MAX, STEP_SUBJECT_MAX } from "../shared/limits.ts";
 import { checkApiRequest } from "./guard.ts";
 import { invalidBodyMessage, requestObject } from "./request-body.ts";
@@ -15,7 +15,7 @@ import { Engine } from "./engine/engine.ts";
 import type { StoredDefinition } from "./engine/engine-store.ts";
 import { UnconnectedEmailPort, UnprovisionedSmsPort } from "./engine/ports.ts";
 import { accountView, needsAttention, progressView } from "./engine/views.ts";
-import { callsView, callTaskView, todayView } from "./engine/call-views.ts";
+import { callsView, callTaskView, recordCalls, todayView } from "./engine/call-views.ts";
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
 import { sealReckoning } from "../domain/sequence/progress.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
@@ -302,12 +302,13 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
 
   app.get("/people/:id", async (c) => {
     const person = await store.person(c.req.param("id"));
-    return person ? c.json(person) : notFound(c, "person");
+    // Each enrollment's open calls, as of now, by the engine's rules (ticket 15b).
+    return person ? c.json<PersonRecord & RecordCalls>({ ...person, ...(await recordCalls(store, person.enrollments.map((e) => e.id), Date.parse(now()), rules)) }) : notFound(c, "person");
   });
 
   app.get("/companies/:id", async (c) => {
     const company = await store.company(c.req.param("id"));
-    return company ? c.json(company) : notFound(c, "company");
+    return company ? c.json<CompanyRecord & RecordCalls>({ ...company, ...(await recordCalls(store, company.enrollments.map((e) => e.id), Date.parse(now()), rules)) }) : notFound(c, "company");
   });
 
   // -------------------------------------------------------------------------------------------

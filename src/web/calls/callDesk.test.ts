@@ -4,6 +4,7 @@ import { business, person } from "../../../test/support/export-builder.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
 import type { ApiError, CallOutcomeRefusal, CallOutcomeAnswer, CallsView, CallTaskView } from "../../shared/api.ts";
 import { CallDesk, NoAnswer, Refused, type CallDeskPorts, type DeskFault, type KeyValue, type OutcomeBody } from "./callDesk.ts";
+import { loggedLine, refusedRecordLine } from "./wording.ts";
 
 /**
  * The call desk's rule (ADR 0003 4.4.1) on the cases the review bot found on e6872eb, each driven
@@ -873,5 +874,107 @@ describe("a kept refusal is removed only by its own Dismiss (review bot on 26d4b
     await a.moveOn();
     await flush();
     expect(a.getSnapshot().refusedRecords).toHaveLength(1);
+  });
+});
+
+describe("a redial and a callback's date and time are part of the press, like the outcome (ticket 15b; ADR 0003 4.4.1)", () => {
+  const ready = async (w: Awaited<ReturnType<typeof world>>, faults: ReadonlySet<DeskFault> = new Set()) => {
+    const d = w.desk(new MapStore(), faults);
+    await d.start();
+    await w.fireTimers();
+    const snap = d.getSnapshot();
+    if (snap.task?.state !== "ready") throw new Error("no call on screen");
+    return { d, view: snap.task.view };
+  };
+
+  test("a redial is fixed in the entry at the press, sent again unchanged after no answer, and said as the server stored it", async () => {
+    const w = await world();
+    const { d, view } = await ready(w);
+    expect(view.redial).toEqual({ listedFor: "2026-11-03", ifUnworked: "2026-11-03" });
+    d.setDraft({ outcome: "no_answer", redial: true, note: "Rang out." });
+    d.log();
+    await flush();
+    const first = w.held[0];
+    expect(first?.body).toMatchObject({ outcome: "no_answer", redial: true, note: "Rang out." });
+    await w.answer(first!, true);
+    await w.fireTimers();
+    expect(w.held[0]?.body).toEqual(first?.body);
+    await w.answer(w.held[0]!);
+    await flush();
+    const logged = d.getSnapshot().logged;
+    expect(logged).not.toBeNull();
+    expect(loggedLine(logged!, "Europe/London")).toBe("Pat Oneil: no answer logged, with a redial. The call is on the list for Tue 3 Nov, and the phone track stays open. If it isn’t worked, it is skipped at the end of Tue 3 Nov. The note is saved on Pat Oneil.");
+  });
+
+  test("the redial choice stays in the draft, and goes only with an outcome the call offers it for", async () => {
+    const w = await world();
+    const { d } = await ready(w);
+    d.setDraft({ outcome: "no_answer", redial: true });
+    d.setDraft({ outcome: "interested" });
+    expect(d.getSnapshot().draft).toMatchObject({ outcome: "interested", redial: true });
+    d.log();
+    await flush();
+    expect(w.held[0]?.body).not.toHaveProperty("redial");
+  });
+
+  test("a callback's time is entered in the prospect's time and sent as that instant with their offset; the hold is said from the server's answer", async () => {
+    const w = await world();
+    const { d } = await ready(w);
+    d.setDraft({ outcome: "callback_requested", callbackDay: "2026-11-02", callbackTime: "15:30", note: "After clinic." });
+    expect(d.getSnapshot().callback).toEqual({ at: Date.parse("2026-11-02T15:30:00Z"), problem: null });
+    d.log();
+    await flush();
+    expect(w.held[0]?.body).toMatchObject({ outcome: "callback_requested", callbackAt: "2026-11-02T15:30:00+00:00" });
+    await w.answer(w.held[0]!);
+    await flush();
+    expect(loggedLine(d.getSnapshot().logged!, "Europe/London")).toBe("Pat Oneil: callback requested for Mon 2 Nov at 15:30 their time, the same as yours. Their automated outreach in Desk is held until you log how the callback went. The note is saved on Pat Oneil.");
+  });
+
+  test("a callback with no time, or a time already passed as of the call's read, is refused in place: nothing is sent and the draft stays", async () => {
+    const w = await world();
+    const { d } = await ready(w);
+    d.setDraft({ outcome: "callback_requested", callbackDay: "2026-11-02" });
+    expect(d.getSnapshot().callback).toEqual({ at: null, problem: "missing" });
+    d.log();
+    d.setDraft({ callbackTime: "09:45" });
+    expect(d.getSnapshot().callback).toEqual({ at: null, problem: "past" });
+    d.log();
+    await flush();
+    expect(w.posts()).toBe(0);
+    expect(w.outbox()).toEqual([]);
+    expect(d.getSnapshot().draft).toMatchObject({ outcome: "callback_requested", callbackDay: "2026-11-02", callbackTime: "09:45" });
+  });
+
+  test("a callback pressed for a call that expires before it arrives is refused, kept with its time and note until dismissed", async () => {
+    const w = await world();
+    const { d } = await ready(w);
+    d.setDraft({ outcome: "callback_requested", callbackDay: "2026-11-05", callbackTime: "11:00", note: "Call Thursday." });
+    d.log();
+    await flush();
+    // The request is held while the call's skip limit passes: at the end of Tuesday it is skipped, unworked.
+    await w.h.advanceTo(Date.parse("2026-11-04T10:00:00Z"));
+    await w.answer(w.held[0]!);
+    const kept = d.getSnapshot().refusedRecords;
+    expect(kept).toHaveLength(1);
+    expect(kept[0]?.body).toMatchObject({ callbackAt: "2026-11-05T11:00:00+00:00", note: "Call Thursday." });
+    expect(refusedRecordLine(kept[0]!, "Europe/London")).toMatch(/^Not logged: callback requested for Thu 5 Nov at 11:00 your time for Pat Oneil\. This call was skipped at /);
+  });
+
+  test("the faults that drop a redial on a resend, reset a callback on an answer, or send a past callback are each seen", async () => {
+    const lost = await world();
+    const a = await ready(lost, new Set(["redial_lost_on_resend"]));
+    a.d.setDraft({ outcome: "voicemail", redial: true });
+    a.d.log();
+    await flush();
+    await lost.answer(lost.held[0]!, true);
+    await lost.fireTimers();
+    expect(lost.held[0]?.body).not.toHaveProperty("redial");
+
+    const past = await world();
+    const b = await ready(past, new Set(["past_callback_sent"]));
+    b.d.setDraft({ outcome: "callback_requested", callbackDay: "2026-11-02", callbackTime: "09:00" });
+    b.d.log();
+    await flush();
+    expect(past.posts()).toBe(1);
   });
 });

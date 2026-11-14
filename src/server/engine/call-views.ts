@@ -3,13 +3,13 @@
  * task with everything the call screen shows. Built from the engine's stored facts and the CRM, so
  * the screens render them without recomputing anything.
  */
-import { bucketOf, CALL_OUTCOMES, callNumbers, callWindow, dayHasRoom, isListed, listedForDay, queueRank, queueWall, recordedNumberOf, REDIAL_OUTCOMES, skippedTonight, type CallBucket } from "../../domain/sequence/calls.ts";
+import { bucketOf, CALL_OUTCOMES, callNumbers, callWindow, dayHasRoom, goodNumbers, isListed, listedForDay, queueRank, queueWall, recordedNumberOf, REDIAL_OUTCOMES, skipLimitOf, skippedTonight, unworkedSkipDay, userDayOf, type CallBucket } from "../../domain/sequence/calls.ts";
 import { displayPhone } from "../../domain/phone.ts";
 import { localDayNumber, nextWindowClose, nextWindowOpen, startOfLocalDay, windowOpen } from "../../domain/sequence/clock.ts";
 import { liveTracks } from "../../domain/sequence/definition.ts";
-import { deriveStatus } from "../../domain/sequence/progress.ts";
+import { callbackHold, deriveStatus } from "../../domain/sequence/progress.ts";
 import type { CallAttempt, CallNumber, CallTask, RecordedNumber, SubjectState } from "../../domain/sequence/state.ts";
-import type { CallColleagueView, CallNumberView, CallOffListView, CallQueueItem, CallRecordView, RecordedNumberView, CallsView, CallTaskView, NoteView, TodayView, TouchView } from "../../shared/api.ts";
+import type { CallColleagueView, CallNumberView, CallOffListView, CallQueueItem, CallRecordView, RecordCallView, RecordCalls, RecordedNumberView, CallsView, CallTaskView, NoteView, SkipLimitView, TodayView, TouchView } from "../../shared/api.ts";
 import type { OutreachStore } from "../persistence/store.ts";
 import { DEFAULT_DAILY_CALL_CAPACITY } from "../persistence/sqlite-engine-store.ts";
 import type { StoredNote } from "./engine-store.ts";
@@ -99,7 +99,52 @@ function queueItem(s: SubjectState, task: CallTask, parties: Parties, place: { b
     bucket: place.bucket,
     opensAt: place.opensAt === null ? null : iso(place.opensAt),
     skippedTonight: skippedTonight(s, task, now),
+    noGoodNumber: goodNumbers(s).length === 0,
   };
+}
+
+const dateOrNull = (day: number | null): string | null => (day === null ? null : dateOfDay(day));
+
+/** The skip limit on an open call (3.5, ticket 15b), read ahead by the engine's rule; null for a callback. */
+function skipLimitView(s: SubjectState, task: CallTask, now: number): SkipLimitView | null {
+  if (task.kind !== "call") return null;
+  return {
+    dueDate: dateOfDay(localDayNumber(task.dueWall, s.callDay.userZone)),
+    limitDays: skipLimitOf(s.campaign.definition, task.trackId),
+    ifUnworked: dateOrNull(unworkedSkipDay(s, task, now)),
+  };
+}
+
+/**
+ * Each enrollment's open calls, as of `now`, for the person and company-lead record (ticket 15b): the
+ * same facts the queue and the call read give, built by the same rules.
+ */
+export async function recordCalls(store: OutreachStore, enrollmentIds: readonly string[], now: number, rules: CallViewRules = DEFAULT_RULES): Promise<RecordCalls> {
+  const out: RecordCallView[] = [];
+  for (const id of enrollmentIds) {
+    const s = await asOfNow(store, id, now, rules);
+    if (!s) continue;
+    for (const task of s.callTasks) {
+      if (!task.open) continue;
+      const listed = isListed(s, task);
+      out.push({
+        enrollmentId: id,
+        taskId: task.id,
+        track: { id: task.trackId, label: trackLabel(s, task.trackId) },
+        kind: task.kind,
+        listed,
+        reason: listed ? rules.callReason(s, task, now) : null,
+        listedFor: dateOfDay(listedForDay(s, task)),
+        callbackAt: task.callbackAt === null ? null : iso(task.callbackAt),
+        zone: s.lead.zone,
+        skipLimit: skipLimitView(s, task, now),
+        noGoodNumber: goodNumbers(s).length === 0,
+        heldByCallback: task.kind === "call" && callbackHold(s),
+      });
+    }
+  }
+  const day = await store.engine.callDay(now);
+  return { calls: out, today: dateIn(day.userZone, now) };
 }
 
 /**
@@ -286,5 +331,14 @@ export async function callTaskView(store: OutreachStore, taskId: string, now: nu
     callbackAt: task.callbackAt === null ? null : iso(task.callbackAt),
     dueAt: iso(task.dueWall),
     listedFor: dateOfDay(listedForDay(s, task)),
+    storedCalls: s.callAttempts.filter((c) => c.taskId === taskId).map((c) => ({ requestId: c.requestId, ...callRecordView(s, c) })),
+    asOf: iso(now),
+    skipLimit: task.open ? skipLimitView(s, task, now) : null,
+    redial: listed && task.open
+      ? (() => {
+          const tomorrow = userDayOf(now, s.callDay.userZone) + 1;
+          return { listedFor: dateOfDay(tomorrow), ifUnworked: dateOrNull(unworkedSkipDay(s, task, now, tomorrow)) };
+        })()
+      : null,
   };
 }

@@ -507,7 +507,7 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
       /** The track ended because its address or number is marked bad, with no bounce event of this campaign's. */
       | { readonly kind: "address_bad"; readonly to: string }
       /** The track started after `after`, which was skipped or failed for this lead (ticket 13b). */
-      | { readonly kind: "released"; readonly after: TrackLabel; readonly because: "skipped" | "failed" }
+      | { readonly kind: "released"; readonly after: TrackLabel; readonly because: "skipped" | "failed" | "unworked" }
     ))
   | { readonly kind: "replied"; readonly channel: "email" | "sms" }
   | { readonly kind: "ended"; readonly status: "sequence_finished_no_response" | "finished_no_usable_channel" }
@@ -517,9 +517,32 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
    * (`no_number`); and its start after a track that was skipped or failed.
    */
   | ({ readonly channel: "call"; readonly track: TrackLabel } & (
-      | { readonly kind: "call"; readonly outcome: CallOutcomeApi; readonly number: RecordedNumberView | null; readonly note: string }
+      | {
+          readonly kind: "call";
+          readonly outcome: CallOutcomeApi;
+          readonly number: RecordedNumberView | null;
+          readonly note: string;
+          /** The user asked for a redial with it (ticket 15b). */
+          readonly redial: boolean;
+          /** With a callback requested: the date and time the prospect asked for. */
+          readonly callbackAt: string | null;
+          /** Logged on a callback: the date and time that callback was asked for. */
+          readonly onCallback: string | null;
+          /** The prospect's zone, in which a callback's time is said. */
+          readonly zone: string;
+        }
       | { readonly kind: "skipped"; readonly stepNumber: null; readonly reason: "no_number" }
-      | { readonly kind: "released"; readonly after: TrackLabel; readonly because: "skipped" | "failed" }
+      /**
+       * Skipped by the skip limit (ADR 0003 3.5, ticket 15b): not worked within `limitDays` of its original
+       * due time `dueAt`. The entry's time is the rollover it was skipped at; the tracks after it start.
+       */
+      | { readonly kind: "skipped"; readonly stepNumber: null; readonly reason: "unworked"; readonly dueAt: string; readonly limitDays: number }
+      | { readonly kind: "released"; readonly after: TrackLabel; readonly because: "skipped" | "failed" | "unworked" }
+      /**
+       * A callback whose time has passed with no outcome logged (question Q12), shown at the time asked for
+       * while it is still open: it stays on the call list, flagged overdue, until an outcome is logged.
+       */
+      | { readonly kind: "callback_overdue"; readonly callbackAt: string; readonly zone: string }
     ))
 );
 
@@ -640,6 +663,59 @@ export interface CallQueueItem {
   readonly opensAt: string | null;
   /** Left unworked today, this call is skipped at the end of the day (the skip limit) and the tracks after it start. */
   readonly skippedTonight: boolean;
+  /**
+   * Every number of the lead is missing or marked bad (ticket 15b): no outcome but skip for now can be
+   * logged. On a callback this is question Q13's interim: it stays held and listed until a number is added,
+   * the lead replies, or ticket 17's controls exist.
+   */
+  readonly noGoodNumber: boolean;
+}
+
+/**
+ * The skip limit on an open call (ADR 0003 3.5, ticket 15b), as the engine counts it: from the call's
+ * original due date, whatever rolled it over or redialed it.
+ */
+export interface SkipLimitView {
+  /** The original due date, the user's date the limit counts from (YYYY-MM-DD). */
+  readonly dueDate: string;
+  readonly limitDays: number;
+  /**
+   * If the call is not worked and nothing holds the lead, the user's date at whose end it is skipped
+   * (YYYY-MM-DD); null while a hold freezes the lead's clock.
+   */
+  readonly ifUnworked: string | null;
+}
+
+/**
+ * One enrollment's open call, on the person and company-lead record (ticket 15b), as of the instant read:
+ * the call or callback, whether it is on today's list and why, and the skip limit or the callback's time.
+ */
+export interface RecordCallView {
+  readonly enrollmentId: string;
+  readonly taskId: string;
+  readonly track: { readonly id: string; readonly label: string };
+  readonly kind: "call" | "callback";
+  /** On today's list now. */
+  readonly listed: boolean;
+  /** Why it is on today's list; null when it is not. */
+  readonly reason: CallReasonApi | null;
+  /** The user's date it is listed for, YYYY-MM-DD: a redial moves it on, a callback is listed from its own day. */
+  readonly listedFor: string;
+  readonly callbackAt: string | null;
+  /** The prospect's zone. */
+  readonly zone: string;
+  /** Null for a callback, which is never skipped. */
+  readonly skipLimit: SkipLimitView | null;
+  readonly noGoodNumber: boolean;
+  /** A call held because the lead has an open callback on another phone track: only the callback is listed. */
+  readonly heldByCallback: boolean;
+}
+
+/** GET /api/people/:id and GET /api/companies/:id add each enrollment's open calls to the CRM record (ticket 15b). */
+export interface RecordCalls {
+  readonly calls: readonly RecordCallView[];
+  /** The user's date as the server counts it, YYYY-MM-DD: the day the calls' list dates are read against. */
+  readonly today: string;
 }
 
 /** A track that can change when a campaign's emails go, so the load is not projected (Before launch). */
@@ -820,4 +896,18 @@ export interface CallTaskView {
    * whether a press was logged, whoever received its answer (ADR 0003 4.4.1, "One reconciliation").
    */
   readonly storedRequestIds: readonly string[];
+  /**
+   * The outcomes stored on this task, each with its request id (ticket 15b): what the server holds for a
+   * press, redial and callback time included, so the page says only what was stored.
+   */
+  readonly storedCalls: readonly (CallRecordView & { readonly requestId: string })[];
+  /** The server's instant for this read. */
+  readonly asOf: string;
+  /** The skip limit on this call; null for a callback, which is never skipped. */
+  readonly skipLimit: SkipLimitView | null;
+  /**
+   * What a redial logged now does (ticket 15b): the user's date the call moves to, and the date at whose end
+   * it is skipped if it is still not worked (null while a hold freezes the clock). Null when no redial is offered.
+   */
+  readonly redial: { readonly listedFor: string; readonly ifUnworked: string | null } | null;
 }

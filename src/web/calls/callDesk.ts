@@ -13,6 +13,7 @@
  * - Reads are serial per resource (refresher.ts), and every failure counts toward the page's freshness.
  */
 import type { CallNumberView, CallOffListView, CallOutcomeAnswer, CallOutcomeApi, CallsView, CallTaskView } from "../../shared/api.ts";
+import { callbackChoice, isoWithOffset, type CallbackProblem } from "./callbackTime.ts";
 import { FRESH, REFRESH_INTERVAL_MS, Refresher, type Freshness } from "./refresher.ts";
 
 /** The server's limit on a call note (POST /api/call-tasks/:id/outcome). */
@@ -24,6 +25,10 @@ export interface OutcomeBody {
   readonly numberId: string | null;
   readonly note: string;
   readonly noteScope: "person" | "company";
+  /** A redial asked for with no answer, voicemail or gatekeeper (ticket 15b): sent only as true. */
+  readonly redial?: true;
+  /** With a callback requested: the instant the prospect asked for, with their offset, fixed at the press. */
+  readonly callbackAt?: string;
 }
 
 /** One outbox entry: what the user chose and typed for one call, under one request id. */
@@ -116,7 +121,11 @@ export type DeskFault =
   | "answer_clears_draft"
   | "first_read_skips_reconcile"
   | "task_failures_uncounted"
-  | "reads_overlap";
+  | "reads_overlap"
+  // Ticket 15b: the redial and the callback time are part of the press like the outcome.
+  | "redial_lost_on_resend"
+  | "answer_resets_callback_draft"
+  | "past_callback_sent";
 
 export interface Draft {
   readonly outcome: CallOutcomeApi | null;
@@ -124,6 +133,11 @@ export interface Draft {
   readonly numberId: string | null;
   readonly note: string;
   readonly noteScope: "person" | "company";
+  /** The user asked to call again tomorrow (ticket 15b); sent only with an outcome the call offers a redial for. */
+  readonly redial: boolean;
+  /** A callback's day and time as the user entered them, in the prospect's own zone: YYYY-MM-DD and HH:MM. */
+  readonly callbackDay: string | null;
+  readonly callbackTime: string;
   /** The request id of the press made from this draft, until it is found stored or settled as not stored. */
   readonly pressId: string | null;
   /** The count of call reads started when this press's entry was found gone: a read started after it settles it. */
@@ -230,6 +244,11 @@ export interface DeskSnapshot {
   readonly noteTooLong: boolean;
   /** The last press could not be queued: this device's storage refused the outbox entry, so nothing was sent. */
   readonly notQueued: boolean;
+  /**
+   * With callback requested chosen: the instant entered, or why there is none the server would take
+   * (nothing entered, a time the clocks skip, a time already passed as of the call's read). Log sends nothing without one.
+   */
+  readonly callback: { readonly at: number | null; readonly problem: CallbackProblem | null } | null;
   /** The draft's copy in this tab's storage failed: the note is not kept if the user leaves the page. */
   readonly draftNotKept: boolean;
   /** Counts transitions that replace the controls under the user's keyboard focus, so the page can place it. */
@@ -242,7 +261,7 @@ const FOCUS = "outreach.calls.focus";
 /** Backoff after no answer, in milliseconds; the last repeats. */
 export const RETRY_MS = [1_000, 2_000, 4_000, 8_000] as const;
 
-const EMPTY_DRAFT: Draft = { outcome: null, numberId: null, note: "", noteScope: "person", pressId: null, goneAtRead: null };
+const EMPTY_DRAFT: Draft = { outcome: null, numberId: null, note: "", noteScope: "person", redial: false, callbackDay: null, callbackTime: "", pressId: null, goneAtRead: null };
 
 export const whoOf = (view: Pick<CallTaskView, "person" | "company">): string => view.person?.name ?? view.company.name;
 
@@ -263,7 +282,17 @@ function readDraft(raw: string | null): Draft | null {
   try {
     const d = JSON.parse(raw) as Partial<Draft> | null;
     if (!d || typeof d.note !== "string" || (d.noteScope !== "person" && d.noteScope !== "company")) return null;
-    return { outcome: d.outcome ?? null, numberId: d.numberId ?? null, note: d.note, noteScope: d.noteScope, pressId: typeof d.pressId === "string" ? d.pressId : null, goneAtRead: null };
+    return {
+      outcome: d.outcome ?? null,
+      numberId: d.numberId ?? null,
+      note: d.note,
+      noteScope: d.noteScope,
+      redial: d.redial === true,
+      callbackDay: typeof d.callbackDay === "string" ? d.callbackDay : null,
+      callbackTime: typeof d.callbackTime === "string" ? d.callbackTime : "",
+      pressId: typeof d.pressId === "string" ? d.pressId : null,
+      goneAtRead: null,
+    };
   } catch {
     return null;
   }
@@ -275,6 +304,12 @@ function numberProblemOf(draft: Draft, task: Load<CallTaskView> | null): DeskSna
   const n: CallNumberView | undefined = task.view.numbers.find((x) => x.detailId === draft.numberId);
   if (!n) return { kind: "gone", value: null };
   return n.bad ? { kind: "bad", value: n.value } : null;
+}
+
+/** The callback time entered, judged against the call as the server last read it; null unless callback requested is chosen. */
+function callbackOf(draft: Draft, task: Load<CallTaskView> | null): DeskSnapshot["callback"] {
+  if (draft.outcome !== "callback_requested" || task?.state !== "ready") return null;
+  return callbackChoice(draft, task.view);
 }
 
 /** The page's freshness: the queue's last read, failing or stale if either read is. */
@@ -349,6 +384,7 @@ export class CallDesk {
       locked: false,
       noteTooLong: false,
       notQueued: false,
+      callback: null,
       draftNotKept: false,
       transition: null,
     };
@@ -411,6 +447,7 @@ export class CallDesk {
       locked: call === null ? false : call.kind === "pending" && this.fault("no_lock_while_pending") ? false : call.locked,
       numberProblem: numberProblemOf(next.draft, next.task),
       noteTooLong: next.draft.note.length > NOTE_MAX,
+      callback: callbackOf(next.draft, next.task),
       freshness: this.fault("task_failures_uncounted") ? this.queueReader.freshness() : worse(this.queueReader.freshness(), this.taskReader.freshness()),
       transition: kind ? { seq: ++this.seq, kind } : next.transition,
     };
@@ -534,7 +571,7 @@ export class CallDesk {
   }
 
   /** The user changes the draft of the call on screen; refused while locked. An edit is no longer a press. */
-  setDraft(patch: Partial<Pick<Draft, "outcome" | "numberId" | "note" | "noteScope">>): void {
+  setDraft(patch: Partial<Pick<Draft, "outcome" | "numberId" | "note" | "noteScope" | "redial" | "callbackDay" | "callbackTime">>): void {
     if (!this.live || this.state.locked || this.state.focus === null) return;
     this.keepDraft({ ...this.state.draft, ...patch, pressId: null, goneAtRead: null }, { notQueued: false });
   }
@@ -545,12 +582,22 @@ export class CallDesk {
     if (!this.live || this.state.locked || focus === null || task?.state !== "ready" || draft.outcome === null || this.state.noteTooLong) return;
     const needsNumber = draft.outcome !== "skip_for_now";
     if (needsNumber && (draft.numberId === null || this.state.numberProblem !== null)) return;
+    // The boundary (ticket 15b): a callback with no time, a time the clocks skip, or one already passed as of the
+    // call's read is refused in place, and nothing is sent. A time between the read and the server's now is the server's to refuse.
+    const callback = draft.outcome === "callback_requested" ? callbackChoice(draft, task.view) : null;
+    if (callback && callback.at === null && !(this.fault("past_callback_sent") && callback.problem === "past")) return;
+    const pastAt = callback?.problem === "past" && draft.callbackDay !== null ? Date.parse(task.view.asOf) : null;
+    const at = callback?.at ?? pastAt;
+    // A redial goes only with an outcome the call offers it for; the choice stays in the draft whatever the outcome.
+    const redial = draft.redial && task.view.redialOutcomes.includes(draft.outcome);
     const body: OutcomeBody = {
       requestId: this.ports.newId(),
       outcome: draft.outcome,
       numberId: needsNumber ? draft.numberId : null,
       note: draft.note,
       noteScope: task.view.person === null ? "company" : draft.noteScope,
+      ...(redial ? { redial: true as const } : {}),
+      ...(at !== null && at !== undefined ? { callbackAt: isoWithOffset(at, task.view.zone) } : {}),
     };
     const entry: OutboxEntry = { v: 2, taskId: focus, who: whoOf(task.view), body, pressedAt: this.ports.now() };
     // The boundary: an outcome is not pressed until its entry is stored. If storage refuses it, nothing is
@@ -610,6 +657,10 @@ export class CallDesk {
 
   private async send(entry: OutboxEntry, s: Sending): Promise<void> {
     let body = entry.body;
+    if (this.fault("redial_lost_on_resend") && s.tries > 0 && body.redial) {
+      const { redial: _dropped, ...rest } = body;
+      body = rest;
+    }
     if (this.fault("new_id_on_resend") && s.tries > 0) {
       this.ports.local.remove(OUTBOX + body.requestId);
       body = { ...body, requestId: this.ports.newId() };
@@ -657,6 +708,7 @@ export class CallDesk {
     if (this.sending.get(id) === s) this.sending.delete(id);
     this.unanswered.delete(id);
     if (this.fault("answer_clears_draft") && this.onScreen()) this.keepDraft({ ...EMPTY_DRAFT, numberId: this.state.draft.numberId });
+    if (this.fault("answer_resets_callback_draft") && this.onScreen() && this.state.focus !== null) this.keepDraft({ ...this.state.draft, redial: false, callbackTime: "" });
     await this.refresh();
   }
 

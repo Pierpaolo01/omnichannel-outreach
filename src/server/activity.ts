@@ -19,10 +19,11 @@
  */
 import type { ActivityEntry, EnrollmentView } from "../shared/api.ts";
 import { displayPhone } from "../domain/phone.ts";
-import { goodNumbers } from "../domain/sequence/calls.ts";
+import { goodNumbers, skipLimitOf } from "../domain/sequence/calls.ts";
 import { goodEmail, goodMobile, wallAtLead } from "../domain/sequence/progress.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
 import { trackLabel } from "../shared/track-label.ts";
+import { callRecordView } from "./engine/call-views.ts";
 import { progressView } from "./engine/views.ts";
 import type { OutreachStore } from "./persistence/store.ts";
 
@@ -89,7 +90,7 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
         // A track that started because the one before it was skipped or failed says so (spec "a
         // skipped or failed track counts as finished").
         const before = progress.tracks.find((t) => t.trackId === rule.trackId);
-        const because = before?.finishReason === "skipped_missing_channel" || before?.finishReason === "skipped" ? "skipped" : before?.finishReason === "failed_bad_destination" ? "failed" : null;
+        const because = releasedBecause(before?.finishReason ?? null);
         if (because) entries.push({ campaign, at: new Date(startedAt).toISOString(), kind: "released", channel, track: label, after: labelOf(rule.trackId), because });
       }
       if (track.finishedAt === null) continue;
@@ -109,6 +110,16 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
   }
   // Newest first; at the same instant, the later-recorded entry first.
   return entries.map((e, i) => ({ e, i })).sort((a, b) => b.e.at.localeCompare(a.e.at) || b.i - a.i).map(({ e }) => e);
+}
+
+/**
+ * Why a track that started after another says so: the one before it was skipped (for want of a channel,
+ * or by the user), skipped unworked by the call skip limit (ticket 15b), or failed on a bad destination.
+ */
+function releasedBecause(finish: string | null): "skipped" | "failed" | "unworked" | null {
+  if (finish === "skipped_missing_channel" || finish === "skipped") return "skipped";
+  if (finish === "skipped_unworked") return "unworked";
+  return finish === "failed_bad_destination" ? "failed" : null;
 }
 
 /** The wall instant a track started, or null if it has not. */
@@ -136,7 +147,22 @@ function callEntries(
 ): void {
   const def = state.campaign.definition;
   const label = labelOf(track.trackId);
-  for (const step of track.steps) for (const c of step.calls) entries.push({ campaign, at: c.at, kind: "call", channel: "call", track: label, outcome: c.outcome, number: c.number, note: c.note });
+  // Each call the user logged, from the stored attempts, with its redial and callback time; one logged on a
+  // callback names the time that callback was asked for (ticket 15b).
+  const tasks = state.callTasks.filter((t) => t.trackId === track.trackId);
+  for (const task of tasks) {
+    let askedFor: string | null = null;
+    for (const c of state.callAttempts.filter((a) => a.taskId === task.id)) {
+      const record = callRecordView(state, c);
+      entries.push({ campaign, at: record.at, kind: "call", channel: "call", track: label, outcome: record.outcome, number: record.number, note: record.note, redial: record.redial, callbackAt: record.callbackAt, onCallback: askedFor, zone: state.lead.zone });
+      if (c.outcome !== "skip_for_now") askedFor = c.outcome === "callback_requested" ? record.callbackAt : null;
+    }
+    // A callback still open after the time asked for is overdue (Q12): shown at that time until its outcome.
+    if (task.open && task.kind === "callback" && task.callbackAt !== null && task.callbackAt <= now && state.subject.ended === null) {
+      const at = new Date(task.callbackAt).toISOString();
+      entries.push({ campaign, at, kind: "callback_overdue", channel: "call", track: label, callbackAt: at, zone: state.lead.zone });
+    }
+  }
   if (endedAtLaunch && progress.endedAt !== null && goodNumbers(state).length === 0) {
     entries.push({ campaign, at: progress.endedAt, kind: "skipped", channel: "call", track: label, stepNumber: null, reason: "no_number" });
     return;
@@ -145,8 +171,12 @@ function callEntries(
   const rule = def.tracks.find((t) => t.id === track.trackId)?.start;
   if (startedAt !== null && rule?.kind === "after") {
     const before = progress.tracks.find((t) => t.trackId === rule.trackId);
-    const because = before?.finishReason === "skipped_missing_channel" || before?.finishReason === "skipped" ? "skipped" : before?.finishReason === "failed_bad_destination" ? "failed" : null;
+    const because = releasedBecause(before?.finishReason ?? null);
     if (because) entries.push({ campaign, at: new Date(startedAt).toISOString(), kind: "released", channel: "call", track: label, after: labelOf(rule.trackId), because });
   }
   if (track.finishedAt !== null && track.finishReason === "skipped_missing_channel") entries.push({ campaign, at: track.finishedAt, kind: "skipped", channel: "call", track: label, stepNumber: null, reason: "no_number" });
+  const unworked = tasks.at(-1);
+  if (track.finishedAt !== null && track.finishReason === "skipped_unworked" && unworked) {
+    entries.push({ campaign, at: track.finishedAt, kind: "skipped", channel: "call", track: label, stepNumber: null, reason: "unworked", dueAt: new Date(unworked.dueWall).toISOString(), limitDays: skipLimitOf(def, track.trackId) });
+  }
 }
