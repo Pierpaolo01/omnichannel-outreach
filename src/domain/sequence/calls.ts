@@ -254,13 +254,16 @@ export function dayHasRoom(day: Pick<CallDay, "capacity" | "placedToday" | "comm
 
 /**
  * Places a ready call on today's list (4.4), or returns null when it is not ready or the list has no
- * room. The task keeps the step's original due time, and the skip deadline is resolved once from it (3.5).
+ * room. The task keeps the step's original due time, and the skip deadline is resolved once from it (3.5),
+ * with the phone track's own skip limit (ticket 14c).
  */
 export function placeCall(state: SubjectState, item: ReadyItem, now: number, taskId: string): SubjectState | null {
   if (!readyCalls(state, now).some((r) => r.stepId === item.stepId) || !callRoom(state)) return null;
   const p = progressOf(state, item.trackId);
   if (!p || p.dueAt === null || p.dueWall === null) return null;
   const { userZone, day } = state.callDay;
+  const track = state.campaign.definition.tracks.find((t) => t.id === item.trackId);
+  if (!track) return null;
   const task: CallTask = {
     id: taskId,
     subjectId: state.subject.id,
@@ -283,12 +286,12 @@ export function placeCall(state: SubjectState, item: ReadyItem, now: number, tas
 }
 
 /**
- * The skip limit in force for a phone track, in days (ADR 0003 3.5): the track's own when it has one (pull
- * request 47 adds `callSkipLimitDays` to a phone track), else the campaign's. It is read here, and only here.
+ * The skip limit in force for a phone track, in days (ADR 0003 3.5): the track's own when it has one (set on
+ * each phone track since ticket 14c), else the campaign's. It is read here, and only here: the engine, the
+ * store's re-resolution of an edited limit and the editor's inspector all call this.
  */
-export function skipLimitOf(definition: CampaignDefinition, trackId: string): number {
-  const track = definition.tracks.find((t) => t.id === trackId) as { readonly callSkipLimitDays?: number } | undefined;
-  return track?.callSkipLimitDays ?? definition.callSkipLimitDays;
+export function skipLimitOf(definition: Pick<CampaignDefinition, "tracks" | "callSkipLimitDays">, trackId: string): number {
+  return definition.tracks.find((t) => t.id === trackId)?.callSkipLimitDays ?? definition.callSkipLimitDays;
 }
 
 /**

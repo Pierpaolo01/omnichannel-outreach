@@ -72,6 +72,22 @@ describe("when an unworked call is skipped, as the engine's skip limit decides i
     expect(pat.asOf).toBe("2026-11-02T10:00:00.000Z");
   });
 
+  test("a phone track's own skip limit (pull request 47) is the one the read counts by", async () => {
+    const h = new EngineHarness({ start: MONDAY_9 - H, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+    await h.tick();
+    await h.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "Europe/London" });
+    h.clock = MONDAY_9;
+    const { campaign: c } = await h.createCampaign("Own limit", { businesses: [HARBOUR], people: [PAT] });
+    await h.defineSequence(c.id, definition([{ ...track("p1", "call", [call("c1")], WEEKDAYS_9_TO_17), callSkipLimitDays: 3 }]));
+    expect((await h.launch(c.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + H);
+    const id = (await h.request<CallsView>("GET", "/api/calls")).body.readyNow[0]?.taskId ?? "";
+    const view = (await h.request<CallTaskView>("GET", `/api/call-tasks/${id}`)).body;
+    // Three days from Monday: skipped at the end of Wednesday, with a redial too.
+    expect(view.skipLimit).toEqual({ dueDate: "2026-11-02", limitDays: 3, ifUnworked: "2026-11-04" });
+    expect(view.redial).toEqual({ listedFor: "2026-11-03", ifUnworked: "2026-11-04" });
+  });
+
   test("a call due on a Friday is not skipped over a weekend with no calling hours: the end of Monday", async () => {
     const { task, taskOf } = await world(Date.parse("2026-11-06T09:00:00Z"));
     const pat = await task(await taskOf("Pat Oneil"));

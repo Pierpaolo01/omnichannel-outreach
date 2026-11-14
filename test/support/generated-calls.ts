@@ -151,6 +151,8 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     return item;
   };
   const chance = (p: number) => rand() < p;
+  /** The phone tracks' own skip limits (ticket 14c): a stream of its own, so the rest of each world is as it was. */
+  const trackLimits = random(seed + 1_000_003);
   const problems: string[] = [];
   const problem = (what: string) => {
     if (problems.length < 25 && !problems.includes(what)) problems.push(what);
@@ -234,6 +236,18 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     // The skip limit varies (1, 2 or 3 days), so Q5's interim and the case it distinguishes are both reached.
     const limit = pick([1, 2, 2, 3]);
     features.add(`limit:${limit}`);
+    // Each phone track may hold its own limit (ticket 14c), else it reads the campaign's. From a stream of
+    // its own, so every other draw of the world, and the seeds recorded for it, are unchanged.
+    for (const [ti, t] of tracks.entries()) {
+      if (t.channel !== "call") continue;
+      const own = trackLimits() < 0.5 ? null : 1 + Math.floor(trackLimits() * 3);
+      if (own === null) {
+        features.add("limit:the-campaign's");
+        continue;
+      }
+      tracks[ti] = { ...t, callSkipLimitDays: own };
+      features.add(own === limit ? "limit:a-track's-own" : "limit:a-track's-own-not-the-campaign's");
+    }
     const definition: CampaignDefinition = { timezone: pick(["Europe/London", "America/New_York"]), callSkipLimitDays: limit, emailPool: ["inbox-a"], smsPool: [numbers[ci]!.id], callScript: "Ask who handles bookings.", tracks };
     campaigns.push({ id: "", definition, companies: ci === 0 ? [0, 1, 2] : [0, 1], launchedAt: null });
   }
@@ -477,7 +491,9 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     if (placed === undefined || due === null || !Number.isFinite(due)) return null;
     // Resolved when the call was placed, in the user's zone then.
     const placedZone = uz(placed);
-    const deadline = afterHolds(s, due, startOfDay(local(due, placedZone).day + def(s).callSkipLimitDays, placedZone));
+    // The limit in force for this track (ADR 0003 3.5, ticket 14c): its own, else the campaign's.
+    const limitDays = def(s).tracks.find((x) => x.id === t.id)?.callSkipLimitDays ?? def(s).callSkipLimitDays;
+    const deadline = afterHolds(s, due, startOfDay(local(due, placedZone).day + limitDays, placedZone));
     if (deadline > h.clock) return null;
     const end = endLimitOf(s);
     const segments = userZones.map((z, i) => ({ from: z.at, to: userZones[i + 1]?.at ?? Infinity, zone: z.zone }));

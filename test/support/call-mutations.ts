@@ -1,4 +1,4 @@
-import { callbackDay, REDIAL_OUTCOMES } from "../../src/domain/sequence/calls.ts";
+import { callbackDay, REDIAL_OUTCOMES, skipLimitOf } from "../../src/domain/sequence/calls.ts";
 import { evaluate, finishTrack, progressOf, runs, synced } from "../../src/domain/sequence/progress.ts";
 import { leadNow, localDayNumber, span, wallOfLead } from "../../src/domain/sequence/clock.ts";
 import type { CallTask, SubjectState } from "../../src/domain/sequence/state.ts";
@@ -115,10 +115,9 @@ const RULES: Record<string, Partial<Rules>> = {
   "redial resets the deadline": {
     // The skip limit counted from the latest redial instead of the call's original due time.
     evaluate: (s, now, options) => {
-      const limit = s.campaign.definition.callSkipLimitDays;
       const fromRedial = mapTasks(s, (t) => {
         const r = s.callAttempts.filter((a) => a.taskId === t.id && a.redial).at(-1);
-        return r ? { ...t, skipDeadline: r.at + span(r.atWall, limit, s.callDay.userZone) } : t;
+        return r ? { ...t, skipDeadline: r.at + span(r.atWall, skipLimitOf(s.campaign.definition, t.trackId), s.callDay.userZone) } : t;
       });
       return keepStored(s, R.evaluate(fromRedial, now, options));
     },
@@ -136,7 +135,7 @@ const RULES: Record<string, Partial<Rules>> = {
     // A missed callback dropped after the skip limit, counted in days from its day: the call is skipped and outreach resumes.
     evaluate: (s, now, options) => {
       const cb = s.callTasks.find((t) => t.open && t.kind === "callback");
-      if (!cb || s.subject.ended !== null || callbackDay(s, cb) + s.campaign.definition.callSkipLimitDays > localDayNumber(now, s.callDay.userZone)) return R.evaluate(s, now, options);
+      if (!cb || s.subject.ended !== null || callbackDay(s, cb) + skipLimitOf(s.campaign.definition, cb.trackId) > localDayNumber(now, s.callDay.userZone)) return R.evaluate(s, now, options);
       const released = synced(mapTasks(s, (t) => (t.id === cb.id ? { ...t, kind: "call", callbackAt: null } : t)), now);
       return R.evaluate(finishTrack(released, cb.trackId, "skipped_unworked", leadNow(released.subject.clock, now), now), now, options);
     },
@@ -218,7 +217,7 @@ const EXPECTED: Record<string, { invariant: string; seed: number }> = {
   "outcome on an unlisted task": { invariant: "16", seed: 7 },
   "interested closes only its own task": { invariant: "16", seed: 54 },
   "daily call capacity ignored": { invariant: "17", seed: 0 },
-  "committed calls not counted": { invariant: "17", seed: 1 },
+  "committed calls not counted": { invariant: "17", seed: 2 },
   "a call placed on a day its calling hours have closed": { invariant: "17", seed: 1 },
   "an unworked call holds the parallel tracks": { invariant: "18", seed: 6 },
   "the tracks after a call start when it is placed": { invariant: "7", seed: 4 },

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { launchCheck } from "./blockers.ts";
+import { skipLimitOf } from "./calls.ts";
 import { render } from "./copy.ts";
 import { definitionProblems, ownSubject, WIN_BACK_LATER, type CampaignDefinition, type StepDefinition, type TrackDefinition } from "./definition.ts";
 import { renderStep } from "./dispatch.ts";
@@ -68,6 +69,22 @@ describe("definitions refused at the boundary (ADR 0003 7.1)", () => {
     // The declined path is set on the canvas; win-back arrives with its branch (ticket 16).
     expect(definitionProblems(definition({ tracks: [emailTrack(), call({ declinedPath: "continue" })] }))).toEqual([]);
     expect(definitionProblems(definition({ tracks: [emailTrack(), call({ declinedPath: "win_back" })] }))).toEqual([WIN_BACK_LATER]);
+  });
+
+  test("each phone track may hold its own call skip limit, a whole number of days of at least 1; an email or SMS track holds none (ticket 14c)", () => {
+    const call = (fields: Partial<TrackDefinition> = {}) => emailTrack({ id: "t2", channel: "call", steps: [step("c1", { subject: "", body: "" })], ...fields });
+    expect(definitionProblems(definition({ tracks: [emailTrack(), call({ callSkipLimitDays: 1 }), call({ id: "t3", steps: [step("c2", { subject: "", body: "" })], callSkipLimitDays: 5 })] }))).toEqual([]);
+    for (const bad of [0, -1, 1.5, Number.NaN]) {
+      expect(definitionProblems(definition({ tracks: [emailTrack(), call({ callSkipLimitDays: bad })] }))).toEqual(["The phone track's call skip limit is a whole number of days, at least 1."]);
+    }
+    expect(definitionProblems(definition({ tracks: [emailTrack({ callSkipLimitDays: 2 })] }))).toEqual(["Only a phone track has a call skip limit."]);
+  });
+
+  test("a phone track's skip limit is its own, else the campaign's (a phone track saved before ticket 14c has none of its own)", () => {
+    const call = emailTrack({ id: "t2", channel: "call", steps: [step("c1", { subject: "", body: "" })] });
+    const def = definition({ callSkipLimitDays: 4, tracks: [call] });
+    expect(skipLimitOf(def, "t2")).toBe(4);
+    expect(skipLimitOf({ ...def, tracks: [{ ...call, callSkipLimitDays: 1 }] }, "t2")).toBe(1);
   });
 
   test("a start rule names a live track of the same branch, with a whole delay, and connections never go in a circle", () => {

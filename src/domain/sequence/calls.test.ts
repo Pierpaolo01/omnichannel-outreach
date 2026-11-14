@@ -23,11 +23,11 @@ const callTrack = (fields: Partial<TrackDefinition> = {}): TrackDefinition => ({
 });
 
 /** A lead in a launched call-only campaign at `now`, with the user's list on that day. */
-function launched(now: number, fields: { capacity?: number; committed?: number; placedToday?: number; phones?: CallNumber[] } = {}): SubjectState {
+function launched(now: number, fields: { capacity?: number; committed?: number; placedToday?: number; phones?: CallNumber[]; track?: Partial<TrackDefinition> } = {}): SubjectState {
   const base = subjectState();
   const s: SubjectState = {
     ...base,
-    campaign: { ...base.campaign, launchedAt: now, definition: tracksDefinition([callTrack()]) },
+    campaign: { ...base.campaign, launchedAt: now, definition: tracksDefinition([callTrack(fields.track)]) },
     lead: { ...base.lead, phones: fields.phones ?? [phone("d-main", "main_line", 1), phone("d-mobile", "mobile", 3), phone("d-direct", "direct", 2)] },
     callDay: { userZone: "Europe/London", day: localDayNumber(now, "Europe/London"), capacity: fields.capacity ?? 5, placedToday: fields.placedToday ?? 0, committed: fields.committed ?? 0 },
   };
@@ -60,6 +60,15 @@ describe("placing a due call on the user's list (4.4)", () => {
     // The skip limit (ticket 15) is resolved once, from the original due time: the start of the user's day two days later.
     expect(s.callTasks[0]?.skipDeadline).toBe(s.callTasks[0]!.dueAt + (Date.parse("2026-11-04T00:00:00Z") - MONDAY_9));
     expect(readyCalls(s, MONDAY_9)).toEqual([]);
+  });
+
+  test("the skip deadline is resolved from the phone track's own skip limit, else the campaign's (ticket 14c)", () => {
+    // The campaign's limit is 2 days; this phone track's is 3: the start of the user's day three days after the due date.
+    const own = placed(MONDAY_9, { track: { callSkipLimitDays: 3 } });
+    expect(own.campaign.definition.callSkipLimitDays).toBe(2);
+    expect(own.callTasks[0]?.skipDeadline).toBe(own.callTasks[0]!.dueAt + (Date.parse("2026-11-05T00:00:00Z") - MONDAY_9));
+    const one = placed(MONDAY_9, { track: { callSkipLimitDays: 1 } });
+    expect(one.callTasks[0]?.skipDeadline).toBe(one.callTasks[0]!.dueAt + (Date.parse("2026-11-03T00:00:00Z") - MONDAY_9));
   });
 
   test("the numbers are labelled, direct first, then mobile, then the main line", () => {
