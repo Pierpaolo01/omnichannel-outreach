@@ -10,9 +10,6 @@ export const requestObject = z.strictObject;
 
 /** Fields a later release adds, with what to tell the user who sends one now. */
 const LATER_RELEASE: Readonly<Record<string, string>> = {
-  redial: "Redial arrives with a later release: log the outcome without it.",
-  callbackAt: "Callbacks arrive with a later release: log the outcome without it.",
-  callback: "Callbacks arrive with a later release: log the outcome without it.",
   declined: "Not interested arrives with a later release.",
   declinedPath: "Not interested arrives with a later release.",
 };

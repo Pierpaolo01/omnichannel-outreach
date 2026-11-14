@@ -6,7 +6,7 @@ import { isTimeZone, localDayNumber, prospectZone, resetDayOf, startOfLocalDay, 
 import { defaultGap } from "../../domain/sequence/dispatch.ts";
 import type { MergeData } from "../../domain/sequence/copy.ts";
 import { emptyDefinition, poolOf, type CampaignDefinition } from "../../domain/sequence/definition.ts";
-import { callableOnDay } from "../../domain/sequence/calls.ts";
+import { callableOnDay, skipDeadlineOf, skipLimitOf } from "../../domain/sequence/calls.ts";
 import { deriveStatus } from "../../domain/sequence/progress.ts";
 import type {
   AccountState,
@@ -413,7 +413,35 @@ export class SqliteEngineStore implements EngineStore {
     return e ? { personId: strOrNull(e, "person_id"), companyId: str(e, "company_id"), campaignId: str(e, "campaign_id") } : null;
   }
 
-  async setCallSettings(settings: CallSettings): Promise<void> {
+  /**
+   * Brings every lead with an open call task up to `now` with `asOf`, inside the caller's transaction (a
+   * route that changes a timing input, council on 228cd3b): what fell due is applied under the old inputs
+   * before the change is written. Expiry is the one judgment of a past day that those inputs feed.
+   */
+  catchUpWithin(now: number, asOf: (state: SubjectState) => SubjectState): void {
+    const ids = this.sql(
+      `SELECT DISTINCT t.subject_id FROM call_tasks t JOIN enrollments e ON e.id = t.subject_id
+       WHERE t.open = 1 AND e.ended IS NULL ORDER BY t.subject_id`,
+    )
+      .all()
+      .map((r) => str(r, "subject_id"));
+    for (const id of ids) {
+      const base = this.load(id, now);
+      if (!base) continue;
+      const next = asOf(base);
+      if (JSON.stringify(next) !== JSON.stringify(base)) this.write(base, next, now);
+    }
+  }
+
+  async setCallSettings(settings: CallSettings, catchUp?: { readonly now: number; readonly asOf: (state: SubjectState) => SubjectState }): Promise<void> {
+    if (catchUp) {
+      // What fell due under the old day and zone is applied first, in the same transaction.
+      this.transaction(() => {
+        this.catchUpWithin(catchUp.now, catchUp.asOf);
+        this.run("INSERT INTO engine_meta (key, value) VALUES ('call_settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [JSON.stringify(settings)]);
+      });
+      return;
+    }
     this.run("INSERT INTO engine_meta (key, value) VALUES ('call_settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [JSON.stringify(settings)]);
   }
 
@@ -429,6 +457,19 @@ export class SqliteEngineStore implements EngineStore {
 
   async subjectsWithOpenCallTasks(): Promise<string[]> {
     return this.sql("SELECT DISTINCT subject_id FROM call_tasks WHERE open = 1 ORDER BY subject_id").all().map((r) => str(r, "subject_id"));
+  }
+
+  async openCallbackInstants(): Promise<number[]> {
+    const { userZone } = this.callSettingsNow();
+    return this.sql(
+      `SELECT t.callback_at FROM call_tasks t JOIN enrollments e ON e.id = t.subject_id
+       WHERE t.open = 1 AND t.kind = 'callback' AND t.callback_at IS NOT NULL AND e.ended IS NULL`,
+    )
+      .all()
+      .flatMap((r) => {
+        const at = num(r, "callback_at");
+        return [startOfLocalDay(localDayNumber(at, userZone), userZone), at];
+      });
   }
 
   async notesOf(owner: "person" | "company", ownerId: string): Promise<StoredNote[]> {
@@ -458,15 +499,32 @@ export class SqliteEngineStore implements EngineStore {
     const end = startOfLocalDay(day + 1, userZone);
     const placed = num(this.sql("SELECT COUNT(*) AS n FROM call_tasks WHERE placed_wall >= :start AND placed_wall < :end").get({ start, end }) ?? {}, "n");
     // A carried call counts only on a day it can be listed: its prospect's calling hours open that day
-    // (council on 7902093), so a weekday call left on Friday takes none of the weekend's room.
+    // (council on 7902093), so a weekday call left on Friday takes none of the weekend's room; a callback
+    // from its own day on, at any hour (ticket 15). A task counts as it stood at the day's start, a
+    // callback if the last call logged on it before then asked for one (with that time), so the count is
+    // stable through the day: working a carried call, a callback request and a redial free no room. A task
+    // closed at the instant the day starts (a call skipped by the skip limit at that rollover) was not carried into it.
+    // A call of a lead a callback held at the day's start cannot be listed that day, and nor can any call of a lead
+    // with no good number left to log it on (Q13): neither counts (council on 228cd3b).
     const committed = this.sql(
-      `SELECT t.track_id, c.id AS campaign_id, c.definition_version, c.definition, c.default_timezone, p.timezone AS person_zone, co.timezone AS company_zone
+      `SELECT t.track_id, c.id AS campaign_id, c.definition_version, c.definition, c.default_timezone, p.timezone AS person_zone, co.timezone AS company_zone,
+         (SELECT a.outcome || '|' || COALESCE(a.callback_at, '') FROM call_attempts a
+           WHERE a.task_id = t.id AND a.at_wall < :start AND a.outcome <> 'skip_for_now'
+           ORDER BY a.at_wall DESC, a.rowid DESC LIMIT 1) AS last_call
        FROM call_tasks t JOIN enrollments e ON e.id = t.subject_id JOIN campaigns c ON c.id = e.campaign_id
          LEFT JOIN people p ON p.id = e.person_id JOIN companies co ON co.id = e.company_id
-       WHERE t.placed_wall < :start AND (t.closed_wall IS NULL OR t.closed_wall >= :start) AND (e.ended_wall IS NULL OR e.ended_wall >= :start)`,
+       WHERE t.placed_wall < :start AND (t.closed_wall IS NULL OR t.closed_wall > :start) AND (e.ended_wall IS NULL OR e.ended_wall >= :start)
+         AND NOT EXISTS (
+           SELECT 1 FROM call_tasks h WHERE h.subject_id = t.subject_id AND h.id <> t.id AND h.placed_wall < :start AND (h.closed_wall IS NULL OR h.closed_wall > :start)
+             AND (SELECT a.outcome FROM call_attempts a WHERE a.task_id = h.id AND a.at_wall < :start AND a.outcome <> 'skip_for_now' ORDER BY a.at_wall DESC, a.rowid DESC LIMIT 1) = 'callback_requested')
+         AND EXISTS (
+           SELECT 1 FROM live_contact_details d WHERE d.channel = 'phone' AND d.bad = 0
+             AND ((d.owner_kind = 'person' AND d.owner_id = COALESCE(e.person_id, '')) OR (d.owner_kind = 'company' AND d.owner_id = e.company_id AND d.phone_kind = 'main_line')))`,
     )
       .all({ start })
       .filter((r) => {
+        const [outcome, callbackAt] = (strOrNull(r, "last_call") ?? "").split("|");
+        if (outcome === "callback_requested") return localDayNumber(Number(callbackAt), userZone) <= day;
         const definition = r["definition"] == null ? null : this.definitionOf({ ...r, id: str(r, "campaign_id") });
         const window = definition?.tracks.find((t) => t.id === str(r, "track_id"))?.window ?? [];
         const zone = prospectZone([strOrNull(r, "person_zone"), strOrNull(r, "company_zone")], definition?.timezone ?? "UTC");
@@ -591,7 +649,7 @@ export class SqliteEngineStore implements EngineStore {
     const attempts = this.sql("SELECT * FROM attempts WHERE subject_id = ? ORDER BY claimed_wall, rowid").all(subjectId).map(toAttempt);
     const callAttempts = this.sql("SELECT * FROM call_attempts WHERE subject_id = ? ORDER BY at_wall, rowid")
       .all(subjectId)
-      .map((r): CallAttempt => ({ id: str(r, "id"), requestId: str(r, "request_id"), taskId: str(r, "task_id"), outcome: str(r, "outcome") as CallOutcome, numberDetailId: strOrNull(r, "number_detail_id"), note: str(r, "note"), at: num(r, "at"), atWall: num(r, "at_wall") }));
+      .map((r): CallAttempt => ({ id: str(r, "id"), requestId: str(r, "request_id"), taskId: str(r, "task_id"), outcome: str(r, "outcome") as CallOutcome, redial: num(r, "redial") === 1, callbackAt: numOrNull(r, "callback_at"), numberDetailId: strOrNull(r, "number_detail_id"), note: str(r, "note"), at: num(r, "at"), atWall: num(r, "at_wall") }));
     // Every id that can name one of the lead's numbers resolves through the merge pointer (ADR 0001, ticket 12a):
     // the numbers recorded on its calls, and every detail a re-import folded into one of its numbers, so a
     // screen read before the merge names the same number.
@@ -831,14 +889,24 @@ export class SqliteEngineStore implements EngineStore {
       const before = base.callTasks.find((b) => b.id === t.id);
       if (same(before, t)) continue;
       if (before && !before.open && t.open) throw new Error(`a closed call task never reopens (${t.id})`);
-      if (before && (before.dueAt !== t.dueAt || before.skipDeadline !== t.skipDeadline)) throw new Error(`a call task keeps its original due time and skip deadline (${t.id})`);
+      // Fixed when the task is placed, and never updated below: a change is refused, not silently dropped (review bot on e489037).
+      if (before && (before.dueAt !== t.dueAt || before.dueWall !== t.dueWall || before.dueZone !== t.dueZone)) throw new Error(`a call task keeps its original due time (${t.id})`);
+      if (before && (before.placedWall !== t.placedWall || before.trackId !== t.trackId || before.stepId !== t.stepId || before.subjectId !== t.subjectId)) {
+        throw new Error(`a call task keeps its placement, track and step (${t.id})`);
+      }
+      // The skip deadline changes only as the re-resolution of an edited limit from the task's own due time (ADR 0003
+      // 3.5, 5.2): with the limit in force for its track and the user's zone now. Nothing else moves it.
+      if (before && before.skipDeadline !== t.skipDeadline && t.skipDeadline !== skipDeadlineOf(t, skipLimitOf(next.campaign.definition, t.trackId), next.callDay.userZone)) {
+        throw new Error(`a call task keeps its skip deadline unless its limit is edited (${t.id})`);
+      }
+      if (before && t.reckonedThrough < before.reckonedThrough) throw new Error(`a call task's skip limit is never judged again for a day already judged (${t.id})`);
       changed = true;
       this.run(
-        `INSERT INTO call_tasks (id, subject_id, track_id, step_id, due_at, due_wall, due_zone, skip_deadline, list_day, placed_wall, kind, callback_at, open, closed_wall, skipped_wall)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET list_day = excluded.list_day, kind = excluded.kind, callback_at = excluded.callback_at,
-           open = excluded.open, closed_wall = excluded.closed_wall, skipped_wall = excluded.skipped_wall`,
-        [t.id, id, t.trackId, t.stepId, t.dueAt, t.dueWall, t.dueZone, t.skipDeadline, t.listDay, t.placedWall, t.kind, t.callbackAt, t.open ? 1 : 0, t.closedWall, t.skippedWall],
+        `INSERT INTO call_tasks (id, subject_id, track_id, step_id, due_at, due_wall, due_zone, skip_deadline, list_day, placed_wall, kind, callback_at, open, closed_wall, skipped_wall, reckoned_through)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET skip_deadline = excluded.skip_deadline, list_day = excluded.list_day, kind = excluded.kind, callback_at = excluded.callback_at,
+           open = excluded.open, closed_wall = excluded.closed_wall, skipped_wall = excluded.skipped_wall, reckoned_through = excluded.reckoned_through`,
+        [t.id, id, t.trackId, t.stepId, t.dueAt, t.dueWall, t.dueZone, t.skipDeadline, t.listDay, t.placedWall, t.kind, t.callbackAt, t.open ? 1 : 0, t.closedWall, t.skippedWall, t.reckonedThrough],
       );
     }
     if (base.callTasks.some((b) => !next.callTasks.some((t) => t.id === b.id))) throw new Error("a call task is never deleted");
@@ -846,7 +914,7 @@ export class SqliteEngineStore implements EngineStore {
       if (base.callAttempts.some((b) => b.id === a.id)) continue;
       changed = true;
       // The unique request id refuses a second record of one action, even from another process.
-      this.run("INSERT INTO call_attempts (id, request_id, task_id, subject_id, outcome, number_detail_id, note, at, at_wall) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [a.id, a.requestId, a.taskId, id, a.outcome, a.numberDetailId, a.note, a.at, a.atWall]);
+      this.run("INSERT INTO call_attempts (id, request_id, task_id, subject_id, outcome, redial, callback_at, number_detail_id, note, at, at_wall) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [a.id, a.requestId, a.taskId, id, a.outcome, a.redial ? 1 : 0, a.callbackAt, a.numberDetailId, a.note, a.at, a.atWall]);
     }
     if (next.newNotes.length > 0) {
       const e = this.sql("SELECT person_id, company_id FROM enrollments WHERE id = ?").get(id);
@@ -935,6 +1003,7 @@ function toCallTask(r: Row): CallTask {
     open: num(r, "open") === 1,
     closedWall: numOrNull(r, "closed_wall"),
     skippedWall: numOrNull(r, "skipped_wall"),
+    reckonedThrough: numOrNull(r, "reckoned_through") ?? num(r, "placed_wall"),
   };
 }
 

@@ -461,9 +461,14 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
   /**
    * What happened in the earlier campaigns before the projection (council on 10121d3, item 1): calls
    * the user logged (no answer or gatekeeper, which complete the phone track and start what follows;
-   * interested, which ends the lead), and a campaign paused. Every logged call touches its lead.
+   * interested, which ends the lead), and a campaign paused. Every logged call touches its lead. Ticket
+   * 15 adds a redial (the call moves to the next day; its track stays open) and a callback a day or more
+   * ahead (the lead's automated outreach pauses: its claims are withdrawn and nothing of it is sent until
+   * the outcome, which no estimate can know), and calls left unworked until the skip limit skips them.
    */
   const startedFrom = new Set<string>();
+  /** Ticket 15's stored facts, by world: a lead held by a callback, a call redialed, a call skipped at the skip limit. */
+  const ticket15 = { held: 0, redialed: 0, skipped: 0, releasedBySkip: 0 };
   async function logCalls(h: EngineHarness, campaignId: string, r: () => number, after = false) {
     let logged = 0;
     for (const id of await h.store.engine.subjectsOf(campaignId)) {
@@ -471,11 +476,17 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
       const task = s.callTasks.find((t) => t.open);
       const number = s.lead.phones.find((n) => !n.bad);
       if (!task || !number || r() < 0.3) continue;
-      const outcome = pick(r, ["no_answer", "gatekeeper", "interested"] as const);
-      const res = await h.request("POST", `/api/call-tasks/${task.id}/outcome`, { requestId: `r-${task.id}`, outcome, numberId: number.id, note: "" });
+      const outcome = pick(r, ["no_answer", "gatekeeper", "interested", "no_answer", "gatekeeper", "interested", "redial", "callback_requested"] as const);
+      const body =
+        outcome === "redial" ? { outcome: "no_answer", redial: true }
+        : outcome === "callback_requested" ? { outcome, callbackAt: new Date(h.clock + pick(r, [1, 2, 4]) * DAY).toISOString() }
+        : { outcome };
+      const res = await h.request("POST", `/api/call-tasks/${task.id}/outcome`, { requestId: `r-${task.id}`, ...body, numberId: number.id, note: "" });
       if (res.status !== 200) continue;
       logged++;
-      if (!after) startedFrom.add(outcome === "interested" ? "an interested call ended a lead" : "a logged call touched a lead and finished its phone track");
+      if (outcome === "redial") ticket15.redialed++;
+      if (outcome === "callback_requested") ticket15.held++;
+      if (!after && outcome !== "redial" && outcome !== "callback_requested") startedFrom.add(outcome === "interested" ? "an interested call ended a lead" : "a logged call touched a lead and finished its phone track");
     }
     return logged;
   }
@@ -529,14 +540,21 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
       .map((d) => pickFields({ leadId: d.subjectId, accountId: d.sender, stepId: d.stepId, at: d.at }))
       .sort();
     const predicted = (projected?.sends ?? []).filter((s) => s.at < until).map(pickFields).sort();
-    // Leads whose phone tracks all were skipped for want of a number: nothing of theirs waits on a call.
-    const noCall = new Set<string>();
+    // When each lead's phone tracks were skipped with no call logged: for want of a number, or at the skip limit
+    // (ticket 15). No call is logged after the projection, so a track waiting on a call starts only then.
+    const skippedAt = new Map<string, Map<string, number>>();
     for (const id of mine) {
       const st = (await h.store.engine.subject(id, h.clock))!;
-      const calls = st.campaign.definition.tracks.filter((t) => t.channel === "call" && !t.removed);
-      if (calls.every((t) => st.tracks.find((p) => p.trackId === t.id)?.finishReason === "skipped_missing_channel")) noCall.add(id);
+      const byTrack = new Map<string, number>();
+      for (const p of st.tracks) {
+        if (p.finishReason !== "skipped_missing_channel" && p.finishReason !== "skipped_unworked") continue;
+        if (st.campaign.definition.tracks.find((t) => t.id === p.trackId)?.channel !== "call") continue;
+        byTrack.set(p.trackId, p.finishedWall ?? 0);
+        if (p.finishReason === "skipped_unworked") ticket15.skipped++;
+      }
+      skippedAt.set(id, byTrack);
     }
-    return { actual, predicted, view, projected, noCall, channels: new Set([...h.sms.deliveryLog.slice(already.sms)].filter((d) => mine.has(d.subjectId)).length > 0 ? ["sms"] : []) };
+    return { actual, predicted, view, projected, skippedAt, channels: new Set([...h.sms.deliveryLog.slice(already.sms)].filter((d) => mine.has(d.subjectId)).length > 0 ? ["sms"] : []) };
   }
 
   const SEEDS = Number(process.env["PROJECTION_SEEDS"] ?? 40);
@@ -546,22 +564,32 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
   const REGRESSIONS = [13_056, 13_106];
   for (const seed of [...REGRESSIONS, ...Array.from({ length: SEEDS }, (_, i) => 13_000 + i).filter((x) => !REGRESSIONS.includes(x))]) {
     test(`generated multi-track world ${seed}`, async () => {
-      const { actual, predicted, view, projected, noCall, channels } = await compareWorld(world(seed), seed);
+      const { actual, predicted, view, projected, skippedAt, channels } = await compareWorld(world(seed), seed);
       texted.push(channels.has("sms"));
       const withheld = view.load?.withheldBy ?? null;
       if (withheld === null) {
         expect(predicted).toEqual(actual);
         return;
       }
-      // A track that waits on a call is named, nothing is projected, and with no call logged the
-      // engine indeed sends nothing on it, except to a lead with no number, whose phone track is skipped.
+      // A track that waits on a call is named, nothing is projected, and with no call logged the engine
+      // sends on it only once the call it waits on was skipped: for want of a number, or unworked at the
+      // skip limit (ticket 15), and never before that instant.
       withheldWorlds.push(seed);
       expect(withheld.tracks.every((t) => t.why === "after_a_phone_track")).toBe(true);
       expect(projected).toBeNull();
       // A competing campaign's tracks: named with that campaign; its own sends are not this test's to check.
       if (withheld.campaign !== null) return;
-      const waiting = withheld.tracks.map((t) => `${t.trackId}s`);
-      expect(actual.filter((line) => !noCall.has(line.split(" ")[2] ?? "") && waiting.some((prefix) => line.split(" ")[3]?.startsWith(prefix)))).toEqual([]);
+      const early: string[] = [];
+      for (const line of actual) {
+        const [at, , lead, step] = line.split(" ");
+        const waits = withheld.tracks.find((t) => step?.startsWith(`${t.trackId}s`));
+        if (!waits) continue;
+        // The phone track it waits on, through its chain: any skipped phone track of the lead before the send releases nothing earlier than its skip.
+        const skips = [...(skippedAt.get(lead ?? "")?.values() ?? [])];
+        if (skips.length === 0 || Number(at) < Math.min(...skips)) early.push(line);
+        else ticket15.releasedBySkip++;
+      }
+      expect(early).toEqual([]);
     });
   }
   const withheldWorlds: number[] = [];
@@ -569,6 +597,13 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
     expect([...startedFrom].sort()).toEqual(
       ["a logged call touched a lead and finished its phone track", "a paused competing campaign", "a track after a phone track started when its call was logged", "an interested call ended a lead"].filter((x) => SEEDS >= 40 || startedFrom.has(x)),
     );
+  });
+  test("the worlds include ticket 15's stored facts: leads held by a callback, redialed calls, and calls skipped at the skip limit releasing the tracks after them", () => {
+    if (SEEDS < 40) return;
+    expect(ticket15.held).toBeGreaterThan(0);
+    expect(ticket15.redialed).toBeGreaterThan(0);
+    expect(ticket15.skipped).toBeGreaterThan(0);
+    expect(ticket15.releasedBySkip).toBeGreaterThan(0);
   });
   test("the worlds include phone tracks that hold the tracks after them, and worlds with phone tracks still projected", () => {
     expect(withheldWorlds.length).toBeGreaterThan(0);
