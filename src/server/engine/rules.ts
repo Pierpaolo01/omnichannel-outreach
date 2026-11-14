@@ -20,6 +20,8 @@ import { applyBadDestination, applyReply, applyToAttempt, applyToWork, asOfActio
 import type { SubjectState } from "../../domain/sequence/state.ts";
 import { applyControl, campaignPaused, campaignResumed } from "../../domain/sequence/controls.ts";
 import type { RequestStanding, StoredRequest } from "./engine-store.ts";
+import { afterInterruption, interruptionOf, rescheduledSteps } from "../../domain/sequence/interruption.ts";
+import type { CallAnswer } from "../../domain/sequence/attempt.ts";
 
 export interface Rules {
   readonly evaluate: typeof evaluate;
@@ -77,6 +79,16 @@ export interface Rules {
   readonly previewAsOf: typeof asOfAction;
   /** The version guard (2.5): a change computed from `computedFrom` applies only if nothing it read has changed. */
   readonly versionsMatch: (computedFrom: SubjectState, current: SubjectState) => boolean;
+  /** Ticket 20a: the interruption ending at an instant, from the last heartbeat (more than INTERRUPTION_GAP before it). */
+  readonly interruptionOf: typeof interruptionOf;
+  /** Ticket 20a: what an interruption does to a lead: nothing (it is not a pause). */
+  readonly afterInterruption: typeof afterInterruption;
+  /** Ticket 20a: the sends an interruption rescheduled, for its notice. */
+  readonly rescheduled: typeof rescheduledSteps;
+  /** Ticket 20a, follow-up 42 item 39: the instant a provider's answer is applied at: when it arrived, not when it was asked for. */
+  readonly answerInstant: (askedAt: number, answeredAt: number) => number;
+  /** The answer a call whose answer was never recorded is taken to have (5.3's crash row): unknown. */
+  readonly lostAnswer: CallAnswer;
 }
 
 export const DEFAULT_RULES: Rules = {
@@ -123,4 +135,9 @@ export const DEFAULT_RULES: Rules = {
     a.campaign.version === b.campaign.version &&
     a.campaign.definitionVersion === b.campaign.definitionVersion &&
     JSON.stringify(a.lead) === JSON.stringify(b.lead),
+  interruptionOf,
+  afterInterruption,
+  rescheduled: rescheduledSteps,
+  answerInstant: (_asked, answered) => answered,
+  lostAnswer: { kind: "unknown" },
 };

@@ -4,12 +4,13 @@
  * the screens render them without recomputing anything.
  */
 import { bucketOf, CALL_OUTCOMES, callNumbers, callWindow, dayHasRoom, goodNumbers, isListed, listedForDay, queueRank, queueWall, recordedNumberOf, REDIAL_OUTCOMES, skipLimitOf, skippedTonight, unworkedSkipDay, type CallBucket } from "../../domain/sequence/calls.ts";
+import { interruptionNotice, sendingInterrupted } from "./worker-state.ts";
 import { displayPhone } from "../../domain/phone.ts";
 import { localDayNumber, nextWindowClose, nextWindowOpen, startOfLocalDay, windowOpen } from "../../domain/sequence/clock.ts";
 import { declinedPathOf, liveTracks, winBackAvailable, type DeclinedPath } from "../../domain/sequence/definition.ts";
 import { callbackHold, deriveStatus } from "../../domain/sequence/progress.ts";
 import type { CallAttempt, CallNumber, CallTask, RecordedNumber, SubjectState } from "../../domain/sequence/state.ts";
-import type { DeclinePreviewView, CallColleagueView, CallNumberView, CallOffListView, CallQueueItem, CallRecordView, RecordCallView, RecordCalls, RecordedNumberView, CallsView, CallTaskView, NoteView, SkipLimitView, TodayView, TouchView } from "../../shared/api.ts";
+import type { DeclinePreviewView, CallColleagueView, CallNumberView, CallOffListView, CallQueueItem, CallRecordView, RecordCallView, RecordCalls, RecordedNumberView, CallsView, CallTaskView, NoteView, SkipLimitView, TodayView, TouchView, InterruptionNoticeView, SendingInterruptedView } from "../../shared/api.ts";
 import type { OutreachStore } from "../persistence/store.ts";
 import { DEFAULT_DAILY_CALL_CAPACITY } from "../persistence/sqlite-engine-store.ts";
 import type { StoredNote } from "./engine-store.ts";
@@ -297,7 +298,20 @@ export async function callsView(store: OutreachStore, now: number, options: { re
       readyNow.map((x) => x.taskId),
       focus === null ? null : { taskId: focus, listed: listed.has(focus) },
     ),
+    sendingInterrupted: await sendingInterruptedView(store, now),
   };
+}
+
+/** Whether sending is interrupted now, and since when and why (ticket 20a; follow-up 42 item 45). */
+async function sendingInterruptedView(store: OutreachStore, now: number): Promise<SendingInterruptedView | null> {
+  const state = await sendingInterrupted(store.engine, now);
+  return state ? { since: iso(state.since), cause: state.cause } : null;
+}
+
+/** The current interruption notice (ticket 20a): one line, kept until the next interruption replaces it (question Q18). */
+async function noticeView(store: OutreachStore): Promise<InterruptionNoticeView | null> {
+  const notice = await interruptionNotice(store.engine);
+  return notice ? { from: iso(notice.from), to: iso(notice.to), rescheduled: notice.rescheduled } : null;
 }
 
 /** How many calls Up next shows on Today. */
@@ -319,6 +333,8 @@ export async function todayView(store: OutreachStore, now: number, rules?: CallV
     overdueCallbacks: readyNow.filter((x) => x.reason === "overdue").sort((a, b) => Date.parse(a.callbackAt ?? "") - Date.parse(b.callbackAt ?? "") || (a.taskId < b.taskId ? -1 : 1)),
     carriedOver: listed.filter((x) => x.reason === "rolled_over" || x.reason === "redial").length,
     carriedOverLastDay: listed.filter((x) => (x.reason === "rolled_over" || x.reason === "redial") && x.skippedTonight).length,
+    interruption: await noticeView(store),
+    sendingInterrupted: await sendingInterruptedView(store, now),
   };
 }
 

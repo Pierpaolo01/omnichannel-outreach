@@ -11,6 +11,10 @@ import { sequentialIds } from "./domain.ts";
 import { csvOf, type ExportRows } from "./export-builder.ts";
 import { FakeEmailPort, type FakeAccount, type FakeMode } from "./fake-email-port.ts";
 import { FakeSmsPort, type FakeNumber, type FakeSmsMode } from "./fake-sms-port.ts";
+import { HEARTBEAT_KEY } from "../../src/server/engine/worker-state.ts";
+
+/** The port calls an outage refuses, and the ones a held answer delays (ticket 20a). */
+const PORT_CALLS = new Set(["accounts", "presendCheck", "handover", "withdraw", "observe", "lookup"]);
 
 /**
  * The real HTTP app and SQLite store with the engine over a fake email provider, on a clock the
@@ -133,12 +137,76 @@ export class EngineHarness {
     return this.provider;
   }
 
+  // ---------------------------------------------------------------------------------------------
+  // Interruptions (ADR 0003 "Ticket 20a").
+
+  /**
+   * Whether the application runs continuously. Production's worker ticks every 15 seconds; the harness skips the
+   * ticks that would change nothing, so while the world runs it marks the worker alive (the heartbeat) at each tick
+   * it does run, as those quiet ticks would have. Only the stops and outages a test makes are interruptions.
+   */
+  private live = true;
+  /** While set, every provider call the engine makes fails, as with the network down (the providers still act). */
+  providersDownUntil: number | null = null;
+  /** A provider answer held while the clock moves on (follow-up 42 item 39): the next call of this kind arrives `ms` later. */
+  heldAnswer: { readonly kind: "observe" | "lookup"; readonly ms: number } | null = null;
+  /** The instants held answers arrived at, as asked and as answered. */
+  readonly heldAnswers: { readonly kind: string; readonly askedAt: number; readonly answeredAt: number }[] = [];
+
+  private get reachable(): boolean {
+    return this.providersDownUntil === null || this.clock >= this.providersDownUntil;
+  }
+
+  /** The port as the engine sees it: unreachable during an outage, and with a held answer arriving late. */
+  private gated(port: SendPort): SendPort {
+    return new Proxy(port, {
+      get: (target, prop, receiver) => {
+        const value: unknown = Reflect.get(target, prop, receiver);
+        if (typeof prop !== "string" || !PORT_CALLS.has(prop) || typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          if (!this.reachable) return Promise.reject(new Error("the provider is unreachable"));
+          const held = this.heldAnswer;
+          if (held && held.kind === prop) {
+            this.heldAnswer = null;
+            const askedAt = this.clock;
+            this.clock += held.ms;
+            this.advanceProviders();
+            this.heldAnswers.push({ kind: prop, askedAt, answeredAt: this.clock });
+          }
+          return (value as (...a: unknown[]) => unknown).apply(target, args);
+        };
+      },
+    });
+  }
+
+  /**
+   * Stops the application for `ms`: nothing ticks while the providers carry on; then a fresh engine on the same store
+   * runs restart settlement. The heartbeat stays where the last tick left it.
+   */
+  async stopFor(ms: number): Promise<void> {
+    this.live = false;
+    this.clock += ms;
+    await this.restart();
+    this.live = true;
+  }
+
+  /** The application keeps ticking, but the harness stops standing in for its quiet ticks: until a tick of the engine's own succeeds. */
+  stopMarkingAlive(): void {
+    this.live = false;
+  }
+
+  /** Cuts every provider off until `until`, while the application keeps ticking. */
+  cutProvidersOff(until: number): void {
+    this.providersDownUntil = until;
+    this.live = false;
+  }
+
   private newEngine(): Engine {
     return new Engine({
       ...this.options.engine,
       store: this.store.engine,
-      port: this.provider,
-      ...(this.smsProvider ? { smsPort: this.smsProvider } : {}),
+      port: this.gated(this.provider),
+      ...(this.smsProvider ? { smsPort: this.gated(this.smsProvider) } : {}),
       now: () => this.clock,
       newId: this.engineIds,
       ...(this.options.rules ? { rules: this.options.rules } : {}),
@@ -200,8 +268,12 @@ export class EngineHarness {
     // Yield to the event loop, so the test runner's worker can answer its RPC on long runs.
     await new Promise((resolve) => setImmediate(resolve));
     this.advanceProviders();
+    if (this.providersDownUntil !== null && this.clock >= this.providersDownUntil) this.providersDownUntil = null;
+    if (this.live) await this.store.engine.setMeta(HEARTBEAT_KEY, String(this.clock));
     try {
       await this.engine.tick();
+      // The first tick after an outage, every port answering, is the engine's to record; the world runs again after it.
+      if (this.providersDownUntil === null) this.live = true;
     } catch (error) {
       if (error instanceof TransientError) return;
       if (!(error instanceof Crash)) throw error;
@@ -254,7 +326,7 @@ export class EngineHarness {
   async advanceTo(target: number, onInstant?: () => Promise<void>): Promise<void> {
     await this.tick();
     for (let guard = 0; guard < 100_000 && this.clock < target && !this.stopped; guard++) {
-      const wakes = [await this.engine.nextWakeAt(), this.provider.nextActivityAt(), this.smsProvider?.nextActivityAt() ?? null, target].filter((t): t is number => t !== null && t > this.clock);
+      const wakes = [await this.engine.nextWakeAt(), this.provider.nextActivityAt(), this.smsProvider?.nextActivityAt() ?? null, this.providersDownUntil, target].filter((t): t is number => t !== null && t > this.clock);
       this.clock = Math.min(...wakes);
       await this.tick();
       await onInstant?.();

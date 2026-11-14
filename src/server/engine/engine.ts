@@ -26,6 +26,7 @@ function outcomeBody(input: OutcomeInput): string {
 }
 import { UnprovisionedSmsPort, type AttemptRef, type HandoverRequest, type ProviderEvent, type SendPort } from "./ports.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
+import { HEARTBEAT_KEY, NOTICE_KEY, parseInstant, TICK_ENDED_KEY, TICK_FAILED_KEY } from "./worker-state.ts";
 
 export type CrashPoint = "after_claim" | "after_presend" | "after_handover_commit" | "after_call" | "after_retry_commit" | "after_lookup" | "after_observe_event";
 
@@ -133,6 +134,9 @@ export class Engine {
   /** Each sender account's channel, so its attempts reach the right port. */
   private readonly channels = new Map<string, Channel>();
   private readonly now: () => number;
+  /** While a provider's answer is applied: the instant the rules say it is applied at (`answerInstant`); null otherwise. */
+  private applyingAt: number | null = null;
+  private readonly clockNow: () => number;
   private readonly newId: () => string;
   private readonly rules: Rules;
   private readonly hooks: EngineHooks;
@@ -156,7 +160,8 @@ export class Engine {
   constructor(deps: EngineDependencies) {
     this.store = deps.store;
     this.ports = { email: deps.port, sms: deps.smsPort ?? new UnprovisionedSmsPort() };
-    this.now = deps.now;
+    this.clockNow = deps.now;
+    this.now = () => this.applyingAt ?? deps.now();
     this.newId = deps.newId;
     this.rules = { ...DEFAULT_RULES, ...deps.rules };
     this.hooks = deps.hooks ?? {};
@@ -203,24 +208,61 @@ export class Engine {
       for (const a of await this.store.openAttempts()) {
         // The crash row of 5.3: a call whose answer was never recorded is an unknown answer.
         if ((a.state === "handed" || a.state === "accepted") && a.awaitingAnswer) {
-          await this.applyAttempt(a, { kind: "call_answer", answer: { kind: "unknown" }, now: this.now() });
+          await this.applyAttempt(a, { kind: "call_answer", answer: this.rules.lostAnswer, now: this.now() });
         }
       }
       await this.observe();
       await this.settle();
       await this.runTick();
+    }).catch(async (error: unknown) => {
+      await this.noteTickFailed();
+      throw error;
     });
   }
 
   tick(): Promise<void> {
-    return this.ticks.run(() => this.runTick());
+    return this.ticks.run(() => this.runTick()).catch(async (error: unknown) => {
+      await this.noteTickFailed();
+      throw error;
+    });
+  }
+
+  /** A tick that threw completed nothing and writes no heartbeat; the read says ticks are failing (follow-up 42 item 45). */
+  private async noteTickFailed(): Promise<void> {
+    try {
+      await this.store.setMeta(TICK_FAILED_KEY, String(this.clockNow()));
+    } catch {
+      // The store itself may be what fails; the heartbeat's age says enough then.
+    }
+  }
+
+  /**
+   * The first tick after an interruption (ADR 0003 "Ticket 20a"), once every port has answered and every lead has been
+   * evaluated, before anything is claimed: each running lead goes through `afterInterruption` (unchanged), the sends the
+   * interruption rescheduled are counted, and the notice and the heartbeat are written in one store write.
+   */
+  private async recordResume(at: number): Promise<void> {
+    const gap = this.rules.interruptionOf(parseInstant(await this.store.meta(HEARTBEAT_KEY)), at);
+    if (gap === null) return;
+    let rescheduled = 0;
+    for (const id of await this.store.runningSubjectIds()) {
+      const now = this.now();
+      const s = await this.store.subject(id, now);
+      if (!s) continue;
+      rescheduled += this.rules.rescheduled(s, gap, now).length;
+      const after = this.rules.afterInterruption(s, gap, now);
+      if (!same(after, s)) await this.store.update(id, now, (current) => (this.rules.versionsMatch(s, current) ? { ...after, accounts: current.accounts } : null));
+    }
+    await this.store.setMetas({ [NOTICE_KEY]: JSON.stringify({ from: gap.from, to: gap.to, rescheduled }), [HEARTBEAT_KEY]: String(at) });
   }
 
   private async runTick(): Promise<void> {
-    await this.syncAccounts();
+    const started = this.now();
+    let reachable = await this.syncAccounts();
     for (let pass = 0; pass < MAX_PASSES; pass++) {
       let changed = false;
       const observed = await this.observe();
+      if (pass === 0) reachable = reachable && observed.all;
       changed = observed.changed || changed;
       changed = (await this.correlate(observed.ok, false)) || changed;
       changed = (await this.expireClaims()) || changed;
@@ -230,11 +272,14 @@ export class Engine {
       changed = (await this.correlate(false, true)) || changed;
       changed = (await this.withdraw()) || changed;
       changed = (await this.evaluateAll()) || changed;
+      if (pass === 0 && reachable) await this.recordResume(started);
       changed = (await this.placeCallsAll()) || changed;
       changed = (await this.claimAll()) || changed;
       changed = (await this.handOverAll()) || changed;
-      if (!changed) return;
+      if (!changed) break;
     }
+    const ended = this.now();
+    await this.store.setMetas(reachable ? { [TICK_ENDED_KEY]: String(ended), [HEARTBEAT_KEY]: String(ended) } : { [TICK_ENDED_KEY]: String(ended) });
   }
 
   /** The next instant at which a tick could change something, for the worker loop and the tests' clock. */
@@ -317,10 +362,15 @@ export class Engine {
   // -------------------------------------------------------------------------------------------
   // Accounts.
 
-  private async syncAccounts(): Promise<void> {
+  /** Syncs every port's accounts; false when a port did not answer (ticket 20a: it could not send). */
+  private async syncAccounts(): Promise<boolean> {
+    let all = true;
     for (const channel of CHANNELS) {
       const statuses = await this.bounded(() => this.ports[channel].accounts(), null);
-      if (statuses === null) continue;
+      if (statuses === null) {
+        all = false;
+        continue;
+      }
       await this.store.upsertAccounts(statuses);
       // An account its provider no longer lists is disconnected: claims for it wait, and Needs attention lists it.
       await this.store.disconnectUnlisted(channel, statuses.map((a) => a.id));
@@ -329,6 +379,23 @@ export class Engine {
         this.channels.set(s.id, channel);
         if (s.quotaAvailable && known.get(s.id)?.waitReason === "quota") await this.store.updateAccount(s.id, { waitUntil: null, waitReason: null });
       }
+    }
+    return all;
+  }
+
+  /**
+   * Applies a provider's answer at the instant the rules say (`answerInstant`: when it arrived, follow-up 42 item 39):
+   * a request held across a day boundary is applied after it, never at the instant it was asked.
+   */
+  private async answered<T>(askedAt: number, apply: () => Promise<T>): Promise<T> {
+    const arrived = this.clockNow();
+    const at = this.rules.answerInstant(askedAt, arrived);
+    if (at === arrived) return apply();
+    this.applyingAt = at;
+    try {
+      return await apply();
+    } finally {
+      this.applyingAt = null;
     }
   }
 
@@ -402,24 +469,29 @@ export class Engine {
    * Observes every provider; `ok` is false when the email provider could not be observed, which is
    * what a held email reply's running time depends on.
    */
-  private async observe(): Promise<{ changed: boolean; ok: boolean }> {
+  private async observe(): Promise<{ changed: boolean; ok: boolean; all: boolean }> {
     let changed = false;
     let ok = true;
+    let all = true;
     for (const channel of CHANNELS) {
       const checkpoint = await this.store.meta(OBSERVE_CHECKPOINT[channel]);
+      const asked = this.now();
       const observed = await this.bounded(() => this.ports[channel].observe(checkpoint), null);
       if (observed === null) {
         if (channel === "email") ok = false;
+        all = false;
         continue;
       }
       const { events, checkpoint: next } = observed;
-      for (const event of events) {
-        changed = (await (channel === "sms" ? this.applySmsEvent(event) : this.applyEvent(event))) || changed;
-        this.hooks.crashPoint?.("after_observe_event", null);
-      }
+      await this.answered(asked, async () => {
+        for (const event of events) {
+          changed = (await (channel === "sms" ? this.applySmsEvent(event) : this.applyEvent(event))) || changed;
+          this.hooks.crashPoint?.("after_observe_event", null);
+        }
+      });
       if (next !== checkpoint) await this.store.setMeta(OBSERVE_CHECKPOINT[channel], next);
     }
-    return { changed, ok };
+    return { changed, ok, all };
   }
 
   /**
@@ -602,7 +674,7 @@ export class Engine {
     let changed = false;
     for (const a of await this.store.openAttempts()) {
       if (!a.awaitingAnswer || this.locks.calling.has(a.id) || now - (a.lastCallWall ?? a.claimedWall) < ENGINE_PARAMS.CALL_TIMEOUT) continue;
-      changed = (await this.applyAttempt(a, { kind: "call_answer", answer: { kind: "unknown" }, now })) || changed;
+      changed = (await this.applyAttempt(a, { kind: "call_answer", answer: this.rules.lostAnswer, now })) || changed;
     }
     return changed;
   }
@@ -628,9 +700,10 @@ export class Engine {
       }
       const w = (await this.store.work(due.key)) ?? due;
       const port = await this.portOf(w.accountId);
+      const asked = this.now();
       const answer = await this.bounded(() => port.lookup(this.ref(w)), { kind: "unknown" as const });
       this.hooks.crashPoint?.("after_lookup", live?.id ?? null);
-      changed = (await this.applyWork(w.subjectId, w.key, { kind: "lookup_answer", answer, now: this.now() })) || changed;
+      changed = (await this.answered(asked, () => this.applyWork(w.subjectId, w.key, { kind: "lookup_answer", answer, now: this.now() }))) || changed;
     }
     return changed;
   }
@@ -649,9 +722,10 @@ export class Engine {
       const answer = await this.bounded(() => port.withdraw(this.ref(w)), "unknown" as const);
       // "Too late" means it went: the lookup is asked for its send time first, so its successor counts from the real send.
       if (answer === "too-late") {
+        const asked = this.now();
         const looked = await this.bounded(() => port.lookup(this.ref(w)), { kind: "unknown" as const });
         if (looked.kind === "sent") {
-          changed = (await this.applyWork(w.subjectId, w.key, { kind: "lookup_answer", answer: looked, now: this.now() })) || changed;
+          changed = (await this.answered(asked, () => this.applyWork(w.subjectId, w.key, { kind: "lookup_answer", answer: looked, now: this.now() }))) || changed;
           continue;
         }
       }

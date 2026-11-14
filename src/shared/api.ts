@@ -961,6 +961,31 @@ export interface TodayView {
   readonly carriedOver: number;
   /** Of those, the ones skipped tonight if left unworked (`skippedTonight`): on their last day (ticket 15b). */
   readonly carriedOverLastDay: number;
+  /**
+   * The one-line notice of the latest sending interruption (ticket 20a): "sending was interrupted from `from` to `to`;
+   * `rescheduled` sends rescheduled". Kept until a newer interruption replaces it (question Q18); null when none happened.
+   */
+  readonly interruption: InterruptionNoticeView | null;
+  /** While sending is interrupted now: since when, and why. Due sends and calls may be waiting (follow-up 42 item 45). */
+  readonly sendingInterrupted: SendingInterruptedView | null;
+}
+
+/** A sending interruption that has ended (ADR 0003 "Ticket 20a"). */
+export interface InterruptionNoticeView {
+  readonly from: string;
+  readonly to: string;
+  /** The sends the interruption made late: email and texts that could have gone during it and had not gone by its end. */
+  readonly rescheduled: number;
+}
+
+/**
+ * Sending interrupted now (ADR 0003 "Ticket 20a"): no tick has completed with every provider answering for more than five
+ * minutes. `ticks_failing`: the worker's ticks throw; `providers_unreachable`: they run, but a provider does not answer;
+ * `worker_stalled`: no tick has ended since.
+ */
+export interface SendingInterruptedView {
+  readonly since: string;
+  readonly cause: "ticks_failing" | "providers_unreachable" | "worker_stalled";
 }
 
 /** GET /api/calls: the focus queue. The focused task is the first ready now; the queue moves on only after an outcome. */
@@ -988,6 +1013,8 @@ export interface CallsView {
    * listed, so the queue moves on only after an outcome. With none, the first call ready now.
    */
   readonly focusTaskId: string | null;
+  /** As on TodayView: while sending is interrupted now, due calls may be waiting to be placed (follow-up 42 item 45). */
+  readonly sendingInterrupted: SendingInterruptedView | null;
 }
 
 /** POST /api/call-tasks/:id/outcome: the task after the outcome, and the call the focus queue moves on to. */

@@ -33,8 +33,9 @@ import type {
   WorkSettlement,
 } from "../../domain/sequence/state.ts";
 import { isOutreachStatus } from "../../domain/outreach-status.ts";
-import type { BounceEvent, CallNoteRecord, CallSettings, CampaignEngineRow, DefinitionSave, EngineStore, LaunchOutcome, ReplyEvent, SaveResult, SenderAccountConfig, StoredDefinition, StoredNote } from "../engine/engine-store.ts";
+import type { BounceEvent, CallNoteRecord, CallSettings, CampaignEngineRow, DefinitionSave, EngineStore, LaunchOutcome, ReplyEvent, SaveResult, SenderAccountConfig, StoredDefinition, StoredNote, WorkerLease } from "../engine/engine-store.ts";
 import { liveDetailRowOf } from "./sqlite-store.ts";
+import { LEASE_KEY, parseLease } from "../engine/worker-state.ts";
 
 type Row = Record<string, SQLOutputValue>;
 
@@ -450,6 +451,29 @@ export class SqliteEngineStore implements EngineStore {
 
   async setMeta(key: string, value: string): Promise<void> {
     this.run("INSERT INTO engine_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [key, value]);
+  }
+
+  async setMetas(values: Readonly<Record<string, string>>): Promise<void> {
+    this.transaction(() => {
+      for (const [key, value] of Object.entries(values)) this.run("INSERT INTO engine_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [key, value]);
+    });
+  }
+
+  async takeLease(owner: WorkerLease, now: number, staleMs: number, alive: (pid: number) => boolean): Promise<{ readonly ok: true } | { readonly ok: false; readonly holder: WorkerLease }> {
+    return this.transaction(() => {
+      const row = this.sql("SELECT value FROM engine_meta WHERE key = ?").get(LEASE_KEY);
+      const holder = row ? parseLease(str(row, "value")) : null;
+      if (holder && holder.id !== owner.id && now - holder.renewedWall <= staleMs && holder.pid !== owner.pid && alive(holder.pid)) return { ok: false as const, holder };
+      this.run("INSERT INTO engine_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [LEASE_KEY, JSON.stringify({ ...owner, renewedWall: now })]);
+      return { ok: true as const };
+    });
+  }
+
+  async releaseLease(ownerId: string): Promise<void> {
+    this.transaction(() => {
+      const row = this.sql("SELECT value FROM engine_meta WHERE key = ?").get(LEASE_KEY);
+      if (row && parseLease(str(row, "value"))?.id === ownerId) this.run("DELETE FROM engine_meta WHERE key = ?", [LEASE_KEY]);
+    });
   }
 
   async recordBounce(b: BounceEvent): Promise<void> {
