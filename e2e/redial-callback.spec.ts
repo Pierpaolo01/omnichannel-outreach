@@ -292,12 +292,16 @@ test("demonstration: a redial ages from its original due date, an unworked call 
     await expect(page.getByText("Email track 2 started")).toBeVisible();
     await expect(page.getByText("Email 2 sent")).toBeVisible();
     await linger(page);
+    await page.getByText("Phone track skipped, not called").scrollIntoViewIfNeeded();
+    await linger(page);
   });
   await test.step("Wednesday: Tom's callback is still overdue, and nothing more went to him while it holds his outreach", async () => {
     await page.goto(`${f.url}/leads/people/${f.person("Tom")}`);
     await expect(page.getByText(/Callback Tue 10 Nov at 11:00 their time, now overdue/)).toBeVisible();
     await expect(page.getByText("Email 1 sent")).toBeVisible();
     await expect(page.getByText("Email 2 sent")).toHaveCount(0);
+    await linger(page);
+    await page.getByRole("listitem").filter({ hasText: /^Callback overdue/ }).scrollIntoViewIfNeeded();
     await linger(page);
   });
 });
