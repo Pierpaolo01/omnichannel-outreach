@@ -1,0 +1,291 @@
+import { useId, useState } from "react";
+import type { ActivityEntry, ActivityView, DependentTrackState } from "../shared/api.ts";
+import { useApi } from "./api.ts";
+import { ErrorState, Section } from "./components.tsx";
+import { DECLINED_PATH_LINE, OUTCOME_TITLE, dateIn, declineTrackLine, dialledLine } from "./calls/wording.ts";
+import { dayLabel } from "./calls/callbackTime.ts";
+import { Icon, type IconName } from "./icons.tsx";
+import { stepNoun } from "../shared/track-label.ts";
+import { useNow } from "./time.ts";
+
+/**
+ * The record's Activity: one timeline across campaigns, newest first, as in the approved
+ * daily-workspace prototype. Sent emails and texts expand to the copy that went; a reply shows its channel
+ * and date only. Calls show each logged outcome with the number dialled and its note (ticket 14b).
+ * The note box arrives with the ticket that adds notes.
+ */
+export function Activity({ path }: { path: string }) {
+  const { result, retry } = useApi<ActivityView>(path);
+  const [campaign, setCampaign] = useState("");
+  const filterId = useId();
+  const entries = result.state === "ready" ? result.data.entries : null;
+  // Every day and time Activity says is in the user's zone as the server reads it, never the browser's (council on 32454ea, C).
+  const userZone = result.state === "ready" ? result.data.userZone : null;
+  const campaigns = entries ? [...new Map(entries.map((e) => [e.campaign.id, e.campaign.name])).entries()] : [];
+  const shown = entries?.filter((e) => campaign === "" || e.campaign.id === campaign) ?? [];
+  return (
+    <Section
+      title="Activity"
+      aside={
+        campaigns.length > 1 ? (
+          <span className="flex items-center gap-2">
+            <label htmlFor={filterId} className="sr-only">
+              Show activity from
+            </label>
+            <select id={filterId} className="select select-sm border-line-strong" value={campaign} onChange={(e) => setCampaign(e.target.value)}>
+              <option value="">All campaigns</option>
+              {campaigns.map(([id, name]) => (
+                <option key={id} value={id}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </span>
+        ) : undefined
+      }
+    >
+      {result.state === "error" ? (
+        <ErrorState title="The activity didn’t load." message={result.message} onRetry={retry} />
+      ) : entries === null ? (
+        <div role="status" aria-busy="true" aria-label="Loading the activity" className="flex flex-col gap-3 py-3">
+          <div className="skeleton h-9 w-full" />
+          <div className="skeleton h-9 w-full" />
+        </div>
+      ) : shown.length === 0 ? (
+        <p className="py-3 text-[14px] text-muted">Nothing has happened yet.</p>
+      ) : (
+        <ul>
+          {shown.map((entry, i) => (
+            userZone !== null && <Line key={`${entry.at}-${i}`} entry={entry} userZone={userZone} />
+          ))}
+        </ul>
+      )}
+    </Section>
+  );
+}
+
+const REASON: Readonly<Record<string, string>> = {
+  no_email: "No email address.",
+  no_mobile: "No mobile of their own.",
+  company_lead: "A company lead is never texted: a main line isn’t a mobile.",
+  block_list: "The address is on Instantly’s block list.",
+  "invalid address": "Instantly refused the address as invalid. It is marked wrong.",
+  "invalid number": "The number was refused as invalid. It is marked wrong.",
+};
+
+const PLAIN = "bg-raised text-muted shadow-[inset_0_0_0_1px_var(--color-line)]";
+const CRIT = "bg-crit-soft text-crit";
+const HAND = "bg-hand-soft text-hand";
+const CALL = "bg-call-soft text-call";
+
+/** "the email track", "SMS track 2": a track label inside a sentence. */
+const inSentence = (label: { label: string; several: boolean }) => (label.several ? label.label : `the ${label.label.startsWith("SMS") ? label.label : label.label.toLowerCase()}`);
+
+/**
+ * What one timeline entry says. `track` names the entry's track when its campaign has several on
+ * that channel, so two email tracks never read alike (ticket 13b). Exported for its tests.
+ */
+export function describeEntry(entry: ActivityEntry, userZone: string): { icon: IconName; tone: string; title: string; body: string | null; track: string | null } {
+  if (entry.kind === "replied")
+    return {
+      icon: "reply",
+      tone: HAND,
+      title: entry.channel === "email" ? "Replied by email" : "Replied by text",
+      body: entry.channel === "email" ? "Automation stopped in this campaign. Read and answer the reply in Instantly." : "Automation stopped in this campaign. Answer the reply on your phone.",
+      track: null,
+    };
+  if (entry.kind === "ended")
+    return entry.status === "sequence_finished_no_response"
+      ? { icon: "system", tone: PLAIN, title: "Sequence finished with no response", body: null, track: null }
+      : { icon: "system", tone: PLAIN, title: "Finished, no usable channel", body: "Nothing is left to reach them on in this campaign.", track: null };
+  if (entry.channel === "call") {
+    const track = entry.track.several ? entry.track.label : null;
+    switch (entry.kind) {
+      case "call":
+        // What a decline did (its stored path, ticket 16, and each remaining track as the server's read holds it now, ticket 16c),
+        // what the call did to the lead's calls (ticket 15b), the number dialled and the call's note; a skip for now has no number.
+        return {
+          icon: "call",
+          tone: CALL,
+          title: OUTCOME_TITLE[entry.outcome],
+          body:
+            [
+              entry.declinedPath ? DECLINED_PATH_LINE[entry.declinedPath].slice(0, -1) : null,
+              ...entry.afterDecline.map((a) => declineTrackLine(a, "record", userZone).slice(0, -1)),
+              callMeaning(entry),
+              dialledLine(entry.number),
+              entry.note.trim(),
+            ]
+              .filter(Boolean)
+              .join(". ") || null,
+          track,
+        };
+      case "skipped":
+        if (entry.reason === "unworked") {
+          const limit = entry.limitDays === 1 ? "a day" : `${entry.limitDays} days`;
+          // What each track after it has done at this read, from the server: never a start that has not happened (verifier on eac9f6c, F2).
+          // An ended lead's track never starts; a held one has no day yet (council on 32454ea, D).
+          const after = entry.after.map((a) => dependentLine(a, userZone));
+          // The engine's own calendar date, said as a date: never re-derived from an instant (council on 32454ea, C).
+          return { icon: "system", tone: PLAIN, title: `${entry.track.label} skipped, not called`, body: [`Not called within ${limit} of its due date, ${dayLabel(entry.dueDate)}, so the call was skipped.`, ...after].join(" "), track: null };
+        }
+        return { icon: "system", tone: PLAIN, title: `${entry.track.label} skipped`, body: "No good number to call: every number is missing or marked wrong.", track: null };
+      case "released":
+        return { icon: "system", tone: PLAIN, title: `${entry.track.label} started`, body: `It starts after ${inSentence(entry.after)}, which ${releasedWhy(entry.because, entry.after.label)}.`, track: null };
+      case "callback_overdue":
+        return {
+          icon: "bad",
+          tone: CRIT,
+          title: "Callback overdue",
+          body: `They asked for ${at(entry.callbackAt, entry.zone)} their time. It stays on your call list, flagged overdue, and their automated outreach in this campaign stays held until you log what happened.`,
+          track,
+        };
+    }
+  }
+  const sms = entry.channel === "sms";
+  // What a step is called comes from its track's label, so a win-back step reads "Win-back email 1" (council on 4fd9ca4, item 5).
+  const noun = stepNoun(entry.track, entry.channel);
+  const track = entry.track.several ? entry.track.label : null;
+  const icon: IconName = sms ? "sms" : "email";
+  switch (entry.kind) {
+    case "sent":
+      return { icon, tone: PLAIN, title: `${noun} ${entry.stepNumber} sent`, body: null, track };
+    case "failed":
+      return { icon: "bad", tone: CRIT, title: `${noun} ${entry.stepNumber} failed`, body: `${entry.to}: ${REASON[entry.reason] ?? entry.reason}`, track };
+    case "skipped":
+      return { icon: "system", tone: PLAIN, title: entry.stepNumber === null ? `${entry.track.label} skipped` : `${noun} ${entry.stepNumber} skipped`, body: REASON[entry.reason] ?? entry.reason, track: entry.stepNumber === null ? null : track };
+    case "bounced":
+      return sms
+        ? { icon: "bad", tone: CRIT, title: entry.stepNumber === null ? "Bad number" : `${noun} ${entry.stepNumber}: bad number`, body: `${entry.to} was reported invalid and is marked wrong. Nothing more is texted to it.`, track }
+        : { icon: "bad", tone: CRIT, title: entry.stepNumber === null ? "Email bounced" : `${noun} ${entry.stepNumber} bounced`, body: `${entry.to} is marked wrong. Nothing more is sent to it.`, track };
+    case "address_bad":
+      return { icon: "system", tone: PLAIN, title: `${entry.track.label} ended`, body: `${entry.to} is marked wrong, so nothing more is sent to it.`, track: null };
+    case "released":
+      return {
+        icon: "system",
+        tone: PLAIN,
+        title: `${entry.track.label} started`,
+        body: `It starts after ${inSentence(entry.after)}, which ${releasedWhy(entry.because, entry.after.label)}.`,
+        track: null,
+      };
+  }
+}
+
+const timeIn = (zone: string, iso: string) => new Intl.DateTimeFormat("en-GB", { timeZone: zone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(iso));
+/** "Thu 5 Nov at 14:30" in the prospect's zone. */
+const at = (iso: string, zone: string) => `${dateIn(zone, iso)} at ${timeIn(zone, iso)}`;
+
+function releasedWhy(because: "skipped" | "failed" | "unworked", after: string): string {
+  if (because === "unworked") return "was skipped: its call wasn’t made within its skip limit";
+  return because === "skipped" ? "was skipped for this lead" : `ended on a bad ${after.startsWith("SMS") ? "number" : "address"}`;
+}
+
+/**
+ * What Activity says of a track that starts after an unworked skip, from the state the server read (verifier on
+ * 2027f24): one sentence per state, in an exhaustive switch, so a state a later ticket adds fails typecheck until it
+ * has one. Only `waiting` and `held` say the track will start, because the server read says so.
+ */
+export function dependentLine(a: { readonly track: { readonly label: string } } & DependentTrackState, userZone: string): string {
+  const name = a.track.label;
+  switch (a.state) {
+    case "started":
+      return `${name} started after it.`;
+    case "finished":
+      return `${name} has finished.`;
+    case "waiting":
+      return `${name} starts after its delay, on ${dateIn(userZone, a.startsAt)}.`;
+    case "held":
+      return `${name} starts after its delay, once their outreach is no longer held.`;
+    case "dropped_for_win_back":
+      return `${name} will not start: they moved to this campaign’s win-back branch.`;
+    case "skipped_declined":
+      return `${name} was skipped: they declined on a call.`;
+    case "skipped_unworked":
+      return `${name} was skipped: its call wasn’t made within its skip limit.`;
+    case "skipped_no_channel":
+      return `${name} was skipped: there is nothing to reach them on for it.`;
+    case "skipped":
+      return `${name} was skipped.`;
+    case "stopped":
+      return `${name} did not start: their outreach in this campaign stopped.`;
+    case "stopped_after_start":
+      return `${name} started after it, then stopped: their outreach in this campaign stopped.`;
+    case "started_held":
+      return `${name} started after it, and is waiting while their outreach is held.`;
+    case "no_more_calls":
+      return `${name} will not call them: they declined on a call.`;
+    case "not_started":
+      return `${name} has not started.`;
+    default: {
+      const unhandled: never = a;
+      throw new Error(`A track state Activity has no sentence for: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+/**
+ * What a logged call did to the lead's calls (ticket 15b): a redial, a callback asked for, or the callback it answered.
+ * History, in the past tense; a present state (a callback still open and holding outreach) only when the server's read
+ * says so (`callbackOpen`, verifier re-check H), and a day only from the server (`redialListedFrom`, council C).
+ */
+function callMeaning(entry: Extract<ActivityEntry, { kind: "call"; channel: "call" }>): string | null {
+  if (entry.outcome === "callback_requested" && entry.callbackAt !== null) {
+    const asked = `${entry.onCallback === null ? "Callback asked for" : "Callback moved to"}, ${at(entry.callbackAt, entry.zone)} their time`;
+    return entry.callbackOpen ? `${asked}; their automated outreach in this campaign is held until you log how it went` : asked;
+  }
+  if (entry.onCallback !== null) {
+    return entry.outcome === "skip_for_now" ? `Skipped for now on the callback for ${at(entry.onCallback, entry.zone)} their time` : `The callback they asked for, ${at(entry.onCallback, entry.zone)} their time; its hold on automated outreach ended`;
+  }
+  if (!entry.redial) return null;
+  return entry.redialListedFrom ? `Redial asked for: listed again from ${dayLabel(entry.redialListedFrom)}` : "Redial asked for";
+}
+
+function Line({ entry, userZone }: { entry: ActivityEntry; userZone: string }) {
+  const now = useNow();
+  const { icon, tone, title, body, track } = describeEntry(entry, userZone);
+  return (
+    <li className="grid grid-cols-[32px_minmax(0,1fr)_auto] gap-x-3 gap-y-0.5 border-line py-3 [&+&]:border-t">
+      <span className={`grid size-8 place-items-center rounded-full ${tone}`}>
+        <Icon name={icon} className="size-4" />
+      </span>
+      <div className="min-w-0 pt-[5px] font-medium [overflow-wrap:anywhere]">
+        {title}{" "}
+        <span className="text-[13px] font-normal text-muted">
+          {track ? `${track}, ` : ""}in {entry.campaign.name}
+        </span>
+      </div>
+      <time dateTime={entry.at} className="whitespace-nowrap pt-1.5 text-right text-[13px] text-muted">
+        {when(entry.at, now, userZone)}
+      </time>
+      {(body || (entry.kind === "sent" && entry.copy)) && (
+        <div className="col-start-2 col-end-4 min-w-0">
+          {body && <div className="mt-[3px] text-[14px] text-ink-2 [overflow-wrap:anywhere]">{body}</div>}
+          {entry.kind === "sent" && entry.copy && (
+            <details className="group">
+              <summary className="mt-1 w-fit cursor-pointer list-none text-[13px] text-muted underline decoration-line-strong underline-offset-[3px] [&::-webkit-details-marker]:hidden">
+                <span className="group-open:hidden">Show message</span>
+                <span className="hidden group-open:inline">Hide message</span>
+              </summary>
+              <div className="mt-2 whitespace-pre-wrap rounded-field bg-raised px-3.5 py-3 text-[14px] leading-[1.55] text-ink-2 [overflow-wrap:anywhere]">
+                <span className="mb-1 block text-[12.5px] text-muted">
+                  From {entry.from} to {entry.to}
+                </span>
+                {entry.copy.subject && <span className="mb-2 block font-semibold text-base-content">{entry.copy.subject}</span>}
+                {entry.copy.body}
+              </div>
+            </details>
+          )}
+        </div>
+      )}
+    </li>
+  );
+}
+
+/** "Today, 10:00" or "Mon 9 Nov, 10:00", in `zone`: the user's, as the server reads it (council on 32454ea, C). */
+export function when(iso: string, now: Date, zone: string): string {
+  const date = (d: Date) => new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+  const at = new Date(iso);
+  const time = new Intl.DateTimeFormat("en-GB", { timeZone: zone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(at);
+  if (date(at) === date(now)) return `Today, ${time}`;
+  return `${dateIn(zone, iso)}, ${time}`;
+}

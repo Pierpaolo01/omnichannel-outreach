@@ -1,0 +1,599 @@
+import { describe, expect, test } from "vitest";
+import { EngineHarness } from "../../../test/support/engine-harness.ts";
+import { business, person } from "../../../test/support/export-builder.ts";
+import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
+import type { CallsView, CampaignDetail, ControlView, EnrollmentRead, LeadSearchResult } from "../../shared/api.ts";
+
+/**
+ * Pause, resume, skip, stop and restart (ticket 17a) through the real HTTP app, SQLite store and engine, against
+ * the fake email provider: ADR 0003 "Ticket 17a". Nothing is dialled. Data is fictitious.
+ */
+
+const MIN = 60_000;
+const H = 60 * MIN;
+const DAY = 24 * H;
+/** Monday 2 November 2026, 09:00 London (GMT). */
+const MONDAY_9 = Date.parse("2026-11-02T09:00:00Z");
+const ALWAYS = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
+const WEEKDAYS_9_TO_17 = [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 }));
+
+const email = (id: string, waitDays = 0): StepDefinition => ({ id, waitDays, subject: `Subject ${id}`, body: `Email ${id} for {{company}}.`, threading: "new_subject", removed: false });
+const track = (id: string, channel: TrackDefinition["channel"], steps: StepDefinition[], fields: Partial<TrackDefinition> = {}): TrackDefinition => ({
+  id,
+  channel,
+  branch: "main",
+  window: channel === "call" ? WEEKDAYS_9_TO_17 : ALWAYS,
+  steps,
+  start: { kind: "entry" },
+  removed: false,
+  ...fields,
+});
+/** Three emails, two days then three days apart, a call beside them, and a win-back email. */
+const DEFINITION: CampaignDefinition = {
+  timezone: "Europe/London",
+  callSkipLimitDays: 2,
+  emailPool: ["inbox-a"],
+  smsPool: [],
+  callScript: "Ask who looks after new patient bookings.",
+  tracks: [
+    track("e1", "email", [email("s1"), email("s2", 2), email("s3", 3)]),
+    track("p1", "call", [{ ...email("c1"), subject: "", body: "" }]),
+    track("w1", "email", [email("w1s1"), email("w1s2", 2)], { branch: "win_back" }),
+  ],
+};
+const HARBOUR = business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101" });
+const PAT = person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example", direct_phone: "+442079460111" });
+const NIA = person({ person_id: "p2", business_id: "b1", full_name: "Nia Cole", email: "nia@harbour.example", direct_phone: "+442079460112" });
+
+async function world(def: CampaignDefinition = DEFINITION) {
+  const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: 10 * MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+  await h.tick();
+  expect((await h.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "Europe/London" })).status).toBe(200);
+  const campaign = async (name: string) => {
+    const { campaign: c } = await h.createCampaign(name, { businesses: [HARBOUR], people: [PAT, NIA] });
+    await h.defineSequence(c.id, def);
+    expect((await h.launch(c.id)).status).toBe(200);
+    const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${c.id}`)).body.rows;
+    return { id: c.id, lead: (who: string) => rows.find((r) => r.name === who)?.enrollments.find((e) => e.campaign.id === c.id)?.id ?? "" };
+  };
+  let n = 0;
+  const control = (enrollmentId: string, action: string, requestId = `r-${++n}`) => h.request<{ error?: { message: string }; enrollment?: EnrollmentRead; replayed?: boolean }>("POST", `/api/enrollments/${enrollmentId}/controls`, { requestId, action });
+  const campaignControl = (id: string, action: "pause" | "resume", requestId = `r-${++n}`) => h.request<{ error?: { message: string } } & Partial<CampaignDetail>>("POST", `/api/campaigns/${id}/${action}`, { requestId });
+  const read = async (id: string) => (await h.request<EnrollmentRead>("GET", `/api/enrollments/${id}`)).body;
+  const sent = (enrollmentId: string) => h.fake.deliveryLog.filter((d) => d.subjectId === enrollmentId).map((d) => d.stepId);
+  return { h, campaign, control, campaignControl, read, sent };
+}
+const controlOf = (read: EnrollmentRead, action: string): ControlView => read.controls.find((c) => c.action === action)!;
+
+describe("pausing a campaign", () => {
+  test("during a wait: nothing is sent, its calls leave the list, and every wait resumes moved by the time paused", async () => {
+    const { h, campaign, campaignControl, read, sent } = await world();
+    const c = await campaign("Clinics");
+    const pat = c.lead("Pat Oneil");
+    await h.advanceTo(MONDAY_9 + H);
+    expect(sent(pat)).toEqual(["s1"]);
+    const dueBefore = (await read(pat)).tracks.find((t) => t.trackId === "e1")?.nextStep?.dueAt;
+    const q0 = (await h.request<CallsView>("GET", "/api/calls")).body;
+    expect(q0.readyNow.length, JSON.stringify(q0).slice(0, 800)).toBe(2);
+
+    const paused = await campaignControl(c.id, "pause");
+    expect(paused.status).toBe(200);
+    expect(paused.body.pause).toEqual({ paused: true, pausedSince: new Date(MONDAY_9 + H).toISOString() });
+    // A campaign pause changes no status: the counts are of the statuses the leads keep.
+    expect(paused.body.statusCounts, JSON.stringify(paused.body)).toMatchObject({ waiting_on_call: 2 });
+    expect((await h.request<CallsView>("GET", "/api/calls")).body.readyNow).toEqual([]);
+
+    // A week paused: nothing is sent, nothing listed.
+    await h.advanceTo(MONDAY_9 + H + 7 * DAY);
+    expect(sent(pat)).toEqual(["s1"]);
+    expect((await h.request<CallsView>("GET", "/api/calls")).body.readyNow).toEqual([]);
+    expect((await campaignControl(c.id, "pause")).body.error?.message).toMatch(/already paused/);
+
+    expect((await campaignControl(c.id, "resume")).status).toBe(200);
+    const dueAfter = (await read(pat)).tracks.find((t) => t.trackId === "e1")?.nextStep?.dueAt;
+    expect(dueBefore).toBe("2026-11-04T00:00:00.000Z");
+    expect(dueAfter).toBe("2026-11-11T00:00:00.000Z");
+    expect((await h.request<CallsView>("GET", "/api/calls")).body.readyNow.length).toBe(2);
+  });
+
+  test("resume spreads what fell due across the pacing gap, without a burst, and another campaign is untouched", async () => {
+    const { h, campaign, campaignControl, read } = await world();
+    const a = await campaign("Clinics");
+    const b = await campaign("Dentists");
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    expect((await campaignControl(a.id, "pause")).status).toBe(200);
+    const otherBefore = await read(b.lead("Pat Oneil"));
+    await h.advanceTo(MONDAY_9 + 10 * DAY);
+    // The other campaign ran on.
+    expect((await read(b.lead("Pat Oneil"))).tracks).not.toEqual(otherBefore.tracks);
+    expect((await campaignControl(a.id, "resume")).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + 10 * DAY + 6 * H);
+    const calls = h.fake.handoverLog.map((x) => x.at).sort((x, y) => x - y);
+    for (let i = 1; i < calls.length; i++) expect(calls[i]! - calls[i - 1]!).toBeGreaterThanOrEqual(10 * MIN);
+  });
+});
+
+describe("one lead's controls", () => {
+  test("pause and resume one lead; its colleague runs on", async () => {
+    const { h, campaign, control, read, sent } = await world();
+    const c = await campaign("Clinics");
+    const pat = c.lead("Pat Oneil");
+    const nia = c.lead("Nia Cole");
+    await h.advanceTo(MONDAY_9 + H);
+    const offered = controlOf(await read(pat), "pause");
+    expect(offered).toMatchObject({ allowed: true, statusAfter: "paused" });
+    expect((await control(pat, "pause")).body.enrollment?.status).toBe("paused");
+    expect((await h.request<CallsView>("GET", "/api/calls")).body.readyNow.map((x) => x.enrollmentId)).toEqual([nia]);
+    await h.advanceTo(MONDAY_9 + 4 * DAY);
+    expect(sent(pat)).toEqual(["s1"]);
+    expect(sent(nia)).toEqual(["s1", "s2"]);
+    expect(controlOf(await read(pat), "pause")).toEqual({ action: "pause", allowed: false, reason: "They are already paused." });
+    const resumed = await control(pat, "resume");
+    expect(resumed.body.enrollment?.status).toBe("waiting_on_call");
+  });
+
+  test("skip advances exactly one step and never sends it; a repeated request skips once", async () => {
+    const { h, campaign, control, read, sent } = await world();
+    const c = await campaign("Clinics");
+    const pat = c.lead("Pat Oneil");
+    await h.advanceTo(MONDAY_9 + H);
+    const preview = controlOf(await read(pat), "skip");
+    // The current step is the one due first: the call, due at launch, before email 2.
+    expect(preview).toMatchObject({ allowed: true, skips: { trackId: "p1", number: 1, of: 1 } });
+    expect((await control(pat, "skip", "skip-1")).status).toBe(200);
+    const again = await control(pat, "skip", "skip-1");
+    expect(again.status).toBe(200);
+    expect(again.body.replayed).toBe(true);
+    const after = await read(pat);
+    expect(after.tracks.find((t) => t.trackId === "p1")?.finishReason).toBe("skipped_by_user");
+    expect(after.tracks.find((t) => t.trackId === "e1")?.finishReason).toBeNull();
+    // The next skip is email 2, which then never goes; email 3 is due three days after the skip.
+    expect((await control(pat, "skip")).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + 6 * DAY);
+    expect(sent(pat)).toEqual(["s1", "s3"]);
+    expect(h.fake.deliveryLog.find((d) => d.subjectId === pat && d.stepId === "s3")?.at).toBe(Date.parse("2026-11-05T00:00:00Z"));
+    // Reusing an id for another action is refused.
+    expect((await control(pat, "stop", "skip-1")).body.error?.message).toMatch(/already used/);
+  });
+
+  test("stop is final until a restart; restart after an auto-reply continues at the next unsent step without sending anything twice", { timeout: 60_000 }, async () => {
+    const { h, campaign, control, read, sent } = await world();
+    const c = await campaign("Clinics");
+    const pat = c.lead("Pat Oneil");
+    await h.advanceTo(MONDAY_9 + H);
+    expect(h.fake.prospectReplies("pat@harbour.example")).toBe(true);
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    expect((await read(pat)).status).toBe("replied");
+    expect(controlOf(await read(pat), "stop")).toMatchObject({ allowed: false });
+    const restart = controlOf(await read(pat), "resume_from_next_step");
+    expect(restart).toMatchObject({ allowed: true, statusAfter: "waiting_on_call" });
+    expect((await control(pat, "resume_from_next_step")).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + 3 * DAY);
+    expect(sent(pat)).toEqual(["s1", "s2"]);
+    const stopped = await control(pat, "stop");
+    expect(stopped.body.enrollment?.status).toBe("stopped_manually");
+    // Stopped: email 3, due on the Saturday, never goes, and no call is listed.
+    await h.advanceTo(MONDAY_9 + 7 * DAY);
+    expect(sent(pat)).toEqual(["s1", "s2"]);
+    expect((await h.request<CallsView>("GET", "/api/calls")).body.readyNow.map((x) => x.enrollmentId)).not.toContain(pat);
+    // A restart continues with email 3, its wait frozen while stopped: due Saturday 00:00 plus the four days
+    // stopped. Nothing is sent twice.
+    expect((await control(pat, "resume_from_next_step")).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + 9 * DAY);
+    expect(sent(pat)).toEqual(["s1", "s2", "s3"]);
+    expect(h.fake.deliveryLog.find((d) => d.subjectId === pat && d.stepId === "s3")?.at).toBe(Date.parse("2026-11-11T00:00:00Z"));
+  });
+
+  test("a stopped lead moves into win-back, with no call, and the colleague is untouched", async () => {
+    const { h, campaign, control, read, sent } = await world();
+    const c = await campaign("Clinics");
+    const pat = c.lead("Pat Oneil");
+    await h.advanceTo(MONDAY_9 + H);
+    expect((await control(pat, "stop")).status).toBe(200);
+    expect(controlOf(await read(pat), "move_to_win_back")).toMatchObject({ allowed: true, statusAfter: "in_win_back", next: { trackId: "w1", branch: "win_back" } });
+    expect((await control(pat, "move_to_win_back")).body.enrollment?.status).toBe("in_win_back");
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    expect(sent(pat)).toEqual(["s1", "w1s1"]);
+    expect((await h.request<CallsView>("GET", "/api/calls")).body.readyNow.map((x) => x.enrollmentId)).toEqual([c.lead("Nia Cole")]);
+  });
+
+  test("the same lead enrolled in another campaign runs there, and the first enrollment stays as it was", async () => {
+    const { h, campaign, control, read } = await world();
+    const a = await campaign("Clinics");
+    const pat = a.lead("Pat Oneil");
+    await h.advanceTo(MONDAY_9 + H);
+    expect((await control(pat, "stop")).status).toBe(200);
+    const before = await read(pat);
+    const b = await campaign("Dentists");
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    expect((await read(b.lead("Pat Oneil"))).status).toBe("waiting_on_call");
+    const after = await read(pat);
+    expect({ ...after, controls: [] }).toEqual({ ...before, controls: [] });
+  });
+
+  test("before launch every lead control is refused; an unknown field is a 400", async () => {
+    const { h, control } = await world();
+    const { campaign: c } = await h.createCampaign("Draft", { businesses: [HARBOUR], people: [PAT] });
+    const id = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${c.id}`)).body.rows[0]!.enrollments[0]!.id;
+    for (const action of ["pause", "skip", "stop"]) expect((await control(id, action)).body.error?.message).toMatch(/has not launched/);
+    expect((await h.request("POST", `/api/enrollments/${id}/controls`, { requestId: "x", action: "pause", sendNow: true })).status).toBe(400);
+    expect((await h.request("POST", `/api/campaigns/${c.id}/pause`, { requestId: "y" })).status).toBe(409);
+  });
+
+  test("a control is judged as of its own instant: a call that expired at the rollover before the worker ticked is skipped first, and stays skipped", async () => {
+    const { h, campaign, control, read } = await world();
+    const c = await campaign("Clinics");
+    const pat = c.lead("Pat Oneil");
+    await h.advanceTo(MONDAY_9 + H);
+    // Due Monday with a two-day limit: unworked, it expires at the rollover into Wednesday.
+    const rollover = Date.parse("2026-11-04T00:00:00Z");
+    await h.advanceTo(rollover - MIN);
+    expect((await read(pat)).tracks.find((t) => t.trackId === "p1")?.finishReason).toBeNull();
+    h.clock = rollover + 1_000;
+    expect((await control(pat, "pause")).status).toBe(200);
+    const after = await read(pat);
+    expect(after.tracks.find((t) => t.trackId === "p1")).toMatchObject({ finishReason: "skipped_unworked", finishedAt: new Date(rollover).toISOString() });
+    expect(after.status).toBe("paused");
+  });
+
+  test("a call of a lead paused at the day's start takes no room that day; resumed later that day, it is listed all the same (P12)", async () => {
+    const callOnly: CampaignDefinition = { ...DEFINITION, tracks: [track("p1", "call", [{ ...email("c1"), subject: "", body: "" }])] };
+    const { h, campaign, control } = await world(callOnly);
+    expect((await h.request("PUT", "/api/call-settings", { dailyCapacity: 1, userZone: "Europe/London" })).status).toBe(200);
+    const c = await campaign("Clinics");
+    const pat = c.lead("Pat Oneil");
+    const nia = c.lead("Nia Cole");
+    await h.advanceTo(MONDAY_9 + H);
+    const listed = async () => (await h.request<CallsView>("GET", "/api/calls")).body.readyNow.map((x) => x.enrollmentId).sort();
+    // Capacity 1: one of them is placed on Monday.
+    const first = (await listed())[0]!;
+    const other = first === pat ? nia : pat;
+    expect(await listed()).toEqual([first]);
+    expect((await control(first, "pause")).status).toBe(200);
+    // Tuesday: the paused lead's carried call is not committed, so the other lead's call is placed.
+    await h.advanceTo(MONDAY_9 + DAY + H);
+    expect(await listed()).toEqual([other]);
+    // Resumed at noon: its call is listed again, rolled over, beside the one placed today.
+    expect((await control(first, "resume")).status).toBe(200);
+    expect(await listed()).toEqual([pat, nia].sort());
+  });
+
+  test("a reply after a stop keeps the stop's held interval: the next day's committed calls stay as they stood at its start (review bot on ca8baee, item 3)", async () => {
+    const { h, campaign, control } = await world();
+    const c = await campaign("Clinics");
+    const pat = c.lead("Pat Oneil");
+    await h.advanceTo(MONDAY_9 + H);
+    const committed = async () => (await h.store.engine.callDay(h.clock)).committed;
+    // Stopped on Monday with its call open (its skip limit is days away): Tuesday's list does not carry it.
+    expect((await control(pat, "stop")).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + DAY + H);
+    expect(await committed()).toBe(1);
+    // A reply on Tuesday turns the stop into replied, and a restart follows: Tuesday's count is as it stood at its start.
+    expect(h.fake.prospectReplies("pat@harbour.example")).toBe(true);
+    await h.tick();
+    expect(await committed()).toBe(1);
+    expect((await control(pat, "resume_from_next_step")).status).toBe(200);
+    expect(await committed()).toBe(1);
+    // Wednesday: Pat ran at its start, so its carried call counts; Nia's, unworked since Monday with a two-day limit,
+    // was skipped at that rollover. Pat's clock stood still while stopped, so its own limit has not run out.
+    await h.advanceTo(MONDAY_9 + 2 * DAY + H);
+    expect(await committed()).toBe(1);
+    expect((await h.request<EnrollmentRead>("GET", `/api/enrollments/${pat}`)).body.tracks.find((t) => t.trackId === "p1")?.finishReason).toBeNull();
+  });
+
+  test("skip waits for the provider's final word: refused while work it was handed may still be sent, in the read and the action (review bot on ca8baee, item 2)", async () => {
+    // Every email is accepted and sent 27 minutes later; until 38 minutes a lookup lags and answers "not sent".
+    const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: 10 * MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }], modes: ["lookup-lags"], random: () => 0.9 });
+    h.fake.withdrawAnswers = "unknown-sends";
+    await h.tick();
+    const emailOnly: CampaignDefinition = { ...DEFINITION, tracks: [DEFINITION.tracks[0]!] };
+    const { campaign } = await h.createCampaign("Clinics", { businesses: [HARBOUR], people: [PAT] });
+    await h.defineSequence(campaign.id, emailOnly);
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    const pat = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows[0]!.enrollments[0]!.id;
+    await h.advanceTo(MONDAY_9 + MIN);
+    // Paused with email 1 at the provider: the withdrawal answers unknown, and the provider keeps it.
+    expect((await h.request("POST", `/api/enrollments/${pat}/controls`, { requestId: "p", action: "pause" })).status).toBe(200);
+    // At the first lookup the provider still says "not sent", which is not final: the attempt is withdrawn, the work stays uncertain.
+    await h.advanceTo(MONDAY_9 + 16 * MIN);
+    const st = await h.store.engine.subject(pat, h.clock);
+    expect(st?.attempts.find((a) => a.stepId === "s1")).toMatchObject({ state: "withdrawn", endedBy: "lookup_not_sent" });
+    expect(st?.work.find((w) => w.stepId === "s1")?.settled).toBeNull();
+    const read = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${pat}`)).body;
+    expect(controlOf(read, "skip")).toMatchObject({ allowed: false, reason: expect.stringMatching(/may still be sent/) });
+    const skip = await h.request<{ error?: { message: string } }>("POST", `/api/enrollments/${pat}/controls`, { requestId: "s", action: "skip" });
+    expect(skip.status).toBe(409);
+    // The provider sends it: it is recorded once, as sent, and email 2 waits for the resume.
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    expect(h.fake.deliveryLog.map((d) => d.stepId)).toEqual(["s1"]);
+    expect((await h.request<EnrollmentRead>("GET", `/api/enrollments/${pat}`)).body.tracks[0]?.steps[0]?.result).toBe("sent");
+    expect(h.fake.handoverLog.filter((c) => c.stepId === "s2")).toEqual([]);
+  });
+
+  test("a request id is bound to its first answer, refused or accepted: a refused resume sent again after a pause is refused again and changes nothing (verifier B5)", async () => {
+    const { h, campaign, control, campaignControl, read } = await world();
+    const c = await campaign("Clinics");
+    const pat = c.lead("Pat Oneil");
+    await h.advanceTo(MONDAY_9 + H);
+    const first = await control(pat, "resume", "retry-refused");
+    expect(first.status).toBe(409);
+    expect((await control(pat, "pause", "a-pause")).status).toBe(200);
+    const again = await control(pat, "resume", "retry-refused");
+    expect([again.status, again.body.error?.message]).toEqual([409, first.body.error?.message]);
+    expect((await read(pat)).status).toBe("paused");
+    // The same for a campaign: a refused resume, then a pause, then the refused id again.
+    expect((await campaignControl(c.id, "resume", "c-retry")).status).toBe(409);
+    expect((await campaignControl(c.id, "pause", "c-pause")).status).toBe(200);
+    expect((await campaignControl(c.id, "resume", "c-retry")).status).toBe(409);
+    expect((await h.request<CampaignDetail>("GET", `/api/campaigns/${c.id}`)).body.pause.paused).toBe(true);
+  });
+
+  test("a control's answer is its preview: the effect the read showed at that instant, then the read after the worker ran (verifier B4)", async () => {
+    const window = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 10, end: 11 }));
+    const oneEmail: CampaignDefinition = { ...DEFINITION, tracks: [{ ...DEFINITION.tracks[0]!, window, steps: [email("s1")] }] };
+    const { h, campaign, control, read } = await world(oneEmail);
+    const c = await campaign("Clinics");
+    const pat = c.lead("Pat Oneil");
+    await h.advanceTo(MONDAY_9 + 30 * MIN);
+    expect((await control(pat, "pause")).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + H + MIN);
+    const preview = controlOf(await read(pat), "resume");
+    const answer = await h.request<{ effect?: ControlView; enrollment?: EnrollmentRead }>("POST", `/api/enrollments/${pat}/controls`, { requestId: "b4", action: "resume" });
+    expect(answer.status).toBe(200);
+    expect(answer.body.effect).toEqual(preview);
+    // The worker then ran: Pat's email is due, but Nia's took the inbox's 10:00 slot, so it waits for 10:10 and goes then.
+    expect(answer.body.enrollment?.status).toBe("queued");
+    await h.advanceTo(MONDAY_9 + H + 15 * MIN);
+    expect((await read(pat)).status).toBe("sequence_finished_no_response");
+    // A replay answers with the same effect.
+    expect((await h.request<{ effect?: ControlView }>("POST", `/api/enrollments/${pat}/controls`, { requestId: "b4", action: "resume" })).body.effect).toEqual(preview);
+  });
+
+  test("the call outcome route binds a refused request id to its refusal too (verifier B5, the same rule)", async () => {
+    const { h, campaign } = await world();
+    const c = await campaign("Clinics");
+    const pat = c.lead("Pat Oneil");
+    await h.advanceTo(MONDAY_9 + H);
+    const taskId = (await h.request<CallsView>("GET", "/api/calls")).body.readyNow.find((x) => x.enrollmentId === pat)!.taskId;
+    const view = (await h.request<{ numbers: { detailId: string; bad: boolean }[] }>("GET", `/api/call-tasks/${taskId}`)).body;
+    const numberId = view.numbers.find((n) => !n.bad)?.detailId;
+    // Redialed to tomorrow, so an outcome today is refused; the same id sent again tomorrow, when it would be listed, is refused again.
+    expect((await h.request("POST", `/api/call-tasks/${taskId}/outcome`, { requestId: "redial", outcome: "no_answer", redial: true, numberId, note: "" })).status).toBe(200);
+    const body = { requestId: "o-retry", outcome: "no_answer", numberId, note: "" };
+    const first = await h.request<{ error?: { message: string } }>("POST", `/api/call-tasks/${taskId}/outcome`, body);
+    expect(first.status).toBe(409);
+    await h.advanceTo(MONDAY_9 + DAY + H);
+    const again = await h.request<{ error?: { message: string } }>("POST", `/api/call-tasks/${taskId}/outcome`, body);
+    expect([again.status, again.body.error?.message]).toEqual([409, first.body.error?.message]);
+  });
+
+  test("a pause asks the provider to withdraw again each settling period until its answer is final: the second ask cancels the email (verifier L1)", async () => {
+    // Accepted at 09:00 and sent at 09:54 unless withdrawn; the first withdrawal answers unknown and cancels nothing.
+    const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: 10 * MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }], modes: ["late-send"], random: () => 0.9 });
+    h.fake.withdrawAnswers = "unknown-once";
+    await h.tick();
+    const { campaign } = await h.createCampaign("Clinics", { businesses: [HARBOUR], people: [PAT] });
+    await h.defineSequence(campaign.id, { ...DEFINITION, tracks: [DEFINITION.tracks[0]!] });
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    const pat = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows[0]!.enrollments[0]!.id;
+    await h.advanceTo(MONDAY_9 + MIN);
+    expect((await h.request<{ enrollment: EnrollmentRead }>("POST", `/api/enrollments/${pat}/controls`, { requestId: "p", action: "pause" })).body.enrollment.mayStillSend).toBe(1);
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    expect(h.fake.withdrawLog.map((w) => w.answer)).toEqual(["unknown", "withdrawn"]);
+    expect(h.fake.deliveryLog).toEqual([]);
+    expect((await h.request<EnrollmentRead>("GET", `/api/enrollments/${pat}`)).body.mayStillSend).toBe(0);
+  });
+
+  /** One email per lead, sent by a provider whose lookups lag (they answer "not sent" until 38 minutes) and which keeps what a first withdrawal asks for. */
+  async function lagging(people: ReturnType<typeof person>[], k: number) {
+    const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k, healthy: true, quotaAvailable: true, resetZone: "UTC" }], modes: ["lookup-lags"], random: () => 0.9 });
+    h.fake.withdrawAnswers = "unknown-once";
+    await h.tick();
+    const { campaign } = await h.createCampaign("Clinics", { businesses: [HARBOUR], people });
+    await h.defineSequence(campaign.id, { ...DEFINITION, tracks: [{ ...DEFINITION.tracks[0]!, steps: [email("s1")] }] });
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows;
+    return { h, campaign, lead: (who: string) => rows.find((r) => r.name === who)!.enrollments[0]!.id };
+  }
+
+  test("the withdrawal is asked again until the provider's work has a final answer, even after a non-final lookup retired its attempt, and across a restart (council A)", async () => {
+    const { h, lead } = await lagging([PAT], 1);
+    const pat = lead("Pat Oneil");
+    await h.advanceTo(MONDAY_9 + MIN);
+    expect((await h.request("POST", `/api/enrollments/${pat}/controls`, { requestId: "p", action: "pause" })).status).toBe(200);
+    // A restart before the next tick: the intent to withdraw is stored on the work, so the new process keeps it.
+    await h.advanceTo(MONDAY_9 + 15 * MIN + 30_000);
+    await h.restart();
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    // At 16 minutes the lookup answers a non-final "not sent" and retires the attempt, in the same tick before the
+    // withdrawal's retry; the retry is asked of the work all the same, and the fake cancels on the second ask.
+    const st = await h.store.engine.subject(pat, h.clock);
+    expect(st?.attempts[0]).toMatchObject({ state: "withdrawn", endedBy: "lookup_not_sent" });
+    expect(st?.work[0]?.settled).toBe("withdrawn");
+    expect(h.fake.withdrawLog.map((w) => w.answer)).toEqual(["unknown", "withdrawn"]);
+    expect(h.fake.deliveryLog).toEqual([]);
+  });
+
+  test("the in-flight bound counts unsettled provider work, not live attempts: with k = 1 a retired attempt's work keeps the place (council B)", async () => {
+    const { h } = await lagging([PAT, NIA], 1);
+    h.fake.withdrawAnswers = "unknown-sends";
+    await h.advanceTo(MONDAY_9 + MIN);
+    const a = h.fake.handoverLog[0]!.subjectId;
+    // The first lead is paused with its email at the provider; its attempt retires at the 15-minute lookup.
+    expect((await h.request("POST", `/api/enrollments/${a}/controls`, { requestId: "p", action: "pause" })).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + 16 * MIN);
+    // Its work still may be sent, so it still holds the inbox's one place: the second lead's email is not handed over.
+    expect([...new Set(h.fake.handoverLog.map((c) => c.subjectId))]).toEqual([a]);
+  });
+
+  test("the in-flight bound held without any pause too: a reply ends a lead whose email the provider holds, its lookup's non-final not sent retires the attempt, and the work keeps its place (council B, the case before ticket 17)", async () => {
+    // k = 1. Pat's email and text go at 09:00; the provider sends the email at 09:27 and its lookups lag (not sent until
+    // 09:38), and it keeps what it is asked to withdraw. Pat replies by text at 09:01.
+    const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }], modes: ["lookup-lags"], random: () => 0.9, sms: { numbers: [{ id: "+447700900010", capacity: 50, gapMs: MIN, k: 2, healthy: true, resetZone: "Europe/London" }] } });
+    h.fake.withdrawAnswers = "unknown-sends";
+    await h.tick();
+    const withMobile = person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example", dial_phone: "+447700900101", dial_phone_type: "mobile" });
+    const { campaign } = await h.createCampaign("Clinics", { businesses: [HARBOUR], people: [withMobile, NIA] });
+    const text = { id: "x1", channel: "sms" as const, branch: "main" as const, window: ALWAYS, steps: [{ ...email("x1s1"), subject: "" }], start: { kind: "entry" as const }, removed: false };
+    await h.defineSequence(campaign.id, { ...DEFINITION, smsPool: ["+447700900010"], tracks: [{ ...DEFINITION.tracks[0]!, steps: [email("s1")] }, text] });
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + MIN);
+    expect(h.sms.prospectTexts("+447700900101", "Out of office", "+447700900010")).toBe(true);
+    await h.advanceTo(MONDAY_9 + 3 * H);
+    // The most pieces of email work the provider held at once, handed over and not yet sent, by its own logs.
+    const spans = h.fake.handoverLog.filter((c, i, all) => all.findIndex((x) => x.key === c.key) === i).map((c) => ({ from: c.at, to: h.fake.deliveryLog.find((d) => d.key === c.key)?.at ?? Infinity }));
+    const most = Math.max(...spans.map((x) => spans.filter((y) => y.from <= x.from && x.from < y.to).length));
+    expect(most).toBe(1);
+  });
+
+
+  // Council on 56d599c, item J: mayStillSend counts only work with no final answer; every final answer settles it.
+  const finalAnswers = [
+    { channel: "email", answer: "withdrawn", pauseAt: MIN, check: 2 * MIN },
+    { channel: "email", answer: "too-late", pauseAt: 31 * MIN, check: 32 * MIN },
+    { channel: "email", answer: "sent, observed later", pauseAt: MIN, check: 50 * MIN },
+    { channel: "sms", answer: "withdrawn", pauseAt: MIN, check: 2 * MIN },
+    { channel: "sms", answer: "too-late", pauseAt: 31 * MIN, check: 32 * MIN },
+    // Sent at 09:30:30 though asked to withdraw, then bounced: the bounce is final too (council, after 612aa05).
+    { channel: "email", answer: "bounced", pauseAt: MIN, check: 50 * MIN },
+    // A text is withdrawn while it waits, so no pause here: it is sent at 09:30:30 and bounces at 09:32:30.
+    { channel: "sms", answer: "bounced", pauseAt: null, check: 50 * MIN },
+  ] as const;
+  for (const c of finalAnswers) {
+    test(`mayStillSend falls to 0 on a final answer: ${c.channel}, ${c.answer} (council J)`, async () => {
+      // Sent at 09:30:30, observed at 09:45:30 (random 0.5); unknown-sends keeps what an "unknown" withdrawal asks for.
+      const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }], modes: ["late-send"], random: () => 0.5, sms: { numbers: [{ id: "+447700900010", capacity: 50, gapMs: MIN, k: 1, healthy: true, resetZone: "Europe/London" }], modes: ["late-send"] } });
+      if (c.answer === "sent, observed later" || c.answer === "bounced") h.fake.withdrawAnswers = "unknown-sends";
+      if (c.answer === "bounced") {
+        h.fake.bouncing.add("pat@harbour.example");
+        h.sms.invalidAfterSend.add("+447700900101");
+      }
+      await h.tick();
+      const withMobile = person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example", dial_phone: "+447700900101", dial_phone_type: "mobile" });
+      const { campaign } = await h.createCampaign("Clinics", { businesses: [HARBOUR], people: [withMobile] });
+      const track = c.channel === "email" ? { ...DEFINITION.tracks[0]!, steps: [email("s1")] } : { id: "x1", channel: "sms" as const, branch: "main" as const, window: ALWAYS, steps: [{ ...email("x1s1"), subject: "" }], start: { kind: "entry" as const }, removed: false };
+      await h.defineSequence(campaign.id, { ...DEFINITION, smsPool: ["+447700900010"], tracks: [track] });
+      expect((await h.launch(campaign.id)).status).toBe(200);
+      const pat = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows[0]!.enrollments[0]!.id;
+      if (c.pauseAt !== null) {
+        await h.advanceTo(MONDAY_9 + c.pauseAt);
+        const paused = await h.request<{ enrollment: EnrollmentRead }>("POST", `/api/enrollments/${pat}/controls`, { requestId: "p", action: "pause" });
+        expect(paused.status).toBe(200);
+      }
+      await h.advanceTo(MONDAY_9 + c.check);
+      expect((await h.request<EnrollmentRead>("GET", `/api/enrollments/${pat}`)).body.mayStillSend).toBe(0);
+      expect((await h.request<CampaignDetail>("GET", `/api/campaigns/${campaign.id}`)).body.mayStillSend).toBe(0);
+      const log = c.channel === "email" ? h.fake.withdrawLog.map((w) => w.answer) : null;
+      if (log) expect(log[0]).toBe(c.answer === "sent, observed later" || c.answer === "bounced" ? "unknown" : c.answer);
+      if (c.answer === "bounced") {
+        const st = await h.store.engine.subject(pat, h.clock);
+        expect([...(st?.lead.details ?? []), ...(st?.lead.phones ?? [])].some((d) => d.bad)).toBe(true);
+      }
+    });
+  }
+});
+
+/**
+ * Council on 612aa05 (review bot, attempt.ts): an in-flight place is held only by work that may still be sent and by
+ * claims not yet handed over. Whatever final answer the first lead's work gets, the next lead on that sender (k = 1)
+ * is handed over. The too-late case with its send time not yet known held the place for good before the fix.
+ */
+describe("a place is freed at every final answer", () => {
+  const cases = [
+    { channel: "email", answer: "withdrawn" },
+    { channel: "email", answer: "too-late, send time unknown" },
+    { channel: "email", answer: "sent" },
+    { channel: "email", answer: "not sent (rejected)" },
+    { channel: "email", answer: "bounced" },
+    { channel: "sms", answer: "withdrawn" },
+    { channel: "sms", answer: "too-late, send time unknown" },
+    { channel: "sms", answer: "sent" },
+    { channel: "sms", answer: "not sent (rejected)" },
+    { channel: "sms", answer: "bounced" },
+  ] as const;
+  for (const c of cases) {
+    test(`${c.channel}, ${c.answer}: the next lead on the sender is handed over`, async () => {
+      const number = "+447700900010";
+      const silent = c.answer === "too-late, send time unknown";
+      const mode = c.answer === "withdrawn" ? "late-send" : silent ? "silent-send" : "honest";
+      const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }], modes: [mode], random: () => 0.5, sms: { numbers: [{ id: number, capacity: 50, gapMs: MIN, k: 1, healthy: true, resetZone: "Europe/London" }], modes: [mode === "late-send" ? "late-send" : "honest"] } });
+      h.sms.silentSends = silent;
+      await h.tick();
+      const people = [
+        person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example", dial_phone: "+447700900101", dial_phone_type: "mobile" }),
+        person({ person_id: "p2", business_id: "b1", full_name: "Nia Cole", email: "nia@harbour.example", dial_phone: "+447700900102", dial_phone_type: "mobile" }),
+      ];
+      const destinations = c.channel === "email" ? ["pat@harbour.example", "nia@harbour.example"] : ["+447700900101", "+447700900102"];
+      if (c.answer === "not sent (rejected)") for (const d of destinations) (c.channel === "email" ? h.fake.invalid : h.sms.invalid).add(d);
+      if (c.answer === "bounced") for (const d of destinations) (c.channel === "email" ? h.fake.bouncing : h.sms.invalidAfterSend).add(d);
+      const { campaign } = await h.createCampaign("Clinics", { businesses: [HARBOUR], people });
+      const one = c.channel === "email" ? { ...DEFINITION.tracks[0]!, steps: [email("s1")] } : track("x1", "sms", [{ ...email("x1s1"), subject: "" }], { window: ALWAYS });
+      await h.defineSequence(campaign.id, { ...DEFINITION, smsPool: [number], tracks: [one] });
+      expect((await h.launch(campaign.id)).status).toBe(200);
+      const log = () => (c.channel === "email" ? h.fake.handoverLog : h.sms.handoverLog);
+      await h.advanceTo(MONDAY_9 + 30_000);
+      const first = log()[0]!.subjectId;
+      expect(new Set(log().map((x) => x.subjectId)).size).toBe(1);
+      if (c.answer === "withdrawn" || silent) {
+        // Paused at 09:01: before its send (withdrawn), or after a send the provider never reports (too late).
+        await h.advanceTo(MONDAY_9 + MIN);
+        expect((await h.request("POST", `/api/enrollments/${first}/controls`, { requestId: "p", action: "pause" })).status).toBe(200);
+        const withdrawals = c.channel === "email" ? h.fake.withdrawLog : h.sms.withdrawLog;
+        expect(withdrawals.map((w) => w.answer)).toEqual([silent ? "too-late" : "withdrawn"]);
+      }
+      // Every final answer is in by 09:06 (a bounce shows five minutes after its send); the next lead goes by 09:10.
+      await h.advanceTo(MONDAY_9 + 10 * MIN);
+      expect(new Set(log().map((x) => x.subjectId)).size).toBe(2);
+      if (silent) {
+        // The send time is still unknown: the step is not claimed again, and the work is still reconciled.
+        const st = await h.store.engine.subject(first, h.clock);
+        expect(st?.work[0]).toMatchObject({ settled: null });
+        expect(st?.work[0]?.wentWall).not.toBeNull();
+        // Same-key retries before the pause are one piece of work; no new work is made for the step.
+        expect(new Set(log().filter((x) => x.subjectId === first).map((x) => x.key)).size).toBe(1);
+      }
+    });
+  }
+});
+
+/**
+ * The verifier's R2-1 on 612aa05, exactly: two leads, one place (k = 1), a two-step track. Lead A's first step is accepted
+ * and sent; A is paused; the withdrawal answers too late, a final answer; every lookup of A's send time answers unknown
+ * from then on. A's step 2 waits for that send time, mayStillSend is 0, and lead B is handed over all the same.
+ */
+describe("a too-late answer frees the place while every lookup of the send time answers unknown (verifier R2-1)", () => {
+  for (const channel of ["email", "sms"] as const) {
+    test(channel, async () => {
+      const number = "+447700900010";
+      const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 100, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }], modes: ["honest"], sms: { numbers: [{ id: number, capacity: 100, gapMs: MIN, k: 1, healthy: true, resetZone: "Europe/London" }] } });
+      h.fake.silentSends = true;
+      h.sms.silentSends = true;
+      await h.tick();
+      const people = [
+        person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example", dial_phone: "+447700900101", dial_phone_type: "mobile" }),
+        person({ person_id: "p2", business_id: "b1", full_name: "Nia Cole", email: "nia@harbour.example", dial_phone: "+447700900102", dial_phone_type: "mobile" }),
+      ];
+      const { campaign } = await h.createCampaign("Clinics", { businesses: [HARBOUR], people });
+      const two = channel === "email" ? { ...DEFINITION.tracks[0]!, steps: [email("s1"), email("s2", 1)] } : track("x1", "sms", [{ ...email("x1s1"), subject: "" }, { ...email("x1s2", 1), subject: "" }], { window: ALWAYS });
+      await h.defineSequence(campaign.id, { ...DEFINITION, smsPool: [number], tracks: [two] });
+      expect((await h.launch(campaign.id)).status).toBe(200);
+      const log = () => (channel === "email" ? h.fake.handoverLog : h.sms.handoverLog);
+      await h.advanceTo(MONDAY_9 + 30_000);
+      expect(new Set(log().map((x) => x.key)).size).toBe(1);
+      const a = log()[0]!.subjectId;
+      await h.advanceTo(MONDAY_9 + MIN);
+      expect((await h.request("POST", `/api/enrollments/${a}/controls`, { requestId: "p", action: "pause" })).status).toBe(200);
+      expect((channel === "email" ? h.fake.withdrawLog : h.sms.withdrawLog).map((w) => w.answer)).toEqual(["too-late"]);
+      await h.advanceTo(MONDAY_9 + H);
+      const lookups = channel === "email" ? h.fake.lookupLog : h.sms.lookupLog;
+      expect(lookups.length).toBeGreaterThan(0);
+      expect(lookups.every((l) => l.answer === "unknown")).toBe(true);
+      expect((await h.request<EnrollmentRead>("GET", `/api/enrollments/${a}`)).body.mayStillSend).toBe(0);
+      // Lead B was handed over; A's step 2 was not (it waits for the real send time, and A is paused).
+      expect(new Set(log().map((x) => x.subjectId)).size).toBe(2);
+      expect(log().filter((x) => x.subjectId === a).every((x) => x.stepId === (channel === "email" ? "s1" : "x1s1"))).toBe(true);
+      const st = await h.store.engine.subject(a, h.clock);
+      expect(st?.attempts.find((x) => x.stepId === (channel === "email" ? "s1" : "x1s1"))?.state).toMatch(/accepted|handed/);
+    });
+  }
+});

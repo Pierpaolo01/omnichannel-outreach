@@ -1,0 +1,1998 @@
+# 0003. The sequence engine
+
+- **Date:** 2026-11-13. Revised the same day after review rounds 1, 2 and 3 (two reviewers each; coordinator rulings 1–14, 1–10 and items 1–7), and amended in PR 37 after its review round 1 (coordinator rulings 1–11, "Changes from PR 37 review round 1"), by ticket 13a ("Changes from ticket 13a"), by ticket 14a ("Changes from ticket 14a"), by ticket 15a ("Changes from ticket 15a"), by ticket 14c ("Ticket 14c"), and by ticket 16a ("Changes from ticket 16a"), and by ticket 17a ("Ticket 17a").
+- **Status:** Proposed. The council reviews it before ticket [12](https://github.com/Pierpaolo01/omnichannel-outreach/issues/12) starts.
+- **Consumers:** tickets [12](https://github.com/Pierpaolo01/omnichannel-outreach/issues/12) to [23](https://github.com/Pierpaolo01/omnichannel-outreach/issues/23).
+- **Builds on:** [ADR 0001](0001-application-foundation-and-import-model.md) (domain code never reads the clock; the closed outreach-status type; the store interface) and [ADR 0002](0002-email-through-instantly.md) (the application owns every clock; Instantly only carries email). This ADR is the "application owns every clock" half. The Instantly adapter, its experiments and its questions P1–P4 stay in ADR 0002.
+- **Product source:** [the spec](https://github.com/Pierpaolo01/omnichannel-outreach/issues/10), cited by section. Everything else is a factory decision and says so.
+
+## The rule in one paragraph
+
+A campaign has one **definition** of tracks, steps and start rules, with stable ids and removal markers, so nothing ever loses its place. Each lead's **progress** is a set of stored facts and resolved deadlines, all in the lead's own **lead time**, a clock that advances only while nothing holds the lead. Every deadline (a step's due time, a track's delayed start, the call skip limit) is resolved once, when it is created or deliberately edited, and stored. A pause of length D therefore moves every one of them by exactly D, and nothing is recomputed afterwards. One pure function decides what happens next from the facts and the definition. Its result is applied only if the lead has not changed since it was computed. The only way to reach a provider is a **claim** followed by a **handover**. The claim is one transaction that reserves the account's capacity and an in-flight place, and creates the step's single live attempt. The handover is a second conditional transaction that re-checks everything against current state, renders the copy and takes the account's next pacing slot; the provider is called only if it commits. An attempt only moves forward and leaves every waiting state in bounded time. Once the provider may have been called, the attempt is never withdrawn or repeated without a provider signal or the user's decision.
+
+## Context
+
+The spec's rules interact ("Define coordinated email, SMS and phone sequences", "Define the daily call list", "Define reply handoff"):
+
+- a reply stops every track;
+- a callback pauses the lead;
+- an unworked call holds only the tracks after it;
+- a pause freezes waits and the call skip limit;
+- edits must not replay finished work;
+- capacity is shared across campaigns.
+
+Ten tickets build this behaviour in slices. The import ticket (#11) showed the cost of coding a deep rule before its invariants were written. Per `docs/agents/delivery-workflow.md` "Design first", this ADR states:
+
+- the rule;
+- its invariants;
+- the input refused at the boundary;
+- the guarantees held by construction;
+- the generated-sequence test.
+
+Round 1 of review found six ways the first draft could double-send, burst, call after a decline or lose a callback. Each fix is a change to a contract below, not a patch to a case. "Changes from round 1" at the end maps findings to sections.
+
+## 1. The model
+
+### 1.1 Campaign definition
+
+The campaign holds **one current definition**, plus `definition_version`, a counter bumped by every published edit. There is no revision history. Attempts store the copy they rendered, and no invariant needs older definitions; the generated test keeps its own copy of each definition it published. `definition_edited_at` serves ticket 21's "no test since the last edit" warning.
+
+#### 1.1.1 Saving the definition (ticket 12c, PR 41: a deep rule)
+
+Recorded on 13 November 2026 after four review rounds on saving (an unsaved launch, ordering, page leave, a lost answer and restore, two tabs, large drafts). It replaces the edit-stamp rule of the previous round.
+
+**The rule.** Each editor page is an editing **session** with a random id. Every edit it makes gets the next **sequence number** in that session. A save carries its session, its number, and the **base**: the definition revision (`definition_version`) the session last saw from the server. That is the revision it loaded, or the one its last accepted save returned. The server stores, with the definition, the session and number that wrote it (`definition_session`, `definition_seq`, migration 11). In one transaction, the server:
+
+| A save… | Answer | Stored definition |
+| - | - | - |
+| continues the stored session with a higher number | 200 with the sequence | Replaced; revision + 1 |
+| starts from the stored revision (base = stored revision) | 200 with the sequence | Replaced; revision + 1 |
+| repeats the stored session and number with the same content (a retry after a lost answer) | 200 with the sequence | Unchanged |
+| repeats the stored session with a lower number (an older save of the same page arriving late) | 409 `superseded` | Unchanged |
+| comes from a session that is not the stored one, with a lower number than that session's newest accepted save (an older save of a page arriving late, after its newer save was accepted and then replaced) | 409 `superseded` | Unchanged |
+| comes from a session that is not the stored one, repeating that session's newest accepted number with the same content (a retry after a lost answer, after another page that had seen that save replaced it) | 409 `replaced`: the page shows the conflict and says its own change was saved ("Changed elsewhere") | Unchanged |
+| does anything else: another session's save based on an older revision, or the same session and number with other content | 409 `edit_conflict` | Unchanged |
+
+A save with no session (an API client, a test) is stored as before. Launch carries the revision the page shows and is refused with 409 `changed_elsewhere` if the stored revision is another (checked in the launch transaction).
+
+Each session's newest accepted number, with a hash of what it stored, is kept per campaign (`definition_saves`, migration 13), because the campaign row names only the session that wrote last. The migration backfills the session that wrote last with the hash of the stored definition, in the same transaction, so an upgraded database answers that session's retry `replaced` too (council on `aebeb80`, item 1). **What bounds it:** a campaign's rows are deleted in the transaction that launches it, since a launched campaign takes no more saves; a campaign that never launches keeps one row per editing session that saved it, one short row per page load that changed something, which is small and is deleted with the campaign once campaigns can be deleted (no ticket deletes one yet). Without it, the two rows above were answered `edit_conflict`, and a page whose change had been accepted said "Not saved" (seeds 7369, 7412, 7642, 7729 and 7889 of the generated test, found on 14 November 2026 by one run of 1,000 seeds).
+
+**Invariants** (asserted by the generated test after the network settles, and where noted after every step):
+
+1. The stored definition is the newest draft typed in the session that wrote it.
+2. No accepted save from one session is replaced by another session's save unless that session had seen it: a save based on a revision older than the stored one is refused, and its page shows the conflict.
+3. The page's status is never "Saving…" or "Not saved" when the server has accepted its newest edit, and never "Saved" when it has not (every step). Another page may later replace that draft, having seen it, under invariant 2; a page learns of that when it next saves, or when a launch is refused because of it. That refusal is the conflict state, which then says the page's own change was saved ("Changed elsewhere"), not "Not saved".
+4. Launch never starts a definition other than the one on the page.
+5. A refused page keeps what the user typed until they choose to load the stored version.
+6. No answer replaces a draft newer than the one it answered (every step). This holds for a save's answer, a launch's and a load's alike (PR 41 council, item 9; re-check B12).
+7. A conflict stays visible, with "Load the saved version", until the user resolves it, however much they type meanwhile (every step; PR 41 council, item 10; re-check B11).
+8. A page whose newest draft cannot be saved as it stands (`draftProblems`) never says "Saving…" or "Saved": nothing of it is being sent. Its status is `invalid`, worded "Not saved", with the reason in place and no Try again (every step; asserted as 3b; added 14 November 2026).
+
+**The boundary.**
+- A definition is at most **56 KiB** (57,344 bytes) as the JSON body of a save. That bound is below the browser's 64 KiB budget for a request that outlives the page (`keepalive`), so a save sent on leaving can always carry the newest draft. The editor refuses a larger draft in place and sends nothing. The server refuses one with 413 `too_large`.
+- A save whose base is a revision the server never issued is a conflict, not an error.
+
+**By construction.**
+- The accept/refuse decision and the store happen in one `BEGIN IMMEDIATE` transaction. The stored session, number and revision are written with the definition, so a later decision reads what the last accepted save wrote, never a recomputation.
+- The client has one queue (`src/web/campaign/saveQueue.ts`) through which every save is sent and into which every outcome reports: the debounce, Try again, launch, the pool sync, leaving the page, and the page shown again from the back-forward cache. Chained saves run one at a time, each with the newest draft. No answer is resent unchanged: the body of each number is fixed when it is first sent, so a retry carries the same content and pool. Retries after no answer back off (1, 2, 4, 8 seconds, then the page says the change may not be saved), and a retry waiting goes at once when the browser comes back online. `superseded` is not an error.
+- **Leaving with a draft that cannot be saved** (council on `aebeb80`, item 3). When the newest draft cannot be saved as it stands, leaving sends the newest draft that could, if the server has not confirmed it, with the request that outlives the page and under its own number, so a valid edit in flight is not lost with the page's ordinary request. The queue records each number's draft as it is made, and keeps the newest valid one. The page already says the newest is "Not saved".
+- **One gate for every answer** (council on `aebeb80`, item 2). Each request carries the queue's generation, which advances when the user loads the saved version and sets aside every draft typed before. Any answer to a request of an earlier generation, whatever its kind (accepted, superseded, replaced, a conflict, an error, no answer), changes nothing; a save asked for in that generation, in progress or still queued, saves and reports nothing; and a save of the new generation never waits behind one of the old. This is invariant 6 for saves: the answer gate is in one place (`SaveQueue.send`), and the generation a save was asked in is fixed when it is asked (`SaveQueue.save`). The moving window found the last two (seeds 845691 and 463057, now recorded).
+- **One request outlives the page at most.** Leaving sends the newest draft at once with `keepalive`. The browser's 64 KiB budget covers every `keepalive` request outstanding together, so two leave-saves of a 56 KiB draft could not both go. A newer leave-save therefore cancels the one it supersedes before it is sent: the newest carries every edit, and with only one outstanding the bound above always leaves room for it (PR 41 council, item 11).
+- The editor's state is one object (`src/web/campaign/editorStore.ts`), which the page binds through `useSequence` and the generated test drives directly. Every answer, whether a save's, a launch's or a load's, is asked against an **edit number**, the identity of the draft on the page (the pool sync counts as an edit). An answer replaces the draft only if that number is still the newest; otherwise only the server's view is taken. While a launch or a load of the stored version is pending, authoring is locked, so the answer it waits for is always for the draft on the page (invariant 6). The lock is one value of the editor state, `locked` (launched, or a launch or load pending). `update` refuses an edit by it, and every authoring control reads it: copy, waits, threading, sending days and hours, time zone, add and remove. The inbox pool has no control; it follows the connected inboxes. The generated test checks that an edit is taken exactly when `locked` is false, and the browser tests check that no inspector control is enabled while it is true (PR 41 review). Typing in the conflict state keeps the conflict and sends nothing until the stored version is loaded (invariant 7).
+- The email pool follows the connected **email** inboxes only. The engine's SMS numbers are listed with them since ticket 13a, and never enter the email pool.
+
+**The generated test.** `src/web/campaign/saveQueue.generated.test.ts` runs the real editor state (EditorStore and its queue) against the real HTTP app and engine over the fake provider, so launches can start and the pool sync runs. It covers edits, debounces, saves, launches and loads delivered late and out of order, lost answers, the queue's retries, inboxes connecting, leaving the page (kept for Back, or gone with a new page loaded), restores, two sessions editing at once, drafts near the size bound, and typing while a launch or a load is in flight and while in conflict. It asserts invariants 1 to 8. `pnpm check` runs 200 seeds and every seed that once failed, and a moving window of 100 seeds derived from the commit, which runs every invariant but takes no part in the coverage counts: those count over the fixed and recorded seeds only, so they never depend on the commit (CI on `98927b6`); the full search runs 2,000 in the `sequence-search` workflow's shards (`pnpm test:save-search`; `docs/agents/delivery-workflow.md`). Mutations that break the rule make it fail; the test file names them: the server accepting a stale base; the same session and number with other content accepted; a leave-save that does not report; no lock during a launch or a load with its answer replacing the draft regardless (one mutation each); typing in conflict showing "Saving…".
+
+The definition holds:
+
+- **Campaign inputs:**
+  - the default time zone, which is required and defaults to the user's zone when the campaign is created;
+  - the call skip limit in days, default 2 (spec "Unfinished call tasks"). Since ticket 14c each phone track holds its own (below); the campaign's value is read only for a phone track saved without one;
+  - the email and SMS sender pools. A definition saved before ticket 13 has no SMS pool, which reads as empty;
+  - the call script or talking points, shown on every call task. A definition saved before ticket 14 has none, which reads as empty.
+- **Tracks.** Each track has:
+  - a stable `track_id`, never reused;
+  - a `channel`: `email`, `sms` or `call`;
+  - a `branch`: `main` or `win_back`;
+  - a **window**: days of the week, each with a start and end hour in the prospect's local time. An end before the start runs past midnight. For a call track, the window is its calling hours;
+  - an ordered list of steps;
+  - one **start rule**;
+  - a `removed` marker;
+  - for a call track, its **declined path**: `stop`, `continue` or `win_back`, once the canvas sets one. A phone track with none set takes `stop` (question Q14; `declinedPathOf`, ticket 16a). Only a phone track has one.
+  - for a call track, its **call skip limit** in whole days, at least 1 (ticket 14c; "Ticket 14c" below).
+- **Steps.** Each step has:
+  - a stable `step_id`;
+  - a wait in whole days before it (none on a track's first step);
+  - its copy (none on a call step; the campaign's call script shows on the task);
+  - for an email step, its threading mode: `new_subject`, or `continue_thread`, the default after the first step;
+  - a `removed` marker.
+- **Start rules.** Exactly one per track:
+  - `entry`: the lead enters the branch. For `main` that is launch, or enrollment after launch. For `win_back` it is entering win-back;
+  - `after(track_id, delay_days)`.
+
+  The canvas draws connections, and a compiler turns them into start rules. "Together" from X to Y gives Y the same rule as X. "After" from X to Y with delay d gives Y `after(X, d)`.
+
+A campaign has one win-back branch (CONTEXT.md). It is empty unless drawn, and every phone track whose declined path is `win_back` enters it.
+
+### 1.2 Who progresses: subjects
+
+Two kinds of **subject** run through the engine with identical rules:
+
+- an **enrollment**: a lead in a campaign;
+- a **test run**: ruling 10, section 3.6.
+
+Every progress table below is keyed by `subject`, and references a `subjects(id, kind)` table, not `enrollments`: a test run is a subject too (PR 37 ruling 8). Wherever this ADR says "lead", a test run behaves the same, except where section 3.6 says otherwise.
+
+### 1.3 Stored progress
+
+**Subject fields** (on `enrollments`, and on `test_runs`):
+
+| Field | Meaning |
+| - | - |
+| `status` | Enrollments only: the outreach status, a stored column, always equal to `deriveStatus(...)` (2.1), written in the same transaction as every change, indexed for search and measures. |
+| `version` | Bumped by every write to this subject's progress, holds or clock. Every transition is applied with `WHERE version = <the version it was computed from>` (ruling 4, section 2.5). |
+| `ended`, `ended_at` | Null while outreach can run; otherwise the end reason (2.1). |
+| `lead_paused` | The user paused this lead. A boolean, independent of the campaign pause and the callback hold (2.3). |
+| `branch`, `branch_entered_at` | `main` or `win_back`, and the lead time it was entered. |
+| `no_more_calls` | Set by any declined call. Never cleared. |
+| `touched` | Set once the lead has actually been reached: an attempt observed `sent`, or a call outcome logged other than "skip for now" (ruling 6). Never cleared. |
+| `frozen_since`, `frozen_total` | The lead clock (3.2). |
+| `stop_reply_channel`, `stop_reply_at` | The reply that stopped the lead, its channel and its provider time, written in the transaction that ends it as replied and never recomputed (ticket 13a, verifier B1). The status shows it. |
+| `email_sender`, `sms_sender` | The sender account, fixed when the subject's first attempt on that channel is **handed over** (5.5), and never reassigned (spec "Email and Instantly": "A lead keeps one sender inbox for the whole campaign"; the same for SMS is a factory choice). A claim that is withdrawn before its handover fixes nothing. |
+
+The **campaign** row adds `launched_at`, `paused_since` (null unless the campaign is paused), `version` (bumped by pause, resume and edits) and `definition_version`.
+
+**Track progress** `track_progress(subject, track_id)` exists from the moment a track's start is resolved. It holds:
+
+| Field | Meaning |
+| - | - |
+| `start_at`, `start_basis_at`, `start_basis_wall`, `start_zone` | The resolved start, in lead time, and what it was resolved from: the predecessor's finish, in lead time and wall time, and the zone. Set when the start rule is satisfied, or re-resolved by an edit (5.2). |
+| `started_at` | Set when lead time reaches `start_at` and the track actually starts. Set once. |
+| `destination_detail_id` | The good email or mobile chosen at start, for email and SMS tracks: the newest good one. |
+| `next_step_id`, `basis_at`, `basis_wall`, `due_at`, `due_wall`, `due_zone` | The **pending step** (ruling 5): which step is next; the lead time and wall time its wait counts from; its resolved due time in lead time; the wall instant it was resolved to; and the zone. These fields belong to the pending step, not to any attempt. They stay unchanged while the step is claimed, in flight or held, so a withdrawal leaves the same deadline in place. They change only when the step gets a result (the next step is then resolved) or when an edit reconciles it (5.2). |
+| `finished_at`, `finished_wall`, `finish_reason` | Set once, and the track stays finished. The reasons are `completed`, `skipped` (every step skipped), `skipped_missing_channel`, `skipped_declined`, `skipped_by_user`, `skipped_unworked` (the call skip limit), `failed_bad_destination`, `dropped_for_win_back` and `closed_on_interest`. |
+
+**Step results** `step_results(subject, step_id)`, unique on that pair. A step's resolution is a fact: `sent`, `skipped` (with a reason) or `failed`, plus `at` (lead time) and `at_wall`. It is never deleted or changed. A step with no result and no live attempt is not done. A result for an attempt that was live when its track finished is still recorded. It changes neither the finish reason nor any successor work (ruling 7).
+
+**Provider work** `provider_work(key, subject, step_id, ...)`, one row per idempotency key (PR 37 review round 3). It is created by the claim that makes the key and carried on by every attempt that inherits it (5.3). Everything true of the work rather than of one attempt is on it, so settlement, release, the user's mark, lookup, reply matching and inheritance read and write one row, in one transaction:
+
+- the `account_id` and the destination it was handed to;
+- `calls` across its attempts, and `first_handed_wall`;
+- the provider reference;
+- `settled`: null while the provider work is unsettled, otherwise how it settled: `sent`, `not_sent` (a not-sent the transport vouches for), `withdrawn` (a confirmed withdrawal), `rejected` (a refusal of its only call, or the provider's statement that it will not send), `never_called` (its attempt ended before any call), `user_sent` or `user_not_sent` (the user's mark). It is set once. **Unsettled work holds the capacity reservation;** settled work holds none;
+- `sent_wall` and `sent_day`, the provider's send time and the reset day it counted on (also for a send the provider makes after the work settled otherwise);
+- the lookup schedule (`next_lookup_wall`), the latest `lookup` answer and the number of `queued` answers so far;
+- `unresolved_since`: set when the work is unresolved (5.3); a stored fact, not derived.
+
+**Attempts** `attempts(id, subject, step_id, ...)` keep the attempt's own lifecycle only. Each holds:
+
+- the `account_id` chosen at the claim;
+- the destination detail id;
+- the copy, rendered in the first handover transaction (5.5) and never changed afterwards;
+- `retryable`: whether its transport accepts a repeat call with the same idempotency key;
+- `idempotency_key`: the provider work it carries, its own id unless it inherited uncertain work's key (5.3);
+- `calls`: the number of send calls made with this attempt, never more than `MAX_CALLS` (5.6);
+- `claimed_wall`, `handed_at`, `handed_wall`, `last_call_wall`;
+- `presend_checked_wall`;
+- `ended_by`: how a terminal state was reached;
+- `state`, a forward-only chain (claimed, handed, accepted, terminal; section 5.3);
+- the `withdraw_requested` flag and the retry intent.
+
+Two partial unique indexes allow, per `(subject, step_id)`, at most one attempt that is not terminal, and at most one attempt in state `sent`.
+
+**Freezes** `freezes(subject, from_wall, to_wall)` is an append-only record of the subject's frozen intervals. `syncClock` opens an interval when the subject stops running and closes it when the subject runs again, so `to_wall` is null while it is frozen. Intervals that ended before the `handed_wall` of the subject's oldest unsettled attempt may be pruned. It exists to map a provider's past send time exactly onto the lead's clock (3.3).
+
+**Call tasks** `call_tasks(subject, step_id)`, unique, one per call step. Each holds:
+
+- `due_at` (lead time), `due_wall` and `due_zone`: the call step's original due time, with the wall instant and zone it was resolved from;
+- `skip_deadline` (lead time), resolved from `due_wall` (3.5);
+- `list_day`: the user-local day the task is listed for now;
+- `kind`: `call` or `callback`;
+- `callback_at` (wall time);
+- `open`, and `closed_wall`, the instant it closed (ticket 14a);
+- `placed_wall`, the instant it was placed on the list (ticket 14a);
+- `skipped_wall`, the latest "skip for now" (ticket 14a).
+
+**Call attempts** `call_attempts(task_id, outcome, redial, callback_at, number_detail_id, note, at)` record each logged outcome, with whether the user asked for a redial and, for a callback requested, the time the prospect asked for (migration 14, ticket 15a), and, for not interested, the declined path it took (`declined_path`, migration 15, ticket 16a): the track's, or the user's override for that lead. The lead's decline, which every read model shows, is that record; nothing else stores it. A redial or a callback changes the same task; a step never gets a second task. Whether a task was listed on a day is not stored: it follows from its list day, its kind, the prospect's calling hours and the lead's `freezes` record (3.5, as built in 15a).
+
+**Notes** `notes(owner_kind, owner_id, body, at_wall, subject_id, call_attempt_id)` (ticket 14a): a note on a person, or on a company, where it shows for everyone there. A call note is saved as the user chose, a person note unless they choose the company, in the transaction that logs its outcome; a company lead has no person, so its notes are its company's. Notes are never read by decisions.
+
+**Replies** `replies(subject, channel, at, provider_ref)`, unique on `(subject, provider_ref)`: one reply may belong to several subjects when it falls back by inbox and address (2.4). They hold the channel and date only (spec "What the user sees and does"). **Reply events** `reply_events(event, provider_ref, inbox, address, at, received_wall, state, waited_ms, last_counted_wall)` keep every reply event the provider reported, by its event id, for good: `pending` while its thread is not known, `unmatched` when its fallback matched nothing, `resolved` once recorded on a lead (2.4, PR 37 review rounds 2 and 3).
+
+**Capacity reservations** follow ADR 0002 "Sender inbox and capacity", for SMS accounts too, counted per **provider work** (one idempotency key): a send counts on the reset day of its send, and unsettled work not yet sent holds one reservation (4.2 as amended). The `capacity_ledger` is a view over `provider_work`. Each sender account also stores `next_slot_at`, taken at handover and moved to the call's actual start plus the gap (4.2, 5.5).
+
+**SMS bindings** `sms_bindings(sender_number, recipient_key, owner_subject, created_at, released_at)` name the subject that owns that conversation (4.5). The recipient key is the mobile's E.164 form, which is also where an SMS attempt is sent (migration 9). An enrollment's binding is never released or transferred. A test run's binding is released when the test run ends. A partial unique index allows one unreleased binding per pair. Rows are never deleted, so the table is its own history.
+
+### 1.4 What is derived, not stored
+
+These follow from the stored facts, so nothing keeps them in step:
+
+- whether a step is in flight;
+- whether a track is held (5.4);
+- whether copy can be rendered for a lead;
+- which tasks are listed today;
+- the callback hold, which is the open callback task;
+- the lead's next-step sentence;
+- every measure.
+
+## 2. The state machine for one lead in one campaign
+
+### 2.1 Status and endings
+
+The status is a total function of the stored state. Rules are checked in order and the first match wins:
+
+| # | Condition | Status |
+| - | - | - |
+| 1 | `ended` set | the end reason |
+| 2 | `lead_paused` | `paused` |
+| 3 | an open callback task exists (the callback hold) | `callback_scheduled` |
+| 4 | `branch = win_back` | `in_win_back` |
+| 5 | an open call task exists (placed, whatever today's listing) | `waiting_on_call` |
+| 6 | not `touched` | `queued` |
+| 7 | otherwise | `active` |
+
+These are exactly the twelve statuses of `src/domain/outreach-status.ts`. A **campaign pause changes no status**. The spec's paused banner shows "the count of leads in each status", which only makes sense if leads keep theirs. Rule 5 depends on the task existing, not on it being listed, so neither a campaign pause nor a redial to tomorrow flips the status. Rule 2 comes before rule 3: a paused lead's callback is not listed, so "paused" is what the user can act on.
+
+**End reasons and how they happen:**
+
+- **User or prospect events:** `replied` (a reply), `interested_on_call`, `declined_on_call` (the stop path) and `stopped_manually`. Each applies when its event is applied.
+- **Exhaustion endings** (ruling 6): `finished_no_usable_channel` and `sequence_finished_no_response`. They are checked **first** in every evaluation, before any track is started, skipped or finished, and after every fact that can remove work or reach (a bounce, a bad mark, a decline, a skip, an edit):
+  - **Reachable channels.** `reachable` is the set of channels in the lead's current branch that can reach the lead now (`reach.ts`, minus bad details). A lead that declined is never called again in the campaign, so from the decline the call channel does not reach it (`channelReaches`; council on `f5fdeee`, item 1, replacing ticket 16a's first rule, under which such a lead stayed active until its later phone tracks were skipped and then finished with no response). Its remaining phone tracks are still skipped as `skipped_declined` at their start (`startTrack`), so a track after one starts on time. So a lead that declined with the continue path and has no email or mobile left ends at the decline as `finished_no_usable_channel`; one with a live email or SMS track runs on.
+  - **Work left.** The lead has work left if any track that is live for the lead (5.2) is unfinished or not yet started.
+  - **The rule.** When `reachable` is empty, the lead ends `finished_no_usable_channel`, whether or not work is left: nothing it has left can reach it, and anything left would only be skipped. Otherwise, when no work is left, it ends `sequence_finished_no_response`.
+  - **Consequences.** A phone-only lead in an email-only campaign ends with no usable channel at launch, before its email track is marked skipped. A lead whose only email bounced on the last step ends with no usable channel. A lead that received every email but had no mobile for the final SMS track still has email reachable, so it ends with no response.
+- **Precedence.** An event ending (reply, interested, declined, stop) applies whenever it occurs. An exhaustion ending is only evaluated for a lead that is not ended. A reply to a lead already ended for any reason other than `replied` or `interested_on_call` changes its status to `replied` (ruling 9): "any reply" ends outreach with a handover, and "no response" would be false.
+
+**Restart** (spec "Restarting a lead": "for a lead that replied or was stopped") applies to `replied` and `stopped_manually` (ruling 8). Whether `interested_on_call` and `declined_on_call` may also be restarted is question Q6; until it is answered they cannot be. Restarting from step 1 is impossible: no transition deletes a step result or a finished track.
+
+### 2.2 Clocks and holds
+
+A subject **runs** when all of these hold:
+
+```
+runs(s) = campaign launched (or s is a running test run, 3.6)
+        ∧ campaign.paused_since = null (enrollments only)
+        ∧ s.ended = null
+        ∧ ¬s.lead_paused
+        ∧ ¬(s has an open callback task)
+```
+
+Every transaction that changes any input of `runs` ends with `syncClock` (3.2).
+
+**The hold mechanism, as built (ticket 15a, the first hold in the engine).** `runs` is one pure function (`progress.ts`) of the stored facts, and each hold is a fact it reads: `campaign.paused_since`, `lead_paused`, and the open callback task (`callbackHold`). Nothing else decides whether a subject runs: the claim's guard, handover predicate 1, placement (`readyCalls`), evaluation and the listing rule all read it. Every change to a hold is made inside the transaction that records its cause, and that change ends with `synced` (`syncClock` over the subject's `freezes`), so the clock and the record of frozen intervals can never disagree with the holds. Ticket 17 adds the lead and campaign pauses by setting their facts in their own transactions, ending with the same `synced`; it adds no second clock and no second freeze record. The invariants this keeps, asserted by the generated call test with callbacks (9.3):
+
+- `frozen_since` is set exactly when `runs` is false (invariant 9), so lead time stands still exactly while any hold is on, and every stored deadline in lead time (a step's due time, a track's delayed start, the call skip limit) moves by exactly the time held;
+- the `freezes` record holds every interval in which the subject did not run, so any past wall instant can be asked whether the lead ran then and what its lead time was (3.3's `sendPoint`); the skip limit's expiry reads it (3.5);
+- a hold's release that logs an outcome (a callback's outcome) releases first, then records, so the outcome sits at its own instant on a running clock (2.4 "Calls").
+
+### 2.3 The three holds
+
+The three holds are independent booleans (ruling 5). Each changes only on the events listed for it; every other event leaves it alone.
+
+| Hold | Set by | Cleared by | Lists |
+| - | - | - | - |
+| Campaign pause (`campaign.paused_since`) | Pause campaign | Resume campaign | While set, none of the campaign's call tasks are listed and nothing is claimed. |
+| Lead pause (`lead_paused`) | Pause lead (allowed during a callback) | Resume lead; a restart (resume from the next unsent step, move to win-back) | While set, none of the lead's tasks are listed, the callback included. |
+| Callback hold (the open callback task) | The "callback requested" outcome | A final outcome logged on the callback task; skip step on it; its track finishing for any reason (a decline elsewhere, win-back entry, the step being removed by an edit) | While held, only the callback task of that lead is listed. "Skip for now" keeps the hold. |
+
+The callback hold *is* the open callback task, so "hold ⇔ one open callback task" holds by construction. There is a single rule for every way a track can end: **a track that finishes closes its open call task and quiesces its live attempts in the same transaction** (2.5), and closing the task releases any callback hold. A stop or a reply closes nothing: the lead is ended, so nothing of it is listed, and a restart finds its tasks where they were.
+
+**The listing rule** (ruling 6). An open task is **listed** at a moment when all of these hold:
+
+- the subject has not ended;
+- it is not lead-paused;
+- its campaign is not paused (enrollments only);
+- the prospect's calling hours open at some point on the current user day;
+- either the subject has no callback hold, or this task is the callback task;
+- **the task is due on the current user day** (date eligibility):
+  - for `kind = call`, `list_day` is today or earlier, so a redial moved to tomorrow is not listed today and no outcome is accepted on it today;
+  - for `kind = callback`, the user-local date of `callback_at` is today or earlier. A callback is not listed before its day. On its day it is "later today" until `callback_at` and "ready" from then. **An overdue callback stays listed every day**, flagged overdue, until an outcome is logged, and the calling-hours condition does not apply to it, because the prospect chose the time. As built (15a), a callback is flagged **overdue** from `callback_at` on (question Q12): "ready from then" and "overdue" begin at the same instant, the time the prospect asked for.
+
+When a callback is the subject's only hold, its callback task is therefore listed on its day even though `runs` is false. A task **was listed on a user day** if it was listed at any moment of that day. Days on which the prospect's calling hours never open do not count as listed days (3.5).
+
+### 2.4 Events and transitions
+
+Abbreviations:
+
+| | |
+| - | - |
+| R | running (`runs` true) |
+| H | held by at least one hold, not ended |
+| E-r | `replied` or `stopped_manually` (restartable) |
+| E-x | the other endings |
+| D | the campaign is not launched |
+
+"Refused" means a plain error and no change. The UI never offers it, because the allowed-controls function and the transition function read one table. "Impossible" means no well-formed history produces the pair; the engine fails the transaction as a bug.
+
+**Lifecycle**
+
+| Event | Allowed in | Effect | Refused / impossible |
+| - | - | - | - |
+| Launch | D | The campaign is launched, every enrollment syncs its clock, and `main` is entered at lead time 0. | Every other state: impossible, a campaign launches once. |
+| Enroll after launch (re-import) | (new) | A new enrollment, which runs unless the campaign is paused. Existing enrollments are untouched (spec "Re-importing"). | — |
+| Evaluation (time passes) | R | 2.6. | H, E, D: lead time is frozen, so nothing can come due. A callback's wall-clock appointment still moves on the list from "later today" to "ready" or "overdue"; that is presentation. |
+
+**Sending.** Attempt-level effects are in the attempt table, 5.3.
+
+| Event | Allowed in | Effect | Refused / impossible |
+| - | - | - | - |
+| Claim | R, with the campaign running | 4.2. | Anything else: the claim's guard refuses it. |
+| Attempt reaches `sent` | any but D | A `sent` step result. Its time is **when the provider sent it** (ruling 4), mapped exactly onto the lead's clock by 3.3's `leadAt`. That gives `at = leadAt(t)` and `at_wall = wallOfPoint(t)`. `touched` is set. **In the same result transaction, whether or not the subject runs**, the track's next step is resolved from that basis, or the track finishes if no live step is left (2.6 step 3). On a track already finished, the result is recorded and nothing else changes (ruling 7). | D: impossible. Outside R it is only an attempt handed over while running and resolved later (ADR 0002's bounded handover); invariant 2 checks exactly that. |
+| Attempt reaches `rejected` | any but D | The reservation and in-flight place are released. Then by reason: a block-listed address skips the track; an invalid address or number marks the detail bad and fails the track; a refusal for payment required (402) or rate limit (429) puts the **account** into an account-level wait (5.4): until the quota is confirmed for 402, and for the provider's retry-after period, or an exponential backoff starting at one minute, for 429. No claim is made on that account until then, and the step stays pending with its deadline unchanged. Instantly's unexplained skip holds the track (5.4). On a finished track, only the detail mark applies. | D: impossible. |
+| Bounce or invalid number reported after a send | any but D | The detail is marked bad (ADR 0001: bad marks are never cleared). If the track is unfinished, it finishes `failed_bad_destination`, which quiesces its live attempt to the same address. On a finished track the finish reason stays. | D: impossible. |
+| Reply detected or marked | R, H, and every ending except `replied` and `interested_on_call` | `ended = replied`, with channel and date. The lead **quiesces** (2.5). No other subject changes (spec "What stops"; for SMS, 4.5). A reply keeps its campaign's scope (PR 37 review round 2, ruling 3). A reply that carries a thread reference the application does not know yet is held as pending correlation; while it is pending, further sends from that inbox to that address are paused (5.5 predicate 18); it resolves to the one lead when the reference attaches, and falls back to inbox-and-address matching only after one settling period. A reply with no thread reference falls back at once. The fallback matches only work that was sent or is uncertain and was handed over at or before the reply's time: never work the provider rejected, never work handed over after the reply, never an address that has since moved to another owner. It applies to every subject it matches. **For the adapter (12c):** the sender is reduced to a bare, lowercase address (`Name <x@y>` becomes `x@y`) before matching. **A reply's life** (PR 37 review round 3): a reply is identified by its provider event for good, so an observation replay is a no-op and a reply already resolved, to a lead or by fallback, is never made pending again. The wait before falling back counts time the application was running and able to observe, not wall time across an interruption (section 6). For matching, work that was called and then marked not sent by the user counts as uncertain: the user's mark settles capacity, not the facts. A reply is never forgotten: one that matches nothing stays recorded by its provider reference, without pausing sends, and resolves to the lead whose work that reference later attaches to. | `replied` or `interested_on_call`: recorded on the timeline only. D: impossible, there is no thread. |
+
+**Every user action is judged as of its own instant** (review bot on `eda5fa0`, ticket 15a). The worker ticks every 15 seconds, so the stored state can lag the clock: a call whose skip limit expired at a rollover stays open in the store until the next tick. In the transaction that records a user action, the engine therefore first brings the lead up to the action's instant with the same evaluation its tick runs (`asOfAction`: an expiry at a rollover, and the starts and endings it releases, at the instants they fell due), then judges the action on that state. What fell due stands even when the action is refused. A held lead has nothing due by time; a callback falling due and a rollover are read from the clock by the listing rule itself. So an action's answer never depends on whether the worker has ticked since the last due instant. **A refused action still applies what fell due** (coordinator's ruling on the council of `228cd3b`): the expiry was due whatever the action did, so an outcome refused for another reason and resubmitted after the rollover finds the call skipped, and is told so ("This call was skipped at …: it was not worked within its skip limit"). Ticket 17's controls (skip, pause, stop, restart) are user actions under the same rule.
+
+**The same rule for every route that changes, or depends on, what the engine's timing reads** (council on `228cd3b`). The engine's timing reads each lead's zone (the person's, the company's, the campaign default), the call list's day and zone (the call settings), the definition (its windows, waits, delays and skip limit), and the clock. Each route that writes one of these first brings every lead with an open call task up to the route's instant under the old inputs, in the route's own transaction, and seals its skip limit there (`reckoned_through`, 3.5), so a day already past is never judged under the new input. The expiry is the one judgment of a past day that these inputs feed: every other deadline is stored in lead time when it is resolved (3.3), and windows are read at the present instant. The routes, walked by `src/server/engine/as-of-the-instant.test.ts` (which fails on any writing route in neither list):
+
+| Route | Timing input | What it does first |
+| - | - | - |
+| `POST /api/campaigns` (create with an import) | people's and companies' zones (an import updates shared records) | catches up and seals, in the import's transaction |
+| `POST /api/campaigns/:id/imports` | the same | the same |
+| `PUT /api/call-settings` | the call list's zone and day, the daily capacity | the same, in the settings' transaction |
+| `PUT /api/campaigns/:id/sequence` | the definition | refused once launched (running edits are ticket 19, whose reconciliation will catch up first); before launch no lead of it runs |
+| `POST /api/campaigns/:id/launch` | — (starts the clock) | enters and evaluates each lead at its own instant |
+| `POST /api/call-tasks/:id/outcome` | — (a user action) | `asOfAction`, above |
+| `POST /api/scraper-files/check` | — (writes nothing) | — |
+
+Marking provider work (`Engine.markAttempt`, whose route arrives with ticket 20) catches up the same way, though its decision (is the work unresolved?) reads nothing time moves. **Read models** are built the same way (council on `228cd3b`): Today, the call queue, a call task and Needs attention are built from each lead's state as of the instant read (`asOfAction`, nothing written), so a read never offers an outcome the action would refuse. Placement is the exception: a call due at an instant is placed by the worker's tick, so a read just before that tick does not show it yet (ticket 14b's `behind` marker says so on the read side).
+
+**Calls.** Every outcome has one eligibility rule: **the task is listed at that moment** (2.3). The transaction re-checks the listing against current state. On an ordinary task that means the lead is R. On a callback task it means the callback is the lead's only hold. Everything else is refused: ended, lead-paused, a paused campaign, any other task while a callback is open, a day without calling hours, or a stale screen.
+
+| Event | Effect |
+| - | - |
+| No answer, voicemail, gatekeeper with note; no redial | Task closed, track `completed`, `touched` set. |
+| …with redial | The task stays open with `list_day` set to the user's next day, and any "skip for now" of today is cleared. `due_at` and `skip_deadline` are unchanged ("still counts from the original due date"). `touched` set. A redial is refused with any other outcome. |
+| Wrong or dead number | The number is marked bad and `touched` set. Until Q4 is answered, the task closes and the track finishes `completed` (spec: "any other outcome… finishes the phone track"). Later phone tracks with no good number left are skipped as missing. |
+| Callback requested (date and time) | `kind = callback`, `callback_at` set: the callback hold. The lead quiesces and its clock freezes in the same change. `touched` set. Refused without a time, with a time not after now, and a time with any other outcome. |
+| Interested | The task closes and its track finishes `completed`. **Every other open call task of the lead closes too**, and its track finishes `closed_on_interest`. `ended = interested_on_call`; the lead quiesces. `touched` set. |
+| Not interested (stop, continue or win-back, preselected from the track, overridable) | `no_more_calls` is set. This call's track finishes `completed`; every other phone track the lead has started finishes `skipped_declined` at the same instant, with a task or without one (a call due but not yet placed), closing its task, so an open redial or callback closes without an outcome and holds nothing. A phone track that starts later starts and finishes `skipped_declined` at its start, releasing the tracks after it; no call is placed for the lead again (`readyCalls` reads `no_more_calls` too). Then by path: **stop** gives `ended = declined_on_call`, and the lead quiesces. **Continue** leaves the lead running on its other channels. **Win-back** enters win-back (below). `touched` set. The call record keeps the path taken (as built, ticket 16a: `decline` in `progress.ts`). |
+| Any of the above on a callback task | As in the matching row, after which the callback hold is gone (the task is closed or no longer a callback). **The hold is released first, in the same change** (ticket 15a): the task stops being a callback and the clock thaws, then the outcome is recorded at that instant on the running clock, so the call step's result, and a track it finishes, sit at the instant the call was made, and the tracks after it count their delay from then. A redial converts it back to `kind = call` for the next day, keeping its original `due_at` and `skip_deadline`, which have not advanced while frozen. A new callback time keeps the hold (no thaw and no new freeze). |
+| Skip for now | The task moves to the end of today's queue. Nothing else changes: it is not a call made, and on a callback task the hold stays. |
+
+**Entering win-back** (the not-interested win-back path, or "move to win-back"):
+
+- every unfinished main track finishes `dropped_for_win_back`, closing its call tasks, so the callback hold goes; a main track the lead has not started gets a progress row finished `dropped_for_win_back` with no start (ticket 16a), so the lead's progress shows the replaced work and nothing of it can start;
+- live attempts of those tracks quiesce;
+- `branch = win_back` at the current lead time.
+
+**Rollover** is derived: an open task with `list_day` before today shows at the top as rolled over. **Skip-limit expiry** is part of evaluation (3.5).
+
+**Why a call is on the list** (spec "Up next … why it's on the list"; ticket 15a, `reasonOf`): a callback before its time (`callback`), then `overdue`; a call a redial moved on, `redial` until its first listed day has passed (one redialed on a Friday for Saturday, with weekday calling hours, is a redial on Monday; council on `228cd3b`); any other call listed for an earlier day than today, `rolled_over`; otherwise `due`. Every queue item carries it with the call step's original due time, which the skip limit counts from.
+
+**User controls** (spec "Controls" and "Restarting a lead")
+
+| Event | Allowed in | Effect | Refused |
+| - | - | - | - |
+| Pause lead | R, H (callback, campaign pause), D | `lead_paused = true`; the lead quiesces. | Already lead-paused; ended. |
+| Resume lead | lead-paused, not ended | `lead_paused = false`. Other holds stay. | Otherwise. |
+| Pause campaign | launched, not paused | Paused; every enrollment syncs its clock in one transaction, and enrollments quiesce. No status changes. | D, already paused. |
+| Resume campaign | paused | Running; clocks sync. | Otherwise. |
+| Skip step | R, H, not ended | The step the person page names (Q3; until answered, the open step with the earliest due time, ties broken by track id) gets result `skipped (by_user)`. Its `claimed` attempt, if any, becomes `withdrawn` in the same transaction (ruling 1). Its successor resolves from now. On a call step the task closes and the track finishes `skipped_by_user`, releasing any callback hold. | The step has a live attempt past `claimed` (it may already be with the provider); ended; D. |
+| Stop | R, H, D | `ended = stopped_manually`; the lead quiesces. Progress, open tasks and resolved deadlines are kept for a restart. | Already ended. |
+| Resume from the next unsent step | E-r | `ended = null`, `lead_paused = false`. The clock syncs, and every remaining wait continues as it stood at the end. An open callback task resumes the hold. Pacing spreads restarted work. | E-x (Q6), not ended. |
+| Move to win-back | E-r, `branch = main`, the win-back branch has a live track | Enter win-back (above), then `ended = null`, `lead_paused = false`. | Already in win-back; no live win-back track; others. |
+
+**Definition and environment**
+
+| Event | Allowed in | Effect |
+| - | - | - |
+| Edit published | any | Reconciliation in one transaction (5.2). Every subject of the campaign gets a version bump. Refused if the definition fails 7.1, or a launched campaign's definition has a launch blocker. |
+| Contact detail marked bad elsewhere | any | Nothing is stored here. The next claim refuses that destination, the track finishes `failed_bad_destination`, and the endings are checked. |
+| Destination no longer the lead's (a merge made it another owner's detail) | any | The track is skipped as a missing channel (`skipped_missing_channel`) and quiesces, without switching to a company address; the endings are checked (PR 37 ruling 9). |
+| Account unhealthy, disconnected or out of quota | any | Nothing is stored on leads. Claims for that account wait, and Needs attention lists it. |
+| Restart after an interruption | — | Section 6. |
+
+### 2.5 Quiescing, and stale results
+
+**Quiesce** is the one effect applied whenever a subject stops running, or a track finishes for any reason. The triggers are:
+
+- every change that makes `runs` false: a reply, stop, interested, declined-stop, a callback request, lead pause, campaign pause, and the exhaustion endings;
+- every track finish, for that track's attempts: `failed_bad_destination`, a skip, a decline closing other tracks, entering win-back.
+
+Each live attempt in scope is handled by its state:
+
+- **`claimed`:** becomes `withdrawn` locally. The provider was never called.
+- **`handed` or `accepted`:** gets `withdraw_requested`, and the worker calls `port.withdraw`. Section 5.3 says how it resolves.
+
+**Changing pending work withdraws the claim** (ruling 1). A `claimed` attempt becomes `withdrawn` in the same transaction as any change to its track's pending step or that step's content. These changes are a skip, an insert, a removal, a reorder, and a copy or wait edit on the step. A subject's sender is fixed at its first handover (1.3) and never changes afterwards, so there is no sender-change case. They apply to running and held tracks alike. A later claim creates a new attempt, which renders the current copy at its handover. An attempt past `claimed` is not withdrawn by an edit: it may already be with the provider, so it resolves under 5.3 with the copy it was handed.
+
+**Stale results** (ruling 4). `evaluate` and every user action compute a change from a snapshot. A change discarded as stale is recomputed on fresh state in the same tick. The store applies it only if the subject's `version` and the campaign's `version` (and `definition_version`) are unchanged, **and the lead's facts the change read are unchanged**: contact details and their bad marks, zone and merge data, which an import or a mark elsewhere changes without bumping either version (PR 37, review bot `rules.ts:62`). Otherwise nothing is written, and the subject is re-evaluated on fresh state. This makes these impossible:
+
+- a skip-limit expiry computed before a callback was logged closing the callback task;
+- a "sequence finished" computed before a reply overwriting `replied`.
+
+The claim follows the same rule (4.2).
+
+### 2.6 What evaluation does for a running subject
+
+The pure function `evaluate(snapshot, definition, nowWall)` returns one batch of changes, in this order:
+
+1. **Endings first** (2.1).
+2. **Track starts.**
+   - For each live, unstarted track whose rule is satisfied and that has no `start_at` yet: resolve `start_at` (3.3) and store it. For `entry`, that is `branch_entered_at`. For `after(P, d)`, it is P's `finished_at` plus d calendar days.
+   - For each track whose `start_at` has passed: start it. If its channel cannot reach the lead (missing, bad, or a call after a decline), it starts and finishes `skipped_missing_channel` (or `skipped_declined`) at that same lead time, so its dependents count their delay from then (spec "A skipped or failed track counts as finished").
+3. **Next steps.** For each started, unfinished track with no pending step and no live attempt: take the first live step after the last resolved one (5.2). If there is one, resolve its due time from the latest result (3.3). If there is none, the track finishes `completed` (or `skipped` if every step was skipped) at the latest result's lead time.
+4. **Ready items.** Pending steps whose `due_at` has passed. Email and SMS go to the dispatcher (4.2). A call step is placed on the call list (4.4).
+5. **Skip-limit expiry** at a day rollover (3.5). As built (15a) it runs right after the first endings check, before the track starts, so the tracks after an expired call start in the same evaluation; the order changes no instant, since every start is resolved from the stored finish.
+6. **Endings again**, if anything above finished a track.
+
+The function reads no clock and no store. The server runs it on a tick and after every event.
+
+## 3. Time
+
+### 3.1 One injected clock
+
+The server holds one `Clock` (`now()`, in milliseconds). Domain code takes `now` as an argument (ADR 0001's lint rule). Tests use a manual clock and advance it themselves.
+
+### 3.2 Lead time
+
+```
+leadNow(s, now)  = (s.frozen_since ?? now) − s.frozen_total
+wallOfLead(s, now) = s.frozen_since ?? now       -- the wall instant at which lead time stood at leadNow
+```
+
+`syncClock(s, now)` ends every transaction that changes `runs(s)`. If `s` now runs and `frozen_since` is set, it adds `now − frozen_since` to `frozen_total` and clears `frozen_since`. If `s` does not run and `frozen_since` is null, it sets `frozen_since = now`. A new subject starts frozen, with `frozen_since = frozen_total = created_at`, so its lead time is 0 until it first runs.
+
+What freezes is every hold (2.3), and an ended lead: "resume from the next unsent step… like resuming a campaign", so a restarted lead keeps its remaining waits. What does not freeze:
+
+- a sending interruption, since the app being off is not a pause (section 6);
+- an unworked call, which holds only its own track and the tracks after it (spec "Phone tracks").
+
+The one wall-clock time a lead carries is `callback_at`. A callback is an appointment with the prospect: pauses never move it, and after a resume a callback whose time has passed shows as overdue.
+
+### 3.3 Resolving a deadline once (ruling 2)
+
+A wait or delay of N days counts in **calendar days in the prospect's zone**: the item becomes due at the start of the prospect's local day N days after its basis. N = 0 means due at once. Calendar days keep "two days later" on the same weekday instead of drifting a little later at every step. That is a factory reading of "waits are counted in days".
+
+At the moment a deadline is created, with basis lead time `b`, basis wall time `w = wallOfLead(s, now)` and zone `z`:
+
+```
+span(w, 0, z) = 0                                                        -- due at once
+span(w, N, z) = startOfLocalDay(localDate(w, z) + N days, z) − w      -- N ≥ 1; > 0; DST-aware via the zone library
+deadline      = b + span(w, N, z)                                       -- stored, in lead time; deadline_wall = w + span
+```
+
+**A provider's send time** `t_p` is mapped exactly, from the `freezes` record (1.3):
+
+```
+t            = clamp(t_p, handed_wall, now)                  -- provider clock skew cannot move the basis before the handover or into the future
+overlap(t)   = total length of freezes ∩ [t, now]            -- an open interval counts up to now
+leadAt(t)    = leadNow − (now − t) + overlap(t)              -- lead time at wall instant t
+wallOfPoint(t) = t, unless t lies inside a frozen interval [f, g); then f
+```
+
+`wallOfPoint` returns the wall instant at which the lead's clock last stood at `leadAt(t)` while running. So `basis_at` and `basis_wall` always describe the same point, and the calendar arithmetic below starts from the right local date. `freezes` intervals before the oldest unsettled attempt's `handed_wall` are never needed, because `t ≥ handed_wall`.
+
+*Trace* (UTC; a two-day wait; lead time L at Monday 09:00; the next step's due wall instant is what matters):
+
+- **Pause between the handover and the send.** Handover Monday 09:00; pause Monday 10:00 to Tuesday 10:00; the provider sends Tuesday 11:00; the app observes it Thursday 11:00.
+  - `leadAt` = L + 2 h, and `wallOfPoint` = Tuesday 11:00.
+  - The span to Thursday 00:00 is 37 h, so the step is due at L + 39 h. That is Thursday 00:00 on the wall, already due when the send is observed.
+  - The round-2 fallback gave L + 26 h, so the step would have been due Friday 00:00.
+- **The same pause after the send.** Handover Monday 09:00; the provider sends Monday 11:00; pause Monday 12:00 to Tuesday 12:00; observed Thursday 11:00.
+  - `leadAt` = L + 2 h, and `wallOfPoint` = Monday 11:00.
+  - The span to Wednesday 00:00 is 37 h, so the step is due at L + 39 h. The 24-hour pause moves that to Thursday 00:00 on the wall.
+  - The stored totals at observation are identical in both orderings. Only the `freezes` record tells them apart. Both orderings are generated cases (9.2).
+
+Every editable timer stores its basis `b` and `w` and its zone `z` beside the deadline (ruling 5), so a deliberate edit can re-resolve it without reconstructing any pause history:
+
+- **A step's due time:** `b` and `w` are the latest step result's `at` and `at_wall`, which for a send is the provider's send time (2.4, ruling 4), or the track's start for its first step. They are stored as `basis_at`, `basis_wall`, `due_wall` and `due_zone`.
+- **A track's delayed start:** `b` and `w` are the predecessor's `finished_at` and `finished_wall`, stored as `start_basis_at`, `start_basis_wall` and `start_zone`.
+- **The call skip limit:** from the call task's `due_at`, `due_wall` and the user's zone (3.5).
+
+After that, nothing recomputes the stored deadline. A pause of length D leaves `leadNow` constant for D, so the wall instant at which `leadNow` reaches the deadline moves by exactly D. That holds for any pause, including one that ends at 01:00 after a 23:00 start, or one that crosses a daylight-saving change.
+
+Re-resolution, from the stored basis and the new input, happens only on a deliberate edit: the wait, the delay, the skip limit, or the campaign's default zone (5.2). It does not happen when a re-import changes a person's or company's zone, because a re-import never moves progress (invariant 21). Windows always use the current zone at claim time.
+
+### 3.4 Windows and zones
+
+- **The prospect's zone:** the person's zone, else the company's, else the campaign default (spec "Pace, capacity and timing"). An invalid IANA name falls through to the next.
+- **Claims:** a step is claimed only while its track's window is open in that zone. "A step due outside its window waits for the next window."
+- **Call tracks:** the window is the calling hours, in the prospect's zone.
+- **The call list's day** is the user's day, in the user's zone. That is a setting, defaulting to the machine's zone.
+
+### 3.5 The call skip limit
+
+Spec "Unfinished call tasks": "After a configurable number of days (default 2) an unworked call task is marked skipped". Ticket 15: "Retain the original due date for the skip-limit clock" (ruling 8).
+
+- **The deadline.** When the call step's task is created: `skip_deadline = due_at + span(due_wall, limit, user zone)`. `due_wall` is the wall instant the step's due time was resolved to, stored on the task. That is the start of the user's day `limit` days after the original due date, in lead time, so pauses freeze it. An edit of the limit re-resolves it from the same stored `due_at` and `due_wall`.
+- **Expiry.** A task expires only at a user-day rollover, and only if all of these hold: the lead runs; `leadNow ≥ skip_deadline`; the task is not a callback; and it **was listed on the day that is ending** (2.3) and not worked. A task that call capacity kept off the list is never expired, so nothing is dropped for lack of capacity (spec "nothing is dropped"). It gets the whole of its first listed day.
+- **Days without calling hours.** A day on which the prospect's calling hours never open is not a listed day, so no task expires at its end. With the default of 2 and Monday–Friday hours, a call due Friday is listed Friday, not Saturday or Sunday, and expires at the end of Monday, unworked. A call due Thursday expires at the end of Friday.
+- **On expiry:** the task closes, the track finishes `skipped_unworked`, and the tracks after it start after their delay.
+- **As built (ticket 15a, `expireUnworked` in `progress.ts`).** Nothing records listing as it happens. For an open task of kind `call`, every user day d from its first listed day is checked in order, and the task expires at the rollover e that ends the first day d for which all of these hold: d is on or after its `list_day` (a redial moves that to the next day, so the day it was redialed on does not count, and nor does a day it was worked: a task worked on day d is closed, a callback, or moved past d); the prospect's calling hours open at some point of d; the lead ran at e, read from its `freezes` record (any hold, ending or pause at that instant means no expiry then); and lead time at e, read the same way, had reached `skip_deadline`. A lead that ran at the last instant of d with an open task listed for d was listed then, so "listed on the day that is ending" holds. **A day is judged once** (council on `228cd3b`): each task stores `reckoned_through` (migration 14), its placement and then the last rollover judged, and only rollovers after it are judged, with the inputs in force then; a route that changes a timing input seals it at its own instant after catching up (2.4), so the new zone's days count from the change. Rollovers are judged for a held lead too (it did not run at them, so none expires), so a hold never leaves a past day open to a later input. The store refuses a `reckoned_through` that moves back. The call step gets the result `skipped` (`unworked`), and the track finishes `skipped_unworked` at e, in lead time and wall time, which is the instant its dependents count from. Because every rollover after the last judged one is checked, a rollover the application was not running for expires the task where it expired, not when the application next looks. A callback task is never checked. The engine wakes at the user's next day for every subject with an open task.
+- **Editing the limit** (decided in ticket 15a, for ticket 19 and pull request 47's limit per phone track). An edit of the limit re-resolves the skip deadline of every open task from its stored `due_at` and `due_wall`, with the limit now in force for its track (`skipLimitOf`: the track's own, else the campaign's) and the user's zone now (`skipDeadlineOf`), as an edited wait re-resolves a pending step (5.2; spec "changes … apply to every message not yet sent"). Days already judged stay judged. The store accepts a changed `skip_deadline` only when it equals that re-resolution, so nothing else, a redial included, can move it.
+- **What counts.** The deadline counts calendar days from the original due date (the spec's text), and expiry needs a listed day. Whether the limit should count only workable days is question Q5. The two readings differ across non-working days: with a limit of 3, a call due Friday expires at the end of Monday under the interim rule, but at the end of Tuesday when only workable days count.
+
+### 3.6 Test runs (ruling 10)
+
+A **test run** is its own record: `test_runs(id, campaign_id, render_as_enrollment_id, test_contacts, state, started_at, ended_at, ...)` plus the subject fields of 1.3. It never touches an enrollment, so it never appears on a real person's timeline. It is excluded from lead search, statuses and measures, and it cannot collide with ADR 0001's one-lead-per-campaign index.
+
+- **Lifecycle.** `running` → `ended` (`replied`, `finished`, `stopped_by_user`). One test run per campaign at a time: Run test is refused while one is running, and the user stops it explicitly (ruling 9).
+- **Before launch.** It runs whether or not the campaign is launched or paused ("before launch or after an edit", "at any time"). For a test run, `runs` ignores the campaign's launch and pause state.
+- **Recipients.** The user's designated test email and mobile, as recipients only. The copy renders with the data of `render_as_enrollment_id`, a lead the user picks in the preview, named on the test run.
+- **What it shares** with real leads: the definition, the engine, the ports, the real sender accounts, the capacity ledger and the pacing slots ("test sends count like any other send, with no special handling", ruling 8).
+- **What differs.** Every wait and track delay resolves to 60 seconds instead of N calendar days. Whether test runs ignore sending windows is question Q2. Until it is answered, windows apply in the campaign's default zone.
+- **Calls and replies.** Test call tasks go on the user's list labelled "Test"; their outcomes follow the canvas paths, win-back included, and they count against call capacity. A reply from a test contact ends the test run as `replied`. The skip limit stays in days.
+
+## 4. Capacity, priority and pacing
+
+### 4.1 Per account
+
+Each email and SMS sender account has:
+
+- a daily capacity, a positive integer, counted on its reset day: Instantly's reset zone for email (ADR 0002 S5), the user's zone for SMS;
+- a pacing gap: by default, the length of the shortest daily window among the tracks it serves, divided by its capacity, and at least 60 seconds. This way a full day's capacity fits inside the window. The preview shows the gap. A gap configured on the account replaces the default (built in 12b, PR 37 ruling 10);
+- `k`, a bound on attempts handed to the provider but not yet resolved, which is ADR 0002's in-flight bound, from 1 for email;
+- `next_slot_at`.
+
+There is no spacing between touches to the same person from different campaigns in the MVP (ruling 9).
+
+### 4.2 The claim
+
+One transaction:
+
+1. Re-read the subject and campaign, and require the **step guard**: `runs(s)`; the versions the decision was computed from; the step is the track's pending step, live, with no result and no live attempt, and `due_at ≤ leadNow`; the track's window is open in the prospect's zone; the account is healthy; the destination is good and owned by the lead (ADR 0001's ownership rules); and the copy renders. A merge field with no fallback that this lead lacks refuses the claim and holds the track as `render_failed` (5.4), until an edit adds the fallback or the lead gains the field.
+2. Choose the account: the subject's fixed sender if it has one. Otherwise pick a candidate from the pool: the account that can send soonest, then the one with most remaining capacity, then the lowest id; for SMS, only accounts whose pair with this mobile is free (4.5). The candidate becomes the subject's sender, and an SMS pair its binding, only when this attempt's handover commits (5.5).
+3. Require both of these:
+   - **capacity:** `sends counted + open reservations (+ other senders, ADR 0002) < capacity`, counted per provider work (one idempotency key). **Reservations belong to provider work** (PR 37 review round 2, ruling 2): a reservation is released exactly once, atomically across every attempt that shares the key, when the work settles: a send (it becomes a counted send on its send day), a not-sent answer on a transport where that is final, a confirmed withdrawal, or the user's mark, sent or not sent. While the work is uncertain it counts against the current reset day. Uncertain work becomes unresolved within the bound already set (5.3); unresolved work keeps its reservation and is listed in Needs attention with the inbox and how many of its daily sends it is holding (5.4), so an inbox can be slowed by it but never stalled silently. A claim carries on the step's uncertain work (unsettled, called, and carried by no live attempt) with its key and reservation, and needs no new one; **once a key's provider work has settled, no later attempt inherits it**, because inheritance asks the work, not the attempts (PR 37 review round 3). The user's mark, sent or not sent, applies to the work whichever attempt it is given by, and ends every attempt still carrying it;
+   - **in-flight bound:** `attempts on this account in claimed, handed or accepted < k`. Unresolved attempts are still `handed` or `accepted`, so they count.
+4. Write the attempt (`claimed`, with its transport: `threading`, `retryable` and `notSentIsFinal`, stored with the payload), the capacity reservation and the subject's version bump. Commit.
+
+**Pacing is taken at every send call, not at the claim.** Both the handover transaction (5.5) and the retry authorization (5.6) require `now ≥ next_slot_at` and set `next_slot_at = now + gap` in the same write that authorizes the call. That covers first handovers, same-key retries and anything recovered after a crash, so a claim that waited an hour cannot be handed over a second before the next one. Capacity and the in-flight bound at the claim stop a tick from piling up claims, and the slot at each call spaces what the provider actually receives. Invariant 11 is asserted on the fake provider's call log.
+
+### 4.3 Priority
+
+Among the items an account could take at a slot: the items bound to it, and the unbound first-claim items whose pool includes it.
+
+1. **Touched leads first**, then untouched ones ("follow-ups go before first messages to new leads"). A second track's first step is a follow-up, because the lead is not new.
+2. **Oldest due first,** comparing due times as wall instants.
+3. **Then subject id, then step id**, so the order is total and predictable.
+
+Items that do not fit today wait for the next reset day and are never dropped. An untouched lead stays `queued` while it waits ("new leads show as queued until there is capacity"), and Needs attention counts "waiting for sending capacity".
+
+### 4.4 Calls
+
+The user has one daily call capacity, a positive integer.
+
+- **Committed tasks** count first: open tasks already placed (rolled over, redialed to today, callbacks due today). They are always listed, whatever the capacity. As built (ticket 14a): a task placed before the current user day that was open at its start, for a lead that had not ended by then, counted only on a day it can be listed, that is a day its prospect's calling hours open (council on `7902093`): a weekday call left unworked on Friday takes none of Saturday's or Sunday's room, and a ticket 15 callback for a later day will take room only on its day. The count is stable through the day, so working a carried call frees no room for another. As built (ticket 15a): a callback counts from its own day on, at any hour; a task closed at the very instant the day starts (a call skipped by the skip limit at that rollover) was not carried into the day and does not count; and a task counts **as it stood at the day's start**: a callback if the last call logged on it before then asked for one (with that time), otherwise a call. So the count is the same all day: working a carried callback, requesting a callback for a later day and a redial free no room, as working any carried call frees none. (The first version counted a task as the kind it had at the moment of asking, so a callback worked on a day its calling hours never open stopped counting and freed a place; the generated runs found it once the user acted near a callback's time.) A carried task counts only if it can be listed that day (council on `228cd3b`): not a call of a lead that a callback held at the day's start (only the callback is listed), and not any task of a lead with no good number left (Q13: nothing can be logged on it).
+- **New tasks** are placed, by the same priority classes, while `new placed today < capacity − committed`. Placement creates the task with `due_at` set to the step's original due time and the skip deadline from 3.5. A due call is placed only when the prospect's calling hours are open now or open later on the user's day, so a task takes the capacity of a day on which it can be called; one that does not fit or cannot be called today waits for the next user day and is never dropped.
+- **The queue.** "Ready now" means inside the prospect's calling hours, ordered oldest due first; a task skipped for now that day goes after the rest, in the order skipped. As built (ticket 15a, `compareReadyNow`): ready now is ordered by class first, callbacks (by the time asked for), then calls carried from an earlier day (rolled over or redialed: spec "roll over to the top of the next day's list"), then today's (each oldest due first); a callback is ready from its time, at any hour. "Later today" means callable later today: the calling hours open later on the user's day, or a callback is due later today (spec "Working through today's list", ticket 14). Two cases are in neither part, and they differ (council on `7902093`): on a day the prospect's calling hours never open, the task is not listed at all (2.3), and an outcome on it is refused; on a day they opened and have closed, the task is still listed, so an outcome logged on it, such as a call that ran past the hour, is accepted, but it waits for its next calling hours and is not shown as ready or later today.
+- **A read and the worker's placements** (ticket 14b, as settled on 14 November 2026). Calls are placed by the worker's tick, not by a read, and a read says nothing about the worker's progress. Four review rounds each found another way for "the instant the server advertises is exact" to be false (a completed-tick marker, a bounded wait in reads, a `behind` mark and a single-instant tick), and the last of those moved provider facts across an `await` and backdated sends. So the engine, its passes and its clock reads are as the integration branch has them, and the screens keep themselves fresh by a plain interval instead (4.4.1, "Freshness"): a read is at most one tick (15 seconds) plus the interval behind stored state while the server is reachable. `nextChangeAt` is a hint that can only make a read sooner.
+- **The focus** (part b's focus queue, council on `7902093`): the screen names the call it is on, and that call keeps the focus while it is listed, whatever opens or is placed meanwhile; with none named, the focus is the first call ready now. The outcome's answer names the next focus. So the queue moves on only after an outcome or a skip for now, and the read model, not the screen, decides the order and the focus.
+
+#### 4.4.1 Working the call list in the browser (ticket 14b: a deep rule)
+
+Recorded on 13 November 2026 by the ticket 14b implementer before the code. Rewritten on 14 November 2026 after three review rounds had added per-tab ownership, locks and answer records passed between tabs, and each round found holes in the last. The server already makes the hard part safe. Every outcome carries a request id. The same id is answered with the first result and stores nothing twice (verifier B3 on `a1399ce`). The call task read says what is stored. The rule below uses that and keeps almost nothing else.
+
+**The rule.**
+
+- **The outbox is the only client state the user's tabs share.** It lives in `localStorage`. Each entry holds a request id, the task id, and what the user chose and typed (outcome, number, note, where the note goes, since ticket 15b a redial and a callback's time, and since ticket 16c a declined path). Pressing *Log* writes the entry before the first send.
+- **Any desk sends any entry it sees, at any time.** Sending twice is harmless, because the server answers a repeated id with the first result. There are no locks and no ownership. Every open Calls page sends every unanswered entry it sees, retrying with backoff (1, 2, 4, 8 seconds, then every 8). It sees entries on opening, on every refresh and on every storage event from another tab. **Every send goes through one backoff** (review bot on `12f0303`): a desk sends an entry once when it first sees it, and after that only when that entry's own timer fires; *Try again* and coming back online bring that timer forward. No answer, refresh or storage event sends anything at once.
+- **An entry leaves the outbox only on a definite answer, written by whichever desk got it.** An accepted answer removes the entry. A refusal rewrites the same entry as refused, with the server's reason and the off-list facts it read, in one storage write, so the entry is never in neither state. **A kept refusal is removed only by its own *Dismiss*** (review bot on `26d4b49`: moving on removed refusals whose notes were collapsed out of sight). Moving on, editing a draft, a refresh or logging another outcome never removes one; a refused entry stays, with its typed note, on every Calls page until the user dismisses that refusal. **A write that fails is a state the page shows, never a reason to ask the server again.** If storage will not take the refused rewrite (quota, blocked storage), the desk that got the refusal shows it from memory, with its reason and note and the sentence "This device’s storage is full or blocked, so this refusal could not be recorded on it.", and retries the write on that entry's backoff; it does not send the entry again. *Dismiss* removes the entry. A kept refusal says only what is true of that refused outcome: it was not logged, why, and the note typed with it ("The note typed with it: …"); it never says whether that text is saved anywhere, since a later outcome may have saved the same note (re-check on `12f0303`, R2). Kept refusals are listed oldest press first; the first is shown and the rest are behind a count, so the call stays on screen. What is shown or collapsed never decides what is kept. **A refusal has one path** (review bot on `9c3ad27`): every desk on screen lists every kept refusal with its note, whichever tab pressed it and whichever call the desk is on. The only difference the call on screen makes is where the page puts keyboard focus. No other answer is passed between tabs. A desk learns an outcome only from the server.
+- **One reconciliation** (structure, part one; council and review bot on `b8c65f9`). Everything the page shows for the call it is on is computed by one pure function, `reconcile` in `callDesk.ts`, of exactly three inputs: the server's latest read of the task, the outbox entries for that task, and the user's draft in memory. The task read carries `storedRequestIds`, the request ids of every outcome stored on that task, and `offList`, whether the call is off the list and why. Every successful task read, first or later and from any path, goes through it, and so does every outbox change; nothing else sets the lock, *logged*, *pending*, off the list, or any sentence. In order:
+  1. **Stored.** The draft's press id (set when the user pressed *Log* on it) is in `storedRequestIds`: the press is logged, whoever received the answer and whenever. The page shows it as logged, from that read, and moves on to the call the server puts first. This is the only way a draft is consumed.
+  2. **On its way.** An unanswered entry for the call is in the outbox: *pending*, locked. It is this tab's press if its id is the draft's press id, otherwise one from another window.
+  3. **Being confirmed.** The draft's press id is neither stored nor in the outbox (its entry was just removed), and no task read started after the removal was noticed has answered yet: locked, while that read runs. A read started after it that still does not hold the id settles it: the press was never stored (it was refused, and the refusal dismissed), and the draft is a draft again.
+  4. **Off the list.** The server says the call is off the list: why, locked, with *Open the next call*. When the server logged it from a press that is not this tab's, the page says it was logged elsewhere. This tab's typed note is shown as not saved only when the server's read does not hold it and no kept refusal already shows it.
+  5. **Otherwise** a draft, ready to work.
+  
+  **An answer never touches a draft**, on screen or off: an accepted answer removes the entry, a refusal rewrites it, and what the page shows follows from the next read. The draft the user is typing lives in memory and is replaced only by the user, or by step 1. Its `sessionStorage` copy is a convenience for coming back to the page: a failed write is shown ("This note is not being kept on this device if you leave the page.") and never changes what `reconcile` decides.
+- **Reads are ordered, and every failure is counted** (structure, part two). Every read the page makes, Today, the queue and the call, goes through one reader per resource (`Refresher`, `src/web/calls/refresher.ts`) that runs one read at a time and folds the requests made meanwhile into one read after it, so an older answer can never be applied after a newer one, and the next scheduled read is always the newest answer's. Every failure, of any of those reads, goes through the one freshness and backoff rule below, and the call's own read is part of the page's freshness: a call whose read is failing is shown as possibly out of date, never as current.
+- **A redial and a callback's time are part of the press** (ticket 15b, written before its code). The draft holds the redial choice ("Call again tomorrow") and a callback's day and time as the user entered them, in the prospect's zone, beside the outcome, number and note; the draft's `sessionStorage` copy holds them too. *Log* turns them, once, into the entry's fixed body: `redial: true` only with an outcome the call's read offers a redial for (`redialOutcomes`; the choice stays in the draft whatever the outcome), and `callbackAt`, the instant with the prospect's offset. Every send reads them from the entry, so a retry, another tab's send or a send after a reload carries exactly what was pressed. **The boundary:** a callback with no time, a time the clocks skip in the prospect's zone, or a time not after the call's read instant (`asOf`) is refused in place, and nothing is sent; the draft stays. A time after the read but not after the server's own now is the server's to refuse, and that refusal is kept like any other. What the page says before *Log* is read, not computed: the day a redial moves the call to and the day it is skipped if still unworked come from the read's `redial` and `skipLimit` (the engine's `unworkedSkipDay`, the condition `expireUnworked` applies at each rollover); whether a callback's time is inside the calling hours, outside them, or on a day they never open is the engine's own window function (`clock.ts`) on the read's hours and zone, and a callback is accepted in every case (2.3). After *Log*, a sentence that says a redial or a callback was logged reads the server's record of that press (`storedCalls`, by request id), never the draft.
+- **The declined path is part of the press** (ticket 16c, written before its code). The draft holds the path the user chose on the "not interested" radios (`declinedPath`: stop, continue or win back), or none while the user has not touched them; the draft's `sessionStorage` copy holds it too, and the choice stays in the draft whatever outcome is picked, as the redial does. The radios show the user's choice, or, untouched, the path the call's read preselects (`declinedPath`, the phone track's configured path, or for a track with none what the engine does, question Q14), with every path the read does not offer (`declinedPaths`) disabled with its reason. *Log* fixes the path, once, into the entry's body as `declinedPath`, only with not interested: the user's choice, or, untouched, **the path the read the user pressed on preselected**. So a body always names its path, and nothing a later read says (a running edit of the phone track's path, ticket 19) changes what a press meant: every send, retry, other tab and reload reads the body. **The boundary:** a chosen path the call's read does not offer (win back where the campaign has no win-back branch at that read) is refused in place: nothing is sent, the draft keeps the choice, and the page says why and asks for another path. A path offered at the press but no longer by the time it arrives is the server's to refuse, and that refusal is kept like any other. **Read, not computed:** before *Log*, what logging does on the selected path is the call read's `declines`, one per path offered: the engine's own outcome (`logCallOutcome`, not interested on that path, a callback's hold released first as the route does) applied to a copy of the lead's state as of the read, storing nothing, as the redial preview is (ticket 15b). Each reports the lead's status after it, each of the lead's tracks the decline leaves unfinished or finishes (every main track other than the declined call's that had not finished, and the win-back branch's tracks once entered), each in the state the engine's progress then holds through the one exhaustive mapping Activity uses (`dependentStateOf`), and how much work is already with a provider and is asked to withdraw (`withProvider`). After *Log*, the sentence that says what was logged reads the server's record of that press (`storedCalls`: its `declinedPath`) and the lead's status from the read, never the draft.
+- **A time the clocks repeat** (council on `32454ea`, B). A day and time that occurs twice in the prospect's zone means its earliest occurrence after the call's read; it is refused in place only when both occurrences are past. Entering the day or the time chooses that instant against the read then, and the draft keeps it (`callbackAt`), so a reload and a retry send the same occurrence while it is still to come; a kept instant no longer an occurrence of the day and time shown, or no longer to come, gives way to the rule. The sentence that says the time back names the occurrence ("01:30 their time, after the clocks go back").
+- **Read, not computed, everywhere a call is described** (council on `32454ea`, C; verifier re-check on `32454ea`, H). On the Calls page, Today, the record and Activity, every sentence about a call that states a day, a time or a state takes it from a field of the server's read, formatted in a zone passed in explicitly: the user's zone from the read (`userZone` on the queue, Today and Activity), the prospect's from the call. Nothing under `src/web/calls`, and not Activity, reads the browser's zone or takes a zone or a `today` that may be left out (`src/web/calls/zones.test.ts` fails otherwise). A calendar date the engine counts by (an unworked skip's due date) is carried as that date and printed as a date, never re-derived from an instant. **Tense:** Activity is history. An entry says what was asked for and when; a present state (a callback still open and holding outreach, overdue, a track still waiting out its delay) is said only when the server's read at that instant says so, by the listing rule the record uses (`callbackOpen`, the overdue entry, an unworked skip's `after`), so no Activity sentence claims what the record's read denies. A lead that replied or was stopped keeps its tasks for a restart (2.3), and Activity and the record say them as history. **A track after another is said by the engine's own track state at the read** (verifier on `2027f24`), never inferred from how the track before it ended: the server maps every state of its stored progress through one exhaustive switch (`dependentStateOf`, `finishedStateOf`; a `never` check, so a state a later ticket adds fails typecheck until it has one): started; finished; skipped (declined, unworked, no usable channel, or by the user); dropped for win-back; waiting out its delay to a stated day; waiting while the lead is held; not started because outreach stopped or ended; started, then stopped with the lead's outreach (ticket 16c); a phone track that will not call, the lead having declined (ticket 16c); or no start resolved yet. The page renders that state with one sentence each (`dependentLine`, exhaustive too) and has no default sentence: only waiting and held, read from the server, say it will start.
+- **What the user chose is never replaced.** The first good number is chosen once, when a call's draft is made in that tab (and copied to its `sessionStorage`, so moving on and back finds the same draft); afterwards only the user changes the draft. A chosen number that stops being good is reported, and *Log* sends nothing until the user chooses again.
+- **Only a refusal is a refusal.** A 4xx whose code says the action was refused (`outcome_refused`, `not_found`, `invalid_request`) is definite. Any other answer, 408 and 429 included, is no answer.
+- **Freshness, one rule for Today and Calls** (`src/web/calls/refresher.ts`; settled 14 November 2026). While Today or Calls is visible it reads again every **20 seconds** (`REFRESH_INTERVAL_MS`, a little longer than the worker's 15-second tick), and also on becoming visible, on focus, on coming back online, after any action in this or another window (a storage event), and at the server's `nextChangeAt` when that is sooner. Hidden, it does not poll. Calls reads the call on screen with every read of the queue. **The guarantee:** while visible and the server reachable, what the page shows is at most one tick plus 20 seconds behind stored state. `nextChangeAt` is only a hint (calling hours opening or closing, the user's next day) that can make a read sooner; nothing depends on it being complete. A failed read keeps the screen and is retried with backoff (2, 5, 15, 30, then every 60 seconds). After two failures in a row of any of the screen's reads, the call's included, the screen says it may be out of date, with *Try again*.
+- **Keyboard focus is never left on the body.** An outcome logged, or a retry that succeeded, goes to the next call's number. A refusal goes to *Open the next call*. A number invalidated under the keyboard goes to another good number. Dismissing the last kept refusal goes to the call's number. Anything else that removes the focused control falls back to a ranked list (`src/web/focusRescue.ts`).
+
+**Two sources only** (named after the re-check and review bot on `9c3ad27`). Five defects found then shared one cause. Each treated the page's memory as a source of truth: a cached copy of the outbox in the storage adapter (a dismissed refusal came back from another tab's cache; a press held only in memory was lost on leaving when storage was full); a note held by the desk and shown as unsaved after a failed read; and a separate branch for the focused call that hid, then deleted, a refusal's note. The rule is that the page has two sources only: the server's read and answers, and the stored outbox entries.
+- **Storage is the only truth.** The adapter (`src/web/calls/storage.ts`) caches nothing. A key another tab removed reads as absent. Every change is a change to one key, or a read-modify-write of one stored value in one synchronous step. A removal is final: no desk writes back a copy it holds.
+- **The boundary of a press.** An outcome is not pressed until its outbox entry is stored. If storage refuses the write (quota, blocked storage), nothing is sent. A request the page could not track could be neither retried nor reconciled after the user leaves, and the user would believe it queued. So the page says the outcome could not be queued on this device and keeps the draft and the chosen number, and *Log* stays available. A refusal that arrives while storage is full cannot be rewritten as refused: it is shown from the desk that got it, and its write retried on the backoff (the rule above).
+- **What the desk keeps besides the two sources and the user's draft, and why.** None is written to shared storage, and none decides what was saved, logged or sent:
+  - the last server reads, the queue and the call, each with its reader's freshness;
+  - this tab's focus, and the draft of the call it is on, with a `sessionStorage` copy of each;
+  - the last outcome `reconcile` found stored for this tab's press, which the status line shows after moving on;
+  - per-entry retry timers (`sending`), the one backoff every send and every retried write goes through;
+  - `unstored`, refusals this desk got that storage would not record, shown until written or dismissed;
+  - `unanswered`, whose last attempt here had no answer, worded as "not confirmed yet";
+  - the count of task reads started, which step 3 compares with;
+  - `notQueued`, `draftNotKept` and a focus-transition counter.
+
+**Invariants** (the generated test asserts them after every step, and after the network settles with no user action):
+
+1. **Nothing stored twice.** The server holds at most one call record per press.
+2. **Never more than the server said.** A desk shows an outcome as logged only once the server's read holds that request id, and as refused only after a refusal for it.
+3. **Nothing lost.** After settling, no entry is unanswered, and every press is either stored on the server or kept as a refusal with its note until its own *Dismiss*; nothing else removes a kept refusal. An entry removed in any tab never reappears. A press storage refused sends nothing, says so and keeps its draft.
+4. **The focus holds.** It moves only when `reconcile` finds this tab's press for the call stored, or on *Open the next call*.
+5. **One lock.** The outcome controls are locked exactly while the call has an unanswered entry, or the desk shows the call off the list.
+6. **The user's choice stands.** A draft changes only when the user changes it, or when `reconcile` finds its press stored. No answer changes a draft; a failed `sessionStorage` write changes nothing but the sentence that says so.
+7. **Status is derived and true.** A desk shows a call as pending exactly while the outbox holds an unanswered entry for it. Once settled, what it shows agrees with the server's read: a call the server has off the list is never shown workable.
+8. **Gone means silent.** A desk no longer on screen writes nothing but outbox entries.
+9. **Liveness.** With no user action, every unanswered entry is sent until the server answers it. Settling uses only storage events, coming back online once, and timers due within a minute.
+10. **Bounded sending.** A desk sends an entry once when it first sees it and then only on that entry's backoff; while storage refuses to record a refusal, the refusal is shown from the desk and nothing is sent again for it (`callDesk.test.ts` bounds this by a count of requests, with every request answered at once for a long run of refreshes, storage events and timers).
+11. **Every sentence about saved, logged, sent or queued comes from the server's answer or read about that exact thing**, or from the failed storage write it reports. A kept refusal makes no claim about whether its note is saved. The generated runs check the page's sentences against the server's read.
+12. **A stored press is never an unsent draft.** Once settled, no tab shows as a draft, unlocked, a press the server has stored, whoever received its answer, including when the tab left Calls while it was on its way.
+13. **Reads are ordered and counted.** What a desk shows never goes back to an older read than one it has applied, and each failed read, of the queue or of the call, counts toward the out-of-date notice.
+14. **What is stored is what was pressed** (ticket 15b; the declined path since ticket 16c). The server's record of a press has the outcome, the redial, the callback time and the declined path fixed in its entry at the press, whichever desk sent it and however often. A callback, or a declined path the read does not offer, refused in place sent nothing. A not-interested press whose radios were untouched carries the path its read preselected, even when a later read preselects another. **The generated test's record of a press comes from the user's choice** (council on `32454ea`, A): built by the test before `log()`, from what the generated user chose (the outcome; a redial only with no answer, voicemail or not reached, and only when chosen; the callback's day and time converted in the prospect's zone by the test's own conversion, not the product's; with not interested, the path the user chose, or, untouched, the path the call's read showed preselected when the user pressed), and compared with the first outbox entry, every request and the server's stored record. A record taken from the outbox the code under test wrote could not catch a body corrupted where it is first built.
+
+Invariant 6 covers the redial choice, the callback's day and time and the declined path chosen on the radios like the rest of the draft: no answer and no refresh changes them. An untouched choice stays untouched: a read that preselects another path changes what the radios show before a press, never the draft.
+
+**The boundary.** A note over the server's 10,000 characters is refused in place, and so is a callback with no time, a time that does not exist in the prospect's zone, or a time none of whose occurrences is after the call's read (ticket 15b; a time the clocks repeat means its earliest occurrence after the read, council on `32454ea`), and a declined path the call's read does not offer (ticket 16c). An outbox entry the page cannot read is discarded. An action is created only for the call the desk is on, and never while it is locked.
+
+**By construction.** The request id and body are fixed at the press and stored before the first send, and every send reads them from the outbox. Every write a desk makes on an answer is a single-key `localStorage` write. "Pending", "refused" and "off the list" are recomputed from the outbox and the last server read on every change; they are never stored apart from them.
+
+**The generated test.** `src/web/calls/callDesk.generated.test.ts` runs real call desks against the real HTTP app and engine. There are two to four tabs, which reload, leave Calls, close, or are duplicated. They share one `localStorage`, and storage events reach the other tabs. Each run includes:
+- presses of every outcome;
+- requests delivered late or lost, and retries;
+- numbers marked bad from outside the desks;
+- leads replying, and the clock moving.
+
+Faults, each killed by a known seed in `pnpm check` (the invariant it breaks in brackets):
+- a resend with a new request id (7); logged shown when sent (2); an entry removed when sent (7);
+- a refresh that adopts the server's focus (4); no lock while pending (5); a number gone bad replaced (6);
+- pending kept after the entry is answered (7); a disposed desk still reading and writing the tab's storage (8);
+- a desk that retries only the entries for the call it is on (9);
+- a refusal removed without being kept (3); a kept refusal hidden on the call the desk is on (3); a stale copy of an entry written back over another tab's removal (3); a call's refusals removed on moving on from it (3);
+- `reconcile` ignoring the server's stored ids, so a stored press stays a draft (12);
+- a resend that drops the press's redial (14); an answer that resets the draft's redial and callback time (6); a callback whose time has passed sent anyway (14, the boundary: the generated runs check that no request carries a callback time not after the read the desk pressed on) (ticket 15b);
+- the body corrupted where it is first built: the redial dropped at the press, and a callback time read in the user's zone instead of the prospect's (14; council on `32454ea`). The runs include a lead in New York against a user in London, and fixed runs across the 2026 clock changes (29 March; 25 October, before and inside the hour the clocks repeat) that press callbacks for times inside that hour;
+- an answer clearing the draft on screen (6);
+- the declined path lost at the press (the user's override replaced by the read's preselected path), lost on a resend, and the preselected path read again at send time from the latest read of the call instead of the read the user pressed on (14; ticket 16c). The runs draw each run's win-back branch (present or not) and the phone track's configured path (unset, stop, continue, win back), press not interested on each path offered, overridden and not, and now and then a path the read does not offer, and change the stored phone track's path between reads as ticket 19's running edits will (a direct write, as `as-of-the-instant.test.ts` edits a launched skip limit), so a press untouched before the change and sent after it must carry the path it was pressed with;
+- a first read of a call skipping `reconcile` (3; also `callDesk.test.ts`, the queue naming a call its own read has off the list);
+- the call's failed reads left uncounted (13);
+- reads of one resource overlapping, so an older answer lands last (13).
+
+One fault is killed outside the generated runs, by a count of requests in `callDesk.test.ts`: a refusal storage cannot record sent again at once (10).
+
+The runs also hold reads of the queue and of a call and answer them later in any order, fail reads of a call, make a tab's `sessionStorage` refuse writes for a while, and, after settling, check the page's sentences against the server's read (11), that no stored press is still a draft (12), and that no call the server has off the list is shown workable (7).
+
+The runs also make storage refuse every write for a few steps at a time, and dismiss refusals and answer entries interleaved across tabs.
+
+### 4.5 SMS conversations
+
+An SMS conversation is one thread between a sender number and a recipient mobile, whatever campaign sent into it. A reply carries only that pair, so it cannot name a campaign by itself (both reviewers). The engine stores which subject owns each pair:
+
+- `sms_bindings(sender_number, recipient_key)` names the **owning subject**. A subject takes the binding in the transaction that commits its first SMS handover to that mobile, if no unreleased binding exists for the pair. If a concurrent handover took it first, the handover fails its predicates and the claim is withdrawn.
+- **An enrollment's binding is never transferred** (ruling 8). Once an enrollment owns a pair, it keeps it for good, including after it ends, so a late reply always reaches the campaign that texted. The table is its own history.
+- **A test run owns its pair only while it runs.** Ending the test run sets `released_at`, so a second test run with the same contacts can take the pair and complete. A test run whose pair is owned by an enrollment is held as `sms_conversation_taken`, like any other subject.
+- **Attribution.** A reply on a pair goes to its unreleased owner, which invariant 14 relies on. If the pair has no unreleased owner, the reply is recorded on the most recent released owner, which is always a test run, and changes nothing because that test run has ended. A reply that the user sent to an earlier test after a later one started goes to the running test run. That ambiguity exists only between the user's own test runs.
+- **Another subject** that needs the same mobile uses another sender number in its pool that has room, and keeps that number as its fixed SMS sender. If there is none, its SMS track is held with the reason `sms_conversation_taken`, "this mobile is in campaign X's SMS conversation from this number" (5.4). The held track drops nothing and is listed in Needs attention. It stays held until a free number joins the pool, or the user skips the step or stops the lead. Whether it should instead be skipped like a missing channel is question Q7; this is the interim.
+
+## 5. Running edits and the provider boundary
+
+### 5.1 Live tracks and steps
+
+- **A track** is live for a lead if it is not removed, or the lead has started it. A track that is removed after a lead started it keeps running for that lead ("rearranging tracks applies only to leads who haven't started the affected tracks").
+- **A step** is live if it is not removed.
+- **The lead's next step** in a track is the first live step, in the current order, that comes after the lead's last resolved step and has no result. "An added step reaches leads still in that track": it reaches them if it is placed after where they are. A step placed (or moved) before the lead's last resolved step is behind them. Sending it would be out of order, so it is not sent. That narrows the spec's wording, and it is question Q8.
+
+### 5.2 Reconciling an edit (ruling 7)
+
+Publishing an edit runs one transaction over every subject of the campaign. In it, every started, unfinished track with no live attempt beyond `claimed` is reconciled, **held or not**:
+
+- if the edit changes its pending step or that step's content, its `claimed` attempt is withdrawn (2.5);
+- `next_step_id` becomes the next step of 5.1;
+- `due_at` and `due_wall` are re-resolved (3.3) from the stored `basis_at`, `basis_wall` and that step's current wait;
+- a hold on a step the edit removed ends with that step.
+
+The stored step and the rule always agree (invariant 22). The claim's step guard (4.2) and the handover guard (5.5) check the same thing again against current state, so a track that an edit skipped cannot send a removed or stale step.
+
+| Edit | Reconciliation |
+| - | - |
+| Insert a step | If it lands between the last resolved step and the pending one, it becomes the pending step, and its due time is resolved from the same basis with its own wait. If it lands later, nothing changes now. If it lands behind the lead, see Q8. |
+| Remove a step | If it is pending (no attempt, or only `claimed`, which is withdrawn), the next live step becomes pending from the same basis. If none is left, the track finishes `completed` at the current lead time. If it is in flight or `unresolved`, it resolves normally, because it may have reached the provider. Then the next step follows. |
+| Reorder steps | The pending step is recomputed by 5.1. Steps moved behind the lead are not sent (Q8). |
+| Change a wait | If the step is pending, its due time is re-resolved from its basis. |
+| Change copy | A `claimed` attempt on that step is withdrawn. The copy renders at handover, so the next attempt carries the new copy. Attempts already handed over keep their copy (ADR 0002). |
+| Add a missing fallback | Nothing stored: the render check runs at claim and handover, so tracks held `render_failed` claim again. |
+| Add a track or change connections | Unstarted tracks: any stored `start_at` is discarded, and the start rule is re-applied by the next evaluation, resolving from the predecessor's stored `finished_at`. Started tracks: unchanged. |
+| Remove a track | Started: unchanged. Unstarted: its `start_at` is discarded. 7.1 refuses a definition whose live rules name a removed track, so its dependents must be reconnected in the same edit. |
+| Change a track's window | Nothing stored: windows apply at claim. |
+| Change the declined path | Nothing stored: it is read when an outcome is logged, and preselected on the screen. |
+| Change the skip limit | The `skip_deadline` of every open task is re-resolved from its `due_at` and `due_wall` with the limit now in force for its track and the user's zone now (3.5, "Editing the limit"); days already judged stay judged. |
+| Change the campaign's default zone | For subjects using the default zone: pending due times are re-resolved from their basis, and `start_at` is re-resolved only for tracks that have not started. A started track's `start_at` is history and stays. |
+| Remove a sender account from a pool | Subjects already fixed to it keep it ("one sender inbox for the whole campaign"). New subjects choose from the new pool. If the removed account is disconnected, its subjects' work waits in Needs attention. A fixed sender never changes. |
+| Change capacity, gap or `k` | Nothing stored: they apply at the next claim. |
+
+### 5.3 Ports and the attempt contract (ruling 1)
+
+Each sending channel has one port:
+
+```
+interface SendPort {
+  readonly retryable: boolean            // a repeat call with the same key cannot send twice
+  readonly notSentIsFinal: boolean       // lookup's "not-sent" is a documented final statement for this transport
+  handover(a: { idempotencyKey, sender, destination, rendered, threadRef? }):
+    Promise<{ kind: "accepted", providerRef } | { kind: "rejected", reason, final: true } | { kind: "unknown" }>
+    // "rejected" only for a documented refusal before processing (validation, block list, 402, 429);
+    // a 5xx, a timeout or anything undocumented is "unknown"
+  withdraw(a): Promise<"withdrawn" | "too-late" | "unknown">     // "withdrawn" only on a positive provider signal
+  observe(since): Promise<ProviderEvent[]>   // sent (with the provider's send time), delivered, failed, bounced, reply, unsubscribed, rejected
+  lookup(a): Promise<{ kind: "sent", sentAt, providerRef } | { kind: "queued" } | { kind: "not-sent" } | { kind: "unknown" }>
+    // queued: the provider holds the work and has not sent it yet
+}
+```
+
+Retryability and "not sent is final" belong to a **transport**, not the port: `transportFor(step)` names the one a step travels by, and the claim stores it on the attempt with the payload (PR 37 ruling 9). The pre-send check is a port method too. Every port wait is bounded by `CALL_TIMEOUT` (PR 37 ruling 5).
+
+**Email** is ADR 0002's Instantly adapter. The `/leads/add` opener is `retryable: true`. The reply and forward follow-up transports have no key, so they are `retryable: false`. `withdraw` returns `unknown`, and `notSentIsFinal` is false, until ADR 0002's X5 shows otherwise. A `not-sent` that is not final is treated as `unknown`.
+
+**SMS:** no provider is provisioned or chosen (#28).
+
+- The running app registers an `UnprovisionedSmsPort` with no sender accounts, whose transport is unavailable. An SMS track therefore always meets launch blocker 3, which is honest by construction, and no SMS step is ever claimed.
+- Tests and ticket 13's demonstration use a fake SMS provider (`test/support/fake-sms-port.ts`), whose numbers read "Simulated SMS (not a provider)". **The running app never registers it**, not even against the development data directory (ticket 13a: the brief allows no simulated provider in the running application, so nothing can be mistaken for a working integration). `GET /api/sms-provider` reports `none` in the running app.
+- A text has no idempotency key the app can rely on, so the fake's transport is `retryable: false`; a real adapter states its own. An SMS reply carries only the two numbers (4.5). A number the carrier reports invalid after a send (not a mobile, unallocated, permanently unreachable) is the `bounced` event, which marks the mobile bad. **An adapter must never map a transient failure** (a handset off, a full queue, a carrier outage, a filtered message) to `bounced`: that would mark a good mobile bad for every campaign. A transient failure after the send is no event the engine acts on; the step stays sent.
+
+**Calls** have no port (ruling 9). The user dials on their own phone, and a call counts as made only when the user logs an outcome. That refuses, by construction, to "pretend a call happened when it did not". A phone track needs no connected sender account.
+
+**The attempt state chain** runs `claimed` → `handed` → `accepted` → terminal (`sent`, `rejected`, `withdrawn`). `withdraw_requested` is a flag that only goes from false to true, and `unresolved_since` is set once and never cleared. Every event below only moves forward. A repeated event, or one that would move backwards, is ignored and logged. Results may arrive late, twice or out of order. "Settle" in the table means: one `SETTLING` after the attempt's `last_call_wall`, call `lookup`.
+
+| Event \ state | `claimed` | `handed` | `accepted` | terminal |
+| - | - | - | - | - |
+| Handover transaction commits (5.5) | → `handed`, `calls = 1`; copy, `handed_at`, `handed_wall`, `last_call_wall` and the pacing slot written and committed **before** the call | ignore | ignore | ignore |
+| Handover predicates fail (5.5) | → `withdrawn`, `ended_by = guard`. The provider was never called | not possible: the guard runs only on `claimed` | — | — |
+| Claim older than `SETTLING` (5.5 step 5) | → `withdrawn`, `ended_by = claim_expired` | — | — | — |
+| Call returns `accepted` | impossible | → `accepted`, with its reference; any retry intent ends, and settlement stays scheduled (PR 37, review bot `attempt.ts:81`) | ignore (duplicate) | ignore |
+| Call returns `rejected` (final) | impossible | → `rejected` | → `rejected` only on a provider signal that it will not send (Instantly skipped the lead, P4) | ignore |
+| Call returns `unknown`, times out after `CALL_TIMEOUT`, or the worker crashed before recording the answer | impossible | try the **retry authorization** (5.6); if it is refused, stay `handed` and settle | stays `accepted`; settle | ignore |
+| Sent observed (with send time) | impossible: no reference to match | → `sent` | → `sent` | `sent`: a missing provider reference is attached, otherwise ignore. `withdrawn` with `ended_by = lookup_not_sent`: → `sent`, the one terminal state an observation may leave, because the provider's earlier "not sent" was not a confirmed withdrawal. Other terminal states: a missing reference is attached and the send is recorded as a provider anomaly in Needs attention, counted on its send day for capacity, never as a second send of the step |
+| Quiesce | → `withdrawn`, `ended_by = quiesce` | set `withdraw_requested`, call `withdraw` | set `withdraw_requested`, call `withdraw` | ignore |
+| `withdraw` returns `withdrawn` (positive signal) | — | → `withdrawn`, `ended_by = provider`; the work settles, releasing the reservation of every attempt under its key (4.2) | same | ignore |
+| `withdraw` returns `too-late` or `unknown` | — | unchanged; settle | unchanged; settle | ignore |
+| `lookup` returns `sent` | — | → `sent` at `sentAt`, with the provider reference it carries | → `sent` at `sentAt`, with the reference | as "Sent observed" |
+| `lookup` returns `queued` | — | → `accepted`; look up again after each `SETTLING`; after `MAX_QUEUED_LOOKUPS` consecutive `queued` answers set `unresolved_since`, and keep looking up | same | — |
+| `lookup` returns `not-sent`, `retryable` | — | try the **retry authorization** (5.6) with the same key. If it is refused: → `withdrawn`, `ended_by = lookup_not_sent`, keeping its reservation, still looked up each `SETTLING`, and **unresolved** from that answer (`unresolved_since` set unless already set: the transport cannot vouch for the not-sent and no retry is left; PR 37 review round 2, ruling 2); the step's next attempt **inherits this `idempotency_key`**, so no later attempt for the step uses a new key. Also when already unresolved, keeping `unresolved_since` (PR 37 ruling 6) | same | a `lookup_not_sent` attempt: a final not-sent settles it; any other answer but `sent` keeps it unresolved and looked up |
+| `lookup` returns `not-sent`, not `retryable`, `notSentIsFinal` | — | → `withdrawn`, `ended_by = provider`; the work settles (4.2) | same | — |
+| `lookup` returns `unknown`, or a `not-sent` that is not final | — | set `unresolved_since` (5.4); look up again after each `SETTLING` | same | — |
+| User: "mark sent" | — | unresolved only: → `sent` (`ended_by = user`) | same | unresolved `lookup_not_sent` work: → `sent` (`ended_by = user`); counted on its day only, if another attempt already sent the step |
+| User: "mark not sent" | — | unresolved only, and **refused while the latest `lookup` answer is `queued`**: → `withdrawn` (`ended_by = user`); the work settles, its reservation is released across its key, and it is no longer looked up (PR 37 review round 2, ruling 2) | same | unresolved `lookup_not_sent` work: the same |
+
+**Rows about the work, not the attempt** (PR 37 review round 3). A send (observed, by lookup, or the user's "mark sent"), a lookup answer, the provider's refusal and the user's "mark not sent" are events about the provider work: they change its row and every attempt carrying it in one change. A send settles the work and records the step on the work's first attempt handed over; every other live attempt carrying it is settled by the same statement (`withdrawn`, `ended_by = provider`, or `user` for the mark). A lookup answers for the work and moves its live attempt, if any, as the rows above say. "Mark not sent" settles the work (`user_not_sent`), releases its reservation, ends its lookups and withdraws every live attempt carrying it (`ended_by = user`); the step's next attempt takes new work. Unsettled, called work that no live attempt carries is unresolved from then on; an inheritor's handover attends it again. A send the provider makes after the work settled otherwise is an anomaly, counted on its send day, never a second send of the step.
+
+**A provider send belongs to the provider work that produced it** (PR 37 ruling 4). A sent fact for a key settles on the step's first attempt handed over under that key, with its own handover time, payload and send basis, also when that attempt was withdrawn as `lookup_not_sent`; every other live attempt of the step under that key (its inheritor, claimed or handed) is quiesced in the same change. A later sent fact for the same work settles a still-live inheritor by the provider's statement (`withdrawn`, `ended_by = provider`). A step never has two `sent` attempts. A sent fact for the same key attaches a missing provider reference to an attempt in any state, terminal ones included (PR 37 ruling 1).
+
+**Every attempt leaves a waiting state in bounded time** (rulings 3–4; PR 37 ruling 5). Settlement runs on its own clock: an unknown answer schedules the first lookup one `SETTLING` after the call, whether or not a retry is wanted, and a same-key retry still waiting for its pacing slot when the lookup is due is refused, so the attempt reaches lookup and then unresolved within the bound below. An attempt whose call answer was never recorded though no call is in progress (an exception while applying it) is treated as the crash row within `CALL_TIMEOUT`, without a restart.
+
+- **`claimed`:** handed over, or withdrawn by its predicates, or withdrawn after `SETTLING`.
+- **`handed` and `accepted`:** terminal, or `unresolved_since` set, within `SETTLING × (MAX_QUEUED_LOOKUPS + 1)` after their last call, plus the latency of those lookups. The number of calls is at most `MAX_CALLS`.
+- **Unresolved attempts** keep being looked up each `SETTLING`, so a later `sent` or `not-sent` still settles them. One lookup per key per pass serves every attempt sharing it.
+- **Uncertain work** (`withdrawn`, `ended_by = lookup_not_sent`) is unresolved from the not-sent answer that left it without a retry, so it is listed until the provider or the user settles it.
+- **After `withdraw_requested`** the attempt is never called again.
+- **A new attempt** for the step is possible only once the step's attempt is terminal and not `sent`.
+
+The step's state is derived from its attempts: sent if one is `sent`; in flight if one is not terminal; otherwise pending. **Withdrawn without a provider statement happens only from `claimed`.** An attempt that may have reached the provider is never withdrawn by the app on its own, never repeated without its key, never repeated after a withdrawal request or once unresolved, never called more than `MAX_CALLS` times, and never repeated while its subject is not running.
+
+**The user's override is the one exception.** "Mark not sent" on an unresolved attempt is the user's explicit decision under ADR 0002 P3, and it is refused while the provider reports the work queued. It releases the work's reservation (4.2). If the provider did send it, the step can then be delivered twice, and that inbox can send one more than its capacity that day. The at-most-once invariants (4, 5) and the capacity check on the delivery log (10) therefore exclude a send the provider made after the user marked its work not sent, and the screen warns about this before the user confirms.
+
+### 5.4 Held tracks
+
+A track is **held** when the engine cannot proceed without guessing or without the user. This is derived, not stored. A held track stops only itself and the tracks after it; other tracks and the lead's status are unchanged. Each hold shows in Needs attention with its reason:
+
+- **`unresolved`:** an attempt with `unresolved_since` set (5.3). The user resolves it, or a later lookup or observation settles it.
+- **`render_failed`:** the claim cannot render the copy (4.2).
+- **`provider_skipped`:** Instantly skipped the lead for no reason the API exposes (ADR 0002 P4): an attempt `rejected` with that reason, until the user skips the step or resumes it.
+- **`sms_conversation_taken`:** the mobile's SMS conversation from every free number belongs to another subject (4.5).
+- **`no_thread`:** a `continue_thread` step whose track has no thread to continue (its earlier send carries no provider reference, as after the user's "mark sent"). It is held, not sent (PR 37 ruling 1).
+
+Account-level problems (disconnected or unhealthy, stale inbox, quota exhausted) hold no track. Claims for that account wait, and Needs attention lists the account, unhealthy and disconnected ones included (PR 37 ruling 10).
+
+**An inbox never stalls silently** (ruling 3). An account whose in-flight places (`k`) are all taken by attempts older than the settling period is listed in Needs attention with the attempts holding it, for example "inbox X is waiting on an unresolved send to Y". The user's mark frees the place.
+
+**Held capacity** (PR 37 review round 2, ruling 2). Every inbox with unresolved work holding a reservation, live or withdrawn as `lookup_not_sent`, is listed in Needs attention with how many of its daily sends that work holds, its capacity and today's sends, and the work: one entry per piece of provider work, with its lead, step, destination, latest lookup answer and whether "not sent" is allowed (refused while the provider reports it queued). The user's mark, sent or not sent, settles it.
+
+### 5.5 The worker
+
+The outbox runs in this order:
+
+1. **Claim** (4.2) and commit.
+2. **Wait for the slot.** Each account hands over its `claimed` attempts **in 4.3 priority order**: when `next_slot_at` passes, the highest-priority claimed attempt on that account goes next.
+3. **Pre-send network check**, once the slot is free: for email, ADR 0002's pre-send reply check. Its time is stored as `presend_checked_wall`. A reply it finds is applied as a reply event, which quiesces the claim. Its result is valid for `PRESEND_MAX_AGE` (5.6); a handover that misses that age runs the check again. **Since ticket 17a** (council K on `56d599c`) every handover and every retry runs the check afresh, right before the transaction that authorizes it, and never reuses an earlier one; `PRESEND_MAX_AGE` stays as predicate 14's bound.
+4. **Handover transaction** (ruling 1). It is one write, `UPDATE attempts SET state = 'handed', calls = 1 … WHERE id = :a AND state = 'claimed'`, committed only if every one of these **predicates on current state** holds. None of them compares versions: the claim bumped the subject's version itself, and the attempt is excluded from its own conditions.
+   1. The subject is not ended, not lead-paused, and has no open callback task. For an enrollment, its campaign is launched and not paused; for a test run, it is running.
+   2. The track has started and has not finished.
+   3. Its `next_step_id` is the attempt's step.
+   4. The step has no `step_results` row.
+   5. The step is not removed in the current definition.
+   6. `due_at ≤ leadNow`.
+   7. No other non-terminal attempt exists for this step (`id ≠ :a`).
+   8. The track's window is open now, in the prospect's zone.
+   9. The account is healthy and not in an account-level wait.
+   10. The account is the subject's fixed sender, or, when none is fixed, is in the track's pool.
+   11. For SMS, the pair is unbound, or bound to this subject.
+   12. The destination is good and still belongs to the lead.
+   13. No reply has been recorded for the subject since `claimed_wall`.
+   14. `presend_checked_wall ≥ now − PRESEND_MAX_AGE`, and the check found no reply.
+   15. The attempt's capacity reservation exists: its provider work is unsettled. When work settles, by any route (sent, final not-sent, confirmed withdrawal, rejection, the user's mark), every attempt still carrying it that has not been handed over is withdrawn in the same transaction (review bot on `0dc88ab`); a step whose work settled as not sent gets a fresh attempt with a fresh key through the normal claim, and a provider skip still holds the track.
+   16. `now ≥ next_slot_at` on the account.
+   17. A `continue_thread` step has a thread to continue (PR 37 ruling 1).
+   18. No reply from the destination to this account is pending correlation (2.4; PR 37 review round 2, ruling 3). While one is, the claim waits (it is neither handed over nor withdrawn by the guard; its age limit still applies), and a same-key retry waits too.
+
+   In the same write:
+   - the copy is rendered from the current definition and stored on the attempt;
+   - `handed_at` and `handed_wall` are set;
+   - `next_slot_at = now + gap`;
+   - if not yet fixed, the subject's sender is fixed to this account and, for SMS, the binding is inserted.
+
+   The provider is called only if this row changed. If a predicate other than 16 or 18 fails, the attempt becomes `withdrawn` (`ended_by = guard`), and its reservation and in-flight place are released; the step stays pending with its deadline unchanged. If only predicate 16 fails, the attempt stays `claimed`.
+5. **The claim's age limit.** A `claimed` attempt not handed over within `SETTLING` of `claimed_wall` becomes `withdrawn` (`ended_by = claim_expired`), releasing its reservation and in-flight place. A later evaluation claims the step again. So a pre-send check that cannot run, or a slot that never frees, does not hold the place for ever.
+6. **Call** the provider, outside any transaction, with `idempotency_key` and the stored copy. **The path from the authorization commit to the port call is synchronous inside the inbox lock** (PR 37 ruling 2; review round 2, ruling 1): the authorization commits through a store write that completes before it returns, the immutable request is built from the authorized attempt alone, and the port is called on the same synchronous run, so no other write in the process can land between the commit and the call. Authorization, call and pacing slot are one serialized step per inbox. **One engine tick runs at a time per process:** the timer, a launch, restart settlement, observation, the user's marks, a late answer and every other entry point queue behind the running tick. The slot then moves to the call's actual start plus the gap, so pacing holds on the provider's call log even if time passed before the call.
+7. **Apply the result** through the table in 5.3.
+8. **Apply observations** (sent, bounce, reply) through the same table. Each is matched by provider reference or thread (ADR 0002 "Recovery") and is idempotent by provider id.
+
+Because the handover re-checks the step, no change can slip in between the claim and the call (skip, edit, reply, pause, sender trouble). The window left for a change to race the provider is the call itself, which is ADR 0002's bounded handover.
+
+**Known limit** (PR 37 review round 2, ruling 5). Every provider wait is bounded by `CALL_TIMEOUT`, but within a tick the waits for different inboxes run one after another: lookups, withdrawals and send calls for one inbox wait behind another inbox's. During a provider outage one tick can take several `CALL_TIMEOUT`s. Running them concurrently per inbox is left for later. Because ticks run one at a time (step 6), a user action (a mark) or a launch waits for the running tick, which during an outage can be long; yielding between passes or capping the port time per tick is left for ticket 20 (PR 37 review round 3).
+
+### 5.6 Same-key retries, and the engine's parameters
+
+**A same-key retry is its own atomic authorization** (ruling 1). It is one write, committed only if all its conditions hold:
+
+```
+UPDATE attempts SET calls = calls + 1, last_call_wall = :now
+ WHERE id = :a AND state = 'handed' AND retryable = 1
+   AND calls = :c AND calls < MAX_CALLS
+   AND withdraw_requested = 0 AND unresolved_since IS NULL
+```
+
+It is committed only together with:
+
+- the current-state predicates 1–9, 12 and 13 of 5.5, excluding its own attempt;
+- a fresh pre-send check (predicate 14);
+- the pacing slot (predicate 16), setting `next_slot_at = now + gap` in the same write.
+
+Predicates 10 and 11 were settled by the first handover.
+
+The call then resends the **identical `idempotency_key` and the identical stored payload**. The copy is not re-rendered: the copy-is-current check applies only to a first handover.
+
+If the slot is busy, the retry waits for it. If any other condition fails, there is no retry, and the attempt settles through `lookup` (5.3). Recovery after a crash reaches the provider again only through this authorization (section 6), so a retry is paced, guarded and counted like a first handover.
+
+**Parameters**, one value each, used everywhere in this ADR:
+
+| Name | Default | Meaning |
+| - | - | - |
+| `MAX_CALLS` | 3 | Send calls per attempt in total: the handover plus at most two same-key retries. |
+| `SETTLING` | 15 minutes, until ADR 0002's X1 measures the handover latency; then that latency plus a margin | The wait after a call before `lookup`; the maximum age of a `claimed` attempt; the interval between repeated lookups. |
+| `MAX_QUEUED_LOOKUPS` | 12 | Consecutive `queued` answers before an attempt is unresolved. |
+| `PRESEND_MAX_AGE` | 60 seconds | How old a pre-send check may be at the handover or retry it authorizes. |
+| `CALL_TIMEOUT` | 30 seconds | How long a send call may take before it counts as `unknown`. |
+| `MAX_RUNNING_CREDIT` | 60 seconds, four of the worker's 15-second ticks | The most running time one observation may credit to a wait. `runningCredit` in `clock.ts` is the one definition of running time: the gap since the wait was last counted, never negative and never more than this. A suspension of the process, a slow tick or a forward clock jump is never credited whole, and a backward jump credits nothing. A held reply counts running time this way. |
+
+## 6. Restart and the interruption notice
+
+On start, before the first evaluation:
+
+1. **Observe.** Apply provider events since the last checkpoint, with ADR 0002's overlap. The time the application was not running is not counted as a held reply's wait; outstanding events are observed and due lookups made before any held reply is evaluated, so a reply's thread can attach before it would fall back (PR 37 review round 3). A held reply survives a restart.
+2. **Settle open attempts** through the 5.3 table, with no separate path:
+   - `claimed`: 5.5 steps 2–5, in priority order: the slot, a fresh pre-send check, the handover transaction, the age limit;
+   - `handed` with no recorded answer: the crash row of the 5.3 table, that is, the retry authorization of 5.6 (paced and guarded), else settle;
+   - `accepted`, or `handed` once refused a retry: no call; `lookup` once `SETTLING` has passed since `last_call_wall`.
+3. **Evaluate,** which releases overdue work through pacing, the in-flight bound and capacity.
+4. **The interruption notice** (ruling 13).
+   - **Detect.** An interruption happened if the last tick before stopping (`engine_heartbeat`, written each tick) is older than twice the tick interval.
+   - **Count.** The recovery pass counts the sends it actually reschedules: email and SMS items that were due before restart, belonged to running subjects, and are claimed after restart.
+   - **Write.** When that work has drained, or at the end of the day, the line "sending was interrupted from X to Y; N sends rescheduled" is written. Only the latest notice is kept (spec: "no history or audit log beyond that").
+
+Nothing is sent twice: a step has at most one live attempt; a retry reuses its key and only on a retryable transport; and anything that cannot be settled is held. Nothing is skipped: a pending step stays pending until it is claimed, skipped by a rule or the user, or held with a reason. Both promises stay unverified against the real provider until ADR 0002's X5 and X6 pass. X5 must also show that an Instantly idempotency key is still honoured after an outage of days. Laptop-independent sending is unverified while operation is local-only (#28).
+
+## 7. Input refused at the boundary
+
+### 7.1 Definitions that cannot be saved
+
+The canvas cannot produce these, and the server refuses them with a plain message. None is a launch condition; such a definition never exists.
+
+- A cycle in start rules, after "together" is resolved.
+- A start rule that names a missing or removed track, or a track in the other branch.
+- A track with more than one start rule. That includes a track connected "after" two tracks (Q1).
+- A call track with more than one step (spec: a phone track is "one call with no follow-ups").
+- A call step with copy (ticket 14a, verifier F2): a call has no copy of its own; the campaign's call script shows on every call task.
+- A call track in the win-back branch (spec: "no cold call").
+- A call skip limit that is not a whole number of days, at least 1, on the campaign or on a phone track; a skip limit on an email or SMS track (ticket 14c).
+- A declined path of `win_back` when the win-back branch has no live track.
+- A declined path on a track that is not a phone track (ticket 16a).
+
+Each is said in plain words, naming the track within its branch ("the win-back email track", "Win-back SMS track 2"; `trackLabel` names it the same way): "The win-back branch cannot hold a phone track: a lead who declined is never called again in this campaign", "The phone track's declined path is win back, but the win-back branch has no tracks: add a track to it, or choose stop or continue., "The win-back email track starts after a track of the main sequence: connect it inside the win-back branch, which starts when a lead declines".
+- A wait on a first step. A negative or fractional wait or delay.
+- A `continue_thread` step as the first email step: there is no thread to continue.
+- A window with no days, or with equal start and end.
+- A zone that is not an IANA name.
+- A capacity, gap or `k` that is not a positive number.
+- An edit that changes a track's channel or moves a step to another track. Remove it and add a new one, so that ids keep one meaning.
+
+### 7.1.1 Outcomes refused at the boundary (ticket 15a)
+
+An outcome request is refused, with a plain reason and no change, when it asks for a redial with an outcome other than no answer, voicemail or gatekeeper; a callback requested with no time, or with a time not after now; or a callback time with any other outcome; a declined path with any outcome but not interested ("A declined path goes with not interested only"); or not interested whose path, the track's or the override, is win back in a campaign with no live win-back track ("The win-back branch has no tracks: choose stop or continue"; ticket 16a). A callback time that is not an ISO 8601 instant with its offset, or any field the release does not know, is a 400 (`requestObject`). Every refusal stores nothing, so the action can be sent again with its request id; every accepted action, a redial and a callback included, is logged once per request id (verifier B3 on `a1399ce`).
+
+### 7.2 Exactly three launch blockers
+
+These block launch, and they block publishing an edit to a launched campaign ("retain the same three blockers", ticket 19). Everything else is a warning, including "no test run since the last edit" (ticket 21).
+
+1. **Empty copy.** A live email or SMS step in either branch has an empty body, or an empty subject on a `new_subject` step. Call steps have no copy; an empty call script is a warning.
+2. **A merge field with no fallback that some lead lacks.** Checked against every enrollment of the campaign that has not ended. For a lead enrolled later, the claim makes the same check (4.2).
+3. **A track whose channel has no connected sender account.**
+   - An email track needs at least one healthy inbox in its pool.
+   - An SMS track needs at least one connected SMS sender, so SMS is blocked until a provider exists.
+   - A phone track needs none, because the user dials.
+
+**Nothing to launch (interim; question Q9).** A campaign whose main sequence has no live track has nothing to launch. The Launch button is replaced by "Add a track to launch", and the server refuses a launch request with that message. This is not one of the three blockers, and it is not reported as empty copy. A call-only campaign has tracks, so it launches. Whether the human accepts this as a precondition, given that the spec lists exactly three blockers, is question Q9.
+
+## 8. Invariants
+
+The generated test asserts every one of these after every event.
+
+1. **One status.** Every enrollment has exactly one outreach status, and the stored column equals `deriveStatus` of the stored state.
+2. **Nothing reaches a provider for a subject that does not run.**
+   - No attempt is claimed unless 4.2's guard held. No attempt moves from `claimed` to `handed` unless 5.5's predicates held. No retry is called unless 5.6's authorization committed. Each check runs in the same transaction, against current state.
+   - **Checked against the fake providers' call logs** (handovers and retries alike): every call happened at a moment when its subject ran and the step was its track's pending step with no result. Every delivery comes from such a handover, and at most `k` per account were outstanding when the subject stopped.
+3. **At most one live attempt and one `sent` attempt per step**, by unique index.
+4. **Sent at most once, checked against the fake providers' delivery logs.** Each `(subject, step)` is delivered at most once, across resumes, win-back, edits, crashes, lost responses, retries and quiesces. This is not checked against the application's own records. The one exclusion is a step whose earlier attempt the user marked "not sent" (5.3).
+5. **Attempts only move forward.** No attempt leaves a terminal state, and `withdraw_requested` never clears.
+   - Without a provider statement or the user's mark, `withdrawn` happens only from `claimed`.
+   - The one terminal state that an observation may leave is `withdrawn` with `ended_by = lookup_not_sent`, and only for `sent`.
+   - No attempt with `retryable = false` is called twice.
+   - No attempt is called after `withdraw_requested` or `unresolved_since`, or more than `MAX_CALLS` times in total.
+   - Every call of one attempt carries the same `idempotency_key` and payload, and a step's attempts after a `lookup_not_sent` reuse that key until its work settles, and never after (PR 37 review round 3).
+6. **A finished track never restarts.** Once `finished_at` is set, the track gets no new attempt and no new task, and `started_at` is written once. A result can still be added for an attempt that was live at the finish, but it changes neither the finish reason nor any successor (ruling 7).
+7. **Starts follow their rule.** A track starts at its stored `start_at`, which was resolved from the rule in force when it was resolved. For `after(P, d)` that is d calendar days after P's `finished_wall` (3.3). Tracks with the same rule and the same resolution start at the same lead time.
+8. **Steps go in order and on time, at handover.** Steps are resolved in the order of 5.1. **On the fake providers' handover logs**, no step is handed over before its `due_at` (as the reference model predicts it), out of order, after a result, or after it was removed or skipped. A **first** handover carries the copy current at that handover. A retry carries exactly the payload of its attempt's first handover.
+9. **Clocks freeze exactly.**
+   - `frozen_since` is set exactly when `runs(s)` is false, and `leadNow` is then constant.
+   - Stored deadlines change only through their creation and the edits in 5.2. A withdrawal, a rejection or a temporary refusal leaves the pending deadline unchanged.
+   - The wall instant at which a lead reaches any deadline moves by exactly the total frozen time.
+   - A next step's basis is its predecessor's provider send time, clamped to between the handover and now and mapped exactly through the `freezes` record (3.3), not the time the app observed it. `basis_at` and `basis_wall` describe the same point.
+10. **Capacity.** For every account and reset day, counted sends plus open reservations never exceed capacity, counted per provider work with uncertain work keeping its reservation (4.2). **On the fake providers' delivery logs**, no inbox sends more than its capacity on any reset day (PR 37 ruling 3), the one exemption being a send the provider made after the user marked its work not sent (5.3, PR 37 review round 2).
+11. **In-flight bound and pacing.** An account never has more than `k` attempts in `claimed`, `handed` or `accepted`. **On the fake providers' call logs**, two send calls from one account (first handovers and same-key retries alike) are never closer together than its gap. That includes anything recovered after a crash, and test runs.
+12. **Priority, at the handover.** When an attempt is handed over on an account, no other `claimed` attempt on that account that met every predicate except the slot (16) and the pre-send check (14) had a higher priority (4.3); the pre-send check runs only for the attempt the slot goes to (PR 37 ruling 9). When a claim is made, no unclaimed item eligible for that account had a higher priority.
+13. **Windows.** Every claim happens inside its track's window in the prospect's zone. Every task listed as "ready now" is inside calling hours.
+14. **Campaign-local replies.** A reply changes only the subject that owns the thread or the SMS binding. Other campaigns, colleagues and company leads are unchanged. The exception is a reply with no thread, or one whose thread never becomes known within one settling period: it falls back by inbox and address (2.4) and changes every subject whose sent or uncertain work, handed over at or before it from that inbox to that address, it matches, which can be leads in other campaigns. Each pair has at most one unreleased binding. It belongs to the subject whose first SMS handover to that mobile committed first. An enrollment's binding never changes or is released. A test run's binding is released when the test run ends.
+15. **No call after a decline.** After any declined outcome, the enrollment has no open call task, and none is ever created again. Win-back never has a call task.
+16. **Call tasks.** These hold:
+    - an open task's track is unfinished, and a lead that ended `interested_on_call` has no open call task at all;
+    - no outcome is accepted on a call task before its `list_day`, or on a callback task before the user-local day of `callback_at`, and an overdue callback is listed every day until its outcome;
+    - a subject has at most one open callback task, and while it is open the subject does not run;
+    - every call attempt was logged on a task listed at that moment under 2.3, and every outcome logged on a listed callback task is accepted;
+    - a callback task is never expired by the skip limit;
+    - redials and rollovers never change `due_at` or `skip_deadline`;
+    - "skip for now" never adds to calls made;
+    - a task that was never listed is never expired.
+17. **Call capacity.** New tasks listed per user day never exceed capacity minus committed tasks, and committed tasks are never removed for lack of room.
+18. **Nothing is dropped.** After a drain phase at the end of each run, with enough time and capacity and no new events, every subject is ended, holds, or has each unfinished track held with a reason (5.4) or waiting on an open call task. A running lead may also wait on an inbox that Needs attention lists (5.4: account problems hold no track), and must progress once it clears; the drain accepts that wait only while the attempts holding the inbox have latest answers `unknown` or `queued` (a `not-sent` the transport cannot vouch for reads as `unknown`) (PR 37 ruling 9), or while every inbox it may use has all its daily sends held by unresolved work listed in Needs attention (PR 37 review round 2). The drain runs at the configured capacity, so a reservation that is never released shows as a lead that never sends.
+19. **Good destinations only.** A claim names a detail that is good at the time of the claim and belongs to the lead under ADR 0001's ownership rules.
+20. **Correct endings.**
+    - `sequence_finished_no_response` only when no live track is unfinished or unstarted, a channel is still reachable, and no reply or interested call was recorded since the lead last started or restarted.
+    - `finished_no_usable_channel` only when no channel of the branch reaches the lead.
+21. **Re-import never moves progress.** An import changes no existing subject's progress, status, deadlines or clock.
+22. **The pending step agrees with the rule.** For every started, unfinished track with no live attempt beyond `claimed`, held or not, `next_step_id` is the step 5.1 names under the current definition, and a `claimed` attempt names that step.
+23. **Allowed controls match transitions.** Every control offered for a status is accepted, and every control not offered is refused.
+24. **Stale changes are never applied.** A change computed from a version that is no longer current writes nothing.
+25. **Tests stay out of lead counts.** Test runs appear in no lead search, status count or measure. Their sends do count in the ledger and in pacing.
+26. **No attempt waits forever.**
+    - Every `claimed` attempt is handed over or withdrawn within `SETTLING` of `claimed_wall`.
+    - Every `handed` or `accepted` attempt is terminal, or has `unresolved_since` set, within `SETTLING × (MAX_QUEUED_LOOKUPS + 1)` after its last call, plus lookup latency.
+    - Every account whose in-flight places are all held past `SETTLING` is listed in Needs attention.
+    - "Mark not sent" is never accepted while the latest lookup says `queued`.
+27. **Every held reservation is accounted for** (PR 37 review rounds 2 and 3). Every held reservation belongs to provider work that is live, or unresolved and listed in Needs attention under its inbox. Work whose send is proven holds none, and work the record knows settled (a confirmed withdrawal, the user's mark) holds none from that moment.
+
+## 9. Test strategy
+
+### 9.1 Seams
+
+- **`src/domain/sequence/`, pure:**
+  - `definition.ts`: types, the canvas compiler and the 7.1 validator;
+  - `blockers.ts`;
+  - `clock.ts`: lead time, `syncClock`, `span`, windows;
+  - `attempt.ts`: the 5.3 table;
+  - `progress.ts`: `evaluate`, the transitions, `deriveStatus`, the allowed controls;
+  - `reconcile.ts`: 5.2;
+  - `dispatch.ts`: eligibility, priority and the claim's checks;
+  - `describe.ts`: the next-step sentence.
+- **`src/server/engine/`:** the tick, the claim and result transactions with version guards, the outbox worker, the ports, restart.
+
+Example tests cover every transition row and every row of the attempt table. The generated test covers the interleavings that examples miss.
+
+### 9.2 The generated-sequence test
+
+It runs from `src/server/sequence-runs.test.ts`, with the generator and record in `test/support/generated-sequences.ts`. It goes through the real SQLite store and a fake provider per channel. It follows the pattern of `src/server/import-sequences.test.ts`.
+
+Each fake keeps a **handover log** (every call it received, with its time) and a **delivery log** (what it actually sent, with its send time). Each fake can be set to one of these **modes**:
+
+- `honest`;
+- `lost-response`: the work is accepted but the answer never arrives;
+- `late-send`: it sends after a delay, so the send time comes before the app observes it;
+- `duplicate-and-reorder`: results arrive twice and out of order;
+- `withdraw-unknown`: a withdrawal works, but the fake answers `unknown`;
+- `same-key-replays`: a repeat call with the same key returns the old result and sends nothing new;
+- `always-unknown`: every call and `lookup` answers `unknown`;
+- `non-retryable`: no key, and a repeat call sends again;
+- `5xx`: answers that must be read as `unknown`;
+- `late-send-beyond-settling`: the provider holds the work longer than `SETTLING` before sending, and `lookup` answers `queued` meanwhile;
+- `lookup-lags`: `lookup` answers `not-sent` for a while after the provider has accepted the work.
+
+1. **Generate definitions.** One to three campaigns that share sender accounts. Each is a tree of tracks with random channels, steps, waits, delays, windows (including overnight ones) and declined paths, all within 7.1; refused definitions get their own example tests. Leads with varied reach and zones, including zones with daylight-saving changes in the test period.
+2. **Generate events** (ruling 14), interleaving:
+   - clock advances from seconds to weeks, including partial-day pauses across both daylight-saving changes;
+   - **nested holds**: a campaign pause inside a lead pause inside a callback, released in every order;
+   - **edits while held**, and edits during in-flight attempts;
+   - provider results that are lost, late, **duplicated or out of order** (sent before accepted, accepted after withdraw);
+   - **crashes on a non-retryable transport** between `handed` and the result;
+   - **a user action between evaluate and apply**, and **between the claim commit and the handover commit** (skip, every edit kind, reply, pause, sender trouble);
+   - claims left `claimed` across a crash, then recovered beside fresh claims on the same account;
+   - a bounce on one step while the next step is `handed`, and win-back entry while a main step is `handed`, followed by late sends and late bounces;
+   - callbacks logged while they are the only hold, and under each other hold;
+   - an SMS pair whose owner ends, followed by a second campaign needing it and a late reply to the first;
+   - replies during in-flight attempts and after endings;
+   - one person in two campaigns sharing one SMS number;
+   - two consecutive test runs with the same contacts and one SMS number, and a late reply to the first;
+   - retries: a crash between the handover commit and the call on a retryable transport, recovered beside fresh claims on the same account with `k = 2`; retries racing a quiesce;
+   - a slot that stays busy, and a pre-send check that cannot run, past `SETTLING`;
+   - the Monday-to-Thursday trace of 3.3 in both orderings, and pauses that start before and end after a provider send;
+   - a redial today followed by an outcome attempt the same day; callbacks set for a later day; overdue callbacks over several days;
+   - interested on one call track while a second call track's task is open;
+   - call outcomes chosen from what is listed;
+   - user controls, including ones that should be refused;
+   - re-imports and test runs.
+3. **Keep an independent record.** A reference model in the test support directory imports nothing from `src/domain/sequence/`. It is written from the spec's words, keeping wall time and an explicit list of frozen intervals per subject. It reads the fakes' delivery logs for send times. From those it predicts:
+   - each step's **due instant**, with its own calendar-day arithmetic counted from the delivered send time mapped through its own frozen-interval list (the same semantics as 3.3's `leadAt` and `wallOfPoint`, implemented separately);
+   - its **window**;
+   - which tracks start and finish;
+   - which call outcomes must be accepted, from its own record of open callbacks and holds rather than the production guard;
+   - which campaign owns each SMS reply, from its own record of first texts;
+   - each lead's status.
+
+   Capacity, pacing and priority are checked as invariants on the handover log, which follows ADR 0001's split.
+4. **Assert after every event:** invariants 1–26. Each subject's due instants, step order, finished tracks, open tasks and status must equal the record's. In an unlimited-capacity variant of each seed, the earliest instant inside the window at or after each predicted due instant must equal the handover instant, up to the pacing gap. Each run ends with a drain phase (time passes, no new events) before invariants 18 and 26.
+5. **Prove the test bites.** `src/server/sequence-runs-oracle.test.ts` swaps in deliberately broken engines, and the generated runs must fail on each:
+   - withdrawing a `handed` attempt;
+   - retrying a non-retryable transport;
+   - recomputing due times from the current `frozen_total`;
+   - a claim that ignores the slot or `k`;
+   - applying stale versions;
+   - a track that finishes without closing its call task;
+   - an SMS reply going to the newest binding;
+   - an ending check placed after the track starts;
+   - counting "touched" at claim time;
+   - a handover without the step re-check;
+   - pacing taken at the claim instead of the handover;
+   - an `accepted` attempt that never settles;
+   - a same-key retry after `withdraw_requested`;
+   - a withdrawal that clears the pending deadline;
+   - a next-step basis taken from the observation time;
+   - a late send on a finished track resolving a successor;
+   - "interested" leaving its task open;
+   - callback outcomes refused while the callback is the only hold;
+   - an SMS binding transferred after its owner ends;
+   - reconciliation skipping held tracks;
+   - a same-key retry without a pacing slot, or without the predicates;
+   - a retry that re-renders the copy;
+   - `not-sent` creating an attempt with a new key;
+   - "mark not sent" accepted while queued;
+   - `queued` treated as unresolved at once;
+   - a claim with no age limit;
+   - the round-2 clamp fallback in place of `leadAt`;
+   - claims handed over out of priority order;
+   - the sender or the binding fixed at the claim;
+   - a redial listed on the same day;
+   - interested closing only its own task;
+   - a test-run binding never released.
+
+A failure the generator finds is shrunk into a named example test.
+
+**Invariant 18 in the call runs and the control runs, as it now is** (ticket 17a; council C on `56d599c`). Section 8's statement is unchanged: nothing is dropped. The record checks it two ways. *Sent within the hour:* a step due inside its window must be handed over within an hour of the moment its sender has had a free in-flight place for that whole hour (`freeHourFrom`), where a place is taken from a handover until the app has any final answer for that work (a send known, a withdrawal answered withdrawn or too late, email and text alike), read from the providers' own logs. *The order check* (4.3): at each first claim of a step on a sender, for a step that needs a new place (not one inheriting earlier work's key), no other step for that sender was due and claimable at least a minute earlier, ranked higher by 4.3 (a touched lead first, then the older stored due time, then subject and step), and still unclaimed. "Claimable" is the record's own: the lead running and not held in the last minute, inside its window, reachable on the channel, its previous step's send known, and no zone change since the due day. So a lead released from a hold is not passed over by later work, and no eligible lead waits while others are served. Mutations killed by it: "steps that fell due while held are never sent after the release" (call runs, seed 7), "the order breaks after a hold is released" (control runs, 33), "an overdue lead is passed over while others are served" (13).
+
+**No behaviour leaves the coverage list silently** (council on `f5fdeee`, item 3): in `pnpm check` a test reads the generated call runs' source and fails on any behaviour name that is neither in `CALL_FEATURES` nor in `RETIRED_FEATURES`, where each retired name carries its reason, and every run, in the check and in the full search, fails when it reaches a name in neither.
+
+**Which run is which** (PR 37 ruling 11). `pnpm check`, which CI runs on every push, runs a fixed, rule-covering set of seeds (`FIXED_SEEDS` in `test/support/sequence-chunks.ts`, each also in its unlimited variant) and, for each mutation, its known killing seed (`test/support/engine-mutations.ts`). The full search, `pnpm test:sequence-search`, runs before a merge in CI only, in eight shards of the `sequence-search` workflow (by hand, or on the pull request's `sequence-search` label): all 100 seeds, ten to a chunk, and a seed search per mutation that reports the seed killing each, so the known seeds can be refreshed. **Every mutation is killed in `pnpm check`** (PR 37 review round 3): by its known killing seed, or, for a rule the generated test does not reach within the seeds the search tries, by a named hand-written regression (`test/support/regressions.ts`) that fails under it, which the search asserts too. A mutation's seed search tries its recorded seed, then at most 30 seed offsets, each as generated and unlimited. Every mutation replay, in the check and the search alike, stops after 10,000 engine writes (claims, handovers, settlements and evaluations that changed state, counted by the harness; about three times what any recorded or fixed seed needs), so a run that a broken engine makes pathological stops at the same point on every machine. A ten-minute wall-clock limit per mutation replay is only a safety net and never decides a result (`test/support/mutation-oracle.ts`). The unmutated seed runs (`test/support/sequence-chunks.ts`) carry neither bound. Rules the generated test does not reach, with the regression that guards each: a send settled on the work's first attempt rather than its inheritor (`sendSettlesOnOriginalWork`), an unresolved work still settled by a later not-sent (`unresolvedThenNotSent`), a lookup's reference kept when no sent event follows (`lookupSentKeepsThread`), a late acceptance clearing retry intent (`lateAcceptanceSettles`), the stale guard reading the lead's facts (`reimportBeatsStaleEnding`), accepted work looked up until unresolved (`acceptedWorkSettles`), and the send pause and the narrowed reply fallback (`fallbackScopeAndPause`). Each mutation names the invariant expected to catch it, and its check passes only if that invariant fails (ruling 7).
+
+**The checker is independent** (PR 37 ruling 7): its own predicates for priority eligibility, and capacity, in-flight and pacing counted from the fake provider's logs, not from the application's counters or the engine's functions. "Mark not sent" stays an engine rule with no HTTP control in 12b (#20 adds it); its exemption covers that step's at-most-once check only, not the lead's later timing.
+
+### 9.3 What the generator must produce by the end of each ticket
+
+| Ticket | Generator adds | Invariants first asserted | Mutations added |
+| - | - | - | - |
+| 12 | One email track of 1–5 steps; waits and windows; leads with and without email, in zones with daylight-saving changes; 1–3 inboxes across 1–2 campaigns; every fake mode; quiesce on reply; crashes at every outbox stage, on both a retryable and a non-retryable transport; user events between evaluate and apply and between claim and handover; recovered claims and recovered retries beside fresh ones with `k = 2`; slots and pre-send checks blocked past `SETTLING`; late sends after the lead ended on a reply (the `freezes` mapping with an open interval); a bounce while the next step is `handed`; re-imports; launch; a drain phase | 1–6, 8–13, 18–21, 24, 26 | withdraw `handed`, retry non-retryable, retry after withdraw, retry without slot or predicates, retry re-renders, new key after `not-sent`, mark-not-sent while queued, queued unresolved at once, claim without age limit, `accepted` never settles, stale apply, handover without re-check, handover out of priority order, pacing at claim, sender fixed at claim, withdrawal clears deadline, basis from observation, clamp fallback, late send resolves successor, capacity off by one, window, touched at claim |
+| 13 | Trees of email and SMS tracks; missing and failing channels; cross-channel replies; one person in two campaigns on one SMS number, including after the first ends; two concurrent first handovers racing for one pair | 7, 14 | SMS reply to the newest campaign, binding transferred after an end, binding fixed at claim, ending check too late |
+| 14 | Call tracks, call capacity, outcomes without redial or callback; interested with a second call track's task open; as built (14a): wrong numbers on every kind of number, a mobile's ending its SMS track; the same action posted again, twice at once and after a restart; person and company notes | 16 (partial), 17 | outcome on an unlisted task, interested closes only its own task; as built, 14 in all ("Changes from ticket 14a") |
+| 15 | Redial, rollover, skip limit on weeks with and without calling hours, callbacks including overdue and for later days, callback outcomes as the only hold and under other holds, an outcome attempted on a same-day redial. As built (15a): the third generator, from the first commit; "under other holds" waits for ticket 17's holds | 9 with callbacks, 16 | redial resets the deadline, redial listed the same day, callback listed before its day, callback expires, a task never listed expires, callback outcome refused when the callback is the only hold; as built, 16 in all ("Changes from ticket 15a") |
+| 16 | Declined paths with overrides, win-back branches with a main step `handed` at entry; works without 15's events. As built (16a): in the third generator, with 15's events, from the first commit ("Changes from ticket 16a") | 15 | open task survives a decline; as built, 5 in all |
+| 17 | Lead and campaign pause, skip, stop, restart, move to win-back, nested holds in every order; the Monday-to-Thursday trace in both orderings; pauses that begin and end around provider sends | 2, 9 and 23 in full | due recomputed from the current total, clamp fallback with a thaw |
+| 18 | Bulk sequences across campaigns | 23 across campaigns | — |
+| 19 | Every edit kind of 5.2, at random points, including while held and between claim and handover | 22, plus 6 and 8 under edits | edit leaves a stale pending step, edit leaves a stale claim, reconciliation skips held tracks |
+| 20 | Outages of random length; unresolved attempts and their resolution | the notice count equals the record's | count due-in-gap instead of rescheduled |
+| 21 | Test runs before and after launch, interleaved with leads; two consecutive test runs on one SMS pair, and a late reply to the first | 14 for test runs, 25 | test exempt from pacing, test-run binding never released |
+| 22 | — | measures equal the record's own counts | skip-for-now counted as a call |
+| 23 | Everything, at 300 seeds | all | all |
+
+## 10. Slicing
+
+Each ticket implements its part completely. A later ticket's area shows an honest not-yet state, never a fake one. Ticket 12 lands as **three pull requests, in order** (ruling 12).
+
+| Ticket | Implements | Leaves as an explicit not-yet state |
+| - | - | - |
+| 12a Detail redirect | Merging a contact detail keeps the merged row, pointing at its target (#32 item 3; ADR 0001 "Constraints"), before any attempt references a detail id. | — |
+| 12b Engine core | Definition and validator, limited to one email track in `main`. Lead time, `syncClock` and deadline resolution. Track progress with the pending step's stored deadline and basis, step results and attempts with the full 5.3 table and settling, the version guard, the claim with capacity and `k`, the **handover transaction** with the full re-check, rendering and the pacing slot. The outbox worker with **withdrawal and quiesce**, the reply stop, late facts on finished tracks, endings, the stalled-inbox listing. Statuses queued, active, replied, sequence finished no response and finished no usable channel. Blockers for email. Restart settlement. All against a fake email port. | A second track is refused with "one email track for now". Unresolved attempts are held and shown, but their resolution controls arrive in #20. |
+| 12c Instantly and UI | The ADR 0002 adapter behind the port, the editor, preview, launch, and the timeline. The preview's **projected daily load per sender account and time until all leads start** is a dry run of `dispatch.ts`: the claim and handover rules with an unlimited clock over the enrolled leads, with no provider and no writes. So the preview cannot disagree with sending, and it shows each account's gap. | Real provider proof is gated by ADR 0002's experiments. Laptop-off is unverified. |
+| 13a SMS and coordination, engine and HTTP | Multiple tracks with together and after; release on skip and failure; the SMS port (unprovisioned, and a fake for tests only) and bindings; the cross-channel reply stop; account problems in Needs attention. | In the real app, SMS is blocked by blocker 3 until a provider exists. No screens. |
+| 13b SMS on the screens | After pull request 41: the SMS editor, canvas connections, preview, coverage, load and timeline for SMS. | — |
+| 14 Phone track | Call tracks, placement and capacity, ready now and later today, outcomes without redial, callback or not interested; `waiting_on_call`, `interested_on_call`; the rule that a finishing track closes its task. | "Not interested" is not offered. Unworked tasks stay listed with no skip limit. That is still truthful: they hold only their dependents. |
+| 15 Redial, callback, rollover | `skip_deadline` and its expiry rule, rollover, redial, the callback hold, overdue callbacks. | Campaign pause (#17). |
+| 16 Declined paths | The win-back branch, declined paths with overrides, `no_more_calls`, closing tasks on a decline, entering win-back, `in_win_back`, `declined_on_call`. It depends only on #14: tasks closing on a decline releases a callback hold whenever #15 is present, with no code of #15's needed. | Moving a stopped or replied lead to win-back (#17). As built: 16a is the engine and HTTP; 16b the canvas control, the branch on the canvas, and the outcome screen's preselection and override. |
+| 17 Pause, resume, restart | Lead and campaign holds, skip, stop, restart, move to win-back, the paused banner, **`describe.ts` and the allowed controls** (ruling 12). | — |
+| 18 People and bulk | Bulk actions as loops of single transitions with per-lead results, reusing #17's controls and sentences. | — |
+| 19 Running edits | Publishing edits to a launched campaign and the 5.2 reconciliation; the Instantly re-push. | — |
+| 20 Recovery and attention | The heartbeat, the notice, `lookup`, unresolved resolution (P3), the full Needs attention list. | Laptop-off proof stays unverified while local-only. |
+| 21 Test runs | The `test_runs` lifecycle, 60-second deadlines, test contacts, test call tasks, the "no test since last edit" warning. | No test contact is designated yet (#28), so real receipt is unverified. |
+| 22 Measures | Read from facts. Per channel: sent, failed or bounced, and replies. Calls made, meaning logged outcomes other than skip for now. Connected: interested, not interested and callback requested. Interested, declined, and callbacks pending, meaning open callback tasks of subjects that have not ended. Reply rate is leads replied on a channel over leads sent at least one message on it; connect rate is connected over made. | — |
+| 23 Acceptance story | The generator at full capability, and the nine-step story. | Whatever the provider gates and #28 leave unverified. |
+
+## 11. Not decided here
+
+- **The Instantly mechanics**, the experiments and P1–P4. ADR 0002 owns them.
+- **The SMS provider.** Twilio is not provisioned (#28). The port keeps the engine independent of it.
+- **Hosting.** The engine is a library plus a tick in the server process. "Keeps sending with the laptop off" stays unverified until hosting arrives.
+- **The canvas library and the editor's look** (`docs/agents/ui.md`).
+- **Social tracks.** A social port would plug in like SMS, and "the step waits while the laptop is off" becomes an account-health wait.
+- **The import questions in #32.** They change who is enrolled, not how an enrollment runs.
+- **Tuning values:** the tick interval, and `k` beyond ADR 0002's X1. The defaults of the engine's other parameters are in 5.6. These are parameters with tests, not product behaviour.
+
+## Questions for the human
+
+Settled by the spec or by the coordinator's rulings, so no longer asked:
+
+- phone tracks dial on the user's own phone;
+- a reply after an ending sets "replied";
+- no spacing between touches from different campaigns;
+- one test run per campaign at a time, with an explicit stop.
+
+Each question below changes one rule, and each lists what is built until it is answered.
+
+- **Q1. A track connected "after" two tracks.** *Recommendation:* not in the MVP. One incoming connection per track; every example in the spec is a chain. If wanted, it would mean "after both have finished". *Built:* refused (7.1).
+- **Q2. Test runs and sending windows.** Should a test send each step about a minute after the last, whatever the time of day? *Recommendation:* yes. The test contact is not a prospect, and a test started at 19:00 would otherwise wait until morning. *Built:* windows apply in the campaign's default zone.
+- **Q3. "Skip this step" with parallel tracks.** Which step is skipped when email and SMS are both mid-track? *Recommendation:* the one the person page's sentence names, which is the next step due. *Built:* that.
+- **Q4. A wrong number when another good number remains.** The spec says both "any other outcome… finishes the phone track" and "phone steps are skipped when no good number remains". *Recommendation:* keep the task open so the user can dial the other number. *Built:* the track finishes.
+  - **A wrong mobile and the SMS track** (ticket 14a, verifier on `a1399ce`). Ticket 14 says a wrong number "leaves other channels running". A mobile is both a number to call and the lead's SMS destination, so marking it bad on a call also ends an SMS track that texts it, as `failed_bad_destination`, the spec's rule for an invalid SMS number ("the same rule as a wrong phone number"); its later texts are not sent, and the tracks after it start after their delay. Email, and SMS to any other mobile, keep running. A wrong main line is marked bad for every colleague at that company; a colleague's open phone task is then skipped as missing only when the colleague has no other good number, and their other channels continue. *Built:* that. If the human wants a wrong number on a call to leave texts to the same mobile running, the mark would have to be per channel, which ADR 0001 does not have.
+- **Q5. Which days the call skip limit counts.** *Recommendation:* count only days on which the prospect's calling hours open. *Built:* the deadline counts calendar days from the original due date (the spec's text), and a task expires only at the end of a day on which it was listed (3.5). With the default of 2 and Monday–Friday hours, a Friday call therefore expires at the end of Monday, the same as counting workable days. With a limit of 3 it also expires at the end of Monday, where counting workable days gives the end of Tuesday.
+- **Q6. Restarting a lead that was interested or declined on a call.** The spec offers restart "for a lead that replied or was stopped". Note what already follows from the spec: a declined lead who later replies by email or SMS becomes `replied` ("any reply"). Restart is then allowed, for email and SMS only, because `no_more_calls` still bars every call. *Recommendation:* allow restart from both statuses directly, with the same bar on calls after a decline. *Built:* not allowed directly. Only the reply route above.
+- **Q7. One person texted from the same number by two campaigns.** An SMS thread is one conversation between two numbers, so a reply cannot say which campaign it answers. "A reply stops only that campaign" can only mean the campaign that owns the conversation. *Recommendation:* the campaign that texted first owns it for good. A second campaign uses another sender number if one has room; otherwise its SMS track is skipped like a missing channel, with the reason shown, so the lead's later tracks are not stalled. *Built (ruling 8):* the pair is never transferred. The second campaign uses another number with room, or its SMS track is held as `sms_conversation_taken` and listed in Needs attention. Holding drops nothing, but the tracks after it wait until the user acts or a free number joins the pool.
+- **Q8. An added step, or a step moved, behind a lead's position.** "An added step reaches leads still in that track". For a lead past that point, sending it would be out of order. *Recommendation:* such a step is not sent to that lead; it is sent to every lead in the track who has not yet passed its position. *Built:* that.
+- **Q11. How far a wrong-number mark reaches** (ticket 14a, council on `7902093`). The mark is on the contact detail the user dialled, which belongs to one person or one company (ADR 0001): it is shared by every colleague who is called on that company's main line, and by an SMS track texting that person's mobile, and by nobody else. Another company, or a person at another company, who lists the same digits has a detail of their own and stays callable, since a number wrong for one business can be right for another. *Recommendation:* keep it so. *Built:* that.
+- **Q10. SMS to a company lead** (ticket 13a). The ticket says SMS uses "company details for company leads", but a company's details hold only its main line and shared inbox: the import reads every business phone as a main line, and ADR 0001 never treats a main line as an SMS destination, since it is not proof of a mobile. So no company lead can be texted. *Recommendation:* keep it so; texting a shared main line reaches whoever answers the business's phone, not a decision maker. *Built:* a company lead's SMS track is skipped as a missing channel, and the tracks after it start after their delay.
+- **Q12. When a missed callback is overdue** (ticket 15a). The spec says a callback is "later today" before it is due and that a missed callback stays "flagged overdue until an outcome". It does not say whether a callback is missed as soon as the time the prospect asked for passes, or only once that day ends. *Recommendation:* from the time asked for: the user sees at once that the prospect is waiting. *Built:* that. A callback is later today until its time, then ready now and flagged overdue (Today's Needs attention and Up next, `GET /api/needs-attention`), every day, until an outcome is logged.
+- **Q13. A callback whose lead has no good number left** (ticket 15a). A colleague's wrong number on the shared main line can mark the last number of a lead that holds a callback bad. A phone step with no good number is skipped (spec), but a missed callback must never "drop silently back into the sequence". *Recommendation:* keep the callback held and listed, flagged overdue, until the user acts on the lead (skip this step, stop, or a new number by re-import). *Built:* that; no outcome can be logged on it without a good number, so until ticket 17's skip step it waits for a re-import or a reply, and the lead's other outreach in the campaign stays paused.
+- **Q14. A phone track whose declined path the canvas has not set** (ticket 16a). The spec says each phone track's declined path "is set on the canvas" but not what a track has before the user sets it, as every phone track saved before ticket 16 does. *Recommendation:* stop, the path that sends nothing more; the outcome screen preselects it and the user can override it for the lead. *Built:* that (`declinedPathOf`); the call task states the path it will preselect (`declinedPath`). Part b may still show the canvas control with no choice made; which default the canvas shows is the human's.
+- **Q15. Pausing or stopping a lead before its campaign launches** (ticket 17a). The spec's controls act on running outreach; before launch nothing of a lead runs, and a lead held then would not be in the Before launch projection's count of leads to start. *Recommendation:* allow neither before launch; a lead the user does not want contacted is left out of the import. *Built:* both refused before launch ("This campaign has not launched: nothing of this lead runs yet").
+- **Q16. "Resume" or "move to win-back" when nothing could run** (ticket 17a). The spec offers both "for a lead that replied or was stopped". A lead with no step left, or none that can reach it, would be ended again at once by the engine (no response, or no usable channel). *Recommendation:* refuse it with the reason, so the status says what is true. *Built:* refused, with the reason the engine's own transition gives on a copy.
+- **Q17. A message already handed to a provider when the user pauses or stops** (ticket 17a; a provider limitation, measured by the verifier on `ca8baee` against the documented-shape fakes, not a live provider). The email adapter hands over at most one email per inbox ahead of its send (`k = 1`). On a pause or a stop it deletes the handed-over lead; when the deletion takes effect nothing is sent; when it fails or its effect is uncertain, that one email can still be sent. A forced uncertain SMS cancellation behaves the same; no SMS provider is provisioned. *Interim built:* the control is accepted; the withdrawal is asked again each settling period until the provider's answer is final; a late send is recorded once and starts nothing while the lead is held; the enrollment and campaign reads say how many messages may still be sent (`mayStillSend`), for the screens part to show. Skip is different: it is refused while its step's work may still be sent. *For the human:* whether this is acceptable, or a pause should wait for the provider's final answer before it reports done.
+- **Q9. A campaign with no track in the main sequence.** The spec lists exactly three launch blockers, and none of them covers a campaign with nothing in it. *Recommendation:* treat it as "nothing to launch": the Launch button reads "Add a track to launch". It is not a fourth blocker, because no outreach can follow. *Built:* that (7.2).
+
+**Still open in ADR 0002** and unchanged here: P1 (the pre-existing Instantly campaigns on the same inboxes), P2 (continue thread if no transport passes X2), P3 (how the user resolves an unresolved send, used by 5.3–5.4), P4 (Instantly's unexplained skips, used by 5.4), and the consents C1–C4.
+
+## Changes from round 1
+
+| Finding | Resolved in |
+| - | - |
+| Opus 1, GPT 1, GPT 4: an uncertain handover withdrawn or retried; non-monotone results | The 5.3 table, `retryable`, `claimed` vs `handed`; invariants 4–5, checked on the delivery log. |
+| Opus 2, GPT 3: burst; no in-flight bound; withdrawal on every stop | 4.2 `k` and capacity in one transaction (the pacing slot moved to the handover in round 2); quiesce (2.5); invariant 11. |
+| Opus 3, GPT 2: calendar rounding against frozen clocks | 3.3, deadlines resolved once; invariant 9. |
+| Opus 4, GPT 8: SMS reply attribution | 4.5 bindings; invariant 14; Q7. |
+| Opus 5: stale evaluation results | 2.5 version guard; invariant 24. |
+| Opus 6, GPT 5, GPT 6: call tasks and callback holds after declines, win-back and outcomes | 2.3 one closing rule; the callback hold is the open callback task; invariants 15–16. |
+| GPT 7, Opus 11: edits and pending steps | 5.1–5.2 reconciliation for every edit kind; invariant 22; Q8. |
+| GPT 9, Opus 12: test runs | 3.6 separate `test_runs` lifecycle, ordinary capacity and pacing; Q2. |
+| GPT 10: ending precedence | 2.1, endings checked first. |
+| GPT 11: touched at claim | `touched` set only on an actual send or logged call. |
+| GPT 12, Opus 13: test plan | 9.2–9.3. |
+| GPT 13, Opus 12: slicing | 10: 12a–c, controls in 17, 16 independent of 15. |
+| GPT 14, Opus 8–9: questions and product calls | Fourth gate removed (7.2); questions revised. |
+| GPT 15: interruption count and calls made | 6 counts actual reschedules; skip for now is not a call (invariant 16). |
+| Opus 10: status of a paused campaign's calls | 2.1 rule 5 depends on the task existing. |
+| Opus 14, GPT 16: simplify | Revision history, `in_flight` and step states, hosted locking and the 365-day and overnight limits removed. |
+
+**Not adopted as proposed:** Opus 7 (drop the wrong-number question). The reviewers read the spec in opposite ways, so it stays a question (Q4). The built default follows the spec's explicit "any other outcome… finishes the phone track".
+
+## Changes from round 2
+
+Each fix names the invariant that states it, the fake mode or generated case that exercises it (9.2), and the mutation that proves the test catches a regression.
+
+| Finding | Fix | Invariant | Fake mode / generated case | Mutation |
+| - | - | - | - | - |
+| Opus 2, GPT 3: claim not re-checked at handover; edits and skips leave stale claims | 5.5 handover transaction; 2.5 content changes withdraw the claim; 5.2 | 2, 8, 22 | user events and every edit kind between claim and handover | handover without the step re-check; edit leaves a stale claim |
+| GPT 1: recovery burst | 4.2 pacing slot taken at handover | 11, on the handover log | recovered claims beside fresh claims | pacing at claim |
+| Opus 1: an attempt never settles; a withdrawn one is retried | 5.3 settling on every transport, no retry after a withdrawal request, cap of 3; 5.4 stalled inbox listed | 5, 26 | `withdraw-unknown`, `same-key-replays`, `always-unknown`; drain phase | `accepted` never settles; retry after withdraw |
+| Opus 3: basis from the observation time | 2.4 send time mapped to lead time | 9 | `late-send` | basis from observation |
+| GPT 2, Opus 5: deadlines lost on withdrawal; editable timers without a wall basis | 1.3 pending step fields independent of attempts; basis, wall time and zone stored for every timer; 3.3, 3.5 | 9 | withdrawals, then edits of wait, delay, zone and skip limit | withdrawal clears deadline |
+| GPT 4: callback outcomes impossible | 2.3 listing rule; 2.4 single eligibility rule | 16 | callback outcomes as the only hold and under other holds, predicted by the record | callback outcome refused as the only hold |
+| GPT 6, Opus 6: late facts on finished tracks; bad address leaves an attempt live | 1.3, 2.4, 2.5: late results recorded without changing the finish or successors; every track finish quiesces | 6 | bounce while the next step is `handed`; win-back entry while `handed`; `late-send` | late send resolves successor |
+| Opus 4: "interested" leaves its task open | 2.4 Interested row; callbacks pending counts only subjects that have not ended (10) | 16 | interested on a callback task | interested leaves its task open |
+| GPT 5: SMS binding transferred after an end | 4.5 never transferred; held `sms_conversation_taken`; Q7 | 14 | owner ends, then a second campaign and a late reply | binding transferred after an end |
+| GPT 7: empty-main condition reported as empty copy | 7.2: "nothing to launch" kept as the interim; Q9 | — | example test | — |
+| Opus 7: reconciliation skipped held tracks | 5.2 reconciles held tracks too | 22 | edits while held | reconciliation skips held tracks |
+| Opus 8: no reason for the SMS wait | 5.4 `sms_conversation_taken` | 18 | two campaigns on one number | — |
+| Opus 9: "listed" undefined on days without calling hours | 2.3 listing rule; 3.5 | 16 | skip limit across weeks with and without calling hours | a task never listed expires |
+| Opus 10: a declined lead's later reply | Q6 states what follows | 15 | reply after a decline, then restart | open task survives a decline |
+| Opus 11: projection, gap, `skipped`, win-back with no live track, meaning of rejected | 10 (12c dry run of `dispatch.ts`); 4.1 gap from windows; 1.3; 2.4; 5.3 port | 12 | `5xx` | — |
+| GPT 8: N = 0, recovery retry, "mark not sent", ADR 0002 questions | 3.3; 6 uses the 5.3 table; 5.3 and invariant 4 exclusion; questions | 4, 5 | `lost-response` with a user mark | retry after withdraw |
+
+**No finding rejected.** Every scenario in both reports reproduces from the text at `2bec5ee`.
+
+## Changes from round 3
+
+The coordinator's items 1–7. Both reports reproduce from `c3990ba`, and no finding was rejected.
+
+| Item | Fix | Invariant | Fake mode / generated case | Mutation |
+| - | - | - | - | - |
+| 1 Retries | 5.6 retry authorization: a conditional write, the 5.5 predicates excluding its own attempt, a fresh slot, an identical key and payload; recovery goes only through it; `MAX_CALLS` = 3 everywhere | 2, 5, 8, 11 (every send call) | crash between handover and call, recovered beside fresh claims with `k = 2`; retries racing a quiesce | retry without slot or predicates; retry re-renders |
+| 2 Historical send times | 1.3 `freezes` record; 3.3 `leadAt`, `wallOfPoint`, and the clamp of `t_p` to between the handover and now; the reference model keeps its own interval list | 9 | the Monday-to-Thursday trace in both orderings; late sends after a reply ended the lead | clamp fallback |
+| 3 Lookup | 5.3 `sent` (with time), `queued`, `not-sent`, `unknown`; `queued` re-looked-up up to `MAX_QUEUED_LOOKUPS`; `not-sent` retries with the same key and passes the key on; "mark not sent" refused while queued | 4, 5, 26 | `late-send-beyond-settling`, `lookup-lags` | new key after `not-sent`; mark-not-sent while queued; queued unresolved at once |
+| 4 Claimed is bounded | 5.5 steps 2–5: the pre-send check after the slot, `PRESEND_MAX_AGE`, the claim's age limit; section 6 recovery goes through the same steps | 26 | slot busy, and pre-send check unavailable, past `SETTLING` | claim without age limit |
+| 5 Handover predicates | 5.5 step 4's sixteen predicates, with no version comparison and excluding its own attempt; handover in priority order | 2, 12 (at handover) | user events between claim and handover; several claims waiting for one slot | handover out of priority order |
+| 6 Result transaction; 402 | 2.4: the next step resolved in the result transaction whether or not the subject runs; 402 and 429 go to the account-level wait | 8, 18 | sends observed while held; `5xx` and quota refusals | — |
+| 7a Listing dates | 2.3 date eligibility; overdue callbacks stay listed | 16 | same-day redial outcome; callbacks on later days; overdue callbacks | redial listed the same day; callback listed early |
+| 7b Interested | 2.4: closes every open call task (`closed_on_interest`) | 16 | interested with a second call track open | interested closes only its own task |
+| 7c Sender and binding | Fixed at the handover commit (1.3, 4.2, 4.5, 5.5); the sender-change case deleted (2.5, 5.2) | 14 | concurrent first handovers racing for one pair | sender or binding fixed at claim |
+| 7d Zone edit | 5.2: `start_at` re-resolved only for tracks that have not started | 7 | zone edits around track starts | — |
+| 7e Test-run SMS | 4.5: a test run's binding released at its end; late replies recorded on the last released owner | 14 | two consecutive test runs on one pair; a late reply to the first | test-run binding never released |
+
+## Changes from PR 37 review round 1
+
+Two reviewers and an independent verification of `1c2591f`; the coordinator's rulings 1–11. Each blocking finding was reproduced first as a failing test through the real store (`src/server/engine/lifecycle.test.ts`), and the generator can produce its event order.
+
+| Ruling | Change | Sections | Generated case / mutation (invariant) |
+| - | - | - | - |
+| 1 Threads and replies | Lookup's `sent` carries the reference; a later sent fact attaches a missing reference in any state; a reply outside every thread is reconciled by inbox and address; a `continue_thread` step with no thread is held (`no_thread`) | 2.4, 5.3, 5.4, 5.5 | fake modes `lookup-before-event`, `silent-send`, off-thread replies, the user's "mark sent" / "lookup sent without reference" (18) |
+| 2 Authorization to call | Nothing asynchronous between the authorization commit and the call; request built first; authorize, call and slot serialized per inbox; slot from the call's start | 5.5, 5.6 | a reply and a clock advance injected at that point; invariants 2 and 11 on the call log |
+| 3 Capacity | Uncertain work keeps its reservation through withdrawal and an inherited key; ledger per provider work; no exemption in the check | 1.3, 4.2, 5.3, invariant 10 | the verification's B1 (windows 09–10 and 10–17, lagging lookup) as a regression and generated windows; "uncertain work releases its reservation" (10) |
+| 4 Send attribution | A send settles on the work that produced it; inheritors quiesced | 5.3 | lagging lookups with retries refused by a closed window; "send settled on the inheritor" (9) |
+| 5 Settlement clock | A waiting retry does not delay lookup; every port wait bounded; a stuck answer settled without a restart | 5.3, 5.6 | `portHangs`, transient errors after the call, long default gaps; "retry blocks settlement" (26) |
+| 6 Unresolved then not-sent | Settled as `lookup_not_sent`, keeping `unresolved_since` | 5.3 | fake mode `lookup-unknown-then-not-sent`; "unresolved ignores not-sent" (18) |
+| 7 Independent checker | Own priority eligibility; capacity, in-flight and pacing from the fake's logs; each mutation names its invariant | 9.2 | all 27 mutations |
+| 8 Subjects | Progress tables reference `subjects` | 1.2, migration 6 | schema test |
+| 9 Points settled | Invariant 18 wait on a listed inbox; merge-ownership skip; transport stored with the payload; invariant 12 excludes 14 and 16; "mark not sent" exemption narrowed | 2.4, 5.3, invariants 12 and 18, 9.2 | drain check; record's step delivery |
+| 10 Default gap; unhealthy inboxes | Built; listed in Needs attention | 4.1, 5.4 | default gaps in the generator |
+| 11 Check time | `pnpm check` runs fixed seeds and known killing seeds; the full search runs before a merge in the `sequence-search` CI workflow | 9.2; `docs/agents/delivery-workflow.md` | — |
+| Review bot `engine.ts:223` | Ruling 1's fix | 5.3 | as ruling 1 |
+| Review bot `attempt.ts:81` | A late acceptance clears retry intent and keeps settlement scheduled | 5.3 | a lost response's acceptance replayed late; "acceptance keeps retry intent" (26) |
+| Review bot `rules.ts:62` | The stale guard compares the lead's facts too | 2.5 | changes to a lead's facts alone between evaluate and apply, a phone-only person gaining an address; "stale guard ignores lead facts" (1) |
+
+## Changes from PR 37 review round 2
+
+Two reviewers, an independent verification of `9f64b2f` and two review-bot findings; the coordinator's rulings 1–5. Each was reproduced first as a failing test through the real HTTP app and store (`src/server/engine/lifecycle.test.ts`, "review round 2"), or at the domain seam (`progress.test.ts`).
+
+| Ruling | Change | Sections | Regression / generated check (invariant) |
+| - | - | - | - |
+| 1 Commit to call | The authorization commits synchronously and the call follows on the same run, inside the inbox lock; one tick at a time per process, every entry point queued | 5.5 step 6 | a reply committed at every microtask after the commit, for first handover, retry and recovery after restart; two ticks and every other entry point started while one runs |
+| 2 Reservations belong to provider work | Released once across the key on a send, a final not-sent, a confirmed withdrawal or the user's mark; uncertain work unresolved and listed with its inbox and the sends it holds; the user may mark it; flags and lookups cleared on attempts of a settled key; one lookup per key per pass; the drain keeps the configured capacity | 1.3, 4.2, 5.3, 5.4, invariants 10, 18, 27 | review bot `attempt.ts:218` (capacity 1, unresolved, marked not sent); the verification's B2 (re-import withdraws uncertain work); confirmed withdrawal through an inheritor; invariant 27 in every generated run |
+| 3 Replies keep campaign scope | An unknown thread reference is held as pending correlation, pausing that inbox's sends to that address; it resolves to the one lead or falls back after `SETTLING`; the fallback matches only sent or uncertain work handed at or before the reply, to an address the lead still owns; the adapter passes a bare address | 1.3, 2.4, 5.5 predicate 18, invariant 14 | review bot `engine.ts:304` and the verification's B3 (a threaded reply to campaign B before its sent event stops only B); refused work and work handed after the reply not matched; the record's reply times |
+| 4 Search in CI | The `sequence-search` workflow also runs when a pull request gets the `sequence-search` label; each shard runs every eighth seed and mutation and prints every mutation's killing seed | 9.2; `.github/workflows/sequence-search.yml` | — |
+| 5 Small items | A send confirmed by lookup whose event never arrives carries its reference, and the continue-thread follow-up uses it; in-flight counted from the stored attempts as well; invariant 14, the replies key and the first-lookup wording brought in step; the serial provider waits recorded as a known limit | 1.3, 5.3, 5.5, invariants 11, 14 | "lookup sent without reference" (8) |
+
+## Changes from PR 37 review round 3
+
+Two reviewers, an independent verification and the review bot on `51d9503`, and the first full search; the coordinator's rulings. Each finding was reproduced first as a failing test through the real HTTP app and store (`lifecycle.test.ts`, "review round 3"), or at the domain seam.
+
+| Ruling | Change | Sections | Regression / generated check (invariant) |
+| - | - | - | - |
+| Provider work is a record | `provider_work`, one row per key, holds the reservation (while unsettled), the settlement and how, the reference, the lookup schedule and answer, the unresolved time and the user's mark; attempts point at it; sends, lookups, refusals and marks are events on the work | 1.3, 4.2, 5.3, migration 6 | the domain tests of the work rows; review bot `progress.ts:304` and the verification's B4 (settled key never inherited); GPT finding 2 (marking the older attempt ends its inheritor); the verification's B5 (marked not sent, or refused); invariants 5 and 27 |
+| A reply's life | Reply events kept by event id for good; replays are no-ops; an unmatched reply kept by its reference resolves when it attaches; the wait counts running time only; on restart, events and lookups come before the fallback; user-marked work counts as uncertain for matching | 1.3, 2.4, 6 | review bot `engine.ts:304` across a restart (before and after the delayed event); review bot `engine.ts:402` and the verification's B6 (replay); Opus B1 (a reply on work marked not sent stops the lead); the ownership tests of both reviewers |
+| Full search failures | Eight seeds failing invariant 26: a sent fact on work an inheritor carried, after the user's "not sent" on the older attempt, never settled the inheritor; the work record removes the class; seed 20261198 joins the fixed set | 5.3, 9.2 | "full search seed 20261198 and GPT round 3 finding 2" |
+| Unkilled mutations | Each mutation is killed by a known seed or a named regression; "retry after withdraw" names invariant 2, which catches it; new mutations for the send pause, the user's mark leaving work unsettled, settled work inherited and the fallback matching every call; the search's per-mutation budget | 9.2 | `test/support/regressions.ts`, `engine-mutations.ts` |
+| Review bot on `0dc88ab` | Settling work withdraws its claimed attempts in the same change; the handover refuses settled work (predicate 15); a provider skip of work an inheritor was claimed for still holds the track | 5.3, 5.5 predicate 15, invariant 2 | `claimedInheritorRetired`; "handover of settled work" (2) |
+| Small items | `heldCapacity` lists the lookup answer, destination, step, today's sends and whether "not sent" is allowed; the checker exempts only deliveries of work handed over before a mark; `pendingReplies` required; the wait of a user action or a launch behind the running tick recorded as a known limit | 5.4, 5.5, 9.2 | — |
+
+## Ticket 12c: the Before launch projection
+
+Recorded on 13 November 2026 by the 12c implementer. The projection changes no engine or sequence code; the bounce events below add one table the engine writes.
+
+- **What is built.** `src/domain/load-projection.ts`, called by `GET /api/campaigns/:id/before-launch`. It is a dry run with no provider and no writes. It moves from each instant at which something can change to the next: a due time, a window opening, a claim's pacing slot or its expiry, or a full inbox's reset. At each instant it runs the engine's passes until nothing changes. Claims older than `ENGINE_PARAMS.SETTLING` expire. Ready steps are claimed in `comparePriority` order (4.3) while their window is open (`windowOpen`, the claim's step guard). There is one claim per inbox at a time (`k` = 1), on the inbox that can send soonest, then with most remaining capacity, then the lowest id (`chooseAccount`); reservations count against capacity. Each claim is handed over when its inbox's slot comes, and only if the window is still open at that instant (handover predicate 8); the slot then moves on by the gap. Waits use `span` (3.3), capacity uses `resetDayOf` (4.1) and today's count across campaigns, and a lead keeps the inbox of its first email.
+- **Agreement with the engine (PR 41 verification, B5).** The first version checked the window only at 15-minute ticks and counted later slots inside a tick without checking them, so it projected sends after a window closed. The class of defect is a second implementation of the engine's timing drifting from the first. `src/server/before-launch-projection.test.ts` therefore compares the projection with the engine's actual sends over the fake provider. It covers the verifier's case and 40 generated cases (200 when `PROJECTION_SEEDS=200`, all passing on 13 November 2026). The cases are launched near a window's end, the UTC and Los Angeles midnights and a Friday evening, with leads in five zones, windows that run past midnight, one or two inboxes with different reset zones, gaps from one minute to 50 minutes, and up to three emails. Each must match exactly: the same lead, step, inbox and instant. A change to the engine's claim, handover or pacing rules that the projection does not follow fails that test.
+- **Other campaigns' waiting work (PR 41 re-check, B10).** Capacity is per inbox across every campaign, so the projection also simulates the waiting work of other running campaigns that share an inbox with this one. That is each running lead's pending email step, with its stored due instant, window, remaining waits, pool and any claim it holds, under the same rules. Their sends compete for capacity but are not counted in this campaign's figures. A claim already held is in the inbox's count, so it is not counted twice. `before-launch-projection.test.ts` covers the verifier's case (capacity 2, an older waiting lead in another campaign) and 40 generated two-campaign cases, and compares this campaign's sends with the engine's exactly. Without the other campaigns' work, 22 of those 41 fail.
+- **Every input the projection reads, and where the engine reads the same (PR 41 council, item 1).** The projection takes each fact from the engine's stored state through the same function the engine uses. `before-launch.ts` recomputes nothing.
+
+  | Input | The projection reads it from | The engine reads it in |
+  | - | - | - |
+  | An inbox's health, waits (a rate limit's end, a quota hold with none), capacity, today's count with reservations, in-flight bound, pacing gap and slot, reset zone | `EngineStore.accounts(now)`, the `AccountState` records unchanged, for every inbox in any simulated campaign's pool | `EngineStore.accounts` / `SubjectState.accounts`, the same records |
+  | Whether an inbox can take a claim now | `accountAvailable` and `accountHasRoom` on the record with the simulation's count, slot and claim | `chooseAccount` and the handover's predicate 9 (`dispatch.ts`) |
+  | Which inbox a claim takes | `pickAccount` | `chooseAccount`, which calls `pickAccount` |
+  | Which ready step goes first | `comparePriority`, with each lead's stored `touched` and due instant (`TrackProgress.dueWall`) | `claimOrder` / `comparePriority` in `claimAll` |
+  | Whether a step may be claimed or handed over at an instant | `windowOpen` on the track's window in the lead's zone (`LeadFacts.zone`) | `claimRefusal` and handover predicate 8 |
+  | When a wait ends | `span` from the send instant, in the lead's zone | `advanceTrack` |
+  | When a held claim lapses | `ENGINE_PARAMS.SETTLING` from the claim's `claimedWall` | `expireClaims` |
+  | Capacity's day | `resetDayOf` in the inbox's reset zone | the store's count of sends on the reset day |
+  | Another campaign's waiting work | `runningSubjectIds` and `subject`: each running lead's pending email step, `dueWall`, live attempts, `heldReason` and `runs` | `claimAll` / `readyItems` over the same subjects |
+
+  Not read, and so not foreseen: a provider state the engine has not met yet (a quota or rate limit on an inbox no send has tried), provider failures, replies, bounces and pauses. The generated two-campaign test gives each campaign its own subset of three inboxes, makes some unavailable for each reason, and lifts only the states the engine has not met.
+- **Cost.** Measured on 13 November 2026, on this workstation: about 0.3–0.5 s for 500 leads with 500 waiting in another campaign, and about 4–5 s for 2,000 with 2,000 waiting. The Sequence and Leads tabs ask for coverage and fields without the projection (`load=0`). Before launch shows its loading state while it runs.
+- **SMS tracks (merged with ticket 13a, 13 November 2026; replaced by ticket 13b, below).** The projection simulated one email track; SMS sends are not in it yet (ticket 13 part b adds them). Another track can change when emails go: a text marks the lead touched, which moves its emails ahead in priority (4.3), and a track can start after another finishes (1.1). Neither can happen when the campaign's one email track starts at entry and every other live track starts, through its chain of start rules, after it (`emailTimingAlone` in `before-launch.ts`). Then the email load is projected, and the screen says SMS sends are not in the estimate (`leavesOutSms`). Otherwise (an SMS track or a second email track that does not wait for the email track, in this campaign or in another running campaign whose emails on these inboxes are not all sent) nothing is projected and the screen says why (`otherTracksChangeTiming`), as for an inbox with no known end. `before-launch-projection.test.ts` runs 20 generated cases with an SMS track after the email track, with texts sent, and requires the email sends to match the engine's exactly. With the rule switched off, 2 of 20 cases with an SMS track at entry contradict the engine.
+- **What it does not model.** Provider failures, retries, lookups, replies, bounces and pauses: every send is assumed to succeed at once. The screen says so. Production ticks every 15 seconds, not at the exact instants, so a real send can land up to one tick later than projected.
+- **What it reports.** Each pool inbox's busiest day for this campaign, the sends used today across campaigns, and its pacing gap. Also the days until every lead with an email has had its first email, counting launch day as 1, in the campaign's zone.
+
+**A continue-thread email has no subject of its own (PR 41 council, item 3).** `ownSubject(step)` in `definition.ts` is the step's subject on a `new_subject` email and empty on a `continue_thread` email. Rendering at the handover (`renderStep`), launch blocker 2, the claim's render check, the preview and the editor's fallback list all use it. A subject left stored on a continue-thread step (the editor hides it after a switch) is never sent, shown or checked, and switching back to a new subject brings it back. The generated test's independent record follows the same rule (invariant 8's expected copy).
+
+**Bounce events (PR 41 review round 1).** A hard bounce can arrive after its track completed, when the track rightly keeps `completed` (2.4), so the track's finish reason cannot tell the timeline about it. The engine now records each bounce event before applying it: table `bounce_events` (migration 10, numbered after the adapter's 7 and 8 and ticket 13a's 9), keyed by the provider's event id, holding the subject, the provider work's key, track, step, destination and the bounce time. A bounce is recorded only for work some attempt handed over, the same condition under which the engine applies it (PR 41 council, item 5). A repeat of the event records nothing new; a crash between the record and the update is repaired when the event is observed again. Nothing in the engine reads the table. Only `src/server/activity.ts` does, so engine behavior and every invariant are unchanged. An address marked bad by another campaign is not a bounce of this one. **Known limit (re-check B14, the coordinator's ruling of 13 November 2026).** A bounce observed before migration 10 has no stored event, and none is backfilled. It cannot be rebuilt honestly from a bad address or a failed track, because another campaign can mark an address bad. After the upgrade, Activity for such a lead shows the send, the track's ending on a bad address ("… is marked wrong, so nothing more is sent to it", which claims neither this campaign nor another), and the lead's ending, with no bounce entry. Nothing was lost: Activity is new in this pull request, and no real bounce predates it, because real sending has never been turned on. `src/server/persistence/migration-10.test.ts` checks that no bounce is invented and that the ending is shown.
+
+## Changes from ticket 12c (the Instantly adapter)
+
+| Change | Sections | Test |
+| - | - | - |
+| A port's `Transport` may say `available: false`; the engine claims no step that travels by it, so it waits and nothing is sent. Instantly's continue-thread follow-ups use it until ADR 0002's X2 | 4.2, 5.3 | `src/server/instantly/engine-instantly.test.ts` (the follow-up waits unsent; fails without the rule) |
+| `HandoverRequest` carries the attempt's `trackId`, so the adapter names the dispatch campaign; it is read from the authorized attempt like every other field | 5.5 step 6 | `src/server/instantly/port.test.ts` |
+| A held reply's running time was the full gap since its last count whenever observation succeeded, so a same-process suspension with no ticks (a sleeping laptop) was credited whole and could fall back by address before the delayed sent event attached (review bot on `c66a0c8`, found through the adapter). Running time is now `runningCredit`, bounded by `MAX_RUNNING_CREDIT`, and the worker wakes at least that often while a reply waits. The Instantly adapter uses the same function | 2.4, 5.6 parameters | `lifecycle.test.ts` "review bot on c66a0c8"; `clock.test.ts` "running time" (each cause of a gap); the fixed seeds and mutations unchanged |
+
+## Changes from ticket 13a (SMS tracks and coordination)
+
+Recorded on 13 November 2026 by the 13a implementer. Each change was built test-first; the generated test of 9.3's ticket 13 row runs from the pull request's first commit.
+
+| Change | Sections | Test |
+| - | - | - |
+| The validator accepts email and SMS tracks in the main branch, any number, each `entry` or `after(track, d)` with whole d ≥ 0, naming a live track of the same branch, with no cycle. Phone tracks and the win-back branch are refused with "arrive with a later release" until tickets 14 and 16. Two tracks on one channel are named by order ("Email track 2"). | 7.1 | `definition.test.ts` |
+| Track starts run to a fixpoint in one evaluation, so a track skipped at its start releases a chain of zero-delay successors at the same lead time. A delayed start is resolved from the predecessor's stored `finished_at` and `finished_wall` with 3.3's `span`. `nextWakeAt` now includes unstarted tracks' resolved starts, so the worker wakes for them (the running worker also ticks every 15 seconds, so this changed timing only in tests). | 2.6, 3.3 | `progress.test.ts`, `sms.test.ts` |
+| SMS destination: the newest good **own mobile** (phone kind mobile, read as an E.164 number) of a decision maker. A company lead's details hold only main lines, which ADR 0001 ("Usable channels") never treats as an SMS destination, so a company lead's SMS track is skipped as a missing channel. The spec's "company details for company leads" therefore yields no SMS today; this follows ADR 0001 and is reported, not a new rule. | 2.1, 2.6 | `progress.test.ts`, `sms.test.ts` |
+| Dispatch per channel: a claim chooses from the track's channel pool (`poolOf`); the sender is fixed per channel (`email_sender`, `sms_sender`, migration 9) at the first handover; predicate 10 also requires the account's channel; predicate 11 is checked; the handover inserts the binding in the same write. An SMS step renders no subject and is never held `no_thread`. A track held `sms_conversation_taken` stays ready, so a number that joins the pool is used at once; the claim decides. | 4.2, 4.5, 5.5 | `dispatch.test.ts` |
+| An SMS reply is attributed by a pure rule, `smsReplyOwner` (the pair's unreleased owner, else its latest released owner), never by thread or address fallback, and never pending. Its event id is kept as `sms:<id>`; it is applied before its event is recorded, so a crash in between replays as a no-op. | 2.4, 4.5 | `dispatch.test.ts`, `sms.test.ts` |
+| One port per channel in the engine; each attempt reaches the port of its account's channel; each channel has its own observation checkpoint. An account its port no longer lists is marked unhealthy (disconnected). Needs attention adds `senderProblems` (any channel, with label). | 5.3, 5.4 | `sms.test.ts` |
+| The status's reply date is the reply that stopped the lead (the latest at or before its ending), not the latest reply (found by the generated test: a prospect texting twice). | 2.1 | `sms.test.ts` "a second text" |
+| **The ticket 13 generator is a second generator** (`test/support/generated-tracks.ts`, `src/server/sequence-runs-tracks*.test.ts`), with its own independent record, beside the ticket 12 one, which still runs every email fake mode, crash and retry. It generates one to three campaigns, each a tree of one to four email and SMS tracks connected together or after (delay 0–3), people with and without email or mobile in several campaigns, a company lead, bounces, invalid and undeliverable numbers, replies on both channels (STOP included), disconnected and unlisted numbers, one number shared by every campaign, slow pacing that expires claims, and replies and a second worker's handovers between a claim and its handover. It asserts after every event invariants 1–4, 6–8, 10–14, 19 and 20, and 18 after the drain; 7 and 14 for the first time, 12 on both channels. Its record predicts each start from its own calendar arithmetic and the delivery log, each conversation's owner from the SMS provider's call log, and each track's final outcome. | 9.2, 9.3 | — |
+| Mutations, each killed by its known seed in `pnpm check` (`test/support/track-mutations.ts`): the ADR's four ("SMS reply to the newest campaign", "binding transferred after an end", "binding fixed at claim", "ending check too late"), and one per further rule: "after counts from the earlier track's start", "after delay ignored", "together tracks not together", "a skipped or failed track releases nothing", "SMS reply stops only the SMS tracks", "SMS capacity ignored", "SMS sender not fixed", "SMS to any phone". A transferred binding is refused by the store's unique index or its no-removal guard, which the test reports under invariant 14: that guarantee holds by construction. | 9.2 | `sequence-runs-tracks-oracle.test.ts` |
+
+**Verification of `5ca8c5e` and the review bot** (coordinator's items; each reproduced first as a failing test):
+
+| Finding | Change | Sections | Test |
+| - | - | - | - |
+| Review bot: a concurrent first SMS handover for another subject between an evaluation's snapshot and its apply made the no-removal guard abort the tick | An evaluation applies over the current SMS bindings, as over the current accounts; it never removes one | 2.5 | `sms.test.ts` "a conversation another worker takes while this one evaluates" |
+| Verifier B1: a reply observed late, with an earlier provider time, moved the status's reply date | The reply that stops the lead is stored once, in the transaction that ends it (`stop_reply_channel`, `stop_reply_at`, migration 9), and the status shows only that; no later reply moves it, on either channel, across a restart | 1.3, 2.1, 2.4 | `sms.test.ts` "replies observed late and out of order"; the generator reports replies late on both channels |
+| Verifier B2: the record read the predecessor's finish, and each track's start, back from the engine | The record derives every start and finish from its own model and the providers' logs: a skip at the record's start, a completion at the last send once the app could know of it, a failure when the app learned the detail was bad (the refusal, or the failure or bounce event, which may come before the send's own late event); and the reply stop from the reply logs in observation order. It compares the engine's starts and finishes with these after every event | 9.2 | mutations "a failed track finishes a day late", "a skipped track finishes a day late" (7) |
+| Verifier F1: no SMS priority check | The checker's own eligibility at every claim (`afterClaim`, a test hook) and every first handover call, on both channels: no item that could have gone on that account had higher priority | 4.3, invariant 12 | mutations "first messages before follow-ups", "newest due first" (12) |
+| **Defect the priority check found** | A lead with items ready on two channels in one pass lost its second item's claim turn: its first claim bumped its version, so the second was refused as stale and lower-priority leads took the account, waiting it behind them once `k` was full. A subject's later items in a pass are now checked against the state its own claim wrote | 4.2, 4.3 | `sms.test.ts` "a lead's second ready item is still claimed in its priority turn" |
+
+**Council on `0f916b1`** (each real finding reproduced first as a failing test):
+
+| Finding | Change | Sections | Test |
+| - | - | - | - |
+| Migration 9 left the stopping reply empty for leads that replied before it, so they showed `replied` with no channel or date | The migration backfills it: the lead's **first recorded reply** (`replies` by rowid). Replies are inserted as they are observed and any reply ends the lead, so this is the reply the engine now stores for a new stop, and an upgraded lead and a newly stopped one agree. (2.1's earlier wording, "the latest reply at or before the ending", picks a different reply when a later-observed reply carries an earlier time, so it is not used.) **A changed date after the upgrade is the correction, not data loss** (coordinator's ruling): before this pull request the status dated a lead's latest reply, which is the defect it fixes; a lead who replied twice showed the later reply's date before the upgrade and shows the first reply's, the one that stopped it, after. Every other addition reads as before for an old row: `sms_sender` null and no bindings (no texts were ever sent), a stored definition without `smsPool` has none, and an account's `problem` is null until the next account sync rewrites it | 1.3, migration 9 | `src/server/persistence/migration-9.test.ts`: a database written by the app, taken back to before migration 9 and reopened; a later out-of-order reply after the upgrade moves nothing |
+| An unhealthy inbox was listed twice in Needs attention, once as "disconnected" | Each port reports why an account cannot send (`problem`: Instantly's inbox reason, SMS "disconnected"); the store keeps it, `not_listed` when the port stops listing the account; `senderProblems` lists each account once, any channel, with that reason, and replaces 12b's `unhealthyInboxes` | 5.4 | `engine-instantly.test.ts` (`sending_off`, `stale`), `sms.test.ts` (`disconnected`, `not_listed`) |
+| The company-lead SMS question was recorded but not asked | Q10 | Questions | — |
+| `bounced` for SMS could be read to cover transient failures | The port contract states an adapter must never map a transient carrier failure to `bounced`; the fake's set is `invalidAfterSend` | 5.3 | — |
+| No mutation proved an email reply stops SMS work | Mutation "an email reply stops only the email tracks" (14); the generator also replies by email while the lead's text is with the provider | 9.2 | `sequence-runs-tracks-oracle.test.ts` |
+
+Questions kept with their interim: Q7 (a mobile whose conversation from every pool number belongs to another campaign is held as `sms_conversation_taken`, listed in Needs attention; it is not skipped), and Q10 (a company lead has no SMS destination, so its SMS track is skipped). Q1 (one incoming connection per track) is unchanged.
+
+## Ticket 13b: arranging tracks in the editor, and the projection with every track
+
+Recorded on 13 November 2026 by the 13b implementer, before the code. Two rules: one new (the editor's arrangement operations), one replaced (the Before launch projection). Neither changes the engine, the validator (7.1) or any invariant in section 8.
+
+### The arrangement rule (a deep rule: it decides the draft across every edit)
+
+**The rule.** The editor changes a campaign's arrangement only through four pure operations, `arrange(definition, operation)` in `src/web/campaign/arrangement.ts`:
+
+- **add** a track on a channel (email or SMS). It is new, with an id never used in the definition, and starts at launch (`entry`);
+- **remove** a track;
+- **start** a track at launch (`entry`), or **after** another live track of the same branch with a delay in whole days (`after(X, d)`);
+- **delay**: change the days of an `after` start.
+
+Each returns either the new definition or a **refusal**, a plain sentence. A refused operation leaves the draft as it was; the sentence is shown beside the control that asked for it, and focus stays on that control. Every operation goes through the editor's one state and save queue (1.1.1) like any other edit: none saves on its own. Before launch only; a running campaign's arrangement is read-only until ticket 19.
+
+"Together" is not stored (1.1: "together from X to Y gives Y the same rule as X"). The canvas draws the tracks that share a start rule as together: every track that starts at launch hangs from the Launch point, and every track `after(X, d)` hangs from X with the label "after · d days". The inspector's Starts control offers "At launch" or "After" a track with a delay; two tracks are together when both start at launch, or both after the same track with the same delay.
+
+**Refused, in plain words, at the control:**
+
+- starting a track after itself, or after a track that starts after it through its chain (a cycle): "SMS track starts after this one, so this one can't start after it: each would wait for the other.";
+- starting a track after a track that is removed, in the other branch, or not in the definition;
+- removing a track that another live track starts after: "Email track 2 starts after this one. Change how it starts first.";
+- a delay that is negative or not a whole number: "The delay is a whole number of days, 0 or more." The field keeps what was typed and says so; the draft keeps the last whole delay;
+- a delay on a track that starts at launch, which has none.
+
+The editor offers operations on live tracks only; an operation naming a track that is gone is refused ("That track is no longer in the sequence.").
+
+**Invariants** (asserted after every operation by the generated test):
+
+1. From a draft the validator accepts, every operation's result is a draft the validator accepts (`definitionProblems` is empty): the editor cannot produce what 7.1 refuses. This holds by construction rather than by recovery.
+2. A refusal leaves the draft identical, and says why in a non-empty sentence.
+3. Of the operations the editor offers, nothing is refused that the validator would accept: applying a refused operation naively makes `definitionProblems` non-empty.
+4. An operation changes only what it names. Removing a track removes that track and nothing else; no other track's start rule is rewritten.
+5. An added track's id has never been used in the definition, live or removed.
+
+**The boundary.** The server's validator (7.1) still refuses any such definition from any client; this rule only keeps the editor from producing one.
+
+**The generated test.** `src/web/campaign/arrangement.generated.test.ts` starts from generated valid definitions (one to five email and SMS tracks, chains and fans of `after`, delays 0 to 3, removed tracks) and applies generated sequences of operations, including ones that should be refused, asserting invariants 1 to 5 after each. Its mutations, each of which must fail it: no cycle check; removal that ignores dependants; a refusal that still changes the draft; refusing every `after`.
+
+**Saving the new edits.** The arrangement operations, an SMS track's copy, waits and window, and the SMS pool are edits like any other, so 1.1.1's rule and its generated test cover them: `saveQueue.generated.test.ts` adds them to its generated edits, and SMS numbers connecting to its pool sync.
+
+**The SMS pool** follows the connected SMS numbers, as the email pool follows the connected email inboxes (1.1.1): one pool sync for both channels, counted as one edit. In the running app there is no SMS provider, so the SMS pool stays empty and every SMS track meets launch blocker 3.
+
+### The projection with every track (replaces "SMS tracks" in "Ticket 12c: the Before launch projection")
+
+**The rule.** The projection is the engine's own decisions run forward without a provider. It takes every subject it simulates as the engine's own `SubjectState` (`EngineStore.subject`) and moves it only with the engine's own rules object (`DEFAULT_RULES` in `src/server/engine/rules.ts`, the one the engine uses):
+
+- this campaign's leads enter as launch enters them: `evaluate(enterMain(s))` on the definition being projected;
+- each instant runs the engine's passes until nothing changes, in the engine's order: observe the sends of the previous pass (`applyToWork` with the send at its handover instant), expire claims older than the settling time (`applyToAttempt`, `claim_expired`), `evaluate`, claim every `readyItems` item in `claimOrder` with `claimRefusal`, `chooseAccount` and `claim`, then hand over per account in `handoverOrder` with `handoverFailures` and `handOver`, then the provider's acceptance (`applyToAttempt`, `call_answer accepted`);
+- time moves to the next instant at which anything can change, as `Engine.nextWakeAt` computes it: a due step or its window's next opening, a resolved track start, a claim's slot or expiry, an account's wait ending, a reset day.
+
+So track starts, `after` delays counted from the earlier track's finish, a missing channel skipping its track and releasing the tracks after it, touched leads going first across channels, windows, capacity per account across campaigns, pacing, a lead's fixed sender per channel and the SMS conversation rule (4.5) are the engine's, not a second implementation.
+
+What the projection supplies itself, because the store supplies it to the engine: each account's state (`used` on its reset day, counting the simulation's sends and open reservations; `inFlight`; `nextSlotAt`), starting from the engine's own `AccountState` records, and the SMS bindings, starting from the stored ones, shared by every simulated subject as the store shares them. And the provider: every handover is accepted and sent at once, and observed in the next pass, as the fake providers do in tests.
+
+**Which subjects it simulates.** This campaign's leads that have not ended, and every running subject of another campaign whose pools (or fixed senders) share an account with this campaign, or with a campaign already included (the closure: capacity is shared transitively). Their stored progress, claims and bindings are taken as they are; work already with a provider is taken as sent at the instant of the projection, as before.
+
+**When it shows no figure, and says why.**
+
+- An account in a live track's pool cannot send, with no known end (unhealthy, or a quota held), as before.
+- A live track's channel has no connected sender (launch blocker 3): its leads would wait on it for ever, and so would every track after it. In the running app this is every campaign with an SMS track, since no SMS provider exists. The screen names the track.
+
+**What it reports.** For each account in a live track's pool, on either channel: its busiest day for this campaign, the sends used today across campaigns, and its pacing gap. The days until every lead that has a channel some live track uses has had its first message on any channel, counting launch day as day 1, in the campaign's zone.
+
+**What it still does not model.** Provider failures, retries, replies, bounces, invalid numbers found at the send, pauses, and a port's transport that cannot send a step yet (Instantly's continue-thread follow-ups before ADR 0002's X2). Every send is assumed to succeed at once. Production ticks every 15 seconds, so a real send can land up to one tick later.
+
+**Phone tracks (merge of pull request 44).** *Replaced by ticket 14c* ("Calls in the projection"): calls are placed and worked under a stated assumption, and nothing after a phone track is withheld. The paragraph below is the 13b record. A call is a task on the user's list, not a send. Nothing the engine decides about a send reads a call task or the user's call day (`readyItems`, `claimRefusal`, `chooseAccount`, `claim`, `handoverFailures` and `handOver` read neither; only the status does), so the projection leaves due calls unplaced and every email and text it projects is still the engine's own. What a call changes is the user's to decide: a logged call touches the lead, a track after a phone track starts only when the call is logged, and an interested call ends the lead. The engine had no expiry for an unworked call then, so it held the tracks after it until the user logged it (since ticket 15a an unworked call is also skipped at the skip limit, which releases them). Therefore:
+
+- the estimate counts emails and texts, and assumes no call outcome is logged, as it assumes no reply; the screen says both when the campaign has a phone track;
+- an email or SMS track that starts, through its chain, after a phone track withholds the figure, named in `withheldBy` (`after_a_phone_track`, with the phone track it waits on): its sends begin when the user logs a call, which no estimate can know;
+- a lead only a phone track can reach is not counted as one that would not start: it is left to the user's calls (`onlyCalled`);
+- copy for a lead on a track after a phone track carries no day, and names the call it waits on.
+
+This replaces 14a's rule that a phone track beside the email track withholds the figure (its paragraph "Merging pull request 41" below): the engine's rules now decide, and only the user's logging of a call is left out. `withheldBy` is the one source of any "no figure because" about tracks; `src/web/campaign/withheld.ts` words it, and an account that cannot send keeps its own reason (`cannotProject`). The engine-versus-projection test generates phone tracks together with and after the other tracks (without logging any call, as the engine runs with no user): cases where no send track waits on a call must match the engine exactly, and cases where one does must withhold the figure, name that track, and the engine must indeed send nothing on it.
+
+**Every input it reads**, replacing the 12c table:
+
+| Input | The projection reads it from | The engine reads it in |
+| - | - | - |
+| A subject's progress, lead facts, zone, merge data, fixed senders, touched, claims and work | `EngineStore.subject`, the `SubjectState` unchanged | `EngineStore.subject` in every pass |
+| Every decision on a subject | `DEFAULT_RULES` | `Engine.rules`, `DEFAULT_RULES` unless a test swaps one |
+| An account's health, waits, capacity, count with reservations, in-flight bound, gap, slot, reset zone, channel | `EngineStore.accounts(now)`, then the simulation's ledger | `EngineStore.accounts` / `SubjectState.accounts` |
+| SMS conversations | the stored bindings for each simulated mobile, then the simulation's own | `SubjectState.smsBindings` |
+| Reservations and live attempts of subjects it does not simulate | `EngineStore.heldOnAccounts`, counted as `accounts` counts them, kept as they are | `EngineStore.accounts`' `used` and `inFlight` |
+| Which other subjects compete | `runningSubjectIds`, closed over shared accounts | `runningSubjectVersions` in `evaluateAll` and `claimAll` |
+| When to look next | the same instants as `Engine.nextWakeAt` | `Engine.nextWakeAt` |
+
+**Every condition that decides whether or when something is claimed or sent** (review bot on `c1e215e`, the fifth projection-versus-engine finding across pull requests 41 and 45; each earlier one was a condition written beside the engine's rule). Each row is a call into the engine's own function for that decision, on the subject as the store would load it at that instant; nothing is pre-filtered or short-circuited before the call. The bot's finding was exactly such a filter: the claim pass skipped every item whose accounts were full by `accountHasRoom` without the item's inherited reservation, so `chooseAccount`'s exemption for uncertain work a claim carries on never ran.
+
+| Decision | The projection (`src/server/load-projection.ts`) | The engine (`src/server/engine/engine.ts`) |
+| - | - | - |
+| Launch: a lead enters the main branch | `rules.evaluate(rules.enterMain(s))` | `store.launch` with the same two |
+| Tracks start, wait, are skipped or fail, finish; the lead ends | `rules.evaluate` | `evaluateAll`: `rules.evaluate` |
+| Which steps are ready (due, not held but for a taken conversation, not a call) | `rules.readyItems` | `claimAll`: `rules.readyItems` |
+| The order claims are tried in | `rules.claimOrder` over every ready item | `claimAll`: `rules.claimOrder` |
+| Whether a ready step may be claimed now (runs, pending, due, window open, good destination, copy renders, thread) | `rules.claimRefusal` | `claimAll`: `rules.claimRefusal` |
+| Which account takes it (fixed sender or pool, conversation free, available, room counting an inherited reservation, in-flight bound, soonest slot) | `rules.chooseAccount` | `claimAll`: `rules.chooseAccount` |
+| The claim (reservation, inherited key) | `rules.claim` | `claimAll`: `rules.claim` |
+| A claim older than the settling time lapses | `rules.applyToAttempt(claim_expired)` for a claim with `now − claimedWall ≥ SETTLING` | `expireClaims`, the same condition |
+| Which waiting attempt an account's slot goes to | retries first, then `rules.handoverOrder` | `nextForSlot`, the same |
+| A claim waits for its account's slot | `now < nextSlotAt` | `handOverAll`, the same check |
+| Whether a claim is handed over, waits, is skipped or withdrawn | `rules.handoverFailures`, then `rules.handOver` or `rules.applyToAttempt(guard_failed)` | `tryHandover`, the same |
+| A same-key retry: waits, is authorized, or is refused | `rules.retryFailures`, then `rules.authorizeRetry` or `rules.applyToAttempt(retry_refused)` | `tryRetry`, the same |
+| A send is recorded and the next step timed | `rules.applyToWork(sent_observed)` with `rules.sendPoint` | `observe`, the same |
+| When to look again | the instants `Engine.nextWakeAt` uses: a due step or its window's next opening, a track's resolved start, a claim's slot and expiry, a retry's slot, an account wait's end, every account's next reset day | `nextWakeAt` |
+
+Two orders differ from the engine's, and neither changes an answer: `chooseAccount` is called before `claimRefusal` (both are pure and a claim needs both; the account choice is the cheaper), and a subject's evaluation, readiness and loaded view are remembered until it, the accounts or the conversations change (the engine remembers evaluation and empty readiness the same way, by version). `localParts` in `clock.ts` now remembers the instants it was last asked for, a pure function's answers kept, which the engine benefits from too.
+
+**Stored state the projection starts from (review bot and council on `10121d3`).** The rule, once: every piece of work that occupies a sender when the projection is taken, whoever owns it and whatever that owner's status (running, replied, stopped, finished, paused, another campaign), is either advanced by the engine's own rules or the figure is withheld with the reason said; it is never held for ever. So the projection simulates every subject that holds work on an account it simulates (`EngineStore.heldOnAccounts`), not only running ones: a claim of a lead that no longer runs fails the handover's guard and is withdrawn (`handoverFailures`, predicate 1), accepted work is sent at the projection's instant under its stated provider, and a retry for a lead that no longer runs is refused (`retryFailures`). What the engine itself cannot settle without the provider or the user withholds the figure: uncertain work that no claim of its running lead will carry on (only a lookup or the user's mark settles it: `unsettled_work`), and a reply still being matched to its lead, which may stop that lead (`reply_being_matched`).
+
+**Every table and stored field the engine reads to decide a claim, a handover, a settlement, a stop or a wake-up, and how the projection treats it.** Anything not on this list is a defect by definition.
+
+| Table or field | The engine reads it in | The projection |
+| - | - | - |
+| `campaigns`: `launched_at`, `paused_since`, `definition` (tracks, windows, pools), `version`, `definition_version` | `runs`, `evaluate`, `readyItems`, `poolOf`, the version guard | Read as stored; this campaign launched at the projection's instant (`enterMain`). A paused campaign's leads do not run (`runs`), so nothing of theirs is claimed; what they hold moves by the attempt rules |
+| `enrollments`: `ended`, `lead_paused`, `branch`, `branch_entered_at`, `touched`, `frozen_since`, `frozen_total`, `email_sender`, `sms_sender`, `stop_reply_*`, `version` | `runs`, `evaluate`, `comparePriority`, `chooseAccount`, `handOver` | Read as stored; changed only by `DEFAULT_RULES` |
+| `track_progress` (starts, pending step, due and basis instants, finish and reason) | `evaluate`, `readyItems`, `claimRefusal`, `handoverFailures`, `nextWakeAt` | Changed only by `DEFAULT_RULES`; the wake instants are `nextWakeAt`'s |
+| `step_results`, `freezes` | `evaluate`, `advanceTrack`, `wallAtLead`; since ticket 15a the skip limit's expiry (whether the lead ran at a rollover, and its lead time then) | By `DEFAULT_RULES` |
+| `attempts`: `state`, `retry`, `awaiting_answer`, `claimed_wall`, `handed_wall`, pre-send fields, withdraw flags, transport | `claimAll`, `expireClaims`, `handOverAll`, `tryHandover`, `tryRetry`, `withdraw`, `nextWakeAt` | Claimed: expiry and handover by the engine's rules. Handed and awaiting an answer, or accepted: the provider answers accepted and sends at the projection's instant (`applyToAttempt`, `applyToWork`). A retry wanted: the engine's retry rules. A withdrawal asked of an attempt the provider already holds: the provider has sent it (the same model) |
+| `provider_work`: `settled`, `calls`, `sent_wall`, `sent_day`, `next_lookup_wall`, `lookup_answer`, `unresolved_since`, `provider_ref` | the store's account counts, `inheritedWork`, `settle` (lookups), `attend`, `correlate` | Sends and reservations counted from it as the store counts them. Uncertain work a claim of its running lead will carry on: by `inheritedWork` and `claim`. Any other uncertain work (only a lookup or the user settles it): **withheld**, `unsettled_work` |
+| `replies` | `applyReply`, handover predicate 13 | As stored; a future reply is not foreseen (said on the screen) |
+| `reply_events` pending (a reply whose thread is not yet known), with its running wait | `correlate`, `nextWakeAt`, `pendingReplies` on the subject (handover predicate 18) | **Withheld**, `reply_being_matched`, naming the inbox |
+| `sms_bindings` | `pairFree`, `candidatesFor`, `handOver`, `smsReplyOwner` | Shared by every simulated subject; added only by `handOver` |
+| `live_contact_details` (good or bad, owner, kind, key), `people` and `companies` (zone, merge data) | `destinationFor`, `claimRefusal`, `renderStep`, `evaluate` | Read as stored; a future bounce, bad number or mark is not foreseen |
+| `sender_accounts`: `capacity`, `gap_ms`, `k`, `next_slot_at`, `healthy`, `problem`, `wait_until`, `wait_reason`, `backoff_ms`, `reset_zone` | `pickAccount`, `accountAvailable`, `accountHasRoom`, `handoverFailures`, `nextWakeAt` | Read as stored. Unhealthy, or a quota held with no end: **withheld**, `cannot_send` or `quota`. A rate limit's wait: a wake-up at its end. The slot: moved only by `handOver` |
+| The accounts' counts: sends on the reset day, reservations, live attempts | `EngineStore.accounts` | From the simulated subjects' work (every holder on these accounts is simulated), plus today's sends of subjects holding nothing now |
+| `call_tasks`, `call_attempts`, the call settings and day | `placeCallsAll`, `logCallOutcome`, status rule 5 | *Replaced by ticket 14c* ("Calls in the projection" below): due calls are placed by the engine's own placement rules on a call day the projection supplies, and every listed call is worked in the last second of its user day with the engine's own `logCallOutcome`, outcome no answer, the stated assumption. A track after a phone track is projected, not withheld. The other campaigns the assumption covers are named on the screen (`callsNotCounted`). Ticket 15a's stored facts, as the projection starts from them, are in "Merge of ticket 15a" below |
+| A declined lead: `enrollments.no_more_calls`, and `call_attempts.declined_path` (ticket 16a) | `readyCalls`, `startTrack` in `evaluate` (a phone track after a decline is skipped at its start); the record is read by nothing that decides | Simulated by the engine's own `evaluate`: its phone tracks are finished, or skipped at their start, so a track after one starts after its delay as the engine starts it. Such a lead is never called again, so it has no call for the assumed user to log, and it does not name its campaign in `callsNotCounted` (`awaitsACall` reads `no_more_calls`) |
+| A lead in win-back: `enrollments.branch`, `branch_entered_at` (ticket 16a) | `liveTracksFor` in `evaluate` and the endings (the branch's tracks start from its entry; its channels are the lead's reach), `deriveStatus` | Simulated by the engine's rules, as any running lead: its branch's emails and texts are claimed and sent by `readyItems`, `claimRefusal`, `chooseAccount`, `claim` and `handOver`, and counted against the accounts they share. Its main tracks are finished (`dropped_for_win_back`) |
+| A campaign with a win-back branch: the definition's `win_back` tracks, and each phone track's `declinedPath` (ticket 16a) | `liveTracksFor`, `decline`, `enterWinBack` | A lead enters the branch only by a decline, which the projection's assumed user, who logs every listed call no answer at the end of its day (ticket 14c), never logs, so this campaign's leads never reach it; decided by the engine's own `evaluate`, which never starts a branch track for a lead in `main`. The run's own result says so (`Projection.winBackNotCounted`: the branch is live, by `winBackAvailable`, and no simulated lead of this campaign is in it at the end of the run), and the screen shows it with a finished run's figures only: its sends are not counted. A competing campaign's branch counts through its leads already in win-back, above |
+| The providers' observation checkpoints (`engine_meta`) | `observe` | Provider events after the projection's instant are not foreseen, beyond the stated provider |
+| `bounce_events`, `notes`, `imports` | nothing that decides | — |
+
+**What the projection supplies itself, by stated rule:** the store's counts (each account's sends on its reset day, reservations and live attempts, its slot, from `EngineStore.accounts`; what subjects it does not simulate hold, from `EngineStore.heldOnAccounts`, kept as they are) and the provider. The provider: every call the projection makes is accepted and sent at once; work in the provider's hands when the projection is taken is treated so: an accepted attempt sends at that instant, a call still waiting for its answer is answered accepted and sends then, a same-key retry waiting for its slot is made by the retry rules above and sends, and uncertain work no attempt carries stays reserved until a claim carries it on. Lookups, refusals, bounces and replies are not foreseen.
+
+**Ticket 15a's stored facts in the comparison.** The generated multi-track worlds' earlier campaigns also take redials and callbacks a day or more ahead before the projection, and their unworked calls reach the skip limit while the engine runs on. The projection must still list exactly the engine's sends wherever it projects; where it withholds the figure for a track after a phone track, the engine must send on that track only after the call it waits on was skipped (for want of a number, or at the skip limit), never before. A coverage check requires leads held by a callback, redialed calls, calls skipped at the skip limit, and a send released by one, across the 40 worlds.
+
+**The test of that state.** `before-launch-projection.test.ts` "an older campaign's work in every provider state" generates 30 cases (`PROJECTION_SEEDS` raises it) whose older campaign, at the projection's instant, has claims waiting for a slot, same-key retries waiting, accepted work about to send, unresolved work an attempt carries, and uncertain work no attempt carries; afterwards a claim carries that work on. The provider then behaves as stated above, and this campaign's sends must be the engine's exactly. A coverage check fails unless every one of those states occurs. Four of the 30 fail on `c1e215e`; the bot's own case is a regression beside them, failing first.
+
+**Cost.** Measured on 13 November 2026, on this workstation, with one email track of three emails and an SMS track of two texts after it: about 1.4 s for 500 leads and 12.9 s for 2,000, of which about 4 s is reading the leads (`campaignLeads`, follow-up 17 on #42); before the review bot's finding the pre-filtered claim pass took 0.9 s and 4.1 s. Every waiting lead now meets the engine's own guard at every instant, as in the engine itself; the simulation keeps waiting items sorted between passes and remembers loaded subjects until something changes.
+
+**The test.** `src/server/before-launch-projection.test.ts` keeps every earlier comparison (all 148 pass unchanged on the new simulation) and adds generated cases with one to four email and SMS tracks connected together or after (delays 0 to 3), leads with and without an email or a mobile, one to three campaigns sharing inboxes and numbers, the same mobile in two campaigns, and other campaigns launched earlier with work in progress. The projection taken just before launch must list exactly the engine's sends over the fake providers, on both channels: the same lead, track, step, account and instant. 40 worlds run in `pnpm check` (`PROJECTION_SEEDS` raises it). A broken simulation is caught: with its claim order reversed, 17 of the 40 worlds fail. A mutation of the engine's rules themselves changes the engine and the projection together, which is the point: they cannot disagree.
+## Changes from ticket 14a (phone tracks and call tasks)
+
+Recorded on 13 November 2026 by the 14a implementer. Each change was built test-first; the generated test of 9.3's ticket 14 row runs from the pull request's first commit. No telephony provider exists or is chosen: the user dials on their own phone, and the application only lists calls and records outcomes.
+
+| Change | Sections | Test |
+| - | - | - |
+| The validator accepts phone tracks in the main branch: exactly one live step (a removed one does not count), no wait and no copy, the window as calling hours ("the phone track's calling hours have no days"), connected together or after like any track. A declined path of `win_back` is refused with the win-back branch until ticket 16. The definition gains `callScript`; a track gains an optional `declinedPath`, stored, not read. | 1.1, 7.1 | `definition.test.ts` |
+| A phone track starts when a good number exists (the lead's own direct or mobile, or its company's main line; a company lead's main line) and is otherwise skipped as missing. A started phone track whose lead has no good number left is skipped as missing, closing its open task (spec "Phone steps are skipped when no good number remains"). The call channel counts as reachable while a good number exists. | 2.1, 2.6 | `calls.test.ts` (engine) "a colleague's wrong number on the shared main line" |
+| Status rule 5, `waiting_on_call`, and the rule that a finishing track closes its open call task in the same change, whatever the reason. | 2.1, 2.3 | `calls.test.ts`; mutation "a track that finishes without closing its call task" |
+| Placement (4.4 as amended above): its own pass in each tick, after evaluation and before claims, in priority order, each in a transaction that re-reads the day's counts. The worker wakes at the next user day for a due call not yet placed. | 2.6, 4.4 | `calls.test.ts` "the user's daily call capacity"; mutations "daily call capacity ignored", "committed calls not counted", "a call placed on a day its calling hours have closed", "calls placed newest due first" |
+| Outcomes without redial, callback or not interested. A logged call is the call step's result `sent`, with the outcome as its reason, and the track completes; every outcome but skip for now touches the lead. A number is required for every outcome but skip for now, and must be one of the lead's numbers and good. A wrong number marks the dialled detail bad (ADR 0001): a main line for every colleague called on it, a mobile for texts too, which fails an SMS track on it; not another company's or person's detail with the same digits (Q11). Interested completes its track, closes every other open task of the lead (`closed_on_interest`) and ends the lead in this campaign only; a phone track that has started but has no task yet stays unfinished, since the lead has ended. | 2.4 | `calls.test.ts`; mutations "outcome on an unlisted task", "interested closes only its own task", "skip for now finishes the call", "a wrong number leaves the number good", "an outcome on a bad number accepted" |
+| The user's call settings: one daily call capacity (a factory default of 50 until the user sets one) and the user's zone (the machine's until set), `GET`/`PUT /api/call-settings`. | 3.4, 4.4 | `calls.test.ts` |
+| Read models for part b: `GET /api/today`, `GET /api/calls`, `GET /api/call-tasks/:id`, `POST /api/call-tasks/:id/outcome`; the lead's progress shows each phone track's task and each call step's outcomes. Engagement on the task is the replies it lists: open and click tracking is off (ADR 0002) and outside the spec. | — | `calls.test.ts` |
+| **The ticket 14 generator is a third generator** (`test/support/generated-calls.ts`, `src/server/sequence-runs-calls*.test.ts`), with its own record, beside the ticket 12 and 13 ones, whose recorded seeds it leaves alone. It generates one or two campaigns of one to four email, SMS and phone tracks together or after (delay 0-2), calling hours on business days, every day or evenings, people with and without email, mobile or direct line, companies with and without a main line, a company lead, a user zone and a daily call capacity of 1 to 5; the generated user works the focused call with every outcome this ticket offers, attempts outcomes on tasks that are not listed and on numbers already marked bad, and the prospect replies by email and SMS. Each run ends with a drain in which the user works every call. Its record predicts each track's start and finish, which outcome must be accepted, each listed task's place in the queue, the numbers each task offers, when the lead stops and its status. It asserts after every event invariants 1, 2, 4, 6, 7, 8, 13, 16 (the ticket 14 part), 17, 19 and 20, priority at placement (12, for calls), and that a due email or text goes within an hour of its window opening while a call is open (18); and 18 after the drain. | 8, 9.2, 9.3 | — |
+| Mutations, each killed by its known seed in `pnpm check` (`test/support/call-mutations.ts`): the ADR's two ("outcome on an unlisted task", "interested closes only its own task"), 9.2's "a track that finishes without closing its call task", and one per further rule: "daily call capacity ignored", "committed calls not counted", "a call placed on a day its calling hours have closed", "an unworked call holds the parallel tracks", "the tracks after a call start when it is placed", "skip for now finishes the call", "a wrong number leaves the number good", "an outcome on a bad number accepted", "calls placed newest due first". Placing a call never touches the lead; the generated runs cannot see that while the task is open, so an example test guards it ("placing a call never counts as reaching the lead"). The queue's ready-now and later-today split is a read model the generated test checks after every event, but no engine rule decides it, so it has no mutation. | 9.2 | `sequence-runs-calls-oracle.test.ts` |
+
+**Review bot on `a1399ce`** (each reproduced first as a failing test):
+
+| Finding | Change | Sections | Test |
+| - | - | - | - |
+| A named decision maker whose only number was the company main line had a person note stored as a company note: the note's owner was inferred from the lead's numbers | A call note belongs where the user put it, `person` when they choose nothing (the HTTP default). The one fallback is a fact of the lead, not of its numbers: a company lead has no person, so its notes are its company's. Nothing about who or what a call record belongs to is derived from the lead's current numbers | 1.3 Notes, 2.4 | `calls.test.ts` "a note is the person's or the company's as the user chose" |
+| A re-import that merged the dialled detail into another (ADR 0001 "Merged contact details", ticket 12a) left the call's history with no number | Every read of a detail id about calls goes through one function, `numberOf`, which follows the merge pointer: the number recorded on a call, in the call task's history and in the lead's progress, and the number an outcome names, so a screen read before the merge names the same number. The store resolves every id recorded on the lead's calls and every detail merged into one of its numbers. A wrong-number mark is written to the live detail, as every bad mark is | 1.3, 2.4 | `calls.test.ts` "a re-import that merges a dialled number" |
+
+**Verifier on `a1399ce`** (B1 and B2 are the review bot's two findings above; each other finding reproduced first as a failing test):
+
+| Finding | Change | Sections | Test |
+| - | - | - | - |
+| B3. The same skip with a note posted twice (a retry, a double click) stored the note twice: an outcome had no identity of its own | Every outcome and skip the user posts carries the client's `requestId`. It is stored with the call record under a unique index; the outcome's transaction looks it up first, so the same key answers with the first result and stores nothing again, on an open task or a closed one, from any process and across a restart. A key used for another call is refused. A refused request stores nothing, so it can be sent again with its key | 1.3, 2.4 | `calls.test.ts` "a user action posted twice is logged once"; generated: the same action posted twice at once, posted again, and posted again after a restart, with the check that the app holds one call record per action; mutation "a replayed action is logged again" |
+| B4. `{"outcome":"no_answer","redial":true}` answered 200 and completed the track: the schema dropped the field it did not know | Every request body, and every object in one, refuses unknown fields with a 400 that names them and changes nothing. It is the default in one place, `requestObject` (`src/server/request-body.ts`), and a lint rule refuses `z.object` in `src/server`. Redial, callbacks and not interested are named as later releases. Launch takes no options and refuses any field | — | `src/server/request-bodies.test.ts` walks every route the app registers |
+| F2. A phone step accepted copy that nothing used | Refused at the boundary (7.1); the call script is the campaign's | 7.1 | `definition.test.ts` |
+| Generated coverage | The ticket 14 generator now logs wrong numbers on mobiles, with its record failing an SMS track on a mobile marked bad and checking no text goes to it afterwards; checks every person's and company's notes against what the user wrote (mutation "a person note kept on the company"); and posts actions twice | 9.2, 9.3 | `generated-calls.ts` |
+
+**Not reached by the generated test, and what guards each** (9.3): placing a call never touches the lead, invisible while its task is open (`calls.test.ts` "placing a call never counts as reaching the lead"); a re-import that merges a dialled number (`calls.test.ts` "a re-import that merges a dialled number"); a request id reused on another lead's call (`calls.test.ts` "a request id already used for another call"); unknown fields and later-release options in request bodies (`request-bodies.test.ts`); two processes logging one action at once, which the unique index refuses (`calls.test.ts` "posted twice at once" runs in one process; the index is the guard across processes); and the read models' full contents, which the example tests assert field by field.
+
+**Council on `7902093`, and the verifier's re-check** (each code fix reproduced first as a failing test):
+
+| Finding | Change | Sections | Test |
+| - | - | - | - |
+| The focus moved without an outcome: every read made the first ready call the focus, so a later-today call opening with an older due time took it mid-call | The screen names the call it is on (`GET /api/calls?focus=`); it keeps the focus while it is listed. The outcome's answer names the next focus. The order of ready now (`readyNowOrder`) and the focus (`focusOf`) are engine rules the read models use, so the generated test can break them | 4.4 | `calls.test.ts` "the call the user is on keeps the focus"; generated: the user holds the focus across events and follows the answer's next focus; mutations "the focus moves to the oldest ready call", "ready now newest due first" |
+| The schema's CHECK listed the six outcomes, so tickets 15 and 16 would have to rebuild `call_attempts`, which `notes` references | No CHECK on the outcome: which outcomes a release accepts is the HTTP schema's and the domain's | 1.3 | migration list test |
+| Committed tasks counted against capacity on days they cannot be listed | Counted only on a day they can be listed (4.4 as amended) | 4.4 | `calls.test.ts` "a carried call counts against capacity only on a day it can be listed"; the generator's capacity count follows the same rule |
+| Whether an outcome is accepted on a task whose calling hours never open today, or have closed | Stated in 4.4: refused on a day they never open (not listed), accepted after they closed earlier that day (listed). The code already did this | 2.3, 4.4 | `calls.test.ts` "an outcome is accepted after the prospect's calling hours closed earlier that day" |
+| "Everywhere it is used" overstated a wrong-number mark | Q11 states its reach exactly; Q4's colleague case is corrected | Questions | — |
+| A skip for now's note could show as a colleague's last call note | A skip is not a call: excluded | — | `calls.test.ts` "a skip for now is not a call" |
+| The order check read the view's own due times | The record orders ready now from its own due times and compares the whole list; a mutation reversing the view's order is killed | 9.2 | mutation "ready now newest due first" |
+| Verifier re-check: a dialled number merged into a colleague's detail, or the first of two merges, vanished from both histories, because history used the filter of numbers the lead may dial now | History records what was dialled: a past call's number is read from the live detail its recorded id stands for through every merge (`recordedNumberOf`), whoever's detail it has become, with no claim about dialling it now (no bad mark on a past call). `numberOf`, with the dial filter, is used only for a new outcome, so history never lets the user dial a colleague's number. Previous touches, last call notes and notes read history only | 1.3, 2.4 | `calls.test.ts` "a dialled number merged into a colleague's detail, then into the company main line", asserting both histories after each import |
+
+**The two placement departures, in words.** A due call is placed only on a user day on which the prospect's calling hours are open now or open later that day; one whose hours do not open again today waits for the next user day, so a task never takes the room of a day on which it cannot be called. And a call carried over from an earlier day counts against the day's capacity only on a day it can be listed; it counts first, before any new call, on every such day until it is worked or its track finishes.
+
+Questions kept with their interim: Q4 (a wrong number finishes the phone track even when another good number remains; the next phone track, if any, offers what is left), and Q11 (a wrong-number mark is on the dialled detail of one person or company). Migration 12 adds `call_tasks`, `call_attempts` and `notes`, numbered after pull request 41's 10 (bounce events) and 11 (the save rule's session and number).
+
+**Merging pull request 41 (the campaign editor).** The phone track's fields (`callScript`, a track's `declinedPath`) travel in the same save as every other field of the definition (1.1.1), and its request body goes through `requestObject`, as launch's does (launch takes only `definitionVersion`). The load projection now counts a phone track as a track that can change when the campaign's emails go: a logged call touches the lead, whose emails then go first (4.3); a track after a phone track starts when the call is logged; and an interested call ends the lead. So a phone track beside the email track withholds the figure and says why (`otherTracksChangeTiming`), as an SMS track there does, while a phone track that starts after the email track leaves it projected (`before-launch.test.ts` "a phone track beside the email track"). *Replaced at the merge with ticket 13b, whose projection runs the engine's own rules: see "Phone tracks (merge of pull request 44)" in its section.* Activity does not show calls yet: its entries are a closed union that the web timeline renders case by case, so a call entry needs part b's screen; the calls themselves are on the call task and on the lead's progress.
+
+## Changes from ticket 14b (Today and the call focus queue)
+
+Recorded on 13 November 2026 by the 14b implementer. The browser's side of calling is the deep rule in 4.4.1, written before its code. What the server gained is additive and read-only, each built test-first (`src/server/engine/calls-screen.test.ts`):
+
+| Change | Sections |
+| - | - |
+| `GET /api/call-tasks/:id` gains `offList`: why a call is not on today's list, from the stored task and its call records (an outcome logged on it first, then the lead's ending, then its track's finish), and `callingHours`, its phone track's window | 4.4.1 |
+| `GET /api/calls` and `GET /api/today` gain `capacityReached`, from `dayHasRoom`, the rule `callRoom` now calls (`calls.ts`), so the screen never compares counts itself; `GET /api/calls` gains `defaultDailyCapacity` | 4.4 |
+| Activity gains a `call` entry for every outcome logged on a call step, skip for now included, with the number dialled (`recordedNumberOf`) and the call's note. This replaces 14a's "Activity does not show calls yet" | — |
+
+| Review bot and verifier on `e6872eb`: `GET /api/today` and `GET /api/calls` gain `asOf` and `nextChangeAt`, a hint: the earliest of a later-today call's hours opening, a ready call's hours closing (`nextWindowClose`, `clock.ts`) and the user's next day (`calls-screen.test.ts`) | 4.4.1 |
+| Council on `b8c65f9`: `GET /api/call-tasks/:id` gains `storedRequestIds`, the request id of every outcome stored on the task, so a page knows its press is logged whoever got the answer; a refused outcome's 409 carries the call's `offList` as read then | 4.4.1 |
+
+| Merge of ticket 15a (`4f77cb6`): the read models are built as of the instant read, and the additions above sit beside 15a's (`reason`, `kind`, `callbackAt`, `listedFor`, `redialOutcomes`, `overdueCallbacks`, `carriedOver`); `dayHasRoom` is still exactly `callRoom`'s rule. The page offers what it offered before; a redial or callback logged over HTTP is listed with the reason the server gives (a callback waiting for its time is said as a callback, not as calling hours opening), and a refusal's reason is the server's message unless the call was already logged | 4.4.1 |
+
+No engine rule changed. The engine, its passes, its clock reads and the worker are as on the integration branch: a single-instant tick, a completed-placement marker and a waiting read were built and then removed on 14 November 2026 (4.4, "A read and the worker's placements"). `dayHasRoom` is `callRoom`'s body, moved so the read models share it, and `nextWindowClose` only reads a window. `late-provider-facts.test.ts` keeps the engine's behaviour for provider answers held across midnight and across a window's end (review bot on `b8c65f9`).
+
+## Changes from ticket 15a (redials, callbacks and unworked calls)
+
+Recorded on 14 November 2026 by the 15a implementer. Each change was built test-first; the third generator produces the ticket 15 row of 9.3 from the pull request's first commit. The callback hold is the engine's first hold; it is built on section 2's mechanism, now written out in 2.2 ("The hold mechanism, as built"), which ticket 17's pauses extend. Migration 14 (numbered after pull request 49's 13) adds `redial` and `callback_at` to `call_attempts` and `reckoned_through` to `call_tasks`.
+
+| Change | Sections | Test |
+| - | - | - |
+| `runs` reads the callback hold (an open callback task, `callbackHold`); status rule 3 `callback_scheduled`. Every hold change ends with `synced` | 2.1, 2.2 | `calls.test.ts` (domain) "callbacks" |
+| The listing rule with callbacks: from the callback's own user day, at any hour, every day until its outcome; a call is not listed while a callback holds its lead, nor before its list day | 2.3 | `calls.test.ts` (domain); mutations "callback listed before its day", "redial listed the same day" |
+| Outcomes: the redial (no answer, voicemail, gatekeeper only) moves the task to the user's next day and clears today's skip; callback requested (a time still to come) freezes and quiesces the lead; an outcome on a callback releases the hold first, then records the call at that instant on a running clock; a new callback time keeps the hold | 2.4, 7.1.1 | `calls.test.ts` (domain and engine); mutations "callback outcome refused when the callback is the only hold", "a callback does not hold the lead", "a callback does not freeze the clock", "a callback's outcome logged on the frozen clock", "a redial after any outcome" |
+| The skip limit's expiry, read from the freezes record, day by day from the first listed day, in evaluation before the track starts | 2.6, 3.5 | `calls.test.ts` (domain) "the call skip limit", (engine) "a redial ages from the call's original due date"; mutations "redial resets the deadline", "a task never listed expires", "unworked calls never expire", "callback expires" |
+| Committed calls: a callback counts from its own day; a task closed at the day's first instant is not carried into it; a task counts as it stood at the day's start, so the count is the same all day | 4.4 | `calls.test.ts` (engine) "the user's daily call capacity", "working a carried callback on a day its calling hours never open frees no room that day"; the generator's own count |
+| The queue: callbacks first, then carried calls, then today's; a callback ready from its time at any hour, later today before it; each item's `reason` (`due`, `rolled_over`, `redial`, `callback`, `overdue`), `kind`, `callbackAt`, original `dueAt` and `skippedTonight` | 2.4, 4.4 | mutations "carried calls not at the top", "overdue callbacks shown as callbacks" |
+| Read models for part b: `GET /api/today` gains `overdueCallbacks` and `carriedOver`; `GET /api/needs-attention` gains `overdueCallbacks`; `GET /api/call-tasks/:id` gains `kind`, `callbackAt`, `dueAt`, `listedFor` and `redialOutcomes`, and offers `callback_requested`; the lead's progress shows each task's kind, callback time, list date and original due time, and each logged call's redial and callback time. `POST /api/call-tasks/:id/outcome` takes `redial` and `callbackAt` (ISO 8601 with offset) | — | `calls.test.ts` (engine), `request-bodies.test.ts` |
+| **Waking.** `Engine.nextWakeAt` adds the user's next day for every subject with an open task (an expiry can happen then), and each open callback's day start and time (it is listed, then ready, then overdue): no engine write happens at a callback's instants, but the screens' next change, which includes the engine's next wake (4.4.1, ticket 14b), covers them. A held subject's frozen deadlines are not waited for. The evaluation cache of a subject with an open task ends at the user's next day, and is keyed by the call settings (the user's zone decides the day) | 4.4, 5.5 | engine `calls.test.ts`; the generator steps the clock through `nextWakeAt` |
+| The load projection: a callback-held lead's campaign is a calling campaign and withholds its tracks after a phone track; the simulation wakes at the next user day for a subject with an open task, as the engine does | Ticket 13b's tables | `before-launch-projection.test.ts` (40 worlds with redials, callbacks and skip-limit expiries in the earlier campaigns) |
+
+**The generator** (`test/support/generated-calls.ts`). The generated user now asks for redials, also attempts what must be refused (a redial with interested, an outcome on a call redialed to tomorrow), requests callbacks later today, tomorrow or in a few days, works them on time or misses them for days, skips them for now, moves them, and redials off them; days pass so unworked calls reach the skip limit, on weeks with and without calling hours. Its record keeps each lead's callback holds as its own list of frozen intervals, moves every deadline after a hold's start by the time held (email and SMS waits, track delays, the skip deadline), follows each task's kind and list day from the user's own outcomes, and finds each expiry by its own day walk; it predicts which outcomes are accepted, each task's place, reason and original due time, the queue's order, Today's and Needs attention's overdue callbacks, starts and finishes in lead time, and statuses. It asserts in addition: no email or text is handed over while a callback holds its lead (2) or before its due time moved by the holds (8, 9), and the clock is frozen exactly while held (9). **Within one instant** the engine passes twice around a user action: the harness's tick to that instant comes before the action, and the tick the action itself runs comes after it. So an expiry at a rollover comes before an outcome logged at that instant, which is then refused; and an engine event at the instant a hold starts or ends may lie on either side. The record reads each check the way that instant allows: a placement or a send at a hold's first or last instant is not a breach (it may precede the request, or follow the release); whether a due call should have been placed is judged after every action at that instant; and another lead counts as ready for the priority check only if no hold of its own starts or ends at that instant (found by the sweep: a callback for a later day lowers the day's committed count, and the tick the request runs places another lead's call at the same instant). Placement instants are the application's, read from its tasks, and each is checked against the record's own capacity count, priority classes and calling days, as in ticket 14. The drain accepts one wait: a callback whose lead has no good number left (Q13).
+
+**Mutations** (`test/support/call-mutations.ts`), each killed by its recorded seed in `pnpm check`: the ADR's six ("redial resets the deadline", "redial listed the same day", "callback listed before its day", "callback expires", "a task never listed expires", "callback outcome refused when the callback is the only hold"), and one per further rule: "a callback does not hold the lead", "a callback does not freeze the clock", "a callback's outcome logged on the frozen clock", "unworked calls never expire", "carried calls not at the top", "overdue callbacks shown as callbacks", "a redial after any outcome", and, after the review bot on `eda5fa0`, "a user action judged on stale state", and after the council on `228cd3b` "a day already judged is judged again" and "a redial rolled over at its first listed day". The read models' reason became a rule (`callReason`) so a mutation can break it, and so did bringing a lead up to an action's instant (`asOfAction`).
+
+**Not reached by the generated test, and what guards each:** a database written before migration 14 (`migration-14.test.ts`); the HTTP shape of a callback time and unknown fields (`calls.test.ts` "refused plainly", `request-bodies.test.ts`); the redial and callback posted twice and after a restart (`calls.test.ts` "every action is safe to repeat"; the generator also replays them).
+
+**Council on `228cd3b`** (each code fix reproduced first as a failing test; the coordinator's rulings included):
+
+| Finding | Change | Sections | Test |
+| - | - | - | - |
+| Blocking: a re-import that moved the prospect's zone, or a change of the call list's zone, between a rollover and the worker's tick, re-read the past under the new zone, so a call that had expired was kept and accepted a callback | Every route that changes a timing input first catches up every lead with an open call task under the old inputs, in its own transaction, and seals its skip limit (`reckoned_through`); a day is judged once and never again; the routes are enumerated and walked | 2.4, 3.5 | `as-of-the-instant.test.ts` (re-import, settings, the route walk); `calls.test.ts` (domain) "the past is not reinterpreted"; generated: a person's, a company's and the call list's zone move at an instant between a due instant and the tick; mutation "a day already judged is judged again" |
+| The read models listed an expired call and offered outcomes the action then refused | Today, the queue, a task and Needs attention are built as of the instant read | 2.4 | `as-of-the-instant.test.ts` "the read models are as of the instant they are read"; generated: the queue and its focus are checked at those instants too |
+| A carried call of a lead held by another track's callback, and a carried task of a lead with no good number, took a place they could not use | Not counted | 4.4 | `as-of-the-instant.test.ts` (both); the record's own count |
+| A redial on a Friday showed as rolled over on Monday | A redial until its first listed day passes | 2.4 | `as-of-the-instant.test.ts`; mutation "a redial rolled over at its first listed day" |
+| The drain stalled behind a callback it could not log | It skips it for now, once a day, and works the calls behind it; a targeted event strands a held lead's last number so the path is reached | — | generated (`callback-with-no-good-number`, `drain-skipped-a-callback-it-cannot-log`) |
+| Every world had a two-day limit | Limits of 1, 2 and 3 days | 3.5, Q5 | generated |
+| The fixed seeds' behaviours were only listed in a comment | `CALL_FEATURES`, asserted in `pnpm check` | 9.2 | `call-chunks.ts` |
+| A refused action applies what fell due (coordinator: as designed) | The refusal says the call was skipped and when | 2.4 | `calls.test.ts` "as of its own instant" |
+| Pull request 47's review: ADR 3.5 re-resolved an edited limit, the store refused it | Re-resolution it is; the store accepts exactly it | 3.5, 5.2 | `as-of-the-instant.test.ts` "an edited skip limit" |
+
+**Review bot on `eda5fa0`** (each reproduced first as a failing test):
+
+| Finding | Change | Sections | Test |
+| - | - | - | - |
+| An outcome was accepted on a call whose skip limit had already expired, when it arrived between the rollover and the worker's next tick (a callback then held the lead for good) | Every user action is judged as of its own instant: its transaction first applies what fell due (`asOfAction`, the tick's own evaluation), then judges it; what fell due stands if it is refused. The class: no user action may assume a tick has run, checked across launch, imports, saving a definition, the call settings and marks | 2.4 | `calls.test.ts` (engine) "a user action is judged as of its own instant" (a callback, a redial and an outcome one second after the rollover; the same one second before); generated: the user sometimes acts between a due instant (the user's next day, which every expiry falls on, or a callback's time) and the worker's next tick, on either side of it (one second before, at, one and thirty seconds after); mutation "a user action judged on stale state" |
+| The generated test's drain stop read `problems.length === 0` inside a branch that had already narrowed it to 0, which lint flagged as always true (CI on `eda5fa0`; the local lint had been run before that edit) | The stop is asked through a call (`failed()`), which the type checker does not narrow; it is loop control, not a check: without it, the same broken engine's run reports the same first problem after 236 s instead of 2 s | — | lint |
+
+Questions kept with their interim: Q5 (the skip limit counts calendar days from the original due date, and a task expires only at the end of a day it was listed). New: Q12 (a callback is overdue from its time) and Q13 (a callback with no good number left stays held).
+
+## Changes from ticket 16a (declined calls and the win-back branch)
+
+Recorded on 14 November 2026 by the 16a implementer: the engine and the HTTP interface; part b builds the screens. Each change was built test-first; the third generator produces the ticket 16 row of 9.3 from the pull request's first commit. Migration 15 adds `declined_path` to `call_attempts`.
+
+| Change | Sections | Test |
+| - | - | - |
+| The validator accepts the win-back branch: email and SMS tracks, arranged like the main sequence, entered from a phone track's declined path. It refuses a phone track in the branch, a declined path of win back with no live branch track, a declined path on a track that is not a phone track, and a connection across branches (said for each direction). Tracks are named within their branch, here and in `trackLabel` ("Win-back email track 2") | 1.1, 7.1 | `definition.test.ts` "the win-back branch and the declined path" |
+| A phone track's declined path is the one set, else `stop` (`declinedPathOf`, question Q14) | 1.1, Questions | `definition.test.ts` |
+| Not interested: `decline`, after the call's own result completes its track: `no_more_calls`; every other started phone track `skipped_declined` at that instant, task or none; then stop (`declined_on_call`), continue (evaluated on), or win back (`enterWinBack`). A phone track starting later is skipped at its start (`startTrack`), and `readyCalls` places nothing for the lead. The outcome request names the path (`declinedPath`), defaulting to the track's; refused with another outcome, and for win back with no branch. On a callback task the hold is released first (ticket 15a's rule), so the branch starts on a running clock | 2.4, 7.1.1 | `calls.test.ts` (domain) "not interested"; `declined.test.ts` over HTTP; mutations "open task survives a decline", "a decline does not bar later calls", "the user's declined path ignored" |
+| Entering win-back drops every unfinished main track, started or not (a row with no start for one never started), so nothing of it is claimed afterwards; a claim on it is withdrawn and work already handed over is asked to withdraw and resolves by the attempt rules, on a finished track (ruling 7). The branch's entry tracks start at the decline's lead time. In win-back the branch's channels are the lead's reach, so a branch that cannot reach the lead ends it `finished_no_usable_channel` at once, and a finished branch ends it `sequence_finished_no_response`. A reply in win-back is the ordinary reply handoff | 2.1, 2.4 | `calls.test.ts` (domain); `declined.test.ts`; mutations "win-back keeps the main sequence running", "win-back entered at the campaign's start" |
+| Read models for part b: `GET /api/call-tasks/:id` offers `not_interested`, states `declinedPath` (what the outcome screen preselects) and `declinedPaths` (win back only with a branch); each call record carries `declinedPath`; `GET /api/enrollments/:id` gains `branch`, `winBackEnteredAt` and `declined` (`at`, `trackId`, `path`), and every track carries its `branch`; the branch's tracks are listed, after the main sequence's, only once the lead has entered it; Activity (`GET /api/people/:id/activity`, `/companies/:id/activity`): a decline is a call outcome, so it is the call entry pull request 46 made of every logged call, carrying the path it took (`declinedPath`); the timeline and a call's previous touches say it ("Stopped in this campaign", "No more calls in this campaign; the other channels continue", "Moved to this campaign's win-back branch, with no more calls"). Until the merge of pull request 46 it was a separate `declines` list, now gone: one shape for one kind of fact; the lead's status (`in_win_back`, `declined_on_call`) shows in lead search, a person's campaigns and a colleague's row on a call task, as before; a declined lead has no call on Today or the queue. `POST /api/call-tasks/:id/outcome` takes `outcome: "not_interested"` and `declinedPath` | 2.4 | `declined.test.ts`, `request-bodies.test.ts`, `migration-15.test.ts` |
+| The load projection: a declined lead and a lead in win-back are simulated by the engine's rules, and a declined lead no longer counts as one a call may be logged on (`awaitsACall`); a campaign with a branch says its branch is not counted (`winBackNotCounted`). The three stored facts are rows of ticket 13b's table | Ticket 13b's tables | `before-launch-projection.test.ts`: the 40 multi-track worlds gain branches, declined paths and declines in their earlier campaigns, and 20 more worlds whose earlier campaigns open with a phone track and have a branch; the projection must list exactly the engine's sends; a coverage check requires leads declined on each path, competing leads sending in win-back after the projection, and a projected campaign with a branch |
+
+**The generator** (`test/support/generated-calls.ts`). Its ticket 16 draws come from their own stream, so a run in which nobody declines is the run it was. Campaigns often have a win-back branch of one or two email and SMS tracks, together or after (delay 0-2), with their own copy and windows; each phone track's declined path is drawn, sometimes unset. The generated user sometimes declines the focused call, keeping the preselected path or overriding it, declines on callbacks and beside open redials, and sends a declined path with another outcome, or win back where there is no branch. The record keeps each lead's decline from the user's own accepted outcomes; from it, the lead stops (stop), runs on with its phone tracks skipped as declined, those it had started at the decline and later ones at their start (continue), or has its unfinished main tracks dropped at the decline and its branch's tracks started from then, with their own waits and windows (win back); its reach is its branch's channels from then. It predicts the call task's preselected path and the paths offered, which outcomes are accepted, every track's start and finish, the lead's status, branch and decline; and it asserts after every event invariant 15 (no call open after a decline, none placed after it, none in win-back), 6 (nothing of a dropped main track handed over after the lead entered win-back), and 20 (the decline and branch the record says), beside the earlier invariants. **Within one instant** a track the decline itself releases (one after the declined call with no delay) starts after it, so it is never started at the decline. The fixed seeds' behaviours (`CALL_FEATURES`) include each path, an override, a path left unset, a decline beside another open call, a refused win back, a declined path with another outcome, a later phone track skipped at its start, main tracks dropped started and unstarted, sends in win-back, and a reply that stops a lead in win-back.
+
+**Mutations** (`test/support/call-mutations.ts`), each killed by its recorded seed in `pnpm check`: the ADR's "open task survives a decline", and "a decline does not bar later calls", "the user's declined path ignored", "win-back keeps the main sequence running", "win-back entered at the campaign's start", and, after the verifier on `654907b`, "a dropped track's claim is handed over after the decline".
+
+**Review bot on `654907b`** (reproduced first as failing tests):
+
+| Finding | Change | Sections | Test |
+| - | - | - | - |
+| The lead's progress listed the win-back branch for a lead that never entered it, so Activity's one synthetic entry (no usable channel at launch, ticket 13) said a branch track was skipped | **The rule, for every read:** a branch the lead has not entered has no progress and no outcome, so it is in none of the lead's reads: its progress lists the main sequence only until the lead enters win-back, and Activity's launch skips name main tracks only. A lead in win-back keeps its main tracks, each as it finished: `dropped_for_win_back` reads as dropped, and Activity, which states only stored outcomes, says nothing of a dropped track (the decline's call entry says which path replaced it). Every read that iterates a campaign's tracks was checked: the lead's progress and Activity (fixed); the call task's touches, Needs attention's held tracks and the email provider's waiting follow-ups read stored progress rows only, and a dropped row is finished, so none lists it; the copy preview, coverage, the load projection's leads to start and the campaign list read the main sequence only. Two reads take both branches by design, and are about the campaign, not a lead's progress: launch blockers 1 to 3 and the merge fields some lead lacks (7.2: a lead may enter the branch, so its copy must be renderable for every lead), and an account's default gap, which counts every window its pool serves | 7.2, ticket 13's Activity rule | `declined.test.ts` "a branch the lead has not entered is in none of its reads"; the track runs (ticket 13's generator) now save a never-entered win-back branch with half their campaigns and check each lead's progress and Activity against the record, a fixed seed reaching a lead with no channel at launch beside one; the call runs compare every lead's Activity with an independent record after the drain, in the main sequence, beside a branch never entered and in win-back (fixed seed 98 failed before the fix with the bot's case) |
+
+**Verifier on `654907b`** (no blocking defect; three follow-ups, done here):
+
+| Finding | Change | Test |
+| - | - | - |
+| The bot's finding above | As above | As above |
+| The generated runs never reached work in flight when a lead declines: the fake providers sent at once | In 40% of the call runs the providers send up to an hour after the handover and are observed later (the fakes' existing `late-send` mode, from its own stream). Right after launch, when several emails wait on one inbox for their pacing slot and, with late sends, the first ones are with the provider, the generated user sometimes declines a lead on a path drawn for it. The record derives what may still complete from the providers' logs (a delivery comes only from a handover before the decline), demands nothing of a main track dropped before its send was due within the hour, and asserts that nothing of a dropped track is handed over after the decline (6). Two record corrections the new trajectories exposed: a skip-limit rollover at the instant a callback's outcome releases the hold is judged before the release, so as held (seed 20261195); and a main email claimed before a win-back decline is not owed a send | generated: features "declined-with-work-in-flight" on each path, "declined-with-a-main-claim-waiting", "declined-with-a-main-send-with-the-provider", "late-sends"; mutation "a dropped track's claim is handed over after the decline" (killed by 6) |
+| "callback-worked:gatekeeper+redial" was reached by no seed | A targeted draw: on a callback, the gatekeeper sometimes answers and the user redials | generated, listed in `CALL_FEATURES` again |
+
+The fixed seeds were re-chosen to reach all 102 behaviours (asserted), and one mutation needed a new seed ("carried calls not at the top", 11).
+
+**Council on `f5fdeee`, and the verifier's re-check of it** (each built test-first):
+
+| Finding | Change | Test |
+| - | - | - |
+| 1. A lead declined with continue, with nothing left that can run, stayed active until its next phone track was skipped, then ended with no response | The call channel no longer reaches a lead that declined (2.1); the explicit skip at a later phone track's start is kept, so a track after it starts on time. The generated call runs' record agrees: its call channel is lost at the decline | `calls.test.ts` (domain) "a lead that declined with continue is never called again"; `migration-15.test.ts` (a call-only lead now ends with no usable channel); generated, unchanged otherwise |
+| 2. Win back with main work the provider holds was not exercised | The generated user also declines, in runs with late sends, while main work is with the provider, preferring win back; each pair of the path taken and the state of the work is its own behaviour, and win back with work the provider holds is required of the fixed seeds (seed 82; seed 87 added for stop with a claim waiting). A targeted case: win back while the first email is with the provider, the withdrawal answered "unknown" and the email sent anyway, a restart, then the late send observed: it is recorded once, the track stays `dropped_for_win_back`, and nothing of it or after it is handed over | `declined.test.ts` "win back while a main email is with the provider" (an engine test: a restart needs the store and the worker) |
+| 3. The coverage list could lose a behaviour silently | `RETIRED_FEATURES`, and the checks above (9.2) | `call-chunks.ts` |
+| 4 (verifier, blocking). Before launch showed finished figures and "Every email and text counts" for a campaign with a win-back branch, saying nothing of the branch | Inside the finished-run explanation only, when the server's `winBackNotCounted` is true, it says the branch's emails and texts are not counted, because the figures assume every call gets no answer, and that every email and text of the main sequence counts | `phone-editor.spec.ts` "with a win-back branch, a finished estimate says…" (failing before the fix): present for a branch campaign, absent for a removed branch, a run stopped at the horizon and a withheld figure; the states scan's new screen in both themes and at 390 px |
+
+Noted for ticket 17, not changed: `definitionProblems(def, previous)` refuses a track's change of channel, not its move between branches.
+
+**Merge of ticket 14c** (integration tip `2cfae30`, 14 November 2026). The projection now works calls under its stated assumption (every listed call logged no answer at the end of its day): that never logs a decline, so a campaign's branch is never entered by the projection's own actions. `winBackNotCounted` is now read from the finished run's result (`Projection.winBackNotCounted`: the branch is live and no simulated lead is in it), shown with a finished run's figures only. The engine-versus-projection worlds that start from leads declined on each path and leads in win-back run with the daily call logging, and all match exactly, calls and sends. The editor's phone track inspector says the declined path its definition holds (or that none is set, so a declined call stops the lead, Q14), and the sequence editor says when the campaign has a win-back branch it does not draw yet; both are kept by every save there (`phone-editor.spec.ts`; the states scan covers the inspector). The per-track skip limit's stream moved three recorded mutation seeds ("callback expires" 9 to 4, "carried calls not at the top" 11 to 42, "win-back keeps the main sequence running" 38 to 6), and the fixed call seeds were re-chosen to reach all 109 behaviours, restoring four the previous re-listing had dropped when no seed reached them ("a-held-lead-lost-its-last-number", "a-send-moved-by-a-callback", "callback-with-no-good-number", "drain-skipped-a-callback-it-cannot-log").
+
+**Not reached by the generated test, and what guards each:** a database written before migration 15 (`migration-15.test.ts`); unknown fields in the outcome body (`request-bodies.test.ts`).
+
+Questions kept with their interim: Q6 (a declined lead cannot be restarted directly; ticket 17). New: Q14 (an unset declined path stops the lead).
+## Ticket 14c: the phone track in the editor, and calls in the projection
+
+Recorded on 14 November 2026 by the 14c implementer, before the code. Three changes: where each part of a phone track lives (one field added to the definition), the arrangement rule extended to phone tracks, and the Before launch projection extended to place calls. None changes how the engine claims, hands over, places or logs anything; the one engine-facing change is which skip limit a placed task's deadline is resolved from.
+
+### What a phone track holds, and where each part is edited
+
+| Part | Where it is stored | Where the editor shows it |
+| - | - | - |
+| Calling hours: days and hours in the prospect's local time | the track's `window` (1.1), as before | the phone track's inspector |
+| The call skip limit (3.5) | **the track's `callSkipLimitDays`** (new, optional) | the phone track's inspector |
+| How it starts | the track's start rule (1.1) | the phone track's inspector, through the arrangement rule |
+| The call script | the campaign's `callScript` (1.1): one per campaign, shown on every call task | every phone track's inspector, which says it is the campaign's one script |
+| The declined path | the track's `declinedPath`, read from ticket 16 | not edited here: the inspector said it arrives with a later release. Since ticket 16b, the phone track's inspector ("Ticket 16b" below) |
+
+**The skip limit on each phone track.** The coordinator's recorded reading is that calling hours and the skip limit are set on each phone track, and the reference puts "Skip it if unworked for N days" in the phone track's inspector. Until now the definition held one limit for the campaign. So:
+
+- a call track may hold `callSkipLimitDays`, a whole number of days, at least 1; an email or SMS track may not (7.1: "The call skip limit is a whole number of days, at least 1." / "Only a phone track has a call skip limit.");
+- the limit of a phone track is `skipLimitOf(definition, trackId)` in `calls.ts`: its own, else the campaign's `callSkipLimitDays` (a phone track saved over HTTP before ticket 14c has none of its own). It is the one reading of the limit: placement, the store's re-resolution of an edited limit (ticket 15a) and the editor's inspector all call it (the merge of ticket 15a removed a second copy in `definition.ts`);
+- placement resolves the task's skip deadline (3.5) from `skipLimitOf` (`skipDeadlineOf`), and expiry (ticket 15a) reads that deadline. The editor writes the limit on every phone track it adds (2, the spec's default) and never reads the campaign's value for a track that has its own.
+
+Invariant (asserted by worked examples in `calls.test.ts`, with dates written out, for a track's own limit and for the campaign's): a placed task's `skipDeadline` is `dueAt + span(dueWall, skipLimitOf(definition, track), userZone)`. Since the merge of ticket 15a the generated call runs (`generated-calls.ts`) give some phone tracks their own limit of 1 to 3 days, from a random stream of their own, and the record reads the track's limit; `CALL_FEATURES` gains the three cases (the campaign's limit, a track's own equal to it, a track's own different from it).
+
+**The call script** is the campaign's (ticket 14a: "the campaign's call script shows on every call task"). The call task shows it as written: no merge field is filled in on it, so the inspector offers no merge fields for it. An empty script is a warning, never a blocker (7.2).
+
+### The arrangement rule, with phone tracks (amends "The arrangement rule" of ticket 13b)
+
+**add** accepts the channel `call`. The new phone track is one call: one step with no wait, no subject and no copy; calling hours Monday to Friday, 09:00 to 17:00 in the prospect's time; a skip limit of 2 days; it starts at launch. **remove**, **start** and **delay** are unchanged and apply to phone tracks as to any track: a phone track can start at launch or after another track with a delay, other tracks can start after it, and it cannot be removed while another starts after it. A second call attempt is a second phone track the user adds.
+
+Invariants 1 to 5 are unchanged; the generated test now generates drafts with phone tracks and adds phone tracks among its operations. A further mutation, "a phone track added with a follow-up", must fail it (invariant 1: the validator refuses a phone track with two steps).
+
+**Saving.** A phone track's calling hours, its skip limit, the campaign's call script, and adding, starting and removing phone tracks are edits like any other, through the one editor state and save queue (1.1.1). `saveQueue.generated.test.ts` adds them to its generated edits.
+
+### Calls in the projection (amends "Phone tracks (merge of pull request 44)" of ticket 13b)
+
+**The rule.** When any campaign the projection simulates has a live phone track, it also runs the engine's call passes, in the engine's order: after evaluation and before claims (as `Engine.runTick`), every simulated subject's `rules.readyCalls`, sorted by `rules.callOrder`, each placed by `rules.placeCall` on the subject as the store would load it at that instant (`placeCall` decides, with `callRoom`, whether the day has room); and the assumed user, below, working the list with the engine's own `rules.logCallOutcome`.
+
+**The one assumption about the user, and the outcome it assumes** (review bot on `5cd8a93`, coordinator's ruling). No estimate can know which calls the user will log, when, or how they end. The projection states one assumption and applies it with the engine's own rule: **every call on the list is logged at the end of its user day, after its calling hours, and gets no answer**, logged on the lead's first good number (`goodNumbers`). The simulation works the list in the day's last second; a call a logged one releases at once is placed by the passes that follow and worked too, the sweep repeating at that instant until no call on the list is left to work (council on `2cf1d90`, item 1). No answer is an outcome the engine applies without inventing a stop: it finishes the phone track, so the tracks after it start after their delay; it touches the lead, so that lead's later messages and calls go before untouched leads' (4.3, 4.4); and the lead continues. Nothing else is assumed: no call is interested, declined, a wrong number, a redial or a callback. Any other outcome changes the figure, as a reply would, and the screen says so in plain words: "For calls in this campaign, it assumes you log every call on your list at the end of the day it is there, after its calling hours, and that each one gets no answer: its phone track then finishes, the tracks after it start from then, and that lead's later messages and calls go first. A call logged earlier in the day can bring the messages after it forward and change the order of that day's sends; another outcome changes the estimate too, as a reply would."
+
+**Why the time is stated, not a range** (re-check on `2cf1d90`, B2). When in the day a call is logged changes same-day figures: a track after a phone track with no delay starts when the call is logged, and the logged lead goes before untouched ones from then. Logged at 10:00, the re-check's two-lead case sends two emails in a day where the end of the day gives one. Three answers were weighed. A range from the two extremes (logged as soon as the call is listed, and at the end of the day) is not a bound: touched-lead priority and capacity make the figures non-monotone in the time, so a time between could fall outside it. Withholding every figure a time of day could change would withhold the figure for most campaigns with a phone track. So the assumption states its time, the figure is exact for it (the comparisons log at that time on the engine side), and the screen says what an earlier log does. `before-launch-projection.test.ts` "the time of day a call is logged" keeps both sides of the case: logged at the end of the day the engine matches the projected one a day; logged at 10:00 it sends two. This replaces 13b's "assumes no call outcome is logged" for every email and text the projection makes, and the earlier version of this section, which placed calls but applied no outcome and recorded the touched lead's priority as a limit: the bot showed that limit changes when all leads start, not only which lead gets a slot.
+
+What the projection supplies, because the store supplies it to the engine, is the user's call day (`CallDay`, 4.4):
+
+- `capacity` and `userZone`: the stored call settings;
+- `day`: the user day of the instant;
+- `placedToday`: on the projection's own user day, the store's count (every campaign) plus the simulation's placements; on a later day, the simulation's placements that day;
+- `committed`: on the projection's own user day, the store's count; on a later day, the store's own rule (`SqliteEngineStore.callDayAt`, as amended by ticket 15a) over the simulated state: each task as it stood at the day's start (placed before it, not closed by it), for a lead that had not ended by then and has a good number; a task whose last call before the day asked for a callback counts from the callback's own day, at any hour; any other counts if callable that day (`callableOnDay`) and no callback held its lead at the day's start. A task the assumed user worked closed that day, so it is not carried; one the user cannot work (its lead does not run, as in a paused campaign) stays open and counts, as in the engine.
+
+**Which subjects it simulates.** The user's call list is one capacity every campaign shares (spec "Pace, capacity and timing"; for calls, the user's daily call capacity). So when any campaign in the closure over shared sender accounts has a live phone track, every running subject of every campaign with a live phone track joins, the account closure continues from them, and every subject holding an open call task is simulated too. A competitor joined only through the call list can withhold the whole figure for the reasons any competitor can (work on an account only the provider or the user can settle; a reply being matched).
+
+**When it shows no figure.** Only for the reasons 13b lists that remain: a live track with no connected sender (`withheldBy`, `no_sender`), and an account that cannot send with no known end, or held work or a reply being matched (`cannotProject`). A track after a phone track, here or in a competing campaign, is no longer withheld (`after_a_phone_track` is gone): under the stated assumption its start is known. `callsNotCounted` names the other campaigns whose calls the assumption also covers.
+
+**What it reports** (`LoadProjectionView.calls`, present when the campaign has a live phone track):
+
+- the user's daily call capacity, and the calls on today's list across every campaign (the store's placed today plus committed), from the stored call day;
+- this campaign's busiest user day of new calls placed;
+- `daysUntilAllStart` counts a lead as started at its first email or text, or when its first call is placed on the user's list, whichever comes first; `leadsToStart` counts leads any live track can reach, phone tracks included (`channelReaches`). `onlyCalled` counts the leads only a phone track reaches, which are in the figure.
+
+Days count from launch day as day 1, in the campaign's zone, as before. **One screen, one answer** (council on `2cf1d90`, item 2; review bot on `93bcc0c`): Copy for a lead shows one timeline per lead, and every day on it is the day this same projection sends the message to that lead. Where the projection does not reach a message, it and every later message of its track show no day and say why (`CopyPreview` `noDay`): `no_estimate` when no figure is projected (withheld, too large, launched), `beyond_horizon` past the estimate's 120 days, `not_sent` for a field with no fallback that holds it, `skipped` for a track the lead skips. No day is ever worked out another way beside projected ones: the earlier launch-relative fallback could date a follow-up past the horizon before its own first message (the bot's case: email 2 on day 46, email 1 on day 91). `before-launch.test.ts` checks, for every preview it takes, that days never decrease along a track, that a message with no day is followed only by ones with none, and that a track's first day never precedes the last day of the track it starts after.
+
+**Invariants** (asserted by `before-launch-projection.test.ts`, every comparison with an engine whose test user works every listed call in the last second of each user day, logging no answer, and works again, after a tick, any call that releases, until none is left):
+
+1. The projected placements (lead, phone track, user day) and sends (lead, account, step, instant) are exactly the engine's.
+2. Every lead starts on the engine's day (its first send, or its first call placed), and `daysUntilAllStart` is the engine's horizon whenever every lead started within the comparison.
+3. Only a track with no connected sender withholds the figure.
+
+**The tests.** The 13b worlds (40 in `pnpm check`), whose phone tracks start together with, after and before the other tracks, now compare calls as well as sends, with the list worked after launch; tracks after a phone track send in them and match. The competing-campaign worlds (8) have an email track that waits on a competitor's calls and match exactly. The tight worlds (30 in `pnpm check`) have a daily call capacity of 1 to 3, one or two campaigns, one to three phone tracks per campaign with different due dates (at launch, after the email track, after another phone track), sometimes an email track after a call, and some start from calls left unworked on an earlier campaign, or from calls already logged that day on it: skipped for now (still on the list), a voicemail, or a wrong number, which changes the number the assumed user logs on (council on `2cf1d90`, item 6); each compares placements, sends, every lead's start day and the horizon. The council's case of a call released by a worked call, worked the same day, is a regression ("a call released by a worked call is worked the same day"), failing first (Tuesday and Wednesday projected, both Tuesday by the engine). The bot's case is a regression ("a worked call touches its lead"), failing first (day 3 projected, day 5 by the engine). Mutations of the projection alone, each killed by some tight world: ready calls placed in reversed `callOrder`; the calls carried on today's list left out; a worked call that does not touch its lead.
+
+**Cost, and its bound** (re-check on `2cf1d90`, which measured one Before launch read at 51.76 s at 500 leads with a phone track). The time went to call placement on full days: once the day's list was full, every waiting call was re-checked by `readyCalls` and refused by `placeCall` on every pass at every instant of that day, each instant of an email send among them, and each check is several time-zone conversions. The engine's `callRoom` cannot grow within a user day (its committed count is fixed at the day's start, its placed count only rises), so once it refuses, the projection tries no placement until the next user day, which gives every placement the engine would make. A day's committed count is counted once per day. Measured on 14 November 2026 on this workstation, loaded by other sessions, with a phone track at launch and an email track a day after it, a daily call capacity of 25, and the same figures as before the change: about 0.5 s at 500 leads (2.6 s before it on this machine) and about 3.7 s at 2,000 (40 s before it). **The bound:** every call into the engine's rules is one step, counted by wrapping the rules object; past `PROJECTION_MAX_STEPS` (1,500,000, about three times the 2,000-lead case's 484,581) the projection stops, no figure is shown, and the screen says the campaign is too large to estimate here. **Why it stopped** (review bot on `dc9555b`): every run says on itself why it stopped (`Projection.stop`), set at the point it stops, never inferred afterwards: `complete` (every lead of the campaign ended, or nothing more can happen), `horizon` (the next thing it would do lies past its 120 days) or `bound` (with the instant, and whether it ran out in the engine's passes or in the assumed user's call-logging sweep, which checks the bound before each call it logs). The screen shows a figure only from a `complete` run (`LoadProjectionView.stoppedEarly` names the other two, and a withheld input or held sender keeps the run from starting, as before); a run stopped by the horizon still gives the copy preview's days within it, and the message after them says it is past the estimate. `before-launch-cost.test.ts` hits the bound at the first instant, at the last instant the run works before the horizon, and at every step of a run with calls, which includes the middle of a logging sweep, and requires the reason and no figure each time. `before-launch-cost.test.ts` fails if the fixed 500-lead case takes more than 70,000 steps (57,725 when written; 718,791 without the full-day rule), and checks that a projection past a small bound shows no figure.
+
+**Inputs** (the 13b table's `call_tasks` row is replaced): `call_tasks` of every simulated subject, as stored, and the store's call day (`EngineStore.callDay`) at the projection's instant; the call settings; the lead's numbers and their marks (`goodNumbers`), to log the assumed outcome. `call_attempts` and notes decide nothing the projection reads.
+
+**What it still does not foresee.** Any call outcome but no answer, and so anything it changes: a redial, a callback or a number marked wrong that the user has yet to log. What ticket 15a's outcomes have already left in the store, it starts from (below).
+
+### Merge of ticket 15a (redials, callbacks and expiry in the engine)
+
+Recorded on 14 November 2026, merging `integration/outreach-spec` at `4f77cb6`.
+
+**The inspector's words** (review bot on `72b7252`, checked against 2.2 to 2.4 and 3.5): a redial follows no answer, a voicemail or a gatekeeper and moves the call to the user's next day; a callback requested pauses the lead's other outreach in the campaign until the callback's outcome is logged, and a missed callback stays listed, overdue (2.3); the skip limit counts calendar days from the call's original due date, a redial does not restart it and a callback hold freezes it (3.5, lead time); an unworked call is carried to the next day ahead of that day's new calls (after callbacks, 4.4); past the limit it is skipped at the end of a day it was listed, and the tracks after it start after their delay; a call capacity kept off the list is never skipped.
+
+**Stored facts the projection starts from** (replaces the 15a table row "The load projection", which described 13b's withholding: under 14c nothing after a phone track is withheld). Under the stated assumption no redial, callback or expiry arises from the projection's own actions: every listed call is logged, no answer, in the last second of its user day, before the rollover that could expire it. Each can already be in the store when the projection is taken, and each is simulated by the engine's own rules:
+
+- **A lead held by a callback** (an open callback task): `runs` holds it, so none of its sends is claimed. The callback is listed from its own user day at any hour (`isListed`), so the assumed user logs it, no answer, in the last second of that day; the engine's `logCallOutcome` releases the hold first and completes the track. Its campaign is named in `callsNotCounted` (a lead held by a callback is one on which a call can still be logged).
+- **A redial moved to tomorrow** (`list_day`): not listed before that day (`isListed`), then worked on the first day from then on which its calling hours open.
+- **A call the skip limit skips tonight unless worked**: listed today, so worked in the day's last second, before the rollover. An expiry still happens where the engine's would, for a call not worked on a day it was listed (none under the assumption), through the engine's own `evaluate`, which the simulation runs at each subject's next user day as `Engine.evaluateAll` does; the tracks it releases are projected.
+- **Committed calls** on a later day follow the merged store rule (above).
+
+**Tests.** The 13b worlds start from these facts: the earlier campaigns log redials and callbacks a day or more ahead, and in some worlds (a random stream of their own) one to three days pass with calls unworked before the projection; a test requires, over the 40 worlds, leads held by a callback, calls redialed to the next day, phone tracks skipped at the skip limit and calls skipped tonight unless worked, all at the projection's instant, and every world still matches the engine exactly, calls and sends. The tight worlds' mutations are checked on recorded killing seeds instead of a search, so no test depends on machine speed.
+
+## Changes from ticket 15b (the redial, callback, rolled-over and overdue screens)
+
+Recorded on 14 November 2026 by the 15b implementer. The browser's side of a redial and a callback is part of 4.4.1, written there before its code ("A redial and a callback's time are part of the press", invariant 14, the boundary). No engine rule changed. What the server gained is additive and read-only, each built test-first (`src/server/engine/calls-screen-15b.test.ts`):
+
+| Change | Sections |
+| - | - |
+| `unworkedSkipDay` (`calls.ts`): the user day at whose end an unworked call is skipped if the lead keeps running, judged by the condition `expireUnworked` applies at each rollover, as `skippedTonight` reads it for today; null for a callback and while a hold freezes the clock | 3.5 |
+| `GET /api/call-tasks/:id` gains `skipLimit` (the original due date, the limit, and `ifUnworked`), `redial` (the day a redial logged now moves the call to, and `ifUnworked` from then), `storedCalls` (each stored outcome with its request id, redial and callback time) and `asOf` | 3.5, 4.4.1 |
+| Queue items gain `noGoodNumber`: every number of the lead is missing or bad, so no outcome but skip for now can be logged (on a callback, Q13's interim) | 4.4, Q13 |
+| `GET /api/people/:id` and `GET /api/companies/:id` gain `calls`, each enrollment's open call or callback as of the read (listed, reason, list date, callback time, skip limit, no good number, waiting on the lead's callback), and `today` | 2.3, 3.5 |
+| Activity: a call entry carries its redial, its callback time and, when logged on a callback, the time that callback was asked for, with the prospect's zone; a phone track skipped by the skip limit says so with its original due time and limit (`reason: "unworked"`); a track started after it says why (`because: "unworked"`, which the 13b rule had not covered for `skipped_unworked`); an open callback past its time shows as overdue at that time | 3.5, Q12 |
+
+**Review bot on `eac9f6c`** (each reproduced first as a failing test; the coordinator's rulings):
+
+| Finding | Rule | Test |
+| - | - | - |
+| The record showed a reply's retained callback as a held, actionable call (2.3 keeps the task for a restart) | **The record shows a call only as the listing rule decides it.** `recordCalls` shows an open task only if the engine's listing rule (`isListed`, the rule the Calls list and the outcome route accept or refuse by) lists it today or on a later day, applied to a copy of the lead's state with the user day moved (`firstListedDay`, 60 days ahead, past the callback Day select's four weeks); its `listedFor` is that first day. A call held by the lead's own callback is shown only beside that callback. So a lead that replied, was stopped, ended otherwise or is paused shows no open call and no hold; Activity's "callback overdue" reads the same rule | `calls-screen-15b.test.ts`: a reply during a callback, a reply with an open call and a manual stop, for a person and a company lead, each row checked against `GET /api/call-tasks/:id` and the outcome route |
+| A redial off a callback previewed no skip date | **A redial's preview is the engine's outcome applied to a copy.** `redial` on the call's read is `logCallOutcome` (the engine's rule entry) applied to a copy of the lead's state as of the read, with no answer and a redial on the first good number, storing nothing: a callback's hold is released first, as the route does. The read reports the copy's first listed day and skip limit (`{ listedFor, skipLimit }`), and null when the outcome would be refused or no number can be logged on (Q13). The call's read gains `listedFrom`, the same first listed day for the call as it stands, which the logged line says | parity: for an ordinary call, a rolled-over call on its last day, a callback before its time, an overdue callback and a track with its own limit, the preview equals what the next read reports after logging that redial |
+| The logged callback line said "the same as yours" for a user in another zone | Every wording function that says a time in the user's zone takes that zone as a required argument, with no default | a rendered New York user and London prospect: preview, logged line, queue, Today and record |
+| Verifier F2: Activity said "The tracks after it started" under an unworked skip while a dependent track was still waiting out its delay | The skip entry carries `after`: each track that starts after the phone track, from its stored progress at the read: `started`, `waiting` with the wall instant its stored start resolves to while the lead runs, or `held`. A release is never worded as a start | `calls-screen-15b.test.ts` and `redial-callback.spec.ts`, a two-day delay, person and company lead, before and after it ends |
+| Verifier F4: Q13 said "nothing can be logged" on Today and the record, though skip for now can be logged and keeps the callback | One wording function (`noGoodNumberText`) for the call sheet, the queue, Needs attention and the record | one browser test reads all four at one instant |
+| Council on `32454ea`, A to G, and the verifier's re-check H | A: the generated test's record of a press from the user's choice, a New York lead, fixed runs across both 2026 clock changes, two faults at the press (4.4.1, invariant 14). B: a time the clocks repeat (4.4.1). C and H: read, not computed, everywhere a call is described, and Activity's tense (4.4.1); Activity serves `userZone`, a redial entry `redialListedFrom` (the listing rule on a copy holding only that call, from the engine's next day), a callback entry `callbackOpen` (the listing rule on the lead's state as of the read), an unworked skip its engine `dueDate`. D: a track after an unworked skip whose lead ended is `stopped`, not held. E: before Log the hold is said as what logging will do. F: the sheet reads the server's `noGoodNumber` and disables every outcome but skip for now; the record says each fact once. G: a restored day as a date | `callDesk.generated.test.ts`, `callbackTime.test.ts`, `callDesk.test.ts`, `wording.test.ts`, `zones.test.ts`, `activity.test.ts`, `calls-screen-15b.test.ts`, `redial-callback.spec.ts` |
+| Rolled-over calls were absent from Needs attention (spec: "overdue callbacks and rolled-over calls show in Needs attention") | `GET /api/today` gains `carriedOverLastDay`, the carried calls `skippedTonight`; Needs attention shows one row from `carriedOver` after overdue callbacks | the count equals the Calls list's rolled-over and redialed calls at the same read |
+
+**The generated desk test** (`callDesk.generated.test.ts`) now presses redials and callbacks (later today, on later days, and at times already passed), carries the redial and callback time in each tab's record of the user's choice, moves the clock across days so a pressed call can expire before its request arrives (refused, kept with its note), and asserts invariant 14 after every step: each stored press's record matches its pressed entry, and no request carries a callback time not after the read it was pressed on. Its three new faults are each killed by a known seed in `pnpm check`.
+
+## Changes from ticket 16c (not interested on the Calls page, and declined leads on the record)
+
+Recorded on 14 November 2026 by the 16c implementer, before the code. The browser's side of a declined call is part of 4.4.1, written there first ("The declined path is part of the press", invariant 14, the boundary, the three faults). No engine rule changes. What the server gains is additive and read-only, decided by the engine's own functions, each built test-first (`src/server/engine/calls-screen-16c.test.ts`):
+
+| Change | Sections |
+| - | - |
+| `GET /api/call-tasks/:id` gains `declinedPathSet` (whether the phone track's definition sets a path; false means the preselected `declinedPath` is the engine's interim for an unset track, Q14) and `declines`: for each path in `declinedPaths`, the engine's not-interested outcome on that path applied to a copy of the lead as of the read (`logCallOutcome`, as the redial preview), storing nothing: the lead's status after it, each track it leaves unfinished or finishes (every main track other than the declined call's own that had not finished at the read, then the win-back branch's tracks once entered) with its state then, and `withProvider`, the work already handed to a provider on a track the decline finishes or a lead it stops, which is asked to withdraw and may still go (2.5). Null while the call is not listed or no number can be logged on | 2.4, 2.5, 4.4.1 |
+| `DependentTrackState` gains two states, both decided from stored progress in `dependentStateOf`: `stopped_after_start`, a track that had started when the lead's outreach stopped or ended, so it sends nothing more (until ticket 15b's "started" covered it, a present claim the record's read denied once the lead ended), and `no_more_calls`, an unfinished phone track of a lead that declined, which no call will ever be placed for: it is skipped at its start (`startTrack`, ticket 16a). The page's sentence for each state is in an exhaustive switch, so the unworked skip's list (15b) and the decline's lists share them | 2.4, 4.4.1 |
+| Activity: a not-interested call entry gains `afterDecline`, each track the decline left unfinished or finished, by the same selection as the preview, in its state at the read (`dependentStateOf`): history is said in the past tense, and only the read's state at that instant is said in the present | 4.4.1 ("Read, not computed") |
+| The record (`GET /api/people/:id`, `/companies/:id`) gains `declines`, each enrollment's decline (the user's date it was logged, as the engine counts the day, and the path taken), so a campaign row can say a lead declined and which way it went beside its status | 2.1 |
+
+The call task read's `offList` already says why a declined lead's other calls left the list (`lead_ended` with `declined_on_call`, or `track_finished` with `skipped_declined` or `dropped_for_win_back`); the page now words each finish reason in an exhaustive switch.
+
+**As built** (the 16c implementer, after the code):
+
+- **The browser.** The desk's draft holds `declinedPath` (null while the radios are untouched) and its `sessionStorage` copy keeps it; `declined` in the desk's snapshot is the path the radios show and whether the read offers it; *Log* writes `declinedPath` into the body only with not interested, the user's or the read's preselected one, and refuses a path not offered in place. A kept refusal names the path its press carried. The sheet renders the read's `declines` for the path shown (`declinePreviewLines`), and every sentence about a decline comes from one function per state in `src/web/calls/wording.ts`: `declineTrackLine` (one exhaustive switch over the track states, a preview and a record sentence each), `declinedRecordLine` (one per path, a present state only from the status), `trackFinishedLine` (every finish reason, for the off-list line) and `loggedLine` (the stored path and the lead's status). `src/web/calls/declined-wording.test.ts` renders all of them from the server's reads at one instant for each path.
+- **History stays history.** The stored path's line for continue was "No more calls in this campaign; the other channels continue.", a present claim that a later read can deny (the lead may have run out of channels or replied). It is now "…; the other channels were kept going.", and whether they still run is said by the tracks' states and the status at the read.
+- **The generated test.** Its decline draws come from a third stream, so a run with no decline is unchanged in the 14b and 15b draws. Five fixed runs press not interested more often (`DECLINE_RUNS`, seeds 9604, 9622, 9630, 9633, 9639). They are asserted to reach a decline on each path, an untouched and an overridden press, a path not offered, a press stored after the track's path changed, and a decline while the lead has another phone track's call open. The three faults are killed in those runs: "declined path dropped at press" 9602, "declined path lost on resend" 9615, "preselected path read at send" 9604 (a press left untouched, the track's path changed, and the fault sent the new one). Adding declines and the second phone track moved three recorded seeds: "stored press left as draft" (9100, via 9105, back to 9100), "redial lost on resend" (9180 to 9260) and "redial dropped at press" (9103 to 9107).
+
+**Council on `4fd9ca4`** (each built test-first; nothing in the engine's rules, store or migrations changed):
+
+| Item | Change | Test |
+| - | - | - |
+| 1. A later phone track with no progress row read as one that will start | `dependentStateOf` takes the track itself: a phone track of a lead with `noMoreCalls` is `no_more_calls`, with a progress row or none, in the preview (the copy has it) and after Log | `calls-screen-16c.test.ts` item 1; `declined-wording.test.ts` rendered |
+| 2. A started track of a lead that does not run read as running | New state `started_held` (started, and a hold stops the lead: a callback now, a pause from ticket 17), with a sentence in each exhaustive switch | `calls-screen-16c.test.ts` item 2 (a callback hold); the tables in `activity.test.ts` and `declined-wording.test.ts` |
+| 3. Only some paths said no call is made again | The preview carries `noMoreCalls`, the copy's own fact, and every path says "No call is made to them again." from it | `declined-wording.test.ts` |
+| 4. A campaign's name inside a sentence ("Clinics, London's win-back branch"; "In win-back in …") | The preview's sentences say "this campaign"; after Log, "Now in win-back, in {campaign}." | `declined-wording.test.ts`, with a campaign named "Physio, O'Neill's clinics" |
+| 5. A win-back email read "Email 1 sent" | `TrackLabel` carries the track's `branch`, and `stepNoun` in `src/shared/track-label.ts` names a step from it ("Win-back email 1 sent"); `DeclineTrackView` reads the branch from its label | `activity.test.ts` |
+| 6. The record read loaded each subject twice | The declines come from the calls loop's snapshot | `calls-screen-16c.test.ts` item 6 counts the loads |
+| 7. The generated runs never had a lead with two phone tracks | 40% of runs (from the ticket 16c stream) give each lead a second phone track at entry | `callDesk.generated.test.ts`, its coverage check |
+
+## Ticket 17a: pause, resume, skip, stop and restart (the engine and HTTP)
+
+Recorded on 14 November 2026 by the 17a implementer, before the code (delivery workflow, "Design first"). Part a is the engine, the store and the HTTP interface; a later part builds the controls, the Paused banner and the person page's sentences, which read what this part serves and compute nothing. It amends the "User controls" table of 2.4; where they differ, this section wins.
+
+### The rule
+
+**One clock-freezing mechanism, not three.** A campaign pause is `campaign.paused_since`, a lead pause is `lead_paused`, and the callback hold is the open callback task (2.3). Each is a stored fact that `runs` (2.2) reads, and nothing else decides whether a lead runs. Every control is one transaction per lead that, in order:
+
+1. brings the lead up to the action's instant under the facts as they stood (`asOfAction`, 2.4), so what fell due before it (an expiry at a rollover, a start, an ending) is applied first, and stands if the action is refused;
+2. judges the action on that state, and refuses it with a plain reason, or sets or clears its one fact;
+3. quiesces the lead when it stopped running (2.5): a `claimed` attempt is withdrawn locally, a `handed` or `accepted` one is asked to withdraw and resolves by 5.3;
+4. ends with `synced` (3.2), which opens or closes the lead's frozen interval in `freezes`; on a release it then enters the lead's branch if it never entered it (`enterMain`: a lead enrolled while held enters at its first running instant, at lead time 0) and evaluates (2.6).
+
+So a pause is the existing hold mechanism with two more facts. It adds no second clock and no second freeze record. Every stored deadline (a step's due time, a track's delayed start, the call skip limit) is in lead time and is never recomputed, so a pause of length D moves the wall instant of each by exactly D (3.3). A lead paused inside a paused campaign, a callback held inside either, and an ending inside any of them all freeze the one clock, and it runs again only when `runs` is true: when no hold remains.
+
+**A campaign pause** is one transaction over the campaign row and every enrollment of it that has not ended: steps 1 to 4 for each, with `paused_since` set to the instant and the campaign's `version` bumped (so every cached evaluation of its leads is invalid). Ended enrollments are frozen already and are not touched. **Resume** clears `paused_since` in one transaction the same way, with steps 1 and 4 for each lead. No status changes (2.1 rule note): the counts the banner shows are of the statuses the leads keep.
+
+**Resume without a burst** holds by construction: nothing sends at a claim; every send call (a first handover or a same-key retry) takes the account's pacing slot in the transaction that authorizes it (4.2, 5.5), and the gap is the shortest window the account serves divided by its daily capacity (4.1). So the steps that fell due during a pause go out in priority order (4.3), one per gap per account, inside each track's window, and what does not fit a reset day's capacity waits for the next. Calls due during the pause are placed by the day's call capacity (4.4). Nothing is dropped.
+
+**Instantly: held on our side.** The adapter keeps no wait on Instantly: each step is added to its dispatch campaign with `delay: 0` only when it is due and claimed (ADR 0002, "the adapter as built"), so there is no provider clock to freeze. A pause, a stop or a skip therefore needs nothing from Instantly except for work already handed over, at most `k` per inbox, which is asked to withdraw through the adapter's `withdraw` (`DELETE /leads/{id}`, whose answer stays `unknown` until ADR 0002's X5): it resolves by 5.3, so a send it still makes is recorded once (a late fact, 2.5) and starts nothing while the lead is held. Pausing the Instantly dispatch campaign as well is not done: what a paused Instantly campaign does with a lead already added, and whether resuming it releases them at once (bypassing our pacing), is undocumented and would need writes to establish, which this part may not make. The per-lead pause Instantly lacks (ADR 0002, its first table) is not needed: the app holds the step. **Unverified:** "verify real Instantly individual-lead pause and campaign clock freezing" cannot be run (no test contact is designated, #28; writes stay off). What is limited by the provider, and stays so: work handed over before a pause or a stop may still be sent (ADR 0002 "a pause or stop requests withdrawal").
+
+### The controls (amends 2.4 "User controls")
+
+| Action | Allowed when (after step 1) | Effect | Refused with |
+| - | - | - | - |
+| Pause campaign | launched, not paused | `paused_since` = now, every enrollment that has not ended quiesces and freezes | "This campaign has not launched." / "This campaign is already paused." |
+| Resume campaign | paused | `paused_since` = null; every enrollment that has not ended syncs, enters if it never ran, and is evaluated | "This campaign is not paused." |
+| Pause lead | launched, not ended, not lead-paused (a callback or a campaign pause may hold it too) | `lead_paused` = true; quiesce; freeze | "…has not launched", "…is already paused", "Outreach to them has ended in this campaign ({status})." |
+| Resume lead | lead-paused, not ended | `lead_paused` = false; sync; enter; evaluate. Other holds stay | "They are not paused." |
+| Skip step | launched, not ended, a pending step (below) with no live attempt past `claimed` | below | "…has not launched", "…has ended", "No step is waiting: {why}", "The {step} is already with the email provider and may be sent; it cannot be skipped." |
+| Stop | launched, not ended | `ended = stopped_manually`; quiesce; freeze. Progress, open tasks and deadlines are kept | "…has not launched", "…has ended" |
+| Resume from the next unsent step | ended `replied` or `stopped_manually`, and the lead would run with work left | `ended`, `ended_at`, `stop_reply` cleared, `lead_paused` = false; sync; enter; evaluate | "Only a lead that replied or was stopped can be resumed (question Q6)." / "Nothing is left to send them in this campaign: {why}." |
+| Move to win-back | ended `replied` or `stopped_manually`, in the main sequence, the branch has a live track that can reach the lead | `enterWinBack` (2.4), then as resume | "Only a lead that replied or was stopped…" / "They are already in the win-back branch." / "This campaign has no win-back branch." / "The win-back branch cannot reach them: {why}." |
+
+**Changes from 2.4.** Pause and stop are refused before launch (2.4 allowed them in D). Before launch nothing of the lead runs, and a lead paused or stopped then would never enter the projection's count of leads to start; whether the user wants to hold a lead out of a launch is question Q15. Resume and win-back are refused when the engine's own transition, applied to a copy, would end the lead at once with no usable channel or nothing left (question Q16): a "resume" that only re-ends the lead is not one.
+
+**Skip step** (Q3's interim, unchanged): the step skipped is the lead's **current step**: among its started, unfinished tracks with a pending step (`next_step_id`), the one with the earliest due time in lead time, ties broken by track id. A lead whose tracks are all waiting out a delay, or whose every pending step is with a provider, has no step to skip, and the refusal says which. The step gets the result `skipped` (`by_user`) at the lead's current instant (`leadNow`, and `wallOfLead`: the frozen point when the lead is held); a `claimed` attempt of it is withdrawn in the same change; the track's next step resolves from that point with its own wait, or the track finishes (`completed`, or `skipped` when every step was skipped). On a call step the task closes and the track finishes `skipped_by_user`; on a callback the hold is released first, as an outcome's is (2.4 "Calls"), so the result sits on a running clock when no other hold remains. Exactly one step, never sent.
+
+**Restart** never deletes a result, reopens a finished track or rewinds a pending step (the store refuses all three, 1.3), so it continues at the next unsent step and can never start from step 1. A step whose work was with a provider when the lead ended is still in flight after the restart: no new attempt is made for it until that work settles (5.3), so a step the provider sent late is recorded once and its successor follows it, and a step the provider confirmed withdrawn is claimed again with fresh work. A restart into win-back makes no call: the branch holds no phone track (7.1), and entering it finishes every main track, closing their tasks. `no_more_calls` is not set, since no call was declined.
+
+**Requests are idempotent.** Every control carries a `requestId`. **A request id is bound to its first answer, accepted or refused** (verifier B5 on `ca8baee`, which replaced "a refusal stores nothing"): the answer is recorded with the id in the transaction that gives it (`control_requests`, migration 16: the answer, a refusal's reason, an accepted control's effect), and the same id is answered with it again and changes nothing. So a retry after a lost answer cannot pause again after the user resumed, or skip a second step, and a refused request retried after the state changed is refused again rather than executed. An id used for another action or target is refused ("This request id was already used for another action: send a new one."). The same rule holds for the call outcome route (`POST /api/call-tasks/:id/outcome`), whose refusals were not remembered before. To try again after a refusal, the client sends a new id.
+
+**Controls while a step's work is with a provider** (one rule, after the review bot and the verifier on `ca8baee`; it amends 2.4's "User controls" and 2.5). Provider work is **unsettled** while it was called and has no final answer: an attempt past its claim, or work whose attempt was withdrawn on a non-final "not sent" and which a new claim may inherit (5.3). For each control:
+
+- **Skip** is refused while the step it names has unsettled work, live attempt or not ("This step is already with the {provider} and may still be sent, so it cannot be skipped until the provider says whether it was sent."). A claim alone (never called) is withdrawn and the skip proceeds. So a skipped step is never sent (P4), in every case.
+- **Pause and stop** are accepted. A claim is withdrawn locally and sends nothing. Work already handed over is asked to withdraw, and asked again each `SETTLING` while the answer is unknown, until it is final or the work settles (`withdrawLastWall`). What cannot be prevented, stated exactly: the email adapter hands over at most `k = 1` email per inbox ahead (ADR 0002, "what a pause or a stop cannot stop"); when its deletion fails or its effect is uncertain, that one email can still be sent after the pause or stop. A provisioned SMS provider would bound the same window by its own in-flight bound; none is provisioned, and the test SMS port's forced uncertain cancellation behaves the same (one text, recorded once). Such a late send is recorded once, as sent, at the point its lead's clock stood (3.3), and starts nothing while the lead is held; its successor's deadline is resolved and waits (P8). This is a **provider limitation** (question Q17), not a weakened invariant: P1 holds for everything not yet handed over, and the reads say what may still go (`mayStillSend`).
+- **Resume from the next unsent step** and **move to win-back** are accepted. A step whose work is unsettled stays in flight: no new attempt is made until it settles, and an inheritor carries its key (5.3), so the step is never sent twice; a late send on a track dropped for win-back is recorded and starts nothing (ruling 7).
+
+**The answer is the preview** (verifier B4 on `ca8baee`). The read's preview of a control and the control's answer are one function (`effectOf` in `controls-view.ts`) of the lead as of the action's instant (`asOfAction`, what fell due applied first) and of the transition's result: the read applies it to a copy, the action to the store. What the worker does after the control in the same request (a send due at once, observed facts) is not part of the effect: the answer carries it separately, as the enrollment read after the worker ran. So `answer.effect` equals the preview read at that instant, by construction, and the generated control runs compare them field for field.
+
+**The hold history** (migration 16, `hold_intervals`): each campaign pause, lead pause and ending later undone by a restart is kept as an interval. Only the committed-call count reads it (below); the clock reads `freezes`, as before.
+
+### Reads (for the screens part; computed by the engine's functions, nothing beside them)
+
+- `GET /api/campaigns/:id` gains `pause` (`paused`, `pausedSince`), `statusCounts` (the count of the campaign's leads in each of the twelve statuses, zero included) and `controls` (`pause` and `resume`, each allowed or refused with its reason).
+- `GET /api/enrollments/:id` gains `controls`: one entry per action (`pause`, `resume`, `skip`, `stop`, `resume_from_next_step`, `move_to_win_back`), each either refused with the reason the action would give, or allowed with a **preview**: the engine's own transition (`applyControl`) applied to a copy of the lead as of the read, storing nothing, as the call outcome previews are (tickets 15b, 16c). The preview carries the status after it, the step it skips or the next step the lead would send (its track, its place and its due instant once the lead runs, null while another hold remains), and `withProvider`, the work already handed to a provider that the action asks to withdraw and that may still go.
+- `POST /api/campaigns/:id/pause` and `/resume` (`{ requestId }`), and `POST /api/enrollments/:id/controls` (`{ requestId, action }`), answer 200 with the read after the action (for a lead, also `effect`, the control's own effect, equal to the preview), or 409 `control_refused` with the reason; bodies go through `requestObject`, so an unknown field is a 400.
+- `mayStillSend` on the enrollment read and the campaign read: the messages already handed to a provider whose outcome is not final, which may still be sent even while paused or stopped (Q17).
+- **Every route is judged as of its instant** (2.4): each is added to the route walk of `as-of-the-instant.test.ts`.
+
+### Invariants (numbered P1 to P12; each is asserted by a generated test after every event)
+
+1. **P1 Nothing goes out while paused.** No attempt is claimed, handed over or retried, no call task is placed, and no call is listed or accepts an outcome, for a lead while it or its campaign is paused, or after it was stopped and before a restart (on the fakes' call logs and the list). The only send after a pause comes from a handover before it.
+2. **P2 No clock advances while paused.** `frozen_since` is set exactly while `runs` is false; no stored deadline in lead time changes across a pause or a resume; on the wall, every deadline after a resume equals its value before plus the time paused, which the generated record computes from its own list of held intervals.
+3. **P3 No burst.** Per account, two send calls are never closer than its gap and never more than its capacity on a reset day (8.10, 8.11), across every resume; calls placed per day stay within capacity minus committed (8.17).
+4. **P4 Skip advances exactly one step.** The named step gets `skipped (by_user)` and is never handed over afterwards; no other step's facts change; its successor is due at the skip's lead instant plus its wait; a skipped call step finishes its track `skipped_by_user`.
+5. **P5 Stop is final for the automation**, until a restart: P1 holds from it, and every result, finished track and task is kept.
+6. **P6 Restart never re-sends and never rewinds.** Each step is delivered at most once (8.4, on the delivery logs); no result is removed; the first step resolved after a restart is the step that was pending at the end; a restart is accepted only from `replied` or `stopped_manually`.
+7. **P7 Idempotent.** The same request id gives the same answer and one change; a repeated action with a new id is refused (already paused, not paused, ended) and changes nothing but what fell due.
+8. **P8 Late facts commute.** A send, bounce or reply the provider reports after a pause, a stop or a skip is recorded once, at its provider time mapped through `freezes` (3.3), and starts nothing while the lead is held: its successor's deadline is resolved and waits.
+9. **P9 Nested holds.** The lead runs exactly when no hold remains; releasing one hold of several leaves it frozen; the status follows 2.1's order (paused before callback scheduled).
+10. **P10 Nothing else moves.** A control changes no other lead: the person's other campaigns, colleagues and the company's other leads keep their progress, status and clock.
+11. **P11 Allowed controls match transitions** (8.23): every action a read allows is accepted when sent at that instant, and every action it refuses is refused with the same reason.
+12. **P12 Committed calls as the day started.** A carried task counts against the day's call capacity only if its lead was not paused, its campaign not paused and the lead not ended at the day's start; so the count is the same all day, and a resume or restart later that day lists the task without taking a new task's room (as a callback's release already does, 4.4).
+
+### By construction
+
+The hold facts, the deadlines and the frozen intervals are stored and read, never recomputed; `runs` is the only judge of running; the version guard (2.5) discards an evaluation computed before a control; a step has at most one live and one sent attempt (unique indexes); the store refuses to delete a result, reopen a task or a track, or move a task's due time or skip deadline; the claim's guard and the handover's predicate 1 read the hold facts in the transaction that commits the send.
+
+### Across a pause (the brief's questions)
+
+- **The call skip limit.** Its deadline is in lead time, so it stands still while paused; an expiry needs the lead to have run at the rollover (3.5), so none happens while paused. Because expiries happen only at rollovers, a pause of any length inside a day moves an expiry by a whole day at least when the deadline was within that pause: the limit never runs out earlier than on a running clock.
+- **Redials.** A redial's list day is a user day, not a deadline. A day on which the lead is paused at its end is not a listed day (the lead did not run then), so a redial due during a pause shows, after the resume, as rolled over, with its original due time and skip deadline (in lead time, frozen) unchanged.
+- **Open callbacks.** A callback is an appointment (3.2): a pause never moves it. While its lead or campaign is paused it is not listed; after the resume it is listed from its day, overdue once its time has passed, and its hold stays until its outcome. A lead paused during a callback is `paused` (2.1 rule 2) and stays held by the callback after its own resume.
+- **The rollover at midnight.** A held lead's rollovers are judged and recorded (`reckoned_through`) without an expiry (3.5), so a pause or a resume never leaves a past day to be judged later under other inputs; each control's step 1 applies a rollover that fell due before its instant.
+- **Capacity.** A pause withdraws claims, releasing their reservations; work already handed over keeps its reservation until it settles (4.2). Call capacity: P12.
+- **The Before launch projection.** It simulates every other campaign with the engine's own `runs`, so a paused campaign or lead sends nothing and places no call in the projection: the projection assumes a pause lasts, since the user decides when it ends. Their carried calls count on a later day by P12's rule, as the store's count does. The projected campaign itself has no paused or stopped lead, since both are refused before launch (Q15).
+
+### The generated tests
+
+- **The call runs** (`test/support/generated-calls.ts`, the third generator) gain campaign and lead pauses from a stream of their own, so a run with none is the run it was. The generated user pauses and resumes a campaign or a lead at random instants: during a wait, with a claim open, with a send at the provider (the late-send runs), with a call pending, redialed or held by a callback, nested with each other and with callbacks, and around the user day's rollover. The record's hold list becomes the union of callback holds and pauses, merged, so every deadline it predicts (sends, starts, the skip limit) moves by exactly the time held; it lists no call of a paused lead or campaign; it counts committed calls by P12; and it predicts which pause or resume is accepted. Asserted: P1, P2, P3, P9, P11 for pause and resume, beside the earlier invariants.
+- **The control runs** (`test/support/generated-controls.ts`, new): one or two campaigns of email, SMS and phone tracks (a win-back branch in half), people in both, providers that send late or lose answers. The user skips, stops, restarts and moves leads to win-back, and pauses and resumes leads and campaigns, at random instants (during a wait, with a claim open, with work at the provider, with a call listed, redialed or held by a callback, at a rollover), repeats requests with the same id, sends each read's allowed and refused actions, and leads reply (auto-replies) during and after. Its record, independent of `src/domain/sequence/`, keeps each lead's held intervals (pauses, callbacks, endings later restarted) and predicts each step's due instant from the delivered send or the skip, moved by every held interval, the steps skipped, each track's finish, which control is accepted, and the status. Asserted: P1 to P11, and 8.4 on the delivery logs.
+- **Mutations**, one per invariant, each killed by a known seed in `pnpm check` (the mutation names are the test's): pause not freezing the clock (P2), pause leaving claims live (P1), campaign pause not hiding its calls from the list (P1), resume handing over without the slot (P3), skip skipping two steps (P4), skip sending the skipped step (P4), stop keeping tasks listed (P5), restart rewinding to the track's first step (P6), a replayed request applied twice (P7), a late send after a pause resolving its successor on the wall clock (P8), resuming one hold releasing every hold (P9), a campaign pause touching another campaign (P10), the read allowing what the action refuses (P11), and committed calls counted from the current pause state (P12).
+- **Coverage lists.** Each generator's behaviours are named in its coverage list; a name in neither the kept nor the retired list fails the check.
+
+Questions put to the human, each with the interim built: Q15 and Q16 below. Q3 (which step "skip" skips) and Q6 (restarting interested or declined leads) keep their interims.
+
+### As built (the 17a implementer, after the code)
+
+- **Code.** `src/domain/sequence/controls.ts` (`applyControl`, `campaignPaused`, `campaignResumed`, `currentStep`, `campaignRefusal`), each a `Rules` entry so a mutation can replace it; `Engine.controlLead` and `Engine.setCampaignPause`; `SqliteEngineStore.controlSubject` and `setCampaignPause` (one transaction each, with the request id); `src/server/engine/controls-view.ts` (the reads' previews); migration 16 (`hold_intervals`, `control_requests`); the committed-call count's hold rule in the store and in `load-projection.ts` (P12).
+- **A defect the restart found** (built test-first, `src/server/engine/controls.test.ts` "restart after an auto-reply"): after a restart from an auto-reply, the pre-send reply check (ADR 0002) kept finding that same reply in the thread, so every claim expired and the lead never sent again. The first fix (in the engine: a returned reply the record holds clears the send) let an old reply hide a new one in another thread (review bot on `ca8baee`, item 1; verifier B1). **The rule now**, decided where the adapter reads replies (ADR 0002, "Pre-send check"): the send is stopped by any reply, in any of the lead's threads, that the lead's record does not hold (`knownReplies`); every thread is read whole. Regression: `port.test.ts` "a reply the lead's record holds never hides a new one", the new reply in the later and in the earlier thread.
+- **Before launch** the Before launch projection worlds pause a competing campaign through its route, and sometimes one competing lead (`before-launch-projection.test.ts`); the 306 worlds still match the engine exactly.
+- **A track whose start falls due while the lead is held** starts at the release (nothing is evaluated while held), so "skip" on a lead held then refuses with "No step is waiting: the next track has not started yet" until the release, and the read says so. Steps already due show, on the read, when lead time reached them on today's clock.
+- **The generated tests as built.** The call runs gained a run family (`pauses: true`, `CALL_PAUSE_SEEDS` 0, 2, 7, 13, 14, 20, 26 in `pnpm check`, all 100 in the search) whose record merges callback holds with pauses, takes a send made while held from the hold's start (3.3's `wallOfPoint`), ends a lead that loses its last channel while held at the release, and counts committed calls by P12; 25 pause behaviours are in `CALL_FEATURES`. Its trajectories reached a record gap unrelated to pauses (a track released by a decline at its own instant was taken as finishing on its own), fixed in the record. The control runs are `test/support/generated-controls.ts` (seeds 17007, 17018, 17019, 17044 and 17096 in `pnpm check`; 46 behaviours in `CONTROL_FEATURES`, the names it can form but no seed reached in `RETIRED_CONTROL_FEATURES`).
+- **Mutations, each killed by its recorded seed in `pnpm check`.** Call runs with pauses: "a lead pause does not freeze the clock" and "a campaign pause does not freeze the clock" (P2, as 8.9), "a pause does not stop sends" (P1, as 8.2), "a paused campaign's calls stay on the list" (P1, as 8.16), "resuming the campaign releases the lead's own pause" (P9, as the status). Control runs: "a lead pause holds nothing" and "resuming a lead releases its campaign's pause" (P9), "skip skips two steps" (P4, seen as P11: the next read names another step), "a skipped step is sent all the same" (P4), "stop leaves the clock running" (P5, as P9), "a restart rewinds to the track's first step" (P6, as P2), "a restart keeps the ending's clock frozen" (P9), "move to win-back keeps the main sequence" (the status). **Not mutable as a rule, and guarded by example tests instead:** P7 (request ids are the store's: `controls.test.ts` repeats a skip with its id and reuses an id for another action), P10 (one lead per transaction, by construction; the control runs compare every other lead's ending, pause, branch and clock around each control), P11 (the read and the action call the same `applyControl` and `campaignRefusal`; the runs compare every offered control and refusal reason with the action), and P12 (the store's SQL; `controls.test.ts` "a call of a lead paused at the day's start takes no room", which fails without the rule).
+- **Not reached by any generated test, and what guards it:** a database written before migration 16 (`migration-16.test.ts`); unknown fields on the control routes (`request-bodies.test.ts`); a pause judged after a rollover the worker had not ticked (`controls.test.ts` "judged as of its own instant"); the real Instantly provider (unverified, above).
+
+- **After the review bot and the verifier on `ca8baee`** (each reproduced first as a failing test):
+  - *Skip with unsettled work* (review bot item 2, verifier B2): refused while the step's work may still be sent, live attempt or not (the rule above). Regressions: `controls.test.ts` (domain) "a step whose provider work is uncertain cannot be skipped"; `controls.test.ts` (engine) "skip waits for the provider's final word", through the read and the action.
+  - *A reply after a stop lost the stop's held interval* (review bot item 3, verifier B3): an ending's interval in `hold_intervals` now opens when the lead first ends and closes at a restart; a later ending event (a reply to a stopped lead) changes the reason and the ending's own time, never the interval. Migration 16 backfills an open interval for every lead already ended. Regression: `controls.test.ts` "a reply after a stop keeps the stop's held interval".
+  - *A refused request id executed later* (verifier B5) and *the answer differed from the preview* (verifier B4): the rules above. Regressions: `controls.test.ts` "a request id is bound to its first answer", "the call outcome route binds a refused request id", "a control's answer is its preview".
+  - *The withdrawal was asked once* (verifier L1): asked again each `SETTLING` while unknown. Regression: `controls.test.ts` "a pause asks the provider to withdraw again each settling period".
+  - *Seed 20261169 of the call runs' pause family failed invariant 18 in the search.* Cause, from the evidence: the record, not the engine. After a campaign resume the step was due at 16:07:30 with its window open, but both of the inbox's in-flight places (`k = 2` in those runs) were held by other leads' late sends (sent 40 to 55 minutes after their handovers); each later handover came as a place freed, and the step went at 17:37 behind this lead's own older step. The record's check 18 assumed an inbox free for the hour after the window opened, which a resume often makes false, since many overdue steps compete at once. The check now starts its hour once the sender has had a free in-flight place for the whole of it, read from the provider's own logs (`freeHourFrom`). It still catches a step really left unsent: the new mutation "steps that fell due while held are never sent after the release" fails 18 on seed 7. Seed 20261169 (offset 56) is in `CALL_PAUSE_SEEDS`; no fixed seed had a resume with both places held for an hour.
+  - *The generated control runs* gained, from a stream of their own: the answer compared with the preview for every accepted control; refused requests sent again after the state changed; P3 on the providers' call logs; P12, each day's committed calls against the record's own count, through stop, reply and restart; a reply, a restart, then a new reply hidden from observation in another thread (either order), with no email handed over after a pre-send check that could read it; a pause then a skip while lookups lag; a control just after a due instant before the worker's tick. Mutations added, each killed by its recorded seed: "skip ignores provider work withdrawn on a non-final not-sent" (P11, seed 19), "a control's preview skips what fell due" (P11, 10), "a refused request runs when sent again" (P7, 6), "the pacing gap ignored" (P3, 0; pacing is held twice by construction, in the handover transaction and after the call, so this runs the engine with a one-second gap while the record expects five minutes), "a reply the record holds clears the pre-send check", with the provider answering the first thread's reply as the adapter did (P1, 24). Fixed seeds re-chosen: 11 reach all 69 behaviours.
+- **P7, P10, P11 and P12: the example test that fails when each is broken** (the verifier broke each in a source copy and saw these fail):
+  - *P7*, request ids bypassed: `controls.test.ts` "skip advances exactly one step… a repeated request skips once" (the second send skips email 2) and "a request id is bound to its first answer"; and the control runs' "a refused request runs when sent again".
+  - *P10*, a pause not scoped to its campaign: `controls.test.ts` "resume spreads what fell due… another campaign is untouched" and the control runs' P10 comparison of every other lead around each control.
+  - *P11*, a preview that differs from the action: `controls.test.ts` "a control's answer is its preview" and "pause and resume one lead" (the offered and refused controls); the control runs compare every offered control and refusal reason, and every answer with its preview.
+  - *P12*, committed calls without the day-start hold rule: `controls.test.ts` "a call of a lead paused at the day's start takes no room" and "a reply after a stop keeps the stop's held interval"; the control runs count committed calls themselves.
+
+- **After the council, the review bot and the verifier on `56d599c`** (items A to K; each reproduced first as a failing test unless it says otherwise):
+  - *A. Withdrawals are kept on the provider work, not on live attempts* (`2a9c085`). A quiesce marks every piece of the lead's work that may still be sent (`provider_work.withdraw_wanted`, migration 16, backfilled from attempts that had asked); the worker asks the provider for that work, by its key, again each `SETTLING` while the answer is `unknown` (`withdraw_last_wall`), until it is final or the work settles, whether or not an attempt still carries it and across restarts. The worker wakes for the next retry. Regression: `controls.test.ts` "the withdrawal is asked again until the provider's work has a final answer, even after a non-final lookup retired its attempt, and across a restart"; the control runs check it from the providers' logs; mutation "withdrawal retries stop" (seed 1).
+  - *B. The in-flight bound counts provider work by key* (`2a9c085`, `fc15f86`). An account's `k` places are taken by the distinct keys of its live attempts and its work that may still be sent (`occupyingKeys`); a claim that inherits a key takes no new place. **The bound was exceeded before this ticket**, on the integration branch at `cb31184`: a reply ending a lead whose email the provider still held withdrew the attempt, its non-final answer left the work without an attempt, the place was counted free, and with `k = 1` a second lead's email was handed over while the first could still go: two at once. Reproduced on that tip in a scratch checkout; the regression is `controls.test.ts` "the in-flight bound held without any pause too". A pause made it more likely (any number of leads at once). **One definition of unsettled work**, in `attempt.ts`: `isUncertain` (called, no final answer) and, within it, `maySend` (not yet known gone, J below). Skip's refusal and inheritance read `isUncertain`; the in-flight count, `mayStillSend` on both reads, the campaign read (`uncertainWorkOf`, which loads the work and filters with the same function, no SQL restating it) and the quiesce read `maySend`. Mutation "the in-flight bound counts live attempts" (seed 2); the engine's generated runs count by key too.
+  - *C. Invariant 18 as it now is, in the call runs* (`c189643`; section 9.2). The free-hour form of seed 20261169 freed a place only on a delivery or an email withdrawal, so a text cancelled by a pause held its place for good: a place is now freed on **any final answer** (a send known, withdrawn, too late), and the fake SMS port logs its withdrawals. What the hour stood for is now checked directly, in the call runs and in the control runs: **the order check** (4.3). At each first claim of a step on a sender (one needing a place, not inheriting a key), no other step for that sender ranked higher by 4.3 (a touched lead first, then the older stored due time, then subject and step) was due and claimable at least a minute before and still unclaimed. Mutations, killed in the control runs: "the order breaks after a hold is released" (seed 33) and "an overdue lead is passed over while others are served" (13). All 100 seeds of both call families and of the control runs pass.
+  - *D1. Restart refusal* (`2ce9f6b`). Resume from the next unsent step and move to win-back are refused when no unfinished track can run (a finished track's channel does not count), or when the engine's own transition, applied to a copy released of every hold, ends the lead at once (Q16).
+  - *D2. Skip* (`2ce9f6b`). The step skipped is the first pending step, in the current-step order, whose work is not with a provider; skip is refused only when every pending step's work is, and the preview names the step it skips.
+  - *D3. P8 by mutation* (`c31d788`): "a late send after a pause resolves its successor on the wall clock", killed by control seed 12.
+  - *D4 and E. One transaction per request id, on every route* (`2c61757`). The call outcome route goes through the store's `controlSubject`, as the controls and the campaign pause do: the id's stored answer is read under its primary key inside `BEGIN IMMEDIATE`, the action judged and applied, and the answer (with the outcome's id on its call record) recorded, in one transaction. `request-ids.test.ts`: two engines on two connections to one file send the same id at once, for an enrollment control (accepted and refused), a campaign pause and resume and a call outcome, and get one execution and one answer; a mutation that reads the id before the transaction executes one skip twice.
+  - *I. A request id is bound to its body* (`7c8ffe0`). `control_requests` keeps the body; the same id with another body is refused and changes nothing ("This request id was already used for another action: send a new one."; for a call outcome, "…with a different outcome…", comparing outcome, redial, callback time, declined path, number and note). Every route; `request-ids.test.ts`.
+  - *J. `mayStillSend` falls to 0 on every final answer* (`2ce9f6b`, corrected in `fc15f86`). A withdrawal answered too late is the provider's word that the message went: the work is marked gone (`went_wall`), so it no longer may be sent, holds no place and is not withdrawn again, while it stays unsettled (its step cannot be skipped or claimed afresh) until the observation or a lookup, asked at once, gives the send time, at which it settles as sent. The first fix recorded the send at the answer's instant, which the engine's generated runs caught (invariant 9: a successor counts from the provider's send time). Regressions: `controls.test.ts` "mayStillSend falls to 0 on a final answer", for email (withdrawn, too late, sent and observed later) and SMS (withdrawn, too late), at the enrollment read and the campaign read.
+  - *K. A reply between the pre-send check and the handover* (`c31d788`). Two cases. **(ii) A reply we have stored** stops the handover in every process: the handover's transaction reads the lead, ended by the reply, and the claim is withdrawn (`reply-before-handover.test.ts`, email and SMS, the reply stored by a second engine on the same file between our clear check and our transaction). This held before; the test is a regression guard. **(i) A reply the provider has only after our read** cannot be seen by any check made before it: this is a stated limit. Narrowed: the check is no longer reused for up to `PRESEND_MAX_AGE` (60 seconds) but run afresh before each authorization; measured on the fakes with a file database over 399 handovers, from the check's answer to the handover call, median 1.1 ms, 95th percentile 1.5 ms, at most 6.3 ms. On the real provider the window adds the read's response and the handover request's transit, and whatever delay Instantly has before a reply appears to a read; neither is measured (no test contact is designated, #28). The verifier's reproductions on `56d599c`: the email one was case (i); the SMS one, a reply between observation and the check, was case (i) too, made possible by the test SMS port's pre-send check that always answered clear; that port now reads the replies the lead's record does not hold, as a real provider's inbound messages allow.
+  - *F. Migration 16's ended interval* (`b2629b7`). Before migration 16 a reply to an ended lead overwrote `ended_wall`, so the backfilled interval may start at a later reply than the first ending. What it cannot recover is that first instant. No day from the upgrade on is counted wrongly: every pre-17a ending other than a reply closes the lead's call tasks (a decline, interested) or leaves none that counts, and a later reply to a lead that replied leaves it ended; so committed calls on any day from the upgrade on are the same either way. `migration-16.test.ts` builds a database before migration 16 (a lead declined Monday, replying Tuesday, beside another campaign's calls under a capacity of two), upgrades on Wednesday, and compares each day's committed calls with the same history on a database that had migration 16 throughout.
+  - *G. The campaign read* (`a614af9`) counts its leads by a query for that campaign alone (`leadCount`), not by listing every campaign; `statusCounts` is one grouped query on the `(campaign_id, status)` index.
+  - *H. Campaign pause and resume at scale*, measured on the fakes (one transaction over every lead, not restructured): the times are in the pull request.
+- **After the review bot and the verifier on `612aa05`** (each reproduced first as a failing test):
+  - *A place is freed at every final answer* (review bot, `attempt.ts`; verifier R2-1). B's count still kept every live attempt's key, so a too-late answer, whose attempt stays live while the send time is reconciled, held the place for good when lookups kept answering unknown: with `k = 1` the next lead never went. **Occupancy now has one definition** (`occupyingKeys`): work the provider may still send (`maySend`, the definition `mayStillSend` uses) and claims not yet called, once per key. A live attempt whose work has any final answer (withdrawn, too late, sent, not sent, bounced) holds no place; its step still waits for the real send time and is never claimed afresh. Regressions in `controls.test.ts`: "a place is freed at every final answer", each final answer for email and SMS with the next lead handed over, and the verifier's case exactly (accepted, too late, every later lookup unknown, a two-step track). `mayStillSend`'s tests gain the bounce, email and SMS.
+  - *The control runs check it* (invariant F). From the providers' logs, a place is held from a first handover until the app has any final answer for that work; when a final answer leaves the sender a free place and nothing is handed over on it for 20 minutes, no step for it may be waiting that was claimable throughout. And the place count and `mayStillSend` are one definition: whenever no lead's read says a message may still be sent, every sender's places are held only by claims not yet handed over. The runs gained, each from a stream of its own, emails the provider sends but does not report for a day (lookups unknown), and texts sent late, so a pause meets a too-late answer whose send time stays unknown and can withdraw a text; the record now reads text withdrawals and text lookups as it reads email ones. Mutations: "a finally-settled place stays occupied" (612aa05's count, killed by seed 0, and by 16 more of the 100) and the verifier's R2-2, "a withdrawn text keeps its place" (seed 35, a fixed seed in which a text is withdrawn and another lead then needs the number). **The order check (C) does not see the starved lead**: with every place held nothing is claimed, and that check compares claims; on all 17 killing seeds only F fires. The new streams moved two recorded seeds ("a skipped step is sent all the same" 18, "a control's preview skips what fell due" 20) and the fixed seeds (`[17, 19, 33, 35, 48, 64, 72, 86, 91, 99]`, 74 behaviours, three of them no longer retired). All 100 seeds pass.
+
+## Ticket 16b: the declined path and the win-back branch in the editor
+
+Recorded on 14 November 2026 by the 16b implementer. No change to the engine, the store, the validator's rule or any invariant of section 8; one read gains an additive field. Each change was built test-first.
+
+### The arrangement rule, with the branch (amends "The arrangement rule" of ticket 13b and 14c)
+
+- **add** takes a branch: an email or SMS track added to the win-back branch starts at `entry`, which there means when the lead enters the branch. A phone track is never added to the branch; the editor offers none, and the operation refuses it.
+- **declined** (new): sets a phone track's declined path to stop, continue or win back. Win back is refused while the branch has no live track (`winBackAvailable`), and a path on a track that is not a phone track is refused.
+- **remove** of the branch's last live track is refused while a phone track's declined path is win back.
+- **start** after a track of the other branch is refused.
+
+Each of these refusals is the validator's own sentence (7.1): the operation applies the change naively and refuses with the first problem the result has that the draft did not, so the editor says what the server would. **A problem is new by its identity, never its sentence** (council on `aaf82b7`): `definitionIssues` returns each problem with its `kind` and the ids of the track and step it is about, and `definitionProblems` is their sentences. A sentence names a track as it is called now, so removing or adding a track renames its siblings, and comparing sentences refused a removal for a problem a sibling already had ("The win-back email track's sending window has no days.", which was "Win-back email track 2's…" before). The clause the win-back refusal ends with is exported (`NO_WIN_BACK_BRANCH`) and shown under win back while it cannot be chosen; the problem text is unchanged.
+
+Invariants 1 to 5 are unchanged, stated by identity: from any draft, an operation's result has no problem (by `issueKey`) the draft did not have, and a refused operation applied naively has one. A sixth: a refusal never names a problem the draft already had. Half the generated drafts already have problems a user can leave while editing (an empty window, a wait that is not a whole number, a message with no copy), and a fifth mutation, "problems compared by sentence", must fail the test, and does. `arrangement.generated.test.ts` now generates drafts with a branch of one to three email and SMS tracks arranged inside it and phone tracks with a declined path (sometimes unset), and operations that add to the branch (a phone track among them), set paths (win back with no branch among them), connect across branches and remove the branch's tracks. Four further mutations must fail it, and do (invariant 1 kills each): "phone track in the branch", "win back without a branch", "remove ignores win back", "after across branches".
+
+### Saving (1.1.1)
+
+The declined path and the branch's tracks are edits like any other, through the one editor state and save queue; no control saves on its own. `saveQueue.generated.test.ts` gains a third random stream (none on the recorded seeds, which replay the trajectories they were recorded with) with which the generated user sets declined paths and adds, arranges and removes branch tracks through the arrangement operations, one to three per draft. Each page keeps its own record of what it chose (each live phone track's path, each branch track's channel and start), built from the operations it applied, never read back from the editor. After every step the page's draft must have the record's paths and branch (invariant 6), and once settled the stored definition must have the writer's (invariant 1). Two faults in the editor's save (`SaveFault` in `editorStore.ts`, test-only) must fail it, each on its recorded fixed seed: a save whose body leaves out the declined paths (seed 7003) and one that leaves out the branch's tracks (seed 7004). Coverage over the fixed and recorded seeds requires runs that save win back beside a branch, stop or continue, and a branch track arranged after another.
+
+### Copy for a lead (amends "Calls in the projection")
+
+`GET /api/campaigns/:id/preview/:enrollmentId` gains `winBackEntry` (council on `aaf82b7`): how a lead can enter the branch, from the definition alone (`winBackEntry` in `definition.ts`): `declined_path` when a live main-sequence phone track's `declinedPathOf` is win back; `chosen_for_a_lead` when the branch and a phone track are live but no path is win back, so only the per-lead path chosen when a declined call is logged enters it (ticket 16a offers win back for one lead whenever `winBackAvailable`); `never` with no live branch track or no live phone track. Copy for a lead words the branch's messages from it. The estimate's `winBackNotCounted` reads the same function (true only when the entry is not `never`), so the two cannot disagree. It also gains `winBack`: the branch's messages, rendered for the lead in track order, each with no day (`noDay` `win_back`, or `skipped` for a channel the lead lacks, by the same rule as the main sequence). They are listed apart from `steps`, whose order is the order messages can go: the projection never enters the branch (`winBackNotCounted`), so no day is ever worked out for them. `before-launch.test.ts` "copy for a lead in the win-back branch".
+
+### The canvas
+
+The branch is drawn in its own box below the main sequence, its tracks hanging from the point a lead enters it, with a dashed "if declined" edge from each phone track whose path, as `declinedPathOf` reads it, is win back. `e2e/layout.spec.ts` now also checks, at every width, that every branch track is inside the box and below its parent, that the box is below the main sequence, and that each edge ends on the box without crossing any track node.
+
+### Council on `aaf82b7` (each reproduced first as a failing test)
+
+| Item | Change | Test |
+| - | - | - |
+| 1. A removal refused for a problem a sibling already had, renamed by the removal | Problems compared by identity (`definitionIssues`, `issueKey`), for every refusal the arrangement takes from the validator | `arrangement.test.ts` (the reviewers' case); `definition.test.ts` (identity and sentences); the generated test's drafts with problems, invariant 6 and the mutation "problems compared by sentence" |
+| 2. Copy for a lead showed branch messages as "Only if they decline" when no path led there | `winBackEntry` on the read, from the definition's functions, shared with `winBackNotCounted`; the page says "Only if chosen for them" or "Never sent", with one sentence above them. The messages stay listed, marked, rather than hidden | `before-launch.test.ts` (the read and the note agree); `before-launch-projection.test.ts`'s record of when the note shows; `win-back-editor.spec.ts` (rendered, three cases) |
+| 3. Focus after removing the branch's last track | The branch's Add menu and the empty branch's button have their own ids; a removal moves focus to the control the definition it produced has: the branch's Add, the empty branch's button, or Add track when the branch goes | Two focus transitions (the branch goes beside main tracks; the canvas empties), failing before |
+| 4. The save test did not record the branch's copy | Copy edits in branch tracks (bodies, subjects, threading, waits, new follow-ups) from a fourth stream, recorded as chosen and checked like the paths; coverage of copy typed beside an unanswered save; the fault `stale_win_back_copy`, killed by fixed seed 7016 | `saveQueue.generated.test.ts` |
+| 5. Copy and fills | One clause, `WIN_BACK_HAS_NO_TRACKS` ("the win-back branch has no tracks"), says it everywhere: the definition's refusal ("…: add a track to it, or choose stop or continue.", which the editor shows beside win back), and since the merge of ticket 16c the outcome's refusal (`logCallOutcome`: "The win-back branch has no tracks: choose stop or continue.") and the Calls page's reasons ("(the win-back branch has no tracks)", "The win-back branch has no tracks now, so that path can’t be logged. Choose another."), with their tests; the chips say what they count ("1 email"); the box and the chosen path blend `hand-soft` as the reference does (55% and 50%) | The tests that quote the sentence and the chip; the accessibility scan |
+
+### Review bot on `8147ba6` (each reproduced first as a failing test)
+
+| Finding | Change | Test |
+| - | - | - |
+| The save test's new coverage bar failed CI shard 6 of the full search (4 arranged branches against 6.25): in a shard, the coverage seeds are that shard's own, so a share of them is chance | **The rule, for every coverage bar in the file:** a share of the coverage seeds is required only where they are `pnpm check`'s fixed and recorded seeds, the same on every run; in a full-search shard each behaviour must be reached at least once (`atLeast`) | `SAVE_QUEUE_SEARCH=full SEQUENCE_SHARD=6/8` failed before the change and passes after it |
+| Side by side, the win-back box could draw wider than the width the canvas chose its layout by (its name, Add and empty text, about 494px, against a 320px budget), so the canvas scrolled sideways between 1040 and 1220px with the inspector open, a width the layout scan does not visit | The box takes exactly its budgeted width, or the main sequence's when wider (`contain: inline-size`); its contents wrap. **The rule:** the layout scan checks that a side-by-side canvas never draws wider than its budget (`data-needed`), which does not depend on the window, so it holds at every width once it holds at one | `win-back-editor.spec.ts` sweeps 1020 to 1440px in 20px steps (failed by up to 166px before); a screen with one phone track and an empty branch, which the budget check failed (494 against 320) without the change |
+
+## Consequences
+
+- **ADR 0001.** The merge that deletes a contact-detail row becomes a redirect in 12a. Enrollments gain the fields in 1.3. `status` stays the one stored status column.
+- **ADR 0002.** Its attempt states are refined here: `adding` splits into `claimed` and `handed`, `added` becomes `accepted`, `withdraw-requested` becomes a flag, and `unresolved` is a derived hold that every attempt reaches in bounded time unless a provider settles it. Its pre-send check runs before the handover transaction, and its pacing is taken there and at every same-key retry. Its `lookup` gains the answers `queued` and a `sent` that carries the provider's send time. X5 must also establish whether a `not-sent` lookup is final for each transport (`notSentIsFinal`), and what a same-key re-add returns after a lagging add. A stop does not abandon a pending step, so a resume finds it. Its frozen clocks for ticket 17 are met by lead time and stored deadlines. X5 adds the check that an idempotency key is still honoured after a long outage.
+- **Every later ticket** reads this ADR before touching the engine, and changes it before changing a rule.

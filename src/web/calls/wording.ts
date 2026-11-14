@@ -1,0 +1,690 @@
+/**
+ * Every sentence the Today page and the call focus queue say about calls, one function each. Each
+ * reads only what the server reported (the queue, the call task, an outcome's answer, Needs
+ * attention); none decides anything about order, counts, hours, capacity or an outcome's effect.
+ */
+import type { CallNumberView, CallOffListView, CallOutcomeApi, DeclinedPathApi, DeclinePreviewView, DeclineTrackView, CallQueueItem, CallsView, CallTaskView, FinishReasonApi, NeedsAttention, OutreachStatus, RecordCallView, RecordCalls, RecordedNumberView, TodayView, WindowRule } from "../../shared/api.ts";
+import { WIN_BACK_HAS_NO_TRACKS } from "../../domain/sequence/definition.ts";
+import { STATUS_LABEL } from "../status.tsx";
+import type { DeskSnapshot } from "./callDesk.ts";
+import { dayLabel, zonedInstants, type CallbackChoice } from "./callbackTime.ts";
+
+/** The outcome buttons, as the approved prototype labels them. */
+export const OUTCOME_LABEL = {
+  no_answer: "No answer",
+  voicemail: "Left voicemail",
+  gatekeeper: "Didn’t reach them",
+  wrong_number: "Wrong number",
+  interested: "Interested",
+  not_interested: "Not interested",
+  callback_requested: "Callback requested",
+  skip_for_now: "Skip for now",
+} as const satisfies Record<CallOutcomeApi, string>;
+
+/** A logged call's title in Activity and in previous touches. */
+export const OUTCOME_TITLE = {
+  no_answer: "Call: no answer",
+  voicemail: "Call: left voicemail",
+  gatekeeper: "Call: didn’t reach them",
+  wrong_number: "Call: wrong number",
+  interested: "Call: interested",
+  not_interested: "Call: not interested",
+  callback_requested: "Call: callback requested",
+  skip_for_now: "Call skipped for now",
+} as const satisfies Record<CallOutcomeApi, string>;
+
+/** What a declined call did, from the path the server stored with it (ticket 16). */
+export const DECLINED_PATH_LINE = {
+  stop: "Stopped in this campaign.",
+  // History: whether the other channels still run is the lead's status and its tracks' states at the read (ticket 16c).
+  continue: "No more calls in this campaign; the other channels were kept going.",
+  win_back: "Moved to this campaign’s win-back branch, with no more calls.",
+} as const satisfies Record<DeclinedPathApi, string>;
+
+const NUMBER_KIND = { direct: "direct", mobile: "mobile", main_line: "main line" } as const;
+
+export const numberKind = (n: Pick<CallNumberView, "kind">): string => NUMBER_KIND[n.kind];
+
+/** "+44 20 7946 0111, direct": the number a past call was logged on. */
+export const dialledLine = (n: RecordedNumberView | null): string | null => (n ? `${n.value}, ${NUMBER_KIND[n.kind]}` : null);
+
+const timeIn = (zone: string, iso: string): string => new Intl.DateTimeFormat("en-GB", { timeZone: zone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(iso));
+
+/** "Thu 5 Nov": the date of an instant in a zone. */
+export const dateIn = (zone: string, iso: string): string => new Intl.DateTimeFormat("en-GB", { timeZone: zone, weekday: "short", day: "numeric", month: "short" }).format(new Date(iso)).replace(",", "");
+
+/** YYYY-MM-DD of an instant in a zone. */
+const isoDateIn = (zone: string, iso: string): string => new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(iso));
+
+/**
+ * A callback's time, the one way every page says it (council on 32454ea, C): in the prospect's time, with their date
+ * unless it is `today` (the user's date as the server counts it; null to always give it); in the hour the clocks
+ * repeat, which occurrence ("after the clocks go back"); and the user's time when it reads differently, with the
+ * user's date when that differs from theirs. `yours` is null when both read the same.
+ */
+export function callbackTimes(iso: string, zone: string, userZone: string, today: string | null): { theirs: string; yours: string | null; dated: boolean } {
+  const theirDate = isoDateIn(zone, iso);
+  const theirTime = timeIn(zone, iso);
+  const dated = theirDate !== today;
+  const occurrences = zonedInstants(theirDate, theirTime, zone);
+  const clock = occurrences.length > 1 ? (Date.parse(iso) === occurrences[0] ? ", before the clocks go back" : ", after the clocks go back") : "";
+  const theirs = `${dated ? `${dateIn(zone, iso)} at ` : ""}${theirTime} their time${clock}`;
+  const yourDate = isoDateIn(userZone, iso);
+  const yourTime = timeIn(userZone, iso);
+  if (yourDate === theirDate && yourTime === theirTime) return { theirs, yours: null, dated };
+  return { theirs, yours: `${yourDate === theirDate ? "" : `${dateIn(userZone, iso)} at `}${yourTime} your time`, dated };
+}
+
+/** "Thu 5 Nov at 14:30 their time, 15:30 your time", or "…, the same as yours": always dated. */
+export function callbackWhen(iso: string, zone: string, userZone: string): string {
+  const t = callbackTimes(iso, zone, userZone, null);
+  return `${t.theirs}, ${t.yours ?? "the same as yours"}`;
+}
+
+/** "the end of Tue 3 Nov", from a user date. */
+const endOf = (date: string): string => `the end of ${dayLabel(date)}`;
+
+/** The place a zone names, for the local time under a call: "Europe/London" is London. */
+export const zonePlace = (zone: string): string => (zone.split("/").at(-1) ?? zone).replaceAll("_", " ");
+
+/**
+ * Why a call is on the list, or when it opens, as Up next and the queue say it: the server's reason, the
+ * original due date of a carried call, a callback's time in the prospect's and the user's time, and the
+ * server's word that an unworked call is skipped tonight. `today` is the user's date as the server counts it.
+ */
+export function reasonLine(item: CallQueueItem, userZone: string, today: string): { text: string; tone: "muted" | "pause" | "crit" } {
+  const tonight = item.skippedTonight ? ", last day before it’s skipped" : "";
+  // A callback waits for the time the prospect asked for, not for calling hours: said as a callback.
+  if (item.bucket === "later_today" && item.opensAt && item.reason !== "callback" && item.reason !== "overdue") return { text: `Their calling hours start at ${timeIn(userZone, item.opensAt)} your time${tonight}`, tone: "muted" };
+  const due = dateIn(userZone, item.dueAt);
+  switch (item.reason) {
+    case "rolled_over":
+      return { text: `Rolled over, due ${due}${tonight}`, tone: "pause" };
+    case "redial":
+      return { text: `Redial, due ${due}${tonight}`, tone: "pause" };
+    case "callback": {
+      if (!item.callbackAt) return { text: "Callback", tone: "pause" };
+      const t = callbackTimes(item.callbackAt, item.zone, userZone, today);
+      return { text: `Callback they asked for ${t.dated ? "" : "at "}${t.theirs}${t.yours ? `, ${t.yours}` : ""}${item.noGoodNumber ? `; ${noGoodNumberText(null).short}` : ""}`, tone: "pause" };
+    }
+    case "overdue": {
+      if (!item.callbackAt) return { text: "Callback overdue", tone: "crit" };
+      const t = callbackTimes(item.callbackAt, item.zone, userZone, today);
+      return { text: `Callback overdue since ${t.dated ? "" : "today at "}${t.theirs}${t.yours ? `, ${t.yours}` : ""}${item.noGoodNumber ? `; ${noGoodNumberText(null).short}` : ""}`, tone: "crit" };
+    }
+    case "due":
+      return { text: `Due today${tonight}`, tone: "muted" };
+  }
+}
+
+/** The user's date as the server counts it ("2026-11-09" is Monday 9 November), with the time now. */
+export function dateHeading(date: string, now: Date, userZone: string): string {
+  const day = new Intl.DateTimeFormat("en-GB", { timeZone: "UTC", weekday: "long", day: "numeric", month: "long" }).format(new Date(`${date}T12:00:00Z`)).replace(",", "");
+  return `${day}, ${new Intl.DateTimeFormat("en-GB", { timeZone: userZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(now)}`;
+}
+
+/** Today's lede. */
+export function todayLede(readyNow: number, laterToday: number): string {
+  if (readyNow === 0) return laterToday === 0 ? "Nothing to call right now." : `Nothing to call right now. ${laterToday === 1 ? "One call opens" : `${laterToday} calls open`} later today.`;
+  const ready = readyNow === 1 ? "One call is ready now" : `${readyNow} calls are ready now`;
+  return laterToday === 0 ? `${ready}.` : `${ready}, and ${laterToday} more later today.`;
+}
+
+/** The capacity line under the queue. */
+export function capacityLine(view: Pick<CallsView, "dailyCapacity" | "defaultDailyCapacity">): string {
+  const n = view.dailyCapacity;
+  return `Your daily call capacity is ${n} ${n === 1 ? "call" : "calls"}${n === view.defaultDailyCapacity ? ", the default until you set one" : ""}.`;
+}
+
+export const CAPACITY_USED = "Today’s call capacity is used. Calls that fall due now wait for tomorrow; none is dropped.";
+
+const DAY = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+const hour = (h: number) => `${String(h % 24).padStart(2, "0")}:00`;
+
+/** A phone track's calling hours, "Mon–Fri, 09:00–17:00", Monday first; days with other hours each listed. */
+export function callingHoursLine(rules: readonly WindowRule[]): string {
+  if (rules.length === 0) return "No calling hours";
+  const order = [1, 2, 3, 4, 5, 6, 0];
+  const sorted = [...rules].sort((a, b) => order.indexOf(a.day) - order.indexOf(b.day));
+  const groups: { days: number[]; start: number; end: number }[] = [];
+  for (const r of sorted) {
+    const last = groups.at(-1);
+    const prev = last?.days.at(-1);
+    if (last && last.start === r.start && last.end === r.end && prev !== undefined && order.indexOf(r.day) === order.indexOf(prev) + 1) last.days.push(r.day);
+    else groups.push({ days: [r.day], start: r.start, end: r.end });
+  }
+  return groups
+    .map((g) => {
+      const first = DAY[g.days[0] ?? 0];
+      const last = DAY[g.days.at(-1) ?? 0];
+      const days = g.days.length === 1 ? first : g.days.length === 2 ? `${first}, ${last}` : `${first}–${last}`;
+      return `${days}, ${hour(g.start)}–${hour(g.end)}`;
+    })
+    .join("; ");
+}
+
+/** Under the prospect's clock on the call sheet. */
+export function clockLine(task: Pick<CallTaskView, "task" | "listed" | "callingHoursNow">, userZone: string): { text: string; tone: "ok" | "warn" | "plain" } {
+  // A call off the list says nothing about its calling hours now.
+  if (!task.listed) return { text: "Their time", tone: "plain" };
+  // The server's fact about the hours at this instant, never the queue's bucket: a callback is listed by the time asked for (re-check 7, R10).
+  const { open, opensLaterToday } = task.callingHoursNow;
+  if (open) return { text: "Their time, inside calling hours", tone: "ok" };
+  // Outside the hours a callback is still the prospect's own time to call: said plainly, not as a warning.
+  const tone = task.task?.reason === "callback" || task.task?.reason === "overdue" ? "plain" : "warn";
+  if (opensLaterToday !== null) return { text: `Their time. Calling hours start at ${timeIn(userZone, opensLaterToday)} your time`, tone };
+  return { text: "Their time, outside calling hours", tone };
+}
+
+/** While an action is on its way. */
+export function pendingLine(pending: NonNullable<DeskSnapshot["pending"]>): string {
+  const what = pending.body.outcome === "skip_for_now" ? `Skipping ${pending.who} for now` : `Logging ${OUTCOME_LABEL[pending.body.outcome].toLowerCase()}${pending.body.redial ? " with a redial" : ""} for ${pending.who}`;
+  // Another window's press: nothing has failed, it is simply being logged there (council on b8c65f9, item 5).
+  if (!pending.own) return `${what} from another window. It is logged only once.`;
+  return pending.unconfirmed ? `${what}: not confirmed yet. It is being sent again, and it is logged only once.` : `${what}…`;
+}
+
+/** While the server's word on this tab's press is read: its outbox entry has just gone. */
+export function confirmingLine(who: string): string {
+  return `Checking with the server whether ${who}’s outcome is logged…`;
+}
+
+/** What the server did with the last accepted action, read from its answer. */
+export function loggedLine(logged: NonNullable<DeskSnapshot["logged"]>, userZone: string): string {
+  const { body, task, who } = logged;
+  if (body.outcome === "skip_for_now") return `${who} skipped for now.${task.listed ? (task.kind === "callback" ? " The callback stays on today’s list, and their outreach stays held." : " The call stays on today’s list.") : ""}`;
+  // What the server stored for this press: its outcome, redial and callback time (ticket 15b), never the draft's.
+  const stored = task.storedCalls.find((c) => c.requestId === logged.requestId);
+  if (stored?.outcome === "callback_requested" && stored.callbackAt !== null) {
+    const parts = [`${who}: callback requested for ${callbackWhen(stored.callbackAt, task.zone, userZone)}.`];
+    if (task.open && task.kind === "callback" && task.callbackAt === stored.callbackAt) parts.push(`Their automated outreach in ${task.campaign.name} is held until you log how the callback went.`);
+    return withNote(parts, body, task, who);
+  }
+  // Not interested (ticket 16c): the path the server stored with this press, and the lead's status as the read gives it.
+  if (stored?.outcome === "not_interested" && stored.declinedPath !== null) {
+    // The status said lower-case after "Now", so a campaign name with a comma or an apostrophe never reads as part of it (council on 4fd9ca4, item 4).
+    return withNote([`${who}: not interested logged.`, DECLINED_PATH_LINE[stored.declinedPath], `Now ${lowerFirst(STATUS_LABEL[task.status])}, in ${task.campaign.name}.`], body, task, who);
+  }
+  if (stored?.redial) {
+    const parts = [`${who}: ${OUTCOME_LABEL[stored.outcome].toLowerCase()} logged, with a redial.`];
+    if (task.open && !task.listed && task.listedFrom !== null) parts.push(`The call is on the list for ${dayLabel(task.listedFrom)}, and the ${task.track.label.toLowerCase()} stays open.`);
+    if (task.open && task.skipLimit?.ifUnworked) parts.push(`If it isn’t worked, it is skipped at ${endOf(task.skipLimit.ifUnworked)}.`);
+    return withNote(parts, body, task, who);
+  }
+  const parts = [`${who}: ${OUTCOME_LABEL[body.outcome].toLowerCase()} logged.`];
+  const dialled = task.numbers.find((n) => n.detailId === body.numberId);
+  if (body.outcome === "wrong_number" && dialled?.bad) parts.push(`${dialled.value} is marked wrong.`);
+  if (task.status === "interested_on_call") parts.push(`${STATUS_LABEL.interested_on_call} in ${task.campaign.name}. Nothing else is recorded.`);
+  else if (!task.open) parts.push(`The ${task.track.label.toLowerCase()} is finished.`);
+  return withNote(parts, body, task, who);
+}
+
+/** Where the note is, as the server's answer stores it: never from what was asked. */
+function withNote(parts: string[], body: { readonly note: string }, task: CallTaskView, who: string): string {
+  const note = body.note.trim();
+  if (note !== "" && task.companyNotes.some((n) => n.body === note)) parts.push(`The note is saved for everyone at ${task.company.name}.`);
+  else if (note !== "" && task.personNotes.some((n) => n.body === note)) parts.push(`The note is saved on ${who}.`);
+  return parts.join(" ");
+}
+
+/** Why the call the page was on is off the list, from the server's `offList`. */
+export function offListLine(who: string, off: CallOffListView | null, message: string | null, zone: string): string {
+  if (off === null) return message ?? `${who}’s call is no longer on the list.`;
+  switch (off.reason) {
+    case "logged":
+      // This tab's own press, once stored, is shown as logged by it (reconcile); this one came from elsewhere.
+      return `${who}’s call was already logged from another window or device: ${OUTCOME_LABEL[off.outcome].toLowerCase()} at ${timeIn(zone, off.at)}.`;
+    case "lead_ended":
+      if (off.status === "replied") return `${who} replied, so automation stopped and the call left the list.`;
+      if (off.status === "interested_on_call") return `${who} was marked interested on another call, so automation stopped and the call left the list.`;
+      if (off.status === "declined_on_call") return `${who} declined on a call, so their outreach in this campaign stopped and the call left the list.`;
+      return `${who}’s outreach in this campaign has ended (${STATUS_LABEL[off.status].toLowerCase()}), so the call left the list.`;
+    case "track_finished":
+      return trackFinishedLine(who, off.finish);
+    case "not_listed_today":
+      return `${who}’s call is not on today’s list.`;
+  }
+}
+
+/** Why a call whose phone track finished left the list: every finish reason the engine stores, in one exhaustive switch. */
+function trackFinishedLine(who: string, finish: FinishReasonApi | null): string {
+  if (finish === null) return `${who}’s phone track has finished, so the call left the list.`;
+  switch (finish) {
+    case "skipped_missing_channel":
+      return `No good number is left for ${who}, so the phone track was skipped.`;
+    case "skipped_declined":
+      return `${who} declined on another call, so no call is made to them again in this campaign and this call left the list.`;
+    case "dropped_for_win_back":
+      return `${who} moved to this campaign’s win-back branch, which makes no calls, so this call left the list.`;
+    case "skipped_unworked":
+      return `${who}’s call wasn’t made within its skip limit, so it was skipped and left the list.`;
+    case "completed":
+    case "skipped":
+    case "skipped_by_user":
+    case "failed_bad_destination":
+    case "closed_on_interest":
+      return `${who}’s phone track has finished, so the call left the list.`;
+    default: {
+      const unhandled: never = finish;
+      throw new Error(`A finish reason with no sentence: ${String(unhandled)}`);
+    }
+  }
+}
+
+/** A sender account's problem, as Needs attention says it. */
+const SENDER_PROBLEM: Readonly<Record<string, string>> = {
+  sending_off: "Sending is switched off for it in Instantly.",
+  not_active: "Instantly reports it as not active.",
+  no_daily_limit: "It has no daily sending limit in Instantly.",
+  stale: "Instantly hasn’t reported on it recently.",
+  disconnected: "It is disconnected.",
+  not_listed: "Its provider no longer lists it.",
+  unhealthy: "Its provider reports that it can’t send.",
+};
+
+const HOLD_REASON: Readonly<Record<string, string>> = {
+  unresolved: "the provider hasn’t confirmed whether a message went",
+  render_failed: "a message couldn’t be put together from its copy",
+  provider_skipped: "the provider skipped the lead",
+  no_thread: "a follow-up has no earlier email to continue",
+  sms_conversation_taken: "the mobile is in another campaign’s SMS conversation from every number this campaign may use",
+};
+
+export interface AttentionItem {
+  readonly key: string;
+  readonly tone: "crit" | "pause" | "end";
+  readonly title: string;
+  readonly body: string;
+  /** Where to act: Calls for an overdue callback, Campaigns otherwise. */
+  readonly action?: { readonly label: string; readonly href: string };
+}
+
+/**
+ * Overdue callbacks first, as the prototype puts them (ticket 15b), from Today's read, which names whose
+ * they are; GET /api/needs-attention reports the same callbacks without names, so they are said once.
+ */
+function overdueItem(today: Pick<TodayView, "overdueCallbacks" | "userZone" | "date">): AttentionItem | null {
+  const od = today.overdueCallbacks;
+  const first = od[0];
+  if (!first) return null;
+  const name = (x: CallQueueItem) => x.person?.name ?? x.company.name;
+  const asked = od.map((x) => `${name(x)} asked for ${x.callbackAt ? callbackWhen(x.callbackAt, x.zone, today.userZone) : "a callback"}.`).join(" ");
+  const stuck = od.filter((x) => x.noGoodNumber);
+  const q13 = stuck.map((x) => ` ${noGoodNumberText(name(x)).full}`).join("");
+  return {
+    key: "overdue-callbacks",
+    tone: "crit",
+    title: od.length === 1 ? `${name(first)}’s callback is overdue` : `${od.length} callbacks are overdue`,
+    body: `${asked} ${od.length === 1 ? "It stays" : "They stay"} on your call list, flagged overdue, and automated outreach to ${od.length === 1 ? "them" : "each"} stays held until you log what happened.${q13}`,
+    action: { label: "Open Calls", href: "/calls" },
+  };
+}
+
+/**
+ * Calls carried over from earlier days (ticket 15b; spec: "overdue callbacks and rolled-over calls show in Needs
+ * attention"): one row from Today's counts, after overdue callbacks. Up next lists each with its reason.
+ */
+export function carriedItem(today: Pick<TodayView, "carriedOver" | "carriedOverLastDay">): AttentionItem | null {
+  const n = today.carriedOver;
+  const last = today.carriedOverLastDay;
+  if (n === 0) return null;
+  const lastLine =
+    last === 0
+      ? ""
+      : last === n
+        ? n === 1
+          ? " It is on its last day before it is skipped."
+          : ` All ${n} are on their last day before they are skipped.`
+        : ` ${last} of them ${last === 1 ? "is on its" : "are on their"} last day before ${last === 1 ? "it is" : "they are"} skipped.`;
+  return {
+    key: "carried-over",
+    tone: "pause",
+    title: n === 1 ? "One call carried over from an earlier day" : `${n} calls carried over from earlier days`,
+    body: `Rolled over or redialed, ${n === 1 ? "it is" : "each is"} on your list with ${n === 1 ? "its" : "its own"} original due date.${lastLine}`,
+    action: { label: "Open Calls", href: "/calls" },
+  };
+}
+
+/** Everything Needs attention reports, each once; with Today's read, overdue callbacks first, then calls carried over. */
+export function attentionItems(n: NeedsAttention, userZone: string, today: Pick<TodayView, "overdueCallbacks" | "userZone" | "date" | "carriedOver" | "carriedOverLastDay"> | null): AttentionItem[] {
+  const items: AttentionItem[] = [];
+  const overdue = today ? overdueItem(today) : null;
+  if (overdue) items.push(overdue);
+  const carried = today ? carriedItem(today) : null;
+  if (carried) items.push(carried);
+  for (const p of n.senderProblems) {
+    items.push({
+      key: `sender-${p.accountId}`,
+      tone: "crit",
+      title: p.channel === "sms" ? `Your SMS number ${p.label} can’t send` : `Your inbox ${p.label} can’t send`,
+      body: `${SENDER_PROBLEM[p.problem] ?? `The provider says: ${p.problem}.`} Leads that send from it wait; nothing is dropped.`,
+    });
+  }
+  for (const w of n.accountWaits) {
+    items.push({
+      key: `wait-${w.accountId}`,
+      tone: "pause",
+      title: `${w.accountId} is waiting`,
+      body: w.reason === "quota" ? "Instantly refused more sends for now. Sending resumes when it allows; nothing is dropped." : `Instantly asked to slow down. Sending resumes${w.until ? ` at ${timeIn(userZone, w.until)}` : ""}; nothing is dropped.`,
+    });
+  }
+  for (const s of n.stalledInboxes) {
+    items.push({ key: `stalled-${s.accountId}`, tone: "pause", title: `Sends from ${s.accountId} are stalled`, body: `${s.holding.length} ${s.holding.length === 1 ? "send waits" : "sends wait"} on it. Nothing is dropped.` });
+  }
+  for (const c of n.heldCapacity) {
+    items.push({ key: `held-${c.accountId}`, tone: "pause", title: `${c.held} of ${c.accountId}’s ${c.capacity} sends today are held`, body: "The provider hasn’t confirmed whether those messages went, so their room is kept until it does." });
+  }
+  const byReason = new Map<string, number>();
+  for (const t of n.heldTracks) byReason.set(t.reason, (byReason.get(t.reason) ?? 0) + 1);
+  for (const [reason, count] of byReason) {
+    items.push({ key: `tracks-${reason}`, tone: "pause", title: count === 1 ? "One lead’s track is on hold" : `${count} leads’ tracks are on hold`, body: `On hold because ${HOLD_REASON[reason] ?? reason}. Nothing is dropped.` });
+  }
+  for (const [i, a] of n.anomalies.entries()) items.push({ key: `anomaly-${i}`, tone: "end", title: "The provider reported something unexpected", body: a.what });
+  return items;
+}
+
+/** While this page sends an outcome for another call, chosen here or in another tab, that has no answer yet. */
+export function recoveringLine(who: string): string {
+  return `Sending an outcome for ${who} that has no answer yet. It is logged only once.`;
+}
+
+/** A kept refusal: what was not logged, and why, from the server's `offList` when it said. */
+export function refusedRecordLine(
+  record: { readonly who: string; readonly body: { readonly outcome: CallOutcomeApi; readonly redial?: true; readonly callbackAt?: string; readonly declinedPath?: DeclinedPathApi }; readonly refused: { readonly message: string; readonly offList: CallOffListView | null } },
+  zone: string,
+): string {
+  const { body } = record;
+  // The press's own choices: a redial, a callback's time, or the declined path pressed (ticket 16c).
+  const extra = body.redial ? " with a redial" : body.callbackAt ? ` for ${dateIn(zone, body.callbackAt)} at ${timeIn(zone, body.callbackAt)} your time` : body.declinedPath ? ` (“${DECLINED_PATH_CHOICE[body.declinedPath]}”)` : "";
+  const what = body.outcome === "skip_for_now" ? `skip for now on ${record.who}` : `${OUTCOME_LABEL[body.outcome].toLowerCase()}${extra} for ${record.who}`;
+  // The server's own message, unless it refused because the call was already logged, which the off-list facts say with what and when.
+  const why = record.refused.offList?.reason === "logged" ? offListLine(record.who, record.refused.offList, null, zone) : record.refused.message;
+  return `Not logged: ${what}. ${why}`;
+}
+
+/** What the outcome box says of the number: before Log, while it is on its way. */
+export function outcomeNumberLine(outcome: CallOutcomeApi, number: { readonly value: string; readonly kind: CallNumberView["kind"] } | null, pending: boolean): string {
+  if (number === null) return "Choose the number you dialled above.";
+  const n = `${number.value} (${NUMBER_KIND[number.kind]})`;
+  if (outcome === "wrong_number") return pending ? `Logging ${n} as a wrong number…` : `${n}, the number you dial above, will be marked wrong.`;
+  return pending ? `Logging on ${n}…` : `To be logged on ${n}.`;
+}
+
+/** Under the numbers, when the one the user chose can no longer be logged on. */
+export function numberProblemLine(problem: { readonly kind: "bad" | "gone"; readonly value: string | null }): string {
+  return problem.kind === "bad" ? `The number you chose, ${problem.value ?? ""}, is now marked wrong. Choose the number you dial.` : "The number you chose is no longer one of this lead’s. Choose the number you dial.";
+}
+
+
+/** A press this device's storage refused (ADR 0003 4.4.1, the boundary): nothing was sent. */
+/**
+ * A kept refusal says only what is true of it: that outcome was not logged, why, and the note typed
+ * with it. Whether that text is saved anywhere is not its to say (re-check on 12f0303, R2).
+ */
+export const REFUSED_NOTE_LEAD = "The note typed with it:";
+
+/** A refusal this device's storage would not record: shown from the page, its write retried. */
+export const UNSTORED_REFUSAL_LINE = "This device’s storage is full or blocked, so this refusal could not be recorded on it.";
+
+/** The draft's copy in this tab's storage failed (ADR 0003 4.4.1): what it means, and only that. */
+export const DRAFT_NOT_KEPT_LINE = "This note is not being kept on this device if you leave the page.";
+
+export const NOT_QUEUED_LINE = "This outcome couldn’t be queued on this device: its storage is full or blocked, so nothing was sent. Your choice and note are kept. Free some space, or allow this site to store data, then press Log again.";
+
+// ---------------------------------------------------------------------------------------------
+// Redials and callbacks (ticket 15b). What the engine does, said from the server's read of the call before
+// Log (its `redial` and `skipLimit` facts) and from its answer after; nothing here computes a date.
+
+/**
+ * Under "Call again tomorrow", from the call's read: where a redial puts the call, and when the skip limit still
+ * ends it, both from the engine's own outcome applied to a copy of the call (`redial`, review bot on eac9f6c).
+ */
+export function redialLines(task: Pick<CallTaskView, "track"> & { readonly redial: NonNullable<CallTaskView["redial"]> }): { checked: string; unchecked: string } {
+  const track = task.track.label.toLowerCase();
+  const { listedFor, skipLimit } = task.redial;
+  const moves = `The call moves to the list for ${dayLabel(listedFor)}, and the ${track} stays open, so the tracks after it keep waiting.`;
+  const limit = skipLimit
+    ? ` The skip limit still counts from ${dayLabel(skipLimit.dueDate)}, its original due date${skipLimit.ifUnworked ? `: if it isn’t worked, it is skipped at ${endOf(skipLimit.ifUnworked)}` : ""}.`
+    : "";
+  return { checked: `${moves}${limit}`, unchecked: `Without a redial, this call is done: the ${track} finishes, and nothing calls them again unless you ask.` };
+}
+
+/** What the callback controls say about the time entered: shown back in both times, and what the engine will make of it. */
+export function callbackLine(
+  callback: CallbackChoice,
+  advice: "inside" | "outside" | "closed_day" | null,
+  task: Pick<CallTaskView, "zone" | "callingHours">,
+  userZone: string,
+): { text: string; tone: "plain" | "crit" } {
+  if (callback.problem === "missing") return { text: "Enter the day and time they asked for, in their time.", tone: "plain" };
+  if (callback.problem === "no_such_time") return { text: "That time doesn’t exist in their time zone on that day: the clocks change. Choose another time.", tone: "crit" };
+  if (callback.problem === "past" || callback.at === null) return { text: "That time has passed. Choose a time still to come; a callback in the past isn’t accepted.", tone: "crit" };
+  const when = callbackWhen(new Date(callback.at).toISOString(), task.zone, userZone);
+  const hours = callingHoursLine(task.callingHours);
+  const note =
+    advice === "inside"
+      ? "Inside their calling hours."
+      : advice === "outside"
+        ? `Outside their calling hours (${hours}), and still accepted: a callback is listed at the time they asked for.`
+        : `Their calling hours never open on that day (${hours}), and it is still accepted: a callback is listed at the time they asked for.`;
+  return { text: `Callback on ${when}. ${note}`, tone: "plain" };
+}
+
+/** What a callback does to the lead, before Log (ADR 0003 2.3, Q12): the hold, and that nothing ends it but an outcome. */
+export function callbackHoldLine(task: Pick<CallTaskView, "kind" | "campaign">, who: string): string {
+  // Held now only when the server's read shows the callback; before Log, what logging will do (council on 32454ea, E).
+  if (task.kind === "callback") return `A new time keeps the hold: ${who}’s automated outreach in ${task.campaign.name} stays held until you log how the callback went.`;
+  return `Logging this holds ${who}’s automated outreach in ${task.campaign.name} until you log how the callback went. The call then stays open: it is never skipped, and nothing resumes by itself.`;
+}
+
+/** Any other outcome on a callback ends its hold (ADR 0003 2.4: the hold is released first, then the outcome is logged). */
+export const CALLBACK_RELEASE_LINE = "Logging this ends the callback’s hold on their automated outreach in this campaign.";
+
+/** Skip for now, before Log. */
+export function skipLine(task: Pick<CallTaskView, "kind">): string {
+  return task.kind === "callback" ? "The callback goes to the end of today’s list and stays open; their outreach stays held." : "The call goes to the end of today’s list. Nothing else changes.";
+}
+
+/**
+ * Question Q13's interim, said plainly (verifier on eac9f6c, F4): a callback whose lead has no good number left.
+ * Only skip for now can be logged, and it keeps the callback open. The one sentence for the call sheet, the queue
+ * and Up next (`short`), Needs attention and the record, so they cannot disagree.
+ */
+export function noGoodNumberText(who: string | null): { short: string; full: string; afterOverdue: string } {
+  const whose = who === null ? "Every number" : `Every number for ${who}`;
+  const logging = `${whose} is marked wrong, so only skip for now can be logged on this callback, and it keeps the callback open.`;
+  const until = "a new number arrives by import or they reply";
+  const later = "Pausing them or skipping the step arrives with a later release.";
+  return {
+    short: "no good number left, only skip for now can be logged",
+    full: `${logging} It stays on the call list, flagged overdue once its time has passed, and their other outreach in this campaign stays held until ${until}. ${later}`,
+    // After a sentence that already says the callback stays listed and holds outreach: each fact once (council on 32454ea, F).
+    afterOverdue: `${logging} That lasts until ${until}. ${later}`,
+  };
+}
+
+/**
+ * What the record says of one open call (ticket 15b), from the server's read as of `today`: `lead`, said in the
+ * critical colour when the callback is overdue, then `rest`; each fact once.
+ */
+export function recordCallLine(call: RecordCallView, today: string): { lead: string; rest: string } {
+  const limit = call.skipLimit
+    ? ` It was due ${dayLabel(call.skipLimit.dueDate)}${call.skipLimit.ifUnworked ? `; if it isn’t worked, it is skipped at ${endOf(call.skipLimit.ifUnworked)}` : ""}.`
+    : "";
+  if (call.kind === "callback") {
+    const at = call.callbackAt ? `${dateIn(call.zone, call.callbackAt)} at ${timeIn(call.zone, call.callbackAt)} their time` : "at the time they asked for";
+    const overdue = call.reason === "overdue";
+    const lead = overdue
+      ? `Callback ${at}, now overdue. It stays on your call list until you log what happened, and their automated outreach in this campaign stays held until then.`
+      : `Callback ${at}. Their automated outreach in this campaign is held until you log how it went.`;
+    return { lead, rest: call.noGoodNumber ? noGoodNumberText(null).afterOverdue : "" };
+  }
+  const plain = (lead: string) => ({ lead, rest: "" });
+  if (call.heldByCallback) return plain(`Their call on the ${call.track.label.toLowerCase()} waits while their callback is open: only the callback is on the list.`);
+  if (call.listed) {
+    const why = call.reason === "rolled_over" ? "Their call rolled over to today’s list." : call.reason === "redial" ? "Their call is back on today’s list: you asked for a redial." : "Their call is on today’s list.";
+    return plain(`${why}${limit}`);
+  }
+  if (call.listedFor > today) return plain(`Their call is on the list for ${dayLabel(call.listedFor)}.${limit}`);
+  return plain(`Their call waits for a day their calling hours open.${limit}`);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Not interested (ticket 16c). What a decline does, said before Log from the call read's `declines` (the engine's own
+// outcome on a copy), after Log from the server's stored path and the lead's status, and on the record and in Activity
+// from the server's read at that instant. Nothing here decides a path, a status or a track's state.
+
+/** The not-interested radios, as the approved prototype words them. */
+export const DECLINED_PATH_CHOICE = {
+  stop: "Stop all outreach in this campaign",
+  continue: "Keep the email and SMS steps going",
+  win_back: "Move to the win-back messages",
+} as const satisfies Record<DeclinedPathApi, string>;
+
+/** Beside a path the call's read does not offer: the read offers win back only while the campaign has a win-back branch. */
+export const PATH_NOT_OFFERED = `(${WIN_BACK_HAS_NO_TRACKS})`;
+
+/**
+ * Under the radios: where the preselected path comes from, from the read's `declinedPathSet` (never inferred), and, when
+ * the user chose another path for this lead, what the track holds. A track with no path set is said as unset, with the
+ * path logging uses without a choice as the read gives it (`declinedPath`); no setting is claimed for it (review bot on
+ * d478d6d), and Q14 is not answered here. One exhaustive switch, so a third source a later ticket adds needs its sentence.
+ */
+export function declinedPathSourceLine(task: Pick<CallTaskView, "declinedPath" | "declinedPathSet"> & { readonly track: { readonly label: string } }, chosen: DeclinedPathApi | null, who: string): string {
+  const track = task.track.label.toLowerCase();
+  const overridden = chosen !== null && chosen !== task.declinedPath;
+  const source: "set" | "unset" = task.declinedPathSet ? "set" : "unset";
+  switch (source) {
+    case "set":
+      return overridden ? `For ${who} only: the ${track} is set to “${DECLINED_PATH_CHOICE[task.declinedPath]}”.` : `Preselected from the ${track}’s setting.`;
+    case "unset":
+      return overridden
+        ? `For ${who} only: no path is set on the ${track}, so without a choice logging uses “${DECLINED_PATH_CHOICE[task.declinedPath]}”.`
+        : `No path is set on the ${track} for a declined call, so the one logging uses without a choice is preselected.`;
+    default: {
+      const unhandled: never = source;
+      throw new Error(`A preselection source with no sentence: ${String(unhandled)}`);
+    }
+  }
+}
+
+/** A chosen path the call's read does not offer (the boundary, ticket 16c): Log sends nothing. */
+/** Why win back cannot be logged now, in the definition's own words (`WIN_BACK_HAS_NO_TRACKS`; council on aaf82b7). */
+export const PATH_NOT_OFFERED_LINE = `${WIN_BACK_HAS_NO_TRACKS.charAt(0).toUpperCase()}${WIN_BACK_HAS_NO_TRACKS.slice(1)} now, so that path can’t be logged. Choose another.`;
+
+/** What logging not interested on a path does to the lead as a whole, from the preview's status after it. */
+/** "In win-back" as "in win-back": a status label inside a sentence. */
+const lowerFirst = (label: string): string => label.charAt(0).toLowerCase() + label.slice(1);
+
+/**
+ * What logging not interested on a path does to the lead as a whole, from the preview's status after it. Said of "this
+ * campaign", as the logged line and the record say it, never with the campaign's name, which may itself hold a comma or
+ * an apostrophe (council on 4fd9ca4, item 4).
+ */
+function declineLeadLine(status: OutreachStatus): string {
+  switch (status) {
+    case "declined_on_call":
+      return "Logging this stops their outreach in this campaign only. Their other campaigns and colleagues are not affected.";
+    case "in_win_back":
+      return "Logging this moves them to this campaign’s win-back branch: its tracks replace the main sequence’s remaining ones.";
+    case "active":
+    case "queued":
+    case "waiting_on_call":
+      return "Logging this keeps their remaining tracks in this campaign going.";
+    case "finished_no_usable_channel":
+      return "Logging this ends their outreach in this campaign: nothing is left to reach them on without a call (finished, no usable channel).";
+    case "sequence_finished_no_response":
+      return "Logging this ends their outreach in this campaign: nothing is left to send (sequence finished, no response).";
+    case "callback_scheduled":
+    case "paused":
+    case "replied":
+    case "interested_on_call":
+    case "stopped_manually":
+      return `Logging this leaves them ${lowerFirst(STATUS_LABEL[status])} in this campaign.`;
+    default: {
+      const unhandled: never = status;
+      throw new Error(`A status with no sentence: ${String(unhandled)}`);
+    }
+  }
+}
+
+/**
+ * One track a decline leaves unfinished or finishes, said from its state: `preview`, what logging will do (before Log,
+ * from the call read's copy); `record`, as the server's read at this instant holds it (Activity), so stored facts are
+ * said in the past and only the read's present state in the present. One exhaustive switch for both, so a state a
+ * later ticket adds fails typecheck until it has both sentences.
+ */
+export function declineTrackLine(a: DeclineTrackView, mode: "preview" | "record", userZone: string): string {
+  const name = a.track.label;
+  const preview = mode === "preview";
+  switch (a.state) {
+    case "started":
+      if (a.track.branch === "win_back") return preview ? `${name} starts now.` : `${name} started, and is running.`;
+      return preview ? `${name} carries on.` : `${name} carried on, and is running.`;
+    case "started_held":
+      // Started, while a hold stops the lead (a callback now; a pause from ticket 17): never said as running.
+      return preview ? `${name} has started, and waits while their outreach is held.` : `${name} has started, and is waiting while their outreach is held.`;
+    case "finished":
+      return `${name} has finished.`;
+    case "waiting":
+      // The day the server's read resolves its start to, if the lead keeps running: the same in both modes.
+      return `${name} starts after its delay, on ${dateIn(userZone, a.startsAt)}.`;
+    case "held":
+      return `${name} starts after its delay, once their outreach is no longer held.`;
+    case "not_started":
+      return preview ? `${name} starts when the track before it finishes.` : `${name} has not started.`;
+    case "dropped_for_win_back":
+      return preview ? `${name} is dropped for the win-back branch.` : `${name} was dropped for the win-back branch.`;
+    case "skipped_declined":
+      return preview ? `${name} is skipped: no call is made to them again.` : `${name} was skipped: no call is made to them again.`;
+    case "no_more_calls":
+      return `${name} will not call them: no call is made to them again.`;
+    case "skipped_unworked":
+      return `${name} was skipped: its call wasn’t made within its skip limit.`;
+    case "skipped_no_channel":
+      return preview ? `${name} is skipped: there is nothing to reach them on for it.` : `${name} was skipped: there is nothing to reach them on for it.`;
+    case "skipped":
+      return `${name} was skipped.`;
+    case "stopped":
+      return preview ? `${name} will not start.` : `${name} did not start: their outreach in this campaign stopped.`;
+    case "stopped_after_start":
+      return preview ? `${name} stops.` : `${name} stopped: their outreach in this campaign stopped.`;
+    default: {
+      const unhandled: never = a;
+      throw new Error(`A track state with no sentence: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+/** Every path says it, as the prototype does under the radios, from the preview's own fact (council on 4fd9ca4, item 3). */
+export const NO_MORE_CALLS_LINE = "No call is made to them again.";
+
+/**
+ * Before Log, for the path shown on the radios: the lead, whether a call is ever made to them again (the read's
+ * `noMoreCalls`), each track, and the work already with a provider (the read's `declines`).
+ */
+export function declinePreviewLines(preview: DeclinePreviewView, userZone: string): { lead: string; noMoreCalls: string | null; tracks: string[]; provider: string | null } {
+  const n = preview.withProvider;
+  const provider = n === 0 ? null : `${n === 1 ? "One email or text is" : `${n} emails or texts are`} already with the provider: logging this asks it to withdraw ${n === 1 ? "it" : "them"}, and ${n === 1 ? "it" : "they"} may still go.`;
+  return { lead: declineLeadLine(preview.status), noMoreCalls: preview.noMoreCalls ? NO_MORE_CALLS_LINE : null, tracks: preview.tracks.map((t) => declineTrackLine(t, "preview", userZone)), provider };
+}
+
+/**
+ * A decline on the record, beside the enrollment's status (ticket 16c): when it was logged and the path it took, as
+ * history; a present state only as the status the server reads now says it.
+ */
+export function declinedRecordLine(decline: RecordCalls["declines"][number], status: OutreachStatus): string {
+  const day = dayLabel(decline.date);
+  switch (decline.path) {
+    case "stop":
+      return `Declined on a call on ${day}. Their outreach in this campaign stopped there.`;
+    case "continue":
+      return status === "active" || status === "queued" ? `Declined on a call on ${day}. No call is made to them again in this campaign; their other channels continue.` : `Declined on a call on ${day}. No call is made to them again in this campaign.`;
+    case "win_back":
+      return status === "in_win_back" ? `Declined on a call on ${day}, and moved to this campaign’s win-back branch, which is running. No call is made to them again.` : `Declined on a call on ${day}, and moved to this campaign’s win-back branch. No call is made to them again.`;
+    default: {
+      const unhandled: never = decline.path;
+      throw new Error(`A declined path with no sentence: ${String(unhandled)}`);
+    }
+  }
+}

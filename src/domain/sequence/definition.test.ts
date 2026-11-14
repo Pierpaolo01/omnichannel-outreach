@@ -1,0 +1,311 @@
+import { describe, expect, test } from "vitest";
+import { launchCheck } from "./blockers.ts";
+import { skipLimitOf } from "./calls.ts";
+import { render } from "./copy.ts";
+import { declinedPathOf, definitionIssues, definitionProblems, ownSubject, winBackAvailable, winBackEntry, type CampaignDefinition, type StepDefinition, type TrackDefinition } from "./definition.ts";
+import { renderStep } from "./dispatch.ts";
+import { subjectState } from "../../../test/support/sequence-state.ts";
+
+const step = (id: string, fields: Partial<StepDefinition> = {}): StepDefinition => ({
+  id,
+  waitDays: 0,
+  subject: "Hello {{first_name|there}}",
+  body: "A note for {{company}}.",
+  threading: "continue_thread",
+  removed: false,
+  ...fields,
+});
+
+const emailTrack = (fields: Partial<TrackDefinition> = {}): TrackDefinition => ({
+  id: "t1",
+  channel: "email",
+  branch: "main",
+  window: [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 })),
+  steps: [step("s1", { threading: "new_subject" }), step("s2", { waitDays: 2 })],
+  start: { kind: "entry" },
+  removed: false,
+  ...fields,
+});
+
+const definition = (fields: Partial<CampaignDefinition> = {}): CampaignDefinition => ({
+  timezone: "Europe/London",
+  callSkipLimitDays: 2,
+  emailPool: ["inbox-1"],
+  tracks: [emailTrack()],
+  ...fields,
+});
+
+describe("each refusal has a stable identity, from which its sentence is rendered (council on aaf82b7)", () => {
+  test("a problem names its kind and the track or step it is about, whatever the track is called", () => {
+    const w1 = emailTrack({ id: "w1", branch: "win_back", steps: [step("w1s1", { threading: "new_subject" })] });
+    const w2 = emailTrack({ id: "w2", branch: "win_back", window: [], steps: [step("w2s1", { threading: "new_subject" })] });
+    const bad = emailTrack({ steps: [step("s1", { threading: "new_subject" }), step("s2", { waitDays: 1.5 })] });
+    const both = definition({ tracks: [bad, w1, w2] });
+    expect(definitionIssues(both).map(({ kind, trackId, stepId }) => ({ kind, trackId, stepId }))).toEqual([
+      { kind: "wait_not_whole", trackId: "t1", stepId: "s2" },
+      { kind: "window_empty", trackId: "w2", stepId: undefined },
+    ]);
+    // Removing w1 renames w2 ("Win-back email track 2" becomes "the win-back email track"); its problem keeps its identity.
+    const one = definition({ tracks: [bad, w2] });
+    expect(definitionProblems(both)).toContain("Win-back email track 2's sending window has no days.");
+    expect(definitionProblems(one)).toContain("The win-back email track's sending window has no days.");
+    expect(definitionIssues(one).map(({ kind, trackId }) => `${kind} ${trackId}`)).toEqual(["wait_not_whole t1", "window_empty w2"]);
+    // The sentences are the issues' own, in the same order.
+    expect(definitionProblems(both)).toEqual(definitionIssues(both).map((i) => i.text));
+  });
+});
+
+describe("definitions refused at the boundary (ADR 0003 7.1)", () => {
+  test("one email track with ordered follow-ups is accepted", () => {
+    expect(definitionProblems(definition())).toEqual([]);
+  });
+
+  test("email and SMS tracks in the main sequence, together or after a delay, are accepted (ticket 13)", () => {
+    const sms = emailTrack({ id: "t2", channel: "sms", steps: [step("m1", { subject: "" }), step("m2", { waitDays: 1, subject: "" })], start: { kind: "after", trackId: "t1", delayDays: 2 } });
+    const together = emailTrack({ id: "t3", channel: "sms", steps: [step("m3", { subject: "" })] });
+    expect(definitionProblems(definition({ smsPool: ["+447700900001"], tracks: [emailTrack(), sms, together] }))).toEqual([]);
+    // An SMS step has no subject and no thread: its threading is not read.
+    expect(definitionProblems(definition({ tracks: [emailTrack({ channel: "sms", steps: [step("m1")] })] }))).toEqual([]);
+  });
+
+  describe("how a lead can enter the win-back branch (council on aaf82b7)", () => {
+    const call = (fields: Partial<TrackDefinition> = {}): TrackDefinition => emailTrack({ id: "p1", channel: "call", steps: [step("c1", { subject: "", body: "" })], ...fields });
+    const branch = emailTrack({ id: "w1", branch: "win_back", steps: [step("w1s1", { threading: "new_subject" })] });
+    test("by a phone track's declined path; or only when win back is chosen for one lead; or never", () => {
+      expect(winBackEntry(definition({ tracks: [emailTrack(), call({ declinedPath: "win_back" }), branch] }))).toBe("declined_path");
+      // A path left unset reads as stop (Q14), so only the per-lead choice enters the branch.
+      expect(winBackEntry(definition({ tracks: [emailTrack(), call({ declinedPath: "continue" }), branch] }))).toBe("chosen_for_a_lead");
+      expect(winBackEntry(definition({ tracks: [emailTrack(), call(), branch] }))).toBe("chosen_for_a_lead");
+      // No live phone track, or no live branch track: nobody enters it.
+      expect(winBackEntry(definition({ tracks: [emailTrack(), branch] }))).toBe("never");
+      expect(winBackEntry(definition({ tracks: [emailTrack(), call({ declinedPath: "stop", removed: true }), branch] }))).toBe("never");
+      expect(winBackEntry(definition({ tracks: [emailTrack(), call({ declinedPath: "stop" })] }))).toBe("never");
+    });
+  });
+
+  describe("the win-back branch and the declined path (ticket 16)", () => {
+    const call = (fields: Partial<TrackDefinition> = {}) => emailTrack({ id: "p1", channel: "call", steps: [step("c1", { subject: "", body: "" })], ...fields });
+    const winBack = (fields: Partial<TrackDefinition> = {}) => emailTrack({ id: "w1", branch: "win_back", steps: [step("w1s1", { threading: "new_subject" })], ...fields });
+
+    test("a win-back branch of email and SMS tracks, arranged like the main sequence, entered from a phone track's declined path, is accepted", () => {
+      const sms = winBack({ id: "w2", channel: "sms", steps: [step("w2s1", { subject: "" })], start: { kind: "after", trackId: "w1", delayDays: 3 } });
+      expect(definitionProblems(definition({ smsPool: ["+447700900001"], tracks: [emailTrack(), call({ declinedPath: "win_back" }), winBack(), sms] }))).toEqual([]);
+      // A branch may be drawn before any phone track enters it, and a path of stop or continue needs none.
+      expect(definitionProblems(definition({ tracks: [emailTrack(), call({ declinedPath: "stop" }), winBack()] }))).toEqual([]);
+    });
+
+    test("the win-back branch has no call", () => {
+      expect(definitionProblems(definition({ tracks: [emailTrack(), call({ declinedPath: "win_back" }), winBack(), call({ id: "p2", branch: "win_back", steps: [step("c2", { subject: "", body: "" })] })] }))).toEqual([
+        "The win-back branch cannot hold a phone track: a lead who declined is never called again in this campaign. Remove the phone track from the win-back branch.",
+      ]);
+    });
+
+    test("a declined path of win back needs a win-back branch with a live track", () => {
+      const refused = "The phone track's declined path is win back, but the win-back branch has no tracks: add a track to it, or choose stop or continue.";
+      expect(definitionProblems(definition({ tracks: [emailTrack(), call({ declinedPath: "win_back" })] }))).toEqual([refused]);
+      expect(definitionProblems(definition({ tracks: [emailTrack(), call({ declinedPath: "win_back" }), winBack({ removed: true })] }))).toEqual([refused]);
+    });
+
+    test("only a phone track has a declined path", () => {
+      expect(definitionProblems(definition({ tracks: [emailTrack({ declinedPath: "stop" })] }))).toEqual(["Only a phone track has a declined path: the email track has one."]);
+    });
+
+    test("a connection stays inside its branch: the branch starts when a lead declines", () => {
+      const into = winBack({ start: { kind: "after", trackId: "t1", delayDays: 0 } });
+      expect(definitionProblems(definition({ tracks: [emailTrack(), call({ declinedPath: "win_back" }), into] }))).toEqual([
+        "The win-back email track starts after a track of the main sequence: connect it inside the win-back branch, which starts when a lead declines.",
+      ]);
+      const outOf = emailTrack({ id: "t2", steps: [step("s9", { threading: "new_subject" })], start: { kind: "after", trackId: "w1", delayDays: 0 } });
+      expect(definitionProblems(definition({ tracks: [emailTrack(), call({ declinedPath: "win_back" }), winBack(), outOf] }))).toEqual([
+        "Email track 2 starts after a track of the win-back branch: connect it inside the main sequence.",
+      ]);
+    });
+
+    test("tracks are named within their branch", () => {
+      expect(definitionProblems(definition({ tracks: [emailTrack(), winBack({ window: [] })] }))).toEqual(["The win-back email track's sending window has no days."]);
+      expect(definitionProblems(definition({ tracks: [emailTrack(), winBack(), winBack({ id: "w2", window: [], steps: [step("w2s1", { threading: "new_subject" })] })] }))).toEqual(["Win-back email track 2's sending window has no days."]);
+    });
+
+    test("a phone track's declined path is the one the canvas set, and stop when none is set yet (question Q14)", () => {
+      expect(declinedPathOf(call({ declinedPath: "continue" }))).toBe("continue");
+      expect(declinedPathOf(call())).toBe("stop");
+      expect(winBackAvailable(definition({ tracks: [emailTrack(), call()] }))).toBe(false);
+      expect(winBackAvailable(definition({ tracks: [emailTrack(), call(), winBack({ removed: true })] }))).toBe(false);
+      expect(winBackAvailable(definition({ tracks: [emailTrack(), call(), winBack()] }))).toBe(true);
+    });
+  });
+
+  test("a phone track is exactly one call, with no wait and no copy, and connects together or after like any track (ticket 14)", () => {
+    const call = (fields: Partial<TrackDefinition> = {}) => emailTrack({ id: "t2", channel: "call", steps: [step("c1", { subject: "", body: "" })], ...fields });
+    const after = { kind: "after" as const, trackId: "t1", delayDays: 1 };
+    expect(definitionProblems(definition({ callScript: "Ask who handles bookings.", tracks: [emailTrack(), call(), call({ id: "t3", steps: [step("c2", { subject: "", body: "" })], start: after })] }))).toEqual([]);
+    // A call-only campaign is a campaign: its calling hours are the track's window.
+    expect(definitionProblems(definition({ emailPool: [], tracks: [call({ start: { kind: "entry" } })] }))).toEqual([]);
+    expect(definitionProblems(definition({ tracks: [emailTrack(), call({ steps: [step("c1", { subject: "", body: "" }), step("c2", { waitDays: 1, subject: "", body: "" })] })] }))).toEqual(["The phone track is one call with no follow-ups: give it exactly one step."]);
+    expect(definitionProblems(definition({ tracks: [emailTrack(), call({ steps: [] })] }))).toEqual(["The phone track is one call with no follow-ups: give it exactly one step."]);
+    // A removed step does not count, so a track may replace its call.
+    expect(definitionProblems(definition({ tracks: [emailTrack(), call({ steps: [step("c0", { removed: true }), step("c1", { subject: "", body: "" })] })] }))).toEqual([]);
+    expect(definitionProblems(definition({ tracks: [emailTrack(), call({ window: [] })] }))).toEqual(["The phone track's calling hours have no days."]);
+    // A call has no copy: the campaign's call script shows on every call task (verifier F2 on a1399ce).
+    expect(definitionProblems(definition({ tracks: [emailTrack(), call({ steps: [step("c1", { subject: "", body: "Ask for Pat." })] })] }))).toEqual(["The phone track's call has no copy of its own: write talking points in the campaign's call script."]);
+    expect(definitionProblems(definition({ tracks: [emailTrack(), call({ steps: [step("c1", { subject: "Hi", body: "" })] })] }))).toEqual(["The phone track's call has no copy of its own: write talking points in the campaign's call script."]);
+    // The declined path is set on the canvas (ticket 16).
+    expect(definitionProblems(definition({ tracks: [emailTrack(), call({ declinedPath: "continue" })] }))).toEqual([]);
+  });
+
+  test("each phone track may hold its own call skip limit, a whole number of days of at least 1; an email or SMS track holds none (ticket 14c)", () => {
+    const call = (fields: Partial<TrackDefinition> = {}) => emailTrack({ id: "t2", channel: "call", steps: [step("c1", { subject: "", body: "" })], ...fields });
+    expect(definitionProblems(definition({ tracks: [emailTrack(), call({ callSkipLimitDays: 1 }), call({ id: "t3", steps: [step("c2", { subject: "", body: "" })], callSkipLimitDays: 5 })] }))).toEqual([]);
+    for (const bad of [0, -1, 1.5, Number.NaN]) {
+      expect(definitionProblems(definition({ tracks: [emailTrack(), call({ callSkipLimitDays: bad })] }))).toEqual(["The phone track's call skip limit is a whole number of days, at least 1."]);
+    }
+    expect(definitionProblems(definition({ tracks: [emailTrack({ callSkipLimitDays: 2 })] }))).toEqual(["Only a phone track has a call skip limit."]);
+  });
+
+  test("a phone track's skip limit is its own, else the campaign's (a phone track saved before ticket 14c has none of its own)", () => {
+    const call = emailTrack({ id: "t2", channel: "call", steps: [step("c1", { subject: "", body: "" })] });
+    const def = definition({ callSkipLimitDays: 4, tracks: [call] });
+    expect(skipLimitOf(def, "t2")).toBe(4);
+    expect(skipLimitOf({ ...def, tracks: [{ ...call, callSkipLimitDays: 1 }] }, "t2")).toBe(1);
+  });
+
+  test("a start rule names a live track of the same branch, with a whole delay, and connections never go in a circle", () => {
+    const after = (trackId: string, delayDays = 1) => ({ kind: "after" as const, trackId, delayDays });
+    const second = (fields: Partial<TrackDefinition>) => emailTrack({ id: "t2", channel: "sms", steps: [step("m1")], ...fields });
+    expect(definitionProblems(definition({ tracks: [emailTrack(), second({ start: after("t9") })] }))).toEqual(["The SMS track starts after a track that is not in the sequence."]);
+    expect(definitionProblems(definition({ tracks: [emailTrack({ removed: true }), second({ start: after("t1") })] }))).toEqual(["The SMS track starts after a track that is not in the sequence."]);
+    expect(definitionProblems(definition({ tracks: [emailTrack(), second({ start: after("t1", 1.5) })] }))).toEqual(["The delay before the SMS track is a whole number of days."]);
+    expect(definitionProblems(definition({ tracks: [emailTrack(), second({ start: after("t1", -1) })] }))).toEqual(["The delay before the SMS track is a whole number of days."]);
+    expect(definitionProblems(definition({ tracks: [emailTrack({ start: after("t2") }), second({ start: after("t1") })] }))).toEqual(["The tracks' connections go in a circle, so none of them could start."]);
+    expect(definitionProblems(definition({ tracks: [emailTrack({ start: after("t1") })] }))).toEqual(["The tracks' connections go in a circle, so none of them could start."]);
+  });
+
+  test("two tracks on one channel are named by their order", () => {
+    const def = definition({ tracks: [emailTrack(), emailTrack({ id: "t2", window: [], steps: [step("s9", { threading: "new_subject" })] })] });
+    expect(definitionProblems(def)).toEqual(["Email track 2's sending window has no days."]);
+  });
+
+  test("an SMS sender is listed once", () => {
+    expect(definitionProblems(definition({ smsPool: ["+447700900001", "+447700900001"] }))).toEqual(["A sender account is listed twice."]);
+  });
+
+  test("a removed second track does not count", () => {
+    expect(definitionProblems(definition({ tracks: [emailTrack(), emailTrack({ id: "t2", removed: true, steps: [] })] }))).toEqual([]);
+  });
+
+  test("waits: none on the first step, whole non-negative days after it", () => {
+    expect(definitionProblems(definition({ tracks: [emailTrack({ steps: [step("s1", { threading: "new_subject", waitDays: 1 })] })] }))).toEqual([
+      "Step 1 is the first step, so it has no wait.",
+    ]);
+    expect(definitionProblems(definition({ tracks: [emailTrack({ steps: [step("s1", { threading: "new_subject" }), step("s2", { waitDays: 1.5 })] })] }))).toEqual([
+      "Step 2's wait is a whole number of days.",
+    ]);
+    expect(definitionProblems(definition({ tracks: [emailTrack({ steps: [step("s1", { threading: "new_subject" }), step("s2", { waitDays: -1 })] })] }))).toEqual([
+      "Step 2's wait is a whole number of days.",
+    ]);
+  });
+
+  test("continue thread cannot be the first email", () => {
+    expect(definitionProblems(definition({ tracks: [emailTrack({ steps: [step("s1")] })] }))).toEqual([
+      "Step 1 is the first email, so there is no thread to continue: give it a new subject.",
+    ]);
+  });
+
+  test("windows need days and different start and end hours; zones must be IANA names", () => {
+    expect(definitionProblems(definition({ tracks: [emailTrack({ window: [] })] }))).toEqual(["The email track's sending window has no days."]);
+    expect(definitionProblems(definition({ tracks: [emailTrack({ window: [{ day: 1, start: 9, end: 9 }] })] }))).toEqual([
+      "The email track's window starts and ends at the same hour.",
+    ]);
+    expect(definitionProblems(definition({ timezone: "Mars/Base" }))).toEqual([
+      `The campaign's time zone "Mars/Base" is not an IANA time zone such as Europe/London.`,
+    ]);
+  });
+
+  test("an edit cannot change a track's channel or move a step to another track", () => {
+    const before = definition();
+    expect(definitionProblems(definition({ tracks: [emailTrack({ channel: "sms" })] }), before)).toContain("A track cannot change channel: remove it and add a new one.");
+    const moved = definition({ tracks: [emailTrack({ removed: true }), emailTrack({ id: "t2", steps: [step("s1", { threading: "new_subject" })] })] });
+    expect(definitionProblems(moved, before)).toContain("A step cannot move to another track: remove it and add a new one.");
+  });
+
+  test("ids are unique", () => {
+    expect(definitionProblems(definition({ tracks: [emailTrack({ steps: [step("s1", { threading: "new_subject" }), step("s1", { waitDays: 1 })] })] }))).toContain("Two steps share the id s1.");
+  });
+});
+
+describe("merge fields", () => {
+  test("a fallback is used when the lead lacks the field", () => {
+    expect(render("Hi {{first_name|there}}, {{ company }}", { company: "Harbour Lane" })).toEqual({ ok: true, text: "Hi there, Harbour Lane" });
+  });
+
+  test("a field without fallback that the lead lacks fails, naming the field", () => {
+    expect(render("Hi {{first_name}}", { first_name: "  " })).toEqual({ ok: false, missing: ["first_name"] });
+  });
+});
+
+describe("exactly three launch blockers (ADR 0003 7.2)", () => {
+  const inbox = { id: "inbox-1", channel: "email" as const, healthy: true };
+  const lead = { first_name: "Pat", company: "Harbour Lane" };
+
+  test("a complete email track with a connected inbox can launch", () => {
+    expect(launchCheck(definition(), [lead], [inbox])).toEqual({ blockers: [], nothingToLaunch: false, canLaunch: true });
+  });
+
+  test("empty copy: an empty body, or an empty subject on a new-subject step", () => {
+    const def = definition({ tracks: [emailTrack({ steps: [step("s1", { threading: "new_subject", subject: " " }), step("s2", { waitDays: 1, body: "", subject: "" })] })] });
+    expect(launchCheck(def, [lead], [inbox]).blockers.map((b) => b.message)).toEqual(["Email 1 has no subject.", "Email 2 has no message."]);
+  });
+
+  test("a merge field with no fallback that some lead lacks", () => {
+    const def = definition({ tracks: [emailTrack({ steps: [step("s1", { threading: "new_subject", body: "Hi {{first_name}} at {{title|your practice}}" })] })] });
+    const check = launchCheck(def, [lead, { company: "Northgate" }, { company: "Elm" }], [inbox]);
+    expect(check.blockers.map((b) => b.message)).toEqual(["2 leads have no first name, and {{first_name}} has no fallback."]);
+    expect(check.canLaunch).toBe(false);
+  });
+
+  test("no connected sender: an empty pool, or only unhealthy inboxes", () => {
+    expect(launchCheck(definition({ emailPool: [] }), [lead], [inbox]).blockers.map((b) => b.kind)).toEqual(["no_sender"]);
+    expect(launchCheck(definition(), [lead], [{ ...inbox, healthy: false }]).blockers.map((b) => b.message)).toEqual([
+      "The email track has no connected sender inbox.",
+    ]);
+  });
+
+  test("no connected sender is checked per channel: an SMS track needs a connected number in its pool (ticket 13)", () => {
+    const sms = emailTrack({ id: "t2", channel: "sms", steps: [step("m1", { subject: "", body: "Hi {{first_name|there}}" })] });
+    const number = { id: "+447700900001", channel: "sms" as const, healthy: true };
+    expect(launchCheck(definition({ smsPool: [number.id], tracks: [emailTrack(), sms] }), [lead], [inbox, number])).toEqual({ blockers: [], nothingToLaunch: false, canLaunch: true });
+    // No SMS provider: no number is connected, so the SMS track alone blocks launch.
+    expect(launchCheck(definition({ smsPool: [number.id], tracks: [emailTrack(), sms] }), [lead], [inbox]).blockers).toEqual([
+      { kind: "no_sender", trackId: "t2", channel: "sms", message: "The SMS track has no connected sender number." },
+    ]);
+    // An email inbox does not count for SMS, and an unhealthy number is not connected.
+    expect(launchCheck(definition({ smsPool: [inbox.id], tracks: [sms] }), [lead], [inbox]).blockers.map((b) => b.kind === "no_sender" && b.channel)).toEqual(["sms"]);
+    expect(launchCheck(definition({ smsPool: [number.id], tracks: [sms] }), [lead], [{ ...number, healthy: false }]).canLaunch).toBe(false);
+  });
+
+  test("an SMS step's empty message blocks launch; it has no subject to check", () => {
+    const sms = emailTrack({ channel: "sms", steps: [step("m1", { subject: "", body: " " })] });
+    expect(launchCheck(definition({ smsPool: ["n1"], tracks: [sms] }), [lead], [{ id: "n1", channel: "sms", healthy: true }]).blockers.map((b) => b.message)).toEqual(["Text 1 has no message."]);
+  });
+
+  test("a campaign with no track has nothing to launch, which is not a blocker", () => {
+    expect(launchCheck(definition({ tracks: [] }), [lead], [inbox])).toEqual({ blockers: [], nothingToLaunch: true, canLaunch: false });
+  });
+});
+
+describe("a continue-thread email has no subject of its own (PR 41 council, item 3)", () => {
+  // The subject is hidden in the editor once the email continues the thread, but may still be stored.
+  const hidden = step("s2", { waitDays: 2, subject: "About {{city}}", body: "Following up." });
+  const def = definition({ tracks: [emailTrack({ steps: [step("s1", { threading: "new_subject" }), hidden] })] });
+
+  test("its stored subject raises no blocker, even for a field with no fallback that a lead lacks", () => {
+    expect(launchCheck(def, [{ first_name: "Pat", company: "Harbour" }], [{ id: "inbox-1", channel: "email", healthy: true }]).blockers).toEqual([]);
+  });
+
+  test("it is not rendered: the handover carries an empty subject and the thread carries the conversation", () => {
+    const state = subjectState({ campaign: { ...subjectState().campaign, definition: def } });
+    expect(renderStep(state, "t1", "s2")).toEqual({ subject: "", body: "Following up." });
+    expect(ownSubject(hidden)).toBe("");
+    expect(ownSubject(step("s1", { threading: "new_subject", subject: "Hi" }))).toBe("Hi");
+  });
+});

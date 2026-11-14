@@ -1,0 +1,94 @@
+import { useEffect, useState, useSyncExternalStore } from "react";
+import type { CallOffListView, CallOutcomeAnswer, CallsView, CallTaskView } from "../../shared/api.ts";
+import { getJson } from "../api.ts";
+import { CallDesk, NoAnswer, Refused, type DeskSnapshot, type OutcomeBody } from "./callDesk.ts";
+import { browserStorage } from "./storage.ts";
+
+/** How long an outcome waits for its answer before it counts as no answer and is sent again. */
+const ANSWER_TIMEOUT_MS = 20_000;
+
+async function post(taskId: string, body: OutcomeBody): Promise<CallOutcomeAnswer> {
+  const abort = new AbortController();
+  const timeout = setTimeout(() => abort.abort(), ANSWER_TIMEOUT_MS);
+  let response: Response;
+  try {
+    // keepalive: an outcome logged just before the page goes is still delivered.
+    response = await fetch(`/api/call-tasks/${encodeURIComponent(taskId)}/outcome`, {
+      method: "POST",
+      keepalive: true,
+      signal: abort.signal,
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new NoAnswer();
+  } finally {
+    clearTimeout(timeout);
+  }
+  const json: unknown = await response.json().catch(() => null);
+  if (response.ok && json !== null) return json as CallOutcomeAnswer;
+  // A 4xx carries the server's code; the desk counts only a refusal code as definite (isRefusal), so 408
+  // or 429 is sent again. Anything else may or may not have been logged.
+  if (response.status >= 400 && response.status < 500) {
+    const refusal = json as { error?: { message?: unknown; code?: unknown }; offList?: CallOffListView | null } | null;
+    const error = refusal?.error;
+    throw new Refused(response.status, typeof error?.message === "string" ? error.message : `The server answered ${response.status}.`, typeof error?.code === "string" ? error.code : null, refusal?.offList ?? null);
+  }
+  throw new NoAnswer();
+}
+
+const newId = (): string => (typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+
+function browserDesk(): CallDesk {
+  return new CallDesk({
+    calls: async (focus) => (await getJson(`/api/calls${focus ? `?focus=${encodeURIComponent(focus)}` : ""}`)) as CallsView,
+    task: async (id) => (await getJson(`/api/call-tasks/${encodeURIComponent(id)}`)) as CallTaskView,
+    post,
+    local: browserStorage(() => window.localStorage),
+    session: browserStorage(() => window.sessionStorage),
+    newId,
+    now: () => Date.now(),
+    setTimer: (fire, ms) => {
+      const t = setTimeout(fire, ms);
+      return () => clearTimeout(t);
+    },
+  });
+}
+
+/**
+ * The Calls page's binding of CallDesk (callDesk.ts) to React and the browser: it opens the desk,
+ * refreshes on showing the tab again and on another tab's outbox change (the desk itself refreshes at
+ * the server's `nextChangeAt` and after every action), and sends what it holds again when the browser
+ * comes back online. The generated test drives the same desk.
+ * A remount (React's strict mode) disposes the desk and starts it again.
+ */
+export function useCallDesk(): { desk: CallDesk; snap: DeskSnapshot } {
+  const [desk] = useState(browserDesk);
+  const snap = useSyncExternalStore(desk.subscribe, desk.getSnapshot);
+  useEffect(() => {
+    void desk.start();
+    const refresh = () => void desk.refresh();
+    // Hidden, the page does not poll; shown again, it reads at once (ADR 0003 4.4.1, "Freshness").
+    const onVisible = () => desk.setVisible(document.visibilityState === "visible");
+    // Another window's outcome, answer or refusal (any shared calls key) is an action here too.
+    const onStorage = (e: StorageEvent) => {
+      if (e.key?.startsWith("outreach.calls.")) refresh();
+    };
+    const online = () => {
+      desk.retryNow();
+      refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", refresh);
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("online", online);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", refresh);
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("online", online);
+      desk.dispose();
+    };
+  }, [desk]);
+  return { desk, snap };
+}
