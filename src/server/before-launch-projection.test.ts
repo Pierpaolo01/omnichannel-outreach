@@ -565,9 +565,13 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
         await declineCalls(h, ids[i]!, d);
       }
       if (r() < 0.2) {
-        const db = (h.store.engine as unknown as { db: { prepare(sql: string): { run(...a: unknown[]): unknown } } }).db;
-        db.prepare("UPDATE campaigns SET paused_since = ?, version = version + 1 WHERE id = ?").run(h.clock, ids[i]!);
+        // Paused through its route (ticket 17a), so its leads quiesce and the hold history is kept, as the store counts it.
+        expect((await h.request("POST", `/api/campaigns/${ids[i]!}/pause`, { requestId: `pause-${i}` })).status).toBe(200);
         startedFrom.add("a paused competing campaign");
+      } else if (rng(seed + 1717 + i)() < 0.3) {
+        // Ticket 17a, from its own stream: one lead of a competing campaign paused, so its work waits in the projection too.
+        const lead = (await h.store.engine.subjectsOf(ids[i]!))[0];
+        if (lead && (await h.request("POST", `/api/enrollments/${lead}/controls`, { requestId: `lead-${i}`, action: "pause" })).status === 200) startedFrom.add("a paused competing lead");
       }
     }
     for (const id of ids.slice(0, -1)) {
@@ -689,7 +693,7 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
   });
   test("the worlds start from logged calls, interested calls and a paused competing campaign", () => {
     expect([...startedFrom].sort()).toEqual(
-      ["a logged call touched a lead and finished its phone track", "a paused competing campaign", "a track after a phone track started when its call was logged", "an interested call ended a lead"].filter((x) => SEEDS >= 40 || startedFrom.has(x)),
+      ["a logged call touched a lead and finished its phone track", "a paused competing campaign", "a paused competing lead", "a track after a phone track started when its call was logged", "an interested call ended a lead"].filter((x) => SEEDS >= 40 || startedFrom.has(x)),
     );
   });
   test("the worlds start from ticket 15's stored facts: a lead held by a callback, a call redialed to the next day, a call skipped at its skip limit, and a call that is skipped tonight unless worked", () => {
@@ -738,7 +742,8 @@ describe("work an older campaign already holds when the projection is taken (rev
     // Its lookups say not sent until the attempt is withdrawn; the work stays uncertain and reserved.
     await h.advanceTo(Date.parse("2026-11-02T16:00:00Z"));
     const [account] = await h.store.engine.accounts(h.clock);
-    expect(account).toMatchObject({ used: 1, inFlight: 0 });
+    // It holds its in-flight place too, with no attempt carrying it: the provider may still send it (council B on 56d599c).
+    expect(account).toMatchObject({ used: 1, inFlight: 1 });
 
     await h.defineSequence(newer.id, oneEmail(["inbox-a"]));
     const projected = await projectedSends(h.store, newer.id, h.clock);

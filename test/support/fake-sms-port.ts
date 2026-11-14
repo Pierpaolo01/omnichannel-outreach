@@ -1,5 +1,5 @@
 import type { CallAnswer } from "../../src/domain/sequence/attempt.ts";
-import type { AccountStatus, AttemptRef, HandoverRequest, LookupResult, ProviderEvent, SendPort, Transport } from "../../src/server/engine/ports.ts";
+import type { PresendRequest, AccountStatus, AttemptRef, HandoverRequest, LookupResult, ProviderEvent, SendPort, Transport } from "../../src/server/engine/ports.ts";
 import type { DeliveryLogEntry, HandoverLogEntry } from "./fake-email-port.ts";
 
 /**
@@ -66,6 +66,8 @@ export class FakeSmsPort implements SendPort {
    * out of `bounced`.
    */
   readonly invalidAfterSend = new Set<string>();
+  /** Texts that go but are never reported: no sent event, and every lookup answers unknown (as the email fake's silent-send). */
+  silentSends = false;
   onHandover: ((entry: HandoverLogEntry) => Promise<void>) | null = null;
 
   private readonly now: () => number;
@@ -95,9 +97,13 @@ export class FakeSmsPort implements SendPort {
     );
   }
 
-  /** Replies arrive through observation; there is nothing to check before a text. */
-  presendCheck(): Promise<{ kind: "clear" }> {
-    return Promise.resolve({ kind: "clear" });
+  /**
+   * The pre-send check a real SMS provider's inbound messages allow (ticket 17a; council K on 56d599c): any text from the
+   * mobile to the number that the lead's record does not hold stops the send, whether or not it has been observed yet.
+   */
+  presendCheck(request: PresendRequest): Promise<{ kind: "clear" } | { kind: "reply"; providerRef: string; at: number }> {
+    const reply = this.replyLog.find((r) => r.from === request.destination && r.to === request.sender && r.at <= this.now() && !request.knownReplies.includes(r.id));
+    return Promise.resolve(reply ? { kind: "reply", providerRef: reply.id, at: reply.providerAt } : { kind: "clear" });
   }
 
   private pick(): FakeSmsMode {
@@ -130,7 +136,7 @@ export class FakeSmsPort implements SendPort {
     if (mode === "5xx" && this.random() < 0.5) return { kind: "unknown" };
     const providerRef = `sms-${++this.nextRef}`;
     const delay = mode === "late-send" ? Math.round((1 + this.random() * 59) * MINUTE) : 0;
-    this.texts.push({ key: request.idempotencyKey, request, providerRef, sendAt: now + delay, sentAt: null, cancelled: false, observeDelay: mode === "late-send" ? Math.round(this.random() * 30 * MINUTE) : 0 });
+    this.texts.push({ key: request.idempotencyKey, request, providerRef, sendAt: now + delay, sentAt: null, cancelled: false, observeDelay: this.silentSends ? Number.POSITIVE_INFINITY : mode === "late-send" ? Math.round(this.random() * 30 * MINUTE) : 0 });
     this.advance();
     return mode === "lost-response" || mode === "5xx" ? { kind: "unknown" } : { kind: "accepted", providerRef };
   }
@@ -187,12 +193,15 @@ export class FakeSmsPort implements SendPort {
     return true;
   }
 
+  /** Every withdrawal asked, with its answer (council C on 56d599c: a record frees a place on any final answer). */
+  readonly withdrawLog: { at: number; key: string; answer: "withdrawn" | "too-late" | "unknown" }[] = [];
+
   withdraw(attempt: AttemptRef): Promise<"withdrawn" | "too-late" | "unknown"> {
     const t = this.texts.find((x) => x.key === attempt.idempotencyKey);
-    if (!t) return Promise.resolve("unknown");
-    if (t.sentAt !== null) return Promise.resolve("too-late");
-    t.cancelled = true;
-    return Promise.resolve("withdrawn");
+    const answer = !t ? "unknown" : t.sentAt !== null ? "too-late" : "withdrawn";
+    if (t && answer === "withdrawn") t.cancelled = true;
+    this.withdrawLog.push({ at: this.now(), key: attempt.idempotencyKey, answer });
+    return Promise.resolve(answer);
   }
 
   observe(checkpoint: string | null): Promise<{ events: ProviderEvent[]; checkpoint: string }> {
@@ -205,7 +214,7 @@ export class FakeSmsPort implements SendPort {
   lookup(attempt: AttemptRef): Promise<LookupResult> {
     const now = this.now();
     const t = this.texts.find((x) => x.key === attempt.idempotencyKey);
-    const answer: LookupResult = !t || t.cancelled ? { kind: "not-sent" } : t.sentAt !== null && t.sentAt <= now ? { kind: "sent", sentAt: t.sentAt, providerRef: t.providerRef } : { kind: "queued" };
+    const answer: LookupResult = t && this.silentSends ? { kind: "unknown" } : !t || t.cancelled ? { kind: "not-sent" } : t.sentAt !== null && t.sentAt <= now ? { kind: "sent", sentAt: t.sentAt, providerRef: t.providerRef } : { kind: "queued" };
     this.lookupLog.push({ at: now, key: attempt.idempotencyKey, answer: answer.kind });
     return Promise.resolve(answer);
   }

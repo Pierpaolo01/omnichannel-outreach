@@ -6,12 +6,24 @@
  */
 import { ENGINE_PARAMS, isLive, type AttemptEffect, type AttemptEvent, type CallAnswer, type WorkEvent } from "../../domain/sequence/attempt.ts";
 import { launchCheck, type LaunchCheck } from "../../domain/sequence/blockers.ts";
-import { REQUEST_ID_REUSED, type OutcomeInput } from "../../domain/sequence/calls.ts";
+import { REQUEST_ID_DIFFERENT, REQUEST_ID_REUSED, type OutcomeInput } from "../../domain/sequence/calls.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
 import { runs } from "../../domain/sequence/progress.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
-import type { EngineStore, ReplyEvent, StoredDefinition } from "./engine-store.ts";
+import { campaignRefusal, type LeadControl } from "../../domain/sequence/controls.ts";
+import type { ControlView } from "../../shared/api.ts";
+import { effectOf } from "./controls-view.ts";
+import type { ControlRecord, EngineStore, ReplyEvent, StoredDefinition } from "./engine-store.ts";
+
+/** A control's answer. `effect`: the control's own effect, which the read previewed at that instant; null for a campaign's. */
+export type ControlAnswer = { readonly ok: true; readonly replayed: boolean; readonly effect: ControlView | null } | { readonly ok: false; readonly reason: string };
+export const CONTROL_REQUEST_REUSED = "This request id was already used for another action: send a new one.";
+
+/** An outcome request's body as stored with its id (council I on 56d599c): the same id with another body is refused. */
+function outcomeBody(input: OutcomeInput): string {
+  return JSON.stringify({ outcome: input.outcome, redial: input.redial, callbackAt: input.callbackAt, declinedPath: input.declinedPath, numberId: input.numberId, note: input.note, noteScope: input.noteScope });
+}
 import { UnprovisionedSmsPort, type AttemptRef, type HandoverRequest, type ProviderEvent, type SendPort } from "./ports.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 
@@ -275,6 +287,8 @@ export class Engine {
       if (a.retry === "wanted" || a.retry === "wanted_after_not_sent") times.push(slot);
     }
     for (const w of await this.store.openWork()) if (w.nextLookupWall !== null) times.push(w.nextLookupWall);
+    // A withdrawal answered "unknown" is asked again one settling period later (council A on 56d599c).
+    for (const w of await this.store.workToWithdraw()) times.push(w.withdrawLastWall === null ? now : w.withdrawLastWall + ENGINE_PARAMS.SETTLING);
     // A callback changes on the list by the clock (ticket 15): listed from the start of its day, ready at
     // its time. No engine write happens then; the wake is there so the screens' next change covers it.
     for (const t of await this.store.openCallbackInstants()) times.push(t);
@@ -621,15 +635,27 @@ export class Engine {
     return changed;
   }
 
+  /**
+   * Withdrawals are asked of the provider work, not of an attempt (ticket 17a; council A on 56d599c): work a quiesce
+   * wants withdrawn is asked at once, and again each settling period while the answer is unknown, until the work has a
+   * final answer, whether or not an attempt still carries it, and across restarts (the intent is stored on the work).
+   */
   private async withdraw(): Promise<boolean> {
     let changed = false;
-    for (const a of await this.store.openAttempts()) {
-      if (!a.withdrawRequested || a.withdrawCalled || (a.state !== "handed" && a.state !== "accepted")) continue;
-      const w = await this.store.work(a.idempotencyKey);
-      if (!w) continue;
+    const carried = new Set((await this.store.openAttempts()).map((a) => a.idempotencyKey));
+    for (const w of await this.store.workToWithdraw()) {
+      if (!this.rules.withdrawalDue(w, this.now(), carried.has(w.key))) continue;
       const port = await this.portOf(w.accountId);
       const answer = await this.bounded(() => port.withdraw(this.ref(w)), "unknown" as const);
-      changed = (await this.applyAttempt(a, { kind: "withdraw_answer", answer, now: this.now() })) || changed;
+      // "Too late" means it went: the lookup is asked for its send time first, so its successor counts from the real send.
+      if (answer === "too-late") {
+        const looked = await this.bounded(() => port.lookup(this.ref(w)), { kind: "unknown" as const });
+        if (looked.kind === "sent") {
+          changed = (await this.applyWork(w.subjectId, w.key, { kind: "lookup_answer", answer: looked, now: this.now() })) || changed;
+          continue;
+        }
+      }
+      changed = (await this.applyWork(w.subjectId, w.key, { kind: "withdraw_answer", answer, now: this.now() })) || changed;
     }
     return changed;
   }
@@ -723,34 +749,81 @@ export class Engine {
     return this.ticks.run(async () => {
       const subjectId = await this.store.callTaskSubject(taskId);
       if (subjectId === null) return { ok: false as const, reason: "There is no such call task." };
-      // A key logged on another subject's call: the subject's own transaction cannot see it.
+      // A key logged on another subject's call before request ids were kept (a database from before migration 16).
       const loggedOn = await this.store.callRequestTask(input.requestId);
       if (loggedOn !== null && loggedOn !== taskId) return { ok: false as const, reason: REQUEST_ID_REUSED };
       const now = this.now();
-      const refused: { reason: string | null } = { reason: null };
       const ids = { attempt: this.newId(), note: this.newId() };
+      let record: ControlRecord;
       try {
-        await this.store.update(subjectId, now, (stored) => {
+        // The request id is read, the outcome judged and applied, and the answer recorded in one transaction (review bot
+        // and council on 56d599c, item E): two requests with one id, in any process, give one execution and one answer.
+        record = await this.store.controlSubject(subjectId, now, { id: input.requestId, action: "call_outcome", target: taskId, body: outcomeBody(input) }, this.rules.requestStanding, (stored) => {
           // Judged as of the action's instant: what fell due since the last tick (an expiry at the rollover)
           // is applied first, in this transaction, and stands whatever the answer (ADR 0003 2.4).
           const s = this.rules.asOfAction(stored, now, this.rules.evaluate);
           const caughtUp = same(s, stored) ? null : s;
           const out = this.rules.logCallOutcome(s, taskId, input, now, ids, this.rules.isListed);
-          if (!out.ok) {
-            refused.reason = out.reason;
-            return caughtUp;
-          }
-          return out.replayed ? caughtUp : out.state;
+          if (!out.ok) return { write: caughtUp, answer: "refused", reason: out.reason, effect: null };
+          return { write: out.replayed ? caughtUp : out.state, answer: "accepted", reason: null, effect: null };
         });
       } catch (error) {
         // Another process logged this key on another subject's call between the check and this write.
         if (error instanceof Error && error.message.includes("call_attempts.request_id")) return { ok: false as const, reason: REQUEST_ID_REUSED };
         throw error;
       }
-      if (refused.reason !== null) return { ok: false as const, reason: refused.reason };
-      await this.runTick();
+      if (record.kind === "reused") return { ok: false as const, reason: REQUEST_ID_REUSED };
+      if (record.kind === "different") return { ok: false as const, reason: REQUEST_ID_DIFFERENT };
+      if (record.answer === "refused") return { ok: false as const, reason: record.reason ?? "Refused." };
+      if (record.kind === "answered") await this.runTick();
       return { ok: true as const };
     });
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // The user's controls (ticket 17a). Each is judged as of its own instant (2.4) and recorded with its request id.
+
+  /** One control on one lead: accepted, refused with its reason, or the answer to its request id's first send. */
+  controlLead(subjectId: string, action: LeadControl, requestId: string): Promise<ControlAnswer> {
+    return this.ticks.run(async () => {
+      const now = this.now();
+      const record = await this.store.controlSubject(subjectId, now, { id: requestId, action, body: JSON.stringify({ action }) }, this.rules.requestStanding, (stored) => {
+        const s = this.rules.asOfAction(stored, now, this.rules.evaluate);
+        const caughtUp = same(s, stored) ? null : s;
+        const out = this.rules.applyControl(s, action, now);
+        if (!out.ok) return { write: caughtUp, answer: "refused", reason: out.reason, effect: null };
+        // The answer's effect is the read's preview at this instant: the same transition on the same state (verifier B4).
+        return { write: out.state, answer: "accepted", reason: null, effect: JSON.stringify(effectOf(s, action, out.state, now)) };
+      });
+      return this.answerOf(record);
+    });
+  }
+
+  /** Pauses or resumes a campaign: every lead of it that has not ended, in one transaction. */
+  setCampaignPause(campaignId: string, pause: boolean, requestId: string): Promise<ControlAnswer> {
+    return this.ticks.run(async () => {
+      const now = this.now();
+      const out = await this.store.setCampaignPause(
+        campaignId,
+        now,
+        { id: requestId, pause },
+        this.rules.requestStanding,
+        (row) => campaignRefusal(row, pause),
+        (stored) => {
+          const s = this.rules.asOfAction(stored, now, this.rules.evaluate);
+          return pause ? this.rules.campaignPaused(s, now) : this.rules.campaignResumed(s, now);
+        },
+      );
+      return this.answerOf(out);
+    });
+  }
+
+  /** A request's answer: its first answer, refused or accepted, whether given now or replayed (verifier B5). */
+  private async answerOf(record: ControlRecord): Promise<ControlAnswer> {
+    if (record.kind === "reused" || record.kind === "different") return { ok: false, reason: CONTROL_REQUEST_REUSED };
+    if (record.answer === "refused") return { ok: false, reason: record.reason ?? "Refused." };
+    if (record.kind === "answered") await this.runTick();
+    return { ok: true, replayed: record.kind === "replayed", effect: record.effect === null ? null : (JSON.parse(record.effect) as ControlView) };
   }
 
   // -------------------------------------------------------------------------------------------
@@ -854,12 +927,17 @@ export class Engine {
   /** ADR 0002's pre-send check, recorded on the attempt. False when it could not run or found a reply. */
   private async presend(a: Attempt): Promise<boolean> {
     const now = this.now();
-    if (a.presendCheckedWall !== null && a.presendCheckedWall >= now - ENGINE_PARAMS.PRESEND_MAX_AGE && !a.presendFoundReply) return true;
+    // A handover always reads the provider afresh, right before its authorization (council K on 56d599c): an earlier check,
+    // even a recent one, is not reused, so the window in which a reply can reach the provider unseen is the time between this
+    // read and the authorization's commit, with no provider call between them but a wait for the inbox's lock.
     const subject = await this.store.subject(a.subjectId, now);
     const threadRefs = (subject?.work ?? []).flatMap((w) => (w.providerRef === null ? [] : [w.providerRef]));
     const port = await this.portOf(a.accountId);
     const channel = port === this.ports.sms ? "sms" : "email";
-    const result = await this.bounded(() => port.presendCheck({ sender: a.accountId, destination: a.destination, threadRefs }), { kind: "unavailable" as const });
+    // The replies the lead's record holds are not news (a restart after an auto-reply): the port reports any other reply,
+    // in any of the lead's threads (ticket 17a; review bot on ca8baee, item 1; ADR 0002's correlation rules).
+    const knownReplies = (subject?.replies ?? []).filter((r) => r.channel === channel).map((r) => r.providerRef);
+    const result = this.rules.presendAnswer(await this.bounded(() => port.presendCheck({ sender: a.accountId, destination: a.destination, threadRefs, knownReplies }), { kind: "unavailable" as const }), knownReplies);
     if (result.kind === "unavailable") return false;
     await this.store.update(a.subjectId, now, (s) => {
       let next: SubjectState = { ...s, attempts: s.attempts.map((x) => (x.id === a.id ? { ...x, presendCheckedWall: now, presendFoundReply: result.kind === "reply" } : x)) };

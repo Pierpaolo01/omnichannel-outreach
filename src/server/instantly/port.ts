@@ -1,6 +1,6 @@
 import type { CallAnswer } from "../../domain/sequence/attempt.ts";
 import { resetDayOf, runningCredit } from "../../domain/sequence/clock.ts";
-import type { AccountStatus, AttemptRef, HandoverRequest, LookupResult, ProviderEvent, SendPort, Transport } from "../engine/ports.ts";
+import type { AccountStatus, AttemptRef, HandoverRequest, LookupResult, PresendRequest, ProviderEvent, SendPort, Transport } from "../engine/ports.ts";
 import type {
   AddLeadsRequest,
   AddLeadsResponse,
@@ -810,7 +810,7 @@ export class InstantlyEmailPort implements SendPort {
     return "unknown";
   }
 
-  async presendCheck(request: { readonly sender: string; readonly destination: string; readonly threadRefs: readonly string[] }): Promise<{ readonly kind: "clear" } | { readonly kind: "reply"; readonly providerRef: string; readonly at: number } | { readonly kind: "unavailable" }> {
+  async presendCheck(request: PresendRequest): Promise<{ readonly kind: "clear" } | { readonly kind: "reply"; readonly providerRef: string; readonly at: number } | { readonly kind: "unavailable" }> {
     const destination = request.destination.toLowerCase();
     // A reply from this address to this inbox whose work is not proved yet pauses the send.
     if (this.heldReplies().some((h) => !h.released && h.inbox === request.sender && h.from === destination)) return { kind: "unavailable" };
@@ -818,15 +818,22 @@ export class InstantlyEmailPort implements SendPort {
     const threads = new Set(recorded.flatMap((d) => (d.threadId === null ? [] : [d.threadId])));
     // No thread recorded for this lead from this inbox: a reply in one cannot exist yet.
     if (threads.size === 0) return { kind: "clear" };
-    // Each recorded thread is read whole: a reply in it need not carry the lead's metadata.
+    // Every recorded thread is read whole, each page of it: a reply in it need not carry the lead's metadata. The send is
+    // stopped by any reply the lead's record does not hold yet, in any thread; a reply it holds (one the user resumed the
+    // lead after) is not news and never hides another (ticket 17a; review bot on ca8baee, item 1). A reply's identity is
+    // the one its observed event carries (`reply:<email id>`); the bare email id, which this check answered with before
+    // ticket 17a, counts as known too.
+    const known = new Set(request.knownReplies);
+    const isKnown = (e: InstantlyEmail) => known.has(`reply:${e.id}`) || known.has(e.id);
+    let found: InstantlyEmail | null = null;
     for (const thread of threads) {
       const read = await this.readPages<InstantlyEmail>((after) => this.client.get("/api/v2/emails", { search: `thread:${thread}`, eaccount: request.sender, mode: "emode_all", sort_order: "desc", limit: this.config.pageSize, starting_after: after }), undefined, WHOLE_READ_PAGES);
       if (!read) return { kind: "unavailable" };
-      const reply = read.items.find((e) => e.ue_type === 2 && e.eaccount === request.sender && e.thread_id === thread && bare(e.from_address_email) === destination);
-      if (reply) return { kind: "reply", providerRef: reply.id, at: emailTime(reply) };
-      // Only a read that reached the end can say there is no reply.
-      if (!read.complete) return { kind: "unavailable" };
+      const reply = read.items.find((e) => e.ue_type === 2 && e.eaccount === request.sender && e.thread_id === thread && bare(e.from_address_email) === destination && !isKnown(e));
+      if (reply && found === null) found = reply;
+      // Only a read that reached the end can say there is no new reply in it.
+      if (!reply && !read.complete) return { kind: "unavailable" };
     }
-    return { kind: "clear" };
+    return found ? { kind: "reply", providerRef: `reply:${found.id}`, at: emailTime(found) } : { kind: "clear" };
   }
 }

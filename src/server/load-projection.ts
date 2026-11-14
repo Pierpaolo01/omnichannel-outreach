@@ -18,7 +18,7 @@
  * pass, as the fake providers do. `before-launch-projection.test.ts` compares it with the engine's
  * actual sends for generated multi-track, two-channel, multi-campaign cases.
  */
-import { isLive } from "../domain/sequence/attempt.ts";
+import { isLive, occupyingKeys } from "../domain/sequence/attempt.ts";
 import { ENGINE_PARAMS } from "../domain/sequence/attempt.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, startOfLocalDay, windowOpen, type WindowRule } from "../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../domain/sequence/dispatch.ts";
@@ -218,9 +218,13 @@ export function projectLoad(input: ProjectionInput): Projection {
       if (w.settled === null && w.sentWall === null) bump(reserved, w.accountId, sign);
       if (w.sentDay !== null) bump(sentOn, `${w.accountId}/${w.sentDay}`, sign);
     }
+    // In-flight places are held by provider work, counted once per key (`occupyingKeys`, council B on 56d599c).
+    for (const key of occupyingKeys(s.attempts.filter(isLive).map((a) => a.idempotencyKey), s.work)) {
+      const account = s.work.find((w) => w.key === key)?.accountId ?? s.attempts.find((a) => a.idempotencyKey === key)?.accountId;
+      if (account) bump(live, account, sign);
+    }
     for (const a of s.attempts) {
       if (!isLive(a)) continue;
-      bump(live, a.accountId, sign);
       if (a.state === "claimed") {
         const m = claimed.get(a.accountId) ?? new Map<string, string>();
         if (sign > 0) m.set(a.id, s.subject.id);
@@ -287,6 +291,9 @@ export function projectLoad(input: ProjectionInput): Projection {
       if (s.subject.endedWall !== null && s.subject.endedWall < start) continue;
       // A lead with no good number left cannot be called that day (Q13).
       if (goodNumbers(s).length === 0) continue;
+      // A lead paused, or in a paused campaign, at the day's start takes no room that day (ticket 17a, P12). Nothing
+      // in the projection pauses or resumes, so a later day's start is held exactly when the lead is held now.
+      if ((s.campaign.pausedSince !== null && s.campaign.pausedSince <= start) || s.subject.leadPaused) continue;
       // Each task as it stood at the day's start: placed before it and not closed by it (one closed at the
       // instant it starts, a call skipped by the skip limit at that rollover, was not carried into it).
       const carried = s.callTasks.filter((task) => task.placedWall < start && (task.closedWall === null || task.closedWall > start));

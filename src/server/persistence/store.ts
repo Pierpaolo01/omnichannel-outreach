@@ -49,6 +49,8 @@ export interface OutreachStore {
   campaign(id: string): Promise<Campaign | null>;
   /** The campaigns with their lead counts and last import; the HTTP interface adds each one's sequence summary. */
   listCampaigns(): Promise<Omit<CampaignListItem, "sequence">[]>;
+  /** One campaign's lead count, by a query for that campaign alone (the campaign read). */
+  leadCount(campaignId: string): Promise<number>;
 
   /**
    * Loads the directory for the campaign, lets `plan` decide the changes, and applies them with

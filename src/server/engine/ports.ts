@@ -72,13 +72,26 @@ export interface AccountStatus extends SenderAccountConfig {
   readonly quotaAvailable: boolean;
 }
 
+/** What the pre-send check asks of a port. */
+export interface PresendRequest {
+  readonly sender: string;
+  readonly destination: string;
+  readonly threadRefs: readonly string[];
+  /** The replies the lead's record already holds on this channel, by the reply event's identity: not news. */
+  readonly knownReplies: readonly string[];
+}
+
 export interface SendPort {
   readonly channel: "email" | "sms";
   /** Openers and follow-ups may travel differently (ADR 0002). */
   transportFor(step: { readonly threading: "new_subject" | "continue_thread" }): Transport;
   accounts(): Promise<AccountStatus[]>;
-  /** ADR 0002's pre-send reply check. `unavailable` when it cannot run now. */
-  presendCheck(request: { readonly sender: string; readonly destination: string; readonly threadRefs: readonly string[] }): Promise<{ readonly kind: "clear" } | { readonly kind: "reply"; readonly providerRef: string; readonly at: number } | { readonly kind: "unavailable" }>;
+  /**
+   * ADR 0002's pre-send reply check: a reply in any of the lead's threads that is not one of `knownReplies` (the replies
+   * the lead's record holds, by the identity the reply event carries) stops the send; `unavailable` when every thread
+   * could not be read whole (ticket 17a; review bot on ca8baee, item 1).
+   */
+  presendCheck(request: PresendRequest): Promise<{ readonly kind: "clear" } | { readonly kind: "reply"; readonly providerRef: string; readonly at: number } | { readonly kind: "unavailable" }>;
   handover(request: HandoverRequest): Promise<CallAnswer>;
   withdraw(attempt: AttemptRef): Promise<"withdrawn" | "too-late" | "unknown">;
   observe(checkpoint: string | null): Promise<{ readonly events: readonly ProviderEvent[]; readonly checkpoint: string }>;

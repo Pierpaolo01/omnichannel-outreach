@@ -585,6 +585,54 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE call_attempts ADD COLUMN declined_path TEXT CHECK (declined_path IN ('stop', 'continue', 'win_back'));
     `,
   },
+  {
+    // Ticket 17a.
+    version: 16,
+    name: "the hold history and the controls' request ids (ADR 0003, ticket 17a)",
+    // Each campaign pause, lead pause and ending (from the lead's first ending to its restart), as an interval: the committed-call
+    // count reads whether a lead was held at a day's start (P12). And each accepted control by its request id,
+    // so a retry is answered with the first answer and applies nothing twice (P7). Nothing set a pause before
+    // this migration; a database that holds one anyway gets an open interval from now.
+    sql: `
+      CREATE TABLE hold_intervals (
+        id INTEGER PRIMARY KEY,
+        scope TEXT NOT NULL CHECK (scope IN ('campaign', 'lead', 'ended')),
+        owner_id TEXT NOT NULL,
+        from_wall INTEGER NOT NULL,
+        to_wall INTEGER
+      );
+      CREATE INDEX hold_intervals_owner ON hold_intervals(owner_id, scope);
+      CREATE UNIQUE INDEX hold_intervals_one_open ON hold_intervals(owner_id, scope) WHERE to_wall IS NULL;
+      INSERT INTO hold_intervals (scope, owner_id, from_wall, to_wall) SELECT 'campaign', id, paused_since, NULL FROM campaigns WHERE paused_since IS NOT NULL;
+      INSERT INTO hold_intervals (scope, owner_id, from_wall, to_wall)
+        SELECT 'lead', id, COALESCE(frozen_since, 0), NULL FROM enrollments WHERE lead_paused = 1;
+      -- Every lead that has ended holds an open ended interval from its ending (a restart closes it).
+      INSERT INTO hold_intervals (scope, owner_id, from_wall, to_wall)
+        SELECT 'ended', id, COALESCE(ended_wall, 0), NULL FROM enrollments WHERE ended IS NOT NULL;
+      -- Every answered request by its id, accepted or refused, with the refusal's reason or the accepted control's
+      -- effect: a request id is bound to its first answer (verifier B5 on ca8baee).
+      CREATE TABLE control_requests (
+        request_id TEXT PRIMARY KEY,
+        target TEXT NOT NULL,
+        action TEXT NOT NULL,
+        answer TEXT NOT NULL CHECK (answer IN ('accepted', 'refused')),
+        -- The request's body as JSON: an id is bound to it too, and the same id with another body is refused.
+        body TEXT NOT NULL DEFAULT '',
+        reason TEXT,
+        effect TEXT,
+        at_wall INTEGER NOT NULL
+      );
+      -- A withdrawal wanted of provider work, kept on the work so it outlives an attempt a non-final "not sent" retires,
+      -- and when the provider last answered it "unknown": asked again each settling period until the work's answer is
+      -- final (council A on 56d599c). Work whose live attempt was already asked to withdraw keeps that intent.
+      ALTER TABLE provider_work ADD COLUMN withdraw_wanted INTEGER NOT NULL DEFAULT 0 CHECK (withdraw_wanted IN (0, 1));
+      ALTER TABLE provider_work ADD COLUMN withdraw_last_wall INTEGER;
+      -- When the provider said it was too late to withdraw it: it went, and its send time follows (council J).
+      ALTER TABLE provider_work ADD COLUMN went_wall INTEGER;
+      UPDATE provider_work SET withdraw_wanted = 1 WHERE settled IS NULL AND calls > 0
+        AND EXISTS (SELECT 1 FROM attempts a WHERE a.idempotency_key = provider_work.key AND a.withdraw_requested = 1);
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string): void {

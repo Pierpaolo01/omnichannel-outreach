@@ -174,6 +174,9 @@ export function work(fields: Partial<ProviderWork> = {}): ProviderWork {
     lookupAnswer: null,
     queuedLookups: 0,
     unresolvedSince: null,
+    withdrawWanted: false,
+    withdrawLastWall: null,
+    wentWall: null,
     ...fields,
   };
 }

@@ -1,6 +1,6 @@
 import type { CallAnswer } from "../../src/domain/sequence/attempt.ts";
 import type { RenderedCopy } from "../../src/domain/sequence/state.ts";
-import type { AccountStatus, AttemptRef, HandoverRequest, LookupResult, ProviderEvent, SendPort, Transport } from "../../src/server/engine/ports.ts";
+import type { AccountStatus, AttemptRef, HandoverRequest, LookupResult, PresendRequest, ProviderEvent, SendPort, Transport } from "../../src/server/engine/ports.ts";
 
 /**
  * A fake email provider for the engine's tests and the scripted scenario (ADR 0003 9.2). It keeps
@@ -102,6 +102,10 @@ export class FakeEmailPort implements SendPort {
   readonly deliveryLog: DeliveryLogEntry[] = [];
   /** `at`: when the reply's event became visible; `providerAt`: the reply's own time as the provider reports it. */
   readonly replyLog: { at: number; providerAt: number; destination: string; id: string; threadRef: string | null; inbox: string; onThread: boolean; subjectId: string }[] = [];
+  /** Every pre-send check asked: its instant, the threads it read and the reply it answered with (ticket 17a). */
+  readonly presendLog: { at: number; threadRefs: string[]; answered: string | null; repliesSeen: number }[] = [];
+  /** The pre-send defect of ca8baee, for a mutation: answer with the first thread's reply, known or not. */
+  presendFirstReply = false;
   readonly withdrawLog: { at: number; key: string; answer: string }[] = [];
   /** Every lookup the fake answered. */
   readonly lookupLog: { at: number; key: string; answer: LookupResult["kind"] }[] = [];
@@ -121,7 +125,12 @@ export class FakeEmailPort implements SendPort {
   /** Pre-send checks and lookups that never answer; the engine's bounded waits must time them out. */
   portHangs = false;
   /** How a withdrawal is answered: honestly, or "unknown" with the work cancelled or not. */
-  withdrawAnswers: "honest" | "unknown-cancels" | "unknown-sends" = "honest";
+  /** `unknown-once`: the first withdrawal of a piece of work answers unknown and cancels nothing; a later one is honest. */
+  withdrawAnswers: "honest" | "unknown-cancels" | "unknown-sends" | "unknown-once" = "honest";
+  /** Every send, whatever its mode, is never reported: no sent event, and every lookup answers unknown. */
+  silentSends = false;
+  /** For silent-send: after this long the send shows (its event, and lookups), instead of never. */
+  silentRevealAfterMs: number | null = null;
   /** How far back each observation reaches (ADR 0002's overlap). */
   overlapMs = 60 * MINUTE;
   /** Runs at every send call before it is answered: the tests' probe of the app's state at that moment. */
@@ -158,10 +167,16 @@ export class FakeEmailPort implements SendPort {
     );
   }
 
-  presendCheck(request: { sender: string; destination: string; threadRefs: readonly string[] }) {
+  presendCheck(request: PresendRequest) {
     if (this.portHangs) return new Promise<never>(() => undefined);
     if (this.presendUnavailable) return Promise.resolve({ kind: "unavailable" as const });
-    const reply = this.replyLog.find((r) => r.destination === request.destination && r.threadRef !== null && request.threadRefs.includes(r.threadRef) && r.at <= this.now());
+    // Any reply in the lead's threads that its record does not hold, as the adapter reads every thread (ticket 17a).
+    // `presendFirstReply` is the defect the review bot found on ca8baee, for a mutation: the first thread with any reply answers.
+    const inThreads = this.replyLog.filter((r) => r.destination === request.destination && r.threadRef !== null && request.threadRefs.includes(r.threadRef) && r.at <= this.now());
+    const reply = this.presendFirstReply
+      ? request.threadRefs.flatMap((ref) => inThreads.filter((r) => r.threadRef === ref).slice(-1))[0]
+      : inThreads.find((r) => !request.knownReplies.includes(r.id));
+    this.presendLog.push({ at: this.now(), threadRefs: [...request.threadRefs], answered: reply?.id ?? null, repliesSeen: this.replyLog.length });
     return Promise.resolve(reply ? { kind: "reply" as const, providerRef: reply.id, at: reply.at } : { kind: "clear" as const });
   }
 
@@ -250,9 +265,10 @@ export class FakeEmailPort implements SendPort {
       lookupNotSentUntil: mode === "lookup-lags" ? now + Math.round((20 + this.random() * 20) * MINUTE) : 0,
       lookupUnknown: mode === "always-unknown" || mode === "silent-send",
       observeDelay:
-        mode === "late-send" ? Math.round(this.random() * 30 * MINUTE)
+        this.silentSends ? Number.POSITIVE_INFINITY
+        : mode === "late-send" ? Math.round(this.random() * 30 * MINUTE)
         : mode === "lookup-before-event" ? Math.round(SETTLING * (1.2 + this.random() * 3))
-        : mode === "silent-send" ? Number.POSITIVE_INFINITY
+        : mode === "silent-send" ? (this.silentRevealAfterMs ?? Number.POSITIVE_INFINITY)
         : mode === "lookup-lags" ? Math.round((30 + this.random() * 60) * MINUTE)
         : 0,
     };
@@ -328,16 +344,21 @@ export class FakeEmailPort implements SendPort {
    * none. `providerAt`: the reply's time as the provider reports it, earlier than now for a reply the
    * app only observes now (its event becomes visible now either way).
    */
-  prospectReplies(destination: string, onThread = true, providerAt: number | null = null): boolean {
+  /**
+   * The prospect replies. `inThreadOf`: the delivery whose thread it is in (else the latest to that address);
+   * `hiddenForMs`: the reply event becomes visible to observation only that much later, while the pre-send check
+   * reads it at once (a reply that arrives after a tick's observation and before a handover, ticket 17a).
+   */
+  prospectReplies(destination: string, onThread = true, providerAt: number | null = null, options: { readonly inThreadOf?: DeliveryLogEntry; readonly hiddenForMs?: number } = {}): boolean {
     const now = this.now();
-    const last = this.deliveryLog.filter((d) => d.destination === destination && d.at <= now).at(-1);
+    const last = options.inThreadOf ?? this.deliveryLog.filter((d) => d.destination === destination && d.at <= now).at(-1);
     if (!last) return false;
     const id = `reply-${this.replyLog.length + 1}`;
     // Off the thread: from the lead's address to the inbox, as a new conversation with no thread.
     const threadRef = onThread ? last.providerRef : null;
     const at = providerAt ?? now;
     this.replyLog.push({ at: now, providerAt: at, destination, id, threadRef, inbox: last.sender, onThread, subjectId: last.subjectId });
-    this.emit(now, { id, kind: "reply", providerRef: threadRef, at, inbox: last.sender, from: destination });
+    this.emit(now + (options.hiddenForMs ?? 0), { id, kind: "reply", providerRef: threadRef, at, inbox: last.sender, from: destination });
     return true;
   }
 
@@ -347,6 +368,7 @@ export class FakeEmailPort implements SendPort {
       if (!w) return "unknown";
       if (w.sentAt !== null) return "too-late";
       if (this.withdrawAnswers === "unknown-sends") return "unknown";
+      if (this.withdrawAnswers === "unknown-once" && !this.withdrawLog.some((x) => x.key === attempt.idempotencyKey)) return "unknown";
       w.cancelled = true;
       return this.withdrawAnswers === "unknown-cancels" || w.mode === "withdraw-unknown" || w.mode === "always-unknown" ? "unknown" : "withdrawn";
     })();
@@ -381,7 +403,8 @@ export class FakeEmailPort implements SendPort {
     const all = this.work.filter((w) => w.key === attempt.idempotencyKey);
     const sent = all.find((w) => w.sentAt !== null && w.sentAt <= now);
     const w = all.at(-1);
-    if (w?.lookupUnknown) return Promise.resolve({ kind: "unknown" });
+    if (w && this.silentSends) return Promise.resolve({ kind: "unknown" });
+    if (w?.lookupUnknown && (w.mode !== "silent-send" || this.silentRevealAfterMs === null || now < w.acceptedAt + this.silentRevealAfterMs)) return Promise.resolve({ kind: "unknown" });
     // A lagging index says not sent for a while after it took the work, even once it has sent it.
     if (w && now < w.lookupNotSentUntil) return Promise.resolve({ kind: "not-sent" });
     if (sent) return Promise.resolve({ kind: "sent", sentAt: sent.sentAt ?? now, providerRef: sent.providerRef });

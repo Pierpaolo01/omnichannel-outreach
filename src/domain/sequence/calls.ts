@@ -331,6 +331,8 @@ export interface OutcomeInput {
 export type OutcomeResult = { readonly ok: true; readonly state: SubjectState; readonly replayed?: boolean } | { readonly ok: false; readonly reason: string };
 
 export const REQUEST_ID_REUSED = "This request id was already used for another call: send a new one.";
+/** The same id with a different outcome, number, note or choice (council I on 56d599c). */
+export const REQUEST_ID_DIFFERENT = "This request id was already used with a different outcome: send a new id for this one.";
 
 /** The outcomes after which the user may ask for a redial (spec "Call outcomes and their effect on the lead"). */
 export const REDIAL_OUTCOMES: readonly CallOutcome[] = ["no_answer", "voicemail", "gatekeeper"];
@@ -356,7 +358,13 @@ export function logCallOutcome(
   // A key already logged is the same action again: it is answered with the first result, before any
   // other check, so a retry of an outcome that closed its task is not refused as a stale screen.
   const earlier = state.callAttempts.find((a) => a.requestId === input.requestId);
-  if (earlier) return earlier.taskId === taskId ? { ok: true, state, replayed: true } : { ok: false, reason: REQUEST_ID_REUSED };
+  if (earlier && earlier.taskId !== taskId) return { ok: false, reason: REQUEST_ID_REUSED };
+  // The same id is the same action only with the same body: another outcome, number, redial, callback time or path
+  // under it is refused (council I on 56d599c). (The note is compared too: what was saved is what was sent.)
+  if (earlier) {
+    const same = earlier.outcome === input.outcome && earlier.redial === (input.redial === true) && earlier.callbackAt === (input.callbackAt ?? null) && ((input.declinedPath ?? null) === null || earlier.declinedPath === input.declinedPath) && earlier.numberDetailId === (input.outcome === "skip_for_now" ? null : (input.numberId ?? null)) && earlier.note === input.note.trim();
+    return same ? { ok: true, state, replayed: true } : { ok: false, reason: REQUEST_ID_DIFFERENT };
+  }
   const task = state.callTasks.find((t) => t.id === taskId);
   if (!task) return { ok: false, reason: "There is no such call task." };
   if (!task.open) {

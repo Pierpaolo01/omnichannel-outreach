@@ -47,9 +47,9 @@ export class ScriptedEmailPort implements SendPort {
     return Promise.resolve(this.accountList);
   }
 
-  presendCheck(request: { sender: string; destination: string; threadRefs: readonly string[] }) {
-    // ADR 0002's pre-send check reads only the threads the app recorded for the lead.
-    const reply = this.events.find((e) => e.event.kind === "reply" && e.visibleAt <= this.now() && e.event.providerRef !== null && request.threadRefs.includes(e.event.providerRef));
+  presendCheck(request: { sender: string; destination: string; threadRefs: readonly string[]; knownReplies: readonly string[] }) {
+    // ADR 0002's pre-send check reads only the threads the app recorded for the lead, for a reply its record does not hold.
+    const reply = this.events.find((e) => e.event.kind === "reply" && e.visibleAt <= this.now() && e.event.providerRef !== null && request.threadRefs.includes(e.event.providerRef) && !request.knownReplies.includes(e.event.id));
     if (reply && reply.event.kind === "reply") return Promise.resolve({ kind: "reply" as const, providerRef: reply.event.id, at: reply.event.at });
     return this.presend();
   }

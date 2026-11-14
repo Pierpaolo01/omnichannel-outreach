@@ -119,6 +119,10 @@ class SqliteStore implements OutreachStore {
       });
   }
 
+  async leadCount(campaignId: string): Promise<number> {
+    return num(this.db.prepare("SELECT COUNT(*) AS n FROM enrollments WHERE campaign_id = ?").get(campaignId) ?? { n: 0 }, "n");
+  }
+
   async importIntoCampaign(input: {
     campaign: { readonly create: Campaign } | { readonly id: string };
     importId: string;

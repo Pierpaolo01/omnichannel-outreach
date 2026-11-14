@@ -100,7 +100,10 @@ const RULES: Record<string, Partial<Rules>> = {
     callOrder: (a, b) => (a.touched !== b.touched || a.dueWall === b.dueWall ? R.callOrder(a, b) : b.dueWall - a.dueWall),
   },
   // Verifier B3 and B1 on a1399ce.
+  // Since the request id's answer is kept in the store's transaction (council E on 56d599c), a replay is answered there
+  // first: the mutation breaks both layers, the stored answer and the outcome rule's own replay.
   "a replayed action is logged again": {
+    requestStanding: () => "new",
     logCallOutcome: (s, taskId, input, now, ids, listed) => R.logCallOutcome(s, taskId, { ...input, requestId: `${input.requestId}/${ids.attempt}` }, now, ids, listed),
   },
   "a person note kept on the company": {
@@ -281,10 +284,44 @@ const RULES: Record<string, Partial<Rules>> = {
       return { ok: true, state: runs(reset) ? evaluate(reset, now) : reset };
     },
   },
+  // Ticket 17a: the pauses (ADR 0003 "Ticket 17a"), one per invariant the pause runs check.
+  "a lead pause does not freeze the clock": {
+    applyControl: (s, action, now) => {
+      const out = R.applyControl(s, action, now);
+      return out.ok && action === "pause" ? { ok: true, state: { ...out.state, subject: { ...out.state.subject, clock: s.subject.clock }, freezes: s.freezes } } : out;
+    },
+  },
+  "a campaign pause does not freeze the clock": {
+    campaignPaused: (s, now) => {
+      const out = R.campaignPaused(s, now);
+      return { ...out, subject: { ...out.subject, clock: s.subject.clock }, freezes: s.freezes };
+    },
+  },
+  "a pause does not stop sends": {
+    claimRefusal: (s, item, now) => R.claimRefusal(unpaused(s), item, now),
+    handoverFailures: (s, a, account, now) => R.handoverFailures(unpaused(s), a, account, now),
+    readyItems: (s, now) => R.readyItems(unpaused(s), now),
+  },
+  "a paused campaign's calls stay on the list": {
+    isListed: (s, task) => R.isListed({ ...s, campaign: { ...s.campaign, pausedSince: null } }, task),
+  },
+  // Seed 20261169 (search on ca8baee): 18 now waits for an hour with a free in-flight place; this proves it still
+  // catches a step really left unsent after a resume.
+  "steps that fell due while held are never sent after the release": {
+    readyItems: (s, now) => R.readyItems(s, now).filter((item) => !s.freezes.some((f) => f.toWall !== null && f.fromWall > 0 && f.toWall > item.dueWall && f.toWall - f.fromWall > 0)),
+  },
+  "resuming the campaign releases the lead's own pause": {
+    campaignResumed: (s, now) => R.campaignResumed({ ...s, subject: { ...s.subject, leadPaused: false } }, now),
+  },
 };
 
+/** The lead as if neither it nor its campaign were paused. */
+function unpaused(s: SubjectState): SubjectState {
+  return { ...s, subject: { ...s.subject, leadPaused: false }, campaign: { ...s.campaign, pausedSince: null } };
+}
+
 /** The invariant each mutation must break, and the seed offset known to show it (refreshed by the CI search). */
-const EXPECTED: Record<string, { invariant: string; seed: number }> = {
+const EXPECTED: Record<string, { invariant: string; seed: number; pauses?: boolean }> = {
   "outcome on an unlisted task": { invariant: "16", seed: 7 },
   "interested closes only its own task": { invariant: "16", seed: 54 },
   "daily call capacity ignored": { invariant: "17", seed: 0 },
@@ -323,9 +360,16 @@ const EXPECTED: Record<string, { invariant: string; seed: number }> = {
   "win-back keeps the main sequence running": { invariant: "7", seed: 6 },
   "win-back entered at the campaign's start": { invariant: "7", seed: 9 },
   "a dropped track's claim is handed over after the decline": { invariant: "6", seed: 6 },
+  // Ticket 17a, in the pause runs (`pauses: true`).
+  "a lead pause does not freeze the clock": { invariant: "9", seed: 0, pauses: true },
+  "a campaign pause does not freeze the clock": { invariant: "9", seed: 0, pauses: true },
+  "a pause does not stop sends": { invariant: "2", seed: 7, pauses: true },
+  "a paused campaign's calls stay on the list": { invariant: "16", seed: 2, pauses: true },
+  "resuming the campaign releases the lead's own pause": { invariant: "1", seed: 2, pauses: true },
+  "steps that fell due while held are never sent after the release": { invariant: "18", seed: 7, pauses: true },
 };
 
-export const CALL_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number }> = Object.fromEntries(
+export const CALL_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number; readonly pauses?: boolean }> = Object.fromEntries(
   Object.entries(EXPECTED).map(([name, e]) => {
     const rules = RULES[name];
     if (!rules) throw new Error(`no mutation named ${name}`);

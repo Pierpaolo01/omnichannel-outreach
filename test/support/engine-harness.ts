@@ -30,6 +30,8 @@ export interface EngineHarnessOptions {
   readonly engine?: Partial<EngineDependencies>;
   /** A database file instead of an in-memory one, so a test can reopen it (migration tests). */
   readonly databasePath?: string;
+  /** The prefix of the engine's new ids: a harness reopening a database another wrote gives a fresh one, so its ids do not collide. */
+  readonly idPrefix?: string;
   /** A fake SMS provider's numbers (ticket 13). Without them the engine has the unprovisioned SMS port. */
   readonly sms?: { readonly numbers: readonly FakeNumber[]; readonly modes?: readonly FakeSmsMode[] };
 }
@@ -70,11 +72,12 @@ export class EngineHarness {
   /** The HTTP app, for tests that walk its routes. */
   readonly app;
   private readonly options: EngineHarnessOptions;
-  private readonly engineIds = sequentialIds("att");
+  private readonly engineIds: () => string;
 
   constructor(options: EngineHarnessOptions) {
     this.options = options;
     this.hooks = options.hooks ?? {};
+    this.engineIds = sequentialIds(options.idPrefix ?? "att");
     this.clock = options.start;
     this.store = openSqliteStore(options.databasePath ?? ":memory:");
     // Count the engine's subject writes: a deterministic measure of a run's work, the same on every machine.
@@ -100,7 +103,7 @@ export class EngineHarness {
       store: this.store,
       now: () => new Date(this.clock).toISOString(),
       newId: sequentialIds(),
-      engine: { launch: (id, expected) => this.engine.launch(id, expected), logCallOutcome: (id, input) => this.engine.logCallOutcome(id, input) },
+      engine: { launch: (id, expected) => this.engine.launch(id, expected), logCallOutcome: (id, input) => this.engine.logCallOutcome(id, input), controlLead: (id, action, requestId) => this.engine.controlLead(id, action, requestId), setCampaignPause: (id, pause, requestId) => this.engine.setCampaignPause(id, pause, requestId) },
       emailProvider: "status" in this.provider ? (this.provider as Provider & EmailProviderSource) : null,
       smsProvider: this.smsProvider ? "test-simulator" : "none",
       ...(options.rules ? { rules: options.rules } : {}),

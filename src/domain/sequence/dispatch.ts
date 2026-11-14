@@ -151,7 +151,9 @@ export function accountAvailable(account: AccountState, now: number): boolean {
 
 /** Capacity and the in-flight bound (4.2 step 3). An attempt inheriting uncertain work already holds that work's reservation. */
 export function accountHasRoom(account: AccountState, reservedAlready = false): boolean {
-  return (reservedAlready || account.used < account.capacity) && account.inFlight < account.k;
+  // A claim carrying uncertain work already holds that work's place and reservation (`occupyingKeys` counts it once):
+  // it needs neither a new place nor a new reservation (council B on 56d599c).
+  return reservedAlready || (account.used < account.capacity && account.inFlight < account.k);
 }
 
 /**
@@ -250,12 +252,15 @@ export function claim(
     lookupAnswer: null,
     queuedLookups: 0,
     unresolvedSince: null,
+    withdrawWanted: false,
+    withdrawLastWall: null,
+    wentWall: null,
   };
   return {
     ...state,
     attempts: [...state.attempts, attempt],
     work: inherited ? state.work : [...state.work, work],
-    accounts: { ...state.accounts, [account.id]: { ...account, used: account.used + (inherited ? 0 : 1), inFlight: account.inFlight + 1 } },
+    accounts: { ...state.accounts, [account.id]: { ...account, used: account.used + (inherited ? 0 : 1), inFlight: account.inFlight + (inherited ? 0 : 1) } },
   };
 }
 

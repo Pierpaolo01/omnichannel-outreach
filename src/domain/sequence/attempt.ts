@@ -46,7 +46,9 @@ export type WorkEvent =
   | { readonly kind: "lookup_answer"; readonly answer: { readonly kind: LookupAnswer; readonly sentAt?: number; readonly providerRef?: string | null }; readonly now: number }
   | { readonly kind: "provider_rejected"; readonly reason: RejectReason }
   | { readonly kind: "mark_sent"; readonly now: number }
-  | { readonly kind: "mark_not_sent"; readonly now: number };
+  | { readonly kind: "mark_not_sent"; readonly now: number }
+  /** The provider's answer to a withdrawal of the work (ticket 17a; council A): asked of the work, whatever its attempts. */
+  | { readonly kind: "withdraw_answer"; readonly answer: "withdrawn" | "too-late" | "unknown"; readonly now: number };
 
 /** What a change means for the step, the account or the worker. */
 export type AttemptEffect =
@@ -63,7 +65,37 @@ export interface AttemptStep {
 }
 
 /** Unsettled work the provider may hold: called at least once. It keeps its reservation. */
-export const isUncertain = (w: ProviderWork): boolean => w.settled === null && w.calls > 0;
+/**
+ * Unsettled provider work (ticket 17a; council on 56d599c): called, with no final answer yet, whether or not an attempt
+ * still carries it. The one definition the in-flight bound, `mayStillSend`, skip's refusal and the campaign read use.
+ */
+export const isUncertain = (w: Pick<ProviderWork, "settled" | "calls">): boolean => w.settled === null && w.calls > 0;
+
+/**
+ * Unsettled work the provider may still send (council on 56d599c, items B and J): unsettled (`isUncertain`), and not work
+ * the provider said went ("too late", whose send time is still to be observed). The in-flight bound, `mayStillSend` (the
+ * enrollment and campaign reads) and withdrawals use it; skip refuses any unsettled work of its step.
+ */
+export const maySend = (w: Pick<ProviderWork, "settled" | "calls" | "wentWall">): boolean => isUncertain(w) && w.wentWall === null;
+
+/**
+ * The provider work holding an account's in-flight places (4.2's `k`; council B on 56d599c, and the review bot on
+ * 612aa05): work the provider may still send (`maySend`), and claims not yet called, counted once per key. Nothing else:
+ * a live attempt whose work has any final answer (withdrawn, too late, sent, not sent, bounced) holds no place, so a
+ * too-late answer frees its place while the send time is still being reconciled; an inheritor of uncertain work does
+ * not count twice; and work a non-final "not sent" left without an attempt still holds its place. `work` must hold the
+ * work of every live attempt given, settled or not.
+ */
+export function occupyingKeys(liveAttemptKeys: Iterable<string>, work: Iterable<Pick<ProviderWork, "key" | "settled" | "calls" | "wentWall">>): Set<string> {
+  const byKey = new Map([...work].map((w) => [w.key, w]));
+  const keys = new Set<string>();
+  for (const key of liveAttemptKeys) {
+    const w = byKey.get(key);
+    if (!w || w.calls === 0) keys.add(key);
+  }
+  for (const w of byKey.values()) if (maySend(w)) keys.add(w.key);
+  return keys;
+}
 
 /** Unresolved work the user may mark sent or not sent. */
 export const markable = (w: ProviderWork): boolean => isUncertain(w) && w.unresolvedSince !== null;

@@ -281,7 +281,7 @@ describe("observation, lookup, withdrawal and the pre-send check", () => {
     expect(c2.events.filter((e) => e.kind === "reply")).toEqual([{ id: expect.any(String), kind: "reply", providerRef: ref, at: T0 + 2 * MINUTE, inbox: "ada@sender.example", from: "pat@harbour.example" }]);
     // The off-thread reply is held by the adapter, pausing sends to that address from that inbox,
     // and after the settling period it is reported with no thread, for the engine's fallback.
-    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [] })).toEqual({ kind: "unavailable" });
+    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [], knownReplies: [] })).toEqual({ kind: "unavailable" });
     // Released after fifteen minutes of running time: polls once a minute, not one long jump.
     const released = (await pollFor({ port, advance }, c2.checkpoint, 16)).events.filter((e) => e.kind === "reply" && e.providerRef !== ref);
     expect(released).toEqual([{ id: expect.any(String), kind: "reply", providerRef: null, at: T0 + 3 * MINUTE, inbox: "ada@sender.example", from: "pat@harbour.example" }]);
@@ -332,11 +332,50 @@ describe("observation, lookup, withdrawal and the pre-send check", () => {
   test("the pre-send check finds a reply in a recorded thread, is clear otherwise, and is unavailable when the /emails budget is spent", async () => {
     const { port, fake, ref } = await sentOpener();
     await port.observe("c0");
-    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [ref] })).toEqual({ kind: "clear" });
+    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [ref], knownReplies: [] })).toEqual({ kind: "clear" });
     const reply = fake.reply("pat@harbour.example");
-    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [ref] })).toEqual({ kind: "reply", providerRef: reply.id, at: T0 + 2 * MINUTE });
-    for (let i = 0; i < 25; i++) await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [ref] });
-    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [ref] })).toEqual({ kind: "unavailable" });
+    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [ref], knownReplies: [] })).toEqual({ kind: "reply", providerRef: `reply:${reply.id}`, at: T0 + 2 * MINUTE });
+    for (let i = 0; i < 25; i++) await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [ref], knownReplies: [] });
+    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [ref], knownReplies: [] })).toEqual({ kind: "unavailable" });
+  });
+});
+
+describe("review bot on ca8baee, item 1: a reply the lead's record holds never hides a new one", () => {
+  /** Two openers to Pat in two threads, both sent, and observed. */
+  async function twoThreads() {
+    const ctx = await setUp();
+    await ctx.port.observe(null);
+    const refs: string[] = [];
+    for (const key of ["key-a", "key-b"]) {
+      const answer = await ctx.port.handover(request({ idempotencyKey: key, stepId: key === "key-a" ? "s1" : "s2" }));
+      if (answer.kind !== "accepted") throw new Error("not accepted");
+      refs.push(answer.providerRef);
+      ctx.advance(2 * MINUTE);
+    }
+    await ctx.port.observe("c0");
+    const threads = [...new Set(ctx.fake.emails.filter((e) => e.ue_type === 1).map((e) => e.thread_id ?? ""))];
+    if (threads.length !== 2) throw new Error(`expected two threads, got ${threads.length}`);
+    return { ...ctx, refs, threads };
+  }
+  const check = (port: InstantlyEmailPort, refs: string[], knownReplies: string[]) => port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: refs, knownReplies });
+
+  for (const order of ["the new reply in the later thread", "the new reply in the earlier thread"] as const) {
+    test(`with an old reply known and ${order}, the check reports the new one; with both known it is clear`, async () => {
+      const { port, fake, refs, threads, advance } = await twoThreads();
+      const [oldThread = "", newThread = ""] = order === "the new reply in the later thread" ? threads : [...threads].reverse();
+      const old = fake.reply("pat@harbour.example", { threadId: oldThread });
+      advance(MINUTE);
+      expect(await check(port, refs, [`reply:${old.id}`])).toEqual({ kind: "clear" });
+      const fresh = fake.reply("pat@harbour.example", { threadId: newThread });
+      expect(await check(port, refs, [`reply:${old.id}`])).toEqual({ kind: "reply", providerRef: `reply:${fresh.id}`, at: expect.any(Number) });
+      expect(await check(port, refs, [`reply:${old.id}`, `reply:${fresh.id}`])).toEqual({ kind: "clear" });
+    });
+  }
+
+  test("a reply recorded under the pre-send check's earlier identity (the bare email id) counts as known", async () => {
+    const { port, fake, refs, threads } = await twoThreads();
+    const old = fake.reply("pat@harbour.example", { threadId: threads[0] ?? "" });
+    expect(await check(port, refs, [old.id])).toEqual({ kind: "clear" });
   });
 });
 
@@ -375,8 +414,8 @@ describe("signal identity", () => {
     advance(MINUTE);
     const c2 = await port.observe(c1.checkpoint);
     expect(c2.events.filter((e) => e.kind === "reply")).toEqual([]);
-    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [ref] })).toEqual({ kind: "unavailable" });
-    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "nia@harbour.example", threadRefs: [] })).toEqual({ kind: "clear" });
+    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [ref], knownReplies: [] })).toEqual({ kind: "unavailable" });
+    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "nia@harbour.example", threadRefs: [], knownReplies: [] })).toEqual({ kind: "clear" });
     advance(5 * MINUTE);
     const c3 = await port.observe(c2.checkpoint);
     expect(c3.events.map((e) => [e.kind, e.providerRef])).toEqual([
@@ -479,7 +518,7 @@ describe("completeness", () => {
     fake.reply("pat@harbour.example");
     advance(MINUTE);
     for (let i = 0; i < 120; i++) fake.manualSend("pat@harbour.example");
-    expect((await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [ref] })).kind).toBe("reply");
+    expect((await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [ref], knownReplies: [] })).kind).toBe("reply");
   });
 });
 
@@ -556,7 +595,7 @@ describe("council round on 387a19b", () => {
     const second = restart();
     const first = await second.observe(c);
     expect(repliesFrom(first.events, "pat@harbour.example")).toEqual([]);
-    expect(await second.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [] })).toEqual({ kind: "unavailable" });
+    expect(await second.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [], knownReplies: [] })).toEqual({ kind: "unavailable" });
     // One minute counted before the stop, thirteen after it: still held.
     const early = await pollFor(ctx, first.checkpoint, 13, second);
     expect(repliesFrom(early.events, "pat@harbour.example")).toEqual([]);
@@ -568,7 +607,7 @@ describe("council round on 387a19b", () => {
     const { port, fake, ref } = await sentOpener();
     await port.observe("c0");
     fake.reply("pat@harbour.example", { withLead: false });
-    expect((await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [ref] })).kind).toBe("reply");
+    expect((await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [ref], knownReplies: [] })).kind).toBe("reply");
   });
 
   test("item 3: mail that belongs to another campaign by its own identity, or by its thread, never stops the app's outreach", async () => {
@@ -582,7 +621,7 @@ describe("council round on 387a19b", () => {
     fake.receive({ from_address_email: "pat@harbour.example", eaccount: "ada@sender.example", thread_id: foreign.thread_id });
     const polled = await pollFor(ctx, c, 20);
     expect(repliesFrom(polled.events, "pat@harbour.example")).toEqual([]);
-    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [] })).toEqual({ kind: "clear" });
+    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [], knownReplies: [] })).toEqual({ kind: "clear" });
   });
 
   test("item 5: a retry while the first call is still creating the dispatch campaign joins it, and so does another lead's opener: one campaign, one lead each", async () => {
@@ -631,7 +670,7 @@ describe("council round on 387a19b", () => {
     fake.reply("pat@harbour.example");
     const first = await pollFor(ctx, "c0", 1);
     expect(repliesFrom(first.events, "pat@harbour.example")).toEqual([]);
-    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [] })).toEqual({ kind: "unavailable" });
+    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [], knownReplies: [] })).toEqual({ kind: "unavailable" });
     const later = await pollFor(ctx, first.checkpoint, 16);
     expect(repliesFrom(later.events, "pat@harbour.example")).toHaveLength(1);
   });
@@ -653,7 +692,7 @@ describe("review bot on c942fd2: a held reply waits only for time the adapter co
     fake.failWith = null;
     const early = await pollFor(ctx, c, 14);
     expect(repliesFrom(early.events, "pat@harbour.example")).toEqual([]);
-    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [] })).toEqual({ kind: "unavailable" });
+    expect(await port.presendCheck({ sender: "ada@sender.example", destination: "pat@harbour.example", threadRefs: [], knownReplies: [] })).toEqual({ kind: "unavailable" });
     const late = await pollFor(ctx, early.checkpoint, 2);
     expect(repliesFrom(late.events, "pat@harbour.example").map((e) => e.providerRef)).toEqual([null]);
   });

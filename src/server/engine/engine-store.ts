@@ -26,7 +26,40 @@ export interface CampaignEngineRow {
   readonly definitionVersion: number;
   readonly definitionEditedAt: string | null;
   readonly launchedAt: number | null;
+  /** The instant the campaign was paused, or null while it runs (ticket 17a). */
+  readonly pausedSince: number | null;
   readonly version: number;
+}
+
+/**
+ * A request id's first answer (ADR 0003 "Ticket 17a", P7; verifier B5): accepted, with the control's effect as JSON,
+ * or refused, with its reason. The same id is answered with it again and changes nothing.
+ */
+export interface StoredRequest {
+  readonly target: string;
+  readonly action: string;
+  /** The request's body as JSON (council I on 56d599c): the id is bound to it as well as to its answer. */
+  readonly body: string;
+  readonly answer: "accepted" | "refused";
+  readonly reason: string | null;
+  readonly effect: string | null;
+}
+
+/** How a request id stands against its stored first answer: new, a repeat of it, reused for another target or action, or sent again with another body. */
+export type RequestStanding = "new" | "replay" | "reused" | "different";
+
+/** What a control's transaction did: answered now, the first answer replayed, or refused as a reused id. */
+export type ControlRecord =
+  | { readonly kind: "answered" | "replayed"; readonly answer: "accepted" | "refused"; readonly reason: string | null; readonly effect: string | null }
+  | { readonly kind: "reused" }
+  | { readonly kind: "different" };
+
+/** A control's decision on the state it read: what to write (null for nothing), and its answer. */
+export interface ControlDecision<S> {
+  readonly write: S | null;
+  readonly answer: "accepted" | "refused";
+  readonly reason: string | null;
+  readonly effect: string | null;
 }
 
 /**
@@ -140,6 +173,38 @@ export interface EngineStore {
   ): Promise<LaunchOutcome>;
 
   subject(subjectId: string, now: number): Promise<SubjectState | null>;
+  /**
+   * One control on one lead (ticket 17a), in one transaction with its request id: a request id already
+   * recorded for the same target and action is `replayed` and writes nothing; one recorded for another is
+   * `reused`. Otherwise the lead is loaded, `decide` judges it, what it returns is written, and an accepted
+   * control is recorded with its request id.
+   */
+  controlSubject(
+    subjectId: string,
+    now: number,
+    /** `target`: what the id is bound to, the lead by default (a call task for an outcome). `body`: the request as JSON. */
+    request: { readonly id: string; readonly action: string; readonly target?: string; readonly body: string },
+    standing: (stored: StoredRequest | null, request: { readonly target: string; readonly action: string; readonly body: string }) => RequestStanding,
+    decide: (state: SubjectState) => ControlDecision<SubjectState>,
+  ): Promise<ControlRecord>;
+  /**
+   * Pauses (`pause: true`) or resumes a campaign in one transaction (ticket 17a): `refusal` judges the campaign
+   * row; then every enrollment that has not ended is loaded as it stood and written as `perLead` returns it, the
+   * campaign's `paused_since` is set or cleared with its version bumped, its hold interval opened or closed, and
+   * the request recorded. Request ids as `controlSubject`.
+   */
+  setCampaignPause(
+    campaignId: string,
+    now: number,
+    request: { readonly id: string; readonly pause: boolean },
+    standing: (stored: StoredRequest | null, request: { readonly target: string; readonly action: string; readonly body: string }) => RequestStanding,
+    refusal: (row: { readonly launchedAt: number | null; readonly pausedSince: number | null }) => string | null,
+    perLead: (state: SubjectState) => SubjectState,
+  ): Promise<ControlRecord>;
+  /** Provider work of the campaign's leads that was handed over and has not settled: it may still be sent (ticket 17a). */
+  uncertainWorkOf(campaignId: string): Promise<number>;
+  /** The count of the campaign's leads in each outreach status (ticket 17a). */
+  statusCounts(campaignId: string): Promise<Record<string, number>>;
   /** Loads, decides and writes in one transaction. A null decision writes nothing. */
   update(subjectId: string, now: number, decide: (state: SubjectState) => SubjectState | null): Promise<SubjectState | null>;
   /**
@@ -154,6 +219,8 @@ export interface EngineStore {
   /** Every attempt that is not terminal. */
   openAttempts(): Promise<Attempt[]>;
   attempt(attemptId: string): Promise<Attempt | null>;
+  /** Unsettled provider work a quiesce wants withdrawn (ticket 17a; council A). */
+  workToWithdraw(): Promise<ProviderWork[]>;
   /** Unsettled provider work with a lookup scheduled. */
   openWork(): Promise<ProviderWork[]>;
   /**

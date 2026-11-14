@@ -2,7 +2,7 @@ import type { CampaignDefinition, DeclinedPath, StepDefinition, TrackDefinition 
 import type { CallTask, SubjectState } from "../../src/domain/sequence/state.ts";
 import type { Rules } from "../../src/server/engine/rules.ts";
 import { trackLabel } from "../../src/shared/track-label.ts";
-import type { ActivityView, CallOutcomeApi, CallReasonApi, CallsView, CallTaskView, EnrollmentProgress, LeadSearchResult, NeedsAttention, OutreachStatus, PersonRecord, CompanyRecord, TodayView } from "../../src/shared/api.ts";
+import type { CampaignDetail, EnrollmentRead, ActivityView, CallOutcomeApi, CallReasonApi, CallsView, CallTaskView, EnrollmentProgress, LeadSearchResult, NeedsAttention, OutreachStatus, PersonRecord, CompanyRecord, TodayView } from "../../src/shared/api.ts";
 import { EngineHarness, quickWait } from "./engine-harness.ts";
 import { business, person, type ExportRows } from "./export-builder.ts";
 import type { FakeAccount, HandoverLogEntry } from "./fake-email-port.ts";
@@ -68,6 +68,11 @@ export interface CallRunOptions {
   readonly drain?: boolean;
   readonly maxWrites?: number;
   readonly deadline?: number;
+  /**
+   * Ticket 17a: the generated user also pauses and resumes campaigns and leads, at random instants (a run family of
+   * its own, so every run without it, and every seed recorded for a mutation, is the run it was).
+   */
+  readonly pauses?: boolean;
 }
 
 export interface CallRunResult {
@@ -355,6 +360,9 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
   // The record, from the definitions, the people, the user's own outcomes and the providers' logs.
 
   const logged: LoggedOutcome[] = [];
+  // Ticket 17a. The campaign and lead pauses the app accepted, as the record's own intervals; open ones end at Infinity.
+  const campaignPauses: { campaign: number; from: number; to: number }[] = [];
+  const leadPauses: { subjectId: string; from: number; to: number }[] = [];
   /** Bumped whenever `logged` changes, so what the record remembers is keyed by what it was computed from. */
   let recordVersion = 0;
   let actions = 0;
@@ -445,7 +453,9 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
    */
   const endLimitOf = (s: Subject) => {
     const lost = noChannelAt(s);
-    return Math.min(interestedAt(s), replySeenAt(s), declinedStopAt(s), heldStrictly(s, lost) ? Infinity : lost);
+    // A lead held when it loses its last channel ends when the hold is released (its evaluation), never while held.
+    const release = holdsOf(s).find((x) => x.from < lost && lost < x.to)?.to ?? lost;
+    return Math.min(interestedAt(s), replySeenAt(s), declinedStopAt(s), release);
   };
 
   // Ticket 15. Callback holds, the lead's frozen intervals (3.2), from the user's own accepted outcomes.
@@ -457,7 +467,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
    * The lead's callback holds: from an accepted callback request while not held, until the next accepted
    * outcome on that call that is neither skip for now nor a new callback time (a redial ends it too).
    */
-  function holdsOf(s: Subject): { from: number; to: number }[] {
+  function callbackHoldsOf(s: Subject): { from: number; to: number }[] {
     const out: { from: number; to: number }[] = [];
     const open = new Map<string, number>();
     for (const o of logged) {
@@ -475,6 +485,30 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     for (const from of open.values()) out.push({ from, to: Infinity });
     return out.sort((a, b) => a.from - b.from);
   }
+  /** The lead's pauses (ticket 17a): its campaign's and its own. */
+  const pausesOf = (s: Subject) => [...campaignPauses.filter((p) => p.campaign === s.campaign), ...leadPauses.filter((p) => p.subjectId === s.id)];
+  /**
+   * Every interval the lead's clock stood still while it had not ended: its callback holds and its pauses (one
+   * clock for every hold, ADR 0003 "Ticket 17a"), merged where they overlap or meet.
+   */
+  function holdsOf(s: Subject): { from: number; to: number }[] {
+    const all = [...callbackHoldsOf(s), ...pausesOf(s)].sort((a, b) => a.from - b.from);
+    const out: { from: number; to: number }[] = [];
+    for (const x of all) {
+      const last = out.at(-1);
+      if (last && x.from <= last.to) last.to = Math.max(last.to, x.to);
+      else out.push({ ...x });
+    }
+    return out;
+  }
+  /** Held by a callback at `t` (status rule 3, and the one call it lists). */
+  const callbackHeldAt = (s: Subject, t: number) => callbackHoldsOf(s).some((x) => x.from <= t && t < x.to);
+  /** Paused at `t`, by its campaign or itself: nothing of it is listed (ticket 17a). */
+  const pausedAt = (s: Subject, t: number) => pausesOf(s).some((p) => p.from <= t && t < p.to);
+  const leadPausedAt = (s: Subject, t: number) => leadPauses.some((p) => p.subjectId === s.id && p.from <= t && t < p.to);
+  const campaignPausedAt = (ci: number, t: number) => campaignPauses.some((p) => p.campaign === ci && p.from <= t && t < p.to);
+  /** Where the lead's clock stood at wall instant `t`: the start of the hold `t` lies in, else `t` (3.3's `wallOfPoint`). */
+  const pointOf = (s: Subject, t: number) => holdsOf(s).find((x) => x.from <= t && t < x.to)?.from ?? t;
   /** Held at `t` as the screens and the user see it, after the user's action at `t`. */
   const heldAt = (s: Subject, t: number) => holdsOf(s).some((x) => x.from <= t && t < x.to);
   /** Held at `t` for an engine event: the pass before the request at `from` runs first, and the one after the release at `to` runs after. */
@@ -617,8 +651,6 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     const natural = naturalFinish(s, t);
     const d = declineOf(s);
     if (!d || t.branch === "win_back" || t.id === d.trackId) return natural;
-    // A track finished before the decline, as the app knew it then (an observation precedes an action), keeps its finish.
-    if (natural !== null && natural.seen <= d.at) return natural;
     // Started by the decline: due at or before it, and not released by the declined call itself (its finish is the decline).
     const at = startOf(s, t);
     const rule = t.start;
@@ -627,6 +659,9 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       const f = before ? finishFacts(s, before) : null;
       return f !== null && f.at === d.at && (before?.id === d.trackId || f.reason === "skipped_declined" || f.reason === "dropped_for_win_back");
     })();
+    // A track finished before the decline, as the app knew it then (an observation precedes an action), keeps its finish;
+    // one the decline itself released, at its instant, never started (seed 60 of the pause runs, ticket 17a).
+    if (natural !== null && natural.seen <= d.at && !releasedByDecline) return natural;
     const started = at !== null && at <= d.at && !releasedByDecline;
     // Every other phone track it has started is skipped as declined at once, its task closed; a later one at its start.
     if (t.channel === "call" && started) return { at: d.at, seen: d.at, reason: "skipped_declined" };
@@ -660,12 +695,40 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     // A mobile marked bad on a call while its SMS track is open fails the track then (the same rule as an invalid number).
     const bad = t.channel === "sms" ? badAt(mobileOf(s) ?? "") : Infinity;
     if (last && sends.every((d) => d !== undefined) && knownAt(t.channel, last) < bad) {
-      const done = Math.max(last.at, firstCall(t.channel, s.id, t.steps.at(-1)!.id)?.at ?? 0);
+      // A last send made while the lead was held finishes the track where its clock stood: the hold's start (3.3).
+      const done = pointOf(s, Math.max(last.at, firstCall(t.channel, s.id, t.steps.at(-1)!.id)?.at ?? 0));
       const seen = Math.max(done, knownAt(t.channel, last));
       // A send the app learned of at the instant the lead stopped was observed first: observation precedes every action in a tick.
       return seen <= end ? { at: done, seen, reason: "completed" } : null;
     }
     return Number.isFinite(bad) && bad <= end ? { at: bad, seen: bad, reason: "failed_bad_destination" } : null;
+  }
+
+  /**
+   * The first instant from `from` on at which the sender has a free in-flight place (fewer than its k = 2 attempts
+   * handed over and not yet known sent or withdrawn) for a whole hour, read from the provider's own logs; Infinity when
+   * no such hour has passed. A step due then must go within that hour (18): a step left unsent while its inbox sat with
+   * a free place for an hour is the defect; one waiting behind other work holding every place is not.
+   */
+  function freeHourFrom(ch: "email" | "sms", sender: string, from: number): number {
+    const provider = ch === "sms" ? sms : email;
+    const busy = provider.handoverLog
+      .filter((c) => c.sender === sender)
+      .map((c) => {
+        const d = provider.deliveryLog.find((x) => x.key === c.key);
+        // A place is freed on any final answer the app has: the send known, or a withdrawal answered withdrawn or too late
+        // (email and text alike; council C on 56d599c: a text cancelled by a pause was never freed before).
+        const final = provider.withdrawLog.find((w) => w.key === c.key && w.answer !== "unknown")?.at;
+        return { from: c.at, to: Math.min(d ? knownAt(ch, d) : Infinity, final ?? Infinity) };
+      });
+    const fullAt = (t: number) => busy.filter((b) => b.from <= t && t < b.to).length >= 2;
+    const candidates = [...new Set([from, ...busy.map((b) => b.to).filter((t) => t > from && Number.isFinite(t))])].sort((a, b) => a - b);
+    for (const t0 of candidates) {
+      if (t0 + HOUR > h.clock) return Infinity;
+      const changes = [t0, ...busy.flatMap((b) => [b.from, b.to]).filter((t) => t > t0 && t < t0 + HOUR)];
+      if (!changes.some(fullAt)) return t0;
+    }
+    return Infinity;
   }
 
   /** The user day of instant `t`, as wall instants, in the call list's zone at `t`. */
@@ -728,7 +791,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     if (!(runStartOf(s) <= t && t < endLimitOf(s) && !sequenceDoneAt(s, t, true))) return false;
     const st = taskStateAt(s, tr.id, t);
     const today = local(t, uz(t)).day;
-    if (st.kind === "callback") return local(st.callbackAt ?? Infinity, uz(t)).day <= today;
+    if (st.kind === "callback") return !pausedAt(s, t) && local(st.callbackAt ?? Infinity, uz(t)).day <= today;
     return !heldAt(s, t) && st.listDay <= today && hoursOnUserDay(s, tr.id, t);
   }
   /** Why a listed task is on the list by the record: a callback before its time, then overdue; rolled over from an earlier list day; a redial on its day; due. */
@@ -949,7 +1012,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
   async function strandACallback(): Promise<boolean> {
     const now = h.clock;
     for (const held of subjects.values()) {
-      if (!heldAt(held, now) || held.company.line === null || badAt(held.company.line) <= now) continue;
+      if (!callbackHeldAt(held, now) || held.company.line === null || badAt(held.company.line) <= now) continue;
       if (phonesOf(held).some((p) => p.key !== held.company.line && badAt(p.key) > now)) continue;
       for (const [taskId, k] of knownTasks) {
         const colleague = subjects.get(k.subjectId);
@@ -1011,7 +1074,9 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       // 9. The lead's clock stands still exactly while it does not run: held by a callback, or ended (3.2).
       const held = heldAt(s, now);
       if ((st.subject.clock.frozenSince !== null) !== (held || st.subject.ended !== null)) problem(`9: ${id}'s clock is ${st.subject.clock.frozenSince === null ? "running" : "frozen"} at ${new Date(now).toISOString()}; the record says the lead is ${held ? "held by a callback" : st.subject.ended !== null ? "ended" : "running"}`);
-      if (held) features.add("callback-hold");
+      if (callbackHeldAt(s, now)) features.add("callback-hold");
+      if (held && pausedAt(s, now) && callbackHeldAt(s, now)) features.add("a-callback-held-inside-a-pause");
+      if (leadPausedAt(s, now) && campaignPausedAt(s.campaign, now)) features.add("a-lead-paused-inside-a-paused-campaign");
       // 20 and 15 (ticket 16). The lead's branch and its decline, with the path taken, are the record's.
       const d = declineOf(s);
       const declined = d !== null && d.at <= now ? d : null;
@@ -1023,7 +1088,8 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       if (wantBranch === "win_back" && expectedEnd === null) features.add("in-win-back");
       if (expectedEnd === null) {
         const open = st.callTasks.some((t) => t.open);
-        const want: OutreachStatus = held ? "callback_scheduled" : winBackAt(s) <= now ? "in_win_back" : open ? "waiting_on_call" : touchedAt(s, now, false) ? "active" : "queued";
+        // A lead pause comes before the callback hold (2.1 rule 2); a campaign pause changes no status (ticket 17a).
+        const want: OutreachStatus = leadPausedAt(s, now) ? "paused" : callbackHeldAt(s, now) ? "callback_scheduled" : winBackAt(s) <= now ? "in_win_back" : open ? "waiting_on_call" : touchedAt(s, now, false) ? "active" : "queued";
         if (st.subject.ended !== null) problem(`20: ${id} ended ${st.subject.ended} at ${new Date(st.subject.endedWall ?? 0).toISOString()}; the record has it running`);
         else if (progress.status !== want) problem(`1: ${id} is ${progress.status}; the record says ${want} (${open ? "an open call task" : touchedAt(s, now, false) ? "touched" : "never reached"})`);
       }
@@ -1044,14 +1110,14 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
         }
         const f = finishFacts(s, t);
         const dropped = f?.reason === "dropped_for_win_back" && at !== null && f.at <= at;
-        if (at !== null && seen !== null && seen <= now && at < end && p?.startedAt == null && !dropped) problem(`7: ${id}/${t.id} was due to start at ${new Date(at).toISOString()} but has not`);
+        if (at !== null && seen !== null && seen <= now && at < end && p?.startedAt == null && !dropped) problem(`7: ${id}/${t.id} was due to start at ${new Date(at).toISOString()} but has not${process.env["CALLS_DEBUG"] ? ` [holds ${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))}; outcomes ${JSON.stringify(logged.filter((o) => o.subjectId === s.id).map((o) => [isoOf(o.at), o.trackId, o.outcome, o.accepted, o.declinedPath]))}; tracks ${JSON.stringify(st.tracks.map((p) => [p.trackId, p.startAt, p.startedAt, p.finishReason, isoOf(p.finishedWall)]))}; rule ${JSON.stringify(t.start)}]` : ""}`);
         if (p?.finishedWall != null) {
           const frozen = st.subject.endedWall !== null && p.finishedWall === st.subject.endedWall;
           const closedOnInterest = p.finishReason === "closed_on_interest" && p.finishedWall === interestedAt(s);
           if (!frozen && !closedOnInterest && (f === null || f.at !== p.finishedWall || f.reason !== p.finishReason)) {
             problem(`7: ${id}/${t.id} finished ${p.finishReason ?? ""} at ${new Date(p.finishedWall).toISOString()}; the record says ${f === null ? "it has not finished" : `${f.reason} at ${new Date(f.at).toISOString()}`} (starting ${at === null ? "never" : new Date(at).toISOString()}; numbers ${phonesOf(s).map((x) => `${x.kind} ${x.key} bad ${Number.isFinite(badAt(x.key)) ? new Date(badAt(x.key)).toISOString() : "never"}`).join(", ")})`);
           }
-        } else if (f !== null && f.seen <= now && f.at < end) problem(`7: ${id}/${t.id} should have finished ${f.reason} at ${new Date(f.at).toISOString()} but has not`);
+        } else if (f !== null && f.seen <= now && f.at < end) problem(`7: ${id}/${t.id} should have finished ${f.reason} at ${new Date(f.at).toISOString()} but has not${process.env["CALLS_DEBUG"] ? ` [holds ${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))}; pauses ${JSON.stringify(pausesOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))}; placed ${isoOf(placedAt.get(`${s.id}/${t.id}`))}; due ${isoOf(startOf(s, t))}; task ${JSON.stringify(st.callTasks.find((x) => x.trackId === t.id))}; clock ${JSON.stringify(st.subject.clock)}; freezes ${JSON.stringify(st.freezes)}]` : ""}`);
       }
 
       // 16. Call tasks: an open task's track is unfinished; an interested lead has none open; one task per step;
@@ -1064,7 +1130,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
         const due = startOf(s, t);
         if (due === null || task.placedWall < due) problem(`16: ${id}/${task.trackId} was placed at ${new Date(task.placedWall).toISOString()} before its call was due (${due === null ? "never" : new Date(due).toISOString()})`);
         if (due !== null && task.dueWall !== due) problem(`8: ${id}/${task.trackId}'s call is due at ${new Date(task.dueWall).toISOString()}; the record says ${new Date(due).toISOString()}`);
-        if (task.open && task.kind === "callback" && !heldAt(s, now) && st.subject.ended === null) problem(`16: ${id}/${task.trackId} is an open callback, but the record has no callback holding the lead`);
+        if (task.open && task.kind === "callback" && !callbackHeldAt(s, now) && st.subject.ended === null) problem(`16: ${id}/${task.trackId} is an open callback, but the record has no callback holding the lead`);
         if (!hoursLeftToday(s, task.trackId, task.placedWall)) problem(`17: ${id}/${task.trackId} was placed at ${new Date(task.placedWall).toISOString()}, when its calling hours did not open again that user day`);
         if (heldStrictly(s, task.placedWall)) problem(`2: ${id}/${task.trackId} was placed at ${new Date(task.placedWall).toISOString()}, while a callback held the lead`);
         if (!(runStartOf(s) <= task.placedWall && task.placedWall <= end && !sequenceDoneAt(s, task.placedWall, true))) problem(`2: ${id}/${task.trackId} was placed at ${new Date(task.placedWall).toISOString()} while the lead was not running (from ${new Date(runStartOf(s)).toISOString()} to ${Number.isFinite(endLimitOf(s)) ? new Date(endLimitOf(s)).toISOString() : "now"}${sequenceDoneAt(s, task.placedWall) ? ", sequence done" : ""})`);
@@ -1109,8 +1175,10 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
           if (i > 0 && !prev) break;
           // A wait counts in lead time: every callback hold after its basis moves it by the time held (3.2, 3.3).
           // Resolved at the basis, in the prospect's zone then.
-          const unheld = prev ? dueAfter(prev.at, step.waitDays, zoneFor(s, prev.at)) : at;
-          const due = prev ? afterHolds(s, prev.at, unheld) : at;
+          // A send the provider made while the lead was held counts from the instant the hold began (3.3's `wallOfPoint`).
+          const basis = prev ? pointOf(s, prev.at) : at;
+          const unheld = prev ? dueAfter(basis, step.waitDays, zoneFor(s, basis)) : at;
+          const due = prev ? afterHolds(s, basis, unheld) : at;
           if (!reachesAt(s, ch, at) || !Number.isFinite(due)) break;
           // A main track dropped for win-back sends nothing due after the lead entered the branch.
           const ended = finishFacts(s, t);
@@ -1120,14 +1188,16 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
           if (handed && handed.at < due) problem(`9: ${id}/${step.id} was handed over at ${new Date(handed.at).toISOString()}, before its due time ${new Date(due).toISOString()} (${new Date(unheld).toISOString()} moved by the lead's callback holds)`);
           if (handed && due > unheld) features.add("a-send-moved-by-a-callback");
           const opens = firstOpen(t.window, zoneFor(s, due), due);
-          const deadline = opens + HOUR;
+          // The hour starts once the sender has a free in-flight place for all of it (ticket 17a, seed 20261169): after a
+          // resume many due steps compete for an inbox's k places, which late sends hold for up to an hour each.
+          const deadline = freeHourFrom(ch, ch === "sms" ? numbers[s.campaign]!.id : "inbox-a", opens) + HOUR;
           const seen = i === 0 ? startSeenAt(s, t) : due;
           // Not across a move of the prospect's zone: the window is read in the zone of the moment of each claim.
           const moved = [s.person?.key, s.company.key].some((key) => (zoneChanges.get(key ?? "") ?? []).some((z) => z.at >= (prev?.at ?? at) && z.at <= deadline));
           // A main track dropped for win-back before the hour was up sends nothing more (its claim is withdrawn).
           const droppedFirst = ended?.reason === "dropped_for_win_back" && ended.at <= deadline;
           if (droppedFirst || moved || seen === null || seen > opens || deadline > now || !runningAt(s, deadline) || heldWithin(s, opens, deadline) || !inWindow(t.window, zoneFor(s, deadline), deadline - 1) || !reachesAt(s, ch, deadline)) continue;
-          if (!handed || handed.at > deadline) problem(`18: ${id}/${step.id} was due at ${new Date(due).toISOString()} and its window open from ${new Date(opens).toISOString()}, but it was not handed over within an hour`);
+          if (!handed || handed.at > deadline) problem(`18: ${id}/${step.id} was due at ${new Date(due).toISOString()} and its window open from ${new Date(opens).toISOString()}, but it was not handed over within an hour${process.env["CALLS_DEBUG"] ? ` [now ${isoOf(now)}; handed ${isoOf(handed?.at)}; holds ${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))}; pauses ${JSON.stringify(pausesOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))}; callbacks ${JSON.stringify(callbackHoldsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))}; prev ${JSON.stringify(prev ? [isoOf(prev.at), prev.key] : null)}; clock ${JSON.stringify(st.subject.clock)}; ended ${st.subject.ended}; paused ${st.subject.leadPaused}/${String(st.campaign.pausedSince)}; tracks ${JSON.stringify(st.tracks.map((p) => [p.trackId, p.startAt, p.startedAt, p.nextStepId, p.dueAt, isoOf(p.dueWall), p.finishReason]))}; attempts ${JSON.stringify(st.attempts.filter((a) => a.trackId === t.id).map((a) => [a.stepId, a.state, a.endedBy, isoOf(a.claimedWall)]))}; tasks ${JSON.stringify(st.callTasks.map((x) => [x.trackId, x.kind, x.open]))}; freezes ${JSON.stringify(st.freezes.map((f) => [isoOf(f.fromWall), isoOf(f.toWall)]))}; inbox ${JSON.stringify((ch === "sms" ? sms : email).handoverLog.filter((c) => c.at >= due - HOUR && c.at <= deadline + HOUR).map((c) => [isoOf(c.at), c.subjectId, c.stepId, c.mode, isoOf((ch === "sms" ? sms : email).deliveryLog.find((d) => d.key === c.key)?.at)]))}]` : ""}`);
           if (handed && st.callTasks.some((x) => x.open && x.placedWall <= handed.at)) features.add("a-send-beside-an-open-call");
         }
       }
@@ -1156,6 +1226,51 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       if (drained) {
         checkDrained(s, st, progress);
         await checkActivity(s, progress);
+      }
+    }
+
+    // 18, the order (council C on 56d599c): what the free hour stood for. At each first claim of a step on a sender (one that
+    // needs a place: not carrying earlier work's key), no other step for that sender ranked higher by ADR 4.3 (a touched lead
+    // first, then the older stored due time, then lead and step) was due and claimable at least a minute before, and still
+    // unclaimed: so a lead released from a hold is not passed over, and no eligible lead is passed over while others are served.
+    {
+      type Item = { s: Subject; t: TrackDefinition; stepId: string; ch: "email" | "sms"; sender: string; due: number; unheld: number; prevKnown: number; claim: number; inherited: boolean };
+      const items: Item[] = [];
+      for (const [id, st] of states) {
+        const s = subjects.get(id)!;
+        for (const t of def(s).tracks) {
+          if (t.channel === "call") continue;
+          const ch = t.channel;
+          const at = startOf(s, t);
+          if (at === null || !Number.isFinite(at)) continue;
+          for (const [i, step] of t.steps.entries()) {
+            const prev = i > 0 ? deliveryOf(ch, id, t.steps[i - 1]!.id) : undefined;
+            if (i > 0 && !prev) break;
+            const basis = prev ? pointOf(s, prev.at) : at;
+            const unheld = prev ? dueAfter(basis, step.waitDays, zoneFor(s, basis)) : at;
+            const due = prev ? afterHolds(s, basis, unheld) : at;
+            const first = st.attempts.filter((a) => a.stepId === step.id).sort((a, b) => a.claimedWall - b.claimedWall)[0];
+            items.push({ s, t, stepId: step.id, ch, sender: ch === "sms" ? numbers[s.campaign]!.id : "inbox-a", due, unheld: prev ? unheld : at, prevKnown: prev ? knownAt(ch, prev) : (startSeenAt(s, t) ?? Infinity), claim: first?.claimedWall ?? Infinity, inherited: first !== undefined && first.idempotencyKey !== first.id });
+          }
+        }
+      }
+      const eligible = (y: Item, T: number) =>
+        y.due <= T - MINUTE && y.prevKnown <= T - MINUTE && runningAt(y.s, T) && !heldWithin(y.s, y.due, T) && endLimitOf(y.s) > T && inWindow(y.t.window, zoneFor(y.s, T), T) && reachesAt(y.s, y.ch, T) &&
+        !((finishFacts(y.s, y.t)?.at ?? Infinity) <= T) && ![y.s.person?.key, y.s.company.key].some((key) => (zoneChanges.get(key ?? "") ?? []).some((z) => z.at >= y.due - DAY && z.at <= T));
+      const ranksAbove = (y: Item, x: Item, T: number) => {
+        // Touched by the claim's instant: an action at that instant (a call logged) comes before the worker's claims.
+        const ty = touchedAt(y.s, T, false);
+        const tx = touchedAt(x.s, T, false);
+        if (ty !== tx) return ty;
+        if (y.unheld !== x.unheld) return y.unheld < x.unheld;
+        return y.s.id !== x.s.id ? y.s.id < x.s.id : y.stepId < x.stepId;
+      };
+      for (const x of items) {
+        if (!Number.isFinite(x.claim) || x.inherited) continue;
+        for (const y of items) {
+          if (y === x || y.sender !== x.sender || y.claim <= x.claim || !eligible(y, x.claim) || !ranksAbove(y, x, x.claim)) continue;
+          problem(`18: ${x.s.id}/${x.stepId} was claimed on ${x.sender} at ${isoOf(x.claim)} while ${y.s.id}/${y.stepId}, due ${isoOf(y.due)} and ranked higher, waited (claimed ${isoOf(y.claim)})${process.env["CALLS_DEBUG"] ? ` [x unheld ${isoOf(x.unheld)} touched ${String(touchedAt(x.s, x.claim, true))}; y unheld ${isoOf(y.unheld)} touched ${String(touchedAt(y.s, x.claim, true))} prevKnown ${isoOf(y.prevKnown)}; y window ${JSON.stringify(y.t.window.slice(0, 2))}; engine x ${JSON.stringify(states.get(x.s.id)?.tracks.find((p) => p.trackId === x.t.id))}; engine y ${JSON.stringify(states.get(y.s.id)?.tracks.find((p) => p.trackId === y.t.id))}; y attempts ${JSON.stringify(states.get(y.s.id)?.attempts.filter((a) => a.stepId === y.stepId).map((a) => [a.state, a.endedBy, isoOf(a.claimedWall)]))}]` : ""}`);
+        }
       }
     }
 
@@ -1276,6 +1391,8 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       const closed = f !== null && f.at <= from;
       const interested = interestedAt(x.s) < from;
       if (closed || interested || endLimitOf(x.s) < from || sequenceDoneAt(x.s, from - 1)) return false;
+      // Paused, by its campaign or itself, at the day's start: it takes no room that day (ticket 17a, P12).
+      if (pausesOf(x.s).some((p) => p.from <= from && from < p.to)) return false;
       const st = taskStateAt(x.s, x.task.trackId, from, true);
       const heldByAnother = all.some((y) => y.s.id === x.s.id && y.task.id !== x.task.id && y.task.placedWall < from && taskStateAt(y.s, y.task.trackId, from, true).kind === "callback" && !((finishFacts(y.s, def(y.s).tracks.find((z) => z.id === y.task.trackId)!)?.at ?? Infinity) <= from));
       if (heldByAnother || !goodPhoneAt(x.s, Math.min(end - 1, h.clock))) return false;
@@ -1372,7 +1489,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
   }
 
   /** Held by a callback that cannot be logged: the lead has no good number left. */
-  const stuck = (s: Subject) => heldAt(s, h.clock) && !goodPhoneAt(s, h.clock) && h.clock < endLimitOf(s);
+  const stuck = (s: Subject) => callbackHeldAt(s, h.clock) && !goodPhoneAt(s, h.clock) && h.clock < endLimitOf(s);
 
   /**
    * Ready now by the record: open tasks of running leads inside the prospect's calling hours, the ones not
@@ -1477,6 +1594,134 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
   }
 
   // ------------------------------------------------------------------------------------------
+  // Ticket 17a: pauses and resumes, of a campaign or a lead, judged by the record.
+
+  const pauseRand = random(seed ^ 0x17a);
+  const ppick = <T>(items: readonly T[]): T => items[Math.floor(pauseRand() * items.length)] ?? items[0]!;
+  let pauseRequests = 0;
+  /** Ended by the record at `t`: stopped (interested, a reply, a decline that stops, no channel) or finished. */
+  const endedByRecord = (s: Subject, t: number) => Math.min(endLimitOf(s), sequenceDoneInstant(s)) <= t;
+
+  /** What the app holds of the lead at a pause, as behaviours: work in flight, a call on the list, a wait. */
+  async function notePauseContext(s: Subject, what: "lead" | "campaign"): Promise<void> {
+    const st = await h.store.engine.subject(s.id, h.clock);
+    if (!st || st.subject.ended !== null) return;
+    const lead = what === "lead";
+    if (st.attempts.some((a) => a.state === "claimed")) features.add(lead ? "lead-paused-with-a-claim-open" : "campaign-paused-with-a-claim-open");
+    if (st.attempts.some((a) => a.state === "handed" || a.state === "accepted")) features.add(lead ? "lead-paused-with-work-at-the-provider" : "campaign-paused-with-work-at-the-provider");
+    for (const t of st.callTasks.filter((x) => x.open)) {
+      const state = taskStateAt(s, t.trackId, h.clock);
+      if (state.kind === "callback") features.add(lead ? "lead-paused-inside-a-callback" : "campaign-paused-inside-a-callback");
+      else if (state.redialedTo !== null && state.redialedTo === state.listDay) features.add(lead ? "lead-paused-with-a-redial-pending" : "campaign-paused-with-a-redial-pending");
+      else features.add(lead ? "lead-paused-with-a-call-pending" : "campaign-paused-with-a-call-pending");
+    }
+    const lt = (st.subject.clock.frozenSince ?? h.clock) - st.subject.clock.frozenTotal;
+    if (st.tracks.some((p) => p.finishedAt === null && p.startedAt !== null && p.dueAt !== null && p.dueAt > lt)) features.add(lead ? "lead-paused-during-a-wait" : "campaign-paused-during-a-wait");
+  }
+
+
+  /**
+   * One pause or resume, of a campaign or a lead, at its own instant (sometimes around the user day's rollover, before
+   * the worker's tick). The read's offered control must be the record's (P11), the answer the record's, and a request
+   * sent again with its id the same answer and no second change (P7).
+   */
+  async function pauseAction(): Promise<void> {
+    const stale = pauseRand() < 0.25 && (await aroundADueInstant());
+    if (stale) features.add("paused-or-resumed-around-a-due-instant");
+    else await h.advanceTo(h.clock + MINUTE);
+    await pauseOrResume();
+    // Acted between a due instant and the worker's tick: the tick follows, as after any such action.
+    if (stale) await h.tick();
+  }
+
+  async function pauseOrResume(target: { readonly campaign: number } | { readonly lead: Subject } | null = null): Promise<void> {
+    const now = h.clock;
+    const requestId = `pause-${++pauseRequests}`;
+    if (target !== null ? "campaign" in target : pauseRand() < 0.4) {
+      const ci = target !== null && "campaign" in target ? target.campaign : Math.floor(pauseRand() * campaigns.length);
+      const c = campaigns[ci]!;
+      const paused = campaignPausedAt(ci, now);
+      // Mostly the action that applies; sometimes the one that does not, which must be refused.
+      const action = pauseRand() < 0.85 ? (paused ? "resume" : "pause") : paused ? "pause" : "resume";
+      const expected = action === "pause" ? !paused : paused;
+      const offered = (await h.request<CampaignDetail>("GET", `/api/campaigns/${c.id}`)).body.controls.find((x) => x.action === action);
+      if (offered?.allowed !== expected) problem(`23: campaign ${ci + 1}'s read ${offered?.allowed ? "offers" : "refuses"} ${action} at ${isoOf(now)}; the record says it must be ${expected ? "accepted" : "refused"}`);
+      if (expected && action === "pause") for (const sj of subjects.values()) if (sj.campaign === ci && !endedByRecord(sj, now)) await notePauseContext(sj, "campaign");
+      const res = await h.request<{ error?: { message: string } }>("POST", `/api/campaigns/${c.id}/${action}`, { requestId });
+      if ((res.status === 200) !== expected) problem(`23: ${action} of campaign ${ci + 1} at ${isoOf(now)} was ${res.status === 200 ? "accepted" : `refused (${res.body.error?.message ?? res.status})`}; the record says it must be ${expected ? "accepted" : "refused"}`);
+      if (expected) {
+        if (action === "pause") campaignPauses.push({ campaign: ci, from: now, to: Infinity });
+        else for (const p of campaignPauses) if (p.campaign === ci && p.to === Infinity) p.to = now;
+        recordVersion++;
+        features.add(`campaign-${action}d`);
+      } else features.add(`campaign-${action}-refused`);
+      if (pauseRand() < 0.3) {
+        const again = await h.request<{ replayed?: boolean }>("POST", `/api/campaigns/${c.id}/${action}`, { requestId });
+        if (again.status !== res.status || (expected && again.body.replayed !== true)) problem(`7: ${requestId} (${action} of campaign ${ci + 1}) was answered ${res.status} then ${again.status}${expected ? `, replayed ${String(again.body.replayed)}` : ""}; one action has one answer`);
+        features.add("a-pause-request-sent-again");
+      }
+      return;
+    }
+    const s = target !== null && "lead" in target ? target.lead : ppick([...subjects.values()]);
+    const paused = leadPausedAt(s, now);
+    const action = pauseRand() < 0.85 ? (paused ? "resume" : "pause") : paused ? "pause" : "resume";
+    const ended = endedByRecord(s, now);
+    const expected = !ended && (action === "pause" ? !paused : paused);
+    const offered = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${s.id}`)).body.controls.find((x) => x.action === action);
+    if (offered?.allowed !== expected) problem(`23: ${s.id}'s read ${offered?.allowed ? "offers" : "refuses"} ${action} at ${isoOf(now)}; the record says it must be ${expected ? "accepted" : "refused"}${ended ? " (ended)" : ""}`);
+    if (expected && action === "pause") await notePauseContext(s, "lead");
+    const res = await h.request<{ error?: { message: string } }>("POST", `/api/enrollments/${s.id}/controls`, { requestId, action });
+    if ((res.status === 200) !== expected) problem(`23: ${action} of ${s.id} at ${isoOf(now)} was ${res.status === 200 ? "accepted" : `refused (${res.body.error?.message ?? res.status})`}; the record says it must be ${expected ? "accepted" : "refused"}${ended ? " (ended)" : ""}`);
+    if (offered && !offered.allowed && res.status !== 200 && offered.reason !== res.body.error?.message) problem(`23: ${s.id}'s read refuses ${action} because "${offered.reason}", the action because "${res.body.error?.message ?? ""}"`);
+    if (expected) {
+      if (action === "pause") leadPauses.push({ subjectId: s.id, from: now, to: Infinity });
+      else for (const p of leadPauses) if (p.subjectId === s.id && p.to === Infinity) p.to = now;
+      recordVersion++;
+      features.add(`lead-${action}d`);
+    } else features.add(ended ? "lead-pause-refused-ended" : `lead-${action}-refused`);
+    if (pauseRand() < 0.3) {
+      const again = await h.request<{ replayed?: boolean }>("POST", `/api/enrollments/${s.id}/controls`, { requestId, action });
+      if (again.status !== res.status || (expected && again.body.replayed !== true)) problem(`7: ${requestId} (${action} of ${s.id}) was answered ${res.status} then ${again.status}; one action has one answer`);
+      features.add("a-pause-request-sent-again");
+    }
+  }
+
+  /**
+   * Pauses a lead, or its campaign, while it has an email or text claimed and waiting for its slot or with the
+   * provider (the late-send runs keep it there for up to an hour): what was handed over may still be sent, once,
+   * and nothing more is handed over until the resume (P1, P8). True if it did.
+   */
+  async function pauseWithWorkInFlight(): Promise<boolean> {
+    for (const s of subjects.values()) {
+      if (endedByRecord(s, h.clock) || pausedAt(s, h.clock)) continue;
+      const live = ((await h.store.engine.subject(s.id, h.clock))?.attempts ?? []).filter((a) => a.state === "claimed" || a.state === "handed" || a.state === "accepted");
+      if (live.length === 0) continue;
+      await pauseOrResume(pauseRand() < 0.5 ? { lead: s } : { campaign: s.campaign });
+      return true;
+    }
+    return false;
+  }
+
+  /** Before the drain every pause is resumed, so every lead can finish (18). */
+  async function resumeEverything(): Promise<void> {
+    await h.advanceTo(h.clock + MINUTE);
+    for (const [ci, c] of campaigns.entries()) {
+      if (!campaignPausedAt(ci, h.clock)) continue;
+      const res = await h.request("POST", `/api/campaigns/${c.id}/resume`, { requestId: `pause-${++pauseRequests}` });
+      if (res.status !== 200) problem(`23: the drain's resume of campaign ${ci + 1} was refused: ${JSON.stringify(res.body)}`);
+      for (const p of campaignPauses) if (p.campaign === ci && p.to === Infinity) p.to = h.clock;
+    }
+    for (const s of subjects.values()) {
+      if (!leadPausedAt(s, h.clock)) continue;
+      const res = await h.request("POST", `/api/enrollments/${s.id}/controls`, { requestId: `pause-${++pauseRequests}`, action: "resume" });
+      const ended = endedByRecord(s, h.clock);
+      if ((res.status === 200) === ended) problem(`23: the drain's resume of ${s.id} was ${res.status === 200 ? "accepted" : "refused"}; the record says it ${ended ? "ended" : "is paused"}`);
+      for (const p of leadPauses) if (p.subjectId === s.id && p.to === Infinity) p.to = ended ? p.to : h.clock;
+    }
+    recordVersion++;
+  }
+
+  // ------------------------------------------------------------------------------------------
   // Events.
 
   // Right after launch, several emails wait on one inbox for their pacing slot, and in a run with late sends the
@@ -1487,8 +1732,27 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     if (await declineWithWorkInFlight()) await checkAll(false);
   }
 
+  // Ticket 17a: right after launch emails wait on the inbox for their slots, and in a run with late sends the first
+  // ones are with the provider: a pause then meets work in flight.
+  if (options.pauses === true && pauseRand() < 0.7) {
+    await h.advanceTo(h.clock + MINUTE);
+    if (await pauseWithWorkInFlight()) await checkAll(false);
+  }
+
+  const hasProblems = () => problems.length > 0;
   const eventCount = options.events ?? 24;
   for (let e = 0; e < eventCount && problems.length === 0 && !h.stopped; e++) {
+    // Ticket 17a: in a run of the pause family, from its own stream, a pause or a resume before the event.
+    if (options.pauses === true && pauseRand() < 0.3) {
+      // Sometimes right when work is in flight: a minute on, the next claims wait for their slots.
+      if (pauseRand() < 0.3) {
+        await h.advanceTo(h.clock + MINUTE);
+        if (!(await pauseWithWorkInFlight())) await pauseAction();
+      } else await pauseAction();
+      await checkAll(false);
+      // Asked through a call: the loop's condition narrows the length to 0 (as the drain's stop does).
+      if (hasProblems()) break;
+    }
     const r = rand();
     // A minute passes before each action, so no action shares an instant with the ticks before it.
     if (r >= 0.3) await h.advanceTo(h.clock + MINUTE);
@@ -1552,6 +1816,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
 
   const stopped = () => h.stopped;
   const failed = () => problems.length > 0;
+  if (options.pauses === true && problems.length === 0 && !stopped()) await resumeEverything();
   if (problems.length === 0 && options.drain !== false && !stopped()) {
     // The drain: day by day, the user works every call on the list until no lead has work left.
     // A problem found ends the drain, as it ends the events: the run reports it. (Asked through a call: the

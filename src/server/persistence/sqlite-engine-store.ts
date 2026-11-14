@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { ControlDecision, ControlRecord, RequestStanding, StoredRequest } from "../engine/engine-store.ts";
 import type { DatabaseSync, SQLInputValue, SQLOutputValue, StatementSync } from "node:sqlite";
 import { displayPhone, displayPhonesIn } from "../../domain/phone.ts";
 import type { SenderAccountView } from "../../domain/sequence/blockers.ts";
@@ -8,6 +9,7 @@ import type { MergeData } from "../../domain/sequence/copy.ts";
 import { emptyDefinition, poolOf, type CampaignDefinition, type DeclinedPath } from "../../domain/sequence/definition.ts";
 import { callableOnDay, skipDeadlineOf, skipLimitOf } from "../../domain/sequence/calls.ts";
 import { deriveStatus } from "../../domain/sequence/progress.ts";
+import { maySend, occupyingKeys } from "../../domain/sequence/attempt.ts";
 import type {
   AccountState,
   Attempt,
@@ -75,8 +77,99 @@ export class SqliteEngineStore implements EngineStore {
       definitionVersion: num(row, "definition_version"),
       definitionEditedAt: strOrNull(row, "definition_edited_at"),
       launchedAt: numOrNull(row, "launched_at"),
+      pausedSince: numOrNull(row, "paused_since"),
       version: num(row, "version"),
     };
+  }
+
+  private storedRequest(id: string): StoredRequest | null {
+    const row = this.sql("SELECT * FROM control_requests WHERE request_id = ?").get(id);
+    if (!row) return null;
+    return { target: str(row, "target"), action: str(row, "action"), body: str(row, "body"), answer: str(row, "answer") === "refused" ? "refused" : "accepted", reason: strOrNull(row, "reason"), effect: strOrNull(row, "effect") };
+  }
+
+  /** The id's standing inside the caller's transaction: a stored first answer is replayed, or the id is refused as reused. */
+  private standingOf(id: string, request: { readonly target: string; readonly action: string; readonly body: string }, standing: (stored: StoredRequest | null, request: { readonly target: string; readonly action: string; readonly body: string }) => RequestStanding): ControlRecord | null {
+    const stored = this.storedRequest(id);
+    const s = standing(stored, request);
+    if (s === "reused" || s === "different") return { kind: s };
+    if (s === "replay" && stored) return { kind: "replayed", answer: stored.answer, reason: stored.reason, effect: stored.effect };
+    return null;
+  }
+
+  private storeRequest(id: string, request: { readonly target: string; readonly action: string; readonly body: string; readonly answer: "accepted" | "refused"; readonly reason: string | null; readonly effect: string | null }, now: number): void {
+    this.run("INSERT INTO control_requests (request_id, target, action, body, answer, reason, effect, at_wall) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(request_id) DO NOTHING", [id, request.target, request.action, request.body, request.answer, request.reason, request.effect, now]);
+  }
+
+  async controlSubject(
+    subjectId: string,
+    now: number,
+    request: { readonly id: string; readonly action: string; readonly target?: string; readonly body: string },
+    standing: (stored: StoredRequest | null, request: { readonly target: string; readonly action: string; readonly body: string }) => RequestStanding,
+    decide: (state: SubjectState) => ControlDecision<SubjectState>,
+  ): Promise<ControlRecord> {
+    const target = request.target ?? subjectId;
+    return this.transaction((): ControlRecord => {
+      // The id's stored answer is read inside the write transaction (BEGIN IMMEDIATE): a concurrent request with the same id
+      // waits, then finds this one's answer under the primary key and replays it (council E on 56d599c).
+      const known = this.standingOf(request.id, { target, action: request.action, body: request.body }, standing);
+      if (known) return known;
+      const base = this.load(subjectId, now);
+      if (!base) return { kind: "answered", answer: "refused", reason: "There is no such lead.", effect: null };
+      const decision = decide(base);
+      if (decision.write) this.write(base, decision.write, now);
+      // Accepted or refused, the first answer is kept: the same id is answered with it again (verifier B5).
+      this.storeRequest(request.id, { target, action: request.action, body: request.body, answer: decision.answer, reason: decision.reason, effect: decision.effect }, now);
+      return { kind: "answered", answer: decision.answer, reason: decision.reason, effect: decision.effect };
+    });
+  }
+
+  async setCampaignPause(
+    campaignId: string,
+    now: number,
+    request: { readonly id: string; readonly pause: boolean },
+    standing: (stored: StoredRequest | null, request: { readonly target: string; readonly action: string; readonly body: string }) => RequestStanding,
+    refusal: (row: { readonly launchedAt: number | null; readonly pausedSince: number | null }) => string | null,
+    perLead: (state: SubjectState) => SubjectState,
+  ): Promise<ControlRecord> {
+    const action = request.pause ? "pause_campaign" : "resume_campaign";
+    return this.transaction((): ControlRecord => {
+      const body = JSON.stringify({ action });
+      const known = this.standingOf(request.id, { target: campaignId, action, body }, standing);
+      if (known) return known;
+      const row = this.sql("SELECT launched_at, paused_since FROM campaigns WHERE id = ?").get(campaignId);
+      if (!row) return { kind: "answered", answer: "refused", reason: "There is no such campaign.", effect: null };
+      const reason = refusal({ launchedAt: numOrNull(row, "launched_at"), pausedSince: numOrNull(row, "paused_since") });
+      if (reason !== null) {
+        this.storeRequest(request.id, { target: campaignId, action, body, answer: "refused", reason, effect: null }, now);
+        return { kind: "answered", answer: "refused", reason, effect: null };
+      }
+      // Every lead that has not ended, loaded as it stood before the change and written as the change leaves it.
+      for (const e of this.sql("SELECT id FROM enrollments WHERE campaign_id = ? AND ended IS NULL ORDER BY enrolled_at, id").all(campaignId)) {
+        const base = this.load(str(e, "id"), now);
+        if (base) this.write(base, perLead(base), now);
+      }
+      this.run("UPDATE campaigns SET paused_since = ?, version = version + 1 WHERE id = ?", [request.pause ? now : null, campaignId]);
+      if (request.pause) this.run("INSERT INTO hold_intervals (scope, owner_id, from_wall) VALUES ('campaign', ?, ?)", [campaignId, now]);
+      else this.run("UPDATE hold_intervals SET to_wall = ? WHERE scope = 'campaign' AND owner_id = ? AND to_wall IS NULL", [now, campaignId]);
+      this.storeRequest(request.id, { target: campaignId, action, body, answer: "accepted", reason: null, effect: null }, now);
+      return { kind: "answered", answer: "accepted", reason: null, effect: null };
+    });
+  }
+
+  async uncertainWorkOf(campaignId: string): Promise<number> {
+    // The engine's own definition (`maySend`), applied to the rows, not restated in SQL (council on 56d599c).
+    return this.sql("SELECT w.settled, w.calls, w.went_wall FROM provider_work w JOIN enrollments e ON e.id = w.subject_id WHERE e.campaign_id = ? AND w.settled IS NULL")
+      .all(campaignId)
+      .filter((r) => maySend({ settled: null, calls: num(r, "calls"), wentWall: numOrNull(r, "went_wall") })).length;
+  }
+
+  async workToWithdraw(): Promise<ProviderWork[]> {
+    return this.sql("SELECT * FROM provider_work WHERE settled IS NULL AND withdraw_wanted = 1 ORDER BY rowid").all().map(toWork);
+  }
+
+  async statusCounts(campaignId: string): Promise<Record<string, number>> {
+    return Object.fromEntries(this.sql("SELECT status, COUNT(*) AS n FROM enrollments WHERE campaign_id = ? GROUP BY status").all(campaignId).map((r) => [str(r, "status"), num(r, "n")]));
   }
 
   async saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save: DefinitionSave | null = null): Promise<SaveResult> {
@@ -505,7 +598,8 @@ export class SqliteEngineStore implements EngineStore {
     // stable through the day: working a carried call, a callback request and a redial free no room. A task
     // closed at the instant the day starts (a call skipped by the skip limit at that rollover) was not carried into it.
     // A call of a lead a callback held at the day's start cannot be listed that day, and nor can any call of a lead
-    // with no good number left to log it on (Q13): neither counts (council on 228cd3b).
+    // with no good number left to log it on (Q13): neither counts (council on 228cd3b). Nor does a task of a lead
+    // that was paused, in a paused campaign, or ended (and later restarted) at the day's start (ticket 17a, P12).
     const committed = this.sql(
       `SELECT t.track_id, c.id AS campaign_id, c.definition_version, c.definition, c.default_timezone, p.timezone AS person_zone, co.timezone AS company_zone,
          (SELECT a.outcome || '|' || COALESCE(a.callback_at, '') FROM call_attempts a
@@ -517,6 +611,9 @@ export class SqliteEngineStore implements EngineStore {
          AND NOT EXISTS (
            SELECT 1 FROM call_tasks h WHERE h.subject_id = t.subject_id AND h.id <> t.id AND h.placed_wall < :start AND (h.closed_wall IS NULL OR h.closed_wall > :start)
              AND (SELECT a.outcome FROM call_attempts a WHERE a.task_id = h.id AND a.at_wall < :start AND a.outcome <> 'skip_for_now' ORDER BY a.at_wall DESC, a.rowid DESC LIMIT 1) = 'callback_requested')
+         AND NOT EXISTS (
+           SELECT 1 FROM hold_intervals hi WHERE ((hi.scope = 'campaign' AND hi.owner_id = c.id) OR (hi.scope IN ('lead', 'ended') AND hi.owner_id = e.id))
+             AND hi.from_wall <= :start AND (hi.to_wall IS NULL OR hi.to_wall > :start))
          AND EXISTS (
            SELECT 1 FROM live_contact_details d WHERE d.channel = 'phone' AND d.bad = 0
              AND ((d.owner_kind = 'person' AND d.owner_id = COALESCE(e.person_id, '')) OR (d.owner_kind = 'company' AND d.owner_id = e.company_id AND d.phone_kind = 'main_line')))`,
@@ -533,6 +630,16 @@ export class SqliteEngineStore implements EngineStore {
     return { userZone, day, capacity: dailyCapacity, placedToday: placed, committed };
   }
 
+  /** An account's in-flight places in use: its provider work by key, by the engine's own definition (council B on 56d599c). */
+  private occupancy(accountId: string): number {
+    const live = this.sql(`SELECT idempotency_key FROM attempts WHERE account_id = ? AND state IN ${LIVE_STATES}`).all(accountId).map((r) => str(r, "idempotency_key"));
+    // Unsettled work, and the work of every live attempt whatever its settlement (`occupyingKeys` needs both).
+    const work = this.sql(`SELECT key, settled, calls, went_wall FROM provider_work WHERE account_id = ? AND (settled IS NULL OR key IN (SELECT idempotency_key FROM attempts WHERE account_id = ? AND state IN ${LIVE_STATES}))`)
+      .all(accountId, accountId)
+      .map((r) => ({ key: str(r, "key"), settled: strOrNull(r, "settled") as WorkSettlement | null, calls: num(r, "calls"), wentWall: numOrNull(r, "went_wall") }));
+    return occupyingKeys(live, work).size;
+  }
+
   private accountState(id: string, now: number): AccountState | null {
     const a = this.sql("SELECT * FROM sender_accounts WHERE id = ?").get(id);
     if (!a) return null;
@@ -544,7 +651,6 @@ export class SqliteEngineStore implements EngineStore {
     const counts =
       this.sql(
         `SELECT
-           (SELECT COUNT(*) FROM attempts WHERE account_id = :id AND state IN ${LIVE_STATES}) AS live,
            (SELECT COUNT(*) FROM provider_work WHERE account_id = :id AND sent_day = :today) AS sent_today,
            (SELECT COUNT(*) FROM provider_work WHERE account_id = :id AND settled IS NULL AND sent_wall IS NULL) AS reserved`,
       ).get({ id, today: resetDayOf(now, resetZone) }) ?? {};
@@ -564,7 +670,7 @@ export class SqliteEngineStore implements EngineStore {
       backoffMs: num(a, "backoff_ms"),
       resetZone,
       used: num(counts, "sent_today") + num(counts, "reserved"),
-      inFlight: num(counts, "live"),
+      inFlight: this.occupancy(id),
     };
   }
 
@@ -829,12 +935,13 @@ export class SqliteEngineStore implements EngineStore {
       changed = true;
       this.run(
         `INSERT INTO provider_work (key, subject_id, track_id, step_id, account_id, destination, calls, first_handed_wall, provider_ref, settled,
-           sent_wall, sent_day, next_lookup_wall, lookup_answer, queued_lookups, unresolved_since)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           sent_wall, sent_day, next_lookup_wall, lookup_answer, queued_lookups, unresolved_since, withdraw_wanted, withdraw_last_wall, went_wall)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(key) DO UPDATE SET calls = excluded.calls, first_handed_wall = excluded.first_handed_wall, provider_ref = excluded.provider_ref,
            settled = excluded.settled, sent_wall = excluded.sent_wall, sent_day = excluded.sent_day, next_lookup_wall = excluded.next_lookup_wall,
-           lookup_answer = excluded.lookup_answer, queued_lookups = excluded.queued_lookups, unresolved_since = excluded.unresolved_since`,
-        [w.key, id, w.trackId, w.stepId, w.accountId, w.destination, w.calls, w.firstHandedWall, w.providerRef, w.settled, w.sentWall, w.sentDay, w.nextLookupWall, w.lookupAnswer, w.queuedLookups, w.unresolvedSince],
+           lookup_answer = excluded.lookup_answer, queued_lookups = excluded.queued_lookups, unresolved_since = excluded.unresolved_since,
+           withdraw_wanted = excluded.withdraw_wanted, withdraw_last_wall = excluded.withdraw_last_wall, went_wall = excluded.went_wall`,
+        [w.key, id, w.trackId, w.stepId, w.accountId, w.destination, w.calls, w.firstHandedWall, w.providerRef, w.settled, w.sentWall, w.sentDay, w.nextLookupWall, w.lookupAnswer, w.queuedLookups, w.unresolvedSince, w.withdrawWanted ? 1 : 0, w.withdrawLastWall, w.wentWall],
       );
     }
     if (base.work.some((b) => !next.work.some((w) => w.key === b.key))) throw new Error("provider work is never deleted");
@@ -939,6 +1046,24 @@ export class SqliteEngineStore implements EngineStore {
       if (a.waitUntil !== b.waitUntil || a.waitReason !== b.waitReason || a.backoffMs !== b.backoffMs) {
         this.run("UPDATE sender_accounts SET wait_until = ?, wait_reason = ?, backoff_ms = ? WHERE id = ?", [a.waitUntil, a.waitReason, a.backoffMs, accountId]);
       }
+    }
+
+    // The hold history (ticket 17a, P12): a lead pause opens or closes its interval; an ending undone by a
+    // restart is kept as the interval it held the lead.
+    if (base.subject.leadPaused !== next.subject.leadPaused) {
+      changed = true;
+      if (next.subject.leadPaused) this.run("INSERT INTO hold_intervals (scope, owner_id, from_wall) VALUES ('lead', ?, ?)", [id, now]);
+      else this.run("UPDATE hold_intervals SET to_wall = ? WHERE scope = 'lead' AND owner_id = ? AND to_wall IS NULL", [now, id]);
+    }
+    // An ending's interval opens when the lead first ends and closes at a restart. A later ending event (a reply to a
+    // stopped lead) changes the reason and the ending's own time, never this interval (review bot on ca8baee, item 3).
+    if (base.subject.ended === null && next.subject.ended !== null) {
+      changed = true;
+      this.run("INSERT INTO hold_intervals (scope, owner_id, from_wall) VALUES ('ended', ?, ?)", [id, next.subject.endedWall ?? now]);
+    }
+    if (base.subject.ended !== null && next.subject.ended === null) {
+      changed = true;
+      this.run("UPDATE hold_intervals SET to_wall = ? WHERE scope = 'ended' AND owner_id = ? AND to_wall IS NULL", [now, id]);
     }
 
     const s = next.subject;
@@ -1084,6 +1209,9 @@ function toWork(r: Row): ProviderWork {
     lookupAnswer: strOrNull(r, "lookup_answer") as LookupAnswer | null,
     queuedLookups: num(r, "queued_lookups"),
     unresolvedSince: numOrNull(r, "unresolved_since"),
+    withdrawWanted: num(r, "withdraw_wanted") === 1,
+    withdrawLastWall: numOrNull(r, "withdraw_last_wall"),
+    wentWall: numOrNull(r, "went_wall"),
   };
 }
 
