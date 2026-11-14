@@ -12,7 +12,7 @@
  *   of the call, the outbox entries for it, and the user's draft in memory.
  * - Reads are serial per resource (refresher.ts), and every failure counts toward the page's freshness.
  */
-import type { CallNumberView, CallOffListView, CallOutcomeAnswer, CallOutcomeApi, CallsView, CallTaskView } from "../../shared/api.ts";
+import type { CallNumberView, CallOffListView, CallOutcomeAnswer, CallOutcomeApi, CallsView, CallTaskView, DeclinedPathApi } from "../../shared/api.ts";
 import { callbackChoice, isoWithOffset, type CallbackChoice } from "./callbackTime.ts";
 import { FRESH, REFRESH_INTERVAL_MS, Refresher, type Freshness } from "./refresher.ts";
 
@@ -29,6 +29,11 @@ export interface OutcomeBody {
   readonly redial?: true;
   /** With a callback requested: the instant the prospect asked for, with their offset, fixed at the press. */
   readonly callbackAt?: string;
+  /**
+   * With not interested (ticket 16c): the declined path, fixed at the press: the user's choice, or, untouched, the path the
+   * read the user pressed on preselected. Always named, so a later read preselecting another path changes nothing sent.
+   */
+  readonly declinedPath?: DeclinedPathApi;
 }
 
 /** One outbox entry: what the user chose and typed for one call, under one request id. */
@@ -128,7 +133,11 @@ export type DeskFault =
   | "past_callback_sent"
   // Council on 32454ea, A: the body corrupted where it is first built.
   | "callback_offset_of_user_zone"
-  | "redial_dropped_at_press";
+  | "redial_dropped_at_press"
+  // Ticket 16c: the declined path is part of the press.
+  | "declined_path_dropped_at_press"
+  | "declined_path_lost_on_resend"
+  | "preselected_path_read_at_send";
 
 export interface Draft {
   readonly outcome: CallOutcomeApi | null;
@@ -146,6 +155,11 @@ export interface Draft {
    * occurrence after the call's read then. Kept, so a reload or a retry sends the same occurrence (council on 32454ea, B).
    */
   readonly callbackAt: number | null;
+  /**
+   * The declined path the user chose on the not-interested radios (ticket 16c), or null while untouched: then the radios
+   * show the path the call's read preselects, and the press carries that. Kept whatever outcome is picked, as the redial.
+   */
+  readonly declinedPath: DeclinedPathApi | null;
   /** The request id of the press made from this draft, until it is found stored or settled as not stored. */
   readonly pressId: string | null;
   /** The count of call reads started when this press's entry was found gone: a read started after it settles it. */
@@ -257,6 +271,11 @@ export interface DeskSnapshot {
    * (nothing entered, a time the clocks skip, a time already passed as of the call's read). Log sends nothing without one.
    */
   readonly callback: CallbackChoice | null;
+  /**
+   * With not interested chosen (ticket 16c): the path the radios show, the user's (`chosen`) or the read's preselected one,
+   * and whether the call's read offers it. Log sends nothing for a path not offered.
+   */
+  readonly declined: { readonly path: DeclinedPathApi; readonly chosen: boolean; readonly offered: boolean } | null;
   /** The draft's copy in this tab's storage failed: the note is not kept if the user leaves the page. */
   readonly draftNotKept: boolean;
   /** Counts transitions that replace the controls under the user's keyboard focus, so the page can place it. */
@@ -269,7 +288,9 @@ const FOCUS = "outreach.calls.focus";
 /** Backoff after no answer, in milliseconds; the last repeats. */
 export const RETRY_MS = [1_000, 2_000, 4_000, 8_000] as const;
 
-const EMPTY_DRAFT: Draft = { outcome: null, numberId: null, note: "", noteScope: "person", redial: false, callbackDay: null, callbackTime: "", callbackAt: null, pressId: null, goneAtRead: null };
+const EMPTY_DRAFT: Draft = { outcome: null, numberId: null, note: "", noteScope: "person", redial: false, callbackDay: null, callbackTime: "", callbackAt: null, declinedPath: null, pressId: null, goneAtRead: null };
+
+const PATHS: readonly DeclinedPathApi[] = ["stop", "continue", "win_back"];
 
 export const whoOf = (view: Pick<CallTaskView, "person" | "company">): string => view.person?.name ?? view.company.name;
 
@@ -299,6 +320,7 @@ function readDraft(raw: string | null): Draft | null {
       callbackDay: typeof d.callbackDay === "string" ? d.callbackDay : null,
       callbackTime: typeof d.callbackTime === "string" ? d.callbackTime : "",
       callbackAt: typeof d.callbackAt === "number" ? d.callbackAt : null,
+      declinedPath: PATHS.find((x) => x === d.declinedPath) ?? null,
       pressId: typeof d.pressId === "string" ? d.pressId : null,
       goneAtRead: null,
     };
@@ -319,6 +341,13 @@ function numberProblemOf(draft: Draft, task: Load<CallTaskView> | null): DeskSna
 function callbackOf(draft: Draft, task: Load<CallTaskView> | null): DeskSnapshot["callback"] {
   if (draft.outcome !== "callback_requested" || task?.state !== "ready") return null;
   return callbackChoice(draft, task.view);
+}
+
+/** With not interested chosen: the path the radios show, the user's or the read's preselected one, and whether the read offers it. */
+function declinedOf(draft: Draft, task: Load<CallTaskView> | null): DeskSnapshot["declined"] {
+  if (draft.outcome !== "not_interested" || task?.state !== "ready") return null;
+  const path = draft.declinedPath ?? task.view.declinedPath;
+  return { path, chosen: draft.declinedPath !== null, offered: task.view.declinedPaths.includes(path) };
 }
 
 /** The page's freshness: the queue's last read, failing or stale if either read is. */
@@ -394,6 +423,7 @@ export class CallDesk {
       noteTooLong: false,
       notQueued: false,
       callback: null,
+      declined: null,
       draftNotKept: false,
       transition: null,
     };
@@ -457,6 +487,7 @@ export class CallDesk {
       numberProblem: numberProblemOf(next.draft, next.task),
       noteTooLong: next.draft.note.length > NOTE_MAX,
       callback: callbackOf(next.draft, next.task),
+      declined: declinedOf(next.draft, next.task),
       freshness: this.fault("task_failures_uncounted") ? this.queueReader.freshness() : worse(this.queueReader.freshness(), this.taskReader.freshness()),
       transition: kind ? { seq: ++this.seq, kind } : next.transition,
     };
@@ -580,7 +611,7 @@ export class CallDesk {
   }
 
   /** The user changes the draft of the call on screen; refused while locked. An edit is no longer a press. */
-  setDraft(patch: Partial<Pick<Draft, "outcome" | "numberId" | "note" | "noteScope" | "redial" | "callbackDay" | "callbackTime">>): void {
+  setDraft(patch: Partial<Pick<Draft, "outcome" | "numberId" | "note" | "noteScope" | "redial" | "callbackDay" | "callbackTime" | "declinedPath">>): void {
     if (!this.live || this.state.locked || this.state.focus === null) return;
     let draft: Draft = { ...this.state.draft, ...patch, pressId: null, goneAtRead: null };
     // Entering a day or a time chooses its instant now, against the call's read: in the hour the clocks repeat, the
@@ -608,6 +639,11 @@ export class CallDesk {
     const at = callback?.at ?? pastAt;
     // A redial goes only with an outcome the call offers it for; the choice stays in the draft whatever the outcome.
     const redial = draft.redial && task.view.redialOutcomes.includes(draft.outcome) && !this.fault("redial_dropped_at_press");
+    // The declined path (ticket 16c), only with not interested: the user's, or, untouched, the one this read preselects.
+    // The boundary: a path this read does not offer is refused in place, and nothing is sent.
+    const declined = declinedOf(draft, task);
+    if (declined && !declined.offered) return;
+    const declinedPath = declined === null ? null : this.fault("declined_path_dropped_at_press") ? task.view.declinedPath : declined.path;
     const body: OutcomeBody = {
       requestId: this.ports.newId(),
       outcome: draft.outcome,
@@ -616,6 +652,7 @@ export class CallDesk {
       noteScope: task.view.person === null ? "company" : draft.noteScope,
       ...(redial ? { redial: true as const } : {}),
       ...(at !== null ? { callbackAt: isoWithOffset(at, callbackZone) } : {}),
+      ...(declinedPath !== null ? { declinedPath } : {}),
     };
     const entry: OutboxEntry = { v: 2, taskId: focus, who: whoOf(task.view), body, pressedAt: this.ports.now() };
     // The boundary: an outcome is not pressed until its entry is stored. If storage refuses it, nothing is
@@ -677,6 +714,14 @@ export class CallDesk {
     let body = entry.body;
     if (this.fault("redial_lost_on_resend") && s.tries > 0 && body.redial) {
       body = { requestId: body.requestId, outcome: body.outcome, numberId: body.numberId, note: body.note, noteScope: body.noteScope, ...(body.callbackAt === undefined ? {} : { callbackAt: body.callbackAt }) };
+    }
+    if (this.fault("declined_path_lost_on_resend") && s.tries > 0 && body.declinedPath !== undefined) {
+      const { declinedPath: _lost, ...rest } = body;
+      body = rest;
+    }
+    // The fault: the path read again from the latest read of the call at send time, not the one the user pressed on.
+    if (this.fault("preselected_path_read_at_send") && body.declinedPath !== undefined && this.state.task?.state === "ready" && this.state.task.view.taskId === entry.taskId) {
+      body = { ...body, declinedPath: this.state.task.view.declinedPath };
     }
     if (this.fault("new_id_on_resend") && s.tries > 0) {
       this.ports.local.remove(OUTBOX + body.requestId);

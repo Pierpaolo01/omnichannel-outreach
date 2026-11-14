@@ -58,6 +58,7 @@ describe("Activity is history; a present state or a day only from the server's r
     redialListedFrom: null,
     callbackOpen: false,
     declinedPath: null,
+    afterDecline: [],
     ...fields,
   });
   const body = (entry: ActivityEntry, zone = "Europe/London") => describeEntry(entry, zone).body;
@@ -90,12 +91,12 @@ describe("what the timeline says of a declined call (ticket 16)", () => {
   const number = { detailId: "d1", kind: "direct" as const, owner: "person" as const, value: "+44 20 7946 0111" };
 
   test("it says the path the decline took, as stored, then the number and the note", () => {
-    const declined = (declinedPath: "stop" | "continue" | "win_back") => ({ campaign, at, kind: "call" as const, channel: "call" as const, track: one("Phone track"), outcome: "not_interested" as const, number, note: "Happy with their supplier.", declinedPath, redial: false, callbackAt: null, onCallback: null, zone: "Europe/London", redialListedFrom: null, callbackOpen: false });
+    const declined = (declinedPath: "stop" | "continue" | "win_back") => ({ campaign, at, kind: "call" as const, channel: "call" as const, track: one("Phone track"), outcome: "not_interested" as const, number, note: "Happy with their supplier.", declinedPath, redial: false, callbackAt: null, onCallback: null, zone: "Europe/London", redialListedFrom: null, callbackOpen: false, afterDecline: [] });
     expect(say(declined("stop"))).toEqual(["Call: not interested", "Stopped in this campaign. +44 20 7946 0111, direct. Happy with their supplier.", null]);
-    expect(say(declined("continue"))).toEqual(["Call: not interested", "No more calls in this campaign; the other channels continue. +44 20 7946 0111, direct. Happy with their supplier.", null]);
+    expect(say(declined("continue"))).toEqual(["Call: not interested", "No more calls in this campaign; the other channels were kept going. +44 20 7946 0111, direct. Happy with their supplier.", null]);
     expect(say(declined("win_back"))).toEqual(["Call: not interested", "Moved to this campaign’s win-back branch, with no more calls. +44 20 7946 0111, direct. Happy with their supplier.", null]);
     // Any other call has no path.
-    expect(say({ campaign, at, kind: "call", channel: "call", track: one("Phone track"), outcome: "no_answer", number, note: "", declinedPath: null, redial: false, callbackAt: null, onCallback: null, zone: "Europe/London", redialListedFrom: null, callbackOpen: false })).toEqual(["Call: no answer", "+44 20 7946 0111, direct", null]);
+    expect(say({ campaign, at, kind: "call", channel: "call", track: one("Phone track"), outcome: "no_answer", number, note: "", declinedPath: null, redial: false, callbackAt: null, onCallback: null, zone: "Europe/London", redialListedFrom: null, callbackOpen: false, afterDecline: [] })).toEqual(["Call: no answer", "+44 20 7946 0111, direct", null]);
   });
 });
 
@@ -114,6 +115,8 @@ describe("every track state the server sends after an unworked skip has its own 
       skipped_no_channel: "Email track 2 was skipped: there is nothing to reach them on for it.",
       skipped: "Email track 2 was skipped.",
       stopped: "Email track 2 did not start: their outreach in this campaign stopped.",
+      stopped_after_start: "Email track 2 started after it, then stopped: their outreach in this campaign stopped.",
+      no_more_calls: "Email track 2 will not call them: they declined on a call.",
       not_started: "Email track 2 has not started.",
     };
     for (const [state, sentence] of Object.entries(table) as [DependentTrackState["state"], string][]) {
@@ -122,5 +125,41 @@ describe("every track state the server sends after an unworked skip has its own 
     }
     // Only waiting and held, states the server read, say it will start.
     expect(Object.entries(table).filter(([, s]) => s.includes("starts after")).map(([k]) => k).sort()).toEqual(["held", "waiting"]);
+  });
+});
+
+describe("what a decline did to each remaining track, as the server's read holds it now (ticket 16c)", () => {
+  const number = { detailId: "d1", kind: "direct" as const, owner: "person" as const, value: "+44 20 7946 0111" };
+  const several = (label: string) => ({ label, several: true });
+  test("history in the past tense; a present state only as the read's state says it", () => {
+    const entry: ActivityEntry = {
+      campaign,
+      at,
+      kind: "call",
+      channel: "call",
+      track: one("Phone track"),
+      outcome: "not_interested",
+      number,
+      note: "",
+      declinedPath: "win_back",
+      redial: false,
+      callbackAt: null,
+      onCallback: null,
+      zone: "Europe/London",
+      redialListedFrom: null,
+      callbackOpen: false,
+      afterDecline: [
+        { track: several("Email track 1"), branch: "main", state: "dropped_for_win_back", startsAt: null },
+        { track: several("Phone track 2"), branch: "main", state: "dropped_for_win_back", startsAt: null },
+        { track: several("Win-back email track 1"), branch: "win_back", state: "started", startsAt: null },
+        { track: several("Win-back email track 2"), branch: "win_back", state: "waiting", startsAt: "2026-11-04T00:00:00.000Z" },
+      ],
+    };
+    expect(describeEntry(entry, "Europe/London").body).toBe(
+      "Moved to this campaign’s win-back branch, with no more calls. Email track 1 was dropped for the win-back branch. Phone track 2 was dropped for the win-back branch. Win-back email track 1 started, and is running. Win-back email track 2 starts after its delay, on Wed 4 Nov. +44 20 7946 0111, direct",
+    );
+    // After a reply in win-back the same entry reads the lead as it stands: the branch's unstarted track never starts.
+    const replied = { ...entry, afterDecline: [{ track: several("Win-back email track 1"), branch: "win_back" as const, state: "finished" as const, startsAt: null }, { track: several("Win-back email track 2"), branch: "win_back" as const, state: "stopped" as const, startsAt: null }] };
+    expect(describeEntry(replied, "Europe/London").body).toBe("Moved to this campaign’s win-back branch, with no more calls. Win-back email track 1 has finished. Win-back email track 2 did not start: their outreach in this campaign stopped. +44 20 7946 0111, direct");
   });
 });

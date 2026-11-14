@@ -2,7 +2,7 @@ import { useId, useState } from "react";
 import type { ActivityEntry, ActivityView, DependentTrackState } from "../shared/api.ts";
 import { useApi } from "./api.ts";
 import { ErrorState, Section } from "./components.tsx";
-import { DECLINED_PATH_LINE, OUTCOME_TITLE, dateIn, dialledLine } from "./calls/wording.ts";
+import { DECLINED_PATH_LINE, OUTCOME_TITLE, dateIn, declineTrackLine, dialledLine } from "./calls/wording.ts";
 import { dayLabel } from "./calls/callbackTime.ts";
 import { Icon, type IconName } from "./icons.tsx";
 import { useNow } from "./time.ts";
@@ -101,8 +101,24 @@ export function describeEntry(entry: ActivityEntry, userZone: string): { icon: I
     const track = entry.track.several ? entry.track.label : null;
     switch (entry.kind) {
       case "call":
-        // What a decline did (its stored path, ticket 16), what the call did to the lead's calls (ticket 15b), the number dialled and the call's note; a skip for now has no number.
-        return { icon: "call", tone: CALL, title: OUTCOME_TITLE[entry.outcome], body: [entry.declinedPath ? DECLINED_PATH_LINE[entry.declinedPath].slice(0, -1) : null, callMeaning(entry), dialledLine(entry.number), entry.note.trim()].filter(Boolean).join(". ") || null, track };
+        // What a decline did (its stored path, ticket 16, and each remaining track as the server's read holds it now, ticket 16c),
+        // what the call did to the lead's calls (ticket 15b), the number dialled and the call's note; a skip for now has no number.
+        return {
+          icon: "call",
+          tone: CALL,
+          title: OUTCOME_TITLE[entry.outcome],
+          body:
+            [
+              entry.declinedPath ? DECLINED_PATH_LINE[entry.declinedPath].slice(0, -1) : null,
+              ...entry.afterDecline.map((a) => declineTrackLine(a, "record", userZone).slice(0, -1)),
+              callMeaning(entry),
+              dialledLine(entry.number),
+              entry.note.trim(),
+            ]
+              .filter(Boolean)
+              .join(". ") || null,
+          track,
+        };
       case "skipped":
         if (entry.reason === "unworked") {
           const limit = entry.limitDays === 1 ? "a day" : `${entry.limitDays} days`;
@@ -190,6 +206,10 @@ export function dependentLine(a: { readonly track: { readonly label: string } } 
       return `${name} was skipped.`;
     case "stopped":
       return `${name} did not start: their outreach in this campaign stopped.`;
+    case "stopped_after_start":
+      return `${name} started after it, then stopped: their outreach in this campaign stopped.`;
+    case "no_more_calls":
+      return `${name} will not call them: they declined on a call.`;
     case "not_started":
       return `${name} has not started.`;
     default: {
