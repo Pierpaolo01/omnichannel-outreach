@@ -7,7 +7,14 @@ import { liveSteps, liveTracks, ownSubject, poolOf, type CampaignDefinition } fr
 
 export type LaunchBlocker =
   | { readonly kind: "empty_copy"; readonly trackId: string; readonly stepId: string; readonly stepNumber: number; readonly part: "subject" | "body"; readonly message: string }
-  | { readonly kind: "missing_merge_field"; readonly field: string; readonly leadsMissing: number; readonly message: string }
+  | {
+      readonly kind: "missing_merge_field";
+      readonly field: string;
+      readonly leadsMissing: number;
+      readonly message: string;
+      /** Every live message that uses the field with no fallback, by track and its number in the track (ticket 13b). */
+      readonly uses: readonly { readonly trackId: string; readonly stepId: string; readonly stepNumber: number }[];
+    }
   | { readonly kind: "no_sender"; readonly trackId: string; readonly channel: string; readonly message: string };
 
 export interface SenderAccountView {
@@ -44,14 +51,19 @@ export function launchCheck(def: CampaignDefinition, leads: readonly MergeData[]
     });
   }
 
-  const fieldsWithoutFallback = new Set<string>();
+  const fieldsWithoutFallback = new Map<string, { trackId: string; stepId: string; stepNumber: number }[]>();
   for (const track of tracks) {
     if (track.channel === "call") continue;
-    for (const step of liveSteps(track)) {
-      for (const use of [...mergeUses(track.channel === "sms" ? "" : ownSubject(step)), ...mergeUses(step.body)]) if (use.fallback === null) fieldsWithoutFallback.add(use.field);
-    }
+    liveSteps(track).forEach((step, i) => {
+      for (const use of [...mergeUses(track.channel === "sms" ? "" : ownSubject(step)), ...mergeUses(step.body)]) {
+        if (use.fallback !== null) continue;
+        const uses = fieldsWithoutFallback.get(use.field) ?? [];
+        if (!uses.some((u) => u.stepId === step.id)) uses.push({ trackId: track.id, stepId: step.id, stepNumber: i + 1 });
+        fieldsWithoutFallback.set(use.field, uses);
+      }
+    });
   }
-  for (const field of [...fieldsWithoutFallback].sort()) {
+  for (const field of [...fieldsWithoutFallback.keys()].sort()) {
     const leadsMissing = leads.filter((lead) => !render(`{{${field}}}`, lead).ok).length;
     if (leadsMissing > 0) {
       blockers.push({
@@ -59,6 +71,7 @@ export function launchCheck(def: CampaignDefinition, leads: readonly MergeData[]
         field,
         leadsMissing,
         message: `${leadsMissing} ${leadsMissing === 1 ? "lead has" : "leads have"} no ${field.replace(/_/g, " ")}, and {{${field}}} has no fallback.`,
+        uses: fieldsWithoutFallback.get(field) ?? [],
       });
     }
   }

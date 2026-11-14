@@ -409,12 +409,12 @@ describe("sender checks and Needs attention cover SMS", () => {
     await h.advanceTo(MONDAY_9 + 2 * DAY);
     expect(texts(PAT_MOBILE).map((d) => d.stepId)).toEqual(["m1"]);
     const attention = (await h.request<NeedsAttention>("GET", "/api/needs-attention")).body;
-    expect(attention.senderProblems).toEqual([{ accountId: N1, channel: "sms", label: `Simulated SMS (not a provider) ${N1}`, problem: "disconnected" }]);
+    expect(attention.senderProblems).toEqual([{ accountId: N1, channel: "sms", label: "Simulated SMS (not a provider) +44 7700 900001", problem: "disconnected" }]);
     // A number the provider stops listing is disconnected too.
     h.sms.numbers.get(N1)!.healthy = true;
     h.sms.numbers.get(N1)!.listed = false;
     await h.advanceTo(MONDAY_9 + 3 * DAY);
-    expect((await h.request<NeedsAttention>("GET", "/api/needs-attention")).body.senderProblems).toEqual([{ accountId: N1, channel: "sms", label: `Simulated SMS (not a provider) ${N1}`, problem: "not_listed" }]);
+    expect((await h.request<NeedsAttention>("GET", "/api/needs-attention")).body.senderProblems).toEqual([{ accountId: N1, channel: "sms", label: "Simulated SMS (not a provider) +44 7700 900001", problem: "not_listed" }]);
     expect(texts(PAT_MOBILE).map((d) => d.stepId)).toEqual(["m1"]);
     h.sms.numbers.get(N1)!.listed = true;
     await h.advanceTo(MONDAY_9 + 4 * DAY);

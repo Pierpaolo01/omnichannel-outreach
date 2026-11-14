@@ -7,7 +7,7 @@ import { useNow } from "./time.ts";
 
 /**
  * The record's Activity: one timeline across campaigns, newest first, as in the approved
- * daily-workspace prototype. Sent emails expand to the copy that went; a reply shows its channel
+ * daily-workspace prototype. Sent emails and texts expand to the copy that went; a reply shows its channel
  * and date only. The note box arrives with the ticket that adds notes.
  */
 export function Activity({ path }: { path: string }) {
@@ -60,51 +60,78 @@ export function Activity({ path }: { path: string }) {
 
 const REASON: Readonly<Record<string, string>> = {
   no_email: "No email address.",
+  no_mobile: "No mobile of their own.",
+  company_lead: "A company lead is never texted: a main line isn’t a mobile.",
   block_list: "The address is on Instantly’s block list.",
   "invalid address": "Instantly refused the address as invalid. It is marked wrong.",
+  "invalid number": "The number was refused as invalid. It is marked wrong.",
 };
 
 const PLAIN = "bg-raised text-muted shadow-[inset_0_0_0_1px_var(--color-line)]";
 const CRIT = "bg-crit-soft text-crit";
 const HAND = "bg-hand-soft text-hand";
 
-/** What one timeline entry says. Exported for its tests. */
-export function describeEntry(entry: ActivityEntry): { icon: IconName; tone: string; title: string; body: string | null } {
+/** "the email track", "SMS track 2": a track label inside a sentence. */
+const inSentence = (label: { label: string; several: boolean }) => (label.several ? label.label : `the ${label.label.startsWith("SMS") ? label.label : label.label.toLowerCase()}`);
+
+/**
+ * What one timeline entry says. `track` names the entry's track when its campaign has several on
+ * that channel, so two email tracks never read alike (ticket 13b). Exported for its tests.
+ */
+export function describeEntry(entry: ActivityEntry): { icon: IconName; tone: string; title: string; body: string | null; track: string | null } {
+  if (entry.kind === "replied")
+    return {
+      icon: "reply",
+      tone: HAND,
+      title: entry.channel === "email" ? "Replied by email" : "Replied by text",
+      body: entry.channel === "email" ? "Automation stopped in this campaign. Read and answer the reply in Instantly." : "Automation stopped in this campaign. Answer the reply on your phone.",
+      track: null,
+    };
+  if (entry.kind === "ended")
+    return entry.status === "sequence_finished_no_response"
+      ? { icon: "system", tone: PLAIN, title: "Sequence finished with no response", body: null, track: null }
+      : { icon: "system", tone: PLAIN, title: "Finished, no usable channel", body: "Nothing is left to reach them on in this campaign.", track: null };
+  const sms = entry.channel === "sms";
+  const noun = sms ? "Text" : "Email";
+  const track = entry.track.several ? entry.track.label : null;
+  const icon: IconName = sms ? "sms" : "email";
   switch (entry.kind) {
     case "sent":
-      return { icon: "email", tone: PLAIN, title: `Email ${entry.stepNumber} sent`, body: null };
+      return { icon, tone: PLAIN, title: `${noun} ${entry.stepNumber} sent`, body: null, track };
     case "failed":
-      return { icon: "bad", tone: CRIT, title: `Email ${entry.stepNumber} failed`, body: `${entry.to}: ${REASON[entry.reason] ?? entry.reason}` };
+      return { icon: "bad", tone: CRIT, title: `${noun} ${entry.stepNumber} failed`, body: `${entry.to}: ${REASON[entry.reason] ?? entry.reason}`, track };
     case "skipped":
-      return { icon: "system", tone: PLAIN, title: entry.stepNumber === null ? "Email skipped" : `Email ${entry.stepNumber} skipped`, body: REASON[entry.reason] ?? entry.reason };
+      return { icon: "system", tone: PLAIN, title: entry.stepNumber === null ? `${entry.track.label} skipped` : `${noun} ${entry.stepNumber} skipped`, body: REASON[entry.reason] ?? entry.reason, track: entry.stepNumber === null ? null : track };
     case "bounced":
-      return { icon: "bad", tone: CRIT, title: entry.stepNumber === null ? "Email bounced" : `Email ${entry.stepNumber} bounced`, body: `${entry.to} is marked wrong. Nothing more is sent to it.` };
+      return sms
+        ? { icon: "bad", tone: CRIT, title: entry.stepNumber === null ? "Bad number" : `Text ${entry.stepNumber}: bad number`, body: `${entry.to} was reported invalid and is marked wrong. Nothing more is texted to it.`, track }
+        : { icon: "bad", tone: CRIT, title: entry.stepNumber === null ? "Email bounced" : `Email ${entry.stepNumber} bounced`, body: `${entry.to} is marked wrong. Nothing more is sent to it.`, track };
     case "address_bad":
-      return { icon: "system", tone: PLAIN, title: "Email track ended", body: `${entry.to} is marked wrong, so nothing more is sent to it.` };
-    case "replied":
+      return { icon: "system", tone: PLAIN, title: `${entry.track.label} ended`, body: `${entry.to} is marked wrong, so nothing more is sent to it.`, track: null };
+    case "released":
       return {
-        icon: "reply",
-        tone: HAND,
-        title: entry.channel === "email" ? "Replied by email" : "Replied by text",
-        body: entry.channel === "email" ? "Automation stopped in this campaign. Read and answer the reply in Instantly." : "Automation stopped in this campaign. Answer the reply on your phone.",
+        icon: "system",
+        tone: PLAIN,
+        title: `${entry.track.label} started`,
+        body: `It starts after ${inSentence(entry.after)}, which ${entry.because === "skipped" ? "was skipped for this lead" : `ended on a bad ${entry.after.label.startsWith("SMS") ? "number" : "address"}`}.`,
+        track: null,
       };
-    case "ended":
-      return entry.status === "sequence_finished_no_response"
-        ? { icon: "system", tone: PLAIN, title: "Sequence finished with no response", body: null }
-        : { icon: "system", tone: PLAIN, title: "Finished, no usable channel", body: "Nothing is left to reach them on in this campaign." };
   }
 }
 
 function Line({ entry }: { entry: ActivityEntry }) {
   const now = useNow();
-  const { icon, tone, title, body } = describeEntry(entry);
+  const { icon, tone, title, body, track } = describeEntry(entry);
   return (
     <li className="grid grid-cols-[32px_minmax(0,1fr)_auto] gap-x-3 gap-y-0.5 border-line py-3 [&+&]:border-t">
       <span className={`grid size-8 place-items-center rounded-full ${tone}`}>
         <Icon name={icon} className="size-4" />
       </span>
       <div className="min-w-0 pt-[5px] font-medium [overflow-wrap:anywhere]">
-        {title} <span className="text-[13px] font-normal text-muted">in {entry.campaign.name}</span>
+        {title}{" "}
+        <span className="text-[13px] font-normal text-muted">
+          {track ? `${track}, ` : ""}in {entry.campaign.name}
+        </span>
       </div>
       <time dateTime={entry.at} className="whitespace-nowrap pt-1.5 text-right text-[13px] text-muted">
         {when(entry.at, now)}

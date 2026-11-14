@@ -154,7 +154,7 @@ test.describe("on the app over the fake email provider", () => {
 
     await page.goto(`${demo.url}/leads/people/${person("Grace Okafor")}`);
     await page.getByLabel("Show activity from").selectOption({ label: "Sports clinics, Exeter" });
-    await expect(page.getByText("Email skipped")).toBeVisible();
+    await expect(page.getByText("Email track skipped")).toBeVisible();
   });
 });
 
@@ -662,7 +662,7 @@ test.describe("review of pull request 41", () => {
     await expect(page.getByLabel("Fallback for first name")).toBeVisible();
   });
 
-  test("a second email track's blockers (defined through the API) are named as that email track's, never as an SMS track's (PR 41 review: BeforeLaunchTab.tsx)", async ({ page }) => {
+  test("a second email track's blockers (defined through the API) are named as that email track's, never as an SMS track's, and open that track (PR 41 review; ticket 13b)", async ({ page }) => {
     const id = await campaign(track([COPY.first, COPY.second]));
     const email = (await stored(id)).definition;
     const second = { ...email.tracks[0]!, id: "email-2", steps: [{ id: "e2s1", waitDays: 0, subject: "", body: "", threading: "new_subject" as const, removed: false }], start: { kind: "after" as const, trackId: "email", delayDays: 3 } };
@@ -670,24 +670,27 @@ test.describe("review of pull request 41", () => {
     await page.goto(`${r.url}/campaigns/${id}/before-launch`);
     await expect(page.getByText("Email track 2: Email 1 has no subject")).toBeVisible();
     await expect(page.getByText("Email track 2: Email 1 has no copy")).toBeVisible();
-    await expect(page.getByText("This editor opens one email track, so Email track 2 can’t be edited here yet.").first()).toBeVisible();
     await expect(page.getByText(/Text \d|SMS/)).toHaveCount(0);
-    // Nothing to open for a track this editor can't show.
-    await expect(page.getByRole("button", { name: "Write it" })).toHaveCount(0);
+    // Each blocker opens the track and the email it names (ticket 13b: every track opens here).
+    await page.getByRole("button", { name: "Write it" }).first().click();
+    await expect(page).toHaveURL(/track=email-2&step=e2s1/);
+    await expect(page.getByRole("heading", { name: "Email track 2" })).toBeVisible();
   });
 
-  test("a campaign with an SMS track (defined through the API) names the SMS track's blockers as its own, not the email track's (merge of ticket 13a)", async ({ page }) => {
+  test("a campaign with an SMS track names the SMS track's blockers as its own, not the email track's, and its fix opens the text (merge of ticket 13a; ticket 13b)", async ({ page }) => {
     const id = await campaign(track([COPY.first, COPY.second]));
     const email = (await stored(id)).definition;
     const sms = { id: "sms", channel: "sms" as const, branch: "main" as const, window: email.tracks[0]!.window, steps: [{ id: "m1", waitDays: 0, subject: "", body: "", threading: "new_subject" as const, removed: false }], start: { kind: "after" as const, trackId: "email", delayDays: 1 }, removed: false };
     await r.harness.defineSequence(id, { ...email, tracks: [...email.tracks, sms] });
     await page.goto(`${r.url}/campaigns/${id}/before-launch`);
-    await expect(page.getByText("The SMS track has no connected sender number")).toBeVisible();
     await expect(page.getByText("The SMS track: Text 1 has no message")).toBeVisible();
     // The email track has its inbox: nothing is said against it.
     await expect(page.getByText("The email track has no connected sender inbox")).toHaveCount(0);
-    await expect(page.getByText("SMS sends are not in this estimate yet: it counts email only.", { exact: false })).toBeVisible();
+    await page.getByRole("button", { name: "Write it" }).click();
+    await expect(page).toHaveURL(/track=sms&step=m1/);
+    await expect(page.getByLabel("Text 1 message")).toBeVisible();
     await page.getByRole("link", { name: "Sequence" }).click();
     await expect(page.getByRole("button", { name: /^Email track: / })).not.toContainText("to fix");
+    await expect(page.getByRole("button", { name: /^SMS track: / })).toContainText("1 to fix");
   });
 });

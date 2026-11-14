@@ -4,6 +4,7 @@ import type { BeforeLaunchView, CampaignDetail, ImportRecord, LeadOutcome, LeadS
 import { useApi } from "../api.ts";
 import { BeforeLaunchTab } from "../campaign/BeforeLaunchTab.tsx";
 import { SequenceTab } from "../campaign/SequenceTab.tsx";
+import { sendsOnItsOwn } from "../campaign/model.ts";
 import { saveWording } from "../campaign/saveWording.ts";
 import { useSequence, type SequenceEditor } from "../campaign/useSequence.ts";
 import { ErrorState } from "../components.tsx";
@@ -96,7 +97,7 @@ function Campaign({ detail, editor, tab }: { detail: CampaignDetail; editor: Seq
       </header>
       {editor.launched && (
         <p className="mt-4 rounded-box border border-line bg-base-100 px-4 py-3 text-[14px] text-ink-2">
-          Email goes out on its own, inside each lead’s sending window. Pausing, resuming and editing a running campaign arrive with later releases.
+          {sendsOnItsOwn(editor.view.definition)} Pausing, resuming and editing a running campaign arrive with later releases.
         </p>
       )}
 

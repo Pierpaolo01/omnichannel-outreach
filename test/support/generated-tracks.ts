@@ -1,7 +1,8 @@
 import type { CampaignDefinition, StepDefinition, TrackChannel, TrackDefinition } from "../../src/domain/sequence/definition.ts";
 import type { SubjectState } from "../../src/domain/sequence/state.ts";
 import type { Rules } from "../../src/server/engine/rules.ts";
-import type { CompanyRecord, EnrollmentProgress, LeadSearchResult, NeedsAttention, OutreachStatus, PersonRecord } from "../../src/shared/api.ts";
+import type { ActivityView, CompanyRecord, EnrollmentProgress, LeadSearchResult, NeedsAttention, OutreachStatus, PersonRecord } from "../../src/shared/api.ts";
+import { trackLabel } from "../../src/shared/track-label.ts";
 import { EngineHarness, quickWait } from "./engine-harness.ts";
 import { business, person, type ExportRows } from "./export-builder.ts";
 import type { FakeAccount, FakeMode, HandoverLogEntry } from "./fake-email-port.ts";
@@ -78,6 +79,9 @@ interface WorldCompany {
 
 interface Subject {
   readonly id: string;
+  /** The person's or company lead's record, whose Activity shows this subject. */
+  readonly recordId: string;
+  readonly kind: "person" | "company";
   readonly campaign: number;
   readonly person: WorldPerson | null;
   readonly company: WorldCompany;
@@ -261,7 +265,7 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
         if (!e || subjects.has(e.id)) continue;
         const p = row.kind === "person" ? (people.find((x) => x.name === row.name) ?? null) : null;
         const company = p ? companies[p.company]! : companies.find((x) => x.name === row.name)!;
-        subjects.set(e.id, { id: e.id, campaign: ci, person: p, company, enrolledAt: h.clock });
+        subjects.set(e.id, { id: e.id, recordId: row.id, kind: row.kind, campaign: ci, person: p, company, enrolledAt: h.clock });
       }
     }
   };
@@ -534,6 +538,7 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
     }
     // A run stopped by its bound reports what it found before, not an unfinished drain.
     if (!h.stopped) await checkAll(true);
+    if (!h.stopped) await checkActivity();
   }
 
   for (const id of subjects.keys()) {
@@ -653,6 +658,109 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
     }
 
     checkLogs(states);
+  }
+
+  /**
+   * Activity against the record (council on 10121d3, item 8): after the drain, each subject's timeline
+   * lists exactly the entries the record derives from its own starts, finishes, the providers' logs and
+   * the replies, so it can neither omit nor invent one. Entries are compared as kind, channel, track
+   * label and message number; "ended" against the stored ending, which invariant 20 checks.
+   */
+  async function checkActivity(): Promise<void> {
+    const now = h.clock;
+    for (const rec of subjects.values()) {
+      const def = campaigns[rec.campaign]!.definition;
+      const campaignId = campaigns[rec.campaign]!.id;
+      const state = await h.store.engine.subject(rec.id, now);
+      if (!state || !campaignId) continue;
+      const path = rec.kind === "person" ? `/api/people/${rec.recordId}/activity` : `/api/companies/${rec.recordId}/activity`;
+      const shown = (await h.request<ActivityView>("GET", path)).body.entries
+        .filter((e) => e.campaign.id === campaignId)
+        .map((e) => (e.kind === "replied" ? `replied|${e.channel}` : e.kind === "ended" ? "ended" : `${e.kind}|${e.channel}|${e.track.label}|${"stepNumber" in e && e.stepNumber !== null ? e.stepNumber : "-"}`))
+        .sort();
+
+      const expected: string[] = [];
+      const runStart = runStartOf(rec);
+      const channels = [...new Set(def.tracks.map((t) => t.channel))];
+      const atLaunch = runStart <= now && !channels.some((c) => reachesAt(rec, c, runStart - 1));
+      const ownCall = (t: TrackDefinition) => callsOf(t.channel).filter((c) => c.subjectId === rec.id && t.steps.some((st) => st.id === c.stepId));
+      const completed = (t: TrackDefinition) => {
+        const sends = t.steps.map((st) => deliveryOf(t.channel, rec.id, st.id));
+        const last = sends.at(-1);
+        return last !== undefined && sends.every((d) => d !== undefined) && knownAt(t.channel, last) < badAtOf(rec, t.channel);
+      };
+      // At the instant the lead ends (its first reply, or its last channel known bad), the record does
+      // not model the order within the engine's pass: a track that starts then may be stored or not.
+      // The provider's log of calls (independent of the engine's store) settles it when the track
+      // called; otherwise Activity must show either all of what the record expects of that track, or
+      // none of it (search on 7401eb2: seeds 20261124, 20261125, 20261142, 20261191 and others).
+      const called = (t: TrackDefinition) => ownCall(t).length > 0;
+      const started = (t: TrackDefinition) => {
+        const start = startOf(rec, t);
+        return start !== null && start <= now && start <= endLimitOf(rec) ? start : null;
+      };
+      const entriesOf = (t: TrackDefinition, start: number): string[] => {
+        const out: string[] = [];
+        const label = trackLabel(def, t).label;
+        const rule = t.start;
+        const before = rule.kind === "after" ? def.tracks.find((x) => x.id === rule.trackId) : undefined;
+        if (before) {
+          const beforeStart = started(before);
+          if (beforeStart !== null && (!reachesAt(rec, before.channel, beforeStart) || !completed(before))) out.push(`released|${t.channel}|${label}|-`);
+        }
+        const owned = { failure: false };
+        t.steps.forEach((st, i) => {
+          const d = deliveryOf(t.channel, rec.id, st.id);
+          if (d && knownAt(t.channel, d) <= now) out.push(`sent|${t.channel}|${label}|${i + 1}`);
+          const refused = ownCall(t).some((c) => c.stepId === st.id && sms.refusals.some((r) => r.attemptId === c.attemptId && r.reason === "invalid_destination"));
+          if (t.channel === "sms" && refused) {
+            out.push(`failed|sms|${label}|${i + 1}`);
+            owned.failure = true;
+          }
+          const bad = t.channel === "sms" ? sms.invalidAfterSend : email.bouncing;
+          if (d && bad.has(d.destination)) {
+            out.push(`bounced|${t.channel}|${label}|${i + 1}`);
+            owned.failure = true;
+          }
+        });
+        // Skipped when its detail was missing or already bad at its start, unless its own first call
+        // found it bad at that very instant (then it failed); ended on a bad detail with no failure or
+        // bounce of its own: marked bad elsewhere.
+        const own = owned.failure;
+        // A track that starts at the very instant another track's call finds the detail bad: stored
+        // skipped (started after the detail went bad) or failed (started first, then found bad), both
+        // of which the engine may store (check 20). Activity must say whichever it is (seed 20261142).
+        if (!own && badAtOf(rec, t.channel) === start && !called(t)) {
+          const either = [`skipped|${t.channel}|${label}|-`, `address_bad|${t.channel}|${label}|-`];
+          out.push(either.find((x) => shown.includes(x)) ?? either[0]!);
+          return out;
+        }
+        const skipped = !own && !reachesAt(rec, t.channel, start);
+        if (skipped) out.push(`skipped|${t.channel}|${label}|-`);
+        if (!skipped && !own && !completed(t) && badAtOf(rec, t.channel) < Math.min(now + 1, endLimitOf(rec))) out.push(`address_bad|${t.channel}|${label}|-`);
+        return out;
+      };
+      for (const t of def.tracks) {
+        if (t.channel === "call") continue;
+        if (atLaunch) {
+          expected.push(`skipped|${t.channel}|${trackLabel(def, t).label}|-`);
+          continue;
+        }
+        const start = started(t);
+        if (start === null) continue;
+        const entries = entriesOf(t, start);
+        if (start < endLimitOf(rec) || called(t) || entries.every((e) => shown.includes(e))) expected.push(...entries);
+      }
+      const stop = stopOf(rec.id);
+      if (stop && stop.seenAt <= now) {
+        // Replies observed in the same pass reach the app in an order the record does not model: either may be the one that stopped it.
+        const firsts = repliesOf(rec.id).filter((r) => r.seenAt === stop.seenAt).map((r) => `replied|${r.channel}`);
+        expected.push(firsts.find((x) => shown.includes(x)) ?? `replied|${stop.channel}`);
+      }
+      else if (state.subject.ended === "sequence_finished_no_response" || state.subject.ended === "finished_no_usable_channel") expected.push("ended");
+      expected.sort();
+      if (JSON.stringify(shown) !== JSON.stringify(expected)) problem(`activity: ${rec.id} shows ${JSON.stringify(shown)}; the record has ${JSON.stringify(expected)}`);
+    }
   }
 
   function callsOf(channel: TrackChannel): HandoverLogEntry[] {

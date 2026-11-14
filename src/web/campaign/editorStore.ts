@@ -49,6 +49,8 @@ export interface EditorDeps {
 
 /** The connected email inboxes: the email pool follows them; the engine's SMS numbers are not inboxes. */
 export const emailInboxIds = (view: SequenceView): string[] => view.accounts.filter((a) => a.channel === "email").map((a) => a.id);
+/** The connected SMS numbers: the SMS pool follows them (ticket 13b). None in the running app, which has no SMS provider. */
+export const smsNumberIds = (view: SequenceView): string[] => view.accounts.filter((a) => a.channel === "sms").map((a) => a.id);
 
 /** How long after an edit its save is sent. */
 export const SAVE_DELAY_MS = 600;
@@ -64,7 +66,7 @@ export class EditorStore {
     this.deps = deps;
     this.state = { view: initial, draft: initial.definition, save: { kind: "idle" }, unsaved: false, pending: null, locked: initial.launchedAt !== null, problems: draftProblems(initial.definition) };
     this.queue = new SaveQueue({
-      read: () => ({ draft: this.state.draft, accountIds: emailInboxIds(this.state.view), version: this.state.view.definitionVersion }),
+      read: () => ({ draft: this.state.draft, accountIds: emailInboxIds(this.state.view), smsNumberIds: smsNumberIds(this.state.view), version: this.state.view.definitionVersion }),
       put: (definition, options, save) => deps.put({ ...definition, save }, options),
       onStatus: (status) => this.set({ save: status, unsaved: status.kind !== "saved" && status.kind !== "idle" }),
       // Saves land in order, so each accepted view is the newest; the draft only if no edit came after.
@@ -181,13 +183,18 @@ export class EditorStore {
     if (this.timer !== null) void this.saveNow();
   }
 
-  /** The pool follows the provider's inboxes: a difference from what is saved is saved, as an edit. */
+  /**
+   * The pools follow the providers' accounts, each on its own channel: a difference from what is
+   * saved, for a channel with a live track, is saved as one edit (ADR 0003, ticket 13b).
+   */
   private syncPool(): void {
     const view = this.state.view;
-    if (view.launchedAt !== null || !view.definition.tracks.some((t) => !t.removed && t.channel === "email")) return;
-    const pool = [...view.definition.emailPool].sort().join("\n");
-    const connected = [...emailInboxIds(view)].sort().join("\n");
-    if (pool === connected || this.queue.inConflict) return;
+    if (view.launchedAt !== null) return;
+    const live = (channel: "email" | "sms") => view.definition.tracks.some((t) => !t.removed && t.channel === channel);
+    const same = (a: readonly string[], b: readonly string[]) => [...a].sort().join("\n") === [...b].sort().join("\n");
+    const emailDiffers = live("email") && !same(view.definition.emailPool, emailInboxIds(view));
+    const smsDiffers = live("sms") && !same(view.definition.smsPool ?? [], smsNumberIds(view));
+    if ((!emailDiffers && !smsDiffers) || this.queue.inConflict) return;
     this.queue.edited();
     void this.queue.save();
   }

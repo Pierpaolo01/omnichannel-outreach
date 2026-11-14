@@ -28,6 +28,8 @@ export class ScriptedEmailPort implements SendPort {
   /** Overrides the lookup's truthful answer. */
   lookupOverride: ((work: ScriptedWork | undefined, now: number) => LookupResult | null) | null = null;
   withdrawAnswer: "withdrawn" | "too-late" | "unknown" = "unknown";
+  /** A same-key call for work that never sent (dropped) sends it now: a carried-on claim that the provider takes this time. */
+  resendDropped = false;
   presend: () => Promise<{ kind: "clear" } | { kind: "unavailable" }> = () => Promise.resolve({ kind: "clear" });
   private readonly now: () => number;
   private nextRef = 0;
@@ -56,6 +58,10 @@ export class ScriptedEmailPort implements SendPort {
     const now = this.now();
     this.calls.push({ at: now, request });
     const existing = this.works.find((w) => w.key === request.idempotencyKey);
+    if (existing && this.resendDropped && existing.sendAt === null) {
+      existing.sendAt = now;
+      this.advance();
+    }
     if (existing && request.threading === "new_subject") return Promise.resolve({ kind: "accepted", providerRef: existing.ref });
     const script = this.onCall(request);
     // A refusal: the provider never takes the work.

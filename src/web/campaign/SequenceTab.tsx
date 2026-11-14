@@ -1,26 +1,29 @@
-import { useEffect, useId, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useLocation, useSearch } from "wouter";
 import { MERGE_FIELDS } from "../../domain/sequence/copy.ts";
-import type { BeforeLaunchView, CampaignDefinition, EmailProviderStatus, StepDefinition, TrackDefinition } from "../../shared/api.ts";
+import type { BeforeLaunchView, CampaignDefinition, EmailProviderStatus, LaunchBlocker, SmsProviderStatus, StepDefinition, TrackDefinition } from "../../shared/api.ts";
 import { useApi } from "../api.ts";
 import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
 import { campaignPath } from "../pages/CampaignPage.tsx";
+import { arrange, type ArrangeOperation } from "./arrangement.ts";
+import { whyNoSmsNumber } from "./sms-wording.ts";
 import {
+  STEP_NOUN,
   WEEK,
-  emailTrackOf,
   fallbackIn,
   fieldLabel,
   fieldsOf,
   hourLabel,
   liveSteps,
-  newEmailTrack,
   newStep,
   removeStep,
   setWindow,
   threadSubjectOf,
   stepBlockers,
+  trackName,
   trackSummary,
+  trackTitle,
   windowHours,
   withFallback,
 } from "./model.ts";
@@ -33,47 +36,74 @@ const NO_STEP = "none";
 /** One wording, everywhere, for an inbox the provider reports cannot send (PR 41 council, item 7). */
 export const CANNOT_SEND = "can’t send: the provider reports it unavailable";
 
-const LATER = "SMS and phone tracks, and connecting tracks together or after one another, arrive with later releases.";
+const PHONE_LATER = "Phone tracks arrive with a later release.";
 
-/** The Sequence tab: the canvas, and the selected track's inspector beside it. */
+type FocusTarget =
+  | { readonly to: "node"; readonly trackId: string }
+  | { readonly to: "first" }
+  | { readonly to: "add" }
+  | { readonly to: "subject" | "toggle" | "body"; readonly stepId: string };
+
+const liveMain = (def: CampaignDefinition) => def.tracks.filter((t) => !t.removed && t.branch === "main");
+
+/** The Sequence tab: the canvas with every track and how they connect, and the selected track's inspector beside it. */
 export function SequenceTab({ campaignId, editor }: { campaignId: string; editor: SequenceEditor }) {
   const [, navigate] = useLocation();
   const params = new URLSearchParams(useSearch());
-  const track = emailTrackOf(editor.draft);
-  const selected = track && params.get("track") === track.id ? track : undefined;
-  // `step=none` is every email collapsed, apart from no `step` at all, which opens Email 1.
+  const tracks = liveMain(editor.draft);
+  const selected = tracks.find((t) => t.id === params.get("track"));
+  // `step=none` is every message collapsed, apart from no `step` at all, which opens the first.
   const openStep = params.get("step");
   const select = (trackId: string | null, stepId?: string) =>
     navigate(trackId ? `${campaignPath(campaignId)}?track=${encodeURIComponent(trackId)}${stepId ? `&step=${encodeURIComponent(stepId)}` : ""}` : campaignPath(campaignId), { replace: true });
   // Focus moves deliberately when the control holding it goes away (PR 41 verification, F3):
-  // closing the inspector returns it to the track, and adding the first track moves it to
-  // Email 1's subject.
-  const node = useRef<HTMLButtonElement>(null);
-  // After loading the saved version, focus goes to the first email of what loaded: its subject if
-  // it is open, else its row (PR 41 re-check, F8).
-  const [focusNext, setFocusNext] = useState<{ to: "node" | "first" } | { to: "subject" | "toggle"; stepId: string } | null>(null);
+  // closing the inspector returns it to the track; adding a track moves it to the track's first
+  // message; removing a track moves it to Add track.
+  const focusTarget = useRef<FocusTarget | null>(null);
+  const [, rendered] = useState(0);
+  const setFocusNext = (target: FocusTarget) => {
+    focusTarget.current = target;
+    rendered((n) => n + 1);
+  };
+  // After every render: the control asked for, once it exists, takes focus.
   useEffect(() => {
-    if (!focusNext) return;
+    const next = focusTarget.current;
+    if (!next) return;
     const first = selected ? liveSteps(selected)[0] : undefined;
     let target: HTMLElement | null;
-    if (focusNext.to === "node") target = node.current;
-    else if (focusNext.to === "first") target = first ? (document.getElementById(`subject-${first.id}`) ?? document.getElementById(`step-toggle-${first.id}`)) : null;
-    else if ("stepId" in focusNext) target = document.getElementById(`${focusNext.to === "subject" ? "subject" : "step-toggle"}-${focusNext.stepId}`);
-    else target = null;
+    if (next.to === "node") target = document.getElementById(nodeId(next.trackId));
+    else if (next.to === "add") target = document.getElementById(ADD_TRACK_ID);
+    else if (next.to === "first") target = first ? (document.getElementById(`subject-${first.id}`) ?? document.getElementById(`body-${first.id}`) ?? document.getElementById(`step-toggle-${first.id}`)) : null;
+    else target = document.getElementById(`${next.to === "toggle" ? "step-toggle" : next.to}-${next.stepId}`) ?? (next.to === "subject" ? document.getElementById(`body-${next.stepId}`) : null);
     if (target) {
       target.focus();
-      setFocusNext(null);
+      focusTarget.current = null;
     }
-  }, [focusNext, selected, openStep]);
+  });
   const coverage = useApi<BeforeLaunchView>(`/api/campaigns/${encodeURIComponent(campaignId)}/before-launch?load=0&v=${editor.view.definitionVersion}`);
-  const facts = coverage.result.state === "ready" ? coverage.result.data : coverage.result.state === "loading" ? null : null;
+  const facts = coverage.result.state === "ready" ? coverage.result.data : null;
 
-  if (!track) {
+  /** Adds a track through the arrangement rule, opens it, and moves focus to its first message. */
+  const add = (channel: "email" | "sms") => {
+    let added: TrackDefinition | undefined;
+    editor.update((d) => {
+      const out = arrange(d, { kind: "add", channel });
+      if (!out.ok) return d;
+      added = out.added;
+      return out.definition;
+    });
+    const first = added?.steps[0];
+    if (!added || !first) return;
+    select(added.id, first.id);
+    setFocusNext({ to: channel === "email" ? "subject" : "body", stepId: first.id });
+  };
+
+  if (tracks.length === 0) {
     return (
       <div className={`rounded-box border border-line bg-raised bg-[radial-gradient(var(--color-line-strong)_1px,transparent_1px)] bg-[length:18px_18px] px-6 py-14 h-[max(470px,calc(100dvh-306px))]`}>
         <div className="mx-auto flex max-w-[520px] flex-col items-start gap-2.5">
           <h2 className="text-[19px]">Add the first channel track</h2>
-          <p className="text-ink-2">A track is one channel’s first message and its follow-ups.</p>
+          <p className="text-ink-2">A track is one channel’s first message and its follow-ups. Add one, then connect the next to it, together or after a delay.</p>
           {facts && (
             <p className="flex flex-wrap gap-x-4 text-[13px] text-muted">
               <span>
@@ -92,21 +122,11 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
           ) : (
             <>
               <div className="mt-1.5 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  className="btn gap-1.5 border-line-strong bg-base-100 font-medium"
-                  disabled={editor.locked}
-                  onClick={() => {
-                    const added = newEmailTrack();
-                    editor.update((d) => ({ ...d, tracks: [...d.tracks, added] }));
-                    select(added.id, added.steps[0]?.id);
-                    if (added.steps[0]) setFocusNext({ to: "subject", stepId: added.steps[0].id });
-                  }}
-                >
+                <button id={ADD_TRACK_ID} type="button" className="btn gap-1.5 border-line-strong bg-base-100 font-medium" disabled={editor.locked} onClick={() => add("email")}>
                   <Icon name="email" className="size-4" />
                   Email track
                 </button>
-                <button type="button" className="btn gap-1.5 border-line-strong bg-base-100 font-medium" disabled aria-describedby="later-tracks">
+                <button type="button" className="btn gap-1.5 border-line-strong bg-base-100 font-medium" disabled={editor.locked} onClick={() => add("sms")}>
                   <Icon name="sms" className="size-4" />
                   SMS track
                 </button>
@@ -116,7 +136,7 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
                 </button>
               </div>
               <p id="later-tracks" className="text-[13px] text-muted">
-                {LATER}
+                {PHONE_LATER}
               </p>
             </>
           )}
@@ -127,9 +147,20 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
 
   return (
     <div className={`grid grid-cols-1 items-start gap-4 ${selected ? "min-[1020px]:grid-cols-[minmax(0,1fr)_430px]" : ""}`}>
-      <Canvas track={track} selected={selected !== undefined} editor={editor} node={node} onSelect={() => select(selected ? null : track.id)} />
-      {selected && (
+      <Canvas tracks={tracks} selectedId={selected?.id ?? null} editor={editor} onSelect={(id) => select(selected?.id === id ? null : id)} onAdd={add} />
+      {selected?.channel === "call" && (
+        <PhoneTrackPanel
+          track={selected}
+          editor={editor}
+          onClose={() => {
+            select(null);
+            setFocusNext({ to: "node", trackId: selected.id });
+          }}
+        />
+      )}
+      {selected && selected.channel !== "call" && (
         <Inspector
+          key={selected.id}
           track={selected}
           editor={editor}
           facts={facts}
@@ -141,7 +172,11 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
           onLoadedStored={() => setFocusNext({ to: "first" })}
           onClose={() => {
             select(null);
-            setFocusNext({ to: "node" });
+            setFocusNext({ to: "node", trackId: selected.id });
+          }}
+          onRemoved={() => {
+            select(null);
+            setFocusNext({ to: "add" });
           }}
         />
       )}
@@ -149,49 +184,318 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
   );
 }
 
-function Canvas({ track, selected, editor, node, onSelect }: { track: TrackDefinition; selected: boolean; editor: SequenceEditor; node: RefObject<HTMLButtonElement | null>; onSelect: () => void }) {
-  const steps = liveSteps(track);
-  const issues = new Set(steps.flatMap((s) => stepBlockers(s, editor.view.launch.blockers)).map((b) => JSON.stringify(b))).size + editor.view.launch.blockers.filter((b) => b.kind === "no_sender" && b.trackId === track.id).length;
+const ADD_TRACK_ID = "add-track";
+/** The width one track node takes beside another: the node and the space around it. */
+const NODE_WIDTH = 230;
+const NODE_GAP = 24;
+/** The outline (stacked canvas): each level's indent (11px, a 1.5px connector, 12px), and the narrowest a node may get. */
+const OUTLINE_INDENT = 25;
+const NODE_MIN = 176;
+
+/** An element's content width, kept current as it resizes; null until measured. */
+function useWidth(ref: RefObject<HTMLElement | null>): number | null {
+  const [width, setWidth] = useState<number | null>(null);
+  // Measured in a layout effect, so the first frame painted already has the width: measured after
+  // paint, the canvas drew its tracks side by side for a frame and crossed its panel on a phone (CI
+  // on 07bff24). The observer then follows every resize.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const style = getComputedStyle(el);
+    setWidth(el.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight));
+    const observer = new ResizeObserver(([entry]) => setWidth(entry ? entry.contentRect.width : null));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [ref]);
+  return width;
+}
+/**
+ * One of several tracks hanging from the same point: a line joins it to its neighbours at the top,
+ * so tracks that start together read as one fork.
+ */
+const JOINED =
+  "relative px-3 before:absolute before:left-0 before:right-1/2 before:top-0 before:border-t-[1.5px] before:border-line-strong after:absolute after:left-1/2 after:right-0 after:top-0 after:border-t-[1.5px] after:border-line-strong first:before:hidden last:after:hidden";
+const nodeId = (trackId: string) => `track-node-${trackId}`;
+const days = (n: number) => `${n} ${n === 1 ? "day" : "days"}`;
+
+/** How a track starts, in words: "at launch", or "after the email track finishes, plus 2 days". */
+export function startsText(def: CampaignDefinition, track: TrackDefinition): string {
+  if (track.start.kind === "entry") return "at launch";
+  const before = def.tracks.find((t) => t.id === (track.start as { trackId: string }).trackId);
+  return `after ${before ? trackName(def, before) : "another track"} finishes, plus ${days(track.start.delayDays)}`;
+}
+
+/** The launch blockers on one track: empty copy and fields with no fallback in its messages, and no connected sender. */
+export function trackIssues(track: TrackDefinition, blockers: readonly LaunchBlocker[]): number {
+  return new Set(liveSteps(track).flatMap((s) => stepBlockers(s, blockers).filter((b) => b.kind !== "empty_copy" || b.trackId === track.id)).map((b) => JSON.stringify(b))).size + blockers.filter((b) => b.kind === "no_sender" && b.trackId === track.id).length;
+}
+
+/**
+ * The canvas: the Launch point, every track that starts at launch hanging from it ("together" when
+ * there are several), and every track that starts after another hanging from that one with its
+ * delay. Two tracks that start at the same point are together (ADR 0003, ticket 13b).
+ */
+function Canvas({ tracks, selectedId, editor, onSelect, onAdd }: { tracks: readonly TrackDefinition[]; selectedId: string | null; editor: SequenceEditor; onSelect: (trackId: string) => void; onAdd: (channel: "email" | "sms") => void }) {
+  const live = new Set(tracks.map((t) => t.id));
+  const roots = tracks.filter((t) => t.start.kind === "entry" || !live.has(t.start.trackId));
+  const childrenOf = (id: string) => tracks.filter((t) => t.start.kind === "after" && t.start.trackId === id);
+  const rootLabel = roots.length > 1 ? "together" : editor.launched ? "at launch" : "starts at launch";
+  // Side by side while the widest row of tracks fits the canvas; stacked in one column otherwise,
+  // so nothing scrolls sideways or clips at any width (DESIGN.md, Layout).
+  // A track's drawn width side by side: its node, or its row of children, each with 12px either side,
+  // so every level of a chain adds 24px (review bot on 7401eb2).
+  const span = (t: TrackDefinition, depth = 0): number => (depth > tracks.length ? NODE_WIDTH : Math.max(NODE_WIDTH, childrenOf(t.id).reduce((n, c) => n + span(c, depth + 1) + NODE_GAP, 0)));
+  const needed = roots.reduce((n, t) => n + span(t) + NODE_GAP, 0) + 16;
+  const area = useRef<HTMLDivElement>(null);
+  const width = useWidth(area);
+  const stacked = width !== null && needed > width;
+  const row = "flex justify-center";
+  const joined = JOINED;
+  const afterLabel = (t: TrackDefinition) => `after · ${t.start.kind === "after" ? days(t.start.delayDays) : ""}`;
+  const node = (t: TrackDefinition) => <TrackNode track={t} def={editor.draft} selected={selectedId === t.id} blockers={editor.view.launch.blockers} launched={editor.launched} onSelect={() => onSelect(t.id)} />;
+  /**
+   * Stacked (council on 10121d3, item 2): an outline of the stored arrangement. Each track sits under
+   * the track it starts after, indented, on a connector line drawn down from that track; tracks that
+   * start at the same point share an indent and a line, so together never reads as a chain.
+   */
+  // Nodes narrow with each level, down to NODE_MIN; a level that would make them narrower is not
+  // indented further: its tracks sit at their parent's indent, and their label names the parent
+  // (review bot on 7401eb2). So nothing crosses the panel at any width or depth.
+  const levels = Math.max(1, Math.floor(((width ?? 0) - 24 - NODE_MIN) / OUTLINE_INDENT));
+  const afterNamed = (parent: TrackDefinition) => (t: TrackDefinition) => `after ${trackName(editor.draft, parent)} · ${t.start.kind === "after" ? days(t.start.delayDays) : ""}`;
+  const outline = (list: readonly TrackDefinition[], label: (t: TrackDefinition) => string, depth: number, name: string): ReactNode => {
+    const indented = depth < levels;
+    return (
+      <ul aria-label={name} data-outline={indented ? "indented" : "named"} className={`flex min-w-0 flex-col gap-3 self-stretch pt-2 ${indented ? "ml-[11px] border-l-[1.5px] border-line-strong pl-3" : ""}`}>
+        {list.map((t) => {
+          const children = depth > tracks.length ? [] : childrenOf(t.id);
+          return (
+            <li key={t.id} className="flex min-w-0 flex-col items-start gap-1.5">
+              <Pill>{label(t)}</Pill>
+              {node(t)}
+              {children.length > 0 && outline(children, depth + 1 < levels ? afterLabel : afterNamed(t), depth + 1, `Tracks after ${trackName(editor.draft, t)}`)}
+            </li>
+          );
+        })}
+      </ul>
+    );
+  };
+  const branch = (track: TrackDefinition, label: string, depth: number): ReactNode => {
+    const children = depth > tracks.length ? [] : childrenOf(track.id);
+    return (
+      <div className="flex flex-col items-center">
+        <span className="h-3 border-l-[1.5px] border-line-strong" aria-hidden="true" />
+        <Pill>{label}</Pill>
+        <span className="h-4 border-l-[1.5px] border-line-strong" aria-hidden="true" />
+        {node(track)}
+        {children.length > 0 && (
+          <>
+            <span className="h-4 border-l-[1.5px] border-line-strong" aria-hidden="true" />
+            <ul aria-label={`Tracks after ${trackName(editor.draft, track)}`} className={row}>
+              {children.map((c) => (
+                <li key={c.id} className={joined}>
+                  {branch(c, afterLabel(c), depth + 1)}
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </div>
+    );
+  };
   return (
-    <div data-testid="canvas" className={`flex min-w-0 flex-col rounded-box border border-line bg-raised bg-[radial-gradient(var(--color-line-strong)_1px,transparent_1px)] bg-[length:18px_18px] h-[max(470px,calc(100dvh-306px))]`}>
+    <div data-testid="canvas" data-layout={stacked ? "stacked" : "row"} className={`flex min-w-0 flex-col rounded-box border border-line bg-raised bg-[radial-gradient(var(--color-line-strong)_1px,transparent_1px)] bg-[length:18px_18px] h-[max(470px,calc(100dvh-306px))]`}>
       <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
-        <p id="later-tracks" className="max-w-[56ch] text-[12.5px] text-muted">
-          {LATER}
+        <p className="flex items-center gap-2 text-[12.5px] text-muted">
+          <span className="w-4 border-t-[1.5px] border-line-strong" aria-hidden="true" />
+          together or after
         </p>
-        <button type="button" className="btn btn-sm gap-1.5 border-line-strong bg-base-100 font-medium" disabled aria-describedby="later-tracks">
+        {!editor.launched && <AddTrackMenu disabled={editor.locked} onAdd={onAdd} />}
+      </div>
+      {/* A tree, centred, while the tracks fit side by side; an outline when they would not. Launch
+          stays in view as the canvas scrolls. */}
+      <div ref={area} className="min-h-0 flex-1 overflow-auto px-1 pb-10 pt-4">
+        {stacked ? (
+          <div className="flex min-w-0 flex-col items-start px-3">
+            <span data-testid="launch-point" className="sticky top-0 z-[1] rounded-full bg-base-content px-3.5 py-1 text-[12.5px] font-semibold text-base-100">
+              Launch
+            </span>
+            {outline(roots, () => rootLabel, 0, "Tracks that start at launch")}
+          </div>
+        ) : (
+          <div className="mx-auto flex w-max flex-col items-center">
+            <span data-testid="launch-point" className="sticky top-0 z-[1] rounded-full bg-base-content px-3.5 py-1 text-[12.5px] font-semibold text-base-100">
+              Launch
+            </span>
+            <span className="h-4 border-l-[1.5px] border-line-strong" aria-hidden="true" />
+            <ul aria-label="Tracks that start at launch" className={row}>
+              {roots.map((t) => (
+                <li key={t.id} className={joined}>
+                  {branch(t, rootLabel, 0)}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TrackNode({ track, def, selected, blockers, launched, onSelect }: { track: TrackDefinition; def: CampaignDefinition; selected: boolean; blockers: readonly LaunchBlocker[]; launched: boolean; onSelect: () => void }) {
+  const steps = liveSteps(track);
+  const issues = launched ? 0 : trackIssues(track, blockers);
+  const title = trackTitle(def, track);
+  return (
+    <button
+      id={nodeId(track.id)}
+      type="button"
+      aria-pressed={selected}
+      aria-label={`${title}: ${trackSummary(track)}${issues > 0 ? `, ${issues} to fix` : ""}. Starts ${startsText(def, track)}. ${selected ? "Close" : "Open"} it in the inspector.`}
+      onClick={onSelect}
+      className={`flex w-[230px] max-w-full cursor-pointer flex-col gap-[3px] rounded-[11px] border bg-base-100 px-3 pb-3 pt-2.5 text-left hover:border-ink-2 ${
+        selected ? "border-base-content shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-base-content)_14%,transparent)]" : issues > 0 ? "border-crit" : "border-line-strong"
+      }`}
+    >
+      <span className="flex items-center gap-1.5 text-[12px] font-medium text-muted">
+        <Icon name={track.channel === "call" ? "call" : track.channel === "sms" ? "sms" : "email"} className="size-[15px]" />
+        {track.channel === "call" ? "Phone" : track.channel === "sms" ? "SMS" : "Email"}
+        {issues > 0 && <span className="ml-auto flex items-center gap-1 font-semibold text-crit before:size-[7px] before:rounded-full before:bg-current before:content-['']">{issues} to fix</span>}
+      </span>
+      <span className="text-[14.5px] font-semibold leading-[1.3]">{title}</span>
+      <span className="text-[12.5px] text-muted">{trackSummary(track)}</span>
+      <span className="mt-[5px] flex gap-[3px]" aria-hidden="true">
+        {steps.map((s) => (
+          <i key={s.id} className={`h-1 flex-1 rounded-sm ${s.body.trim() || track.channel === "call" ? "bg-line-strong" : "shadow-[inset_0_0_0_1px_var(--color-crit)]"}`} />
+        ))}
+      </span>
+    </button>
+  );
+}
+
+/**
+ * Add track: a menu button (WAI-ARIA menu button pattern; council on 10121d3, item 4). Enter, Space or
+ * Down opens it on the first item and Up on the last; Up, Down, Home and End move between items; Escape
+ * closes it and returns focus to the button; Tab, a click outside or focus leaving closes it. Phone
+ * tracks arrive later: that item is disabled and says so.
+ */
+function AddTrackMenu({ disabled, onAdd }: { disabled: boolean; onAdd: (channel: "email" | "sms") => void }) {
+  const [focusIndex, setFocusIndex] = useState<number | null>(null);
+  const open = focusIndex !== null;
+  const menuId = useId();
+  const buttonId = useId();
+  const root = useRef<HTMLDivElement>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  const items = useRef<(HTMLButtonElement | null)[]>([]);
+  const entries = [
+    { key: "email", label: "Email track", icon: "email" as const, enabled: true },
+    { key: "sms", label: "SMS track", icon: "sms" as const, enabled: true },
+    { key: "call", label: "Phone track", icon: "call" as const, enabled: false },
+  ];
+  useEffect(() => {
+    if (focusIndex !== null) items.current[focusIndex]?.focus();
+  }, [focusIndex]);
+  useEffect(() => {
+    if (!open) return;
+    const outside = (event: PointerEvent) => {
+      if (root.current && !root.current.contains(event.target as Node)) setFocusIndex(null);
+    };
+    document.addEventListener("pointerdown", outside);
+    return () => document.removeEventListener("pointerdown", outside);
+  }, [open]);
+  const close = (refocus: boolean) => {
+    setFocusIndex(null);
+    if (refocus) button.current?.focus();
+  };
+  const choose = (entry: (typeof entries)[number]) => {
+    if (!entry.enabled || entry.key === "call") return;
+    setFocusIndex(null);
+    onAdd(entry.key as "email" | "sms");
+  };
+  return (
+    <div
+      ref={root}
+      className="relative"
+      onBlur={(e) => {
+        if (open && !root.current?.contains(e.relatedTarget)) setFocusIndex(null);
+      }}
+    >
+      <button
+        ref={button}
+        id={ADD_TRACK_ID}
+        type="button"
+        className="btn btn-sm gap-1.5 border-line-strong bg-base-100 font-medium"
+        disabled={disabled}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
+        onClick={() => setFocusIndex(open ? null : 0)}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setFocusIndex(0);
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            setFocusIndex(entries.length - 1);
+          }
+        }}
+      >
+        <span id={buttonId} className="flex items-center gap-1.5">
           <Icon name="plus" className="size-4" />
           Add track
-        </button>
-      </div>
-      <div className="flex min-h-0 flex-1 flex-col items-center overflow-auto px-4 pb-10 pt-4">
-        <span className="rounded-full bg-base-content px-3.5 py-1 text-[12.5px] font-semibold text-base-100">Launch</span>
-        <span className="h-5 border-l-[1.5px] border-line-strong" aria-hidden="true" />
-        <span className="rounded-full border border-line-strong bg-base-100 px-2 text-[12px] text-ink-2">{editor.launched ? "at launch" : "starts at launch"}</span>
-        <span className="h-5 border-l-[1.5px] border-line-strong" aria-hidden="true" />
-        <button
-          ref={node}
-          type="button"
-          aria-pressed={selected}
-          aria-label={`Email track: ${trackSummary(track)}${issues > 0 ? `, ${issues} to fix` : ""}. ${selected ? "Close" : "Open"} it in the inspector.`}
-          onClick={onSelect}
-          className={`flex w-[250px] max-w-full cursor-pointer flex-col gap-[3px] rounded-[11px] border bg-base-100 px-3 pb-3 pt-2.5 text-left hover:border-ink-2 ${
-            selected ? "border-base-content shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-base-content)_14%,transparent)]" : issues > 0 ? "border-crit" : "border-line-strong"
-          }`}
+        </span>
+      </button>
+      {open && (
+        <ul
+          id={menuId}
+          role="menu"
+          aria-labelledby={buttonId}
+          className="absolute right-0 top-[calc(100%+6px)] z-10 flex w-[250px] flex-col gap-0.5 rounded-field border border-line-strong bg-base-100 p-1.5"
+          onKeyDown={(e) => {
+            const last = entries.length - 1;
+            const at = focusIndex;
+            const move = (to: number) => {
+              e.preventDefault();
+              setFocusIndex(to);
+            };
+            if (e.key === "ArrowDown") move(at === last ? 0 : at + 1);
+            else if (e.key === "ArrowUp") move(at === 0 ? last : at - 1);
+            else if (e.key === "Home") move(0);
+            else if (e.key === "End") move(last);
+            else if (e.key === "Escape") {
+              e.preventDefault();
+              close(true);
+            } else if (e.key === "Tab") setFocusIndex(null);
+          }}
         >
-          <span className="flex items-center gap-1.5 text-[12px] font-medium text-muted">
-            <Icon name="email" className="size-[15px]" />
-            Email
-            {issues > 0 && <span className="ml-auto flex items-center gap-1 font-semibold text-crit before:size-[7px] before:rounded-full before:bg-current before:content-['']">{issues} to fix</span>}
-          </span>
-          <span className="text-[14.5px] font-semibold leading-[1.3]">Email track</span>
-          <span className="text-[12.5px] text-muted">{trackSummary(track)}</span>
-          <span className="mt-[5px] flex gap-[3px]" aria-hidden="true">
-            {steps.map((s) => (
-              <i key={s.id} className={`h-1 flex-1 rounded-sm ${s.body.trim() ? "bg-line-strong" : "shadow-[inset_0_0_0_1px_var(--color-crit)]"}`} />
-            ))}
-          </span>
-        </button>
-      </div>
+          {entries.map((entry, i) => (
+            <li key={entry.key} role="none">
+              <button
+                ref={(el) => {
+                  items.current[i] = el;
+                }}
+                type="button"
+                role="menuitem"
+                tabIndex={focusIndex === i ? 0 : -1}
+                aria-disabled={entry.enabled ? undefined : true}
+                aria-describedby={entry.enabled ? undefined : "phone-later"}
+                className={`flex w-full flex-col items-start rounded-[6px] px-2.5 py-2 text-left text-[14px] ${entry.enabled ? "cursor-pointer hover:bg-raised" : "cursor-default text-muted"}`}
+                onClick={() => choose(entry)}
+              >
+                <span className="flex items-center gap-2">
+                  <Icon name={entry.icon} className="size-4 text-muted" />
+                  {entry.label}
+                </span>
+                {!entry.enabled && (
+                  <span id="phone-later" className="pl-6 text-[12.5px] text-muted">
+                    {PHONE_LATER}
+                  </span>
+                )}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -207,31 +511,36 @@ interface InspectorProps {
   onFocusStep: (stepId: string) => void;
   onLoadedStored: () => void;
   onClose: () => void;
+  onRemoved: () => void;
 }
 
-function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, onOpenStep, onFocusStep, onLoadedStored, onClose }: InspectorProps) {
+function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, onOpenStep, onFocusStep, onLoadedStored, onClose, onRemoved }: InspectorProps) {
   const steps = liveSteps(track);
   const titleId = useId();
+  const sms = track.channel === "sms";
+  const noun = STEP_NOUN[sms ? "sms" : "email"];
   // One lock from the editor state, read by every authoring control (PR 41 council, items 9 and 12).
   const locked = editor.locked;
+  const [removal, setRemoval] = useState<string | null>(null);
   const changeTrack = (change: (t: TrackDefinition) => TrackDefinition) =>
     editor.update((d: CampaignDefinition) => ({ ...d, tracks: d.tracks.map((t) => (t.id === track.id ? change(t) : t)) }));
   const changeStep = (stepId: string, change: (s: StepDefinition) => StepDefinition) => changeTrack((t) => ({ ...t, steps: t.steps.map((s) => (s.id === stepId ? change(s) : s)) }));
+  const name = trackName(editor.draft, track);
   return (
     <aside aria-labelledby={titleId} data-testid="inspector" className={`flex min-w-0 flex-col rounded-box border border-line bg-base-100 min-[1020px]:h-[max(470px,calc(100dvh-306px))]`}>
       <div className="flex items-start justify-between gap-2.5 border-b border-line px-[18px] pb-3.5 pt-4">
         <div className="flex flex-wrap items-center gap-2">
           <h2 id={titleId} className="text-[18px]">
-            Email track
+            {trackTitle(editor.draft, track)}
           </h2>
           <span className="inline-flex items-center gap-1.5 rounded-full border border-line px-2 py-0.5 text-[12.5px] text-ink-2">
-            <Icon name="email" className="size-3.5" />
+            <Icon name={sms ? "sms" : "email"} className="size-3.5" />
             {trackSummary(track)}
           </span>
         </div>
         <div className="flex items-center gap-2">
           <SaveStatus editor={editor} />
-          <button type="button" className="btn btn-sm btn-ghost px-1.5" onClick={onClose} aria-label="Close the email track">
+          <button type="button" className="btn btn-sm btn-ghost px-1.5" onClick={onClose} aria-label={`Close ${name}`}>
             <Icon name="close" className="size-4" />
           </button>
         </div>
@@ -254,11 +563,12 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
           </p>
         )}
         {factsFailed && <ErrorState title="Lead counts for the fallbacks didn’t load." message="The copy still saves." onRetry={onRetryFacts} />}
-        {/* Only the editing controls lock on a running campaign; every email still opens. */}
-        <div role="group" aria-label="Emails" className="flex min-w-0 flex-col">
+        {/* Only the editing controls lock on a running campaign; every message still opens. */}
+        <div role="group" aria-label={sms ? "Texts" : "Emails"} className="flex min-w-0 flex-col">
           {steps.map((step, i) => (
             <StepBlock
               key={step.id}
+              channel={sms ? "sms" : "email"}
               step={step}
               index={i}
               steps={steps}
@@ -269,7 +579,7 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
               onChange={(change) => changeStep(step.id, change)}
               locked={locked}
               onRemove={() => {
-                // Focus goes to the email that takes this one's place, or the one before the last.
+                // Focus goes to the message that takes this one's place, or the one before the last.
                 const survivor = steps[i + 1] ?? steps[i - 1];
                 changeTrack((t) => removeStep(t, step.id));
                 if (survivor) onFocusStep(survivor.id);
@@ -283,17 +593,87 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
                 className="btn btn-sm gap-1.5 border-line-strong bg-base-100 font-medium"
                 onClick={() => {
                   const added = newStep(steps.length === 0);
-                  changeTrack((t) => ({ ...t, steps: [...t.steps, added] }));
+                  changeTrack((t) => ({ ...t, steps: [...t.steps, sms ? { ...added, threading: "new_subject" } : added] }));
                   onOpenStep(added.id);
                 }}
               >
                 <Icon name="plus" className="size-4" />
-                {steps.length === 0 ? "Add the first email" : "Add follow-up"}
+                {steps.length === 0 ? `Add the first ${noun.toLowerCase()}` : "Add follow-up"}
               </button>
             </div>
           )}
         </div>
         <TimingAndSender track={track} editor={editor} onWindow={(window) => changeTrack((t) => ({ ...t, window }))} />
+        {!editor.launched && (
+          <div className="flex flex-col items-start gap-1.5 border-t border-line pt-3.5">
+            <button
+              type="button"
+              className="btn btn-sm border-line-strong bg-base-100 font-medium"
+              disabled={locked}
+              aria-describedby={removal ? `${titleId}-removal` : undefined}
+              onClick={() => {
+                const out = arrange(editor.draft, { kind: "remove", trackId: track.id });
+                if (!out.ok) {
+                  setRemoval(out.reason);
+                  return;
+                }
+                editor.update((d) => {
+                  const again = arrange(d, { kind: "remove", trackId: track.id });
+                  return again.ok ? again.definition : d;
+                });
+                onRemoved();
+              }}
+            >
+              Remove {name.replace(/^the /, "this ")}
+            </button>
+            {removal && (
+              <p id={`${titleId}-removal`} role="alert" className="text-[13px] font-medium text-crit">
+                {removal}
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+    </aside>
+  );
+}
+
+/**
+ * A phone track, defined over HTTP since ticket 14a: shown truthfully, and not editable here until
+ * the phone track's editor arrives. Other tracks may start after it; it holds them until its call is
+ * logged (ADR 0003, ticket 13b).
+ */
+function PhoneTrackPanel({ track, editor, onClose }: { track: TrackDefinition; editor: SequenceEditor; onClose: () => void }) {
+  const titleId = useId();
+  const name = trackName(editor.draft, track);
+  const days = WEEK.filter((d) => track.window.some((w) => w.day === d.day)).map((d) => d.name);
+  const hours = windowHours(track.window);
+  return (
+    <aside aria-labelledby={titleId} data-testid="inspector" className="flex min-w-0 flex-col rounded-box border border-line bg-base-100 min-[1020px]:h-[max(470px,calc(100dvh-306px))]">
+      <div className="flex items-start justify-between gap-2.5 border-b border-line px-[18px] pb-3.5 pt-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 id={titleId} className="text-[18px]">
+            {trackTitle(editor.draft, track)}
+          </h2>
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-line px-2 py-0.5 text-[12.5px] text-ink-2">
+            <Icon name="call" className="size-3.5" />
+            {trackSummary(track)}
+          </span>
+        </div>
+        <button type="button" className="btn btn-sm btn-ghost px-1.5" onClick={onClose} aria-label={`Close ${name}`}>
+          <Icon name="close" className="size-4" />
+        </button>
+      </div>
+      <div className="flex flex-col gap-[18px] px-[18px] pb-5 pt-4">
+        <p className="rounded-field bg-raised px-3 py-2 text-[13.5px] text-ink-2">Phone tracks are edited with a later release. This one is shown as it was set up: one call, placed on your list when it is due. The tracks after it start once you log the call.</p>
+        <dl className="grid grid-cols-[112px_minmax(0,1fr)] items-baseline gap-x-3.5 gap-y-[9px] text-[14px] max-[480px]:grid-cols-1">
+          <dt className="text-[13px] text-muted">Starts</dt>
+          <dd>{capitalise(startsText(editor.draft, track))}</dd>
+          <dt className="text-[13px] text-muted">Calling hours</dt>
+          <dd>
+            {days.join(", ") || "No days"}, {hourLabel(hours.start)} to {hourLabel(hours.end)}, the lead’s local time
+          </dd>
+        </dl>
       </div>
     </aside>
   );
@@ -309,6 +689,7 @@ function SaveStatus({ editor }: { editor: SequenceEditor }) {
 }
 
 interface StepProps {
+  channel: "email" | "sms";
   step: StepDefinition;
   index: number;
   steps: readonly StepDefinition[];
@@ -321,15 +702,17 @@ interface StepProps {
   locked: boolean;
 }
 
-function StepBlock({ step, index, steps, open, facts, editor, onToggle, onChange, onRemove, locked }: StepProps) {
-  const name = `Email ${index + 1}`;
+function StepBlock({ channel, step, index, steps, open, facts, editor, onToggle, onChange, onRemove, locked }: StepProps) {
+  const sms = channel === "sms";
+  const noun = STEP_NOUN[channel];
+  const name = `${noun} ${index + 1}`;
   const first = index === 0;
   const issues = stepBlockers(step, editor.view.launch.blockers).length;
   const bodyId = useId();
   const textarea = useRef<HTMLTextAreaElement>(null);
   const [waitText, setWaitText] = useState<string | null>(null);
   const threadSubject = threadSubjectOf(steps, index);
-  const summary = first ? step.subject || "No subject yet" : step.threading === "continue_thread" ? "Continues the thread" : `New subject: ${step.subject || "none yet"}`;
+  const summary = sms ? step.body.trim() || "No message yet" : first ? step.subject || "No subject yet" : step.threading === "continue_thread" ? "Continues the thread" : `New subject: ${step.subject || "none yet"}`;
 
   const insertField = (field: string) => {
     const el = textarea.current;
@@ -367,13 +750,13 @@ function StepBlock({ step, index, steps, open, facts, editor, onToggle, onChange
               aria-label={`Days to wait before ${name}`}
             />
           </label>
-          days after Email {index}
+          days after {noun} {index}
         </div>
       )}
       <div className={`rounded-field border bg-base-100 ${open ? "border-line-strong" : "border-line"} ${first ? "" : ""}`}>
         <button id={`step-toggle-${step.id}`} type="button" className="flex w-full cursor-pointer items-center gap-2 px-3 py-2.5 text-left" aria-expanded={open} aria-controls={bodyId} onClick={onToggle}>
           <span className="text-[14px] font-semibold">{name}</span>
-          {!open && <span className="min-w-0 flex-1 truncate text-[13px] text-muted">{summary}</span>}
+          {!open && <span className="line-clamp-1 min-w-0 flex-1 text-[13px] text-muted [overflow-wrap:anywhere]">{summary}</span>}
           {open && <span className="flex-1" />}
           {issues > 0 && <span className="whitespace-nowrap text-[12.5px] font-semibold text-crit">{issues} to fix</span>}
           <Icon name="chevron" className={`size-4 text-muted ${open ? "rotate-180" : ""}`} />
@@ -381,7 +764,7 @@ function StepBlock({ step, index, steps, open, facts, editor, onToggle, onChange
         {open && (
           <fieldset id={bodyId} disabled={locked} className="flex min-w-0 flex-col gap-2.5 px-3 pb-3.5 pt-0.5">
             <legend className="sr-only">{name}</legend>
-            {!first && (
+            {!first && !sms && (
               <div role="radiogroup" aria-label={`How ${name} is sent`} className="flex flex-wrap gap-1.5">
                 {(["continue_thread", "new_subject"] as const).map((mode) => (
                   <label
@@ -396,7 +779,7 @@ function StepBlock({ step, index, steps, open, facts, editor, onToggle, onChange
                 ))}
               </div>
             )}
-            {first || step.threading === "new_subject" ? (
+            {sms ? null : first || step.threading === "new_subject" ? (
               <label className="flex items-center gap-2 text-[14px]">
                 <span className="w-[54px] flex-none text-[13px] text-muted">Subject</span>
                 <input
@@ -416,15 +799,24 @@ function StepBlock({ step, index, steps, open, facts, editor, onToggle, onChange
             )}
             <textarea
               ref={textarea}
-              className={`textarea min-h-[150px] w-full [field-sizing:content] border-line-strong text-[14px] leading-[1.55] ${step.body.trim() ? "" : "border-crit bg-crit-soft/40"}`}
+              id={`body-${step.id}`}
+              className={`textarea ${sms ? "min-h-[96px]" : "min-h-[150px]"} w-full [field-sizing:content] border-line-strong text-[14px] leading-[1.55] ${step.body.trim() ? "" : "border-crit bg-crit-soft/40"}`}
               value={step.body}
-              placeholder="Write this email. Launch is blocked while it’s empty."
+              placeholder={`Write this ${noun.toLowerCase()}. Launch is blocked while it’s empty.`}
               onChange={(e) => onChange((s) => ({ ...s, body: e.target.value }))}
-              aria-label={`${name} copy`}
+              aria-label={`${name} ${sms ? "message" : "copy"}`}
+              aria-describedby={sms ? `${bodyId}-count` : undefined}
             />
-            <MergeFieldMenu onPick={insertField} />
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <MergeFieldMenu onPick={insertField} />
+              {sms && (
+                <span id={`${bodyId}-count`} className="text-[12.5px] text-muted">
+                  {step.body.length.toLocaleString("en-GB")} {step.body.length === 1 ? "character" : "characters"}, before merge fields are filled in
+                </span>
+              )}
+            </div>
             {/* Once launched the counts would leave out leads that ended, so none is shown (PR 41 council, item 4). */}
-            <Fallbacks step={step} facts={locked ? null : facts} onChange={onChange} />
+            <Fallbacks step={step} noun={noun} facts={locked ? null : facts} onChange={onChange} />
             {steps.length > 1 && !locked && (
               <div>
                 <button type="button" className="btn btn-sm btn-ghost px-2 font-medium text-muted" onClick={onRemove}>
@@ -470,11 +862,11 @@ function MergeFieldMenu({ onPick }: { onPick: (field: string) => void }) {
   );
 }
 
-function Fallbacks({ step, facts, onChange }: { step: StepDefinition; facts: BeforeLaunchView | null; onChange: (change: (s: StepDefinition) => StepDefinition) => void }) {
+function Fallbacks({ step, noun, facts, onChange }: { step: StepDefinition; noun: string; facts: BeforeLaunchView | null; onChange: (change: (s: StepDefinition) => StepDefinition) => void }) {
   const fields = fieldsOf(step);
   if (fields.length === 0) return null;
   return (
-    <ul className="flex flex-col gap-1.5 text-[13px]" aria-label="Merge fields in this email">
+    <ul className="flex flex-col gap-1.5 text-[13px]" aria-label={`Merge fields in this ${noun.toLowerCase()}`}>
       {fields.map((field) => {
         const missing = facts?.mergeFields.find((f) => f.field === field)?.leadsMissing ?? null;
         const fallback = fallbackIn(step, field);
@@ -515,20 +907,23 @@ function TimingAndSender({ track, editor, onWindow }: { track: TrackDefinition; 
   const days = track.window.map((w) => w.day);
   const locked = editor.locked;
   const zones = timeZones(editor.draft.timezone);
-  const accounts = editor.view.accounts.filter((a) => a.channel === "email");
+  const sms = track.channel === "sms";
+  const accounts = editor.view.accounts.filter((a) => a.channel === (sms ? "sms" : "email"));
   return (
     <section aria-label="Timing and sender" className="flex flex-col gap-2">
       <h3 className="text-[13px] font-semibold text-muted">Timing and sender</h3>
       <dl className="grid grid-cols-[112px_minmax(0,1fr)] items-baseline gap-x-3.5 gap-y-[9px] text-[14px] max-[480px]:grid-cols-1">
         <dt className="text-[13px] text-muted">Starts</dt>
-        <dd>At launch</dd>
+        <dd className="min-w-0">
+          <StartsControl track={track} editor={editor} />
+        </dd>
         <dt className="text-[13px] text-muted">Sends from</dt>
         <dd className="min-w-0">
           {accounts.length === 0 ? (
             <>
-              <span className="font-semibold text-crit">No connected sender inbox.</span>
-              <ProviderReason />
-              <div className="text-[12.5px] text-muted">This track can’t send until an inbox is connected. Launch is blocked.</div>
+              <span className="font-semibold text-crit">{sms ? "No connected SMS number." : "No connected sender inbox."}</span>
+              {sms ? <SmsProviderReason /> : <ProviderReason />}
+              <div className="text-[12.5px] text-muted">This track can’t send until {sms ? "a number" : "an inbox"} is connected. Launch is blocked.</div>
             </>
           ) : (
             <>
@@ -536,12 +931,20 @@ function TimingAndSender({ track, editor, onWindow }: { track: TrackDefinition; 
                 {accounts.map((a) => (
                   <li key={a.id} className="[overflow-wrap:anywhere]">
                     {a.label}
+                    {sms && <span className="text-muted"> · at most {a.capacity} texts a day across campaigns</span>}
                     {!a.healthy && <span className="text-crit"> {CANNOT_SEND}</span>}
                   </li>
                 ))}
               </ul>
-              <div className="text-[12.5px] text-muted">Each lead keeps one inbox for the whole campaign.</div>
+              <div className="text-[12.5px] text-muted">Each lead keeps one {sms ? "number" : "inbox"} for the whole campaign.</div>
             </>
+          )}
+          {sms && (
+            <ul className="mt-1.5 flex list-disc flex-col gap-0.5 pl-4 text-[12.5px] text-muted" aria-label="What limits texts">
+              <li>Texts go only to a decision maker’s own mobile. A lead without one, and every company lead, skips this track, and the tracks after it start.</li>
+              <li>A text has no subject.</li>
+              <li>A mobile already in another campaign’s conversation with a number is texted from another number. If none is free, this track waits for that lead and shows in Needs attention.</li>
+            </ul>
           )}
         </dd>
         <dt className="text-[13px] text-muted">Sending window</dt>
@@ -609,6 +1012,99 @@ function TimingAndSender({ track, editor, onWindow }: { track: TrackDefinition; 
   );
 }
 
+/**
+ * How a track starts: at launch, or after another track has finished all its steps, plus a delay in
+ * days. Every change goes through the arrangement rule; a refused one (a cycle) is said beside the
+ * control, which keeps focus, and the draft does not change (ADR 0003, ticket 13b).
+ */
+function StartsControl({ track, editor }: { track: TrackDefinition; editor: SequenceEditor }) {
+  const [refusal, setRefusal] = useState<string | null>(null);
+  const [delayText, setDelayText] = useState<string | null>(null);
+  const refusalId = useId();
+  const others = liveMain(editor.draft).filter((t) => t.id !== track.id);
+  const run = (op: ArrangeOperation): boolean => {
+    const out = arrange(editor.draft, op);
+    if (!out.ok) {
+      setRefusal(out.reason);
+      return false;
+    }
+    setRefusal(null);
+    editor.update((d) => {
+      const again = arrange(d, op);
+      return again.ok ? again.definition : d;
+    });
+    return true;
+  };
+  if (editor.launched) return <>{capitalise(startsText(editor.draft, track))}</>;
+  const after = track.start.kind === "after" ? track.start : null;
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13.5px]">
+        <select
+          aria-label="How this track starts"
+          aria-describedby={refusal ? refusalId : undefined}
+          disabled={editor.locked}
+          className="select select-sm w-auto max-w-full border-line-strong"
+          value={after ? after.trackId : "entry"}
+          onChange={(e) => {
+            const value = e.target.value;
+            setDelayText(null);
+            run({ kind: "start", trackId: track.id, start: value === "entry" ? { kind: "entry" } : { kind: "after", trackId: value, delayDays: after?.delayDays ?? 0 } });
+          }}
+        >
+          <option value="entry">At launch</option>
+          {others.map((o) => (
+            <option key={o.id} value={o.id}>
+              After {trackName(editor.draft, o)}
+            </option>
+          ))}
+        </select>
+        {after && (
+          <label className="flex items-center gap-1.5">
+            finishes, plus
+            <input
+              type="number"
+              min={0}
+              step={1}
+              inputMode="numeric"
+              disabled={editor.locked}
+              className="input input-sm w-[62px] border-line-strong text-right"
+              value={delayText ?? String(after.delayDays)}
+              aria-label="Days after that track finishes"
+              aria-describedby={refusal ? refusalId : undefined}
+              onChange={(e) => {
+                setDelayText(e.target.value);
+                const n = e.target.value.trim() === "" ? Number.NaN : Number(e.target.value);
+                run({ kind: "delay", trackId: track.id, days: n });
+              }}
+              onBlur={() => {
+                setDelayText(null);
+                if (refusal?.startsWith("The delay")) setRefusal(null);
+              }}
+            />
+            days
+          </label>
+        )}
+      </div>
+      {refusal && (
+        <p id={refusalId} role="alert" className="text-[13px] font-medium text-crit">
+          {refusal}
+        </p>
+      )}
+      {after && !refusal && <p className="text-[12.5px] text-muted">Counted from when that track has sent its last step, or was skipped for the lead.</p>}
+    </div>
+  );
+}
+
+const capitalise = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+
+/** Why no SMS number is connected, from GET /api/sms-provider, in the one wording the launch blocker uses too. */
+function SmsProviderReason() {
+  const { result } = useApi<SmsProviderStatus>("/api/sms-provider");
+  const why = whyNoSmsNumber(result.state === "ready" ? result.data : null);
+  return why ? <div className="text-[12.5px] text-ink-2">{why}</div> : null;
+}
+
 /** One line on why no inbox is connected, from GET /api/email-provider; nothing if it is unknown. */
 function ProviderReason() {
   const { result } = useApi<EmailProviderStatus>("/api/email-provider");
@@ -624,7 +1120,7 @@ function timeZones(current: string): string[] {
 }
 
 export function Pill({ children }: { children: ReactNode }) {
-  return <span className="rounded-full border border-line-strong bg-base-100 px-2 text-[12px] text-ink-2">{children}</span>;
+  return <span className="max-w-full rounded-full border border-line-strong bg-base-100 px-2 text-[12px] text-ink-2">{children}</span>;
 }
 
 /**

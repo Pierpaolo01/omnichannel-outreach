@@ -41,6 +41,11 @@ export function parsePhone(raw: string, country: string | null): PhoneNumber | n
 }
 
 /** A stored phone key shown for reading. Keys that are not E.164 show as they are. */
+/** Every international number written inside a text (a sender's label, say), shown as `displayPhone` shows it. */
+export function displayPhonesIn(text: string): string {
+  return text.replace(/\+\d{8,15}\b/g, (n) => displayPhone(n));
+}
+
 export function displayPhone(key: string): string {
   if (!key.startsWith("+")) return key;
   const parsed = parsePhoneNumberFromString(key);

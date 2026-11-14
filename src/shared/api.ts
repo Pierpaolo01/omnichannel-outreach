@@ -181,6 +181,8 @@ export type {
 } from "../domain/sequence/definition.ts";
 export type { WindowRule } from "../domain/sequence/clock.ts";
 export type { LaunchBlocker } from "../domain/sequence/blockers.ts";
+export type { TrackLabel } from "./track-label.ts";
+import type { TrackLabel } from "./track-label.ts";
 
 /** A sender account the engine may send from, as the provider reports it. */
 export interface SenderAccountViewApi {
@@ -361,47 +363,65 @@ export interface BeforeLaunchView {
 }
 
 export interface LoadProjectionView {
-  /** The leads the email track would send to; the rest have no email and skip it. */
-  readonly leadsWithEmail: number;
+  /**
+   * This campaign's leads some live track can reach: they would start. Null when nothing is
+   * projected (see `cannotProject` and `noSender`).
+   */
+  readonly leadsToStart: number | null;
+  /**
+   * Leads only a phone track can reach. A call is a task on the user's list, not a send: the estimate
+   * counts emails and texts only, and assumes no call outcome is logged (ADR 0003, ticket 13b).
+   */
+  readonly onlyCalled: number;
+  /** Every sender account in a live track's pool, on either channel. */
   readonly accounts: readonly {
     readonly id: string;
     readonly label: string;
+    readonly channel: "email" | "sms";
     readonly capacity: number;
-    /** Sends already counted or reserved today on this inbox, across every campaign. */
+    /** Sends already counted or reserved today on this account, across every campaign. */
     readonly usedToday: number;
     /** The most this campaign would send from it on one day. */
     readonly busiestDay: number;
     readonly gapSeconds: number;
   }[];
   /**
-   * Calendar days, counting launch day as day 1, until every lead with an email has had its first
-   * email; null when no connected inbox can send, or not all start within the projection's horizon.
+   * Calendar days, counting launch day as day 1, until every lead some live track can reach has had
+   * its first message on any channel; null when nothing is projected, or not all start within the
+   * projection's horizon.
    */
   readonly daysUntilAllStart: number | null;
   /** Leads that would not have started within the projection's horizon. */
   readonly notStartedWithinHorizon: number;
   readonly horizonDays: number;
   /**
-   * Pool inboxes that cannot send now with no known end: the provider reports them unable to send
-   * (stale, sending off, not active), or the lead quota is held. While any is listed there is no
-   * projection, because none can be honest. A rate limit has an end, and the projection resumes there.
+   * Pool accounts that cannot send now with no known end: the provider reports them unable to send
+   * (stale, sending off, not active, disconnected), or the lead quota is held. While any is listed
+   * there is no projection, because none can be honest. A rate limit has an end, and the projection resumes there.
    */
-  readonly cannotProject: readonly { readonly accountId: string; readonly label: string; readonly reason: "cannot_send" | "quota" }[];
+  readonly cannotProject: readonly {
+    readonly accountId: string;
+    readonly label: string;
+    readonly channel: "email" | "sms";
+    /**
+     * `unsettled_work`: work whose outcome only the provider or the user can settle holds some of its
+     * sends (Needs attention lists it); `reply_being_matched`: a reply to it is being matched to its
+     * lead, which may stop that lead (ADR 0003, ticket 13b).
+     */
+    readonly reason: "cannot_send" | "quota" | "unsettled_work" | "reply_being_matched";
+  }[];
   /**
-   * Another track can change when emails go, which the estimate does not simulate yet (SMS sends
-   * arrive in it with ticket 13b): an SMS track, or a second email track, that does not start after
-   * this campaign's email track, here or in another running campaign on the same inboxes. While set
-   * there is no projection.
-   */
-  readonly otherTracksChangeTiming: "this_campaign" | "other_campaign" | null;
-  /**
-   * Which tracks withhold the figure, and why, whenever `otherTracksChangeTiming` is set: the screen
-   * words its reason from these alone (review bot on 8edc8dd). `campaign` is null for this campaign,
-   * else the running campaign whose tracks they are.
+   * The tracks that withhold the figure, and why, whenever one does (ADR 0003, ticket 13b): a track
+   * whose channel has no connected sender (launch blocker 3), or an email or SMS track that waits,
+   * through its chain, on a phone track, which starts only when the user logs the call. The screen
+   * words any "no figure because" from these alone (`src/web/campaign/withheld.ts`). Null when none does.
    */
   readonly withheldBy: WithheldBy | null;
-  /** The projection counts email only: this campaign's SMS track, which starts after its emails, is left out. */
-  readonly leavesOutSms: boolean;
+  /**
+   * Competing campaigns on these senders where a call can still be logged. The estimate assumes no call
+   * is logged anywhere: a logged call there touches that lead, whose emails and texts then go first.
+   */
+  readonly callsNotCounted: readonly { readonly id: string; readonly name: string }[];
 }
 
 /** Rendered copy, in pieces, so a fallback the lead gets can be shown as one. */
@@ -419,9 +439,22 @@ export interface CopyPreview {
   readonly steps: readonly {
     readonly trackId: string;
     readonly stepId: string;
+    readonly channel: "email" | "sms";
+    /** Its number within its track: Email 2, Text 1. */
     readonly number: number;
-    /** The earliest day it can go, counting the first email as day 1: one plus every wait before it. */
-    readonly day: number;
+    /**
+     * The earliest day it can go for this lead, counting launch day as day 1: its track's start (at
+     * launch, or after the track it follows has finished all its steps, plus the delay) and every
+     * wait before it. Sending windows can move it later.
+     */
+    readonly day: number | null;
+    /**
+     * The phone track this message waits on, through its track's chain, when `day` is null: it goes
+     * only after the user logs that call, so no day can be given (ADR 0003, ticket 13b).
+     */
+    readonly waitsOnCall: string | null;
+    /** This lead lacks the track's channel (no email; no mobile of their own, or a company lead), so the track is skipped and the tracks after it start sooner. */
+    readonly skipped: boolean;
     readonly threading: "new_subject" | "continue_thread";
     /** The subject the step writes; on a continue-thread step, the subject of the thread it continues. */
     readonly subject: readonly CopySegment[];
@@ -433,19 +466,26 @@ export interface CopyPreview {
 
 /** One line of a person's or company lead's timeline (GET /api/people/:id/activity). Newest first. */
 export type ActivityEntry = { readonly campaign: { readonly id: string; readonly name: string }; readonly at: string } & (
-  | {
-      readonly kind: "sent";
-      readonly stepNumber: number;
-      readonly from: string;
-      readonly to: string;
-      readonly copy: { readonly subject: string; readonly body: string } | null;
-    }
-  | { readonly kind: "failed"; readonly stepNumber: number; readonly to: string; readonly reason: string }
-  | { readonly kind: "skipped"; readonly stepNumber: number | null; readonly reason: string }
-  /** A hard bounce the provider reported for an email of this campaign: the address is marked bad. */
-  | { readonly kind: "bounced"; readonly stepNumber: number | null; readonly to: string }
-  /** The track ended because its address is marked bad, with no bounce event of this campaign's: another campaign's bounce, or this campaign's observed before migration 10. */
-  | { readonly kind: "address_bad"; readonly to: string }
+  | ({ readonly channel: "email" | "sms"; readonly track: TrackLabel } & (
+      | {
+          readonly kind: "sent";
+          readonly stepNumber: number;
+          readonly from: string;
+          /** The address, or the mobile grouped for reading. */
+          readonly to: string;
+          /** A text's subject is empty. */
+          readonly copy: { readonly subject: string; readonly body: string } | null;
+        }
+      | { readonly kind: "failed"; readonly stepNumber: number; readonly to: string; readonly reason: string }
+      /** `no_email`, `no_mobile`, `company_lead` (a company lead is never texted, ADR 0003 Q10), `block_list`, or the step's reason. */
+      | { readonly kind: "skipped"; readonly stepNumber: number | null; readonly reason: string }
+      /** A hard bounce, or a number the carrier reported invalid after a text: the address or number is marked bad. */
+      | { readonly kind: "bounced"; readonly stepNumber: number | null; readonly to: string }
+      /** The track ended because its address or number is marked bad, with no bounce event of this campaign's. */
+      | { readonly kind: "address_bad"; readonly to: string }
+      /** The track started after `after`, which was skipped or failed for this lead (ticket 13b). */
+      | { readonly kind: "released"; readonly after: TrackLabel; readonly because: "skipped" | "failed" }
+    ))
   | { readonly kind: "replied"; readonly channel: "email" | "sms" }
   | { readonly kind: "ended"; readonly status: "sequence_finished_no_response" | "finished_no_usable_channel" }
 );
@@ -548,13 +588,17 @@ export interface WithheldTrack {
   /** As the canvas names it: "the phone track", "SMS track 2". */
   readonly label: string;
   /**
-   * `not_after_the_email_track`: it starts with or before the email track; `another_email_track`: a
-   * second email track; `email_track_not_at_launch`: the email track itself starts after another.
+   * `no_sender`: its channel has no connected sender, so its leads and every track after it would
+   * wait; `after_a_phone_track`: an email or SMS track that starts, through its chain, after a phone
+   * track, which finishes only when the user logs its call, which no estimate can know.
    */
-  readonly why: "not_after_the_email_track" | "another_email_track" | "email_track_not_at_launch";
+  readonly why: "no_sender" | "after_a_phone_track";
+  /** For `after_a_phone_track`: the phone track it waits on. */
+  readonly phoneTrack?: string;
 }
 
 export interface WithheldBy {
+  /** Null for this campaign's own tracks; else the competing campaign whose tracks they are (ticket 14a; council on 10121d3). */
   readonly campaign: { readonly id: string; readonly name: string } | null;
   readonly tracks: readonly WithheldTrack[];
 }
