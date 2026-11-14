@@ -26,8 +26,15 @@ export function newEmailTrack(): TrackDefinition {
   return newTrack("email");
 }
 
-/** A new track on `channel`, starting at launch: weekdays from 09:00 to 17:00 in the lead's time, and an empty first message. */
-export function newTrack(channel: "email" | "sms"): TrackDefinition {
+/** The skip limit every new phone track starts with (spec "Unfinished call tasks": default 2). */
+export const DEFAULT_SKIP_LIMIT_DAYS = 2;
+
+/**
+ * A new track on `channel`, starting at launch, with weekdays from 09:00 to 17:00 in the lead's time
+ * (for a phone track, its calling hours): an empty first message, or for a phone track its one call,
+ * which has no copy, and the default skip limit (ADR 0003, ticket 14c).
+ */
+export function newTrack(channel: "email" | "sms" | "call"): TrackDefinition {
   return {
     id: newId("track"),
     channel,
@@ -36,6 +43,7 @@ export function newTrack(channel: "email" | "sms"): TrackDefinition {
     steps: [newStep(true)],
     start: { kind: "entry" },
     removed: false,
+    ...(channel === "call" ? { callSkipLimitDays: DEFAULT_SKIP_LIMIT_DAYS } : {}),
   };
 }
 

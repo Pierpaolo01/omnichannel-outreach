@@ -1,6 +1,7 @@
 /**
  * How the editor arranges a campaign's tracks (ADR 0003, ticket 13b, "The arrangement rule"): four
- * pure operations, each returning the new definition or a refusal in plain words. A refused
+ * pure operations, each returning the new definition or a refusal in plain words. Since ticket 14c
+ * `add` adds phone tracks too: one call, with no copy. A refused
  * operation leaves the draft as it was. From a draft the validator accepts, no operation produces
  * one it refuses (ADR 0003 7.1): a cycle, a start after a missing track, a negative or fractional
  * delay. `arrangement.generated.test.ts` asserts the rule's invariants after every operation.
@@ -9,7 +10,7 @@ import type { CampaignDefinition, StartRule, TrackDefinition } from "../../share
 import { newTrack, trackName } from "./model.ts";
 
 export type ArrangeOperation =
-  | { readonly kind: "add"; readonly channel: "email" | "sms" }
+  | { readonly kind: "add"; readonly channel: "email" | "sms" | "call" }
   | { readonly kind: "remove"; readonly trackId: string }
   | { readonly kind: "start"; readonly trackId: string; readonly start: StartRule }
   | { readonly kind: "delay"; readonly trackId: string; readonly days: number };
@@ -17,7 +18,7 @@ export type ArrangeOperation =
 export type Arranged = { readonly ok: true; readonly definition: CampaignDefinition; readonly added?: TrackDefinition } | { readonly ok: false; readonly reason: string };
 
 /** Deliberately broken versions of the rule, for the generated test's mutations only. */
-export type ArrangeMutation = "no_cycle_check" | "remove_ignores_dependants" | "refusal_changes_draft" | "refuse_every_after";
+export type ArrangeMutation = "no_cycle_check" | "remove_ignores_dependants" | "refusal_changes_draft" | "refuse_every_after" | "phone_track_with_a_follow_up";
 const NONE: ReadonlySet<ArrangeMutation> = new Set();
 
 const refuse = (reason: string): Arranged => ({ ok: false, reason });
@@ -66,6 +67,8 @@ function decide(def: CampaignDefinition, op: ArrangeOperation, broken: ReadonlyS
     const used = new Set(def.tracks.map((t) => t.id));
     let added = newTrack(op.channel);
     while (used.has(added.id)) added = newTrack(op.channel);
+    // Mutation only: a phone track added with a follow-up, which a phone track never has.
+    if (op.channel === "call" && broken.has("phone_track_with_a_follow_up")) added = { ...added, steps: [...added.steps, { ...added.steps[0]!, id: `${added.id}-again`, waitDays: 1 }] };
     return { ok: true, definition: { ...def, tracks: [...def.tracks, added] }, added };
   }
   const track = live(def).find((t) => t.id === op.trackId);
