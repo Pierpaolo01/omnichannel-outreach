@@ -597,7 +597,7 @@ export class CallDesk {
       note: draft.note,
       noteScope: task.view.person === null ? "company" : draft.noteScope,
       ...(redial ? { redial: true as const } : {}),
-      ...(at !== null && at !== undefined ? { callbackAt: isoWithOffset(at, task.view.zone) } : {}),
+      ...(at !== null ? { callbackAt: isoWithOffset(at, task.view.zone) } : {}),
     };
     const entry: OutboxEntry = { v: 2, taskId: focus, who: whoOf(task.view), body, pressedAt: this.ports.now() };
     // The boundary: an outcome is not pressed until its entry is stored. If storage refuses it, nothing is
@@ -658,8 +658,7 @@ export class CallDesk {
   private async send(entry: OutboxEntry, s: Sending): Promise<void> {
     let body = entry.body;
     if (this.fault("redial_lost_on_resend") && s.tries > 0 && body.redial) {
-      const { redial: _dropped, ...rest } = body;
-      body = rest;
+      body = { requestId: body.requestId, outcome: body.outcome, numberId: body.numberId, note: body.note, noteScope: body.noteScope, ...(body.callbackAt === undefined ? {} : { callbackAt: body.callbackAt }) };
     }
     if (this.fault("new_id_on_resend") && s.tries > 0) {
       this.ports.local.remove(OUTBOX + body.requestId);

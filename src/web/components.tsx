@@ -1,6 +1,7 @@
 import { useId, type ReactNode } from "react";
 import { Link } from "wouter";
-import type { ColleagueView, ContactDetailView, EnrollmentView, UnenrolledReason } from "../shared/api.ts";
+import type { ColleagueView, ContactDetailView, EnrollmentView, RecordCalls, UnenrolledReason } from "../shared/api.ts";
+import { recordCallLine } from "./calls/wording.ts";
 import { Icon } from "./icons.tsx";
 import { StatusBadge, enrollmentSentence } from "./status.tsx";
 import { clockIn, useNow } from "./time.ts";
@@ -114,11 +115,14 @@ export function CampaignRows({
   unenrolledReason,
   who,
   companyIsLead = false,
+  calls,
 }: {
   enrollments: readonly EnrollmentView[];
   unenrolledReason: UnenrolledReason;
   who: "person" | "company";
   companyIsLead?: boolean;
+  /** Each enrollment's open calls, as the record's read gives them (ticket 15b). */
+  calls?: RecordCalls;
 }) {
   if (enrollments.length === 0) {
     return (
@@ -139,6 +143,13 @@ export function CampaignRows({
               <StatusBadge status={enrollment.status} />
             </div>
             {sentence && <p className="text-[14px] text-ink-2">{sentence}</p>}
+            {calls?.calls
+              .filter((c) => c.enrollmentId === enrollment.id)
+              .map((c) => (
+                <p key={c.taskId} className={`text-[14px] [overflow-wrap:anywhere] ${c.reason === "overdue" ? "text-crit" : "text-ink-2"}`}>
+                  {recordCallLine(c, calls.today)}
+                </p>
+              ))}
           </li>
         );
       })}

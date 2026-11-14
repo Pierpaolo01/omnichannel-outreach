@@ -493,19 +493,20 @@ test("opening the next call keeps refusals that wait behind the count, with thei
   await expect(page.getByRole("list", { name: "More outcomes not logged" })).toContainText("Line busy twice, try the mobile.");
 });
 
-test("a callback logged over HTTP, which this page has no control for yet, is listed with the reason the server gives (merge of ticket 15a)", async ({ page }) => {
+test("a callback logged over HTTP is listed with the reason the server gives (merge of ticket 15a; offered on the page since ticket 15b)", async ({ page }) => {
   const f = await freshCalls("ready", "callback-over-http");
   const t = await focused(f);
   const out = await f.harness.request("POST", `/api/call-tasks/${t.taskId}/outcome`, { requestId: "callback-1", outcome: "callback_requested", callbackAt: "2026-11-09T12:00:00.000Z", numberId: t.numberId });
   expect(out.status).toBe(200);
   await page.goto(`${f.url}/`);
   // Today's "Later today" names it as a callback, not as calling hours opening.
-  await expect(page.getByText(/Amira Hassan \(callback asked for at 12:00\)/)).toBeVisible();
+  await expect(page.getByText(/Amira Hassan \(callback they asked for at 12:00 their time\)/)).toBeVisible();
   await page.goto(`${f.url}/calls`);
   const queue = page.getByRole("complementary", { name: "Call queue" });
-  await expect(queue.getByRole("listitem").filter({ hasText: "Amira Hassan" })).toContainText("Callback asked for at 12:00");
-  // The page still offers only what it offers today: callback requested stays in its not-yet state.
-  await expect(page.getByRole("button", { name: "Callback requested" })).toBeDisabled();
+  await expect(queue.getByRole("listitem").filter({ hasText: "Amira Hassan" })).toContainText("Callback they asked for at 12:00 their time");
+  // Ticket 15b offers callback requested; not interested (ticket 16) keeps its not-yet state.
+  await expect(page.getByRole("button", { name: "Callback requested" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Not interested" })).toBeDisabled();
 });
 
 test.describe("the sheet's calling-hours label says the server's fact about the hours now, whatever the call's kind (re-check 7, R10)", () => {
@@ -517,7 +518,7 @@ test.describe("the sheet's calling-hours label says the server's fact about the 
     await page.addInitScript((id) => window.sessionStorage.setItem("outreach.calls.focus", id), t.taskId);
     await page.goto(`${f.url}/calls`);
     const sheet = page.getByRole("region", { name: "Call with Amira Hassan" });
-    await expect(sheet).toContainText("Callback asked for at 12:00");
+    await expect(sheet).toContainText("Callback they asked for at 12:00 their time");
     await expect(sheet).toContainText("Their time, inside calling hours");
     await expect(sheet).toContainText("Calling hours Mon–Fri, 09:00–17:00");
     await expect(sheet).not.toContainText("Calling hours start at");
@@ -532,7 +533,7 @@ test.describe("the sheet's calling-hours label says the server's fact about the 
     await page.addInitScript((id) => window.sessionStorage.setItem("outreach.calls.focus", id), t.taskId);
     await page.goto(`${f.url}/calls`);
     const sheet = page.getByRole("region", { name: "Call with Amira Hassan" });
-    await expect(sheet).toContainText("Callback overdue, asked for at 17:15");
+    await expect(sheet).toContainText("Callback overdue since today at 17:15 their time");
     await expect(sheet).toContainText("Their time, outside calling hours");
     await expect(sheet).toContainText("Calling hours Mon–Fri, 09:00–17:00");
     await expect(sheet).not.toContainText("inside calling hours");

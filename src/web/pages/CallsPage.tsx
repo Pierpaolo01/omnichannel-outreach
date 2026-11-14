@@ -5,7 +5,15 @@ import { when } from "../activity.tsx";
 import { CallDesk, NOTE_MAX, whoOf, type DeskSnapshot } from "../calls/callDesk.ts";
 import { useCallDesk } from "../calls/useCallDesk.ts";
 import { useFocusRescue } from "../focusRescue.ts";
+import { callbackAdvice, callbackDays } from "../calls/callbackTime.ts";
 import {
+  CALLBACK_RELEASE_LINE,
+  callbackHoldLine,
+  callbackLine,
+  noGoodNumberLine,
+  redialLines,
+  skipLine,
+  zonePlace,
   DRAFT_NOT_KEPT_LINE,
   NOT_QUEUED_LINE,
   confirmingLine,
@@ -33,8 +41,8 @@ import { Icon } from "../icons.tsx";
 import { StatusBadge } from "../status.tsx";
 import { useNow } from "../time.ts";
 
-/** The outcomes this release offers, in the prototype's order. Callback requested and not interested arrive later. */
-const OFFERED: readonly CallOutcomeApi[] = ["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "skip_for_now"];
+/** The outcomes this release offers, in the prototype's order; not interested (ticket 16) sits before skip for now as a not-yet pill. */
+const OFFERED: readonly CallOutcomeApi[] = ["no_answer", "voicemail", "gatekeeper", "wrong_number", "callback_requested", "interested"];
 
 const TONE = { muted: "text-muted", pause: "text-pause", crit: "text-crit" } as const;
 
@@ -62,7 +70,7 @@ export function CallsPage() {
         ) : snap.task.state === "error" ? (
           <ErrorState title="This call didn’t load." message={snap.task.message} onRetry={() => void desk.refresh()} retryRef={(el) => placeFocus(el, "error")} rescue={2} />
         ) : (
-          <Sheet desk={desk} snap={snap} task={snap.task.view} userZone={queue.view.userZone} placeFocus={placeFocus} />
+          <Sheet desk={desk} snap={snap} task={snap.task.view} userZone={queue.view.userZone} today={queue.view.date} placeFocus={placeFocus} />
         )}
       </div>
     </div>
@@ -170,7 +178,7 @@ function RecordItem({ desk, snap, record: r, zone, placeFocus }: { desk: CallDes
 
 function Queue({ snap }: { snap: DeskSnapshot }) {
   const view = snap.queue.state === "ready" ? snap.queue.view : null;
-  const item = (x: CallQueueItem) => <QueueItem key={x.taskId} item={x} current={x.taskId === snap.focus} userZone={view?.userZone ?? "UTC"} />;
+  const item = (x: CallQueueItem) => <QueueItem key={x.taskId} item={x} current={x.taskId === snap.focus} userZone={view?.userZone ?? "UTC"} today={view?.date} />;
   return (
     <aside aria-label="Call queue" className="min-[901px]:sticky min-[901px]:top-6">
       <h2 className="mb-1.5 ml-2.5 text-[13px] font-semibold text-muted">Ready now, {view ? view.readyNow.length : "…"}</h2>
@@ -188,8 +196,8 @@ function Queue({ snap }: { snap: DeskSnapshot }) {
   );
 }
 
-function QueueItem({ item, current, userZone }: { item: CallQueueItem; current: boolean; userZone: string }) {
-  const why = reasonLine(item, userZone);
+function QueueItem({ item, current, userZone, today }: { item: CallQueueItem; current: boolean; userZone: string; today: string | undefined }) {
+  const why = reasonLine(item, userZone, today);
   return (
     <li
       aria-current={current ? "true" : undefined}
@@ -227,7 +235,7 @@ function NothingToCall({ view, listDone, placeFocus }: { view: CallsView; listDo
   const later = view.laterToday[0];
   const lines: string[] = [];
   if (listDone) lines.push("Every call ready now has an outcome.");
-  if (later) lines.push(`${view.laterToday.length === 1 ? "One call opens" : `${view.laterToday.length} calls open`} later today. ${reasonLine(later, view.userZone).text}.`);
+  if (later) lines.push(`${view.laterToday.length === 1 ? "One call opens" : `${view.laterToday.length} calls open`} later today. ${reasonLine(later, view.userZone, view.date).text}.`);
   if (view.capacityReached) lines.push(CAPACITY_USED);
   if (lines.length === 0) lines.push("Calls appear here once a launched campaign reaches a call step. You place every call yourself.");
   return (
@@ -251,7 +259,7 @@ function NothingToCall({ view, listDone, placeFocus }: { view: CallsView; listDo
   );
 }
 
-function Sheet({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; snap: DeskSnapshot; task: CallTaskView; userZone: string; placeFocus: ReturnType<typeof useKeyboardFocus> }) {
+function Sheet({ desk, snap, task, userZone, today, placeFocus }: { desk: CallDesk; snap: DeskSnapshot; task: CallTaskView; userZone: string; today: string; placeFocus: ReturnType<typeof useKeyboardFocus> }) {
   const who = whoOf(task);
   const recordHref = task.person ? `/leads/people/${task.person.id}` : `/leads/companies/${task.company.id}`;
   const clock = clockLine(task, userZone);
@@ -280,7 +288,7 @@ function Sheet({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sna
               )}
             </p>
             {/* Why the call is on the list, as the server gives it: a redial or a callback included, which this page has no control for yet. */}
-            {task.task && <p className="mt-1 text-[13px] text-band-muted">{reasonLine(task.task, userZone).text}</p>}
+            {task.task && <p className="mt-1 text-[13px] text-band-muted">{reasonLine(task.task, userZone, today).text}</p>}
           </div>
           <div className="text-right">
             <div className="text-[34px] font-medium leading-none tracking-[-0.02em]">{task.localTime}</div>
@@ -319,6 +327,11 @@ function Sheet({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sna
                 );
               })}
             </div>
+          )}
+          {task.kind === "callback" && task.listed && task.numbers.every((n) => n.bad) && (
+            <p role="note" className="mt-3 max-w-[70ch] text-[14px] font-medium text-band-warn">
+              {noGoodNumberLine(who)}
+            </p>
           )}
           {snap.numberProblem && (
             <p role="alert" className="mt-3 text-[14px] font-medium text-band-warn">
@@ -469,7 +482,8 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
   const dialled = task.numbers.find((n) => n.detailId === draft.numberId);
   const away = snap.away;
   const pending = snap.pending !== null;
-  const canLog = draft.outcome !== null && !snap.noteTooLong && (draft.outcome === "skip_for_now" || (dialled !== undefined && snap.numberProblem === null));
+  const canLog = draft.outcome !== null && !snap.noteTooLong && (draft.outcome === "skip_for_now" || (dialled !== undefined && snap.numberProblem === null)) && (draft.outcome !== "callback_requested" || snap.callback?.at != null);
+  const days = callbackDays(task.asOf, task.zone);
   return (
     <div className="flex flex-col gap-3.5 min-[901px]:sticky min-[901px]:bottom-0 border-t border-line bg-base-100 px-5 pb-[22px] pt-5 shadow-[0_-10px_24px_-18px_rgba(21,26,45,0.35)] min-[901px]:px-[30px]">
       {away && (
@@ -522,27 +536,17 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
       </div>
       <div role="group" aria-label="Call outcome" aria-describedby={later} className="flex flex-wrap gap-2">
         {OFFERED.map((o) => (
-          <button
-            key={o}
-            type="button"
-            aria-pressed={!away && draft.outcome === o}
-            disabled={locked}
-            onClick={() => desk.setDraft({ outcome: o })}
-            className={`rounded-[20px] border px-3.5 py-[7px] text-[14px] font-medium ${!away && draft.outcome === o ? "border-base-content bg-base-content text-base-200" : "border-line-strong bg-base-100 hover:border-ink-2"} disabled:cursor-not-allowed disabled:border-line disabled:text-muted disabled:hover:border-line`}
-          >
-            {OUTCOME_LABEL[o]}
-          </button>
+          <OutcomePill key={o} label={OUTCOME_LABEL[o]} pressed={!away && draft.outcome === o} locked={locked} onPress={() => desk.setDraft({ outcome: o, ...(o === "callback_requested" && draft.callbackDay === null ? { callbackDay: days[0]?.value ?? null } : {}) })} />
         ))}
-        {(["Callback requested", "Not interested"] as const).map((label) => (
-          <button key={label} type="button" disabled aria-describedby={later} className="cursor-not-allowed rounded-[20px] border border-dashed border-line-strong bg-base-100 px-3.5 py-[7px] text-[14px] font-medium text-muted">
-            {label}
-          </button>
-        ))}
+        <button type="button" disabled aria-describedby={later} className="cursor-not-allowed rounded-[20px] border border-dashed border-line-strong bg-base-100 px-3.5 py-[7px] text-[14px] font-medium text-muted">
+          Not interested
+        </button>
+        <OutcomePill label={OUTCOME_LABEL.skip_for_now} pressed={!away && draft.outcome === "skip_for_now"} locked={locked} onPress={() => desk.setDraft({ outcome: "skip_for_now" })} />
       </div>
       <p id={later} className="-mt-2 text-[13px] text-muted">
-        Callback requested, not interested and calling again tomorrow arrive with later releases.
+        Not interested arrives with a later release.
       </p>
-      {!away && draft.outcome && draft.outcome !== "skip_for_now" && (
+      {!away && draft.outcome && (
         <div className="flex flex-col gap-2.5 rounded-field bg-raised px-4 py-3.5 text-[14px]">
           {draft.outcome === "wrong_number" ? (
             <p>{outcomeNumberLine("wrong_number", dialled && !snap.numberProblem ? dialled : null, pending)}</p>
@@ -553,17 +557,35 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
               </p>
               <p className="text-[13px] text-muted">Their other campaigns and colleagues keep running.</p>
             </>
+          ) : draft.outcome === "callback_requested" ? (
+            <CallbackFields desk={desk} snap={snap} task={task} userZone={userZone} days={days} who={who} />
+          ) : draft.outcome === "skip_for_now" ? (
+            <p className="text-[13px] text-muted">{skipLine(task)}</p>
           ) : (
-            <p className="text-[13px] text-muted">
-              {draft.outcome === "gatekeeper" && !pending ? "Add a note about who you spoke to. " : ""}
-              {outcomeNumberLine(draft.outcome, dialled && !snap.numberProblem ? dialled : null, pending)}
-            </p>
+            <>
+              <p className="text-[13px] text-muted">
+                {draft.outcome === "gatekeeper" && !pending ? "Add a note about who you spoke to. " : ""}
+                {outcomeNumberLine(draft.outcome, dialled && !snap.numberProblem ? dialled : null, pending)}
+              </p>
+              {task.redialOutcomes.includes(draft.outcome) && <RedialChoice desk={desk} snap={snap} task={task} />}
+            </>
           )}
+          {task.kind === "callback" && draft.outcome !== "skip_for_now" && draft.outcome !== "callback_requested" && <p className="text-[13px] text-muted">{CALLBACK_RELEASE_LINE}</p>}
         </div>
       )}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <span id={hintId} className="text-[13px] text-muted">
-          {pending ? "" : draft.outcome === null ? "Pick what happened to finish this call." : !canLog && !snap.noteTooLong ? "Choose the number you dial above." : ""}
+          {pending
+            ? ""
+            : draft.outcome === null
+              ? "Pick what happened to finish this call."
+              : !canLog && !snap.noteTooLong
+                ? draft.outcome !== "skip_for_now" && (dialled === undefined || snap.numberProblem !== null)
+                  ? "Choose the number you dial above."
+                  : snap.callback?.problem === "missing"
+                    ? "Enter the time they asked for."
+                    : "Choose a callback time still to come."
+                : ""}
         </span>
         <span className="flex flex-wrap items-center gap-2">
           {snap.pending?.unconfirmed && (
@@ -586,5 +608,82 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
         </span>
       </div>
     </div>
+  );
+}
+
+function OutcomePill({ label, pressed, locked, onPress }: { label: string; pressed: boolean; locked: boolean; onPress: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={pressed}
+      disabled={locked}
+      onClick={onPress}
+      className={`rounded-[20px] border px-3.5 py-[7px] text-[14px] font-medium ${pressed ? "border-base-content bg-base-content text-base-200" : "border-line-strong bg-base-100 hover:border-ink-2"} disabled:cursor-not-allowed disabled:border-line disabled:text-muted disabled:hover:border-line`}
+    >
+      {label}
+    </button>
+  );
+}
+
+/** "Call again tomorrow" (the prototype's redial check), with what the engine then does, from the call's read. */
+function RedialChoice({ desk, snap, task }: { desk: CallDesk; snap: DeskSnapshot; task: CallTaskView }) {
+  const lines = redialLines(task);
+  const hint = useId();
+  return (
+    <label className="flex cursor-pointer items-start gap-2.5">
+      <input type="checkbox" className="mt-[3px] size-4 shrink-0 accent-[var(--color-call)]" checked={snap.draft.redial} disabled={snap.locked} aria-describedby={hint} onChange={(e) => desk.setDraft({ redial: e.target.checked })} />
+      <span>
+        <span className="font-medium">Call again tomorrow</span>
+        <span id={hint} className="block text-[13px] text-muted">
+          {snap.draft.redial ? lines.checked : lines.unchecked}
+        </span>
+      </span>
+    </label>
+  );
+}
+
+/**
+ * The prospect's requested day and time, entered in their time (the prototype's Day and Their time), shown
+ * back in theirs and the user's, with what the engine makes of it and the hold it places.
+ */
+function CallbackFields({ desk, snap, task, userZone, days, who }: { desk: CallDesk; snap: DeskSnapshot; task: CallTaskView; userZone: string; days: { value: string; label: string }[]; who: string }) {
+  const dayId = useId();
+  const timeId = useId();
+  const lineId = useId();
+  const { draft, locked } = snap;
+  const callback = snap.callback ?? { at: null, problem: "missing" as const };
+  const line = callbackLine(callback, callback.at === null ? null : callbackAdvice(callback.at, task), task, userZone);
+  // A day chosen before the prospect's today moved on stays listed, so the select shows what the draft holds.
+  const options = draft.callbackDay !== null && !days.some((d) => d.value === draft.callbackDay) ? [{ value: draft.callbackDay, label: draft.callbackDay }, ...days] : days;
+  return (
+    <>
+      <div className="flex flex-wrap items-end gap-x-4 gap-y-2.5">
+        <div className="flex flex-col gap-1">
+          <label htmlFor={dayId} className="text-[13px] font-semibold text-muted">
+            Day
+          </label>
+          <select id={dayId} className="select w-[200px] border-line-strong" value={draft.callbackDay ?? days[0]?.value ?? ""} disabled={locked} aria-describedby={lineId} onChange={(e) => desk.setDraft({ callbackDay: e.target.value })}>
+            {options.map((d) => (
+              <option key={d.value} value={d.value}>
+                {d.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="flex flex-col gap-1">
+          <label htmlFor={timeId} className="text-[13px] font-semibold text-muted">
+            Their time
+          </label>
+          <input id={timeId} type="time" step={60} className="input w-[140px] border-line-strong" value={draft.callbackTime} readOnly={locked} aria-describedby={lineId} onChange={(e) => desk.setDraft({ callbackTime: e.target.value })} />
+        </div>
+        <p className="pb-2 text-[13px] text-muted">
+          In {zonePlace(task.zone)} time ({task.zone})
+        </p>
+      </div>
+      <p id={lineId} aria-live="polite" className={line.tone === "crit" ? "font-medium text-crit" : ""}>
+        {line.text}
+      </p>
+      <p className="text-[13px] text-muted">{callbackHoldLine(task, who)}</p>
+    </>
   );
 }

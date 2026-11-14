@@ -118,7 +118,7 @@ describe("callbacks on the screens (ADR 0003 2.3, Q12, Q13)", () => {
     expect((await log(id, { outcome: "voicemail", numberId: await numberOf(id, "direct") })).status).toBe(200);
     const entries = await activity("Pat Oneil");
     expect(entries.some((e) => e.kind === "callback_overdue")).toBe(false);
-    expect(entries.filter((e) => e.kind === "call").map((e) => e.kind === "call" && [e.outcome, e.callbackAt, e.onCallback])).toEqual([
+    expect(entries.flatMap((e) => (e.kind === "call" ? [[e.outcome, e.callbackAt, e.onCallback]] : []))).toEqual([
       ["voicemail", null, "2026-11-02T15:00:00.000Z"],
       ["callback_requested", "2026-11-02T15:00:00.000Z", null],
     ]);

@@ -9,6 +9,7 @@ import type {
   LeadSearchResult,
   NeedsAttention,
   PersonRecord,
+  RecordCalls,
 } from "../src/shared/api.ts";
 
 /**
@@ -21,7 +22,8 @@ export type MockBody =
   | LeadSearchResult
   | { campaigns: CampaignListItem[] }
   | { campaign: Campaign; imports: ImportRecord[] }
-  | PersonRecord
+  | (PersonRecord & RecordCalls)
+  | (CompanyRecord & RecordCalls)
   | CompanyRecord
   | FileCheckResult
   | NeedsAttention;

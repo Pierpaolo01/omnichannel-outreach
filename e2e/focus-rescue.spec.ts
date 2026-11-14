@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { focused, freshCalls, logElsewhere, logWithMouse } from "./screens.ts";
+import { callbackWithNoGoodNumber, carriedAndOverdue, focused, freshCalls, logElsewhere, logWithMouse, openCalls } from "./screens.ts";
 import { serverError } from "./mocks.ts";
 
 /**
@@ -80,6 +80,33 @@ const SETUPS: readonly Setup[] = [
       await page.route("**/api/calls*", serverError);
       await page.goto(`${f.url}/calls`);
       await page.getByText("The call list didn’t load.").waitFor();
+    },
+  },
+  // Ticket 15b.
+  {
+    name: "Calls, a redial chosen",
+    open: async (page) => {
+      await ready("rescue-redial")(page);
+      await page.getByRole("button", { name: "No answer", exact: true }).click();
+      await page.getByRole("checkbox", { name: /Call again tomorrow/ }).check();
+    },
+  },
+  {
+    name: "Calls, a callback time entered",
+    open: async (page) => {
+      const f = await freshCalls("ready", "rescue-callback");
+      await openCalls(page, f);
+      await page.getByRole("button", { name: "Callback requested", exact: true }).click();
+      await page.getByLabel("Their time", { exact: true }).fill("15:30");
+    },
+  },
+  { name: "Calls, an overdue callback", open: async (page) => openCalls(page, await carriedAndOverdue("rescue-overdue")) },
+  { name: "Calls, a callback with no good number left", open: async (page) => openCalls(page, await callbackWithNoGoodNumber("rescue-q13")) },
+  {
+    name: "Today, an overdue callback",
+    open: async (page) => {
+      await openCalls(page, await carriedAndOverdue("rescue-today-overdue"), "/");
+      await page.getByText("Tom’s callback is overdue").waitFor();
     },
   },
   {
