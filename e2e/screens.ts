@@ -464,6 +464,27 @@ export const SCREENS: readonly Screen[] = [
     },
   },
   {
+    name: "calls, the call was declined in another window",
+    open: async (page) => {
+      const f = await calls(page, "ready", "/calls", "screen-declined-elsewhere");
+      await page.getByText(/^Calling hours /).waitFor();
+      const t = await focused(f);
+      await logElsewhere(f, t.taskId, "not_interested", t.numberId);
+      await logWithMouse(page, "No answer");
+      await settle(page, "already logged from another window or device: not interested");
+    },
+  },
+  {
+    name: "a person's Activity with a declined call",
+    open: async (page) => {
+      const f = await calls(page, "ready", "/calls", "screen-activity-declined");
+      const t = await focused(f);
+      await logElsewhere(f, t.taskId, "not_interested", t.numberId);
+      await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
+      await settle(page, "Call: not interested");
+    },
+  },
+  {
     name: "calls, the list done",
     open: async (page) => {
       const f = await freshCalls("full", "screen-done");
@@ -1169,6 +1190,15 @@ export const SCREENS: readonly Screen[] = [
     },
   },
   {
+    name: "a phone track with a declined path, in a campaign with a win-back branch set over HTTP",
+    open: async (page) => {
+      const branch = { id: "wb-1", channel: "email" as const, branch: "win_back" as const, window: [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 })), steps: [{ id: "wb-1-s1", waitDays: 0, subject: "No pressure", body: "Understood, {{first_name|there}}.", threading: "new_subject" as const, removed: false }], start: { kind: "entry" as const }, removed: false };
+      const id = await campaignWith(page, "A call with a win-back branch", { ...WITH_A_CALL, tracks: [...WITH_A_CALL.tracks.map((t) => (t.id === "call" ? { ...t, declinedPath: "win_back" as const } : t)), branch] });
+      await page.goto(`/campaigns/${id}?track=call`);
+      await settle(page, "A declined call moves the lead to this campaign’s win-back branch");
+    },
+  },
+  {
     name: "a phone track with an empty call script, on the canvas with the tracks around it",
     open: async (page) => {
       const id = await campaignWith(page, "Two channels and a call, no script", { ...WITH_A_CALL, callScript: "" });
@@ -1242,6 +1272,19 @@ export const SCREENS: readonly Screen[] = [
       });
       await page.goto(`${f.url}/campaigns/${id}/before-launch`);
       await settle(page, "This campaign is too large to estimate here");
+    },
+  },
+  {
+    // Ticket 16a: a finished estimate for a campaign with a win-back branch says the branch is not counted.
+    name: "fake provider: before launch for a campaign with a win-back branch",
+    open: async (page) => {
+      // An app of its own each time: other screens' running campaigns on the shared app can hold work that withholds the figure.
+      const f = await fakeProviderApp(`win-back-branch-${Date.now()}-${Math.random()}`);
+      const id = await f.freshTwoChannelCampaign(`With a win-back branch ${Date.now()}`);
+      const branch = { ...TWO_CHANNELS.tracks[0]!, id: "wb-1", branch: "win_back" as const, steps: TWO_CHANNELS.tracks[0]!.steps.slice(0, 1).map((st) => ({ ...st, id: "wb-1-s1" })) };
+      await page.request.put(`${f.url}/api/campaigns/${id}/sequence`, { data: { ...TWO_CHANNELS, callScript: "Ask who books.", tracks: [...TWO_CHANNELS.tracks, phoneTrack("call", { kind: "entry" }, { declinedPath: "win_back" }), branch] } });
+      await page.goto(`${f.url}/campaigns/${id}/before-launch`);
+      await settle(page, "win-back emails and texts are not counted");
     },
   },
   {

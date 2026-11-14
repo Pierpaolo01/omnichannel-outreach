@@ -1,8 +1,9 @@
 import { readFileSync } from "node:fs";
 import { expect, test, type Page } from "@playwright/test";
-import type { Campaign, CallsView, SequenceView } from "../src/shared/api.ts";
+import type { BeforeLaunchView, Campaign, CallsView, CampaignDefinition, SequenceView } from "../src/shared/api.ts";
 import { TWO_CHANNELS, fakeProviderApp } from "./fake-provider.ts";
 import { WITH_A_CALL, phoneTrack } from "./screens.ts";
+import { respond } from "./mocks.ts";
 import { fixture } from "./support.ts";
 
 /**
@@ -41,7 +42,8 @@ test.describe("the phone track on the canvas and in its inspector", () => {
     // The callback hold lasts until its outcome is logged, not until the time asked for (review bot on 72b7252; ADR 0003 2.3).
     await expect(inspector.getByText("pauses this lead’s other outreach in the campaign until you log the callback’s outcome; a missed callback stays on your list, overdue, until you do.", { exact: false })).toBeVisible();
     await expect(inspector.getByText("until the time the prospect asked for", { exact: false })).toHaveCount(0);
-    await expect(inspector.getByText("choosing what a declined call does arrives with a later release", { exact: false })).toBeVisible();
+    // No declined path is set on a new phone track: said as the engine reads it (question Q14), with the choice a later release.
+    await expect(inspector.getByText("No path is set, so a declined call stops the lead in this campaign. Choosing stop, continue on the other channels, or the win-back branch here arrives with a later release.", { exact: false })).toBeVisible();
     // Together with the email track: both hang from Launch.
     await expect(page.getByRole("list", { name: "Tracks that start at launch" }).getByRole("button")).toHaveCount(2);
 
@@ -63,6 +65,25 @@ test.describe("the phone track on the canvas and in its inspector", () => {
     await page.reload();
     await expect(page.getByRole("list", { name: "Tracks after the email track" }).getByRole("button", { name: /^Phone track: / })).toBeVisible();
     await expect(page.getByLabel("Call script")).toHaveValue("Ask who books the evening appointments.");
+  });
+
+  test("a declined path and a win-back branch set over HTTP are said truthfully, and kept when an edit is saved here (ticket 16a)", async ({ page }) => {
+    const id = await newCampaign(page, "A branch set over HTTP");
+    const branch = { id: "wb-1", channel: "email" as const, branch: "win_back" as const, window: [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 })), steps: [{ id: "wb-1-s1", waitDays: 0, subject: "No pressure", body: "Understood, {{first_name|there}}.", threading: "new_subject" as const, removed: false }], start: { kind: "entry" as const }, removed: false };
+    const def = { ...WITH_A_CALL, tracks: [...WITH_A_CALL.tracks.map((t) => (t.id === "call" ? { ...t, declinedPath: "win_back" as const } : t)), branch] };
+    expect((await page.request.put(`/api/campaigns/${id}/sequence`, { data: def })).status()).toBe(200);
+    await page.goto(`/campaigns/${id}?track=call`);
+    const inspector = page.getByTestId("inspector");
+    await expect(inspector.getByText("A declined call moves the lead to this campaign’s win-back branch, with no more calls.", { exact: false })).toBeVisible();
+    await expect(inspector.getByText("This campaign has a win-back branch of one track, for leads who decline on a call. It is kept as it is when you save here; showing and editing it here arrives with a later release.")).toBeVisible();
+    // The branch is not drawn on the canvas as part of the main sequence.
+    await expect(page.getByRole("button", { name: /No pressure/ })).toHaveCount(0);
+    await page.getByLabel("Call script").fill("Ask who looks after new patient bookings.");
+    await saved(page);
+    const after = await stored(page, id);
+    expect(after.callScript).toBe("Ask who looks after new patient bookings.");
+    expect(after.tracks.find((t) => t.id === "call")?.declinedPath).toBe("win_back");
+    expect(after.tracks.find((t) => t.id === "wb-1")).toEqual(branch);
   });
 
   test("a track after the phone track says it waits for the call's outcome, and the phone track cannot be removed until it starts elsewhere", async ({ page }) => {
@@ -173,6 +194,41 @@ test.describe("calls in Before launch", () => {
     await page.request.put(`${f.url}/api/campaigns/${id}/sequence`, { data: { ...TWO_CHANNELS, callScript: "Ask who books.", tracks: [...TWO_CHANNELS.tracks, phoneTrack("call", { kind: "entry" })] } });
     await page.goto(`${f.url}/campaigns/${id}/before-launch`);
     await expect(page.getByText("every email and SMS track has a sender.", { exact: false })).toBeVisible();
+  });
+
+  test("with a win-back branch, a finished estimate says the branch's emails and texts are not counted; never without a live branch, nor with no figure (ticket 16a)", async ({ page }) => {
+    // An app of its own: another test's running campaign on a shared app can hold work that withholds the figure.
+    const f = await fakeProviderApp("win-back-before-launch");
+    const branchTrack = { ...TWO_CHANNELS.tracks[0]!, id: "wb-1", branch: "win_back" as const, steps: TWO_CHANNELS.tracks[0]!.steps.slice(0, 1).map((st) => ({ ...st, id: "wb-1-s1" })) };
+    const withBranch = (removed: boolean): CampaignDefinition => ({ ...TWO_CHANNELS, callScript: "Ask who books.", tracks: [...TWO_CHANNELS.tracks, phoneTrack("call", { kind: "entry" }, { declinedPath: removed ? "stop" : "win_back" }), { ...branchTrack, removed }] });
+    const notCounted = "This campaign’s win-back emails and texts are not counted: the figures assume every call gets no answer, so nobody enters win-back.";
+    const everyCounts = "Every email and text counts: tracks that start together and tracks that wait for another.";
+
+    const branch = await f.freshTwoChannelCampaign("A win-back branch");
+    expect((await page.request.put(`${f.url}/api/campaigns/${branch}/sequence`, { data: withBranch(false) })).status()).toBe(200);
+    await page.goto(`${f.url}/campaigns/${branch}/before-launch`);
+    await expect(page.getByText(notCounted, { exact: false })).toBeVisible();
+    await expect(page.getByText("Every email and text of the main sequence counts", { exact: false })).toBeVisible();
+    await expect(page.getByText(everyCounts, { exact: false })).toHaveCount(0);
+
+    // A removed branch is no branch: every email and text counts, and nothing is said of win-back.
+    const none = await f.freshTwoChannelCampaign("No live branch");
+    expect((await page.request.put(`${f.url}/api/campaigns/${none}/sequence`, { data: withBranch(true) })).status()).toBe(200);
+    await page.goto(`${f.url}/campaigns/${none}/before-launch`);
+    await expect(page.getByText(everyCounts, { exact: false })).toBeVisible();
+    await expect(page.getByText(notCounted, { exact: false })).toHaveCount(0);
+
+    // A run that stopped early, or a withheld figure, shows no figure and says nothing of the branch (marked so in transit, with the flag left set).
+    for (const change of [{ stoppedEarly: "horizon" as const, leadsToStart: null, daysUntilAllStart: null }, { withheldBy: { campaign: null, tracks: [{ trackId: "sms", channel: "sms" as const, label: "the SMS track", why: "no_sender" as const }] } }]) {
+      await page.unrouteAll();
+      await page.route("**/api/campaigns/*/before-launch?v=*", async (route) => {
+        const body = (await (await route.fetch()).json()) as BeforeLaunchView;
+        await respond(route, { ...body, load: body.load && { ...body.load, ...change, winBackNotCounted: true } });
+      });
+      await page.goto(`${f.url}/campaigns/${branch}/before-launch`);
+      await expect(page.getByText("stoppedEarly" in change ? "runs past the estimate" : "the SMS track", { exact: false }).first()).toBeVisible();
+      await expect(page.getByText(notCounted, { exact: false })).toHaveCount(0);
+    }
   });
 
   test("a running campaign's phone track is read-only, and says why", async ({ page }) => {

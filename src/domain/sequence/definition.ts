@@ -1,8 +1,9 @@
 /**
  * A campaign's definition (ADR 0003 1.1) and the definitions refused at the boundary (7.1).
  * Ticket 13 runs email and SMS tracks in the main branch, connected together or after a delay;
- * ticket 14 adds phone tracks, each exactly one call. The win-back branch is refused with a plain
- * message until the ticket that builds it (ADR 0003 section 10).
+ * ticket 14 adds phone tracks, each exactly one call; ticket 16 adds each phone track's declined path
+ * and the campaign's win-back branch: email and SMS tracks, arranged like the main sequence, that a
+ * lead enters when it declines on a call, with no call.
  */
 import { isTimeZone, type WindowRule } from "./clock.ts";
 
@@ -24,7 +25,7 @@ export interface StepDefinition {
 
 export type StartRule = { readonly kind: "entry" } | { readonly kind: "after"; readonly trackId: string; readonly delayDays: number };
 
-/** What a declined call does (ADR 0003 1.1): set on the canvas, applied by ticket 16. */
+/** What a declined call does (ADR 0003 1.1, 2.4): set on the canvas, preselected on the outcome, overridable per lead. */
 export type DeclinedPath = "stop" | "continue" | "win_back";
 
 export interface TrackDefinition {
@@ -36,7 +37,7 @@ export interface TrackDefinition {
   readonly steps: readonly StepDefinition[];
   readonly start: StartRule;
   readonly removed: boolean;
-  /** A phone track's declined path, when the canvas has set one. Read from ticket 16 on; nothing reads it yet. */
+  /** A phone track's declined path, when the canvas has set one; `declinedPathOf` reads it. */
   readonly declinedPath?: DeclinedPath;
   /**
    * A phone track's call skip limit in days (ADR 0003 3.5; ticket 14c: set on each phone track). A
@@ -59,7 +60,14 @@ export interface CampaignDefinition {
   readonly tracks: readonly TrackDefinition[];
 }
 
-export const WIN_BACK_LATER = "The win-back branch arrives with a later release.";
+/**
+ * A phone track's declined path: the one the canvas set, else stop (question Q14's interim: a definition
+ * saved before ticket 16, or a phone track the canvas has not set a path on, stops the lead).
+ */
+export const declinedPathOf = (track: Pick<TrackDefinition, "declinedPath"> | undefined): DeclinedPath => track?.declinedPath ?? "stop";
+
+/** Whether a lead can enter the campaign's win-back branch: it has a live track. */
+export const winBackAvailable = (def: CampaignDefinition): boolean => def.tracks.some((t) => !t.removed && t.branch === "win_back");
 
 /** An empty definition for a new campaign. */
 export function emptyDefinition(timezone: string): CampaignDefinition {
@@ -109,22 +117,40 @@ export function definitionProblems(def: CampaignDefinition, previous: CampaignDe
   }
 
   const live = def.tracks.filter((t) => !t.removed);
-  if (live.some((t) => t.branch !== "main" || t.declinedPath === "win_back")) problems.push(WIN_BACK_LATER);
-  if (problems.length > 0 && live.some((t) => t.branch !== "main")) return problems;
-
+  // Tracks are named within their branch: "the email track", "Win-back email track 2".
   const label = (track: TrackDefinition) => {
-    const same = live.filter((t) => t.channel === track.channel);
+    const same = live.filter((t) => t.channel === track.channel && t.branch === track.branch);
     const channel = track.channel === "sms" ? "SMS" : track.channel === "call" ? "phone" : track.channel;
-    return same.length === 1 ? `the ${channel} track` : `${channel[0]?.toUpperCase() ?? ""}${channel.slice(1)} track ${same.indexOf(track) + 1}`;
+    const named = track.branch === "win_back" ? `win-back ${channel}` : channel;
+    return same.length === 1 ? `the ${named} track` : `${named[0]?.toUpperCase() ?? ""}${named.slice(1)} track ${same.indexOf(track) + 1}`;
   };
   const capital = (text: string) => `${text[0]?.toUpperCase() ?? ""}${text.slice(1)}`;
   const byId = new Map(live.map((t) => [t.id, t]));
+
+  // The win-back branch (ticket 16): no call in it (spec "no cold call"), and a phone track enters it only
+  // when it has a live track. The declined path is the only branch point, so no connection crosses branches.
+  if (live.some((t) => t.branch === "win_back" && t.channel === "call")) {
+    problems.push("The win-back branch cannot hold a phone track: a lead who declined is never called again in this campaign. Remove the phone track from the win-back branch.");
+  }
+  for (const track of live) {
+    if (track.declinedPath !== undefined && track.channel !== "call") problems.push(`Only a phone track has a declined path: ${label(track)} has one.`);
+    if (track.channel === "call" && track.branch === "main" && track.declinedPath === "win_back" && !winBackAvailable(def)) {
+      problems.push(`${capital(label(track))}'s declined path is win back, but the campaign has no win-back branch: add a track to the win-back branch, or choose stop or continue.`);
+    }
+  }
 
   for (const track of live) {
     const name = capital(label(track));
     if (track.start.kind === "after") {
       const before = byId.get(track.start.trackId);
-      if (!before || before.branch !== track.branch) problems.push(`${name} starts after a track that is not in the sequence.`);
+      if (!before) problems.push(`${name} starts after a track that is not in the sequence.`);
+      else if (before.branch !== track.branch) {
+        problems.push(
+          track.branch === "win_back"
+            ? `${name} starts after a track of the main sequence: connect it inside the win-back branch, which starts when a lead declines.`
+            : `${name} starts after a track of the win-back branch: connect it inside the main sequence.`,
+        );
+      }
       if (!isWholeDays(track.start.delayDays)) problems.push(`The delay before ${label(track)} is a whole number of days.`);
     }
     if (track.window.length === 0) problems.push(`${name}'s ${track.channel === "call" ? "calling hours have" : "sending window has"} no days.`);

@@ -3,7 +3,7 @@
  * reads only what the server reported (the queue, the call task, an outcome's answer, Needs
  * attention); none decides anything about order, counts, hours, capacity or an outcome's effect.
  */
-import type { CallNumberView, CallOffListView, CallOutcomeApi, CallQueueItem, CallsView, CallTaskView, NeedsAttention, RecordedNumberView, WindowRule } from "../../shared/api.ts";
+import type { CallNumberView, CallOffListView, CallOutcomeApi, DeclinedPathApi, CallQueueItem, CallsView, CallTaskView, NeedsAttention, RecordedNumberView, WindowRule } from "../../shared/api.ts";
 import { STATUS_LABEL } from "../status.tsx";
 import type { DeskSnapshot } from "./callDesk.ts";
 
@@ -14,6 +14,8 @@ export const OUTCOME_LABEL = {
   gatekeeper: "Didn’t reach them",
   wrong_number: "Wrong number",
   interested: "Interested",
+  // Logged over HTTP for now: the page offers no control for it yet (ticket 16's screens are part b).
+  not_interested: "Not interested",
   // Logged over HTTP for now: the page offers no control for it yet (ticket 15's screens are a later part).
   callback_requested: "Callback requested",
   skip_for_now: "Skip for now",
@@ -26,9 +28,17 @@ export const OUTCOME_TITLE = {
   gatekeeper: "Call: didn’t reach them",
   wrong_number: "Call: wrong number",
   interested: "Call: interested",
+  not_interested: "Call: not interested",
   callback_requested: "Call: callback requested",
   skip_for_now: "Call skipped for now",
 } as const satisfies Record<CallOutcomeApi, string>;
+
+/** What a declined call did, from the path the server stored with it (ticket 16). */
+export const DECLINED_PATH_LINE = {
+  stop: "Stopped in this campaign.",
+  continue: "No more calls in this campaign; the other channels continue.",
+  win_back: "Moved to this campaign’s win-back branch, with no more calls.",
+} as const satisfies Record<DeclinedPathApi, string>;
 
 const NUMBER_KIND = { direct: "direct", mobile: "mobile", main_line: "main line" } as const;
 

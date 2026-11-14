@@ -122,7 +122,7 @@ describe("outcomes the user logs (spec: Call outcomes and their effect on the le
     expect(logged.status).toBe(200);
     const after = await task(taskId);
     expect(after).toMatchObject({ open: false, listed: false, outcomes: [], status: "active" });
-    expect(after.touches.at(-1)).toEqual({ kind: "call", at: "2026-11-02T11:00:00.000Z", outcome: "gatekeeper", number: dialled, note: "Receptionist says Pat is in clinic until 3.", redial: false, callbackAt: null });
+    expect(after.touches.at(-1)).toEqual({ kind: "call", at: "2026-11-02T11:00:00.000Z", outcome: "gatekeeper", number: dialled, note: "Receptionist says Pat is in clinic until 3.", redial: false, callbackAt: null, declinedPath: null });
     expect(after.personNotes.map((n) => n.body)).toEqual(["Receptionist says Pat is in clinic until 3."]);
     expect(after.companyNotes).toEqual([]);
     expect((await calls()).readyNow).toEqual([]);
@@ -183,7 +183,7 @@ describe("the call task shows what the user needs to make the call (spec: Call t
       script: "Ask who looks after new patient bookings.",
       status: "waiting_on_call",
       listed: true,
-      outcomes: ["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "callback_requested", "skip_for_now"], redialOutcomes: ["no_answer", "voicemail", "gatekeeper"],
+      outcomes: ["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "not_interested", "callback_requested", "skip_for_now"], redialOutcomes: ["no_answer", "voicemail", "gatekeeper"],
     });
     expect(first.numbers.map((n) => [n.kind, n.owner, n.bad])).toEqual([["direct", "person", false], ["mobile", "person", false]]);
     expect(first.touches).toEqual([{ kind: "email", at: "2026-11-02T09:00:00.000Z", stepId: "s1", copy: { subject: "Hello Omar", body: "Email s1 for Northgate Dental." } }]);
@@ -275,8 +275,6 @@ describe("wrong numbers, interest and skipping (spec: Call outcomes and their ef
     expect(skipped).toMatchObject({ open: true, listed: true, status: "waiting_on_call", touches: [] });
     expect((await h.progress(skipped.enrollmentId)).status).toBe("waiting_on_call");
 
-    // Not interested, callbacks and redials are not offered by this release.
-    expect((await log(firstId, { outcome: "not_interested", numberId: skipped.numbers[0]?.detailId })).status).toBe(400);
     // A closed task, an unknown task, and a call outside the prospect's calling day are refused.
     expect((await log(firstId, { outcome: "no_answer", numberId: skipped.numbers[0]?.detailId })).status).toBe(200);
     expect((await log(firstId, { outcome: "no_answer", numberId: skipped.numbers[0]?.detailId })).body.error?.message).toContain("no longer on the list");

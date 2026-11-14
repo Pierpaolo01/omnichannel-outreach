@@ -2,7 +2,7 @@ import { useId, useState } from "react";
 import type { ActivityEntry, ActivityView } from "../shared/api.ts";
 import { useApi } from "./api.ts";
 import { ErrorState, Section } from "./components.tsx";
-import { OUTCOME_TITLE, dialledLine } from "./calls/wording.ts";
+import { DECLINED_PATH_LINE, OUTCOME_TITLE, dialledLine } from "./calls/wording.ts";
 import { Icon, type IconName } from "./icons.tsx";
 import { useNow } from "./time.ts";
 
@@ -98,8 +98,8 @@ export function describeEntry(entry: ActivityEntry): { icon: IconName; tone: str
     const track = entry.track.several ? entry.track.label : null;
     switch (entry.kind) {
       case "call":
-        // The number dialled and the call's note; a skip for now has no number.
-        return { icon: "call", tone: CALL, title: OUTCOME_TITLE[entry.outcome], body: [dialledLine(entry.number), entry.note.trim()].filter(Boolean).join(". ") || null, track };
+        // What a decline did (its stored path), the number dialled and the call's note; a skip for now has no number.
+        return { icon: "call", tone: CALL, title: OUTCOME_TITLE[entry.outcome], body: [entry.declinedPath ? DECLINED_PATH_LINE[entry.declinedPath].slice(0, -1) : null, dialledLine(entry.number), entry.note.trim()].filter(Boolean).join(". ") || null, track };
       case "skipped":
         return { icon: "system", tone: PLAIN, title: `${entry.track.label} skipped`, body: "No good number to call: every number is missing or marked wrong.", track: null };
       case "released":

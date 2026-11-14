@@ -259,6 +259,8 @@ export interface StepProgressView {
 export interface TrackProgressView {
   readonly trackId: string;
   readonly channel: string;
+  /** The main sequence, or the campaign's win-back branch (ticket 16). */
+  readonly branch: "main" | "win_back";
   readonly started: boolean;
   readonly finishReason: FinishReasonApi | null;
   readonly finishedAt: string | null;
@@ -296,7 +298,20 @@ export interface EnrollmentProgress {
   /** The lead's SMS number, fixed at its first text (ticket 13). */
   readonly smsSender: string | null;
   readonly zone: string;
+  /**
+   * The main sequence's tracks, and the win-back branch's once the lead has entered it, each with its branch
+   * (ticket 16). A branch the lead has not entered has no progress and is not listed (review bot on 654907b);
+   * after a win-back entry the main tracks the lead had not finished show `dropped_for_win_back`.
+   */
   readonly tracks: readonly TrackProgressView[];
+  /** Where the lead runs: the main sequence, or the win-back branch since `winBackEnteredAt` (ticket 16). */
+  readonly branch: "main" | "win_back";
+  readonly winBackEnteredAt: string | null;
+  /**
+   * The lead declined on a call (ticket 16): when, on which phone track, and the declined path taken (the
+   * track's, or the user's override for this lead). No call is made to the lead again in this campaign.
+   */
+  readonly declined: { readonly at: string; readonly trackId: string; readonly path: DeclinedPathApi } | null;
 }
 
 /** GET /api/needs-attention (the 12b part: stalled inboxes, held tracks, account waits, provider anomalies). */
@@ -466,6 +481,14 @@ export interface LoadProjectionView {
    * worked on their day with no answer (ADR 0003, ticket 14c). The screen names them.
    */
   readonly callsNotCounted: readonly { readonly id: string; readonly name: string }[];
+  /**
+   * The estimate's run counted none of this campaign's win-back branch (ticket 16): its emails and texts go
+   * only to leads who decline on a call, and the assumed user logs every call no answer (ticket 14c). False
+   * when the campaign has no branch, or no figure is shown.
+   * A competing lead already in win-back when the estimate is taken is counted: its branch runs by the
+   * engine's own rules.
+   */
+  readonly winBackNotCounted: boolean;
 }
 
 /** Rendered copy, in pieces, so a fallback the lead gets can be shown as one. */
@@ -539,7 +562,14 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
    * (`no_number`); and its start after a track that was skipped or failed.
    */
   | ({ readonly channel: "call"; readonly track: TrackLabel } & (
-      | { readonly kind: "call"; readonly outcome: CallOutcomeApi; readonly number: RecordedNumberView | null; readonly note: string }
+      | {
+          readonly kind: "call";
+          readonly outcome: CallOutcomeApi;
+          readonly number: RecordedNumberView | null;
+          readonly note: string;
+          /** With not interested: the declined path taken, the track's or the user's override for the lead (ticket 16). */
+          readonly declinedPath: DeclinedPathApi | null;
+        }
       | { readonly kind: "skipped"; readonly stepNumber: null; readonly reason: "no_number" }
       | { readonly kind: "released"; readonly after: TrackLabel; readonly because: "skipped" | "failed" }
     ))
@@ -594,9 +624,13 @@ export interface EmailProviderStatus {
 
 /**
  * What the user logs on a call task. A callback requested carries `callbackAt`; no answer, voicemail and
- * gatekeeper may carry `redial` (ticket 15). Not interested arrives with ticket 16.
+ * gatekeeper may carry `redial` (ticket 15); not interested may carry `declinedPath`, the user's override of
+ * the phone track's path for this lead (ticket 16).
  */
 export type CallOutcomeApi = import("../domain/sequence/state.ts").CallOutcome;
+
+/** A phone track's declined path (ticket 16): stop the lead, continue on the other channels, or win back. */
+export type DeclinedPathApi = import("../domain/sequence/definition.ts").DeclinedPath;
 
 /**
  * Why a call is on the list (ticket 15): `due` today; `rolled_over` from an earlier day, unworked; `redial`,
@@ -615,6 +649,8 @@ export interface CallRecordView {
   readonly redial: boolean;
   /** With a callback requested: the date and time the prospect asked for. */
   readonly callbackAt: string | null;
+  /** With not interested: the declined path taken (ticket 16). */
+  readonly declinedPath: DeclinedPathApi | null;
 }
 
 /** GET and PUT /api/call-settings: the user's daily call capacity and the zone the call list's day is counted in. */
@@ -829,6 +865,10 @@ export interface CallTaskView {
   readonly dueAt: string;
   /** The user's date the call is listed for, YYYY-MM-DD: a redial moves it to the next day. */
   readonly listedFor: string;
+  /** The phone track's declined path, which the outcome screen preselects for not interested (ticket 16). */
+  readonly declinedPath: DeclinedPathApi;
+  /** The paths the user may choose for this lead: win back only while the campaign has a win-back branch. */
+  readonly declinedPaths: readonly DeclinedPathApi[];
   /**
    * The request id of every outcome stored on this task, skips for now included: the server's word on
    * whether a press was logged, whoever received its answer (ADR 0003 4.4.1, "One reconciliation").

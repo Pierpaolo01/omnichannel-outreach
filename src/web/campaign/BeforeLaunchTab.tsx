@@ -398,7 +398,11 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
             : load.daysUntilAllStart !== null
               ? `All ${load.leadsToStart} leads start within ${load.daysUntilAllStart} ${load.daysUntilAllStart === 1 ? "day" : "days"} of launch.`
               : ""}{" "}
-          {calls ? "A lead starts with its first email or text, or when its first call goes on your list. " : ""}Every email and text counts: tracks that start together and tracks that wait for another.{" "}
+          {calls ? "A lead starts with its first email or text, or when its first call goes on your list. " : ""}
+          {/* The server's word, from the finished run (ticket 16a): its win-back branch is never entered under the assumption. */}
+          {load.winBackNotCounted
+            ? "Every email and text of the main sequence counts: tracks that start together and tracks that wait for another. This campaign’s win-back emails and texts are not counted: the figures assume every call gets no answer, so nobody enters win-back."
+            : "Every email and text counts: tracks that start together and tracks that wait for another."}{" "}
           {callCaveat(calls, load.callsNotCounted)} Follow-ups always go before first messages when a sender is full. What other running campaigns have waiting on these senders is counted; every send is assumed to succeed, and replies, bounces, bad numbers and pauses are not foreseen.
         </p>
       )}

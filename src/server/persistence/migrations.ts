@@ -575,6 +575,16 @@ export const MIGRATIONS: readonly Migration[] = [
       UPDATE call_tasks SET reckoned_through = placed_wall;
     `,
   },
+  {
+    // Ticket 16a.
+    version: 15,
+    name: "the declined path on the call records (ADR 0003 1.3, 2.4; ticket 16)",
+    // A not interested call keeps the declined path it applied, the phone track's or the user's override for
+    // that lead. Earlier records are of other outcomes (ticket 15 refused not interested): none.
+    sql: `
+      ALTER TABLE call_attempts ADD COLUMN declined_path TEXT CHECK (declined_path IN ('stop', 'continue', 'win_back'));
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string): void {

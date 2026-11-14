@@ -130,8 +130,8 @@ describe("calls in the record's Activity (ticket 14: the person and company-lead
     const activity = (await h.request<ActivityView>("GET", `/api/people/${personId("Pat Oneil")}/activity`)).body.entries;
     const calls = activity.filter((e) => e.kind === "call");
     expect(calls).toEqual([
-      { kind: "call", channel: "call", track: { label: "Phone track", several: false }, campaign: expect.objectContaining({ name: "Calls" }), at: "2026-11-02T10:30:00.000Z", outcome: "wrong_number", number: { detailId: direct?.detailId, kind: "direct", owner: "person", value: direct?.value }, note: "Disconnected tone." },
-      { kind: "call", channel: "call", track: { label: "Phone track", several: false }, campaign: expect.objectContaining({ name: "Calls" }), at: "2026-11-02T10:00:00.000Z", outcome: "skip_for_now", number: null, note: "In clinic, try after lunch." },
+      { kind: "call", channel: "call", track: { label: "Phone track", several: false }, campaign: expect.objectContaining({ name: "Calls" }), at: "2026-11-02T10:30:00.000Z", outcome: "wrong_number", number: { detailId: direct?.detailId, kind: "direct", owner: "person", value: direct?.value }, note: "Disconnected tone." , declinedPath: null },
+      { kind: "call", channel: "call", track: { label: "Phone track", several: false }, campaign: expect.objectContaining({ name: "Calls" }), at: "2026-11-02T10:00:00.000Z", outcome: "skip_for_now", number: null, note: "In clinic, try after lunch." , declinedPath: null },
     ]);
   });
 });

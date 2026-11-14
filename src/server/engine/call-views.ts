@@ -6,7 +6,7 @@
 import { bucketOf, CALL_OUTCOMES, callNumbers, callWindow, dayHasRoom, isListed, listedForDay, queueRank, queueWall, recordedNumberOf, REDIAL_OUTCOMES, skippedTonight, type CallBucket } from "../../domain/sequence/calls.ts";
 import { displayPhone } from "../../domain/phone.ts";
 import { localDayNumber, nextWindowClose, nextWindowOpen, startOfLocalDay, windowOpen } from "../../domain/sequence/clock.ts";
-import { liveTracks } from "../../domain/sequence/definition.ts";
+import { declinedPathOf, liveTracks, winBackAvailable } from "../../domain/sequence/definition.ts";
 import { deriveStatus } from "../../domain/sequence/progress.ts";
 import type { CallAttempt, CallNumber, CallTask, RecordedNumber, SubjectState } from "../../domain/sequence/state.ts";
 import type { CallColleagueView, CallNumberView, CallOffListView, CallQueueItem, CallRecordView, RecordedNumberView, CallsView, CallTaskView, NoteView, TodayView, TouchView } from "../../shared/api.ts";
@@ -50,6 +50,7 @@ export const callRecordView = (s: SubjectState, c: CallAttempt): CallRecordView 
   note: c.note,
   redial: c.redial,
   callbackAt: c.callbackAt === null ? null : iso(c.callbackAt),
+  declinedPath: c.declinedPath,
 });
 
 /** A phone track's name as the canvas gives it: "Phone track", or "Phone track 2" when the campaign has several. */
@@ -286,5 +287,7 @@ export async function callTaskView(store: OutreachStore, taskId: string, now: nu
     callbackAt: task.callbackAt === null ? null : iso(task.callbackAt),
     dueAt: iso(task.dueWall),
     listedFor: dateOfDay(listedForDay(s, task)),
+    declinedPath: declinedPathOf(s.campaign.definition.tracks.find((t) => t.id === task.trackId)),
+    declinedPaths: winBackAvailable(s.campaign.definition) ? ["stop", "continue", "win_back"] : ["stop", "continue"],
   };
 }

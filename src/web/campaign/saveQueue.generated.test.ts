@@ -99,7 +99,13 @@ const RUN_SEEDS = [
 ];
 /** The coverage checks below hold over many runs, not over a few (council on aebeb80, item 5). */
 const ENOUGH_FOR_COVERAGE = SEEDS >= 100;
-const coverage = { lateAfterLoad: 0 };
+/**
+ * The seeds the coverage checks count over: the fixed and recorded ones, the same on every commit. The moving
+ * window runs every invariant on its seeds but takes no part in coverage counts, so they cannot depend on the
+ * commit (CI on 98927b6: a window of few SMS saves failed a share taken over every seed run).
+ */
+const FIXED_SEEDS = Array.from({ length: SEEDS }, (_, i) => 7000 + i).filter((_, i) => inShard(i));
+const COVERAGE_SEEDS = new Set([...FIXED_SEEDS, ...(FULL_SEARCH && SHARD ? [] : REGRESSIONS)]);
 const STEPS = 60;
 
 function rng(seed: number): () => number {
@@ -303,13 +309,15 @@ async function run(seed: number) {
   const heldBack = (x: Request) => x.heldPastLoads !== undefined && x.page.store.loads <= x.heldPastLoads && !x.page.gone;
   /** Answers to a save sent before its page loaded the saved version, with what the page showed before them (invariant 6). */
   const late: { page: Page; shown: string }[] = [];
+  /** How many late answers to a save sent before its page loaded the saved version this run gave (coverage). */
+  let lateAfterLoad = 0;
   const shownBy = (page: Page) => JSON.stringify([page.store.getSnapshot().save, page.store.inConflict, page.store.getSnapshot().draft]);
   const answer = (req: Request, lost: boolean) => {
     requests.splice(requests.indexOf(req), 1);
     if (req.page.gone) return;
     if (req.kind === "put" && req.loads < req.page.store.loads && !req.page.frozen) {
       late.push({ page: req.page, shown: shownBy(req.page) });
-      coverage.lateAfterLoad++;
+      lateAfterLoad++;
     }
     // Only a save is retried after no answer; a launch or a load gets its answer.
     if ((lost && req.kind === "put") || !req.answer) return req.reject(new NoAnswer());
@@ -450,33 +458,31 @@ async function run(seed: number) {
   }
   const stored = (await h.request<SequenceView>("GET", path)).body.definition;
   const smsSaved = stored.tracks.some((t) => !t.removed && t.channel === "sms") && (stored.smsPool ?? []).length > 0;
-  return { problems, pending: requests.length, launchedOnce: launchedOnce(), smsSaved, phoneSaved: phoneCoverage.phoneSaved, phoneAny: phoneCoverage.phoneAny };
+  return { problems, pending: requests.length, launchedOnce: launchedOnce(), smsSaved, phoneSaved: phoneCoverage.phoneSaved, phoneAny: phoneCoverage.phoneAny, lateAfterLoad };
 }
 
 describe("saving the definition, generated over the real editor state (ADR 0003 1.1.1)", () => {
-  const launched: boolean[] = [];
-  const smsSaved: boolean[] = [];
-  const phoneSaved: boolean[] = [];
+  // What each coverage seed's run reached; the window's runs are checked for every invariant and counted for nothing.
+  const reached: { launched: boolean; smsSaved: boolean; phoneSaved: boolean; lateAfterLoad: number }[] = [];
   for (const seed of RUN_SEEDS) {
     test(`run ${seed}`, async () => {
       const out = await run(seed);
-      launched.push(out.launchedOnce);
-      smsSaved.push(out.smsSaved);
-      phoneSaved.push(out.phoneSaved);
+      if (COVERAGE_SEEDS.has(seed)) reached.push({ launched: out.launchedOnce, smsSaved: out.smsSaved, phoneSaved: out.phoneSaved, lateAfterLoad: out.lateAfterLoad });
       expect(out.pending).toBe(0);
       expect(out.problems).toEqual([]);
     });
   }
+  const count = (f: (r: (typeof reached)[number]) => boolean) => reached.filter(f).length;
   test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs include launches that start, not only refused ones", () => {
-    expect(launched.filter(Boolean).length).toBeGreaterThan(RUN_SEEDS.length / 10);
+    expect(count((r) => r.launched)).toBeGreaterThan(COVERAGE_SEEDS.size / 10);
   });
   test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs answer saves sent before their page loaded the saved version, late (council on aebeb80, item 2)", () => {
-    expect(coverage.lateAfterLoad).toBeGreaterThan(0);
+    expect(count((r) => r.lateAfterLoad > 0)).toBeGreaterThan(0);
   });
   test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs save arranged SMS tracks with the numbers that connected (ticket 13b)", () => {
-    expect(smsSaved.filter(Boolean).length).toBeGreaterThan(RUN_SEEDS.length / 20);
+    expect(count((r) => r.smsSaved)).toBeGreaterThan(COVERAGE_SEEDS.size / 20);
   });
   test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs save phone tracks with their own calling hours and skip limits (ticket 14c)", () => {
-    expect(phoneSaved.filter(Boolean).length).toBeGreaterThan(0);
+    expect(count((r) => r.phoneSaved)).toBeGreaterThan(0);
   });
 });

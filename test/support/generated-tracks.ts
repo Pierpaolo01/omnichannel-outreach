@@ -90,7 +90,13 @@ interface Subject {
 
 interface Campaign {
   id: string;
+  /** The main sequence, which the record models. */
   readonly definition: CampaignDefinition;
+  /**
+   * Its win-back branch (ticket 16), saved with it. No lead here declines (there is no call), so no lead
+   * enters it: the record leaves it out, and the app must show nothing of it on any lead (review bot on 654907b).
+   */
+  readonly branch: readonly TrackDefinition[];
   readonly companies: number[];
   launchedAt: number | null;
 }
@@ -234,12 +240,22 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
       smsPool: smsPool.length > 0 ? smsPool : [numbers[0]!.id],
       tracks,
     };
-    campaigns.push({ id: "", definition, companies: ci === 0 ? [0, 1, 2] : ci === 1 ? [0, 1] : [1, 2], launchedAt: null });
+    // Ticket 16's branch, from its own stream, so the runs above keep every draw they had.
+    const branchRand = random(seed ^ 0x16b ^ ci);
+    const branch: TrackDefinition[] = branchRand() < 0.5
+      ? Array.from({ length: 1 + Math.floor(branchRand() * 2) }, (_, i) => {
+          const channel = branchRand() < 0.6 ? ("email" as const) : ("sms" as const);
+          const id = `c${ci}w${i + 1}`;
+          return { id, channel, branch: "win_back" as const, window: ALL_DAY, steps: [{ id: `${id}s1`, waitDays: 0, subject: channel === "email" ? "Still here, {{first_name|there}}" : "", body: "One more note for {{company}}.", threading: "new_subject" as const, removed: false }], start: { kind: "entry" as const }, removed: false };
+        })
+      : [];
+    campaigns.push({ id: "", definition, branch, companies: ci === 0 ? [0, 1, 2] : ci === 1 ? [0, 1] : [1, 2], launchedAt: null });
   }
   for (const c of campaigns) {
     if (c.definition.tracks.some((t) => t.start.kind === "after")) features.add("after");
     if (c.definition.tracks.filter((t) => t.start.kind === "entry").length > 1) features.add("together");
     if (new Set(c.definition.tracks.map((t) => t.channel)).size > 1) features.add("both-channels");
+    if (c.branch.length > 0) features.add("a-win-back-branch-never-entered");
   }
   if (campaigns.length > 1) features.add("several-campaigns");
 
@@ -327,7 +343,7 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
   for (const [ci, c] of campaigns.entries()) {
     const created = await h.createCampaign(`Campaign ${ci + 1}`, rowsFor(c), c.definition.timezone);
     c.id = created.campaign.id;
-    await h.defineSequence(c.id, c.definition);
+    await h.defineSequence(c.id, { ...c.definition, tracks: [...c.definition.tracks, ...c.branch] });
   }
   await discover();
   email.onHandover = probe(h, problem, "email", checkHandoverPriority);
@@ -683,6 +699,11 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
       const runStart = runStartOf(rec);
       const channels = [...new Set(def.tracks.map((t) => t.channel))];
       const atLaunch = runStart <= now && !channels.some((c) => reachesAt(rec, c, runStart - 1));
+      const branch = campaigns[rec.campaign]!.branch;
+      if (branch.length > 0) features.add(atLaunch ? "no-channel-at-launch-beside-a-branch" : "a-lead-beside-a-branch-never-entered");
+      // A branch the lead never entered has no progress and is in none of its reads (review bot on 654907b).
+      const progress = (await h.request<EnrollmentProgress>("GET", `/api/enrollments/${rec.id}`)).body;
+      if (progress.branch !== "main" || progress.tracks.some((t) => branch.some((b) => b.id === t.trackId))) problem(`activity: ${rec.id}'s progress shows the win-back branch it never entered (${JSON.stringify(progress.tracks.map((t) => t.trackId))})`);
       const ownCall = (t: TrackDefinition) => callsOf(t.channel).filter((c) => c.subjectId === rec.id && t.steps.some((st) => st.id === c.stepId));
       const completed = (t: TrackDefinition) => {
         const sends = t.steps.map((st) => deliveryOf(t.channel, rec.id, st.id));

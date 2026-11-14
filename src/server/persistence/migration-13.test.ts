@@ -39,6 +39,7 @@ function beforeMigration13(file: string): void {
   db.exec(`
     DROP TABLE definition_saves;
     DROP INDEX call_tasks_open_callbacks;
+    ALTER TABLE call_attempts DROP COLUMN declined_path;
     ALTER TABLE call_attempts DROP COLUMN redial;
     ALTER TABLE call_attempts DROP COLUMN callback_at;
     ALTER TABLE call_tasks DROP COLUMN reckoned_through;

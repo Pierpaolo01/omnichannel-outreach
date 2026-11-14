@@ -6,7 +6,7 @@
 import type { OutreachStatus } from "../outreach-status.ts";
 import { applyAttemptEvent, applyLookup, isLive, isUncertain, markable, withRef, type AttemptEffect, type AttemptEvent, type WorkEvent } from "./attempt.ts";
 import { leadNow, localDayNumber, nextWindowOpen, sendPoint, span, startOfLocalDay, syncClock, wallOfLead, type Freeze, type LeadClock } from "./clock.ts";
-import { liveSteps, type TrackChannel, type TrackDefinition } from "./definition.ts";
+import { liveSteps, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
 import type { Attempt, EndReason, FinishReason, LeadDetail, ProviderWork, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
 
 // ---------------------------------------------------------------------------------------------
@@ -86,9 +86,13 @@ export function hasGoodNumber(state: SubjectState): boolean {
   return state.lead.phones.some((p) => !p.bad);
 }
 
-/** Whether a track on `channel` can reach the lead now. */
+/**
+ * Whether a track on `channel` can reach the lead now. A phone track cannot once the lead declined: it is never
+ * called again in this campaign (council on f5fdeee, item 1), so a lead with nothing else left ends with no usable
+ * channel at the decline. `startTrack` still skips a phone track after a decline as `skipped_declined`.
+ */
 export function channelReaches(state: SubjectState, channel: TrackChannel): boolean {
-  return channel === "call" ? hasGoodNumber(state) : destinationFor(state.lead.details, channel) !== null;
+  return channel === "call" ? hasGoodNumber(state) && !state.subject.noMoreCalls : destinationFor(state.lead.details, channel) !== null;
 }
 
 /** Channels in the lead's branch that can reach the lead now (2.1). */
@@ -378,6 +382,8 @@ function startTrack(state: SubjectState, track: TrackDefinition, lead: number, n
   // A phone track has no single destination: the user chooses among the lead's numbers at each call.
   const destination = destinationFor(s.lead.details, track.channel);
   s = withTrack(s, track.id, (t) => ({ ...t, startedAt: startAt, destinationDetailId: destination?.id ?? null }));
+  // A phone track after a decline starts and is skipped at once: no call is made to the lead again (2.4).
+  if (track.channel === "call" && s.subject.noMoreCalls) return finishTrack(s, track.id, "skipped_declined", startAt, startWall);
   return channelReaches(s, track.channel) ? advanceTrack(s, track, startAt, startWall) : finishTrack(s, track.id, "skipped_missing_channel", startAt, startWall);
 }
 
@@ -405,6 +411,43 @@ export function enterMain(state: SubjectState, now: number): SubjectState {
   const s = synced(state, now);
   if (s.subject.branchEnteredAt !== null || !runs(s)) return s;
   return { ...s, subject: { ...s.subject, branch: "main", branchEnteredAt: leadNow(s.subject.clock, now) } };
+}
+
+/**
+ * A declined call (ADR 0003 2.4 "Calls", ticket 16), after the declined call's own result has completed its
+ * track at `at`: no call is made to the lead again in this campaign (`noMoreCalls`, never cleared), so every
+ * other phone track it has started finishes `skipped_declined` at the same instant, closing its task (an open
+ * redial or callback closes without an outcome and holds nothing), and a later one is skipped at its start.
+ * Then by path: stop ends the lead `declined_on_call`; continue leaves it running on its other channels;
+ * win back enters the campaign's win-back branch (`enterWinBack`). Other campaigns and colleagues are untouched.
+ */
+export function decline(state: SubjectState, path: DeclinedPath, at: number, atWall: number, now: number): SubjectState {
+  let s: SubjectState = { ...state, subject: { ...state.subject, noMoreCalls: true } };
+  for (const track of s.campaign.definition.tracks) {
+    const p = progressOf(s, track.id);
+    if (track.channel === "call" && p && p.startedAt !== null && p.finishedAt === null) s = finishTrack(s, track.id, "skipped_declined", at, atWall);
+  }
+  if (path === "stop") return end(s, "declined_on_call", now);
+  if (path === "win_back") s = enterWinBack(s, now);
+  return runs(s) ? evaluate(s, now) : s;
+}
+
+/**
+ * Entering win-back (2.4): every unfinished main track finishes `dropped_for_win_back` now, started or not,
+ * closing its call task and quiescing its live attempts, so nothing of it is claimed afterwards; an attempt
+ * already with a provider resolves by the attempt rules, on a finished track (ruling 7). Then the lead's branch
+ * is `win_back`, entered at the current lead time, from which the branch's entry tracks start.
+ */
+export function enterWinBack(state: SubjectState, now: number): SubjectState {
+  const at = leadNow(state.subject.clock, now);
+  const atWall = wallOfLead(state.subject.clock, now);
+  let s = state;
+  for (const track of liveTracksFor(s)) {
+    if (track.branch !== "main" || progressOf(s, track.id)?.finishedAt != null) continue;
+    if (!progressOf(s, track.id)) s = { ...s, tracks: [...s.tracks, emptyProgress(track.id)] };
+    s = finishTrack(s, track.id, "dropped_for_win_back", at, atWall);
+  }
+  return { ...s, subject: { ...s.subject, branch: "win_back", branchEnteredAt: at } };
 }
 
 /** A reply ends outreach in this campaign (2.4), unless the lead already replied or was interested. */
