@@ -336,6 +336,21 @@ describe("Before launch: copy for a lead in the win-back branch (ticket 16b)", (
     expect(northgate.winBack[0]!.body.find((x) => x.kind === "fallback")?.text).toBe("there");
   });
 
+  test("the read says how a lead can enter the branch, and the estimate's note agrees: never without a phone track (council on aaf82b7)", async () => {
+    const entry = async (tracks: readonly TrackDefinition[]) => {
+      const { h, id } = await campaign([inbox("inbox-a")]);
+      await h.defineSequence(id, { ...def, tracks });
+      const lead = (await beforeLaunch(h, id)).leads.find((l) => l.name === "Pat Oneil")!;
+      const copy = (await h.request<CopyPreview>("GET", `/api/campaigns/${id}/preview/${lead.id}`)).body;
+      return [copy.winBackEntry, (await beforeLaunch(h, id)).load?.winBackNotCounted];
+    };
+    const [main, call, branchEmail, branchSms] = def.tracks as [TrackDefinition, TrackDefinition, TrackDefinition, TrackDefinition];
+    expect(await entry(def.tracks)).toEqual(["declined_path", true]);
+    expect(await entry([main, { ...call, declinedPath: "continue" }, branchEmail, branchSms])).toEqual(["chosen_for_a_lead", true]);
+    // With no phone track the branch can never be entered, so the estimate says nothing of it either.
+    expect(await entry([main, branchEmail, branchSms])).toEqual(["never", false]);
+  });
+
   test("a campaign with no win-back branch lists none", async () => {
     const { h, id } = await campaign([inbox("inbox-a")]);
     await h.defineSequence(id, emailTrack([step("s1", { subject: "Hi", threading: "new_subject" })]));

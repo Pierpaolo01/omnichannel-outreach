@@ -89,7 +89,7 @@ test.describe("the declined path and the win-back branch in the campaign editor 
     await page.keyboard.press("Enter");
     await page.getByRole("button", { name: "Remove this win-back email track" }).focus();
     await page.keyboard.press("Enter");
-    await expect(page.getByRole("alert").filter({ hasText: "The phone track's declined path is win back, but the campaign has no win-back branch: add a track to the win-back branch, or choose stop or continue." })).toBeVisible();
+    await expect(page.getByRole("alert").filter({ hasText: "The phone track's declined path is win back, but the win-back branch has no tracks: add a track to it, or choose stop or continue." })).toBeVisible();
     await expect(page.getByRole("button", { name: "Remove this win-back email track" })).toBeFocused();
     expect((await stored(page, id)).tracks.some((t) => t.branch === "win_back" && !t.removed)).toBe(true);
 
@@ -138,6 +138,23 @@ test.describe("the declined path and the win-back branch in the campaign editor 
     await expect(copy.getByRole("listitem").first()).toContainText("Only if they decline");
     await blocker.getByRole("button", { name: "Open track" }).click();
     await expect(page.getByTestId("inspector").getByRole("heading", { name: "Win-back SMS track" })).toBeVisible();
+  });
+
+  test("Copy for a lead says how a lead can enter the branch, from the server: by the declined path, only if chosen for one lead, or never (council on aaf82b7)", async ({ page }) => {
+    const branchTracks = WITH_A_BRANCH.tracks.filter((t) => t.branch === "win_back");
+    const cases = [
+      { name: "Win back by path", tracks: WITH_A_BRANCH.tracks, label: "Only if they decline", sentence: "These go only if this lead declines on a call and moves to the branch" },
+      { name: "Win back by choice only", tracks: WITH_A_BRANCH.tracks.map((t) => (t.id === "call" ? { ...t, declinedPath: "continue" as const } : t)), label: "Only if chosen for them", sentence: "No phone track’s declined path is win back, so these go only if win back is chosen for this lead" },
+      { name: "Win back never", tracks: [...WITH_A_CALL.tracks.filter((t) => t.channel !== "call").map((t) => (t.start.kind === "after" && t.start.trackId === "call" ? { ...t, start: { kind: "entry" as const } } : t)), ...branchTracks], label: "Never sent", sentence: "The campaign has no phone track to decline on, so no lead can enter the win-back branch: these are never sent." },
+    ];
+    for (const c of cases) {
+      const id = await campaign(page, c.name, { ...WITH_A_BRANCH, tracks: c.tracks });
+      await page.goto(`/campaigns/${id}/before-launch`);
+      const copy = page.getByRole("region", { name: "If they decline: the win-back branch" });
+      await expect(copy.getByText(c.sentence, { exact: false })).toBeVisible();
+      const labels = await copy.getByRole("list", { name: "The win-back branch’s messages" }).getByRole("listitem").allTextContents();
+      expect([c.name, labels.length > 0, labels.every((l) => l.includes(c.label))]).toEqual([c.name, true, true]);
+    }
   });
 
   test("the branch never makes the canvas scroll sideways, at any width between the laptop sizes, with the inspector open (review bot on 8147ba6)", async ({ page }) => {

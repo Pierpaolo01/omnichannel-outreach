@@ -101,7 +101,7 @@ describe("the win-back branch and the declined path in the editor (ADR 0003, tic
     callSkipLimitDays: 2,
     ...(declinedPath ? { declinedPath } : {}),
   });
-  const noBranch = "The phone track's declined path is win back, but the campaign has no win-back branch: add a track to the win-back branch, or choose stop or continue.";
+  const noBranch = "The phone track's declined path is win back, but the win-back branch has no tracks: add a track to it, or choose stop or continue.";
 
   test("adding an email or SMS track to the win-back branch puts it there, starting when the lead enters the branch", () => {
     for (const channel of ["email", "sms"] as const) {

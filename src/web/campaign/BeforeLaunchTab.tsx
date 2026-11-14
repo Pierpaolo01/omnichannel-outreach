@@ -506,7 +506,7 @@ function Preview({ campaignId, editor, leads, horizonDays }: { campaignId: strin
 }
 
 /** When a message goes, as Copy for a lead heads it: the estimate's day, or why it has none. One source for every day shown. */
-function whenSent(s: CopyPreview["steps"][number], horizonDays: number | null): string {
+function whenSent(s: CopyPreview["steps"][number], horizonDays: number | null, entry: CopyPreview["winBackEntry"] = "declined_path"): string {
   if (s.day !== null) return s.waitsOnCall ? `Day ${s.day}, after ${s.waitsOnCall}’s call` : `Day ${s.day}`;
   switch (s.noDay) {
     case "skipped":
@@ -516,7 +516,8 @@ function whenSent(s: CopyPreview["steps"][number], horizonDays: number | null): 
     case "not_sent":
       return "Not sent";
     case "win_back":
-      return "Only if they decline";
+      // How a lead can enter the branch, from the server's read (`winBackEntry`; council on aaf82b7).
+      return entry === "chosen_for_a_lead" ? "Only if chosen for them" : entry === "never" ? "Never sent" : "Only if they decline";
     default:
       return "No day: no estimate";
   }
@@ -547,10 +548,10 @@ function LeadCopy({ campaignId, enrollmentId, version, def, horizonDays }: { cam
           <h3 id="win-back-copy" className="text-[15px] font-semibold">
             If they decline: the win-back branch
           </h3>
-          <p className="-mt-1 text-[13px] text-muted">These go only if this lead declines on a call and moves to the branch, which the estimate never assumes, so none has a day.</p>
+          <p className="-mt-1 text-[13px] text-muted">{WIN_BACK_ENTRY[preview.winBackEntry]}</p>
           <ol className="flex flex-col gap-3" aria-label="The win-back branch’s messages">
             {preview.winBack.map((s) => (
-              <PreviewMessage key={s.stepId} s={s} def={def} named horizonDays={horizonDays} />
+              <PreviewMessage key={s.stepId} s={s} def={def} named horizonDays={horizonDays} entry={preview.winBackEntry} />
             ))}
           </ol>
         </section>
@@ -559,8 +560,15 @@ function LeadCopy({ campaignId, enrollmentId, version, def, horizonDays }: { cam
   );
 }
 
+/** How a lead can enter the win-back branch, as the server reads it (`winBackEntry`; council on aaf82b7): one sentence above its messages. */
+const WIN_BACK_ENTRY: Record<CopyPreview["winBackEntry"], string> = {
+  declined_path: "These go only if this lead declines on a call and moves to the branch, which the estimate never assumes, so none has a day.",
+  chosen_for_a_lead: "No phone track’s declined path is win back, so these go only if win back is chosen for this lead when their declined call is logged. None has a day.",
+  never: "The campaign has no phone track to decline on, so no lead can enter the win-back branch: these are never sent.",
+};
+
 /** One message of Copy for a lead: its heading with the day it goes, or why it has none, and its copy rendered for the lead. */
-function PreviewMessage({ s, def, named, horizonDays }: { s: CopyPreview["steps"][number]; def: CampaignDefinition; named: boolean; horizonDays: number | null }) {
+function PreviewMessage({ s, def, named, horizonDays, entry }: { s: CopyPreview["steps"][number]; def: CampaignDefinition; named: boolean; horizonDays: number | null; entry?: CopyPreview["winBackEntry"] }) {
   const track = def.tracks.find((t) => t.id === s.trackId);
   const sms = s.channel === "sms";
   const noun = `${sms ? "Text" : "Email"} ${s.number}`;
@@ -574,7 +582,7 @@ function PreviewMessage({ s, def, named, horizonDays }: { s: CopyPreview["steps"
             {named && track ? <span className="font-normal text-muted"> · {trackTitle(def, track)}</span> : null}
           </span>
         </span>
-        <span className="whitespace-nowrap text-muted">{whenSent(s, horizonDays)}</span>
+        <span className="whitespace-nowrap text-muted">{whenSent(s, horizonDays, entry)}</span>
       </div>
       <div className="px-3.5 py-3 text-[14px] leading-[1.55]">
         {s.skipped ? (

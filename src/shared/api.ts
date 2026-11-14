@@ -538,6 +538,12 @@ export interface CopyPreview {
    * `skipped` for a track whose channel the lead lacks). Empty when the campaign has no live branch track.
    */
   readonly winBack: CopyPreview["steps"];
+  /**
+   * How a lead can enter the win-back branch (council on aaf82b7; `winBackEntry` in definition.ts): by a phone
+   * track's declined path, only when win back is chosen for one lead as their declined call is logged, or never
+   * (no live branch track, or no live phone track). The page words `winBack`'s messages from it.
+   */
+  readonly winBackEntry: import("../domain/sequence/definition.ts").WinBackEntry;
 }
 
 /** One line of a person's or company lead's timeline (GET /api/people/:id/activity). Newest first. */

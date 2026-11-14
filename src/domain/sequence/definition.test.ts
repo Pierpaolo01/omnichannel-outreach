@@ -68,6 +68,21 @@ describe("definitions refused at the boundary (ADR 0003 7.1)", () => {
     expect(definitionProblems(definition({ tracks: [emailTrack({ channel: "sms", steps: [step("m1")] })] }))).toEqual([]);
   });
 
+  describe("how a lead can enter the win-back branch (council on aaf82b7)", () => {
+    const call = (fields: Partial<TrackDefinition> = {}): TrackDefinition => emailTrack({ id: "p1", channel: "call", steps: [step("c1", { subject: "", body: "" })], ...fields });
+    const branch = emailTrack({ id: "w1", branch: "win_back", steps: [step("w1s1", { threading: "new_subject" })] });
+    test("by a phone track's declined path; or only when win back is chosen for one lead; or never", () => {
+      expect(winBackEntry(definition({ tracks: [emailTrack(), call({ declinedPath: "win_back" }), branch] }))).toBe("declined_path");
+      // A path left unset reads as stop (Q14), so only the per-lead choice enters the branch.
+      expect(winBackEntry(definition({ tracks: [emailTrack(), call({ declinedPath: "continue" }), branch] }))).toBe("chosen_for_a_lead");
+      expect(winBackEntry(definition({ tracks: [emailTrack(), call(), branch] }))).toBe("chosen_for_a_lead");
+      // No live phone track, or no live branch track: nobody enters it.
+      expect(winBackEntry(definition({ tracks: [emailTrack(), branch] }))).toBe("never");
+      expect(winBackEntry(definition({ tracks: [emailTrack(), call({ declinedPath: "stop", removed: true }), branch] }))).toBe("never");
+      expect(winBackEntry(definition({ tracks: [emailTrack(), call({ declinedPath: "stop" })] }))).toBe("never");
+    });
+  });
+
   describe("the win-back branch and the declined path (ticket 16)", () => {
     const call = (fields: Partial<TrackDefinition> = {}) => emailTrack({ id: "p1", channel: "call", steps: [step("c1", { subject: "", body: "" })], ...fields });
     const winBack = (fields: Partial<TrackDefinition> = {}) => emailTrack({ id: "w1", branch: "win_back", steps: [step("w1s1", { threading: "new_subject" })], ...fields });
@@ -86,7 +101,7 @@ describe("definitions refused at the boundary (ADR 0003 7.1)", () => {
     });
 
     test("a declined path of win back needs a win-back branch with a live track", () => {
-      const refused = "The phone track's declined path is win back, but the campaign has no win-back branch: add a track to the win-back branch, or choose stop or continue.";
+      const refused = "The phone track's declined path is win back, but the win-back branch has no tracks: add a track to it, or choose stop or continue.";
       expect(definitionProblems(definition({ tracks: [emailTrack(), call({ declinedPath: "win_back" })] }))).toEqual([refused]);
       expect(definitionProblems(definition({ tracks: [emailTrack(), call({ declinedPath: "win_back" }), winBack({ removed: true })] }))).toEqual([refused]);
     });

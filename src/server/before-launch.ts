@@ -8,7 +8,7 @@ import { missingFields, renderSegments, type Segment } from "../domain/copy-prev
 import { isLive, isUncertain } from "../domain/sequence/attempt.ts";
 import { localDayNumber } from "../domain/sequence/clock.ts";
 import { mergeUses } from "../domain/sequence/copy.ts";
-import { liveSteps, liveTracks, ownSubject, poolOf, type CampaignDefinition, type TrackDefinition } from "../domain/sequence/definition.ts";
+import { liveSteps, liveTracks, ownSubject, poolOf, winBackEntry, type CampaignDefinition, type TrackDefinition } from "../domain/sequence/definition.ts";
 import { callbackHold, goodEmail, hasGoodNumber, progressOf, runs } from "../domain/sequence/progress.ts";
 import type { AccountState, CallDay, SubjectState } from "../domain/sequence/state.ts";
 import type { BeforeLaunchView, ContactDetailView, CopyPreview, LeadRow, LoadProjectionView, PreviewLead, WithheldBy, WithheldTrack } from "../shared/api.ts";
@@ -463,5 +463,5 @@ export async function copyPreview(store: OutreachStore, campaignId: string, enro
         missing,
       }));
     });
-  return { lead, steps: steps.map((x) => x.step), winBack };
+  return { lead, steps: steps.map((x) => x.step), winBack, winBackEntry: winBackEntry(definition) };
 }

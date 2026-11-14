@@ -1411,7 +1411,7 @@ export const SCREENS: readonly Screen[] = [
     open: async (page) => {
       const id = await campaignWith(page, "A call that continues", { ...WITH_A_CALL, tracks: WITH_A_CALL.tracks.map((t) => (t.id === "call" ? { ...t, declinedPath: "continue" as const } : t)) });
       await page.goto(`/campaigns/${id}?track=call`);
-      await settle(page, "The campaign has no win-back branch: add a track to the win-back branch, or choose stop or continue.");
+      await settle(page, "The win-back branch has no tracks: add a track to it, or choose stop or continue.");
     },
   },
   {
@@ -1452,7 +1452,7 @@ export const SCREENS: readonly Screen[] = [
       const id = await campaignWith(page, "The branch's last track", { ...WITH_A_BRANCH, tracks: WITH_A_BRANCH.tracks.filter((t) => t.id !== "wb-sms") });
       await page.goto(`/campaigns/${id}?track=wb-email&step=none`);
       await page.getByRole("button", { name: "Remove this win-back email track" }).click();
-      await settle(page, "declined path is win back, but the campaign has no win-back branch");
+      await settle(page, "declined path is win back, but the win-back branch has no tracks");
     },
   },
   {
@@ -2123,7 +2123,7 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
       await page.getByRole("button", { name: "Remove this win-back email track" }).focus();
     },
     act: (page) => page.keyboard.press("Enter"),
-    focused: (page) => page.getByRole("button", { name: "Remove this win-back email track", description: /declined path is win back, but the campaign has no win-back branch/ }),
+    focused: (page) => page.getByRole("button", { name: "Remove this win-back email track", description: /declined path is win back, but the win-back branch has no tracks/ }),
   },
   {
     name: "Edit branch on the phone track opens the branch's first track and moves focus to it",

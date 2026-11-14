@@ -50,7 +50,7 @@ test.describe("the phone track on the canvas and in its inspector", () => {
     await expect(paths.getByRole("radio", { checked: true })).toHaveCount(0);
     await expect(inspector.getByText("No path is chosen yet, so a declined call stops the lead in this campaign.")).toBeVisible();
     await expect(paths.getByRole("radio", { name: /^Win back/ })).toBeDisabled();
-    await expect(inspector.getByText("The campaign has no win-back branch: add a track to the win-back branch, or choose stop or continue.")).toBeVisible();
+    await expect(inspector.getByText("The win-back branch has no tracks: add a track to it, or choose stop or continue.")).toBeVisible();
     await expect(page.getByRole("button", { name: /^Phone track: .*If declined: stop, not chosen yet\./ })).toBeVisible();
     // Together with the email track: both hang from Launch.
     await expect(page.getByRole("list", { name: "Tracks that start at launch" }).getByRole("button")).toHaveCount(2);

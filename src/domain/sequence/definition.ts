@@ -71,10 +71,27 @@ export const declinedPathOf = (track: Pick<TrackDefinition, "declinedPath"> | un
  * clause the validator's refusal ends with (7.1), which the editor also shows beside win back while it
  * cannot be chosen (ticket 16b), so both say the same.
  */
-export const NO_WIN_BACK_BRANCH = "the campaign has no win-back branch: add a track to the win-back branch, or choose stop or continue.";
+export const NO_WIN_BACK_BRANCH = "the win-back branch has no tracks: add a track to it, or choose stop or continue.";
 
 /** Whether a lead can enter the campaign's win-back branch: it has a live track. */
 export const winBackAvailable = (def: CampaignDefinition): boolean => def.tracks.some((t) => !t.removed && t.branch === "win_back");
+
+/**
+ * How a lead can enter the campaign's win-back branch (council on aaf82b7), from the definition alone:
+ * - `declined_path`: some live phone track of the main sequence has win back as its declined path
+ *   (`declinedPathOf`), so a declined call there moves the lead in;
+ * - `chosen_for_a_lead`: the branch has a live track and the main sequence a live phone track, but no
+ *   path is win back, so a lead enters it only when win back is chosen for them as their declined call is
+ *   logged (the outcome's per-lead path, ticket 16a: offered whenever `winBackAvailable`);
+ * - `never`: the branch has no live track, or the main sequence has no live phone track to decline on.
+ * The copy preview says it, and the estimate's `winBackNotCounted` reads it, so the two cannot disagree.
+ */
+export type WinBackEntry = "declined_path" | "chosen_for_a_lead" | "never";
+export function winBackEntry(def: CampaignDefinition): WinBackEntry {
+  const calls = liveTracks(def, "main").filter((t) => t.channel === "call");
+  if (!winBackAvailable(def) || calls.length === 0) return "never";
+  return calls.some((t) => declinedPathOf(t) === "win_back") ? "declined_path" : "chosen_for_a_lead";
+}
 
 /** An empty definition for a new campaign. */
 export function emptyDefinition(timezone: string): CampaignDefinition {
