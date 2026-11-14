@@ -88,8 +88,9 @@ function watched(store: KeyValue, owner: () => Instance, problems: string[], lab
     keys: () => store.keys(),
     set: (k, v) => {
       gone("set", k);
-      store.set(k, v);
-      changed?.(k);
+      const stored = store.set(k, v);
+      if (stored) changed?.(k);
+      return stored;
     },
     remove: (k) => {
       gone("remove", k);
@@ -101,9 +102,21 @@ function watched(store: KeyValue, owner: () => Instance, problems: string[], lab
 
 class MapStore implements KeyValue {
   readonly map = new Map<string, string>();
+  /** While true, every write is refused, as a full or blocked browser storage refuses it. */
+  full = false;
+  /** Outbox keys once removed: an entry removed in any tab never reappears (ADR 0003 4.4.1). */
+  readonly removed = new Set<string>();
+  readonly reappeared: string[] = [];
   get = (k: string) => this.map.get(k) ?? null;
-  set = (k: string, v: string) => void this.map.set(k, v);
-  remove = (k: string) => void this.map.delete(k);
+  set = (k: string, v: string) => {
+    if (this.full) return false;
+    if (this.removed.has(k)) this.reappeared.push(k);
+    this.map.set(k, v);
+    return true;
+  };
+  remove = (k: string) => {
+    if (this.map.delete(k) && k.startsWith("outreach.calls.outbox.")) this.removed.add(k);
+  };
   keys = () => [...this.map.keys()];
 }
 
@@ -258,12 +271,15 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
   /** A refused press, by any of its ids, once seen. */
   const seenRefused = new Set<Press>();
   const check = async (moved: Set<Instance>) => {
+    // Storage is the only truth: an entry removed in any tab never reappears.
+    for (const k of local.reappeared.splice(0)) problems.push(`3: ${k} was removed and came back`);
     // Invariant 10: a refused press keeps its record until the user acknowledges it.
     for (const p of presses) {
       const refusedId = [...p.ids].find((id) => refusedIds.has(id));
       if (refusedId === undefined || dismissed.has(refusedId)) continue;
       if (shownRefusal(refusedId)) seenRefused.add(p);
-      else if (!movedOnFrom.has(refusedId)) problems.push(`3: press ${refusedId} was refused and is shown nowhere`);
+      // A refusal that came while storage was full could not be kept: the entry stays unanswered and is sent, and refused, again.
+      else if (!movedOnFrom.has(refusedId) && local.get(`outreach.calls.outbox.${refusedId}`) === null) problems.push(`3: press ${refusedId} was refused and is shown nowhere`);
     }
     for (const p of presses) {
       let n = 0;
@@ -279,12 +295,19 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
       // Invariant 7: pending is an unanswered outbox entry for the call on screen.
       if (snap.pending && !(local.get(`outreach.calls.outbox.${snap.pending.body.requestId}`) ?? "").startsWith("{") ) problems.push(`7: ${tab.label} shows ${snap.pending.body.requestId} pending, but it is not in the outbox`);
       if (snap.pending && shownRefusal(snap.pending.body.requestId)) problems.push(`7: ${tab.label} shows ${snap.pending.body.requestId} pending, but it was refused`);
-      for (const shown of [snap.away?.requestId ?? null, snap.refusal?.requestId ?? null]) {
-        if (shown === null) continue;
-        if (!refusedIds.has(shown)) problems.push(`2: ${tab.label} shows ${shown} refused without a refusal`);
-        const press = pressOf.get(shown);
-        for (const id of press?.ids ?? []) if (await stored(id)) problems.push(`2: ${tab.label} shows a press refused though the server logged it as ${id}`);
-        if (snap.away?.requestId === shown && press && snap.away.note !== press.note) problems.push(`3: ${tab.label} lost the note of its refused press`);
+      // One path for every refusal (ADR 0003 4.4.1): each refused entry in storage is shown by every desk on screen,
+      // with its note, whichever call that desk is on (the same one, another, or none).
+      for (const key of local.keys()) {
+        if (!key.startsWith("outreach.calls.outbox.")) continue;
+        const raw = local.get(key) ?? "";
+        if (!raw.includes('"refused"')) continue;
+        const entry = JSON.parse(raw) as { taskId: string; body: { requestId: string; note: string } };
+        const shownHere = snap.refusedRecords.find((x) => x.body.requestId === entry.body.requestId);
+        if (!shownHere) problems.push(`3: ${tab.label} does not show the kept refusal ${entry.body.requestId}`);
+        else if (shownHere.body.note !== entry.body.note) problems.push(`3: ${tab.label} shows the kept refusal ${entry.body.requestId} without its note`);
+        if (!refusedIds.has(entry.body.requestId)) problems.push(`2: ${entry.body.requestId} is kept as refused without a refusal`);
+        const where = snap.focus === null ? "none" : snap.focus === entry.taskId ? "same" : "other";
+        seen.refusalFocus.add(where);
       }
       // A logged outcome, whichever desk had its answer, consumes its call's draft.
       if (snap.logged !== null && snap.logged.requestId !== i.lastLogged) tab.choices.delete(snap.logged.task.taskId);
@@ -300,8 +323,8 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
       i.lastLogged = snap.logged?.requestId ?? null;
       if (snap.focus !== i.lastFocus && i.lastFocus !== null && !moved.has(i) && !newlyLogged) problems.push(`4: ${tab.label}'s focus moved from ${i.lastFocus} to ${snap.focus} without an outcome or moving on`);
       i.lastFocus = snap.focus;
-      if (snap.away?.requestId) seen.refusedShown++;
-      if (snap.away && snap.away.requestId === null) seen.foundGone++;
+      if (snap.refusedRecords.some((x) => x.taskId === snap.focus)) seen.refusedShown++;
+      if (snap.away) seen.foundGone++;
       if (snap.pending?.unconfirmed) seen.unconfirmed++;
       if (snap.recovering.length > 0) seen.recovered++;
       if (snap.refusedRecords.length > 0) seen.records++;
@@ -312,12 +335,22 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
 
   /** Refusals a desk showed on the call and the user moved on from (acknowledged). */
   const movedOnFrom = new Set<string>();
-  const seen = { refusedShown: 0, foundGone: 0, unconfirmed: 0, blocked: 0, recovered: 0, dismissed: 0, records: 0, leftWithPending: 0 };
+  const seen = { refusedShown: 0, foundGone: 0, unconfirmed: 0, blocked: 0, recovered: 0, dismissed: 0, records: 0, leftWithPending: 0, notQueued: 0, refusalFocus: new Set<string>() };
+  let storageFullUntil = -1;
   const tabs: Tab[] = [];
   tabs.push(await newTab("a"), await newTab("b"));
   let notes = 0;
   for (let s = 0; s < STEPS; s++) {
     const roll = r();
+    // Once, in the evening, nothing is ready and the user opens Calls in a fresh tab: its desk is on no call.
+    if (s === 60 && r() < 0.7) {
+      const evening = Date.parse("2026-11-02T17:10:00Z");
+      if (h.clock < evening) await h.advanceTo(evening);
+      if (tabs.length < 4) tabs.push(await newTab("evening"));
+    }
+    // Now and then the device's storage is full for a few steps: every write is refused.
+    if (!local.full && r() < 0.03) storageFullUntil = s + 1 + Math.floor(r() * 4);
+    local.full = s < storageFullUntil;
     const tab = tabs[Math.floor(r() * tabs.length)] ?? tabs[0]!;
     const desk = tab.instance.desk;
     const snap = desk.getSnapshot();
@@ -331,14 +364,20 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
         // Often the shared main line, which another lead's call can mark bad under this draft.
         const roll2 = r();
         const numberId = roll2 < 0.3 ? (numbers.find((n) => n.kind === "main_line")?.detailId ?? snap.draft.numberId) : roll2 < 0.45 ? (numbers[Math.floor(r() * numbers.length)]?.detailId ?? null) : snap.draft.numberId;
-        // Editing the draft a refusal was shown on acknowledges that refusal.
-        if (snap.refusal) movedOnFrom.add(snap.refusal.requestId);
         desk.setDraft({ outcome, note, numberId, noteScope: r() < 0.3 ? "company" : "person" });
         if (snap.focus !== null) tab.choices.set(snap.focus, { numberId, outcome, note });
         const blocked = outcome !== "skip_for_now" && desk.getSnapshot().numberProblem !== null;
+        const sentBefore = requests.length;
         pressing = true;
         desk.log();
         pressing = false;
+        // The boundary: a press storage refused is not pressed. Nothing is sent, the page says so, and the draft stays.
+        if (local.full && !blocked && (outcome === "skip_for_now" || numberId !== null)) {
+          if (!desk.getSnapshot().notQueued) problems.push(`3: ${tab.label} accepted a press its storage refused`);
+          if (requests.length !== sentBefore) problems.push(`3: ${tab.label} sent a press it could not store`);
+          if (desk.getSnapshot().draft.note !== note) problems.push(`6: ${tab.label} lost the draft of a press it could not store`);
+          seen.notQueued++;
+        }
         // Invariant 7: a number that is no longer good blocks Log; nothing is sent on it or in its place.
         if (blocked && desk.getSnapshot().pending !== null) problems.push(`6: ${tab.label} logged though the chosen number is no longer good`);
         if (blocked) seen.blocked++;
@@ -372,7 +411,8 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
     } else if (roll < 0.73) {
       if (snap.away !== null) {
         moved.add(tab.instance);
-        if (snap.away.requestId) movedOnFrom.add(snap.away.requestId);
+        // Moving on from a call acknowledges every refusal kept for it.
+        for (const r of snap.refusedRecords) if (r.taskId === snap.away.taskId) movedOnFrom.add(r.body.requestId);
         await desk.moveOn();
       } else if (snap.refusedRecords.length > 0) {
         const first = snap.refusedRecords[0]!;
@@ -447,6 +487,7 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
   }
   await flush();
 
+  local.full = false;
   // The network settles without reopening any tab: timers fire, the browser comes back online, the
   // tabs refresh (sending entries left by closed tabs), and every request arrives and is answered.
   for (let guard = 0; guard < 60; guard++) {
@@ -488,7 +529,7 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
 }
 
 describe("working the call list in the browser, generated over the real call desk (ADR 0003 4.4.1)", () => {
-  const counts: { presses: number; logged: number; seen: { refusedShown: number; foundGone: number; unconfirmed: number; blocked: number; recovered: number; dismissed: number; records: number; leftWithPending: number } }[] = [];
+  const counts: { presses: number; logged: number; seen: { refusedShown: number; foundGone: number; unconfirmed: number; blocked: number; recovered: number; dismissed: number; records: number; leftWithPending: number; notQueued: number; refusalFocus: Set<string> } }[] = [];
   for (const seed of Array.from({ length: SEEDS }, (_, i) => 9100 + i)) {
     test(`run ${seed}`, async () => {
       const out = await run(seed);
@@ -505,21 +546,26 @@ describe("working the call list in the browser, generated over the real call des
     expect(counts.filter((c) => c.seen.blocked > 0).length).toBeGreaterThan(0);
     expect(counts.filter((c) => c.seen.recovered > 0).length).toBeGreaterThan(0);
     expect(counts.filter((c) => c.seen.records > 0).length).toBeGreaterThan(0);
+    expect(counts.filter((c) => c.seen.notQueued > 0).length).toBeGreaterThan(0);
+    // A refusal is recovered by a desk on that same call, on another call, and on none.
+    for (const where of ["same", "other", "none"]) expect(counts.some((c) => c.seen.refusalFocus.has(where)), where).toBe(true);
   });
 });
 
 describe("each desk fault is caught by its known seed (ADR 0003 4.4.1)", () => {
   const KILLING: readonly [DeskFault, number, string][] = [
-    ["new_id_on_resend", 9119, "7:"],
+    ["new_id_on_resend", 9111, "7:"],
     ["logged_when_sent", 9100, "2:"],
     ["outbox_removed_when_sent", 9100, "7:"],
     ["refresh_adopts_focus", 9100, "4:"],
     ["no_lock_while_pending", 9100, "5:"],
     ["substitute_bad_number", 9100, "6:"],
     ["pending_kept_after_answer", 9100, "7:"],
-    ["disposed_desk_applies", 9100, "8:"],
-    ["only_own_entries_retried", 9101, "9:"],
-    ["refusal_dropped", 9109, "3:"],
+    ["disposed_desk_applies", 9101, "8:"],
+    ["only_own_entries_retried", 9105, "9:"],
+    ["refusal_dropped", 9100, "3:"],
+    ["focused_refusal_hidden", 9100, "3:"],
+    ["stale_copy_written_back", 9101, "3:"],
   ];
   for (const [fault, seed, invariant] of KILLING) {
     test(`${fault}, seed ${seed}, invariant ${invariant}`, async () => {
@@ -531,7 +577,7 @@ describe("each desk fault is caught by its known seed (ADR 0003 4.4.1)", () => {
 
 /** By hand: CALL_DESK_FAULT_SEARCH=1 prints the first seeds that catch each fault, to fill KILLING above. */
 describe.skipIf(!process.env["CALL_DESK_FAULT_SEARCH"])("fault search (by hand)", () => {
-  const all: DeskFault[] = ["new_id_on_resend", "logged_when_sent", "outbox_removed_when_sent", "refresh_adopts_focus", "no_lock_while_pending", "substitute_bad_number", "pending_kept_after_answer", "disposed_desk_applies", "only_own_entries_retried", "refusal_dropped"];
+  const all: DeskFault[] = ["new_id_on_resend", "logged_when_sent", "outbox_removed_when_sent", "refresh_adopts_focus", "no_lock_while_pending", "substitute_bad_number", "pending_kept_after_answer", "disposed_desk_applies", "only_own_entries_retried", "refusal_dropped", "focused_refusal_hidden", "stale_copy_written_back"];
   for (const fault of all) {
     test(fault, async () => {
       const found: string[] = [];

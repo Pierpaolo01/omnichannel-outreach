@@ -4,6 +4,8 @@ import { business, person } from "../../../test/support/export-builder.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
 import type { ActivityView, CallsView, CallTaskView, LeadSearchResult, TodayView } from "../../shared/api.ts";
 import { TICK_MS, Worker } from "../worker.ts";
+import { placeCall, readyCalls } from "../../domain/sequence/calls.ts";
+import { Crash } from "../../../test/support/engine-harness.ts";
 
 /**
  * What the Today page and the call focus queue read (ticket 14, part b), through the real HTTP app,
@@ -213,7 +215,7 @@ describe("the instant the server advertises is one at which its answer shows the
   });
 
   test("an ordinary read never waits for the worker", async () => {
-    const worker = { completedThrough: () => Date.parse("2026-11-02T09:00:00Z"), caughtUpTo: () => new Promise<boolean>(() => undefined), nextTickAt: () => null };
+    const worker = { tickEnded: () => new Promise<void>(() => undefined), nextTickAt: () => null };
     const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }], worker });
     await h.tick();
     expect((await h.request<CallsView>("GET", "/api/calls")).status).toBe(200);
@@ -221,20 +223,108 @@ describe("the instant the server advertises is one at which its answer shows the
   });
 });
 
-describe("a read and the worker's placements: a completed-tick marker (ADR 0003 4.4; review bot on 36232cd)", () => {
-  /** The midnight world of the test above, with a worker whose tick the test can hold open after it starts. */
-  async function heldWorld() {
+describe("a read and the worker's placements: the completed-placement marker is stored with the placements (ADR 0003 4.4; review bot on 9c3ad27)", () => {
+  const SAM = person({ person_id: "p3", business_id: "b1", full_name: "Sam Lee", email: "sam@harbour.example" });
+  const ANA = person({ person_id: "p4", business_id: "b1", full_name: "Ana Ruiz", email: "ana@harbour.example" });
+  type Ending = "succeeds" | "throws before placing" | "throws after placing some" | "is killed mid-tick" | "the database refuses the commit" | "two ticks overlap";
+
+  /**
+   * Monday: two calls fit the capacity and are worked; the other two wait for Tuesday. At 00:00:05 on
+   * Tuesday the tick that places them ends as `ending` says.
+   */
+  async function midnight(ending: Ending) {
+    let fault: "before" | "after" | "crash" | null = null;
+    let placed = 0;
+    const h = new EngineHarness({
+      start: MONDAY_9,
+      accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
+      rules: {
+        readyCalls: (s, now) => {
+          if (fault === "before") throw new Error("a failure before placing");
+          if (fault === "crash") throw new Crash("mid-tick");
+          return readyCalls(s, now);
+        },
+        placeCall: (s, item, now, id) => {
+          if (fault === "after" && ++placed === 2) throw new Error("a failure after placing one");
+          return placeCall(s, item, now, id);
+        },
+      },
+    });
+    await h.tick();
+    await h.request("PUT", "/api/call-settings", { dailyCapacity: 2, userZone: "Europe/London" });
+    const { campaign: c } = await h.createCampaign("Endings", { businesses: [HARBOUR], people: [PAT, NIA, SAM, ANA] });
+    await h.defineSequence(c.id, definition([track("p1", "call", [call("c1")], ALWAYS)]));
+    expect((await h.launch(c.id)).status).toBe(200);
+    await h.tick();
+    for (const item of (await h.request<CallsView>("GET", "/api/calls")).body.readyNow) {
+      const t = (await h.request<CallTaskView>("GET", `/api/call-tasks/${item.taskId}`)).body;
+      expect((await h.request("POST", `/api/call-tasks/${t.taskId}/outcome`, { requestId: `r-${t.taskId}`, outcome: "no_answer", numberId: t.numbers[0]?.detailId })).status).toBe(200);
+    }
+    h.clock = Date.parse("2026-11-02T23:59:45Z");
+    await h.tick();
+    h.clock = Date.parse("2026-11-03T00:00:05Z");
+    const tick = () => h.engine.tick().catch(() => undefined);
+    if (ending === "succeeds") await tick();
+    if (ending === "throws before placing") {
+      fault = "before";
+      await tick();
+    }
+    if (ending === "throws after placing some") {
+      fault = "after";
+      await tick();
+    }
+    if (ending === "is killed mid-tick") {
+      fault = "crash";
+      await tick();
+      fault = null;
+      await h.restart();
+    }
+    if (ending === "the database refuses the commit") {
+      const store = h.store.engine;
+      const original = store.placeCalls.bind(store);
+      store.placeCalls = () => Promise.reject(new Error("SQLITE_BUSY: the commit was refused"));
+      await tick();
+      store.placeCalls = original;
+    }
+    if (ending === "two ticks overlap") await Promise.all([tick(), tick()]);
+    fault = null;
+    return h;
+  }
+
+  /** Each ending, and how many of the two due calls its stored state holds (a restart's own settlement places them). */
+  const ENDINGS: readonly [Ending, number][] = [
+    ["succeeds", 2],
+    ["throws before placing", 0],
+    ["throws after placing some", 0],
+    ["is killed mid-tick", 2],
+    ["the database refuses the commit", 0],
+    ["two ticks overlap", 2],
+  ];
+  for (const [ending, placedAfter] of ENDINGS) {
+    test(`a tick that ${ending}: a read never says the list is current while a due call is unplaced`, async () => {
+      const h = await midnight(ending);
+      const now = h.clock;
+      for (const view of [(await h.request<CallsView>("GET", "/api/calls")).body, (await h.request<TodayView>("GET", "/api/today")).body]) {
+        const ready = "readyNow" in view && Array.isArray(view.readyNow) ? view.readyNow.length : (view as TodayView).readyNow;
+        expect(ready).toBe(placedAfter);
+        // Work due and unplaced is never reported current, nor announced as far off.
+        expect(view.behind).toBe(ready < 2);
+        if (view.behind) expect(Date.parse(view.nextChangeAt ?? "")).toBeLessThanOrEqual(now + TICK_MS);
+      }
+      // The next tick that succeeds places them and the list is current again.
+      await h.engine.tick();
+      const after = (await h.request<CallsView>("GET", "/api/calls")).body;
+      expect(after.readyNow).toHaveLength(2);
+      expect(after.behind).toBe(false);
+    });
+  }
+
+  test("a read at the advertised instant waits at most 3 seconds for the marker, then answers what is stored, marked behind", async () => {
     const timers: { at: number; fire: () => void }[] = [];
     const box: { h: EngineHarness | null } = { h: null };
-    let gate: (() => void) | null = null;
-    let holding = false;
     const worker = new Worker({
       recover: async () => undefined,
-      tick: async () => {
-        // Started, and nothing committed yet: the case both earlier fixes missed.
-        if (holding) await new Promise<void>((resolve) => (gate = resolve));
-        await box.h?.tick();
-      },
+      tick: async () => undefined,
       now: () => box.h?.clock ?? 0,
       setTimer: (fire, ms) => {
         const t = { at: (box.h?.clock ?? 0) + ms, fire };
@@ -245,74 +335,17 @@ describe("a read and the worker's placements: a completed-tick marker (ADR 0003 
         };
       },
     });
-    const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }], worker });
+    const h = await midnight("throws before placing");
     box.h = h;
-    await h.tick();
-    await h.request("PUT", "/api/call-settings", { dailyCapacity: 1, userZone: "Europe/London" });
-    const { campaign: c } = await h.createCampaign("Held", { businesses: [HARBOUR], people: [PAT, NIA] });
-    await h.defineSequence(c.id, definition([track("p1", "call", [call("c1")], ALWAYS)]));
-    expect((await h.launch(c.id)).status).toBe(200);
-    await h.tick();
-    const monday = (await h.request<CallsView>("GET", "/api/calls")).body;
-    const first = (await h.request<CallTaskView>("GET", `/api/call-tasks/${monday.focusTaskId}`)).body;
-    expect((await h.request("POST", `/api/call-tasks/${first.taskId}/outcome`, { requestId: "r1", outcome: "no_answer", numberId: first.numbers[0]?.detailId })).status).toBe(200);
-    // The worker's last finished tick began at 23:59:45; its next is due at 00:00:00.
-    h.clock = Date.parse("2026-11-02T23:59:45Z");
-    worker.start();
-    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
-    const fireDue = () => {
-      const due = timers.filter((t) => t.at <= h.clock);
-      for (const t of due) {
-        timers.splice(timers.indexOf(t), 1);
-        t.fire();
-      }
-    };
-    const settle = async () => {
-      for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
-    };
-    return { h, worker, timers, fireDue, settle, hold: () => (holding = true), release: () => gate?.() };
-  }
-
-  test("a read at the advertised instant while the tick that will place the call has started and not finished waits for it to finish", async () => {
-    const w = await heldWorld();
-    w.hold();
-    w.h.clock = Date.parse("2026-11-03T00:00:00Z");
-    w.fireDue();
-    await w.settle();
-    // The tick began at 00:00:00 and is held before its placements commit.
-    w.h.clock = Date.parse("2026-11-03T00:00:01Z");
     let answered: CallsView | null = null;
-    const read = w.h.request<CallsView>("GET", `/api/calls?expected=${encodeURIComponent("2026-11-03T00:00:00.000Z")}`).then((x) => (answered = x.body));
-    await w.settle();
+    const app = (await import("../app.ts")).createApp({ store: h.store, now: () => new Date(h.clock).toISOString(), newId: () => `n${Math.random()}`, engine: { launch: () => Promise.reject(new Error("no")), logCallOutcome: () => Promise.reject(new Error("no")), nextWakeAt: () => h.engine.nextWakeAt(), callsPlacedThrough: () => h.engine.callsPlacedThrough(), nextCallWakeAt: (a) => h.engine.nextCallWakeAt(a) }, worker });
+    const read = Promise.resolve(app.request(`/api/calls?expected=${encodeURIComponent("2026-11-03T00:00:00.000Z")}`)).then(async (r: Response) => (answered = (await r.json()) as CallsView));
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
     expect(answered).toBeNull();
-    w.release();
-    await read;
-    expect(answered!.readyNow.map((x) => x.person?.name)).toEqual(["Nia Cole"]);
-    expect(answered!.behind).toBe(false);
-    w.worker.stop();
-  });
-
-  test("a tick that never finishes: the read answers within the 3-second bound, with what is stored, marked behind, and the worker's next tick as its next change, never tomorrow", async () => {
-    const w = await heldWorld();
-    w.hold();
-    w.h.clock = Date.parse("2026-11-03T00:00:00Z");
-    w.fireDue();
-    await w.settle();
-    w.h.clock = Date.parse("2026-11-03T00:00:01Z");
-    let answered: CallsView | null = null;
-    const read = w.h.request<CallsView>("GET", `/api/calls?expected=${encodeURIComponent("2026-11-03T00:00:00.000Z")}`).then((x) => (answered = x.body));
-    await w.settle();
-    expect(answered).toBeNull();
-    w.h.clock = Date.parse("2026-11-03T00:00:04Z");
-    w.fireDue();
+    h.clock += 3_000;
+    for (const t of timers.filter((x) => x.at <= h.clock)) t.fire();
     await read;
     expect(answered!.readyNow).toEqual([]);
     expect(answered!.behind).toBe(true);
-    expect(Date.parse(answered!.nextChangeAt ?? "")).toBeLessThanOrEqual(w.h.clock + TICK_MS);
-    // An ordinary read meanwhile never advertises a far-off change while the call is due and unplaced.
-    const ordinary = (await w.h.request<TodayView>("GET", "/api/today")).body;
-    expect(ordinary.behind).toBe(true);
-    expect(Date.parse(ordinary.nextChangeAt ?? "")).toBeLessThanOrEqual(w.h.clock + TICK_MS);
-    w.worker.stop();
   });
 });

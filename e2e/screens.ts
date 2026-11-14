@@ -1334,7 +1334,7 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
       await page.keyboard.press("Enter");
       await page.getByRole("button", { name: "Log and open next call" }).focus();
       await page.keyboard.press("Enter");
-      await page.getByText(/already logged:/).waitFor();
+      await page.getByRole("button", { name: "Open the next call" }).waitFor();
     },
     focused: (page) => page.getByRole("button", { name: "Open the next call" }),
   },

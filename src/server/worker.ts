@@ -1,10 +1,8 @@
 /**
  * The engine's worker: restart settlement once (ADR 0003 section 6), then a tick every `TICK_MS` after
- * the last one ends. It keeps the **completed-tick marker** the read models rely on (ADR 0003 4.4, "A
- * read and the worker's placements"): `completedThrough`, the instant its last finished tick began. A
- * tick evaluates and places at its own start or later and commits each placement before it finishes,
- * so the stored state shows everything due at or before that instant. A tick that has begun and not
- * finished covers nothing yet.
+ * the last one ends. The completed-placement marker a read relies on is not kept here: the engine
+ * stores it in the transaction that stores its placements (ADR 0003 4.4). The worker only lets a read
+ * wait for its next tick to end, and says when that tick is due.
  */
 export const TICK_MS = 15_000;
 /** How long a read waits for the worker before it answers with what is stored, marked `behind`. */
@@ -19,30 +17,18 @@ export interface WorkerDeps {
   onError?(error: unknown): void;
 }
 
-/** What the HTTP app reads from the worker. */
+/** What the HTTP app reads from the worker: only when its ticks end. The marker itself is stored (ADR 0003 4.4). */
 export interface WorkerProgress {
-  /** The instant the last finished tick began: everything due at or before it is stored. Null before the first finishes. */
-  completedThrough(): number | null;
-  /**
-   * Resolves true once a tick that began at or after `at` has finished, or false after `boundMs`
-   * (the worker's own timer), whichever comes first.
-   */
-  caughtUpTo(at: number, boundMs: number): Promise<boolean>;
-  /** When the worker's next tick is due to begin; null while none is scheduled. */
+  /** Resolves when the worker's next tick ends, whether it succeeded or threw, or after `boundMs`, whichever is first. */
+  tickEnded(boundMs: number): Promise<void>;
+  /** When the worker's next tick is due to begin; null while one runs or none is scheduled. */
   nextTickAt(): number | null;
-}
-
-interface Waiter {
-  readonly at: number;
-  readonly resolve: (done: boolean) => void;
-  cancel: () => void;
 }
 
 export class Worker implements WorkerProgress {
   private readonly deps: WorkerDeps;
-  private completed: number | null = null;
   private next: number | null = null;
-  private waiters: Waiter[] = [];
+  private waiters: (() => void)[] = [];
   private cancel: (() => void) | null = null;
   private stopped = false;
 
@@ -62,28 +48,25 @@ export class Worker implements WorkerProgress {
     this.next = null;
   }
 
-  completedThrough(): number | null {
-    return this.completed;
-  }
-
   nextTickAt(): number | null {
     return this.next;
   }
 
-  caughtUpTo(at: number, boundMs: number): Promise<boolean> {
-    if (this.completed !== null && this.completed >= at) return Promise.resolve(true);
+  tickEnded(boundMs: number): Promise<void> {
     return new Promise((resolve) => {
-      const waiter: Waiter = { at, resolve, cancel: () => undefined };
-      waiter.cancel = this.deps.setTimer(() => {
-        this.waiters = this.waiters.filter((w) => w !== waiter);
-        resolve(false);
-      }, boundMs);
-      this.waiters.push(waiter);
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        cancelBound();
+        resolve();
+      };
+      const cancelBound = this.deps.setTimer(finish, boundMs);
+      this.waiters.push(finish);
     });
   }
 
   private async work(first: boolean): Promise<void> {
-    const began = this.deps.now();
     this.next = null;
     try {
       if (first) await this.deps.recover();
@@ -91,14 +74,10 @@ export class Worker implements WorkerProgress {
     } catch (error) {
       this.deps.onError?.(error);
     }
-    // Finished: everything due at or before `began` is stored now.
-    this.completed = this.completed === null ? began : Math.max(this.completed, began);
-    const done = this.waiters.filter((w) => w.at <= began);
-    this.waiters = this.waiters.filter((w) => w.at > began);
-    for (const w of done) {
-      w.cancel();
-      w.resolve(true);
-    }
+    // Only a wake-up: what a read relies on is the stored marker, written with the placements.
+    const waiting = this.waiters;
+    this.waiters = [];
+    for (const w of waiting) w();
     if (this.halted()) return;
     this.next = this.deps.now() + TICK_MS;
     this.cancel = this.deps.setTimer(() => void this.work(false), TICK_MS);

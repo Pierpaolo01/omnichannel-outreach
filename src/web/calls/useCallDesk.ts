@@ -1,60 +1,11 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import type { CallOutcomeAnswer, CallsView, CallTaskView } from "../../shared/api.ts";
 import { getJson } from "../api.ts";
-import { CallDesk, NoAnswer, Refused, type DeskSnapshot, type KeyValue, type OutcomeBody } from "./callDesk.ts";
+import { CallDesk, NoAnswer, Refused, type DeskSnapshot, type OutcomeBody } from "./callDesk.ts";
+import { browserStorage } from "./storage.ts";
 
 /** How long an outcome waits for its answer before it counts as no answer and is sent again. */
 const ANSWER_TIMEOUT_MS = 20_000;
-
-/** Browser storage that never throws: private windows and blocked storage fall back to memory. */
-function storage(pick: () => Storage): KeyValue {
-  const memory = new Map<string, string>();
-  const s = (): Storage | null => {
-    try {
-      return pick();
-    } catch {
-      return null;
-    }
-  };
-  return {
-    get: (k) => {
-      try {
-        return s()?.getItem(k) ?? memory.get(k) ?? null;
-      } catch {
-        return memory.get(k) ?? null;
-      }
-    },
-    set: (k, v) => {
-      memory.set(k, v);
-      try {
-        s()?.setItem(k, v);
-      } catch {
-        // memory holds it
-      }
-    },
-    remove: (k) => {
-      memory.delete(k);
-      try {
-        s()?.removeItem(k);
-      } catch {
-        // memory only
-      }
-    },
-    keys: () => {
-      const keys = new Set(memory.keys());
-      try {
-        const st = s();
-        for (let i = 0; st && i < st.length; i++) {
-          const k = st.key(i);
-          if (k !== null) keys.add(k);
-        }
-      } catch {
-        // memory only
-      }
-      return [...keys];
-    },
-  };
-}
 
 async function post(taskId: string, body: OutcomeBody): Promise<CallOutcomeAnswer> {
   const abort = new AbortController();
@@ -98,8 +49,8 @@ function browserDesk(): CallDesk {
     },
     task: async (id) => (await getJson(`/api/call-tasks/${encodeURIComponent(id)}`)) as CallTaskView,
     post,
-    local: storage(() => window.localStorage),
-    session: storage(() => window.sessionStorage),
+    local: browserStorage(() => window.localStorage),
+    session: browserStorage(() => window.sessionStorage),
     newId,
     setTimer: (fire, ms) => {
       const t = setTimeout(fire, ms);

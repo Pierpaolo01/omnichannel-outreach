@@ -22,7 +22,12 @@ const DEFINITION: CampaignDefinition = { timezone: "Europe/London", callSkipLimi
 class MapStore implements KeyValue {
   readonly map = new Map<string, string>();
   get = (k: string) => this.map.get(k) ?? null;
-  set = (k: string, v: string) => void this.map.set(k, v);
+  full = false;
+  set = (k: string, v: string) => {
+    if (this.full) return false;
+    this.map.set(k, v);
+    return true;
+  };
   remove = (k: string) => void this.map.delete(k);
   keys = () => [...this.map.keys()];
 }
@@ -57,6 +62,8 @@ async function world() {
   await h.advanceTo(MONDAY_10);
 
   const local = new MapStore();
+  /** Task reads to fail before the next succeeds. */
+  let failTaskReads = 0;
   /** Every POST the desks made, held until the test answers it. */
   const held: Held[] = [];
   const timers: (() => void)[] = [];
@@ -75,7 +82,13 @@ async function world() {
     new CallDesk({
       faults,
       calls: async (focus) => (await h.request<CallsView>("GET", `/api/calls${focus ? `?focus=${focus}` : ""}`)).body,
-      task: async (id) => (await h.request<CallTaskView>("GET", `/api/call-tasks/${id}`)).body,
+      task: async (id) => {
+        if (failTaskReads > 0) {
+          failTaskReads--;
+          throw new Error("The server answered 503.");
+        }
+        return (await h.request<CallTaskView>("GET", `/api/call-tasks/${id}`)).body;
+      },
       post: (taskId, body) => new Promise((resolve, reject) => held.push({ taskId, body, resolve, reject })),
       local,
       session,
@@ -91,7 +104,7 @@ async function world() {
   };
   const outbox = () => local.keys().filter((k) => k.startsWith("outreach.calls.outbox."));
   const stored = async (requestId: string) => (await h.store.engine.callRequestTask(requestId)) !== null;
-  return { h, desk, held, answer, fireTimers, outbox, stored, local };
+  return { h, desk, held, answer, fireTimers, outbox, stored, local, failTaskReads: (n: number) => (failTaskReads = n) };
 }
 
 describe("what the user chose is never replaced for them (review bot on e6872eb, finding 1)", () => {
@@ -308,7 +321,7 @@ describe("what a desk shows is derived from the server and the outbox (council o
     const snap = a2.getSnapshot();
     expect(snap.pending).toBeNull();
     // Its own resend got the server's replayed answer (shown as logged), or the server's read says it is logged.
-    expect(snap.logged?.requestId === resend.body.requestId || snap.away?.offList?.reason === "logged").toBe(true);
+    expect(snap.logged?.requestId === resend.body.requestId || snap.away?.offList.reason === "logged").toBe(true);
     expect(w.outbox()).toEqual([]);
   });
 
@@ -389,5 +402,121 @@ describe("liveness: an outcome left by a tab that leaves is sent by a tab still 
     await w.fireTimers();
     expect(w.held).toEqual([]);
     expect(w.outbox()).toHaveLength(1);
+  });
+});
+
+describe("whether a note was saved is the server's fact (review bot on 9c3ad27)", () => {
+  test("a voicemail saved with its note, the page left, one failed read: the page never says the saved note was not saved", async () => {
+    const w = await world();
+    const session = new MapStore();
+    const a = w.desk(session);
+    await a.start();
+    await w.fireTimers();
+    a.setDraft({ outcome: "voicemail", note: "Left a message about evening bookings." });
+    a.log();
+    await flush();
+    // Saved on the server; the answer is lost and the user leaves Calls.
+    await w.answer(w.held[0]!, true);
+    a.dispose();
+    // Back on Calls: the page sends the entry again and the server answers with the stored result; the next read of the call fails once.
+    const back = w.desk(session);
+    await back.start();
+    await flush();
+    w.failTaskReads(1);
+    for (const x of [...w.held]) await w.answer(x);
+    await flush();
+    await back.refresh();
+    await flush();
+    const away = back.getSnapshot().away;
+    expect(away).toMatchObject({ offList: { reason: "logged", outcome: "voicemail" } });
+    expect(away?.note).toBe("");
+  });
+});
+
+describe("one path for a refusal, whichever call the page is on (review bot on 9c3ad27)", () => {
+  test("another tab's outcome refused on the call this page is on keeps that tab's note on screen and in storage", async () => {
+    const w = await world();
+    const b = w.desk(new MapStore());
+    await b.start();
+    await w.fireTimers();
+    const snap = b.getSnapshot();
+    const view = snap.task?.state === "ready" ? snap.task.view : null;
+    const mainLine = view?.numbers.find((n) => n.kind === "main_line");
+    b.setDraft({ numberId: mainLine?.detailId ?? null, outcome: "no_answer", note: "Typed in the other tab." });
+    b.log();
+    await flush();
+    // B's request never arrives, and B closes. The main line is marked bad on a colleague's call meanwhile.
+    for (const x of w.held.splice(0)) x.reject(new NoAnswer());
+    await flush();
+    b.dispose();
+    const calls = (await w.h.request<CallsView>("GET", "/api/calls")).body;
+    const other = calls.readyNow.find((x) => x.taskId !== snap.focus);
+    expect((await w.h.request("POST", `/api/call-tasks/${other?.taskId}/outcome`, { requestId: "elsewhere-main", outcome: "wrong_number", numberId: mainLine?.detailId })).status).toBe(200);
+
+    // A, on that same call, sends B's entry and gets the refusal.
+    const a = w.desk(new MapStore());
+    await a.start();
+    await flush();
+    expect(a.getSnapshot().focus).toBe(snap.focus);
+    await w.answer(w.held[0]!);
+    await flush();
+    const kept = a.getSnapshot().refusedRecords;
+    expect(kept).toEqual([expect.objectContaining({ taskId: snap.focus, body: expect.objectContaining({ note: "Typed in the other tab." }) })]);
+    expect(w.outbox()).toHaveLength(1);
+  });
+});
+
+describe("storage is the only truth: a dismissal is final, and a press storage refuses is not pressed (re-check on 9c3ad27, B2 and B3)", () => {
+  test("a refusal dismissed in one tab never comes back from another tab that had sent the entry", async () => {
+    const w = await world();
+    const a = w.desk(new MapStore());
+    await a.start();
+    await w.fireTimers();
+    const taskId = a.getSnapshot().focus ?? "";
+    const numberId = a.getSnapshot().draft.numberId;
+    a.setDraft({ outcome: "no_answer", note: "Typed in tab A." });
+    a.log();
+    await flush();
+    // A's request never arrives; the call is worked elsewhere, so B's resend is refused.
+    for (const x of w.held.splice(0)) x.reject(new NoAnswer());
+    await flush();
+    expect((await w.h.request("POST", `/api/call-tasks/${taskId}/outcome`, { requestId: "elsewhere", outcome: "interested", numberId })).status).toBe(200);
+    const b = w.desk(new MapStore());
+    await b.start();
+    await flush();
+    for (const x of w.held.filter((x) => x.body.note === "Typed in tab A.")) await w.answer(x);
+    await flush();
+    const kept = b.getSnapshot().refusedRecords;
+    expect(kept).toHaveLength(1);
+    b.dismiss(kept[0]!.body.requestId);
+    expect(w.outbox()).toEqual([]);
+    // A comes back online and its retry timers run: nothing is sent again, nothing pending, nothing comes back.
+    a.retryNow();
+    await w.fireTimers();
+    await a.refresh();
+    await flush();
+    expect(w.held.filter((x) => x.body.note === "Typed in tab A.")).toEqual([]);
+    expect(a.getSnapshot().pending).toBeNull();
+    expect(a.getSnapshot().refusedRecords).toEqual([]);
+    expect(w.outbox()).toEqual([]);
+  });
+
+  test("a press storage refuses sends nothing, says so, keeps the draft and number, and Log works once storage has room", async () => {
+    const w = await world();
+    const a = w.desk(new MapStore());
+    await a.start();
+    await w.fireTimers();
+    const numberId = a.getSnapshot().draft.numberId;
+    a.setDraft({ outcome: "voicemail", note: "Left a message." });
+    w.local.full = true;
+    a.log();
+    await flush();
+    expect(w.held).toEqual([]);
+    expect(a.getSnapshot()).toMatchObject({ notQueued: true, pending: null, locked: false, draft: { outcome: "voicemail", note: "Left a message.", numberId } });
+    w.local.full = false;
+    a.log();
+    await flush();
+    expect(w.held).toHaveLength(1);
+    expect(a.getSnapshot().notQueued).toBe(false);
   });
 });

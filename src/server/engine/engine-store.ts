@@ -139,6 +139,14 @@ export interface EngineStore {
   /** Loads, decides and writes in one transaction. A null decision writes nothing. */
   update(subjectId: string, now: number, decide: (state: SubjectState) => SubjectState | null): Promise<SubjectState | null>;
   /**
+   * One pass of call placement (ADR 0003 4.4) in one transaction: each decision is applied to its
+   * subject as `update` would, and the **completed-placement marker** is set to `through` (never
+   * lowered) in the same transaction. If anything throws, nothing is stored, the marker included.
+   */
+  placeCalls(through: number, now: number, decisions: readonly { readonly subjectId: string; readonly decide: (state: SubjectState) => SubjectState | null }[]): Promise<number>;
+  /** The instant through which call placement is complete and stored; null before the first pass. */
+  callsPlacedThrough(): Promise<number | null>;
+  /**
    * `update`, committed before it returns: a send's authorization uses it so that nothing
    * asynchronous runs between the commit and the provider call (ADR 0003 5.5 step 6).
    */

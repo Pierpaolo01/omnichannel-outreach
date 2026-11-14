@@ -224,14 +224,42 @@ export class Engine {
     }
   }
 
+  /** The instant through which call placement is complete and stored (ADR 0003 4.4); null before the first pass. */
+  callsPlacedThrough(): Promise<number | null> {
+    return this.store.callsPlacedThrough();
+  }
+
   /**
-   * The next instant at which a tick could change something, for the worker loop and the tests' clock.
-   * With `after`, the earliest such instant after it, which may be at or before now: work that fell
-   * due since then (ticket 14b, the read models' completed-tick marker, ADR 0003 4.4).
+   * The earliest instant after `after` at which the call list can change by placement (ADR 0003 4.4):
+   * a phone track due to start, a due call step not yet placed (at its due time, or, once due, at the
+   * next user day after `after`, when hours and room are counted again). Email and SMS work is left out.
    */
-  async nextWakeAt(after?: number): Promise<number | null> {
+  async nextCallWakeAt(after: number): Promise<number | null> {
     const now = this.now();
-    const from = after ?? now;
+    const times: number[] = [];
+    for (const id of await this.store.runningSubjectIds()) {
+      const s = await this.store.subject(id, now);
+      if (!s) continue;
+      const lead = leadNow(s.subject.clock, now);
+      for (const p of s.tracks) {
+        if (s.campaign.definition.tracks.find((t) => t.id === p.trackId)?.channel !== "call" || p.finishedAt !== null) continue;
+        if (p.startedAt === null) {
+          if (p.startAt !== null) times.push(now + (p.startAt - lead));
+          continue;
+        }
+        if (p.nextStepId === null || p.dueAt === null || s.callTasks.some((t) => t.stepId === p.nextStepId)) continue;
+        const due = now + (p.dueAt - lead);
+        times.push(due > after ? due : await this.nextUserDay(after));
+      }
+    }
+    const later = times.filter((t) => t > after);
+    return later.length > 0 ? Math.min(...later) : null;
+  }
+
+  /** The next instant at which a tick could change something, for the worker loop and the tests' clock. */
+  async nextWakeAt(): Promise<number | null> {
+    const now = this.now();
+    const from = now;
     const times: number[] = [];
     for (const [id, version] of await this.store.runningSubjectVersions()) {
       let cached = this.wakeCache.get(id);
@@ -690,13 +718,14 @@ export class Engine {
       for (const item of items) ready.push({ item, snapshot });
     }
     ready.sort((a, b) => this.rules.callOrder(a.item, b.item));
-    let changed = false;
-    for (const { item } of ready) {
+    // One transaction for the whole pass and its completed-placement marker (ADR 0003 4.4): the marker
+    // cannot advance unless these placements are stored, whatever throws or restarts. Each placement
+    // still re-reads the day's counts, now including those placed before it in this pass.
+    const decisions = ready.map(({ item }) => {
       const taskId = this.newId();
-      const written = await this.store.update(item.subjectId, now, (s) => this.rules.placeCall(s, item, now, taskId));
-      changed = written !== null || changed;
-    }
-    return changed;
+      return { subjectId: item.subjectId, decide: (s: SubjectState) => this.rules.placeCall(s, item, now, taskId) };
+    });
+    return (await this.store.placeCalls(now, now, decisions)) > 0;
   }
 
   /**

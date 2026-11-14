@@ -7,6 +7,7 @@ import { useCallDesk } from "../calls/useCallDesk.ts";
 import { useFocusRescue } from "../focusRescue.ts";
 import {
   BEHIND_LINE,
+  NOT_QUEUED_LINE,
   CAPACITY_USED,
   OUTCOME_LABEL,
   OUTCOME_TITLE,
@@ -46,7 +47,7 @@ export function CallsPage() {
       <div className="flex min-w-0 flex-col gap-3">
         {snap.freshness.stale && snap.queue.state === "ready" && <StaleNotice freshness={snap.freshness} onRetry={() => void desk.refresh()} rescue={2} />}
         <Status snap={snap} />
-        <Records desk={desk} snap={snap} />
+        <Records desk={desk} snap={snap} placeFocus={placeFocus} />
         {queue.state === "error" ? (
           <ErrorState title="The call list didn’t load." message={queue.message} onRetry={() => void desk.refresh()} rescue={2} />
         ) : queue.state === "loading" ? (
@@ -71,14 +72,14 @@ export function CallsPage() {
  * call, or the number to choose again). A focus found gone on a refresh moves it only if the control
  * that had it is now locked.
  */
-function useKeyboardFocus(snap: DeskSnapshot): (el: HTMLElement | null, role: "next" | "away" | "number" | "empty" | "error") => void {
+function useKeyboardFocus(snap: DeskSnapshot): (el: HTMLElement | null, role: "next" | "away" | "number" | "empty" | "error" | "dismiss") => void {
   const handled = useRef<number | null>(null);
   const want = snap.transition;
   return (el, role) => {
     if (!el || !want || handled.current === want.seq) return;
     const matches =
       ((want.kind === "logged" || want.kind === "moved") && (role === "number" || role === "empty" || role === "error")) ||
-      (want.kind === "refused" && (role === "away" || (role === "number" && snap.away === null))) ||
+      (want.kind === "refused" && (role === "away" || (role === "dismiss" && snap.away === null))) ||
       (want.kind === "away" && role === "away" && (document.activeElement === document.body || document.activeElement?.closest("[data-locks]") !== null));
     if (!matches) return;
     handled.current = want.seq;
@@ -105,7 +106,7 @@ function Status({ snap }: { snap: DeskSnapshot }) {
 }
 
 /** Refusals no page showed on its call: kept, with the note typed, until the user dismisses them. */
-function Records({ desk, snap }: { desk: CallDesk; snap: DeskSnapshot }) {
+function Records({ desk, snap, placeFocus }: { desk: CallDesk; snap: DeskSnapshot; placeFocus: ReturnType<typeof useKeyboardFocus> }) {
   if (snap.refusedRecords.length === 0) return null;
   const zone = snap.queue.state === "ready" ? snap.queue.view.userZone : Intl.DateTimeFormat().resolvedOptions().timeZone;
   return (
@@ -121,7 +122,13 @@ function Records({ desk, snap }: { desk: CallDesk; snap: DeskSnapshot }) {
             </p>
           )}
           <div>
-            <button type="button" data-rescue="2" className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={() => desk.dismiss(r.body.requestId)}>
+            <button
+              type="button"
+              data-rescue="2"
+              ref={r.taskId === snap.focus ? (el) => placeFocus(el, "dismiss") : undefined}
+              className="btn btn-sm border-line-strong bg-base-100 font-medium"
+              onClick={() => desk.dismiss(r.body.requestId)}
+            >
               Dismiss
             </button>
           </div>
@@ -436,7 +443,7 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
     <div className="flex flex-col gap-3.5 min-[901px]:sticky min-[901px]:bottom-0 border-t border-line bg-base-100 px-5 pb-[22px] pt-5 shadow-[0_-10px_24px_-18px_rgba(21,26,45,0.35)] min-[901px]:px-[30px]">
       {away && (
         <div role="alert" className="flex flex-col gap-2.5 rounded-field bg-crit-soft px-4 py-3 text-[14px]">
-          <p className="text-base-content">{offListLine(away.who, away.offList, away.message, userZone)}</p>
+          <p className="text-base-content">{offListLine(away.who, away.offList, null, userZone)}</p>
           {away.note.trim() !== "" && (
             <p className="text-ink-2 [overflow-wrap:anywhere]">
               Your note wasn’t saved: <q className="whitespace-pre-wrap">{away.note}</q>
@@ -449,9 +456,9 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
           </div>
         </div>
       )}
-      {snap.refusal && (
+      {snap.notQueued && (
         <p role="alert" className="rounded-field bg-crit-soft px-4 py-2.5 text-[14px] text-base-content">
-          Not logged: {snap.refusal.message}
+          {NOT_QUEUED_LINE}
         </p>
       )}
       <div className="grid grid-cols-1 gap-1.5">

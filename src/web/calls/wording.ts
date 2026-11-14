@@ -122,7 +122,10 @@ export function loggedLine(logged: NonNullable<DeskSnapshot["logged"]>): string 
   if (body.outcome === "wrong_number" && dialled?.bad) parts.push(`${dialled.value} is marked wrong.`);
   if (task.status === "interested_on_call") parts.push(`${STATUS_LABEL.interested_on_call} in ${task.campaign.name}. Nothing else is recorded.`);
   else if (!task.open) parts.push(`The ${task.track.label.toLowerCase()} is finished.`);
-  if (body.note.trim() !== "") parts.push(body.noteScope === "company" ? `The note is saved for everyone at ${task.company.name}.` : `The note is saved on ${who}.`);
+  // Where the note is, as the server's answer stores it: never from what was asked.
+  const note = body.note.trim();
+  if (note !== "" && task.companyNotes.some((n) => n.body === note)) parts.push(`The note is saved for everyone at ${task.company.name}.`);
+  else if (note !== "" && task.personNotes.some((n) => n.body === note)) parts.push(`The note is saved on ${who}.`);
   return parts.join(" ");
 }
 
@@ -203,12 +206,12 @@ export function attentionItems(n: NeedsAttention, userZone: string): AttentionIt
   return items;
 }
 
-/** While this page sends an outcome for another call, logged here or in another tab, that has no answer yet. */
+/** While this page sends an outcome for another call, chosen here or in another tab, that has no answer yet. */
 export function recoveringLine(who: string): string {
-  return `Sending an outcome logged for ${who} that has no answer yet. It is logged only once.`;
+  return `Sending an outcome for ${who} that has no answer yet. It is logged only once.`;
 }
 
-/** A refusal no page showed on its call: what was not logged, and why, from the server's `offList` when it said. */
+/** A kept refusal: what was not logged, and why, from the server's `offList` when it said. */
 export function refusedRecordLine(
   record: { readonly who: string; readonly body: { readonly outcome: CallOutcomeApi }; readonly refused: { readonly message: string; readonly offList: CallOffListView | null } },
   zone: string,
@@ -233,3 +236,6 @@ export function numberProblemLine(problem: { readonly kind: "bad" | "gone"; read
 
 /** When the server says its worker has work due that it has not finished (ADR 0003 4.4). */
 export const BEHIND_LINE = "Calls that have just fallen due may still be being placed. This page updates when they are.";
+
+/** A press this device's storage refused (ADR 0003 4.4.1, the boundary): nothing was sent. */
+export const NOT_QUEUED_LINE = "This outcome couldn’t be queued on this device: its storage is full or blocked, so nothing was sent. Your choice and note are kept. Free some space, or allow this site to store data, then press Log again.";

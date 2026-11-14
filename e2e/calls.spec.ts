@@ -1,7 +1,7 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import type { ActivityView } from "../src/shared/api.ts";
 import { fakeCallsApp, type FakeCallsApp } from "./fake-provider.ts";
-import { respond } from "./mocks.ts";
+import { respond, serverError } from "./mocks.ts";
 import { focused, freshCalls, logElsewhere, logWithMouse } from "./screens.ts";
 
 /**
@@ -163,7 +163,11 @@ test("a call logged from another window is refused here, explained, and the queu
   const t = await focused(f);
   await logElsewhere(f, t.taskId, "interested", t.numberId);
   await logWithMouse(page, "Left voicemail", "Typed here.");
-  await expect(page.getByRole("alert")).toContainText("Amira Hassan’s call is already logged: interested at 10:00.");
+  // One path for the refusal: kept with its note, and the call says why it is off the list.
+  const notLogged = page.getByRole("list", { name: "Outcomes not logged" });
+  await expect(notLogged).toContainText("Not logged: left voicemail for Amira Hassan.");
+  await expect(notLogged).toContainText("Your note wasn’t saved: Typed here.");
+  await expect(page.getByRole("alert").filter({ hasText: "Open the next call" })).toContainText("Amira Hassan’s call is already logged: interested at 10:00.");
   await expect(outcomeStatus(page)).not.toContainText("logged.");
   await page.getByRole("button", { name: "Open the next call" }).click();
   await expect(page.getByRole("heading", { name: "Tom" })).toBeVisible();
@@ -355,4 +359,72 @@ test("an outcome left by a closed tab and refused on recovery is listed with its
   await expect(notLogged).toContainText("Your note wasn’t saved: Orphan refusal note must remain visible");
   await notLogged.getByRole("button", { name: "Dismiss" }).click();
   await expect(notLogged).toHaveCount(0);
+});
+
+test("what the page says was saved, logged or sent comes from the server, with a failed read in between (review bot on 9c3ad27)", async ({ page }) => {
+  const f = await freshCalls("ready", "saved-sentences");
+  await page.goto(`${f.url}/calls`);
+  await expect(page.getByRole("heading", { name: "Amira Hassan" })).toBeVisible();
+  // The outcome reaches the server; its answer is lost on the way back.
+  let lose = true;
+  await page.route("**/api/call-tasks/*/outcome", async (route) => {
+    if (!lose) return route.continue();
+    lose = false;
+    await route.fetch();
+    return route.abort("connectionreset");
+  });
+  await logWithMouse(page, "Left voicemail", "Left a message about evening bookings.");
+  await expect(outcomeStatus(page)).toContainText("not confirmed yet");
+  // The user leaves Calls and comes back; the first read of the call fails.
+  await page.goto(`${f.url}/leads`);
+  let failOnce = true;
+  await page.route("**/api/call-tasks/*", (route) => {
+    if (route.request().method() !== "GET" || !failOnce) return route.continue();
+    failOnce = false;
+    return serverError(route);
+  });
+  await page.goto(`${f.url}/calls`);
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await expect(page.getByRole("alert")).toContainText("Amira Hassan’s call is already logged: left voicemail at 10:00.");
+  // The note is stored with that call: nothing on the page says it was not saved.
+  await expect(page.getByText("wasn’t saved")).toHaveCount(0);
+  await page.getByRole("button", { name: "Open the next call" }).click();
+  await expect(page.getByRole("heading", { name: "Tom" })).toBeVisible();
+  // A note logged here is said to be saved where the server's answer stores it.
+  await page.getByRole("checkbox", { name: /company note/ }).check();
+  await logWithMouse(page, "No answer", "Tom is in on Thursdays.");
+  await expect(outcomeStatus(page)).toContainText("The note is saved for everyone at Harbour Lane Physio.");
+});
+
+test("a press this device cannot store sends nothing, says so, and keeps the draft; Log works once storage has room (re-check on 9c3ad27, B3)", async ({ page }) => {
+  const f = await freshCalls("ready", "storage-full");
+  await page.addInitScript(() => {
+    const setItem = Object.getOwnPropertyDescriptor(Storage.prototype, "setItem")?.value as (this: Storage, k: string, v: string) => void;
+    Storage.prototype.setItem = function (this: Storage, k: string, v: string) {
+      if (this === window.localStorage && (window as Window & { storageFull?: boolean }).storageFull) throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+      setItem.call(this, k, v);
+    };
+  });
+  await page.goto(`${f.url}/calls`);
+  await expect(page.getByRole("heading", { name: "Amira Hassan" })).toBeVisible();
+  const posts: string[] = [];
+  page.on("request", (r) => {
+    if (r.method() === "POST" && r.url().includes("/outcome")) posts.push(r.url());
+  });
+  await page.evaluate(() => ((window as Window & { storageFull?: boolean }).storageFull = true));
+  await logWithMouse(page, "Left voicemail", "Left a message about evening bookings.");
+  await expect(page.getByRole("alert").filter({ hasText: "couldn’t be queued on this device" })).toBeVisible();
+  expect(posts).toEqual([]);
+  await expect(page.getByLabel("Notes from this call")).toHaveValue("Left a message about evening bookings.");
+  await expect(logButton(page)).toBeEnabled();
+  // Leaving and coming back: nothing was queued, so nothing is pending or lost; the draft is still there.
+  await page.goto(`${f.url}/leads`);
+  await page.goto(`${f.url}/calls`);
+  await expect(page.getByRole("heading", { name: "Amira Hassan" })).toBeVisible();
+  await expect(page.getByLabel("Notes from this call")).toHaveValue("Left a message about evening bookings.");
+  await page.evaluate(() => ((window as Window & { storageFull?: boolean }).storageFull = false));
+  await outcome(page, "Left voicemail").click();
+  await logButton(page).click();
+  await expect(outcomeStatus(page)).toContainText("Amira Hassan: left voicemail logged.");
+  expect(posts).toHaveLength(1);
 });
