@@ -3,10 +3,10 @@ import { definitionProblems, type CampaignDefinition, type TrackDefinition } fro
 import { arrange } from "./arrangement.ts";
 
 const week = [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 }));
-const track = (id: string, channel: "email" | "sms", start: TrackDefinition["start"] = { kind: "entry" }): TrackDefinition => ({
+const track = (id: string, channel: "email" | "sms", start: TrackDefinition["start"] = { kind: "entry" }, branch: TrackDefinition["branch"] = "main"): TrackDefinition => ({
   id,
   channel,
-  branch: "main",
+  branch,
   window: week,
   steps: [{ id: `${id}-s1`, waitDays: 0, subject: channel === "email" ? "Hi" : "", body: "Hello.", threading: "new_subject", removed: false }],
   start,
@@ -86,5 +86,84 @@ describe("arranging tracks in the editor (ADR 0003, ticket 13b)", () => {
   test("two tracks on one channel are named by their own channel and order, never by position among all tracks", () => {
     const before = def(track("m1", "sms"), track("e", "email"), track("m2", "sms", { kind: "after", trackId: "e", delayDays: 0 }));
     expect(arrange(before, { kind: "remove", trackId: "e" })).toEqual({ ok: false, reason: "SMS track 2 starts after this one. Change how it starts first." });
+  });
+});
+
+describe("the win-back branch and the declined path in the editor (ADR 0003, ticket 16b)", () => {
+  const call = (id: string, declinedPath?: TrackDefinition["declinedPath"]): TrackDefinition => ({
+    id,
+    channel: "call",
+    branch: "main",
+    window: week,
+    steps: [{ id: `${id}-s1`, waitDays: 0, subject: "", body: "", threading: "new_subject", removed: false }],
+    start: { kind: "entry" },
+    removed: false,
+    callSkipLimitDays: 2,
+    ...(declinedPath ? { declinedPath } : {}),
+  });
+  const noBranch = "The phone track's declined path is win back, but the campaign has no win-back branch: add a track to the win-back branch, or choose stop or continue.";
+
+  test("adding an email or SMS track to the win-back branch puts it there, starting when the lead enters the branch", () => {
+    for (const channel of ["email", "sms"] as const) {
+      const out = arrange(def(track("e", "email"), call("p")), { kind: "add", channel, branch: "win_back" });
+      if (!out.ok) throw new Error(out.reason);
+      expect(out.added).toMatchObject({ channel, branch: "win_back", start: { kind: "entry" }, removed: false });
+      expect(out.added?.callSkipLimitDays).toBeUndefined();
+      expect(definitionProblems(out.definition)).toEqual([]);
+    }
+  });
+
+  test("a phone track is never added to the win-back branch: the definition's own sentence says why", () => {
+    const before = def(track("e", "email"), call("p"));
+    expect(arrange(before, { kind: "add", channel: "call", branch: "win_back" })).toEqual({
+      ok: false,
+      reason: "The win-back branch cannot hold a phone track: a lead who declined is never called again in this campaign. Remove the phone track from the win-back branch.",
+    });
+  });
+
+  test("a phone track's declined path is set to stop or continue, and to win back only once the branch has a live track", () => {
+    const before = def(track("e", "email"), call("p"));
+    for (const path of ["stop", "continue"] as const) {
+      const out = arrange(before, { kind: "declined", trackId: "p", path });
+      if (!out.ok) throw new Error(out.reason);
+      expect(out.definition.tracks[1]).toEqual({ ...call("p"), declinedPath: path });
+    }
+    expect(arrange(before, { kind: "declined", trackId: "p", path: "win_back" })).toEqual({ ok: false, reason: noBranch });
+    const branch = arrange(before, { kind: "add", channel: "email", branch: "win_back" });
+    if (!branch.ok) throw new Error(branch.reason);
+    const out = arrange(branch.definition, { kind: "declined", trackId: "p", path: "win_back" });
+    if (!out.ok) throw new Error(out.reason);
+    expect(out.definition.tracks.find((t) => t.id === "p")?.declinedPath).toBe("win_back");
+    expect(definitionProblems(out.definition)).toEqual([]);
+  });
+
+  test("only a phone track has a declined path", () => {
+    expect(arrange(def(track("e", "email")), { kind: "declined", trackId: "e", path: "stop" })).toEqual({ ok: false, reason: "Only a phone track has a declined path: the email track has one." });
+  });
+
+  test("the branch's last live track cannot be removed while a phone track's declined path is win back; it can once the path is another", () => {
+    const before = def(track("e", "email"), call("p", "win_back"), track("w", "email", { kind: "entry" }, "win_back"));
+    expect(arrange(before, { kind: "remove", trackId: "w" })).toEqual({ ok: false, reason: noBranch });
+    const stopped = arrange(before, { kind: "declined", trackId: "p", path: "stop" });
+    if (!stopped.ok) throw new Error(stopped.reason);
+    expect(arrange(stopped.definition, { kind: "remove", trackId: "w" })).toMatchObject({ ok: true });
+    // With another live branch track, one of them goes.
+    const two = def(track("e", "email"), call("p", "win_back"), track("w", "email", { kind: "entry" }, "win_back"), track("w2", "sms", { kind: "entry" }, "win_back"));
+    expect(arrange(two, { kind: "remove", trackId: "w" })).toMatchObject({ ok: true });
+  });
+
+  test("tracks of the branch connect inside it, and no connection crosses between the branch and the main sequence", () => {
+    const before = def(track("e", "email"), call("p", "win_back"), track("w", "email", { kind: "entry" }, "win_back"), track("w2", "sms", { kind: "entry" }, "win_back"));
+    const inside = arrange(before, { kind: "start", trackId: "w2", start: { kind: "after", trackId: "w", delayDays: 2 } });
+    if (!inside.ok) throw new Error(inside.reason);
+    expect(definitionProblems(inside.definition)).toEqual([]);
+    expect(arrange(before, { kind: "start", trackId: "w", start: { kind: "after", trackId: "e", delayDays: 0 } })).toEqual({
+      ok: false,
+      reason: "The win-back email track starts after a track of the main sequence: connect it inside the win-back branch, which starts when a lead declines.",
+    });
+    expect(arrange(before, { kind: "start", trackId: "e", start: { kind: "after", trackId: "w", delayDays: 0 } })).toEqual({
+      ok: false,
+      reason: "The email track starts after a track of the win-back branch: connect it inside the main sequence.",
+    });
   });
 });
