@@ -1,3 +1,4 @@
+import type { SubjectState } from "../../domain/sequence/state.ts";
 import type { Channel, PhoneKind } from "../../domain/contact-details.ts";
 import type { DetailOwner, Directory, ImportPlan } from "../../domain/import-plan.ts";
 import type { OutreachStatus } from "../../domain/outreach-status.ts";
@@ -61,6 +62,11 @@ export interface OutreachStore {
     importedAt: string;
     fileNames: ImportFileNames;
     plan: (directory: Directory) => ImportPlan;
+    /**
+     * An import changes leads' zones, which the engine's timing reads: every lead with an open call task
+     * is first brought up to `now` under the old zones, in the import's transaction (council on 228cd3b).
+     */
+    catchUp?: { readonly now: number; readonly asOf: (state: SubjectState) => SubjectState };
   }): Promise<ImportRecord>;
   listImports(campaignId: string): Promise<ImportRecord[]>;
   /**

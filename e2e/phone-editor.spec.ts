@@ -37,7 +37,7 @@ test.describe("the phone track on the canvas and in its inspector", () => {
     await expect(inspector.getByRole("button", { name: "Monday", pressed: true })).toBeVisible();
     await expect(inspector.getByRole("button", { name: "Saturday", pressed: false })).toBeVisible();
     await expect(page.getByLabel("Calling starts at")).toHaveValue("9");
-    await expect(inspector.getByText("Redials and callbacks arrive with a later release.", { exact: false })).toBeVisible();
+    await expect(inspector.getByText("logging them on the Calls page arrives with the next release", { exact: false })).toBeVisible();
     await expect(inspector.getByText("choosing what a declined call does arrives with a later release", { exact: false })).toBeVisible();
     // Together with the email track: both hang from Launch.
     await expect(page.getByRole("list", { name: "Tracks that start at launch" }).getByRole("button")).toHaveCount(2);

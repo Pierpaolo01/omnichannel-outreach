@@ -9,7 +9,7 @@ import { isLive, isUncertain } from "../domain/sequence/attempt.ts";
 import { localDayNumber } from "../domain/sequence/clock.ts";
 import { mergeUses } from "../domain/sequence/copy.ts";
 import { liveSteps, liveTracks, ownSubject, poolOf, type CampaignDefinition, type TrackDefinition } from "../domain/sequence/definition.ts";
-import { goodEmail, hasGoodNumber, progressOf, runs } from "../domain/sequence/progress.ts";
+import { callbackHold, goodEmail, hasGoodNumber, progressOf, runs } from "../domain/sequence/progress.ts";
 import type { AccountState, CallDay, SubjectState } from "../domain/sequence/state.ts";
 import type { BeforeLaunchView, ContactDetailView, CopyPreview, LeadRow, LoadProjectionView, PreviewLead, WithheldBy, WithheldTrack } from "../shared/api.ts";
 import { trackLabel, trackPhrase } from "../shared/track-label.ts";
@@ -143,12 +143,18 @@ function withheldTracks(definition: CampaignDefinition, all: readonly AccountSta
 
 const hasCalls = (definition: CampaignDefinition) => liveTracks(definition, "main").some((t) => t.channel === "call");
 
+/**
+ * A lead on which the user may still log a call: running, or held by a callback, whose outcome releases
+ * it (ticket 15).
+ */
+const awaitsACall = (s: SubjectState) => runs(s) || (s.subject.ended === null && callbackHold(s));
+
 /** Other campaigns whose calls the projection works too, as the assumed user works the whole list (the screen names them). */
 function callingCampaigns(others: readonly SubjectState[]): string[] {
   const ids = new Set<string>();
   for (const s of others) {
     const calls = liveTracks(s.campaign.definition, "main").filter((t) => t.channel === "call");
-    if (runs(s) && calls.some((t) => progressOf(s, t.id)?.finishedAt == null)) ids.add(s.campaign.id);
+    if (awaitsACall(s) && calls.some((t) => progressOf(s, t.id)?.finishedAt == null)) ids.add(s.campaign.id);
   }
   return [...ids];
 }

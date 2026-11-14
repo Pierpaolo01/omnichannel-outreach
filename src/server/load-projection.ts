@@ -261,8 +261,10 @@ export function projectLoad(input: ProjectionInput): Projection {
   // ---- The user's call list (ADR 0003, ticket 14c), as the store supplies it to the engine: on the
   // projection's own user day, the stored counts across every campaign plus the simulation's
   // placements; on a later day, the simulation's placements, and the store's own count of committed
-  // tasks (placed before the day, open at its start, for a lead that had not ended, callable that day)
-  // over the simulated subjects, which include every subject holding an open call task. The user is
+  // tasks over the simulated subjects, which include every subject holding an open call task: the rule of
+  // `SqliteEngineStore.callDayAt` (ticket 15a), each task as it stood at the day's start, for a lead that
+  // had not ended and has a good number; a callback from its own day; a call callable that day, unless
+  // a callback held its lead. The user is
   // assumed to work every call on the list on its day, logging no answer (`workTheList` below), so
   // what is carried is what the engine would carry.
   const callSettings = input.callDay;
@@ -278,8 +280,23 @@ export function projectLoad(input: ProjectionInput): Projection {
     let n = 0;
     for (const s of states.values()) {
       if (s.subject.endedWall !== null && s.subject.endedWall < start) continue;
-      for (const task of s.callTasks) {
-        if (task.placedWall >= start || (!task.open && (task.closedWall ?? Number.NEGATIVE_INFINITY) < start)) continue;
+      // A lead with no good number left cannot be called that day (Q13).
+      if (goodNumbers(s).length === 0) continue;
+      // Each task as it stood at the day's start: placed before it and not closed by it (one closed at the
+      // instant it starts, a call skipped by the skip limit at that rollover, was not carried into it).
+      const carried = s.callTasks.filter((task) => task.placedWall < start && (task.closedWall === null || task.closedWall > start));
+      /** The last call logged on a task before the day's start, skips for now aside: a callback requested makes it a callback then. */
+      const lastCall = (taskId: string) => s.callAttempts.filter((a) => a.taskId === taskId && a.atWall < start && a.outcome !== "skip_for_now").at(-1);
+      const callbackAtStart = (taskId: string) => lastCall(taskId)?.outcome === "callback_requested";
+      for (const task of carried) {
+        const last = lastCall(task.id);
+        // A callback counts from its own day, at any hour (ticket 15).
+        if (last?.outcome === "callback_requested") {
+          if (last.callbackAt !== null && localDayNumber(last.callbackAt, zone) <= day) n++;
+          continue;
+        }
+        // A call of a lead a callback held at the day's start cannot be listed that day.
+        if (carried.some((other) => other.id !== task.id && callbackAtStart(other.id))) continue;
         if (callableOnDay(callWindow(s, task.trackId), s.lead.zone, start, end)) n++;
       }
     }
@@ -622,6 +639,8 @@ export function projectLoad(input: ProjectionInput): Projection {
         if (next === loaded) {
           const lead = leadNow(s.subject.clock, t);
           const starts = s.tracks.filter((p) => p.startedAt === null && p.startAt !== null).map((p) => t + ((p.startAt ?? 0) - lead)).filter((x) => x > t);
+          // An open call task may be skipped at the user's next day (the skip limit, ticket 15), as `Engine.evaluateAll` looks then.
+          if (s.callTasks.some((x) => x.open)) starts.push(startOfLocalDay(localDayNumber(t, s.callDay.userZone) + 1, s.callDay.userZone));
           const until = Math.min(Infinity, ...starts);
           evalUntil.set(id, { state: s, until });
           wakes.push(until, id);

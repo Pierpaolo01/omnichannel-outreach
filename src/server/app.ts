@@ -17,6 +17,8 @@ import { UnconnectedEmailPort, UnprovisionedSmsPort } from "./engine/ports.ts";
 import { accountView, needsAttention, progressView } from "./engine/views.ts";
 import { callsView, callTaskView, todayView } from "./engine/call-views.ts";
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
+import { sealReckoning } from "../domain/sequence/progress.ts";
+import type { SubjectState } from "../domain/sequence/state.ts";
 import type { CampaignDetail, CampaignListItem, CampaignSequenceSummary, SequenceView } from "../shared/api.ts";
 import { beforeLaunchView, copyPreview } from "./before-launch.ts";
 import { activityOf } from "./activity.ts";
@@ -79,14 +81,21 @@ const callSettingsBody = requestObject({
   dailyCapacity: z.number().int("The daily call capacity is a whole number.").positive("The daily call capacity is at least 1.").max(1_000),
   userZone: z.string().trim().refine((z) => isTimeZone(z), "Use an IANA time zone such as Europe/London."),
 });
-// Not interested, callback and redial arrive with tickets 15 and 16; they are refused here until then.
+// Not interested arrives with ticket 16 and is refused here until then. Redial and callback are ticket 15's;
+// which outcome each goes with is the domain's rule (`logCallOutcome`), refused there with a plain reason.
 const outcomeBody = requestObject({
   /**
    * The client's key for this one action: the same key answers with the first result and stores
    * nothing again, so a retry or a double click never logs an outcome or a note twice (verifier B3).
    */
   requestId: z.string().trim().min(1, "Send a request id with each outcome.").max(200),
-  outcome: z.enum(["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "skip_for_now"], { message: "Choose one of the outcomes this release offers: no answer, voicemail left, gatekeeper or not reached, wrong or dead number, interested, or skip for now." }),
+  outcome: z.enum(["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "callback_requested", "skip_for_now"], {
+    message: "Choose one of the outcomes this release offers: no answer, voicemail left, gatekeeper or not reached, wrong or dead number, interested, callback requested, or skip for now.",
+  }),
+  /** With no answer, voicemail or gatekeeper: move the call onto the user's next day. */
+  redial: z.boolean().optional(),
+  /** With a callback requested: the date and time the prospect asked for, with its offset (ISO 8601). */
+  callbackAt: z.iso.datetime({ offset: true, message: "Give the callback's date and time as an ISO 8601 instant with its offset, such as 2026-11-03T15:00:00+00:00." }).optional(),
   numberId: z.string().min(1).max(200).nullish(),
   note: z.string().max(10_000).default(""),
   noteScope: z.enum(["person", "company"]).default("person"),
@@ -140,6 +149,13 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   const rules: Rules = { ...DEFAULT_RULES, ...givenRules };
   const engine = givenEngine ?? new Engine({ store: store.engine, port: new UnconnectedEmailPort(), smsPort: new UnprovisionedSmsPort(), now: () => Date.parse(now()), newId });
   const app = new Hono().basePath("/api");
+  /**
+   * For a route that changes an input the engine's timing reads (an import that may move a lead's or a
+   * company's zone, the call settings): every lead with an open call task is first brought up to `at` under
+   * the old inputs, in the route's own transaction, and its skip limit sealed there (ADR 0003 2.4, council on
+   * 228cd3b). The routes are listed in ADR 0003 and walked by `as-of-the-instant.test.ts`.
+   */
+  const catchUpAt = (at: number) => ({ now: at, asOf: (s: SubjectState) => sealReckoning(rules.asOfAction(s, at, rules.evaluate), at) });
   app.use(async (c, next) => {
     const verdict = checkApiRequest({
       method: c.req.method,
@@ -194,6 +210,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
       importedAt,
       fileNames: { people: body.fileNames?.people ?? null, businesses: body.fileNames?.businesses ?? null },
       plan: (directory) => planImport({ directory, scraped: parsed.value, now: importedAt, newId }),
+      catchUp: catchUpAt(Date.parse(importedAt)),
     });
     return c.json({ campaign: await store.campaign(record.campaignId), import: record }, 201);
   };
@@ -425,7 +442,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   app.put("/call-settings", async (c) => {
     const body = callSettingsBody.safeParse(await readJson(c));
     if (!body.success) return invalid(c, body.error);
-    await store.engine.setCallSettings(body.data);
+    await store.engine.setCallSettings(body.data, catchUpAt(Date.parse(now())));
     return c.json(await store.engine.callSettings());
   });
 
@@ -435,7 +452,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   app.get("/calls", async (c) => c.json(await callsView(store, Date.parse(now()), { focus: c.req.query("focus") || null, rules })));
 
   app.get("/call-tasks/:id", async (c) => {
-    const view = await callTaskView(store, c.req.param("id"), Date.parse(now()));
+    const view = await callTaskView(store, c.req.param("id"), Date.parse(now()), rules);
     return view ? c.json(view) : notFound(c, "call task");
   });
 
@@ -444,16 +461,24 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     if (!body.success) return invalid(c, body.error);
     const id = c.req.param("id");
     if ((await store.engine.callTaskSubject(id)) === null) return notFound(c, "call task");
-    const outcome = await engine.logCallOutcome(id, { requestId: body.data.requestId, outcome: body.data.outcome, numberId: body.data.numberId ?? null, note: body.data.note, noteScope: body.data.noteScope });
+    const outcome = await engine.logCallOutcome(id, {
+      requestId: body.data.requestId,
+      outcome: body.data.outcome,
+      redial: body.data.redial ?? false,
+      callbackAt: body.data.callbackAt === undefined ? null : Date.parse(body.data.callbackAt),
+      numberId: body.data.numberId ?? null,
+      note: body.data.note,
+      noteScope: body.data.noteScope,
+    });
     if (!outcome.ok) return c.json<ApiError>({ error: { code: "outcome_refused", message: outcome.reason } }, 409);
     // The answer names the next focus: the queue moves on only now that an outcome is logged.
     const at = Date.parse(now());
-    const task = await callTaskView(store, id, at);
+    const task = await callTaskView(store, id, at, rules);
     if (!task) return notFound(c, "call task");
     return c.json<CallOutcomeAnswer>({ task, nextFocusTaskId: (await callsView(store, at, { rules })).focusTaskId });
   });
 
-  app.get("/needs-attention", async (c) => c.json(await needsAttention(store.engine, Date.parse(now()))));
+  app.get("/needs-attention", async (c) => c.json(await needsAttention(store.engine, Date.parse(now()), rules)));
 
   // No SMS provider is provisioned or chosen (#28): the running app reports none, honestly.
   app.get("/sms-provider", async (c) => {

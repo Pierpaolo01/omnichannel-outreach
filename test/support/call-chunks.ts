@@ -12,15 +12,97 @@ import { FULL_SEARCH, inShard, SEED } from "./sequence-chunks.ts";
  */
 
 /**
- * Offsets from SEED. Chosen greedily from a sweep of all 100 seeds so that together they reach every
- * behaviour the runs report (`stats.features`): every capacity, a call waiting for room and one
- * waiting behind committed calls, later today and rolled-over calls, every outcome, a refused one and one on a number already marked bad, a wrong mobile failing its SMS track, one action posted
- * twice at once, again, and again after a restart,
- * two phone tracks and interested closing the other's task, a track after a call and one beside it,
- * a phone track skipped when no good number is left, replies by email and SMS, and all four endings.
- * Refresh it when the generator changes.
+ * Offsets from SEED, chosen greedily from a sweep of all 100 seeds so that together they reach every
+ * behaviour the runs report (`stats.features`). Which behaviours those are is `CALL_FEATURES`, and
+ * `pnpm check` asserts that the fixed seeds' runs reach every one of them, so a change to the generator
+ * cannot silently drop one. Refresh both when the generator changes (last swept on 14 November 2026, ticket
+ * 15a after the council on 228cd3b: 75 behaviours). The merge into ticket 14c added each phone track's own
+ * skip limit, drawn from a stream of its own, and three behaviours for it; seed 20 was added then, as the
+ * first seed reaching "outcome-on-a-redial-for-tomorrow", which the limits moved off the fixed seeds.
  */
-export const CALL_FIXED_SEEDS: readonly number[] = [12, 16, 27, 36, 45, 70, 93];
+export const CALL_FIXED_SEEDS: readonly number[] = [9, 15, 20, 35, 40, 46, 61, 73, 76, 79];
+
+/** Every behaviour the fixed seeds must reach between them. */
+export const CALL_FEATURES: readonly string[] = [
+  "a-company-zone-moved",
+  "a-held-lead-lost-its-last-number",
+  "a-person-zone-moved",
+  "a-redial-skipped-from-its-original-due-date",
+  "a-send-beside-an-open-call",
+  "acted-after-a-callback-time-before-the-tick",
+  "acted-after-a-rollover-before-the-tick",
+  "acted-just-before-a-due-instant",
+  "after-a-call",
+  "an-expiry-released-a-track",
+  "bad-number-chosen",
+  "call-list-zone-moved",
+  "callback-for-a-later-day",
+  "callback-hold",
+  "callback-later-today",
+  "callback-with-no-good-number",
+  "callback-worked:callback_requested",
+  "callback-worked:gatekeeper",
+  "callback-worked:gatekeeper+redial",
+  "callback-worked:interested",
+  "callback-worked:no_answer",
+  "callback-worked:no_answer+redial",
+  "callback-worked:skip_for_now",
+  "callback-worked:voicemail",
+  "callback-worked:voicemail+redial",
+  "callback-worked:wrong_number",
+  "capacity:1",
+  "capacity:2",
+  "capacity:3",
+  "capacity:5",
+  "closed-on-interest",
+  "drain-skipped-a-callback-it-cannot-log",
+  "email-reply",
+  "ended:finished_no_usable_channel",
+  "ended:interested_on_call",
+  "ended:replied",
+  "ended:sequence_finished_no_response",
+  "later-today",
+  "limit:1",
+  "limit:2",
+  "limit:3",
+  "limit:a-track's-own",
+  "limit:a-track's-own-not-the-campaign's",
+  "limit:the-campaign's",
+  "outcome-on-a-redial-for-tomorrow",
+  "outcome-refused",
+  "outcome:callback_requested",
+  "outcome:gatekeeper",
+  "outcome:gatekeeper+redial",
+  "outcome:interested",
+  "outcome:no_answer",
+  "outcome:no_answer+redial",
+  "outcome:skip_for_now",
+  "outcome:voicemail",
+  "outcome:voicemail+redial",
+  "outcome:wrong_number",
+  "overdue-callback-for-days",
+  "parallel-with-a-call",
+  "phone-skipped",
+  "posted-twice-at-once",
+  "ready-now-of-several-reasons",
+  "reason:callback",
+  "reason:due",
+  "reason:overdue",
+  "reason:redial",
+  "reason:rolled_over",
+  "redial-with-the-wrong-outcome",
+  "replayed",
+  "replayed-after-restart",
+  "rolled-over",
+  "skipped-call-last",
+  "skipped-unworked",
+  "sms-reply",
+  "two-phone-tracks",
+  "two-ready-calls",
+  "waits-behind-committed",
+  "waits-for-room",
+  "wrong-mobile",
+];
 const SEARCH_SEEDS = 100;
 /** Seed offsets each mutation's search tries after its recorded seed. */
 const MAX_SEEDS = 30;
@@ -43,15 +125,24 @@ export function callChunks(from: number, to: number): void {
       test(`seeds ${chunk.map((o) => SEED + o).join(", ")}`, async () => {
         const failures: string[] = [];
         for (const offset of chunk) {
-          const { problems } = await runCalls(SEED + offset);
+          const { problems, stats } = await runCalls(SEED + offset);
+          for (const f of stats.features) reached.add(f);
           if (problems.length > 0) failures.push(`seed ${SEED + offset}: ${problems.join("; ")}`);
         }
         for (const failure of failures) console.error(failure);
         expect(failures).toEqual([]);
       }, 1_800_000);
     }
+    if (!FULL_SEARCH && from === 0) {
+      test("the fixed seeds reach every behaviour they were chosen for", () => {
+        expect(CALL_FEATURES.filter((f) => !reached.has(f))).toEqual([]);
+      });
+    }
   });
 }
+
+/** The behaviours the runs of this process reached. */
+const reached = new Set<string>();
 
 /**
  * Each broken engine must fail the invariant it names: in `pnpm check` on its known seed; in the

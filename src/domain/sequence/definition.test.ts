@@ -1,7 +1,8 @@
 import { describe, expect, test } from "vitest";
 import { launchCheck } from "./blockers.ts";
+import { skipLimitOf } from "./calls.ts";
 import { render } from "./copy.ts";
-import { definitionProblems, ownSubject, skipLimitOf, WIN_BACK_LATER, type CampaignDefinition, type StepDefinition, type TrackDefinition } from "./definition.ts";
+import { definitionProblems, ownSubject, WIN_BACK_LATER, type CampaignDefinition, type StepDefinition, type TrackDefinition } from "./definition.ts";
 import { renderStep } from "./dispatch.ts";
 import { subjectState } from "../../../test/support/sequence-state.ts";
 
@@ -82,8 +83,8 @@ describe("definitions refused at the boundary (ADR 0003 7.1)", () => {
   test("a phone track's skip limit is its own, else the campaign's (a phone track saved before ticket 14c has none of its own)", () => {
     const call = emailTrack({ id: "t2", channel: "call", steps: [step("c1", { subject: "", body: "" })] });
     const def = definition({ callSkipLimitDays: 4, tracks: [call] });
-    expect(skipLimitOf(def, call)).toBe(4);
-    expect(skipLimitOf(def, { ...call, callSkipLimitDays: 1 })).toBe(1);
+    expect(skipLimitOf(def, "t2")).toBe(4);
+    expect(skipLimitOf({ ...def, tracks: [{ ...call, callSkipLimitDays: 1 }] }, "t2")).toBe(1);
   });
 
   test("a start rule names a live track of the same branch, with a whole delay, and connections never go in a circle", () => {

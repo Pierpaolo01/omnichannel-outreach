@@ -1,5 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useLocation, useSearch } from "wouter";
+import { skipLimitOf } from "../../domain/sequence/calls.ts";
 import { MERGE_FIELDS } from "../../domain/sequence/copy.ts";
 import type { BeforeLaunchView, CampaignDefinition, EmailProviderStatus, LaunchBlocker, SmsProviderStatus, StepDefinition, TrackDefinition } from "../../shared/api.ts";
 import { useApi } from "../api.ts";
@@ -676,12 +677,13 @@ function PhoneInspector({ track, editor, onLoadedStored, onClose, onRemoved }: {
   const [skipText, setSkipText] = useState<string | null>(null);
   const changeTrack = (change: (t: TrackDefinition) => TrackDefinition) =>
     editor.update((d: CampaignDefinition) => ({ ...d, tracks: d.tracks.map((t) => (t.id === track.id ? change(t) : t)) }));
-  const skipLimit = track.callSkipLimitDays ?? editor.draft.callSkipLimitDays;
+  // The one reading of the limit, the engine's (ADR 0003 3.5): the track's own, else the campaign's.
+  const skipLimit = skipLimitOf(editor.draft, track.id);
   return (
     <InspectorFrame titleId={titleId} track={track} editor={editor} onClose={onClose}>
       <EditorNotices editor={editor} onLoadedStored={onLoadedStored} />
       <p className="rounded-field bg-raised px-3 py-2 text-[13.5px] text-ink-2">
-        A phone track is one call, placed on your list when it falls due. You dial it and log what happened. For a second planned attempt, add another phone track. Redials and callbacks arrive with a later release.
+        A phone track is one call, placed on your list when it falls due. You dial it and log what happened. For a second planned attempt, add another phone track. The app already handles a redial, which puts the call on your next day’s list, and a callback, which holds the lead’s other outreach until the time the prospect asked for; logging them on the Calls page arrives with the next release.
       </p>
       <div className="flex min-w-0 flex-col gap-[18px]">
         <div className="flex min-w-0 flex-col gap-1.5">
@@ -727,9 +729,9 @@ function PhoneInspector({ track, editor, onLoadedStored, onClose, onRemoved }: {
             days
           </label>
           <p id={skipHint} className="text-[12.5px] text-muted">
-            Counted from the day the call falls due.{" "}
+            Counted in calendar days from the day the call falls due; a redial does not restart it.{" "}
             {track.callSkipLimitDays === undefined ? `This phone track uses the campaign’s limit, ${skipLimit} ${skipLimit === 1 ? "day" : "days"}, until you change it here.` : skipLimit === DEFAULT_SKIP_LIMIT_DAYS ? `${DEFAULT_SKIP_LIMIT_DAYS} days is the default.` : ""}{" "}
-            Skipping an unworked call arrives with a later release: until then a call stays on your list until you log it.
+            A call you don’t work rolls over to the top of your next day’s list. Once its limit has run out, it is skipped at the end of a day it was on your list, and the tracks after it start.
           </p>
         </div>
       </div>

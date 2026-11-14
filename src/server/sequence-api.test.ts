@@ -98,7 +98,7 @@ describe("the sequence interface (tickets 12b and 13)", () => {
     expect((await api.get("/api/campaigns/nope/sequence")).status).toBe(404);
     expect((await api.get("/api/enrollments/nope")).status).toBe(404);
     expect((await put(api, "nope", { timezone: "UTC", emailPool: [], tracks: [] })).status).toBe(404);
-    expect((await api.get<NeedsAttention>("/api/needs-attention")).body).toEqual({ stalledInboxes: [], heldTracks: [], accountWaits: [], senderProblems: [], heldCapacity: [], anomalies: [] });
+    expect((await api.get<NeedsAttention>("/api/needs-attention")).body).toEqual({ overdueCallbacks: [], stalledInboxes: [], heldTracks: [], accountWaits: [], senderProblems: [], heldCapacity: [], anomalies: [] });
   });
 });
 

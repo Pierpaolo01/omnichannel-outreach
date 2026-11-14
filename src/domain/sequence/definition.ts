@@ -40,7 +40,7 @@ export interface TrackDefinition {
   readonly declinedPath?: DeclinedPath;
   /**
    * A phone track's call skip limit in days (ADR 0003 3.5; ticket 14c: set on each phone track). A
-   * phone track saved before ticket 14c has none of its own and reads the campaign's (`skipLimitOf`).
+   * phone track saved before ticket 14c has none of its own and reads the campaign's (`skipLimitOf` in calls.ts, the one reading of the limit).
    */
   readonly callSkipLimitDays?: number;
 }
@@ -48,7 +48,7 @@ export interface TrackDefinition {
 export interface CampaignDefinition {
   /** The campaign's default zone, used when neither the lead nor its company has one. */
   readonly timezone: string;
-  /** The call skip limit in days (ADR 0003 3.5), for a phone track that holds none of its own (`skipLimitOf`). */
+  /** The call skip limit in days (ADR 0003 3.5), for a phone track that holds none of its own (`skipLimitOf` in calls.ts). */
   readonly callSkipLimitDays: number;
   /** Sender accounts email tracks may use. */
   readonly emailPool: readonly string[];
@@ -85,8 +85,6 @@ export const ownSubject = (step: StepDefinition): string => (step.threading === 
 
 const isWholeDays = (n: number) => Number.isInteger(n) && n >= 0;
 
-/** A phone track's call skip limit in days (ADR 0003, ticket 14c): its own, else the campaign's. */
-export const skipLimitOf = (def: CampaignDefinition, track: TrackDefinition): number => track.callSkipLimitDays ?? def.callSkipLimitDays;
 
 /**
  * Plain messages for a definition that cannot be saved (ADR 0003 7.1). Empty when it can.

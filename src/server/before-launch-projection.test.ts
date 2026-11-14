@@ -6,6 +6,8 @@ import type { CampaignDefinition, StepDefinition } from "../domain/sequence/defi
 import type { WindowRule } from "../domain/sequence/clock.ts";
 import type { BeforeLaunchView } from "../shared/api.ts";
 import { localDayNumber, resetDayOf, startOfLocalDay } from "../domain/sequence/clock.ts";
+import { skippedTonight } from "../domain/sequence/calls.ts";
+import { callbackHold } from "../domain/sequence/progress.ts";
 import { inbox as scriptedInbox, quickWaits } from "../../test/support/regressions.ts";
 import { ScriptedEmailPort } from "../../test/support/scripted-email-port.ts";
 import { projectedSends, type ProjectionMutation } from "./before-launch.ts";
@@ -462,9 +464,18 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
   /**
    * What happened in the earlier campaigns before the projection (council on 10121d3, item 1): calls
    * the user logged (no answer or gatekeeper, which complete the phone track and start what follows;
-   * interested, which ends the lead), and a campaign paused. Every logged call touches its lead.
+   * interested, which ends the lead), and a campaign paused. Every logged call touches its lead. Ticket
+   * 15 adds a redial (the call moves to the next day; its track stays open) and a callback a day or more
+   * ahead (the lead's automated outreach pauses: its claims are withdrawn and nothing of it is sent until
+   * the outcome, which no estimate can know), and calls left unworked until the skip limit skips them.
    */
   const startedFrom = new Set<string>();
+  /**
+   * Ticket 15's stored facts at the projection's instant, in the earlier campaigns, counted over the worlds:
+   * a lead held by a callback, a call redialed to the user's next day, a phone track skipped at the skip limit,
+   * and a call that the skip limit skips at the end of today unless it is worked.
+   */
+  const ticket15 = { held: 0, redialed: 0, skipped: 0, expiresTonight: 0 };
   async function logCalls(h: EngineHarness, campaignId: string, r: () => number, after = false) {
     let logged = 0;
     for (const id of await h.store.engine.subjectsOf(campaignId)) {
@@ -472,11 +483,15 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
       const task = s.callTasks.find((t) => t.open);
       const number = s.lead.phones.find((n) => !n.bad);
       if (!task || !number || r() < 0.3) continue;
-      const outcome = pick(r, ["no_answer", "gatekeeper", "interested"] as const);
-      const res = await h.request("POST", `/api/call-tasks/${task.id}/outcome`, { requestId: `r-${task.id}`, outcome, numberId: number.id, note: "" });
+      const outcome = pick(r, ["no_answer", "gatekeeper", "interested", "no_answer", "gatekeeper", "interested", "redial", "callback_requested"] as const);
+      const body =
+        outcome === "redial" ? { outcome: "no_answer", redial: true }
+        : outcome === "callback_requested" ? { outcome, callbackAt: new Date(h.clock + pick(r, [1, 2, 4]) * DAY).toISOString() }
+        : { outcome };
+      const res = await h.request("POST", `/api/call-tasks/${task.id}/outcome`, { requestId: `r-${task.id}`, ...body, numberId: number.id, note: "" });
       if (res.status !== 200) continue;
       logged++;
-      if (!after) startedFrom.add(outcome === "interested" ? "an interested call ended a lead" : "a logged call touched a lead and finished its phone track");
+      if (!after && outcome !== "redial" && outcome !== "callback_requested") startedFrom.add(outcome === "interested" ? "an interested call ended a lead" : "a logged call touched a lead and finished its phone track");
     }
     return logged;
   }
@@ -514,6 +529,19 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
         const def = st.campaign.definition;
         const afterCall = def.tracks.filter((t) => t.start.kind === "after" && def.tracks.find((x) => x.id === (t.start as { trackId: string }).trackId)?.channel === "call");
         if (afterCall.some((t) => st.tracks.find((p) => p.trackId === t.id)?.startedAt != null && st.tracks.find((p) => p.trackId === (t.start as { trackId: string }).trackId)?.finishReason === "completed")) startedFrom.add("a track after a phone track started when its call was logged");
+      }
+    }
+    // Sometimes days pass with calls left unworked before the projection, so the skip limit has skipped some
+    // and some are skipped tonight unless worked (ticket 15). Its own stream, so the worlds above are unchanged.
+    const r15 = rng(seed + 1515);
+    if (r15() < 0.4) await h.advanceTo(h.clock + pick(r15, [DAY, 2 * DAY, 3 * DAY]));
+    for (const id of ids.slice(0, -1)) {
+      for (const sid of await h.store.engine.subjectsOf(id)) {
+        const st = (await h.store.engine.subject(sid, h.clock))!;
+        if (callbackHold(st)) ticket15.held++;
+        if (st.callTasks.some((t) => t.open && t.kind === "call" && t.listDay > st.callDay.day)) ticket15.redialed++;
+        if (st.tracks.some((p) => p.finishReason === "skipped_unworked")) ticket15.skipped++;
+        if (st.callTasks.some((t) => skippedTonight(st, t, h.clock))) ticket15.expiresTonight++;
       }
     }
     const target = ids.at(-1)!;
@@ -579,6 +607,11 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
     expect([...startedFrom].sort()).toEqual(
       ["a logged call touched a lead and finished its phone track", "a paused competing campaign", "a track after a phone track started when its call was logged", "an interested call ended a lead"].filter((x) => SEEDS >= 40 || startedFrom.has(x)),
     );
+  });
+  test("the worlds start from ticket 15's stored facts: a lead held by a callback, a call redialed to the next day, a call skipped at its skip limit, and a call that is skipped tonight unless worked", () => {
+    if (SEEDS < 40) return;
+    expect(ticket15).toMatchObject({ held: expect.any(Number), redialed: expect.any(Number), skipped: expect.any(Number), expiresTonight: expect.any(Number) });
+    expect(Math.min(ticket15.held, ticket15.redialed, ticket15.skipped, ticket15.expiresTonight)).toBeGreaterThan(0);
   });
   test("the worlds include tracks after a phone track that send once its call is worked (ticket 14c)", () => {
     expect(afterCallWorlds.length).toBeGreaterThan(0);
@@ -1255,21 +1288,21 @@ describe("generated: calls placed within a tight daily call capacity, the user w
     expect([...coverage.startedFrom].sort()).toEqual(["skip_for_now", "voicemail", "wrong_number"]);
   });
 
-  // Each mutation of the projection alone must make some world disagree with the engine (ADR 0003, ticket 14c).
-  const MUTATIONS: Record<string, ProjectionMutation> = {
-    "ready calls placed in reversed priority": { rules: { ...DEFAULT_RULES, callOrder: (a, b) => DEFAULT_RULES.callOrder(b, a) } },
-    "the calls carried on today's list left out": { callDay: (d) => ({ ...d, committed: 0 }) },
+  // Each mutation of the projection alone must make a world disagree with the engine (ADR 0003, ticket 14c),
+  // checked on its recorded killing seed (the first from 14,300 that kills it, found by a sweep on the merge
+  // of ticket 15a), so no test searches against the clock.
+  const MUTATIONS: Record<string, { broken: ProjectionMutation; seed: number }> = {
+    "ready calls placed in reversed priority": { seed: 14_300, broken: { rules: { ...DEFAULT_RULES, callOrder: (a, b) => DEFAULT_RULES.callOrder(b, a) } } },
+    "the calls carried on today's list left out": { seed: 14_326, broken: { callDay: (d) => ({ ...d, committed: 0 }) } },
     // The bot's finding on 5cd8a93: the call is worked, but the lead is not touched by it.
-    "a worked call that does not touch its lead": { rules: { ...DEFAULT_RULES, logCallOutcome: (s, ...rest) => { const out = DEFAULT_RULES.logCallOutcome(s, ...rest); return out.ok ? { ...out, state: { ...out.state, subject: { ...out.state.subject, touched: s.subject.touched } } } : out; } } },
+    "a worked call that does not touch its lead": { seed: 14_302, broken: { rules: { ...DEFAULT_RULES, logCallOutcome: (s, ...rest) => { const out = DEFAULT_RULES.logCallOutcome(s, ...rest); return out.ok ? { ...out, state: { ...out.state, subject: { ...out.state.subject, touched: s.subject.touched } } } : out; } } } },
   };
-  for (const [name, broken] of Object.entries(MUTATIONS)) {
-    test(`the mutation "${name}" makes a world disagree`, async () => {
-      let killed = false;
-      for (let seed = 14_300; seed < 14_400 && !killed; seed++) {
-        const out = await compareCalls(seed, broken);
-        killed = JSON.stringify([out.predictedCalls, out.predictedSends, out.predictedStarts]) !== JSON.stringify([out.calls, out.sends, out.starts]);
-      }
-      expect(killed).toBe(true);
+  for (const [name, { broken, seed }] of Object.entries(MUTATIONS)) {
+    test(`the mutation "${name}" makes world ${seed} disagree, and the world agrees without it`, { timeout: 120_000 }, async () => {
+      const out = await compareCalls(seed, broken);
+      expect(JSON.stringify([out.predictedCalls, out.predictedSends, out.predictedStarts])).not.toBe(JSON.stringify([out.calls, out.sends, out.starts]));
+      const sound = await compareCalls(seed);
+      expect(JSON.stringify([sound.predictedCalls, sound.predictedSends, sound.predictedStarts])).toBe(JSON.stringify([sound.calls, sound.sends, sound.starts]));
     });
   }
 });
