@@ -138,14 +138,22 @@ export function firstListedDay(s: SubjectState, task: CallTask, rules: CallViewR
  * waits on the lead's callback while that callback is itself shown. A lead that replied, was stopped or ended
  * otherwise shows none, though its tasks are kept for a restart (review bot on eac9f6c).
  */
-export async function recordCalls(store: OutreachStore, enrollmentIds: readonly string[], now: number, rules: CallViewRules = DEFAULT_RULES): Promise<RecordCalls> {
+export async function recordCalls(
+  store: OutreachStore,
+  enrollmentIds: readonly string[],
+  now: number,
+  rules: CallViewRules = DEFAULT_RULES,
+  /** Each enrollment's stored state, loaded once for the whole record read (council on 4fd9ca4, item 6; ticket 17b reads it too). */
+  loaded?: ReadonlyMap<string, SubjectState | null>,
+): Promise<RecordCalls> {
   const out: RecordCallView[] = [];
   const day = await store.engine.callDay(now);
   // Each enrollment's decline (ticket 16c), from the same snapshot as its calls (council on 4fd9ca4, item 6): the user's
   // date it was logged on, as the engine counts the day, and its path.
   const declines: RecordCalls["declines"][number][] = [];
   for (const id of enrollmentIds) {
-    const s = await asOfNow(store, id, now, rules);
+    const stored = loaded ? (loaded.get(id) ?? null) : await store.engine.subject(id, now);
+    const s = stored ? rules.asOfAction(stored, now, rules.evaluate) : null;
     if (!s) continue;
     const declined = s.callAttempts.find((c) => c.outcome === "not_interested" && c.declinedPath !== null);
     if (declined?.declinedPath) declines.push({ enrollmentId: id, date: dateOfDay(localDayNumber(declined.atWall, day.userZone)), path: declined.declinedPath });

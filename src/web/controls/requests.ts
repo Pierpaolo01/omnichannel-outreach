@@ -64,8 +64,8 @@ export const isControlKey = (key: string | null): boolean => key?.startsWith(PRE
 function parse(text: string | null): PressEntry | null {
   if (text === null) return null;
   try {
-    const value = JSON.parse(text) as PressEntry;
-    return value && value.v === 1 && typeof value.requestId === "string" ? value : null;
+    const value: unknown = JSON.parse(text);
+    return typeof value === "object" && value !== null && "v" in value && value.v === 1 && "requestId" in value && typeof value.requestId === "string" ? (value as PressEntry) : null;
   } catch {
     return null;
   }
@@ -136,6 +136,11 @@ export class ControlRequests {
     this.timers.clear();
   }
 
+  /** Read through a method: `stop` may run while a send is awaited. */
+  private halted(): boolean {
+    return this.stopped;
+  }
+
   private storedById(requestId: string): PressEntry | null {
     for (const key of this.ports.local.keys()) {
       if (!isControlKey(key)) continue;
@@ -157,7 +162,7 @@ export class ControlRequests {
       answer = null;
     }
     this.inFlight.delete(entry.requestId);
-    if (this.stopped) return;
+    if (this.halted()) return;
     if (answer === null) {
       this.unanswered.add(entry.requestId);
       const n = this.attempts.get(entry.requestId) ?? 0;

@@ -216,7 +216,7 @@ test("Today and Calls show an overdue callback first, then calls carried from th
 
 test("a callback whose lead has no good number left is said the same way on the sheet, the queue, Today and the record, read at one instant: only skip for now can be logged, and it keeps the callback (Q13; verifier on eac9f6c, F4)", async ({ page }) => {
   const f = await callbackWithNoGoodNumber("q13");
-  const full = "Every number for Tom is marked wrong, so only skip for now can be logged on this callback, and it keeps the callback open. It stays on the call list, flagged overdue once its time has passed, and their other outreach in this campaign stays held until a new number arrives by import or they reply. Pausing them or skipping the step arrives with a later release.";
+  const full = "Every number for Tom is marked wrong, so only skip for now can be logged on this callback, and it keeps the callback open. It stays on the call list, flagged overdue once its time has passed, and their other outreach in this campaign stays held until a new number arrives by import or they reply. On their record you can skip this call step or stop them.";
   const short = "no good number left, only skip for now can be logged";
   // One instant for all four reads: the app's clock does not move during this test.
   await openCalls(page, f);
@@ -237,7 +237,7 @@ test("a callback whose lead has no good number left is said the same way on the 
   await expect(page.getByRole("region", { name: "Up next" }).getByRole("listitem").first()).toContainText(short);
   await page.goto(`${f.url}/leads/people/${f.person("Tom")}`);
   // The record says each fact once: the overdue sentence (critical), then only what Q13 adds.
-  await expect(page.getByText("Every number is marked wrong, so only skip for now can be logged on this callback, and it keeps the callback open. That lasts until a new number arrives by import or they reply. Pausing them or skipping the step arrives with a later release.", { exact: false })).toBeVisible();
+  await expect(page.getByText("Every number is marked wrong, so only skip for now can be logged on this callback, and it keeps the callback open. That lasts until a new number arrives by import or they reply. On their record you can skip this call step or stop them.", { exact: false })).toBeVisible();
   await expect(page.getByText("flagged overdue once its time has passed", { exact: false })).toHaveCount(0);
   await expect(page.getByText("nothing can be logged", { exact: false })).toHaveCount(0);
   // Skip for now is accepted and keeps the callback open and held.

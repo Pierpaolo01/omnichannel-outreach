@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { CallQueueItem, CallTaskView } from "../../shared/api.ts";
-import { clockLine, refusedRecordLine } from "./wording.ts";
+import { clockLine, noGoodNumberText, pausedCallsLine, refusedRecordLine } from "./wording.ts";
 
 describe("a kept refusal's reason (merge of ticket 15a)", () => {
   const record = (offList: Parameters<typeof refusedRecordLine>[0]["refused"]["offList"], message: string) => ({ who: "Amira Hassan", body: { outcome: "no_answer" as const }, refused: { message, offList } });
@@ -90,5 +90,17 @@ describe("a callback's time on the queue, with the user's date when it differs, 
     const task = { zone: "Europe/London", callingHours: [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 })) };
     expect(callbackLine({ at: Date.parse("2027-10-31T01:30:00Z"), problem: null, occurrence: "second" }, "inside", task, "Europe/London").text).toBe("Callback on Sun 31 Oct at 01:30 their time, after the clocks go back, the same as yours. Inside their calling hours.");
     expect(callbackWhen("2027-10-31T00:30:00.000Z", "Europe/London", "Europe/London")).toBe("Sun 31 Oct at 01:30 their time, before the clocks go back, the same as yours");
+  });
+});
+
+describe("a paused campaign whose calls are off the list (ticket 17b), from the server's read", () => {
+  test("its name, how many of its leads wait on a call, and since when, in the user's zone", () => {
+    expect(pausedCallsLine({ id: "c1", name: "Roofers, Antwerp", pausedSince: "2026-11-02T10:15:00.000Z", calls: 1 }, "Europe/London")).toBe("One call in Roofers, Antwerp is off your list while the campaign is paused (since Mon 2 Nov at 10:15).");
+    expect(pausedCallsLine({ id: "c1", name: "Roofers, Antwerp", pausedSince: "2026-11-02T10:15:00.000Z", calls: 3 }, "Europe/Brussels")).toBe("3 calls in Roofers, Antwerp are off your list while the campaign is paused (since Mon 2 Nov at 11:15).");
+  });
+
+  test("Q13's sentence no longer says pausing and skipping arrive later: they are on the lead's record", () => {
+    expect(noGoodNumberText("Tom").full).not.toContain("later release");
+    expect(noGoodNumberText("Tom").full).toContain("On their record you can skip this call step or stop them.");
   });
 });

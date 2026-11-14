@@ -36,6 +36,8 @@ export interface CampaignPauseRead {
   readonly controls: readonly CampaignControlView[];
   /** Messages of the campaign's leads already handed to a provider whose outcome is not final: each may still be sent, also while paused (as `EnrollmentRead.mayStillSend`). */
   readonly mayStillSend: number;
+  /** The user's zone, in which the pause's date is said (ticket 17b). */
+  readonly userZone: string;
 }
 
 export interface CampaignListItem extends Campaign, CampaignPauseRead {
@@ -672,7 +674,8 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
       readonly step: { readonly channel: "email" | "sms" | "call"; readonly track: TrackLabel; readonly number: number } | null;
     }
   /** The lead's campaign was paused or resumed while they were enrolled (ticket 17b), from the same record. */
-  | { readonly kind: "campaign_paused" | "campaign_resumed" }
+  | { readonly kind: "campaign_paused" }
+  | { readonly kind: "campaign_resumed" }
   | { readonly kind: "ended"; readonly status: "sequence_finished_no_response" | "finished_no_usable_channel" }
   /**
    * A phone track's entries (ticket 14b): each call outcome the user logged, skip for now included,

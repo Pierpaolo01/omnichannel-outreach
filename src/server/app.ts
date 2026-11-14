@@ -268,7 +268,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     const row = await store.engine.campaign(campaignId);
     const stored = await store.engine.statusCounts(campaignId);
     const statusCounts = Object.fromEntries(OUTREACH_STATUSES.map((status) => [status, stored[status] ?? 0])) as Record<OutreachStatus, number>;
-    return { pause: { paused: row?.pausedSince != null, pausedSince: row?.pausedSince != null ? new Date(row.pausedSince).toISOString() : null }, statusCounts, controls: campaignControls(row), mayStillSend: await store.engine.uncertainWorkOf(campaignId) };
+    return { pause: { paused: row?.pausedSince != null, pausedSince: row?.pausedSince != null ? new Date(row.pausedSince).toISOString() : null }, statusCounts, controls: campaignControls(row), mayStillSend: await store.engine.uncertainWorkOf(campaignId), userZone: (await store.engine.callSettings()).userZone };
   };
   const controlRefused = (c: Context, message: string) => c.json<ControlRefusal>({ error: { code: "control_refused", message } }, 409);
 
@@ -340,12 +340,14 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   app.get("/people/:id", async (c) => {
     const person = await store.person(c.req.param("id"));
     // Each enrollment's open calls, as of now, by the engine's rules (ticket 15b).
-    return person ? c.json<PersonRecord & RecordCalls & RecordControls>({ ...person, ...(await recordCalls(store, person.enrollments.map((e) => e.id), Date.parse(now()), rules)), ...(await recordControls(person.enrollments.map((e) => e.id))) }) : notFound(c, "person");
+    if (!person) return notFound(c, "person");
+    return c.json<PersonRecord & RecordCalls & RecordControls>({ ...person, ...(await recordReads(person.enrollments.map((e) => e.id))) });
   });
 
   app.get("/companies/:id", async (c) => {
     const company = await store.company(c.req.param("id"));
-    return company ? c.json<CompanyRecord & RecordCalls & RecordControls>({ ...company, ...(await recordCalls(store, company.enrollments.map((e) => e.id), Date.parse(now()), rules)), ...(await recordControls(company.enrollments.map((e) => e.id))) }) : notFound(c, "company");
+    if (!company) return notFound(c, "company");
+    return c.json<CompanyRecord & RecordCalls & RecordControls>({ ...company, ...(await recordReads(company.enrollments.map((e) => e.id))) });
   });
 
   // -------------------------------------------------------------------------------------------
@@ -464,19 +466,28 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     return company ? c.json<ActivityView>({ entries: await activityOf(store, company.enrollments, Date.parse(now()), "company", rules), userZone: (await store.engine.callSettings()).userZone }) : notFound(c, "company");
   });
 
+  // Work handed over and not settled may still be sent (ticket 17a's provider limitation): the screens say so.
+  const readOf = (state: SubjectState, at: number): EnrollmentRead => ({ ...progressView(state, at), controls: controlsView(state, at, rules), mayStillSend: state.work.filter(maySend).length });
   const enrollmentRead = async (id: string): Promise<EnrollmentRead | null> => {
     const at = Date.parse(now());
     const state = await store.engine.subject(id, at);
-    // Work handed over and not settled may still be sent (ticket 17a's provider limitation): the screens say so.
-    return state ? { ...progressView(state, at), controls: controlsView(state, at, rules), mayStillSend: state.work.filter(maySend).length } : null;
+    return state ? readOf(state, at) : null;
   };
 
   // Ticket 17b: each enrollment's read on the record, with its campaign's launch and pause, so each campaign row shows
   // the controls allowed in its status, what each will do, and its sentence. The same read as GET /api/enrollments/:id.
-  const recordControls = async (enrollmentIds: readonly string[]): Promise<RecordControls> => {
+  // Each enrollment is loaded once for the whole record read, at one instant (council on 4fd9ca4, item 6).
+  const recordReads = async (enrollmentIds: readonly string[]): Promise<RecordCalls & RecordControls> => {
+    const at = Date.parse(now());
+    const loaded = new Map<string, SubjectState | null>();
+    for (const id of enrollmentIds) loaded.set(id, await store.engine.subject(id, at));
+    return { ...(await recordCalls(store, enrollmentIds, at, rules, loaded)), ...(await recordControls(enrollmentIds, loaded, at)) };
+  };
+  const recordControls = async (enrollmentIds: readonly string[], loaded: ReadonlyMap<string, SubjectState | null>, at: number): Promise<RecordControls> => {
     const leads: RecordLead[] = [];
     for (const id of enrollmentIds) {
-      const read = await enrollmentRead(id);
+      const state = loaded.get(id) ?? null;
+      const read = state ? readOf(state, at) : null;
       if (!read) continue;
       const row = await store.engine.campaign(read.campaignId);
       const iso = (t: number | null | undefined) => (t == null ? null : new Date(t).toISOString());

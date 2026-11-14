@@ -21,7 +21,9 @@ function sharedStorage(): KeyValue & { refuse: boolean; data: Map<string, string
       data.set(k, v);
       return true;
     },
-    remove: (k: string) => void data.delete(k),
+    remove: (k: string) => {
+      data.delete(k);
+    },
     keys: () => [...data.keys()],
   };
   return kv;
@@ -84,7 +86,9 @@ function tab(storage: KeyValue, srv: ReturnType<typeof server>, time: ReturnType
     setTimer: time.setTimer,
     send: srv.send,
     onResult: (r) => results.push(r),
-    onChange: () => void changes++,
+    onChange: () => {
+      changes++;
+    },
   });
   return { requests, results, changes: () => changes };
 }

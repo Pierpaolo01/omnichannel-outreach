@@ -22,7 +22,7 @@ import {
 const ZONE = "Europe/London";
 const EMAIL = { label: "Email track", several: false, branch: "main" as const };
 const step = (fields: Partial<ControlStepView> = {}): ControlStepView => ({ trackId: "e1", track: EMAIL, channel: "email", branch: "main", stepId: "s2", number: 2, of: 3, dueAt: null, ...fields });
-const allowed = (action: LeadControlApi, fields: Partial<Extract<ControlView, { allowed: true }>> = {}): ControlView => ({ action, allowed: true, statusAfter: "active", skips: null, next: null, withProvider: 0, ...fields });
+const allowed = (action: LeadControlApi, fields: Partial<Extract<ControlView, { allowed: true }>> = {}): Extract<ControlView, { allowed: true }> => ({ action, allowed: true, statusAfter: "active", skips: null, next: null, withProvider: 0, ...fields });
 const refused = (action: LeadControlApi, reason: string): ControlView => ({ action, allowed: false, reason });
 
 function lead(status: OutreachStatus, fields: Partial<RecordLead> = {}): RecordLead {
@@ -176,6 +176,7 @@ describe("the campaign's pause", () => {
     statusCounts: counts({ queued: 1, active: 2, in_win_back: 1, waiting_on_call: 3, callback_scheduled: 1, replied: 2, interested_on_call: 1, paused: 1, stopped_manually: 1, sequence_finished_no_response: 4 }),
     controls: [],
     mayStillSend: 0,
+    userZone: ZONE,
     ...fields,
   });
   test("the counts in each status group sum the read's statuses", () => {
