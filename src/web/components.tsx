@@ -1,9 +1,11 @@
 import { useId, type ReactNode } from "react";
 import { Link } from "wouter";
-import type { ColleagueView, ContactDetailView, EnrollmentView, RecordCalls, UnenrolledReason } from "../shared/api.ts";
+import type { ColleagueView, ContactDetailView, EnrollmentView, RecordCalls, RecordControls, UnenrolledReason } from "../shared/api.ts";
 import { declinedRecordLine, recordCallLine } from "./calls/wording.ts";
 import { Icon } from "./icons.tsx";
-import { StatusBadge, enrollmentSentence } from "./status.tsx";
+import { StatusBadge } from "./status.tsx";
+import { CampaignPausedMarker, LeadControls, LeadSentence } from "./controls/ControlViews.tsx";
+import type { Controls } from "./controls/useControls.ts";
 import { clockIn, useNow } from "./time.ts";
 import type { Freshness } from "./calls/refresher.ts";
 
@@ -116,6 +118,9 @@ export function CampaignRows({
   who,
   companyIsLead = false,
   calls,
+  leads,
+  controls,
+  name,
 }: {
   enrollments: readonly EnrollmentView[];
   unenrolledReason: UnenrolledReason;
@@ -123,6 +128,11 @@ export function CampaignRows({
   companyIsLead?: boolean;
   /** Each enrollment's open calls, as the record's read gives them (ticket 15b). */
   calls?: RecordCalls;
+  /** Each enrollment's read, its controls and sentence (ticket 17b), and the page's control requests. */
+  leads: RecordControls;
+  controls: Controls;
+  /** Whose record this is, to label each control. */
+  name: string;
 }) {
   if (enrollments.length === 0) {
     return (
@@ -135,20 +145,30 @@ export function CampaignRows({
   return (
     <ul>
       {enrollments.map((enrollment) => {
-        const sentence = enrollmentSentence(enrollment.status);
+        // The enrollment's own read at the record's instant: its status, sentence and controls (ticket 17b).
+        const lead = leads.leads.find((l) => l.id === enrollment.id) ?? null;
+        const status = lead?.status ?? enrollment.status;
         return (
           <li key={enrollment.id} className="flex flex-col gap-2 border-line py-4 [&+&]:border-t">
             <div className="flex flex-wrap items-center justify-between gap-2.5">
-              <span className="min-w-0 font-semibold [overflow-wrap:anywhere]">{enrollment.campaign.name}</span>
-              <StatusBadge status={enrollment.status} />
+              <span className="min-w-0 font-semibold [overflow-wrap:anywhere]">
+                {enrollment.campaign.name}
+                {lead?.campaignState.paused && (
+                  <>
+                    {" "}
+                    <CampaignPausedMarker />
+                  </>
+                )}
+              </span>
+              <StatusBadge status={status} />
             </div>
-            {sentence && <p className="text-[14px] text-ink-2">{sentence}</p>}
+            {lead && <LeadSentence lead={lead} userZone={leads.userZone} />}
             {/* A decline on a call and the path it took (ticket 16c), beside the status the server reads now. */}
             {calls?.declines
               .filter((d) => d.enrollmentId === enrollment.id)
               .map((d) => (
                 <p key={`declined-${d.enrollmentId}`} className="text-[14px] text-ink-2 [overflow-wrap:anywhere]">
-                  {declinedRecordLine(d, enrollment.status)}
+                  {declinedRecordLine(d, status)}
                 </p>
               ))}
             {calls?.calls
@@ -163,6 +183,7 @@ export function CampaignRows({
                   </p>
                 );
               })}
+            {lead && <LeadControls lead={lead} userZone={leads.userZone} controls={controls} who={name} campaignName={enrollment.campaign.name} />}
           </li>
         );
       })}

@@ -1,11 +1,12 @@
 import { Link } from "wouter";
 import type { CallQueueItem, TodayView } from "../../shared/api.ts";
 import { useLiveToday } from "../calls/useLiveToday.ts";
-import { CAPACITY_USED, attentionItems, dateHeading, reasonLine, todayLede, zonePlace } from "../calls/wording.ts";
+import { CAPACITY_USED, attentionItems, dateHeading, reasonLine, todayLede, zonePlace, pausedCallsLine } from "../calls/wording.ts";
 import { ErrorState, StaleNotice } from "../components.tsx";
 import { Icon } from "../icons.tsx";
 import { greeting, todayHeading, useNow } from "../time.ts";
 import { useFocusRescue } from "../focusRescue.ts";
+import { campaignPath } from "./CampaignPage.tsx";
 
 const TONE = { muted: "text-muted", pause: "text-pause", crit: "text-crit" } as const;
 const DOT = { crit: "bg-crit", pause: "bg-pause", end: "bg-end" } as const;
@@ -53,7 +54,18 @@ export function TodayPage() {
               <div className="skeleton h-12 w-full" />
             </div>
           ) : (
+            <>
             <UpNext view={view} />
+            {/* A paused campaign's calls are off the list (ticket 17b): said where the user would otherwise miss them. */}
+            {view.pausedCampaigns.map((p) => (
+              <p key={p.id} className="mt-3.5 text-[13px] text-pause [overflow-wrap:anywhere]">
+                {pausedCallsLine(p, view.userZone)}{" "}
+                <Link href={campaignPath(p.id)} className="text-pause underline">
+                  Open {p.name}
+                </Link>
+              </p>
+            ))}
+            </>
           )}
         </section>
         <section aria-labelledby="needs-attention">

@@ -1,6 +1,6 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import type { ActivityEntry, ActivityView, DependentTrackState } from "../shared/api.ts";
-import { useApi } from "./api.ts";
+import { useLiveRead } from "./controls/useLiveRead.ts";
 import { ErrorState, Section } from "./components.tsx";
 import { DECLINED_PATH_LINE, OUTCOME_TITLE, dateIn, declineTrackLine, dialledLine } from "./calls/wording.ts";
 import { dayLabel } from "./calls/callbackTime.ts";
@@ -14,8 +14,13 @@ import { useNow } from "./time.ts";
  * and date only. Calls show each logged outcome with the number dialled and its note (ticket 14b).
  * The note box arrives with the ticket that adds notes.
  */
-export function Activity({ path }: { path: string }) {
-  const { result, retry } = useApi<ActivityView>(path);
+export function Activity({ path, reads }: { path: string; reads: number }) {
+  // Read live (ticket 17b), and again each time the record reads: a control's entry shows once it is applied.
+  const { read: result, refresh } = useLiveRead<ActivityView>(path);
+  const retry = () => void refresh();
+  useEffect(() => {
+    if (reads > 0) void refresh();
+  }, [reads, refresh]);
   const [campaign, setCampaign] = useState("");
   const filterId = useId();
   const entries = result.state === "ready" ? result.data.entries : null;
@@ -98,6 +103,10 @@ export function describeEntry(entry: ActivityEntry, userZone: string): { icon: I
     return entry.status === "sequence_finished_no_response"
       ? { icon: "system", tone: PLAIN, title: "Sequence finished with no response", body: null, track: null }
       : { icon: "system", tone: PLAIN, title: "Finished, no usable channel", body: "Nothing is left to reach them on in this campaign.", track: null };
+  // The controls the user applied (ticket 17b): what happened then, never a state since (a pause may still hold).
+  if (entry.kind === "campaign_paused") return { icon: "system", tone: PLAIN, title: "Campaign paused", body: "Its calls left your list and its waits froze.", track: null };
+  if (entry.kind === "campaign_resumed") return { icon: "system", tone: PLAIN, title: "Campaign resumed", body: null, track: null };
+  if (entry.kind === "control") return controlEntry(entry);
   if (entry.channel === "call") {
     const track = entry.track.several ? entry.track.label : null;
     switch (entry.kind) {
@@ -168,6 +177,33 @@ export function describeEntry(entry: ActivityEntry, userZone: string): { icon: I
         body: `It starts after ${inSentence(entry.after)}, which ${releasedWhy(entry.because, entry.after.label)}.`,
         track: null,
       };
+  }
+}
+
+/** One control the user applied, as history: the step it named is said by its track's own name for a step. */
+function controlEntry(entry: Extract<ActivityEntry, { kind: "control" }>): { icon: IconName; tone: string; title: string; body: string | null; track: string | null } {
+  const step = entry.step;
+  const name = step === null ? null : step.channel === "call" ? "Call" : `${stepNoun(step.track, step.channel)} ${step.number}`;
+  const track = step?.track.several ? step.track.label : null;
+  const at = name === null ? null : name === "Call" ? "the call" : name.charAt(0).toLowerCase() + name.slice(1);
+  const plain = (title: string, body: string | null = null) => ({ icon: "system" as const, tone: PLAIN, title, body, track });
+  switch (entry.action) {
+    case "pause":
+      return plain("Paused by you", "Their waits froze.");
+    case "resume":
+      return plain("Resumed by you");
+    case "skip":
+      return plain(`${name ?? "Step"} skipped by you`, step?.channel === "call" ? "It was never made." : "It was never sent.");
+    case "stop":
+      return plain("Stopped by you");
+    case "resume_from_next_step":
+      return plain("Resumed from the next step by you", at ? `They resumed at ${at}.` : null);
+    case "move_to_win_back":
+      return plain("Moved to win-back by you", `Their remaining main-sequence steps were dropped${at ? `, and they started at ${at}` : ""}.`);
+    default: {
+      const unhandled: never = entry.action;
+      throw new Error(`A control with no timeline entry: ${String(unhandled)}`);
+    }
   }
 }
 

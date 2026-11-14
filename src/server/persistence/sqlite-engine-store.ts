@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ControlDecision, ControlRecord, RequestStanding, StoredRequest } from "../engine/engine-store.ts";
+import type { AcceptedControl, ControlDecision, ControlRecord, RequestStanding, StoredRequest } from "../engine/engine-store.ts";
 import type { DatabaseSync, SQLInputValue, SQLOutputValue, StatementSync } from "node:sqlite";
 import { displayPhone, displayPhonesIn } from "../../domain/phone.ts";
 import type { SenderAccountView } from "../../domain/sequence/blockers.ts";
@@ -166,6 +166,15 @@ export class SqliteEngineStore implements EngineStore {
 
   async workToWithdraw(): Promise<ProviderWork[]> {
     return this.sql("SELECT * FROM provider_work WHERE settled IS NULL AND withdraw_wanted = 1 ORDER BY rowid").all().map(toWork);
+  }
+
+  async acceptedControls(targets: readonly string[]): Promise<AcceptedControl[]> {
+    if (targets.length === 0) return [];
+    const marks = targets.map(() => "?").join(", ");
+    return this.db
+      .prepare(`SELECT target, action, effect, at_wall FROM control_requests WHERE answer = 'accepted' AND action <> 'call_outcome' AND target IN (${marks}) ORDER BY at_wall, rowid`)
+      .all(...targets)
+      .map((r) => ({ target: str(r, "target"), action: str(r, "action"), effect: strOrNull(r, "effect"), atWall: num(r, "at_wall") }));
   }
 
   async statusCounts(campaignId: string): Promise<Record<string, number>> {

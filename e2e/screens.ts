@@ -1,7 +1,7 @@
 import type { APIRequestContext, Locator, Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { OUTREACH_STATUSES } from "../src/domain/outreach-status.ts";
-import type { BeforeLaunchView, CampaignDefinition, CompanyRecord, ImportRecord, LeadSearchResult, PersonRecord, RecordCalls, SequenceView, SummaryEntry } from "../src/shared/api.ts";
+import type { BeforeLaunchView, CampaignDefinition, CampaignListItem, CompanyRecord, ControlStepView, ControlView, ImportRecord, LeadControlApi, LeadSearchResult, OutreachStatus, PersonRecord, RecordCalls, RecordControls, RecordLead, SequenceView, SummaryEntry } from "../src/shared/api.ts";
 import { refusedPair, respond, serverError } from "./mocks.ts";
 import { FAKE_INBOX, FAKE_NUMBERS, TWO_CHANNELS, fakeCallsApp, fakeProviderApp, type CallsScenario, type FakeCallsApp, type FakeProviderApp } from "./fake-provider.ts";
 import { fixture } from "./support.ts";
@@ -162,7 +162,45 @@ const BUSINESS_HEADER_ONLY_MISSING_PLACE =
   "business_id,business_name,phone_e164\nbz-1,Some Clinic,+442079460999\n";
 
 /** A person record showing every outreach status, a bad number and a newer email. */
-export function galleryRecord(id: string): PersonRecord & RecordCalls {
+/**
+ * A fixture enrollment read for the gallery (ticket 17b): the controls a lead in each status has, as the server offers
+ * them, so every status shows its sentence and its controls. Fictitious.
+ */
+export function galleryLead(id: string, campaignId: string, status: OutreachStatus, fields: Partial<RecordLead> = {}): RecordLead {
+  const email = (number: number, dueAt: string | null = null): ControlStepView => ({ trackId: "e1", track: { label: "Email track", several: false, branch: "main" }, channel: "email", branch: "main", stepId: `s${number}`, number, of: 3, dueAt });
+  const ended = `Outreach to them has ended in this campaign (${status.replaceAll("_", " ")}).`;
+  const ok = (action: LeadControlApi, more: Partial<Extract<ControlView, { allowed: true }>> = {}): ControlView => ({ action, allowed: true, statusAfter: status, skips: null, next: null, withProvider: 0, ...more });
+  const no = (action: LeadControlApi, reason: string): ControlView => ({ action, allowed: false, reason });
+  const running = [ok("pause", { statusAfter: "paused", next: email(2) }), no("resume", "They are not paused."), ok("skip", { skips: email(2), next: email(3, "2026-11-13T09:00:00.000Z") }), ok("stop", { statusAfter: "stopped_manually" }), no("resume_from_next_step", "Only a lead that replied or was stopped can be resumed (question Q6)."), no("move_to_win_back", "Only a lead that replied or was stopped can be moved to win-back.")];
+  const controls: ControlView[] =
+    status === "paused"
+      ? [no("pause", "They are already paused."), ok("resume", { statusAfter: "active", next: email(2, "2026-11-11T09:00:00.000Z") }), ok("skip", { skips: email(2), next: email(3) }), ok("stop", { statusAfter: "stopped_manually" })]
+      : status === "replied" || status === "stopped_manually"
+        ? [no("pause", ended), no("skip", ended), ok("resume_from_next_step", { statusAfter: "active", next: email(3, "2026-11-11T09:00:00.000Z") }), no("move_to_win_back", "This campaign has no win-back branch.")]
+        : ["queued", "active", "in_win_back", "waiting_on_call", "callback_scheduled"].includes(status)
+          ? running
+          : [no("pause", ended), no("skip", ended), no("stop", ended), no("resume_from_next_step", "Only a lead that replied or was stopped can be resumed (question Q6).")];
+  return {
+    id,
+    campaignId,
+    status,
+    endedAt: status === "stopped_manually" ? "2026-11-10T16:30:00.000Z" : null,
+    reply: status === "replied" ? { channel: "email", at: "2026-11-10T14:05:00.000Z" } : null,
+    sender: null,
+    smsSender: null,
+    zone: "Europe/London",
+    tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, hold: null, nextStep: { stepId: "s2", number: 2, dueAt: "2026-11-11T09:00:00.000Z" }, callTask: null, steps: [] }],
+    branch: status === "in_win_back" ? "win_back" : "main",
+    winBackEnteredAt: null,
+    declined: null,
+    controls,
+    mayStillSend: 0,
+    campaignState: { launched: true, paused: false, pausedSince: null },
+    ...fields,
+  };
+}
+
+export function galleryRecord(id: string): PersonRecord & RecordCalls & RecordControls {
   const statuses = OUTREACH_STATUSES;
   const e = (status: (typeof OUTREACH_STATUSES)[number]) => `e${statuses.indexOf(status)}`;
   const base = { track: { id: "p1", label: "Phone track" }, zone: "Europe/London", noGoodNumber: false, heldByCallback: false, callbackAt: null, skipLimit: null } as const;
@@ -182,7 +220,14 @@ export function galleryRecord(id: string): PersonRecord & RecordCalls {
     { id: "e-redial", campaign: { id: "c-redial", name: "Calls, redialed" }, status: "waiting_on_call" as const, enrolledAt: "2026-11-12T09:00:00.000Z" },
     { id: "e-held", campaign: { id: "c-held", name: "Two phone tracks" }, status: "callback_scheduled" as const, enrolledAt: "2026-11-12T09:00:00.000Z" },
   ];
+  const enrollments = [...statuses.map((status, i) => ({ id: `e${i}`, campaign: { id: `c${i}`, name: `Campaign ${i + 1}` }, status, enrolledAt: "2026-11-12T09:00:00.000Z" })), ...more];
+  // Ticket 17b: each enrollment's read. A stopped lead has an email the provider may still send; an active lead's campaign is paused.
+  const leads = enrollments.map((e) =>
+    galleryLead(e.id, e.campaign.id, e.status, e.status === "stopped_manually" ? { mayStillSend: 1 } : e.status === "active" ? { campaignState: { launched: true, paused: true, pausedSince: "2026-11-10T08:30:00.000Z" } } : {}),
+  );
   return {
+    leads,
+    userZone: "Europe/London",
     calls,
     today: "2026-11-10",
     declines: [],
@@ -199,7 +244,7 @@ export function galleryRecord(id: string): PersonRecord & RecordCalls {
       { id: "d3", owner: "person", channel: "phone", phoneKind: "direct", value: "+44 20 7946 0999", bad: true, newer: false },
       { id: "d4", owner: "company", channel: "phone", phoneKind: "main_line", value: "+44 20 7946 0998", bad: false, newer: false },
     ],
-    enrollments: [...statuses.map((status, i) => ({ id: `e${i}`, campaign: { id: `c${i}`, name: `Campaign ${i + 1}` }, status, enrolledAt: "2026-11-12T09:00:00.000Z" })), ...more],
+    enrollments,
     unenrolledReason: null,
     colleagues: [
       { id: "p2", name: "Colleague Two", title: "Manager", enrollments: statuses.slice(5, 8).map((status, i) => ({ id: `ce${i}`, campaign: { id: `c${i}`, name: `Campaign ${i + 1}` }, status, enrolledAt: "2026-11-12T09:00:00.000Z" })), unenrolledReason: null },
@@ -387,7 +432,9 @@ export const JUNIPER_LATER = {
   calls: [],
   today: "2026-11-13",
   declines: [],
-} satisfies CompanyRecord & RecordCalls;
+  leads: [galleryLead("e1", "c1", "queued", { campaignState: { launched: false, paused: false, pausedSince: null }, controls: [] })],
+  userZone: "Europe/London",
+} satisfies CompanyRecord & RecordCalls & RecordControls;
 
 export const JUNIPER_LATER_ROW = {
   rows: [{ kind: "company", id: "co-juniper", name: "Juniper Pilates Studio", city: "London", peopleOnRecord: 2, peopleReachable: 1, enrollments: JUNIPER_LATER.enrollments, unenrolledReason: null }],
@@ -476,6 +523,29 @@ export async function openCalls(page: Page, f: FakeCallsApp, path = "/calls"): P
   await page.clock.setFixedTime(f.harness.clock);
   await page.goto(f.url + path);
   if (path === "/calls") await page.getByText(/^Calling hours /).waitFor();
+}
+
+/** One control on a lead over HTTP, as another window would (ticket 17b). */
+export async function leadControl(f: FakeCallsApp, who: string, action: string): Promise<void> {
+  const rows = (await f.harness.request<LeadSearchResult>("GET", `/api/leads?campaign=${f.campaign}&limit=500`)).body.rows;
+  const enrollment = rows.find((r) => r.name === who)?.enrollments[0]?.id ?? "";
+  const out = await f.harness.request("POST", `/api/enrollments/${enrollment}/controls`, { requestId: `elsewhere-${action}-${enrollment}-${Date.now()}`, action });
+  if (out.status !== 200) throw new Error(`the control was refused: ${JSON.stringify(out.body)}`);
+}
+
+/** A win-back calls app of its own whose campaign is paused, at Monday 10:00 London (ticket 17b); one per name. */
+const pausedApps = new Map<string, Promise<FakeCallsApp>>();
+export function pausedCalls(name: string): Promise<FakeCallsApp> {
+  let app = pausedApps.get(name);
+  if (!app) {
+    app = fakeCallsApp("win-back", `paused-${name}`).then(async (f) => {
+      const out = await f.harness.request("POST", `/api/campaigns/${f.campaign}/pause`, { requestId: `paused-${name}` });
+      if (out.status !== 200) throw new Error(`the campaign did not pause: ${JSON.stringify(out.body)}`);
+      return f;
+    });
+    pausedApps.set(name, app);
+  }
+  return app;
 }
 
 export const SCREENS: readonly Screen[] = [
@@ -1321,7 +1391,7 @@ export const SCREENS: readonly Screen[] = [
       await settle(page, "start within");
     },
   },
-  { name: "fake provider: running campaign", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}`); await settle(page, "Pausing, resuming and editing a running campaign arrive with later releases."); } },
+  { name: "fake provider: running campaign", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}`); await settle(page, "Editing a running campaign arrives with a later release."); } },
   { name: "fake provider: running campaign's email track", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}?track=email`); await settle(page, "Editing a running campaign arrives with a later release."); } },
   {
     name: "fake provider: before launch with a change that isn't saved",
@@ -1706,6 +1776,119 @@ export const SCREENS: readonly Screen[] = [
   },
   { name: "record not found", open: async (page) => { await page.goto("/leads/people/nobody"); await settle(page, "No one found"); } },
   { name: "page not found", open: async (page) => { await page.goto("/nowhere"); await settle(page, "Page not found"); } },
+  // Ticket 17b: pause, resume, skip, stop and restart on the record, the campaign page and the list.
+  { name: "controls: a person's campaign row, running, with its sentence and controls", open: async (page) => { const f = await calls(page, "win-back", "/"); await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`); await settle(page, "Next: the call."); } },
+  {
+    name: "controls: a lead control's confirmation, with the read's preview",
+    open: async (page) => {
+      const f = await calls(page, "win-back", "/");
+      await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
+      await page.getByRole("button", { name: "Pause: Amira Hassan in Clinics, London" }).click();
+      await settle(page, "every wait freezes until you resume them");
+    },
+  },
+  {
+    name: "controls: a lead control on its way",
+    open: async (page) => {
+      await page.route("**/api/enrollments/*/controls", () => new Promise(() => undefined));
+      const f = await calls(page, "win-back", "/", "controls-pending");
+      await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
+      await page.getByRole("button", { name: "Stop: Amira Hassan in Clinics, London" }).click();
+      await page.getByRole("group").getByRole("button", { name: "Stop", exact: true }).click();
+      await settle(page, "Stopping…");
+    },
+  },
+  {
+    name: "controls: what a lead control did",
+    open: async (page) => {
+      const f = await calls(page, "win-back", "/", "controls-done");
+      await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
+      await page.getByRole("button", { name: "Pause: Amira Hassan in Clinics, London" }).click();
+      await page.getByRole("group").getByRole("button", { name: "Pause", exact: true }).click();
+      await settle(page, "Paused before the call. Waiting times are frozen.");
+    },
+  },
+  {
+    name: "controls: a lead control refused in place",
+    open: async (page) => {
+      await page.route("**/api/enrollments/*/controls", (route) => respond(route, { error: { code: "control_refused", message: "No step is waiting: the next track has not started yet." } }, 409));
+      const f = await calls(page, "win-back", "/");
+      await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
+      await page.getByRole("button", { name: "Skip this step: Amira Hassan in Clinics, London" }).click();
+      await page.getByRole("group").getByRole("button", { name: "Skip this step", exact: true }).click();
+      await settle(page, "Skip this step was not applied.");
+    },
+  },
+  {
+    name: "controls: a stopped lead, with the restarts the read allows",
+    open: async (page) => {
+      const f = await freshCalls("win-back", "controls-stopped");
+      await leadControl(f, "Amira Hassan", "stop");
+      await page.clock.setFixedTime(f.harness.clock);
+      await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
+      await page.getByRole("button", { name: "Move to win-back: Amira Hassan in Clinics, London" }).click();
+      await settle(page, "They move to this campaign’s win-back branch");
+    },
+  },
+  {
+    name: "controls: long names, with a confirmation open",
+    open: async (page, data) => {
+      const id = data.person("Amira Hassan");
+      const record = galleryRecord(id);
+      const longPerson = `Maximiliana ${"Ottenheimer-".repeat(6)}Featherstonehaugh`;
+      const enrollments = record.enrollments.slice(0, 2).map((e) => ({ ...e, campaign: { ...e.campaign, name: LONG_CAMPAIGN_NAME } }));
+      await page.route(`**/api/people/${id}`, (route) => respond(route, { ...record, name: longPerson, enrollments, leads: record.leads.slice(0, 2), calls: [] }));
+      await page.goto(`/leads/people/${id}`);
+      await page.getByRole("button", { name: /^Skip this step: / }).first().click();
+      await settle(page, "is skipped and never sent");
+    },
+  },
+  { name: "controls: a campaign's list row, paused, with its banner", open: async (page) => { const f = await pausedCalls("list"); await page.clock.setFixedTime(f.harness.clock); await page.goto(`${f.url}/campaigns`); await settle(page, "Paused since Mon 9 Nov at 10:00"); } },
+  { name: "controls: a campaign's page, paused, with its banner", open: async (page) => { const f = await pausedCalls("page"); await page.clock.setFixedTime(f.harness.clock); await page.goto(`${f.url}/campaigns/${f.campaign}`); await settle(page, "Paused since Mon 9 Nov at 10:00"); } },
+  {
+    name: "controls: a campaign's pause confirmation on its page",
+    open: async (page) => {
+      const f = await calls(page, "win-back", "/");
+      await page.goto(`${f.url}/campaigns/${f.campaign}`);
+      await page.getByRole("button", { name: "Pause campaign: Clinics, London" }).click();
+      await settle(page, "every waiting time freezes");
+    },
+  },
+  {
+    name: "controls: a campaign's pause confirmation on the list",
+    open: async (page) => {
+      await calls(page, "win-back", "/campaigns");
+      await page.getByRole("button", { name: "Pause campaign: Clinics, London" }).click();
+      await settle(page, "every waiting time freezes");
+    },
+  },
+  {
+    name: "controls: a long campaign name, paused, on the list",
+    open: async (page) => {
+      const counts = Object.fromEntries(OUTREACH_STATUSES.map((st, i) => [st, i * 7])) as Record<OutreachStatus, number>;
+      const item: CampaignListItem = {
+        id: "c-long",
+        name: LONG_CAMPAIGN_NAME,
+        defaultTimezone: "Europe/London",
+        createdAt: "2026-11-02T09:00:00.000Z",
+        leadCount: Object.values(counts).reduce((a, b) => a + b, 0),
+        sequence: { launchedAt: "2026-11-02T09:00:00.000Z", tracks: ["email", "call", "email"] },
+        lastImport: null,
+        pause: { paused: true, pausedSince: "2026-11-09T10:00:00.000Z" },
+        statusCounts: counts,
+        controls: [{ action: "pause", allowed: false, reason: "This campaign is already paused." }, { action: "resume", allowed: true }],
+        mayStillSend: 2,
+        userZone: "Europe/London",
+      };
+      await page.route("**/api/campaigns", (route) => respond(route, { campaigns: [item] }));
+      await page.goto("/campaigns");
+      await page.getByRole("button", { name: /^Resume campaign: / }).click();
+      await settle(page, "Each lead continues where it was");
+    },
+  },
+  { name: "controls: a person in a paused campaign", open: async (page) => { const f = await pausedCalls("person"); await page.clock.setFixedTime(f.harness.clock); await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`); await settle(page, "(campaign paused)"); } },
+  { name: "controls: today with a paused campaign's calls off the list", open: async (page) => { const f = await pausedCalls("today"); await page.clock.setFixedTime(f.harness.clock); await page.goto(`${f.url}/`); await settle(page, "off your list while the campaign is paused"); } },
+  { name: "controls: calls with a paused campaign's calls off the list", open: async (page) => { const f = await pausedCalls("calls"); await page.clock.setFixedTime(f.harness.clock); await page.goto(`${f.url}/calls`); await settle(page, "Nothing to call right now"); } },
 ];
 
 /**
@@ -2247,5 +2430,68 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
     },
     act: (page) => page.keyboard.press("Enter"),
     focused: (page) => page.getByRole("button", { name: /^SMS track: / }),
+  },
+  // Ticket 17b: a control's confirmation, its answer and its refusal.
+  {
+    name: "Cancel on a lead control's confirmation returns focus to the control",
+    open: async (page) => {
+      const f = await calls(page, "win-back", "/");
+      await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
+      await page.getByRole("button", { name: "Stop: Amira Hassan in Clinics, London" }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByRole("group").getByRole("button", { name: "Cancel" }).focus();
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByRole("button", { name: "Stop: Amira Hassan in Clinics, London" }),
+  },
+  {
+    name: "confirming a lead control moves focus to what it did",
+    open: async (page) => {
+      const f = await calls(page, "win-back", "/", "focus-confirm");
+      await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
+      await page.getByRole("button", { name: "Pause: Amira Hassan in Clinics, London" }).focus();
+      await page.keyboard.press("Enter");
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByRole("status").filter({ hasText: /^Paused\./ }),
+  },
+  {
+    name: "Dismiss on a refused lead control returns focus to the row's first control",
+    open: async (page) => {
+      await page.route("**/api/enrollments/*/controls", (route) => respond(route, { error: { code: "control_refused", message: "They are already paused." } }, 409));
+      const f = await calls(page, "win-back", "/");
+      await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
+      await page.getByRole("button", { name: "Pause: Amira Hassan in Clinics, London" }).focus();
+      await page.keyboard.press("Enter");
+      await page.keyboard.press("Enter");
+      await page.getByRole("alert").getByRole("button", { name: "Dismiss" }).waitFor();
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByRole("button", { name: "Pause: Amira Hassan in Clinics, London" }),
+  },
+  {
+    name: "Cancel on a campaign's pause confirmation returns focus to Pause campaign",
+    open: async (page) => {
+      await calls(page, "win-back", "/campaigns");
+      await page.getByRole("button", { name: "Pause campaign: Clinics, London" }).focus();
+      await page.keyboard.press("Enter");
+      await page.keyboard.press("Escape");
+      await page.getByRole("button", { name: "Pause campaign: Clinics, London" }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByRole("group").getByRole("button", { name: "Cancel" }).focus();
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByRole("button", { name: "Pause campaign: Clinics, London" }),
+  },
+  {
+    name: "confirming a campaign's pause moves focus to what it did",
+    open: async (page) => {
+      const f = await calls(page, "win-back", "/", "focus-campaign");
+      await page.goto(`${f.url}/campaigns/${f.campaign}`);
+      await page.getByRole("button", { name: "Pause campaign: Clinics, London" }).focus();
+      await page.keyboard.press("Enter");
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByRole("status").filter({ hasText: /^Paused\. Its calls are off your list/ }),
   },
 ];

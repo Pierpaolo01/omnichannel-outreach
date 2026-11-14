@@ -172,3 +172,33 @@ describe("what a decline did to each remaining track, as the server's read holds
     expect(describeEntry(replied, "Europe/London").body).toBe("Moved to this campaign’s win-back branch, with no more calls. Win-back email track 1 has finished. Win-back email track 2 did not start: their outreach in this campaign stopped. +44 20 7946 0111, direct");
   });
 });
+
+describe("what the timeline says of the controls the user applied (ticket 17b), in the past tense", () => {
+  const say = (entry: ActivityEntry) => {
+    const { title, body, track } = describeEntry(entry, "Europe/London");
+    return [title, body, track];
+  };
+  const control = (action: Extract<ActivityEntry, { kind: "control" }>["action"], step: Extract<ActivityEntry, { kind: "control" }>["step"] = null): ActivityEntry => ({ campaign, at, kind: "control", action, step });
+
+  test("pause, resume and stop", () => {
+    expect(say(control("pause"))).toEqual(["Paused by you", "Their waits froze.", null]);
+    expect(say(control("resume"))).toEqual(["Resumed by you", null, null]);
+    expect(say(control("stop"))).toEqual(["Stopped by you", null, null]);
+  });
+
+  test("a skip names the step it skipped, and its track when the campaign has several on that channel", () => {
+    expect(say(control("skip", { channel: "email", track: one("Email track"), number: 2 }))).toEqual(["Email 2 skipped by you", "It was never sent.", null]);
+    expect(say(control("skip", { channel: "sms", track: { label: "SMS track 2", several: true, branch: "main" }, number: 1 }))).toEqual(["Text 1 skipped by you", "It was never sent.", "SMS track 2"]);
+    expect(say(control("skip", { channel: "call", track: one("Phone track"), number: 1 }))).toEqual(["Call skipped by you", "It was never made.", null]);
+  });
+
+  test("the restarts name the step they resumed at", () => {
+    expect(say(control("resume_from_next_step", { channel: "email", track: one("Email track"), number: 3 }))).toEqual(["Resumed from the next step by you", "They resumed at email 3.", null]);
+    expect(say(control("move_to_win_back", { channel: "email", track: { label: "Win-back email track", several: false, branch: "win_back" }, number: 1 }))).toEqual(["Moved to win-back by you", "Their remaining main-sequence steps were dropped, and they started at win-back email 1.", null]);
+  });
+
+  test("the campaign's pause and resume", () => {
+    expect(say({ campaign, at, kind: "campaign_paused" })).toEqual(["Campaign paused", "Its calls left your list and its waits froze.", null]);
+    expect(say({ campaign, at, kind: "campaign_resumed" })).toEqual(["Campaign resumed", null, null]);
+  });
+});

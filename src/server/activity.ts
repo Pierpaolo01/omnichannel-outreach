@@ -17,7 +17,8 @@
  * has no delivered
  * state, because Instantly reports none (ADR 0002, "Delivered").
  */
-import type { ActivityEntry, EnrollmentView } from "../shared/api.ts";
+import type { ActivityEntry, ControlView, EnrollmentView } from "../shared/api.ts";
+import { LEAD_CONTROLS } from "../domain/sequence/controls.ts";
 import { displayPhone } from "../domain/phone.ts";
 import { goodNumbers, skipLimitOf, userDayOf } from "../domain/sequence/calls.ts";
 import { localDayNumber } from "../domain/sequence/clock.ts";
@@ -78,7 +79,8 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
         if (step.result === "failed") {
           const to = step.sends.at(-1)?.destination ?? "";
           entries.push({ campaign, at: step.at, kind: "failed", channel, track: label, stepNumber: step.number, to: shown(channel, to), reason: step.reason ?? "failed" });
-        } else if (step.result === "skipped") {
+        } else if (step.result === "skipped" && step.reason !== "by_user") {
+          // A step the user skipped is said once, by the control's own entry below (ticket 17b).
           entries.push({ campaign, at: step.at, kind: "skipped", channel, track: label, stepNumber: step.number, reason: SKIP_REASON[step.reason ?? ""] ?? step.reason ?? "skipped" });
         }
       }
@@ -106,6 +108,23 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
         // event (ADR 0003, bounce events). The entry says only what the stored ending says.
         entries.push({ campaign, at: track.finishedAt, kind: "address_bad", channel, track: label, to: shown(channel, lastTo ?? "") });
       }
+    }
+    // The controls the user applied (ticket 17b), each read from the engine's record of the accepted request: the lead's
+    // own, and its campaign's pause and resume while the lead was enrolled.
+    const enrolledAt = Date.parse(enrollment.enrolledAt);
+    for (const accepted of await store.engine.acceptedControls([enrollment.id, campaign.id])) {
+      const at = new Date(accepted.atWall).toISOString();
+      if (accepted.target === campaign.id) {
+        if (accepted.atWall < enrolledAt) continue;
+        if (accepted.action === "pause_campaign") entries.push({ campaign, at, kind: "campaign_paused" });
+        else if (accepted.action === "resume_campaign") entries.push({ campaign, at, kind: "campaign_resumed" });
+        continue;
+      }
+      const action = LEAD_CONTROLS.find((a) => a === accepted.action);
+      if (!action) continue;
+      const effect = accepted.effect === null ? null : (JSON.parse(accepted.effect) as ControlView);
+      const named = effect?.allowed ? (action === "skip" ? effect.skips : action === "resume_from_next_step" || action === "move_to_win_back" ? effect.next : null) : null;
+      entries.push({ campaign, at, kind: "control", action, step: named ? { channel: named.channel, track: labelOf(named.trackId), number: named.number } : null });
     }
     if (progress.reply) entries.push({ campaign, at: progress.reply.at, kind: "replied", channel: progress.reply.channel });
     else if (progress.endedAt !== null && (progress.status === "sequence_finished_no_response" || progress.status === "finished_no_usable_channel")) {

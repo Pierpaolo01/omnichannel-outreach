@@ -7,7 +7,7 @@ import type { InstantlyStore } from "../instantly/store.ts";
 import type {
   Campaign,
   ImportFileNames,
-  CampaignListItem,
+  CampaignListItem, CampaignPauseRead,
   CompanyRecord,
   ImportRecord,
   LeadSearchResult,
@@ -48,7 +48,7 @@ export interface OutreachStore {
   createCampaign(campaign: Campaign): Promise<void>;
   campaign(id: string): Promise<Campaign | null>;
   /** The campaigns with their lead counts and last import; the HTTP interface adds each one's sequence summary. */
-  listCampaigns(): Promise<Omit<CampaignListItem, "sequence">[]>;
+  listCampaigns(): Promise<Omit<CampaignListItem, "sequence" | keyof CampaignPauseRead>[]>;
   /** One campaign's lead count, by a query for that campaign alone (the campaign read). */
   leadCount(campaignId: string): Promise<number>;
 

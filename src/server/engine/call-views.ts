@@ -138,14 +138,22 @@ export function firstListedDay(s: SubjectState, task: CallTask, rules: CallViewR
  * waits on the lead's callback while that callback is itself shown. A lead that replied, was stopped or ended
  * otherwise shows none, though its tasks are kept for a restart (review bot on eac9f6c).
  */
-export async function recordCalls(store: OutreachStore, enrollmentIds: readonly string[], now: number, rules: CallViewRules = DEFAULT_RULES): Promise<RecordCalls> {
+export async function recordCalls(
+  store: OutreachStore,
+  enrollmentIds: readonly string[],
+  now: number,
+  rules: CallViewRules = DEFAULT_RULES,
+  /** Each enrollment's stored state, loaded once for the whole record read (council on 4fd9ca4, item 6; ticket 17b reads it too). */
+  loaded?: ReadonlyMap<string, SubjectState | null>,
+): Promise<RecordCalls> {
   const out: RecordCallView[] = [];
   const day = await store.engine.callDay(now);
   // Each enrollment's decline (ticket 16c), from the same snapshot as its calls (council on 4fd9ca4, item 6): the user's
   // date it was logged on, as the engine counts the day, and its path.
   const declines: RecordCalls["declines"][number][] = [];
   for (const id of enrollmentIds) {
-    const s = await asOfNow(store, id, now, rules);
+    const stored = loaded ? (loaded.get(id) ?? null) : await store.engine.subject(id, now);
+    const s = stored ? rules.asOfAction(stored, now, rules.evaluate) : null;
     if (!s) continue;
     const declined = s.callAttempts.find((c) => c.outcome === "not_interested" && c.declinedPath !== null);
     if (declined?.declinedPath) declines.push({ enrollmentId: id, date: dateOfDay(localDayNumber(declined.atWall, day.userZone)), path: declined.declinedPath });
@@ -278,7 +286,7 @@ function nextChange(changes: readonly number[], now: number): string | null {
  * The focus queue. `focus` is the call the user's screen is on: it keeps the focus while it is listed,
  * so the queue moves on only after an outcome (or a skip for now) is logged on it.
  */
-export async function callsView(store: OutreachStore, now: number, options: { readonly focus?: string | null; readonly rules?: CallViewRules } = {}): Promise<CallsView> {
+export async function callsView(store: OutreachStore, now: number, options: { readonly focus?: string | null; readonly rules?: CallViewRules } = {}): Promise<Omit<CallsView, "pausedCampaigns">> {
   const { day, readyNow, laterToday, listed, changes } = await callList(store, now, options.rules);
   const focus = options.focus ?? null;
   return {
@@ -303,7 +311,7 @@ export async function callsView(store: OutreachStore, now: number, options: { re
 /** How many calls Up next shows on Today. */
 const UP_NEXT = 5;
 
-export async function todayView(store: OutreachStore, now: number, rules?: CallViewRules): Promise<TodayView> {
+export async function todayView(store: OutreachStore, now: number, rules?: CallViewRules): Promise<Omit<TodayView, "pausedCampaigns">> {
   const { day, readyNow, laterToday, changes } = await callList(store, now, rules);
   const listed = [...readyNow, ...laterToday];
   return {

@@ -3,7 +3,7 @@
  * reads only what the server reported (the queue, the call task, an outcome's answer, Needs
  * attention); none decides anything about order, counts, hours, capacity or an outcome's effect.
  */
-import type { CallNumberView, CallOffListView, CallOutcomeApi, DeclinedPathApi, DeclinePreviewView, DeclineTrackView, CallQueueItem, CallsView, CallTaskView, FinishReasonApi, NeedsAttention, OutreachStatus, RecordCallView, RecordCalls, RecordedNumberView, TodayView, WindowRule } from "../../shared/api.ts";
+import type { PausedCampaignCalls, CallNumberView, CallOffListView, CallOutcomeApi, DeclinedPathApi, DeclinePreviewView, DeclineTrackView, CallQueueItem, CallsView, CallTaskView, FinishReasonApi, NeedsAttention, OutreachStatus, RecordCallView, RecordCalls, RecordedNumberView, TodayView, WindowRule } from "../../shared/api.ts";
 import { WIN_BACK_HAS_NO_TRACKS } from "../../domain/sequence/definition.ts";
 import { STATUS_LABEL } from "../status.tsx";
 import type { DeskSnapshot } from "./callDesk.ts";
@@ -494,7 +494,8 @@ export function noGoodNumberText(who: string | null): { short: string; full: str
   const whose = who === null ? "Every number" : `Every number for ${who}`;
   const logging = `${whose} is marked wrong, so only skip for now can be logged on this callback, and it keeps the callback open.`;
   const until = "a new number arrives by import or they reply";
-  const later = "Pausing them or skipping the step arrives with a later release.";
+  // Ticket 17b: skipping the call step ends the callback (ADR 0003 "Ticket 17a", skip on a callback), and stopping ends their outreach.
+  const later = "On their record you can skip this call step or stop them.";
   return {
     short: "no good number left, only skip for now can be logged",
     full: `${logging} It stays on the call list, flagged overdue once its time has passed, and their other outreach in this campaign stays held until ${until}. ${later}`,
@@ -687,4 +688,13 @@ export function declinedRecordLine(decline: RecordCalls["declines"][number], sta
       throw new Error(`A declined path with no sentence: ${String(unhandled)}`);
     }
   }
+}
+
+/**
+ * A paused campaign whose leads wait on a call (ticket 17b), where Today and Calls would otherwise show nothing of them:
+ * how many, and since when it is paused, from the server's read, in the user's zone.
+ */
+export function pausedCallsLine(paused: PausedCampaignCalls, userZone: string): string {
+  const many = paused.calls === 1 ? "One call" : `${paused.calls} calls`;
+  return `${many} in ${paused.name} ${paused.calls === 1 ? "is" : "are"} off your list while the campaign is paused (since ${dateIn(userZone, paused.pausedSince)} at ${timeIn(userZone, paused.pausedSince)}).`;
 }
