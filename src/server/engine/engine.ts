@@ -733,42 +733,32 @@ export class Engine {
     return this.ticks.run(async () => {
       const subjectId = await this.store.callTaskSubject(taskId);
       if (subjectId === null) return { ok: false as const, reason: "There is no such call task." };
-      // A request id is bound to its first answer, refused or accepted (verifier B5 on ca8baee): a refused outcome sent
-      // again is refused again, even when the call could take it now; an id used for another action is refused.
-      const standing = this.rules.requestStanding(await this.store.requestAnswer(input.requestId), taskId, "call_outcome");
-      if (standing === "reused") return { ok: false as const, reason: REQUEST_ID_REUSED };
-      const first = standing === "replay" ? await this.store.requestAnswer(input.requestId) : null;
-      if (first?.answer === "refused") return { ok: false as const, reason: first.reason ?? "Refused." };
-      // A key logged on another subject's call: the subject's own transaction cannot see it.
+      // A key logged on another subject's call before request ids were kept (a database from before migration 16).
       const loggedOn = await this.store.callRequestTask(input.requestId);
       if (loggedOn !== null && loggedOn !== taskId) return { ok: false as const, reason: REQUEST_ID_REUSED };
       const now = this.now();
-      const refused: { reason: string | null } = { reason: null };
       const ids = { attempt: this.newId(), note: this.newId() };
+      let record: ControlRecord;
       try {
-        await this.store.update(subjectId, now, (stored) => {
+        // The request id is read, the outcome judged and applied, and the answer recorded in one transaction (review bot
+        // and council on 56d599c, item E): two requests with one id, in any process, give one execution and one answer.
+        record = await this.store.controlSubject(subjectId, now, { id: input.requestId, action: "call_outcome", target: taskId }, this.rules.requestStanding, (stored) => {
           // Judged as of the action's instant: what fell due since the last tick (an expiry at the rollover)
           // is applied first, in this transaction, and stands whatever the answer (ADR 0003 2.4).
           const s = this.rules.asOfAction(stored, now, this.rules.evaluate);
           const caughtUp = same(s, stored) ? null : s;
           const out = this.rules.logCallOutcome(s, taskId, input, now, ids, this.rules.isListed);
-          if (!out.ok) {
-            refused.reason = out.reason;
-            return caughtUp;
-          }
-          return out.replayed ? caughtUp : out.state;
+          if (!out.ok) return { write: caughtUp, answer: "refused", reason: out.reason, effect: null };
+          return { write: out.replayed ? caughtUp : out.state, answer: "accepted", reason: null, effect: null };
         });
       } catch (error) {
         // Another process logged this key on another subject's call between the check and this write.
         if (error instanceof Error && error.message.includes("call_attempts.request_id")) return { ok: false as const, reason: REQUEST_ID_REUSED };
         throw error;
       }
-      if (refused.reason !== null) {
-        await this.store.recordRequest(input.requestId, { target: taskId, action: "call_outcome", answer: "refused", reason: refused.reason, effect: null }, now);
-        return { ok: false as const, reason: refused.reason };
-      }
-      await this.store.recordRequest(input.requestId, { target: taskId, action: "call_outcome", answer: "accepted", reason: null, effect: null }, now);
-      await this.runTick();
+      if (record.kind === "reused") return { ok: false as const, reason: REQUEST_ID_REUSED };
+      if (record.answer === "refused") return { ok: false as const, reason: record.reason ?? "Refused." };
+      if (record.kind === "answered") await this.runTick();
       return { ok: true as const };
     });
   }

@@ -179,14 +179,11 @@ export interface EngineStore {
   controlSubject(
     subjectId: string,
     now: number,
-    request: { readonly id: string; readonly action: string },
+    /** `target`: what the id is bound to, the lead by default (a call task for an outcome). */
+    request: { readonly id: string; readonly action: string; readonly target?: string },
     standing: (stored: StoredRequest | null, target: string, action: string) => RequestStanding,
     decide: (state: SubjectState) => ControlDecision<SubjectState>,
   ): Promise<ControlRecord>;
-  /** A request id's stored first answer, or null. */
-  requestAnswer(requestId: string): Promise<StoredRequest | null>;
-  /** Stores a request id's first answer (a refused call outcome, which stores nothing else). An id already stored is kept. */
-  recordRequest(requestId: string, request: { readonly target: string; readonly action: string; readonly answer: "accepted" | "refused"; readonly reason: string | null; readonly effect: string | null }, now: number): Promise<void>;
   /**
    * Pauses (`pause: true`) or resumes a campaign in one transaction (ticket 17a): `refusal` judges the campaign
    * row; then every enrollment that has not ended is loaded as it stood and written as `perLead` returns it, the

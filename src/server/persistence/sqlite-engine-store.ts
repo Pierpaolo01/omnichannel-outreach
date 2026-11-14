@@ -101,30 +101,25 @@ export class SqliteEngineStore implements EngineStore {
     this.run("INSERT INTO control_requests (request_id, target, action, answer, reason, effect, at_wall) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(request_id) DO NOTHING", [id, request.target, request.action, request.answer, request.reason, request.effect, now]);
   }
 
-  async requestAnswer(requestId: string): Promise<StoredRequest | null> {
-    return this.storedRequest(requestId);
-  }
-
-  async recordRequest(requestId: string, request: { readonly target: string; readonly action: string; readonly answer: "accepted" | "refused"; readonly reason: string | null; readonly effect: string | null }, now: number): Promise<void> {
-    this.transaction(() => this.storeRequest(requestId, request, now));
-  }
-
   async controlSubject(
     subjectId: string,
     now: number,
-    request: { readonly id: string; readonly action: string },
+    request: { readonly id: string; readonly action: string; readonly target?: string },
     standing: (stored: StoredRequest | null, target: string, action: string) => RequestStanding,
     decide: (state: SubjectState) => ControlDecision<SubjectState>,
   ): Promise<ControlRecord> {
+    const target = request.target ?? subjectId;
     return this.transaction((): ControlRecord => {
-      const known = this.standingOf(request.id, subjectId, request.action, standing);
+      // The id's stored answer is read inside the write transaction (BEGIN IMMEDIATE): a concurrent request with the same id
+      // waits, then finds this one's answer under the primary key and replays it (council E on 56d599c).
+      const known = this.standingOf(request.id, target, request.action, standing);
       if (known) return known;
       const base = this.load(subjectId, now);
       if (!base) return { kind: "answered", answer: "refused", reason: "There is no such lead.", effect: null };
       const decision = decide(base);
       if (decision.write) this.write(base, decision.write, now);
       // Accepted or refused, the first answer is kept: the same id is answered with it again (verifier B5).
-      this.storeRequest(request.id, { target: subjectId, action: request.action, answer: decision.answer, reason: decision.reason, effect: decision.effect }, now);
+      this.storeRequest(request.id, { target, action: request.action, answer: decision.answer, reason: decision.reason, effect: decision.effect }, now);
       return { kind: "answered", answer: decision.answer, reason: decision.reason, effect: decision.effect };
     });
   }
