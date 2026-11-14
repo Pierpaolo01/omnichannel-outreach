@@ -371,7 +371,9 @@ export const JUNIPER_LATER = {
     { id: "p1", name: "Marco Bianchi", title: "Studio owner", enrollments: [{ id: "e2", campaign: { id: "c1", name: "Physio clinics, London" }, status: "queued", enrolledAt: "2026-11-13T09:00:00.000Z" }], unenrolledReason: null },
     { id: "p2", name: "Lucia Neri", title: "Studio manager", enrollments: [], unenrolledReason: "no_usable_channel" },
   ],
-} satisfies CompanyRecord;
+  calls: [],
+  today: "2026-11-13",
+} satisfies CompanyRecord & RecordCalls;
 
 export const JUNIPER_LATER_ROW = {
   rows: [{ kind: "company", id: "co-juniper", name: "Juniper Pilates Studio", city: "London", peopleOnRecord: 2, peopleReachable: 1, enrollments: JUNIPER_LATER.enrollments, unenrolledReason: null }],

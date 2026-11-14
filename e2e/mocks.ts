@@ -25,7 +25,6 @@ export type MockBody =
   | { campaign: Campaign; imports: ImportRecord[] }
   | (PersonRecord & RecordCalls)
   | (CompanyRecord & RecordCalls)
-  | CompanyRecord
   | FileCheckResult
   | BeforeLaunchView
   | NeedsAttention;
