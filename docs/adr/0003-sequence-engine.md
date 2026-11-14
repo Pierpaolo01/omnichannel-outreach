@@ -1962,6 +1962,49 @@ Recorded on 14 November 2026 by the 17b implementer. The screens read what 17a s
 - **The control runs' recorded seed for "a late send after a pause resolves its successor on the wall clock"** is 20 (was 12): the stale-confirmation stream's refused requests move the runs' interleaving.
 - **The call desk's seed for `past_callback_sent`** is 9126 (was 9101): the Calls read's extra awaits moved the runs' interleaving; the fault-free runs are unchanged.
 
+## Ticket 18: bulk controls on Leads (a bulk action is a set of per-lead controls)
+
+Recorded on 14 November 2026 by the ticket 18 implementer, before the code (delivery workflow, "Design first"). Leads gains a selection and four bulk actions, add to campaign, pause, resume and stop, scoped to the campaign Leads is filtered to or to every campaign each selected person or company lead is in. This section says how one bulk action is built from the per-lead controls of 17a and 17b and from the import's enrollment rule, and adds no rule of its own about what a control does to a lead.
+
+### The rule
+
+**A bulk control is the set of per-lead controls its confirmation showed, nothing more.** Each per-lead effect is `Engine.controlLead` (17a), with its own request id, its own precondition and `judgeControl`'s one refusal order, in its own transaction. No code path pauses, resumes or stops a lead except that one.
+
+1. **Scope is resolved once, as of one instant, by a read** (`POST /api/bulk/preview`, read-only). The body names the selected rows (person or company lead, at most 500, the search's bound) and the scope (a campaign, or none for every campaign). At one instant `asOf`, every enrollment of each selected row in scope is loaded once (the same `readOf` as `GET /api/enrollments/:id`) and the action's entry in that read's `controls` is taken as it is: allowed with its preview and `digest`, or refused with the reason the action itself would give. The read returns those items, the rows that have no enrollment in scope, and the counts the confirmation states (how many it applies to; how many are refused, grouped by reason). Every count is a tally of the same read's items.
+2. **The confirmation is a snapshot of that read** (4.4.1, "The controls follow this rule"). It shows the read's scope and counts and nothing newer, and the press sends the read's allowed items only, each with the precondition that read showed (`expect`: the lead's status and the preview's digest). An item the read refused is not sent: the confirmation said it would be left alone. A lead enrolled in scope after the read is not in the press.
+3. **One bulk request id; each per-lead id is derived from it.** The press is `POST /api/bulk` with `{ bulkId, action, campaignId, items: [{ enrollmentId, expect }] }`. The per-lead request id is `bulkId/enrollmentId`, so a retry of the press, from any tab, after a reload or after a lost answer, sends every per-lead request with the id it had, and 17a's rule ("a request id is bound to its first answer") answers each with its first answer and changes nothing. The bulk id is bound to its body (`bulk_requests`, migration 17: the id, the action and a hash of the body); the same id with another body is refused whole, before any lead ("This request id was already used for another action: send a new one.").
+4. **Partial results are reported per lead, truthfully.** The answer lists every item with the per-lead answer: applied (with its `effect`, the preview at that instant), or refused with the engine's reason, and whether it was a replay. A per-lead refusal never stops the others. The counts in the answer are tallies of its rows.
+5. **A retry after a partial failure** (the process stopped, or the connection dropped, after some per-lead transactions committed): the client has no answer and sends the same body again. Items already applied or refused are replayed with their first answers; items not yet reached are judged now, in the one order, against the confirmation's precondition, so an item whose lead changed meanwhile is refused with "This lead changed since you confirmed this…" and an item that still holds is applied. The answer to the retry is the whole set.
+6. **Add to campaign uses the import's enrollment rule** (ADR 0001; `planImport`'s `decide`, its company-lead rule and its destination safety net, factored out as `planEnrollment` and called by both). In one transaction: a lead already enrolled in the campaign is reported and left alone; a person with no usable channel is not enrolled and the reason is given in the import results' wording; a company with decision makers on record who can be reached is not enrolled as a company lead; a lead whose personal email, mobile or shared inbox another lead in the campaign holds is not enrolled (`shares_contact`); everyone else is enrolled, as an import enrolls (queued; in a launched, running campaign, entering at once at lead time 0). Its preview is the same plan applied to the directory read at `asOf`, writing nothing. The answer is stored with the bulk id in the same transaction, so a retry replays it and never enrolls twice; a person enrolled between the confirmation and the press is reported as already enrolled.
+7. **Two tabs.** Two confirmations opened on one read and pressed from two tabs are two bulk ids: per lead, the first applies and the second is refused by the lead's own rule ("They are already paused.", "…has ended…") or by its precondition. No lead is changed twice. The client keeps a press in the shared outbox (`localStorage`) before its first send, under its bulk id, and any Leads page sends it until it gets a definite answer, as 17b's control requests do.
+
+### Invariants (B1 to B6; the generated bulk runs assert each after every step)
+
+1. **B1 Scope.** A preview's items are exactly the enrollments, as of its instant, of the selected rows in the scope campaign (or in every campaign); a press changes no enrollment outside its items.
+2. **B2 Once.** No per-lead effect is applied twice: retries, reloads and a second tab change nothing a first send applied, and each per-lead request id has one answer.
+3. **B3 Only on what was confirmed.** An item applies only while its lead's state is the one its confirmation showed; otherwise it is refused, and nothing of that lead changes.
+4. **B4 The answer is true.** Each answer row says what the server did to that lead (applied or refused, and why), equal on every replay; the answer's and the preview's counts are tallies of their rows.
+5. **B5 Each lead's state is the record's.** After every step, every enrollment's state (running, paused, stopped) equals the independent record's.
+6. **B6 Add enrolls by the import's rule.** Never a second enrollment of one lead in one campaign; a person with no usable channel is never enrolled; the set of enrollments equals the record's.
+
+### Boundary
+
+Refused outright at the route: an unknown field, an empty selection or one over 500 rows or items, an action other than the four, add without a campaign, a bulk id over 80 characters or with a `/`. A row or enrollment that does not exist is answered per item ("There is no such lead."), never by refusing the bulk.
+
+### By construction
+
+The per-lead effect is the engine's function and nothing else; the per-lead id is a pure function of the bulk id and the enrollment; each item's precondition is copied from the read the confirmation opened on; add's answer is written in the transaction that enrolls.
+
+### The generated test
+
+`test/support/generated-bulk.ts`, run by `src/server/sequence-runs-bulk.test.ts` (fixed seeds) and `sequence-runs-bulk-oracle.test.ts` (one mutation per invariant, each with its recorded killing seed in `pnpm check`), so the `sequence-search` workflow runs all 100 seeds and a seed search per mutation. Through the real HTTP app, SQLite store and engine on the fake providers, with fictitious data: two or three campaigns (one not launched), people and company leads enrolled in random subsets, a person with no usable channel. Each step is one of: a per-lead control from elsewhere (pause, resume, stop, restart); a tab (two) opening a confirmation on a random selection, scope and action; a tab pressing its open confirmation, with the answer delivered, lost after the server applied it, or lost before it arrived; the other tab or a reload sending a stored press again; a tab pressing a confirmation another tab already pressed from the same read; add to campaign of a random selection. The record, independent of `src/domain/sequence/`, keeps each enrollment's state (running, paused, stopped) and each campaign's enrollments, predicts each preview's items and each answer row from the rules of the controls table (17a) and from whether the lead's state changed since the confirmation's read, and treats a request lost after arrival as applied when it arrived.
+
+Mutations (`BulkRules`, injected into the app as `Rules` is): "a fresh per-lead request id on every send" (B2), "the confirmation's precondition is not sent" (B3), "the scope ignores the campaign filter" (B1), "a refused item reported as applied" (B4), "add enrolls a person with no usable channel" (B6). B5 is asserted by all of them.
+
+### Not in this ticket
+
+The person page's own "Add to another campaign" (spec, Person page 2) is not among ticket 18's acceptance criteria; bulk add with one row selected covers it. Bulk skip, restart and move to win-back are not bulk actions in the spec.
+
 ## Ticket 16b: the declined path and the win-back branch in the editor
 
 Recorded on 14 November 2026 by the 16b implementer. No change to the engine, the store, the validator's rule or any invariant of section 8; one read gains an additive field. Each change was built test-first.
