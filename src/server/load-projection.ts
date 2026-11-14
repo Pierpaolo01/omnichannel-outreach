@@ -22,9 +22,10 @@ import { isLive } from "../domain/sequence/attempt.ts";
 import { ENGINE_PARAMS } from "../domain/sequence/attempt.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, startOfLocalDay, windowOpen, type WindowRule } from "../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../domain/sequence/dispatch.ts";
+import { callableOnDay, callWindow } from "../domain/sequence/calls.ts";
 import { liveSteps, liveTracks, poolOf, type CampaignDefinition, type TrackChannel } from "../domain/sequence/definition.ts";
-import { destinationFor } from "../domain/sequence/progress.ts";
-import type { AccountState, Attempt, SmsBinding, SubjectState } from "../domain/sequence/state.ts";
+import { channelReaches } from "../domain/sequence/progress.ts";
+import type { AccountState, Attempt, CallDay, SmsBinding, SubjectState } from "../domain/sequence/state.ts";
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
 
 /** The engine's quota wait with no known end (engine-store). */
@@ -43,7 +44,23 @@ export interface ProjectionInput {
   /** The zone launch days are counted in: the campaign's default zone. */
   readonly zone: string;
   readonly horizonDays: number;
+  /**
+   * The user's call list at the projection's instant, as the store reports it (`EngineStore.callDay`),
+   * when this campaign has a live phone track: due calls are then placed by the engine's own rules
+   * (ADR 0003, ticket 14c). Absent, no call is placed.
+   */
+  readonly callDay?: CallDay;
   readonly rules?: Rules;
+}
+
+/** One call the projection places on the user's list. */
+export interface ProjectedCall {
+  readonly leadId: string;
+  readonly trackId: string;
+  readonly stepId: string;
+  /** The user-local day number it is placed on, in the user's zone. */
+  readonly day: number;
+  readonly at: number;
 }
 
 export interface ProjectedSend {
@@ -60,15 +77,22 @@ export interface ProjectedSend {
 export interface Projection {
   /** The most this campaign sends from each account on one of its reset days. */
   readonly busiestDay: ReadonlyMap<string, number>;
-  /** This campaign's leads an email or SMS track can reach: they start with an email or a text. */
+  /**
+   * This campaign's leads a live track can reach: they start with an email or a text, or, when calls
+   * are placed (`callDay`), with their first call on the user's list.
+   */
   readonly leadsToStart: number;
-  /** Leads only a phone track can reach: they are left to the user's calls, which the estimate does not count. */
+  /** Leads only a phone track can reach. Without `callDay` they are left out of `leadsToStart`, to the user's calls. */
   readonly onlyCalled: number;
   /** Launch day is day 1. Null when some lead does not start within the horizon, or none starts. */
   readonly daysUntilAllStart: number | null;
   readonly notStarted: number;
   /** Every projected send of this campaign, in order. */
   readonly sends: readonly ProjectedSend[];
+  /** Every call of this campaign placed on the user's list, in order (only with `callDay`). */
+  readonly calls: readonly ProjectedCall[];
+  /** The most calls of this campaign placed on one user day. */
+  readonly busiestCallDay: number;
 }
 
 /** A tiny min-heap of (instant, subject) wake-ups; stale entries only cost an extra look. */
@@ -149,7 +173,7 @@ export function projectLoad(input: ProjectionInput): Projection {
   /** Claimed attempts per account: the handover's candidates. */
   const claimed = new Map<string, Map<string, string>>();
   const retrying = new Map<string, Map<string, string>>();
-  const bump = (m: Map<string, number>, k: string, by: number) => m.set(k, (m.get(k) ?? 0) + by);
+  const bump = <K,>(m: Map<K, number>, k: K, by: number) => m.set(k, (m.get(k) ?? 0) + by);
   const contribute = (s: SubjectState, sign: 1 | -1) => {
     for (const w of s.work) {
       if (w.settled === null && w.sentWall === null) bump(reserved, w.accountId, sign);
@@ -199,6 +223,28 @@ export function projectLoad(input: ProjectionInput): Projection {
   // counts beyond the simulation's own work is sends made today by subjects that hold nothing now.
   const baseToday = new Map(accountIds.map((id) => [id, (records.get(id)?.used ?? 0) - sendsBefore(id) - (reserved.get(id) ?? 0)]));
   const slot = new Map(accountIds.map((id) => [id, records.get(id)?.nextSlotAt ?? 0]));
+
+  // ---- The user's call list (ADR 0003, ticket 14c), as the store supplies it to the engine: on the
+  // projection's own user day, the stored counts across every campaign plus the simulation's
+  // placements; on a later day, the simulation's placements, and stored open tasks listed for the
+  // first time that day. The user is assumed to work through each day's list, so nothing the
+  // simulation places is carried into a later day's room; no outcome is applied.
+  const callSettings = input.callDay;
+  const day0 = callSettings ? localDayNumber(now, callSettings.userZone) : 0;
+  const placedOn = new Map<number, number>();
+  const committedOn = new Map<number, number>();
+  const callDayAt = (t: number): CallDay | null => {
+    if (!callSettings) return null;
+    const day = localDayNumber(t, callSettings.userZone);
+    return {
+      userZone: callSettings.userZone,
+      day,
+      capacity: callSettings.capacity,
+      placedToday: (day === day0 ? callSettings.placedToday : 0) + (placedOn.get(day) ?? 0),
+      committed: day === day0 ? callSettings.committed : (committedOn.get(day) ?? 0),
+    };
+  };
+  const nextUserDay = (t: number): number => (callSettings ? startOfLocalDay(localDayNumber(t, callSettings.userZone) + 1, callSettings.userZone) : Infinity);
 
   /** The account as the store would report it at `t`. */
   const view = (id: string, t: number): AccountState | undefined => {
@@ -252,7 +298,8 @@ export function projectLoad(input: ProjectionInput): Projection {
       smsBindings = { version: bindingsVersion, list: [...mobiles].flatMap((m) => bindings.get(m) ?? []) };
       bindingsCache.set(s, smsBindings);
     }
-    return { ...s, accounts: accounts.accounts, smsBindings: smsBindings.list };
+    const callDay = callDayAt(t);
+    return { ...s, accounts: accounts.accounts, smsBindings: smsBindings.list, ...(callDay ? { callDay } : {}) };
   };
 
   const dirty = new Set<string>(states.keys());
@@ -297,6 +344,32 @@ export function projectLoad(input: ProjectionInput): Projection {
     const loaded = load(s.subject.id, now);
     write(s.subject.id, loaded, rules.evaluate(rules.enterMain(loaded, now), now));
   }
+
+  // Stored open tasks carried into a later day (none callable on the projection's own day, which the
+  // store's count covers): each counts on the first user day it can be listed, and is worked then.
+  const callers = new Set<string>();
+  if (callSettings) {
+    const zone = callSettings.userZone;
+    const dayStart = (d: number) => startOfLocalDay(d, zone);
+    for (const [id, s] of states) {
+      if (liveTracks(s.campaign.definition, "main").some((t) => t.channel === "call")) callers.add(id);
+      if (s.subject.ended !== null) continue;
+      for (const task of s.callTasks) {
+        if (!task.open || task.placedWall >= dayStart(day0)) continue;
+        const window = callWindow(s, task.trackId);
+        if (callableOnDay(window, s.lead.zone, dayStart(day0), dayStart(day0 + 1))) continue;
+        for (let d = day0 + 1; d <= day0 + 14; d++) {
+          if (!callableOnDay(window, s.lead.zone, dayStart(d), dayStart(d + 1))) continue;
+          bump(committedOn, d, 1);
+          break;
+        }
+      }
+    }
+  }
+  const calls: ProjectedCall[] = [];
+  let callSeq = 0;
+  /** A caller with no call ready, unchanged since, on the same user day, before its next due call. */
+  const callChecked = new Map<string, { state: SubjectState; day: number; until: number }>();
 
   const sends: ProjectedSend[] = [];
   let attemptSeq = 0;
@@ -506,6 +579,42 @@ export function projectLoad(input: ProjectionInput): Projection {
       dirty.clear();
       for (const id of evaluatedAgain) dirty.add(id);
 
+      // Calls (4.4), exactly as `Engine.placeCallsAll`: every caller's ready calls, in `callOrder`,
+      // each placed by `placeCall` on the subject as the store would load it now, with the day's room.
+      if (callSettings) {
+        const day = localDayNumber(t, callSettings.userZone);
+        const items: ReadyItem[] = [];
+        for (const id of callers) {
+          const st = stateOf(id);
+          const known = callChecked.get(id);
+          if (known?.state === st && known.day === day && t < known.until) continue;
+          const found = rules.readyCalls(load(id, t), t);
+          items.push(...found);
+          if (found.length === 0) {
+            // Nothing to place until a call falls due, or the next user day (its hours may open then).
+            const lead = leadNow(st.subject.clock, t);
+            const dues = st.tracks.filter((p) => p.finishedAt === null && p.dueAt !== null && p.dueAt > lead).map((p) => t + ((p.dueAt ?? 0) - lead));
+            const until = Math.min(nextUserDay(t), ...dues);
+            callChecked.set(id, { state: st, day, until });
+            if (st.tracks.some((p) => p.finishedAt === null && p.nextStepId !== null && !st.callTasks.some((x) => x.stepId === p.nextStepId) && st.campaign.definition.tracks.find((x) => x.id === p.trackId)?.channel === "call")) wakes.push(until, id);
+          }
+        }
+        items.sort(rules.callOrder);
+        for (const item of items) {
+          const loaded = load(item.subjectId, t);
+          const next = rules.placeCall(loaded, item, t, `projected-call-${++callSeq}`);
+          if (!next) {
+            // No room today: it waits for the next user day, and is never dropped.
+            wakes.push(nextUserDay(t), item.subjectId);
+            continue;
+          }
+          write(item.subjectId, loaded, next);
+          bump(placedOn, day, 1);
+          if (oursIds.has(item.subjectId)) calls.push({ leadId: item.subjectId, trackId: item.trackId, stepId: item.stepId, day, at: t });
+          changed = true;
+        }
+      }
+
       // Claims (4.2): every ready item in claim order (4.3), exactly as `Engine.claimAll` does it.
       // Each item goes to the engine's own step guard, account choice and claim, on the subject as
       // the store would load it now (current accounts, conversations and its own earlier claim this
@@ -599,24 +708,33 @@ export function projectLoad(input: ProjectionInput): Projection {
     const id = key.slice(0, key.lastIndexOf("/"));
     busiest.set(id, Math.max(busiest.get(id) ?? 0, n));
   }
-  // The estimate counts emails and texts. A lead no live track can reach ends at launch, with the
-  // reason shown elsewhere; a lead only a phone track can reach is left to the user's calls.
-  const sendTracks = liveTracks(input.definition, "main").filter((t) => t.channel !== "call");
+  // A lead no live track can reach ends at launch, with the reason shown elsewhere. A lead starts at
+  // its first email or text, or, when calls are placed, when its first call goes on the user's list
+  // (ticket 14c); without calls placed, a lead only a phone track can reach is left to the user's calls.
+  const liveMain = liveTracks(input.definition, "main");
+  const sendTracks = liveMain.filter((t) => t.channel !== "call");
+  const counted = callSettings ? liveMain : sendTracks;
   const reachable = launched.map((s) => s.subject.id).filter((id) => {
     const s = stateOf(id);
     return !(s.subject.ended === "finished_no_usable_channel" && s.results.length === 0 && (s.subject.endedWall ?? now) <= now);
   });
-  const entered = reachable.filter((id) => sendTracks.some((t) => destinationFor(stateOf(id).lead.details, t.channel) !== null));
+  const bySend = reachable.filter((id) => sendTracks.some((t) => channelReaches(stateOf(id), t.channel)));
+  const entered = reachable.filter((id) => counted.some((t) => channelReaches(stateOf(id), t.channel)));
   const first = new Map<string, number>();
   for (const s of sends) if (!first.has(s.leadId)) first.set(s.leadId, s.at);
+  for (const c of calls) if ((first.get(c.leadId) ?? Infinity) > c.at) first.set(c.leadId, c.at);
   const notStarted = entered.filter((id) => !first.has(id)).length;
   const firsts = [...first.values()];
+  const perCallDay = new Map<number, number>();
+  for (const c of calls) bump(perCallDay, c.day, 1);
   return {
     busiestDay: busiest,
     leadsToStart: entered.length,
-    onlyCalled: reachable.length - entered.length,
+    onlyCalled: reachable.length - bySend.length,
     daysUntilAllStart: notStarted > 0 || firsts.length === 0 ? null : localDayNumber(Math.max(...firsts), input.zone) - localDayNumber(now, input.zone) + 1,
     notStarted,
     sends,
+    calls,
+    busiestCallDay: Math.max(0, ...perCallDay.values()),
   };
 }

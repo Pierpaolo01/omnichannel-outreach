@@ -307,18 +307,32 @@ describe("Before launch: projected daily load per sender inbox", () => {
     });
   });
 
-  test("a phone track beside or after the email track: the emails are projected, as the engine sends them with no call logged; leads reached only by calls are left to the user (ticket 13b, merge of 14a)", async () => {
+  test("a phone track beside or after the email track: the emails are projected, as the engine sends them with no call logged, and every call goes on the list within the daily call capacity (ticket 13b, merge of 14a; ticket 14c)", async () => {
     const call = (start: TrackDefinition["start"]): TrackDefinition => ({ id: "p1", channel: "call", branch: "main", window: weekdays, steps: [step("c1", { body: "" })], start, removed: false });
     const many = Array.from({ length: 25 }, (_, i) => person({ person_id: `c${i}`, business_id: "b1", full_name: `Caller Number${String(i).padStart(3, "0")}`, email: `caller${i}@harbour.example` }));
     const callOnly = person({ person_id: "c99", business_id: "b1", full_name: "Only Called", direct_phone: "+44 20 7946 0399" });
     const { h, id } = await campaign([inbox("inbox-a", { capacity: 10 })], [...many, callOnly], [HARBOUR]);
     const email = emailTrack([step("s1", { subject: "Hi", threading: "new_subject" }), step("s2", { waitDays: 2 })]);
-    for (const start of [{ kind: "entry" } as const, { kind: "after", trackId: "t1", delayDays: 1 } as const]) {
-      await h.defineSequence(id, { ...email, tracks: [...email.tracks, call(start)] });
-      // 10 a day: days 1 and 2 take 20 first emails; days 3 and 4 go to their follow-ups first (4.3);
-      // the last 5 start on day 5. The call changes none of it while it is not logged.
-      expect((await beforeLaunch(h, id)).load).toMatchObject({ withheldBy: null, leadsToStart: 25, onlyCalled: 1, daysUntilAllStart: 5 });
-    }
+    // Every lead has a good number: Harbour Lane's main line, and Only Called's own direct line.
+    // At launch, all 26 calls go on Monday's list (capacity 50), so every lead has started on day 1.
+    await h.defineSequence(id, { ...email, tracks: [...email.tracks, call({ kind: "entry" })] });
+    expect((await beforeLaunch(h, id)).load).toMatchObject({ withheldBy: null, leadsToStart: 26, onlyCalled: 1, daysUntilAllStart: 1, calls: { capacity: 50, onListToday: 0, busiestDay: 26 } });
+    // After the email track, plus a day: 10 emails a day, so days 1 and 2 take 20 first emails, days 3
+    // and 4 go to their follow-ups first (4.3) and the last 5 start on day 5. Only Called has no email,
+    // so the email track is skipped for them at launch and their call goes on Tuesday's list. The call
+    // changes none of the emails while it is not logged.
+    await h.defineSequence(id, { ...email, tracks: [...email.tracks, call({ kind: "after", trackId: "t1", delayDays: 1 })] });
+    const after = (await beforeLaunch(h, id)).load;
+    expect(after).toMatchObject({ withheldBy: null, leadsToStart: 26, onlyCalled: 1, daysUntilAllStart: 5, accounts: [expect.objectContaining({ busiestDay: 10 })] });
+    // A capacity of 3 a day spreads the 26 calls over more days; the emails are unchanged.
+    expect((await h.request("PUT", "/api/call-settings", { dailyCapacity: 3, userZone: "Europe/London" })).status).toBe(200);
+    await h.defineSequence(id, { ...email, tracks: [...email.tracks, call({ kind: "entry" })] });
+    const tight = (await beforeLaunch(h, id)).load;
+    expect(tight).toMatchObject({ withheldBy: null, leadsToStart: 26, calls: { capacity: 3, onListToday: 0, busiestDay: 3 }, accounts: [expect.objectContaining({ busiestDay: 10 })] });
+    // Only Called is reached by no email, so nothing touches them: their call is not among the three
+    // placed at launch, and from then on every other lead, touched by its first email, goes first
+    // (4.4: the priority classes of 4.3). Their call is the 26th, on the ninth weekday: day 11.
+    expect(tight?.daysUntilAllStart).toBe(11);
   });
 
   test("the withheld figure names each track that withholds it, and why: no connected sender, or waiting on a phone track's call (review bot on 8edc8dd; ticket 13b)", async () => {
@@ -344,6 +358,9 @@ describe("Before launch: projected daily load per sender inbox", () => {
         { trackId: "e2", channel: "email", label: "email track 2", why: "after_a_phone_track", phoneTrack: "the phone track" },
       ],
     });
+    // A second phone track after the first goes on the list only once the first call is logged (ticket 14c).
+    const secondCall: TrackDefinition = { ...phone, id: "p2", steps: [step("c2", { body: "" })], start: { kind: "after", trackId: "p1", delayDays: 2 } };
+    expect((await load([phone, secondCall])).withheldBy).toEqual({ campaign: null, tracks: [{ trackId: "p2", channel: "call", label: "phone track 2", why: "after_a_phone_track", phoneTrack: "phone track 1" }] });
     // An SMS track with no number: named as such.
     expect((await load([sms({ kind: "entry" })], [])).withheldBy).toEqual({ campaign: null, tracks: [{ trackId: "m1", channel: "sms", label: "the SMS track", why: "no_sender" }] });
   });

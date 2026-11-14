@@ -8,7 +8,7 @@ import { missingFields, renderSegments, type Segment } from "../domain/copy-prev
 import { isLive, isUncertain } from "../domain/sequence/attempt.ts";
 import { mergeUses } from "../domain/sequence/copy.ts";
 import { liveSteps, liveTracks, ownSubject, poolOf, type CampaignDefinition, type TrackDefinition } from "../domain/sequence/definition.ts";
-import { goodEmail, progressOf, runs } from "../domain/sequence/progress.ts";
+import { goodEmail, hasGoodNumber, progressOf, runs } from "../domain/sequence/progress.ts";
 import type { AccountState, SubjectState } from "../domain/sequence/state.ts";
 import type { BeforeLaunchView, ContactDetailView, CopyPreview, LeadRow, LoadProjectionView, PreviewLead, WithheldBy, WithheldTrack } from "../shared/api.ts";
 import { trackLabel, trackPhrase } from "../shared/track-label.ts";
@@ -40,8 +40,9 @@ async function campaignLeads(store: OutreachStore, campaignId: string, definitio
       email: goodEmail(state.lead.details)?.value ?? null,
       // A decision maker's own mobile; company leads are never texted on a company line.
       mobile: row.kind === "person" && good(details, (d) => d.owner === "person" && d.phoneKind === "mobile"),
-      // Calls may use the company's main line for any lead.
-      phone: good(details, (d) => d.channel === "phone"),
+      // Calls may use the company's main line for any lead: a good number as the engine counts it
+      // (direct, mobile or main line), which is what starts a phone track (ticket 14c).
+      phone: hasGoodNumber(state),
       lacks: [...fields.keys()].filter((f) => !state.lead.mergeData[f]?.trim()),
     };
     out.push({ lead: previewLead(row, enrollment.id, channels), state, details });
@@ -131,7 +132,11 @@ function withheldTracks(definition: CampaignDefinition, all: readonly AccountSta
   const live = liveTracks(definition, "main");
   const named = (t: TrackDefinition) => trackPhrase(definition, t);
   return live.flatMap((t): WithheldTrack[] => {
-    if (t.channel === "call") return [];
+    // A phone track after a phone track goes on the list only once the earlier call is logged (ticket 14c).
+    if (t.channel === "call") {
+      const phone = phoneBefore(definition, t);
+      return phone ? [{ trackId: t.id, channel: t.channel, label: named(t), why: "after_a_phone_track", phoneTrack: named(phone) }] : [];
+    }
     const connected = all.some((a) => a.channel === t.channel && poolOf(definition, t.channel).includes(a.id));
     if (!connected) return [{ trackId: t.id, channel: t.channel, label: named(t), why: "no_sender" }];
     const phone = phoneBefore(definition, t);
@@ -159,14 +164,15 @@ function phoneBefore(definition: CampaignDefinition, t: TrackDefinition): TrackD
  * naming that campaign. A lead whose phone track has finished (logged, or skipped for want of a number)
  * waits on nothing, and is simulated like any other.
  */
-function competingWithheld(others: readonly SubjectState[]): { campaignId: string; tracks: WithheldTrack[] } | null {
+function competingWithheld(others: readonly SubjectState[], calls: boolean): { campaignId: string; tracks: WithheldTrack[] } | null {
   const byCampaign = new Map<string, SubjectState[]>();
   for (const s of others) byCampaign.set(s.campaign.id, [...(byCampaign.get(s.campaign.id) ?? []), s]);
   for (const [campaignId, subjects] of byCampaign) {
     const definition = subjects[0]?.campaign.definition;
     if (!definition) continue;
     const tracks = liveTracks(definition, "main").flatMap((t): WithheldTrack[] => {
-      if (t.channel === "call") return [];
+      // Its later calls compete for the user's list when this campaign places calls (ticket 14c).
+      if (t.channel === "call" && !calls) return [];
       const phone = phoneBefore(definition, t);
       if (!phone) return [];
       const waiting = subjects.some((s) => runs(s) && progressOf(s, phone.id)?.finishedAt == null && progressOf(s, t.id)?.finishedAt == null);
@@ -205,7 +211,8 @@ async function projectionOf(store: OutreachStore, campaignId: string, definition
   const withheld = withheldTracks(definition, all);
   if (withheld.length > 0) return { projection: null, withheldBy: { campaign: null, tracks: withheld }, callsNotCounted: [], held: [] };
   if (poolAccounts(definition, all).some((a) => cannotProject(a, now) !== null)) return { projection: null, withheldBy: null, callsNotCounted: [], held: [] };
-  const competing = await competingSubjects(store, campaignId, definition, now);
+  const calls = liveTracks(definition, "main").some((t) => t.channel === "call");
+  const competing = await competingSubjects(store, campaignId, definition, now, calls);
   // Every subject holding work on these accounts is simulated, whatever its status (replied, stopped,
   // finished, paused): its claims, calls in flight and retries move by the engine's own rules.
   const known = new Set([...leads.map((l) => l.state.subject.id), ...competing.subjects.map((o) => o.subject.id)]);
@@ -221,7 +228,7 @@ async function projectionOf(store: OutreachStore, campaignId: string, definition
   if (held.length > 0) return { projection: null, withheldBy: null, callsNotCounted: [], held };
   const nameOf = async (id: string) => ({ id, name: (await store.campaign(id))?.name ?? "" });
   const callsNotCounted = await Promise.all(callingCampaigns(competing.subjects).map(nameOf));
-  const elsewhere = competingWithheld(competing.subjects);
+  const elsewhere = competingWithheld(competing.subjects, calls);
   if (elsewhere) return { projection: null, withheldBy: { campaign: await nameOf(elsewhere.campaignId), tracks: elsewhere.tracks }, callsNotCounted, held: [] };
   const projection = projectLoad({
     now,
@@ -231,6 +238,7 @@ async function projectionOf(store: OutreachStore, campaignId: string, definition
     accounts: all,
     zone: definition.timezone,
     horizonDays: PROJECTION_HORIZON_DAYS,
+    ...(calls ? { callDay: await store.engine.callDay(now) } : {}),
   });
   return { projection, withheldBy: null, callsNotCounted, held: [] };
 }
@@ -246,9 +254,10 @@ const accountsOf = (s: SubjectState): string[] => [
 /**
  * Running subjects of other campaigns that compete for this campaign's accounts: capacity is per
  * account across every campaign, so a campaign sharing an account with one already included is
- * included too.
+ * included too. When this campaign places calls, the user's call list is one more such capacity:
+ * every campaign with a live phone track competes for it (ADR 0003, ticket 14c).
  */
-async function competingSubjects(store: OutreachStore, campaignId: string, definition: CampaignDefinition, now: number): Promise<{ subjects: SubjectState[]; reach: Set<string> }> {
+async function competingSubjects(store: OutreachStore, campaignId: string, definition: CampaignDefinition, now: number, calls: boolean): Promise<{ subjects: SubjectState[]; reach: Set<string> }> {
   const byCampaign = new Map<string, SubjectState[]>();
   for (const id of await store.engine.runningSubjectIds()) {
     const s = await store.engine.subject(id, now);
@@ -262,7 +271,8 @@ async function competingSubjects(store: OutreachStore, campaignId: string, defin
     for (const [id, subjects] of byCampaign) {
       if (included.has(id)) continue;
       const uses = new Set(subjects.flatMap(accountsOf));
-      if (![...uses].some((a) => reach.has(a))) continue;
+      const callsToo = calls && subjects.some((x) => liveTracks(x.campaign.definition, "main").some((t) => t.channel === "call"));
+      if (!callsToo && ![...uses].some((a) => reach.has(a))) continue;
       included.add(id);
       for (const a of uses) reach.add(a);
       grew = true;
@@ -333,7 +343,14 @@ async function loadProjection(store: OutreachStore, campaignId: string, definiti
     ],
     withheldBy,
     callsNotCounted,
+    calls: liveTracks(definition, "main").some((t) => t.channel === "call") ? await callsView(store, now, projection) : null,
   };
+}
+
+/** The calls row: the user's capacity and today's list from the stored call day, and this campaign's busiest projected day. */
+async function callsView(store: OutreachStore, now: number, projection: Projection | null): Promise<NonNullable<LoadProjectionView["calls"]>> {
+  const day = await store.engine.callDay(now);
+  return { capacity: day.capacity, onListToday: day.placedToday + day.committed, busiestDay: projection ? projection.busiestCallDay : null };
 }
 
 /** Copy for one lead of the campaign, or null when the enrollment is not one of its leads. */

@@ -369,8 +369,8 @@ export interface LoadProjectionView {
    */
   readonly leadsToStart: number | null;
   /**
-   * Leads only a phone track can reach. A call is a task on the user's list, not a send: the estimate
-   * counts emails and texts only, and assumes no call outcome is logged (ADR 0003, ticket 13b).
+   * Leads only a phone track can reach. Since ticket 14c they start when their first call goes on the
+   * user's list, and are counted in `leadsToStart` and `daysUntilAllStart`.
    */
   readonly onlyCalled: number;
   /** Every sender account in a live track's pool, on either channel. */
@@ -387,8 +387,8 @@ export interface LoadProjectionView {
   }[];
   /**
    * Calendar days, counting launch day as day 1, until every lead some live track can reach has had
-   * its first message on any channel; null when nothing is projected, or not all start within the
-   * projection's horizon.
+   * its first message on any channel or its first call placed on the user's list; null when nothing
+   * is projected, or not all start within the projection's horizon.
    */
   readonly daysUntilAllStart: number | null;
   /** Leads that would not have started within the projection's horizon. */
@@ -417,6 +417,20 @@ export interface LoadProjectionView {
    * words any "no figure because" from these alone (`src/web/campaign/withheld.ts`). Null when none does.
    */
   readonly withheldBy: WithheldBy | null;
+  /**
+   * The user's calls, when the campaign has a live phone track (ADR 0003, ticket 14c); null otherwise.
+   * A call is a task on the user's list, not a send: the projection places due calls by the engine's
+   * own rules within the daily call capacity, assuming the user works through each day's list, and
+   * foresees no call outcome.
+   */
+  readonly calls: {
+    /** The user's daily call capacity, across every campaign (GET /api/call-settings). */
+    readonly capacity: number;
+    /** Calls on today's list across every campaign: placed today, and carried from earlier days. */
+    readonly onListToday: number;
+    /** The most calls of this campaign placed on one day; null when nothing is projected. */
+    readonly busiestDay: number | null;
+  } | null;
   /**
    * Competing campaigns on these senders where a call can still be logged. The estimate assumes no call
    * is logged anywhere: a logged call there touches that lead, whose emails and texts then go first.
