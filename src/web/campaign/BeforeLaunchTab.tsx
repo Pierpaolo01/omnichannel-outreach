@@ -218,8 +218,8 @@ function Warnings({ facts, editor }: { facts: BeforeLaunchView; editor: Sequence
   for (const a of editor.view.accounts.filter((x) => !x.healthy && live.some((t) => t.channel === x.channel))) {
     items.push({ title: `${a.label} ${CANNOT_SEND}`, detail: "Its leads wait until it can send again." });
   }
-  if (facts.load && facts.load.notStartedWithinHorizon > 0) {
-    items.push({ title: `${facts.load.notStartedWithinHorizon} leads would not start within ${facts.load.horizonDays} days`, detail: "The senders’ daily capacity is too small for this many leads, or their texts wait for a free number." });
+  if (facts.load?.someNotStartedWithinHorizon) {
+    items.push({ title: `Some leads would not start within ${facts.load.horizonDays} days`, detail: "The senders’ daily capacity is too small for this many leads, or their texts wait for a free number." });
   }
   return (
     <section aria-labelledby="warnings">
@@ -313,7 +313,7 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
   if (!def.tracks.some((t) => !t.removed && t.branch === "main")) return <p className="text-[14px] text-muted">Add a track to see the load it puts on each sender.</p>;
   // No figure that could contradict the engine: a track the server names (no sender, or after a
   // call), or a sender with no known end.
-  const blocked = load.withheldBy !== null || load.cannotProject.length > 0 || load.tooLarge;
+  const blocked = load.withheldBy !== null || load.cannotProject.length > 0 || load.stoppedEarly !== null;
   const calls = def.tracks.some((t) => !t.removed && t.branch === "main" && t.channel === "call");
   const callRow = load.calls;
   return (
@@ -383,8 +383,10 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
           {/* Worded from the tracks the server names, never guessed from this campaign's channels. */}
           {withheldExplanation(load.withheldBy)}
         </p>
-      ) : load.tooLarge ? (
+      ) : load.stoppedEarly === "bound" ? (
         <p className="mt-2 text-[13.5px] text-ink-2">This campaign is too large to estimate here: working out its daily load would take too long, so no figure is shown. Nothing else on this page is affected.</p>
+      ) : load.stoppedEarly === "horizon" ? (
+        <p className="mt-2 text-[13.5px] text-ink-2">This campaign runs past the estimate’s {load.horizonDays} days: some of its leads, messages or calls come later than that, so no figure is shown. Nothing else on this page is affected.</p>
       ) : load.cannotProject.length > 0 ? (
         <p className="mt-2 text-[13px] text-ink-2">
           Can’t project the load while {and(load.cannotProject.map(heldSaid))}. Nothing says when that ends.
@@ -395,7 +397,7 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
             ? "No lead has a channel these tracks use yet."
             : load.daysUntilAllStart !== null
               ? `All ${load.leadsToStart} leads start within ${load.daysUntilAllStart} ${load.daysUntilAllStart === 1 ? "day" : "days"} of launch.`
-              : `${load.notStartedWithinHorizon} of ${load.leadsToStart} leads would not start within ${load.horizonDays} days.`}{" "}
+              : ""}{" "}
           {calls ? "A lead starts with its first email or text, or when its first call goes on your list. " : ""}Every email and text counts: tracks that start together and tracks that wait for another.{" "}
           {callCaveat(calls, load.callsNotCounted)} Follow-ups always go before first messages when a sender is full. What other running campaigns have waiting on these senders is counted; every send is assumed to succeed, and replies, bounces, bad numbers and pauses are not foreseen.
         </p>

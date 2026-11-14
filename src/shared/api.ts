@@ -391,8 +391,8 @@ export interface LoadProjectionView {
    * is projected, or not all start within the projection's horizon.
    */
   readonly daysUntilAllStart: number | null;
-  /** Leads that would not have started within the projection's horizon. */
-  readonly notStartedWithinHorizon: number;
+  /** Some lead would not have started within the projection's horizon (said without a count: that run stopped at the horizon). */
+  readonly someNotStartedWithinHorizon: boolean;
   readonly horizonDays: number;
   /**
    * Pool accounts that cannot send now with no known end: the provider reports them unable to send
@@ -418,10 +418,12 @@ export interface LoadProjectionView {
    */
   readonly withheldBy: WithheldBy | null;
   /**
-   * The projection reached its bound on work (`PROJECTION_MAX_STEPS`, calls into the engine's rules)
-   * and stopped, so no figure is shown: the campaign is too large to estimate (ADR 0003, ticket 14c).
+   * Why the projection stopped before its end, as the run says on itself, so no figure is shown
+   * (ADR 0003, ticket 14c): `bound`, it reached its bound on work (`PROJECTION_MAX_STEPS`, calls into
+   * the engine's rules) and the campaign is too large to estimate; `horizon`, something it would do lies
+   * past its `horizonDays`. Null when it reached its end, or did not run (see `withheldBy` and `cannotProject`).
    */
-  readonly tooLarge: boolean;
+  readonly stoppedEarly: "bound" | "horizon" | null;
   /**
    * The user's calls, when the campaign has a live phone track (ADR 0003, ticket 14c); null otherwise.
    * A call is a task on the user's list, not a send: the projection places due calls by the engine's

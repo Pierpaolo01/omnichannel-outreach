@@ -1022,11 +1022,28 @@ export const SCREENS: readonly Screen[] = [
       await page.request.put(`${f.url}/api/campaigns/${id}/sequence`, { data: { ...TWO_CHANNELS, callScript: "Ask who books.", tracks: [...TWO_CHANNELS.tracks, phoneTrack("call", { kind: "entry" })] } });
       await page.route("**/api/campaigns/*/before-launch?v=*", async (route) => {
         const body = (await (await route.fetch()).json()) as BeforeLaunchView;
-        const load = body.load && { ...body.load, tooLarge: true, leadsToStart: null, daysUntilAllStart: null, calls: body.load.calls && { ...body.load.calls, busiestDay: null } };
+        const load = body.load && { ...body.load, stoppedEarly: "bound" as const, leadsToStart: null, daysUntilAllStart: null, calls: body.load.calls && { ...body.load.calls, busiestDay: null } };
         await respond(route, { ...body, load });
       });
       await page.goto(`${f.url}/campaigns/${id}/before-launch`);
       await settle(page, "This campaign is too large to estimate here");
+    },
+  },
+  {
+    // The projection's horizon (review bot on dc9555b): a run that stops there shows no figure, and says
+    // why. The answer is marked so in transit, as the too-large one is.
+    name: "fake provider: before launch for a campaign that runs past the estimate",
+    open: async (page) => {
+      const f = await fakeProviderApp("phone-track");
+      const id = await f.freshTwoChannelCampaign(`Past the estimate ${Date.now()}`);
+      await page.request.put(`${f.url}/api/campaigns/${id}/sequence`, { data: { ...TWO_CHANNELS, callScript: "Ask who books.", tracks: [...TWO_CHANNELS.tracks, phoneTrack("call", { kind: "entry" })] } });
+      await page.route("**/api/campaigns/*/before-launch?v=*", async (route) => {
+        const body = (await (await route.fetch()).json()) as BeforeLaunchView;
+        const load = body.load && { ...body.load, stoppedEarly: "horizon" as const, leadsToStart: null, daysUntilAllStart: null, calls: body.load.calls && { ...body.load.calls, busiestDay: null } };
+        await respond(route, { ...body, load });
+      });
+      await page.goto(`${f.url}/campaigns/${id}/before-launch`);
+      await settle(page, "This campaign runs past the estimate");
     },
   },
   {

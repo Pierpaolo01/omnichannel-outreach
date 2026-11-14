@@ -14,7 +14,7 @@ import type { AccountState, CallDay, SubjectState } from "../domain/sequence/sta
 import type { BeforeLaunchView, ContactDetailView, CopyPreview, LeadRow, LoadProjectionView, PreviewLead, WithheldBy, WithheldTrack } from "../shared/api.ts";
 import { trackLabel, trackPhrase } from "../shared/track-label.ts";
 import type { Rules } from "./engine/rules.ts";
-import { projectLoad, type Projection } from "./load-projection.ts";
+import { projectLoad, type Projection, type ProjectionStop } from "./load-projection.ts";
 import type { OutreachStore } from "./persistence/store.ts";
 
 /** Why Copy for a lead shows a message with no day. */
@@ -154,9 +154,15 @@ function callingCampaigns(others: readonly SubjectState[]): string[] {
 }
 
 interface ProjectionResult {
+  /**
+   * The projection, whenever it ran: a run stopped by the bound is never returned, since part of it is
+   * no answer. A run stopped by the horizon is returned with its `stop`, for the days it does cover.
+   */
   readonly projection: Projection | null;
-  /** The projection reached its bound on work and stopped: the campaign is too large to estimate. */
-  readonly tooLarge?: boolean;
+  /** Why the run stopped early, as it says on itself: the bound on work, or the horizon. Null when it reached its end, or did not run. */
+  readonly stoppedEarly?: "bound" | "horizon" | null;
+  /** Why the run stopped, as it says on itself; absent when it did not run (no track, a withheld input, a held sender). */
+  readonly stop?: ProjectionStop;
   readonly withheldBy: WithheldBy | null;
   readonly callsNotCounted: readonly { readonly id: string; readonly name: string }[];
   readonly held: readonly { accountId: string; reason: "unsettled_work" | "reply_being_matched" }[];
@@ -217,9 +223,11 @@ async function projectionOf(store: OutreachStore, campaignId: string, definition
     ...(broken.rules ? { rules: broken.rules } : {}),
     ...(broken.maxSteps !== undefined ? { maxSteps: broken.maxSteps } : {}),
   });
-  // Past its bound the projection's figures are partial: none is shown, and the screen says why.
-  if (projection.tooLarge) return { projection: null, tooLarge: true, withheldBy: null, callsNotCounted, held: [] };
-  return { projection, withheldBy: null, callsNotCounted, held: [] };
+  // Past its bound the projection's figures are partial: none is shown, and the screen says why. Past
+  // its horizon the days it covers stand, but no load figure does (the screen says so).
+  const { stop } = projection;
+  if (stop.reason === "bound") return { projection: null, stoppedEarly: "bound", stop, withheldBy: null, callsNotCounted, held: [] };
+  return { projection, stoppedEarly: stop.reason === "horizon" ? "horizon" : null, stop, withheldBy: null, callsNotCounted, held: [] };
 }
 
 /** The accounts a running subject may use: its campaign's pools, its fixed senders and its live attempts'. */
@@ -293,6 +301,13 @@ export async function projectedSends(store: OutreachStore, campaignId: string, n
   return (await projectionOf(store, campaignId, row.definition, await campaignLeads(store, campaignId, row.definition, now), now, broken)).projection;
 }
 
+/** Why the projection stopped, for the tests of where it stops: null when it did not run. */
+export async function projectionStop(store: OutreachStore, campaignId: string, now: number, broken: ProjectionMutation = {}): Promise<ProjectionStop | null> {
+  const row = await store.engine.campaign(campaignId);
+  if (!row?.definition) return null;
+  return (await projectionOf(store, campaignId, row.definition, await campaignLeads(store, campaignId, row.definition, now), now, broken)).stop ?? null;
+}
+
 /** A deliberately broken projection, for the comparison test's mutations only: other rules, or another starting call day. */
 export interface ProjectionMutation {
   readonly rules?: Rules;
@@ -305,7 +320,10 @@ async function loadProjection(store: OutreachStore, campaignId: string, definiti
   const labels = await store.engine.accountLabels();
   const all = await store.engine.accounts(now);
   const pool = poolAccounts(definition, all);
-  const { projection, withheldBy, callsNotCounted, held, tooLarge } = await projectionOf(store, campaignId, definition, leads, now);
+  const result = await projectionOf(store, campaignId, definition, leads, now);
+  const { withheldBy, callsNotCounted, held } = result;
+  // A figure only from a run that reached its end unbounded (review bot on dc9555b): the run says why it stopped.
+  const projection = result.projection?.stop.reason === "complete" ? result.projection : null;
   return {
     leadsToStart: projection?.leadsToStart ?? null,
     onlyCalled: projection?.onlyCalled ?? 0,
@@ -319,7 +337,8 @@ async function loadProjection(store: OutreachStore, campaignId: string, definiti
       gapSeconds: Math.round(a.gapMs / 1000),
     })),
     daysUntilAllStart: projection?.daysUntilAllStart ?? null,
-    notStartedWithinHorizon: projection?.notStarted ?? 0,
+    // Said without a count: the run that finds it stopped at the horizon.
+    someNotStartedWithinHorizon: result.stoppedEarly === "horizon" && (result.projection?.notStarted ?? 0) > 0,
     horizonDays: PROJECTION_HORIZON_DAYS,
     cannotProject: [
       ...pool.flatMap((a) => {
@@ -329,7 +348,7 @@ async function loadProjection(store: OutreachStore, campaignId: string, definiti
       ...held.map((h) => ({ accountId: h.accountId, label: labels[h.accountId] ?? h.accountId, channel: all.find((a) => a.id === h.accountId)?.channel ?? ("email" as const), reason: h.reason })),
     ],
     withheldBy,
-    tooLarge: tooLarge === true,
+    stoppedEarly: result.stoppedEarly ?? null,
     callsNotCounted,
     calls: liveTracks(definition, "main").some((t) => t.channel === "call") ? await callsView(store, now, projection) : null,
   };

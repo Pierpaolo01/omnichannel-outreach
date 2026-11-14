@@ -220,7 +220,7 @@ describe("an inbox that cannot send now (PR 41 council, item 1)", () => {
 
   test("a rate limit with an end resumes at that instant, as the engine does, instead of looking like an outage", async () => {
     const { h, second, view, projected } = await twoCampaigns(inbox(), (x) => x.fake.rateLimitedUntil.set("inbox-a", MONDAY_10 + 2 * MIN));
-    expect(view.load).toMatchObject({ daysUntilAllStart: 1, notStartedWithinHorizon: 0, cannotProject: [] });
+    expect(view.load).toMatchObject({ daysUntilAllStart: 1, someNotStartedWithinHorizon: false, cannotProject: [] });
     expect((await h.launch(second.id)).status).toBe(200);
     await h.advanceTo(MONDAY_10 + DAY);
     const sentSecond = h.fake.deliveryLog.find((d) => d.destination === "lead2@clinic2.example");

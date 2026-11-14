@@ -107,9 +107,21 @@ export interface Projection {
   readonly busiestCallDay: number;
   /** Calls into the engine's rules the projection made: its work, bounded by `PROJECTION_MAX_STEPS`. */
   readonly steps: number;
-  /** It reached the bound and stopped: no figure in it may be shown. */
-  readonly tooLarge: boolean;
+  /** Why the run stopped, set at the point it stopped. Only a `complete` run's figures may be shown. */
+  readonly stop: ProjectionStop;
 }
+
+/**
+ * Why a projection stopped (review bot on dc9555b; coordinator's ruling): it is set where the run
+ * stops, never inferred afterwards. `complete`: every lead of this campaign ended, or nothing more can
+ * happen. `horizon`: the next thing that would happen lies past the horizon, so the figures do not
+ * cover all of the campaign. `bound`: the bound on work ran out at instant `at`, in the engine's passes
+ * or in the assumed user's daily call-logging sweep, so the run is partial.
+ */
+export type ProjectionStop =
+  | { readonly reason: "complete" }
+  | { readonly reason: "horizon"; readonly at: number }
+  | { readonly reason: "bound"; readonly at: number; readonly during: "passes" | "call_logging" };
 
 /** A tiny min-heap of (instant, subject) wake-ups; stale entries only cost an extra look. */
 class Wakes {
@@ -400,13 +412,17 @@ export function projectLoad(input: ProjectionInput): Projection {
    * item 1). Each sweep closes a task, so it ends.
    */
   let workSeq = 0;
+  /** Why the run stopped, set where it stops. */
+  let stop: ProjectionStop | null = null;
   /** The user day on which the list is known to be full (`callRoom` refused): no placement is tried again that day. */
   let fullDay = Number.NaN;
-  const workTheList = (t: number): boolean => {
+  const workTheList = (t: number): boolean | "bound" => {
     let any = false;
     for (const [id, s] of [...states]) {
       for (const task of s.callTasks) {
         if (!task.open) continue;
+        // The bound ran out in the middle of the sweep: what is left of it was not logged.
+        if (steps > maxSteps) return "bound";
         const loaded = load(id, t);
         if (!rules.isListed(loaded, task)) continue;
         const number = goodNumbers(loaded)[0];
@@ -416,7 +432,7 @@ export function projectLoad(input: ProjectionInput): Projection {
         if (out.ok && !out.replayed) any = write(id, loaded, out.state) || any;
       }
     }
-    return any;
+    return steps > maxSteps ? "bound" : any;
   };
   const calls: ProjectedCall[] = [];
   let callSeq = 0;
@@ -558,11 +574,13 @@ export function projectLoad(input: ProjectionInput): Projection {
   };
 
   let t = now;
-  let tooLarge = false;
-  for (let guard = 0; guard < 2_000_000 && t <= end; guard++) {
-    if (oursIds.size === 0 || oursDone()) break;
+  for (let guard = 0; guard < 2_000_000; guard++) {
+    if (oursIds.size === 0 || oursDone()) {
+      stop = { reason: "complete" };
+      break;
+    }
     if (steps > maxSteps) {
-      tooLarge = true;
+      stop = { reason: "bound", at: t, during: "passes" };
       break;
     }
     // Subjects whose time-driven change (a start, a due step) has come.
@@ -733,14 +751,21 @@ export function projectLoad(input: ProjectionInput): Projection {
     // projection is incomplete, and is marked so before time moves on, here or past the horizon
     // (review bot on 93bcc0c).
     if (steps > maxSteps) {
-      tooLarge = true;
+      stop = { reason: "bound", at: t, during: "passes" };
       break;
     }
 
     // The day's list is worked in its last second, after this instant's passes (as the engine's user
     // logs between ticks); the passes then run again at the same instant, placing any call a logged one
     // released, and the list is worked again, until a sweep finds nothing left to work.
-    if (callSettings && t === lastSecondOf(t) && workTheList(t)) continue;
+    if (callSettings && t === lastSecondOf(t)) {
+      const worked = workTheList(t);
+      if (worked === "bound") {
+        stop = { reason: "bound", at: t, during: "call_logging" };
+        break;
+      }
+      if (worked) continue;
+    }
 
     // The next instant anything can change, as `Engine.nextWakeAt`.
     const candidates: number[] = [wakes.peek()];
@@ -778,9 +803,20 @@ export function projectLoad(input: ProjectionInput): Projection {
     // An open call is worked in the last second of its day.
     if (callSettings && [...states.values()].some((x) => x.callTasks.some((task) => task.open))) candidates.push(t < lastSecondOf(t) ? lastSecondOf(t) : lastSecondOf(t + 2000));
     const next = Math.min(...candidates.filter((c) => c > t));
-    if (!Number.isFinite(next)) break;
+    // Nothing more can happen: the run has reached its end.
+    if (!Number.isFinite(next)) {
+      stop = { reason: "complete" };
+      break;
+    }
+    // The next thing that would happen lies past the horizon: the figures do not cover all of it.
+    if (next > end) {
+      stop = { reason: "horizon", at: t };
+      break;
+    }
     t = next;
   }
+  // The loop's own guard on instants is a bound on work too.
+  const stopped: ProjectionStop = stop ?? { reason: "bound", at: t, during: "passes" };
 
   // ---- What the screen shows.
   const busiest = new Map<string, number>();
@@ -819,6 +855,6 @@ export function projectLoad(input: ProjectionInput): Projection {
     calls,
     busiestCallDay: Math.max(0, ...perCallDay.values()),
     steps,
-    tooLarge,
+    stop: stopped,
   };
 }

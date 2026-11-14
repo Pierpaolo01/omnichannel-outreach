@@ -297,7 +297,7 @@ describe("Before launch: projected daily load per sender inbox", () => {
     const { h, id } = await campaign([inbox("inbox-a", { capacity: 10 })], many(25).people, many(25).businesses);
     await h.defineSequence(id, emailTrack([step("s1", { subject: "Hi", threading: "new_subject" })]));
     const { load } = await beforeLaunch(h, id);
-    expect(load).toMatchObject({ leadsToStart: 25, daysUntilAllStart: 3, notStartedWithinHorizon: 0 });
+    expect(load).toMatchObject({ leadsToStart: 25, daysUntilAllStart: 3, someNotStartedWithinHorizon: false });
     expect(load!.accounts).toEqual([expect.objectContaining({ id: "inbox-a", capacity: 10, usedToday: 0, busiestDay: 10 })]);
   });
 
