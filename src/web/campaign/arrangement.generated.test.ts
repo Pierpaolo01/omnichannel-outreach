@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { definitionProblems, type CampaignDefinition, type TrackDefinition } from "../../domain/sequence/definition.ts";
+import { definitionIssues, definitionProblems, issueKey, type CampaignDefinition, type TrackDefinition } from "../../domain/sequence/definition.ts";
 import { arrange, naive, type ArrangeMutation, type ArrangeOperation } from "./arrangement.ts";
 
 /**
@@ -57,6 +57,25 @@ function generateDefinition(r: () => number): CampaignDefinition {
   return { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: [], smsPool: [], tracks: withPaths };
 }
 
+/**
+ * Problems a user can leave in a draft while editing, which the editor shows and does not save (council on
+ * aaf82b7): an email or SMS track with no sending days, a follow-up whose wait is not a whole number, a
+ * message with no copy. Drawn from their own stream, so the draft is the one `generateDefinition` made.
+ */
+function withProblems(r: () => number, def: CampaignDefinition): CampaignDefinition {
+  return {
+    ...def,
+    tracks: def.tracks.map((t) => {
+      if (t.removed || t.channel === "call" || r() > 0.35) return t;
+      const roll = r();
+      if (roll < 0.4) return { ...t, window: [] };
+      const first = t.steps[0]!;
+      if (roll < 0.75) return { ...t, steps: [...t.steps, { ...first, id: `${t.id}-s2`, waitDays: 1.5, threading: "continue_thread" as const }] };
+      return { ...t, steps: t.steps.map((st) => ({ ...st, body: "" })) };
+    }),
+  };
+}
+
 /** An operation the editor offers for this draft: on live tracks only, with good and bad values. */
 function generateOperation(r: () => number, def: CampaignDefinition): ArrangeOperation {
   const live = def.tracks.filter((t) => !t.removed);
@@ -75,10 +94,19 @@ function generateOperation(r: () => number, def: CampaignDefinition): ArrangeOpe
   return r() < 0.25 ? { kind: "start", trackId: subject.id, start: { kind: "entry" } } : { kind: "start", trackId: subject.id, start: { kind: "after", trackId: pick(r, live).id, delayDays: pick(r, [0, 1, 2, 3, -2, 0.5]) } };
 }
 
+/** The problems `next` has that `def` did not, by identity. */
+const newIssues = (def: CampaignDefinition, next: CampaignDefinition) => {
+  const before = new Set(definitionIssues(def).map(issueKey));
+  return definitionIssues(next).filter((i) => !before.has(issueKey(i)));
+};
+
 function runSeed(seed: number, broken?: ReadonlySet<ArrangeMutation>): void {
   const r = rng(seed);
-  let def = generateDefinition(r);
-  expect(definitionProblems(def)).toEqual([]);
+  const clean = generateDefinition(r);
+  expect(definitionProblems(clean)).toEqual([]);
+  // Half the drafts already have problems, from a stream of their own.
+  const rp = rng(seed ^ 0x0c0f_fee5);
+  let def = rp() < 0.5 ? withProblems(rp, clean) : clean;
   const everId = new Set(def.tracks.map((t) => t.id));
   for (let i = 0; i < 25; i++) {
     const op = generateOperation(r, def);
@@ -87,13 +115,17 @@ function runSeed(seed: number, broken?: ReadonlySet<ArrangeMutation>): void {
       // 2. A refusal leaves the draft identical and says why.
       expect(out.reason.length).toBeGreaterThan(0);
       expect((out as { definition?: CampaignDefinition }).definition ?? def).toBe(def);
-      // 3. Nothing is refused that the validator would accept.
-      expect(definitionProblems(naive(def, op))).not.toEqual([]);
+      // 3. Nothing is refused that the validator would accept: applied naively, it adds a problem the draft did not have.
+      const added = newIssues(def, naive(def, op));
+      expect(added).not.toEqual([]);
+      // 6. A refusal never names a problem the draft already had, under whatever name its track has now.
+      const named = definitionIssues(naive(def, op)).filter((i) => i.text === out.reason);
+      if (named.length > 0) expect([op, out.reason, named.some((i) => added.some((a) => issueKey(a) === issueKey(i)))]).toEqual([op, out.reason, true]);
       continue;
     }
     const next = out.definition;
-    // 1. The result is a draft the validator accepts.
-    expect(definitionProblems(next)).toEqual([]);
+    // 1. The result adds no problem the draft did not have (none at all, from a draft the validator accepts).
+    expect(newIssues(def, next).map((i) => i.text)).toEqual([]);
     // 4. Only what the operation names changes.
     const others = (d: CampaignDefinition, except: string | null) => d.tracks.filter((t) => t.id !== except);
     if (op.kind === "add") {
@@ -125,6 +157,7 @@ describe("the arrangement rule, generated (ADR 0003, ticket 13b)", () => {
     "win_back_without_a_branch",
     "remove_ignores_win_back",
     "after_across_branches",
+    "problems_compared_by_sentence",
   ];
   for (const mutation of mutations) {
     test(`the mutation "${mutation}" fails it`, () => {

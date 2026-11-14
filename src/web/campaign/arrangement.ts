@@ -9,7 +9,7 @@
  * one it refuses (ADR 0003 7.1): a cycle, a start after a missing track, a negative or fractional
  * delay. `arrangement.generated.test.ts` asserts the rule's invariants after every operation.
  */
-import { definitionProblems, type Branch, type DeclinedPath } from "../../domain/sequence/definition.ts";
+import { definitionIssues, definitionProblems, issueKey, type Branch, type DeclinedPath } from "../../domain/sequence/definition.ts";
 import type { CampaignDefinition, StartRule, TrackDefinition } from "../../shared/api.ts";
 import { newTrack, trackName } from "./model.ts";
 
@@ -34,7 +34,8 @@ export type ArrangeMutation =
   | "phone_track_in_the_branch"
   | "win_back_without_a_branch"
   | "remove_ignores_win_back"
-  | "after_across_branches";
+  | "after_across_branches"
+  | "problems_compared_by_sentence";
 const NONE: ReadonlySet<ArrangeMutation> = new Set();
 
 const refuse = (reason: string): Arranged => ({ ok: false, reason });
@@ -58,11 +59,18 @@ const live = (def: CampaignDefinition) => def.tracks.filter((t) => !t.removed);
 
 /**
  * What the definition would newly refuse in `next` (ADR 0003 7.1), in its own sentence, or null. The
- * branch's refusals are the definition's: the editor says what the server would.
+ * branch's refusals are the definition's: the editor says what the server would. A problem is new by its
+ * identity (`issueKey`: its kind and the track and step it is about), never by its sentence: removing or
+ * adding a track renames its siblings, so a problem a sibling already had would read as new (council on
+ * aaf82b7). The mutation `problems_compared_by_sentence` compares sentences instead.
  */
-function newProblem(def: CampaignDefinition, next: CampaignDefinition): string | null {
-  const before = new Set(definitionProblems(def));
-  return definitionProblems(next).find((p) => !before.has(p)) ?? null;
+function newProblem(def: CampaignDefinition, next: CampaignDefinition, broken: ReadonlySet<ArrangeMutation>): string | null {
+  if (broken.has("problems_compared_by_sentence")) {
+    const sentences = new Set(definitionProblems(def));
+    return definitionProblems(next).find((p) => !sentences.has(p)) ?? null;
+  }
+  const before = new Set(definitionIssues(def).map(issueKey));
+  return definitionIssues(next).find((issue) => !before.has(issueKey(issue)))?.text ?? null;
 }
 
 export function arrange(def: CampaignDefinition, op: ArrangeOperation, broken: ReadonlySet<ArrangeMutation> = NONE): Arranged {
@@ -92,7 +100,7 @@ export function naive(def: CampaignDefinition, op: ArrangeOperation): CampaignDe
 function decide(def: CampaignDefinition, op: ArrangeOperation, broken: ReadonlySet<ArrangeMutation>): Arranged {
   if (op.kind === "add") {
     // The win-back branch holds no phone track (spec "no cold call"): the editor never offers one.
-    if (op.branch === "win_back" && op.channel === "call" && !broken.has("phone_track_in_the_branch")) return refuse(newProblem(def, naive(def, op)) ?? "The win-back branch cannot hold a phone track.");
+    if (op.branch === "win_back" && op.channel === "call" && !broken.has("phone_track_in_the_branch")) return refuse(newProblem(def, naive(def, op), broken) ?? "The win-back branch cannot hold a phone track.");
     const used = new Set(def.tracks.map((t) => t.id));
     let added = newTrack(op.channel, op.branch);
     while (used.has(added.id)) added = newTrack(op.channel, op.branch);
@@ -109,17 +117,17 @@ function decide(def: CampaignDefinition, op: ArrangeOperation, broken: ReadonlyS
     if (dependant && !broken.has("remove_ignores_dependants")) return refuse(`${capitalise(trackName(def, dependant))} starts after this one. Change how it starts first.`);
     // The branch's last live track, while a phone track's declined path is win back (ticket 16b).
     const next = naive(def, op);
-    const problem = track.branch === "win_back" && !broken.has("remove_ignores_win_back") ? newProblem(def, next) : null;
+    const problem = track.branch === "win_back" && !broken.has("remove_ignores_win_back") ? newProblem(def, next, broken) : null;
     if (problem) return refuse(problem);
     return { ok: true, definition: next };
   }
 
   if (op.kind === "declined") {
     const next = naive(def, op);
-    if (track.channel !== "call") return refuse(newProblem(def, next) ?? "Only a phone track has a declined path.");
+    if (track.channel !== "call") return refuse(newProblem(def, next, broken) ?? "Only a phone track has a declined path.");
     // Win back only once the branch has a live track: the definition's `winBackAvailable`, said in its own sentence.
     if (op.path === "win_back" && !broken.has("win_back_without_a_branch")) {
-      const problem = newProblem(def, next);
+      const problem = newProblem(def, next, broken);
       if (problem) return refuse(problem);
     }
     return { ok: true, definition: next };
@@ -138,7 +146,7 @@ function decide(def: CampaignDefinition, op: ArrangeOperation, broken: ReadonlyS
     const before = live(def).find((t) => t.id === start.trackId);
     if (!before) return refuse("That track is no longer in the sequence.");
     // The declined path is the only branch point: no connection crosses between the branch and the main sequence.
-    if (before.branch !== track.branch && !broken.has("after_across_branches")) return refuse(newProblem(def, naive(def, op)) ?? "That track is in the other branch.");
+    if (before.branch !== track.branch && !broken.has("after_across_branches")) return refuse(newProblem(def, naive(def, op), broken) ?? "That track is in the other branch.");
     if (!isWholeDays(start.delayDays)) return refuse("The delay is a whole number of days, 0 or more.");
     if (waitsOn(def, before, track.id) && !broken.has("no_cycle_check")) return refuse(`${capitalise(trackName(def, before))} starts after this one, so this one can’t start after it: each would wait for the other.`);
   }

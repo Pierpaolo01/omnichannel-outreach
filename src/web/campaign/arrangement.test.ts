@@ -166,4 +166,13 @@ describe("the win-back branch and the declined path in the editor (ADR 0003, tic
       reason: "The email track starts after a track of the win-back branch: connect it inside the main sequence.",
     });
   });
+
+  test("a removal is refused only for a problem it causes, never one a remaining track already had under another name (council on aaf82b7)", () => {
+    const noDays = { ...track("w2", "email", { kind: "entry" }, "win_back"), window: [] };
+    const before = def(track("e", "email"), call("p"), track("w1", "email", { kind: "entry" }, "win_back"), noDays);
+    // The second track's empty window is a problem the draft already has; removing the first only renames it.
+    const out = arrange(before, { kind: "remove", trackId: "w1" });
+    expect(out).toMatchObject({ ok: true });
+    if (out.ok) expect(out.definition.tracks.map((t) => t.id)).toEqual(["e", "p", "w2"]);
+  });
 });
