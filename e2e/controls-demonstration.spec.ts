@@ -130,7 +130,7 @@ test("pause during a wait and a pending call, the frozen skip limit, a smooth re
     await page.getByRole("region", { name: "Activity" }).scrollIntoViewIfNeeded();
     await linger(page);
     const entries = (await f.harness.request<ActivityView>("GET", `/api/people/${amira}/activity`)).body.entries;
-    expect(entries.filter((e) => e.kind === "control").map((e) => (e.kind === "control" ? e.action : ""))).toEqual(["resume_from_next_step", "skip"]);
+    expect(entries.flatMap((e) => (e.kind === "control" ? [e.action] : []))).toEqual(["resume_from_next_step", "skip"]);
     expect((await read()).status).not.toBe("stopped_manually");
   });
 });
