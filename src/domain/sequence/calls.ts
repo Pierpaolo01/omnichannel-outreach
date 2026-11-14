@@ -175,6 +175,29 @@ export function skippedTonight(state: SubjectState, task: CallTask, now: number)
   return leadNow(state.subject.clock, now) + (userDay(state).end - now) >= task.skipDeadline;
 }
 
+/**
+ * Read ahead for the screens (ticket 15b; read-only): the user day at whose end a call left unworked is
+ * skipped by the skip limit (3.5), counting from `fromDay` (its list day, or the day after today for a
+ * redial asked for now), if the lead keeps running and nothing else changes. Each day is judged by the
+ * condition `expireUnworked` applies at its rollover, as `skippedTonight` reads it for today: the
+ * prospect's calling hours open on that day, and lead time at its end reaches the skip deadline. Null for
+ * a callback, which is never skipped, and while a hold freezes the lead's clock, when no day can be named.
+ */
+export function unworkedSkipDay(state: SubjectState, task: CallTask, now: number, fromDay: number = task.listDay): number | null {
+  if (task.kind !== "call" || !task.open || !runs(state)) return null;
+  const { userZone, day } = state.callDay;
+  const window = callWindow(state, task.trackId);
+  const lead = leadNow(state.subject.clock, now);
+  const first = Math.max(fromDay, day);
+  // A year of days with no calling hours means none opens: nothing can be named.
+  for (let d = first; d < first + 366; d++) {
+    const end = startOfLocalDay(d + 1, userZone);
+    if (!callableOnDay(window, state.lead.zone, startOfLocalDay(d, userZone), end)) continue;
+    if (lead + (end - now) >= task.skipDeadline) return d;
+  }
+  return null;
+}
+
 /** Whether the task's calling hours opened on some user day in [from, to). */
 function listedBetween(state: SubjectState, task: CallTask, from: number, to: number): boolean {
   const { userZone } = state.callDay;

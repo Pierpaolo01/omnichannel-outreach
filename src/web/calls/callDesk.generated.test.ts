@@ -26,7 +26,10 @@ import { CallDesk, NoAnswer, Refused, type DeskFault, type KeyValue, type Outcom
  * outbox. 9. Liveness: after settling nothing is unanswered and no desk shows an action pending.
  * 10. Bounded sending (checked by a count of requests in callDesk.test.ts). 11. Every sentence about
  * saved, logged or refused agrees with the server's read. 12. A stored press is never an unsent draft.
- * 13. Reads are ordered and counted.
+ * 13. Reads are ordered and counted. 14. What is stored is what was pressed (ticket 15b): every request and
+ * the server's record of a press carry its outcome, redial and callback time, and no callback time not after
+ * the read it was pressed on is sent. Ticket 15b's presses (redials, callbacks later today, on later days and
+ * in the past) and nights passing (so a press on its way can meet an expired call) draw from a second stream.
  *
  * Each desk fault (callDesk.ts `DeskFault`) breaks one of them; the last block checks a known seed
  * catches each (refusal_resent_at_once is caught by its count of requests in callDesk.test.ts).
@@ -69,9 +72,16 @@ const PEOPLE = [
   person({ person_id: "p2", business_id: "b1", full_name: "Nia Cole", email: "nia@harbour.example", dial_phone: "+447700900102", dial_phone_type: "mobile" }),
   person({ person_id: "p3", business_id: "b2", full_name: "Sam Lee", email: "sam@elm.example", direct_phone: "+442079460222" }),
   person({ person_id: "p4", business_id: "b2", full_name: "Ana Ruiz", email: "ana@elm.example" }),
+  // Council on 32454ea, A: a lead in another zone than the user's, so a callback time read in the wrong zone is caught.
+  person({ person_id: "p5", business_id: "b3", full_name: "Lee Grant", email: "lee@hudson.example", direct_phone: "+12025550143" }),
 ];
-const BUSINESSES = [business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101" }), business({ business_id: "b2", business_name: "Elm Street Clinic", phone_e164: "+442079460202" })];
+const BUSINESSES = [
+  business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101" }),
+  business({ business_id: "b2", business_name: "Elm Street Clinic", phone_e164: "+442079460202" }),
+  business({ business_id: "b3", business_name: "Hudson Physio", phone_e164: "+12025550100", timezone: "America/New_York", country: "US", city: "New York" }),
+];
 const OUTCOMES: readonly CallOutcomeApi[] = ["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "skip_for_now"];
+const REDIAL_OUTCOMES: readonly CallOutcomeApi[] = ["no_answer", "voicemail", "gatekeeper"];
 
 /** Lets every request in flight to the in-process app finish. */
 const flush = async () => {
@@ -156,7 +166,48 @@ interface Choice {
   readonly numberId: string | null;
   readonly outcome: string | null;
   readonly note: string;
+  /** Ticket 15b: the redial choice and a callback's day and time, as the user entered them. */
+  readonly redial: boolean;
+  readonly callbackDay: string | null;
+  readonly callbackTime: string;
 }
+
+const sameChoice = (a: Choice, b: Choice) => a.numberId === b.numberId && a.outcome === b.outcome && a.note === b.note && a.redial === b.redial && a.callbackDay === b.callbackDay && a.callbackTime === b.callbackTime;
+
+/** London's date and time of an instant, as the callback controls take them. */
+const dayIn = (zone: string, t: number) => new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" }).format(t);
+const timeIn = (zone: string, t: number) => new Intl.DateTimeFormat("en-GB", { timeZone: zone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(t);
+const londonDay = (t: number) => dayIn("Europe/London", t);
+
+/**
+ * The test's own conversion of a wall day and time in `zone` to every instant that reads so (council on 32454ea, A):
+ * every quarter-hour offset from -15 to +15 hours, kept where the zone reads that day and time. Independent of the
+ * product's `zonedInstants`; none in a gap the clocks skip, two in the hour they repeat.
+ */
+function ownInstants(day: string, time: string, zone: string): number[] {
+  const [y, mo, d] = day.split("-").map(Number);
+  const [hh, mm] = time.split(":").map(Number);
+  const wall = Date.UTC(y ?? 0, (mo ?? 1) - 1, d ?? 1, hh ?? 0, mm ?? 0);
+  const out: number[] = [];
+  for (let q = -60; q <= 60; q++) {
+    const t = wall - q * 15 * MIN;
+    if (dayIn(zone, t) === day && timeIn(zone, t) === time && !out.includes(t)) out.push(t);
+  }
+  return out.sort((a, b) => a - b);
+}
+
+/** What the generated user chose, as the body of its press must carry it (invariant 14), built before log(). */
+interface Expected {
+  readonly outcome: CallOutcomeApi;
+  readonly numberId: string | null;
+  readonly note: string;
+  readonly noteScope: "person" | "company";
+  readonly redial: boolean;
+  readonly callbackAt: number | null;
+}
+
+const sameAsChosen = (body: OutcomeBody, e: Expected) =>
+  body.outcome === e.outcome && body.numberId === e.numberId && body.note === e.note && body.noteScope === e.noteScope && (body.redial === true) === e.redial && (body.callbackAt === undefined ? null : Date.parse(body.callbackAt)) === e.callbackAt;
 
 interface Request {
   readonly from: Instance;
@@ -173,17 +224,27 @@ interface Press {
   readonly ids: Set<string>;
 }
 
-async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
+/** A run's start and its phone track's calling hours: by default Monday 08:30 London, weekdays 09:00 to 17:00. */
+interface RunOptions {
+  readonly start?: number;
+  readonly phoneWindow?: readonly { day: number; start: number; end: number }[];
+}
+
+async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set(), options: RunOptions = {}) {
+  const START = options.start ?? MONDAY_830;
+  const definition: CampaignDefinition = options.phoneWindow ? { ...DEFINITION, tracks: DEFINITION.tracks.map((t) => (t.channel === "call" ? { ...t, window: [...(options.phoneWindow ?? [])] } : t)) } : DEFINITION;
   const r = rng(seed);
-  const h = new EngineHarness({ start: MONDAY_830 - 30 * MIN, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+  // Ticket 15b's choices draw from a stream of their own, so the 14b runs keep their shape.
+  const r15 = rng(seed ^ 0x15b15b);
+  const h = new EngineHarness({ start: START - 30 * MIN, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
   await h.tick();
   await h.request("PUT", "/api/call-settings", { dailyCapacity: 3, userZone: "Europe/London" });
-  h.clock = MONDAY_830;
+  h.clock = START;
   const { campaign } = await h.createCampaign("Generated calls", { businesses: BUSINESSES, people: PEOPLE });
-  await h.defineSequence(campaign.id, DEFINITION);
+  await h.defineSequence(campaign.id, definition);
   expect((await h.launch(campaign.id)).status).toBe(200);
-  expect((await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows.length).toBe(4);
-  await h.advanceTo(MONDAY_830 + 35 * MIN);
+  expect((await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows.length).toBe(5);
+  await h.advanceTo(START + 35 * MIN);
 
   const local = new MapStore();
   const requests: Request[] = [];
@@ -226,6 +287,9 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
   /** True while log() runs: its first post is a new press, recorded right after. */
   let pressing = false;
   const stored = async (id: string) => (await h.store.engine.callRequestTask(id)) !== null;
+  /** What each press must carry, from the generated user's choice (invariant 14), and the presses already checked against the server. */
+  const expectedOf = new Map<string, Expected>();
+  const checkedStored = new Set<string>();
 
   const open = async (tab: Tab): Promise<Instance> => {
     const timers = new Set<() => void>();
@@ -252,6 +316,9 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
         ),
       post: (taskId, body) =>
         new Promise<CallOutcomeAnswer>((resolve, reject) => {
+          // Invariant 14: every request of a press carries the user's choice.
+          const chosen = expectedOf.get(body.requestId);
+          if (chosen && !sameAsChosen(body, chosen)) problems.push(`14: a request for ${body.requestId} carries ${JSON.stringify(body)}, not the user's choice ${JSON.stringify(chosen)}`);
           // Attribute a resend under another id (a fault) to the press pending in this tab.
           if (!pressing && !pressOf.has(body.requestId)) {
             const press = [...presses].reverse().find((p) => p.tab === tab.label);
@@ -324,6 +391,17 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
   /** A refused press, by any of its ids, once seen. */
   const seenRefused = new Set<Press>();
   const check = async (moved: Set<Instance>) => {
+    // Invariant 14: the server's record of a press is what was pressed: its outcome, redial and callback time.
+    for (const [id, chosen] of expectedOf) {
+      if (checkedStored.has(id)) continue;
+      const taskId = await h.store.engine.callRequestTask(id);
+      if (taskId === null) continue;
+      checkedStored.add(id);
+      const record = (await h.request<CallTaskView>("GET", `/api/call-tasks/${taskId}`)).body.storedCalls.find((c) => c.requestId === id);
+      if (!record || record.outcome !== chosen.outcome || record.redial !== chosen.redial || (record.callbackAt === null ? null : Date.parse(record.callbackAt)) !== chosen.callbackAt) problems.push(`14: ${id} is stored as ${JSON.stringify(record)}, not as the user chose ${JSON.stringify(chosen)}`);
+      if (chosen.redial) seen.redials++;
+      if (chosen.callbackAt !== null) seen.callbacks++;
+    }
     // Storage is the only truth: an entry removed in any tab never reappears.
     for (const k of local.reappeared.splice(0)) problems.push(`3: ${k} was removed and came back`);
     // Invariant 3: a refused press keeps its record until the user presses its own Dismiss; nothing else removes it.
@@ -378,9 +456,9 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
       // Invariant 6: the draft of the call on screen is what the user chose, or, before any choice, its first making.
       if (snap.focus !== null && snap.task?.state === "ready" && snap.task.view.taskId === snap.focus) {
         const chosen = tab.choices.get(snap.focus);
-        const now = { numberId: snap.draft.numberId, outcome: snap.draft.outcome, note: snap.draft.note };
+        const now: Choice = { numberId: snap.draft.numberId, outcome: snap.draft.outcome, note: snap.draft.note, redial: snap.draft.redial, callbackDay: snap.draft.callbackDay, callbackTime: snap.draft.callbackTime };
         if (!chosen) tab.choices.set(snap.focus, now);
-        else if (chosen.numberId !== now.numberId || chosen.outcome !== now.outcome || chosen.note !== now.note) problems.push(`6: ${tab.label}'s draft for ${snap.focus} became ${JSON.stringify(now)}, not the user's ${JSON.stringify(chosen)}`);
+        else if (!sameChoice(chosen, now)) problems.push(`6: ${tab.label}'s draft for ${snap.focus} became ${JSON.stringify(now)}, not the user's ${JSON.stringify(chosen)}`);
       }
       if (snap.focus !== i.lastFocus && i.lastFocus !== null) tab.choices.delete(i.lastFocus);
       const newlyLogged = snap.logged !== null && snap.logged.requestId !== i.lastLogged;
@@ -399,7 +477,7 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
     }
   };
 
-  const seen = { loggedFromRead: 0, heldGets: 0, failedReads: 0, sessionRefused: 0, confirming: 0, refusedShown: 0, foundGone: 0, unconfirmed: 0, blocked: 0, recovered: 0, dismissed: 0, records: 0, leftWithPending: 0, notQueued: 0, refusalFocus: new Set<string>() };
+  const seen = { repeatedPress: 0, repeatedHour: 0, redialPresses: 0, redials: 0, callbacks: 0, pastCallbacks: 0, expiredPress: 0, loggedFromRead: 0, heldGets: 0, failedReads: 0, sessionRefused: 0, confirming: 0, refusedShown: 0, foundGone: 0, unconfirmed: 0, blocked: 0, recovered: 0, dismissed: 0, records: 0, leftWithPending: 0, notQueued: 0, refusalFocus: new Set<string>() };
   let storageFullUntil = -1;
   const tabs: Tab[] = [];
   tabs.push(await newTab("a"), await newTab("b"));
@@ -408,7 +486,7 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
     const roll = r();
     // Once, in the evening, nothing is ready and the user opens Calls in a fresh tab: its desk is on no call.
     if (s === 60 && r() < 0.7) {
-      const evening = Date.parse("2026-11-02T17:10:00Z");
+      const evening = START + (17 * 60 + 10 - (8 * 60 + 30)) * MIN;
       if (h.clock < evening) await h.advanceTo(evening);
       if (tabs.length < 4) tabs.push(await newTab("evening"));
     }
@@ -430,25 +508,69 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
     if (roll < 0.24) {
       if (!tab.instance.disposed && snap.task?.state === "ready" && !snap.locked) {
         const numbers = snap.task.view.numbers;
-        const outcome = OUTCOMES[Math.floor(r() * OUTCOMES.length)] ?? "no_answer";
+        let outcome = OUTCOMES[Math.floor(r() * OUTCOMES.length)] ?? "no_answer";
         const note = r() < 0.6 ? `note ${++notes}` : "";
+        // Ticket 15b: a callback asked for (later today, on a later day, or now and then at a time already
+        // passed, which the page refuses in place), or a redial with an outcome that offers one.
+        let redial = snap.draft.redial;
+        let callbackDay = snap.draft.callbackDay;
+        let callbackTime = snap.draft.callbackTime;
+        if (r15() < 0.3) {
+          outcome = "callback_requested";
+          const asOf = Date.parse(snap.task.view.asOf);
+          const zone = snap.task.view.zone;
+          const roll15 = r15();
+          // In the prospect's zone: a time passed, later today, on a later day, or a time near the clocks' change (01:05, 01:30, 01:45 today).
+          // A run started at a clock change asks for times near it more often.
+          const near = options.start === undefined ? 0.2 : 0.6;
+          if (roll15 < 1 - near) {
+            const spread = (roll15 / (1 - near)) * 0.8;
+            const when = spread < 0.2 ? asOf - 30 * MIN : spread < 0.45 ? asOf + (20 + Math.floor(r15() * 100)) * MIN : asOf + (1 + Math.floor(r15() * 3)) * 24 * 60 * MIN;
+            callbackDay = dayIn(zone, when);
+            callbackTime = timeIn(zone, when);
+          } else {
+            callbackDay = dayIn(zone, asOf);
+            callbackTime = ["01:05", "01:30", "01:45"][Math.floor(r15() * 3)] ?? "01:30";
+          }
+        } else if (REDIAL_OUTCOMES.includes(outcome)) redial = r15() < 0.75;
         // Often the shared main line, which another lead's call can mark bad under this draft.
         const roll2 = r();
         const numberId = roll2 < 0.3 ? (numbers.find((n) => n.kind === "main_line")?.detailId ?? snap.draft.numberId) : roll2 < 0.45 ? (numbers[Math.floor(r() * numbers.length)]?.detailId ?? null) : snap.draft.numberId;
-        desk.setDraft({ outcome, note, numberId, noteScope: r() < 0.3 ? "company" : "person" });
-        if (snap.focus !== null) tab.choices.set(snap.focus, { numberId, outcome, note });
+        const noteScope = r() < 0.3 ? "company" : "person";
+        // The user's choice, as the press must carry it: built here, from what the user chose, with the test's own conversion.
+        const readAt = desk.getSnapshot().task;
+        const chosenOn = readAt?.state === "ready" ? readAt.view : snap.task.view;
+        const occurrences = outcome === "callback_requested" && callbackDay !== null && callbackTime !== "" ? ownInstants(callbackDay, callbackTime, chosenOn.zone) : [];
+        if (occurrences.length > 1) seen.repeatedHour++;
+        const expected: Expected = {
+          outcome,
+          numberId: outcome === "skip_for_now" ? null : numberId,
+          note,
+          noteScope: chosenOn.person === null ? "company" : noteScope,
+          redial: redial && REDIAL_OUTCOMES.includes(outcome),
+          callbackAt: occurrences.find((t) => t > Date.parse(chosenOn.asOf)) ?? null,
+        };
+        desk.setDraft({ outcome, note, numberId, noteScope, redial, callbackDay, callbackTime });
+        if (snap.focus !== null) tab.choices.set(snap.focus, { numberId, outcome, note, redial, callbackDay, callbackTime });
         // Now and then the user only edits the draft, and presses nothing.
         if (r() < 0.2) {
           await flush();
           await check(moved);
           continue;
         }
-        const blocked = outcome !== "skip_for_now" && desk.getSnapshot().numberProblem !== null;
+        const blocked = (outcome !== "skip_for_now" && desk.getSnapshot().numberProblem !== null) || (outcome === "callback_requested" && desk.getSnapshot().callback?.at === null && !faults.has("past_callback_sent"));
+        if (outcome === "callback_requested" && desk.getSnapshot().callback?.problem === "past") seen.pastCallbacks++;
+        const pressedOn = snap.task.view.asOf;
         const sentBefore = requests.length;
         pressing = true;
         desk.log();
         pressing = false;
         // The boundary: a press storage refused is not pressed. Nothing is sent, the page says so, and the draft stays.
+        // The boundary (ticket 15b): a callback time not after the read it was pressed on is refused in place, and nothing is sent.
+        const sentNow = requests.slice(sentBefore);
+        for (const q of sentNow) if (q.body.callbackAt && Date.parse(q.body.callbackAt) <= Date.parse(pressedOn)) problems.push(`14: ${tab.label} sent a callback for ${q.body.callbackAt}, not after the read it was pressed on (${pressedOn})`);
+        // A callback whose day and time have no occurrence still to come (a time passed, or one the clocks skip) sends nothing.
+        if (outcome === "callback_requested" && expected.callbackAt === null && sentNow.length > 0) problems.push(`14: ${tab.label} sent a callback for ${callbackDay ?? ""} ${callbackTime}, which has no time still to come`);
         if (local.full && !blocked && (outcome === "skip_for_now" || numberId !== null)) {
           if (!desk.getSnapshot().notQueued) problems.push(`3: ${tab.label} accepted a press its storage refused`);
           if (requests.length !== sentBefore) problems.push(`3: ${tab.label} sent a press it could not store`);
@@ -462,6 +584,13 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
         const id = desk.getSnapshot().pending?.body.requestId;
         if (id !== undefined && !pressOf.has(id)) {
           const press = { tab: tab.label, note, ids: new Set([id]) };
+          // The first outbox entry, as the press wrote it, is the user's choice.
+          const entry = local.get(`outreach.calls.outbox.${id}`);
+          const written = entry === null ? null : (JSON.parse(entry) as { body: OutcomeBody }).body;
+          if (written && !sameAsChosen(written, expected)) problems.push(`14: ${tab.label} wrote the press ${id} as ${JSON.stringify(written)}, not the user's choice ${JSON.stringify(expected)}`);
+          expectedOf.set(id, expected);
+          if (expected.callbackAt !== null && occurrences.length > 1) seen.repeatedPress++;
+          if (expected.redial) seen.redialPresses++;
           presses.push(press);
           pressOf.set(id, press);
           if (snap.focus !== null) pressedChoice.set(id, { tab, taskId: snap.focus, choice: tab.choices.get(snap.focus) });
@@ -550,7 +679,13 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
       h.fake.prospectReplies(who, true, null);
       await h.advanceTo(h.clock + MIN);
     } else if (roll < 0.94) {
-      await h.advanceTo(h.clock + 20 * MIN);
+      // Ticket 15b: now and then the next morning, so a callback falls due or is missed, a redial is listed, and a call
+      // pressed before the night may arrive after its skip limit has passed.
+      if (r15() < 0.2) {
+        const pending = requests.some((q) => q.answer === null);
+        await h.advanceTo(Date.parse(`${londonDay(h.clock + 24 * 60 * MIN)}T09:20:00Z`));
+        if (pending) seen.expiredPress++;
+      } else await h.advanceTo(h.clock + 20 * MIN);
     }
     await flush();
     // A request the desk answered may have moved its focus synchronously; the step's own desk too.
@@ -612,7 +747,7 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
     if (snap.confirming) problems.push(`9: ${t.label} is still confirming after the network settled`);
     // Invariant 11: the page's sentences agree with the server's read.
     if (snap.logged) {
-      const line = loggedLine(snap.logged);
+      const line = loggedLine(snap.logged, "Europe/London");
       const now = (await h.request<CallTaskView>("GET", `/api/call-tasks/${snap.logged.task.taskId}`)).body;
       const note = snap.logged.body.note.trim();
       if (line.includes("The note is saved") && ![...now.personNotes, ...now.companyNotes].some((n) => n.body === note)) problems.push(`11: ${t.label} says the note of ${snap.logged.requestId} is saved; the server does not hold it`);
@@ -637,7 +772,7 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
 }
 
 describe("working the call list in the browser, generated over the real call desk (ADR 0003 4.4.1)", () => {
-  const counts: { presses: number; logged: number; seen: { loggedFromRead: number; heldGets: number; failedReads: number; sessionRefused: number; confirming: number; refusedShown: number; foundGone: number; unconfirmed: number; blocked: number; recovered: number; dismissed: number; records: number; leftWithPending: number; notQueued: number; refusalFocus: Set<string> } }[] = [];
+  const counts: { presses: number; logged: number; seen: { repeatedPress: number; repeatedHour: number; redialPresses: number; redials: number; callbacks: number; pastCallbacks: number; expiredPress: number; loggedFromRead: number; heldGets: number; failedReads: number; sessionRefused: number; confirming: number; refusedShown: number; foundGone: number; unconfirmed: number; blocked: number; recovered: number; dismissed: number; records: number; leftWithPending: number; notQueued: number; refusalFocus: Set<string> } }[] = [];
   for (const seed of Array.from({ length: SEEDS }, (_, i) => 9100 + i)) {
     test(`run ${seed}`, async () => {
       const out = await run(seed);
@@ -659,11 +794,60 @@ describe("working the call list in the browser, generated over the real call des
     for (const k of ["loggedFromRead", "heldGets", "failedReads", "sessionRefused", "confirming"] as const) expect(counts.filter((c) => c.seen[k] > 0).length, k).toBeGreaterThan(0);
     // A refusal is recovered by a desk on that same call, on another call, and on none.
     for (const where of ["same", "other", "none"]) expect(counts.some((c) => c.seen.refusalFocus.has(where)), where).toBe(true);
+    // Ticket 15b: redials and callbacks stored, a callback refused in place for its past time, and presses on their way across a night.
+    for (const k of ["redials", "callbacks", "pastCallbacks", "expiredPress"] as const) expect(counts.filter((c) => c.seen[k] > 0).length, k).toBeGreaterThan(0);
   });
 });
 
+describe("fixed runs across the clock changes, with a lead in New York (council on 32454ea, A and B)", () => {
+  const RUNS: readonly [string, number, number][] = [
+    ["29 March 2026, the clocks go forward", 9500, Date.parse("2026-03-29T00:20:00Z")],
+    // Seeds from the by-hand search below: each presses a callback for a time inside the repeated hour.
+    ["25 October 2026, before the hour the clocks repeat", 9505, Date.parse("2026-10-24T23:50:00Z")],
+    ["25 October 2026, reaching the second occurrence of the repeated hour", 9508, Date.parse("2026-10-25T00:50:00Z")],
+  ];
+  const repeated: number[] = [];
+  for (const [name, seed, start] of RUNS) {
+    test(`${name}, seed ${seed}`, async () => {
+      const out = await run(seed, new Set(), { start, phoneWindow: ALWAYS });
+      repeated.push(out.seen.repeatedPress);
+      expect(out.problems).toEqual([]);
+    });
+  }
+  test("the October runs press callbacks for a time inside the hour the clocks repeat", () => {
+    expect(repeated.slice(1).every((n) => n > 0)).toBe(true);
+  });
+});
+
+/** By hand: CALL_DESK_CLOCK_FAULT_SEARCH=1 prints seeds of the March run (calling hours always open) that catch the zone fault. */
+describe.skipIf(!process.env["CALL_DESK_CLOCK_FAULT_SEARCH"])("clock-run fault search (by hand)", () => {
+  test("callback_offset_of_user_zone", async () => {
+    const found: string[] = [];
+    for (let seed = 9500; seed < 9800 && found.length < 2; seed++) {
+      const out = await run(seed, new Set<DeskFault>(["callback_offset_of_user_zone"]), { start: Date.parse("2026-03-29T00:20:00Z"), phoneWindow: ALWAYS });
+      if (out.problems.length > 0) found.push(`${seed}: ${out.problems[0] ?? ""}`);
+    }
+    console.info("FAULT", JSON.stringify(found));
+  }, 600_000);
+});
+
+/** By hand: CALL_DESK_CLOCK_SEARCH=1 prints October seeds whose runs press a callback for a time the clocks repeat, to fill RUNS above. */
+describe.skipIf(!process.env["CALL_DESK_CLOCK_SEARCH"])("clock-change seed search (by hand)", () => {
+  for (const start of [Date.parse("2026-10-24T23:50:00Z"), Date.parse("2026-10-25T00:50:00Z")]) {
+    test(new Date(start).toISOString(), async () => {
+      const found: string[] = [];
+      for (let seed = 9500; seed < 9700 && found.length < 4; seed++) {
+        const out = await run(seed, new Set(), { start, phoneWindow: ALWAYS });
+        if (out.seen.repeatedPress > 0) found.push(`${seed}: ${out.seen.repeatedPress} pressed, problems ${out.problems.length}`);
+      }
+      console.info("CLOCK", new Date(start).toISOString(), JSON.stringify(found));
+    }, 600_000);
+  }
+});
+
 describe("each desk fault is caught by its known seed (ADR 0003 4.4.1)", () => {
-  const KILLING: readonly [DeskFault, number, string][] = [
+  const MARCH_RUN: RunOptions = { start: Date.parse("2026-03-29T00:20:00Z"), phoneWindow: ALWAYS };
+  const KILLING: readonly [DeskFault, number, string, RunOptions?][] = [
     ["new_id_on_resend", 9134, "7:"],
     ["logged_when_sent", 9100, "2:"],
     ["outbox_removed_when_sent", 9100, "7:"],
@@ -672,7 +856,7 @@ describe("each desk fault is caught by its known seed (ADR 0003 4.4.1)", () => {
     ["substitute_bad_number", 9100, "6:"],
     ["pending_kept_after_answer", 9100, "7:"],
     ["disposed_desk_applies", 9100, "8:"],
-    ["only_focused_entries_retried", 9105, "9:"],
+    ["only_focused_entries_retried", 9134, "9:"],
     ["refusal_dropped", 9100, "3:"],
     ["focused_refusal_hidden", 9101, "3:"],
     ["stale_copy_written_back", 9115, "3:"],
@@ -680,12 +864,20 @@ describe("each desk fault is caught by its known seed (ADR 0003 4.4.1)", () => {
     ["stored_press_left_as_draft", 9100, "12:"],
     ["answer_clears_draft", 9100, "6:"],
     ["first_read_skips_reconcile", 9123, "3:"],
-    ["task_failures_uncounted", 9102, "13:"],
+    ["task_failures_uncounted", 9117, "13:"],
     ["reads_overlap", 9100, "13:"],
+    // Ticket 15b.
+    ["redial_lost_on_resend", 9180, "14:"],
+    ["answer_resets_callback_draft", 9105, "6:"],
+    ["past_callback_sent", 9101, "14:"],
+    // Council on 32454ea, A: the body corrupted where it is first built, against the user's own choice.
+    ["redial_dropped_at_press", 9103, "14:"],
+    // A callback on the New York lead, reached at night in the March run (calling hours always open).
+    ["callback_offset_of_user_zone", 9668, "14:", MARCH_RUN],
   ];
-  for (const [fault, seed, invariant] of KILLING) {
-    test(`${fault}, seed ${seed}, invariant ${invariant}`, async () => {
-      const out = await run(seed, new Set([fault]));
+  for (const [fault, seed, invariant, options] of KILLING) {
+    test(`${fault}, seed ${seed}${options ? " (the March run)" : ""}, invariant ${invariant}`, async () => {
+      const out = await run(seed, new Set([fault]), options);
       expect(out.problems.some((p) => p.startsWith(invariant))).toBe(true);
     });
   }
@@ -694,7 +886,7 @@ describe("each desk fault is caught by its known seed (ADR 0003 4.4.1)", () => {
 /** By hand: CALL_DESK_FAULT_SEARCH=1 prints the first seeds that catch each fault, to fill KILLING above. */
 describe.skipIf(!process.env["CALL_DESK_FAULT_SEARCH"])("fault search (by hand)", () => {
   // refusal_resent_at_once needs storage full while answers keep coming; callDesk.test.ts kills it by a count of requests.
-  const all: DeskFault[] = ["new_id_on_resend", "logged_when_sent", "outbox_removed_when_sent", "refresh_adopts_focus", "no_lock_while_pending", "substitute_bad_number", "pending_kept_after_answer", "disposed_desk_applies", "only_focused_entries_retried", "refusal_dropped", "focused_refusal_hidden", "stale_copy_written_back", "refusal_removed_on_move_on", "stored_press_left_as_draft", "answer_clears_draft", "first_read_skips_reconcile", "task_failures_uncounted", "reads_overlap"];
+  const all: DeskFault[] = ["new_id_on_resend", "logged_when_sent", "outbox_removed_when_sent", "refresh_adopts_focus", "no_lock_while_pending", "substitute_bad_number", "pending_kept_after_answer", "disposed_desk_applies", "only_focused_entries_retried", "refusal_dropped", "focused_refusal_hidden", "stale_copy_written_back", "refusal_removed_on_move_on", "stored_press_left_as_draft", "answer_clears_draft", "first_read_skips_reconcile", "task_failures_uncounted", "reads_overlap", "redial_lost_on_resend", "answer_resets_callback_draft", "past_callback_sent", "callback_offset_of_user_zone", "redial_dropped_at_press"];
   for (const fault of all) {
     test(fault, async () => {
       const found: string[] = [];

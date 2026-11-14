@@ -1,5 +1,5 @@
 import { Redirect } from "wouter";
-import type { CompanyRecord } from "../../shared/api.ts";
+import type { CompanyRecord, RecordCalls } from "../../shared/api.ts";
 import { Activity } from "../activity.tsx";
 import { useApi } from "../api.ts";
 import { BackToLeads, CampaignRows, ContactRow, ErrorState, LocalTime, PeopleRows, RecordSkeleton, Section } from "../components.tsx";
@@ -10,7 +10,7 @@ import { NoSuchRecord } from "./PersonPage.tsx";
  * a lead has no page of its own; its record is Leads filtered to the company (principal, 12 Nov 2026).
  */
 export function CompanyPage({ id }: { id: string }) {
-  const { result, retry } = useApi<CompanyRecord>(`/api/companies/${encodeURIComponent(id)}`);
+  const { result, retry } = useApi<CompanyRecord & RecordCalls>(`/api/companies/${encodeURIComponent(id)}`);
   return (
     <div>
       <BackToLeads />
@@ -31,7 +31,7 @@ export function CompanyPage({ id }: { id: string }) {
   );
 }
 
-function Company({ company }: { company: CompanyRecord }) {
+function Company({ company }: { company: CompanyRecord & RecordCalls }) {
   return (
     <article className="flex max-w-[780px] flex-col gap-10">
       <header className="flex flex-wrap items-end justify-between gap-5">
@@ -52,7 +52,7 @@ function Company({ company }: { company: CompanyRecord }) {
       <ContactRow details={company.contactDetails} />
 
       <Section title="Campaigns">
-        <CampaignRows enrollments={company.enrollments} unenrolledReason={company.unenrolledReason} who="company" />
+        <CampaignRows enrollments={company.enrollments} unenrolledReason={company.unenrolledReason} who="company" calls={company} />
       </Section>
 
       {company.people.length > 0 && (

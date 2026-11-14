@@ -8,8 +8,10 @@ import type {
   FileCheckResult,
   ImportRecord,
   LeadSearchResult,
+  CallTaskView,
   NeedsAttention,
   PersonRecord,
+  RecordCalls,
 } from "../src/shared/api.ts";
 
 /**
@@ -22,11 +24,12 @@ export type MockBody =
   | LeadSearchResult
   | { campaigns: CampaignListItem[] }
   | { campaign: Campaign; imports: ImportRecord[] }
-  | PersonRecord
-  | CompanyRecord
+  | (PersonRecord & RecordCalls)
+  | (CompanyRecord & RecordCalls)
   | FileCheckResult
   | BeforeLaunchView
-  | NeedsAttention;
+  | NeedsAttention
+  | CallTaskView;
 
 export function respond(route: Route, body: MockBody, status = 200): Promise<void> {
   // eslint-disable-next-line no-restricted-syntax -- the one typed entry point

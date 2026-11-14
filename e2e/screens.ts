@@ -1,7 +1,7 @@
 import type { APIRequestContext, Locator, Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { OUTREACH_STATUSES } from "../src/domain/outreach-status.ts";
-import type { BeforeLaunchView, CampaignDefinition, CompanyRecord, ImportRecord, LeadSearchResult, PersonRecord, SequenceView, SummaryEntry } from "../src/shared/api.ts";
+import type { BeforeLaunchView, CampaignDefinition, CompanyRecord, ImportRecord, LeadSearchResult, PersonRecord, RecordCalls, SequenceView, SummaryEntry } from "../src/shared/api.ts";
 import { refusedPair, respond, serverError } from "./mocks.ts";
 import { FAKE_INBOX, FAKE_NUMBERS, TWO_CHANNELS, fakeCallsApp, fakeProviderApp, type CallsScenario, type FakeCallsApp, type FakeProviderApp } from "./fake-provider.ts";
 import { fixture } from "./support.ts";
@@ -162,9 +162,29 @@ const BUSINESS_HEADER_ONLY_MISSING_PLACE =
   "business_id,business_name,phone_e164\nbz-1,Some Clinic,+442079460999\n";
 
 /** A person record showing every outreach status, a bad number and a newer email. */
-function galleryRecord(id: string): PersonRecord {
+export function galleryRecord(id: string): PersonRecord & RecordCalls {
   const statuses = OUTREACH_STATUSES;
+  const e = (status: (typeof OUTREACH_STATUSES)[number]) => `e${statuses.indexOf(status)}`;
+  const base = { track: { id: "p1", label: "Phone track" }, zone: "Europe/London", noGoodNumber: false, heldByCallback: false, callbackAt: null, skipLimit: null } as const;
+  const limit = { dueDate: "2026-11-09", limitDays: 2, ifUnworked: "2026-11-10" } as const;
+  // Ticket 15b: every state of an open call on the record (the enrollment beside each is a fixture; the record pairs them by id).
+  const calls: RecordCalls["calls"] = [
+    { ...base, enrollmentId: e("waiting_on_call"), taskId: "t-rolled", kind: "call", listed: true, reason: "rolled_over", listedFor: "2026-11-10", skipLimit: limit },
+    { ...base, enrollmentId: e("callback_scheduled"), taskId: "t-callback", kind: "callback", listed: true, reason: "callback", listedFor: "2026-11-10", callbackAt: "2026-11-10T15:00:00.000Z" },
+    { ...base, enrollmentId: "e-overdue", taskId: "t-overdue", kind: "callback", listed: true, reason: "overdue", listedFor: "2026-11-09", callbackAt: "2026-11-09T11:30:00.000Z", noGoodNumber: true },
+    { ...base, enrollmentId: "e-redial", taskId: "t-redial", kind: "call", listed: false, reason: null, listedFor: "2026-11-11", skipLimit: { ...limit, ifUnworked: "2026-11-11" } },
+    { ...base, enrollmentId: "e-held", taskId: "t-held-callback", kind: "callback", listed: false, reason: null, listedFor: "2026-11-12", callbackAt: "2026-11-12T10:00:00.000Z" },
+    { ...base, enrollmentId: "e-held", taskId: "t-held", track: { id: "p2", label: "Phone track 2" }, kind: "call", listed: false, reason: null, listedFor: "2026-11-10", heldByCallback: true, skipLimit: { ...limit, ifUnworked: null } },
+  ];
+  // Enrollments whose status goes with those calls, after the one-per-status gallery.
+  const more = [
+    { id: "e-overdue", campaign: { id: "c-overdue", name: "Callbacks, overdue" }, status: "callback_scheduled" as const, enrolledAt: "2026-11-12T09:00:00.000Z" },
+    { id: "e-redial", campaign: { id: "c-redial", name: "Calls, redialed" }, status: "waiting_on_call" as const, enrolledAt: "2026-11-12T09:00:00.000Z" },
+    { id: "e-held", campaign: { id: "c-held", name: "Two phone tracks" }, status: "callback_scheduled" as const, enrolledAt: "2026-11-12T09:00:00.000Z" },
+  ];
   return {
+    calls,
+    today: "2026-11-10",
     kind: "person",
     id,
     name: "Status Gallery",
@@ -178,7 +198,7 @@ function galleryRecord(id: string): PersonRecord {
       { id: "d3", owner: "person", channel: "phone", phoneKind: "direct", value: "+44 20 7946 0999", bad: true, newer: false },
       { id: "d4", owner: "company", channel: "phone", phoneKind: "main_line", value: "+44 20 7946 0998", bad: false, newer: false },
     ],
-    enrollments: statuses.map((status, i) => ({ id: `e${i}`, campaign: { id: `c${i}`, name: `Campaign ${i + 1}` }, status, enrolledAt: "2026-11-12T09:00:00.000Z" })),
+    enrollments: [...statuses.map((status, i) => ({ id: `e${i}`, campaign: { id: `c${i}`, name: `Campaign ${i + 1}` }, status, enrolledAt: "2026-11-12T09:00:00.000Z" })), ...more],
     unenrolledReason: null,
     colleagues: [
       { id: "p2", name: "Colleague Two", title: "Manager", enrollments: statuses.slice(5, 8).map((status, i) => ({ id: `ce${i}`, campaign: { id: `c${i}`, name: `Campaign ${i + 1}` }, status, enrolledAt: "2026-11-12T09:00:00.000Z" })), unenrolledReason: null },
@@ -351,7 +371,9 @@ export const JUNIPER_LATER = {
     { id: "p1", name: "Marco Bianchi", title: "Studio owner", enrollments: [{ id: "e2", campaign: { id: "c1", name: "Physio clinics, London" }, status: "queued", enrolledAt: "2026-11-13T09:00:00.000Z" }], unenrolledReason: null },
     { id: "p2", name: "Lucia Neri", title: "Studio manager", enrollments: [], unenrolledReason: "no_usable_channel" },
   ],
-} satisfies CompanyRecord;
+  calls: [],
+  today: "2026-11-13",
+} satisfies CompanyRecord & RecordCalls;
 
 export const JUNIPER_LATER_ROW = {
   rows: [{ kind: "company", id: "co-juniper", name: "Juniper Pilates Studio", city: "London", peopleOnRecord: 2, peopleReachable: 1, enrollments: JUNIPER_LATER.enrollments, unenrolledReason: null }],
@@ -380,6 +402,66 @@ export async function openWithKeptRefusals(page: Page, name: string): Promise<Fa
   await page.goto(`${f.url}/calls`);
   await settle(page, "2 more outcomes not logged");
   return f;
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// Ticket 15b: redials, callbacks, rolled-over and overdue calls, set up over HTTP as another window would.
+
+interface QueueRow { taskId: string; person: { name: string } | null; company: { name: string } }
+interface QueueRead { readyNow: QueueRow[]; laterToday: QueueRow[] }
+
+/** The task of a lead on today's list, and its numbers by kind. */
+export async function callOf(f: FakeCallsApp, who: string): Promise<{ taskId: string; number: (kind: "mobile" | "main_line" | "direct") => string | null }> {
+  const list = (await f.harness.request<QueueRead>("GET", "/api/calls")).body;
+  // A company lead's call has no person: it is found by the company's name.
+  const taskId = [...list.readyNow, ...list.laterToday].find((x) => (x.person?.name ?? x.company.name) === who)?.taskId ?? "";
+  const numbers = (await f.harness.request<{ numbers: { detailId: string; kind: string }[] }>("GET", `/api/call-tasks/${taskId}`)).body.numbers;
+  return { taskId, number: (kind) => numbers.find((n) => n.kind === kind)?.detailId ?? null };
+}
+
+async function logOver(f: FakeCallsApp, taskId: string, body: Record<string, unknown>): Promise<void> {
+  const out = await f.harness.request("POST", `/api/call-tasks/${taskId}/outcome`, { requestId: `setup-${taskId}-${String(body["outcome"])}-${Date.now()}`, ...body });
+  if (out.status !== 200) throw new Error(`setting up failed: ${JSON.stringify(out.body)}`);
+}
+
+/**
+ * Monday: Amira's call redialed, Tom asks for a callback on Tuesday at 11:00, Grace's call left unworked.
+ * Then Tuesday 11:30: Tom's callback is overdue, Amira's redial and Grace's rolled-over call are on their last day.
+ */
+export async function carriedAndOverdue(name: string): Promise<FakeCallsApp> {
+  const f = await freshCalls("ready", name);
+  const amira = await callOf(f, "Amira Hassan");
+  const tom = await callOf(f, "Tom");
+  await logOver(f, amira.taskId, { outcome: "no_answer", redial: true, numberId: amira.number("mobile"), note: "Rang out." });
+  await logOver(f, tom.taskId, { outcome: "callback_requested", callbackAt: "2026-11-10T11:00:00+00:00", numberId: tom.number("main_line"), note: "Call after the morning clinic." });
+  await f.harness.advanceTo(Date.parse("2026-11-10T11:30:00Z"));
+  return f;
+}
+
+/** Monday 10:45: Tom's callback (10:30) is overdue, and the shared main line, his only number, was marked wrong on Amira's call (Q13). */
+export async function callbackWithNoGoodNumber(name: string): Promise<FakeCallsApp> {
+  const f = await freshCalls("ready", name);
+  const amira = await callOf(f, "Amira Hassan");
+  const tom = await callOf(f, "Tom");
+  await logOver(f, tom.taskId, { outcome: "callback_requested", callbackAt: "2026-11-09T10:30:00+00:00", numberId: tom.number("main_line") });
+  await logOver(f, amira.taskId, { outcome: "wrong_number", numberId: amira.number("main_line"), note: "The clinic's line is a fax." });
+  await f.harness.advanceTo(Date.parse("2026-11-09T10:45:00Z"));
+  return f;
+}
+
+/** Tuesday 10:00: Monday's calls were left unworked, so all four are carried over and on their last day. */
+export async function carriedOnly(name: string): Promise<FakeCallsApp> {
+  const f = await freshCalls("ready", name);
+  await f.harness.advanceTo(Date.parse("2026-11-10T10:00:00Z"));
+  return f;
+}
+
+/** Opens Calls on a fresh app at its own clock, and waits for the sheet. */
+export async function openCalls(page: Page, f: FakeCallsApp, path = "/calls"): Promise<void> {
+  await page.clock.setFixedTime(f.harness.clock);
+  await page.goto(f.url + path);
+  if (path === "/calls") await page.getByText(/^Calling hours /).waitFor();
 }
 
 export const SCREENS: readonly Screen[] = [
@@ -530,6 +612,111 @@ export const SCREENS: readonly Screen[] = [
     name: "calls, three kept refusals",
     open: async (page) => {
       await openWithKeptRefusals(page, "screen-three-refusals");
+    },
+  },
+  // Ticket 15b: redials and callbacks on the call sheet, carried and overdue calls on Today and Calls.
+  {
+    name: "calls, a redial chosen",
+    open: async (page) => {
+      await calls(page, "ready", "/calls");
+      await page.getByText(/^Calling hours /).waitFor();
+      await page.getByRole("button", { name: "No answer", exact: true }).click();
+      await page.getByRole("checkbox", { name: /Call again tomorrow/ }).check();
+      await settle(page, "The call moves to the list for Tue 10 Nov");
+    },
+  },
+  {
+    name: "calls, a callback time entered",
+    open: async (page) => {
+      await calls(page, "ready", "/calls");
+      await page.getByText(/^Calling hours /).waitFor();
+      await page.getByRole("button", { name: "Callback requested", exact: true }).click();
+      await page.getByLabel("Their time", { exact: true }).fill("15:30");
+      await settle(page, "Inside their calling hours.");
+    },
+  },
+  {
+    name: "calls, a callback time already passed",
+    open: async (page) => {
+      await calls(page, "ready", "/calls");
+      await page.getByText(/^Calling hours /).waitFor();
+      await page.getByRole("button", { name: "Callback requested", exact: true }).click();
+      await page.getByLabel("Their time", { exact: true }).fill("09:30");
+      await settle(page, "That time has passed.");
+    },
+  },
+  {
+    name: "calls, a callback on a day their calling hours never open",
+    open: async (page) => {
+      await calls(page, "ready", "/calls");
+      await page.getByText(/^Calling hours /).waitFor();
+      await page.getByRole("button", { name: "Callback requested", exact: true }).click();
+      await page.getByLabel("Day", { exact: true }).selectOption("2026-11-14");
+      await page.getByLabel("Their time", { exact: true }).fill("11:00");
+      await settle(page, "Their calling hours never open on that day");
+    },
+  },
+  {
+    name: "calls, a callback logged and held",
+    open: async (page) => {
+      await calls(page, "ready", "/calls", "screen-callback-logged");
+      await page.getByText(/^Calling hours /).waitFor();
+      await page.getByRole("button", { name: "Callback requested", exact: true }).click();
+      await page.getByLabel("Their time", { exact: true }).fill("15:30");
+      await page.getByRole("button", { name: "Log and open next call" }).click();
+      await settle(page, "is held until you log how the callback went.");
+    },
+  },
+  {
+    name: "calls, an overdue callback",
+    open: async (page) => {
+      await openCalls(page, await carriedAndOverdue("screen-overdue"));
+      await settle(page, "Callback overdue since today at 11:00 their time");
+    },
+  },
+  {
+    name: "calls, a callback with no good number left",
+    open: async (page) => {
+      await openCalls(page, await callbackWithNoGoodNumber("screen-q13"));
+      await settle(page, "only skip for now can be logged on this callback");
+    },
+  },
+  {
+    name: "today with an overdue callback, a redial and a rolled-over call",
+    open: async (page) => {
+      await openCalls(page, await carriedAndOverdue("screen-today-carried"), "/");
+      await settle(page, "Tom’s callback is overdue");
+    },
+  },
+  {
+    name: "today with only calls carried over from earlier days",
+    open: async (page) => {
+      await openCalls(page, await carriedOnly("screen-today-carried-only"), "/");
+      await settle(page, "4 calls carried over from earlier days");
+    },
+  },
+  {
+    name: "today with a callback that has no good number left",
+    open: async (page) => {
+      await openCalls(page, await callbackWithNoGoodNumber("screen-today-q13"), "/");
+      await settle(page, "Every number for Tom is marked wrong");
+    },
+  },
+  {
+    name: "a person's record with a redial, a callback and the call skipped unworked",
+    open: async (page) => {
+      const f = await carriedAndOverdue("screen-record-skipped");
+      await f.harness.advanceTo(Date.parse("2026-11-11T11:00:00Z"));
+      await openCalls(page, f, `/leads/people/${f.person("Amira Hassan")}`);
+      await settle(page, "Phone track skipped, not called");
+    },
+  },
+  {
+    name: "a person's record with an overdue callback",
+    open: async (page) => {
+      const f = await carriedAndOverdue("screen-record-overdue");
+      await openCalls(page, f, `/leads/people/${f.person("Tom")}`);
+      await settle(page, "now overdue");
     },
   },
   {

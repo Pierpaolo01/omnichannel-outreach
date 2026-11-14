@@ -38,7 +38,9 @@ test.describe("the phone track on the canvas and in its inspector", () => {
     await expect(inspector.getByRole("button", { name: "Monday", pressed: true })).toBeVisible();
     await expect(inspector.getByRole("button", { name: "Saturday", pressed: false })).toBeVisible();
     await expect(page.getByLabel("Calling starts at")).toHaveValue("9");
-    await expect(inspector.getByText("Logging them on the Calls page arrives with the next release.", { exact: false })).toBeVisible();
+    // Redials and callbacks are logged on the Calls page (ticket 15b), so nothing says they arrive later.
+    await expect(inspector.getByText("Two more outcomes keep the call open, and you log both on the Calls page.", { exact: false })).toBeVisible();
+    await expect(inspector.getByText("arrives with the next release", { exact: false })).toHaveCount(0);
     // The callback hold lasts until its outcome is logged, not until the time asked for (review bot on 72b7252; ADR 0003 2.3).
     await expect(inspector.getByText("pauses this lead’s other outreach in the campaign until you log the callback’s outcome; a missed callback stays on your list, overdue, until you do.", { exact: false })).toBeVisible();
     await expect(inspector.getByText("until the time the prospect asked for", { exact: false })).toHaveCount(0);

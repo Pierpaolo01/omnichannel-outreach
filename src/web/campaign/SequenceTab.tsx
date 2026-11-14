@@ -697,7 +697,7 @@ function PhoneInspector({ track, editor, onLoadedStored, onClose, onRemoved }: {
     <InspectorFrame titleId={titleId} track={track} editor={editor} onClose={onClose}>
       <EditorNotices editor={editor} onLoadedStored={onLoadedStored} />
       <p className="rounded-field bg-raised px-3 py-2 text-[13.5px] text-ink-2">
-        A phone track is one call, placed on your list when it falls due. You dial it and log what happened. For a second planned attempt, add another phone track. The app already handles two more outcomes. A redial, after no answer, a voicemail or a gatekeeper, moves the call to your next day’s list. A callback requested pauses this lead’s other outreach in the campaign until you log the callback’s outcome; a missed callback stays on your list, overdue, until you do. Logging them on the Calls page arrives with the next release.
+        A phone track is one call, placed on your list when it falls due. You dial it and log what happened. For a second planned attempt, add another phone track. Two more outcomes keep the call open, and you log both on the Calls page. A redial, after no answer, a voicemail or a gatekeeper, moves the call to your next day’s list. A callback requested pauses this lead’s other outreach in the campaign until you log the callback’s outcome; a missed callback stays on your list, overdue, until you do.
       </p>
       <div className="flex min-w-0 flex-col gap-[18px]">
         <div className="flex min-w-0 flex-col gap-1.5">

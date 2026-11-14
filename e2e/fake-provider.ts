@@ -247,7 +247,8 @@ export const CALL_SCRIPT = "Ask for the clinic director or the practice owner.\n
 
 const WEEKDAYS_9_TO_17 = [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 }));
 
-export const callsDefinition = (): CampaignDefinition => ({
+/** `afterCallDelayDays`: how long the email after the call waits once the phone track has ended (ticket 15b's `delayed` scenario: 2). */
+export const callsDefinition = (afterCallDelayDays = 0): CampaignDefinition => ({
   timezone: "Europe/London",
   callSkipLimitDays: 2,
   emailPool: [FAKE_INBOX],
@@ -262,13 +263,33 @@ export const callsDefinition = (): CampaignDefinition => ({
       branch: "main",
       window: WEEKDAYS_9_TO_17,
       steps: [step("a1", { subject: "Following up on my call", body: "Hi {{first_name|there}},\n\nThanks for picking up earlier. Here is the two-minute video I mentioned for {{company}}.\n\nAlex", threading: "new_subject" })],
-      start: { kind: "after", trackId: "phone", delayDays: 0 },
+      start: { kind: "after", trackId: "phone", delayDays: afterCallDelayDays },
       removed: false,
     },
   ],
 });
 
-export type CallsScenario = "ready" | "early" | "full";
+export type CallsScenario = "ready" | "early" | "full" | "delayed" | "after-skip";
+
+/**
+ * The verifier's reproduction on 2027f24 (`after-skip`): two phone tracks with skip limits 2 and 8, the email after the
+ * first phone track three days after it ends, and a win-back branch.
+ */
+export const afterSkipDefinition = (): CampaignDefinition => {
+  const base = callsDefinition(3);
+  const [email, phone, afterCall] = base.tracks;
+  if (!email || !phone || !afterCall) throw new Error("the calls definition changed");
+  return {
+    ...base,
+    tracks: [
+      email,
+      { ...phone, callSkipLimitDays: 2 },
+      { ...phone, id: "phone2", steps: [step("c2", { threading: "new_subject" })], callSkipLimitDays: 8 },
+      afterCall,
+      { id: "win-back", channel: "email", branch: "win_back", window: WEEKDAYS_9_TO_17, steps: [step("w1", { subject: "One more idea", body: "Hi {{first_name|there}},\n\nOne more idea for {{company}}.\n\nAlex", threading: "new_subject" })], start: { kind: "entry" }, removed: false },
+    ],
+  };
+};
 
 export interface FakeCallsApp {
   readonly url: string;
@@ -282,7 +303,7 @@ const callsStarted = new Map<string, Promise<FakeCallsApp>>();
 
 /**
  * One calls app per name and test worker. `ready`: Monday 10:00 London, calls ready now. `early`:
- * Monday 07:30, the calls wait for their calling hours. `full`: a daily call capacity of 2, used.
+ * Monday 07:30, the calls wait for their calling hours. `full`: a daily call capacity of 2, used. `delayed`: as `ready`, with the email after the call two days after the phone track ends.
  * The scans share each scenario's app and change nothing in it; a test that logs takes its own name.
  */
 export function fakeCallsApp(scenario: CallsScenario, name: string = scenario): Promise<FakeCallsApp> {
@@ -301,7 +322,7 @@ async function startCalls(scenario: CallsScenario): Promise<FakeCallsApp> {
   const csv = { businessesCsv: readFileSync(fixture("businesses-run1.csv"), "utf8"), peopleCsv: readFileSync(fixture("people-run1.csv"), "utf8") };
   const campaign = (await harness.request<{ campaign: Campaign }>("POST", "/api/campaigns", { name: "Clinics, London", defaultTimezone: "Europe/London", ...csv })).body.campaign.id;
   await harness.tick();
-  await harness.defineSequence(campaign, callsDefinition());
+  await harness.defineSequence(campaign, scenario === "after-skip" ? afterSkipDefinition() : callsDefinition(scenario === "delayed" ? 2 : 0));
   harness.clock = MONDAY_8 - H;
   const launched = await harness.launch(campaign);
   if (launched.status !== 200) throw new Error(`the calls campaign did not launch: ${JSON.stringify(launched.body)}`);
