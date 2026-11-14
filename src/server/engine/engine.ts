@@ -287,6 +287,8 @@ export class Engine {
       if (a.retry === "wanted" || a.retry === "wanted_after_not_sent") times.push(slot);
     }
     for (const w of await this.store.openWork()) if (w.nextLookupWall !== null) times.push(w.nextLookupWall);
+    // A withdrawal answered "unknown" is asked again one settling period later (council A on 56d599c).
+    for (const w of await this.store.workToWithdraw()) times.push(w.withdrawLastWall === null ? now : w.withdrawLastWall + ENGINE_PARAMS.SETTLING);
     // A callback changes on the list by the clock (ticket 15): listed from the start of its day, ready at
     // its time. No engine write happens then; the wake is there so the screens' next change covers it.
     for (const t of await this.store.openCallbackInstants()) times.push(t);
@@ -640,8 +642,9 @@ export class Engine {
    */
   private async withdraw(): Promise<boolean> {
     let changed = false;
+    const carried = new Set((await this.store.openAttempts()).map((a) => a.idempotencyKey));
     for (const w of await this.store.workToWithdraw()) {
-      if (!this.rules.withdrawalDue(w, this.now())) continue;
+      if (!this.rules.withdrawalDue(w, this.now(), carried.has(w.key))) continue;
       const port = await this.portOf(w.accountId);
       const answer = await this.bounded(() => port.withdraw(this.ref(w)), "unknown" as const);
       // "Too late" means it went: the lookup is asked for its send time first, so its successor counts from the real send.
@@ -924,7 +927,9 @@ export class Engine {
   /** ADR 0002's pre-send check, recorded on the attempt. False when it could not run or found a reply. */
   private async presend(a: Attempt): Promise<boolean> {
     const now = this.now();
-    if (a.presendCheckedWall !== null && a.presendCheckedWall >= now - ENGINE_PARAMS.PRESEND_MAX_AGE && !a.presendFoundReply) return true;
+    // A handover always reads the provider afresh, right before its authorization (council K on 56d599c): an earlier check,
+    // even a recent one, is not reused, so the window in which a reply can reach the provider unseen is the time between this
+    // read and the authorization's commit, with no provider call between them but a wait for the inbox's lock.
     const subject = await this.store.subject(a.subjectId, now);
     const threadRefs = (subject?.work ?? []).flatMap((w) => (w.providerRef === null ? [] : [w.providerRef]));
     const port = await this.portOf(a.accountId);

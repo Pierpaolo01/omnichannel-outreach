@@ -1,5 +1,5 @@
 import type { CallAnswer } from "../../src/domain/sequence/attempt.ts";
-import type { AccountStatus, AttemptRef, HandoverRequest, LookupResult, ProviderEvent, SendPort, Transport } from "../../src/server/engine/ports.ts";
+import type { PresendRequest, AccountStatus, AttemptRef, HandoverRequest, LookupResult, ProviderEvent, SendPort, Transport } from "../../src/server/engine/ports.ts";
 import type { DeliveryLogEntry, HandoverLogEntry } from "./fake-email-port.ts";
 
 /**
@@ -95,9 +95,13 @@ export class FakeSmsPort implements SendPort {
     );
   }
 
-  /** Replies arrive through observation; there is nothing to check before a text. */
-  presendCheck(): Promise<{ kind: "clear" }> {
-    return Promise.resolve({ kind: "clear" });
+  /**
+   * The pre-send check a real SMS provider's inbound messages allow (ticket 17a; council K on 56d599c): any text from the
+   * mobile to the number that the lead's record does not hold stops the send, whether or not it has been observed yet.
+   */
+  presendCheck(request: PresendRequest): Promise<{ kind: "clear" } | { kind: "reply"; providerRef: string; at: number }> {
+    const reply = this.replyLog.find((r) => r.from === request.destination && r.to === request.sender && r.at <= this.now() && !request.knownReplies.includes(r.id));
+    return Promise.resolve(reply ? { kind: "reply", providerRef: reply.id, at: reply.providerAt } : { kind: "clear" });
   }
 
   private pick(): FakeSmsMode {

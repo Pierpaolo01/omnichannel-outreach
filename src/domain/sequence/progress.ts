@@ -152,8 +152,12 @@ export function quiesce(state: SubjectState, trackId: string | null = null): Sub
   return next;
 }
 
-/** Work whose withdrawal is to be asked of the provider at `now`: wanted, unsettled, and not asked within a settling period. */
-export function withdrawalDue(w: ProviderWork, now: number): boolean {
+/**
+ * Work whose withdrawal is to be asked of the provider at `now`: wanted, unsettled, and not asked within a settling period,
+ * whether or not a live attempt still carries it (`carried`, which the rule deliberately ignores; a mutation reads it).
+ */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- the rule ignores it by design; a mutation reads it
+export function withdrawalDue(w: ProviderWork, now: number, carried = true): boolean {
   return w.withdrawWanted && isUncertain(w) && (w.withdrawLastWall === null || now >= w.withdrawLastWall + ENGINE_PARAMS.SETTLING);
 }
 

@@ -48,6 +48,8 @@ export interface ControlRunOptions {
   readonly presendFirstReply?: boolean;
   /** For a mutation: the senders' pacing gap the engine is given, while the record keeps expecting 5 minutes (P3). */
   readonly gapMs?: number;
+  /** For a mutation: the store counts an account's in-flight places by live attempts, as before council B on 56d599c. */
+  readonly occupancyCountsAttempts?: boolean;
 }
 
 export interface ControlRunResult {
@@ -107,6 +109,11 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   // on a non-final "not sent" while still uncertain (the reviewer's reproduction, review bot on ca8baee, item 2).
   if (keepsSending || lookupLags) h.fake.withdrawAnswers = "unknown-sends";
   if (options.presendFirstReply === true) h.fake.presendFirstReply = true;
+  if (options.occupancyCountsAttempts === true) {
+    // The mutation replaces the store's own count (`occupancy`) with live attempts only.
+    const store = h.store.engine as unknown as { db: { prepare(sql: string): { get(...a: unknown[]): Record<string, unknown> | undefined } }; occupancy: (id: string) => number };
+    store.occupancy = (id: string) => Number(store.db.prepare("SELECT COUNT(*) AS n FROM attempts WHERE account_id = ? AND state IN ('claimed', 'handed', 'accepted')").get(id)?.["n"] ?? 0);
+  }
   const email = h.fake;
   const sms = h.sms;
 
@@ -219,7 +226,18 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     const call = handovers(t.channel).find((c) => c.key === d.key);
     // The app learns of a send from the provider's event or from a lookup that answers sent, whichever is first.
     const looked = t.channel === "email" ? (email.lookupLog.find((l) => l.key === d.key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity) : Infinity;
-    return { at: pointOf(s, Math.max(d.at, call?.at ?? d.at)), seen: Math.min(d.visibleAt, looked), kind: "sent" };
+    // Or from a withdrawal answered "too late" (council J): the worker then asks the lookup; if it does not say sent yet,
+    // the send is recorded at the answer's instant.
+    const tooLate = t.channel === "email" ? email.withdrawLog.find((w) => w.key === d.key && w.answer === "too-late") : undefined;
+    const seen = Math.min(d.visibleAt, looked);
+    if (tooLate && tooLate.at <= seen) {
+      const lookedThen = email.lookupLog.some((l) => l.key === d.key && l.at === tooLate.at && l.answer === "sent");
+      // A first withdrawal is asked in the worker's pass after the control that wanted it, at that instant: ordered after the
+      // control. A retry comes in a pass of its own, before any action at its instant.
+      const first = email.withdrawLog.find((w) => w.key === d.key) === tooLate;
+      return { at: pointOf(s, lookedThen ? Math.max(d.at, call?.at ?? d.at) : tooLate.at), seen: first ? tooLate.at + 1 : tooLate.at, kind: "sent" };
+    }
+    return { at: pointOf(s, Math.max(d.at, call?.at ?? d.at)), seen, kind: "sent" };
   }
   /** A track's start (wall), or null while its rule is not met. */
   function startOf(s: Subject, t: TrackDefinition): number | null {
@@ -386,6 +404,32 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
         const sawIt = email.presendLog.some((p) => p.repliesSeen > index && p.at <= c.at && p.threadRefs.includes(r.threadRef ?? ""));
         if (!restarted && sawIt) problem(`P1: ${r.subjectId}/${c.stepId} was handed over at ${isoOf(c.at)}, after a reply at ${isoOf(r.at)} that a pre-send check could read and before any restart${process.env["CONTROLS_DEBUG"] ? ` [reply ${JSON.stringify(r)}; checks ${JSON.stringify(email.presendLog.filter((p) => p.at >= r.at - HOUR && p.at <= c.at + MINUTE).map((p) => [isoOf(p.at), p.threadRefs, p.answered, p.repliesSeen]))}; endings ${JSON.stringify(endings.filter((e) => e.subjectId === r.subjectId).map((e) => [e.kind, isoOf(e.at), isoOf(e.restartedAt)]))}; app replies ${JSON.stringify((await h.store.engine.subject(r.subjectId, now))?.replies)}; handover ${JSON.stringify([c.key, c.destination, isoOf(c.at)])}; index ${index}]` : ""}`);
       }
+    }
+    // Council A on 56d599c: a withdrawal answered "unknown" is asked again one settling period on, while the work has no
+    // final answer by the record (not known sent, not withdrawn), whether or not an attempt still carries it.
+    const SETTLING = 15 * MINUTE;
+    for (const key of new Set(email.withdrawLog.map((w) => w.key))) {
+      const asks = email.withdrawLog.filter((w) => w.key === key);
+      const last = asks.at(-1)!;
+      if (last.answer !== "unknown" || now < last.at + SETTLING + MINUTE) continue;
+      const d = email.deliveryLog.find((x) => x.key === key);
+      const known = d ? Math.min(d.visibleAt, email.lookupLog.find((l) => l.key === key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity) : Infinity;
+      if (known <= last.at + SETTLING) continue;
+      const owner = email.handoverLog.find((c) => c.key === key)?.subjectId ?? "";
+      const st = await h.store.engine.subject(owner, now);
+      problem(`A: the withdrawal of ${key} answered unknown at ${isoOf(last.at)} and was not asked again by ${isoOf(last.at + SETTLING)}, though its work had no final answer${process.env["CONTROLS_DEBUG"] ? ` [work ${JSON.stringify(st?.work.find((w) => w.key === key))}; attempts ${JSON.stringify(st?.attempts.filter((a) => a.idempotencyKey === key).map((a) => [a.state, a.endedBy, a.withdrawRequested, a.withdrawCalled]))}; handovers ${JSON.stringify(email.handoverLog.filter((c) => c.key === key).map((c) => isoOf(c.at)))}; lookups ${JSON.stringify(email.lookupLog.filter((l) => l.key === key).map((l) => [isoOf(l.at), l.answer]))}; asks ${JSON.stringify(asks.map((w) => [isoOf(w.at), w.answer]))}]` : ""}`);
+    }
+    // Council B: each email handover finds fewer than the inbox's k = 2 other pieces of work handed over and unsettled, by
+    // the provider's own logs (settled once the app knows it sent, or the provider confirmed a withdrawal).
+    const firstCalls = email.handoverLog.filter((c, i, all) => all.findIndex((x) => x.key === c.key) === i);
+    const settledAt = (key: string) => {
+      const d = email.deliveryLog.find((x) => x.key === key);
+      const sent = d ? Math.min(d.visibleAt, email.lookupLog.find((l) => l.key === key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity, email.withdrawLog.find((w) => w.key === key && w.answer === "too-late")?.at ?? Infinity) : Infinity;
+      return Math.min(sent, email.withdrawLog.find((w) => w.key === key && w.answer === "withdrawn")?.at ?? Infinity);
+    };
+    for (const c of firstCalls) {
+      const held = firstCalls.filter((x) => x.key !== c.key && x.at < c.at && settledAt(x.key) > c.at);
+      if (held.length >= 2) problem(`B: ${c.subjectId}/${c.stepId} was handed over at ${isoOf(c.at)} while the inbox already had ${held.length} pieces of work with the provider unsettled (${held.map((x) => x.key).join(", ")})`);
     }
     // P12: the day's committed calls, by the record: carried calls open at the day's start, of leads not held then.
     const dayStart = startOfDay(local(now, ZONE).day, ZONE);

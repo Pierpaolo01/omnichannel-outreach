@@ -83,6 +83,21 @@ const RULES: Record<string, Partial<Rules>> = {
   // Pacing is held twice by construction (the slot taken in the handover transaction, and moved after the call), so no
   // one rule removes it: this runs the engine with a one-second gap while the record expects five minutes (options below).
   "the pacing gap ignored": {},
+  // P8 (council D3 on 56d599c): a send the provider made while the lead was held counts from its wall instant, not from
+  // where the lead's clock stood, so its successor is due early.
+  "a late send after a pause resolves its successor on the wall clock": {
+    sendPoint: (clock, freezes, providerTime, handedWall, now) => {
+      const real = R.sendPoint(clock, freezes, providerTime, handedWall, now);
+      const t = Math.min(Math.max(providerTime, handedWall), now);
+      return { at: real.at - (t - real.atWall), atWall: t };
+    },
+  },
+  // Council on 56d599c, items A and B.
+  "a withdrawal's retries stop when its attempt retires": {
+    withdrawalDue: (w, now, carried) => carried === true && R.withdrawalDue(w, now, carried),
+  },
+  // The in-flight count is the store's (options below): it counts live attempts, as before the fix.
+  "the in-flight bound counts live attempts": {},
   "a reply the record holds clears the pre-send check": {
     presendAnswer: (answer, known) => (answer.kind === "reply" && "providerRef" in answer && known.includes(String(answer.providerRef)) ? { kind: "clear" as const } : answer),
   },
@@ -90,7 +105,7 @@ const RULES: Record<string, Partial<Rules>> = {
 
 /** The invariant each mutation must break, and the seed offset known to show it (refreshed by the CI search). */
 const EXPECTED: Record<string, { invariant: string; seed: number; options?: Partial<ControlRunOptions> }> = {
-  "a lead pause holds nothing": { invariant: "P9", seed: 2 },
+  "a lead pause holds nothing": { invariant: "P9", seed: 1 },
   "skip skips two steps": { invariant: "P11", seed: 0 },
   "a skipped step is sent all the same": { invariant: "P4", seed: 10 },
   "stop leaves the clock running": { invariant: "P9", seed: 0 },
@@ -100,8 +115,11 @@ const EXPECTED: Record<string, { invariant: string; seed: number; options?: Part
   "resuming a lead releases its campaign's pause": { invariant: "P9", seed: 4 },
   "skip ignores provider work withdrawn on a non-final not-sent": { invariant: "P11", seed: 19 },
   "a control's preview skips what fell due": { invariant: "P11", seed: 10 },
-  "a refused request runs when sent again": { invariant: "P7", seed: 6 },
+  "a refused request runs when sent again": { invariant: "P7", seed: 2 },
   "the pacing gap ignored": { invariant: "P3", seed: 0, options: { gapMs: 1000 } },
+  "a late send after a pause resolves its successor on the wall clock": { invariant: "P2", seed: 12 },
+  "a withdrawal's retries stop when its attempt retires": { invariant: "A", seed: 1 },
+  "the in-flight bound counts live attempts": { invariant: "B", seed: 2, options: { occupancyCountsAttempts: true } },
   // With the provider answering the first thread's reply, as the adapter did on ca8baee: the defect restored.
   "a reply the record holds clears the pre-send check": { invariant: "P1", seed: 24, options: { presendFirstReply: true } },
 };

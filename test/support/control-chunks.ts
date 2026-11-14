@@ -13,7 +13,7 @@ import { FULL_SEARCH, inShard } from "./sequence-chunks.ts";
 
 export const CONTROL_SEED = 17_000;
 /** Offsets from CONTROL_SEED, chosen greedily from a sweep of all 100 (14 November 2026, after the review bot and the verifier on ca8baee) to reach every behaviour below. */
-export const CONTROL_FIXED_SEEDS: readonly number[] = [6, 8, 33, 37, 40, 48, 61, 76, 86, 87, 96];
+export const CONTROL_FIXED_SEEDS: readonly number[] = [0, 8, 31, 33, 37, 45, 48, 61, 76, 86, 96];
 const SEARCH_SEEDS = 100;
 const MAX_SEEDS = 30;
 const RUN_WRITES = 10_000;
