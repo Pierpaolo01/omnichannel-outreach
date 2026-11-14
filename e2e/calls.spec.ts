@@ -475,3 +475,19 @@ test("three kept refusals leave the call on screen: the oldest shows, the rest w
   await page.getByText("2 more outcomes not logged").click();
   await expect(page.getByRole("list", { name: "More outcomes not logged" }).getByRole("listitem").first()).toContainText("Left with the practice manager.");
 });
+
+test("opening the next call keeps refusals that wait behind the count, with their notes, until each is dismissed (review bot on 26d4b49)", async ({ page }) => {
+  await page.setViewportSize({ width: 1360, height: 900 });
+  const f = await openWithKeptRefusals(page, "kept-refusals-move-on");
+  // Another window logs the call these refusals are for; the page says so.
+  const t = await focused(f);
+  await logElsewhere(f, t.taskId, "interested", t.numberId);
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await page.getByRole("button", { name: "Open the next call" }).click();
+  await expect(page.getByRole("heading", { name: "Tom" })).toBeVisible();
+  // Nothing was dismissed: all three are still kept, two of them behind the count.
+  await expect(page.getByText("2 more outcomes not logged")).toBeVisible();
+  expect(await page.evaluate(() => Object.keys(window.localStorage).filter((k) => k.startsWith("outreach.calls.outbox.")).length)).toBe(3);
+  await page.getByText("2 more outcomes not logged").click();
+  await expect(page.getByRole("list", { name: "More outcomes not logged" })).toContainText("Line busy twice, try the mobile.");
+});

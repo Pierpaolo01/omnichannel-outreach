@@ -21,7 +21,7 @@ import { CallDesk, NoAnswer, Refused, type DeskFault, type KeyValue, type Outcom
  *
  * Invariants (ADR 0003 4.4.1, numbered as there), from an independent record of every press:
  * 1. Nothing stored twice. 2. Never more than the server said. 3. Nothing lost: every press is stored
- * or kept as a refusal with its note until acknowledged. 4. The focus holds. 5. One lock.
+ * or kept as a refusal with its note until its own Dismiss. 4. The focus holds. 5. One lock.
  * 6. The user's choice stands. 7. Status is derived and true. 8. A desk off screen writes only the
  * outbox. 9. Liveness: after settling nothing is unanswered and no desk shows an action pending.
  * 10. Bounded sending (checked by a count of requests in callDesk.test.ts). 11. Every sentence about
@@ -326,13 +326,13 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
   const check = async (moved: Set<Instance>) => {
     // Storage is the only truth: an entry removed in any tab never reappears.
     for (const k of local.reappeared.splice(0)) problems.push(`3: ${k} was removed and came back`);
-    // Invariant 10: a refused press keeps its record until the user acknowledges it.
+    // Invariant 3: a refused press keeps its record until the user presses its own Dismiss; nothing else removes it.
     for (const p of presses) {
       const refusedId = [...p.ids].find((id) => refusedIds.has(id));
       if (refusedId === undefined || dismissed.has(refusedId)) continue;
       if (shownRefusal(refusedId)) seenRefused.add(p);
       // A refusal storage would not record is shown by the desk that got it; if that desk is gone, the entry is still unanswered.
-      else if (!movedOnFrom.has(refusedId) && local.get(`outreach.calls.outbox.${refusedId}`) === null) problems.push(`3: press ${refusedId} was refused and is shown nowhere`);
+      else if (local.get(`outreach.calls.outbox.${refusedId}`) === null) problems.push(`3: press ${refusedId} was refused and is shown nowhere`);
     }
     for (const p of presses) {
       let n = 0;
@@ -399,8 +399,6 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
     }
   };
 
-  /** Refusals a desk showed on the call and the user moved on from (acknowledged). */
-  const movedOnFrom = new Set<string>();
   const seen = { loggedFromRead: 0, heldGets: 0, failedReads: 0, sessionRefused: 0, confirming: 0, refusedShown: 0, foundGone: 0, unconfirmed: 0, blocked: 0, recovered: 0, dismissed: 0, records: 0, leftWithPending: 0, notQueued: 0, refusalFocus: new Set<string>() };
   let storageFullUntil = -1;
   const tabs: Tab[] = [];
@@ -490,8 +488,7 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
     } else if (roll < 0.73) {
       if (snap.away !== null) {
         moved.add(tab.instance);
-        // Moving on from a call acknowledges every refusal kept for it.
-        for (const r of snap.refusedRecords) if (r.taskId === snap.away.taskId) movedOnFrom.add(r.body.requestId);
+        // Moving on dismisses nothing: every refusal kept for the call stays until its own Dismiss.
         void desk.moveOn();
       } else if (snap.refusedRecords.length > 0) {
         const first = snap.refusedRecords[0]!;
@@ -679,6 +676,7 @@ describe("each desk fault is caught by its known seed (ADR 0003 4.4.1)", () => {
     ["refusal_dropped", 9100, "3:"],
     ["focused_refusal_hidden", 9101, "3:"],
     ["stale_copy_written_back", 9115, "3:"],
+    ["refusal_removed_on_move_on", 9101, "3:"],
     ["stored_press_left_as_draft", 9100, "12:"],
     ["answer_clears_draft", 9100, "6:"],
     ["first_read_skips_reconcile", 9123, "3:"],
@@ -696,7 +694,7 @@ describe("each desk fault is caught by its known seed (ADR 0003 4.4.1)", () => {
 /** By hand: CALL_DESK_FAULT_SEARCH=1 prints the first seeds that catch each fault, to fill KILLING above. */
 describe.skipIf(!process.env["CALL_DESK_FAULT_SEARCH"])("fault search (by hand)", () => {
   // refusal_resent_at_once needs storage full while answers keep coming; callDesk.test.ts kills it by a count of requests.
-  const all: DeskFault[] = ["new_id_on_resend", "logged_when_sent", "outbox_removed_when_sent", "refresh_adopts_focus", "no_lock_while_pending", "substitute_bad_number", "pending_kept_after_answer", "disposed_desk_applies", "only_focused_entries_retried", "refusal_dropped", "focused_refusal_hidden", "stale_copy_written_back", "stored_press_left_as_draft", "answer_clears_draft", "first_read_skips_reconcile", "task_failures_uncounted", "reads_overlap"];
+  const all: DeskFault[] = ["new_id_on_resend", "logged_when_sent", "outbox_removed_when_sent", "refresh_adopts_focus", "no_lock_while_pending", "substitute_bad_number", "pending_kept_after_answer", "disposed_desk_applies", "only_focused_entries_retried", "refusal_dropped", "focused_refusal_hidden", "stale_copy_written_back", "refusal_removed_on_move_on", "stored_press_left_as_draft", "answer_clears_draft", "first_read_skips_reconcile", "task_failures_uncounted", "reads_overlap"];
   for (const fault of all) {
     test(fault, async () => {
       const found: string[] = [];

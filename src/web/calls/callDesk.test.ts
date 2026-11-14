@@ -249,7 +249,7 @@ describe("a desk that is no longer on screen writes nothing but the outbox (revi
   });
 });
 
-describe("a refusal is kept, with its note, until acknowledged (verifier on e6872eb, item 5)", () => {
+describe("a refusal is kept, with its note, until dismissed (verifier on e6872eb, item 5)", () => {
   const recoveredRefusal = async (faults: ReadonlySet<DeskFault> = new Set()) => {
     const w = await world();
     const a = w.desk(new MapStore(), faults);
@@ -831,5 +831,47 @@ describe("a refusal this device cannot record is shown, never a reason to ask ag
   test("the fault that sends again at once when the refusal cannot be recorded is caught by the count of requests", async () => {
     const { w } = await refusedWhileFull(new Set(["refusal_resent_at_once"]));
     expect(w.posts()).toBeGreaterThan(2);
+  });
+});
+
+describe("a kept refusal is removed only by its own Dismiss (review bot on 26d4b49)", () => {
+  /** Two refusals kept for the call on screen and an older one for another call; the call is then logged elsewhere. */
+  const kept = async (faults: ReadonlySet<DeskFault> = new Set()) => {
+    const w = await world();
+    const queue = (await w.h.request<CallsView>("GET", "/api/calls")).body;
+    const [onScreen, other] = [queue.readyNow[0]!.taskId, queue.readyNow[1]!.taskId];
+    const refused = { message: "This call is already logged.", offList: null };
+    const put = (id: string, taskId: string, note: string, pressedAt: number) =>
+      w.local.set(`outreach.calls.outbox.${id}`, JSON.stringify({ v: 2, taskId, who: "Someone", body: { requestId: id, outcome: "no_answer", numberId: null, note, noteScope: "person" }, pressedAt, refused }));
+    put("older-other", other, "Older note on another call.", 1);
+    put("kept-1", onScreen, "First note, behind the count.", 2);
+    put("kept-2", onScreen, "Second note, behind the count.", 3);
+    const view = (await w.h.request<CallTaskView>("GET", `/api/call-tasks/${onScreen}`)).body;
+    expect((await w.h.request("POST", `/api/call-tasks/${onScreen}/outcome`, { requestId: "elsewhere-9", outcome: "interested", numberId: view.numbers[0]?.detailId })).status).toBe(200);
+    const session = new MapStore();
+    session.set("outreach.calls.focus", onScreen);
+    const a = w.desk(session, faults);
+    await a.start();
+    await flush();
+    expect(a.getSnapshot().away?.offList.reason).toBe("logged");
+    return { w, a };
+  };
+
+  test("moving on from the call keeps every refusal kept for it, with its note", async () => {
+    const { w, a } = await kept();
+    await a.moveOn();
+    await flush();
+    expect(a.getSnapshot().refusedRecords.map((r) => r.body.note)).toEqual(["Older note on another call.", "First note, behind the count.", "Second note, behind the count."]);
+    expect(w.outbox()).toHaveLength(3);
+    // Each goes only by its own Dismiss.
+    a.dismiss("kept-1");
+    expect(a.getSnapshot().refusedRecords.map((r) => r.body.requestId)).toEqual(["older-other", "kept-2"]);
+  });
+
+  test("the fault that removes a call's refusals on moving on is caught", async () => {
+    const { a } = await kept(new Set(["refusal_removed_on_move_on"]));
+    await a.moveOn();
+    await flush();
+    expect(a.getSnapshot().refusedRecords).toHaveLength(1);
   });
 });

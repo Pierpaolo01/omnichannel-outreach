@@ -7,7 +7,7 @@
  * - The outbox (shared by the user's tabs) is the only shared state. Log writes an entry before the
  *   first send; any desk sends any unanswered entry it sees, on one backoff, until the server answers.
  * - An answer only updates the outbox: accepted removes the entry; refused rewrites it as refused,
- *   keeping the typed note until the user acknowledges it. An answer never touches a draft.
+ *   keeping the typed note until the user dismisses that refusal. An answer never touches a draft.
  * - Everything shown for the call on screen is `reconcile` of three inputs: the server's latest read
  *   of the call, the outbox entries for it, and the user's draft in memory.
  * - Reads are serial per resource (refresher.ts), and every failure counts toward the page's freshness.
@@ -35,7 +35,7 @@ export interface OutboxEntry {
   readonly body: OutcomeBody;
   /** When it was pressed (ms since the epoch, this device's clock): kept refusals are listed oldest first. */
   readonly pressedAt?: number;
-  /** Set when the server refused it: kept, with the note, until the user acknowledges it. */
+  /** Set when the server refused it: kept, with the note, until the user dismisses it (its own Dismiss only). */
   readonly refused?: { readonly message: string; readonly offList: CallOffListView | null };
 }
 
@@ -111,6 +111,7 @@ export type DeskFault =
   | "focused_refusal_hidden"
   | "stale_copy_written_back"
   | "refusal_resent_at_once"
+  | "refusal_removed_on_move_on"
   | "stored_press_left_as_draft"
   | "answer_clears_draft"
   | "first_read_skips_reconcile"
@@ -597,11 +598,9 @@ export class CallDesk {
   async moveOn(): Promise<void> {
     const away = this.state.away;
     if (!this.live || !away || this.state.pending !== null) return;
-    // Moving on from the call acknowledges every refusal kept for it, which the page showed with its note.
-    for (const e of this.entries()) {
-      if ((!e.refused && !this.unstored.has(e.body.requestId)) || e.taskId !== away.taskId) continue;
-      this.ports.local.remove(OUTBOX + e.body.requestId);
-      this.forgetUnstored(e.body.requestId);
+    // A kept refusal goes only by its own Dismiss: moving on keeps every one, shown or behind the count (review bot on 26d4b49).
+    if (this.fault("refusal_removed_on_move_on")) {
+      for (const e of this.entries()) if (e.refused && e.taskId === away.taskId) this.ports.local.remove(OUTBOX + e.body.requestId);
     }
     // The call's draft stays in this tab: if the server lists the call again and puts it first, it is still there.
     this.ports.session.remove(FOCUS);
