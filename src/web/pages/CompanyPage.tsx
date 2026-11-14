@@ -1,7 +1,9 @@
 import { Redirect } from "wouter";
-import type { CompanyRecord, RecordCalls } from "../../shared/api.ts";
+import type { CompanyRecord, RecordCalls, RecordControls } from "../../shared/api.ts";
+import type { Controls } from "../controls/useControls.ts";
 import { Activity } from "../activity.tsx";
-import { useApi } from "../api.ts";
+import { useControls } from "../controls/useControls.ts";
+import { useLiveRead } from "../controls/useLiveRead.ts";
 import { BackToLeads, CampaignRows, ContactRow, ErrorState, LocalTime, PeopleRows, RecordSkeleton, Section } from "../components.tsx";
 import { NoSuchRecord } from "./PersonPage.tsx";
 
@@ -10,28 +12,31 @@ import { NoSuchRecord } from "./PersonPage.tsx";
  * a lead has no page of its own; its record is Leads filtered to the company (principal, 12 Nov 2026).
  */
 export function CompanyPage({ id }: { id: string }) {
-  const { result, retry } = useApi<CompanyRecord & RecordCalls>(`/api/companies/${encodeURIComponent(id)}`);
+  // Read live (ticket 17b): after a control's answer, on another tab's control and while visible.
+  const { read, refresh } = useLiveRead<CompanyRecord & RecordCalls & RecordControls>(`/api/companies/${encodeURIComponent(id)}`);
+  const targets = read.state === "ready" ? read.data.leads.map((l) => ({ kind: "lead" as const, id: l.id })) : [];
+  const controls = useControls(targets, refresh);
   return (
     <div>
       <BackToLeads />
-      {result.state === "loading" ? (
+      {read.state === "loading" ? (
         <RecordSkeleton />
-      ) : result.state === "error" ? (
-        result.notFound ? (
+      ) : read.state === "error" ? (
+        read.notFound ? (
           <NoSuchRecord />
         ) : (
-          <ErrorState title="This record didn’t load." message={result.message} onRetry={retry} />
+          <ErrorState title="This record didn’t load." message={read.message} onRetry={() => void refresh()} />
         )
-      ) : result.data.enrollments.length === 0 && result.data.people.length > 0 ? (
-        <Redirect to={`/leads?company=${result.data.id}`} replace />
+      ) : read.data.enrollments.length === 0 && read.data.people.length > 0 ? (
+        <Redirect to={`/leads?company=${read.data.id}`} replace />
       ) : (
-        <Company company={result.data} />
+        <Company company={read.data} controls={controls} reads={read.reads} />
       )}
     </div>
   );
 }
 
-function Company({ company }: { company: CompanyRecord & RecordCalls }) {
+function Company({ company, controls, reads }: { company: CompanyRecord & RecordCalls & RecordControls; controls: Controls; reads: number }) {
   return (
     <article className="flex max-w-[780px] flex-col gap-10">
       <header className="flex flex-wrap items-end justify-between gap-5">
@@ -52,7 +57,7 @@ function Company({ company }: { company: CompanyRecord & RecordCalls }) {
       <ContactRow details={company.contactDetails} />
 
       <Section title="Campaigns">
-        <CampaignRows enrollments={company.enrollments} unenrolledReason={company.unenrolledReason} who="company" calls={company} />
+        <CampaignRows enrollments={company.enrollments} unenrolledReason={company.unenrolledReason} who="company" calls={company} leads={company} controls={controls} name={company.name} />
       </Section>
 
       {company.people.length > 0 && (
@@ -61,7 +66,7 @@ function Company({ company }: { company: CompanyRecord & RecordCalls }) {
         </Section>
       )}
 
-      {company.enrollments.length > 0 && <Activity path={`/api/companies/${encodeURIComponent(company.id)}/activity`} />}
+      {company.enrollments.length > 0 && <Activity path={`/api/companies/${encodeURIComponent(company.id)}/activity`} reads={reads} />}
     </article>
   );
 }

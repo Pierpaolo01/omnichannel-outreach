@@ -7,7 +7,8 @@
  */
 import { leadNow, wallOfLead } from "./clock.ts";
 import type { TrackDefinition } from "./definition.ts";
-import { advanceTrack, channelReaches, end, enterMain, enterWinBack, evaluate, finishTrack, hasWorkLeft, liveTracksFor, progressOf, quiesce, runs, synced } from "./progress.ts";
+import type { OutreachStatus } from "../outreach-status.ts";
+import { advanceTrack, channelReaches, deriveStatus, end, enterMain, enterWinBack, evaluate, finishTrack, hasWorkLeft, liveTracksFor, progressOf, quiesce, runs, synced } from "./progress.ts";
 import { isUncertain } from "./attempt.ts";
 import type { SubjectState } from "./state.ts";
 
@@ -199,4 +200,85 @@ export function campaignRefusal(row: { readonly launchedAt: number | null; reado
   if (row === null) return "There is no such campaign.";
   if (pause) return row.launchedAt === null ? "This campaign has not launched." : row.pausedSince !== null ? "This campaign is already paused." : null;
   return row.pausedSince === null ? "This campaign is not paused." : null;
+}
+
+/**
+ * What a control was confirmed on (coordinator's ruling on the verifier's B1 at 8a1732a; the precondition is the whole
+ * preview since the verifier's R1 on 57d874f): the lead's status in the read the confirmation showed, and the digest of
+ * the preview it showed (`previewDigest`). Sent with the request, so a confirmation shown on one state never applies to
+ * another, whichever tab or process sent first.
+ */
+export interface LeadExpectation {
+  readonly status: OutreachStatus;
+  readonly preview: string;
+}
+
+export const CHANGED_SINCE_CONFIRMED = "This lead changed since you confirmed this, so nothing was changed. Look at the row again and confirm what it shows now.";
+export const PREVIEW_CHANGED = "What this would do changed since you confirmed it, so nothing was changed. Look at the row again and confirm what it shows now.";
+
+const stepKey = (step: { readonly track: TrackDefinition; readonly stepId: string } | null): string => (step ? `${step.track.id}/${step.stepId}@${step.track.branch}` : "-");
+
+/**
+ * What a control's preview names, as one short string (verifier R1 on 57d874f): the action, the lead's status after it, the
+ * step it skips and the next step it leaves the lead on (track, step and branch). The same facts the preview shows
+ * (`effectOf`: `skipTarget` before, `currentStep` and the status after), and nothing that moves with the clock (a due time)
+ * or with a provider's answer (what may still be sent). The read carries it with each allowed control; the press sends it.
+ */
+export function previewDigest(before: SubjectState, action: LeadControl, after: SubjectState): string {
+  return `${action}|${deriveStatus(after)}|${action === "skip" ? stepKey(skipTarget(before)) : "-"}|${stepKey(currentStep(after))}`;
+}
+
+/**
+ * Why a control no longer applies as confirmed, or null when it does (or carries no expectation). The status is the stored
+ * lead's, as every read says it (`stored`); the preview is the digest of what the action would do now, from the lead as
+ * of the action's instant (`before`) and the transition's result (`after`, null when the action is refused: then its own
+ * refusal comes first, `judgeControl`).
+ */
+export function controlPrecondition(stored: SubjectState, before: SubjectState, action: LeadControl, after: SubjectState | null, expected: LeadExpectation | null): string | null {
+  if (expected === null) return null;
+  if (deriveStatus(stored) !== expected.status) return CHANGED_SINCE_CONFIRMED;
+  if (after === null) return null;
+  return previewDigest(before, action, after) === expected.preview ? null : PREVIEW_CHANGED;
+}
+
+export const CAMPAIGN_CHANGED_SINCE_CONFIRMED = "This campaign was paused or resumed since you confirmed this, so nothing was changed. Look at it again and confirm what it shows now.";
+
+/** A campaign's pause or resume confirmed on the pause read `expected` (its `pausedSince`, wall ms or null): null when it still holds. */
+export function campaignPrecondition(row: { readonly pausedSince: number | null } | null, expected: { readonly pausedSince: number | null } | null): string | null {
+  if (expected === null || row === null) return null;
+  return row.pausedSince === expected.pausedSince ? null : CAMPAIGN_CHANGED_SINCE_CONFIRMED;
+}
+
+/**
+ * The one refusal order, for the read and the action alike (the search on 54f3a73, seeds 17085 and 17093): the action's own
+ * rule on the lead's state first (ended, paused, nothing waiting…), so a request on an ended lead gets the reason the read
+ * gives it; then, for an action that would apply, whether it still applies as confirmed. The read passes no expectation, so
+ * its preview and refusals are the action's for a request confirmed on that read. `stored` is the lead as stored (its
+ * status is the read's), `before` the lead as of the action's instant.
+ */
+export function judgeControl(
+  stored: SubjectState,
+  before: SubjectState,
+  action: LeadControl,
+  now: number,
+  expected: LeadExpectation | null,
+  rules: { readonly applyControl: typeof applyControl; readonly controlPrecondition: typeof controlPrecondition },
+): ControlResult {
+  const out = rules.applyControl(before, action, now);
+  if (!out.ok) return out;
+  const changed = rules.controlPrecondition(stored, before, action, out.state, expected);
+  return changed === null ? out : { ok: false, reason: changed };
+}
+
+/**
+ * A campaign's pause or resume, in the same order as a lead's (`judgeControl`) for the read and the action: the campaign's
+ * own rule first (not launched, already paused, not paused), then whether it is still paused as the confirmation read it.
+ */
+export function judgeCampaignControl(
+  row: { readonly launchedAt: number | null; readonly pausedSince: number | null } | null,
+  pause: boolean,
+  expected: { readonly pausedSince: number | null } | null,
+  rules: { readonly campaignPrecondition: typeof campaignPrecondition },
+): string | null {
+  return campaignRefusal(row, pause) ?? rules.campaignPrecondition(row, expected);
 }

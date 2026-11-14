@@ -149,7 +149,7 @@ test.describe("on the app over the fake email provider", () => {
 
     await page.goto(`${demo.url}/leads/people/${person("Daniel Price")}`);
     await page.getByLabel("Show activity from").selectOption({ label: "Sports clinics, Exeter" });
-    await expect(page.getByText("Replied by email")).toBeVisible();
+    await expect(page.getByRole("region", { name: "Activity" }).getByText("Replied by email")).toBeVisible();
     await expect(page.getByText("Email 2 sent")).toHaveCount(0);
 
     await page.goto(`${demo.url}/leads/people/${person("Grace Okafor")}`);

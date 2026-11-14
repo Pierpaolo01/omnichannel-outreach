@@ -69,6 +69,11 @@ export interface ControlRunOptions {
    * last ask (check A).
    */
   readonly withdrawalAcrossARecovery?: boolean;
+  /**
+   * For a mutation (council on 57d874f, item 1): a confirmation left open sends the precondition of the read current when it
+   * is confirmed, not of the read it opened on, as a confirmation that re-targets on a live read would.
+   */
+  readonly clickTimeExpectation?: boolean;
 }
 
 export interface ControlRunResult {
@@ -125,6 +130,8 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   // Review bot and verifier on ca8baee, from a stream of their own: providers whose lookups lag behind acceptance (work
   // withdrawn on a non-final "not sent" while still uncertain), and replies the pre-send check reads before observation.
   const r17 = random(seed ^ 0x17d);
+  // Ticket 17b, from a stream of its own: a Skip confirmation left open on an earlier read, confirmed after its step changed.
+  const r18 = random(seed ^ 0x181);
   const lookupLags = r17() < 0.4;
   if (lookupLags) features.add("lookups-lag");
   // Review bot on 612aa05, from a stream of its own: emails the provider sends but never reports (no event, lookups
@@ -789,6 +796,16 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   // The generated user.
 
   let requests = 0;
+  /**
+   * What a confirmation shown on `read` sends with the control (ticket 17b): the lead's status, and the step the preview
+   * named, the step a skip skips or a restart resumes at. A control is applied only while it still holds.
+   */
+  const expectOf = (read: EnrollmentRead, action: LeadControlApi): { status: string; preview: string } => {
+    const c = read.controls.find((x) => x.action === action);
+    return { status: read.status, preview: c?.allowed ? c.digest : "" };
+  };
+  /** Each lead's last read a control was judged on, for a confirmation left open on it (the stale-confirmation stream). */
+  const lastReads = new Map<string, EnrollmentRead>();
   /** One control on one lead, checked against the record, the read before it, and its own repeat. */
   async function control(s: Subject, action: LeadControlApi, options: { readonly othersMayMove?: boolean } = {}): Promise<void> {
     // What the app found while the clock moved (a hidden reply at a pre-send check) is in the record before any action.
@@ -796,6 +813,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     const now = h.clock;
     const expected = accepts(s, action, now);
     const read = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${s.id}`)).body;
+    lastReads.set(s.id, read);
     const offered = read.controls.find((c) => c.action === action);
     if (!offered || offered.allowed !== expected) problem(`P11: ${s.id}'s read ${offered?.allowed ? "offers" : "refuses"} ${action} at ${isoOf(now)}; the record says it must be ${expected ? "accepted" : "refused"}${offered && !offered.allowed ? ` ("${offered.reason}")` : ""}${process.env["CONTROLS_DEBUG"] ? ` [holds ${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))}; pauses ${JSON.stringify([...leadPauses.filter((p) => p.subjectId === s.id), ...campaignPauses.filter((p) => p.campaign === s.campaign)].map((p) => [isoOf(p.from), isoOf(p.to)]))}; endings ${JSON.stringify(endings.filter((e) => e.subjectId === s.id).map((e) => [e.kind, isoOf(e.at), isoOf(e.restartedAt)]))}; downs ${JSON.stringify(downs.map((x) => [isoOf(x.from), isoOf(x.to)]))}; freezes ${JSON.stringify((await h.store.engine.subject(s.id, now))?.freezes.map((f) => [isoOf(f.fromWall), isoOf(f.toWall)]))}; current ${currentStep(s, now)?.stepId ?? "none"}; starts ${JSON.stringify(def(s).tracks.map((x) => [x.id, JSON.stringify(x.start), isoOf(startOf(s, x)), finishOf(s, x)]))}; lookups ${JSON.stringify(email.lookupLog.filter((l) => l.key === "att-122").map((l) => [isoOf(l.at), l.answer]))}; engineTracks ${JSON.stringify((await h.store.engine.subject(s.id, now))?.tracks.map((p) => [p.trackId, p.startAt, p.startedAt, p.finishReason, isoOf(p.finishedWall)]))}; clock ${JSON.stringify((await h.store.engine.subject(s.id, now))?.subject.clock)}; work ${JSON.stringify((await h.store.engine.subject(s.id, now))?.work.map((w) => [w.stepId, w.key, w.calls, w.settled, w.lookupAnswer]))}; attempts ${JSON.stringify((await h.store.engine.subject(s.id, now))?.attempts.map((a) => [a.stepId, a.idempotencyKey, a.state, a.endedBy]))}; handovers ${JSON.stringify(email.handoverLog.filter((c) => c.subjectId === s.id).map((c) => [c.stepId, c.key, isoOf(c.at), c.mode]))}; deliveries ${JSON.stringify(email.deliveryLog.filter((c) => c.subjectId === s.id).map((c) => [c.stepId, c.key, isoOf(c.at)]))}; withdrawals ${JSON.stringify(email.withdrawLog)}]` : ""}`);
     const current = action === "skip" ? (skipTargetOf(s, now) ?? currentStep(s, now)) : currentStep(s, now);
@@ -805,11 +823,12 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     const before = await others(s, null);
     const requestId = `c-${++requests}`;
     const uncertain = (await h.store.engine.subject(s.id, now))?.work.some((w) => w.settled === null && w.calls > 0) ?? false;
-    const res = await h.request<{ error?: { message: string }; replayed?: boolean; effect?: unknown }>("POST", `/api/enrollments/${s.id}/controls`, { requestId, action });
+    const body = { requestId, action, expect: expectOf(read, action) };
+    const res = await h.request<{ error?: { message: string }; replayed?: boolean; effect?: unknown }>("POST", `/api/enrollments/${s.id}/controls`, body);
     const accepted = res.status === 200;
     // The answer's effect is the read's preview at that instant, field for field (verifier B4).
     if (accepted && offered?.allowed && JSON.stringify(res.body.effect) !== JSON.stringify(offered)) problem(`P11: ${action} on ${s.id} at ${isoOf(now)} answered the effect ${JSON.stringify(res.body.effect)}; the read previewed ${JSON.stringify(offered)}`);
-    if (!accepted && res.body.error) refused.push({ path: `/api/enrollments/${s.id}/controls`, body: { requestId, action }, message: res.body.error.message });
+    if (!accepted && res.body.error) refused.push({ path: `/api/enrollments/${s.id}/controls`, body, message: res.body.error.message });
     if (uncertain) features.add(accepted ? `${action}-with-uncertain-work` : `${action}-refused-with-uncertain-work`);
     if (accepted !== expected) problem(`P11: ${action} on ${s.id} at ${isoOf(now)} was ${accepted ? "accepted" : `refused (${res.body.error?.message ?? res.status})`}; the record says it must be ${expected ? "accepted" : "refused"}`);
     if (offered && !offered.allowed && !accepted && offered.reason !== res.body.error?.message) problem(`P11: ${s.id}'s read refuses ${action} with "${offered.reason}"; the action says "${res.body.error?.message ?? ""}"`);
@@ -851,14 +870,50 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
       if (listedBefore.has(s.id)) features.add(`${action}-with-a-call-listed`);
     } else features.add(`${action}-refused`);
     if (rand() < 0.25) {
-      const again = await h.request<{ replayed?: boolean }>("POST", `/api/enrollments/${s.id}/controls`, { requestId, action });
+      const again = await h.request<{ replayed?: boolean }>("POST", `/api/enrollments/${s.id}/controls`, body);
       if (again.status !== res.status || (accepted && again.body.replayed !== true)) problem(`P7: ${requestId} (${action} on ${s.id}) was answered ${res.status} then ${again.status}${accepted ? `, replayed ${String(again.body.replayed)}` : ""}`);
       features.add("a-control-sent-again");
     }
   }
   let listedBefore = new Set<string>();
   /** Requests the app refused, to send again later with the same id (P7; verifier B5). */
-  const refused: { path: string; body: Record<string, string>; message: string }[] = [];
+  const refused: { path: string; body: { readonly requestId: string } & Record<string, unknown>; message: string }[] = [];
+  /**
+   * A Skip confirmation left open on an earlier read, confirmed after its step changed (verifier B1 on 8a1732a): another
+   * tab skipped it, or it was sent or ended meanwhile. Sent with the precondition of the read it was shown on, it must be
+   * refused, with no step skipped and no other lead changed (P13). Only sent when the record's current step differs from
+   * the one that read named, so a run with none is the run it was.
+   */
+  async function staleSkip(): Promise<void> {
+    settleHidden();
+    const now = h.clock;
+    const candidates = [...lastReads.entries()].flatMap(([id, read]) => {
+      const s = subjects.get(id);
+      const c = read.controls.find((x) => x.action === "skip");
+      const named = c?.allowed ? c.skips : null;
+      if (!s || !named) return [];
+      const current = skipTargetOf(s, now) ?? currentStep(s, now);
+      return current?.stepId !== named.stepId || endedAt(s, now) ? [{ s, read, named }] : [];
+    });
+    const chosen = candidates[Math.floor(r18() * candidates.length)];
+    if (!chosen) return;
+    const before = await others(null, null);
+    const results = async () => JSON.stringify((await h.store.engine.subject(chosen.s.id, h.clock))?.results.map((r) => [r.stepId, r.result, r.reason]).sort());
+    const was = await results();
+    const current = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${chosen.s.id}`)).body;
+    // The confirmation is a snapshot: it sends the read it opened on (unless the mutation re-targets it on the newest read).
+    const shown = options.clickTimeExpectation === true ? current : chosen.read;
+    const res = await h.request<{ error?: { message: string } }>("POST", `/api/enrollments/${chosen.s.id}/controls`, { requestId: `stale-${++requests}`, action: "skip", expect: expectOf(shown, "skip") });
+    if (res.status !== 409) problem(`P13: a Skip confirmed on ${chosen.s.id}'s read naming ${chosen.named.stepId}, sent at ${isoOf(now)} after that step changed, was answered ${res.status}`);
+    // One refusal order for the read and the action (judgeControl): where the current read refuses the skip, the stale
+    // request gets the same reason, whatever its precondition says (the search on 54f3a73).
+    const nowOffered = current.controls.find((c) => c.action === "skip");
+    if (nowOffered && !nowOffered.allowed && res.body.error?.message !== nowOffered.reason) problem(`P11: ${chosen.s.id}'s read refuses skip with "${nowOffered.reason}"; a stale Skip sent then was refused with "${res.body.error?.message ?? ""}"`);
+    if ((await results()) !== was) problem(`P13: a stale Skip on ${chosen.s.id} changed its step results (${was} to ${await results()})`);
+    await unchanged(before, `a stale Skip on ${chosen.s.id}`);
+    features.add("a-stale-skip-confirmation-refused");
+  }
+
   /** A refused request sent again, after whatever changed since: the same refusal, and nothing changes. */
   async function retryRefused(): Promise<void> {
     settleHidden();
@@ -866,7 +921,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     if (!r) return;
     const before = await others(null, null);
     const again = await h.request<{ error?: { message: string } }>("POST", r.path, r.body);
-    if (again.status !== 409 || again.body.error?.message !== r.message) problem(`P7: ${r.body["requestId"] ?? ""} (${r.path}) was refused ("${r.message}"); sent again at ${isoOf(h.clock)} it was answered ${again.status}${again.body.error ? ` ("${again.body.error.message}")` : ""}`);
+    if (again.status !== 409 || again.body.error?.message !== r.message) problem(`P7: ${r.body.requestId} (${r.path}) was refused ("${r.message}"); sent again at ${isoOf(h.clock)} it was answered ${again.status}${again.body.error ? ` ("${again.body.error.message}")` : ""}`);
     await unchanged(before, `a refused request sent again`);
     features.add("a-refused-request-sent-again-later");
   }
@@ -984,10 +1039,11 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     const now = h.clock;
     const paused = campaignPausedAt(ci, now);
     const expected = action === "pause" ? !paused : paused;
-    const offered = (await h.request<CampaignDetail>("GET", `/api/campaigns/${campaignIds[ci]!}`)).body.controls.find((c) => c.action === action);
+    const detail = (await h.request<CampaignDetail>("GET", `/api/campaigns/${campaignIds[ci]!}`)).body;
+    const offered = detail.controls.find((c) => c.action === action);
     if (offered?.allowed !== expected) problem(`P11: campaign ${ci + 1}'s read ${offered?.allowed ? "offers" : "refuses"} ${action}; the record says ${expected ? "accept" : "refuse"}`);
     const before = await others(null, ci);
-    const body = { requestId: `c-${++requests}` };
+    const body = { requestId: `c-${++requests}`, expect: { pausedSince: detail.pause.pausedSince } };
     const res = await h.request<{ error?: { message: string } }>("POST", `/api/campaigns/${campaignIds[ci]!}/${action}`, body);
     if (res.status !== 200 && res.body.error) refused.push({ path: `/api/campaigns/${campaignIds[ci]!}/${action}`, body, message: res.body.error.message });
     if ((res.status === 200) !== expected) problem(`P11: ${action} of campaign ${ci + 1} at ${isoOf(now)} was ${res.status === 200 ? "accepted" : "refused"}; the record says ${expected ? "accept" : "refuse"}`);
@@ -1257,6 +1313,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
       const ci = Math.floor(rand() * campaignIds.length);
       await campaignControl(ci, campaignPausedAt(ci, h.clock) ? "resume" : "pause");
     } else if (kind < 0.9) await autoReply();
+    if (r18() < 0.3) await staleSkip();
     await checkAll();
     if (interrupting && r20() < 0.4 && calm()) {
       await interrupt();

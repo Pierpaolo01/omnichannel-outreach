@@ -36,13 +36,3 @@ export function StatusBadge({ status }: { status: OutreachStatus }) {
     </span>
   );
 }
-
-/** One sentence on where a campaign enrollment stands, in the words the user acts on. */
-export function enrollmentSentence(status: OutreachStatus): string | null {
-  switch (status) {
-    case "queued":
-      return "Nothing goes out until this campaign launches.";
-    default:
-      return null;
-  }
-}

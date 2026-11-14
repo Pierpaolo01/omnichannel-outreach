@@ -986,7 +986,7 @@ describe("each desk fault is caught by its known seed (ADR 0003 4.4.1)", () => {
     // Ticket 15b.
     ["redial_lost_on_resend", 9260, "14:"],
     ["answer_resets_callback_draft", 9105, "6:"],
-    // Re-chosen by the search below for ticket 20a: the worker's end-of-tick heartbeat write moved this run's held reads.
+    // Re-chosen by the search below in ticket 17b and, independently, in ticket 20a: both moved this run's interleaving (the Calls read's paused campaigns; the tick's heartbeat write).
     ["past_callback_sent", 9126, "14:"],
     // Council on 32454ea, A: the body corrupted where it is first built, against the user's own choice.
     ["redial_dropped_at_press", 9107, "14:"],

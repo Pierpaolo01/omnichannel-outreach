@@ -18,7 +18,9 @@ export const CONTROL_SEED = 17_000;
  * verifier on 612aa05, with sends never reported and texts sent late) to reach every behaviour below; 35 added, a run in
  * which a text is withdrawn and a second lead then needs its number's place (verifier R2-2).
  */
-export const CONTROL_FIXED_SEEDS: readonly number[] = [17, 19, 33, 35, 48, 64, 72, 86, 91, 99];
+// 85 and 93 (ticket 17b, the search on 54f3a73): an ended lead's skip, sent with its read's precondition, refused with
+// the precondition's reason instead of the read's; one refusal order for the read and the action (judgeControl) since.
+export const CONTROL_FIXED_SEEDS: readonly number[] = [17, 19, 33, 35, 48, 64, 72, 85, 86, 91, 93, 99];
 const SEARCH_SEEDS = 100;
 const MAX_SEEDS = 30;
 const RUN_WRITES = 10_000;
@@ -37,6 +39,8 @@ export const CONTROL_FEATURES: readonly string[] = [
   "a-new-reply-in-an-earlier-thread-after-a-restart",
   "a-new-reply-in-the-latest-thread-after-a-restart",
   "a-refused-request-sent-again-later",
+  // Ticket 17b: a Skip confirmed on an earlier read, after its step changed, is refused (P13).
+  "a-stale-skip-confirmation-refused",
   "a-reply-after-the-sequence-finished",
   "a-reply-to-a-stopped-lead",
   "a-reply-while-paused",

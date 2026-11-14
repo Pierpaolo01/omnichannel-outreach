@@ -26,7 +26,21 @@ export interface CampaignSequenceSummary {
   readonly tracks: readonly ("email" | "sms" | "call")[];
 }
 
-export interface CampaignListItem extends Campaign {
+/** A campaign's pause as its read says it (ticket 17a): served on the campaign's page and, since ticket 17b, on each row of the list. */
+export interface CampaignPauseRead {
+  /** Whether the campaign is paused, and since when (ticket 17a). A campaign pause changes no lead's status. */
+  readonly pause: { readonly paused: boolean; readonly pausedSince: string | null };
+  /** The count of the campaign's leads in each outreach status, every status listed, zero included (ticket 17a). */
+  readonly statusCounts: Readonly<Record<OutreachStatus, number>>;
+  /** Pause and resume, each allowed now or refused with the reason the action would give (ticket 17a). */
+  readonly controls: readonly CampaignControlView[];
+  /** Messages of the campaign's leads already handed to a provider whose outcome is not final: each may still be sent, also while paused (as `EnrollmentRead.mayStillSend`). */
+  readonly mayStillSend: number;
+  /** The user's zone, in which the pause's date is said (ticket 17b). */
+  readonly userZone: string;
+}
+
+export interface CampaignListItem extends Campaign, CampaignPauseRead {
   readonly leadCount: number;
   readonly sequence: CampaignSequenceSummary;
   readonly lastImport: {
@@ -37,19 +51,11 @@ export interface CampaignListItem extends Campaign {
 }
 
 /** GET /api/campaigns/:id */
-export interface CampaignDetail {
+export interface CampaignDetail extends CampaignPauseRead {
   readonly campaign: Campaign;
   readonly imports: readonly ImportRecord[];
   readonly leadCount: number;
   readonly sequence: CampaignSequenceSummary;
-  /** Whether the campaign is paused, and since when (ticket 17a). A campaign pause changes no lead's status. */
-  readonly pause: { readonly paused: boolean; readonly pausedSince: string | null };
-  /** The count of the campaign's leads in each outreach status, every status listed, zero included (ticket 17a). */
-  readonly statusCounts: Readonly<Record<OutreachStatus, number>>;
-  /** Pause and resume, each allowed now or refused with the reason the action would give (ticket 17a). */
-  readonly controls: readonly CampaignControlView[];
-  /** Messages of the campaign's leads already handed to a provider whose outcome is not final: each may still be sent, also while paused (as `EnrollmentRead.mayStillSend`). */
-  readonly mayStillSend: number;
 }
 
 /** A campaign control as the campaign read offers it (ticket 17a). */
@@ -61,6 +67,13 @@ export type LeadControlApi = "pause" | "resume" | "skip" | "stop" | "resume_from
 /** A step a control names: the one it skips, or the next one the lead would send. */
 export interface ControlStepView {
   readonly trackId: string;
+  /** The track's name, as the editor and Activity name it (ticket 17b). */
+  readonly track: TrackLabel;
+  /**
+   * A call step's record (council on 57d874f, item 8): the calls logged on it so far (skip for now is not a call), and
+   * whether it is a callback the prospect asked for. Null for an email or a text.
+   */
+  readonly call: { readonly attempts: number; readonly callback: boolean } | null;
   readonly channel: "email" | "sms" | "call";
   readonly branch: "main" | "win_back";
   readonly stepId: string;
@@ -86,6 +99,11 @@ export type ControlView =
       readonly skips: ControlStepView | null;
       readonly next: ControlStepView | null;
       readonly withProvider: number;
+      /**
+       * What this preview names (the action, the status after, the step it skips, the next step and its branch), as one
+       * string: a confirmation sends it back with the press, and the control applies only while it is unchanged (ticket 17b).
+       */
+      readonly digest: string;
     };
 
 /** GET /api/enrollments/:id: the lead's progress and the controls allowed now (ticket 17a). */
@@ -97,6 +115,36 @@ export interface EnrollmentRead extends EnrollmentProgress {
    * withdrawal is asked again until then; a send is recorded once and starts nothing while the lead is held.
    */
   readonly mayStillSend: number;
+}
+
+/** One enrollment's read on a person's or company lead's record (ticket 17b), with its campaign's launch and pause as read at the same instant. */
+export interface RecordLead extends EnrollmentRead {
+  readonly campaignState: { readonly launched: boolean; readonly paused: boolean; readonly pausedSince: string | null };
+}
+
+/** GET /api/people/:id and GET /api/companies/:id add each enrollment's read, so the record's campaign rows show its controls and sentence (ticket 17b). */
+export interface RecordControls {
+  readonly leads: readonly RecordLead[];
+  /** The user's zone, in which the record's days and times are said. */
+  readonly userZone: string;
+}
+
+/** POST /api/enrollments/:id/controls: the control's own effect (its preview at that instant) and the read after the worker ran. */
+export interface ControlAnswer {
+  readonly effect: Extract<ControlView, { readonly allowed: true }>;
+  readonly enrollment: EnrollmentRead | null;
+  readonly replayed: boolean;
+}
+
+/**
+ * A paused campaign whose calls are off Today's and Calls' lists while it is paused (ticket 17b): `calls`, the open call
+ * tasks the engine's listing rule lists today with the pause lifted, judged on the same loaded leads as the list.
+ */
+export interface PausedCampaignCalls {
+  readonly id: string;
+  readonly name: string;
+  readonly pausedSince: string;
+  readonly calls: number;
 }
 
 /** A refused control (409 `control_refused`). */
@@ -660,6 +708,18 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
       | { readonly kind: "released"; readonly after: TrackLabel; readonly because: "skipped" | "failed" | "unworked" }
     ))
   | { readonly kind: "replied"; readonly channel: "email" | "sms" }
+  /**
+   * A control the user applied to this lead (ticket 17b), from the engine's record of accepted requests: pause, resume, skip,
+   * stop, or a restart. `step` is the step a skip skipped, or the step a restart named as next then; null otherwise.
+   */
+  | {
+      readonly kind: "control";
+      readonly action: LeadControlApi;
+      readonly step: { readonly channel: "email" | "sms" | "call"; readonly track: TrackLabel; readonly number: number; readonly call: ControlStepView["call"] } | null;
+    }
+  /** The lead's campaign was paused or resumed while they were enrolled (ticket 17b), from the same record. */
+  | { readonly kind: "campaign_paused" }
+  | { readonly kind: "campaign_resumed" }
   | { readonly kind: "ended"; readonly status: "sequence_finished_no_response" | "finished_no_usable_channel" }
   /**
    * A phone track's entries (ticket 14b): each call outcome the user logged, skip for now included,
@@ -998,6 +1058,8 @@ export interface TodayView {
   readonly carriedOver: number;
   /** Of those, the ones skipped tonight if left unworked (`skippedTonight`): on their last day (ticket 15b). */
   readonly carriedOverLastDay: number;
+  /** Paused campaigns whose leads wait on a call: their calls are off the list while paused (ticket 17b). */
+  readonly pausedCampaigns: readonly PausedCampaignCalls[];
   /**
    * The one-line notice of the latest sending interruption (ticket 20a): "sending was interrupted from `from` to `to`;
    * `rescheduled` sends rescheduled". Kept until a newer interruption replaces it (question Q18); null when none happened.
@@ -1054,6 +1116,8 @@ export interface CallsView {
   readonly focusTaskId: string | null;
   /** As on TodayView: while sending is interrupted now, due calls may be waiting to be placed (follow-up 42 item 45). */
   readonly sendingInterrupted: SendingInterruptedView | null;
+  /** As on TodayView: paused campaigns whose calls are off the list (ticket 17b). */
+  readonly pausedCampaigns: readonly PausedCampaignCalls[];
 }
 
 /** POST /api/call-tasks/:id/outcome: the task after the outcome, and the call the focus queue moves on to. */

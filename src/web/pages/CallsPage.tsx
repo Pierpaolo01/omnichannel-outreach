@@ -41,6 +41,7 @@ import {
   reasonLine,
   recoveringLine,
   refusedRecordLine,
+  pausedCallsLine,
 } from "../calls/wording.ts";
 import { ErrorState, StaleNotice } from "../components.tsx";
 import { Icon } from "../icons.tsx";
@@ -204,6 +205,11 @@ function Queue({ snap }: { snap: DeskSnapshot }) {
           {view.capacityReached ? ` ${CAPACITY_USED}` : ""}
         </p>
       )}
+      {view?.pausedCampaigns.map((p) => (
+        <p key={p.id} className="mt-2 px-2.5 text-[12.5px] leading-[1.45] text-pause [overflow-wrap:anywhere]">
+          {pausedCallsLine(p, view.userZone)}
+        </p>
+      ))}
     </aside>
   );
 }
@@ -249,6 +255,8 @@ function NothingToCall({ view, listDone, placeFocus }: { view: CallsView; listDo
   if (listDone) lines.push("Every call ready now has an outcome.");
   if (later) lines.push(`${view.laterToday.length === 1 ? "One call opens" : `${view.laterToday.length} calls open`} later today. ${reasonLine(later, view.userZone, view.date).text}.`);
   if (view.capacityReached) lines.push(CAPACITY_USED);
+  // A paused campaign's calls are off the list (ticket 17b): said here, where the user would otherwise miss them.
+  for (const p of view.pausedCampaigns) lines.push(pausedCallsLine(p, view.userZone));
   if (lines.length === 0) lines.push("Calls appear here once a launched campaign reaches a call step. You place every call yourself.");
   return (
     <section aria-labelledby="calls-empty" className="overflow-clip rounded-box border border-line bg-base-100">
