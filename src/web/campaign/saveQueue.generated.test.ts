@@ -6,6 +6,7 @@ import type { FakeAccount } from "../../../test/support/fake-email-port.ts";
 import type { ApiError, CampaignDefinition, SequenceView } from "../../shared/api.ts";
 import { DEFINITION_MAX_BYTES } from "../../shared/limits.ts";
 import { arrange, type ArrangeOperation } from "./arrangement.ts";
+import { newStep } from "./model.ts";
 import { EditorStore, type SaveFault } from "./editorStore.ts";
 import { NoAnswer, draftProblems, type SaveStatus } from "./saveQueue.ts";
 
@@ -63,7 +64,7 @@ import { NoAnswer, draftProblems, type SaveStatus } from "./saveQueue.ts";
  *
  * Faults injected on every push (ticket 16b; `SaveFault` in editorStore.ts), each killed by its recorded
  * fixed seed (FAULT_SEEDS): a save that leaves out each phone track's declined path, and a save that leaves
- * out the win-back branch's tracks.
+ * out the win-back branch's tracks; and (council on aaf82b7) a save that sends the branch's copy of the save before it.
  */
 /** The full search (`pnpm test:save-search`, in the `sequence-search` workflow), sharded by `SEQUENCE_SHARD`, "i/n". */
 const FULL_SEARCH = process.env["SAVE_QUEUE_SEARCH"] === "full";
@@ -87,7 +88,7 @@ const REGRESSIONS = [7369, 7412, 7642, 7729, 7889, 845691, 463057];
  * seeds. The recorded seeds above replay the trajectories they were recorded with, so the generated user
  * makes no declined-path or branch edit on them.
  */
-const FAULT_SEEDS: Record<SaveFault, number> = { declined_path_not_sent: 7003, win_back_tracks_not_sent: 7004 };
+const FAULT_SEEDS: Record<SaveFault, number> = { declined_path_not_sent: 7003, win_back_tracks_not_sent: 7004, stale_win_back_copy: 7016 };
 /** The commit the moving window is derived from: CI's, else the checkout's HEAD, else none. */
 function commitOf(): string {
   if (process.env["GITHUB_SHA"]) return process.env["GITHUB_SHA"];
@@ -217,7 +218,10 @@ const flush = async () => {
 interface Shape {
   readonly paths: Readonly<Record<string, string | null>>;
   readonly branch: Readonly<Record<string, string>>;
+  /** Each live branch track's live steps in order, as "id:subject|body|threading|wait" (council on aaf82b7). */
+  readonly copy: Readonly<Record<string, readonly string[]>>;
 }
+const stepKey = (st: { id: string; subject: string; body: string; threading: string; waitDays: number }) => `${st.id}:${st.subject}|${st.body}|${st.threading}|${st.waitDays}`;
 const startKey = (start: CampaignDefinition["tracks"][number]["start"]) => (start.kind === "entry" ? "entry" : `after ${start.trackId} ${start.delayDays}`);
 /** The shape a definition has, to compare with a record. */
 function shapeOf(def: CampaignDefinition): Shape {
@@ -225,16 +229,20 @@ function shapeOf(def: CampaignDefinition): Shape {
   return {
     paths: Object.fromEntries(live.filter((t) => t.channel === "call" && t.branch === "main").map((t) => [t.id, t.declinedPath ?? null])),
     branch: Object.fromEntries(live.filter((t) => t.branch === "win_back").map((t) => [t.id, `${t.channel} ${startKey(t.start)}`])),
+    copy: Object.fromEntries(live.filter((t) => t.branch === "win_back").map((t) => [t.id, t.steps.filter((st) => !st.removed).map(stepKey)])),
   };
 }
-const sameShape = (a: Shape, b: Shape) => JSON.stringify([Object.entries(a.paths).sort(), Object.entries(a.branch).sort()]) === JSON.stringify([Object.entries(b.paths).sort(), Object.entries(b.branch).sort()]);
-const NO_SHAPE: Shape = { paths: {}, branch: {} };
+const shapeText = (a: Shape) => JSON.stringify([Object.entries(a.paths).sort(), Object.entries(a.branch).sort(), Object.entries(a.copy).sort()]);
+const sameShape = (a: Shape, b: Shape) => shapeText(a) === shapeText(b);
+const NO_SHAPE: Shape = { paths: {}, branch: {}, copy: {} };
 
 async function run(seed: number, faults?: ReadonlySet<SaveFault>) {
   const r = rng(seed);
   // A third stream for the declined paths and the win-back branch (ticket 16b); none on a recorded seed.
   const r3 = rng(seed ^ 0x16b0_16b0);
   const branchEdits = !REGRESSIONS.includes(seed);
+  // A fourth for the branch's copy (council on aaf82b7), so the third stream's draws stay as they were.
+  const r4 = rng(seed ^ 0x0aaf_82b7);
   // A second stream for what was added later (the late answer after a load), so the first stream's
   // choices, and the recorded seeds, stay as they were until it first acts.
   const r2 = rng(seed ^ 0x5eed_c0de);
@@ -251,7 +259,7 @@ async function run(seed: number, faults?: ReadonlySet<SaveFault>) {
   const writerNow = (): string | null => server.writer;
   /** Every save the server accepted, as session/number. */
   const accepted = new Set<string>();
-  const phoneCoverage = { phoneSaved: false, phoneAny: false, winBackSaved: false, declinedSaved: false, branchArranged: false };
+  const phoneCoverage = { phoneSaved: false, phoneAny: false, winBackSaved: false, declinedSaved: false, branchArranged: false, branchCopySaved: false };
   const putRaw = async (body: Request["body"]) => {
     const out = await h.request<unknown>("PUT", path, body);
     if (out.status === 200) {
@@ -262,6 +270,7 @@ async function run(seed: number, faults?: ReadonlySet<SaveFault>) {
       if (tracks.some((t) => !t.removed && t.channel === "call")) phoneCoverage.phoneAny = true;
       if (tracks.some((t) => !t.removed && t.channel === "call" && t.declinedPath === "win_back") && tracks.some((t) => !t.removed && t.branch === "win_back")) phoneCoverage.winBackSaved = true;
       if (tracks.some((t) => !t.removed && t.branch === "win_back" && t.start.kind === "after")) phoneCoverage.branchArranged = true;
+      if (tracks.some((t) => !t.removed && t.branch === "win_back" && t.steps.some((st) => st.body.startsWith("wb") || st.subject.startsWith("ws")))) phoneCoverage.branchCopySaved = true;
       if (tracks.some((t) => !t.removed && t.channel === "call" && (t.declinedPath === "stop" || t.declinedPath === "continue"))) phoneCoverage.declinedSaved = true;
       if (view.definitionVersion > server.version) {
         const session = body.save?.session ?? null;
@@ -277,6 +286,7 @@ async function run(seed: number, faults?: ReadonlySet<SaveFault>) {
   server.writer = null;
 
   let typed = 0;
+  let copyBesideInFlight = false;
   let inboxes = 1;
   let numbers = 0;
   /**
@@ -293,6 +303,35 @@ async function run(seed: number, faults?: ReadonlySet<SaveFault>) {
    * ones (win back with no branch track, the branch's last track under win back, a connection across
    * branches, a phone track in the branch) leave the draft as it was. Returns the draft and the record.
    */
+  let copies = 0;
+  /**
+   * A copy edit in a win-back track (council on aaf82b7): a body, a subject (where the email writes one), the
+   * threading of a follow-up email, a follow-up's wait, or a new follow-up. The values are the generated user's,
+   * recorded as chosen; the editor's draft is not read back.
+   */
+  const copyEdit = (before: CampaignDefinition, shape: Shape, track: CampaignDefinition["tracks"][number]): { definition: CampaignDefinition; shape: Shape; copy: true } => {
+    const steps = track.steps.filter((st) => !st.removed);
+    const k = Math.floor(r4() * steps.length);
+    const step = steps[k]!;
+    const email = track.channel === "email";
+    const roll = r4();
+    let next: typeof track.steps;
+    if (roll < 0.35) next = track.steps.map((st) => (st.id === step.id ? { ...st, body: `wb${++copies}` } : st));
+    else if (roll < 0.55 && email && (k === 0 || step.threading === "new_subject")) next = track.steps.map((st) => (st.id === step.id ? { ...st, subject: `ws${++copies}` } : st));
+    else if (roll < 0.65 && email && k > 0) next = track.steps.map((st) => (st.id === step.id ? { ...st, threading: st.threading === "new_subject" ? ("continue_thread" as const) : ("new_subject" as const) } : st));
+    else if (roll < 0.8 && k > 0) next = track.steps.map((st) => (st.id === step.id ? { ...st, waitDays: Math.floor(r4() * 4) } : st));
+    else {
+      // A follow-up, as the inspector adds one (an SMS has no thread), with copy of its own.
+      const added = { ...newStep(false), body: `wb${++copies}` };
+      next = [...track.steps, email ? added : { ...added, threading: "new_subject" as const }];
+    }
+    const edited = { ...track, steps: next };
+    return {
+      definition: { ...before, tracks: before.tracks.map((t) => (t.id === track.id ? edited : t)) },
+      shape: { ...shape, copy: { ...shape.copy, [track.id]: next.filter((st) => !st.removed).map(stepKey) } },
+      copy: true,
+    };
+  };
   const branchEdit = (before: CampaignDefinition, shape: Shape): { definition: CampaignDefinition; shape: Shape } | null => {
     const live = before.tracks.filter((t) => !t.removed);
     const calls = live.filter((t) => t.channel === "call" && t.branch === "main");
@@ -313,28 +352,44 @@ async function run(seed: number, faults?: ReadonlySet<SaveFault>) {
     }
     else if (roll < 0.85) op = { kind: "delay", trackId: pick3(branch).id, days: Math.floor(r3() * 4) };
     else op = { kind: "remove", trackId: pick3(branch).id };
-    const out = arrange(before, op);
-    if (!out.ok) return null;
+    const arrangedOut = arrange(before, op);
+    if (!arrangedOut.ok) return null;
+    // A new branch track gets its first message's copy at once (a body, and a subject on an email), so a copy edit
+    // later in the same draft starts from what the record says.
+    const fresh = op.kind === "add" && op.branch === "win_back" ? arrangedOut.added : undefined;
+    const out = fresh
+      ? { ...arrangedOut, definition: { ...arrangedOut.definition, tracks: arrangedOut.definition.tracks.map((t) => (t.id === fresh.id ? { ...t, steps: t.steps.map((st) => ({ ...st, body: "Text.", subject: t.channel === "email" ? "Hi" : "" })) } : t)) } }
+      : arrangedOut;
     // The record: what this operation chose, kept apart from the editor's draft.
     const paths = { ...shape.paths };
     const without = (record: Readonly<Record<string, string>>, id: string) => Object.fromEntries(Object.entries(record).filter(([k]) => k !== id));
     let kept: Record<string, string> = { ...shape.branch };
+    let copy: Record<string, readonly string[]> = { ...shape.copy };
     if (op.kind === "declined") paths[op.trackId] = op.path;
     else if (op.kind === "add" && out.added && op.branch !== "win_back") paths[out.added.id] = null;
-    else if (op.kind === "add" && out.added) kept[out.added.id] = `${op.channel} entry`;
+    else if (op.kind === "add" && out.added) {
+      kept[out.added.id] = `${op.channel} entry`;
+      // A new track's first message, as the generated user's draft fills it in (below): a body, and a subject on an email.
+      const first = out.added.steps[0]!;
+      copy[out.added.id] = [stepKey({ ...first, subject: op.channel === "email" ? "Hi" : "", body: "Text." })];
+    }
     else if (op.kind === "start") kept[op.trackId] = `${kept[op.trackId]?.split(" ")[0] ?? ""} ${startKey(op.start)}`;
     else if (op.kind === "delay") kept[op.trackId] = (kept[op.trackId] ?? "").replace(/ \d+$/, ` ${op.days}`);
-    else if (op.kind === "remove") kept = without(kept, op.trackId);
-    return { definition: out.definition, shape: { paths, branch: kept } };
+    else if (op.kind === "remove") {
+      kept = without(kept, op.trackId);
+      copy = Object.fromEntries(Object.entries(copy).filter(([id]) => id !== op.trackId));
+    }
+    return { definition: out.definition, shape: { paths, branch: kept, copy } };
   };
   /** The record after an edit of the main sequence: a phone track added has no path; one removed has none. */
   const mainShape = (shape: Shape, op: ArrangeOperation, added: string | null): Shape => {
     const paths: Record<string, string | null> = Object.fromEntries(Object.entries(shape.paths).filter(([id]) => op.kind !== "remove" || id !== op.trackId));
     if (op.kind === "add" && op.channel === "call" && added) paths[added] = null;
-    return { paths, branch: shape.branch };
+    return { paths, branch: shape.branch, copy: shape.copy };
   };
-  const arranged = (before: CampaignDefinition, subject: string, shape: Shape): { definition: CampaignDefinition; shape: Shape } => {
-    const finish = (base: CampaignDefinition, next: Shape) => ({
+  const arranged = (before: CampaignDefinition, subject: string, shape: Shape): { definition: CampaignDefinition; shape: Shape; copy?: boolean } => {
+    const finish = (base: CampaignDefinition, next: Shape, copy = false) => ({
+      copy,
       definition: {
         ...base,
         callScript: subject,
@@ -344,9 +399,16 @@ async function run(seed: number, faults?: ReadonlySet<SaveFault>) {
     });
     if (branchEdits && r3() < (before.tracks.some((t) => !t.removed && t.channel === "call") ? 0.85 : 0.5)) {
       // One to three of them before the save goes, as a user does in the inspector within the debounce.
-      let edited = { definition: before, shape };
+      let edited: { definition: CampaignDefinition; shape: Shape; copy?: true } = { definition: before, shape };
+      let copy = false;
       for (let n = 1 + Math.floor(r3() * 3); n > 0; n--) edited = branchEdit(edited.definition, edited.shape) ?? edited;
-      return finish(edited.definition, edited.shape);
+      // Then often copy in the branch, wholly from a stream of its own, so the arrangement draws stay as they were.
+      const branch = edited.definition.tracks.filter((t) => !t.removed && t.branch === "win_back");
+      if (branch.length > 0 && r4() < 0.5) {
+        edited = copyEdit(edited.definition, edited.shape, branch[Math.floor(r4() * branch.length)]!);
+        copy = true;
+      }
+      return finish(edited.definition, edited.shape, copy);
     }
     // The main sequence's own edits never name a branch track (ticket 16b): the branch has its own.
     const live = before.tracks.filter((t) => !t.removed && t.branch === "main");
@@ -488,6 +550,8 @@ async function run(seed: number, faults?: ReadonlySet<SaveFault>) {
         : size < 0.55 ? arranged(before, subject, shapeBefore)
         : { definition: definitionWith(subject, pool), shape: NO_SHAPE };
       const next = edit.definition;
+      // Newer branch copy typed while an older save of this page is still unanswered (council on aaf82b7).
+      const inFlight = requests.some((x) => x.page === page && x.kind === "put" && x.answer === null);
       page.store.update(() => next);
       // Typing is refused once launched and while a launch or a load is in flight: nothing was typed.
       if (page.store.getSnapshot().draft === before && !lockedBefore) problems.push(`6: ${page.session} refused an edit while editing was shown open`);
@@ -496,6 +560,7 @@ async function run(seed: number, faults?: ReadonlySet<SaveFault>) {
         page.newestTyped = subject;
         page.newestSendable = draftProblems(next).length === 0 ? subject : null;
         page.shape = edit.shape;
+        if ("copy" in edit && edit.copy && inFlight) copyBesideInFlight = true;
       }
     } else if (roll < 0.36 && live && page.timer) {
       const fire = page.timer;
@@ -590,16 +655,16 @@ async function run(seed: number, faults?: ReadonlySet<SaveFault>) {
   }
   const stored = (await h.request<SequenceView>("GET", path)).body.definition;
   const smsSaved = stored.tracks.some((t) => !t.removed && t.channel === "sms") && (stored.smsPool ?? []).length > 0;
-  return { problems, pending: requests.length, launchedOnce: launchedOnce(), smsSaved, phoneSaved: phoneCoverage.phoneSaved, phoneAny: phoneCoverage.phoneAny, lateAfterLoad, winBackSaved: phoneCoverage.winBackSaved, declinedSaved: phoneCoverage.declinedSaved, branchArranged: phoneCoverage.branchArranged };
+  return { problems, pending: requests.length, launchedOnce: launchedOnce(), smsSaved, phoneSaved: phoneCoverage.phoneSaved, phoneAny: phoneCoverage.phoneAny, lateAfterLoad, winBackSaved: phoneCoverage.winBackSaved, declinedSaved: phoneCoverage.declinedSaved, branchArranged: phoneCoverage.branchArranged, branchCopySaved: phoneCoverage.branchCopySaved, copyBesideInFlight };
 }
 
 describe("saving the definition, generated over the real editor state (ADR 0003 1.1.1)", () => {
   // What each coverage seed's run reached; the window's runs are checked for every invariant and counted for nothing.
-  const reached: { launched: boolean; smsSaved: boolean; phoneSaved: boolean; lateAfterLoad: number; winBackSaved: boolean; declinedSaved: boolean; branchArranged: boolean }[] = [];
+  const reached: { launched: boolean; smsSaved: boolean; phoneSaved: boolean; lateAfterLoad: number; winBackSaved: boolean; declinedSaved: boolean; branchArranged: boolean; branchCopySaved: boolean; copyBesideInFlight: boolean }[] = [];
   for (const seed of RUN_SEEDS) {
     test(`run ${seed}`, async () => {
       const out = await run(seed);
-      if (COVERAGE_SEEDS.has(seed)) reached.push({ launched: out.launchedOnce, smsSaved: out.smsSaved, phoneSaved: out.phoneSaved, lateAfterLoad: out.lateAfterLoad, winBackSaved: out.winBackSaved, declinedSaved: out.declinedSaved, branchArranged: out.branchArranged });
+      if (COVERAGE_SEEDS.has(seed)) reached.push({ launched: out.launchedOnce, smsSaved: out.smsSaved, phoneSaved: out.phoneSaved, lateAfterLoad: out.lateAfterLoad, winBackSaved: out.winBackSaved, declinedSaved: out.declinedSaved, branchArranged: out.branchArranged, branchCopySaved: out.branchCopySaved, copyBesideInFlight: out.copyBesideInFlight });
       expect(out.pending).toBe(0);
       expect(out.problems).toEqual([]);
     });
@@ -621,6 +686,10 @@ describe("saving the definition, generated over the real editor state (ADR 0003 
     expect(count((r) => r.winBackSaved)).toBeGreaterThan(atLeast(1 / 20));
     expect(count((r) => r.declinedSaved)).toBeGreaterThan(atLeast(1 / 20));
     expect(count((r) => r.branchArranged)).toBeGreaterThan(atLeast(1 / 40));
+  });
+  test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs save the branch's copy, subjects, threading and waits, some typed while an older save was unanswered (council on aaf82b7)", () => {
+    expect(count((r) => r.branchCopySaved)).toBeGreaterThan(atLeast(1 / 20));
+    expect(count((r) => r.copyBesideInFlight)).toBeGreaterThan(atLeast(1 / 40));
   });
   // Each fault in the editor's saving is killed by its recorded fixed seed (ticket 16b).
   for (const fault of Object.keys(FAULT_SEEDS) as SaveFault[]) {
