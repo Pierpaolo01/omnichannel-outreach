@@ -504,9 +504,9 @@ test("a callback logged over HTTP is listed with the reason the server gives (me
   await page.goto(`${f.url}/calls`);
   const queue = page.getByRole("complementary", { name: "Call queue" });
   await expect(queue.getByRole("listitem").filter({ hasText: "Amira Hassan" })).toContainText("Callback they asked for at 12:00 their time");
-  // Ticket 15b offers callback requested; not interested (ticket 16) keeps its not-yet state.
+  // Ticket 15b offers callback requested, and ticket 16c not interested.
   await expect(page.getByRole("button", { name: "Callback requested" })).toBeEnabled();
-  await expect(page.getByRole("button", { name: "Not interested" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Not interested" })).toBeEnabled();
 });
 
 test.describe("the sheet's calling-hours label says the server's fact about the hours now, whatever the call's kind (re-check 7, R10)", () => {

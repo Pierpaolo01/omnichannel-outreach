@@ -274,3 +274,41 @@ test("a decline logged in another window while this page is on the lead's other 
   await expect(page.getByRole("alert").filter({ hasText: "Open the next call" })).toContainText("Amira Hassan declined on another call, so no call is made to them again in this campaign and this call left the list.");
   await shot(page, "declined-other-call-off-list");
 });
+
+test("the demonstration (ticket 16): all three paths and an override, the main sequence replaced, no further cold call, and a reply stopping the lead in win-back", async ({ page }) => {
+  const f = await freshCalls("win-back", "declined-demonstration");
+  await page.clock.install({ time: f.harness.clock });
+  await page.goto(`${f.url}/calls`);
+  // Amira: win back, as the phone track preselects; Tom: continue, overridden for him; Grace: stop, overridden for her.
+  for (const [who, choice] of [["Amira Hassan", null], ["Tom", /Keep the email and SMS steps going/], ["Grace Okafor", /Stop all outreach in this campaign/]] as const) {
+    await expect(page.getByRole("heading", { name: who })).toBeVisible();
+    await outcome(page, "Not interested").click();
+    await linger(page);
+    if (choice) {
+      await path(page, choice).check();
+      await linger(page);
+    }
+    await logButton(page).click();
+    await expect(outcomeStatus(page)).toContainText(`${who}: not interested logged.`);
+    await linger(page);
+  }
+  // Amira's main sequence is replaced by the win-back branch.
+  await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
+  await expect(page.getByRole("region", { name: "Activity" })).toContainText("Email track 1 was dropped for the win-back branch.");
+  await linger(page);
+  // The next morning: none of the three is called again.
+  await f.harness.advanceTo(f.harness.clock + 24 * 3_600_000);
+  await page.clock.setSystemTime(f.harness.clock);
+  await page.goto(`${f.url}/calls`);
+  for (const who of ["Amira Hassan", "Tom", "Grace Okafor"]) expect(await queueNames(f)).not.toContain(who);
+  await expect(page.getByRole("heading", { name: "Amira Hassan" })).toHaveCount(0);
+  await linger(page);
+  // Amira replies to a win-back email: the ordinary reply handoff.
+  f.harness.fake.prospectReplies("amira@harbourlanephysio.example", true, null);
+  await f.harness.advanceTo(f.harness.clock + 10 * 60_000);
+  await page.clock.setSystemTime(f.harness.clock);
+  await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
+  await expect(page.getByRole("region", { name: "Campaigns" })).toContainText("Replied, automation stopped");
+  await expect(page.getByRole("region", { name: "Activity" })).toContainText("Replied by email");
+  await linger(page);
+});
