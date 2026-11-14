@@ -184,6 +184,10 @@ const RULES: Record<string, Partial<Rules>> = {
   "overdue callbacks shown as callbacks": {
     callReason: (s, task, now) => (R.callReason(s, task, now) === "overdue" ? "callback" : R.callReason(s, task, now)),
   },
+  // Review bot on eda5fa0: an action judged on the state of the worker's last tick, not as of its own instant.
+  "a user action judged on stale state": {
+    asOfAction: (s) => s,
+  },
   "a redial after any outcome": {
     logCallOutcome: (s, taskId, input, now, ids, listed) =>
       input.redial && !REDIAL_OUTCOMES.includes(input.outcome) ? R.logCallOutcome(s, taskId, { ...input, redial: false }, now, ids, listed) : R.logCallOutcome(s, taskId, input, now, ids, listed),
@@ -201,13 +205,13 @@ const RULES: Record<string, Partial<Rules>> = {
 /** The invariant each mutation must break, and the seed offset known to show it (refreshed by the CI search). */
 const EXPECTED: Record<string, { invariant: string; seed: number }> = {
   "outcome on an unlisted task": { invariant: "16", seed: 0 },
-  "interested closes only its own task": { invariant: "16", seed: 35 },
+  "interested closes only its own task": { invariant: "16", seed: 54 },
   "daily call capacity ignored": { invariant: "17", seed: 0 },
   "committed calls not counted": { invariant: "17", seed: 1 },
   "a call placed on a day its calling hours have closed": { invariant: "17", seed: 1 },
   "an unworked call holds the parallel tracks": { invariant: "18", seed: 6 },
   "the tracks after a call start when it is placed": { invariant: "7", seed: 3 },
-  "skip for now finishes the call": { invariant: "7", seed: 3 },
+  "skip for now finishes the call": { invariant: "7", seed: 4 },
   "a wrong number leaves the number good": { invariant: "19", seed: 24 },
   "an outcome on a bad number accepted": { invariant: "16", seed: 49 },
   "calls placed newest due first": { invariant: "12", seed: 3 },
@@ -229,6 +233,7 @@ const EXPECTED: Record<string, { invariant: string; seed: number }> = {
   "carried calls not at the top": { invariant: "16", seed: 14 },
   "overdue callbacks shown as callbacks": { invariant: "16", seed: 2 },
   "a redial after any outcome": { invariant: "16", seed: 0 },
+  "a user action judged on stale state": { invariant: "16", seed: 12 },
 };
 
 export const CALL_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number }> = Object.fromEntries(

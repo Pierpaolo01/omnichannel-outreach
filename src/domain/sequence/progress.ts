@@ -291,6 +291,16 @@ export function evaluate(state: SubjectState, now: number, options: { readonly e
 }
 
 /**
+ * A user action is judged on the lead's state as of the action's own instant (ADR 0003 2.4, review bot
+ * on eda5fa0): in the transaction that records it, everything already due at or before that instant is
+ * applied first, by the same evaluation the worker's tick runs (an expiry at a rollover, the starts and
+ * endings it releases), whether or not the worker has ticked since. A held lead has nothing due by time.
+ */
+export function asOfAction(state: SubjectState, now: number, evaluateAt: typeof evaluate = evaluate): SubjectState {
+  return runs(state) ? evaluateAt(state, now) : state;
+}
+
+/**
  * The call skip limit (ADR 0003 3.5; ticket 15). An open call task (not a callback) expires at the end
  * of a user day d, the rollover e = start of day d + 1, when all of these held:
  * - it was listed on day d: d is on or after its list day (a redial moves that to the next day), and

@@ -446,17 +446,23 @@ export class SqliteEngineStore implements EngineStore {
     const placed = num(this.sql("SELECT COUNT(*) AS n FROM call_tasks WHERE placed_wall >= :start AND placed_wall < :end").get({ start, end }) ?? {}, "n");
     // A carried call counts only on a day it can be listed: its prospect's calling hours open that day
     // (council on 7902093), so a weekday call left on Friday takes none of the weekend's room; a callback
-    // from its own day on, at any hour (ticket 15). A task closed at the instant the day starts (a call
-    // skipped by the skip limit at that rollover) was not carried into it.
+    // from its own day on, at any hour (ticket 15). A task counts as it stood at the day's start, a
+    // callback if the last call logged on it before then asked for one (with that time), so the count is
+    // stable through the day: working a carried call, a callback request and a redial free no room. A task
+    // closed at the instant the day starts (a call skipped by the skip limit at that rollover) was not carried into it.
     const committed = this.sql(
-      `SELECT t.track_id, t.kind, t.callback_at, c.id AS campaign_id, c.definition_version, c.definition, c.default_timezone, p.timezone AS person_zone, co.timezone AS company_zone
+      `SELECT t.track_id, c.id AS campaign_id, c.definition_version, c.definition, c.default_timezone, p.timezone AS person_zone, co.timezone AS company_zone,
+         (SELECT a.outcome || '|' || COALESCE(a.callback_at, '') FROM call_attempts a
+           WHERE a.task_id = t.id AND a.at_wall < :start AND a.outcome <> 'skip_for_now'
+           ORDER BY a.at_wall DESC, a.rowid DESC LIMIT 1) AS last_call
        FROM call_tasks t JOIN enrollments e ON e.id = t.subject_id JOIN campaigns c ON c.id = e.campaign_id
          LEFT JOIN people p ON p.id = e.person_id JOIN companies co ON co.id = e.company_id
        WHERE t.placed_wall < :start AND (t.closed_wall IS NULL OR t.closed_wall > :start) AND (e.ended_wall IS NULL OR e.ended_wall >= :start)`,
     )
       .all({ start })
       .filter((r) => {
-        if (str(r, "kind") === "callback") return localDayNumber(num(r, "callback_at"), userZone) <= day;
+        const [outcome, callbackAt] = (strOrNull(r, "last_call") ?? "").split("|");
+        if (outcome === "callback_requested") return localDayNumber(Number(callbackAt), userZone) <= day;
         const definition = r["definition"] == null ? null : this.definitionOf({ ...r, id: str(r, "campaign_id") });
         const window = definition?.tracks.find((t) => t.id === str(r, "track_id"))?.window ?? [];
         const zone = prospectZone([strOrNull(r, "person_zone"), strOrNull(r, "company_zone")], definition?.timezone ?? "UTC");

@@ -11,7 +11,7 @@
  * and an overdue callback holding the lead's automated outreach until its outcome is logged.
  */
 import type { CampaignDefinition, StepDefinition } from "../src/domain/sequence/definition.ts";
-import type { CallsView, CallTaskView, EnrollmentProgress, LeadSearchResult, NeedsAttention, TodayView } from "../src/shared/api.ts";
+import type { CallTaskView, EnrollmentProgress, LeadSearchResult, NeedsAttention, TodayView } from "../src/shared/api.ts";
 import { EngineHarness } from "../test/support/engine-harness.ts";
 import { business, person } from "../test/support/export-builder.ts";
 

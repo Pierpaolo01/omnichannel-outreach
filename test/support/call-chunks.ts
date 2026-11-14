@@ -21,10 +21,11 @@ import { FULL_SEARCH, inShard, SEED } from "./sequence-chunks.ts";
  * and, since ticket 15, redials (one refused the same day, one asked for with the wrong outcome),
  * callbacks later today and for a later day, worked with every outcome, moved, skipped for now and
  * overdue for days, every reason on the list, sends moved by a hold, calls skipped at the skip limit
- * (a redialed one, one releasing a track) and a callback left with no good number.
- * Refresh it when the generator changes (last swept on 14 November 2026, ticket 15a: 65 behaviours).
+ * (a redialed one, one releasing a track), a callback left with no good number, and actions that reach
+ * the app between a due instant (a rollover, a callback's time) and the worker's tick, and just before one.
+ * Refresh it when the generator changes (last swept on 14 November 2026, ticket 15a after the review bot on eda5fa0: 67 behaviours).
  */
-export const CALL_FIXED_SEEDS: readonly number[] = [2, 7, 16, 19, 35, 55, 59, 98];
+export const CALL_FIXED_SEEDS: readonly number[] = [4, 6, 7, 45, 49, 56, 98];
 const SEARCH_SEEDS = 100;
 /** Seed offsets each mutation's search tries after its recorded seed. */
 const MAX_SEEDS = 30;

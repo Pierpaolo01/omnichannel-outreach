@@ -16,7 +16,7 @@ import {
   retryFailures,
 } from "../../domain/sequence/dispatch.ts";
 import { compareReadyNow, focusOf, isListed, logCallOutcome, placeCall, readyCalls, reasonOf } from "../../domain/sequence/calls.ts";
-import { applyBadDestination, applyReply, applyToAttempt, applyToWork, enterMain, evaluate, replyMatches, smsReplyOwner } from "../../domain/sequence/progress.ts";
+import { applyBadDestination, applyReply, applyToAttempt, applyToWork, asOfAction, enterMain, evaluate, replyMatches, smsReplyOwner } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
 
 export interface Rules {
@@ -52,6 +52,8 @@ export interface Rules {
   /** The listing rule (2.3), which decides whether an outcome is accepted. */
   readonly isListed: typeof isListed;
   readonly logCallOutcome: typeof logCallOutcome;
+  /** Brings a lead's state up to a user action's instant before the action is judged (2.4). */
+  readonly asOfAction: typeof asOfAction;
   /** The order of ready-now calls in the queue the read models show (4.4). */
   readonly readyNowOrder: typeof compareReadyNow;
   /** Which call the focus queue shows (part b): the one the user is on while it is listed. */
@@ -87,6 +89,7 @@ export const DEFAULT_RULES: Rules = {
   placeCall,
   isListed,
   logCallOutcome,
+  asOfAction,
   readyNowOrder: compareReadyNow,
   focusOf,
   callReason: reasonOf,

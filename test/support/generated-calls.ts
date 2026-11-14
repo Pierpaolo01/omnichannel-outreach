@@ -428,6 +428,10 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
         st.callbackAt = null;
         st.listDay = local(o.at, userZone).day + 1;
         st.redialedTo = st.listDay;
+      } else if (o.outcome !== "skip_for_now") {
+        // Its outcome: the call is done (a callback's outcome releases the hold first, so it closes as a call).
+        st.kind = "call";
+        st.callbackAt = null;
       }
     }
     return st;
@@ -600,10 +604,20 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
 
   /** The call the user's screen is on: named on every read of the queue, so it keeps the focus while it is listed. */
   let focus: string | null = null;
+  /**
+   * Set while the user acts between a due instant and the worker's tick: what the user reads then is the
+   * app's state as of its last tick (the read side's freshness is ticket 14b's rule, not checked here),
+   * and the action must still be judged as of its own instant (2.4; review bot on eda5fa0).
+   */
+  let staleRead = false;
   async function queue(): Promise<CallsView> {
     const q = (await h.request<CallsView>("GET", `/api/calls${focus ? `?focus=${focus}` : ""}`)).body;
     const held = focus;
     focus = q.focusTaskId;
+    if (staleRead) {
+      for (const item of [...q.readyNow, ...q.laterToday]) knownTasks.set(item.taskId, { subjectId: item.enrollmentId, trackId: item.track.id });
+      return q;
+    }
     // The focus moves only when the call the user is on leaves the list (an outcome, or its lead stopping).
     const expected = held !== null && knownTasks.has(held) && listedByRecord(held, h.clock) ? held : ((await recordReadyNow())[0] ?? null);
     if (q.focusTaskId !== expected) problem(`16: the focus is ${q.focusTaskId ?? "none"} at ${new Date(h.clock).toISOString()}; the user was on ${held ?? "nothing"}, and the record says ${expected ?? "none"}`);
@@ -630,6 +644,9 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     const number = view.numbers.find((n) => n.detailId === numberId);
     const key = number ? (phonesOf(s).find((p) => digits(p.key) === digits(number.value))?.key ?? null) : null;
     const now = h.clock;
+    // The app's placements so far (each checked against the record's capacity, priority and calling days), so an
+    // action judged as of its instant knows a call placed while no check ran, as in a stretch before a due instant.
+    for (const sid of subjects.keys()) for (const t of (await h.store.engine.subject(sid, now))?.callTasks ?? []) notePlacement(sid, t);
     const numberOk = outcome === "skip_for_now" || (key !== null && badAt(key) > now);
     const redial = extra.redial === true;
     const callbackAt = extra.callbackAt ?? null;
@@ -655,7 +672,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     if (answers.length > 1) features.add(r < 0.1 ? "posted-twice-at-once" : "replayed");
     const res = answers[0]!;
     const accepted = res.status === 200;
-    if (accepted !== expected) problem(`16: ${outcome} on ${view.enrollmentId}/${view.track.id} at ${new Date(now).toISOString()} was ${accepted ? "accepted" : `refused (${res.body.error?.message ?? res.status})`}; the record says it must be ${expected ? "accepted" : "refused"}`);
+    if (accepted !== expected) problem(`16: ${outcome} on ${view.enrollmentId}/${view.track.id} at ${new Date(now).toISOString()} was ${accepted ? "accepted" : `refused (${res.body.error?.message ?? res.status})`}; the record says it must be ${expected ? "accepted" : "refused"}${process.env["CALLS_DEBUG"] ? ` [placed ${isoOf(placedAt.get(`${s.id}/${view.track.id}`))}; due ${isoOf(startOf(s, def(s).tracks.find((t) => t.id === view.track.id)!))}; expiry ${isoOf(expiryOf(s, def(s).tracks.find((t) => t.id === view.track.id)!))}; state ${JSON.stringify(taskStateAt(s, view.track.id, now, true))}; holds ${JSON.stringify(holdsOf(s))}; outcomes ${JSON.stringify(acceptedOn(s, view.track.id).map((o) => [isoOf(o.at), o.outcome, o.redial]))}]` : ""}`);
     if (accepted && expected && answers.length === 1) {
       // The answer names the next focus: the first call ready now, by the record, once this outcome is logged.
       const skippedBefore = skips.get(taskId);
@@ -889,7 +906,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     const days = new Set(allTasks.map((x) => local(x.task.placedWall, userZone).day));
     for (const d of days) {
       const counts = dayCounts(allTasks, startOfDay(d, userZone));
-      if (counts.placed > capacity - counts.committed) problem(`17: ${counts.placed} new calls were placed on ${new Date(d * DAY).toISOString().slice(0, 10)} with ${counts.committed} committed and a capacity of ${capacity}`);
+      if (counts.placed > capacity - counts.committed) problem(`17: ${counts.placed} new calls were placed on ${new Date(d * DAY).toISOString().slice(0, 10)} with ${counts.committed} committed and a capacity of ${capacity}${process.env["CALLS_DEBUG"] ? ` engine day ${JSON.stringify(await h.store.engine.callDay(startOfDay(d, userZone)))} ${JSON.stringify(allTasks.map((x) => ({ s: x.s.id, t: x.task.trackId, placed: isoOf(x.task.placedWall), closed: isoOf(x.task.closedWall), kind: x.task.kind, hours: hoursOnUserDay(x.s, x.task.trackId, startOfDay(d, userZone)), outcomes: acceptedOn(x.s, x.task.trackId).map((o) => [isoOf(o.at), o.outcome, isoOf(o.callbackAt)]) })))}` : ""}`);
     }
 
     // 12 for calls. At every placement, no call ready then with a higher priority was left unplaced.
@@ -966,13 +983,11 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
    * New tasks placed on the user day of `t`, and committed tasks: placed earlier, open at its start (one
    * closed at that very instant, such as a call skipped at that rollover, was not carried into it), for
    * leads not stopped by then, on a day they can be listed: a call on a day its calling hours open, a
-   * callback from its own day. A task's kind is the one it has at `t` (or at the day's end, for a past
-   * day): a call that became a callback for a later day, or the reverse, counts as what it is now, so the
-   * count only falls during a day, never rises.
+   * callback from its own day. A task counts as it stood at the day's start (a callback if the user's last
+   * outcome on it before then asked for one), so the count is the same all day.
    */
   function dayCounts(all: readonly { s: Subject; task: CallTask }[], t: number): { placed: number; committed: number } {
     const { start: from, end } = userDay(t);
-    const asOf = Math.min(end - 1, h.clock);
     const placed = all.filter((x) => x.task.placedWall >= from && x.task.placedWall < end).length;
     const committed = all.filter((x) => {
       if (x.task.placedWall >= from) return false;
@@ -981,7 +996,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       const closed = f !== null && f.at <= from;
       const interested = interestedAt(x.s) < from;
       if (closed || interested || endLimitOf(x.s) < from || sequenceDoneAt(x.s, from - 1)) return false;
-      const st = taskStateAt(x.s, x.task.trackId, asOf);
+      const st = taskStateAt(x.s, x.task.trackId, from, true);
       return st.kind === "callback" ? local(st.callbackAt ?? Infinity, userZone).day <= local(from, userZone).day : hoursOnUserDay(x.s, x.task.trackId, from);
     }).length;
     return { placed, committed };
@@ -1059,6 +1074,26 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     return found ? (await h.request<CompanyRecord>("GET", `/api/companies/${found.id}`)).body.enrollments.find((e) => e.id === id)?.status : undefined;
   }
 
+  /**
+   * Moves the clock to around an instant at which something falls due on the list: the user's next day (the
+   * rollover every skip-limit expiry happens at) or a callback's time, on either side of it. The worker ticks
+   * up to two seconds before it and not again, so the user's next action reaches the app between that instant
+   * and the worker's next tick; the record judges it as of its own instant, as for any action.
+   */
+  async function aroundADueInstant(): Promise<boolean> {
+    const now = h.clock;
+    const instants = [startOfDay(local(now, userZone).day + 1, userZone), ...logged.filter((o) => o.accepted && o.callbackAt !== null && o.callbackAt > now + 5_000).map((o) => o.callbackAt ?? 0)];
+    const target = instants[Math.floor(staleRand() * instants.length)] ?? now;
+    const side = [-1_000, 0, 1_000, 30_000][Math.floor(staleRand() * 4)] ?? 0;
+    if (target + side <= now + 2_000) return false;
+    await h.advanceTo(target - 2_000);
+    h.clock = Math.max(h.clock, target + side);
+    staleRead = true;
+    features.add(side < 0 ? "acted-just-before-a-due-instant" : target === instants[0] ? "acted-after-a-rollover-before-the-tick" : "acted-after-a-callback-time-before-the-tick");
+    return true;
+  }
+  const staleRand = random(seed ^ 0x15a);
+
   // ------------------------------------------------------------------------------------------
   // Events.
 
@@ -1070,8 +1105,14 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     if (r < 0.3) {
       await h.advanceTo(h.clock + pick([20 * MINUTE, 2 * HOUR, 5 * HOUR, DAY, 2 * DAY]));
     } else if (r < 0.7) {
-      // Work the list: every call the user starts is the focused one.
-      if (await workFocus(false)) await checkNumbers();
+      // Work the list: every call the user starts is the focused one. Sometimes the user acts between a due
+      // instant and the worker's tick (review bot on eda5fa0); the worker's tick then follows.
+      const stale = staleRand() < 0.3 && (await aroundADueInstant());
+      const worked = await workFocus(false);
+      if (stale) {
+        staleRead = false;
+        await h.tick();
+      } else if (worked) await checkNumbers();
       else await h.advanceTo(h.clock + pick([HOUR, 3 * HOUR]));
     } else if (r < 0.8) {
       // An outcome on a task the user is not shown now: closed, of an ended lead, or outside its calling day.
@@ -1106,11 +1147,13 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
   }
 
   const stopped = () => h.stopped;
+  const failed = () => problems.length > 0;
   if (problems.length === 0 && options.drain !== false && !stopped()) {
     // The drain: day by day, the user works every call on the list until no lead has work left.
-    // A problem found ends the drain, as it ends the events: the run reports it.
-    for (let step = 0; step < 400 && !stopped() && problems.length === 0; step++) {
-      for (let i = 0; i < 30 && problems.length === 0; i++) {
+    // A problem found ends the drain, as it ends the events: the run reports it. (Asked through a call: the
+    // enclosing check narrows `problems.length` to 0, and `problem` adds to it from inside the loop.)
+    for (let step = 0; step < 400 && !stopped() && !failed(); step++) {
+      for (let i = 0; i < 30 && !failed(); i++) {
         await h.advanceTo(h.clock + MINUTE);
         if (!(await workFocus(true))) break;
       }

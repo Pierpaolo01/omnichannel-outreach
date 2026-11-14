@@ -728,13 +728,17 @@ export class Engine {
       const refused: { reason: string | null } = { reason: null };
       const ids = { attempt: this.newId(), note: this.newId() };
       try {
-        await this.store.update(subjectId, now, (s) => {
+        await this.store.update(subjectId, now, (stored) => {
+          // Judged as of the action's instant: what fell due since the last tick (an expiry at the rollover)
+          // is applied first, in this transaction, and stands whatever the answer (ADR 0003 2.4).
+          const s = this.rules.asOfAction(stored, now, this.rules.evaluate);
+          const caughtUp = same(s, stored) ? null : s;
           const out = this.rules.logCallOutcome(s, taskId, input, now, ids, this.rules.isListed);
           if (!out.ok) {
             refused.reason = out.reason;
-            return null;
+            return caughtUp;
           }
-          return out.replayed ? null : out.state;
+          return out.replayed ? caughtUp : out.state;
         });
       } catch (error) {
         // Another process logged this key on another subject's call between the check and this write.
