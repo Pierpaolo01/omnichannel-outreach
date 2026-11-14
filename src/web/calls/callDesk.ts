@@ -716,8 +716,7 @@ export class CallDesk {
       body = { requestId: body.requestId, outcome: body.outcome, numberId: body.numberId, note: body.note, noteScope: body.noteScope, ...(body.callbackAt === undefined ? {} : { callbackAt: body.callbackAt }) };
     }
     if (this.fault("declined_path_lost_on_resend") && s.tries > 0 && body.declinedPath !== undefined) {
-      const { declinedPath: _lost, ...rest } = body;
-      body = rest;
+      body = Object.fromEntries(Object.entries(body).filter(([k]) => k !== "declinedPath")) as unknown as OutcomeBody;
     }
     // The fault: the path read again from the latest read of the call at send time, not the one the user pressed on.
     if (this.fault("preselected_path_read_at_send") && body.declinedPath !== undefined && this.state.task?.state === "ready" && this.state.task.view.taskId === entry.taskId) {

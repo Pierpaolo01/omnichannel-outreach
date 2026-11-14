@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
-import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
+import type { CampaignDefinition, DeclinedPath, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
 import type { ApiError, CallOutcomeAnswer, CallOutcomeApi, CallOutcomeRefusal, CallsView, CallTaskView, LeadSearchResult } from "../../shared/api.ts";
 import { loggedLine } from "./wording.ts";
 import { CallDesk, NoAnswer, Refused, type DeskFault, type KeyValue, type OutcomeBody } from "./callDesk.ts";
@@ -30,6 +30,11 @@ import { CallDesk, NoAnswer, Refused, type DeskFault, type KeyValue, type Outcom
  * the server's record of a press carry its outcome, redial and callback time, and no callback time not after
  * the read it was pressed on is sent. Ticket 15b's presses (redials, callbacks later today, on later days and
  * in the past) and nights passing (so a press on its way can meet an expired call) draw from a second stream.
+ * Ticket 16c's draw from a third: whether the campaign has a win-back branch and the phone track's configured path
+ * (unset, stop, continue, win back), not interested pressed on each path offered (untouched, so the read's
+ * preselected path, or the user's own) and now and then on a path the read does not offer (refused in place), and the
+ * stored phone track's path changing between reads, as ticket 19's running edits will: a press untouched before the
+ * change and sent after it must carry the path it was pressed with (14), and the user's choice survives every answer (6).
  *
  * Each desk fault (callDesk.ts `DeskFault`) breaks one of them; the last block checks a known seed
  * catches each (refusal_resent_at_once is caught by its count of requests in callDesk.test.ts).
@@ -81,6 +86,8 @@ const BUSINESSES = [
   business({ business_id: "b3", business_name: "Hudson Physio", phone_e164: "+12025550100", timezone: "America/New_York", country: "US", city: "New York" }),
 ];
 const OUTCOMES: readonly CallOutcomeApi[] = ["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "skip_for_now"];
+/** Ticket 16c: the win-back branch some runs have, two emails a day apart. */
+const WIN_BACK_TRACK: TrackDefinition = { ...track("w1", "email", [step("w1s1", 0, "One more idea for {{company}}."), step("w1s2", 1, "A last idea for {{company}}.")], { kind: "entry" }), branch: "win_back" };
 const REDIAL_OUTCOMES: readonly CallOutcomeApi[] = ["no_answer", "voicemail", "gatekeeper"];
 
 /** Lets every request in flight to the in-process app finish. */
@@ -170,9 +177,11 @@ interface Choice {
   readonly redial: boolean;
   readonly callbackDay: string | null;
   readonly callbackTime: string;
+  /** Ticket 16c: the path chosen on the not-interested radios, or null while untouched. */
+  readonly declinedPath: DeclinedPath | null;
 }
 
-const sameChoice = (a: Choice, b: Choice) => a.numberId === b.numberId && a.outcome === b.outcome && a.note === b.note && a.redial === b.redial && a.callbackDay === b.callbackDay && a.callbackTime === b.callbackTime;
+const sameChoice = (a: Choice, b: Choice) => a.numberId === b.numberId && a.outcome === b.outcome && a.note === b.note && a.redial === b.redial && a.callbackDay === b.callbackDay && a.callbackTime === b.callbackTime && a.declinedPath === b.declinedPath;
 
 /** London's date and time of an instant, as the callback controls take them. */
 const dayIn = (zone: string, t: number) => new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" }).format(t);
@@ -204,10 +213,18 @@ interface Expected {
   readonly noteScope: "person" | "company";
   readonly redial: boolean;
   readonly callbackAt: number | null;
+  /** With not interested: the user's path, or, untouched, the one the read the user pressed on preselected; null otherwise. */
+  readonly declinedPath: DeclinedPath | null;
 }
 
 const sameAsChosen = (body: OutcomeBody, e: Expected) =>
-  body.outcome === e.outcome && body.numberId === e.numberId && body.note === e.note && body.noteScope === e.noteScope && (body.redial === true) === e.redial && (body.callbackAt === undefined ? null : Date.parse(body.callbackAt)) === e.callbackAt;
+  body.outcome === e.outcome &&
+  body.numberId === e.numberId &&
+  body.note === e.note &&
+  body.noteScope === e.noteScope &&
+  (body.redial === true) === e.redial &&
+  (body.callbackAt === undefined ? null : Date.parse(body.callbackAt)) === e.callbackAt &&
+  (body.declinedPath ?? null) === e.declinedPath;
 
 interface Request {
   readonly from: Instance;
@@ -228,14 +245,23 @@ interface Press {
 interface RunOptions {
   readonly start?: number;
   readonly phoneWindow?: readonly { day: number; start: number; end: number }[];
+  /** Ticket 16c: how often a press is not interested (default 0.35); the decline runs press it more. */
+  readonly declines?: number;
 }
 
 async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set(), options: RunOptions = {}) {
   const START = options.start ?? MONDAY_830;
-  const definition: CampaignDefinition = options.phoneWindow ? { ...DEFINITION, tracks: DEFINITION.tracks.map((t) => (t.channel === "call" ? { ...t, window: [...(options.phoneWindow ?? [])] } : t)) } : DEFINITION;
   const r = rng(seed);
   // Ticket 15b's choices draw from a stream of their own, so the 14b runs keep their shape.
   const r15 = rng(seed ^ 0x15b15b);
+  // Ticket 16c's too: the win-back branch, the phone track's configured path, declines and running edits of the path.
+  const r16 = rng(seed ^ 0x16c16c);
+  const pick = <T,>(xs: readonly T[], roll: number): T => xs[Math.min(xs.length - 1, Math.floor(roll * xs.length))] as T;
+  const hasBranch = r16() < 0.6;
+  const configurable: readonly (DeclinedPath | undefined)[] = hasBranch ? [undefined, "stop", "continue", "win_back"] : [undefined, "stop", "continue"];
+  const configured = pick(configurable, r16());
+  const withPhone = (t: TrackDefinition): TrackDefinition => (t.channel === "call" ? { ...t, ...(options.phoneWindow ? { window: [...options.phoneWindow] } : {}), ...(configured ? { declinedPath: configured } : {}) } : t);
+  const definition: CampaignDefinition = { ...DEFINITION, tracks: [...DEFINITION.tracks.map(withPhone), ...(hasBranch ? [WIN_BACK_TRACK] : [])] };
   const h = new EngineHarness({ start: START - 30 * MIN, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
   await h.tick();
   await h.request("PUT", "/api/call-settings", { dailyCapacity: 3, userZone: "Europe/London" });
@@ -287,6 +313,18 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set(), opt
   /** True while log() runs: its first post is a new press, recorded right after. */
   let pressing = false;
   const stored = async (id: string) => (await h.store.engine.callRequestTask(id)) !== null;
+  /**
+   * Ticket 19 will publish running edits; here the stored phone track's declined path changes directly (as
+   * as-of-the-instant.test.ts edits a launched skip limit), so a later read preselects another path.
+   */
+  const db = (h.store.engine as unknown as { db: { prepare(sql: string): { get(...a: unknown[]): Record<string, unknown> | undefined; run(...a: unknown[]): unknown } } }).db;
+  const setConfiguredPath = (path: DeclinedPath | undefined) => {
+    const def = JSON.parse(String(db.prepare("SELECT definition FROM campaigns WHERE id = ?").get(campaign.id)?.["definition"])) as CampaignDefinition;
+    const tracks = def.tracks.map((t) => (t.channel === "call" ? { ...t, declinedPath: path } : t));
+    db.prepare("UPDATE campaigns SET definition = ?, version = version + 1, definition_version = definition_version + 1 WHERE id = ?").run(JSON.stringify({ ...def, tracks }), campaign.id);
+  };
+  /** Presses of not interested left untouched, by request id, with the path pressed: one sent after a path change is counted. */
+  const untouchedPresses = new Map<string, DeclinedPath>();
   /** What each press must carry, from the generated user's choice (invariant 14), and the presses already checked against the server. */
   const expectedOf = new Map<string, Expected>();
   const checkedStored = new Set<string>();
@@ -398,9 +436,13 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set(), opt
       if (taskId === null) continue;
       checkedStored.add(id);
       const record = (await h.request<CallTaskView>("GET", `/api/call-tasks/${taskId}`)).body.storedCalls.find((c) => c.requestId === id);
-      if (!record || record.outcome !== chosen.outcome || record.redial !== chosen.redial || (record.callbackAt === null ? null : Date.parse(record.callbackAt)) !== chosen.callbackAt) problems.push(`14: ${id} is stored as ${JSON.stringify(record)}, not as the user chose ${JSON.stringify(chosen)}`);
+      if (!record || record.outcome !== chosen.outcome || record.redial !== chosen.redial || (record.callbackAt === null ? null : Date.parse(record.callbackAt)) !== chosen.callbackAt || record.declinedPath !== chosen.declinedPath) problems.push(`14: ${id} is stored as ${JSON.stringify(record)}, not as the user chose ${JSON.stringify(chosen)}`);
       if (chosen.redial) seen.redials++;
       if (chosen.callbackAt !== null) seen.callbacks++;
+      if (chosen.declinedPath !== null) seen.declines[chosen.declinedPath]++;
+      // A press untouched, stored after the track's configured path changed away from the one it was pressed with.
+      const pressedWith = untouchedPresses.get(id);
+      if (pressedWith !== undefined && pressedWith !== (await h.request<CallTaskView>("GET", `/api/call-tasks/${taskId}`)).body.declinedPath) seen.storedAfterPathChange++;
     }
     // Storage is the only truth: an entry removed in any tab never reappears.
     for (const k of local.reappeared.splice(0)) problems.push(`3: ${k} was removed and came back`);
@@ -456,7 +498,7 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set(), opt
       // Invariant 6: the draft of the call on screen is what the user chose, or, before any choice, its first making.
       if (snap.focus !== null && snap.task?.state === "ready" && snap.task.view.taskId === snap.focus) {
         const chosen = tab.choices.get(snap.focus);
-        const now: Choice = { numberId: snap.draft.numberId, outcome: snap.draft.outcome, note: snap.draft.note, redial: snap.draft.redial, callbackDay: snap.draft.callbackDay, callbackTime: snap.draft.callbackTime };
+        const now: Choice = { numberId: snap.draft.numberId, outcome: snap.draft.outcome, note: snap.draft.note, redial: snap.draft.redial, callbackDay: snap.draft.callbackDay, callbackTime: snap.draft.callbackTime, declinedPath: snap.draft.declinedPath };
         if (!chosen) tab.choices.set(snap.focus, now);
         else if (!sameChoice(chosen, now)) problems.push(`6: ${tab.label}'s draft for ${snap.focus} became ${JSON.stringify(now)}, not the user's ${JSON.stringify(chosen)}`);
       }
@@ -477,7 +519,7 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set(), opt
     }
   };
 
-  const seen = { repeatedPress: 0, repeatedHour: 0, redialPresses: 0, redials: 0, callbacks: 0, pastCallbacks: 0, expiredPress: 0, loggedFromRead: 0, heldGets: 0, failedReads: 0, sessionRefused: 0, confirming: 0, refusedShown: 0, foundGone: 0, unconfirmed: 0, blocked: 0, recovered: 0, dismissed: 0, records: 0, leftWithPending: 0, notQueued: 0, refusalFocus: new Set<string>() };
+  const seen = { declines: { stop: 0, continue: 0, win_back: 0 } as Record<DeclinedPath, number>, overrides: 0, untouched: 0, notOffered: 0, pathChanges: 0, storedAfterPathChange: 0, repeatedPress: 0, repeatedHour: 0, redialPresses: 0, redials: 0, callbacks: 0, pastCallbacks: 0, expiredPress: 0, loggedFromRead: 0, heldGets: 0, failedReads: 0, sessionRefused: 0, confirming: 0, refusedShown: 0, foundGone: 0, unconfirmed: 0, blocked: 0, recovered: 0, dismissed: 0, records: 0, leftWithPending: 0, notQueued: 0, refusalFocus: new Set<string>() };
   let storageFullUntil = -1;
   const tabs: Tab[] = [];
   tabs.push(await newTab("a"), await newTab("b"));
@@ -494,6 +536,13 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set(), opt
     if (!local.full && r() < 0.03) storageFullUntil = s + 1 + Math.floor(r() * 4);
     local.full = s < storageFullUntil;
     const tab = tabs[Math.floor(r() * tabs.length)] ?? tabs[0]!;
+    // Ticket 16c: now and then the phone track's configured path changes (a running edit, ticket 19), more often while a
+    // not-interested press left untouched is on its way, so it is sent after a read that preselects another path.
+    const untouchedOnItsWay = requests.some((q) => q.answer === null && untouchedPresses.has(q.body.requestId));
+    if (r16() < (untouchedOnItsWay ? 0.5 : 0.03)) {
+      setConfiguredPath(pick(configurable, r16()));
+      seen.pathChanges++;
+    }
     // Now and then a held read is answered, in any order, or fails; and a tab's own storage refuses writes for a while.
     if (gets.length > 0 && r() < 0.35) {
       const g = gets.splice(Math.floor(r() * gets.length), 1)[0]!;
@@ -533,6 +582,25 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set(), opt
             callbackTime = ["01:05", "01:30", "01:45"][Math.floor(r15() * 3)] ?? "01:30";
           }
         } else if (REDIAL_OUTCOMES.includes(outcome)) redial = r15() < 0.75;
+        // Ticket 16c: not interested, from its own stream, with the radios untouched (the read's preselected path), the
+        // user's own path among those offered, or now and then a path the read does not offer.
+        let declinedPath = snap.draft.declinedPath;
+        let notOffered = false;
+        if (outcome !== "callback_requested" && r16() < (options.declines ?? 0.35)) {
+          outcome = "not_interested";
+          const roll16 = r16();
+          const offered = snap.task.view.declinedPaths;
+          if (roll16 < 0.4) {
+            seen.untouched++;
+          } else if (roll16 < 0.85 || offered.length === 3) {
+            declinedPath = pick(offered, r16());
+            seen.overrides++;
+          } else {
+            declinedPath = "win_back";
+            notOffered = true;
+            seen.notOffered++;
+          }
+        }
         // Often the shared main line, which another lead's call can mark bad under this draft.
         const roll2 = r();
         const numberId = roll2 < 0.3 ? (numbers.find((n) => n.kind === "main_line")?.detailId ?? snap.draft.numberId) : roll2 < 0.45 ? (numbers[Math.floor(r() * numbers.length)]?.detailId ?? null) : snap.draft.numberId;
@@ -549,16 +617,18 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set(), opt
           noteScope: chosenOn.person === null ? "company" : noteScope,
           redial: redial && REDIAL_OUTCOMES.includes(outcome),
           callbackAt: occurrences.find((t) => t > Date.parse(chosenOn.asOf)) ?? null,
+          // The user's own path, or, untouched, the one this read shows preselected: built by the test from the user's choice.
+          declinedPath: outcome === "not_interested" ? (declinedPath ?? chosenOn.declinedPath) : null,
         };
-        desk.setDraft({ outcome, note, numberId, noteScope, redial, callbackDay, callbackTime });
-        if (snap.focus !== null) tab.choices.set(snap.focus, { numberId, outcome, note, redial, callbackDay, callbackTime });
+        desk.setDraft({ outcome, note, numberId, noteScope, redial, callbackDay, callbackTime, declinedPath });
+        if (snap.focus !== null) tab.choices.set(snap.focus, { numberId, outcome, note, redial, callbackDay, callbackTime, declinedPath });
         // Now and then the user only edits the draft, and presses nothing.
         if (r() < 0.2) {
           await flush();
           await check(moved);
           continue;
         }
-        const blocked = (outcome !== "skip_for_now" && desk.getSnapshot().numberProblem !== null) || (outcome === "callback_requested" && desk.getSnapshot().callback?.at === null && !faults.has("past_callback_sent"));
+        const blocked = (outcome !== "skip_for_now" && desk.getSnapshot().numberProblem !== null) || (outcome === "callback_requested" && desk.getSnapshot().callback?.at === null && !faults.has("past_callback_sent")) || notOffered;
         if (outcome === "callback_requested" && desk.getSnapshot().callback?.problem === "past") seen.pastCallbacks++;
         const pressedOn = snap.task.view.asOf;
         const sentBefore = requests.length;
@@ -570,6 +640,8 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set(), opt
         const sentNow = requests.slice(sentBefore);
         for (const q of sentNow) if (q.body.callbackAt && Date.parse(q.body.callbackAt) <= Date.parse(pressedOn)) problems.push(`14: ${tab.label} sent a callback for ${q.body.callbackAt}, not after the read it was pressed on (${pressedOn})`);
         // A callback whose day and time have no occurrence still to come (a time passed, or one the clocks skip) sends nothing.
+        // The boundary (ticket 16c): a declined path the read does not offer sends nothing.
+        if (notOffered && sentNow.length > 0) problems.push(`14: ${tab.label} sent not interested on ${expected.declinedPath ?? ""}, a path its read does not offer`);
         if (outcome === "callback_requested" && expected.callbackAt === null && sentNow.length > 0) problems.push(`14: ${tab.label} sent a callback for ${callbackDay ?? ""} ${callbackTime}, which has no time still to come`);
         if (local.full && !blocked && (outcome === "skip_for_now" || numberId !== null)) {
           if (!desk.getSnapshot().notQueued) problems.push(`3: ${tab.label} accepted a press its storage refused`);
@@ -589,6 +661,7 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set(), opt
           const written = entry === null ? null : (JSON.parse(entry) as { body: OutcomeBody }).body;
           if (written && !sameAsChosen(written, expected)) problems.push(`14: ${tab.label} wrote the press ${id} as ${JSON.stringify(written)}, not the user's choice ${JSON.stringify(expected)}`);
           expectedOf.set(id, expected);
+          if (outcome === "not_interested" && declinedPath === null && expected.declinedPath !== null) untouchedPresses.set(id, expected.declinedPath);
           if (expected.callbackAt !== null && occurrences.length > 1) seen.repeatedPress++;
           if (expected.redial) seen.redialPresses++;
           presses.push(press);
@@ -772,7 +845,7 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set(), opt
 }
 
 describe("working the call list in the browser, generated over the real call desk (ADR 0003 4.4.1)", () => {
-  const counts: { presses: number; logged: number; seen: { repeatedPress: number; repeatedHour: number; redialPresses: number; redials: number; callbacks: number; pastCallbacks: number; expiredPress: number; loggedFromRead: number; heldGets: number; failedReads: number; sessionRefused: number; confirming: number; refusedShown: number; foundGone: number; unconfirmed: number; blocked: number; recovered: number; dismissed: number; records: number; leftWithPending: number; notQueued: number; refusalFocus: Set<string> } }[] = [];
+  const counts: Awaited<ReturnType<typeof run>>[] = [];
   for (const seed of Array.from({ length: SEEDS }, (_, i) => 9100 + i)) {
     test(`run ${seed}`, async () => {
       const out = await run(seed);
@@ -796,6 +869,8 @@ describe("working the call list in the browser, generated over the real call des
     for (const where of ["same", "other", "none"]) expect(counts.some((c) => c.seen.refusalFocus.has(where)), where).toBe(true);
     // Ticket 15b: redials and callbacks stored, a callback refused in place for its past time, and presses on their way across a night.
     for (const k of ["redials", "callbacks", "pastCallbacks", "expiredPress"] as const) expect(counts.filter((c) => c.seen[k] > 0).length, k).toBeGreaterThan(0);
+    // Ticket 16c: the phone track's path changes in the default runs too, with declines among their presses.
+    for (const k of ["pathChanges", "untouched", "overrides"] as const) expect(counts.filter((c) => c.seen[k] > 0).length, k).toBeGreaterThan(0);
   });
 });
 
@@ -817,6 +892,37 @@ describe("fixed runs across the clock changes, with a lead in New York (council 
   test("the October runs press callbacks for a time inside the hour the clocks repeat", () => {
     expect(repeated.slice(1).every((n) => n > 0)).toBe(true);
   });
+});
+
+describe("fixed runs that press not interested more often (ticket 16c; ADR 0003 4.4.1)", () => {
+  // Seeds from the by-hand search below: together they store declines on each path, press untouched and overridden,
+  // refuse a path the read does not offer in place, and store a press untouched before the track's path changed.
+  const DECLINE_RUNS: readonly number[] = [9601, 9604, 9613, 9614, 9630];
+  const reached: Awaited<ReturnType<typeof run>>[] = [];
+  for (const seed of DECLINE_RUNS) {
+    test(`run ${seed}`, async () => {
+      const out = await run(seed, new Set(), { declines: 0.8 });
+      reached.push(out);
+      expect(out.problems).toEqual([]);
+    });
+  }
+  test("they reach each path, untouched and overridden presses, a path not offered, and a press stored after the path changed", () => {
+    for (const path of ["stop", "continue", "win_back"] as const) expect(reached.some((c) => c.seen.declines[path] > 0), path).toBe(true);
+    for (const k of ["untouched", "overrides", "notOffered", "pathChanges", "storedAfterPathChange"] as const) expect(reached.filter((c) => c.seen[k] > 0).length, k).toBeGreaterThan(0);
+  });
+});
+
+/** By hand: CALL_DESK_DECLINE_SEARCH=1 prints, for decline-heavy runs, what each seed reaches, to fill DECLINE_RUNS below. */
+describe.skipIf(!process.env["CALL_DESK_DECLINE_SEARCH"])("decline seed search (by hand)", () => {
+  test("seeds", async () => {
+    const found: string[] = [];
+    for (let seed = 9600; seed < 9640; seed++) {
+      const out = await run(seed, new Set(), { declines: 0.8 });
+      const d = out.seen;
+      found.push(`${seed}: stop ${d.declines.stop} continue ${d.declines.continue} win_back ${d.declines.win_back} untouched ${d.untouched} overrides ${d.overrides} notOffered ${d.notOffered} afterChange ${d.storedAfterPathChange} problems ${out.problems.length}`);
+    }
+    console.info("DECLINES\n" + found.join("\n"));
+  }, 600_000);
 });
 
 /** By hand: CALL_DESK_CLOCK_FAULT_SEARCH=1 prints seeds of the March run (calling hours always open) that catch the zone fault. */
@@ -847,6 +953,7 @@ describe.skipIf(!process.env["CALL_DESK_CLOCK_SEARCH"])("clock-change seed searc
 
 describe("each desk fault is caught by its known seed (ADR 0003 4.4.1)", () => {
   const MARCH_RUN: RunOptions = { start: Date.parse("2026-03-29T00:20:00Z"), phoneWindow: ALWAYS };
+  const DECLINE_RUN: RunOptions = { declines: 0.8 };
   const KILLING: readonly [DeskFault, number, string, RunOptions?][] = [
     ["new_id_on_resend", 9134, "7:"],
     ["logged_when_sent", 9100, "2:"],
@@ -861,22 +968,28 @@ describe("each desk fault is caught by its known seed (ADR 0003 4.4.1)", () => {
     ["focused_refusal_hidden", 9101, "3:"],
     ["stale_copy_written_back", 9115, "3:"],
     ["refusal_removed_on_move_on", 9101, "3:"],
-    ["stored_press_left_as_draft", 9100, "12:"],
+    // Re-chosen when ticket 16c's declines changed the runs' trajectories (by the search below).
+    ["stored_press_left_as_draft", 9105, "12:"],
     ["answer_clears_draft", 9100, "6:"],
     ["first_read_skips_reconcile", 9123, "3:"],
     ["task_failures_uncounted", 9117, "13:"],
     ["reads_overlap", 9100, "13:"],
     // Ticket 15b.
-    ["redial_lost_on_resend", 9180, "14:"],
+    ["redial_lost_on_resend", 9260, "14:"],
     ["answer_resets_callback_draft", 9105, "6:"],
     ["past_callback_sent", 9101, "14:"],
     // Council on 32454ea, A: the body corrupted where it is first built, against the user's own choice.
     ["redial_dropped_at_press", 9103, "14:"],
     // A callback on the New York lead, reached at night in the March run (calling hours always open).
     ["callback_offset_of_user_zone", 9668, "14:", MARCH_RUN],
+    // Ticket 16c, in the decline runs: the user's path dropped at the press; lost on a resend; and the preselected path read
+    // again at send time, which seed 9604 reaches with a press left untouched before the track's path changed.
+    ["declined_path_dropped_at_press", 9602, "14:", DECLINE_RUN],
+    ["declined_path_lost_on_resend", 9615, "14:", DECLINE_RUN],
+    ["preselected_path_read_at_send", 9604, "14:", DECLINE_RUN],
   ];
   for (const [fault, seed, invariant, options] of KILLING) {
-    test(`${fault}, seed ${seed}${options ? " (the March run)" : ""}, invariant ${invariant}`, async () => {
+    test(`${fault}, seed ${seed}${options === MARCH_RUN ? " (the March run)" : options === DECLINE_RUN ? " (a decline run)" : ""}, invariant ${invariant}`, async () => {
       const out = await run(seed, new Set([fault]), options);
       expect(out.problems.some((p) => p.startsWith(invariant))).toBe(true);
     });
@@ -886,12 +999,15 @@ describe("each desk fault is caught by its known seed (ADR 0003 4.4.1)", () => {
 /** By hand: CALL_DESK_FAULT_SEARCH=1 prints the first seeds that catch each fault, to fill KILLING above. */
 describe.skipIf(!process.env["CALL_DESK_FAULT_SEARCH"])("fault search (by hand)", () => {
   // refusal_resent_at_once needs storage full while answers keep coming; callDesk.test.ts kills it by a count of requests.
-  const all: DeskFault[] = ["new_id_on_resend", "logged_when_sent", "outbox_removed_when_sent", "refresh_adopts_focus", "no_lock_while_pending", "substitute_bad_number", "pending_kept_after_answer", "disposed_desk_applies", "only_focused_entries_retried", "refusal_dropped", "focused_refusal_hidden", "stale_copy_written_back", "refusal_removed_on_move_on", "stored_press_left_as_draft", "answer_clears_draft", "first_read_skips_reconcile", "task_failures_uncounted", "reads_overlap", "redial_lost_on_resend", "answer_resets_callback_draft", "past_callback_sent", "callback_offset_of_user_zone", "redial_dropped_at_press"];
-  for (const fault of all) {
+  const all: DeskFault[] = ["new_id_on_resend", "logged_when_sent", "outbox_removed_when_sent", "refresh_adopts_focus", "no_lock_while_pending", "substitute_bad_number", "pending_kept_after_answer", "disposed_desk_applies", "only_focused_entries_retried", "refusal_dropped", "focused_refusal_hidden", "stale_copy_written_back", "refusal_removed_on_move_on", "stored_press_left_as_draft", "answer_clears_draft", "first_read_skips_reconcile", "task_failures_uncounted", "reads_overlap", "redial_lost_on_resend", "answer_resets_callback_draft", "past_callback_sent", "callback_offset_of_user_zone", "redial_dropped_at_press", "declined_path_dropped_at_press", "declined_path_lost_on_resend", "preselected_path_read_at_send"];
+  // CALL_DESK_FAULTS=a,b narrows the search; CALL_DESK_FAULT_DECLINES=1 searches the decline runs' options (ticket 16c).
+  const only = process.env["CALL_DESK_FAULTS"]?.split(",") ?? null;
+  const options: RunOptions = process.env["CALL_DESK_FAULT_DECLINES"] ? { declines: 0.8 } : {};
+  for (const fault of all.filter((f) => only === null || only.includes(f))) {
     test(fault, async () => {
       const found: string[] = [];
-      for (let seed = 9100; seed < Number(process.env["CALL_DESK_FAULT_SEARCH_TO"] ?? 9180) && found.length < 2; seed++) {
-        const out = await run(seed, new Set([fault]));
+      for (let seed = Number(process.env["CALL_DESK_FAULT_SEARCH_FROM"] ?? 9100); seed < Number(process.env["CALL_DESK_FAULT_SEARCH_TO"] ?? 9180) && found.length < 2; seed++) {
+        const out = await run(seed, new Set([fault]), options);
         if (out.problems.length > 0) found.push(`${seed}: ${out.problems[0]}`);
       }
       console.info("FAULT", fault, JSON.stringify(found));
