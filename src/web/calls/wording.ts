@@ -222,7 +222,7 @@ export function refusedRecordLine(
 /** What the outcome box says of the number: before Log, while it is on its way. */
 export function outcomeNumberLine(outcome: CallOutcomeApi, number: { readonly value: string; readonly kind: CallNumberView["kind"] } | null, pending: boolean): string {
   if (number === null) return "Choose the number you dialled above.";
-  const n = `${number.value}, ${NUMBER_KIND[number.kind]}`;
+  const n = `${number.value} (${NUMBER_KIND[number.kind]})`;
   if (outcome === "wrong_number") return pending ? `Logging ${n} as a wrong number…` : `${n}, the number you dial above, will be marked wrong.`;
   return pending ? `Logging on ${n}…` : `To be logged on ${n}.`;
 }
