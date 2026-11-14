@@ -93,12 +93,10 @@ describe("a running campaign takes edits", () => {
   });
 
   test("an added track reaches every running lead; a finished track is never restarted", async () => {
-    const one = def([track("e1", [email("s1")])]);
     const w = await world(def([track("e1", [email("s1")]), track("e2", [email("x1")], { start: { kind: "after", trackId: "e1", delayDays: 3 } })]));
     const pat = w.lead("Pat Oneil");
     await w.h.advanceTo(MONDAY_9 + H);
     expect(w.sent(pat)).toEqual(["s1"]);
-    void one;
     // e1 is finished for Pat; a step added to it is never sent. e2 is reconnected to start one day after e1.
     const saved = await w.save(def([track("e1", [email("s1"), email("s2", 1)]), track("e2", [email("x1")], { start: { kind: "after", trackId: "e1", delayDays: 1 } }), track("e3", [email("y1")])]));
     expect(saved.status, JSON.stringify(saved.body)).toBe(200);
@@ -107,5 +105,31 @@ describe("a running campaign takes edits", () => {
     const x1 = w.handovers(pat).find((x) => x.stepId === "x1")!;
     expect(x1.at).toBeGreaterThanOrEqual(Date.parse("2026-11-03T00:00:00Z"));
     expect(x1.at).toBeLessThan(Date.parse("2026-11-03T01:00:00Z"));
+  });
+});
+
+describe("the editor's read of what a draft would do (ADR 0003 \"Ticket 19\")", () => {
+  test("leads before, inside and past the affected step are counted as the save would treat them; nothing is stored", async () => {
+    const w = await world();
+    const pat = w.lead("Pat Oneil");
+    await w.h.advanceTo(MONDAY_9 + H);
+    // Nia replies, so she is past everything.
+    w.h.fake.prospectReplies("nia@harbour.example");
+    await w.h.advanceTo(MONDAY_9 + 2 * H);
+    const draft = def([track("e1", [email("s1", 0, "Changed."), { ...email("s2", 2), removed: true }, email("s3", 3), email("s4", 1)])]);
+    const read = await w.h.request<import("../../shared/api.ts").EditImpactView>("POST", `/api/campaigns/${w.id}/sequence/impact`, { definition: draft });
+    expect(read.status, JSON.stringify(read.body)).toBe(200);
+    expect(read.body.leads).toBe(2);
+    expect(read.body.changes.map((c) => [c.kind, c.stepId, c.reaches, c.skips, c.inFlight, c.untouched])).toEqual([
+      ["step_copy", "s1", 0, 0, 0, 2],
+      ["step_removed", "s2", 0, 1, 0, 1],
+      ["step_added", "s4", 1, 0, 0, 1],
+    ]);
+    expect(read.body.problems).toEqual([]);
+    // A draft that deletes a step is refused before Apply, in the save's own words.
+    const deleting = await w.h.request<import("../../shared/api.ts").EditImpactView>("POST", `/api/campaigns/${w.id}/sequence/impact`, { definition: def([track("e1", [email("s1")])]) });
+    expect(deleting.body.problems.join(" ")).toContain("cannot be deleted on a running campaign");
+    expect(w.sent(pat)).toEqual(["s1"]);
+    expect((await w.h.request<{ definitionVersion: number }>("GET", `/api/campaigns/${w.id}/sequence`)).body.definitionVersion).toBe(read.body.definitionVersion);
   });
 });

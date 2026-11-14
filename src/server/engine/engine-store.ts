@@ -184,6 +184,11 @@ export interface EngineStore {
    * save is applied by `running` (ticket 19); without it, a launched campaign's save is refused as `launched`.
    */
   saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save?: DefinitionSave | null, running?: RunningSave): Promise<SaveResult>;
+  /**
+   * Every enrollment of the campaign as stored now, in one snapshot, with the zone each would have under `draft` (its
+   * default zone may differ): what the editor's read of a running edit starts from (ADR 0003 "Ticket 19"). Stores nothing.
+   */
+  campaignLeadsUnder(campaignId: string, now: number, draft: CampaignDefinition): Promise<{ readonly state: SubjectState; readonly zoneUnderDraft: string }[]>;
   /** The merge data of every enrollment of the campaign that has not ended, and the sender accounts. */
   launchInputs(campaignId: string): Promise<{ leads: MergeData[]; accounts: SenderAccountView[] }>;
   /**

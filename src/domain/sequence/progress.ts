@@ -201,12 +201,17 @@ export function checkEndings(state: SubjectState, now: number): SubjectState {
 
 /** The step 5.1 names: the first live step after the last resolved one, with no result. */
 export function nextStepOf(state: SubjectState, track: TrackDefinition): string | null {
+  return remainingSteps(state, track)[0] ?? null;
+}
+
+/** The steps still ahead of the lead in a track, in order (5.1): live, after its last resolved step, with no result. */
+export function remainingSteps(state: SubjectState, track: TrackDefinition): string[] {
   const resolved = new Set(state.results.filter((r) => r.trackId === track.id).map((r) => r.stepId));
   let lastResolved = -1;
   track.steps.forEach((s, i) => {
     if (resolved.has(s.id)) lastResolved = i;
   });
-  return track.steps.find((s, i) => i > lastResolved && !s.removed && !resolved.has(s.id))?.id ?? null;
+  return track.steps.filter((s, i) => i > lastResolved && !s.removed && !resolved.has(s.id)).map((s) => s.id);
 }
 
 /**

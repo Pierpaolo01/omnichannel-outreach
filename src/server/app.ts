@@ -21,8 +21,9 @@ import { accountView, needsAttention, progressView } from "./engine/views.ts";
 import { callsView, callTaskView, recordCalls, todayView } from "./engine/call-views.ts";
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
 import { sealReckoning } from "../domain/sequence/progress.ts";
+import { editImpactView } from "./engine/edit-impact.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
-import type { ControlRefusal, EnrollmentRead, CampaignDetail, CampaignListItem, CampaignPauseRead, CampaignSequenceSummary, RecordControls, RecordLead, SequenceView } from "../shared/api.ts";
+import type { ControlRefusal, EnrollmentRead, CampaignDetail, CampaignListItem, CampaignPauseRead, CampaignSequenceSummary, EditImpactView, RecordControls, RecordLead, SequenceView } from "../shared/api.ts";
 import { beforeLaunchView, copyPreview } from "./before-launch.ts";
 import { activityOf } from "./activity.ts";
 import { registerEmailProviderRoutes, type EmailProviderSource } from "./instantly/routes.ts";
@@ -76,6 +77,13 @@ const definitionBody = requestObject({
   /** Who wrote the save (ADR 0003 1.1.1): its editing session, its number there, and the revision it last saw. */
   save: requestObject({ session: z.string().min(1).max(100), seq: z.number().int().nonnegative(), base: z.number().int().nonnegative() }).optional(),
 });
+
+const impactBody = requestObject({ definition: definitionBody.omit({ save: true }) });
+
+/** A definition as stored: a declined path only when the canvas set one; the phone track's fields travel in the same save (ADR 0003 1.1.1). */
+function definitionFromBody(fields: Omit<z.infer<typeof definitionBody>, "save">): CampaignDefinition {
+  return { ...fields, tracks: fields.tracks.map(({ declinedPath, callSkipLimitDays, ...t }) => ({ ...t, ...(declinedPath ? { declinedPath } : {}), ...(callSkipLimitDays !== undefined ? { callSkipLimitDays } : {}) })) };
+}
 
 /** The user's zone: the machine's, which a campaign's default zone starts from (ADR 0003 1.1). */
 const machineZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -398,8 +406,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     const body = definitionBody.safeParse(await readJson(c));
     if (!body.success) return invalid(c, body.error);
     const { save, ...fields } = body.data;
-    // A declined path is stored only when the canvas set one; the phone track's fields travel in the same save (ADR 0003 1.1.1).
-    const definition: CampaignDefinition = { ...fields, tracks: fields.tracks.map(({ declinedPath, callSkipLimitDays, ...t }) => ({ ...t, ...(declinedPath ? { declinedPath } : {}), ...(callSkipLimitDays !== undefined ? { callSkipLimitDays } : {}) })) };
+    const definition = definitionFromBody(fields);
     const row = await store.engine.campaign(campaign.id);
     const problems = definitionProblems(definition, row?.definition ?? null, { launched: row?.launchedAt != null });
     if (problems.length > 0) return c.json<ApiError>({ error: { code: "invalid_sequence", message: problems.join(" ") } }, 400);
@@ -424,6 +431,16 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
       return c.json<ApiError>({ error: { code: "launched", message: "This campaign is running. Editing a running campaign arrives with a later release." } }, 409);
     }
     return c.json(await sequenceView(campaign.id, campaign.defaultTimezone, result.stored));
+  });
+
+  // Ticket 19: what applying a draft would do to a running campaign's leads, read through the engine's own functions.
+  app.post("/campaigns/:id/sequence/impact", withinDefinitionLimit, async (c) => {
+    const campaign = await store.campaign(c.req.param("id"));
+    if (!campaign) return notFound(c, "campaign");
+    const body = impactBody.safeParse(await readJson(c));
+    if (!body.success) return invalid(c, body.error);
+    const view = await editImpactView(store.engine, rules, campaign.id, definitionFromBody(body.data.definition), Date.parse(now()));
+    return view ? c.json<EditImpactView>(view) : notFound(c, "campaign");
   });
 
   app.post("/campaigns/:id/launch", async (c) => {

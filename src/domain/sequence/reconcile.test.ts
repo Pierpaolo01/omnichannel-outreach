@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { DAY, H, handed, MONDAY_9, step, subjectState, track, tracksDefinition, withAttempts } from "../../../test/support/sequence-state.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "./definition.ts";
 import { applyToWork, enterMain, evaluate } from "./progress.ts";
-import { alignPending, reconcileEdit } from "./reconcile.ts";
+import { alignPending, changesBetween, editImpact, reconcileEdit } from "./reconcile.ts";
 import type { SubjectState } from "./state.ts";
 
 /**
@@ -134,5 +134,35 @@ describe("rearranging tracks applies only to leads that have not started them", 
     const paused = { ...base, campaign: { ...base.campaign, pausedSince: MONDAY_9 + H } };
     const after = edit(paused, tracksDefinition([emailTrack(steps3().map((s) => (s.id === "s2" ? { ...s, waitDays: 5 } : s)))]), MONDAY_9 + 2 * H);
     expect(progress(after)).toMatchObject({ nextStepId: "s2", dueWall: Date.parse("2026-11-07T00:00:00Z") });
+  });
+});
+
+describe("what an edit does to one lead (the editor's read)", () => {
+  const def0 = tracksDefinition([emailTrack()]);
+  const afterFirst = () => sent(launchedWith(def0), "s1", MONDAY_9);
+
+  test("each change between two definitions, by identity", () => {
+    const next = tracksDefinition([
+      emailTrack([step("s1", { threading: "new_subject", body: "Changed." }), { ...step("s2", { waitDays: 2 }), removed: true }, step("s3", { waitDays: 1 }), step("s4", { waitDays: 1 })]),
+      track("t2", "sms", [step("m1", { subject: "" })]),
+    ]);
+    expect(changesBetween(def0, next).map((c) => `${c.kind} ${c.trackId} ${c.stepId ?? ""}`.trim())).toEqual(["step_copy t1 s1", "step_removed t1 s2", "step_wait t1 s3", "step_added t1 s4", "track_added t2"]);
+  });
+
+  test("a lead between two steps: the removed pending step is skipped, a changed earlier step leaves it untouched, an added later one reaches it", () => {
+    const before = afterFirst();
+    const next = tracksDefinition([emailTrack([step("s1", { threading: "new_subject", body: "Changed." }), { ...step("s2", { waitDays: 2 }), removed: true }, step("s3", { waitDays: 3 }), step("s4", { waitDays: 1 })])]);
+    const after = edit(before, next, MONDAY_9 + H);
+    const impact = editImpact(before, after, changesBetween(def0, next));
+    expect(impact).toEqual(["untouched", "skips", "reaches"]);
+  });
+
+  test("a lead whose pending step is with the provider holds it in flight; an ended lead is untouched by everything", () => {
+    const base = afterFirst();
+    const flying = withAttempts(base, [...base.attempts, handed({ id: "h2", idempotencyKey: "h2", stepId: "s2" })], base.work);
+    const next = tracksDefinition([emailTrack(steps3().map((s) => (s.id === "s2" ? { ...s, body: "Changed." } : s)))]);
+    expect(editImpact(flying, edit(flying, next, MONDAY_9 + H), changesBetween(def0, next))).toEqual(["in_flight"]);
+    const ended = { ...base, subject: { ...base.subject, ended: "replied" as const } };
+    expect(editImpact(ended, edit(ended, next, MONDAY_9 + H), changesBetween(def0, next))).toEqual(["untouched"]);
   });
 });

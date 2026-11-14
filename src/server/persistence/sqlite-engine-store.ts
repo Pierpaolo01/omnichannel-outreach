@@ -771,12 +771,25 @@ export class SqliteEngineStore implements EngineStore {
     return data;
   }
 
-  private load(subjectId: string, now: number): SubjectState | null {
+  async campaignLeadsUnder(campaignId: string, now: number, draft: CampaignDefinition): Promise<{ readonly state: SubjectState; readonly zoneUnderDraft: string }[]> {
+    // One snapshot: every lead read in one transaction (a read is one snapshot).
+    return this.transaction(() =>
+      this.sql("SELECT id FROM enrollments WHERE campaign_id = ? ORDER BY enrolled_at, id")
+        .all(campaignId)
+        .flatMap((e) => {
+          const state = this.load(str(e, "id"), now);
+          const under = this.load(str(e, "id"), now, draft);
+          return state && under ? [{ state, zoneUnderDraft: under.lead.zone }] : [];
+        }),
+    );
+  }
+
+  private load(subjectId: string, now: number, definitionOverride?: CampaignDefinition): SubjectState | null {
     const e = this.sql("SELECT * FROM enrollments WHERE id = ?").get(subjectId);
     if (!e) return null;
     const c = this.sql("SELECT * FROM campaigns WHERE id = ?").get(str(e, "campaign_id"));
     if (!c) throw new Error(`enrollment ${subjectId} has no campaign`);
-    const definition = c["definition"] == null ? emptyDefinition(strOrNull(c, "default_timezone") ?? "UTC") : this.definitionOf(c);
+    const definition = definitionOverride ?? (c["definition"] == null ? emptyDefinition(strOrNull(c, "default_timezone") ?? "UTC") : this.definitionOf(c));
     const personId = strOrNull(e, "person_id");
     const companyId = str(e, "company_id");
     const person = personId === null ? undefined : this.sql("SELECT timezone FROM people WHERE id = ?").get(personId);
