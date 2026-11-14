@@ -1665,6 +1665,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     if (await pauseWithWorkInFlight()) await checkAll(false);
   }
 
+  const hasProblems = () => problems.length > 0;
   const eventCount = options.events ?? 24;
   for (let e = 0; e < eventCount && problems.length === 0 && !h.stopped; e++) {
     // Ticket 17a: in a run of the pause family, from its own stream, a pause or a resume before the event.
@@ -1675,7 +1676,8 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
         if (!(await pauseWithWorkInFlight())) await pauseAction();
       } else await pauseAction();
       await checkAll(false);
-      if (problems.length > 0) break;
+      // Asked through a call: the loop's condition narrows the length to 0 (as the drain's stop does).
+      if (hasProblems()) break;
     }
     const r = rand();
     // A minute passes before each action, so no action shares an instant with the ticks before it.
