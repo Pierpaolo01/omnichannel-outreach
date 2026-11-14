@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { OUTREACH_STATUSES } from "../src/domain/outreach-status.ts";
 import type { CampaignDefinition, CompanyRecord, ImportRecord, LeadSearchResult, PersonRecord, SequenceView, SummaryEntry } from "../src/shared/api.ts";
 import { refusedPair, respond, serverError } from "./mocks.ts";
-import { FAKE_INBOX, FAKE_NUMBERS, TWO_CHANNELS, fakeProviderApp } from "./fake-provider.ts";
+import { FAKE_INBOX, FAKE_NUMBERS, TWO_CHANNELS, fakeProviderApp, type FakeProviderApp } from "./fake-provider.ts";
 import { fixture } from "./support.ts";
 
 /** Opens a path on the app over the fake email provider. */
@@ -158,6 +158,37 @@ function chainOf(n: number): CampaignDefinition {
     };
   });
   return { ...TWO_CHANNELS, emailPool: [], smsPool: [], tracks };
+}
+
+/** A phone track as the editor adds it (ticket 14c): one call, weekday calling hours, a skip limit of 2 days. */
+export function phoneTrack(id: string, start: CampaignDefinition["tracks"][number]["start"], fields: Partial<CampaignDefinition["tracks"][number]> = {}): CampaignDefinition["tracks"][number] {
+  return { id, channel: "call", branch: "main", window: [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 })), start, removed: false, callSkipLimitDays: 2, steps: [{ id: `${id}-c1`, waitDays: 0, subject: "", body: "", threading: "new_subject", removed: false }], ...fields };
+}
+
+/** Email and SMS tracks, a phone track after the email track, and email track 2 after the call. */
+export const WITH_A_CALL: CampaignDefinition = {
+  ...TWO_CHANNELS,
+  emailPool: [],
+  smsPool: [],
+  callScript: "Ask who books the evening appointments.\nMention the two emails about evening booking.",
+  tracks: [...TWO_CHANNELS.tracks.map((t) => (t.id === "email-2" ? { ...t, start: { kind: "after" as const, trackId: "call", delayDays: 1 } } : t)), phoneTrack("call", { kind: "after", trackId: "email", delayDays: 1 })],
+};
+
+/** A launched campaign over the fake providers with a phone track after its email track, made once per app. */
+const runningCalls = new WeakMap<FakeProviderApp, Promise<string>>();
+export function runningWithACall(f: FakeProviderApp): Promise<string> {
+  let made = runningCalls.get(f);
+  if (!made) {
+    made = (async () => {
+      const id = await f.freshTwoChannelCampaign("Physio clinics with a call, Leeds");
+      await f.harness.defineSequence(id, { ...TWO_CHANNELS, callScript: "Ask who books the evening appointments.", tracks: [...TWO_CHANNELS.tracks, phoneTrack("call", { kind: "after", trackId: "email", delayDays: 1 })] });
+      const launched = await f.harness.launch(id);
+      if (launched.status !== 200) throw new Error(`the campaign with a call did not launch: ${JSON.stringify(launched.body)}`);
+      return id;
+    })();
+    runningCalls.set(f, made);
+  }
+  return made;
 }
 
 async function settle(page: Page, text: string | RegExp): Promise<void> {
@@ -916,17 +947,76 @@ export const SCREENS: readonly Screen[] = [
       await settle(page, "Change how it starts first.");
     },
   },
+  // Ticket 14c: the phone track's editor, and calls in Before launch.
   {
-    name: "a phone track, which this editor cannot edit yet",
+    name: "a phone track in the inspector",
     open: async (page) => {
-      const id = await campaignWith(page, "Two channels and a call", {
-        ...TWO_CHANNELS,
-        emailPool: [],
-        smsPool: [],
-        tracks: [...TWO_CHANNELS.tracks, { id: "call", channel: "call", branch: "main", window: [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 })), start: { kind: "after", trackId: "email", delayDays: 1 }, removed: false, steps: [{ id: "c1", waitDays: 0, subject: "", body: "", threading: "new_subject", removed: false }] }],
-      });
+      const id = await campaignWith(page, "Two channels and a call", WITH_A_CALL);
       await page.goto(`/campaigns/${id}?track=call`);
-      await settle(page, "Phone tracks are edited with a later release.");
+      await settle(page, "Skip it if unworked for");
+    },
+  },
+  {
+    name: "a phone track with an empty call script, on the canvas with the tracks around it",
+    open: async (page) => {
+      const id = await campaignWith(page, "Two channels and a call, no script", { ...WITH_A_CALL, callScript: "" });
+      await page.goto(`/campaigns/${id}?track=call`);
+      await settle(page, "Talking points for your calls");
+    },
+  },
+  {
+    name: "a phone track's skip limit that cannot be saved",
+    open: async (page) => {
+      const id = await campaignWith(page, "Two channels and a call", WITH_A_CALL);
+      await page.goto(`/campaigns/${id}?track=call`);
+      // Held, so the shared campaign keeps its limit.
+      await page.route("**/api/campaigns/*/sequence", (route) => (route.request().method() === "PUT" ? new Promise(() => undefined) : route.continue()));
+      await page.getByLabel("Days before an unworked call is skipped").fill("0");
+      await settle(page, "call skip limit is a whole number of days, at least 1");
+    },
+  },
+  {
+    name: "a track that starts after a phone track, in the inspector",
+    open: async (page) => {
+      const id = await campaignWith(page, "Two channels and a call", WITH_A_CALL);
+      await page.goto(`/campaigns/${id}?track=email-2&step=none`);
+      await settle(page, "It waits for the call’s outcome");
+    },
+  },
+  {
+    name: "before launch with a phone track, and no email or SMS provider",
+    open: async (page) => {
+      const id = await campaignWith(page, "Two channels and a call", WITH_A_CALL);
+      await page.goto(`/campaigns/${id}/before-launch`);
+      await settle(page, "Your calls");
+    },
+  },
+  {
+    name: "fake provider: before launch with a phone track, its calls projected",
+    open: async (page) => {
+      const f = await fakeProviderApp("phone-track");
+      const id = await f.freshTwoChannelCampaign(`Calls projected ${Date.now()}`);
+      await page.request.put(`${f.url}/api/campaigns/${id}/sequence`, { data: { ...TWO_CHANNELS, callScript: "Ask who books the evening appointments.", tracks: [...TWO_CHANNELS.tracks, phoneTrack("call", { kind: "entry" })] } });
+      await page.goto(`${f.url}/campaigns/${id}/before-launch`);
+      await settle(page, "when its first call goes on your list");
+    },
+  },
+  {
+    name: "fake provider: before launch with a phone track after a phone track",
+    open: async (page) => {
+      const f = await fakeProviderApp("phone-track");
+      const id = await f.freshTwoChannelCampaign(`Two calls ${Date.now()}`);
+      await page.request.put(`${f.url}/api/campaigns/${id}/sequence`, { data: { ...TWO_CHANNELS, callScript: "Ask who books.", tracks: [...TWO_CHANNELS.tracks, phoneTrack("call", { kind: "entry" }), phoneTrack("call-2", { kind: "after", trackId: "call", delayDays: 2 })] } });
+      await page.goto(`${f.url}/campaigns/${id}/before-launch`);
+      await settle(page, "phone track 2 starts after phone track 1");
+    },
+  },
+  {
+    name: "fake provider: a running campaign's phone track, read-only",
+    open: async (page) => {
+      const f = await fakeProviderApp("phone-track");
+      await page.goto(`${f.url}/campaigns/${await runningWithACall(f)}?track=call`);
+      await settle(page, "Editing a running campaign arrives with a later release.");
     },
   },
   {
@@ -960,7 +1050,7 @@ export const SCREENS: readonly Screen[] = [
       const id = await campaignWith(page, "Two channels, no provider");
       await page.goto(`/campaigns/${id}`);
       await page.getByRole("button", { name: "Add track" }).click();
-      await settle(page, "Phone tracks arrive with a later release.");
+      await settle(page, "Phone track");
     },
   },
   { name: "fake provider: every track on the canvas, running", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.twoChannels}`); await settle(page, "Email track 2"); } },
@@ -1151,14 +1241,80 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
     focused: (page) => page.getByRole("menuitem", { name: "Email track" }),
   },
   {
-    name: "Up on Add track opens its menu on the last item, the disabled phone track that says why",
+    name: "Up on Add track opens its menu on the last item, Phone track",
     open: async (page) => {
       const id = await campaignWith(page, "Focus: menu opens on last");
       await page.goto(`/campaigns/${id}`);
       await page.getByRole("button", { name: "Add track" }).focus();
     },
     act: (page) => page.keyboard.press("ArrowUp"),
-    focused: (page) => page.getByRole("menuitem", { name: /^Phone track/, description: "Phone tracks arrive with a later release." }),
+    focused: (page) => page.getByRole("menuitem", { name: "Phone track" }),
+  },
+  // Ticket 14c: phone tracks.
+  {
+    name: "adding a phone track from the Add track menu moves focus to its call script",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: add a phone track");
+      await page.goto(`/campaigns/${id}`);
+      await page.getByRole("button", { name: "Add track" }).focus();
+      await page.keyboard.press("ArrowUp");
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByLabel("Call script"),
+  },
+  {
+    name: "adding a phone track from the empty canvas moves focus to its call script",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: first phone track", { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: [], smsPool: [], tracks: [] });
+      await page.goto(`/campaigns/${id}`);
+      await page.getByRole("button", { name: "Phone track" }).focus();
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByLabel("Call script"),
+  },
+  {
+    name: "closing a phone track's inspector returns focus to its track",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: close a phone track", WITH_A_CALL);
+      await page.goto(`/campaigns/${id}?track=call`);
+      await page.getByRole("button", { name: "Close the phone track" }).focus();
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByRole("button", { name: /^Phone track: / }),
+  },
+  {
+    name: "removing a phone track moves focus to Add track",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: remove a phone track", { ...TWO_CHANNELS, emailPool: [], smsPool: [], tracks: [...TWO_CHANNELS.tracks, phoneTrack("call", { kind: "entry" })] });
+      await page.goto(`/campaigns/${id}?track=call`);
+      await page.getByRole("button", { name: "Remove this phone track" }).focus();
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByRole("button", { name: "Add track" }),
+  },
+  {
+    name: "a refused removal of a phone track keeps focus on Remove, which the reason describes",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: phone removal refused", WITH_A_CALL);
+      await page.goto(`/campaigns/${id}?track=call`);
+      await page.getByRole("button", { name: "Remove this phone track" }).focus();
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByRole("button", { name: "Remove this phone track", description: "Email track 2 starts after this one. Change how it starts first." }),
+  },
+  {
+    name: "a refused skip limit keeps focus on its field",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: skip limit refused", WITH_A_CALL);
+      await page.goto(`/campaigns/${id}?track=call`);
+      await page.route("**/api/campaigns/*/sequence", (route) => (route.request().method() === "PUT" ? new Promise(() => undefined) : route.continue()));
+      await page.getByLabel("Days before an unworked call is skipped").focus();
+    },
+    act: async (page) => {
+      await page.keyboard.press("ControlOrMeta+a");
+      await page.keyboard.type("0");
+    },
+    focused: (page) => page.getByLabel("Days before an unworked call is skipped"),
   },
   {
     name: "Down and Up move between the menu's items, wrapping",

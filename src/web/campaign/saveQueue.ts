@@ -90,8 +90,12 @@ export function draftProblems(def: CampaignDefinition): string[] {
     const where = live.length > 1 ? `${trackLabel(def, track).label}: ` : "";
     const noun = track.channel === "sms" ? "Text" : track.channel === "call" ? "Call" : "Email";
     const first = track.channel === "sms" ? "text" : track.channel === "call" ? "call" : "email";
-    if (track.window.length === 0) problems.push(`${where}Choose at least one sending day.`);
-    if (track.window.some((w) => w.start === w.end)) problems.push(`${where}The sending window starts and ends at the same hour.`);
+    const call = track.channel === "call";
+    if (track.window.length === 0) problems.push(`${where}Choose at least one ${call ? "calling" : "sending"} day.`);
+    if (track.window.some((w) => w.start === w.end)) problems.push(`${where}${call ? "The calling hours start" : "The sending window starts"} and end${call ? "" : "s"} at the same hour.`);
+    // A phone track's own skip limit (ADR 0003, ticket 14c), as the validator refuses it.
+    const limit = track.callSkipLimitDays;
+    if (call && limit !== undefined && !(Number.isInteger(limit) && limit >= 1)) problems.push(`${where}The call skip limit is a whole number of days, at least 1.`);
     track.steps
       .filter((s) => !s.removed)
       .forEach((s, i) => {

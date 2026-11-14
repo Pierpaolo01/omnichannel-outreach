@@ -39,6 +39,14 @@ describe("removing an email and following a thread (review: SequenceTab.tsx:220 
     expect(draftProblems({ timezone: "UTC", callSkipLimitDays: 2, emailPool: [], tracks: [next] })).toEqual([]);
   });
 
+  test("a phone track's draft is said in place before it is sent: a skip limit below 1 or not whole, and calling hours with no day (ticket 14c)", () => {
+    const call = (fields: Partial<TrackDefinition>): TrackDefinition => ({ ...track([step("c1", { waitDays: 0, body: "" })]), id: "p1", channel: "call", callSkipLimitDays: 2, ...fields });
+    const def = (t: TrackDefinition) => ({ timezone: "UTC", callSkipLimitDays: 2, emailPool: [], tracks: [t] });
+    expect(draftProblems(def(call({})))).toEqual([]);
+    for (const bad of [0, -2, 1.5, Number.NaN]) expect(draftProblems(def(call({ callSkipLimitDays: bad })))).toEqual(["The call skip limit is a whole number of days, at least 1."]);
+    expect(draftProblems(def(call({ window: [] })))).toEqual(["Choose at least one calling day."]);
+  });
+
   test("removing a later email leaves the others as they were", () => {
     const steps = [step("s1", { waitDays: 0, subject: "Hello", threading: "new_subject" }), step("s2"), step("s3")];
     expect(removeStep(track(steps), "s2").steps).toEqual([steps[0], steps[2]]);
