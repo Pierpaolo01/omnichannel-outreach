@@ -349,7 +349,7 @@ test("an outcome left by a closed tab and refused on recovery is listed with its
 
   await page.goto(`${f.url}/calls`);
   const notLogged = page.getByRole("list", { name: "Outcomes not logged" });
-  await expect(notLogged).toContainText("Not logged: No answer for Amira Hassan. This call is no longer on the list");
+  await expect(notLogged).toContainText("Not logged: no answer for Amira Hassan. Amira Hassan’s call was already logged elsewhere, perhaps in another tab: interested at 10:00.");
   await expect(notLogged).toContainText("Your note wasn’t saved: Orphan refusal note must remain visible");
   await notLogged.getByRole("button", { name: "Dismiss" }).click();
   await expect(notLogged).toHaveCount(0);

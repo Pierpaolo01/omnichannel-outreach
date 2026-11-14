@@ -8,6 +8,7 @@ import { getRequestListener } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { createApp } from "./app.ts";
+import { Worker } from "./worker.ts";
 import { Engine } from "./engine/engine.ts";
 import { UnconnectedEmailPort, UnprovisionedSmsPort, type SendPort } from "./engine/ports.ts";
 import { InstantlyClient } from "./instantly/client.ts";
@@ -60,24 +61,22 @@ console.info(JSON.stringify({ level: "info", event: "email_provider", provider: 
 // No SMS provider is provisioned or chosen (#28): SMS has no connected sender, so SMS tracks cannot launch.
 console.info(JSON.stringify({ level: "info", event: "sms_provider", provider: "none" }));
 const engine = new Engine({ store: store.engine, port: emailPort, smsPort: new UnprovisionedSmsPort(), now: () => Date.now(), newId: randomUUID });
+const worker = new Worker({
+  recover: () => engine.recover(),
+  tick: () => engine.tick(),
+  now: () => Date.now(),
+  setTimer: (fire, ms) => {
+    const t = setTimeout(fire, ms);
+    return () => clearTimeout(t);
+  },
+  onError: (error) => console.error(JSON.stringify({ level: "error", event: "engine_tick_failed", message: error instanceof Error ? error.message : String(error) })),
+});
 const api = getRequestListener(
-  createApp({ store, now: () => new Date().toISOString(), newId: randomUUID, engine, emailProvider: emailPort instanceof InstantlyEmailPort ? emailPort : null }).fetch,
+  createApp({ store, now: () => new Date().toISOString(), newId: randomUUID, engine, worker, emailProvider: emailPort instanceof InstantlyEmailPort ? emailPort : null }).fetch,
 );
 
-/** The worker: restart settlement once (ADR 0003 section 6), then a tick on an interval. */
-const TICK_MS = 15_000;
-let ticking: ReturnType<typeof setTimeout> | undefined;
-let stopped = false;
-async function work(first: boolean): Promise<void> {
-  try {
-    if (first) await engine.recover();
-    else await engine.tick();
-  } catch (error) {
-    console.error(JSON.stringify({ level: "error", event: "engine_tick_failed", message: error instanceof Error ? error.message : String(error) }));
-  }
-  if (!stopped) ticking = setTimeout(() => void work(false), TICK_MS);
-}
-void work(true);
+// The worker: restart settlement once, then a tick every 15 seconds (src/server/worker.ts).
+worker.start();
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => void;
 
@@ -116,8 +115,7 @@ server.listen(port, host, () => {
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
-    stopped = true;
-    clearTimeout(ticking);
+    worker.stop();
     server.close();
     void store.close().finally(() => process.exit(0));
   });

@@ -121,7 +121,13 @@ const newId = (): string => (typeof crypto.randomUUID === "function" ? crypto.ra
 
 function browserDesk(): CallDesk {
   return new CallDesk({
-    calls: async (focus) => (await getJson(`/api/calls${focus ? `?focus=${encodeURIComponent(focus)}` : ""}`)) as CallsView,
+    calls: async (focus, expected) => {
+      const query = new URLSearchParams();
+      if (focus) query.set("focus", focus);
+      if (expected) query.set("expected", expected);
+      const q = query.toString();
+      return (await getJson(`/api/calls${q ? `?${q}` : ""}`)) as CallsView;
+    },
     task: async (id) => (await getJson(`/api/call-tasks/${encodeURIComponent(id)}`)) as CallTaskView,
     post,
     local: storage(() => window.localStorage),
@@ -152,10 +158,14 @@ export function useCallDesk(): { desk: CallDesk; snap: DeskSnapshot } {
     const onVisible = () => {
       if (document.visibilityState === "visible") refresh();
     };
+    // Another window's outcome, answer or refusal (any shared calls key) is an action here too.
     const onStorage = (e: StorageEvent) => {
-      if (e.key?.startsWith("outreach.calls.outbox.")) refresh();
+      if (e.key?.startsWith("outreach.calls.")) refresh();
     };
-    const online = () => desk.retryNow();
+    const online = () => {
+      desk.retryNow();
+      refresh();
+    };
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("focus", refresh);
     window.addEventListener("storage", onStorage);

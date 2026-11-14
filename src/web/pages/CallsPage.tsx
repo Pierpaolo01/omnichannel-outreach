@@ -4,6 +4,7 @@ import type { CallColleagueView, CallOutcomeApi, CallQueueItem, CallsView, CallT
 import { when } from "../activity.tsx";
 import { CallDesk, NOTE_MAX, whoOf, type DeskSnapshot } from "../calls/callDesk.ts";
 import { useCallDesk } from "../calls/useCallDesk.ts";
+import { useFocusRescue } from "../focusRescue.ts";
 import {
   CAPACITY_USED,
   OUTCOME_LABEL,
@@ -15,13 +16,14 @@ import {
   loggedLine,
   numberKind,
   numberProblemLine,
+  outcomeNumberLine,
   offListLine,
   pendingLine,
   reasonLine,
   recoveringLine,
   refusedRecordLine,
 } from "../calls/wording.ts";
-import { ErrorState } from "../components.tsx";
+import { ErrorState, StaleNotice } from "../components.tsx";
 import { Icon } from "../icons.tsx";
 import { StatusBadge } from "../status.tsx";
 import { useNow } from "../time.ts";
@@ -35,15 +37,17 @@ const TONE = { muted: "text-muted", pause: "text-pause", crit: "text-crit" } as 
 export function CallsPage() {
   const { desk, snap } = useCallDesk();
   const placeFocus = useKeyboardFocus(snap);
+  const rescue = useFocusRescue();
   const queue = snap.queue;
   return (
-    <div className="grid grid-cols-1 items-start gap-7 min-[901px]:grid-cols-[250px_minmax(0,1fr)] xl:grid-cols-[290px_minmax(0,1fr)]">
+    <div ref={rescue} className="grid grid-cols-1 items-start gap-7 min-[901px]:grid-cols-[250px_minmax(0,1fr)] xl:grid-cols-[290px_minmax(0,1fr)]">
       <Queue snap={snap} />
       <div className="flex min-w-0 flex-col gap-3">
+        {snap.freshness.stale && snap.queue.state === "ready" && <StaleNotice freshness={snap.freshness} onRetry={() => void desk.refresh()} rescue={2} />}
         <Status snap={snap} />
         <Records desk={desk} snap={snap} />
         {queue.state === "error" ? (
-          <ErrorState title="The call list didn’t load." message={queue.message} onRetry={() => void desk.refresh()} />
+          <ErrorState title="The call list didn’t load." message={queue.message} onRetry={() => void desk.refresh()} rescue={2} />
         ) : queue.state === "loading" ? (
           <SheetSkeleton />
         ) : snap.focus === null ? (
@@ -51,7 +55,7 @@ export function CallsPage() {
         ) : snap.task === null || snap.task.state === "loading" ? (
           <SheetSkeleton />
         ) : snap.task.state === "error" ? (
-          <ErrorState title="This call didn’t load." message={snap.task.message} onRetry={() => void desk.refresh()} retryRef={(el) => placeFocus(el, "error")} />
+          <ErrorState title="This call didn’t load." message={snap.task.message} onRetry={() => void desk.refresh()} retryRef={(el) => placeFocus(el, "error")} rescue={2} />
         ) : (
           <Sheet desk={desk} snap={snap} task={snap.task.view} userZone={queue.view.userZone} placeFocus={placeFocus} />
         )}
@@ -102,12 +106,13 @@ function Status({ snap }: { snap: DeskSnapshot }) {
 /** Refusals no page showed on its call: kept, with the note typed, until the user dismisses them. */
 function Records({ desk, snap }: { desk: CallDesk; snap: DeskSnapshot }) {
   if (snap.refusedRecords.length === 0) return null;
+  const zone = snap.queue.state === "ready" ? snap.queue.view.userZone : Intl.DateTimeFormat().resolvedOptions().timeZone;
   return (
     <ul aria-label="Outcomes not logged" className="flex flex-col gap-2">
       {snap.refusedRecords.map((r) => (
         <li key={r.entry.body.requestId} className="flex flex-col gap-2 rounded-field bg-crit-soft px-4 py-3 text-[14px]">
           <p role="alert" className="text-base-content [overflow-wrap:anywhere]">
-            {refusedRecordLine(r)}
+            {refusedRecordLine(r, zone)}
           </p>
           {r.entry.body.note.trim() !== "" && (
             <p className="text-ink-2 [overflow-wrap:anywhere]">
@@ -115,7 +120,7 @@ function Records({ desk, snap }: { desk: CallDesk; snap: DeskSnapshot }) {
             </p>
           )}
           <div>
-            <button type="button" className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={() => desk.dismiss(r.entry.body.requestId)}>
+            <button type="button" data-rescue="2" className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={() => desk.dismiss(r.entry.body.requestId)}>
               Dismiss
             </button>
           </div>
@@ -200,7 +205,7 @@ function NothingToCall({ view, listDone, placeFocus }: { view: CallsView; listDo
         ))}
       </div>
       <div className="px-[30px] py-6">
-        <Link href="/" ref={(el: HTMLAnchorElement | null) => placeFocus(el, "empty")} className="btn border-line-strong bg-base-100 font-medium">
+        <Link href="/" data-rescue="5" ref={(el: HTMLAnchorElement | null) => placeFocus(el, "empty")} className="btn border-line-strong bg-base-100 font-medium">
           Back to Today
         </Link>
       </div>
@@ -258,7 +263,8 @@ function Sheet({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sna
                       type="radio"
                       name="dialled-number"
                       ref={checked ? (el) => placeFocus(el, "number") : undefined}
-                      className="size-4 accent-[var(--color-call)]"
+                      data-rescue={checked ? 3 : 4}
+                      className={`size-4 accent-[var(--color-call)] ${checked && (n.bad || snap.locked) ? `rounded-full outline outline-2 outline-offset-2 ${n.bad ? "outline-band-warn" : "outline-band-ok"}` : ""}`}
                       checked={checked}
                       disabled={n.bad || snap.locked}
                       onChange={() => desk.setDraft({ numberId: n.detailId })}
@@ -267,6 +273,7 @@ function Sheet({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sna
                     <span className="text-[13px] text-band-muted">
                       {numberKind(n)}
                       {n.bad ? ", marked wrong" : n.owner === "company" ? ", the company’s" : ""}
+                      {checked && (n.bad || snap.locked) ? <b className="font-semibold text-band-ink">, your choice</b> : null}
                     </span>
                   </label>
                 );
@@ -434,7 +441,7 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
             </p>
           )}
           <div>
-            <button type="button" ref={(el) => placeFocus(el, "away")} className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={() => void desk.moveOn()}>
+            <button type="button" data-rescue="1" ref={(el) => placeFocus(el, "away")} className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={() => void desk.moveOn()}>
               Open the next call
             </button>
           </div>
@@ -497,7 +504,7 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
       {!away && draft.outcome && draft.outcome !== "skip_for_now" && (
         <div className="flex flex-col gap-2.5 rounded-field bg-raised px-4 py-3.5 text-[14px]">
           {draft.outcome === "wrong_number" ? (
-            <p>{dialled && !snap.numberProblem ? `${dialled.value}, ${numberKind(dialled)}, the number you dial above, is marked wrong.` : "Choose the number you dialled above."}</p>
+            <p>{outcomeNumberLine("wrong_number", dialled && !snap.numberProblem ? dialled : null, pending)}</p>
           ) : draft.outcome === "interested" ? (
             <>
               <p>
@@ -506,7 +513,10 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
               <p className="text-[13px] text-muted">Their other campaigns and colleagues keep running.</p>
             </>
           ) : (
-            <p className="text-[13px] text-muted">{draft.outcome === "gatekeeper" ? "Add a note about who you spoke to. " : ""}Logged on {dialled && !snap.numberProblem ? `${dialled.value}, ${numberKind(dialled)}` : "the number you choose above"}.</p>
+            <p className="text-[13px] text-muted">
+              {draft.outcome === "gatekeeper" && !pending ? "Add a note about who you spoke to. " : ""}
+              {outcomeNumberLine(draft.outcome, dialled && !snap.numberProblem ? dialled : null, pending)}
+            </p>
           )}
         </div>
       )}
@@ -515,7 +525,7 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
           {pending ? "" : draft.outcome === null ? "Pick what happened to finish this call." : !canLog && !snap.noteTooLong ? "Choose the number you dial above." : ""}
         </span>
         <span className="flex flex-wrap items-center gap-2">
-          {snap.pending?.unconfirmed && (
+          {snap.pending?.unconfirmed && !snap.pending.elsewhere && (
             <button type="button" className="btn border-line-strong bg-base-100 font-medium" onClick={() => desk.retryNow()}>
               Try again now
             </button>

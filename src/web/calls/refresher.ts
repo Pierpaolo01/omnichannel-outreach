@@ -28,7 +28,11 @@ export interface Freshness {
 export const FRESH: Freshness = { failures: 0, lastReadAt: null, stale: false };
 
 export interface RefresherDeps<T extends Timed> {
-  read(): Promise<T>;
+  /**
+   * One read. `expected` is the server's own `nextChangeAt` when the read is the one it asked for:
+   * the server then answers only once its worker has made that change (ADR 0003 4.4.1).
+   */
+  read(expected: string | null): Promise<T>;
   /** Applies a successful read; awaited before the read counts as done. */
   onRead(value: T): Promise<void> | void;
   onFailure(error: unknown, freshness: Freshness): void;
@@ -62,16 +66,16 @@ export class Refresher<T extends Timed> {
   }
 
   /** Reads now; the next read is then scheduled from the answer, or from the backoff after a failure. */
-  async now(): Promise<void> {
+  async now(expected: string | null = null): Promise<void> {
     if (this.halted()) return;
     let value: T;
     try {
-      value = await this.deps.read();
+      value = await this.deps.read(expected);
     } catch (error) {
       if (this.halted()) return;
       this.failures++;
       this.deps.onFailure(error, this.freshness());
-      this.schedule(REFRESH_RETRY_MS[Math.min(this.failures - 1, REFRESH_RETRY_MS.length - 1)] ?? 60_000);
+      this.schedule(REFRESH_RETRY_MS[Math.min(this.failures - 1, REFRESH_RETRY_MS.length - 1)] ?? 60_000, expected);
       return;
     }
     if (this.halted()) return;
@@ -82,7 +86,7 @@ export class Refresher<T extends Timed> {
     if (value.nextChangeAt === null) {
       this.cancel?.();
       this.cancel = null;
-    } else this.schedule(Math.max(0, Date.parse(value.nextChangeAt) - Date.parse(value.asOf)));
+    } else this.schedule(Math.max(0, Date.parse(value.nextChangeAt) - Date.parse(value.asOf)), value.nextChangeAt);
   }
 
   /** Read through a method: `stop` may run while a read is awaited. */
@@ -90,11 +94,11 @@ export class Refresher<T extends Timed> {
     return this.stopped;
   }
 
-  private schedule(ms: number): void {
+  private schedule(ms: number, expected: string | null): void {
     this.cancel?.();
     this.cancel = this.deps.setTimer(() => {
       this.cancel = null;
-      void this.now();
+      void this.now(expected);
     }, ms);
   }
 }

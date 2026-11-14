@@ -32,6 +32,8 @@ export interface EngineHarnessOptions {
   readonly databasePath?: string;
   /** A fake SMS provider's numbers (ticket 13). Without them the engine has the unprovisioned SMS port. */
   readonly sms?: { readonly numbers: readonly FakeNumber[]; readonly modes?: readonly FakeSmsMode[] };
+  /** A worker the HTTP app reads its progress from (ticket 14b's freshness rule); the harness ticks itself otherwise. */
+  readonly worker?: import("../../src/server/worker.ts").WorkerProgress;
 }
 
 /** A provider the harness can drive: it acts on its own at instants the harness advances to. */
@@ -104,6 +106,7 @@ export class EngineHarness {
       emailProvider: "status" in this.provider ? (this.provider as Provider & EmailProviderSource) : null,
       smsProvider: this.smsProvider ? "test-simulator" : "none",
       ...(options.rules ? { rules: options.rules } : {}),
+      ...(options.worker ? { worker: options.worker } : {}),
     });
   }
 

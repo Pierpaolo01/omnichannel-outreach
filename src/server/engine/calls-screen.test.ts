@@ -3,6 +3,7 @@ import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
 import type { ActivityView, CallsView, CallTaskView, LeadSearchResult, TodayView } from "../../shared/api.ts";
+import { TICK_MS, Worker } from "../worker.ts";
 
 /**
  * What the Today page and the call focus queue read (ticket 14, part b), through the real HTTP app,
@@ -139,5 +140,65 @@ describe("when the call list next changes by the clock (ADR 0003 4.4.1, review b
     const view = (await h.request<CallsView>("GET", "/api/calls")).body;
     expect(view.readyNow).toEqual([]);
     expect(view.nextChangeAt).toBe("2026-11-02T09:00:00.000Z");
+  });
+});
+
+describe("the instant the server advertises is one at which its answer shows the change (review bot on b15a769, item 7)", () => {
+  test("a call placed at the user's midnight: a read at the advertised instant, before the worker's tick, waits for that tick and shows it", async () => {
+    // The worker as the running app has it: TICK_MS between ticks, on timers this test steps by hand.
+    const timers: { at: number; fire: () => void }[] = [];
+    const box: { h: EngineHarness | null } = { h: null };
+    const worker = new Worker({
+      recover: async () => undefined,
+      tick: () => (box.h ? box.h.tick() : Promise.resolve()),
+      now: () => box.h?.clock ?? 0,
+      setTimer: (fire, ms) => {
+        const t = { at: (box.h?.clock ?? 0) + ms, fire };
+        timers.push(t);
+        return () => timers.splice(timers.indexOf(t), 1);
+      },
+    });
+    const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }], worker });
+    box.h = h;
+    await h.tick();
+    await h.request("PUT", "/api/call-settings", { dailyCapacity: 1, userZone: "Europe/London" });
+    const { campaign: c } = await h.createCampaign("Midnight", { businesses: [HARBOUR], people: [PAT, NIA] });
+    await h.defineSequence(c.id, definition([track("p1", "call", [call("c1")], ALWAYS)]));
+    expect((await h.launch(c.id)).status).toBe(200);
+    await h.tick();
+    // Monday: one call fits the capacity; it is worked. The other waits for Tuesday.
+    const monday = (await h.request<CallsView>("GET", "/api/calls")).body;
+    expect(monday.readyNow).toHaveLength(1);
+    const first = (await h.request<CallTaskView>("GET", `/api/call-tasks/${monday.focusTaskId}`)).body;
+    expect((await h.request("POST", `/api/call-tasks/${first.taskId}/outcome`, { requestId: "r1", outcome: "no_answer", numberId: first.numbers[0]?.detailId })).status).toBe(200);
+
+    // 23:59:50 London; the worker's last tick started at 23:59:45, so its next starts at 00:00:00.
+    h.clock = Date.parse("2026-11-02T23:59:45Z");
+    worker.start();
+    await new Promise((r) => setImmediate(r));
+    h.clock = Date.parse("2026-11-02T23:59:50Z");
+    const before = (await h.request<CallsView>("GET", "/api/calls")).body;
+    expect(before).toMatchObject({ readyNow: [], nextChangeAt: "2026-11-03T00:00:00.000Z" });
+
+    // The page reads at the advertised instant; the worker's timer has not fired yet.
+    h.clock = Date.parse("2026-11-03T00:00:00Z");
+    let answered: CallsView | null = null;
+    const read = h.request<CallsView>("GET", `/api/calls?expected=${encodeURIComponent(before.nextChangeAt ?? "")}`).then((x) => (answered = x.body));
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+    expect(answered).toBeNull();
+    // The worker's tick at 00:00:00 (TICK_MS after the last) places Tuesday's call; then the read answers with it.
+    expect(timers[0]?.at).toBe(Date.parse("2026-11-02T23:59:45Z") + TICK_MS);
+    timers.shift()?.fire();
+    await read;
+    expect(answered!.readyNow.map((x) => x.person?.name)).toEqual(["Nia Cole"]);
+    worker.stop();
+  });
+
+  test("an ordinary read never waits for the worker", async () => {
+    const worker = { lastTickStartedAt: () => 0, caughtUp: () => new Promise<void>(() => undefined) };
+    const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }], worker });
+    await h.tick();
+    expect((await h.request<CallsView>("GET", "/api/calls")).status).toBe(200);
+    expect((await h.request<TodayView>("GET", "/api/today")).status).toBe(200);
   });
 });

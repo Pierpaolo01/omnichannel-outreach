@@ -16,6 +16,7 @@ import type { StoredDefinition } from "./engine/engine-store.ts";
 import { UnconnectedEmailPort, UnprovisionedSmsPort } from "./engine/ports.ts";
 import { accountView, needsAttention, progressView } from "./engine/views.ts";
 import { callsView, callTaskView, todayView } from "./engine/call-views.ts";
+import type { WorkerProgress } from "./worker.ts";
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
 import type { CampaignDetail, CampaignListItem, CampaignSequenceSummary, SequenceView } from "../shared/api.ts";
 import { beforeLaunchView, copyPreview } from "./before-launch.ts";
@@ -29,6 +30,11 @@ export interface AppDependencies {
   readonly newId: () => string;
   /** The sequence engine. Without one, the app runs an engine with no connected email provider. */
   readonly engine?: Pick<Engine, "launch" | "logCallOutcome" | "nextWakeAt">;
+  /**
+   * The engine's worker, when one runs (the running app). A clock-driven read the server asked for
+   * (`expected`, its own `nextChangeAt`) that the worker has not reached yet waits for its next tick.
+   */
+  readonly worker?: WorkerProgress;
   /** The email provider's own description, for GET /api/email-provider; absent when none is connected. */
   readonly emailProvider?: EmailProviderSource | null;
   /**
@@ -134,7 +140,7 @@ const launchBody = requestObject({ definitionVersion: z.number().int().optional(
 const checkBody = requestObject({ businessesCsv: z.string().optional(), peopleCsv: z.string().optional() });
 
 /** The HTTP interface. Every route is under /api; the web client is served separately. */
-export function createApp({ store, now, newId, engine: givenEngine, emailProvider, smsProvider = "none", rules: givenRules }: AppDependencies): Hono {
+export function createApp({ store, now, newId, engine: givenEngine, worker, emailProvider, smsProvider = "none", rules: givenRules }: AppDependencies): Hono {
   const rules: Rules = { ...DEFAULT_RULES, ...givenRules };
   const engine = givenEngine ?? new Engine({ store: store.engine, port: new UnconnectedEmailPort(), smsPort: new UnprovisionedSmsPort(), now: () => Date.parse(now()), newId });
   const app = new Hono().basePath("/api");
@@ -424,11 +430,29 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     return c.json(await store.engine.callSettings());
   });
 
+  /**
+   * A read at the instant the server advertised (`expected`, its own `nextChangeAt`) must show the
+   * change (ADR 0003 4.4.1): if the worker has not started a tick since that instant, the read waits
+   * for the end of its next one, so placing calls and starting tracks are done before it answers.
+   */
+  const caughtUp = async (expected: string | undefined): Promise<void> => {
+    const at = expected ? Date.parse(expected) : Number.NaN;
+    if (!worker || Number.isNaN(at) || at > Date.parse(now())) return;
+    const last = worker.lastTickStartedAt();
+    if (last === null || last < at) await worker.caughtUp();
+  };
+
   // `nextChangeAt` includes the engine's next wake: a call can be placed or a track start then (ADR 0003 4.4.1).
-  app.get("/today", async (c) => c.json(await todayView(store, Date.parse(now()), rules, await engine.nextWakeAt())));
+  app.get("/today", async (c) => {
+    await caughtUp(c.req.query("expected"));
+    return c.json(await todayView(store, Date.parse(now()), rules, await engine.nextWakeAt()));
+  });
 
   // `focus`: the call the user's screen is on. It stays the focus while it is listed.
-  app.get("/calls", async (c) => c.json(await callsView(store, Date.parse(now()), { focus: c.req.query("focus") || null, rules, nextWake: await engine.nextWakeAt() })));
+  app.get("/calls", async (c) => {
+    await caughtUp(c.req.query("expected"));
+    return c.json(await callsView(store, Date.parse(now()), { focus: c.req.query("focus") || null, rules, nextWake: await engine.nextWakeAt() }));
+  });
 
   app.get("/call-tasks/:id", async (c) => {
     const view = await callTaskView(store, c.req.param("id"), Date.parse(now()));

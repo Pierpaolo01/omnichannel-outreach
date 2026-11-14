@@ -110,6 +110,7 @@ export function clockLine(task: Pick<CallTaskView, "task" | "listed">, userZone:
 /** While an action is on its way. */
 export function pendingLine(pending: NonNullable<DeskSnapshot["pending"]>): string {
   const what = pending.body.outcome === "skip_for_now" ? `Skipping ${pending.who} for now` : `Logging ${OUTCOME_LABEL[pending.body.outcome].toLowerCase()} for ${pending.who}`;
+  if (pending.elsewhere) return `${what}: another Calls tab is sending it. It is logged only once.`;
   return pending.unconfirmed ? `${what}: not confirmed yet. It is being sent again, and it is logged only once.` : `${what}…`;
 }
 
@@ -208,10 +209,22 @@ export function recoveringLine(who: string): string {
   return `Sending again an outcome logged for ${who} in a tab that closed before the server answered. It is logged only once.`;
 }
 
-/** A refusal no page showed on its call: what was not logged, and why. */
-export function refusedRecordLine(record: { readonly entry: { readonly who: string; readonly body: { readonly outcome: CallOutcomeApi } }; readonly message: string }): string {
-  const what = record.entry.body.outcome === "skip_for_now" ? `Skip for now on ${record.entry.who}` : `${OUTCOME_LABEL[record.entry.body.outcome]} for ${record.entry.who}`;
-  return `Not logged: ${what}. ${record.message}`;
+/** A refusal no page showed on its call: what was not logged, and why, from the server's `offList` when it said. */
+export function refusedRecordLine(
+  record: { readonly entry: { readonly who: string; readonly body: { readonly outcome: CallOutcomeApi } }; readonly message: string; readonly offList?: CallOffListView | null },
+  zone: string,
+): string {
+  const what = record.entry.body.outcome === "skip_for_now" ? `skip for now on ${record.entry.who}` : `${OUTCOME_LABEL[record.entry.body.outcome].toLowerCase()} for ${record.entry.who}`;
+  const why = record.offList ? offListLine(record.entry.who, record.offList, null, zone) : record.message;
+  return `Not logged: ${what}. ${why}`;
+}
+
+/** What the outcome box says of the number: before Log, while it is on its way. */
+export function outcomeNumberLine(outcome: CallOutcomeApi, number: { readonly value: string; readonly kind: CallNumberView["kind"] } | null, pending: boolean): string {
+  if (number === null) return "Choose the number you dialled above.";
+  const n = `${number.value}, ${NUMBER_KIND[number.kind]}`;
+  if (outcome === "wrong_number") return pending ? `Logging ${n} as a wrong number…` : `${n}, the number you dial above, will be marked wrong.`;
+  return pending ? `Logging on ${n}…` : `To be logged on ${n}.`;
 }
 
 /** Under the numbers, when the one the user chose can no longer be logged on. */

@@ -2,9 +2,10 @@ import { Link } from "wouter";
 import type { CallQueueItem, TodayView } from "../../shared/api.ts";
 import { useLiveToday } from "../calls/useLiveToday.ts";
 import { CAPACITY_USED, attentionItems, dateHeading, reasonLine, todayLede, zonePlace } from "../calls/wording.ts";
-import { ErrorState } from "../components.tsx";
+import { ErrorState, StaleNotice } from "../components.tsx";
 import { Icon } from "../icons.tsx";
 import { greeting, todayHeading, useNow } from "../time.ts";
+import { useFocusRescue } from "../focusRescue.ts";
 
 const TONE = { muted: "text-muted", pause: "text-pause", crit: "text-crit" } as const;
 const DOT = { crit: "bg-crit", pause: "bg-pause", end: "bg-end" } as const;
@@ -12,10 +13,12 @@ const DOT = { crit: "bg-crit", pause: "bg-pause", end: "bg-end" } as const;
 /** Today, the landing page: the date, today's calls and Needs attention, as the server reports them. */
 export function TodayPage() {
   const now = useNow();
-  const { today, attention, retry } = useLiveToday();
-  const view = today.data;
+  const live = useLiveToday();
+  const rescue = useFocusRescue();
+  const view = live.data?.today ?? null;
+  const attention = live.data?.attention ?? null;
   return (
-    <div>
+    <div ref={rescue}>
       <div className="flex flex-wrap items-end justify-between gap-6 border-b border-line pb-7">
         <div>
           <p className="mb-1.5 text-[15px] text-muted">{view ? dateHeading(view.date, now, view.userZone) : todayHeading(now)}</p>
@@ -25,24 +28,25 @@ export function TodayPage() {
               {todayLede(view.readyNow, view.laterToday)}
               {view.capacityReached ? ` ${CAPACITY_USED}` : ""}
             </p>
-          ) : today.error === null ? (
+          ) : live.error === null ? (
             <div role="status" aria-label="Loading today’s calls" className="skeleton mt-3 h-6 w-80 max-w-full" />
           ) : null}
         </div>
         {view && view.readyNow > 0 && (
-          <Link href="/calls" className="btn btn-primary h-auto gap-2.5 rounded-[12px] px-[22px] py-3.5 text-[16px] font-semibold">
+          <Link href="/calls" data-rescue="5" className="btn btn-primary h-auto gap-2.5 rounded-[12px] px-[22px] py-3.5 text-[16px] font-semibold">
             <Icon name="call" />
             Start calling
           </Link>
         )}
       </div>
+      {live.freshness.stale && <StaleNotice freshness={live.freshness} onRetry={live.retry} rescue={2} />}
       <div className="grid grid-cols-1 gap-12 pt-7 lg:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]">
         <section aria-labelledby="up-next">
           <h2 id="up-next" className="mb-2 text-[19px]">
             Up next
           </h2>
-          {view === null && today.error !== null ? (
-            <ErrorState title="Today’s calls didn’t load." message={today.error} onRetry={retry} />
+          {view === null && live.error !== null ? (
+            <ErrorState title="Today’s calls didn’t load." message={live.error} onRetry={live.retry} rescue={2} />
           ) : view === null ? (
             <div role="status" aria-busy="true" aria-label="Loading up next" className="flex flex-col gap-3 py-3">
               <div className="skeleton h-12 w-full" />
@@ -56,12 +60,12 @@ export function TodayPage() {
           <h2 id="needs-attention" className="mb-3.5 text-[19px]">
             Needs attention
           </h2>
-          {attention.data === null && attention.error !== null ? (
-            <ErrorState title="Needs attention didn’t load." message={attention.error} onRetry={retry} />
-          ) : attention.data === null ? (
+          {attention === null && live.error !== null ? (
+            <ErrorState title="Needs attention didn’t load." message={live.error} onRetry={live.retry} rescue={2} />
+          ) : attention === null ? (
             <div role="status" aria-busy="true" aria-label="Loading needs attention" className="skeleton h-20 w-full" />
           ) : (
-            <Attention items={attentionItems(attention.data, view?.userZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone)} />
+            <Attention items={attentionItems(attention, view?.userZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone)} />
           )}
         </section>
       </div>

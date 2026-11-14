@@ -423,7 +423,7 @@ export const SCREENS: readonly Screen[] = [
       }, [t.taskId, t.numberId] as const);
       await page.clock.setFixedTime(f.harness.clock);
       await page.goto(`${f.url}/calls`);
-      await settle(page, "Not logged: No answer for Amira Hassan.");
+      await settle(page, "Not logged: no answer for Amira Hassan.");
     },
   },
   {
@@ -1050,6 +1050,65 @@ export interface FocusTransition {
 }
 
 export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
+  {
+    name: "the chosen number invalidated under the keyboard moves focus to a number that can still be chosen (re-check on b15a769)",
+    open: async (page) => {
+      const f = await freshCalls("ready", "focus-number-gone");
+      await page.goto(`${f.url}/calls`);
+      await page.getByText(/^Calling hours /).waitFor();
+      // Chosen from the keyboard: the mobile is first, the main line next.
+      await page.getByRole("radio", { name: /7700 900101/ }).focus();
+      await page.keyboard.press("ArrowDown");
+      await page.getByRole("radio", { name: /7946 0101/, checked: true }).waitFor();
+      (page as Page & { calls?: FakeCallsApp }).calls = f;
+    },
+    act: async (page) => {
+      const f = (page as Page & { calls?: FakeCallsApp }).calls!;
+      const tom = (await f.harness.request<{ readyNow: { taskId: string; person: { name: string } | null }[] }>("GET", "/api/calls")).body.readyNow.find((x) => x.person?.name === "Tom");
+      const main = (await f.harness.request<{ numbers: { detailId: string; kind: string }[] }>("GET", `/api/call-tasks/${tom?.taskId}`)).body.numbers.find((n) => n.kind === "main_line");
+      await logElsewhere(f, tom?.taskId ?? "", "wrong_number", main?.detailId ?? null);
+      await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+      await page.getByText("is now marked wrong").waitFor();
+    },
+    focused: (page) => page.getByRole("radio", { name: /7700 900101/ }),
+  },
+  {
+    name: "a retry that succeeds after the call failed to load moves focus to the call's number (re-check on b15a769)",
+    open: async (page) => {
+      const f = await freshCalls("ready", "focus-retry");
+      await page.route("**/api/call-tasks/*", (route) => (route.request().method() === "GET" ? serverError(route) : route.continue()));
+      await page.goto(`${f.url}/calls`);
+      await page.getByText("This call didn’t load.").waitFor();
+    },
+    act: async (page) => {
+      await page.unrouteAll({ behavior: "ignoreErrors" });
+      await page.getByRole("button", { name: "Try again" }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByText(/^Calling hours /).waitFor();
+    },
+    focused: (page) => page.getByRole("group", { name: "Number you dial" }).getByRole("radio", { checked: true }),
+  },
+  {
+    name: "dismissing the last kept refusal moves focus to the call's number (re-check on b15a769)",
+    open: async (page) => {
+      const f = await freshCalls("ready", "focus-dismiss");
+      const t = await focused(f);
+      await logElsewhere(f, t.taskId, "interested", t.numberId);
+      await page.addInitScript(([taskId, numberId]) => {
+        const body = { requestId: "left-by-a-closed-tab", outcome: "no_answer", numberId, note: "Front desk.", noteScope: "person" };
+        window.localStorage.setItem("outreach.calls.outbox.left-by-a-closed-tab", JSON.stringify({ v: 1, tab: "closed-tab", taskId, who: "Amira Hassan", body }));
+      }, [t.taskId, t.numberId] as const);
+      await page.goto(`${f.url}/calls`);
+      await page.getByRole("button", { name: "Dismiss" }).waitFor();
+      await page.getByText(/^Calling hours /).waitFor();
+    },
+    act: async (page) => {
+      await page.getByRole("button", { name: "Dismiss" }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByRole("button", { name: "Dismiss" }).waitFor({ state: "detached" });
+    },
+    focused: (page) => page.getByRole("group", { name: "Number you dial" }).getByRole("radio", { checked: true }),
+  },
   {
     name: "logging an outcome when the next call fails to load moves focus to its Try again (verifier on e6872eb)",
     open: async (page) => { const f = await freshCalls("ready", "focus-load-error"); await page.goto(`${f.url}/calls`); await page.getByText(/^Calling hours /).waitFor(); },

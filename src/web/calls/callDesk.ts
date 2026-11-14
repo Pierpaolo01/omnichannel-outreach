@@ -88,7 +88,8 @@ export interface KeyValue {
 }
 
 export interface CallDeskPorts {
-  calls(focus: string | null): Promise<CallsView>;
+  /** The queue, naming the focus; `expected` is the server's own `nextChangeAt` on the read it asked for. */
+  calls(focus: string | null, expected?: string | null): Promise<CallsView>;
   task(taskId: string): Promise<CallTaskView>;
   /** One POST of an outcome: rejects with `NoAnswer` or `Refused`. */
   post(taskId: string, body: OutcomeBody): Promise<CallOutcomeAnswer>;
@@ -280,10 +281,10 @@ export class CallDesk {
     }
     this.tab = tab;
     this.refresher = new Refresher({
-      read: async () => {
+      read: async (expected) => {
         const named = this.state.focus;
         const life = this.life;
-        return { ...(await ports.calls(named)), named, life };
+        return { ...(await ports.calls(named, expected)), named, life };
       },
       onRead: (read) => this.applyQueue(read),
       onFailure: (error, freshness) => this.readFailed(error, freshness),
