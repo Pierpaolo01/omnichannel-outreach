@@ -6,14 +6,15 @@
 import { bucketOf, CALL_OUTCOMES, callNumbers, callWindow, dayHasRoom, goodNumbers, isListed, listedForDay, queueRank, queueWall, recordedNumberOf, REDIAL_OUTCOMES, skipLimitOf, skippedTonight, unworkedSkipDay, type CallBucket } from "../../domain/sequence/calls.ts";
 import { displayPhone } from "../../domain/phone.ts";
 import { localDayNumber, nextWindowClose, nextWindowOpen, startOfLocalDay, windowOpen } from "../../domain/sequence/clock.ts";
-import { declinedPathOf, liveTracks, winBackAvailable } from "../../domain/sequence/definition.ts";
+import { declinedPathOf, liveTracks, winBackAvailable, type DeclinedPath } from "../../domain/sequence/definition.ts";
 import { callbackHold, deriveStatus } from "../../domain/sequence/progress.ts";
 import type { CallAttempt, CallNumber, CallTask, RecordedNumber, SubjectState } from "../../domain/sequence/state.ts";
-import type { CallColleagueView, CallNumberView, CallOffListView, CallQueueItem, CallRecordView, RecordCallView, RecordCalls, RecordedNumberView, CallsView, CallTaskView, NoteView, SkipLimitView, TodayView, TouchView } from "../../shared/api.ts";
+import type { DeclinePreviewView, CallColleagueView, CallNumberView, CallOffListView, CallQueueItem, CallRecordView, RecordCallView, RecordCalls, RecordedNumberView, CallsView, CallTaskView, NoteView, SkipLimitView, TodayView, TouchView } from "../../shared/api.ts";
 import type { OutreachStore } from "../persistence/store.ts";
 import { DEFAULT_DAILY_CALL_CAPACITY } from "../persistence/sqlite-engine-store.ts";
 import type { StoredNote } from "./engine-store.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
+import { afterDeclineTracks } from "./track-states.ts";
 
 /**
  * The decisions the call read models make, from the engine's rules: each lead's state as of the instant read
@@ -167,7 +168,14 @@ export async function recordCalls(store: OutreachStore, enrollmentIds: readonly 
     }
   }
   const day = await store.engine.callDay(now);
-  return { calls: out, today: dateIn(day.userZone, now) };
+  // Each enrollment's decline (ticket 16c): the user's date it was logged on, as the engine counts the day, and its path.
+  const declines: RecordCalls["declines"][number][] = [];
+  for (const id of enrollmentIds) {
+    const s = await store.engine.subject(id, now);
+    const declined = s?.callAttempts.find((c) => c.outcome === "not_interested" && c.declinedPath !== null);
+    if (declined?.declinedPath) declines.push({ enrollmentId: id, date: dateOfDay(localDayNumber(declined.atWall, day.userZone)), path: declined.declinedPath });
+  }
+  return { calls: out, today: dateIn(day.userZone, now), declines };
 }
 
 /**
@@ -186,6 +194,38 @@ function redialPreview(s: SubjectState, task: CallTask, now: number, rules: Call
   const first = after.open ? firstListedDay(out.state, after, rules) : null;
   if (first === null) return null;
   return { listedFor: dateOfDay(first), skipLimit: skipLimitView(out.state, after, now) };
+}
+
+/** The paths the user may choose for a lead of this campaign: win back only while it has a win-back branch. */
+const declinedPathsOf = (s: SubjectState): DeclinedPath[] => (winBackAvailable(s.campaign.definition) ? ["stop", "continue", "win_back"] : ["stop", "continue"]);
+
+/** Live attempts already handed to a provider and asked to withdraw. */
+const withProvider = (s: SubjectState): Set<string> => new Set(s.attempts.filter((a) => (a.state === "handed" || a.state === "accepted") && a.withdrawRequested).map((a) => a.id));
+
+/**
+ * What not interested logged now would do on each path offered (ticket 16c), as the redial preview is built: the engine's
+ * own outcome (`logCallOutcome`, a callback's hold released first, as the route does) on a copy of the lead's state as of
+ * the read, on the first good number, then the lead as a read right after would see it; nothing is stored. Each reports
+ * the lead's status, every track the decline leaves unfinished or finishes in its state then, and the work already with
+ * a provider that the decline asks to withdraw. Null when no number can be logged on, or the engine would refuse it.
+ */
+function declinePreviews(s: SubjectState, task: CallTask, now: number, rules: CallViewRules): CallTaskView["declines"] {
+  const number = goodNumbers(s)[0];
+  if (!number) return null;
+  const before = withProvider(s);
+  const out: DeclinePreviewView[] = [];
+  for (const path of declinedPathsOf(s)) {
+    const logged = rules.logCallOutcome(s, task.id, { requestId: `preview:${task.id}:${path}`, outcome: "not_interested", declinedPath: path, numberId: number.id, note: "", noteScope: "person" }, now, { attempt: "preview", note: "preview" }, rules.isListed);
+    if (!logged.ok) return null;
+    const after = rules.asOfAction(logged.state, now, rules.evaluate);
+    out.push({
+      path,
+      status: deriveStatus(after),
+      tracks: afterDeclineTracks(after, task.trackId, now, path, now),
+      withProvider: [...withProvider(after)].filter((id) => !before.has(id)).length,
+    });
+  }
+  return out;
 }
 
 /**
@@ -379,6 +419,8 @@ export async function callTaskView(store: OutreachStore, taskId: string, now: nu
     redial: listed && task.open ? redialPreview(s, task, now, rules) : null,
     listedFrom: task.open ? dateOrNull(firstListedDay(s, task, rules)) : null,
     declinedPath: declinedPathOf(s.campaign.definition.tracks.find((t) => t.id === task.trackId)),
-    declinedPaths: winBackAvailable(s.campaign.definition) ? ["stop", "continue", "win_back"] : ["stop", "continue"],
+    declinedPaths: declinedPathsOf(s),
+    declinedPathSet: s.campaign.definition.tracks.find((t) => t.id === task.trackId)?.declinedPath !== undefined,
+    declines: listed && task.open ? declinePreviews(s, task, now, rules) : null,
   };
 }
