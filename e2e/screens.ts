@@ -1212,6 +1212,14 @@ export const SCREENS: readonly Screen[] = [
   },
   // Ticket 16b: the declined path and the win-back branch in the editor.
   {
+    name: "a phone track whose declined path is stop, on its node and in its inspector",
+    open: async (page) => {
+      const id = await campaignWith(page, "A call that stops", { ...WITH_A_CALL, tracks: WITH_A_CALL.tracks.map((t) => (t.id === "call" ? { ...t, declinedPath: "stop" as const } : t)) });
+      await page.goto(`/campaigns/${id}?track=call`);
+      await settle(page, "If declined: stop");
+    },
+  },
+  {
     name: "a phone track whose declined path is continue, with no win-back track, so win back cannot be chosen",
     open: async (page) => {
       const id = await campaignWith(page, "A call that continues", { ...WITH_A_CALL, tracks: WITH_A_CALL.tracks.map((t) => (t.id === "call" ? { ...t, declinedPath: "continue" as const } : t)) });
