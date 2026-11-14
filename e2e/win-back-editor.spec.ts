@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { expect, test, type Page } from "@playwright/test";
 import type { Campaign, SequenceView } from "../src/shared/api.ts";
-import { WITH_A_BRANCH, WITH_A_CALL } from "./screens.ts";
+import { WITH_A_BRANCH, WITH_A_CALL, phoneTrack } from "./screens.ts";
 import { fixture } from "./support.ts";
 
 /**
@@ -138,5 +138,26 @@ test.describe("the declined path and the win-back branch in the campaign editor 
     await expect(copy.getByRole("listitem").first()).toContainText("Only if they decline");
     await blocker.getByRole("button", { name: "Open track" }).click();
     await expect(page.getByTestId("inspector").getByRole("heading", { name: "Win-back SMS track" })).toBeVisible();
+  });
+
+  test("the branch never makes the canvas scroll sideways, at any width between the laptop sizes, with the inspector open (review bot on 8147ba6)", async ({ page }) => {
+    // The bot's case: one phone track is the whole main sequence, so the tracks are drawn side by side.
+    const onlyACall = { ...WITH_A_CALL, tracks: [phoneTrack("call", { kind: "entry" })] };
+    const empty = await campaign(page, "Branch width, empty", onlyACall);
+    const one = await campaign(page, "Branch width, one track", { ...onlyACall, tracks: [...onlyACall.tracks, WITH_A_BRANCH.tracks.find((t) => t.id === "wb-email")!] });
+    const overflow: string[] = [];
+    for (const id of [empty, one]) {
+      for (let width = 1020; width <= 1440; width += 20) {
+        await page.setViewportSize({ width, height: 900 });
+        await page.goto(`/campaigns/${id}?track=call`);
+        await page.getByTestId("win-back-branch").waitFor();
+        const sideways = await page.getByTestId("canvas").evaluate((canvas) => {
+          const area = canvas.querySelector<HTMLElement>(".overflow-auto");
+          return area ? area.scrollWidth - area.clientWidth : 0;
+        });
+        if (sideways > 1) overflow.push(`${id === empty ? "empty branch" : "one branch track"} at ${width}px: ${sideways}px sideways`);
+      }
+    }
+    expect(overflow).toEqual([]);
   });
 });

@@ -285,7 +285,7 @@ function treeOf(tracks: readonly TrackDefinition[]) {
 const BRANCH_INSET = 18;
 /** Room kept on the right of a stacked canvas for the declined edges' gutter (ticket 16b). */
 const EDGE_GUTTER = 20;
-/** The narrowest the win-back box is drawn side by side, so its name and empty state read on one or two lines. */
+/** The narrowest the win-back box is drawn side by side; its name, Add and empty state wrap within it. */
 const BRANCH_MIN = 320;
 
 /**
@@ -321,7 +321,8 @@ function Canvas({
   const branchRootLabel = branch.roots.length > 1 ? "together" : "when they enter win-back";
   // Side by side while the widest row of tracks fits the canvas, the branch's within its box; stacked
   // in one column otherwise, so nothing scrolls sideways or clips at any width (DESIGN.md, Layout).
-  const needed = Math.max(main.needed, showBranch ? Math.max(BRANCH_MIN, branch.needed + 2 * BRANCH_INSET) : 0);
+  const branchWidth = Math.max(BRANCH_MIN, branch.needed + 2 * BRANCH_INSET);
+  const needed = Math.max(main.needed, showBranch ? branchWidth : 0);
   const area = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const width = useWidth(area);
@@ -332,12 +333,12 @@ function Canvas({
   const node = (t: TrackDefinition) => <TrackNode track={t} def={editor.draft} selected={selectedId === t.id} blockers={editor.view.launch.blockers} launched={editor.launched} onSelect={() => onSelect(t.id)} />;
   const tree = (of: ReturnType<typeof treeOf>, count: number, root: string, name: string, room: number) => <Tree of={of} count={count} node={node} rootLabel={root} name={name} def={editor.draft} stacked={stacked} room={room} />;
   const box = showBranch && (
-    <WinBackBox empty={branchTracks.length === 0} launched={editor.launched} locked={editor.locked} stacked={stacked} gutter={gutter} onAdd={(channel) => onAdd(channel, "win_back")}>
+    <WinBackBox empty={branchTracks.length === 0} launched={editor.launched} locked={editor.locked} stacked={stacked} gutter={gutter} width={branchWidth} onAdd={(channel) => onAdd(channel, "win_back")}>
       {branchTracks.length > 0 && tree(branch, branchTracks.length, branchRootLabel, "Win-back tracks that start when a lead enters the branch", (width ?? 0) - 2 * BRANCH_INSET)}
     </WinBackBox>
   );
   return (
-    <div data-testid="canvas" data-layout={stacked ? "stacked" : "row"} className={`flex min-w-0 flex-col rounded-box border border-line bg-raised bg-[radial-gradient(var(--color-line-strong)_1px,transparent_1px)] bg-[length:18px_18px] h-[max(470px,calc(100dvh-306px))]`}>
+    <div data-testid="canvas" data-layout={stacked ? "stacked" : "row"} data-needed={needed} className={`flex min-w-0 flex-col rounded-box border border-line bg-raised bg-[radial-gradient(var(--color-line-strong)_1px,transparent_1px)] bg-[length:18px_18px] h-[max(470px,calc(100dvh-306px))]`}>
       <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
         <p className="flex flex-wrap items-center gap-x-3.5 gap-y-1 text-[12.5px] text-muted">
           <span className="flex items-center gap-2">
@@ -366,7 +367,7 @@ function Canvas({
             {box}
           </div>
         ) : (
-          <div ref={content} className="relative mx-auto flex w-max flex-col items-center">
+          <div ref={content} data-testid="canvas-content" className="relative mx-auto flex w-max flex-col items-center">
             <DeclinedEdges edges={edges} />
             <span data-testid="launch-point" className="sticky top-0 z-[1] rounded-full bg-base-content px-3.5 py-1 text-[12.5px] font-semibold text-base-100">
               Launch
@@ -464,15 +465,18 @@ const ADD_WIN_BACK_ID = "add-win-back-track";
  * tracks): a dashed box in `hand`, its name, its own Add (email or SMS: the branch holds no phone
  * track, so none is offered), and its tracks; while it has none, what it is and what makes it appear.
  */
-function WinBackBox({ empty, launched, locked, stacked, gutter, onAdd, children }: { empty: boolean; launched: boolean; locked: boolean; stacked: boolean; gutter: number; onAdd: (channel: "email" | "sms") => void; children: ReactNode }) {
+function WinBackBox({ empty, launched, locked, stacked, gutter, width, onAdd, children }: { empty: boolean; launched: boolean; locked: boolean; stacked: boolean; gutter: number; width: number; onAdd: (channel: "email" | "sms") => void; children: ReactNode }) {
   const headingId = useId();
   return (
     <section
       aria-labelledby={headingId}
       data-testid="win-back-branch"
-      className={`relative z-[1] mt-12 flex min-w-0 flex-col gap-1 rounded-box border-[1.5px] border-dashed border-hand/50 bg-hand-soft px-4 pb-5 pt-3 ${stacked ? "" : "min-w-[320px] self-stretch"}`}
-      // Stacked, the box reaches under the edges' gutter, so each "if declined" edge ends on it.
-      style={stacked ? { width: `calc(100% + ${gutter}px)` } : undefined}
+      // Side by side, the box is exactly as wide as the canvas's layout budgeted (`width`), or the main
+      // sequence's width when that is wider: `contain: inline-size` keeps its name, Add and empty text from
+      // widening the canvas past what was measured (review bot on 8147ba6); they wrap instead. Stacked, it
+      // reaches under the edges' gutter, so each "if declined" edge ends on it.
+      className={`relative z-[1] mt-12 flex min-w-0 flex-col gap-1 rounded-box border-[1.5px] border-dashed border-hand/50 bg-hand-soft px-4 pb-5 pt-3 ${stacked ? "" : "self-stretch [contain:inline-size]"}`}
+      style={stacked ? { width: `calc(100% + ${gutter}px)` } : { minWidth: width }}
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 id={headingId} className="text-[13px] font-semibold text-hand">

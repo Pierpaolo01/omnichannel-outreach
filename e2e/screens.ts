@@ -1236,6 +1236,14 @@ export const SCREENS: readonly Screen[] = [
     },
   },
   {
+    name: "a campaign whose main sequence is one phone track, with its inspector open and the win-back branch empty",
+    open: async (page) => {
+      const id = await campaignWith(page, "Only a call, no branch yet", { ...WITH_A_CALL, tracks: [phoneTrack("call", { kind: "entry" })] });
+      await page.goto(`/campaigns/${id}?track=call`);
+      await settle(page, "No tracks yet. A lead who declines on a call can move here");
+    },
+  },
+  {
     name: "the win-back branch with an email track and an SMS track after it, and the dashed edge from the phone track",
     open: async (page) => {
       const id = await campaignWith(page, "A call with an arranged win-back branch", WITH_A_BRANCH);

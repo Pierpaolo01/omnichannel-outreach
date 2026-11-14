@@ -141,6 +141,12 @@ for (const width of WIDTHS) {
           const bb = branchBox.getBoundingClientRect();
           if (Math.abs(end - bb.top) > 8 || origin.left + x < bb.left || origin.left + x > bb.right) problems.push(`the edge from ${from} does not end on the win-back branch's box`);
         }
+        // Side by side, the drawing is never wider than the width the canvas chose its layout by (`data-needed`):
+        // its width does not depend on the window, so a wider drawing would scroll sideways at some width
+        // between the ones checked here (review bot on 8147ba6: the win-back box at 1140px).
+        const drawing = canvas.querySelector<HTMLElement>('[data-testid="canvas-content"]');
+        const budget = Number(canvas.dataset["needed"]);
+        if (!stacked && drawing && drawing.getBoundingClientRect().width > budget + 1) problems.push(`the canvas draws ${Math.round(drawing.getBoundingClientRect().width)}px side by side but chose its layout for ${budget}px`);
         // Every node, label and connector stays inside the canvas panel, and every node's content inside
         // the node, at every width and depth (review bot on 7401eb2).
         const panel = canvas.getBoundingClientRect();
