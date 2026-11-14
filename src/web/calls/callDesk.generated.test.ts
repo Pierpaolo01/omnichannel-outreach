@@ -26,7 +26,10 @@ import { CallDesk, NoAnswer, Refused, type DeskFault, type KeyValue, type Outcom
  * outbox. 9. Liveness: after settling nothing is unanswered and no desk shows an action pending.
  * 10. Bounded sending (checked by a count of requests in callDesk.test.ts). 11. Every sentence about
  * saved, logged or refused agrees with the server's read. 12. A stored press is never an unsent draft.
- * 13. Reads are ordered and counted.
+ * 13. Reads are ordered and counted. 14. What is stored is what was pressed (ticket 15b): every request and
+ * the server's record of a press carry its outcome, redial and callback time, and no callback time not after
+ * the read it was pressed on is sent. Ticket 15b's presses (redials, callbacks later today, on later days and
+ * in the past) and nights passing (so a press on its way can meet an expired call) draw from a second stream.
  *
  * Each desk fault (callDesk.ts `DeskFault`) breaks one of them; the last block checks a known seed
  * catches each (refusal_resent_at_once is caught by its count of requests in callDesk.test.ts).
@@ -72,6 +75,7 @@ const PEOPLE = [
 ];
 const BUSINESSES = [business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101" }), business({ business_id: "b2", business_name: "Elm Street Clinic", phone_e164: "+442079460202" })];
 const OUTCOMES: readonly CallOutcomeApi[] = ["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "skip_for_now"];
+const REDIAL_OUTCOMES: readonly CallOutcomeApi[] = ["no_answer", "voicemail", "gatekeeper"];
 
 /** Lets every request in flight to the in-process app finish. */
 const flush = async () => {
@@ -156,7 +160,17 @@ interface Choice {
   readonly numberId: string | null;
   readonly outcome: string | null;
   readonly note: string;
+  /** Ticket 15b: the redial choice and a callback's day and time, as the user entered them. */
+  readonly redial: boolean;
+  readonly callbackDay: string | null;
+  readonly callbackTime: string;
 }
+
+const sameChoice = (a: Choice, b: Choice) => a.numberId === b.numberId && a.outcome === b.outcome && a.note === b.note && a.redial === b.redial && a.callbackDay === b.callbackDay && a.callbackTime === b.callbackTime;
+
+/** London's date and time of an instant, as the callback controls take them. */
+const londonDay = (t: number) => new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit" }).format(t);
+const londonTime = (t: number) => new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(t);
 
 interface Request {
   readonly from: Instance;
@@ -175,6 +189,8 @@ interface Press {
 
 async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
   const r = rng(seed);
+  // Ticket 15b's choices draw from a stream of their own, so the 14b runs keep their shape.
+  const r15 = rng(seed ^ 0x15b15b);
   const h = new EngineHarness({ start: MONDAY_830 - 30 * MIN, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
   await h.tick();
   await h.request("PUT", "/api/call-settings", { dailyCapacity: 3, userZone: "Europe/London" });
@@ -226,6 +242,9 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
   /** True while log() runs: its first post is a new press, recorded right after. */
   let pressing = false;
   const stored = async (id: string) => (await h.store.engine.callRequestTask(id)) !== null;
+  /** Each press's body as its entry held it at the press (invariant 14), and the presses already checked against the server. */
+  const pressedBody = new Map<string, OutcomeBody>();
+  const checkedStored = new Set<string>();
 
   const open = async (tab: Tab): Promise<Instance> => {
     const timers = new Set<() => void>();
@@ -252,6 +271,9 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
         ),
       post: (taskId, body) =>
         new Promise<CallOutcomeAnswer>((resolve, reject) => {
+          // Invariant 14: every request of a press carries exactly what was pressed.
+          const pressed = pressedBody.get(body.requestId);
+          if (pressed && JSON.stringify(pressed) !== JSON.stringify(body)) problems.push(`14: a request for ${body.requestId} carries ${JSON.stringify(body)}, not the press ${JSON.stringify(pressed)}`);
           // Attribute a resend under another id (a fault) to the press pending in this tab.
           if (!pressing && !pressOf.has(body.requestId)) {
             const press = [...presses].reverse().find((p) => p.tab === tab.label);
@@ -324,6 +346,18 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
   /** A refused press, by any of its ids, once seen. */
   const seenRefused = new Set<Press>();
   const check = async (moved: Set<Instance>) => {
+    // Invariant 14: the server's record of a press is what was pressed: its outcome, redial and callback time.
+    for (const [id, body] of pressedBody) {
+      if (checkedStored.has(id)) continue;
+      const taskId = await h.store.engine.callRequestTask(id);
+      if (taskId === null) continue;
+      checkedStored.add(id);
+      const record = (await h.request<CallTaskView>("GET", `/api/call-tasks/${taskId}`)).body.storedCalls.find((c) => c.requestId === id);
+      const at = (iso: string | null | undefined) => (iso ? Date.parse(iso) : null);
+      if (!record || record.outcome !== body.outcome || record.redial !== (body.redial === true) || at(record.callbackAt) !== at(body.callbackAt)) problems.push(`14: ${id} is stored as ${JSON.stringify(record)}, not as pressed ${JSON.stringify(body)}`);
+      if (body.redial) seen.redials++;
+      if (body.callbackAt) seen.callbacks++;
+    }
     // Storage is the only truth: an entry removed in any tab never reappears.
     for (const k of local.reappeared.splice(0)) problems.push(`3: ${k} was removed and came back`);
     // Invariant 3: a refused press keeps its record until the user presses its own Dismiss; nothing else removes it.
@@ -378,9 +412,9 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
       // Invariant 6: the draft of the call on screen is what the user chose, or, before any choice, its first making.
       if (snap.focus !== null && snap.task?.state === "ready" && snap.task.view.taskId === snap.focus) {
         const chosen = tab.choices.get(snap.focus);
-        const now = { numberId: snap.draft.numberId, outcome: snap.draft.outcome, note: snap.draft.note };
+        const now: Choice = { numberId: snap.draft.numberId, outcome: snap.draft.outcome, note: snap.draft.note, redial: snap.draft.redial, callbackDay: snap.draft.callbackDay, callbackTime: snap.draft.callbackTime };
         if (!chosen) tab.choices.set(snap.focus, now);
-        else if (chosen.numberId !== now.numberId || chosen.outcome !== now.outcome || chosen.note !== now.note) problems.push(`6: ${tab.label}'s draft for ${snap.focus} became ${JSON.stringify(now)}, not the user's ${JSON.stringify(chosen)}`);
+        else if (!sameChoice(chosen, now)) problems.push(`6: ${tab.label}'s draft for ${snap.focus} became ${JSON.stringify(now)}, not the user's ${JSON.stringify(chosen)}`);
       }
       if (snap.focus !== i.lastFocus && i.lastFocus !== null) tab.choices.delete(i.lastFocus);
       const newlyLogged = snap.logged !== null && snap.logged.requestId !== i.lastLogged;
@@ -399,7 +433,7 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
     }
   };
 
-  const seen = { loggedFromRead: 0, heldGets: 0, failedReads: 0, sessionRefused: 0, confirming: 0, refusedShown: 0, foundGone: 0, unconfirmed: 0, blocked: 0, recovered: 0, dismissed: 0, records: 0, leftWithPending: 0, notQueued: 0, refusalFocus: new Set<string>() };
+  const seen = { redialPresses: 0, redials: 0, callbacks: 0, pastCallbacks: 0, expiredPress: 0, loggedFromRead: 0, heldGets: 0, failedReads: 0, sessionRefused: 0, confirming: 0, refusedShown: 0, foundGone: 0, unconfirmed: 0, blocked: 0, recovered: 0, dismissed: 0, records: 0, leftWithPending: 0, notQueued: 0, refusalFocus: new Set<string>() };
   let storageFullUntil = -1;
   const tabs: Tab[] = [];
   tabs.push(await newTab("a"), await newTab("b"));
@@ -430,25 +464,43 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
     if (roll < 0.24) {
       if (!tab.instance.disposed && snap.task?.state === "ready" && !snap.locked) {
         const numbers = snap.task.view.numbers;
-        const outcome = OUTCOMES[Math.floor(r() * OUTCOMES.length)] ?? "no_answer";
+        let outcome = OUTCOMES[Math.floor(r() * OUTCOMES.length)] ?? "no_answer";
         const note = r() < 0.6 ? `note ${++notes}` : "";
+        // Ticket 15b: a callback asked for (later today, on a later day, or now and then at a time already
+        // passed, which the page refuses in place), or a redial with an outcome that offers one.
+        let redial = snap.draft.redial;
+        let callbackDay = snap.draft.callbackDay;
+        let callbackTime = snap.draft.callbackTime;
+        if (r15() < 0.3) {
+          outcome = "callback_requested";
+          const asOf = Date.parse(snap.task.view.asOf);
+          const roll15 = r15();
+          const when = roll15 < 0.25 ? asOf - 30 * MIN : roll15 < 0.5 ? asOf + (20 + Math.floor(r15() * 100)) * MIN : asOf + (1 + Math.floor(r15() * 3)) * 24 * 60 * MIN;
+          callbackDay = londonDay(when);
+          callbackTime = londonTime(when);
+        } else if (REDIAL_OUTCOMES.includes(outcome)) redial = r15() < 0.75;
         // Often the shared main line, which another lead's call can mark bad under this draft.
         const roll2 = r();
         const numberId = roll2 < 0.3 ? (numbers.find((n) => n.kind === "main_line")?.detailId ?? snap.draft.numberId) : roll2 < 0.45 ? (numbers[Math.floor(r() * numbers.length)]?.detailId ?? null) : snap.draft.numberId;
-        desk.setDraft({ outcome, note, numberId, noteScope: r() < 0.3 ? "company" : "person" });
-        if (snap.focus !== null) tab.choices.set(snap.focus, { numberId, outcome, note });
+        desk.setDraft({ outcome, note, numberId, noteScope: r() < 0.3 ? "company" : "person", redial, callbackDay, callbackTime });
+        if (snap.focus !== null) tab.choices.set(snap.focus, { numberId, outcome, note, redial, callbackDay, callbackTime });
         // Now and then the user only edits the draft, and presses nothing.
         if (r() < 0.2) {
           await flush();
           await check(moved);
           continue;
         }
-        const blocked = outcome !== "skip_for_now" && desk.getSnapshot().numberProblem !== null;
+        const blocked = (outcome !== "skip_for_now" && desk.getSnapshot().numberProblem !== null) || (outcome === "callback_requested" && desk.getSnapshot().callback?.at === null && !faults.has("past_callback_sent"));
+        if (outcome === "callback_requested" && desk.getSnapshot().callback?.problem === "past") seen.pastCallbacks++;
+        const pressedOn = snap.task.view.asOf;
         const sentBefore = requests.length;
         pressing = true;
         desk.log();
         pressing = false;
         // The boundary: a press storage refused is not pressed. Nothing is sent, the page says so, and the draft stays.
+        // The boundary (ticket 15b): a callback time not after the read it was pressed on is refused in place, and nothing is sent.
+        const sentNow = requests.slice(sentBefore);
+        for (const q of sentNow) if (q.body.callbackAt && Date.parse(q.body.callbackAt) <= Date.parse(pressedOn)) problems.push(`14: ${tab.label} sent a callback for ${q.body.callbackAt}, not after the read it was pressed on (${pressedOn})`);
         if (local.full && !blocked && (outcome === "skip_for_now" || numberId !== null)) {
           if (!desk.getSnapshot().notQueued) problems.push(`3: ${tab.label} accepted a press its storage refused`);
           if (requests.length !== sentBefore) problems.push(`3: ${tab.label} sent a press it could not store`);
@@ -462,6 +514,9 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
         const id = desk.getSnapshot().pending?.body.requestId;
         if (id !== undefined && !pressOf.has(id)) {
           const press = { tab: tab.label, note, ids: new Set([id]) };
+          const entry = local.get(`outreach.calls.outbox.${id}`);
+          if (entry) pressedBody.set(id, (JSON.parse(entry) as { body: OutcomeBody }).body);
+          if (pressedBody.get(id)?.redial) seen.redialPresses++;
           presses.push(press);
           pressOf.set(id, press);
           if (snap.focus !== null) pressedChoice.set(id, { tab, taskId: snap.focus, choice: tab.choices.get(snap.focus) });
@@ -550,7 +605,13 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
       h.fake.prospectReplies(who, true, null);
       await h.advanceTo(h.clock + MIN);
     } else if (roll < 0.94) {
-      await h.advanceTo(h.clock + 20 * MIN);
+      // Ticket 15b: now and then the next morning, so a callback falls due or is missed, a redial is listed, and a call
+      // pressed before the night may arrive after its skip limit has passed.
+      if (r15() < 0.2) {
+        const pending = requests.some((q) => q.answer === null);
+        await h.advanceTo(Date.parse(`${londonDay(h.clock + 24 * 60 * MIN)}T09:20:00Z`));
+        if (pending) seen.expiredPress++;
+      } else await h.advanceTo(h.clock + 20 * MIN);
     }
     await flush();
     // A request the desk answered may have moved its focus synchronously; the step's own desk too.
@@ -637,7 +698,7 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
 }
 
 describe("working the call list in the browser, generated over the real call desk (ADR 0003 4.4.1)", () => {
-  const counts: { presses: number; logged: number; seen: { loggedFromRead: number; heldGets: number; failedReads: number; sessionRefused: number; confirming: number; refusedShown: number; foundGone: number; unconfirmed: number; blocked: number; recovered: number; dismissed: number; records: number; leftWithPending: number; notQueued: number; refusalFocus: Set<string> } }[] = [];
+  const counts: { presses: number; logged: number; seen: { redialPresses: number; redials: number; callbacks: number; pastCallbacks: number; expiredPress: number; loggedFromRead: number; heldGets: number; failedReads: number; sessionRefused: number; confirming: number; refusedShown: number; foundGone: number; unconfirmed: number; blocked: number; recovered: number; dismissed: number; records: number; leftWithPending: number; notQueued: number; refusalFocus: Set<string> } }[] = [];
   for (const seed of Array.from({ length: SEEDS }, (_, i) => 9100 + i)) {
     test(`run ${seed}`, async () => {
       const out = await run(seed);
@@ -659,6 +720,8 @@ describe("working the call list in the browser, generated over the real call des
     for (const k of ["loggedFromRead", "heldGets", "failedReads", "sessionRefused", "confirming"] as const) expect(counts.filter((c) => c.seen[k] > 0).length, k).toBeGreaterThan(0);
     // A refusal is recovered by a desk on that same call, on another call, and on none.
     for (const where of ["same", "other", "none"]) expect(counts.some((c) => c.seen.refusalFocus.has(where)), where).toBe(true);
+    // Ticket 15b: redials and callbacks stored, a callback refused in place for its past time, and presses on their way across a night.
+    for (const k of ["redials", "callbacks", "pastCallbacks", "expiredPress"] as const) expect(counts.filter((c) => c.seen[k] > 0).length, k).toBeGreaterThan(0);
   });
 });
 
@@ -672,7 +735,7 @@ describe("each desk fault is caught by its known seed (ADR 0003 4.4.1)", () => {
     ["substitute_bad_number", 9100, "6:"],
     ["pending_kept_after_answer", 9100, "7:"],
     ["disposed_desk_applies", 9100, "8:"],
-    ["only_focused_entries_retried", 9105, "9:"],
+    ["only_focused_entries_retried", 9134, "9:"],
     ["refusal_dropped", 9100, "3:"],
     ["focused_refusal_hidden", 9101, "3:"],
     ["stale_copy_written_back", 9115, "3:"],
@@ -680,8 +743,12 @@ describe("each desk fault is caught by its known seed (ADR 0003 4.4.1)", () => {
     ["stored_press_left_as_draft", 9100, "12:"],
     ["answer_clears_draft", 9100, "6:"],
     ["first_read_skips_reconcile", 9123, "3:"],
-    ["task_failures_uncounted", 9102, "13:"],
+    ["task_failures_uncounted", 9108, "13:"],
     ["reads_overlap", 9100, "13:"],
+    // Ticket 15b.
+    ["redial_lost_on_resend", 9180, "14:"],
+    ["answer_resets_callback_draft", 9105, "6:"],
+    ["past_callback_sent", 9101, "14:"],
   ];
   for (const [fault, seed, invariant] of KILLING) {
     test(`${fault}, seed ${seed}, invariant ${invariant}`, async () => {
@@ -694,7 +761,7 @@ describe("each desk fault is caught by its known seed (ADR 0003 4.4.1)", () => {
 /** By hand: CALL_DESK_FAULT_SEARCH=1 prints the first seeds that catch each fault, to fill KILLING above. */
 describe.skipIf(!process.env["CALL_DESK_FAULT_SEARCH"])("fault search (by hand)", () => {
   // refusal_resent_at_once needs storage full while answers keep coming; callDesk.test.ts kills it by a count of requests.
-  const all: DeskFault[] = ["new_id_on_resend", "logged_when_sent", "outbox_removed_when_sent", "refresh_adopts_focus", "no_lock_while_pending", "substitute_bad_number", "pending_kept_after_answer", "disposed_desk_applies", "only_focused_entries_retried", "refusal_dropped", "focused_refusal_hidden", "stale_copy_written_back", "refusal_removed_on_move_on", "stored_press_left_as_draft", "answer_clears_draft", "first_read_skips_reconcile", "task_failures_uncounted", "reads_overlap"];
+  const all: DeskFault[] = ["new_id_on_resend", "logged_when_sent", "outbox_removed_when_sent", "refresh_adopts_focus", "no_lock_while_pending", "substitute_bad_number", "pending_kept_after_answer", "disposed_desk_applies", "only_focused_entries_retried", "refusal_dropped", "focused_refusal_hidden", "stale_copy_written_back", "refusal_removed_on_move_on", "stored_press_left_as_draft", "answer_clears_draft", "first_read_skips_reconcile", "task_failures_uncounted", "reads_overlap", "redial_lost_on_resend", "answer_resets_callback_draft", "past_callback_sent"];
   for (const fault of all) {
     test(fault, async () => {
       const found: string[] = [];
