@@ -92,6 +92,17 @@ const RULES: Record<string, Partial<Rules>> = {
       return { at: real.at - (t - real.atWall), atWall: t };
     },
   },
+  // Council C on 56d599c: the order 18's free hour stood for.
+  "the order breaks after a hold is released": {
+    readyItems: (s, now) => {
+      const released = s.freezes.some((f) => f.toWall !== null && f.toWall > f.fromWall && now - f.toWall < 2 * 3_600_000);
+      // A lead released from a hold within two hours ranks after everything else due: its items wait behind newer ones.
+      return R.readyItems(s, now).map((item) => (released ? { ...item, dueWall: now + 30 * 24 * 3_600_000, touched: false } : item));
+    },
+  },
+  "an overdue lead passed over while others are served": {
+    claimOrder: (a, b) => (a.touched === b.touched && a.dueWall !== b.dueWall ? b.dueWall - a.dueWall : R.claimOrder(a, b)),
+  },
   // Council on 56d599c, items A and B.
   "a withdrawal's retries stop when its attempt retires": {
     withdrawalDue: (w, now, carried) => carried === true && R.withdrawalDue(w, now, carried),
@@ -118,6 +129,8 @@ const EXPECTED: Record<string, { invariant: string; seed: number; options?: Part
   "a refused request runs when sent again": { invariant: "P7", seed: 2 },
   "the pacing gap ignored": { invariant: "P3", seed: 0, options: { gapMs: 1000 } },
   "a late send after a pause resolves its successor on the wall clock": { invariant: "P2", seed: 12 },
+  "the order breaks after a hold is released": { invariant: "18", seed: 33 },
+  "an overdue lead passed over while others are served": { invariant: "18", seed: 13 },
   "a withdrawal's retries stop when its attempt retires": { invariant: "A", seed: 1 },
   "the in-flight bound counts live attempts": { invariant: "B", seed: 2, options: { occupancyCountsAttempts: true } },
   // With the provider answering the first thread's reply, as the adapter did on ca8baee: the defect restored.

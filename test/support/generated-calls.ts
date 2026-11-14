@@ -716,8 +716,10 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       .filter((c) => c.sender === sender)
       .map((c) => {
         const d = provider.deliveryLog.find((x) => x.key === c.key);
-        const withdrawn = ch === "email" ? email.withdrawLog.find((w) => w.key === c.key && w.answer === "withdrawn")?.at : undefined;
-        return { from: c.at, to: Math.min(d ? knownAt(ch, d) : Infinity, withdrawn ?? Infinity) };
+        // A place is freed on any final answer the app has: the send known, or a withdrawal answered withdrawn or too late
+        // (email and text alike; council C on 56d599c: a text cancelled by a pause was never freed before).
+        const final = provider.withdrawLog.find((w) => w.key === c.key && w.answer !== "unknown")?.at;
+        return { from: c.at, to: Math.min(d ? knownAt(ch, d) : Infinity, final ?? Infinity) };
       });
     const fullAt = (t: number) => busy.filter((b) => b.from <= t && t < b.to).length >= 2;
     const candidates = [...new Set([from, ...busy.map((b) => b.to).filter((t) => t > from && Number.isFinite(t))])].sort((a, b) => a - b);
@@ -1224,6 +1226,51 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       if (drained) {
         checkDrained(s, st, progress);
         await checkActivity(s, progress);
+      }
+    }
+
+    // 18, the order (council C on 56d599c): what the free hour stood for. At each first claim of a step on a sender (one that
+    // needs a place: not carrying earlier work's key), no other step for that sender ranked higher by ADR 4.3 (a touched lead
+    // first, then the older stored due time, then lead and step) was due and claimable at least a minute before, and still
+    // unclaimed: so a lead released from a hold is not passed over, and no eligible lead is passed over while others are served.
+    {
+      type Item = { s: Subject; t: TrackDefinition; stepId: string; ch: "email" | "sms"; sender: string; due: number; unheld: number; prevKnown: number; claim: number; inherited: boolean };
+      const items: Item[] = [];
+      for (const [id, st] of states) {
+        const s = subjects.get(id)!;
+        for (const t of def(s).tracks) {
+          if (t.channel === "call") continue;
+          const ch = t.channel;
+          const at = startOf(s, t);
+          if (at === null || !Number.isFinite(at)) continue;
+          for (const [i, step] of t.steps.entries()) {
+            const prev = i > 0 ? deliveryOf(ch, id, t.steps[i - 1]!.id) : undefined;
+            if (i > 0 && !prev) break;
+            const basis = prev ? pointOf(s, prev.at) : at;
+            const unheld = prev ? dueAfter(basis, step.waitDays, zoneFor(s, basis)) : at;
+            const due = prev ? afterHolds(s, basis, unheld) : at;
+            const first = st.attempts.filter((a) => a.stepId === step.id).sort((a, b) => a.claimedWall - b.claimedWall)[0];
+            items.push({ s, t, stepId: step.id, ch, sender: ch === "sms" ? numbers[s.campaign]!.id : "inbox-a", due, unheld: prev ? unheld : at, prevKnown: prev ? knownAt(ch, prev) : (startSeenAt(s, t) ?? Infinity), claim: first?.claimedWall ?? Infinity, inherited: first !== undefined && first.idempotencyKey !== first.id });
+          }
+        }
+      }
+      const eligible = (y: Item, T: number) =>
+        y.due <= T - MINUTE && y.prevKnown <= T - MINUTE && runningAt(y.s, T) && !heldWithin(y.s, y.due, T) && endLimitOf(y.s) > T && inWindow(y.t.window, zoneFor(y.s, T), T) && reachesAt(y.s, y.ch, T) &&
+        !((finishFacts(y.s, y.t)?.at ?? Infinity) <= T) && ![y.s.person?.key, y.s.company.key].some((key) => (zoneChanges.get(key ?? "") ?? []).some((z) => z.at >= y.due - DAY && z.at <= T));
+      const ranksAbove = (y: Item, x: Item, T: number) => {
+        // Touched by the claim's instant: an action at that instant (a call logged) comes before the worker's claims.
+        const ty = touchedAt(y.s, T, false);
+        const tx = touchedAt(x.s, T, false);
+        if (ty !== tx) return ty;
+        if (y.unheld !== x.unheld) return y.unheld < x.unheld;
+        return y.s.id !== x.s.id ? y.s.id < x.s.id : y.stepId < x.stepId;
+      };
+      for (const x of items) {
+        if (!Number.isFinite(x.claim) || x.inherited) continue;
+        for (const y of items) {
+          if (y === x || y.sender !== x.sender || y.claim <= x.claim || !eligible(y, x.claim) || !ranksAbove(y, x, x.claim)) continue;
+          problem(`18: ${x.s.id}/${x.stepId} was claimed on ${x.sender} at ${isoOf(x.claim)} while ${y.s.id}/${y.stepId}, due ${isoOf(y.due)} and ranked higher, waited (claimed ${isoOf(y.claim)})${process.env["CALLS_DEBUG"] ? ` [x unheld ${isoOf(x.unheld)} touched ${String(touchedAt(x.s, x.claim, true))}; y unheld ${isoOf(y.unheld)} touched ${String(touchedAt(y.s, x.claim, true))} prevKnown ${isoOf(y.prevKnown)}; y window ${JSON.stringify(y.t.window.slice(0, 2))}; engine x ${JSON.stringify(states.get(x.s.id)?.tracks.find((p) => p.trackId === x.t.id))}; engine y ${JSON.stringify(states.get(y.s.id)?.tracks.find((p) => p.trackId === y.t.id))}; y attempts ${JSON.stringify(states.get(y.s.id)?.attempts.filter((a) => a.stepId === y.stepId).map((a) => [a.state, a.endedBy, isoOf(a.claimedWall)]))}]` : ""}`);
+        }
       }
     }
 

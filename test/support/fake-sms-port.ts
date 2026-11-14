@@ -191,12 +191,15 @@ export class FakeSmsPort implements SendPort {
     return true;
   }
 
+  /** Every withdrawal asked, with its answer (council C on 56d599c: a record frees a place on any final answer). */
+  readonly withdrawLog: { at: number; key: string; answer: "withdrawn" | "too-late" | "unknown" }[] = [];
+
   withdraw(attempt: AttemptRef): Promise<"withdrawn" | "too-late" | "unknown"> {
     const t = this.texts.find((x) => x.key === attempt.idempotencyKey);
-    if (!t) return Promise.resolve("unknown");
-    if (t.sentAt !== null) return Promise.resolve("too-late");
-    t.cancelled = true;
-    return Promise.resolve("withdrawn");
+    const answer = !t ? "unknown" : t.sentAt !== null ? "too-late" : "withdrawn";
+    if (t && answer === "withdrawn") t.cancelled = true;
+    this.withdrawLog.push({ at: this.now(), key: attempt.idempotencyKey, answer });
+    return Promise.resolve(answer);
   }
 
   observe(checkpoint: string | null): Promise<{ events: ProviderEvent[]; checkpoint: string }> {

@@ -425,6 +425,49 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
       const held = firstCalls.filter((x) => x.key !== c.key && x.at < c.at && settledAt(x.key) > c.at);
       if (held.length >= 2) problem(`B: ${c.subjectId}/${c.stepId} was handed over at ${isoOf(c.at)} while the inbox already had ${held.length} pieces of work with the provider unsettled (${held.map((x) => x.key).join(", ")})`);
     }
+    // 18's order (council C on 56d599c): at each first claim of a step that needs an in-flight place, no other step for the
+    // same sender, ranked higher by ADR 4.3 (a touched lead first, then the older stored due time, then lead and step),
+    // was due and claimable a minute before and still unclaimed: no lead released from a hold, and no overdue lead, is
+    // passed over while others are served.
+    {
+      type Item = { s: Subject; t: TrackDefinition; stepId: string; sender: string; due: number; stored: number; known: number; claim: number; inherited: boolean };
+      const items: Item[] = [];
+      for (const s of subjects.values()) {
+        const st = await h.store.engine.subject(s.id, now);
+        for (const t of def(s).tracks) {
+          if (t.channel === "call" || !reaches(s, t)) continue;
+          const start = startOf(s, t);
+          if (start === null) continue;
+          for (const [i, step] of t.steps.entries()) {
+            const prev = i > 0 ? resolution(s, t, t.steps[i - 1]!.id) : null;
+            if (i > 0 && !prev) break;
+            const stored = prev ? dueAfter(prev.at, step.waitDays, ZONE) : start;
+            const due = prev ? afterHolds(s, prev.at, stored) : start;
+            const known = prev ? prev.seen : (t.start.kind === "after" ? (finishOf(s, def(s).tracks.find((x) => x.id === (t.start.kind === "after" ? t.start.trackId : ""))!)?.seen ?? Infinity) : start);
+            const first = st?.attempts.filter((a) => a.stepId === step.id).sort((a, b) => a.claimedWall - b.claimedWall)[0];
+            items.push({ s, t, stepId: step.id, sender: t.channel === "sms" ? numbers[s.campaign]!.id : "inbox-a", due, stored, known, claim: first?.claimedWall ?? Infinity, inherited: first !== undefined && first.idempotencyKey !== first.id });
+          }
+        }
+      }
+      const touched = (s: Subject, T: number) => (["email", "sms"] as const).some((ch) => deliveries(ch).some((d) => d.subjectId === s.id && d.visibleAt <= T)) || [...callsDone].some(([k, at]) => k.startsWith(`${s.id}/`) && at <= T) || skips.some((x) => x.subjectId === s.id && x.at <= T && def(s).tracks.find((t) => t.id === x.trackId)?.channel === "call");
+      const eligible = (y: Item, T: number) =>
+        y.due <= T - MINUTE && y.known <= T - MINUTE && !holdsOf(y.s).some((x) => x.from <= T && x.to > T - MINUTE) && !endedAt(y.s, T) && branchOf(y.s, T) === y.t.branch &&
+        !skips.some((x) => x.subjectId === y.s.id && x.stepId === y.stepId && x.at <= T) && !((finishOf(y.s, y.t)?.at ?? Infinity) <= T) && !hidden.some((r) => r.subjectId === y.s.id && r.at <= T);
+      const ranksAbove = (y: Item, x: Item, T: number) => {
+        const ty = touched(y.s, T);
+        const tx = touched(x.s, T);
+        if (ty !== tx) return ty;
+        if (y.stored !== x.stored) return y.stored < x.stored;
+        return y.s.id !== x.s.id ? y.s.id < x.s.id : y.stepId < x.stepId;
+      };
+      for (const x of items) {
+        if (!Number.isFinite(x.claim) || x.inherited) continue;
+        for (const y of items) {
+          if (y === x || y.sender !== x.sender || y.claim <= x.claim || !eligible(y, x.claim) || !ranksAbove(y, x, x.claim)) continue;
+          problem(`18: ${x.s.id}/${x.stepId} was claimed on ${x.sender} at ${isoOf(x.claim)} while ${y.s.id}/${y.stepId}, due ${isoOf(y.due)} and ranked higher, waited (claimed ${isoOf(y.claim)})`);
+        }
+      }
+    }
     // P12: the day's committed calls, by the record: carried calls open at the day's start, of leads not held then.
     const dayStart = startOfDay(local(now, ZONE).day, ZONE);
     let committed = 0;
