@@ -476,7 +476,7 @@ function WinBackBox({ empty, launched, locked, stacked, gutter, onAdd, children 
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 id={headingId} className="text-[13px] font-semibold text-hand">
-          Win-back branch <span className="font-normal text-muted">· for leads who decline on a call</span>
+          Win-back branch <span className="font-normal text-ink-2">· for leads who decline on a call</span>
         </h3>
         {!launched && !empty && <AddTrackMenu id={ADD_WIN_BACK_ID} label="Add win-back track" channels={["email", "sms"]} disabled={locked} onAdd={(channel) => channel !== "call" && onAdd(channel)} />}
       </div>
@@ -535,7 +535,8 @@ function useDeclinedEdges(content: RefObject<HTMLDivElement | null>, from: reado
           const n = button.getBoundingClientRect();
           const y = n.top - origin.top + n.height / 2;
           const x0 = n.right - origin.left;
-          const x = layout === "row" ? column.getBoundingClientRect().right - origin.left - 6 : origin.width - gutter / 2;
+          // Stacked, the gutter is the last `gutter` pixels inside the content's 12px right padding.
+          const x = layout === "row" ? column.getBoundingClientRect().right - origin.left - 6 : origin.width - 12 - gutter / 2;
           next.push({ trackId: id, d: `M ${x0} ${y} H ${x} V ${top - 6}`, arrow: `M ${x - 4} ${top - 7} L ${x + 4} ${top - 7} L ${x} ${top - 1} Z`, label: { x, y: top - 24 } });
         }
       }
@@ -1042,7 +1043,8 @@ function DeclinedPathControl({ track, editor, onEditBranch }: { track: TrackDefi
                   onChange={() => choose(path)}
                 />
                 <b className="font-semibold">{label}</b>
-                <span className="col-start-2 text-[13px] text-muted">{detail}</span>
+                {/* On the chosen path's tinted fill, secondary text is ink-2: muted falls short of AA on hand-soft. */}
+                <span className={`col-start-2 text-[13px] ${on ? "text-ink-2" : "text-muted"}`}>{detail}</span>
               </label>
               {path === "win_back" && unavailable && (
                 <p id={unavailableId} className="pl-[30px] text-[13px] text-ink-2">
