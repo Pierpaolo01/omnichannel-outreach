@@ -22,9 +22,10 @@ export function trackLabel(def: CampaignDefinition, track: Pick<TrackDefinition,
   return { label: `${word} track ${same.findIndex((t) => t.id === track.id) + 1}`, several: true };
 }
 
-/** A track's name inside a sentence: "the email track", "the SMS track", "email track 2", "SMS track 2", "the phone track". */
+/** A track's name inside a sentence: "the email track", "the SMS track", "email track 2", "SMS track 2", "the phone track", "the win-back SMS track". */
 export function trackPhrase(def: CampaignDefinition, track: Pick<TrackDefinition, "id" | "channel">): string {
   const { label, several } = trackLabel(def, track);
-  const lower = track.channel === "sms" ? label : label.charAt(0).toLowerCase() + label.slice(1);
+  // "SMS" keeps its capitals; any other first word, "Win-back" included, is lower case mid-sentence (ticket 16b).
+  const lower = label.startsWith("SMS") ? label : label.charAt(0).toLowerCase() + label.slice(1);
   return several ? lower : `the ${lower}`;
 }
