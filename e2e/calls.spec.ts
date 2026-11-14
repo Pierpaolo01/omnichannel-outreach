@@ -295,6 +295,9 @@ test.describe("whatever the server decides by the clock is refreshed when it can
         senderProblems: [{ accountId: "sms-1", channel: "sms", label: "+44 7700 900999", problem: "disconnected" }],
         heldCapacity: [],
         anomalies: [],
+        waitingForCapacity: [],
+        noUsableChannel: [],
+        waitingOnTransport: [],
         overdueCallbacks: [],
       });
     });

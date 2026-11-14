@@ -414,6 +414,32 @@ export interface NeedsAttention {
     }[];
   }[];
   readonly anomalies: readonly { readonly what: string; readonly at: string }[];
+  /**
+   * Leads waiting for sending capacity (ticket 20a; spec "Needs attention"): each email or text that is due and could
+   * be claimed now, but every account it may use is full for its reset day. It goes when the first of them resets.
+   */
+  readonly waitingForCapacity: readonly {
+    readonly enrollmentId: string;
+    readonly campaignId: string;
+    readonly trackId: string;
+    readonly stepId: string;
+    readonly channel: "email" | "sms";
+    readonly dueAt: string;
+    readonly accountIds: readonly string[];
+    readonly resetsAt: string;
+  }[];
+  /**
+   * Leads left with no usable channel, from any cause (ticket 20a; follow-up 42 item 50), most recently ended first, with
+   * why each channel of their branch cannot reach them. They stay listed: the ending is final (question Q20).
+   */
+  readonly noUsableChannel: readonly {
+    readonly enrollmentId: string;
+    readonly campaignId: string;
+    readonly endedAt: string;
+    readonly channels: readonly { readonly channel: "email" | "sms" | "call"; readonly why: "missing" | "bad" | "declined" }[];
+  }[];
+  /** Due steps waiting for a transport the provider cannot use yet, such as continue-thread follow-ups (follow-up 42 item 12). */
+  readonly waitingOnTransport: readonly { readonly enrollmentId: string; readonly trackId: string; readonly stepId: string; readonly channel: "email" | "sms"; readonly dueAt: string }[];
 }
 
 // ---------------------------------------------------------------------------------------------

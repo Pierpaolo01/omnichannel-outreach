@@ -283,6 +283,8 @@ export interface EngineStore {
   releaseLease(ownerId: string): Promise<void>;
   recordAnomaly(attemptId: string | null, what: string, atWall: number): Promise<void>;
   anomalies(): Promise<{ attemptId: string | null; what: string; atWall: number }[]>;
+  /** Enrollments that ended for `reason`, most recently ended first (ticket 20a: Needs attention's no-usable-channel list). */
+  endedSubjectIds(reason: import("../../domain/sequence/state.ts").EndReason): Promise<string[]>;
   /** Subject ids of a campaign, launched or not, oldest enrollment first. */
   subjectsOf(campaignId: string): Promise<string[]>;
 

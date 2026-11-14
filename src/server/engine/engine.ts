@@ -349,6 +349,11 @@ export class Engine {
     return future.length > 0 ? Math.min(...future) : null;
   }
 
+  /** Whether a step on `channel` with `threading` can be handed to its port now (a transport may be unavailable: ADR 0002 X2). */
+  transportAvailable(channel: Channel, threading: "new_subject" | "continue_thread"): boolean {
+    return this.ports[channel].transportFor({ threading }).available !== false;
+  }
+
   /** ADR 0002 P3's resolution of unresolved work, by any attempt carrying it. The controls arrive with ticket 20; the rule is here. */
   markAttempt(attemptId: string, mark: "sent" | "not_sent"): Promise<boolean> {
     return this.ticks.run(async () => {

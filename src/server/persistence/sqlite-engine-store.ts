@@ -290,6 +290,10 @@ export class SqliteEngineStore implements EngineStore {
       .map((r) => str(r, "id"));
   }
 
+  async endedSubjectIds(reason: EndReason): Promise<string[]> {
+    return this.sql("SELECT id FROM enrollments WHERE ended = ? ORDER BY ended_wall DESC, id").all(reason).map((r) => str(r, "id"));
+  }
+
   async runningSubjectVersions(): Promise<Map<string, string>> {
     // The subject's and campaign's versions, plus the lead facts decisions read that no subject
     // write bumps: the lead's live details and their bad marks, and its records' last update.

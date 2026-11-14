@@ -78,7 +78,7 @@ function recipientOf(state: SubjectState, trackId: string): string | null {
  * The accounts a claim for a step on this track may choose from: the fixed sender, else the pool;
  * for SMS, only numbers whose conversation with the mobile is free or this subject's (4.5).
  */
-function candidatesFor(state: SubjectState, trackId: string): string[] {
+export function candidatesFor(state: SubjectState, trackId: string): string[] {
   const channel = channelOf(state, trackId) ?? "email";
   const fixed = senderOf(state, channel);
   const ids = fixed !== null ? [fixed] : [...poolOf(state.campaign.definition, channel)];

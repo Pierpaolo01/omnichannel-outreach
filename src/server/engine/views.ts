@@ -3,8 +3,9 @@ import { isLive, markable } from "../../domain/sequence/attempt.ts";
 import { isListed, listedForDay, reasonOf } from "../../domain/sequence/calls.ts";
 import { callRecordView, dateOfDay } from "./call-views.ts";
 import { leadNow } from "../../domain/sequence/clock.ts";
-import { heldReason, stalledAccounts } from "../../domain/sequence/dispatch.ts";
-import { deriveStatus, liveTracksFor, wallAtLead } from "../../domain/sequence/progress.ts";
+import { accountAvailable, candidatesFor, claimRefusal, heldReason, inheritedWork, readyItems, stalledAccounts } from "../../domain/sequence/dispatch.ts";
+import { localDayNumber, startOfLocalDay } from "../../domain/sequence/clock.ts";
+import { channelOf, deriveStatus, liveTracksFor, unreachableWhy, wallAtLead } from "../../domain/sequence/progress.ts";
 import type { AccountState, SubjectState } from "../../domain/sequence/state.ts";
 import type { EnrollmentProgress, NeedsAttention, SenderAccountViewApi } from "../../shared/api.ts";
 import type { EngineStore } from "./engine-store.ts";
@@ -121,7 +122,12 @@ export function accountView(a: AccountState, label: string): SenderAccountViewAp
   };
 }
 
-export async function needsAttention(store: EngineStore, now: number, rules: Pick<Rules, "asOfAction" | "evaluate"> = DEFAULT_RULES): Promise<NeedsAttention> {
+export async function needsAttention(
+  store: EngineStore,
+  now: number,
+  rules: Pick<Rules, "asOfAction" | "evaluate"> = DEFAULT_RULES,
+  transportAvailable: (channel: "email" | "sms", threading: "new_subject" | "continue_thread") => boolean = () => true,
+): Promise<NeedsAttention> {
   const accounts = await store.accounts(now);
   const open = await store.openAttempts();
   // Unresolved provider work keeps its reservation; each inbox it holds is listed with how many of
@@ -149,13 +155,49 @@ export async function needsAttention(store: EngineStore, now: number, rules: Pic
     heldCapacity.push({ accountId: acc.id, held: held.length, capacity: acc.capacity, sentToday: await store.sentToday(acc.id, now), work });
   }
   const heldTracks: NeedsAttention["heldTracks"][number][] = [];
+  const waitingForCapacity: NeedsAttention["waitingForCapacity"][number][] = [];
+  const waitingOnTransport: NeedsAttention["waitingOnTransport"][number][] = [];
   for (const id of await store.runningSubjectIds()) {
-    const s = await store.subject(id, now);
-    if (!s) continue;
-    for (const p of s.tracks) {
-      const reason = heldReason(s, p.trackId, now);
+    const stored = await store.subject(id, now);
+    if (!stored) continue;
+    for (const p of stored.tracks) {
+      const reason = heldReason(stored, p.trackId, now);
       if (reason) heldTracks.push({ enrollmentId: id, trackId: p.trackId, reason });
     }
+    // Ticket 20a: as of the read, each due step the claim's step guard accepts now that waits for a transport the
+    // provider cannot use yet, or for an account full for its reset day (not for a pacing slot or an in-flight place).
+    const s = rules.asOfAction(stored, now, rules.evaluate);
+    for (const item of readyItems(s, now)) {
+      if (claimRefusal(s, item, now) !== null) continue;
+      const channel = channelOf(s, item.trackId);
+      if (channel !== "email" && channel !== "sms") continue;
+      const step = s.campaign.definition.tracks.find((t) => t.id === item.trackId)?.steps.find((x) => x.id === item.stepId);
+      const base = { enrollmentId: id, trackId: item.trackId, stepId: item.stepId, channel, dueAt: new Date(item.dueWall).toISOString() };
+      if (!transportAvailable(channel, step?.threading ?? "new_subject")) {
+        waitingOnTransport.push(base);
+        continue;
+      }
+      // A claim carrying uncertain work already holds its reservation: it never waits for capacity.
+      if (inheritedWork(s, item.stepId)) continue;
+      const usable = candidatesFor(s, item.trackId)
+        .map((x) => s.accounts[x])
+        .filter((a): a is AccountState => a !== undefined && a.channel === channel && accountAvailable(a, now));
+      if (usable.length === 0 || usable.some((a) => a.used < a.capacity)) continue;
+      const resetsAt = Math.min(...usable.map((a) => startOfLocalDay(localDayNumber(now, a.resetZone) + 1, a.resetZone)));
+      waitingForCapacity.push({ ...base, campaignId: s.campaign.id, accountIds: usable.map((a) => a.id).sort(), resetsAt: new Date(resetsAt).toISOString() });
+    }
+  }
+  // Ticket 20a (follow-up 42 item 50): every lead that ended with no usable channel, from any cause, most recent first,
+  // with why each channel of its branch cannot reach it. It stays listed: the ending is final (question Q20).
+  const noUsableChannel: NeedsAttention["noUsableChannel"][number][] = [];
+  for (const id of await store.endedSubjectIds("finished_no_usable_channel")) {
+    const s = await store.subject(id, now);
+    if (!s) continue;
+    const channels = [...new Set(liveTracksFor(s).map((t) => t.channel))].flatMap((channel) => {
+      const why = unreachableWhy(s, channel);
+      return why === null ? [] : [{ channel, why }];
+    });
+    noUsableChannel.push({ enrollmentId: id, campaignId: s.campaign.id, endedAt: new Date(s.subject.endedWall ?? now).toISOString(), channels });
   }
   // Overdue callbacks (ticket 15): listed callbacks whose time has passed (the queue's own two rules). Each
   // holds its lead's outreach in that campaign until the user logs its outcome; none expires.
@@ -183,6 +225,9 @@ export async function needsAttention(store: EngineStore, now: number, rules: Pic
     ),
     senderProblems: await senderProblems(store, accounts),
     heldCapacity,
+    waitingForCapacity,
+    noUsableChannel,
+    waitingOnTransport,
     anomalies: (await store.anomalies()).map((x) => ({ what: x.what, at: new Date(x.atWall).toISOString() })),
   };
 }
