@@ -516,9 +516,11 @@ export interface CopyPreview {
      * day the projection sends it, and nothing else. `skipped`: the lead skips its track. `no_estimate`:
      * no figure is projected (withheld, too large, or the campaign has launched). `beyond_horizon`: the
      * projection's horizon ends before it. `not_sent`: a merge field with no fallback the lead lacks
-     * holds it. The rest of its track then shows no day either, for the same reason.
+     * holds it. The rest of its track then shows no day either, for the same reason. `win_back`: a message
+     * of the win-back branch (ticket 16b), listed in `winBack`, which goes only to a lead who declines on a
+     * call; the estimate never enters the branch (`LoadProjectionView.winBackNotCounted`), so it has no day.
      */
-    readonly noDay: "skipped" | "no_estimate" | "beyond_horizon" | "not_sent" | null;
+    readonly noDay: "skipped" | "no_estimate" | "beyond_horizon" | "not_sent" | "win_back" | null;
     /** The phone track this message waits on, through its track's chain, if any. */
     readonly waitsOnCall: string | null;
     /** This lead lacks the track's channel (no email; no mobile of their own, or a company lead), so the track is skipped and the tracks after it start sooner. */
@@ -530,6 +532,12 @@ export interface CopyPreview {
     /** Merge fields this lead lacks that have no fallback: the copy cannot be sent to them. */
     readonly missing: readonly string[];
   }[];
+  /**
+   * The win-back branch's messages for this lead (ticket 16b), in track order, apart from `steps`: they go
+   * only if the lead declines on a call and moves to the branch, so none has a day (`noDay` `win_back`, or
+   * `skipped` for a track whose channel the lead lacks). Empty when the campaign has no live branch track.
+   */
+  readonly winBack: CopyPreview["steps"];
 }
 
 /** One line of a person's or company lead's timeline (GET /api/people/:id/activity). Newest first. */

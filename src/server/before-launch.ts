@@ -408,20 +408,25 @@ export async function copyPreview(store: OutreachStore, campaignId: string, enro
   // message. Where it does not (no estimate, past its horizon, or a field with no fallback the lead
   // lacks), the message and every later one in its track show no day, and say why; no day is ever
   // worked out another way beside projected ones.
+  /** A track's live steps rendered for this lead: each subject (a continue-thread email replies to its track's thread), body and missing fields. */
+  const rendered = (track: TrackDefinition) => {
+    let threadSubject: Segment[] = [];
+    return liveSteps(track).map((step, i) => {
+      const email = track.channel === "email";
+      const own = email ? renderSegments(ownSubject(step), data) : [];
+      const subject = email && step.threading === "continue_thread" ? [{ text: "Re: ", kind: "literal" as const }, ...threadSubject] : own;
+      if (email && step.threading === "new_subject") threadSubject = own;
+      const body = renderSegments(step.body, data);
+      return { step, i, subject, body, missing: missingFields([...own, ...body]) };
+    });
+  };
   const steps: { step: CopyPreview["steps"][number]; order: number }[] = [];
   tracks.forEach((track, trackIndex) => {
     const skip = skipped(track);
     const phone = phoneBefore(track);
     const waitsOn = phone ? trackLabel(definition, phone).label : null;
     let stopped: NoDay | null = null;
-    let threadSubject: Segment[] = [];
-    liveSteps(track).forEach((step, i) => {
-      const email = track.channel === "email";
-      const own = email ? renderSegments(ownSubject(step), data) : [];
-      const subject = email && step.threading === "continue_thread" ? [{ text: "Re: ", kind: "literal" as const }, ...threadSubject] : own;
-      if (email && step.threading === "new_subject") threadSubject = own;
-      const body = renderSegments(step.body, data);
-      const missing = missingFields([...own, ...body]);
+    rendered(track).forEach(({ step, i, subject, body, missing }) => {
       const projectedOn = projectedDay.get(step.id);
       let day: number | null = null;
       let noDay: NoDay | null = null;
@@ -437,5 +442,26 @@ export async function copyPreview(store: OutreachStore, campaignId: string, enro
     });
   });
   steps.sort((x, y) => (x.step.day ?? Infinity) - (y.step.day ?? Infinity) || x.order - y.order);
-  return { lead, steps: steps.map((x) => x.step) };
+  // The win-back branch (ticket 16b): what a lead who declines would get, in track order. The estimate never
+  // enters the branch, so no message of it has a day; a track whose channel the lead lacks is skipped there too.
+  const winBack = liveTracks(definition, "win_back")
+    .filter((t) => t.channel !== "call")
+    .flatMap((track) => {
+      const skip = skipped(track);
+      return rendered(track).map(({ step, i, subject, body, missing }): CopyPreview["steps"][number] => ({
+        trackId: track.id,
+        stepId: step.id,
+        channel: track.channel === "sms" ? "sms" : "email",
+        number: i + 1,
+        day: null,
+        noDay: skip ? "skipped" : "win_back",
+        waitsOnCall: null,
+        skipped: skip,
+        threading: step.threading,
+        subject,
+        body,
+        missing,
+      }));
+    });
+  return { lead, steps: steps.map((x) => x.step), winBack };
 }
