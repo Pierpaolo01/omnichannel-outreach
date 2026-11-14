@@ -1031,7 +1031,7 @@ export const SCREENS: readonly Screen[] = [
       const definition = { ...TWO_CHANNELS, tracks: [...TWO_CHANNELS.tracks.map((t) => (t.id === "email-2" ? { ...t, start: { kind: "after" as const, trackId: "call", delayDays: 0 } } : t)), call] };
       await page.request.put(`${f.url}/api/campaigns/${id}/sequence`, { data: definition });
       await page.goto(`${f.url}/campaigns/${id}/before-launch`);
-      await settle(page, "after the phone track’s call");
+      await settle(page, "For calls in this campaign, it assumes you work every call");
     },
   },
   // Chains the outline must fit at every width (review bot on 7401eb2): four tracks deep, as the bot
