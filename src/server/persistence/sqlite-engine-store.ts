@@ -9,7 +9,7 @@ import type { MergeData } from "../../domain/sequence/copy.ts";
 import { emptyDefinition, poolOf, type CampaignDefinition, type DeclinedPath } from "../../domain/sequence/definition.ts";
 import { callableOnDay, skipDeadlineOf, skipLimitOf } from "../../domain/sequence/calls.ts";
 import { deriveStatus } from "../../domain/sequence/progress.ts";
-import { isUncertain, occupyingKeys } from "../../domain/sequence/attempt.ts";
+import { maySend, occupyingKeys } from "../../domain/sequence/attempt.ts";
 import type {
   AccountState,
   Attempt,
@@ -158,10 +158,10 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   async uncertainWorkOf(campaignId: string): Promise<number> {
-    // The engine's own definition (`isUncertain`), applied to the rows, not restated in SQL (council on 56d599c).
-    return this.sql("SELECT w.settled, w.calls FROM provider_work w JOIN enrollments e ON e.id = w.subject_id WHERE e.campaign_id = ? AND w.settled IS NULL")
+    // The engine's own definition (`maySend`), applied to the rows, not restated in SQL (council on 56d599c).
+    return this.sql("SELECT w.settled, w.calls, w.went_wall FROM provider_work w JOIN enrollments e ON e.id = w.subject_id WHERE e.campaign_id = ? AND w.settled IS NULL")
       .all(campaignId)
-      .filter((r) => isUncertain({ settled: null, calls: num(r, "calls") })).length;
+      .filter((r) => maySend({ settled: null, calls: num(r, "calls"), wentWall: numOrNull(r, "went_wall") })).length;
   }
 
   async workToWithdraw(): Promise<ProviderWork[]> {
@@ -633,7 +633,7 @@ export class SqliteEngineStore implements EngineStore {
   /** An account's in-flight places in use: its provider work by key, by the engine's own definition (council B on 56d599c). */
   private occupancy(accountId: string): number {
     const live = this.sql(`SELECT idempotency_key FROM attempts WHERE account_id = ? AND state IN ${LIVE_STATES}`).all(accountId).map((r) => str(r, "idempotency_key"));
-    const work = this.sql("SELECT key, settled, calls FROM provider_work WHERE account_id = ? AND settled IS NULL").all(accountId).map((r) => ({ key: str(r, "key"), settled: null, calls: num(r, "calls") }));
+    const work = this.sql("SELECT key, settled, calls, went_wall FROM provider_work WHERE account_id = ? AND settled IS NULL").all(accountId).map((r) => ({ key: str(r, "key"), settled: null, calls: num(r, "calls"), wentWall: numOrNull(r, "went_wall") }));
     return occupyingKeys(live, work).size;
   }
 
@@ -932,13 +932,13 @@ export class SqliteEngineStore implements EngineStore {
       changed = true;
       this.run(
         `INSERT INTO provider_work (key, subject_id, track_id, step_id, account_id, destination, calls, first_handed_wall, provider_ref, settled,
-           sent_wall, sent_day, next_lookup_wall, lookup_answer, queued_lookups, unresolved_since, withdraw_wanted, withdraw_last_wall)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           sent_wall, sent_day, next_lookup_wall, lookup_answer, queued_lookups, unresolved_since, withdraw_wanted, withdraw_last_wall, went_wall)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(key) DO UPDATE SET calls = excluded.calls, first_handed_wall = excluded.first_handed_wall, provider_ref = excluded.provider_ref,
            settled = excluded.settled, sent_wall = excluded.sent_wall, sent_day = excluded.sent_day, next_lookup_wall = excluded.next_lookup_wall,
            lookup_answer = excluded.lookup_answer, queued_lookups = excluded.queued_lookups, unresolved_since = excluded.unresolved_since,
-           withdraw_wanted = excluded.withdraw_wanted, withdraw_last_wall = excluded.withdraw_last_wall`,
-        [w.key, id, w.trackId, w.stepId, w.accountId, w.destination, w.calls, w.firstHandedWall, w.providerRef, w.settled, w.sentWall, w.sentDay, w.nextLookupWall, w.lookupAnswer, w.queuedLookups, w.unresolvedSince, w.withdrawWanted ? 1 : 0, w.withdrawLastWall],
+           withdraw_wanted = excluded.withdraw_wanted, withdraw_last_wall = excluded.withdraw_last_wall, went_wall = excluded.went_wall`,
+        [w.key, id, w.trackId, w.stepId, w.accountId, w.destination, w.calls, w.firstHandedWall, w.providerRef, w.settled, w.sentWall, w.sentDay, w.nextLookupWall, w.lookupAnswer, w.queuedLookups, w.unresolvedSince, w.withdrawWanted ? 1 : 0, w.withdrawLastWall, w.wentWall],
       );
     }
     if (base.work.some((b) => !next.work.some((w) => w.key === b.key))) throw new Error("provider work is never deleted");
@@ -1208,6 +1208,7 @@ function toWork(r: Row): ProviderWork {
     unresolvedSince: numOrNull(r, "unresolved_since"),
     withdrawWanted: num(r, "withdraw_wanted") === 1,
     withdrawLastWall: numOrNull(r, "withdraw_last_wall"),
+    wentWall: numOrNull(r, "went_wall"),
   };
 }
 

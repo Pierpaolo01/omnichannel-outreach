@@ -85,8 +85,9 @@ function noStepReason(state: SubjectState): string {
 
 /** Whether a step's provider work may still be sent: an attempt past its claim, or called work not yet settled. */
 export function withProvider(state: SubjectState, stepId: string): boolean {
-  // An attempt past its claim has called its work, so this is the one definition, `isUncertain`, that the in-flight
-  // bound and `mayStillSend` use too (council on 56d599c).
+  // An attempt past its claim has called its work, so this is unsettled work (`isUncertain`): work that may still be sent
+  // (`maySend`, which the in-flight bound and `mayStillSend` count), and work the provider said went ("too late") whose
+  // send is not recorded yet, which a skip cannot skip either (council on 56d599c).
   return state.work.some((w) => w.stepId === stepId && isUncertain(w));
 }
 

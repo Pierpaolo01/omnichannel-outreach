@@ -176,6 +176,7 @@ export function work(fields: Partial<ProviderWork> = {}): ProviderWork {
     unresolvedSince: null,
     withdrawWanted: false,
     withdrawLastWall: null,
+    wentWall: null,
     ...fields,
   };
 }

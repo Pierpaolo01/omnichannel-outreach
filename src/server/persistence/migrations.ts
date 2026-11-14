@@ -627,6 +627,8 @@ export const MIGRATIONS: readonly Migration[] = [
       -- final (council A on 56d599c). Work whose live attempt was already asked to withdraw keeps that intent.
       ALTER TABLE provider_work ADD COLUMN withdraw_wanted INTEGER NOT NULL DEFAULT 0 CHECK (withdraw_wanted IN (0, 1));
       ALTER TABLE provider_work ADD COLUMN withdraw_last_wall INTEGER;
+      -- When the provider said it was too late to withdraw it: it went, and its send time follows (council J).
+      ALTER TABLE provider_work ADD COLUMN went_wall INTEGER;
       UPDATE provider_work SET withdraw_wanted = 1 WHERE settled IS NULL AND calls > 0
         AND EXISTS (SELECT 1 FROM attempts a WHERE a.idempotency_key = provider_work.key AND a.withdraw_requested = 1);
     `,

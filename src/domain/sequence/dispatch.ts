@@ -254,6 +254,7 @@ export function claim(
     unresolvedSince: null,
     withdrawWanted: false,
     withdrawLastWall: null,
+    wentWall: null,
   };
   return {
     ...state,

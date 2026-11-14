@@ -119,7 +119,7 @@ const RULES: Record<string, Partial<Rules>> = {
       const claimed = out.attempts.find((x) => x.id === input.attemptId);
       const inherited = claimed && claimed.idempotencyKey !== claimed.id ? out.work.find((w) => w.key === claimed.idempotencyKey) : undefined;
       if (!claimed || !inherited) return out;
-      const fresh: ProviderWork = { ...inherited, key: claimed.id, calls: 0, firstHandedWall: null, providerRef: null, settled: null, sentWall: null, sentDay: null, nextLookupWall: null, lookupAnswer: null, queuedLookups: 0, unresolvedSince: null, withdrawWanted: false, withdrawLastWall: null };
+      const fresh: ProviderWork = { ...inherited, key: claimed.id, calls: 0, firstHandedWall: null, providerRef: null, settled: null, sentWall: null, sentDay: null, nextLookupWall: null, lookupAnswer: null, queuedLookups: 0, unresolvedSince: null, withdrawWanted: false, withdrawLastWall: null, wentWall: null };
       return { ...out, attempts: out.attempts.map((x) => (x.id === claimed.id ? { ...x, idempotencyKey: x.id } : x)), work: [...out.work, fresh] };
     },
   },

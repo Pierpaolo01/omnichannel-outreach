@@ -100,7 +100,10 @@ const RULES: Record<string, Partial<Rules>> = {
     callOrder: (a, b) => (a.touched !== b.touched || a.dueWall === b.dueWall ? R.callOrder(a, b) : b.dueWall - a.dueWall),
   },
   // Verifier B3 and B1 on a1399ce.
+  // Since the request id's answer is kept in the store's transaction (council E on 56d599c), a replay is answered there
+  // first: the mutation breaks both layers, the stored answer and the outcome rule's own replay.
   "a replayed action is logged again": {
+    requestStanding: () => "new",
     logCallOutcome: (s, taskId, input, now, ids, listed) => R.logCallOutcome(s, taskId, { ...input, requestId: `${input.requestId}/${ids.attempt}` }, now, ids, listed),
   },
   "a person note kept on the company": {

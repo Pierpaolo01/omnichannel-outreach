@@ -113,7 +113,7 @@ const EXPECTED: Record<string, { invariant: string; seed: number; options?: Part
   "a restart keeps the ending's clock frozen": { invariant: "P9", seed: 0 },
   "move to win-back keeps the main sequence": { invariant: "status", seed: 0 },
   "resuming a lead releases its campaign's pause": { invariant: "P9", seed: 4 },
-  "skip ignores provider work withdrawn on a non-final not-sent": { invariant: "P11", seed: 19 },
+  "skip ignores provider work withdrawn on a non-final not-sent": { invariant: "P11", seed: 1 },
   "a control's preview skips what fell due": { invariant: "P11", seed: 10 },
   "a refused request runs when sent again": { invariant: "P7", seed: 2 },
   "the pacing gap ignored": { invariant: "P3", seed: 0, options: { gapMs: 1000 } },

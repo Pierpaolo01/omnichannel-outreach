@@ -54,6 +54,7 @@ describe("migration 14 on a database with calls logged before it", () => {
       DROP TABLE IF EXISTS control_requests;
       ALTER TABLE provider_work DROP COLUMN withdraw_wanted;
       ALTER TABLE provider_work DROP COLUMN withdraw_last_wall;
+      ALTER TABLE provider_work DROP COLUMN went_wall;
       DELETE FROM schema_migrations WHERE version >= 14;
     `);
     db.close();

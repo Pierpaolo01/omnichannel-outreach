@@ -4,7 +4,7 @@
  * it takes a `SubjectState` and the time, and returns the next `SubjectState`.
  */
 import type { OutreachStatus } from "../outreach-status.ts";
-import { applyAttemptEvent, applyLookup, ENGINE_PARAMS, isLive, isUncertain, markable, withRef, type AttemptEffect, type AttemptEvent, type WorkEvent } from "./attempt.ts";
+import { applyAttemptEvent, applyLookup, ENGINE_PARAMS, isLive, isUncertain, markable, maySend, withRef, type AttemptEffect, type AttemptEvent, type WorkEvent } from "./attempt.ts";
 import { leadNow, localDayNumber, nextWindowOpen, sendPoint, span, startOfLocalDay, syncClock, wallOfLead, type Freeze, type LeadClock } from "./clock.ts";
 import { liveSteps, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
 import type { Attempt, EndReason, FinishReason, LeadDetail, ProviderWork, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
@@ -146,7 +146,7 @@ export function quiesce(state: SubjectState, trackId: string | null = null): Sub
   // Every piece of work in scope the provider may still send is to be withdrawn, live attempt or not: the intent is kept
   // on the work, so a non-final "not sent" that retires its attempt does not end it (ticket 17a; council A on 56d599c).
   for (const w of next.work) {
-    if ((trackId !== null && w.trackId !== trackId) || !isUncertain(w) || w.withdrawWanted) continue;
+    if ((trackId !== null && w.trackId !== trackId) || !maySend(w) || w.withdrawWanted) continue;
     next = withWork(next, { ...w, withdrawWanted: true, withdrawLastWall: null });
   }
   return next;
@@ -158,7 +158,7 @@ export function quiesce(state: SubjectState, trackId: string | null = null): Sub
  */
 // eslint-disable-next-line @typescript-eslint/no-unused-vars -- the rule ignores it by design; a mutation reads it
 export function withdrawalDue(w: ProviderWork, now: number, carried = true): boolean {
-  return w.withdrawWanted && isUncertain(w) && (w.withdrawLastWall === null || now >= w.withdrawLastWall + ENGINE_PARAMS.SETTLING);
+  return w.withdrawWanted && maySend(w) && (w.withdrawLastWall === null || now >= w.withdrawLastWall + ENGINE_PARAMS.SETTLING);
 }
 
 /**
@@ -562,15 +562,12 @@ export function applyToWork(
     const attended = attend(s, now);
     return { state: runs(attended) ? evaluate(attended, now) : attended, effects };
   };
-  // A withdrawal answered "too late" is the provider's final word that the message went (council on 56d599c, item J):
-  // it settles the work as sent, at the answer's instant when no lookup has told the send time.
-  const tooLate = event.kind === "withdraw_answer" && event.answer === "too-late";
-  const sentFact = event.kind === "sent_observed" || (event.kind === "lookup_answer" && event.answer.kind === "sent") || event.kind === "mark_sent" || tooLate;
+  const sentFact = event.kind === "sent_observed" || (event.kind === "lookup_answer" && event.answer.kind === "sent") || event.kind === "mark_sent";
   if (sentFact) {
     const byUser = event.kind === "mark_sent";
     if (byUser && !markable(w)) return { state, effects: [{ kind: "ignored", what: "mark sent is only for unresolved work" }] };
     const ref = event.kind === "sent_observed" ? event.providerRef : event.kind === "lookup_answer" ? (event.answer.providerRef ?? null) : null;
-    const providerTime = event.kind === "sent_observed" ? event.providerTime : event.kind === "lookup_answer" ? (event.answer.sentAt ?? event.now) : event.kind === "withdraw_answer" ? event.now : event.now;
+    const providerTime = event.kind === "sent_observed" ? event.providerTime : event.kind === "lookup_answer" ? (event.answer.sentAt ?? event.now) : event.now;
     const referenced = withRef(event.kind === "lookup_answer" ? { ...w, lookupAnswer: "sent" } : w, ref);
     if (w.settled === "sent" || w.settled === "user_sent") return { state: withWork(state, referenced), effects: [{ kind: "ignored", what: "the work was already settled as sent" }] };
     const at = Math.min(Math.max(providerTime, w.firstHandedWall ?? providerTime), now);
@@ -581,7 +578,7 @@ export function applyToWork(
       return { state: withWork(state, counted), effects: [{ kind: "anomaly", what: `the provider sent work that was ${w.settled === "user_not_sent" ? "marked not sent" : (w.settled ?? "never handed over")}` }] };
     }
     const settled: ProviderWork = { ...referenced, settled: byUser ? "user_sent" : "sent", nextLookupWall: null, sentWall: at, sentDay: options.resetDay(w.accountId, at), withdrawWanted: false };
-    const endedBy = byUser ? "user" : event.kind === "lookup_answer" ? "lookup" : tooLate ? "provider" : "observed";
+    const endedBy = byUser ? "user" : event.kind === "lookup_answer" ? "lookup" : "observed";
     let s = withWork(state, settled);
     // Every other live attempt carrying the work is settled by the same statement.
     for (const a of s.attempts) {
@@ -625,8 +622,14 @@ export function applyToWork(
         for (const a of s.attempts) if (a.idempotencyKey === key && isLive(a)) s = withAttempt(s, { ...a, state: "withdrawn", endedBy: a.state === "claimed" ? "guard" : "provider", awaitingAnswer: false });
         return done(s, []);
       }
-      // "unknown": asked again one settling period on, and looked up meanwhile. ("too-late" settled the work above.)
-      const next: ProviderWork = { ...w, withdrawLastWall: event.now, nextLookupWall: w.nextLookupWall ?? event.now + ENGINE_PARAMS.SETTLING };
+      // "too late" is the provider's final word that the message went (council J on 56d599c): the work is marked gone, so it
+      // no longer counts as work that may still be sent nor holds an in-flight place, and is not withdrawn again; its send
+      // time, from which the next step counts (ruling 4), comes from the observation or a lookup, asked at once.
+      // "unknown": asked again one settling period on, and looked up meanwhile.
+      const next: ProviderWork =
+        event.answer === "too-late"
+          ? { ...w, withdrawWanted: false, withdrawLastWall: event.now, wentWall: event.now, nextLookupWall: Math.min(w.nextLookupWall ?? event.now, event.now) }
+          : { ...w, withdrawLastWall: event.now, nextLookupWall: w.nextLookupWall ?? event.now + ENGINE_PARAMS.SETTLING };
       return done(withWork(s, next), []);
     }
     case "mark_not_sent": {

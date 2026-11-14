@@ -47,6 +47,7 @@ function beforeMigration13(file: string): void {
     DROP TABLE IF EXISTS control_requests;
     ALTER TABLE provider_work DROP COLUMN withdraw_wanted;
       ALTER TABLE provider_work DROP COLUMN withdraw_last_wall;
+      ALTER TABLE provider_work DROP COLUMN went_wall;
     DELETE FROM schema_migrations WHERE version > 12;
   `);
   db.close();

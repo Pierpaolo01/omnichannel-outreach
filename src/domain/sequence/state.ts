@@ -179,6 +179,11 @@ export interface ProviderWork {
   readonly withdrawWanted: boolean;
   /** When the provider last answered the withdrawal "unknown": asked again one settling period later. */
   readonly withdrawLastWall: number | null;
+  /**
+   * When the provider said it is too late to withdraw it: it went (council J on 56d599c). Such work no longer may be sent,
+   * so it holds no in-flight place; it settles as sent when its send time is observed or looked up.
+   */
+  readonly wentWall: number | null;
 }
 
 /**

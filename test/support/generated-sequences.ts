@@ -1012,9 +1012,12 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     for (const c of fake.handoverLog) if (!firstCallOf.has(c.key)) firstCallOf.set(c.key, c);
     const settledAt = (key: string): number => {
       const delivered = fake.deliveryLog.filter((d) => d.key === key).map(knownAt);
-      const looked = fake.lookupLog.filter((l) => l.key === key && (l.answer === "sent" || l.answer === "not-sent")).map((l) => l.at);
+      // A "not sent" the transport cannot vouch for (this fake's never can, `notSentIsFinal: false`) is not a final
+      // answer: the work keeps its place until the provider's answer is final (council B on 56d599c). A withdrawal
+      // answered too late is final: it went.
+      const looked = fake.lookupLog.filter((l) => l.key === key && l.answer === "sent").map((l) => l.at);
       const refused = fake.refusals.filter((r) => fake.handoverLog.some((c) => c.key === key && c.attemptId === r.attemptId)).map((r) => r.at);
-      const withdrawn = fake.withdrawLog.filter((w) => w.key === key && w.answer === "withdrawn").map((w) => w.at);
+      const withdrawn = fake.withdrawLog.filter((w) => w.key === key && (w.answer === "withdrawn" || w.answer === "too-late")).map((w) => w.at);
       return Math.min(...delivered, ...looked, ...refused, ...withdrawn, markedSent.get(key) ?? Infinity, markedNotSentKeys.get(key) ?? Infinity);
     };
     for (const [key, c] of firstCallOf) {

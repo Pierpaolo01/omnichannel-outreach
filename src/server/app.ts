@@ -4,7 +4,7 @@ import { z } from "zod";
 import { planImport } from "../domain/import-plan.ts";
 import { isOutreachStatus, OUTREACH_STATUSES, type OutreachStatus } from "../domain/outreach-status.ts";
 import { LEAD_CONTROLS } from "../domain/sequence/controls.ts";
-import { isUncertain } from "../domain/sequence/attempt.ts";
+import { maySend } from "../domain/sequence/attempt.ts";
 import { campaignControls, controlsView } from "./engine/controls-view.ts";
 import { checkScraperFile, parseScraperExport } from "../domain/scraper-export.ts";
 import type { ActivityView, ApiError, CallOutcomeAnswer, CallOutcomeRefusal, Campaign, CompanyRecord, FileCheckResult, PersonRecord, RecordCalls, SmsProviderStatus } from "../shared/api.ts";
@@ -467,7 +467,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     const at = Date.parse(now());
     const state = await store.engine.subject(id, at);
     // Work handed over and not settled may still be sent (ticket 17a's provider limitation): the screens say so.
-    return state ? { ...progressView(state, at), controls: controlsView(state, at, rules), mayStillSend: state.work.filter(isUncertain).length } : null;
+    return state ? { ...progressView(state, at), controls: controlsView(state, at, rules), mayStillSend: state.work.filter(maySend).length } : null;
   };
 
   app.get("/enrollments/:id", async (c) => {

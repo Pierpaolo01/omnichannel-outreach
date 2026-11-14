@@ -225,18 +225,12 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     if (!d) return null;
     const call = handovers(t.channel).find((c) => c.key === d.key);
     // The app learns of a send from the provider's event or from a lookup that answers sent, whichever is first.
-    const looked = t.channel === "email" ? (email.lookupLog.find((l) => l.key === d.key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity) : Infinity;
-    // Or from a withdrawal answered "too late" (council J): the worker then asks the lookup; if it does not say sent yet,
-    // the send is recorded at the answer's instant.
-    const tooLate = t.channel === "email" ? email.withdrawLog.find((w) => w.key === d.key && w.answer === "too-late") : undefined;
+    const lookedAt = t.channel === "email" ? (email.lookupLog.find((l) => l.key === d.key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity) : Infinity;
+    // A lookup the first withdrawal's "too late" asks for runs in the worker's pass after the control that wanted the
+    // withdrawal, at that instant: ordered after the control (council J).
+    const firstAsk = email.withdrawLog.find((w) => w.key === d.key);
+    const looked = firstAsk && firstAsk.answer === "too-late" && firstAsk.at === lookedAt ? lookedAt + 1 : lookedAt;
     const seen = Math.min(d.visibleAt, looked);
-    if (tooLate && tooLate.at <= seen) {
-      const lookedThen = email.lookupLog.some((l) => l.key === d.key && l.at === tooLate.at && l.answer === "sent");
-      // A first withdrawal is asked in the worker's pass after the control that wanted it, at that instant: ordered after the
-      // control. A retry comes in a pass of its own, before any action at its instant.
-      const first = email.withdrawLog.find((w) => w.key === d.key) === tooLate;
-      return { at: pointOf(s, lookedThen ? Math.max(d.at, call?.at ?? d.at) : tooLate.at), seen: first ? tooLate.at + 1 : tooLate.at, kind: "sent" };
-    }
     return { at: pointOf(s, Math.max(d.at, call?.at ?? d.at)), seen, kind: "sent" };
   }
   /** A track's start (wall), or null while its rule is not met. */

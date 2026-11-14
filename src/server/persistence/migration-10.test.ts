@@ -61,6 +61,7 @@ function beforeMigration10(file: string): void {
     DROP TABLE IF EXISTS control_requests;
     ALTER TABLE provider_work DROP COLUMN withdraw_wanted;
       ALTER TABLE provider_work DROP COLUMN withdraw_last_wall;
+      ALTER TABLE provider_work DROP COLUMN went_wall;
     DELETE FROM schema_migrations WHERE version > 9;
   `);
   expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'bounce_events'").all()).toEqual([]);
