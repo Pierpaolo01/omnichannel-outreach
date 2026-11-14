@@ -294,8 +294,9 @@ export interface EnrollmentProgress {
   readonly smsSender: string | null;
   readonly zone: string;
   /**
-   * Every track of the main sequence, and of the win-back branch, each with its branch (ticket 16): after a
-   * win-back entry the main tracks show `dropped_for_win_back` and the branch's tracks their own progress.
+   * The main sequence's tracks, and the win-back branch's once the lead has entered it, each with its branch
+   * (ticket 16). A branch the lead has not entered has no progress and is not listed (review bot on 654907b);
+   * after a win-back entry the main tracks the lead had not finished show `dropped_for_win_back`.
    */
   readonly tracks: readonly TrackProgressView[];
   /** Where the lead runs: the main sequence, or the win-back branch since `winBackEnteredAt` (ticket 16). */

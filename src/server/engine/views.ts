@@ -30,8 +30,10 @@ export function progressView(s: SubjectState, now: number): EnrollmentProgress {
     branch: s.subject.branch,
     winBackEnteredAt: s.subject.branch === "win_back" && s.subject.branchEnteredAt !== null ? iso(wallAtLead(s.subject.clock, s.freezes, s.subject.branchEnteredAt, now)) : null,
     declined: declinedOf(s),
-    // The main sequence's tracks, then the win-back branch's (ticket 16), then removed tracks the lead had reached.
-    tracks: [...forBranch(s, "main"), ...forBranch(s, "win_back"), ...s.campaign.definition.tracks.filter((t) => t.removed && !liveTracksFor(s).includes(t))]
+    // The main sequence's tracks, then, for a lead that entered it, the win-back branch's (ticket 16), then removed
+    // tracks the lead had reached. A branch the lead has not entered has no progress and is in none of its reads
+    // (review bot on 654907b); a lead in win-back keeps its main tracks, each as it finished (`dropped_for_win_back`).
+    tracks: [...forBranch(s, "main"), ...(s.subject.branch === "win_back" ? forBranch(s, "win_back") : []), ...s.campaign.definition.tracks.filter((t) => t.removed && !liveTracksFor(s).includes(t))]
       .filter((t) => !t.removed || s.tracks.some((p) => p.trackId === t.id))
       .filter((t, i, all) => all.indexOf(t) === i)
       .map((track) => {

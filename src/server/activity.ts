@@ -49,7 +49,8 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
     }
     // Ended for want of a usable channel before any track started: the only case Activity says more
     // than the stored outcomes (council on 10121d3, item 8).
-    const endedAtLaunch = progress.status === "finished_no_usable_channel" && !progress.tracks.some((t) => t.started);
+    // At launch the lead is in the main sequence, so only its tracks can say so; a branch's never can.
+    const endedAtLaunch = progress.status === "finished_no_usable_channel" && progress.branch === "main" && !progress.tracks.some((t) => t.started);
     for (const track of progress.tracks) {
       if (track.channel !== "email" && track.channel !== "sms") continue;
       const channel = track.channel;
@@ -71,7 +72,7 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
           entries.push({ campaign, at: step.at, kind: "skipped", channel, track: label, stepNumber: step.number, reason: SKIP_REASON[step.reason ?? ""] ?? step.reason ?? "skipped" });
         }
       }
-      if (endedAtLaunch && progress.endedAt !== null && !hasChannel) {
+      if (endedAtLaunch && progress.endedAt !== null && !hasChannel && track.branch === "main") {
         // The one entry not read from this track's own stored outcome: a lead with no usable channel
         // ends at launch, before any track starts, so no track stores a skip; each says why here.
         entries.push({ campaign, at: progress.endedAt, kind: "skipped", channel, track: label, stepNumber: null, reason: missing });

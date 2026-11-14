@@ -1,7 +1,8 @@
 import type { CampaignDefinition, DeclinedPath, StepDefinition, TrackDefinition } from "../../src/domain/sequence/definition.ts";
 import type { CallTask, SubjectState } from "../../src/domain/sequence/state.ts";
 import type { Rules } from "../../src/server/engine/rules.ts";
-import type { CallOutcomeApi, CallReasonApi, CallsView, CallTaskView, EnrollmentProgress, LeadSearchResult, NeedsAttention, OutreachStatus, PersonRecord, CompanyRecord, TodayView } from "../../src/shared/api.ts";
+import { trackLabel } from "../../src/shared/track-label.ts";
+import type { ActivityView, CallOutcomeApi, CallReasonApi, CallsView, CallTaskView, EnrollmentProgress, LeadSearchResult, NeedsAttention, OutreachStatus, PersonRecord, CompanyRecord, TodayView } from "../../src/shared/api.ts";
 import { EngineHarness, quickWait } from "./engine-harness.ts";
 import { business, person, type ExportRows } from "./export-builder.ts";
 import type { FakeAccount, HandoverLogEntry } from "./fake-email-port.ts";
@@ -1093,7 +1094,10 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
           if (heldStrictly(s, c.at)) problem(`2: ${id}/${c.stepId} was handed over at ${new Date(c.at).toISOString()}, while a callback held the lead (${holdsOf(s).map((x) => `${new Date(x.from).toISOString()} to ${Number.isFinite(x.to) ? new Date(x.to).toISOString() : "now"}`).join(", ")})`);
         }
       }
-      if (drained) checkDrained(s, st, progress);
+      if (drained) {
+        checkDrained(s, st, progress);
+        await checkActivity(s, progress);
+      }
     }
 
     // Notes: each is where the user put it, once. A person's notes are the person-scoped notes of their calls,
@@ -1235,6 +1239,69 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     if (st.subject.ended === null) problem(`18: ${s.id} is ${progress.status} after the drain (${JSON.stringify(progress.tracks.map((t) => [t.trackId, t.finishReason]))})`);
     if (st.callTasks.some((t) => t.open) && st.subject.ended === null) problem(`18: ${s.id} still has an open call task after the drain`);
   }
+  /**
+   * Activity against the record, after the drain (ticket 16; the rule of ticket 13's track runs): the timeline
+   * lists exactly what the record derives from its own starts and finishes, the providers' logs and the replies.
+   * Email and SMS tracks of the main sequence, and of the win-back branch once the lead entered it; a branch the
+   * lead never entered says nothing, and neither does a main track dropped for win-back (review bot on 654907b).
+   * Entries are compared as kind, channel, track label and message number; "ended" against the stored ending.
+   */
+  async function checkActivity(s: Subject, progress: EnrollmentProgress): Promise<void> {
+    const now = h.clock;
+    const recordId = await recordOf(s);
+    if (recordId === null) return;
+    const campaignId = campaigns[s.campaign]!.id;
+    const shown = (await h.request<ActivityView>("GET", `/api/${s.person ? "people" : "companies"}/${recordId}/activity`)).body.entries
+      .filter((e) => e.campaign.id === campaignId)
+      .map((e) => (e.kind === "replied" ? `replied|${e.channel}` : e.kind === "ended" ? "ended" : `${e.kind}|${e.channel}|${e.track.label}|${"stepNumber" in e && e.stepNumber !== null ? e.stepNumber : "-"}`))
+      .sort();
+    const expected: string[] = [];
+    const end = endLimitOf(s);
+    const atLaunch = noChannelAt(s) === runStartOf(s) && runStartOf(s) <= now;
+    for (const t of tracksOf(s)) {
+      if (t.channel === "call") continue;
+      const ch = t.channel;
+      const label = trackLabel(def(s), t).label;
+      if (atLaunch) {
+        // The one entry not read from a stored outcome: no usable channel at launch, said for each main track.
+        if (t.branch === "main") expected.push(`skipped|${ch}|${label}|-`);
+        continue;
+      }
+      t.steps.forEach((st, i) => {
+        const d = deliveryOf(ch, s.id, st.id);
+        if (d && knownAt(ch, d) <= now) expected.push(`sent|${ch}|${label}|${i + 1}`);
+      });
+      const f = finishFacts(s, t);
+      const start = startOf(s, t);
+      const started = start !== null && start <= now && start < end && !(f?.reason === "dropped_for_win_back" && f.at <= start);
+      if (!started) continue;
+      const rule = t.start;
+      const before = rule.kind === "after" ? def(s).tracks.find((x) => x.id === rule.trackId) : undefined;
+      const released = before ? finishFacts(s, before)?.reason : undefined;
+      if (released === "skipped_missing_channel" || released === "failed_bad_destination") expected.push(`released|${ch}|${label}|-`);
+      if (f?.reason === "skipped_missing_channel") expected.push(`skipped|${ch}|${label}|-`);
+      if (f?.reason === "failed_bad_destination") expected.push(`address_bad|${ch}|${label}|-`);
+      if (t.branch === "win_back") features.add("activity-in-win-back");
+      if (f?.reason === "dropped_for_win_back") features.add("activity-of-a-dropped-track");
+    }
+    if (progress.status === "replied") {
+      // The first reply stopped it; replies on both channels at one instant reach the app in an order the record does not model.
+      const mail = Math.min(Infinity, ...email.replyLog.filter((r) => r.subjectId === s.id).map((r) => r.at));
+      const firstText = sms.deliveryLog.find((d) => d.subjectId === s.id)?.at ?? Infinity;
+      const text = Math.min(Infinity, ...sms.replyLog.filter((r) => r.to === numbers[s.campaign]!.id && r.from === mobileOf(s) && r.at >= firstText).map((r) => r.at));
+      expected.push(mail === text ? (shown.find((x) => x.startsWith("replied|")) ?? "replied|email") : `replied|${mail < text ? "email" : "sms"}`);
+    } else if (progress.status === "sequence_finished_no_response" || progress.status === "finished_no_usable_channel") expected.push("ended");
+    expected.sort();
+    if (def(s).tracks.some((t) => t.branch === "win_back")) features.add(Number.isFinite(winBackAt(s)) ? "activity-compared-in-win-back" : "activity-compared-beside-a-branch-never-entered");
+    if (JSON.stringify(shown) !== JSON.stringify(expected)) problem(`activity: ${s.id} shows ${JSON.stringify(shown)}; the record has ${JSON.stringify(expected)}`);
+  }
+  /** The person's record, or the company lead's. */
+  async function recordOf(s: Subject): Promise<string | null> {
+    const name = s.person ? s.person.name : s.company.name;
+    const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?q=${encodeURIComponent(name)}`)).body.rows;
+    return rows.find((r) => (s.person ? r.name === name && r.kind === "person" : r.kind === "company"))?.id ?? null;
+  }
+
   /** Held by a callback that cannot be logged: the lead has no good number left. */
   const stuck = (s: Subject) => heldAt(s, h.clock) && !goodPhoneAt(s, h.clock) && h.clock < endLimitOf(s);
 

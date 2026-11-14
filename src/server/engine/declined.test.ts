@@ -165,7 +165,8 @@ describe("the three paths (spec: Declined calls and the win-back branch; ticket 
     expect(await h.progress(pat)).toMatchObject({ status: "active", branch: "main", declined: { path: "continue" } });
     await h.advanceTo(MONDAY_9 + 14 * DAY);
     const progress = await h.progress(pat);
-    expect(progress.tracks.map((t) => [t.trackId, t.finishReason])).toEqual([["p1", "completed"], ["e1", "completed"], ["e2", "completed"], ["p2", "skipped_declined"], ["w1", null], ["w2", null]]);
+    // A branch the lead never entered is in none of its reads.
+    expect(progress.tracks.map((t) => [t.trackId, t.finishReason])).toEqual([["p1", "completed"], ["e1", "completed"], ["e2", "completed"], ["p2", "skipped_declined"]]);
     expect(progress.tracks.find((t) => t.trackId === "p2")?.callTask).toBeNull();
     expect(progress.status).toBe("sequence_finished_no_response");
     expect(sent("pat@harbour.example").filter((s) => s.startsWith("w"))).toEqual([]);
@@ -229,5 +230,40 @@ describe("Activity says what was declined and which path was taken", () => {
     await h.advanceTo(MONDAY_9 + 2 * H);
     // The branch's emails are named as the branch's tracks.
     expect((await h.request<ActivityView>("GET", `/api/people/${pat.id}/activity`)).body.entries.find((e) => e.kind === "sent" && e.stepNumber === 1 && e.at >= new Date(MONDAY_9 + H).toISOString())).toMatchObject({ track: { label: "Win-back email track 1", several: true } });
+  });
+});
+
+describe("a branch the lead has not entered is in none of its reads (review bot on 654907b)", () => {
+  test("a lead with no usable channel at launch: its progress lists the main sequence only, and Activity skips only the main tracks", async () => {
+    const { h } = await world();
+    h.clock = MONDAY_9;
+    const OMAR = person({ person_id: "p3", business_id: "b2", full_name: "Omar Reed", title: "Director", direct_phone: "+442079460113" });
+    const { campaign: c } = await h.createCampaign("Email only, with a branch", { businesses: [business({ business_id: "b2", business_name: "Northgate Dental" })], people: [OMAR] });
+    const def: CampaignDefinition = { ...definition(undefined), tracks: [track("e1", "email", [email("e1s1")]), track("w1", "email", [email("w1s1")], { branch: "win_back" })] };
+    await h.defineSequence(c.id, def);
+    expect((await h.launch(c.id)).status).toBe(200);
+    const row = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${c.id}`)).body.rows[0]!;
+    const progress = await h.progress(row.enrollments[0]!.id);
+    expect(progress).toMatchObject({ status: "finished_no_usable_channel", branch: "main", declined: null });
+    expect(progress.tracks.map((t) => t.trackId)).toEqual(["e1"]);
+    const activity = (await h.request<ActivityView>("GET", `/api/people/${row.id}/activity`)).body;
+    expect(activity.entries.map((e) => (e.kind === "skipped" ? `skipped ${e.track.label}` : e.kind))).toEqual(["ended", "skipped Email track"]);
+  });
+
+  test("a lead in win-back: its dropped main tracks read as dropped, never skipped or failed, and Activity says nothing of them", async () => {
+    const { h, campaign, decline } = await world();
+    h.clock = MONDAY_9;
+    const c = await campaign("Spring physio", definition("win_back"));
+    const pat = c.lead("Pat Oneil");
+    // Running in main, the lead's progress has no branch track.
+    expect((await h.progress(pat)).tracks.some((t) => t.branch === "win_back")).toBe(false);
+    await h.advanceTo(MONDAY_9 + H);
+    expect((await decline(pat)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    const progress = await h.progress(pat);
+    expect(progress.tracks.filter((t) => t.branch === "main").map((t) => t.finishReason)).toEqual(["completed", "dropped_for_win_back", "dropped_for_win_back", "dropped_for_win_back"]);
+    const person = (await h.request<LeadSearchResult>("GET", "/api/leads?q=Pat")).body.rows[0]!;
+    const entries = (await h.request<ActivityView>("GET", `/api/people/${person.id}/activity`)).body.entries.filter((e) => e.campaign.id === c.id);
+    expect(entries.map((e) => (e.kind === "sent" ? `sent ${e.track.label} ${e.stepNumber}` : e.kind))).toEqual(["sent Win-back email track 1 1", "sent Email track 1 1"]);
   });
 });

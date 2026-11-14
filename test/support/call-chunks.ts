@@ -16,7 +16,7 @@ import { FULL_SEARCH, inShard, SEED } from "./sequence-chunks.ts";
  * behaviour the runs report (`stats.features`). Which behaviours those are is `CALL_FEATURES`, and
  * `pnpm check` asserts that the fixed seeds' runs reach every one of them, so a change to the generator
  * cannot silently drop one. Refresh both when the generator changes (last swept on 14 November 2026, ticket
- * 16a: 94 behaviours. Ticket 16's draws moved the ticket 15 runs that declines touch, and "callback-worked:
+ * 16a: 98 behaviours. Ticket 16's draws moved the ticket 15 runs that declines touch, and "callback-worked:
  * gatekeeper+redial", a redial off a callback after a gatekeeper, is reached by none of the 100 seeds now; the
  * same rule is reached after no answer and voicemail, which stay listed).
  */
@@ -24,6 +24,10 @@ export const CALL_FIXED_SEEDS: readonly number[] = [9, 16, 20, 21, 30, 35, 38, 4
 
 /** Every behaviour the fixed seeds must reach between them. */
 export const CALL_FEATURES: readonly string[] = [
+  "activity-of-a-dropped-track",
+  "activity-in-win-back",
+  "activity-compared-in-win-back",
+  "activity-compared-beside-a-branch-never-entered",
   "a-company-zone-moved",
   "a-held-lead-lost-its-last-number",
   "a-later-phone-track-skipped-as-declined",
