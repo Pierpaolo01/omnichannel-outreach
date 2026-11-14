@@ -41,17 +41,6 @@ const RULES: Record<string, Partial<Rules>> = {
       return out.ok && action === "stop" ? { ok: true, state: frozenAsBefore(s, out.state) } : out;
     },
   },
-  "a restart rewinds to the track's first step": {
-    applyControl: (s, action, now) => {
-      const out = R.applyControl(s, action, now);
-      if (!out.ok || action !== "resume_from_next_step") return out;
-      const tracks = out.state.tracks.map((p) => {
-        const first = out.state.campaign.definition.tracks.find((t) => t.id === p.trackId)?.steps[0]?.id ?? null;
-        return p.finishedAt === null && p.nextStepId !== null && first !== null ? { ...p, nextStepId: first } : p;
-      });
-      return { ok: true, state: { ...out.state, tracks } };
-    },
-  },
   "a restart keeps the ending's clock frozen": {
     applyControl: (s, action, now) => {
       const out = R.applyControl(s, action, now);
@@ -142,7 +131,9 @@ const EXPECTED: Record<string, { invariant: string; seed: number; options?: Part
   "skip skips two steps": { invariant: "P11", seed: 0 },
   "a skipped step is sent all the same": { invariant: "P4", seed: 18 },
   "stop leaves the clock running": { invariant: "P9", seed: 0 },
-  "a restart rewinds to the track's first step": { invariant: "P2", seed: 0 },
+  // "a restart rewinds to the track's first step" (P6) is retired since ticket 19: `alignPending`, which every evaluation and
+  // settlement runs, re-derives a pending step that names a step already resolved, so no rule swap of `applyControl` can
+  // rewind a lead. `reconcile.test.ts` "a pending step pointed back at a sent step is brought forward again" guards it.
   "a restart keeps the ending's clock frozen": { invariant: "P9", seed: 0 },
   "move to win-back keeps the main sequence": { invariant: "status", seed: 0 },
   "resuming a lead releases its campaign's pause": { invariant: "P9", seed: 4 },

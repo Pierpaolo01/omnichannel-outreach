@@ -180,3 +180,12 @@ describe("a change of the campaign's default zone (ADR 0003 \"Ticket 19\", step 
     expect(progress(reconcileEdit(withDefinition(before, next), before.campaign.definition, "Europe/London", MONDAY_9 + H))).toEqual(progress(before));
   });
 });
+
+describe("the pending step is 5.1's whatever wrote it (ADR 0003 \"Ticket 19\", step 4)", () => {
+  test("a pending step pointed back at a sent step is brought forward again (retires the control mutation \"a restart rewinds to the track's first step\")", () => {
+    const base = sent(launchedWith(tracksDefinition([emailTrack()])), "s1", MONDAY_9);
+    const rewound = { ...base, tracks: base.tracks.map((t) => ({ ...t, nextStepId: "s1" })) };
+    expect(progress(evaluate(rewound, MONDAY_9 + H))?.nextStepId).toBe("s2");
+    expect(progress(alignPending(rewound, MONDAY_9 + H))).toEqual(progress(base));
+  });
+});
