@@ -1278,7 +1278,8 @@ export const SCREENS: readonly Screen[] = [
     // Ticket 16a: a finished estimate for a campaign with a win-back branch says the branch is not counted.
     name: "fake provider: before launch for a campaign with a win-back branch",
     open: async (page) => {
-      const f = await fakeProviderApp("phone-track");
+      // An app of its own each time: other screens' running campaigns on the shared app can hold work that withholds the figure.
+      const f = await fakeProviderApp(`win-back-branch-${Date.now()}-${Math.random()}`);
       const id = await f.freshTwoChannelCampaign(`With a win-back branch ${Date.now()}`);
       const branch = { ...TWO_CHANNELS.tracks[0]!, id: "wb-1", branch: "win_back" as const, steps: TWO_CHANNELS.tracks[0]!.steps.slice(0, 1).map((st) => ({ ...st, id: "wb-1-s1" })) };
       await page.request.put(`${f.url}/api/campaigns/${id}/sequence`, { data: { ...TWO_CHANNELS, callScript: "Ask who books.", tracks: [...TWO_CHANNELS.tracks, phoneTrack("call", { kind: "entry" }, { declinedPath: "win_back" }), branch] } });

@@ -197,7 +197,8 @@ test.describe("calls in Before launch", () => {
   });
 
   test("with a win-back branch, a finished estimate says the branch's emails and texts are not counted; never without a live branch, nor with no figure (ticket 16a)", async ({ page }) => {
-    const f = await fakeProviderApp("phone-editor");
+    // An app of its own: another test's running campaign on a shared app can hold work that withholds the figure.
+    const f = await fakeProviderApp("win-back-before-launch");
     const branchTrack = { ...TWO_CHANNELS.tracks[0]!, id: "wb-1", branch: "win_back" as const, steps: TWO_CHANNELS.tracks[0]!.steps.slice(0, 1).map((st) => ({ ...st, id: "wb-1-s1" })) };
     const withBranch = (removed: boolean): CampaignDefinition => ({ ...TWO_CHANNELS, callScript: "Ask who books.", tracks: [...TWO_CHANNELS.tracks, phoneTrack("call", { kind: "entry" }, { declinedPath: removed ? "stop" : "win_back" }), { ...branchTrack, removed }] });
     const notCounted = "This campaign’s win-back emails and texts are not counted: the figures assume every call gets no answer, so nobody enters win-back.";
