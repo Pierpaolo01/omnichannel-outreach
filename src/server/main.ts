@@ -16,6 +16,7 @@ import { InstantlyEmailPort } from "./instantly/port.ts";
 import { DATABASE_FILE, resolveDataDir } from "./config.ts";
 import { checkHost, isLoopbackAddress } from "./guard.ts";
 import { openSqliteStore } from "./persistence/sqlite-store.ts";
+import { LEASE_RENEW_MS, processAlive, WorkerLeaseHolder } from "./worker-lease.ts";
 
 /**
  * Runs the whole application locally: the HTTP interface under /api and the web client.
@@ -38,6 +39,15 @@ const dataDir = resolveDataDir({
 });
 mkdirSync(dataDir, { recursive: true, mode: 0o700 });
 const store = openSqliteStore(path.join(dataDir, DATABASE_FILE));
+// One worker per database (ADR 0003 "Ticket 20a"): a second application on this data directory is refused before it
+// listens, so two processes never recover and send from one database at once.
+const lease = new WorkerLeaseHolder(store.engine, { id: randomUUID(), pid: process.pid, now: () => Date.now(), alive: processAlive });
+const taken = await lease.take();
+if (!taken.ok) {
+  console.error(JSON.stringify({ level: "error", event: "worker_refused", message: taken.message }));
+  await store.close();
+  process.exit(1);
+}
 // Email goes through Instantly when a key is configured (ADR 0002); real writes stay off unless the
 // run sets OUTREACH_INSTANTLY_WRITES=on. Without a key every email track meets launch blocker 3.
 const readText = (file: string): string | null => {
@@ -78,6 +88,15 @@ async function work(first: boolean): Promise<void> {
   if (!stopped) ticking = setTimeout(() => void work(false), TICK_MS);
 }
 void work(true);
+// The lease is renewed on a timer of its own, so a slow tick never loses it. A worker whose lease another process took
+// (this one was suspended past the stale limit) stops: two workers must not send from one database.
+const renewing = setInterval(() => {
+  void lease.renew().then((held) => {
+    if (held) return;
+    console.error(JSON.stringify({ level: "error", event: "worker_lease_lost", message: "Another process took over this database's worker. This one stops." }));
+    shutdown(1);
+  });
+}, LEASE_RENEW_MS);
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => void;
 
@@ -114,11 +133,14 @@ server.listen(port, host, () => {
   console.info(JSON.stringify({ level: "info", event: "listening", url: `http://${host}:${port}`, dataDir, production }));
 });
 
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, () => {
-    stopped = true;
-    clearTimeout(ticking);
-    server.close();
-    void store.close().finally(() => process.exit(0));
-  });
+function shutdown(code: number): void {
+  stopped = true;
+  clearTimeout(ticking);
+  clearInterval(renewing);
+  server.close();
+  void lease
+    .release()
+    .catch(() => undefined)
+    .finally(() => void store.close().finally(() => process.exit(code)));
 }
+for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => shutdown(0));
