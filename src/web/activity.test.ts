@@ -40,3 +40,20 @@ describe("what the timeline says of SMS, skipped and released tracks (ticket 13b
     expect(say({ campaign, at, kind: "released", channel: "email", track: { label: "Email track 2", several: true }, after: one("SMS track"), because: "failed" })).toEqual(["Email track 2 started", "It starts after the SMS track, which ended on a bad number.", null]);
   });
 });
+
+describe("what the timeline says of a declined call (ticket 16)", () => {
+  const say = (entry: ActivityEntry) => {
+    const { title, body, track } = describeEntry(entry);
+    return [title, body, track];
+  };
+  const number = { detailId: "d1", kind: "direct" as const, owner: "person" as const, value: "+44 20 7946 0111" };
+
+  test("it says the path the decline took, as stored, then the number and the note", () => {
+    const declined = (declinedPath: "stop" | "continue" | "win_back") => ({ campaign, at, kind: "call" as const, channel: "call" as const, track: one("Phone track"), outcome: "not_interested" as const, number, note: "Happy with their supplier.", declinedPath });
+    expect(say(declined("stop"))).toEqual(["Call: not interested", "Stopped in this campaign. +44 20 7946 0111, direct. Happy with their supplier.", null]);
+    expect(say(declined("continue"))).toEqual(["Call: not interested", "No more calls in this campaign; the other channels continue. +44 20 7946 0111, direct. Happy with their supplier.", null]);
+    expect(say(declined("win_back"))).toEqual(["Call: not interested", "Moved to this campaign’s win-back branch, with no more calls. +44 20 7946 0111, direct. Happy with their supplier.", null]);
+    // Any other call has no path.
+    expect(say({ campaign, at, kind: "call", channel: "call", track: one("Phone track"), outcome: "no_answer", number, note: "", declinedPath: null })).toEqual(["Call: no answer", "+44 20 7946 0111, direct", null]);
+  });
+});

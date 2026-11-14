@@ -110,5 +110,5 @@ const p = progress;
 for (const who of ["Pat Oneil", "Nia Cole", "Omar Reed", "Sam Lee"]) log(`${at(h.clock)}  ${who}'s phone tracks with a call placed: ${await calls(who)}`);
 const pat = (await h.request<LeadSearchResult>("GET", "/api/leads?q=Pat")).body.rows[0];
 const activity = (await h.request<ActivityView>("GET", `/api/people/${pat?.id ?? ""}/activity`)).body;
-log(`${at(h.clock)}  Pat's Activity declines: ${JSON.stringify(activity.declines)}`);
+log(`${at(h.clock)}  Pat's Activity, call entries: ${JSON.stringify(activity.entries.flatMap((e) => (e.kind === "call" ? [{ at: e.at, track: e.track.label, outcome: e.outcome, declinedPath: e.declinedPath, note: e.note }] : [])))}`);
 await h.store.close();

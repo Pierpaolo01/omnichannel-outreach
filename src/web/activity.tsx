@@ -2,13 +2,15 @@ import { useId, useState } from "react";
 import type { ActivityEntry, ActivityView } from "../shared/api.ts";
 import { useApi } from "./api.ts";
 import { ErrorState, Section } from "./components.tsx";
+import { DECLINED_PATH_LINE, OUTCOME_TITLE, dialledLine } from "./calls/wording.ts";
 import { Icon, type IconName } from "./icons.tsx";
 import { useNow } from "./time.ts";
 
 /**
  * The record's Activity: one timeline across campaigns, newest first, as in the approved
  * daily-workspace prototype. Sent emails and texts expand to the copy that went; a reply shows its channel
- * and date only. The note box arrives with the ticket that adds notes.
+ * and date only. Calls show each logged outcome with the number dialled and its note (ticket 14b).
+ * The note box arrives with the ticket that adds notes.
  */
 export function Activity({ path }: { path: string }) {
   const { result, retry } = useApi<ActivityView>(path);
@@ -70,6 +72,7 @@ const REASON: Readonly<Record<string, string>> = {
 const PLAIN = "bg-raised text-muted shadow-[inset_0_0_0_1px_var(--color-line)]";
 const CRIT = "bg-crit-soft text-crit";
 const HAND = "bg-hand-soft text-hand";
+const CALL = "bg-call-soft text-call";
 
 /** "the email track", "SMS track 2": a track label inside a sentence. */
 const inSentence = (label: { label: string; several: boolean }) => (label.several ? label.label : `the ${label.label.startsWith("SMS") ? label.label : label.label.toLowerCase()}`);
@@ -91,6 +94,18 @@ export function describeEntry(entry: ActivityEntry): { icon: IconName; tone: str
     return entry.status === "sequence_finished_no_response"
       ? { icon: "system", tone: PLAIN, title: "Sequence finished with no response", body: null, track: null }
       : { icon: "system", tone: PLAIN, title: "Finished, no usable channel", body: "Nothing is left to reach them on in this campaign.", track: null };
+  if (entry.channel === "call") {
+    const track = entry.track.several ? entry.track.label : null;
+    switch (entry.kind) {
+      case "call":
+        // What a decline did (its stored path), the number dialled and the call's note; a skip for now has no number.
+        return { icon: "call", tone: CALL, title: OUTCOME_TITLE[entry.outcome], body: [entry.declinedPath ? DECLINED_PATH_LINE[entry.declinedPath].slice(0, -1) : null, dialledLine(entry.number), entry.note.trim()].filter(Boolean).join(". ") || null, track };
+      case "skipped":
+        return { icon: "system", tone: PLAIN, title: `${entry.track.label} skipped`, body: "No good number to call: every number is missing or marked wrong.", track: null };
+      case "released":
+        return { icon: "system", tone: PLAIN, title: `${entry.track.label} started`, body: `It starts after ${inSentence(entry.after)}, which ${entry.because === "skipped" ? "was skipped for this lead" : `ended on a bad ${entry.after.label.startsWith("SMS") ? "number" : "address"}`}.`, track: null };
+    }
+  }
   const sms = entry.channel === "sms";
   const noun = sms ? "Text" : "Email";
   const track = entry.track.several ? entry.track.label : null;
@@ -160,7 +175,7 @@ function Line({ entry }: { entry: ActivityEntry }) {
   );
 }
 
-function when(iso: string, now: Date): string {
+export function when(iso: string, now: Date): string {
   const at = new Date(iso);
   const time = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(at);
   if (at.toDateString() === now.toDateString()) return `Today, ${time}`;

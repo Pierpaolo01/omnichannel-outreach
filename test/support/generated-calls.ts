@@ -1253,13 +1253,14 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     const campaignId = campaigns[s.campaign]!.id;
     const shown = (await h.request<ActivityView>("GET", `/api/${s.person ? "people" : "companies"}/${recordId}/activity`)).body.entries
       .filter((e) => e.campaign.id === campaignId)
-      .map((e) => (e.kind === "replied" ? `replied|${e.channel}` : e.kind === "ended" ? "ended" : `${e.kind}|${e.channel}|${e.track.label}|${"stepNumber" in e && e.stepNumber !== null ? e.stepNumber : "-"}`))
+      .map((e) => (e.kind === "replied" ? `replied|${e.channel}` : e.kind === "ended" ? "ended" : e.kind === "call" ? `call|${e.track.label}|${e.outcome}|${e.declinedPath ?? "-"}` : `${e.kind}|${e.channel}|${e.track.label}|${"stepNumber" in e && e.stepNumber !== null ? e.stepNumber : "-"}`))
       .sort();
     const expected: string[] = [];
+    // Every outcome the user logged on the lead, skip for now included, a decline with the path it took (ticket 14b, 16).
+    for (const o of logged) if (o.accepted && o.subjectId === s.id) expected.push(`call|${trackLabel(def(s), { id: o.trackId, channel: "call" }).label}|${o.outcome}|${o.declinedPath ?? "-"}`);
     const end = endLimitOf(s);
     const atLaunch = noChannelAt(s) === runStartOf(s) && runStartOf(s) <= now;
     for (const t of tracksOf(s)) {
-      if (t.channel === "call") continue;
       const ch = t.channel;
       const label = trackLabel(def(s), t).label;
       if (atLaunch) {
@@ -1267,10 +1268,12 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
         if (t.branch === "main") expected.push(`skipped|${ch}|${label}|-`);
         continue;
       }
-      t.steps.forEach((st, i) => {
-        const d = deliveryOf(ch, s.id, st.id);
-        if (d && knownAt(ch, d) <= now) expected.push(`sent|${ch}|${label}|${i + 1}`);
-      });
+      if (ch !== "call") {
+        t.steps.forEach((st, i) => {
+          const d = deliveryOf(ch, s.id, st.id);
+          if (d && knownAt(ch, d) <= now) expected.push(`sent|${ch}|${label}|${i + 1}`);
+        });
+      }
       const f = finishFacts(s, t);
       const start = startOf(s, t);
       const started = start !== null && start <= now && start < end && !(f?.reason === "dropped_for_win_back" && f.at <= start);

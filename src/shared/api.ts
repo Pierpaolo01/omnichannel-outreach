@@ -169,6 +169,11 @@ export interface ApiError {
   readonly error: { readonly code: string; readonly message: string; readonly problems?: readonly { file: string; message: string }[] };
 }
 
+/** A refused call outcome: the call's off-list facts as the server read them when it refused (ticket 14b). */
+export interface CallOutcomeRefusal extends ApiError {
+  readonly offList: CallOffListView | null;
+}
+
 // ---------------------------------------------------------------------------------------------
 // The sequence engine (ADR 0003), ticket 12b: one email track, launch, and each lead's progress.
 
@@ -527,15 +532,27 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
     ))
   | { readonly kind: "replied"; readonly channel: "email" | "sms" }
   | { readonly kind: "ended"; readonly status: "sequence_finished_no_response" | "finished_no_usable_channel" }
+  /**
+   * A phone track's entries (ticket 14b): each call outcome the user logged, skip for now included,
+   * with the number dialled (none on a skip) and its note; a skip for want of a good number
+   * (`no_number`); and its start after a track that was skipped or failed.
+   */
+  | ({ readonly channel: "call"; readonly track: TrackLabel } & (
+      | {
+          readonly kind: "call";
+          readonly outcome: CallOutcomeApi;
+          readonly number: RecordedNumberView | null;
+          readonly note: string;
+          /** With not interested: the declined path taken, the track's or the user's override for the lead (ticket 16). */
+          readonly declinedPath: DeclinedPathApi | null;
+        }
+      | { readonly kind: "skipped"; readonly stepNumber: null; readonly reason: "no_number" }
+      | { readonly kind: "released"; readonly after: TrackLabel; readonly because: "skipped" | "failed" }
+    ))
 );
 
 export interface ActivityView {
   readonly entries: readonly ActivityEntry[];
-  /**
-   * Each campaign in which the lead declined on a call (ticket 16), with the phone track and the declined
-   * path taken, newest first. Kept beside `entries` until part b's timeline renders it as an entry of its own.
-   */
-  readonly declines: readonly { readonly campaign: { readonly id: string; readonly name: string }; readonly at: string; readonly track: TrackLabel; readonly path: DeclinedPathApi }[];
 }
 
 /**
@@ -685,9 +702,19 @@ export interface WithheldBy {
 export interface TodayView {
   /** The user's date, YYYY-MM-DD in their zone. */
   readonly date: string;
+  /** The server's instant for this answer. */
+  readonly asOf: string;
+  /**
+   * A hint (ADR 0003 4.4.1, "Freshness"): an instant at which this answer is known to change by the
+   * clock (calling hours opening or closing, the user's next day). A screen may refresh then, sooner
+   * than its interval; nothing depends on it being complete.
+   */
+  readonly nextChangeAt: string | null;
   readonly userZone: string;
   readonly readyNow: number;
   readonly laterToday: number;
+  /** Today's call capacity is used: calls due after this wait for the next day, and none is dropped (4.4). */
+  readonly capacityReached: boolean;
   /** The next calls, in queue order: ready now first, then later today. */
   readonly upNext: readonly CallQueueItem[];
   /** Needs attention (ticket 15): every overdue callback on the list, oldest first, each holding its lead's outreach. */
@@ -699,8 +726,16 @@ export interface TodayView {
 /** GET /api/calls: the focus queue. The focused task is the first ready now; the queue moves on only after an outcome. */
 export interface CallsView {
   readonly date: string;
+  /** The server's instant for this answer. */
+  readonly asOf: string;
+  /** As on TodayView: a hint of when the queue changes by the clock. */
+  readonly nextChangeAt: string | null;
   readonly userZone: string;
   readonly dailyCapacity: number;
+  /** The capacity the user has until they set one. */
+  readonly defaultDailyCapacity: number;
+  /** Today's call capacity is used: no new call is placed today (4.4: new placed today < capacity − committed). */
+  readonly capacityReached: boolean;
   /** New tasks placed today, and tasks carried into today from earlier days, which count first. */
   readonly placedToday: number;
   readonly committed: number;
@@ -755,6 +790,18 @@ export interface CallColleagueView {
   readonly lastCallNote: { readonly note: string; readonly outcome: string; readonly at: string } | null;
 }
 
+/**
+ * Why a call task is not on today's list (ADR 0003 4.4.1), from the stored task and its call records:
+ * `logged`, an outcome was logged on it (by any tab or client); `track_finished`, its phone track
+ * finished otherwise (with the reason); `lead_ended`, the lead's outreach ended in this campaign;
+ * `not_listed_today`, it waits for a day its calling hours open. `status` is the lead's status now.
+ */
+export type CallOffListView =
+  | { readonly reason: "logged"; readonly outcome: CallOutcomeApi; readonly at: string; readonly status: OutreachStatus }
+  | { readonly reason: "track_finished"; readonly finish: FinishReasonApi | null; readonly status: OutreachStatus }
+  | { readonly reason: "lead_ended"; readonly status: OutreachStatus }
+  | { readonly reason: "not_listed_today"; readonly status: OutreachStatus };
+
 /** GET /api/call-tasks/:id: everything the call screen shows for one task. */
 export interface CallTaskView {
   readonly task: CallQueueItem | null;
@@ -764,6 +811,8 @@ export interface CallTaskView {
   readonly open: boolean;
   /** On today's list now, so an outcome is accepted. */
   readonly listed: boolean;
+  /** Why it is not on today's list; null while it is. */
+  readonly offList: CallOffListView | null;
   readonly status: OutreachStatus;
   readonly person: { readonly id: string; readonly name: string; readonly title: string } | null;
   readonly company: { readonly id: string; readonly name: string };
@@ -772,6 +821,14 @@ export interface CallTaskView {
   readonly zone: string;
   readonly localTime: string;
   readonly numbers: readonly CallNumberView[];
+  /** The phone track's calling hours, in the prospect's local time (its window: days 0 = Sunday, whole hours). */
+  readonly callingHours: readonly import("../domain/sequence/clock.ts").WindowRule[];
+  /**
+   * Whether the prospect is inside those calling hours at this read's instant, by the engine's own window
+   * rule (re-check 7, R10), and, when not, the instant they open later on the user's day (null if not
+   * today). A fact about the hours only: a callback is listed by the time asked for, whatever the hours.
+   */
+  readonly callingHoursNow: { readonly open: boolean; readonly opensLaterToday: string | null };
   /** The campaign's call script or talking points. */
   readonly script: string;
   /** Every earlier touch on this lead in this campaign, oldest first. Engagement (opens, clicks) is not tracked. */
@@ -796,4 +853,9 @@ export interface CallTaskView {
   readonly declinedPath: DeclinedPathApi;
   /** The paths the user may choose for this lead: win back only while the campaign has a win-back branch. */
   readonly declinedPaths: readonly DeclinedPathApi[];
+  /**
+   * The request id of every outcome stored on this task, skips for now included: the server's word on
+   * whether a press was logged, whoever received its answer (ADR 0003 4.4.1, "One reconciliation").
+   */
+  readonly storedRequestIds: readonly string[];
 }

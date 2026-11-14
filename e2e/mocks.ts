@@ -7,6 +7,7 @@ import type {
   FileCheckResult,
   ImportRecord,
   LeadSearchResult,
+  NeedsAttention,
   PersonRecord,
 } from "../src/shared/api.ts";
 
@@ -22,7 +23,8 @@ export type MockBody =
   | { campaign: Campaign; imports: ImportRecord[] }
   | PersonRecord
   | CompanyRecord
-  | FileCheckResult;
+  | FileCheckResult
+  | NeedsAttention;
 
 export function respond(route: Route, body: MockBody, status = 200): Promise<void> {
   // eslint-disable-next-line no-restricted-syntax -- the one typed entry point

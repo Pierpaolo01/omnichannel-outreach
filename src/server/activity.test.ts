@@ -101,7 +101,7 @@ describe("the person timeline: email activity as the provider reported it", () =
     const h = new EngineHarness({ start: MONDAY_8, accounts: [] });
     await h.createCampaign("Quiet", { businesses: [business({ business_id: "b1", business_name: "Harbour Lane Physio" })], people: PEOPLE.slice(0, 1) });
     const rows = (await h.request<{ rows: { id: string }[] }>("GET", "/api/leads")).body.rows;
-    expect((await h.request<ActivityView>("GET", `/api/people/${rows[0]!.id}/activity`)).body).toEqual({ entries: [], declines: [] });
+    expect((await h.request<ActivityView>("GET", `/api/people/${rows[0]!.id}/activity`)).body).toEqual({ entries: [] });
     expect((await h.request<ApiError>("GET", "/api/people/nope/activity")).status).toBe(404);
     expect((await h.request<ApiError>("GET", "/api/companies/nope/activity")).status).toBe(404);
   });

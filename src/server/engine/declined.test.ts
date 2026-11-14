@@ -226,7 +226,10 @@ describe("Activity says what was declined and which path was taken", () => {
     const pat = (await h.request<LeadSearchResult>("GET", "/api/leads?q=Pat")).body.rows[0]!;
     expect((await h.request<PersonRecord>("GET", `/api/people/${pat.id}`)).body.enrollments[0]?.status).toBe("in_win_back");
     const activity = (await h.request<ActivityView>("GET", `/api/people/${pat.id}/activity`)).body;
-    expect(activity.declines).toEqual([{ campaign: { id: c.id, name: "Spring physio" }, at: new Date(MONDAY_9 + H).toISOString(), track: { label: "Phone track 1", several: true }, path: "win_back" }]);
+    // A decline is a call outcome, an entry like any other, with the path it took.
+    expect(activity.entries.filter((e) => e.kind === "call")).toEqual([
+      expect.objectContaining({ campaign: { id: c.id, name: "Spring physio" }, at: new Date(MONDAY_9 + H).toISOString(), channel: "call", track: { label: "Phone track 1", several: true }, outcome: "not_interested", declinedPath: "win_back" }),
+    ]);
     await h.advanceTo(MONDAY_9 + 2 * H);
     // The branch's emails are named as the branch's tracks.
     expect((await h.request<ActivityView>("GET", `/api/people/${pat.id}/activity`)).body.entries.find((e) => e.kind === "sent" && e.stepNumber === 1 && e.at >= new Date(MONDAY_9 + H).toISOString())).toMatchObject({ track: { label: "Win-back email track 1", several: true } });
@@ -264,6 +267,7 @@ describe("a branch the lead has not entered is in none of its reads (review bot 
     expect(progress.tracks.filter((t) => t.branch === "main").map((t) => t.finishReason)).toEqual(["completed", "dropped_for_win_back", "dropped_for_win_back", "dropped_for_win_back"]);
     const person = (await h.request<LeadSearchResult>("GET", "/api/leads?q=Pat")).body.rows[0]!;
     const entries = (await h.request<ActivityView>("GET", `/api/people/${person.id}/activity`)).body.entries.filter((e) => e.campaign.id === c.id);
-    expect(entries.map((e) => (e.kind === "sent" ? `sent ${e.track.label} ${e.stepNumber}` : e.kind))).toEqual(["sent Win-back email track 1 1", "sent Email track 1 1"]);
+    // The branch's send, the decline (a call entry with its path), and the main email sent before it: nothing of the dropped tracks.
+    expect(entries.map((e) => (e.kind === "sent" ? `sent ${e.track.label} ${e.stepNumber}` : e.kind === "call" ? `call ${e.outcome} ${e.declinedPath ?? ""}` : e.kind))).toEqual(["sent Win-back email track 1 1", "call not_interested win_back", "sent Email track 1 1"]);
   });
 });
