@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { launchCheck } from "./blockers.ts";
 import { render } from "./copy.ts";
-import { definitionProblems, ownSubject, WIN_BACK_LATER, type CampaignDefinition, type StepDefinition, type TrackDefinition } from "./definition.ts";
+import { declinedPathOf, definitionProblems, ownSubject, winBackAvailable, type CampaignDefinition, type StepDefinition, type TrackDefinition } from "./definition.ts";
 import { renderStep } from "./dispatch.ts";
 import { subjectState } from "../../../test/support/sequence-state.ts";
 
@@ -47,8 +47,56 @@ describe("definitions refused at the boundary (ADR 0003 7.1)", () => {
     expect(definitionProblems(definition({ tracks: [emailTrack({ channel: "sms", steps: [step("m1")] })] }))).toEqual([]);
   });
 
-  test("the win-back branch is refused until the ticket that builds it", () => {
-    expect(definitionProblems(definition({ tracks: [emailTrack({ branch: "win_back" })] }))).toEqual([WIN_BACK_LATER]);
+  describe("the win-back branch and the declined path (ticket 16)", () => {
+    const call = (fields: Partial<TrackDefinition> = {}) => emailTrack({ id: "p1", channel: "call", steps: [step("c1", { subject: "", body: "" })], ...fields });
+    const winBack = (fields: Partial<TrackDefinition> = {}) => emailTrack({ id: "w1", branch: "win_back", steps: [step("w1s1", { threading: "new_subject" })], ...fields });
+
+    test("a win-back branch of email and SMS tracks, arranged like the main sequence, entered from a phone track's declined path, is accepted", () => {
+      const sms = winBack({ id: "w2", channel: "sms", steps: [step("w2s1", { subject: "" })], start: { kind: "after", trackId: "w1", delayDays: 3 } });
+      expect(definitionProblems(definition({ smsPool: ["+447700900001"], tracks: [emailTrack(), call({ declinedPath: "win_back" }), winBack(), sms] }))).toEqual([]);
+      // A branch may be drawn before any phone track enters it, and a path of stop or continue needs none.
+      expect(definitionProblems(definition({ tracks: [emailTrack(), call({ declinedPath: "stop" }), winBack()] }))).toEqual([]);
+    });
+
+    test("the win-back branch has no call", () => {
+      expect(definitionProblems(definition({ tracks: [emailTrack(), call({ declinedPath: "win_back" }), winBack(), call({ id: "p2", branch: "win_back", steps: [step("c2", { subject: "", body: "" })] })] }))).toEqual([
+        "The win-back branch cannot hold a phone track: a lead who declined is never called again in this campaign. Remove the phone track from the win-back branch.",
+      ]);
+    });
+
+    test("a declined path of win back needs a win-back branch with a live track", () => {
+      const refused = "The phone track's declined path is win back, but the campaign has no win-back branch: add a track to the win-back branch, or choose stop or continue.";
+      expect(definitionProblems(definition({ tracks: [emailTrack(), call({ declinedPath: "win_back" })] }))).toEqual([refused]);
+      expect(definitionProblems(definition({ tracks: [emailTrack(), call({ declinedPath: "win_back" }), winBack({ removed: true })] }))).toEqual([refused]);
+    });
+
+    test("only a phone track has a declined path", () => {
+      expect(definitionProblems(definition({ tracks: [emailTrack({ declinedPath: "stop" })] }))).toEqual(["Only a phone track has a declined path: the email track has one."]);
+    });
+
+    test("a connection stays inside its branch: the branch starts when a lead declines", () => {
+      const into = winBack({ start: { kind: "after", trackId: "t1", delayDays: 0 } });
+      expect(definitionProblems(definition({ tracks: [emailTrack(), call({ declinedPath: "win_back" }), into] }))).toEqual([
+        "The win-back email track starts after a track of the main sequence: connect it inside the win-back branch, which starts when a lead declines.",
+      ]);
+      const outOf = emailTrack({ id: "t2", steps: [step("s9", { threading: "new_subject" })], start: { kind: "after", trackId: "w1", delayDays: 0 } });
+      expect(definitionProblems(definition({ tracks: [emailTrack(), call({ declinedPath: "win_back" }), winBack(), outOf] }))).toEqual([
+        "Email track 2 starts after a track of the win-back branch: connect it inside the main sequence.",
+      ]);
+    });
+
+    test("tracks are named within their branch", () => {
+      expect(definitionProblems(definition({ tracks: [emailTrack(), winBack({ window: [] })] }))).toEqual(["The win-back email track's sending window has no days."]);
+      expect(definitionProblems(definition({ tracks: [emailTrack(), winBack(), winBack({ id: "w2", window: [], steps: [step("w2s1", { threading: "new_subject" })] })] }))).toEqual(["Win-back email track 2's sending window has no days."]);
+    });
+
+    test("a phone track's declined path is the one the canvas set, and stop when none is set yet (question Q14)", () => {
+      expect(declinedPathOf(call({ declinedPath: "continue" }))).toBe("continue");
+      expect(declinedPathOf(call())).toBe("stop");
+      expect(winBackAvailable(definition({ tracks: [emailTrack(), call()] }))).toBe(false);
+      expect(winBackAvailable(definition({ tracks: [emailTrack(), call(), winBack({ removed: true })] }))).toBe(false);
+      expect(winBackAvailable(definition({ tracks: [emailTrack(), call(), winBack()] }))).toBe(true);
+    });
   });
 
   test("a phone track is exactly one call, with no wait and no copy, and connects together or after like any track (ticket 14)", () => {
@@ -65,9 +113,8 @@ describe("definitions refused at the boundary (ADR 0003 7.1)", () => {
     // A call has no copy: the campaign's call script shows on every call task (verifier F2 on a1399ce).
     expect(definitionProblems(definition({ tracks: [emailTrack(), call({ steps: [step("c1", { subject: "", body: "Ask for Pat." })] })] }))).toEqual(["The phone track's call has no copy of its own: write talking points in the campaign's call script."]);
     expect(definitionProblems(definition({ tracks: [emailTrack(), call({ steps: [step("c1", { subject: "Hi", body: "" })] })] }))).toEqual(["The phone track's call has no copy of its own: write talking points in the campaign's call script."]);
-    // The declined path is set on the canvas; win-back arrives with its branch (ticket 16).
+    // The declined path is set on the canvas (ticket 16).
     expect(definitionProblems(definition({ tracks: [emailTrack(), call({ declinedPath: "continue" })] }))).toEqual([]);
-    expect(definitionProblems(definition({ tracks: [emailTrack(), call({ declinedPath: "win_back" })] }))).toEqual([WIN_BACK_LATER]);
   });
 
   test("a start rule names a live track of the same branch, with a whole delay, and connections never go in a circle", () => {

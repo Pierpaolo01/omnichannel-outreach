@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { EngineHarness } from "../../test/support/engine-harness.ts";
 import { business, person } from "../../test/support/export-builder.ts";
 import type { FakeAccount } from "../../test/support/fake-email-port.ts";
-import type { CampaignDefinition, StepDefinition } from "../domain/sequence/definition.ts";
+import type { CampaignDefinition, DeclinedPath, StepDefinition } from "../domain/sequence/definition.ts";
 import type { WindowRule } from "../domain/sequence/clock.ts";
 import type { BeforeLaunchView } from "../shared/api.ts";
 import { localDayNumber, resetDayOf } from "../domain/sequence/clock.ts";
@@ -451,7 +451,28 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
           removed: false,
         });
       }
-      const definition: CampaignDefinition = { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: subset(inboxes).map((x) => x.id), smsPool: subset(numbers).map((x) => x.id), tracks };
+      // Ticket 16, from its own stream so the worlds above keep their shape: a win-back branch of one or two
+      // email and SMS tracks in half the campaigns, and each phone track's declined path.
+      const wb = rng(seed * 31 + c + 1616);
+      const branch: CampaignDefinition["tracks"][number][] = [];
+      if (wb() < 0.5) {
+        for (let i = 0; i < 1 + Math.floor(wb() * 2); i++) {
+          const channel = pick(wb, ["email", "sms"] as const);
+          const id = `c${c}w${i}`;
+          branch.push({
+            id,
+            channel,
+            branch: "win_back",
+            window: pick(wb, WINDOWS),
+            steps: Array.from({ length: 1 + Math.floor(wb() * 2) }, (_, k) => ({ id: `${id}s${k}`, waitDays: k === 0 ? 0 : 1 + Math.floor(wb() * 2), subject: channel === "email" ? "Still here" : "", body: "One more note.", threading: "new_subject" as const, removed: false })),
+            start: branch.length > 0 && wb() < 0.5 ? { kind: "after" as const, trackId: pick(wb, branch).id, delayDays: Math.floor(wb() * 3) } : { kind: "entry" as const },
+            removed: false,
+          });
+        }
+      }
+      const paths: DeclinedPath[] = ["stop", "continue", ...(branch.length > 0 ? (["win_back", "win_back"] as const) : [])];
+      const withPaths = tracks.map((t) => (t.channel === "call" ? { ...t, declinedPath: pick(wb, paths) } : t));
+      const definition: CampaignDefinition = { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: subset(inboxes).map((x) => x.id), smsPool: subset(numbers).map((x) => x.id), tracks: [...withPaths, ...branch] };
       // People are shared between campaigns, so one mobile can be in two campaigns' conversations.
       return { definition, leads: subset(people.map((_, i) => i)), launchAfterMs: Math.floor(r() * 3) * 9 * MIN };
     });
@@ -469,32 +490,54 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
   const startedFrom = new Set<string>();
   /** Ticket 15's stored facts, by world: a lead held by a callback, a call redialed, a call skipped at the skip limit. */
   const ticket15 = { held: 0, redialed: 0, skipped: 0, releasedBySkip: 0 };
-  async function logCalls(h: EngineHarness, campaignId: string, r: () => number, after = false) {
+  /** Ticket 16's stored facts: leads declined on each path before the projection, and the sends of competing leads in win-back after it. */
+  const ticket16 = { stop: 0, continue: 0, win_back: 0, winBackSends: 0, projectedWithABranch: 0 };
+  async function logCalls(h: EngineHarness, campaignId: string, r: () => number, after = false, d: () => number = () => 1) {
     let logged = 0;
     for (const id of await h.store.engine.subjectsOf(campaignId)) {
       const s = (await h.store.engine.subject(id, h.clock))!;
       const task = s.callTasks.find((t) => t.open);
       const number = s.lead.phones.find((n) => !n.bad);
       if (!task || !number || r() < 0.3) continue;
-      const outcome = pick(r, ["no_answer", "gatekeeper", "interested", "no_answer", "gatekeeper", "interested", "redial", "callback_requested"] as const);
+      const drawn = pick(r, ["no_answer", "gatekeeper", "interested", "no_answer", "gatekeeper", "interested", "redial", "callback_requested"] as const);
+      // Ticket 16: a quarter of the calls are declined, on the track's path or the user's override for the lead.
+      const outcome = d() < 0.25 ? "not_interested" : drawn;
+      const winBack = s.campaign.definition.tracks.some((t) => t.branch === "win_back");
+      const override = outcome === "not_interested" && d() < 0.3 ? pick(d, winBack ? (["stop", "continue", "win_back"] as const) : (["stop", "continue"] as const)) : null;
       const body =
-        outcome === "redial" ? { outcome: "no_answer", redial: true }
+        outcome === "not_interested" ? { outcome, ...(override ? { declinedPath: override } : {}) }
+        : outcome === "redial" ? { outcome: "no_answer", redial: true }
         : outcome === "callback_requested" ? { outcome, callbackAt: new Date(h.clock + pick(r, [1, 2, 4]) * DAY).toISOString() }
         : { outcome };
       const res = await h.request("POST", `/api/call-tasks/${task.id}/outcome`, { requestId: `r-${task.id}`, ...body, numberId: number.id, note: "" });
       if (res.status !== 200) continue;
       logged++;
       if (outcome === "redial") ticket15.redialed++;
+      if (outcome === "not_interested") ticket16[override ?? s.campaign.definition.tracks.find((t) => t.id === task.trackId)?.declinedPath ?? "stop"]++;
       if (outcome === "callback_requested") ticket15.held++;
       if (!after && outcome !== "redial" && outcome !== "callback_requested") startedFrom.add(outcome === "interested" ? "an interested call ended a lead" : "a logged call touched a lead and finished its phone track");
     }
     return logged;
+  }
+  /** Ticket 16: the user declines open calls of an earlier campaign, each on its track's path or an override for the lead. */
+  async function declineCalls(h: EngineHarness, campaignId: string, d: () => number) {
+    for (const id of await h.store.engine.subjectsOf(campaignId)) {
+      const s = (await h.store.engine.subject(id, h.clock))!;
+      const task = s.callTasks.find((t) => t.open);
+      const number = s.lead.phones.find((n) => !n.bad);
+      if (!task || !number || d() < 0.3) continue;
+      const winBack = s.campaign.definition.tracks.some((t) => t.branch === "win_back");
+      const override = winBack && d() < 0.5 ? "win_back" : d() < 0.3 ? pick(d, ["stop", "continue"] as const) : null;
+      const res = await h.request("POST", `/api/call-tasks/${task.id}/outcome`, { requestId: `d-${task.id}`, outcome: "not_interested", ...(override ? { declinedPath: override } : {}), numberId: number.id, note: "" });
+      if (res.status === 200) ticket16[override ?? s.campaign.definition.tracks.find((t) => t.id === task.trackId)?.declinedPath ?? "stop"]++;
+    }
   }
 
   async function compareWorld(w: World, seed: number) {
     const h = new EngineHarness({ start: w.start, accounts: w.inboxes, sms: { numbers: w.numbers } });
     expect((await h.request("PUT", "/api/call-settings", { dailyCapacity: 50, userZone: "Europe/London" })).status).toBe(200);
     const r = rng(seed + 77);
+    const d = rng(seed + 1616);
     const rows = (leads: readonly number[]) => ({
       businesses: leads.map((i) => business({ business_id: `b${i}`, business_name: `Clinic ${i}`, timezone: w.people[i]!.zone })),
       people: leads.map((i) => person({ person_id: `p${i}`, business_id: `b${i}`, full_name: `Lead Person${i}`, email: w.people[i]!.email ? `lead${i}@clinic${i}.example` : "", timezone: "", ...(w.people[i]!.mobile ? { dial_phone: mobileOf(i), dial_phone_type: "mobile" } : {}) })),
@@ -510,7 +553,11 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
       if (c.launchAfterMs > 0) await h.advanceTo(h.clock + c.launchAfterMs);
       if (r() < 0.7) {
         await h.advanceTo(h.clock + pick(r, [H, 3 * H, DAY]));
-        if ((await logCalls(h, ids[i]!, r)) > 0) await h.advanceTo(h.clock + pick(r, [MIN, 2 * H, DAY]));
+        if ((await logCalls(h, ids[i]!, r, false, d)) > 0) await h.advanceTo(h.clock + pick(r, [MIN, 2 * H, DAY]));
+      }
+      if (d() < 0.6) {
+        await h.advanceTo(h.clock + pick(d, [H, 5 * H]));
+        await declineCalls(h, ids[i]!, d);
       }
       if (r() < 0.2) {
         const db = (h.store.engine as unknown as { db: { prepare(sql: string): { run(...a: unknown[]): unknown } } }).db;
@@ -529,11 +576,19 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
     const target = ids.at(-1)!;
     const projected = await projectedSends(h.store, target, h.clock);
     const view = (await h.request<BeforeLaunchView>("GET", `/api/campaigns/${target}/before-launch`)).body;
+    // The branch's sends are not counted, and the screen says so whenever the campaign has one (ticket 16).
+    const hasBranch = w.campaigns.at(-1)!.definition.tracks.some((t) => t.branch === "win_back");
+    if (view.load) expect(view.load.winBackNotCounted).toBe(hasBranch);
+    if (hasBranch && view.load?.withheldBy === null) ticket16.projectedWithABranch++;
+    const inWinBack = new Set<string>();
+    for (const id of ids.slice(0, -1)) for (const sid of await h.store.engine.subjectsOf(id)) if ((await h.store.engine.subject(sid, h.clock))?.subject.branch === "win_back") inWinBack.add(sid);
+    const competingBefore = { email: h.fake.deliveryLog.length, sms: h.sms.deliveryLog.length };
     const already = { email: h.fake.deliveryLog.length, sms: h.sms.deliveryLog.length };
     expect((await h.launch(target)).status).toBe(200);
     const until = w.start + 12 * DAY;
     await h.advanceTo(until);
     const mine = new Set(await h.store.engine.subjectsOf(target));
+    ticket16.winBackSends += [...h.fake.deliveryLog.slice(competingBefore.email), ...h.sms.deliveryLog.slice(competingBefore.sms)].filter((x) => inWinBack.has(x.subjectId) && x.stepId.includes("w")).length;
     const pickFields = (x: { leadId: string; accountId: string; stepId: string; at: number }) => `${x.at} ${x.accountId} ${x.leadId} ${x.stepId}`;
     const actual = [...h.fake.deliveryLog.slice(already.email), ...h.sms.deliveryLog.slice(already.sms)]
       .filter((d) => mine.has(d.subjectId) && d.at < until)
@@ -564,7 +619,13 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
   const REGRESSIONS = [13_056, 13_106];
   for (const seed of [...REGRESSIONS, ...Array.from({ length: SEEDS }, (_, i) => 13_000 + i).filter((x) => !REGRESSIONS.includes(x))]) {
     test(`generated multi-track world ${seed}`, async () => {
-      const { actual, predicted, view, projected, skippedAt, channels } = await compareWorld(world(seed), seed);
+      await verify(world(seed), seed);
+    });
+  }
+  /** The projection lists exactly the engine's sends, or withholds the figure for a track waiting on a call, which the engine then sends on only after that call was skipped. */
+  async function verify(w: World, seed: number) {
+    {
+      const { actual, predicted, view, projected, skippedAt, channels } = await compareWorld(w, seed);
       texted.push(channels.has("sms"));
       const withheld = view.load?.withheldBy ?? null;
       if (withheld === null) {
@@ -590,9 +651,31 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
         else ticket15.releasedBySkip++;
       }
       expect(early).toEqual([]);
-    });
+    }
   }
   const withheldWorlds: number[] = [];
+  /**
+   * Ticket 16's stored facts, made certain (the worlds above reach them only now and then): each earlier campaign
+   * opens with a phone track and has a win-back branch, so the user's declines leave leads stopped, continuing
+   * on the other channels with no call again, and in win-back when the projection is taken.
+   */
+  const DECLINE_SEEDS = Number(process.env["PROJECTION_SEEDS"] ?? 40) / 2;
+  for (const seed of Array.from({ length: DECLINE_SEEDS }, (_, i) => 14_000 + i)) {
+    test(`generated world with declined leads ${seed}`, async () => {
+      const w = world(seed);
+      const last = w.campaigns.length - 1;
+      const campaigns = w.campaigns.map((c, i) => {
+        if (i === last) return c;
+        const tracks = c.definition.tracks;
+        const call = { id: `c${i}call`, channel: "call" as const, branch: "main" as const, window: [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 })), steps: [{ id: `c${i}calls0`, waitDays: 0, subject: "", body: "", threading: "new_subject" as const, removed: false }], start: { kind: "entry" as const }, removed: false, declinedPath: pick(rng(seed + i), ["stop", "continue", "win_back"] as const) };
+        const branch = tracks.some((t) => t.branch === "win_back")
+          ? []
+          : [{ id: `c${i}w9`, channel: "email" as const, branch: "win_back" as const, window: WINDOWS[0]!, steps: [0, 1, 2].map((k) => ({ id: `c${i}w9s${k}`, waitDays: k === 0 ? 0 : 1, subject: "Still here", body: "One more note.", threading: "new_subject" as const, removed: false })), start: { kind: "entry" as const }, removed: false }];
+        return { ...c, definition: { ...c.definition, tracks: [call, ...tracks, ...branch] } };
+      });
+      await verify({ ...w, campaigns, people: w.people.map((p) => ({ ...p, email: true })) }, seed);
+    });
+  }
   test("the worlds start from logged calls, interested calls and a paused competing campaign", () => {
     expect([...startedFrom].sort()).toEqual(
       ["a logged call touched a lead and finished its phone track", "a paused competing campaign", "a track after a phone track started when its call was logged", "an interested call ended a lead"].filter((x) => SEEDS >= 40 || startedFrom.has(x)),
@@ -604,6 +687,10 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
     expect(ticket15.redialed).toBeGreaterThan(0);
     expect(ticket15.skipped).toBeGreaterThan(0);
     expect(ticket15.releasedBySkip).toBeGreaterThan(0);
+  });
+  test("the worlds include ticket 16's stored facts: leads declined on each path, competing leads sending in win-back, and a projected campaign with a win-back branch", () => {
+    if (SEEDS < 40) return;
+    expect(Object.entries(ticket16).filter(([, n]) => n === 0).map(([what]) => what), JSON.stringify(ticket16)).toEqual([]);
   });
   test("the worlds include phone tracks that hold the tracks after them, and worlds with phone tracks still projected", () => {
     expect(withheldWorlds.length).toBeGreaterThan(0);

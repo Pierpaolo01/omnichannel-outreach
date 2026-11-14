@@ -1,9 +1,9 @@
 import { describe, expect, test } from "vitest";
-import { DAY, H, MONDAY_9, subjectState, tracksDefinition } from "../../../test/support/sequence-state.ts";
+import { attempt, DAY, H, handed, MONDAY_9, subjectState, tracksDefinition, withAttempts } from "../../../test/support/sequence-state.ts";
 import { bucketOf, callNumbers, compareReadyNow, isListed, logCallOutcome, placeCall, readyCalls, reasonOf } from "./calls.ts";
 import { localDayNumber } from "./clock.ts";
 import type { TrackDefinition } from "./definition.ts";
-import { deriveStatus, enterMain, evaluate, runs, sealReckoning } from "./progress.ts";
+import { applyReply, deriveStatus, enterMain, evaluate, runs, sealReckoning } from "./progress.ts";
 import type { CallNumber, SubjectState } from "./state.ts";
 
 /** Call tasks as pure rules (ADR 0003 2.3, 2.4 "Calls", 4.4; ticket 14). Data is fictitious. */
@@ -307,4 +307,150 @@ describe("the past is not reinterpreted (ADR 0003 3.5; council on 228cd3b)", () 
     expect(at.tracks[0]).toMatchObject({ finishReason: "skipped_unworked", finishedWall: Date.parse("2026-11-04T05:00:00Z") });
   });
 
+});
+
+describe("not interested: the phone track's declined path (ticket 16; ADR 0003 2.4 \"Calls\", \"Entering win-back\")", () => {
+  const ok = (r: ReturnType<typeof logCallOutcome>) => {
+    if (!r.ok) throw new Error(r.reason);
+    return r.state;
+  };
+  const emailStep = (id: string, waitDays = 0): TrackDefinition["steps"][number] => ({ id, waitDays, subject: "Hello {{first_name|there}}", body: "A note for {{company}}.", threading: "new_subject", removed: false });
+  const EVERY_HOUR = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
+  const email = (id: string, steps: TrackDefinition["steps"], fields: Partial<TrackDefinition> = {}): TrackDefinition => ({ id, channel: "email", branch: "main", window: EVERY_HOUR, steps, start: { kind: "entry" }, removed: false, ...fields });
+  const call = (id: string, stepId: string, fields: Partial<TrackDefinition> = {}) => callTrack({ id, steps: [{ id: stepId, waitDays: 0, subject: "", body: "", threading: "new_subject", removed: false }], ...fields });
+  /**
+   * Two phone tracks at entry (p1, whose path is under test, and p2), an email track beside them (e1, two emails),
+   * an email track and a phone track a day after p1 (e2, p3), and, unless left out, a win-back branch: an email
+   * at its entry and a second email a day later.
+   */
+  function world(path: TrackDefinition["declinedPath"], branch = true): SubjectState {
+    const tracks = [
+      call("p1", "c1", path ? { declinedPath: path } : {}),
+      call("p2", "c2"),
+      email("e1", [emailStep("e1s1"), emailStep("e1s2", 2)]),
+      email("e2", [emailStep("e2s1")], { start: { kind: "after", trackId: "p1", delayDays: 1 } }),
+      call("p3", "c3", { start: { kind: "after", trackId: "p1", delayDays: 1 } }),
+      ...(branch ? [email("w1", [emailStep("w1s1")], { branch: "win_back" }), email("w2", [emailStep("w2s1")], { branch: "win_back", start: { kind: "after", trackId: "w1", delayDays: 1 } })] : []),
+    ];
+    const base = subjectState();
+    let s: SubjectState = {
+      ...base,
+      campaign: { ...base.campaign, launchedAt: MONDAY_9, definition: tracksDefinition(tracks) },
+      lead: { ...base.lead, phones: [phone("d-main", "main_line", 1), phone("d-direct", "direct", 2)] },
+      callDay: { userZone: "Europe/London", day: localDayNumber(MONDAY_9, "Europe/London"), capacity: 5, placedToday: 0, committed: 0 },
+    };
+    s = evaluate(enterMain(s, MONDAY_9), MONDAY_9);
+    for (const [i, item] of readyCalls(s, MONDAY_9).entries()) s = placeCall(s, item, MONDAY_9, `task-${i + 1}`) ?? s;
+    return s;
+  }
+  const AT = MONDAY_9 + H;
+  const declined = (fields: Partial<Parameters<typeof logCallOutcome>[2]> = {}) => ({ requestId: "r-declined", outcome: "not_interested" as const, numberId: "d-direct", note: "", noteScope: "person" as const, ...fields });
+  const finish = (s: SubjectState, trackId: string) => s.tracks.find((t) => t.trackId === trackId)?.finishReason ?? null;
+
+  test("the world: both entry calls are placed, and the email beside them is due", () => {
+    const s = world("continue");
+    expect(s.callTasks.map((t) => [t.id, t.trackId, t.open])).toEqual([["task-1", "p1", true], ["task-2", "p2", true]]);
+    expect(s.tracks.find((t) => t.trackId === "e1")?.nextStepId).toBe("e1s1");
+  });
+
+  test("stop: the lead ends declined on call in this campaign; every open call closes, the declined one completed and the others skipped as declined", () => {
+    const s = ok(logCallOutcome(world("stop"), "task-1", declined(), AT, { attempt: "a1", note: "n1" }));
+    expect(s.subject).toMatchObject({ ended: "declined_on_call", endedWall: AT, noMoreCalls: true, touched: true, branch: "main" });
+    expect(deriveStatus(s)).toBe("declined_on_call");
+    expect(s.callTasks.map((t) => [t.id, t.open, t.closedWall])).toEqual([["task-1", false, AT], ["task-2", false, AT]]);
+    expect([finish(s, "p1"), finish(s, "p2")]).toEqual(["completed", "skipped_declined"]);
+    expect(s.results).toEqual([expect.objectContaining({ stepId: "c1", result: "sent", reason: "not_interested", atWall: AT })]);
+    // The call record keeps the path taken, for Activity and the lead's progress.
+    expect(s.callAttempts.at(-1)).toMatchObject({ outcome: "not_interested", declinedPath: "stop" });
+    expect(runs(s)).toBe(false);
+  });
+
+  test("continue: the other channels run on; no call is placed for this lead again, the later phone track included", () => {
+    const s = ok(logCallOutcome(world("continue"), "task-1", declined(), AT, { attempt: "a1", note: "n1" }));
+    expect(s.subject).toMatchObject({ ended: null, noMoreCalls: true, branch: "main" });
+    expect(deriveStatus(s)).toBe("active");
+    expect([finish(s, "p1"), finish(s, "p2"), finish(s, "e1")]).toEqual(["completed", "skipped_declined", null]);
+    expect(s.callTasks.every((t) => !t.open)).toBe(true);
+    expect(s.callAttempts.at(-1)).toMatchObject({ declinedPath: "continue" });
+    // A day after p1's finish, e2 starts as arranged, and the later phone track starts and is skipped as declined.
+    const later = AT + DAY + H;
+    const next = evaluate(atDay(s, later), later);
+    expect(finish(next, "p3")).toBe("skipped_declined");
+    expect(next.tracks.find((t) => t.trackId === "e2")).toMatchObject({ startedAt: expect.any(Number), finishedAt: null, nextStepId: "e2s1" });
+    expect(readyCalls(next, later)).toEqual([]);
+    expect(next.callTasks).toHaveLength(2);
+  });
+
+  test("win back: the main sequence's remaining tracks are dropped and the branch's tracks start, with no call", () => {
+    const s = ok(logCallOutcome(world("win_back"), "task-1", declined(), AT, { attempt: "a1", note: "n1" }));
+    const lead = s.subject.branchEnteredAt;
+    expect(s.subject).toMatchObject({ ended: null, noMoreCalls: true, branch: "win_back" });
+    expect(lead).toBe(s.results.at(-1)?.at);
+    expect(deriveStatus(s)).toBe("in_win_back");
+    // Every remaining main track is dropped, started or not, so none of its work is claimed afterwards.
+    expect(["p1", "p2", "e1", "e2", "p3"].map((id) => finish(s, id))).toEqual(["completed", "skipped_declined", "dropped_for_win_back", "dropped_for_win_back", "dropped_for_win_back"]);
+    expect(s.tracks.find((t) => t.trackId === "e2")).toMatchObject({ startedAt: null, finishedWall: AT });
+    // The branch's entry track starts at once, its next track after its own delay.
+    expect(s.tracks.find((t) => t.trackId === "w1")).toMatchObject({ startedAt: lead, nextStepId: "w1s1", dueWall: AT });
+    expect(s.tracks.find((t) => t.trackId === "w2")).toBeUndefined();
+    expect(readyCalls(s, AT)).toEqual([]);
+    expect(s.callAttempts.at(-1)).toMatchObject({ declinedPath: "win_back" });
+  });
+
+  test("win back with a main email in flight: a claim is withdrawn; work already handed over is asked to withdraw and completes as the attempt rules say", () => {
+    const base = world("win_back");
+    const withWork = withAttempts(base, [attempt({ id: "a-claimed", trackId: "e1", stepId: "e1s1" }), handed({ id: "a-handed", idempotencyKey: "a-handed", trackId: "e2", stepId: "e2s1" })]);
+    const s = ok(logCallOutcome(withWork, "task-1", declined(), AT, { attempt: "a1", note: "n1" }));
+    expect(s.attempts.map((a) => [a.id, a.state, a.withdrawRequested])).toEqual([["a-claimed", "withdrawn", false], ["a-handed", "handed", true]]);
+  });
+
+  test("the user may override the path for this one lead", () => {
+    const stop = ok(logCallOutcome(world("win_back"), "task-1", declined({ declinedPath: "stop" }), AT, { attempt: "a1", note: "n1" }));
+    expect(deriveStatus(stop)).toBe("declined_on_call");
+    expect(stop.callAttempts.at(-1)).toMatchObject({ declinedPath: "stop" });
+    const winBack = ok(logCallOutcome(world("continue"), "task-1", declined({ declinedPath: "win_back" }), AT, { attempt: "a1", note: "n1" }));
+    expect(deriveStatus(winBack)).toBe("in_win_back");
+  });
+
+  test("a phone track with no declined path set stops the lead (question Q14)", () => {
+    expect(deriveStatus(ok(logCallOutcome(world(undefined), "task-1", declined(), AT, { attempt: "a1", note: "n1" })))).toBe("declined_on_call");
+  });
+
+  test("refused plainly, changing nothing: win back with no win-back branch, and a declined path with another outcome", () => {
+    expect(logCallOutcome(world("stop", false), "task-1", declined({ declinedPath: "win_back" }), AT, { attempt: "a1", note: "n1" })).toEqual({ ok: false, reason: "This campaign has no win-back branch: choose stop or continue." });
+    expect(logCallOutcome(world("stop"), "task-1", declined({ outcome: "no_answer", declinedPath: "continue" }), AT, { attempt: "a1", note: "n1" })).toEqual({ ok: false, reason: "A declined path goes with not interested only." });
+    expect(logCallOutcome(world("stop"), "task-1", declined({ redial: true }), AT, { attempt: "a1", note: "n1" })).toEqual({ ok: false, reason: "A redial follows no answer, voicemail left, or gatekeeper or not reached." });
+  });
+
+  test("a redial waiting for tomorrow on another phone track closes without an outcome and holds nothing", () => {
+    const redialed = ok(logCallOutcome(world("continue"), "task-2", { requestId: "r-redial", outcome: "no_answer", redial: true, numberId: "d-direct", note: "", noteScope: "person" }, MONDAY_9 + 30 * MIN, { attempt: "a0", note: "n0" }));
+    const s = ok(logCallOutcome(redialed, "task-1", declined(), AT, { attempt: "a1", note: "n1" }));
+    expect(s.callTasks.find((t) => t.id === "task-2")).toMatchObject({ open: false, closedWall: AT });
+    expect(finish(s, "p2")).toBe("skipped_declined");
+    expect(s.callAttempts.filter((a) => a.taskId === "task-2").map((a) => a.outcome)).toEqual(["no_answer"]);
+  });
+
+  test("declined on a callback: the hold is released first, so the call is logged at that instant on a running clock", () => {
+    const WEDNESDAY_15 = MONDAY_9 + 2 * DAY + 6 * H;
+    const held = ok(logCallOutcome(world("win_back"), "task-1", { requestId: "r-cb", outcome: "callback_requested", callbackAt: WEDNESDAY_15, numberId: "d-direct", note: "", noteScope: "person" }, AT, { attempt: "a0", note: "n0" }));
+    expect(runs(held)).toBe(false);
+    const s = ok(logCallOutcome(atDay(held, WEDNESDAY_15), "task-1", declined(), WEDNESDAY_15, { attempt: "a1", note: "n1" }));
+    expect(runs(s)).toBe(true);
+    expect(s.freezes.at(-1)).toEqual({ fromWall: AT, toWall: WEDNESDAY_15 });
+    expect(s.tracks.find((t) => t.trackId === "w1")).toMatchObject({ dueWall: WEDNESDAY_15 });
+    expect(deriveStatus(s)).toBe("in_win_back");
+  });
+
+  test("a reply during win-back is the ordinary reply handoff for this lead in this campaign", () => {
+    const s = ok(logCallOutcome(world("win_back"), "task-1", declined(), AT, { attempt: "a1", note: "n1" }));
+    const replied = applyReply(s, { channel: "email", atWall: AT + H, providerRef: "ref-1" }, AT + H);
+    expect(deriveStatus(replied)).toBe("replied");
+    expect(runs(replied)).toBe(false);
+  });
+
+  test("in win-back, the branch's channels are the lead's reach: a branch the lead cannot be reached on ends it with no usable channel", () => {
+    const noEmail = world("win_back");
+    const s = ok(logCallOutcome({ ...noEmail, lead: { ...noEmail.lead, details: [], resolved: {} } }, "task-1", declined(), AT, { attempt: "a1", note: "n1" }));
+    expect(deriveStatus(s)).toBe("finished_no_usable_channel");
+  });
 });

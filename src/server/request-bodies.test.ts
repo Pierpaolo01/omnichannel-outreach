@@ -62,21 +62,17 @@ describe("request bodies refuse fields they do not know (verifier B4)", () => {
     expect(res.body.error.message).toContain("attachment");
   });
 
-  test("not interested is refused plainly and leaves the call open, until ticket 16 builds it", async () => {
+  test("not interested takes its declined path; a field it does not know is refused and leaves the call open (ticket 16)", async () => {
     const { h, taskId, campaignId } = await world();
     const view = (await h.request<CallTaskView>("GET", `/api/call-tasks/${taskId}`)).body;
-    const declined = await h.request<{ error: { message: string } }>("POST", `/api/call-tasks/${taskId}/outcome`, { requestId: "r-declined", outcome: "no_answer", numberId: view.numbers[0]?.detailId, declinedPath: "stop" });
-    expect(declined.status).toBe(400);
-    expect(declined.body.error.message).toBe("Not interested arrives with a later release. Nothing was changed. (Fields this release does not accept: declinedPath.)");
-    const notInterested = await h.request<{ error: { message: string } }>("POST", `/api/call-tasks/${taskId}/outcome`, { requestId: "r-ni", outcome: "not_interested", numberId: view.numbers[0]?.detailId });
-    expect(notInterested.status).toBe(400);
-    expect(notInterested.body.error.message).toContain("Choose one of the outcomes this release offers");
+    const unknown = await h.request<{ error: { message: string } }>("POST", `/api/call-tasks/${taskId}/outcome`, { requestId: "r-declined", outcome: "not_interested", numberId: view.numbers[0]?.detailId, declined: true });
+    expect(unknown.status).toBe(400);
+    expect(unknown.body.error.message).toBe("Nothing was changed. (Fields this release does not accept: declined.)");
     const after = (await h.request<CallTaskView>("GET", `/api/call-tasks/${taskId}`)).body;
     expect(after).toMatchObject({ open: true, touches: [] });
     const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaignId}`)).body.rows;
     expect(rows[0]?.enrollments[0]?.status).toBe("waiting_on_call");
-    // A redial, ticket 15's, is accepted with the outcomes it follows.
-    expect((await h.request("POST", `/api/call-tasks/${taskId}/outcome`, { requestId: "r-ok", outcome: "no_answer", redial: true, numberId: view.numbers[0]?.detailId })).status).toBe(200);
+    expect((await h.request("POST", `/api/call-tasks/${taskId}/outcome`, { requestId: "r-ok", outcome: "not_interested", declinedPath: "continue", numberId: view.numbers[0]?.detailId })).status).toBe(200);
   });
 
   test("an import with an unknown field is refused before anything is imported", async () => {

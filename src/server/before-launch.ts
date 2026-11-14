@@ -7,7 +7,7 @@
 import { missingFields, renderSegments, type Segment } from "../domain/copy-preview.ts";
 import { isLive, isUncertain } from "../domain/sequence/attempt.ts";
 import { mergeUses } from "../domain/sequence/copy.ts";
-import { liveSteps, liveTracks, ownSubject, poolOf, type CampaignDefinition, type TrackDefinition } from "../domain/sequence/definition.ts";
+import { liveSteps, liveTracks, ownSubject, poolOf, winBackAvailable, type CampaignDefinition, type TrackDefinition } from "../domain/sequence/definition.ts";
 import { callbackHold, goodEmail, progressOf, runs } from "../domain/sequence/progress.ts";
 import type { AccountState, SubjectState } from "../domain/sequence/state.ts";
 import type { BeforeLaunchView, ContactDetailView, CopyPreview, LeadRow, LoadProjectionView, PreviewLead, WithheldBy, WithheldTrack } from "../shared/api.ts";
@@ -178,8 +178,12 @@ function competingWithheld(others: readonly SubjectState[]): { campaignId: strin
   return null;
 }
 
-/** A lead on which the user may still log a call: running, or held by a callback, whose outcome releases it. */
-const awaitsACall = (s: SubjectState) => runs(s) || (s.subject.ended === null && callbackHold(s));
+/**
+ * A lead on which the user may still log a call: running, or held by a callback, whose outcome releases it;
+ * and not one that declined, which is never called again (ticket 16): its phone tracks are finished or are
+ * skipped at their start by the engine's own evaluation, so what waits on them is simulated, not withheld.
+ */
+const awaitsACall = (s: SubjectState) => (runs(s) || (s.subject.ended === null && callbackHold(s))) && !s.subject.noMoreCalls;
 
 /** Competing campaigns where a call can still be logged: the estimate assumes none is (the screen says so). */
 function callingCampaigns(others: readonly SubjectState[]): string[] {
@@ -337,6 +341,8 @@ async function loadProjection(store: OutreachStore, campaignId: string, definiti
     ],
     withheldBy,
     callsNotCounted,
+    // Only a decline enters the branch, and the estimate assumes no call is logged (ticket 16).
+    winBackNotCounted: winBackAvailable(definition),
   };
 }
 

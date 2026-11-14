@@ -34,6 +34,9 @@ const keepStored = (before: SubjectState, after: SubjectState): SubjectState => 
     return b ? { ...t, skipDeadline: b.skipDeadline, dueAt: b.dueAt } : t;
   }),
 });
+/** The lead as if it had never declined, and the stored bar put back. */
+const callable = (s: SubjectState): SubjectState => ({ ...s, subject: { ...s.subject, noMoreCalls: false } });
+const keepBar = (before: SubjectState, after: SubjectState): SubjectState => ({ ...after, subject: { ...after.subject, noMoreCalls: before.subject.noMoreCalls } });
 const mapTasks = (s: SubjectState, change: (t: CallTask) => CallTask): SubjectState => ({ ...s, callTasks: s.callTasks.map(change) });
 
 const RULES: Record<string, Partial<Rules>> = {
@@ -211,6 +214,54 @@ const RULES: Record<string, Partial<Rules>> = {
       return out.ok ? { ok: true, state: keepTasksOpen(s, out.state) } : out;
     },
   },
+
+  // ADR 0003 9.3, ticket 16.
+  "open task survives a decline": {
+    logCallOutcome: (s, taskId, input, now, ids, listed) => {
+      const out = R.logCallOutcome(s, taskId, input, now, ids, listed);
+      if (!out.ok || out.replayed || input.outcome !== "not_interested") return out;
+      // Every other task the lead had open stays open, and its track as it was.
+      const others = s.callTasks.filter((t) => t.open && t.id !== taskId);
+      return {
+        ok: true,
+        state: {
+          ...out.state,
+          callTasks: out.state.callTasks.map((t) => others.find((o) => o.id === t.id) ?? t),
+          tracks: out.state.tracks.map((p) => (others.some((o) => o.trackId === p.trackId) ? (progressOf(s, p.trackId) ?? p) : p)),
+        },
+      };
+    },
+  },
+  // One per further rule of ticket 16.
+  "a decline does not bar later calls": {
+    // Starting and placing read the lead as if it had never declined; the stored fact stays as it is.
+    evaluate: (s, now, options) => keepBar(s, R.evaluate(callable(s), now, options)),
+    readyCalls: (s, now) => R.readyCalls(callable(s), now),
+    placeCall: (s, item, now, id) => {
+      const out = R.placeCall(callable(s), item, now, id);
+      return out ? keepBar(s, out) : null;
+    },
+  },
+  "the user's declined path ignored": {
+    logCallOutcome: (s, taskId, input, now, ids, listed) => R.logCallOutcome(s, taskId, { ...input, declinedPath: null }, now, ids, listed),
+  },
+  "win-back keeps the main sequence running": {
+    logCallOutcome: (s, taskId, input, now, ids, listed) => {
+      const out = R.logCallOutcome(s, taskId, input, now, ids, listed);
+      if (!out.ok || out.replayed || out.state.subject.branch !== "win_back" || s.subject.branch === "win_back") return out;
+      // The main tracks that were running keep their pending steps, so their sends go on.
+      return { ok: true, state: { ...out.state, tracks: out.state.tracks.map((p) => (p.finishReason === "dropped_for_win_back" ? (progressOf(s, p.trackId) ?? p) : p)) } };
+    },
+  },
+  "win-back entered at the campaign's start": {
+    logCallOutcome: (s, taskId, input, now, ids, listed) => {
+      const out = R.logCallOutcome(s, taskId, input, now, ids, listed);
+      if (!out.ok || out.replayed || out.state.subject.branch !== "win_back" || s.subject.branch === "win_back") return out;
+      const branch = new Set(out.state.campaign.definition.tracks.filter((t) => t.branch === "win_back").map((t) => t.id));
+      const reset = { ...out.state, subject: { ...out.state.subject, branchEnteredAt: 0 }, tracks: out.state.tracks.filter((p) => !branch.has(p.trackId)) };
+      return { ok: true, state: runs(reset) ? evaluate(reset, now) : reset };
+    },
+  },
 };
 
 /** The invariant each mutation must break, and the seed offset known to show it (refreshed by the CI search). */
@@ -231,7 +282,7 @@ const EXPECTED: Record<string, { invariant: string; seed: number }> = {
   "a track that finishes without closing its call task": { invariant: "16", seed: 0 },
   "ready now newest due first": { invariant: "16", seed: 6 },
   "the focus moves to the oldest ready call": { invariant: "16", seed: 2 },
-  "redial resets the deadline": { invariant: "16", seed: 9 },
+  "redial resets the deadline": { invariant: "16", seed: 23 },
   "redial listed the same day": { invariant: "16", seed: 0 },
   "callback listed before its day": { invariant: "16", seed: 20 },
   "callback expires": { invariant: "16", seed: 9 },
@@ -247,6 +298,11 @@ const EXPECTED: Record<string, { invariant: string; seed: number }> = {
   "a user action judged on stale state": { invariant: "16", seed: 3 },
   "a day already judged is judged again": { invariant: "7", seed: 96 },
   "a redial rolled over at its first listed day": { invariant: "16", seed: 27 },
+  "open task survives a decline": { invariant: "15", seed: 40 },
+  "a decline does not bar later calls": { invariant: "15", seed: 98 },
+  "the user's declined path ignored": { invariant: "20", seed: 79 },
+  "win-back keeps the main sequence running": { invariant: "7", seed: 38 },
+  "win-back entered at the campaign's start": { invariant: "7", seed: 9 },
 };
 
 export const CALL_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number }> = Object.fromEntries(

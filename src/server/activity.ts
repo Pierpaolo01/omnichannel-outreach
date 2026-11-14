@@ -16,12 +16,12 @@
  * has no delivered
  * state, because Instantly reports none (ADR 0002, "Delivered").
  */
-import type { ActivityEntry, EnrollmentView } from "../shared/api.ts";
+import type { ActivityEntry, ActivityView, EnrollmentView } from "../shared/api.ts";
 import { displayPhone } from "../domain/phone.ts";
 import { goodEmail, goodMobile, wallAtLead } from "../domain/sequence/progress.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
 import { trackLabel } from "../shared/track-label.ts";
-import { progressView } from "./engine/views.ts";
+import { declinedOf, progressView } from "./engine/views.ts";
 import type { OutreachStore } from "./persistence/store.ts";
 
 const SKIP_REASON: Readonly<Record<string, string>> = { "address on the provider's block list": "block_list" };
@@ -103,6 +103,21 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
   }
   // Newest first; at the same instant, the later-recorded entry first.
   return entries.map((e, i) => ({ e, i })).sort((a, b) => b.e.at.localeCompare(a.e.at) || b.i - a.i).map(({ e }) => e);
+}
+
+/**
+ * The lead's declined calls (ticket 16), one per campaign at most: the stored call record with the path it
+ * took, on its phone track. Newest first. `ActivityView.declines`, until part b's timeline makes it an entry.
+ */
+export async function declinesOf(store: OutreachStore, enrollments: readonly EnrollmentView[], now: number): Promise<ActivityView["declines"]> {
+  const out: { campaign: { id: string; name: string }; at: string; track: ReturnType<typeof trackLabel>; path: NonNullable<ReturnType<typeof declinedOf>>["path"] }[] = [];
+  for (const enrollment of enrollments) {
+    const state = await store.engine.subject(enrollment.id, now);
+    const declined = state ? declinedOf(state) : null;
+    if (!state || !declined) continue;
+    out.push({ campaign: enrollment.campaign, at: declined.at, track: trackLabel(state.campaign.definition, { id: declined.trackId, channel: "call" }), path: declined.path });
+  }
+  return out.sort((a, b) => b.at.localeCompare(a.at));
 }
 
 /** The wall instant a track started, or null if it has not. */

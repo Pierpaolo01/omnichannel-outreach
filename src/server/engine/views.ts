@@ -4,7 +4,7 @@ import { isListed, listedForDay, reasonOf } from "../../domain/sequence/calls.ts
 import { callRecordView, dateOfDay } from "./call-views.ts";
 import { leadNow } from "../../domain/sequence/clock.ts";
 import { heldReason, stalledAccounts } from "../../domain/sequence/dispatch.ts";
-import { deriveStatus, liveTracksFor } from "../../domain/sequence/progress.ts";
+import { deriveStatus, liveTracksFor, wallAtLead } from "../../domain/sequence/progress.ts";
 import type { AccountState, SubjectState } from "../../domain/sequence/state.ts";
 import type { EnrollmentProgress, NeedsAttention, SenderAccountViewApi } from "../../shared/api.ts";
 import type { EngineStore } from "./engine-store.ts";
@@ -27,8 +27,13 @@ export function progressView(s: SubjectState, now: number): EnrollmentProgress {
     sender: s.subject.emailSender,
     smsSender: s.subject.smsSender,
     zone: s.lead.zone,
-    tracks: [...liveTracksFor(s), ...s.campaign.definition.tracks.filter((t) => t.removed && !liveTracksFor(s).includes(t))]
+    branch: s.subject.branch,
+    winBackEnteredAt: s.subject.branch === "win_back" && s.subject.branchEnteredAt !== null ? iso(wallAtLead(s.subject.clock, s.freezes, s.subject.branchEnteredAt, now)) : null,
+    declined: declinedOf(s),
+    // The main sequence's tracks, then the win-back branch's (ticket 16), then removed tracks the lead had reached.
+    tracks: [...forBranch(s, "main"), ...forBranch(s, "win_back"), ...s.campaign.definition.tracks.filter((t) => t.removed && !liveTracksFor(s).includes(t))]
       .filter((t) => !t.removed || s.tracks.some((p) => p.trackId === t.id))
+      .filter((t, i, all) => all.indexOf(t) === i)
       .map((track) => {
         const p = s.tracks.find((x) => x.trackId === track.id);
         const numberOf = (stepId: string) => track.steps.filter((st) => !st.removed).findIndex((st) => st.id === stepId) + 1;
@@ -36,6 +41,7 @@ export function progressView(s: SubjectState, now: number): EnrollmentProgress {
         return {
           trackId: track.id,
           channel: track.channel,
+          branch: track.branch,
           callTask: task
             ? {
                 taskId: task.id,
@@ -87,6 +93,17 @@ export function progressView(s: SubjectState, now: number): EnrollmentProgress {
         };
       }),
   };
+}
+
+/** A branch's tracks for the lead: not removed, or already started by it (5.1). */
+const forBranch = (s: SubjectState, branch: "main" | "win_back") =>
+  s.campaign.definition.tracks.filter((t) => t.branch === branch && (!t.removed || s.tracks.some((p) => p.trackId === t.id && p.startedAt !== null)));
+
+/** The lead's declined call (ticket 16): its stored record, with the path it took. A lead declines at most once. */
+export function declinedOf(s: SubjectState): EnrollmentProgress["declined"] {
+  const record = s.callAttempts.find((c) => c.outcome === "not_interested" && c.declinedPath !== null);
+  const trackId = record ? s.callTasks.find((t) => t.id === record.taskId)?.trackId : undefined;
+  return record?.declinedPath && trackId ? { at: new Date(record.atWall).toISOString(), trackId, path: record.declinedPath } : null;
 }
 
 export function accountView(a: AccountState, label: string): SenderAccountViewApi {

@@ -4,7 +4,7 @@ import { z } from "zod";
 import { planImport } from "../domain/import-plan.ts";
 import { isOutreachStatus } from "../domain/outreach-status.ts";
 import { checkScraperFile, parseScraperExport } from "../domain/scraper-export.ts";
-import type { ApiError, CallOutcomeAnswer, Campaign, FileCheckResult, SmsProviderStatus } from "../shared/api.ts";
+import type { ActivityView, ApiError, CallOutcomeAnswer, Campaign, FileCheckResult, SmsProviderStatus } from "../shared/api.ts";
 import { CAMPAIGN_NAME_MAX, DEFINITION_MAX_BYTES, STEP_BODY_MAX, STEP_SUBJECT_MAX } from "../shared/limits.ts";
 import { checkApiRequest } from "./guard.ts";
 import { invalidBodyMessage, requestObject } from "./request-body.ts";
@@ -21,7 +21,7 @@ import { sealReckoning } from "../domain/sequence/progress.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
 import type { CampaignDetail, CampaignListItem, CampaignSequenceSummary, SequenceView } from "../shared/api.ts";
 import { beforeLaunchView, copyPreview } from "./before-launch.ts";
-import { activityOf } from "./activity.ts";
+import { activityOf, declinesOf } from "./activity.ts";
 import { registerEmailProviderRoutes, type EmailProviderSource } from "./instantly/routes.ts";
 
 export interface AppDependencies {
@@ -79,17 +79,19 @@ const callSettingsBody = requestObject({
   dailyCapacity: z.number().int("The daily call capacity is a whole number.").positive("The daily call capacity is at least 1.").max(1_000),
   userZone: z.string().trim().refine((z) => isTimeZone(z), "Use an IANA time zone such as Europe/London."),
 });
-// Not interested arrives with ticket 16 and is refused here until then. Redial and callback are ticket 15's;
-// which outcome each goes with is the domain's rule (`logCallOutcome`), refused there with a plain reason.
+// Redial and callback are ticket 15's, not interested and its declined path ticket 16's; which outcome each
+// goes with is the domain's rule (`logCallOutcome`), refused there with a plain reason.
 const outcomeBody = requestObject({
   /**
    * The client's key for this one action: the same key answers with the first result and stores
    * nothing again, so a retry or a double click never logs an outcome or a note twice (verifier B3).
    */
   requestId: z.string().trim().min(1, "Send a request id with each outcome.").max(200),
-  outcome: z.enum(["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "callback_requested", "skip_for_now"], {
-    message: "Choose one of the outcomes this release offers: no answer, voicemail left, gatekeeper or not reached, wrong or dead number, interested, callback requested, or skip for now.",
+  outcome: z.enum(["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "not_interested", "callback_requested", "skip_for_now"], {
+    message: "Choose one of the outcomes this release offers: no answer, voicemail left, gatekeeper or not reached, wrong or dead number, interested, not interested, callback requested, or skip for now.",
   }),
+  /** With not interested: the declined path for this lead, overriding the phone track's (stop, continue or win back). */
+  declinedPath: z.enum(["stop", "continue", "win_back"], { message: "A declined path is stop, continue or win_back." }).optional(),
   /** With no answer, voicemail or gatekeeper: move the call onto the user's next day. */
   redial: z.boolean().optional(),
   /** With a callback requested: the date and time the prospect asked for, with its offset (ISO 8601). */
@@ -418,12 +420,12 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   // The timeline's campaign activity on a person or company-lead record (ticket 12c).
   app.get("/people/:id/activity", async (c) => {
     const person = await store.person(c.req.param("id"));
-    return person ? c.json({ entries: await activityOf(store, person.enrollments, Date.parse(now()), "person") }) : notFound(c, "person");
+    return person ? c.json<ActivityView>({ entries: await activityOf(store, person.enrollments, Date.parse(now()), "person"), declines: await declinesOf(store, person.enrollments, Date.parse(now())) }) : notFound(c, "person");
   });
 
   app.get("/companies/:id/activity", async (c) => {
     const company = await store.company(c.req.param("id"));
-    return company ? c.json({ entries: await activityOf(store, company.enrollments, Date.parse(now()), "company") }) : notFound(c, "company");
+    return company ? c.json<ActivityView>({ entries: await activityOf(store, company.enrollments, Date.parse(now()), "company"), declines: await declinesOf(store, company.enrollments, Date.parse(now())) }) : notFound(c, "company");
   });
 
   app.get("/enrollments/:id", async (c) => {
@@ -464,6 +466,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
       outcome: body.data.outcome,
       redial: body.data.redial ?? false,
       callbackAt: body.data.callbackAt === undefined ? null : Date.parse(body.data.callbackAt),
+      declinedPath: body.data.declinedPath ?? null,
       numberId: body.data.numberId ?? null,
       note: body.data.note,
       noteScope: body.data.noteScope,

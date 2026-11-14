@@ -16,22 +16,31 @@ import { FULL_SEARCH, inShard, SEED } from "./sequence-chunks.ts";
  * behaviour the runs report (`stats.features`). Which behaviours those are is `CALL_FEATURES`, and
  * `pnpm check` asserts that the fixed seeds' runs reach every one of them, so a change to the generator
  * cannot silently drop one. Refresh both when the generator changes (last swept on 14 November 2026, ticket
- * 15a after the council on 228cd3b: 75 behaviours).
+ * 16a: 94 behaviours. Ticket 16's draws moved the ticket 15 runs that declines touch, and "callback-worked:
+ * gatekeeper+redial", a redial off a callback after a gatekeeper, is reached by none of the 100 seeds now; the
+ * same rule is reached after no answer and voicemail, which stay listed).
  */
-export const CALL_FIXED_SEEDS: readonly number[] = [9, 15, 35, 40, 46, 61, 73, 76, 79];
+export const CALL_FIXED_SEEDS: readonly number[] = [9, 16, 20, 21, 30, 35, 38, 42, 46, 57, 60, 61, 78, 92, 98];
 
 /** Every behaviour the fixed seeds must reach between them. */
 export const CALL_FEATURES: readonly string[] = [
   "a-company-zone-moved",
   "a-held-lead-lost-its-last-number",
+  "a-later-phone-track-skipped-as-declined",
   "a-person-zone-moved",
+  "a-phone-track-released-by-the-decline-skipped",
   "a-redial-skipped-from-its-original-due-date",
   "a-send-beside-an-open-call",
+  "a-send-in-win-back",
+  "a-started-main-track-dropped",
+  "a-win-back-branch",
   "acted-after-a-callback-time-before-the-tick",
   "acted-after-a-rollover-before-the-tick",
   "acted-just-before-a-due-instant",
   "after-a-call",
   "an-expiry-released-a-track",
+  "an-open-call-skipped-as-declined",
+  "an-unstarted-main-track-dropped",
   "bad-number-chosen",
   "call-list-zone-moved",
   "callback-for-a-later-day",
@@ -40,10 +49,10 @@ export const CALL_FEATURES: readonly string[] = [
   "callback-with-no-good-number",
   "callback-worked:callback_requested",
   "callback-worked:gatekeeper",
-  "callback-worked:gatekeeper+redial",
   "callback-worked:interested",
   "callback-worked:no_answer",
   "callback-worked:no_answer+redial",
+  "callback-worked:not_interested",
   "callback-worked:skip_for_now",
   "callback-worked:voicemail",
   "callback-worked:voicemail+redial",
@@ -53,12 +62,21 @@ export const CALL_FEATURES: readonly string[] = [
   "capacity:3",
   "capacity:5",
   "closed-on-interest",
+  "declined-path-overridden",
+  "declined-path-with-another-outcome",
+  "declined-with-another-call-open",
+  "declined-with-no-path-set",
+  "declined:continue",
+  "declined:stop",
+  "declined:win_back",
   "drain-skipped-a-callback-it-cannot-log",
   "email-reply",
+  "ended:declined_on_call",
   "ended:finished_no_usable_channel",
   "ended:interested_on_call",
   "ended:replied",
   "ended:sequence_finished_no_response",
+  "in-win-back",
   "later-today",
   "limit:1",
   "limit:2",
@@ -71,6 +89,7 @@ export const CALL_FEATURES: readonly string[] = [
   "outcome:interested",
   "outcome:no_answer",
   "outcome:no_answer+redial",
+  "outcome:not_interested",
   "outcome:skip_for_now",
   "outcome:voicemail",
   "outcome:voicemail+redial",
@@ -88,6 +107,7 @@ export const CALL_FEATURES: readonly string[] = [
   "redial-with-the-wrong-outcome",
   "replayed",
   "replayed-after-restart",
+  "replied-in-win-back",
   "rolled-over",
   "skipped-call-last",
   "skipped-unworked",
@@ -96,6 +116,7 @@ export const CALL_FEATURES: readonly string[] = [
   "two-ready-calls",
   "waits-behind-committed",
   "waits-for-room",
+  "win-back-refused-without-a-branch",
   "wrong-mobile",
 ];
 const SEARCH_SEEDS = 100;

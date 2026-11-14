@@ -5,7 +5,7 @@ import type { SenderAccountView } from "../../domain/sequence/blockers.ts";
 import { isTimeZone, localDayNumber, prospectZone, resetDayOf, startOfLocalDay, type WindowRule } from "../../domain/sequence/clock.ts";
 import { defaultGap } from "../../domain/sequence/dispatch.ts";
 import type { MergeData } from "../../domain/sequence/copy.ts";
-import { emptyDefinition, poolOf, type CampaignDefinition } from "../../domain/sequence/definition.ts";
+import { emptyDefinition, poolOf, type CampaignDefinition, type DeclinedPath } from "../../domain/sequence/definition.ts";
 import { callableOnDay, skipDeadlineOf, skipLimitOf } from "../../domain/sequence/calls.ts";
 import { deriveStatus } from "../../domain/sequence/progress.ts";
 import type {
@@ -649,7 +649,7 @@ export class SqliteEngineStore implements EngineStore {
     const attempts = this.sql("SELECT * FROM attempts WHERE subject_id = ? ORDER BY claimed_wall, rowid").all(subjectId).map(toAttempt);
     const callAttempts = this.sql("SELECT * FROM call_attempts WHERE subject_id = ? ORDER BY at_wall, rowid")
       .all(subjectId)
-      .map((r): CallAttempt => ({ id: str(r, "id"), requestId: str(r, "request_id"), taskId: str(r, "task_id"), outcome: str(r, "outcome") as CallOutcome, redial: num(r, "redial") === 1, callbackAt: numOrNull(r, "callback_at"), numberDetailId: strOrNull(r, "number_detail_id"), note: str(r, "note"), at: num(r, "at"), atWall: num(r, "at_wall") }));
+      .map((r): CallAttempt => ({ id: str(r, "id"), requestId: str(r, "request_id"), taskId: str(r, "task_id"), outcome: str(r, "outcome") as CallOutcome, redial: num(r, "redial") === 1, callbackAt: numOrNull(r, "callback_at"), declinedPath: declinedPathOrNull(strOrNull(r, "declined_path")), numberDetailId: strOrNull(r, "number_detail_id"), note: str(r, "note"), at: num(r, "at"), atWall: num(r, "at_wall") }));
     // Every id that can name one of the lead's numbers resolves through the merge pointer (ADR 0001, ticket 12a):
     // the numbers recorded on its calls, and every detail a re-import folded into one of its numbers, so a
     // screen read before the merge names the same number.
@@ -914,7 +914,7 @@ export class SqliteEngineStore implements EngineStore {
       if (base.callAttempts.some((b) => b.id === a.id)) continue;
       changed = true;
       // The unique request id refuses a second record of one action, even from another process.
-      this.run("INSERT INTO call_attempts (id, request_id, task_id, subject_id, outcome, redial, callback_at, number_detail_id, note, at, at_wall) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [a.id, a.requestId, a.taskId, id, a.outcome, a.redial ? 1 : 0, a.callbackAt, a.numberDetailId, a.note, a.at, a.atWall]);
+      this.run("INSERT INTO call_attempts (id, request_id, task_id, subject_id, outcome, redial, callback_at, declined_path, number_detail_id, note, at, at_wall) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [a.id, a.requestId, a.taskId, id, a.outcome, a.redial ? 1 : 0, a.callbackAt, a.declinedPath, a.numberDetailId, a.note, a.at, a.atWall]);
     }
     if (next.newNotes.length > 0) {
       const e = this.sql("SELECT person_id, company_id FROM enrollments WHERE id = ?").get(id);
@@ -970,6 +970,11 @@ export class SqliteEngineStore implements EngineStore {
       throw error;
     }
   }
+}
+
+/** A call record's declined path, as migration 15's CHECK allows it. */
+function declinedPathOrNull(value: string | null): DeclinedPath | null {
+  return value === "stop" || value === "continue" || value === "win_back" ? value : null;
 }
 
 function parseDefinition(row: Row): CampaignDefinition {
