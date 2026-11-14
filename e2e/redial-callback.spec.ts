@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { respond } from "./mocks.ts";
-import { callbackWithNoGoodNumber, callOf, carriedAndOverdue, freshCalls, galleryRecord, openCalls } from "./screens.ts";
+import { SCREENS, callbackWithNoGoodNumber, callOf, carriedAndOverdue, freshCalls, galleryRecord, openCalls, seedData } from "./screens.ts";
 
 /**
  * Redials, callbacks, rolled-over and overdue calls (ticket 15, part b), on the app over the fake email
@@ -317,4 +317,31 @@ test("the record says each open call's state in its campaign row: rolled over, a
   await page.getByRole("heading", { name: "Campaigns" }).scrollIntoViewIfNeeded();
   await page.getByText("Callbacks, overdue").scrollIntoViewIfNeeded();
   await shot(page, "record-call-states");
+});
+
+/** EVIDENCE_DIR only: the changed pages' states from the standing screen list (each loading, empty, error and success state), light and dark. */
+const EVIDENCE_SCREENS = [
+  "today loading",
+  "today error",
+  "today with calls ready",
+  "calls loading",
+  "calls error",
+  "calls, the call didn't load",
+  "calls, before calling hours",
+  "calls, the list done",
+  "calls, a callback on a day their calling hours never open",
+  "calls, a callback logged and held",
+  "calls, a callback time entered",
+  "every outreach status, a bad number and a newer email",
+];
+test.describe("evidence (EVIDENCE_DIR only)", () => {
+  test.skip(!process.env["EVIDENCE_DIR"], "evidence captures only");
+  for (const name of EVIDENCE_SCREENS) {
+    const screen = SCREENS.find((x) => x.name === name);
+    if (!screen) continue;
+    test(`capture: ${name}`, async ({ page, request }) => {
+      await screen.open(page, await seedData(request));
+      await shot(page, `screen-${name.replace(/[^a-z0-9]+/gi, "-")}`);
+    });
+  }
 });
