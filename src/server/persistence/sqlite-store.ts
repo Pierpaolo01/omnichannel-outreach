@@ -204,9 +204,8 @@ class SqliteStore implements OutreachStore {
       SELECT 'person' AS kind, p.id AS id, p.display_name AS sort_name FROM people p
       JOIN companies c ON c.id = p.company_id
       WHERE (:text = '' OR p.search_name LIKE :like ESCAPE '\\' OR c.search_name LIKE :like ESCAPE '\\'
-        OR ${detailMatch(
-          "((d.owner_kind = 'person' AND d.owner_id = p.id) OR (d.owner_kind = 'company' AND d.owner_id = c.id))",
-        )})
+        OR ${detailMatch("d.owner_kind = 'person' AND d.owner_id = p.id")}
+        OR ${detailMatch("d.owner_kind = 'company' AND d.owner_id = c.id")})
       AND (:company = '' OR p.company_id = :company)
       AND ${enrollmentFilter("e.lead_kind = 'person' AND e.person_id = p.id")}
       UNION ALL
