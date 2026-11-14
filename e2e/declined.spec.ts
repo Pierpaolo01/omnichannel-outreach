@@ -140,6 +140,10 @@ test("a phone track with no path set: stop is preselected as what logging does, 
   await expect(paths(page)).toHaveAccessibleDescription("No path is set on the phone track for a declined call, so the one logging uses without a choice is preselected.");
   await expect(path(page, /Move to the win-back messages \(this campaign has none\)/)).toBeDisabled();
   await shot(page, "declined-no-path-set");
+  // Overridden on a track with no path set: no setting is claimed for the track (review bot on d478d6d).
+  await path(page, /Keep the email and SMS steps going/).check();
+  await expect(paths(page)).toHaveAccessibleDescription("For Amira Hassan only: no path is set on the phone track, so without a choice logging uses “Stop all outreach in this campaign”.");
+  await shot(page, "declined-no-path-set-overridden");
 });
 
 test("a path the read no longer offers is refused in place: nothing is sent, the choice stays, and Log waits for another path", async ({ page }) => {

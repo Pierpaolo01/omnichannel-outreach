@@ -4,7 +4,7 @@ import { business, person } from "../../../test/support/export-builder.ts";
 import type { CampaignDefinition, DeclinedPath, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
 import type { ActivityView, CallTaskView, LeadSearchResult, PersonRecord, RecordCalls } from "../../shared/api.ts";
 import { describeEntry } from "../activity.tsx";
-import { DECLINED_PATH_LINE, declinedRecordLine, declinePreviewLines, loggedLine, offListLine, refusedRecordLine } from "./wording.ts";
+import { DECLINED_PATH_LINE, declinedPathSourceLine, declinedRecordLine, declinePreviewLines, loggedLine, offListLine, refusedRecordLine } from "./wording.ts";
 
 /**
  * Every sentence the screens say about a decline (ticket 16c), rendered from the server's reads at one instant: the
@@ -95,5 +95,24 @@ describe("every screen says a decline from the server's reads, so none can disag
   test("a kept refusal names the path its press carried", () => {
     const line = refusedRecordLine({ who: "Pat Oneil", body: { outcome: "not_interested", declinedPath: "continue" }, refused: { message: "This call is no longer on the list.", offList: null } }, "Europe/London");
     expect(line).toBe("Not logged: not interested (“Keep the email and SMS steps going”) for Pat Oneil. This call is no longer on the list.");
+  });
+});
+
+describe("where the preselected path comes from is said from the read: set on the phone track, or not set (review bot on d478d6d)", () => {
+  const set = { declinedPath: "win_back" as const, declinedPathSet: true, track: { label: "Phone track" } };
+  const unset = { declinedPath: "stop" as const, declinedPathSet: false, track: { label: "Phone track" } };
+
+  test("untouched, or the user's choice equal to the preselection", () => {
+    expect(declinedPathSourceLine(set, null, "Pat Oneil")).toBe("Preselected from the phone track’s setting.");
+    expect(declinedPathSourceLine(set, "win_back", "Pat Oneil")).toBe("Preselected from the phone track’s setting.");
+    expect(declinedPathSourceLine(unset, null, "Pat Oneil")).toBe("No path is set on the phone track for a declined call, so the one logging uses without a choice is preselected.");
+    expect(declinedPathSourceLine(unset, "stop", "Pat Oneil")).toBe("No path is set on the phone track for a declined call, so the one logging uses without a choice is preselected.");
+  });
+
+  test("overridden: a set path is named as the track's setting; with none set, no setting is claimed", () => {
+    expect(declinedPathSourceLine(set, "continue", "Pat Oneil")).toBe("For Pat Oneil only: the phone track is set to “Move to the win-back messages”.");
+    const overUnset = declinedPathSourceLine(unset, "continue", "Pat Oneil");
+    expect(overUnset).toBe("For Pat Oneil only: no path is set on the phone track, so without a choice logging uses “Stop all outreach in this campaign”.");
+    expect(overUnset).not.toContain("is set to");
   });
 });

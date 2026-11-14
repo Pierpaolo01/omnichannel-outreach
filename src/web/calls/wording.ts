@@ -542,12 +542,28 @@ export const DECLINED_PATH_CHOICE = {
 /** Beside a path the call's read does not offer: the read offers win back only while the campaign has a win-back branch. */
 export const PATH_NOT_OFFERED = "(this campaign has none)";
 
-/** Under the radios: where the preselected path comes from, as the read says it (Q14: a track with none set). */
-export function declinedPathSourceLine(task: Pick<CallTaskView, "declinedPath" | "declinedPathSet" | "track">, chosen: DeclinedPathApi | null, who: string): string {
+/**
+ * Under the radios: where the preselected path comes from, from the read's `declinedPathSet` (never inferred), and, when
+ * the user chose another path for this lead, what the track holds. A track with no path set is said as unset, with the
+ * path logging uses without a choice as the read gives it (`declinedPath`); no setting is claimed for it (review bot on
+ * d478d6d), and Q14 is not answered here. One exhaustive switch, so a third source a later ticket adds needs its sentence.
+ */
+export function declinedPathSourceLine(task: Pick<CallTaskView, "declinedPath" | "declinedPathSet"> & { readonly track: { readonly label: string } }, chosen: DeclinedPathApi | null, who: string): string {
   const track = task.track.label.toLowerCase();
-  const source = task.declinedPathSet ? `Preselected from the ${track}’s setting.` : `No path is set on the ${track} for a declined call, so the one logging uses without a choice is preselected.`;
-  if (chosen === null || chosen === task.declinedPath) return source;
-  return `For ${who} only: the ${track} is set to “${DECLINED_PATH_CHOICE[task.declinedPath]}”.`;
+  const overridden = chosen !== null && chosen !== task.declinedPath;
+  const source: "set" | "unset" = task.declinedPathSet ? "set" : "unset";
+  switch (source) {
+    case "set":
+      return overridden ? `For ${who} only: the ${track} is set to “${DECLINED_PATH_CHOICE[task.declinedPath]}”.` : `Preselected from the ${track}’s setting.`;
+    case "unset":
+      return overridden
+        ? `For ${who} only: no path is set on the ${track}, so without a choice logging uses “${DECLINED_PATH_CHOICE[task.declinedPath]}”.`
+        : `No path is set on the ${track} for a declined call, so the one logging uses without a choice is preselected.`;
+    default: {
+      const unhandled: never = source;
+      throw new Error(`A preselection source with no sentence: ${String(unhandled)}`);
+    }
+  }
 }
 
 /** A chosen path the call's read does not offer (the boundary, ticket 16c): Log sends nothing. */
