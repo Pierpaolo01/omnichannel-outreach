@@ -1,5 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { callbackWithNoGoodNumber, callOf, carriedAndOverdue, freshCalls, openCalls } from "./screens.ts";
+import { respond } from "./mocks.ts";
+import { callbackWithNoGoodNumber, callOf, carriedAndOverdue, freshCalls, galleryRecord, openCalls } from "./screens.ts";
 
 /**
  * Redials, callbacks, rolled-over and overdue calls (ticket 15, part b), on the app over the fake email
@@ -17,9 +18,17 @@ const dayField = (page: Page) => page.getByLabel("Day", { exact: true });
 const timeField = (page: Page) => page.getByLabel("Their time", { exact: true });
 
 /** Screenshots of the page as it is, in both themes, when EVIDENCE_DIR is set. */
-async function shot(page: Page, name: string): Promise<void> {
+async function shot(page: Page, name: string, narrow = false): Promise<void> {
   const dir = process.env["EVIDENCE_DIR"];
   if (!dir) return;
+  if (narrow) {
+    const size = page.viewportSize();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByLabel("Day", { exact: true }).scrollIntoViewIfNeeded();
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: `${dir}/${name}-390.png` });
+    if (size) await page.setViewportSize(size);
+  }
   for (const scheme of ["light", "dark"] as const) {
     await page.emulateMedia({ colorScheme: scheme });
     // The theme's colour transitions settle before the capture; the viewport is what the user sees (the log bar is sticky).
@@ -108,7 +117,7 @@ test("a callback: entered in their time, said back in both, judged before Log as
   await expect(page.getByText("Callback on Mon 9 Nov at 15:30 their time, the same as yours. Inside their calling hours.")).toBeVisible();
   await expect(page.getByText("Amira Hassan’s automated outreach in Clinics, London is held from now until you log how the callback went. The call stays open: it is never skipped, and nothing resumes by itself.")).toBeVisible();
   await page.getByLabel("Notes from this call").fill("Asked for a call after clinic.");
-  await shot(page, "calls-callback-entered");
+  await shot(page, "calls-callback-entered", true);
   await logButton(page).click();
   await expect(outcomeStatus(page)).toHaveText(
     "Amira Hassan: callback requested for Mon 9 Nov at 15:30 their time, the same as yours. Their automated outreach in Clinics, London is held until you log how the callback went. The note is saved on Amira Hassan.",
@@ -291,4 +300,21 @@ test("demonstration: a redial ages from its original due date, an unworked call 
     await expect(page.getByText("Email 2 sent")).toHaveCount(0);
     await linger(page);
   });
+});
+
+test("the record says each open call's state in its campaign row: rolled over, a callback, overdue with no good number, a redial for another day, and a call waiting on a callback", async ({ page }) => {
+  const f = await freshCalls("ready", "record-gallery");
+  const id = f.person("Amira Hassan");
+  // The gallery fixture: a fictitious record with every call state on it.
+  await page.route(`**/api/people/${id}`, (route) => respond(route, galleryRecord(id)));
+  await page.goto(`${f.url}/leads/people/${id}`);
+  await expect(page.getByText("Their call rolled over to today’s list. It was due Mon 9 Nov; if it isn’t worked, it is skipped at the end of Tue 10 Nov.")).toBeVisible();
+  await expect(page.getByText("Callback Tue 10 Nov at 15:00 their time. Their automated outreach in this campaign is held until you log how it went.")).toBeVisible();
+  await expect(page.getByText(/Callback Mon 9 Nov at 11:30 their time, now overdue\..*Every number is marked wrong/)).toBeVisible();
+  await expect(page.getByText("Their call is on the list for Wed 11 Nov. It was due Mon 9 Nov; if it isn’t worked, it is skipped at the end of Wed 11 Nov.")).toBeVisible();
+  await expect(page.getByText("Their call on the phone track 2 waits while their callback is open: only the callback is on the list.")).toBeVisible();
+  await expect(page.getByText("Callback Thu 12 Nov at 10:00 their time. Their automated outreach in this campaign is held until you log how it went.")).toBeVisible();
+  await page.getByRole("heading", { name: "Campaigns" }).scrollIntoViewIfNeeded();
+  await page.getByText("Callbacks, overdue").scrollIntoViewIfNeeded();
+  await shot(page, "record-call-states");
 });

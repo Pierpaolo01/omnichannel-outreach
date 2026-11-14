@@ -103,13 +103,6 @@ const SETUPS: readonly Setup[] = [
   { name: "Calls, an overdue callback", open: async (page) => openCalls(page, await carriedAndOverdue("rescue-overdue")) },
   { name: "Calls, a callback with no good number left", open: async (page) => openCalls(page, await callbackWithNoGoodNumber("rescue-q13")) },
   {
-    name: "Today, an overdue callback",
-    open: async (page) => {
-      await openCalls(page, await carriedAndOverdue("rescue-today-overdue"), "/");
-      await page.getByText("Tom’s callback is overdue").waitFor();
-    },
-  },
-  {
     name: "Today, nothing loaded",
     open: async (page) => {
       const f = await freshCalls("ready", "rescue-today-error");

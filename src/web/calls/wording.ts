@@ -417,7 +417,7 @@ export function recordCallLine(call: RecordCallView, today: string): string {
     if (call.noGoodNumber) lines.push("Every number is marked wrong, so nothing can be logged on it until a new number arrives by import or they reply. Pausing them or skipping the step arrives with a later release.");
     return lines.join(" ");
   }
-  if (call.heldByCallback) return `Their ${call.track.label.toLowerCase()} call waits while their callback is open.`;
+  if (call.heldByCallback) return `Their call on the ${call.track.label.toLowerCase()} waits while their callback is open: only the callback is on the list.`;
   if (call.listed) {
     const why = call.reason === "rolled_over" ? "Their call rolled over to today’s list." : call.reason === "redial" ? "Their call is back on today’s list: you asked for a redial." : "Their call is on today’s list.";
     return `${why}${limit}`;

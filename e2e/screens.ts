@@ -162,7 +162,7 @@ const BUSINESS_HEADER_ONLY_MISSING_PLACE =
   "business_id,business_name,phone_e164\nbz-1,Some Clinic,+442079460999\n";
 
 /** A person record showing every outreach status, a bad number and a newer email. */
-function galleryRecord(id: string): PersonRecord & RecordCalls {
+export function galleryRecord(id: string): PersonRecord & RecordCalls {
   const statuses = OUTREACH_STATUSES;
   const e = (status: (typeof OUTREACH_STATUSES)[number]) => `e${statuses.indexOf(status)}`;
   const base = { track: { id: "p1", label: "Phone track" }, zone: "Europe/London", noGoodNumber: false, heldByCallback: false, callbackAt: null, skipLimit: null } as const;
@@ -171,9 +171,16 @@ function galleryRecord(id: string): PersonRecord & RecordCalls {
   const calls: RecordCalls["calls"] = [
     { ...base, enrollmentId: e("waiting_on_call"), taskId: "t-rolled", kind: "call", listed: true, reason: "rolled_over", listedFor: "2026-11-10", skipLimit: limit },
     { ...base, enrollmentId: e("callback_scheduled"), taskId: "t-callback", kind: "callback", listed: true, reason: "callback", listedFor: "2026-11-10", callbackAt: "2026-11-10T15:00:00.000Z" },
-    { ...base, enrollmentId: e("queued"), taskId: "t-overdue", kind: "callback", listed: true, reason: "overdue", listedFor: "2026-11-09", callbackAt: "2026-11-09T11:30:00.000Z", noGoodNumber: true },
-    { ...base, enrollmentId: e("active"), taskId: "t-redial", kind: "call", listed: false, reason: null, listedFor: "2026-11-11", skipLimit: { ...limit, ifUnworked: "2026-11-11" } },
-    { ...base, enrollmentId: e("in_win_back"), taskId: "t-held", kind: "call", listed: false, reason: null, listedFor: "2026-11-10", heldByCallback: true, skipLimit: { ...limit, ifUnworked: null } },
+    { ...base, enrollmentId: "e-overdue", taskId: "t-overdue", kind: "callback", listed: true, reason: "overdue", listedFor: "2026-11-09", callbackAt: "2026-11-09T11:30:00.000Z", noGoodNumber: true },
+    { ...base, enrollmentId: "e-redial", taskId: "t-redial", kind: "call", listed: false, reason: null, listedFor: "2026-11-11", skipLimit: { ...limit, ifUnworked: "2026-11-11" } },
+    { ...base, enrollmentId: "e-held", taskId: "t-held-callback", kind: "callback", listed: false, reason: null, listedFor: "2026-11-12", callbackAt: "2026-11-12T10:00:00.000Z" },
+    { ...base, enrollmentId: "e-held", taskId: "t-held", track: { id: "p2", label: "Phone track 2" }, kind: "call", listed: false, reason: null, listedFor: "2026-11-10", heldByCallback: true, skipLimit: { ...limit, ifUnworked: null } },
+  ];
+  // Enrollments whose status goes with those calls, after the one-per-status gallery.
+  const more = [
+    { id: "e-overdue", campaign: { id: "c-overdue", name: "Callbacks, overdue" }, status: "callback_scheduled" as const, enrolledAt: "2026-11-12T09:00:00.000Z" },
+    { id: "e-redial", campaign: { id: "c-redial", name: "Calls, redialed" }, status: "waiting_on_call" as const, enrolledAt: "2026-11-12T09:00:00.000Z" },
+    { id: "e-held", campaign: { id: "c-held", name: "Two phone tracks" }, status: "callback_scheduled" as const, enrolledAt: "2026-11-12T09:00:00.000Z" },
   ];
   return {
     calls,
@@ -191,7 +198,7 @@ function galleryRecord(id: string): PersonRecord & RecordCalls {
       { id: "d3", owner: "person", channel: "phone", phoneKind: "direct", value: "+44 20 7946 0999", bad: true, newer: false },
       { id: "d4", owner: "company", channel: "phone", phoneKind: "main_line", value: "+44 20 7946 0998", bad: false, newer: false },
     ],
-    enrollments: statuses.map((status, i) => ({ id: `e${i}`, campaign: { id: `c${i}`, name: `Campaign ${i + 1}` }, status, enrolledAt: "2026-11-12T09:00:00.000Z" })),
+    enrollments: [...statuses.map((status, i) => ({ id: `e${i}`, campaign: { id: `c${i}`, name: `Campaign ${i + 1}` }, status, enrolledAt: "2026-11-12T09:00:00.000Z" })), ...more],
     unenrolledReason: null,
     colleagues: [
       { id: "p2", name: "Colleague Two", title: "Manager", enrollments: statuses.slice(5, 8).map((status, i) => ({ id: `ce${i}`, campaign: { id: `c${i}`, name: `Campaign ${i + 1}` }, status, enrolledAt: "2026-11-12T09:00:00.000Z" })), unenrolledReason: null },
