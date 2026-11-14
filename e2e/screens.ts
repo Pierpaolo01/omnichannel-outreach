@@ -1009,7 +1009,7 @@ export const SCREENS: readonly Screen[] = [
       const id = await f.freshTwoChannelCampaign(`Two calls ${Date.now()}`);
       await page.request.put(`${f.url}/api/campaigns/${id}/sequence`, { data: { ...TWO_CHANNELS, callScript: "Ask who books.", tracks: [...TWO_CHANNELS.tracks, phoneTrack("call", { kind: "entry" }), phoneTrack("call-2", { kind: "after", trackId: "call", delayDays: 2 })] } });
       await page.goto(`${f.url}/campaigns/${id}/before-launch`);
-      await settle(page, "phone track 2 starts after phone track 1");
+      await settle(page, "and that each one gets no answer");
     },
   },
   {
@@ -1021,7 +1021,8 @@ export const SCREENS: readonly Screen[] = [
     },
   },
   {
-    // Over the fake providers, so every track has a sender and only the call holds the figure back.
+    // Over the fake providers, so every track has a sender: a track after a call is projected under the
+    // stated assumption about calls (ticket 14c), and its message carries the call it follows.
     name: "fake provider: before launch with a track that waits on a call",
     open: async (page) => {
       const f = await fakeProviderApp("a-track-after-a-call");
@@ -1030,7 +1031,7 @@ export const SCREENS: readonly Screen[] = [
       const definition = { ...TWO_CHANNELS, tracks: [...TWO_CHANNELS.tracks.map((t) => (t.id === "email-2" ? { ...t, start: { kind: "after" as const, trackId: "call", delayDays: 0 } } : t)), call] };
       await page.request.put(`${f.url}/api/campaigns/${id}/sequence`, { data: definition });
       await page.goto(`${f.url}/campaigns/${id}/before-launch`);
-      await settle(page, "which finishes only when you log the call");
+      await settle(page, "after the phone track’s call");
     },
   },
   // Chains the outline must fit at every width (review bot on 7401eb2): four tracks deep, as the bot

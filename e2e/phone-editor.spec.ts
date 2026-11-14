@@ -84,7 +84,7 @@ test.describe("the phone track on the canvas and in its inspector", () => {
     expect((await stored(page, id)).tracks.find((t) => t.id === "call")?.callSkipLimitDays).toBe(4);
   });
 
-  test("a second phone track is a second call the user places after the first, and Before launch then withholds the figure and says why", async ({ page }) => {
+  test("a second phone track is a second call the user places after the first, and Before launch projects it under the stated assumption about calls", async ({ page }) => {
     const id = await newCampaign(page, "Two calls");
     await page.request.put(`/api/campaigns/${id}/sequence`, { data: { ...TWO_CHANNELS, emailPool: [], smsPool: [], tracks: [...TWO_CHANNELS.tracks, phoneTrack("call", { kind: "entry" })] } });
     await page.goto(`/campaigns/${id}`);
@@ -95,7 +95,8 @@ test.describe("the phone track on the canvas and in its inspector", () => {
     await page.getByLabel("Days after that track finishes").fill("2");
     await saved(page);
     await page.getByRole("link", { name: /Before launch/ }).click();
-    await expect(page.getByText("phone track 2 starts after phone track 1, which finishes only when you log the call", { exact: false })).toBeVisible();
+    await expect(page.getByText("it assumes you work every call on your list on the day it is there, and that each one gets no answer", { exact: false })).toBeVisible();
+    await expect(page.getByText("Can’t project", { exact: false })).toHaveCount(0);
   });
 });
 
@@ -122,7 +123,7 @@ test.describe("calls in Before launch", () => {
     await expect(calls).toContainText("2 a day");
     await expect(calls).toContainText("of 2");
     await expect(page.getByText("A lead starts with its first email or text, or when its first call goes on your list.", { exact: false })).toBeVisible();
-    await expect(page.getByText("assuming you work through each day’s list", { exact: false })).toBeVisible();
+    await expect(page.getByText("For calls in this campaign, it assumes you work every call on your list on the day it is there, and that each one gets no answer", { exact: false })).toBeVisible();
     await page.getByRole("button", { name: "Launch campaign" }).click();
     await expect(page.getByText(/^Launched .*\.$/)).toBeVisible();
     await f.harness.tick();

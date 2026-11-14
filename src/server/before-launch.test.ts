@@ -335,7 +335,7 @@ describe("Before launch: projected daily load per sender inbox", () => {
     expect(tight?.daysUntilAllStart).toBe(11);
   });
 
-  test("the withheld figure names each track that withholds it, and why: no connected sender, or waiting on a phone track's call (review bot on 8edc8dd; ticket 13b)", async () => {
+  test("only a track with no connected sender withholds the figure, and it is named; tracks after a phone track, and a phone track after another, are projected under the stated assumption about calls (review bot on 8edc8dd; ticket 13b; review bot on 5cd8a93)", async () => {
     const N1 = "+447700900001";
     const h = new EngineHarness({ start: MONDAY_8, accounts: [inbox("inbox-a", { capacity: 10 })], sms: { numbers: [{ id: N1, capacity: 50, gapMs: null, k: 1, healthy: true, resetZone: "Europe/London" }] } });
     const { campaign: c } = await h.createCampaign("Autumn physio", { businesses: [HARBOUR], people: PEOPLE });
@@ -350,19 +350,14 @@ describe("Before launch: projected daily load per sender inbox", () => {
     };
     // Together with or after the email track, an SMS track, a second email track and a phone track are all projected.
     expect(await load([phone, sms({ kind: "entry" }), secondEmail({ kind: "after", trackId: "t1", delayDays: 1 })])).toMatchObject({ withheldBy: null, daysUntilAllStart: expect.any(Number) });
-    // A track after the phone track, directly or through another: named, with the call it waits on.
-    expect((await load([phone, sms({ kind: "after", trackId: "p1", delayDays: 1 }), secondEmail({ kind: "after", trackId: "m1", delayDays: 0 })])).withheldBy).toEqual({
-      campaign: null,
-      tracks: [
-        { trackId: "m1", channel: "sms", label: "the SMS track", why: "after_a_phone_track", phoneTrack: "the phone track" },
-        { trackId: "e2", channel: "email", label: "email track 2", why: "after_a_phone_track", phoneTrack: "the phone track" },
-      ],
-    });
-    // A second phone track after the first goes on the list only once the first call is logged (ticket 14c).
+    // A track after the phone track, directly or through another: projected, its call assumed worked
+    // on its day with no answer, which finishes the phone track (ticket 14c).
+    expect(await load([phone, sms({ kind: "after", trackId: "p1", delayDays: 1 }), secondEmail({ kind: "after", trackId: "m1", delayDays: 0 })])).toMatchObject({ withheldBy: null, daysUntilAllStart: expect.any(Number) });
+    // A second phone track after the first: projected the same way.
     const secondCall: TrackDefinition = { ...phone, id: "p2", steps: [step("c2", { body: "" })], start: { kind: "after", trackId: "p1", delayDays: 2 } };
-    expect((await load([phone, secondCall])).withheldBy).toEqual({ campaign: null, tracks: [{ trackId: "p2", channel: "call", label: "phone track 2", why: "after_a_phone_track", phoneTrack: "phone track 1" }] });
+    expect(await load([phone, secondCall])).toMatchObject({ withheldBy: null, daysUntilAllStart: expect.any(Number) });
     // An SMS track with no number: named as such.
-    expect((await load([sms({ kind: "entry" })], [])).withheldBy).toEqual({ campaign: null, tracks: [{ trackId: "m1", channel: "sms", label: "the SMS track", why: "no_sender" }] });
+    expect((await load([sms({ kind: "entry" })], [])).withheldBy).toEqual({ tracks: [{ trackId: "m1", channel: "sms", label: "the SMS track", why: "no_sender" }] });
   });
 
   describe("a competing campaign's calls (council on 10121d3, item 1; the test 14a had, restored)", () => {
@@ -381,13 +376,10 @@ describe("Before launch: projected daily load per sender inbox", () => {
       return { h, other, c };
     }
 
-    test("an email track after its phone track withholds this campaign's figure, naming that campaign, until its calls are logged", async () => {
+    test("an email track after its phone track: projected, its calls assumed worked on their day, and the caveat names that campaign; once its calls are logged, it names none", async () => {
       const { h, other, c } = await competing([phone(), afterCall]);
-      expect((await beforeLaunch(h, c.id)).load).toMatchObject({
-        daysUntilAllStart: null,
-        withheldBy: { campaign: { id: other.id, name: "Winter physio" }, tracks: [{ trackId: "e2", channel: "email", label: "email track 2", why: "after_a_phone_track", phoneTrack: "the phone track" }] },
-      });
-      // The user logs every placed call: no email waits on a call any more, so the figure is projected.
+      expect((await beforeLaunch(h, c.id)).load).toMatchObject({ withheldBy: null, daysUntilAllStart: expect.any(Number), callsNotCounted: [{ id: other.id, name: "Winter physio" }] });
+      // The user logs every placed call: no call is left to assume anything about.
       await h.advanceTo(h.clock + H);
       for (const id of await h.store.engine.subjectsOf(other.id)) {
         const s = (await h.store.engine.subject(id, h.clock))!;

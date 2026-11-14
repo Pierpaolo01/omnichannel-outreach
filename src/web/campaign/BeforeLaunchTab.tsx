@@ -378,7 +378,7 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
         </table>
       )}
       {load.withheldBy !== null ? (
-        <p className={`${load.accounts.length > 0 || callRow !== null ? "mt-2" : ""} text-[13.5px] ${load.withheldBy.tracks.some((t) => t.why === "no_sender") ? "text-crit" : "text-ink-2"}`}>
+        <p className={`${load.accounts.length > 0 || callRow !== null ? "mt-2" : ""} text-[13.5px] text-crit`}>
           {/* Worded from the tracks the server names, never guessed from this campaign's channels. */}
           {withheldExplanation(load.withheldBy)}
         </p>
@@ -416,16 +416,16 @@ function heldSaid(c: LoadProjectionView["cannotProject"][number]): string {
 }
 
 /**
- * What the estimate assumes about the user's calls, here and in competing campaigns (council on
- * 10121d3, item 1; ADR 0003, ticket 14c): calls go on the list by the engine's own rules within the
- * daily call capacity, assuming each day's list is worked, and no call's outcome is foreseen, while a
- * logged call touches the lead, whose emails and texts then go first.
+ * What the estimate assumes about the user's calls, here and in the campaigns sharing these senders
+ * or the call list (ADR 0003, ticket 14c; review bot on 5cd8a93): every call on the list is worked on
+ * its day and gets no answer. The engine's own rules then finish its phone track, start the tracks
+ * after it, and put that lead's later messages and calls first. Any other outcome changes it, as a
+ * reply would.
  */
 function callCaveat(here: boolean, elsewhere: readonly { readonly name: string }[]): string {
   if (!here && elsewhere.length === 0) return "";
   const where = and([...(here ? ["this campaign"] : []), ...elsewhere.map((c) => c.name)]);
-  const placed = here ? "Calls go on your list as they fall due, inside each lead’s calling hours and your daily call capacity, assuming you work through each day’s list. " : "Calls are tasks on your list, not sends. ";
-  return `${placed}No call’s outcome is foreseen: the emails and texts assume no call is logged in ${where}, though a logged call moves that lead’s emails and texts ahead. `;
+  return `For calls in ${where}, it assumes you work every call on your list on the day it is there, and that each one gets no answer: its phone track then finishes, the tracks after it start, and that lead’s later messages and calls go first. Another outcome changes this, as a reply would. `;
 }
 
 const gap = (seconds: number) => (seconds < 120 ? `${seconds} seconds` : `${Math.round(seconds / 60)} minutes`);
@@ -522,7 +522,7 @@ function LeadCopy({ campaignId, enrollmentId, version, def }: { campaignId: stri
                   {several && track ? <span className="font-normal text-muted"> · {trackTitle(def, track)}</span> : null}
                 </span>
               </span>
-              <span className="whitespace-nowrap text-muted">{s.day !== null ? `Day ${s.day}` : `When ${s.waitsOnCall ?? "a phone track"}’s call is logged`}</span>
+              <span className="whitespace-nowrap text-muted">{s.day === null ? `When ${s.waitsOnCall ?? "a phone track"}’s call is worked` : s.waitsOnCall ? `Day ${s.day}, after ${s.waitsOnCall}’s call` : `Day ${s.day}`}</span>
             </div>
             <div className="px-3.5 py-3 text-[14px] leading-[1.55]">
               {s.skipped ? (

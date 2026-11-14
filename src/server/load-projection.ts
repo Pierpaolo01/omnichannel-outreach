@@ -22,7 +22,7 @@ import { isLive } from "../domain/sequence/attempt.ts";
 import { ENGINE_PARAMS } from "../domain/sequence/attempt.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, startOfLocalDay, windowOpen, type WindowRule } from "../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../domain/sequence/dispatch.ts";
-import { callableOnDay, callWindow } from "../domain/sequence/calls.ts";
+import { callableOnDay, callWindow, goodNumbers } from "../domain/sequence/calls.ts";
 import { liveSteps, liveTracks, poolOf, type CampaignDefinition, type TrackChannel } from "../domain/sequence/definition.ts";
 import { channelReaches } from "../domain/sequence/progress.ts";
 import type { AccountState, Attempt, CallDay, SmsBinding, SubjectState } from "../domain/sequence/state.ts";
@@ -226,13 +226,30 @@ export function projectLoad(input: ProjectionInput): Projection {
 
   // ---- The user's call list (ADR 0003, ticket 14c), as the store supplies it to the engine: on the
   // projection's own user day, the stored counts across every campaign plus the simulation's
-  // placements; on a later day, the simulation's placements, and stored open tasks listed for the
-  // first time that day. The user is assumed to work through each day's list, so nothing the
-  // simulation places is carried into a later day's room; no outcome is applied.
+  // placements; on a later day, the simulation's placements, and the store's own count of committed
+  // tasks (placed before the day, open at its start, for a lead that had not ended, callable that day)
+  // over the simulated subjects, which include every subject holding an open call task. The user is
+  // assumed to work every call on the list on its day, logging no answer (`workTheList` below), so
+  // what is carried is what the engine would carry.
   const callSettings = input.callDay;
   const day0 = callSettings ? localDayNumber(now, callSettings.userZone) : 0;
   const placedOn = new Map<number, number>();
-  const committedOn = new Map<number, number>();
+  const committedMemo = { day: Number.NaN, written: -1, value: 0 };
+  const committedOn = (day: number, zone: string): number => {
+    if (committedMemo.day === day && committedMemo.written === written) return committedMemo.value;
+    const start = startOfLocalDay(day, zone);
+    const end = startOfLocalDay(day + 1, zone);
+    let n = 0;
+    for (const s of states.values()) {
+      if (s.subject.endedWall !== null && s.subject.endedWall < start) continue;
+      for (const task of s.callTasks) {
+        if (task.placedWall >= start || (!task.open && (task.closedWall ?? Number.NEGATIVE_INFINITY) < start)) continue;
+        if (callableOnDay(callWindow(s, task.trackId), s.lead.zone, start, end)) n++;
+      }
+    }
+    Object.assign(committedMemo, { day, written, value: n });
+    return n;
+  };
   const callDayAt = (t: number): CallDay | null => {
     if (!callSettings) return null;
     const day = localDayNumber(t, callSettings.userZone);
@@ -241,9 +258,11 @@ export function projectLoad(input: ProjectionInput): Projection {
       day,
       capacity: callSettings.capacity,
       placedToday: (day === day0 ? callSettings.placedToday : 0) + (placedOn.get(day) ?? 0),
-      committed: day === day0 ? callSettings.committed : (committedOn.get(day) ?? 0),
+      committed: day === day0 ? callSettings.committed : committedOn(day, callSettings.userZone),
     };
   };
+  /** The last second of the user day `t` falls in: the instant the assumed user works the day's list. */
+  const lastSecondOf = (t: number): number => (callSettings ? startOfLocalDay(localDayNumber(t, callSettings.userZone) + 1, callSettings.userZone) - 1000 : Infinity);
   const nextUserDay = (t: number): number => (callSettings ? startOfLocalDay(localDayNumber(t, callSettings.userZone) + 1, callSettings.userZone) : Infinity);
 
   /** The account as the store would report it at `t`. */
@@ -345,27 +364,33 @@ export function projectLoad(input: ProjectionInput): Projection {
     write(s.subject.id, loaded, rules.evaluate(rules.enterMain(loaded, now), now));
   }
 
-  // Stored open tasks carried into a later day (none callable on the projection's own day, which the
-  // store's count covers): each counts on the first user day it can be listed, and is worked then.
   const callers = new Set<string>();
-  if (callSettings) {
-    const zone = callSettings.userZone;
-    const dayStart = (d: number) => startOfLocalDay(d, zone);
-    for (const [id, s] of states) {
-      if (liveTracks(s.campaign.definition, "main").some((t) => t.channel === "call")) callers.add(id);
-      if (s.subject.ended !== null) continue;
+  if (callSettings) for (const [id, s] of states) if (liveTracks(s.campaign.definition, "main").some((t) => t.channel === "call")) callers.add(id);
+  /**
+   * The assumed user (ADR 0003, ticket 14c): in the last second of each user day, every call on the
+   * list is worked and logged as no answer on the lead's first good number, by the engine's own
+   * `logCallOutcome`. That finishes the phone track (the tracks after it start after their delay),
+   * touches the lead (its later messages and calls go first) and continues the lead, as the engine
+   * does with that outcome.
+   */
+  let workedAt = Number.NaN;
+  let workSeq = 0;
+  const workTheList = (t: number): boolean => {
+    let any = false;
+    for (const [id, s] of [...states]) {
       for (const task of s.callTasks) {
-        if (!task.open || task.placedWall >= dayStart(day0)) continue;
-        const window = callWindow(s, task.trackId);
-        if (callableOnDay(window, s.lead.zone, dayStart(day0), dayStart(day0 + 1))) continue;
-        for (let d = day0 + 1; d <= day0 + 14; d++) {
-          if (!callableOnDay(window, s.lead.zone, dayStart(d), dayStart(d + 1))) continue;
-          bump(committedOn, d, 1);
-          break;
-        }
+        if (!task.open) continue;
+        const loaded = load(id, t);
+        if (!rules.isListed(loaded, task)) continue;
+        const number = goodNumbers(loaded)[0];
+        if (!number) continue;
+        const n = ++workSeq;
+        const out = rules.logCallOutcome(loaded, task.id, { requestId: `projected-work-${n}`, outcome: "no_answer", numberId: number.id, note: "", noteScope: "person" }, t, { attempt: `projected-attempt-${n}`, note: `projected-note-${n}` }, rules.isListed);
+        if (out.ok && !out.replayed) any = write(id, loaded, out.state) || any;
       }
     }
-  }
+    return any;
+  };
   const calls: ProjectedCall[] = [];
   let callSeq = 0;
   /** A caller with no call ready, unchanged since, on the same user day, before its next due call. */
@@ -662,6 +687,13 @@ export function projectLoad(input: ProjectionInput): Projection {
       if (!changed && observed.length === 0) break;
     }
 
+    // The day's list is worked in its last second, after this instant's passes (as the engine's user
+    // logs between ticks); the passes then run again at the same instant.
+    if (callSettings && t === lastSecondOf(t) && workedAt !== t) {
+      workedAt = t;
+      if (workTheList(t)) continue;
+    }
+
     // The next instant anything can change, as `Engine.nextWakeAt`.
     const candidates: number[] = [wakes.peek()];
     // Waiting items whose window is closed wake at its next opening: once per window and zone.
@@ -695,6 +727,8 @@ export function projectLoad(input: ProjectionInput): Projection {
       // Capacity frees at every account's next reset day.
       candidates.push(startOfLocalDay(localDayNumber(t, a.resetZone) + 1, a.resetZone));
     }
+    // An open call is worked in the last second of its day.
+    if (callSettings && [...states.values()].some((x) => x.callTasks.some((task) => task.open))) candidates.push(t < lastSecondOf(t) ? lastSecondOf(t) : lastSecondOf(t + 2000));
     const next = Math.min(...candidates.filter((c) => c > t));
     if (!Number.isFinite(next)) break;
     t = next;
