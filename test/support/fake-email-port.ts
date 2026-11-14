@@ -161,7 +161,8 @@ export class FakeEmailPort implements SendPort {
   presendCheck(request: { sender: string; destination: string; threadRefs: readonly string[] }) {
     if (this.portHangs) return new Promise<never>(() => undefined);
     if (this.presendUnavailable) return Promise.resolve({ kind: "unavailable" as const });
-    const reply = this.replyLog.find((r) => r.destination === request.destination && r.threadRef !== null && request.threadRefs.includes(r.threadRef) && r.at <= this.now());
+    // The newest reply in the lead's threads, as the adapter reads a thread (newest first).
+    const reply = this.replyLog.filter((r) => r.destination === request.destination && r.threadRef !== null && request.threadRefs.includes(r.threadRef) && r.at <= this.now()).at(-1);
     return Promise.resolve(reply ? { kind: "reply" as const, providerRef: reply.id, at: reply.at } : { kind: "clear" as const });
   }
 

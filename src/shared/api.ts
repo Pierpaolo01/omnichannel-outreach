@@ -42,6 +42,58 @@ export interface CampaignDetail {
   readonly imports: readonly ImportRecord[];
   readonly leadCount: number;
   readonly sequence: CampaignSequenceSummary;
+  /** Whether the campaign is paused, and since when (ticket 17a). A campaign pause changes no lead's status. */
+  readonly pause: { readonly paused: boolean; readonly pausedSince: string | null };
+  /** The count of the campaign's leads in each outreach status, every status listed, zero included (ticket 17a). */
+  readonly statusCounts: Readonly<Record<OutreachStatus, number>>;
+  /** Pause and resume, each allowed now or refused with the reason the action would give (ticket 17a). */
+  readonly controls: readonly CampaignControlView[];
+}
+
+/** A campaign control as the campaign read offers it (ticket 17a). */
+export type CampaignControlView = { readonly action: "pause" | "resume"; readonly allowed: true } | { readonly action: "pause" | "resume"; readonly allowed: false; readonly reason: string };
+
+/** The controls on one lead in one campaign (ADR 0003 "Ticket 17a"). */
+export type LeadControlApi = "pause" | "resume" | "skip" | "stop" | "resume_from_next_step" | "move_to_win_back";
+
+/** A step a control names: the one it skips, or the next one the lead would send. */
+export interface ControlStepView {
+  readonly trackId: string;
+  readonly channel: "email" | "sms" | "call";
+  readonly branch: "main" | "win_back";
+  readonly stepId: string;
+  /** Its place among the track's steps, from 1, and how many there are. */
+  readonly number: number;
+  readonly of: number;
+  /** When it falls due once the lead runs; null while another hold remains after the action, or when not resolved yet. */
+  readonly dueAt: string | null;
+}
+
+/**
+ * One control as the lead's read offers it: refused with the reason the action itself would give, or allowed
+ * with what it will do, decided by the engine's own transition applied to a copy of the lead as of the read,
+ * storing nothing (ticket 17a). `withProvider` counts work already handed to a provider that the action asks to
+ * withdraw, which may still be sent.
+ */
+export type ControlView =
+  | { readonly action: LeadControlApi; readonly allowed: false; readonly reason: string }
+  | {
+      readonly action: LeadControlApi;
+      readonly allowed: true;
+      readonly statusAfter: OutreachStatus;
+      readonly skips: ControlStepView | null;
+      readonly next: ControlStepView | null;
+      readonly withProvider: number;
+    };
+
+/** GET /api/enrollments/:id: the lead's progress and the controls allowed now (ticket 17a). */
+export interface EnrollmentRead extends EnrollmentProgress {
+  readonly controls: readonly ControlView[];
+}
+
+/** A refused control (409 `control_refused`). */
+export interface ControlRefusal {
+  readonly error: { readonly code: "control_refused"; readonly message: string };
 }
 
 export interface ImportFileNames {

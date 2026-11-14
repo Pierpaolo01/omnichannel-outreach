@@ -26,7 +26,18 @@ export interface CampaignEngineRow {
   readonly definitionVersion: number;
   readonly definitionEditedAt: string | null;
   readonly launchedAt: number | null;
+  /** The instant the campaign was paused, or null while it runs (ticket 17a). */
+  readonly pausedSince: number | null;
   readonly version: number;
+}
+
+/** What a control's transaction did with its request id (ADR 0003 "Ticket 17a", P7). */
+export type ControlRecord = "accepted" | "refused" | "replayed" | "reused";
+
+/** A control's decision on the state it read: what to write (null for nothing), and whether it was accepted. */
+export interface ControlDecision<S> {
+  readonly write: S | null;
+  readonly accepted: boolean;
 }
 
 /**
@@ -140,6 +151,28 @@ export interface EngineStore {
   ): Promise<LaunchOutcome>;
 
   subject(subjectId: string, now: number): Promise<SubjectState | null>;
+  /**
+   * One control on one lead (ticket 17a), in one transaction with its request id: a request id already
+   * recorded for the same target and action is `replayed` and writes nothing; one recorded for another is
+   * `reused`. Otherwise the lead is loaded, `decide` judges it, what it returns is written, and an accepted
+   * control is recorded with its request id.
+   */
+  controlSubject(subjectId: string, now: number, request: { readonly id: string; readonly action: string }, decide: (state: SubjectState) => ControlDecision<SubjectState>): Promise<ControlRecord>;
+  /**
+   * Pauses (`pause: true`) or resumes a campaign in one transaction (ticket 17a): `refusal` judges the campaign
+   * row; then every enrollment that has not ended is loaded as it stood and written as `perLead` returns it, the
+   * campaign's `paused_since` is set or cleared with its version bumped, its hold interval opened or closed, and
+   * the request recorded. Request ids as `controlSubject`.
+   */
+  setCampaignPause(
+    campaignId: string,
+    now: number,
+    request: { readonly id: string; readonly pause: boolean },
+    refusal: (row: { readonly launchedAt: number | null; readonly pausedSince: number | null }) => string | null,
+    perLead: (state: SubjectState) => SubjectState,
+  ): Promise<{ readonly record: ControlRecord; readonly reason: string | null }>;
+  /** The count of the campaign's leads in each outreach status (ticket 17a). */
+  statusCounts(campaignId: string): Promise<Record<string, number>>;
   /** Loads, decides and writes in one transaction. A null decision writes nothing. */
   update(subjectId: string, now: number, decide: (state: SubjectState) => SubjectState | null): Promise<SubjectState | null>;
   /**

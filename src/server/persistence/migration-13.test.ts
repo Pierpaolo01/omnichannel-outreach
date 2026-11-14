@@ -43,6 +43,8 @@ function beforeMigration13(file: string): void {
     ALTER TABLE call_attempts DROP COLUMN redial;
     ALTER TABLE call_attempts DROP COLUMN callback_at;
     ALTER TABLE call_tasks DROP COLUMN reckoned_through;
+    DROP TABLE IF EXISTS hold_intervals;
+    DROP TABLE IF EXISTS control_requests;
     DELETE FROM schema_migrations WHERE version > 12;
   `);
   db.close();

@@ -585,6 +585,35 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE call_attempts ADD COLUMN declined_path TEXT CHECK (declined_path IN ('stop', 'continue', 'win_back'));
     `,
   },
+  {
+    // Ticket 17a.
+    version: 16,
+    name: "the hold history and the controls' request ids (ADR 0003, ticket 17a)",
+    // Each campaign pause, lead pause and ending later undone by a restart, as an interval: the committed-call
+    // count reads whether a lead was held at a day's start (P12). And each accepted control by its request id,
+    // so a retry is answered with the first answer and applies nothing twice (P7). Nothing set a pause before
+    // this migration; a database that holds one anyway gets an open interval from now.
+    sql: `
+      CREATE TABLE hold_intervals (
+        id INTEGER PRIMARY KEY,
+        scope TEXT NOT NULL CHECK (scope IN ('campaign', 'lead', 'ended')),
+        owner_id TEXT NOT NULL,
+        from_wall INTEGER NOT NULL,
+        to_wall INTEGER
+      );
+      CREATE INDEX hold_intervals_owner ON hold_intervals(owner_id, scope);
+      CREATE UNIQUE INDEX hold_intervals_one_open ON hold_intervals(owner_id, scope) WHERE to_wall IS NULL;
+      INSERT INTO hold_intervals (scope, owner_id, from_wall, to_wall) SELECT 'campaign', id, paused_since, NULL FROM campaigns WHERE paused_since IS NOT NULL;
+      INSERT INTO hold_intervals (scope, owner_id, from_wall, to_wall)
+        SELECT 'lead', id, COALESCE(frozen_since, 0), NULL FROM enrollments WHERE lead_paused = 1;
+      CREATE TABLE control_requests (
+        request_id TEXT PRIMARY KEY,
+        target TEXT NOT NULL,
+        action TEXT NOT NULL,
+        at_wall INTEGER NOT NULL
+      );
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string): void {

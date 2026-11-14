@@ -2,7 +2,9 @@ import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { planImport } from "../domain/import-plan.ts";
-import { isOutreachStatus } from "../domain/outreach-status.ts";
+import { isOutreachStatus, OUTREACH_STATUSES, type OutreachStatus } from "../domain/outreach-status.ts";
+import { LEAD_CONTROLS } from "../domain/sequence/controls.ts";
+import { campaignControls, controlsView } from "./engine/controls-view.ts";
 import { checkScraperFile, parseScraperExport } from "../domain/scraper-export.ts";
 import type { ActivityView, ApiError, CallOutcomeAnswer, CallOutcomeRefusal, Campaign, CompanyRecord, FileCheckResult, PersonRecord, RecordCalls, SmsProviderStatus } from "../shared/api.ts";
 import { CAMPAIGN_NAME_MAX, DEFINITION_MAX_BYTES, STEP_BODY_MAX, STEP_SUBJECT_MAX } from "../shared/limits.ts";
@@ -19,7 +21,7 @@ import { callsView, callTaskView, recordCalls, todayView } from "./engine/call-v
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
 import { sealReckoning } from "../domain/sequence/progress.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
-import type { CampaignDetail, CampaignListItem, CampaignSequenceSummary, SequenceView } from "../shared/api.ts";
+import type { ControlRefusal, EnrollmentRead, CampaignDetail, CampaignListItem, CampaignSequenceSummary, SequenceView } from "../shared/api.ts";
 import { beforeLaunchView, copyPreview } from "./before-launch.ts";
 import { activityOf } from "./activity.ts";
 import { registerEmailProviderRoutes, type EmailProviderSource } from "./instantly/routes.ts";
@@ -30,7 +32,7 @@ export interface AppDependencies {
   readonly now: () => string;
   readonly newId: () => string;
   /** The sequence engine. Without one, the app runs an engine with no connected email provider. */
-  readonly engine?: Pick<Engine, "launch" | "logCallOutcome">;
+  readonly engine?: Pick<Engine, "launch" | "logCallOutcome" | "controlLead" | "setCampaignPause">;
   /** The email provider's own description, for GET /api/email-provider; absent when none is connected. */
   readonly emailProvider?: EmailProviderSource | null;
   /**
@@ -80,6 +82,14 @@ const machineZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 const callSettingsBody = requestObject({
   dailyCapacity: z.number().int("The daily call capacity is a whole number.").positive("The daily call capacity is at least 1.").max(1_000),
   userZone: z.string().trim().refine((z) => isTimeZone(z), "Use an IANA time zone such as Europe/London."),
+});
+// Ticket 17a. Each control carries the client's key for that one action: the same key answers with the first
+// answer and applies nothing again, so a retry after a lost answer cannot skip a second step or pause again.
+const controlRequestId = z.string().trim().min(1, "Send a request id with each action.").max(200);
+const campaignControlBody = requestObject({ requestId: controlRequestId });
+const leadControlBody = requestObject({
+  requestId: controlRequestId,
+  action: z.enum(LEAD_CONTROLS, { message: "Choose one of: pause, resume, skip, stop, resume_from_next_step, move_to_win_back." }),
 });
 // Redial and callback are ticket 15's, not interested and its declined path ticket 16's; which outcome each
 // goes with is the domain's rule (`logCallOutcome`), refused there with a plain reason.
@@ -248,8 +258,29 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     const campaign = await store.campaign(c.req.param("id"));
     if (!campaign) return notFound(c, "campaign");
     const leadCount = (await store.listCampaigns()).find((item) => item.id === campaign.id)?.leadCount ?? 0;
-    return c.json<CampaignDetail>({ campaign, imports: await store.listImports(campaign.id), leadCount, sequence: await sequenceSummary(campaign.id) });
+    return c.json<CampaignDetail>({ campaign, imports: await store.listImports(campaign.id), leadCount, sequence: await sequenceSummary(campaign.id), ...(await pauseRead(campaign.id)) });
   });
+
+  // Ticket 17a: the campaign pause, its date, the count of leads in each status, and the controls allowed now.
+  const pauseRead = async (campaignId: string) => {
+    const row = await store.engine.campaign(campaignId);
+    const stored = await store.engine.statusCounts(campaignId);
+    const statusCounts = Object.fromEntries(OUTREACH_STATUSES.map((status) => [status, stored[status] ?? 0])) as Record<OutreachStatus, number>;
+    return { pause: { paused: row?.pausedSince != null, pausedSince: row?.pausedSince != null ? new Date(row.pausedSince).toISOString() : null }, statusCounts, controls: campaignControls(row) };
+  };
+  const controlRefused = (c: Context, message: string) => c.json<ControlRefusal>({ error: { code: "control_refused", message } }, 409);
+
+  for (const pause of [true, false]) {
+    app.post(`/campaigns/:id/${pause ? "pause" : "resume"}`, async (c) => {
+      const body = campaignControlBody.safeParse(await readJson(c));
+      if (!body.success) return invalid(c, body.error);
+      const id = c.req.param("id");
+      if (!(await store.campaign(id))) return notFound(c, "campaign");
+      const answer = await engine.setCampaignPause(id, pause, body.data.requestId);
+      if (!answer.ok) return controlRefused(c, answer.reason);
+      return c.json({ ...(await pauseRead(id)), replayed: answer.replayed });
+    });
+  }
 
   app.get("/campaigns/:id/imports", async (c) => {
     const campaign = await store.campaign(c.req.param("id"));
@@ -431,10 +462,26 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     return company ? c.json<ActivityView>({ entries: await activityOf(store, company.enrollments, Date.parse(now()), "company", rules), userZone: (await store.engine.callSettings()).userZone }) : notFound(c, "company");
   });
 
-  app.get("/enrollments/:id", async (c) => {
+  const enrollmentRead = async (id: string): Promise<EnrollmentRead | null> => {
     const at = Date.parse(now());
-    const state = await store.engine.subject(c.req.param("id"), at);
-    return state ? c.json(progressView(state, at)) : notFound(c, "enrollment");
+    const state = await store.engine.subject(id, at);
+    return state ? { ...progressView(state, at), controls: controlsView(state, at, rules) } : null;
+  };
+
+  app.get("/enrollments/:id", async (c) => {
+    const read = await enrollmentRead(c.req.param("id"));
+    return read ? c.json(read) : notFound(c, "enrollment");
+  });
+
+  // Ticket 17a: pause, resume, skip, stop and the two restarts of one lead, judged as of the request's instant.
+  app.post("/enrollments/:id/controls", async (c) => {
+    const body = leadControlBody.safeParse(await readJson(c));
+    if (!body.success) return invalid(c, body.error);
+    const id = c.req.param("id");
+    if (!(await store.engine.subject(id, Date.parse(now())))) return notFound(c, "enrollment");
+    const answer = await engine.controlLead(id, body.data.action, body.data.requestId);
+    if (!answer.ok) return controlRefused(c, answer.reason);
+    return c.json({ enrollment: await enrollmentRead(id), replayed: answer.replayed });
   });
 
   // -------------------------------------------------------------------------------------------

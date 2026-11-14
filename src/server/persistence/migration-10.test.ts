@@ -57,6 +57,8 @@ function beforeMigration10(file: string): void {
     DROP TABLE bounce_events;
     ALTER TABLE campaigns DROP COLUMN definition_session;
     ALTER TABLE campaigns DROP COLUMN definition_seq;
+    DROP TABLE IF EXISTS hold_intervals;
+    DROP TABLE IF EXISTS control_requests;
     DELETE FROM schema_migrations WHERE version > 9;
   `);
   expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'bounce_events'").all()).toEqual([]);
@@ -94,9 +96,9 @@ describe("migration 10 on a database with a bounce observed before it (re-check 
     expect(entries.filter((e) => e.kind === "bounced")).toEqual([]);
     expect(entries[0]).toMatchObject({ kind: "ended", status: "finished_no_usable_channel" });
     expect(entries[1]).toMatchObject({ kind: "address_bad", to: "sam@harbour.example" });
-    // The upgrade itself ran 10 and 11 (and 12, ticket 14a's call tables, 13, pull request 49's sessions' saves, and 14, ticket 15a's redial, callback and skip-limit fields), and later bounces are recorded again.
+    // The upgrade itself ran 10 and 11 (and 12, ticket 14a's call tables, 13, pull request 49's sessions' saves, and 14, ticket 15a's redial, callback and skip-limit fields, 15 and 16), and later bounces are recorded again.
     const versions = new DatabaseSync(file).prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((r) => Number(r["version"]));
-    expect(versions.filter((v) => v >= 9)).toEqual([9, 10, 11, 12, 13, 14, 15]);
+    expect(versions.filter((v) => v >= 9)).toEqual([9, 10, 11, 12, 13, 14, 15, 16]);
     await after.store.close();
   });
 });

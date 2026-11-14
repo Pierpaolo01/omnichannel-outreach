@@ -47,6 +47,8 @@ describe("migration 15 on a database with calls logged before it", () => {
     const db = new DatabaseSync(file);
     db.exec(`
       ALTER TABLE call_attempts DROP COLUMN declined_path;
+      DROP TABLE IF EXISTS hold_intervals;
+      DROP TABLE IF EXISTS control_requests;
       DELETE FROM schema_migrations WHERE version >= 15;
     `);
     db.close();

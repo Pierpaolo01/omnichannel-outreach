@@ -102,6 +102,9 @@ describe("a route that changes an input the engine's timing reads first applies 
       "PUT /api/campaigns/:id/sequence": "refused once the campaign has launched (ticket 19); before launch no lead of it runs",
       "POST /api/campaigns/:id/launch": "enters and evaluates each lead at its own instant",
       "POST /api/call-tasks/:id/outcome": "judged as of its own instant (asOfAction)",
+      "POST /api/enrollments/:id/controls": "judged as of its own instant (asOfAction, ticket 17a); a pause holds the clock, which every stored deadline reads",
+      "POST /api/campaigns/:id/pause": "each lead judged as of the pause's instant (asOfAction), then held, in one transaction (ticket 17a)",
+      "POST /api/campaigns/:id/resume": "each lead judged as of the resume's instant (asOfAction), then released, in one transaction (ticket 17a)",
     };
     const probe = await world(def());
     const routes = [...new Set(probe.h.app.routes.filter((r) => ["POST", "PUT", "PATCH", "DELETE"].includes(r.method)).map((r) => `${r.method} ${r.path}`))];

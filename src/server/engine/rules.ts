@@ -18,6 +18,7 @@ import {
 import { compareReadyNow, focusOf, isListed, logCallOutcome, placeCall, readyCalls, reasonOf } from "../../domain/sequence/calls.ts";
 import { applyBadDestination, applyReply, applyToAttempt, applyToWork, asOfAction, enterMain, evaluate, replyMatches, smsReplyOwner } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
+import { applyControl, campaignPaused, campaignResumed } from "../../domain/sequence/controls.ts";
 
 export interface Rules {
   readonly evaluate: typeof evaluate;
@@ -60,6 +61,11 @@ export interface Rules {
   readonly focusOf: typeof focusOf;
   /** Why a call is on the list (ticket 15): due, rolled over, a redial, a callback, or an overdue callback. */
   readonly callReason: typeof reasonOf;
+  /** One user control on one lead (ticket 17a): pause, resume, skip, stop, and the two restarts. */
+  readonly applyControl: typeof applyControl;
+  /** The campaign pause and resume as each of its leads takes them (ticket 17a). */
+  readonly campaignPaused: typeof campaignPaused;
+  readonly campaignResumed: typeof campaignResumed;
   /** The version guard (2.5): a change computed from `computedFrom` applies only if nothing it read has changed. */
   readonly versionsMatch: (computedFrom: SubjectState, current: SubjectState) => boolean;
 }
@@ -93,6 +99,9 @@ export const DEFAULT_RULES: Rules = {
   readyNowOrder: compareReadyNow,
   focusOf,
   callReason: reasonOf,
+  applyControl,
+  campaignPaused,
+  campaignResumed,
   // Everything an evaluation reads: the subject's and campaign's versions cover its progress and the
   // definition; the lead's facts (contact details and their marks, zone, merge data) change without
   // bumping them (an import, a mark elsewhere), so they are compared as they were read.

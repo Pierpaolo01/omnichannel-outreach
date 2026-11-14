@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { EngineHarness } from "../../test/support/engine-harness.ts";
 import { business, csvOf, person } from "../../test/support/export-builder.ts";
 import type { CampaignDefinition } from "../domain/sequence/definition.ts";
-import type { CallsView, CallTaskView, LeadSearchResult } from "../shared/api.ts";
+import type { CallsView, CallTaskView, EnrollmentRead, LeadSearchResult } from "../shared/api.ts";
 
 /**
  * Every request body the HTTP interface reads refuses fields it does not know, with a 400 that names
@@ -32,18 +32,20 @@ async function world() {
   await h.defineSequence(unlaunched.id, definition);
   expect((await h.launch(campaign.id)).status).toBe(200);
   const taskId = (await h.request<CallsView>("GET", "/api/calls")).body.focusTaskId ?? "";
-  return { h, campaignId: campaign.id, unlaunchedId: unlaunched.id, taskId, rows };
+  const enrollmentId = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows[0]?.enrollments[0]?.id ?? "";
+  return { h, campaignId: campaign.id, unlaunchedId: unlaunched.id, taskId, rows, enrollmentId };
 }
 
 describe("request bodies refuse fields they do not know (verifier B4)", () => {
   test("every route that takes a body answers 400 naming an unknown field, and changes nothing", async () => {
-    const { h, unlaunchedId, taskId } = await world();
+    const { h, unlaunchedId, taskId, enrollmentId } = await world();
     const routes = h.app.routes.filter((r) => ["POST", "PUT", "PATCH", "DELETE"].includes(r.method));
     expect(routes.length).toBeGreaterThan(5);
     for (const r of routes) {
       const path = r.path.replace(/:(\w+)/g, (_m, name: string) => {
         if (name === "id" && r.path.startsWith("/api/campaigns/")) return unlaunchedId;
         if (name === "id" && r.path.startsWith("/api/call-tasks/")) return taskId;
+        if (name === "id" && r.path.startsWith("/api/enrollments/")) return enrollmentId;
         throw new Error(`the route walk cannot fill :${name} in ${r.path}; add it here`);
       });
       const res = await h.request<{ error?: { code: string; message: string } }>(r.method, path, { zzUnexpected: true });
@@ -53,6 +55,7 @@ describe("request bodies refuse fields they do not know (verifier B4)", () => {
     // Nothing was applied: the unlaunched campaign is still unlaunched, and the call is still open.
     expect((await h.request<{ launchedAt: string | null }>("GET", `/api/campaigns/${unlaunchedId}/sequence`)).body.launchedAt).toBeNull();
     expect((await h.request<CallTaskView>("GET", `/api/call-tasks/${taskId}`)).body.open).toBe(true);
+    expect((await h.request<EnrollmentRead>("GET", `/api/enrollments/${enrollmentId}`)).body.status).toBe("waiting_on_call");
   });
 
   test("a nested object refuses unknown fields too", async () => {

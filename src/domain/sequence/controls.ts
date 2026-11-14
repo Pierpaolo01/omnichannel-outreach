@@ -1,0 +1,163 @@
+/**
+ * The user's controls on one lead, and the campaign pause as it applies to each lead (ADR 0003, "Ticket 17a").
+ * Every control is a pure transition of one `SubjectState`: it sets or clears one stored fact that `runs`
+ * reads (the lead pause, the campaign pause, the ending), quiesces when the lead stops running, and ends with
+ * `synced`, so there is one clock and one freeze record for every hold. The engine brings the lead up to the
+ * action's instant first (`asOfAction`), then calls these; the reads call the same functions on a copy.
+ */
+import { leadNow, wallOfLead } from "./clock.ts";
+import type { TrackDefinition } from "./definition.ts";
+import { advanceTrack, end, enterMain, enterWinBack, evaluate, finishTrack, hasWorkLeft, liveTracksFor, progressOf, quiesce, reachable, runs, synced } from "./progress.ts";
+import { isLive } from "./attempt.ts";
+import type { SubjectState } from "./state.ts";
+
+export const LEAD_CONTROLS = ["pause", "resume", "skip", "stop", "resume_from_next_step", "move_to_win_back"] as const;
+export type LeadControl = (typeof LEAD_CONTROLS)[number];
+
+export type ControlResult = { readonly ok: true; readonly state: SubjectState } | { readonly ok: false; readonly reason: string };
+
+const refuse = (reason: string): ControlResult => ({ ok: false, reason });
+const accept = (state: SubjectState): ControlResult => ({ ok: true, state });
+
+export const NOT_LAUNCHED = "This campaign has not launched: nothing of this lead runs yet.";
+export const ENDED = "Outreach to them has ended in this campaign.";
+export const NOT_RESTARTABLE = "Only a lead that replied or was stopped can be resumed or moved to win-back.";
+
+/**
+ * A lead's release from a hold: its clock syncs, it enters its branch if it never ran (a lead enrolled while
+ * held enters at lead time 0), and, if it runs now, it is evaluated at once, as the tick would.
+ */
+export function released(state: SubjectState, now: number): SubjectState {
+  const entered = enterMain(state, now);
+  return runs(entered) ? evaluate(entered, now) : entered;
+}
+
+/** The campaign pause applied to one of its leads that has not ended: it quiesces and its clock freezes. */
+export function campaignPaused(state: SubjectState, now: number): SubjectState {
+  const paused = { ...state, campaign: { ...state.campaign, pausedSince: now } };
+  if (state.subject.ended !== null) return paused;
+  return synced(quiesce(paused), now);
+}
+
+/** The campaign resumed for one of its leads: the clock syncs, and the lead runs on if no other hold remains. */
+export function campaignResumed(state: SubjectState, now: number): SubjectState {
+  const resumed = { ...state, campaign: { ...state.campaign, pausedSince: null } };
+  if (state.subject.ended !== null) return resumed;
+  return released(resumed, now);
+}
+
+/**
+ * The lead's current step (question Q3's interim): among its started, unfinished tracks with a pending step,
+ * the one due first in lead time, ties broken by track id. Null when every track is waiting out a delay,
+ * not started, or finished.
+ */
+export function currentStep(state: SubjectState): { readonly track: TrackDefinition; readonly stepId: string; readonly dueAt: number | null } | null {
+  const candidates = liveTracksFor(state).flatMap((track) => {
+    const p = progressOf(state, track.id);
+    if (!p || p.startedAt === null || p.finishedAt !== null || p.nextStepId === null) return [];
+    return [{ track, stepId: p.nextStepId, dueAt: p.dueAt }];
+  });
+  candidates.sort((a, b) => (a.dueAt ?? Infinity) - (b.dueAt ?? Infinity) || (a.track.id < b.track.id ? -1 : a.track.id > b.track.id ? 1 : 0));
+  return candidates[0] ?? null;
+}
+
+/** Why a lead has no step to skip: what it is waiting for. */
+function noStepReason(state: SubjectState): string {
+  const waiting = liveTracksFor(state).some((t) => {
+    const p = progressOf(state, t.id);
+    return !p || (p.finishedAt === null && p.startedAt === null);
+  });
+  return waiting ? "No step is waiting: the next track has not started yet." : "No step is waiting: every track has finished.";
+}
+
+const PROVIDER_NAME = { email: "email provider", sms: "SMS provider", call: "call list" } as const;
+
+/** Skip the current step (ADR 0003 "Ticket 17a", "Skip step"): exactly one step, never sent. */
+function skip(state: SubjectState, now: number): ControlResult {
+  const current = currentStep(state);
+  if (!current) return refuse(noStepReason(state));
+  const { track, stepId } = current;
+  if (state.attempts.some((a) => a.stepId === stepId && isLive(a) && a.state !== "claimed")) {
+    return refuse(`This step is already with the ${PROVIDER_NAME[track.channel]} and may be sent, so it cannot be skipped.`);
+  }
+  let s = state;
+  // On a callback, the hold is released first, as an outcome's is (2.4 "Calls"): the result sits on a running clock.
+  if (s.callTasks.some((t) => t.open && t.stepId === stepId && t.kind === "callback")) {
+    s = synced({ ...s, callTasks: s.callTasks.map((t) => (t.open && t.stepId === stepId ? { ...t, kind: "call" as const, callbackAt: null } : t)) }, now);
+  }
+  const at = leadNow(s.subject.clock, now);
+  const atWall = wallOfLead(s.subject.clock, now);
+  s = quiesce(s, track.id);
+  s = { ...s, results: [...s.results, { stepId, trackId: track.id, result: "skipped", reason: "by_user", at, atWall, attemptId: null }] };
+  if (track.channel === "call") s = finishTrack(s, track.id, "skipped_by_user", at, atWall);
+  else s = advanceTrack({ ...s, tracks: s.tracks.map((p) => (p.trackId === track.id ? { ...p, nextStepId: null } : p)) }, track, at, atWall);
+  s = synced(s, now);
+  return accept(runs(s) ? evaluate(s, now) : s);
+}
+
+/** Why nothing would run after a restart: the reason the engine would end the lead with at once. */
+function nothingLeft(state: SubjectState): string | null {
+  if (!hasWorkLeft(state)) return "every track has finished";
+  if (reachable(state).size === 0) return "no channel left in it can reach them";
+  return null;
+}
+
+/** A replied or stopped lead's ending undone (the restarts of 2.4): its other facts stay. */
+function unended(state: SubjectState): SubjectState {
+  return { ...state, subject: { ...state.subject, ended: null, endedAt: null, endedWall: null, stopReply: null, leadPaused: false } };
+}
+
+const restartable = (state: SubjectState) => state.subject.ended === "replied" || state.subject.ended === "stopped_manually";
+
+/**
+ * One control on one lead, judged on `state` as it stands (the caller first applies what fell due, 2.4).
+ * Refused with a plain reason, or the next state.
+ */
+export function applyControl(state: SubjectState, action: LeadControl, now: number): ControlResult {
+  const { subject, campaign } = state;
+  switch (action) {
+    case "pause":
+      if (campaign.launchedAt === null) return refuse(NOT_LAUNCHED);
+      if (subject.ended !== null) return refuse(ENDED);
+      if (subject.leadPaused) return refuse("They are already paused.");
+      return accept(synced(quiesce({ ...state, subject: { ...subject, leadPaused: true } }), now));
+    case "resume":
+      if (subject.ended !== null) return refuse(ENDED);
+      if (!subject.leadPaused) return refuse("They are not paused.");
+      return accept(released({ ...state, subject: { ...subject, leadPaused: false } }, now));
+    case "skip":
+      if (campaign.launchedAt === null) return refuse(NOT_LAUNCHED);
+      if (subject.ended !== null) return refuse(ENDED);
+      return skip(state, now);
+    case "stop":
+      if (campaign.launchedAt === null) return refuse(NOT_LAUNCHED);
+      if (subject.ended !== null) return refuse(ENDED);
+      return accept(end(state, "stopped_manually", now));
+    case "resume_from_next_step": {
+      if (!restartable(state)) return refuse(NOT_RESTARTABLE);
+      const s = unended(state);
+      const why = nothingLeft(s);
+      if (why !== null) return refuse(`Nothing is left to send them in this campaign: ${why}.`);
+      return accept(released(s, now));
+    }
+    case "move_to_win_back": {
+      if (!restartable(state)) return refuse(NOT_RESTARTABLE);
+      if (subject.branch === "win_back") return refuse("They are already in the win-back branch.");
+      if (!campaign.definition.tracks.some((t) => t.branch === "win_back" && !t.removed)) return refuse("This campaign has no win-back branch.");
+      const s = enterWinBack(unended(state), now);
+      if (reachable(s).size === 0) return refuse("The win-back branch cannot reach them: none of its channels has a usable address or number for them.");
+      return accept(released(s, now));
+    }
+    default: {
+      const never: never = action;
+      return refuse(`Unknown action ${String(never)}.`);
+    }
+  }
+}
+
+/** Why a campaign pause (`pause`) or resume is refused, or null: the one judgment the action and the read share. */
+export function campaignRefusal(row: { readonly launchedAt: number | null; readonly pausedSince: number | null } | null, pause: boolean): string | null {
+  if (row === null) return "There is no such campaign.";
+  if (pause) return row.launchedAt === null ? "This campaign has not launched." : row.pausedSince !== null ? "This campaign is already paused." : null;
+  return row.pausedSince === null ? "This campaign is not paused." : null;
+}

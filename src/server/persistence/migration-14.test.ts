@@ -50,6 +50,8 @@ describe("migration 14 on a database with calls logged before it", () => {
       ALTER TABLE call_attempts DROP COLUMN redial;
       ALTER TABLE call_attempts DROP COLUMN callback_at;
       ALTER TABLE call_tasks DROP COLUMN reckoned_through;
+      DROP TABLE IF EXISTS hold_intervals;
+      DROP TABLE IF EXISTS control_requests;
       DELETE FROM schema_migrations WHERE version >= 14;
     `);
     db.close();

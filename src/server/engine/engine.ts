@@ -11,7 +11,11 @@ import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, sta
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
 import { runs } from "../../domain/sequence/progress.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
-import type { EngineStore, ReplyEvent, StoredDefinition } from "./engine-store.ts";
+import { campaignRefusal, type LeadControl } from "../../domain/sequence/controls.ts";
+import type { ControlRecord, EngineStore, ReplyEvent, StoredDefinition } from "./engine-store.ts";
+
+export type ControlAnswer = { readonly ok: true; readonly replayed: boolean } | { readonly ok: false; readonly reason: string };
+export const CONTROL_REQUEST_REUSED = "This request id was already used for another action: send a new one.";
 import { UnprovisionedSmsPort, type AttemptRef, type HandoverRequest, type ProviderEvent, type SendPort } from "./ports.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 
@@ -754,6 +758,53 @@ export class Engine {
   }
 
   // -------------------------------------------------------------------------------------------
+  // The user's controls (ticket 17a). Each is judged as of its own instant (2.4) and recorded with its request id.
+
+  /** One control on one lead: accepted, refused with its reason, or the answer to its request id's first send. */
+  controlLead(subjectId: string, action: LeadControl, requestId: string): Promise<ControlAnswer> {
+    return this.ticks.run(async () => {
+      const now = this.now();
+      const refused: { reason: string | null } = { reason: null };
+      const record = await this.store.controlSubject(subjectId, now, { id: requestId, action }, (stored) => {
+        const s = this.rules.asOfAction(stored, now, this.rules.evaluate);
+        const caughtUp = same(s, stored) ? null : s;
+        const out = this.rules.applyControl(s, action, now);
+        if (!out.ok) {
+          refused.reason = out.reason;
+          return { write: caughtUp, accepted: false };
+        }
+        return { write: out.state, accepted: true };
+      });
+      return this.answerOf(record, refused.reason);
+    });
+  }
+
+  /** Pauses or resumes a campaign: every lead of it that has not ended, in one transaction. */
+  setCampaignPause(campaignId: string, pause: boolean, requestId: string): Promise<ControlAnswer> {
+    return this.ticks.run(async () => {
+      const now = this.now();
+      const out = await this.store.setCampaignPause(
+        campaignId,
+        now,
+        { id: requestId, pause },
+        (row) => campaignRefusal(row, pause),
+        (stored) => {
+          const s = this.rules.asOfAction(stored, now, this.rules.evaluate);
+          return pause ? this.rules.campaignPaused(s, now) : this.rules.campaignResumed(s, now);
+        },
+      );
+      return this.answerOf(out.record, out.reason);
+    });
+  }
+
+  private async answerOf(record: ControlRecord, reason: string | null): Promise<ControlAnswer> {
+    if (record === "reused") return { ok: false, reason: CONTROL_REQUEST_REUSED };
+    if (record === "refused") return { ok: false, reason: reason ?? "There is no such lead." };
+    if (record === "accepted") await this.runTick();
+    return { ok: true, replayed: record === "replayed" };
+  }
+
+  // -------------------------------------------------------------------------------------------
   // Claims (4.2) in priority order (4.3).
 
   private async claimAll(): Promise<boolean> {
@@ -861,6 +912,13 @@ export class Engine {
     const channel = port === this.ports.sms ? "sms" : "email";
     const result = await this.bounded(() => port.presendCheck({ sender: a.accountId, destination: a.destination, threadRefs }), { kind: "unavailable" as const });
     if (result.kind === "unavailable") return false;
+    // A reply the lead's record already holds on this channel (at or before its latest recorded one) is not new:
+    // the user resumed the lead after it (ticket 17a, restart after an auto-reply). Only a later reply stops it.
+    if (result.kind === "reply" && subject?.replies.some((r) => r.channel === channel && r.atWall >= result.at)) {
+      await this.store.update(a.subjectId, now, (s) => ({ ...s, attempts: s.attempts.map((x) => (x.id === a.id ? { ...x, presendCheckedWall: now, presendFoundReply: false } : x)) }));
+      this.hooks.crashPoint?.("after_presend", a.id);
+      return true;
+    }
     await this.store.update(a.subjectId, now, (s) => {
       let next: SubjectState = { ...s, attempts: s.attempts.map((x) => (x.id === a.id ? { ...x, presendCheckedWall: now, presendFoundReply: result.kind === "reply" } : x)) };
       if (result.kind === "reply") next = this.rules.applyReply(next, { channel, atWall: Math.min(result.at, now), providerRef: result.providerRef }, now);
