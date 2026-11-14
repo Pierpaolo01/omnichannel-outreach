@@ -49,6 +49,7 @@ const harness = (databasePath: string) =>
 function beforeMigration9(file: string): void {
   const db = new DatabaseSync(file);
   db.exec(`
+    DROP TABLE definition_saves;
     DROP TABLE notes;
     DROP TABLE call_attempts;
     DROP TABLE call_tasks;

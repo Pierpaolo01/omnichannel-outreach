@@ -147,11 +147,23 @@ describe("a save that cannot complete says so, and anything waiting on it (launc
     expect(await retried).toEqual({ ok: true });
   });
 
-  test("a draft the server would refuse is not sent, and is a failure", async () => {
+  test("a draft the server would refuse is not sent, and is a failure the status names as a draft that cannot be saved, not an error to try again", async () => {
     const h = harness();
     h.setDraft(def("A", { tracks: [{ ...def("A").tracks[0]!, window: [] }] }));
     expect(await h.queue.save()).toEqual({ ok: false, reason: "invalid", message: "Choose at least one sending day." });
     expect(h.calls).toHaveLength(0);
+    expect(h.statuses.at(-1)).toEqual({ kind: "invalid", message: "Choose at least one sending day." });
+  });
+
+  test("an older save accepted while the newest draft cannot be saved leaves the status on that draft, never back to Saving…", async () => {
+    const h = harness();
+    h.edit("Valid");
+    const first = h.queue.save();
+    await h.settle();
+    h.setDraft(def("B", { tracks: [{ ...def("B").tracks[0]!, window: [] }] }));
+    h.calls[0]!.resolve();
+    await first;
+    expect(h.statuses.at(-1)).toEqual({ kind: "invalid", message: "Choose at least one sending day." });
   });
 });
 
@@ -261,6 +273,21 @@ describe("another page changed the campaign (ADR 0003 1.1.1, B7)", () => {
     h.queue.loadedStored();
     expect(h.queue.inConflict).toBe(false);
     expect(h.statuses.at(-1)).toEqual({ kind: "idle" });
+  });
+
+  test("a retry of a save the server accepted, then replaced with another page's that had seen it, is the conflict state saying this page's change was saved (generated seed 7369)", async () => {
+    const h = harness();
+    h.edit("Mine");
+    const saved = h.queue.save();
+    await h.settle();
+    h.calls[0]!.reject(Object.assign(new Error("This page’s change was saved, then the sequence was changed on another page."), { code: "replaced" }));
+    expect(await saved).toMatchObject({ ok: false, reason: "conflict" });
+    expect(h.queue.inConflict).toBe(true);
+    expect(h.statuses.at(-1)).toEqual({ kind: "conflict", message: "This page’s change was saved, then the sequence was changed on another page.", saved: true });
+    // Typing after it: that edit is this page's own and not saved.
+    h.edit("Mine, again");
+    expect(await h.queue.save()).toMatchObject({ ok: false, reason: "conflict" });
+    expect(h.calls).toHaveLength(1);
   });
 
   test("each save is based on the revision the page last had from the server", async () => {

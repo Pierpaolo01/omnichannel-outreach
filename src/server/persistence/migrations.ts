@@ -530,6 +530,25 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX notes_by_owner ON notes(owner_kind, owner_id, at_wall);
     `,
   },
+  {
+    version: 13,
+    name: "each editing session's newest accepted save of a campaign's definition (ADR 0003 1.1.1, the generated save test's seeds 7369 and 7729)",
+    // The campaign row names only the session that wrote last, so once another page saved, a late or
+    // retried save of a page that had saved before was refused as a conflict, and that page said its
+    // change was not saved. Each session's newest accepted number, and a hash of what it stored, are
+    // kept here. The writer at the time of this migration is known from the campaign row.
+    sql: `
+      CREATE TABLE definition_saves (
+        campaign_id TEXT NOT NULL REFERENCES campaigns(id),
+        session TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        content_sha256 TEXT,
+        PRIMARY KEY (campaign_id, session)
+      );
+      INSERT INTO definition_saves (campaign_id, session, seq, content_sha256)
+        SELECT id, definition_session, definition_seq, NULL FROM campaigns WHERE definition_session IS NOT NULL AND definition_seq IS NOT NULL;
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string): void {

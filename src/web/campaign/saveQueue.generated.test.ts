@@ -32,6 +32,14 @@ import { NoAnswer, draftProblems, type SaveStatus } from "./saveQueue.ts";
  * 6. No answer (save, launch or load) replaces a draft newer than the one it answered.
  * 7. A conflict stays visible until the user resolves it, however much they type.
  *
+ * 3b. A page whose newest draft cannot be sent never shows "Saving…" or "Saved" (after every step).
+ *
+ * How many runs (recorded in docs/agents/delivery-workflow.md): `pnpm check` runs 200 seeds (7000 to
+ * 7199) and every seed that once failed (REGRESSIONS); the full search, in the `sequence-search`
+ * workflow's eight shards (`pnpm test:save-search`), runs 2,000 seeds, a quarter of a thousand per
+ * shard. Both are bounded by count, never by time. The five regressions were found by one run of
+ * 1,000 seeds (14 November 2026) when `pnpm check` ran 60 and no search ran this test at all.
+ *
  * Mutations that make it fail, each checked by hand when this was written:
  * - the server accepting a save whatever its base (sqlite-engine-store.ts): invariant 2;
  * - the server treating a repeat of the same session and number as a conflict: invariant 3;
@@ -40,7 +48,20 @@ import { NoAnswer, draftProblems, type SaveStatus } from "./saveQueue.ts";
  *   (editorStore.ts `update` and `answer`; council item 9, re-check B12): invariant 6;
  * - typing in conflict showing "Saving…" (editorStore.ts `update`; council item 10): invariant 7.
  */
-const SEEDS = Number(process.env["SAVE_QUEUE_SEEDS"] ?? 60);
+/** The full search (`pnpm test:save-search`, in the `sequence-search` workflow), sharded by `SEQUENCE_SHARD`, "i/n". */
+const FULL_SEARCH = process.env["SAVE_QUEUE_SEARCH"] === "full";
+const SEEDS = Number(process.env["SAVE_QUEUE_SEEDS"] ?? (FULL_SEARCH ? 2_000 : 200));
+const SHARD = /^(\d+)\/(\d+)$/.exec(process.env["SEQUENCE_SHARD"] ?? "");
+const inShard = (index: number) => !FULL_SEARCH || !SHARD || index % Number(SHARD[2]) === Number(SHARD[1]) - 1;
+/**
+ * Seeds that once failed, run on every push. 7369, 7412, 7642 and 7889: a retry of a save the server
+ * had accepted, after another page that had seen it saved over it, was refused as a conflict, and the
+ * page said "Not saved". 7729: an older save of a page arriving after its newer one was accepted and
+ * then replaced, the same. Both because the server forgot a session's accepted saves once another
+ * session wrote (ADR 0003 1.1.1, migration 13).
+ */
+const REGRESSIONS = [7369, 7412, 7642, 7729, 7889];
+const RUN_SEEDS = [...new Set([...Array.from({ length: SEEDS }, (_, i) => 7000 + i).filter((_, i) => inShard(i)), ...(FULL_SEARCH && SHARD ? [] : REGRESSIONS)])];
 const STEPS = 60;
 
 function rng(seed: number): () => number {
@@ -235,7 +256,9 @@ async function run(seed: number) {
     const status = page.store.getSnapshot().save;
     // A conflict says whether this page's own newest edit was saved before the other change.
     const says = status.kind === "conflict" ? (status.saved ? "saved" : "not saved") : status.kind;
-    if (newestAccepted && (says === "error" || says === "not saved" || (settled && says === "saving"))) problems.push(`3: ${page.session} shows ${says} though its newest edit was accepted`);
+    if (newestAccepted && (says === "error" || says === "invalid" || says === "not saved" || (settled && says === "saving"))) problems.push(`3: ${page.session} shows ${says} though its newest edit was accepted`);
+    // 3b. A draft that cannot be sent is never "Saving…" or "Saved": nothing of it is being sent.
+    if (page.newestSendable === null && !page.store.inConflict && (status.kind === "saving" || status.kind === "saved")) problems.push(`3b: ${page.session} shows ${status.kind} for "${page.newestTyped}", which cannot be saved`);
     if (!newestAccepted && says === "saved") problems.push(`3: ${page.session} shows ${status.kind} saved though "${page.newestTyped}" was not accepted`);
   };
 
@@ -353,7 +376,7 @@ async function run(seed: number) {
 describe("saving the definition, generated over the real editor state (ADR 0003 1.1.1)", () => {
   const launched: boolean[] = [];
   const smsSaved: boolean[] = [];
-  for (const seed of Array.from({ length: SEEDS }, (_, i) => 7000 + i)) {
+  for (const seed of RUN_SEEDS) {
     test(`run ${seed}`, async () => {
       const out = await run(seed);
       launched.push(out.launchedOnce);
@@ -363,9 +386,9 @@ describe("saving the definition, generated over the real editor state (ADR 0003 
     });
   }
   test("the runs include launches that start, not only refused ones", () => {
-    expect(launched.filter(Boolean).length).toBeGreaterThan(SEEDS / 10);
+    expect(launched.filter(Boolean).length).toBeGreaterThan(RUN_SEEDS.length / 10);
   });
   test("the runs save arranged SMS tracks with the numbers that connected (ticket 13b)", () => {
-    expect(smsSaved.filter(Boolean).length).toBeGreaterThan(SEEDS / 20);
+    expect(smsSaved.filter(Boolean).length).toBeGreaterThan(RUN_SEEDS.length / 20);
   });
 });

@@ -136,8 +136,12 @@ export class EditorStore {
     // Shown at once, so a change is never labelled saved while it waits; a conflict stays shown,
     // now with an edit of its own that is not saved.
     const now = this.state.save;
-    const save: SaveStatus = !this.queue.inConflict ? { kind: "saving" } : now.kind === "conflict" ? { ...now, saved: false } : now;
-    this.set({ draft: change(this.state.draft), unsaved: true, save });
+    const draft = change(this.state.draft);
+    // Never "Saving…" for a draft that cannot be saved as it stands: nothing of it is sent.
+    const problems = draftProblems(draft);
+    const pending: SaveStatus = problems.length > 0 ? { kind: "invalid", message: problems.join(" ") } : { kind: "saving" };
+    const save: SaveStatus = !this.queue.inConflict ? pending : now.kind === "conflict" ? { ...now, saved: false } : now;
+    this.set({ draft, unsaved: true, save });
     this.schedule();
   }
 

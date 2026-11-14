@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { DatabaseSync, SQLInputValue, SQLOutputValue, StatementSync } from "node:sqlite";
 import { displayPhone, displayPhonesIn } from "../../domain/phone.ts";
 import type { SenderAccountView } from "../../domain/sequence/blockers.ts";
@@ -93,12 +94,34 @@ export class SqliteEngineStore implements EngineStore {
       const row = this.sql("SELECT * FROM campaigns WHERE id = ?").get(campaignId);
       if (!row) return { outcome: "missing" };
       const stored = storedDefinitionOf(row);
-      if (Number(changed) > 0) return { outcome: "saved", stored };
+      const hash = createHash("sha256").update(text).digest("hex");
+      if (Number(changed) > 0) {
+        // Each session's newest accepted number, kept after another session writes (migration 13).
+        if (save) {
+          this.run(
+            `INSERT INTO definition_saves (campaign_id, session, seq, content_sha256) VALUES (?, ?, ?, ?)
+             ON CONFLICT(campaign_id, session) DO UPDATE SET seq = excluded.seq, content_sha256 = excluded.content_sha256 WHERE excluded.seq >= definition_saves.seq`,
+            [campaignId, save.session, save.seq, hash],
+          );
+        }
+        return { outcome: "saved", stored };
+      }
       if (row["launched_at"] != null) return { outcome: "launched", stored };
       if (save && strOrNull(row, "definition_session") === save.session) {
         const seq = numOrNull(row, "definition_seq") ?? 0;
         if (seq > save.seq) return { outcome: "superseded", stored };
         if (seq === save.seq && row["definition"] === text) return { outcome: "unchanged", stored };
+      }
+      // Another session wrote last: this session's own newest accepted save still answers for it.
+      if (save) {
+        const mine = this.sql("SELECT seq, content_sha256 FROM definition_saves WHERE campaign_id = ? AND session = ?").get(campaignId, save.session);
+        if (mine) {
+          const seq = num(mine, "seq");
+          // An older save of a page that has since saved a newer one: superseded, as in its own session.
+          if (save.seq < seq) return { outcome: "superseded", stored };
+          // A retry of what was accepted, then replaced by a page that had seen it: saved, then replaced.
+          if (save.seq === seq && strOrNull(mine, "content_sha256") === hash) return { outcome: "replaced", stored };
+        }
       }
       return { outcome: "conflict", stored };
     });

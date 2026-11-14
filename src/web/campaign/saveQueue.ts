@@ -17,7 +17,10 @@
  *   such a request can always carry; a larger one is refused here and never sent.
  * - No answer is resent unchanged, a few times. `superseded` (an older save of this page arriving
  *   late) is not an error. `edit_conflict` means another page changed the campaign: the draft is
- *   kept and the status says so until the user loads the stored version.
+ *   kept and the status says so until the user loads the stored version. `replaced` is the same,
+ *   for a save the server had accepted before another page that had seen it saved over it (a retry
+ *   after a lost answer): the status says this page's change was saved.
+ * - A draft that cannot be saved is never "Saving…": nothing of it is being sent (`invalid`).
  *
  * The status is "saved" exactly when the server has confirmed the newest number. Tested on its own
  * and, with the server rule, by saveQueue.generated.test.ts.
@@ -29,6 +32,11 @@ import { trackLabel } from "../../shared/track-label.ts";
 export type SaveStatus =
   | { readonly kind: "idle" | "saving" | "saved" }
   | { readonly kind: "error"; readonly message: string }
+  /**
+   * The newest draft cannot be saved as it stands (`draftProblems`): nothing of it is being sent,
+   * and trying again cannot help until it is changed.
+   */
+  | { readonly kind: "invalid"; readonly message: string }
   /**
    * Another page changed the campaign since this one loaded it: the draft is kept. `saved` when this
    * page's newest edit was saved before the other change replaced it (a refused launch finds that),
@@ -173,6 +181,12 @@ export class SaveQueue {
     return this.acceptedSeq >= this.seq;
   }
 
+  /** The status while the newest draft is not yet confirmed: being saved, or one that cannot be saved as it stands. */
+  pendingStatus(): SaveStatus {
+    const problems = draftProblems(this.deps.read().draft);
+    return problems.length > 0 ? { kind: "invalid", message: problems.join(" ") } : { kind: "saving" };
+  }
+
   /** Another page changed the campaign, as a refused launch reports: the conflict state. */
   markConflict(message: string): void {
     this.conflictSeq = Math.max(this.conflictSeq ?? 0, this.seq, 1);
@@ -243,7 +257,7 @@ export class SaveQueue {
   restored(): Promise<SaveOutcome> {
     this.leaveSave?.abort();
     this.leaveSave = null;
-    if (!this.confirmed() && !this.inConflict) this.deps.onStatus({ kind: "saving" });
+    if (!this.confirmed() && !this.inConflict) this.deps.onStatus(this.pendingStatus());
     return this.save();
   }
 
@@ -257,13 +271,21 @@ export class SaveQueue {
       }
       // A later save of this page got in: an older one's conflict no longer counts.
       if (this.conflictSeq !== null && save.seq > this.conflictSeq) this.conflictSeq = null;
-      if (!this.inConflict) this.deps.onStatus(this.confirmed() ? { kind: "saved" } : { kind: "saving" });
+      if (!this.inConflict) this.deps.onStatus(this.confirmed() ? { kind: "saved" } : this.pendingStatus());
       return { kind: "accepted" };
     } catch (error) {
       if (error instanceof NoAnswer) return { kind: "no_answer" };
       const code = (error as { code?: unknown }).code;
       const message = error instanceof Error ? error.message : "The change wasn’t saved.";
       if (code === "superseded") return { kind: "superseded" };
+      if (code === "replaced") {
+        // The server had accepted this number, then another page that had seen it saved over it
+        // (ADR 0003 1.1.1): the conflict state, and this page's change counts as saved.
+        this.acceptedSeq = Math.max(this.acceptedSeq, save.seq);
+        this.conflictSeq = Math.max(this.conflictSeq ?? 0, save.seq);
+        this.deps.onStatus({ kind: "conflict", message, saved: this.confirmed() });
+        return { kind: "conflict", message };
+      }
       if (code === "edit_conflict") {
         // An older save than one already accepted: superseded, whatever it collided with.
         if (save.seq <= this.acceptedSeq) return { kind: "superseded" };
@@ -291,7 +313,7 @@ export class SaveQueue {
       const problems = draftProblems(draft);
       if (problems.length > 0) {
         const message = problems.join(" ");
-        this.deps.onStatus({ kind: "error", message });
+        this.deps.onStatus({ kind: "invalid", message });
         return { ok: false, reason: "invalid", message };
       }
       this.deps.onStatus({ kind: "saving" });
