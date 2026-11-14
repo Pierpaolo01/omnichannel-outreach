@@ -108,12 +108,16 @@ export function callingHoursLine(rules: readonly WindowRule[]): string {
 }
 
 /** Under the prospect's clock on the call sheet. */
-export function clockLine(task: Pick<CallTaskView, "task" | "listed">, userZone: string): { text: string; tone: "ok" | "warn" | "plain" } {
+export function clockLine(task: Pick<CallTaskView, "task" | "listed" | "callingHoursNow">, userZone: string): { text: string; tone: "ok" | "warn" | "plain" } {
   // A call off the list says nothing about its calling hours now.
   if (!task.listed) return { text: "Their time", tone: "plain" };
-  if (task.task?.bucket === "ready_now") return { text: "Their time, inside calling hours", tone: "ok" };
-  if (task.task?.bucket === "later_today" && task.task.opensAt) return { text: `Their time. Calling hours start at ${timeIn(userZone, task.task.opensAt)} your time`, tone: "warn" };
-  return { text: "Their time, outside calling hours", tone: "warn" };
+  // The server's fact about the hours at this instant, never the queue's bucket: a callback is listed by the time asked for (re-check 7, R10).
+  const { open, opensLaterToday } = task.callingHoursNow;
+  if (open) return { text: "Their time, inside calling hours", tone: "ok" };
+  // Outside the hours a callback is still the prospect's own time to call: said plainly, not as a warning.
+  const tone = task.task?.reason === "callback" || task.task?.reason === "overdue" ? "plain" : "warn";
+  if (opensLaterToday !== null) return { text: `Their time. Calling hours start at ${timeIn(userZone, opensLaterToday)} your time`, tone };
+  return { text: "Their time, outside calling hours", tone };
 }
 
 /** While an action is on its way. */

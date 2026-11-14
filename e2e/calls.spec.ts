@@ -507,3 +507,34 @@ test("a callback logged over HTTP, which this page has no control for yet, is li
   // The page still offers only what it offers today: callback requested stays in its not-yet state.
   await expect(page.getByRole("button", { name: "Callback requested" })).toBeDisabled();
 });
+
+test.describe("the sheet's calling-hours label says the server's fact about the hours now, whatever the call's kind (re-check 7, R10)", () => {
+  test("a callback asked for at 12:00, read at 10:00 with the hours open: inside calling hours, and the reason says the callback", async ({ page }) => {
+    const f = await freshCalls("ready", "r10-waiting");
+    const t = await focused(f);
+    expect((await f.harness.request("POST", `/api/call-tasks/${t.taskId}/outcome`, { requestId: "r10-cb", outcome: "callback_requested", callbackAt: "2026-11-09T12:00:00.000Z", numberId: t.numberId })).status).toBe(200);
+    // The tab is on Amira's callback (the queue's first call is another).
+    await page.addInitScript((id) => window.sessionStorage.setItem("outreach.calls.focus", id), t.taskId);
+    await page.goto(`${f.url}/calls`);
+    const sheet = page.getByRole("region", { name: "Call with Amira Hassan" });
+    await expect(sheet).toContainText("Callback asked for at 12:00");
+    await expect(sheet).toContainText("Their time, inside calling hours");
+    await expect(sheet).toContainText("Calling hours Mon–Fri, 09:00–17:00");
+    await expect(sheet).not.toContainText("Calling hours start at");
+  });
+
+  test("an overdue callback after the hours close: outside calling hours, beside hours that say so", async ({ page }) => {
+    const f = await freshCalls("ready", "r10-overdue");
+    const t = await focused(f);
+    expect((await f.harness.request("POST", `/api/call-tasks/${t.taskId}/outcome`, { requestId: "r10-late", outcome: "callback_requested", callbackAt: "2026-11-09T17:15:00.000Z", numberId: t.numberId })).status).toBe(200);
+    await f.harness.advanceTo(Date.parse("2026-11-09T17:30:00.000Z"));
+    await page.clock.setFixedTime(f.harness.clock);
+    await page.addInitScript((id) => window.sessionStorage.setItem("outreach.calls.focus", id), t.taskId);
+    await page.goto(`${f.url}/calls`);
+    const sheet = page.getByRole("region", { name: "Call with Amira Hassan" });
+    await expect(sheet).toContainText("Callback overdue, asked for at 17:15");
+    await expect(sheet).toContainText("Their time, outside calling hours");
+    await expect(sheet).toContainText("Calling hours Mon–Fri, 09:00–17:00");
+    await expect(sheet).not.toContainText("inside calling hours");
+  });
+});

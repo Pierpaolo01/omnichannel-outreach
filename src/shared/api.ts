@@ -789,6 +789,12 @@ export interface CallTaskView {
   readonly numbers: readonly CallNumberView[];
   /** The phone track's calling hours, in the prospect's local time (its window: days 0 = Sunday, whole hours). */
   readonly callingHours: readonly import("../domain/sequence/clock.ts").WindowRule[];
+  /**
+   * Whether the prospect is inside those calling hours at this read's instant, by the engine's own window
+   * rule (re-check 7, R10), and, when not, the instant they open later on the user's day (null if not
+   * today). A fact about the hours only: a callback is listed by the time asked for, whatever the hours.
+   */
+  readonly callingHoursNow: { readonly open: boolean; readonly opensLaterToday: string | null };
   /** The campaign's call script or talking points. */
   readonly script: string;
   /** Every earlier touch on this lead in this campaign, oldest first. Engagement (opens, clicks) is not tracked. */

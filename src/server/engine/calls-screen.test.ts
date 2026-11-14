@@ -104,6 +104,19 @@ describe("the day's call capacity and the call's calling hours, as the screens s
     const { task, taskOf } = await world();
     expect((await task(await taskOf("Pat Oneil"))).callingHours).toEqual(WEEKDAYS_9_TO_17);
   });
+
+  test("the call task says whether the prospect is inside those hours as of the read, and when they open later today (re-check 7, R10)", async () => {
+    const { h, task, taskOf } = await world();
+    const pat = await taskOf("Pat Oneil");
+    // Monday 10:00 London, hours 09:00 to 17:00: inside.
+    expect((await task(pat)).callingHoursNow).toEqual({ open: true, opensLaterToday: null });
+    // Monday 17:30: closed, and they do not open again today.
+    h.clock = Date.parse("2026-11-02T17:30:00Z");
+    expect((await task(pat)).callingHoursNow).toEqual({ open: false, opensLaterToday: null });
+    // Tuesday 07:30: closed, opening at 09:00 later today.
+    h.clock = Date.parse("2026-11-03T07:30:00Z");
+    expect((await task(pat)).callingHoursNow).toEqual({ open: false, opensLaterToday: "2026-11-03T09:00:00.000Z" });
+  });
 });
 
 describe("calls in the record's Activity (ticket 14: the person and company-lead timeline)", () => {

@@ -5,7 +5,7 @@
  */
 import { bucketOf, CALL_OUTCOMES, callNumbers, callWindow, dayHasRoom, isListed, listedForDay, queueRank, queueWall, recordedNumberOf, REDIAL_OUTCOMES, skippedTonight, type CallBucket } from "../../domain/sequence/calls.ts";
 import { displayPhone } from "../../domain/phone.ts";
-import { localDayNumber, nextWindowClose, startOfLocalDay } from "../../domain/sequence/clock.ts";
+import { localDayNumber, nextWindowClose, nextWindowOpen, startOfLocalDay, windowOpen } from "../../domain/sequence/clock.ts";
 import { liveTracks } from "../../domain/sequence/definition.ts";
 import { deriveStatus } from "../../domain/sequence/progress.ts";
 import type { CallAttempt, CallNumber, CallTask, RecordedNumber, SubjectState } from "../../domain/sequence/state.ts";
@@ -210,6 +210,14 @@ function offListOf(s: SubjectState, task: CallTask, listed: boolean): CallOffLis
   return { reason: "not_listed_today", status };
 }
 
+/** Whether the hours are open at `now`, by the engine's window rule, and, if not, when they open later on the user's day. */
+function callingHoursAt(window: ReturnType<typeof callWindow>, zone: string, now: number, userZone: string): CallTaskView["callingHoursNow"] {
+  if (windowOpen(window, zone, now)) return { open: true, opensLaterToday: null };
+  const opens = nextWindowOpen(window, zone, now);
+  const today = opens !== null && localDayNumber(opens, userZone) === localDayNumber(now, userZone);
+  return { open: false, opensLaterToday: today ? iso(opens) : null };
+}
+
 /** One call task with everything the call screen shows, or null for an unknown task. */
 export async function callTaskView(store: OutreachStore, taskId: string, now: number, rules: CallViewRules = DEFAULT_RULES): Promise<CallTaskView | null> {
   const subjectId = await store.engine.callTaskSubject(taskId);
@@ -265,6 +273,7 @@ export async function callTaskView(store: OutreachStore, taskId: string, now: nu
     localTime: localTimeIn(s.lead.zone, now),
     numbers: numbers.map(numberView),
     callingHours: callWindow(s, task.trackId),
+    callingHoursNow: callingHoursAt(callWindow(s, task.trackId), s.lead.zone, now, s.callDay.userZone),
     script: s.campaign.definition.callScript ?? "",
     touches: touches.map((x) => x.touch),
     personNotes: parties.person ? (await store.engine.notesOf("person", parties.person.id)).map(noteView) : [],
