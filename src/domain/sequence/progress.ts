@@ -4,7 +4,7 @@
  * it takes a `SubjectState` and the time, and returns the next `SubjectState`.
  */
 import type { OutreachStatus } from "../outreach-status.ts";
-import { applyAttemptEvent, applyLookup, isLive, isUncertain, markable, withRef, type AttemptEffect, type AttemptEvent, type WorkEvent } from "./attempt.ts";
+import { applyAttemptEvent, applyLookup, ENGINE_PARAMS, isLive, isUncertain, markable, withRef, type AttemptEffect, type AttemptEvent, type WorkEvent } from "./attempt.ts";
 import { leadNow, localDayNumber, nextWindowOpen, sendPoint, span, startOfLocalDay, syncClock, wallOfLead, type Freeze, type LeadClock } from "./clock.ts";
 import { liveSteps, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
 import type { Attempt, EndReason, FinishReason, LeadDetail, ProviderWork, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
@@ -143,7 +143,18 @@ export function quiesce(state: SubjectState, trackId: string | null = null): Sub
     const step = applyAttemptEvent(attempt, workOf(next, attempt.idempotencyKey), { kind: "quiesce" });
     next = withWork(withAttempt(next, step.attempt), step.work);
   }
+  // Every piece of work in scope the provider may still send is to be withdrawn, live attempt or not: the intent is kept
+  // on the work, so a non-final "not sent" that retires its attempt does not end it (ticket 17a; council A on 56d599c).
+  for (const w of next.work) {
+    if ((trackId !== null && w.trackId !== trackId) || !isUncertain(w) || w.withdrawWanted) continue;
+    next = withWork(next, { ...w, withdrawWanted: true, withdrawLastWall: null });
+  }
   return next;
+}
+
+/** Work whose withdrawal is to be asked of the provider at `now`: wanted, unsettled, and not asked within a settling period. */
+export function withdrawalDue(w: ProviderWork, now: number): boolean {
+  return w.withdrawWanted && isUncertain(w) && (w.withdrawLastWall === null || now >= w.withdrawLastWall + ENGINE_PARAMS.SETTLING);
 }
 
 /**
@@ -595,6 +606,22 @@ export function applyToWork(
       else if (refused) s = withAttempt(s, { ...refused, rejectReason: event.reason });
       if (refused) s = recordRejected(s, s.attempts.find((a) => a.id === refused.id) ?? refused, event.reason, now);
       return done(s, [{ kind: "rejected", reason: event.reason }]);
+    }
+    case "withdraw_answer": {
+      if (w.settled !== null || !w.withdrawWanted) return { state, effects: [{ kind: "ignored", what: "a withdrawal answer for work not being withdrawn" }] };
+      // Every live attempt carrying the work has now been asked (it is never called again).
+      let s = state;
+      for (const a of s.attempts) if (a.idempotencyKey === key && isLive(a) && a.state !== "claimed") s = withAttempt(s, { ...a, withdrawRequested: true, withdrawCalled: true, retry: a.retry === "none" ? "none" : "refused" });
+      if (event.answer === "withdrawn") {
+        // A confirmed withdrawal settles the work (4.2) and ends every attempt still carrying it.
+        s = withWork(s, { ...w, settled: "withdrawn", nextLookupWall: null, withdrawWanted: false, withdrawLastWall: event.now });
+        for (const a of s.attempts) if (a.idempotencyKey === key && isLive(a)) s = withAttempt(s, { ...a, state: "withdrawn", endedBy: a.state === "claimed" ? "guard" : "provider", awaitingAnswer: false });
+        return done(s, []);
+      }
+      // "too-late": the provider sent or is sending it, which the lookup settles; nothing more to ask. "unknown": asked
+      // again one settling period on, and looked up meanwhile.
+      const next: ProviderWork = event.answer === "too-late" ? { ...w, withdrawWanted: false, withdrawLastWall: event.now } : { ...w, withdrawLastWall: event.now, nextLookupWall: w.nextLookupWall ?? event.now + ENGINE_PARAMS.SETTLING };
+      return done(withWork(s, next), []);
     }
     case "mark_not_sent": {
       if (!markable(w)) return { state, effects: [{ kind: "ignored", what: "mark not sent is only for unresolved work" }] };

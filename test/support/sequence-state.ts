@@ -148,7 +148,6 @@ export function attempt(fields: Partial<Attempt> = {}): Attempt {
     endedBy: null,
     withdrawRequested: false,
     withdrawCalled: false,
-    withdrawLastWall: null,
     awaitingAnswer: false,
     retry: "none",
     rejectReason: null,
@@ -175,6 +174,8 @@ export function work(fields: Partial<ProviderWork> = {}): ProviderWork {
     lookupAnswer: null,
     queuedLookups: 0,
     unresolvedSince: null,
+    withdrawWanted: false,
+    withdrawLastWall: null,
     ...fields,
   };
 }

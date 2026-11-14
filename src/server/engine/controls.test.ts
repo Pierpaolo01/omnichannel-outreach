@@ -383,5 +383,68 @@ describe("one lead's controls", () => {
     expect(h.fake.deliveryLog).toEqual([]);
     expect((await h.request<EnrollmentRead>("GET", `/api/enrollments/${pat}`)).body.mayStillSend).toBe(0);
   });
+
+  /** One email per lead, sent by a provider whose lookups lag (they answer "not sent" until 38 minutes) and which keeps what a first withdrawal asks for. */
+  async function lagging(people: ReturnType<typeof person>[], k: number) {
+    const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k, healthy: true, quotaAvailable: true, resetZone: "UTC" }], modes: ["lookup-lags"], random: () => 0.9 });
+    h.fake.withdrawAnswers = "unknown-once";
+    await h.tick();
+    const { campaign } = await h.createCampaign("Clinics", { businesses: [HARBOUR], people });
+    await h.defineSequence(campaign.id, { ...DEFINITION, tracks: [{ ...DEFINITION.tracks[0]!, steps: [email("s1")] }] });
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows;
+    return { h, campaign, lead: (who: string) => rows.find((r) => r.name === who)!.enrollments[0]!.id };
+  }
+
+  test("the withdrawal is asked again until the provider's work has a final answer, even after a non-final lookup retired its attempt, and across a restart (council A)", async () => {
+    const { h, lead } = await lagging([PAT], 1);
+    const pat = lead("Pat Oneil");
+    await h.advanceTo(MONDAY_9 + MIN);
+    expect((await h.request("POST", `/api/enrollments/${pat}/controls`, { requestId: "p", action: "pause" })).status).toBe(200);
+    // A restart before the next tick: the intent to withdraw is stored on the work, so the new process keeps it.
+    await h.advanceTo(MONDAY_9 + 15 * MIN + 30_000);
+    await h.restart();
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    // At 16 minutes the lookup answers a non-final "not sent" and retires the attempt, in the same tick before the
+    // withdrawal's retry; the retry is asked of the work all the same, and the fake cancels on the second ask.
+    const st = await h.store.engine.subject(pat, h.clock);
+    expect(st?.attempts[0]).toMatchObject({ state: "withdrawn", endedBy: "lookup_not_sent" });
+    expect(st?.work[0]?.settled).toBe("withdrawn");
+    expect(h.fake.withdrawLog.map((w) => w.answer)).toEqual(["unknown", "withdrawn"]);
+    expect(h.fake.deliveryLog).toEqual([]);
+  });
+
+  test("the in-flight bound counts unsettled provider work, not live attempts: with k = 1 a retired attempt's work keeps the place (council B)", async () => {
+    const { h } = await lagging([PAT, NIA], 1);
+    h.fake.withdrawAnswers = "unknown-sends";
+    await h.advanceTo(MONDAY_9 + MIN);
+    const a = h.fake.handoverLog[0]!.subjectId;
+    // The first lead is paused with its email at the provider; its attempt retires at the 15-minute lookup.
+    expect((await h.request("POST", `/api/enrollments/${a}/controls`, { requestId: "p", action: "pause" })).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + 16 * MIN);
+    // Its work still may be sent, so it still holds the inbox's one place: the second lead's email is not handed over.
+    expect([...new Set(h.fake.handoverLog.map((c) => c.subjectId))]).toEqual([a]);
+  });
+
+  test("the in-flight bound held without any pause too: a reply ends a lead whose email the provider holds, its lookup's non-final not sent retires the attempt, and the work keeps its place (council B, the case before ticket 17)", async () => {
+    // k = 1. Pat's email and text go at 09:00; the provider sends the email at 09:27 and its lookups lag (not sent until
+    // 09:38), and it keeps what it is asked to withdraw. Pat replies by text at 09:01.
+    const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }], modes: ["lookup-lags"], random: () => 0.9, sms: { numbers: [{ id: "+447700900010", capacity: 50, gapMs: MIN, k: 2, healthy: true, resetZone: "Europe/London" }] } });
+    h.fake.withdrawAnswers = "unknown-sends";
+    await h.tick();
+    const withMobile = person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example", dial_phone: "+447700900101", dial_phone_type: "mobile" });
+    const { campaign } = await h.createCampaign("Clinics", { businesses: [HARBOUR], people: [withMobile, NIA] });
+    const text = { id: "x1", channel: "sms" as const, branch: "main" as const, window: ALWAYS, steps: [{ ...email("x1s1"), subject: "" }], start: { kind: "entry" as const }, removed: false };
+    await h.defineSequence(campaign.id, { ...DEFINITION, smsPool: ["+447700900010"], tracks: [{ ...DEFINITION.tracks[0]!, steps: [email("s1")] }, text] });
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + MIN);
+    expect(h.sms.prospectTexts("+447700900101", "Out of office", "+447700900010")).toBe(true);
+    await h.advanceTo(MONDAY_9 + 3 * H);
+    // The most pieces of email work the provider held at once, handed over and not yet sent, by its own logs.
+    const spans = h.fake.handoverLog.filter((c, i, all) => all.findIndex((x) => x.key === c.key) === i).map((c) => ({ from: c.at, to: h.fake.deliveryLog.find((d) => d.key === c.key)?.at ?? Infinity }));
+    const most = Math.max(...spans.map((x) => spans.filter((y) => y.from <= x.from && x.from < y.to).length));
+    expect(most).toBe(1);
+  });
+
 });
 

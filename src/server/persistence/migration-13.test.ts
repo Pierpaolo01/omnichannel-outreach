@@ -45,7 +45,8 @@ function beforeMigration13(file: string): void {
     ALTER TABLE call_tasks DROP COLUMN reckoned_through;
     DROP TABLE IF EXISTS hold_intervals;
     DROP TABLE IF EXISTS control_requests;
-    ALTER TABLE attempts DROP COLUMN withdraw_last_wall;
+    ALTER TABLE provider_work DROP COLUMN withdraw_wanted;
+      ALTER TABLE provider_work DROP COLUMN withdraw_last_wall;
     DELETE FROM schema_migrations WHERE version > 12;
   `);
   db.close();

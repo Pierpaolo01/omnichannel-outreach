@@ -219,6 +219,8 @@ export interface EngineStore {
   /** Every attempt that is not terminal. */
   openAttempts(): Promise<Attempt[]>;
   attempt(attemptId: string): Promise<Attempt | null>;
+  /** Unsettled provider work a quiesce wants withdrawn (ticket 17a; council A). */
+  workToWithdraw(): Promise<ProviderWork[]>;
   /** Unsettled provider work with a lookup scheduled. */
   openWork(): Promise<ProviderWork[]>;
   /**

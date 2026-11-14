@@ -134,10 +134,8 @@ export interface Attempt {
   readonly presendFoundReply: boolean;
   readonly endedBy: EndedBy | null;
   readonly withdrawRequested: boolean;
-  /** The worker has asked the provider to withdraw. */
+  /** The worker has asked the provider to withdraw this attempt's work. */
   readonly withdrawCalled: boolean;
-  /** When the last withdrawal answered "unknown": asked again one settling period later. Null once an answer was final. */
-  readonly withdrawLastWall: number | null;
   /** A send call was authorized and its answer has not been recorded (a crash leaves this set). */
   readonly awaitingAnswer: boolean;
   /** A same-key retry the worker should try to authorize (5.6); `after_not_sent` withdraws if refused. */
@@ -173,6 +171,14 @@ export interface ProviderWork {
   readonly lookupAnswer: LookupAnswer | null;
   readonly queuedLookups: number;
   readonly unresolvedSince: number | null;
+  /**
+   * A pause, a stop or any quiesce asked for this work to be withdrawn (ticket 17a; council A on 56d599c): kept on the
+   * work, not on an attempt, so it outlives an attempt a non-final "not sent" retires. Asked of the provider until the
+   * work has a final answer (withdrawn, sent, or a final not sent) or the provider says it is too late.
+   */
+  readonly withdrawWanted: boolean;
+  /** When the provider last answered the withdrawal "unknown": asked again one settling period later. */
+  readonly withdrawLastWall: number | null;
 }
 
 /**
@@ -367,7 +373,7 @@ export interface AccountState {
   readonly resetZone: string;
   /** Sends counted on today's reset day plus open reservations, across every subject. */
   readonly used: number;
-  /** Attempts in claimed, handed or accepted, across every subject. */
+  /** Provider work holding in-flight places, across every subject: live attempts' work and unsettled work, once per key (`occupyingKeys`). */
   readonly inFlight: number;
 }
 

@@ -16,7 +16,7 @@ import {
   retryFailures,
 } from "../../domain/sequence/dispatch.ts";
 import { compareReadyNow, focusOf, isListed, logCallOutcome, placeCall, readyCalls, reasonOf } from "../../domain/sequence/calls.ts";
-import { applyBadDestination, applyReply, applyToAttempt, applyToWork, asOfAction, enterMain, evaluate, replyMatches, smsReplyOwner } from "../../domain/sequence/progress.ts";
+import { applyBadDestination, applyReply, applyToAttempt, applyToWork, asOfAction, enterMain, evaluate, replyMatches, smsReplyOwner, withdrawalDue } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
 import { applyControl, campaignPaused, campaignResumed } from "../../domain/sequence/controls.ts";
 import type { RequestStanding, StoredRequest } from "./engine-store.ts";
@@ -67,6 +67,8 @@ export interface Rules {
   /** The campaign pause and resume as each of its leads takes them (ticket 17a). */
   readonly campaignPaused: typeof campaignPaused;
   readonly campaignResumed: typeof campaignResumed;
+  /** Whether a piece of work's withdrawal is to be asked now (ticket 17a; council A): its own intent and schedule. */
+  readonly withdrawalDue: typeof withdrawalDue;
   /** How a request id stands against its stored first answer (verifier B5): new, a replay of it, or reused. */
   readonly requestStanding: (stored: StoredRequest | null, target: string, action: string) => RequestStanding;
   /** What the engine makes of the pre-send check's answer (ADR 0002): as given; the mutation of ca8baee's defect clears a known reply. */
@@ -109,6 +111,7 @@ export const DEFAULT_RULES: Rules = {
   applyControl,
   campaignPaused,
   campaignResumed,
+  withdrawalDue,
   requestStanding: (stored, target, action) => (stored === null ? "new" : stored.target === target && stored.action === action ? "replay" : "reused"),
   previewAsOf: asOfAction,
   presendAnswer: (answer) => answer,

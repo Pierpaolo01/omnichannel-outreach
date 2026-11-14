@@ -8,7 +8,7 @@
 import { leadNow, wallOfLead } from "./clock.ts";
 import type { TrackDefinition } from "./definition.ts";
 import { advanceTrack, end, enterMain, enterWinBack, evaluate, finishTrack, hasWorkLeft, liveTracksFor, progressOf, quiesce, reachable, runs, synced } from "./progress.ts";
-import { isLive, isUncertain } from "./attempt.ts";
+import { isUncertain } from "./attempt.ts";
 import type { SubjectState } from "./state.ts";
 
 export const LEAD_CONTROLS = ["pause", "resume", "skip", "stop", "resume_from_next_step", "move_to_win_back"] as const;
@@ -72,7 +72,9 @@ function noStepReason(state: SubjectState): string {
 
 /** Whether a step's provider work may still be sent: an attempt past its claim, or called work not yet settled. */
 export function withProvider(state: SubjectState, stepId: string): boolean {
-  return state.attempts.some((a) => a.stepId === stepId && isLive(a) && a.state !== "claimed") || state.work.some((w) => w.stepId === stepId && isUncertain(w));
+  // An attempt past its claim has called its work, so this is the one definition, `isUncertain`, that the in-flight
+  // bound and `mayStillSend` use too (council on 56d599c).
+  return state.work.some((w) => w.stepId === stepId && isUncertain(w));
 }
 
 const PROVIDER_NAME = { email: "email provider", sms: "SMS provider", call: "call list" } as const;

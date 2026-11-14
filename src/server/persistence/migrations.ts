@@ -620,8 +620,13 @@ export const MIGRATIONS: readonly Migration[] = [
         effect TEXT,
         at_wall INTEGER NOT NULL
       );
-      -- When a withdrawal was last asked of the provider: asked again each settling period until its answer is final.
-      ALTER TABLE attempts ADD COLUMN withdraw_last_wall INTEGER;
+      -- A withdrawal wanted of provider work, kept on the work so it outlives an attempt a non-final "not sent" retires,
+      -- and when the provider last answered it "unknown": asked again each settling period until the work's answer is
+      -- final (council A on 56d599c). Work whose live attempt was already asked to withdraw keeps that intent.
+      ALTER TABLE provider_work ADD COLUMN withdraw_wanted INTEGER NOT NULL DEFAULT 0 CHECK (withdraw_wanted IN (0, 1));
+      ALTER TABLE provider_work ADD COLUMN withdraw_last_wall INTEGER;
+      UPDATE provider_work SET withdraw_wanted = 1 WHERE settled IS NULL AND calls > 0
+        AND EXISTS (SELECT 1 FROM attempts a WHERE a.idempotency_key = provider_work.key AND a.withdraw_requested = 1);
     `,
   },
 ];

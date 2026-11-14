@@ -46,7 +46,9 @@ export type WorkEvent =
   | { readonly kind: "lookup_answer"; readonly answer: { readonly kind: LookupAnswer; readonly sentAt?: number; readonly providerRef?: string | null }; readonly now: number }
   | { readonly kind: "provider_rejected"; readonly reason: RejectReason }
   | { readonly kind: "mark_sent"; readonly now: number }
-  | { readonly kind: "mark_not_sent"; readonly now: number };
+  | { readonly kind: "mark_not_sent"; readonly now: number }
+  /** The provider's answer to a withdrawal of the work (ticket 17a; council A): asked of the work, whatever its attempts. */
+  | { readonly kind: "withdraw_answer"; readonly answer: "withdrawn" | "too-late" | "unknown"; readonly now: number };
 
 /** What a change means for the step, the account or the worker. */
 export type AttemptEffect =
@@ -63,7 +65,22 @@ export interface AttemptStep {
 }
 
 /** Unsettled work the provider may hold: called at least once. It keeps its reservation. */
-export const isUncertain = (w: ProviderWork): boolean => w.settled === null && w.calls > 0;
+/**
+ * Unsettled provider work (ticket 17a; council on 56d599c): called, with no final answer yet, whether or not an attempt
+ * still carries it. The one definition the in-flight bound, `mayStillSend`, skip's refusal and the campaign read use.
+ */
+export const isUncertain = (w: Pick<ProviderWork, "settled" | "calls">): boolean => w.settled === null && w.calls > 0;
+
+/**
+ * The provider work holding an account's in-flight places (4.2's `k`; council B on 56d599c): every live attempt's work,
+ * a claim's included, and every piece of unsettled work, counted once per key, so an inheritor of uncertain work does
+ * not count twice and work a non-final "not sent" left without an attempt still holds its place.
+ */
+export function occupyingKeys(liveAttemptKeys: Iterable<string>, work: Iterable<Pick<ProviderWork, "key" | "settled" | "calls">>): Set<string> {
+  const keys = new Set(liveAttemptKeys);
+  for (const w of work) if (isUncertain(w)) keys.add(w.key);
+  return keys;
+}
 
 /** Unresolved work the user may mark sent or not sent. */
 export const markable = (w: ProviderWork): boolean => isUncertain(w) && w.unresolvedSince !== null;
@@ -141,13 +158,7 @@ export function applyAttemptEvent(a: Attempt, w: ProviderWork, event: AttemptEve
         const work: ProviderWork = w.settled === null ? { ...w, settled: "withdrawn", nextLookupWall: null } : w;
         return { attempt: { ...a, withdrawCalled: true, state: "withdrawn", endedBy: "provider", awaitingAnswer: false }, work, effects: [] };
       }
-      // "too-late" is final (the provider sent it); "unknown" is asked again one settling period on (`withdrawLastWall`),
-      // until the provider's answer is final or the work settles (ticket 17a: a pause or a stop retries its withdrawal).
-      return {
-        attempt: { ...a, withdrawCalled: true, withdrawLastWall: event.answer === "unknown" ? event.now : null },
-        work: w.settled === null ? { ...w, nextLookupWall: w.nextLookupWall ?? event.now + ENGINE_PARAMS.SETTLING } : w,
-        effects: [],
-      };
+      return { attempt: { ...a, withdrawCalled: true }, work: w.settled === null ? { ...w, nextLookupWall: w.nextLookupWall ?? event.now + ENGINE_PARAMS.SETTLING } : w, effects: [] };
 
     case "retry_refused":
       if (a.retry === "wanted_after_not_sent") {

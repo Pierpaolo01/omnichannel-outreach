@@ -742,7 +742,8 @@ describe("work an older campaign already holds when the projection is taken (rev
     // Its lookups say not sent until the attempt is withdrawn; the work stays uncertain and reserved.
     await h.advanceTo(Date.parse("2026-11-02T16:00:00Z"));
     const [account] = await h.store.engine.accounts(h.clock);
-    expect(account).toMatchObject({ used: 1, inFlight: 0 });
+    // It holds its in-flight place too, with no attempt carrying it: the provider may still send it (council B on 56d599c).
+    expect(account).toMatchObject({ used: 1, inFlight: 1 });
 
     await h.defineSequence(newer.id, oneEmail(["inbox-a"]));
     const projected = await projectedSends(h.store, newer.id, h.clock);

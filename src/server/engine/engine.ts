@@ -628,17 +628,18 @@ export class Engine {
     return changed;
   }
 
+  /**
+   * Withdrawals are asked of the provider work, not of an attempt (ticket 17a; council A on 56d599c): work a quiesce
+   * wants withdrawn is asked at once, and again each settling period while the answer is unknown, until the work has a
+   * final answer, whether or not an attempt still carries it, and across restarts (the intent is stored on the work).
+   */
   private async withdraw(): Promise<boolean> {
     let changed = false;
-    for (const a of await this.store.openAttempts()) {
-      // Asked once, then again each settling period while the provider's answer stays unknown (ticket 17a).
-      const due = !a.withdrawCalled || (a.withdrawLastWall !== null && this.now() >= a.withdrawLastWall + ENGINE_PARAMS.SETTLING);
-      if (!a.withdrawRequested || !due || (a.state !== "handed" && a.state !== "accepted")) continue;
-      const w = await this.store.work(a.idempotencyKey);
-      if (!w) continue;
+    for (const w of await this.store.workToWithdraw()) {
+      if (!this.rules.withdrawalDue(w, this.now())) continue;
       const port = await this.portOf(w.accountId);
       const answer = await this.bounded(() => port.withdraw(this.ref(w)), "unknown" as const);
-      changed = (await this.applyAttempt(a, { kind: "withdraw_answer", answer, now: this.now() })) || changed;
+      changed = (await this.applyWork(w.subjectId, w.key, { kind: "withdraw_answer", answer, now: this.now() })) || changed;
     }
     return changed;
   }
