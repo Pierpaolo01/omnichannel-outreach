@@ -3,20 +3,29 @@
  * task with everything the call screen shows. Built from the engine's stored facts and the CRM, so
  * the screens render them without recomputing anything.
  */
-import { bucketOf, CALL_OUTCOMES, callNumbers, callWindow, dayHasRoom, isListed, reasonOf, recordedNumberOf, type CallBucket } from "../../domain/sequence/calls.ts";
+import { bucketOf, CALL_OUTCOMES, callNumbers, callWindow, dayHasRoom, isListed, listedForDay, queueRank, queueWall, recordedNumberOf, REDIAL_OUTCOMES, skippedTonight, type CallBucket } from "../../domain/sequence/calls.ts";
 import { displayPhone } from "../../domain/phone.ts";
 import { localDayNumber, nextWindowClose, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { liveTracks } from "../../domain/sequence/definition.ts";
 import { deriveStatus } from "../../domain/sequence/progress.ts";
-import type { CallNumber, CallTask, RecordedNumber, SubjectState } from "../../domain/sequence/state.ts";
-import type { CallColleagueView, CallNumberView, CallOffListView, CallQueueItem, RecordedNumberView, CallsView, CallTaskView, NoteView, TodayView, TouchView } from "../../shared/api.ts";
+import type { CallAttempt, CallNumber, CallTask, RecordedNumber, SubjectState } from "../../domain/sequence/state.ts";
+import type { CallColleagueView, CallNumberView, CallOffListView, CallQueueItem, CallRecordView, RecordedNumberView, CallsView, CallTaskView, NoteView, TodayView, TouchView } from "../../shared/api.ts";
 import type { OutreachStore } from "../persistence/store.ts";
 import { DEFAULT_DAILY_CALL_CAPACITY } from "../persistence/sqlite-engine-store.ts";
 import type { StoredNote } from "./engine-store.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 
-/** The decisions the call read models make: the queue order and the focus, from the engine's rules. */
-export type CallViewRules = Pick<Rules, "readyNowOrder" | "focusOf">;
+/**
+ * The decisions the call read models make, from the engine's rules: each lead's state as of the instant read
+ * (the same catch-up a user action gets, council on 228cd3b), the queue order, the focus and the reasons.
+ */
+export type CallViewRules = Pick<Rules, "readyNowOrder" | "focusOf" | "callReason" | "asOfAction" | "evaluate">;
+
+/** A lead's state as of `now`: what fell due since the worker's last tick is applied (nothing is written). */
+async function asOfNow(store: OutreachStore, id: string, now: number, rules: CallViewRules): Promise<SubjectState | null> {
+  const stored = await store.engine.subject(id, now);
+  return stored ? rules.asOfAction(stored, now, rules.evaluate) : null;
+}
 
 const iso = (t: number) => new Date(t).toISOString();
 
@@ -27,8 +36,21 @@ export function localTimeIn(zone: string, t: number): string {
 
 /** The user's date, YYYY-MM-DD in their zone. */
 function dateIn(zone: string, t: number): string {
-  return new Date(localDayNumber(t, zone) * 86_400_000).toISOString().slice(0, 10);
+  return dateOfDay(localDayNumber(t, zone));
 }
+
+/** A user-local day number as YYYY-MM-DD. */
+export const dateOfDay = (day: number): string => new Date(day * 86_400_000).toISOString().slice(0, 10);
+
+/** One logged call as the screens show it: the number dialled, and a redial or the callback time asked for. */
+export const callRecordView = (s: SubjectState, c: CallAttempt): CallRecordView => ({
+  outcome: c.outcome,
+  at: iso(c.atWall),
+  number: recordedView(recordedNumberOf(s, c.numberDetailId)),
+  note: c.note,
+  redial: c.redial,
+  callbackAt: c.callbackAt === null ? null : iso(c.callbackAt),
+});
 
 /** A phone track's name as the canvas gives it: "Phone track", or "Phone track 2" when the campaign has several. */
 function trackLabel(s: SubjectState, trackId: string): string {
@@ -62,7 +84,7 @@ async function partiesOf(store: OutreachStore, subjectId: string): Promise<Parti
   };
 }
 
-function queueItem(s: SubjectState, task: CallTask, parties: Parties, place: { bucket: CallBucket; opensAt: number | null }, now: number): CallQueueItem {
+function queueItem(s: SubjectState, task: CallTask, parties: Parties, place: { bucket: CallBucket; opensAt: number | null }, now: number, rules: CallViewRules = DEFAULT_RULES): CallQueueItem {
   return {
     taskId: task.id,
     enrollmentId: s.subject.id,
@@ -70,10 +92,13 @@ function queueItem(s: SubjectState, task: CallTask, parties: Parties, place: { b
     track: { id: task.trackId, label: trackLabel(s, task.trackId) },
     zone: s.lead.zone,
     localTime: localTimeIn(s.lead.zone, now),
-    reason: reasonOf(s, task),
+    reason: rules.callReason(s, task, now),
+    kind: task.kind,
+    callbackAt: task.callbackAt === null ? null : iso(task.callbackAt),
     dueAt: iso(task.dueWall),
     bucket: place.bucket,
     opensAt: place.opensAt === null ? null : iso(place.opensAt),
+    skippedTonight: skippedTonight(s, task, now),
   };
 }
 
@@ -83,13 +108,13 @@ function queueItem(s: SubjectState, task: CallTask, parties: Parties, place: { b
  */
 async function callList(store: OutreachStore, now: number, rules: CallViewRules = DEFAULT_RULES) {
   const day = await store.engine.callDay(now);
-  const items: { item: CallQueueItem; task: CallTask; skippedToday: boolean; subjectId: string; opensAt: number }[] = [];
+  const items: { item: CallQueueItem; task: CallTask; skippedToday: boolean; subjectId: string; opensAt: number; rank: 0 | 1 | 2 }[] = [];
   /** Instants at which the list changes by the clock: hours opening (later today) and closing (ready now). */
   const changes: number[] = [startOfLocalDay(day.day + 1, day.userZone)];
   /** Every open task listed now, in a queue part or not (its hours closed for the day). */
   const listed = new Set<string>();
   for (const id of await store.engine.subjectsWithOpenCallTasks()) {
-    const s = await store.engine.subject(id, now);
+    const s = await asOfNow(store, id, now, rules);
     if (!s) continue;
     for (const task of s.callTasks) {
       if (task.open && isListed(s, task)) listed.add(task.id);
@@ -101,12 +126,12 @@ async function callList(store: OutreachStore, now: number, rules: CallViewRules 
       const closes = place.bucket === "ready_now" ? nextWindowClose(callWindow(s, task.trackId), s.lead.zone, now) : null;
       if (closes !== null) changes.push(closes);
       const skippedToday = task.skippedWall !== null && localDayNumber(task.skippedWall, day.userZone) === day.day;
-      items.push({ item: queueItem(s, task, parties, place, now), task, skippedToday, subjectId: id, opensAt: place.opensAt ?? now });
+      items.push({ item: queueItem(s, task, parties, place, now, rules), task, skippedToday, subjectId: id, opensAt: place.opensAt ?? now, rank: queueRank(s, task, now) });
     }
   }
   const byDue = (a: (typeof items)[number], b: (typeof items)[number]) =>
     a.task.dueWall - b.task.dueWall || (a.subjectId < b.subjectId ? -1 : a.subjectId > b.subjectId ? 1 : 0) || (a.task.stepId < b.task.stepId ? -1 : 1);
-  const entry = (x: (typeof items)[number]) => ({ taskId: x.task.id, subjectId: x.subjectId, stepId: x.task.stepId, dueWall: x.task.dueWall, skippedWall: x.skippedToday ? x.task.skippedWall : null });
+  const entry = (x: (typeof items)[number]) => ({ taskId: x.task.id, subjectId: x.subjectId, stepId: x.task.stepId, rank: x.rank, dueWall: queueWall(x.task), skippedWall: x.skippedToday ? x.task.skippedWall : null });
   const readyNow = items
     .filter((x) => x.item.bucket === "ready_now")
     .sort((a, b) => rules.readyNowOrder(entry(a), entry(b)))
@@ -155,7 +180,20 @@ const UP_NEXT = 5;
 
 export async function todayView(store: OutreachStore, now: number, rules?: CallViewRules): Promise<TodayView> {
   const { day, readyNow, laterToday, changes } = await callList(store, now, rules);
-  return { date: dateIn(day.userZone, now), asOf: iso(now), nextChangeAt: nextChange(changes, now), userZone: day.userZone, readyNow: readyNow.length, laterToday: laterToday.length, capacityReached: !dayHasRoom(day), upNext: [...readyNow, ...laterToday].slice(0, UP_NEXT) };
+  const listed = [...readyNow, ...laterToday];
+  return {
+    date: dateIn(day.userZone, now),
+    asOf: iso(now),
+    nextChangeAt: nextChange(changes, now),
+    userZone: day.userZone,
+    readyNow: readyNow.length,
+    laterToday: laterToday.length,
+    capacityReached: !dayHasRoom(day),
+    upNext: listed.slice(0, UP_NEXT),
+    // Oldest first, by the time the prospect asked for.
+    overdueCallbacks: readyNow.filter((x) => x.reason === "overdue").sort((a, b) => Date.parse(a.callbackAt ?? "") - Date.parse(b.callbackAt ?? "") || (a.taskId < b.taskId ? -1 : 1)),
+    carriedOver: listed.filter((x) => x.reason === "rolled_over" || x.reason === "redial").length,
+  };
 }
 
 /**
@@ -173,14 +211,15 @@ function offListOf(s: SubjectState, task: CallTask, listed: boolean): CallOffLis
 }
 
 /** One call task with everything the call screen shows, or null for an unknown task. */
-export async function callTaskView(store: OutreachStore, taskId: string, now: number): Promise<CallTaskView | null> {
+export async function callTaskView(store: OutreachStore, taskId: string, now: number, rules: CallViewRules = DEFAULT_RULES): Promise<CallTaskView | null> {
   const subjectId = await store.engine.callTaskSubject(taskId);
-  const s = subjectId === null ? null : await store.engine.subject(subjectId, now);
+  const s = subjectId === null ? null : await asOfNow(store, subjectId, now, rules);
   const task = s?.callTasks.find((t) => t.id === taskId);
   const parties = subjectId === null ? null : await partiesOf(store, subjectId);
   if (!s || !task || !parties) return null;
   const place = task.open ? bucketOf(s, task, now) : null;
   const numbers = callNumbers(s);
+  const item = place ? queueItem(s, task, parties, place, now, rules) : null;
   const listed = isListed(s, task);
 
   const touches: { touch: TouchView; t: number }[] = [];
@@ -193,7 +232,7 @@ export async function callTaskView(store: OutreachStore, taskId: string, now: nu
   for (const r of s.replies) touches.push({ touch: { kind: "reply", channel: r.channel, at: iso(r.atWall) }, t: r.atWall });
   for (const c of s.callAttempts) {
     if (c.outcome === "skip_for_now") continue;
-    touches.push({ touch: { kind: "call", at: iso(c.atWall), outcome: c.outcome, number: recordedView(recordedNumberOf(s, c.numberDetailId)), note: c.note }, t: c.atWall });
+    touches.push({ touch: { kind: "call", ...callRecordView(s, c) }, t: c.atWall });
   }
   touches.sort((a, b) => a.t - b.t);
 
@@ -213,7 +252,7 @@ export async function callTaskView(store: OutreachStore, taskId: string, now: nu
   });
 
   return {
-    task: place ? queueItem(s, task, parties, place, now) : null,
+    task: item,
     taskId,
     enrollmentId: s.subject.id,
     open: task.open,
@@ -233,5 +272,10 @@ export async function callTaskView(store: OutreachStore, taskId: string, now: nu
     colleagues,
     outcomes: listed ? CALL_OUTCOMES : [],
     storedRequestIds: s.callAttempts.filter((c) => c.taskId === taskId).map((c) => c.requestId),
+    redialOutcomes: listed ? REDIAL_OUTCOMES : [],
+    kind: task.kind,
+    callbackAt: task.callbackAt === null ? null : iso(task.callbackAt),
+    dueAt: iso(task.dueWall),
+    listedFor: dateOfDay(listedForDay(s, task)),
   };
 }

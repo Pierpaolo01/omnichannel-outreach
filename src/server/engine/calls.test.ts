@@ -77,7 +77,7 @@ describe("a phone track's call becomes a task on the user's list (spec: Phone tr
     const monday = await today();
     expect(monday).toMatchObject({ date: "2026-11-02", userZone: "Europe/London", readyNow: 1, laterToday: 0 });
     expect(monday.upNext).toEqual([expect.objectContaining({ bucket: "ready_now", reason: "due", localTime: "09:00", opensAt: null })]);
-    await h.advanceTo(Date.parse("2026-11-05T05:00:00Z"));
+    await h.advanceTo(Date.parse("2026-11-03T05:00:00Z"));
 
     // The parallel email track ran both its steps; the email after the phone track waits for the call.
     expect(emails("pat@harbour.example").map((d) => d.stepId)).toEqual(["s1", "s2"]);
@@ -87,14 +87,14 @@ describe("a phone track's call becomes a task on the user's list (spec: Phone tr
     expect(progress.tracks.map((t) => [t.trackId, t.finishReason])).toEqual([["e1", "completed"], ["p1", null], ["e2", null]]);
     expect(progress.tracks.find((t) => t.trackId === "e2")?.started).toBe(false);
 
-    // Thursday 05:00 London: outside calling hours, the unworked call waits as later today, rolled over.
-    const thursday = await today();
-    expect(thursday).toMatchObject({ date: "2026-11-05", readyNow: 0, laterToday: 1 });
-    expect(thursday.upNext).toEqual([expect.objectContaining({ bucket: "later_today", reason: "rolled_over", localTime: "05:00", opensAt: "2026-11-05T09:00:00.000Z" })]);
+    // Tuesday 05:00 London: outside calling hours, the unworked call waits as later today, rolled over.
+    const tuesday = await today();
+    expect(tuesday).toMatchObject({ date: "2026-11-03", readyNow: 0, laterToday: 1 });
+    expect(tuesday.upNext).toEqual([expect.objectContaining({ bucket: "later_today", reason: "rolled_over", localTime: "05:00", opensAt: "2026-11-03T09:00:00.000Z" })]);
     expect((await calls()).focusTaskId).toBeNull();
 
-    // At 09:00 it is ready now, oldest due first.
-    await h.advanceTo(Date.parse("2026-11-05T09:30:00Z"));
+    // At 09:00 it is ready now, carried over from Monday, with its original due time.
+    await h.advanceTo(Date.parse("2026-11-03T09:30:00Z"));
     const ready = await calls();
     expect(ready.readyNow).toEqual([
       expect.objectContaining({ person: { id: expect.any(String), name: "Pat Oneil", title: "Clinic owner" }, company: expect.objectContaining({ name: "Harbour Lane Physio" }), campaign: { id: c.id, name: "Calls and email" }, track: { id: "p1", label: "Phone track" }, localTime: "09:30", dueAt: "2026-11-02T09:00:00.000Z" }),
@@ -122,7 +122,7 @@ describe("outcomes the user logs (spec: Call outcomes and their effect on the le
     expect(logged.status).toBe(200);
     const after = await task(taskId);
     expect(after).toMatchObject({ open: false, listed: false, outcomes: [], status: "active" });
-    expect(after.touches.at(-1)).toEqual({ kind: "call", at: "2026-11-02T11:00:00.000Z", outcome: "gatekeeper", number: dialled, note: "Receptionist says Pat is in clinic until 3." });
+    expect(after.touches.at(-1)).toEqual({ kind: "call", at: "2026-11-02T11:00:00.000Z", outcome: "gatekeeper", number: dialled, note: "Receptionist says Pat is in clinic until 3.", redial: false, callbackAt: null });
     expect(after.personNotes.map((n) => n.body)).toEqual(["Receptionist says Pat is in clinic until 3."]);
     expect(after.companyNotes).toEqual([]);
     expect((await calls()).readyNow).toEqual([]);
@@ -183,7 +183,7 @@ describe("the call task shows what the user needs to make the call (spec: Call t
       script: "Ask who looks after new patient bookings.",
       status: "waiting_on_call",
       listed: true,
-      outcomes: ["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "skip_for_now"],
+      outcomes: ["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "callback_requested", "skip_for_now"], redialOutcomes: ["no_answer", "voicemail", "gatekeeper"],
     });
     expect(first.numbers.map((n) => [n.kind, n.owner, n.bad])).toEqual([["direct", "person", false], ["mobile", "person", false]]);
     expect(first.touches).toEqual([{ kind: "email", at: "2026-11-02T09:00:00.000Z", stepId: "s1", copy: { subject: "Hello Omar", body: "Email s1 for Northgate Dental." } }]);
@@ -252,7 +252,7 @@ describe("wrong numbers, interest and skipping (spec: Call outcomes and their ef
     const after = await calls();
     expect(after.readyNow.filter((x) => x.person?.name === "Pat Oneil").map((x) => x.campaign.name)).toEqual(["Autumn", "Autumn"]);
     expect(after.readyNow.filter((x) => x.person?.name === "Nia Cole").length).toBe(4);
-    await h.advanceTo(MONDAY_9 + 2 * DAY);
+    await h.advanceTo(MONDAY_9 + DAY);
     expect(emails("pat@harbour.example").filter((d) => d.subjectId === spring.lead("Pat Oneil")).map((d) => d.stepId)).toEqual(["s1"]);
     expect(emails("pat@harbour.example").filter((d) => d.subjectId === autumn.lead("Pat Oneil")).map((d) => d.stepId)).toEqual(["s1", "s2"]);
     expect((await h.progress(spring.lead("Nia Cole"))).status).toBe("waiting_on_call");
@@ -261,7 +261,8 @@ describe("wrong numbers, interest and skipping (spec: Call outcomes and their ef
   test("skip for now moves the task to the end of the queue and is not a call made; outcomes on a task that is not listed are refused", async () => {
     const { h, campaign, calls, task, log } = await world();
     h.clock = MONDAY_9;
-    const c = await campaign("Skipping", definition([track("p1", "call", [call("c1")], { kind: "entry" }, WEEKDAYS_9_TO_17)], { emailPool: [] }));
+    // A skip limit past Saturday: the call is still open then, so Saturday tests a day its calling hours never open.
+    const c = await campaign("Skipping", definition([track("p1", "call", [call("c1")], { kind: "entry" }, WEEKDAYS_9_TO_17)], { emailPool: [], callSkipLimitDays: 7 }));
     await h.advanceTo(MONDAY_9 + H);
     const before = await calls();
     expect(before.readyNow.map((x) => x.person?.name)).toEqual(["Pat Oneil", "Nia Cole"].sort((a, b) => (c.lead(a) < c.lead(b) ? -1 : 1)));
@@ -314,11 +315,14 @@ describe("the user's daily call capacity (spec: Pace, capacity and timing; ADR 0
     expect(await calls()).toMatchObject({ placedToday: 0, committed: 2 });
     expect((await h.progress(ids[2] ?? "")).status).toBe("queued");
 
-    // Wednesday: one call is carried over, so one new call fits: the one that waited.
+    // Wednesday: Monday's other call, unworked on Monday and Tuesday, was skipped at the end of Tuesday (the
+    // skip limit, ticket 15), and the email after it went then. Nothing is carried, so the call that waited fits.
     await h.advanceTo(Date.parse("2026-11-04T09:30:00Z"));
+    const unworked = ids.find((id) => id !== first.enrollmentId && id !== ids[2]) ?? "";
+    expect((await h.progress(unworked)).tracks.map((t) => [t.trackId, t.finishReason, t.finishedAt])).toEqual([["e1", "completed", "2026-11-04T00:00:00.000Z"], ["p1", "skipped_unworked", "2026-11-04T00:00:00.000Z"]]);
     const wednesday = await calls();
-    expect(wednesday).toMatchObject({ placedToday: 1, committed: 1 });
-    expect(wednesday.readyNow.map((x) => [x.enrollmentId, x.reason])).toEqual([[ids.find((id) => id !== first.enrollmentId && id !== ids[2]), "rolled_over"], [ids[2], "due"]].sort((a, b) => (a[0]! < b[0]! ? -1 : 1)));
+    expect(wednesday).toMatchObject({ placedToday: 1, committed: 0 });
+    expect(wednesday.readyNow.map((x) => [x.enrollmentId, x.reason])).toEqual([[ids[2], "due"]]);
     expect((await h.progress(ids[2] ?? "")).status).toBe("waiting_on_call");
   });
 
@@ -621,3 +625,200 @@ describe("a call's history is what was dialled, not what may be dialled now (ver
   });
 });
 
+
+describe("redials, callbacks and unworked calls (ticket 15)", () => {
+  const WED_0 = Date.parse("2026-11-04T00:00:00Z");
+  const def = () =>
+    definition([
+      // The parallel email track: two emails a day apart, and a third two days later.
+      track("e1", "email", [email("s1"), email("s2", 1), email("s3", 2)]),
+      track("p1", "call", [call("c1")], { kind: "entry" }, WEEKDAYS_9_TO_17),
+      // "Following up on my call": only after the phone track has finished.
+      track("e2", "email", [email("f1")], after("p1", 0)),
+    ]);
+
+  test("a redial ages from the call's original due date; the unworked call is skipped at the skip limit, the message after it goes then, and the parallel emails never wait", async () => {
+    const { h, campaign, calls, today, task, log, emails } = await world({ people: [PAT] });
+    h.clock = MONDAY_9;
+    const c = await campaign("Redial", def());
+    const id = (await calls()).focusTaskId ?? "";
+    const direct = (await task(id)).numbers.find((n) => n.kind === "direct")?.detailId;
+
+    // Monday 10:00: no answer, and the user asks for a redial. The call leaves today's list for tomorrow's.
+    await h.advanceTo(MONDAY_9 + H);
+    expect((await log(id, { outcome: "no_answer", redial: true, numberId: direct, note: "Rang out." })).status).toBe(200);
+    expect(await task(id)).toMatchObject({ open: true, listed: false, outcomes: [], kind: "call", listedFor: "2026-11-03", dueAt: "2026-11-02T09:00:00.000Z" });
+    expect((await today()).upNext).toEqual([]);
+    expect((await log(id, { outcome: "no_answer", numberId: direct })).status).toBe(409);
+    expect((await h.progress(c.lead("Pat Oneil"))).status).toBe("waiting_on_call");
+
+    // Tuesday: on the list as a redial, at the top, with its original due date; skipped tonight if left unworked.
+    await h.advanceTo(MONDAY_9 + DAY + H);
+    const tuesday = await today();
+    expect(tuesday.upNext).toEqual([expect.objectContaining({ taskId: id, reason: "redial", dueAt: "2026-11-02T09:00:00.000Z", bucket: "ready_now", skippedTonight: true })]);
+    expect(tuesday.carriedOver).toBe(1);
+
+    // Left unworked: at the end of Tuesday (two days from its original due date, not from the redial) it is skipped.
+    await h.advanceTo(WED_0 + 2 * H);
+    const progress = await h.progress(c.lead("Pat Oneil"));
+    expect(progress.tracks.find((t) => t.trackId === "p1")).toMatchObject({ finishReason: "skipped_unworked", finishedAt: "2026-11-04T00:00:00.000Z", callTask: { open: false } });
+    expect(progress.status).toBe("active");
+    expect((await today()).upNext).toEqual([]);
+    // The message after the call went when the call was skipped; the parallel track sent on its own days throughout.
+    expect(emails("pat@harbour.example").map((d) => [d.stepId, new Date(d.at).toISOString()])).toEqual([
+      ["s1", "2026-11-02T09:00:00.000Z"],
+      ["s2", "2026-11-03T00:00:00.000Z"],
+      ["f1", "2026-11-04T00:00:00.000Z"],
+    ]);
+    await h.advanceTo(WED_0 + DAY + H);
+    expect(emails("pat@harbour.example").map((d) => d.stepId)).toEqual(["s1", "s2", "f1", "s3"]);
+  });
+
+  test("a callback holds the lead's automated outreach until its outcome: later today before its time, overdue after, never expired or resumed silently", async () => {
+    const { h, campaign, calls, today, task, log, emails } = await world({ people: [PAT] });
+    h.clock = MONDAY_9;
+    const c = await campaign("Callback", def());
+    const id = (await calls()).focusTaskId ?? "";
+    const direct = (await task(id)).numbers.find((n) => n.kind === "direct")?.detailId;
+
+    // Monday 10:00: Pat asks to be called back on Tuesday at 15:00.
+    await h.advanceTo(MONDAY_9 + H);
+    expect((await log(id, { outcome: "callback_requested", callbackAt: "2026-11-03T15:00:00.000Z", numberId: direct, note: "Call back tomorrow afternoon." })).status).toBe(200);
+    expect((await h.progress(c.lead("Pat Oneil"))).status).toBe("callback_scheduled");
+    expect(await task(id)).toMatchObject({ kind: "callback", callbackAt: "2026-11-03T15:00:00.000Z", listedFor: "2026-11-03", listed: false });
+
+    // Tuesday morning: later today, at the time Pat asked for. The email due at Tuesday 00:00 waits.
+    await h.advanceTo(MONDAY_9 + DAY);
+    expect((await today()).upNext).toEqual([expect.objectContaining({ taskId: id, kind: "callback", reason: "callback", bucket: "later_today", opensAt: "2026-11-03T15:00:00.000Z" })]);
+    expect(emails("pat@harbour.example").map((d) => d.stepId)).toEqual(["s1"]);
+
+    // Missed. Thursday, at 22:00, outside every calling hour: still on the list, overdue, at the top; nothing sent; never skipped.
+    await h.advanceTo(MONDAY_9 + 3 * DAY + 13 * H);
+    const thursday = await today();
+    expect(thursday.overdueCallbacks).toEqual([expect.objectContaining({ taskId: id, reason: "overdue", bucket: "ready_now", callbackAt: "2026-11-03T15:00:00.000Z", dueAt: "2026-11-02T09:00:00.000Z" })]);
+    expect((await h.request<{ overdueCallbacks: unknown[] }>("GET", "/api/needs-attention")).body.overdueCallbacks).toEqual([{ taskId: id, enrollmentId: c.lead("Pat Oneil"), campaignId: c.id, callbackAt: "2026-11-03T15:00:00.000Z", dueAt: "2026-11-02T09:00:00.000Z" }]);
+    expect(emails("pat@harbour.example").map((d) => d.stepId)).toEqual(["s1"]);
+    expect((await h.progress(c.lead("Pat Oneil"))).status).toBe("callback_scheduled");
+
+    // Thursday 22:30: the user reaches Pat's voicemail. The hold ends; the clock resumes where it stopped (Monday 10:00),
+    // so the email that was due 14 hours later goes 14 hours from now, and the message after the call goes now.
+    const thursday2230 = MONDAY_9 + 3 * DAY + 13 * H + 30 * 60_000;
+    await h.advanceTo(thursday2230);
+    expect((await log(id, { outcome: "voicemail", numberId: direct })).status).toBe(200);
+    expect((await h.progress(c.lead("Pat Oneil"))).status).toBe("active");
+    await h.advanceTo(thursday2230 + 15 * H);
+    expect(emails("pat@harbour.example").map((d) => [d.stepId, new Date(d.at).toISOString()])).toEqual([
+      ["s1", "2026-11-02T09:00:00.000Z"],
+      ["f1", "2026-11-05T22:30:00.000Z"],
+      ["s2", "2026-11-06T12:30:00.000Z"],
+    ]);
+  });
+
+  test("redial and callback are refused plainly where they do not apply, and every action is safe to repeat", async () => {
+    const { h, campaign, calls, task } = await world({ people: [PAT] });
+    h.clock = MONDAY_9;
+    const c = await campaign("Refusals", def());
+    const id = (await calls()).focusTaskId ?? "";
+    const direct = (await task(id)).numbers.find((n) => n.kind === "direct")?.detailId;
+    const post = (body: Record<string, unknown>) => h.request<{ error?: { code: string; message: string } }>("POST", `/api/call-tasks/${id}/outcome`, { numberId: direct, note: "", ...body });
+
+    expect(await post({ requestId: "r1", outcome: "interested", redial: true })).toMatchObject({ status: 409, body: { error: { code: "outcome_refused", message: "A redial follows no answer, voicemail left, or gatekeeper or not reached." } } });
+    expect(await post({ requestId: "r2", outcome: "callback_requested" })).toMatchObject({ status: 409, body: { error: { message: "Give the date and time the prospect asked to be called back." } } });
+    expect(await post({ requestId: "r3", outcome: "no_answer", callbackAt: "2026-11-03T15:00:00.000Z" })).toMatchObject({ status: 409, body: { error: { message: "A date and time goes with a callback requested only." } } });
+    expect(await post({ requestId: "r4", outcome: "callback_requested", callbackAt: "2026-11-01T15:00:00.000Z" })).toMatchObject({ status: 409, body: { error: { message: "A callback is for a date and time still to come." } } });
+    expect((await post({ requestId: "r5", outcome: "callback_requested", callbackAt: "tomorrow at three" })).status).toBe(400);
+    expect((await post({ requestId: "r6", outcome: "callback_requested", callbackAt: "2026-11-03T15:00:00.000Z", reschedule: "auto" })).status).toBe(400);
+    // Nothing above was logged.
+    expect((await h.progress(c.lead("Pat Oneil"))).tracks.find((t) => t.trackId === "p1")?.steps[0]?.calls).toEqual([]);
+
+    // The same callback posted twice, once more after a restart: logged once, and the hold is the one asked for.
+    const body = { requestId: "r7", outcome: "callback_requested", callbackAt: "2026-11-03T15:00:00+01:00" };
+    const twice = await Promise.all([post(body), post(body)]);
+    expect(twice.map((r) => r.status)).toEqual([200, 200]);
+    await h.restart();
+    expect((await post(body)).status).toBe(200);
+    const progress = await h.progress(c.lead("Pat Oneil"));
+    expect(progress.status).toBe("callback_scheduled");
+    expect(progress.tracks.find((t) => t.trackId === "p1")?.steps[0]?.calls).toEqual([expect.objectContaining({ outcome: "callback_requested", callbackAt: "2026-11-03T14:00:00.000Z", redial: false })]);
+
+    // A redial posted twice moves the call once.
+    await h.advanceTo(Date.parse("2026-11-03T14:30:00Z"));
+    const redial = { requestId: "r8", outcome: "gatekeeper", redial: true };
+    expect((await post(redial)).status).toBe(200);
+    expect((await post(redial)).status).toBe(200);
+    expect(await task(id)).toMatchObject({ kind: "call", listedFor: "2026-11-04" });
+    expect((await h.progress(c.lead("Pat Oneil"))).tracks.find((t) => t.trackId === "p1")?.steps[0]?.calls.map((x) => [x.outcome, x.redial])).toEqual([["callback_requested", false], ["gatekeeper", true]]);
+  });
+});
+
+describe("a user action is judged as of its own instant, whether or not the worker has ticked since (review bot on eda5fa0)", () => {
+  const WED_0 = Date.parse("2026-11-04T00:00:00Z");
+  const def = () => definition([track("p1", "call", [call("c1")], { kind: "entry" }, WEEKDAYS_9_TO_17), track("e2", "email", [email("f1")], after("p1", 0))]);
+
+  for (const [name, body] of [
+    ["a callback", { outcome: "callback_requested", callbackAt: "2026-11-05T15:00:00Z" }],
+    ["a redial", { outcome: "no_answer", redial: true }],
+    ["an outcome", { outcome: "voicemail" }],
+  ] as const) {
+    test(`${name} one second after the skip limit expired the call, before any tick, is refused, and the expiry and what it releases stand as at that rollover`, async () => {
+      const { h, campaign, calls, task, log, emails } = await world({ people: [PAT] });
+      h.clock = MONDAY_9;
+      const c = await campaign("As of the instant", def());
+      const id = (await calls()).focusTaskId ?? "";
+      const direct = (await task(id)).numbers.find((n) => n.kind === "direct")?.detailId;
+      await h.advanceTo(WED_0 - 60_000);
+      // The worker has not ticked since Tuesday 23:59; the user acts at Wednesday 00:00:01.
+      h.clock = WED_0 + 1_000;
+      const res = await log(id, { ...body, numberId: direct });
+      // Refused, and it says why: the call was skipped at that rollover, before this action arrived.
+      expect(res).toMatchObject({ status: 409, body: { error: { message: "This call was skipped at 2026-11-04T00:00:00.000Z: it was not worked within its skip limit, so it is no longer on the list." } } });
+      const progress = await h.progress(c.lead("Pat Oneil"));
+      // Never reached: the call was skipped unworked, and the email after it has only just started.
+      expect(progress.status).toBe("queued");
+      expect(progress.tracks.find((t) => t.trackId === "p1")).toMatchObject({ finishReason: "skipped_unworked", finishedAt: "2026-11-04T00:00:00.000Z", callTask: { open: false } });
+      expect(progress.tracks.find((t) => t.trackId === "p1")?.steps[0]?.calls).toEqual([]);
+      // The track after the call starts from the rollover, not from when the worker caught up.
+      await h.advanceTo(WED_0 + H);
+      expect(emails("pat@harbour.example").map((d) => [d.stepId, new Date(d.at).toISOString()])).toEqual([["f1", "2026-11-04T00:00:01.000Z"]]);
+      expect(progress.tracks.find((t) => t.trackId === "e2")?.started).toBe(true);
+    });
+  }
+
+  test("one second before the rollover, the same action is accepted", async () => {
+    const { h, campaign, calls, task, log } = await world({ people: [PAT] });
+    h.clock = MONDAY_9;
+    const c = await campaign("Just in time", def());
+    const id = (await calls()).focusTaskId ?? "";
+    const direct = (await task(id)).numbers.find((n) => n.kind === "direct")?.detailId;
+    await h.advanceTo(WED_0 - 60_000);
+    h.clock = WED_0 - 1_000;
+    expect((await log(id, { outcome: "callback_requested", callbackAt: "2026-11-05T15:00:00Z", numberId: direct })).status).toBe(200);
+    expect((await h.progress(c.lead("Pat Oneil"))).status).toBe("callback_scheduled");
+  });
+});
+
+describe("a call carried into a day counts against it as it stood at the day's start (ticket 15a, found by the generated runs)", () => {
+  test("working a carried callback on a day its calling hours never open frees no room that day", async () => {
+    const { h, campaign, calls, task, log } = await world({ capacity: 1 });
+    h.clock = MONDAY_9;
+    const a = await campaign("Weekday calls", definition([track("p1", "call", [call("c1")], { kind: "entry" }, WEEKDAYS_9_TO_17)], { emailPool: [] }), [PAT]);
+    const id = (await calls()).focusTaskId ?? "";
+    const direct = (await task(id)).numbers.find((n) => n.kind === "direct")?.detailId;
+    // Monday: Pat asks to be called back on Saturday at 10:00.
+    await h.advanceTo(MONDAY_9 + H);
+    expect((await log(id, { outcome: "callback_requested", callbackAt: "2026-11-07T10:00:00Z", numberId: direct })).status).toBe(200);
+    // Saturday 08:00: another campaign's call falls due; the carried callback takes the day's one place.
+    await h.advanceTo(Date.parse("2026-11-07T08:00:00Z"));
+    const b = await campaign("Every day", definition([track("p2", "call", [call("c2")], { kind: "entry" }, ALWAYS)], { emailPool: [] }), [NIA]);
+    expect(await calls()).toMatchObject({ committed: 1, placedToday: 0 });
+    // Saturday 10:30: the user works the callback. That frees no room today: Nia's call waits for Sunday.
+    await h.advanceTo(Date.parse("2026-11-07T10:30:00Z"));
+    expect((await log(id, { outcome: "no_answer", numberId: direct })).status).toBe(200);
+    expect((await h.progress(a.lead("Pat Oneil"))).tracks[0]?.finishReason).toBe("completed");
+    await h.advanceTo(Date.parse("2026-11-07T23:00:00Z"));
+    expect(await calls()).toMatchObject({ committed: 1, placedToday: 0 });
+    expect((await h.progress(b.lead("Nia Cole"))).status).toBe("queued");
+    await h.advanceTo(Date.parse("2026-11-08T08:00:00Z"));
+    expect((await h.progress(b.lead("Nia Cole"))).status).toBe("waiting_on_call");
+  });
+});

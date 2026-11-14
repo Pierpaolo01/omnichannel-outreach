@@ -1,11 +1,12 @@
-import { finishTrack, progressOf } from "../../src/domain/sequence/progress.ts";
-import { leadNow, wallOfLead } from "../../src/domain/sequence/clock.ts";
-import type { SubjectState } from "../../src/domain/sequence/state.ts";
+import { callbackDay, REDIAL_OUTCOMES } from "../../src/domain/sequence/calls.ts";
+import { evaluate, finishTrack, progressOf, runs, synced } from "../../src/domain/sequence/progress.ts";
+import { leadNow, localDayNumber, span, wallOfLead } from "../../src/domain/sequence/clock.ts";
+import type { CallTask, SubjectState } from "../../src/domain/sequence/state.ts";
 import { DEFAULT_RULES, type Rules } from "../../src/server/engine/rules.ts";
 
 /**
  * Deliberately broken engines for phone tracks and call tasks (ADR 0003 9.2 step 5, the ticket 14
- * row of 9.3): the ADR's two, and one for each further rule ticket 14 adds. Each replaces one
+ * and 15 rows of 9.3): the ADR's, and one for each further rule each ticket adds. Each replaces one
  * decision; the generated call runs (generated-calls.ts) must fail the invariant it names.
  */
 
@@ -24,6 +25,16 @@ const keepTasksOpen = (before: SubjectState, after: SubjectState): SubjectState 
   ...after,
   callTasks: after.callTasks.map((t) => (before.callTasks.find((x) => x.id === t.id)?.open && !t.open ? { ...t, open: true, closedWall: null } : t)),
 });
+
+/** Every task's stored fields as they were before a change, so a broken rule's own edits to them do not reach the store's guards. */
+const keepStored = (before: SubjectState, after: SubjectState): SubjectState => ({
+  ...after,
+  callTasks: after.callTasks.map((t) => {
+    const b = before.callTasks.find((x) => x.id === t.id);
+    return b ? { ...t, skipDeadline: b.skipDeadline, dueAt: b.dueAt } : t;
+  }),
+});
+const mapTasks = (s: SubjectState, change: (t: CallTask) => CallTask): SubjectState => ({ ...s, callTasks: s.callTasks.map(change) });
 
 const RULES: Record<string, Partial<Rules>> = {
   // ADR 0003 9.3, ticket 14.
@@ -99,6 +110,99 @@ const RULES: Record<string, Partial<Rules>> = {
   "the focus moves to the oldest ready call": {
     focusOf: (readyNow) => R.focusOf(readyNow, null),
   },
+
+  // ADR 0003 9.3, ticket 15.
+  "redial resets the deadline": {
+    // The skip limit counted from the latest redial instead of the call's original due time.
+    evaluate: (s, now, options) => {
+      const limit = s.campaign.definition.callSkipLimitDays;
+      const fromRedial = mapTasks(s, (t) => {
+        const r = s.callAttempts.filter((a) => a.taskId === t.id && a.redial).at(-1);
+        return r ? { ...t, skipDeadline: r.at + span(r.atWall, limit, s.callDay.userZone) } : t;
+      });
+      return keepStored(s, R.evaluate(fromRedial, now, options));
+    },
+  },
+  "redial listed the same day": {
+    logCallOutcome: (s, taskId, input, now, ids, listed) => {
+      const out = R.logCallOutcome(s, taskId, input, now, ids, listed);
+      return out.ok && input.redial && !out.replayed ? { ok: true, state: mapTasks(out.state, (t) => (t.id === taskId ? { ...t, listDay: s.callDay.day } : t)) } : out;
+    },
+  },
+  "callback listed before its day": {
+    isListed: (s, task) => (task.kind === "callback" ? task.open && s.subject.ended === null && !s.subject.leadPaused : R.isListed(s, task)),
+  },
+  "callback expires": {
+    // A missed callback dropped after the skip limit, counted in days from its day: the call is skipped and outreach resumes.
+    evaluate: (s, now, options) => {
+      const cb = s.callTasks.find((t) => t.open && t.kind === "callback");
+      if (!cb || s.subject.ended !== null || callbackDay(s, cb) + s.campaign.definition.callSkipLimitDays > localDayNumber(now, s.callDay.userZone)) return R.evaluate(s, now, options);
+      const released = synced(mapTasks(s, (t) => (t.id === cb.id ? { ...t, kind: "call", callbackAt: null } : t)), now);
+      return R.evaluate(finishTrack(released, cb.trackId, "skipped_unworked", leadNow(released.subject.clock, now), now), now, options);
+    },
+  },
+  "a task never listed expires": {
+    // The skip limit's days counted whether or not the prospect's calling hours open on them.
+    evaluate: (s, now, options) => withDefinitionOf(s, R.evaluate(anyHours(s), now, options)),
+  },
+  "callback outcome refused when the callback is the only hold": {
+    isListed: (s, task) => R.isListed(s, task) && (task.kind !== "callback" || runs(s)),
+  },
+
+  // One per further rule of ticket 15.
+  "a callback does not hold the lead": {
+    // The callback is kept as an ordinary call for its day: the lead's emails and texts carry on.
+    logCallOutcome: (s, taskId, input, now, ids, listed) => {
+      const out = R.logCallOutcome(s, taskId, input, now, ids, listed);
+      if (!out.ok || out.replayed || input.outcome !== "callback_requested") return out;
+      const unheld = mapTasks(out.state, (t) => (t.id === taskId ? { ...t, kind: "call", listDay: localDayNumber(input.callbackAt ?? now, s.callDay.userZone) } : t));
+      return { ok: true, state: evaluate(synced(unheld, now), now) };
+    },
+  },
+  "a callback does not freeze the clock": {
+    logCallOutcome: (s, taskId, input, now, ids, listed) => {
+      const out = R.logCallOutcome(s, taskId, input, now, ids, listed);
+      if (!out.ok || out.replayed || input.outcome !== "callback_requested") return out;
+      return { ok: true, state: { ...out.state, subject: { ...out.state.subject, clock: s.subject.clock }, freezes: s.freezes } };
+    },
+  },
+  "a callback's outcome logged on the frozen clock": {
+    // The call is recorded at the instant the clock froze, and only then does the hold end.
+    logCallOutcome: (s, taskId, input, now, ids, listed) => {
+      const task = s.callTasks.find((t) => t.id === taskId);
+      if (!task || task.kind !== "callback" || input.outcome === "skip_for_now" || input.outcome === "callback_requested" || s.callAttempts.some((a) => a.requestId === input.requestId) || !(listed ?? R.isListed)(s, task)) return R.logCallOutcome(s, taskId, input, now, ids, listed);
+      const out = R.logCallOutcome(mapTasks(s, (t) => (t.id === taskId ? { ...t, kind: "call", callbackAt: null } : t)), taskId, input, now, ids, () => true);
+      return out.ok ? { ok: true, state: synced(out.state, now) } : out;
+    },
+  },
+  "unworked calls never expire": {
+    evaluate: (s, now, options) => keepStored(s, R.evaluate(mapTasks(s, (t) => ({ ...t, skipDeadline: Number.MAX_SAFE_INTEGER })), now, options)),
+  },
+  "carried calls not at the top": {
+    readyNowOrder: (a, b) => R.readyNowOrder({ ...a, rank: a.rank === 1 ? 2 : a.rank }, { ...b, rank: b.rank === 1 ? 2 : b.rank }),
+  },
+  "overdue callbacks shown as callbacks": {
+    callReason: (s, task, now) => (R.callReason(s, task, now) === "overdue" ? "callback" : R.callReason(s, task, now)),
+  },
+  // Council on 228cd3b: the past reinterpreted, and a redial's reason.
+  "a day already judged is judged again": {
+    // The skip limit judged from the placement every time, with today's zones, as if no day had been judged.
+    evaluate: (s, now, options) => {
+      const out = R.evaluate(mapTasks(s, (t) => ({ ...t, reckonedThrough: t.placedWall })), now, options);
+      return mapTasks(out, (t) => ({ ...t, reckonedThrough: Math.max(t.reckonedThrough, s.callTasks.find((x) => x.id === t.id)?.reckonedThrough ?? t.reckonedThrough) }));
+    },
+  },
+  "a redial rolled over at its first listed day": {
+    callReason: (s, task, now) => (R.callReason(s, task, now) === "redial" && task.listDay < s.callDay.day ? "rolled_over" : R.callReason(s, task, now)),
+  },
+  // Review bot on eda5fa0: an action judged on the state of the worker's last tick, not as of its own instant.
+  "a user action judged on stale state": {
+    asOfAction: (s) => s,
+  },
+  "a redial after any outcome": {
+    logCallOutcome: (s, taskId, input, now, ids, listed) =>
+      input.redial && !REDIAL_OUTCOMES.includes(input.outcome) ? R.logCallOutcome(s, taskId, { ...input, redial: false }, now, ids, listed) : R.logCallOutcome(s, taskId, input, now, ids, listed),
+  },
   // ADR 0003 9.2: "a track that finishes without closing its call task", whichever change finishes it.
   "a track that finishes without closing its call task": {
     evaluate: (s, now, options) => keepTasksOpen(s, R.evaluate(s, now, options)),
@@ -111,22 +215,38 @@ const RULES: Record<string, Partial<Rules>> = {
 
 /** The invariant each mutation must break, and the seed offset known to show it (refreshed by the CI search). */
 const EXPECTED: Record<string, { invariant: string; seed: number }> = {
-  "outcome on an unlisted task": { invariant: "16", seed: 4 },
-  "interested closes only its own task": { invariant: "16", seed: 4 },
+  "outcome on an unlisted task": { invariant: "16", seed: 7 },
+  "interested closes only its own task": { invariant: "16", seed: 54 },
   "daily call capacity ignored": { invariant: "17", seed: 0 },
   "committed calls not counted": { invariant: "17", seed: 1 },
   "a call placed on a day its calling hours have closed": { invariant: "17", seed: 1 },
   "an unworked call holds the parallel tracks": { invariant: "18", seed: 6 },
-  "the tracks after a call start when it is placed": { invariant: "7", seed: 3 },
-  "skip for now finishes the call": { invariant: "7", seed: 3 },
-  "a wrong number leaves the number good": { invariant: "19", seed: 8 },
-  "an outcome on a bad number accepted": { invariant: "16", seed: 36 },
+  "the tracks after a call start when it is placed": { invariant: "7", seed: 4 },
+  "skip for now finishes the call": { invariant: "7", seed: 4 },
+  "a wrong number leaves the number good": { invariant: "19", seed: 3 },
+  "an outcome on a bad number accepted": { invariant: "16", seed: 49 },
   "calls placed newest due first": { invariant: "12", seed: 3 },
-  "a replayed action is logged again": { invariant: "16", seed: 0 },
+  "a replayed action is logged again": { invariant: "16", seed: 2 },
   "a person note kept on the company": { invariant: "16", seed: 0 },
   "a track that finishes without closing its call task": { invariant: "16", seed: 0 },
   "ready now newest due first": { invariant: "16", seed: 6 },
-  "the focus moves to the oldest ready call": { invariant: "16", seed: 0 },
+  "the focus moves to the oldest ready call": { invariant: "16", seed: 2 },
+  "redial resets the deadline": { invariant: "16", seed: 9 },
+  "redial listed the same day": { invariant: "16", seed: 0 },
+  "callback listed before its day": { invariant: "16", seed: 20 },
+  "callback expires": { invariant: "16", seed: 9 },
+  "a task never listed expires": { invariant: "7", seed: 27 },
+  "callback outcome refused when the callback is the only hold": { invariant: "16", seed: 0 },
+  "a callback does not hold the lead": { invariant: "16", seed: 2 },
+  "a callback does not freeze the clock": { invariant: "9", seed: 0 },
+  "a callback's outcome logged on the frozen clock": { invariant: "7", seed: 0 },
+  "unworked calls never expire": { invariant: "7", seed: 0 },
+  "carried calls not at the top": { invariant: "16", seed: 8 },
+  "overdue callbacks shown as callbacks": { invariant: "16", seed: 2 },
+  "a redial after any outcome": { invariant: "16", seed: 0 },
+  "a user action judged on stale state": { invariant: "16", seed: 3 },
+  "a day already judged is judged again": { invariant: "7", seed: 96 },
+  "a redial rolled over at its first listed day": { invariant: "16", seed: 27 },
 };
 
 export const CALL_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number }> = Object.fromEntries(

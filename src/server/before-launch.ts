@@ -8,7 +8,7 @@ import { missingFields, renderSegments, type Segment } from "../domain/copy-prev
 import { isLive, isUncertain } from "../domain/sequence/attempt.ts";
 import { mergeUses } from "../domain/sequence/copy.ts";
 import { liveSteps, liveTracks, ownSubject, poolOf, type CampaignDefinition, type TrackDefinition } from "../domain/sequence/definition.ts";
-import { goodEmail, progressOf, runs } from "../domain/sequence/progress.ts";
+import { callbackHold, goodEmail, progressOf, runs } from "../domain/sequence/progress.ts";
 import type { AccountState, SubjectState } from "../domain/sequence/state.ts";
 import type { BeforeLaunchView, ContactDetailView, CopyPreview, LeadRow, LoadProjectionView, PreviewLead, WithheldBy, WithheldTrack } from "../shared/api.ts";
 import { trackLabel, trackPhrase } from "../shared/track-label.ts";
@@ -156,8 +156,9 @@ function phoneBefore(definition: CampaignDefinition, t: TrackDefinition): TrackD
  * The same rule over a competing campaign's running leads (council on 10121d3, item 1): an email or
  * SMS track there that still waits, for some lead, on a phone track whose call is not yet logged. Each
  * logged call releases it, and no estimate can know when, so this campaign's figure is withheld too,
- * naming that campaign. A lead whose phone track has finished (logged, or skipped for want of a number)
- * waits on nothing, and is simulated like any other.
+ * naming that campaign. A lead held by a callback counts: its outcome, when the user logs it, releases
+ * the hold and what waits on the call (ticket 15). A lead whose phone track has finished (logged,
+ * skipped for want of a number, or skipped at the skip limit) waits on nothing, and is simulated like any other.
  */
 function competingWithheld(others: readonly SubjectState[]): { campaignId: string; tracks: WithheldTrack[] } | null {
   const byCampaign = new Map<string, SubjectState[]>();
@@ -169,7 +170,7 @@ function competingWithheld(others: readonly SubjectState[]): { campaignId: strin
       if (t.channel === "call") return [];
       const phone = phoneBefore(definition, t);
       if (!phone) return [];
-      const waiting = subjects.some((s) => runs(s) && progressOf(s, phone.id)?.finishedAt == null && progressOf(s, t.id)?.finishedAt == null);
+      const waiting = subjects.some((s) => awaitsACall(s) && progressOf(s, phone.id)?.finishedAt == null && progressOf(s, t.id)?.finishedAt == null);
       return waiting ? [{ trackId: t.id, channel: t.channel, label: trackPhrase(definition, t), why: "after_a_phone_track", phoneTrack: trackPhrase(definition, phone) }] : [];
     });
     if (tracks.length > 0) return { campaignId, tracks };
@@ -177,12 +178,15 @@ function competingWithheld(others: readonly SubjectState[]): { campaignId: strin
   return null;
 }
 
+/** A lead on which the user may still log a call: running, or held by a callback, whose outcome releases it. */
+const awaitsACall = (s: SubjectState) => runs(s) || (s.subject.ended === null && callbackHold(s));
+
 /** Competing campaigns where a call can still be logged: the estimate assumes none is (the screen says so). */
 function callingCampaigns(others: readonly SubjectState[]): string[] {
   const ids = new Set<string>();
   for (const s of others) {
     const calls = liveTracks(s.campaign.definition, "main").filter((t) => t.channel === "call");
-    if (runs(s) && calls.some((t) => progressOf(s, t.id)?.finishedAt == null)) ids.add(s.campaign.id);
+    if (awaitsACall(s) && calls.some((t) => progressOf(s, t.id)?.finishedAt == null)) ids.add(s.campaign.id);
   }
   return [...ids];
 }

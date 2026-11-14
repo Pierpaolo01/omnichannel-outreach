@@ -61,6 +61,7 @@ const NEEDS_ATTENTION = {
   ],
   heldCapacity: [],
   anomalies: [],
+  overdueCallbacks: [],
 } as const;
 
 /**

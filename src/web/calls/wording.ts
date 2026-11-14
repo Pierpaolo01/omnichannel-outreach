@@ -14,6 +14,8 @@ export const OUTCOME_LABEL = {
   gatekeeper: "Didn’t reach them",
   wrong_number: "Wrong number",
   interested: "Interested",
+  // Logged over HTTP for now: the page offers no control for it yet (ticket 15's screens are a later part).
+  callback_requested: "Callback requested",
   skip_for_now: "Skip for now",
 } as const satisfies Record<CallOutcomeApi, string>;
 
@@ -24,6 +26,7 @@ export const OUTCOME_TITLE = {
   gatekeeper: "Call: didn’t reach them",
   wrong_number: "Call: wrong number",
   interested: "Call: interested",
+  callback_requested: "Call: callback requested",
   skip_for_now: "Call skipped for now",
 } as const satisfies Record<CallOutcomeApi, string>;
 
@@ -41,13 +44,19 @@ export const zonePlace = (zone: string): string => (zone.split("/").at(-1) ?? zo
 
 /** Why a call is on the list, or when it opens, as Up next and the queue say it. */
 export function reasonLine(item: CallQueueItem, userZone: string): { text: string; tone: "muted" | "pause" | "crit" } {
-  if (item.bucket === "later_today" && item.opensAt) return { text: `Their calling hours start at ${timeIn(userZone, item.opensAt)} your time`, tone: "muted" };
+  // A callback waits for the time the prospect asked for, not for calling hours: said as a callback.
+  if (item.bucket === "later_today" && item.opensAt && item.reason !== "callback" && item.reason !== "overdue") return { text: `Their calling hours start at ${timeIn(userZone, item.opensAt)} your time`, tone: "muted" };
+  // Every reason the server gives is said, including those the page has no control for yet (redials and callbacks are logged over HTTP for now).
   switch (item.reason) {
     case "rolled_over":
       return { text: "Rolled over from an earlier day", tone: "pause" };
+    case "redial":
+      return { text: "A redial from an earlier day", tone: "pause" };
+    case "callback":
+      return { text: item.callbackAt ? `Callback asked for at ${timeIn(userZone, item.callbackAt)}` : "Callback", tone: "pause" };
     case "overdue":
-      return { text: "Overdue", tone: "crit" };
-    default:
+      return { text: item.callbackAt ? `Callback overdue, asked for at ${timeIn(userZone, item.callbackAt)}` : "Callback overdue", tone: "crit" };
+    case "due":
       return { text: "Due today", tone: "muted" };
   }
 }
@@ -225,7 +234,8 @@ export function refusedRecordLine(
   zone: string,
 ): string {
   const what = record.body.outcome === "skip_for_now" ? `skip for now on ${record.who}` : `${OUTCOME_LABEL[record.body.outcome].toLowerCase()} for ${record.who}`;
-  const why = record.refused.offList ? offListLine(record.who, record.refused.offList, null, zone) : record.refused.message;
+  // The server's own message, unless it refused because the call was already logged, which the off-list facts say with what and when.
+  const why = record.refused.offList?.reason === "logged" ? offListLine(record.who, record.refused.offList, null, zone) : record.refused.message;
   return `Not logged: ${what}. ${why}`;
 }
 

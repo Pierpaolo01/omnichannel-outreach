@@ -253,7 +253,7 @@ export interface StepProgressView {
   readonly at: string | null;
   readonly sends: readonly SendView[];
   /** A call step's logged outcomes, skip for now included (ticket 14); empty on email and SMS steps. */
-  readonly calls: readonly { readonly outcome: CallOutcomeApi; readonly at: string; readonly number: RecordedNumberView | null; readonly note: string }[];
+  readonly calls: readonly CallRecordView[];
 }
 
 export interface TrackProgressView {
@@ -266,7 +266,20 @@ export interface TrackProgressView {
   /** The pending step and the wall instant it is due, if the lead keeps running. */
   readonly nextStep: { readonly stepId: string; readonly number: number; readonly dueAt: string } | null;
   /** A phone track's call task once placed on the user's list (ticket 14): open until its outcome or its track's finish. */
-  readonly callTask: { readonly taskId: string; readonly open: boolean; readonly placedAt: string; readonly listed: boolean } | null;
+  readonly callTask: {
+    readonly taskId: string;
+    readonly open: boolean;
+    readonly placedAt: string;
+    readonly listed: boolean;
+    /** A callback holds the lead's outreach in this campaign until its outcome (ticket 15). */
+    readonly kind: "call" | "callback";
+    /** For a callback: the date and time the prospect asked for. */
+    readonly callbackAt: string | null;
+    /** The user's date the call is listed for, YYYY-MM-DD: a redial moves it to the next day. */
+    readonly listedFor: string;
+    /** The call step's original due time, which the skip limit counts from. */
+    readonly dueAt: string;
+  } | null;
   readonly steps: readonly StepProgressView[];
 }
 
@@ -288,6 +301,11 @@ export interface EnrollmentProgress {
 
 /** GET /api/needs-attention (the 12b part: stalled inboxes, held tracks, account waits, provider anomalies). */
 export interface NeedsAttention {
+  /**
+   * Callbacks whose time has passed with no outcome logged (ticket 15): each holds its lead's automated
+   * outreach in that campaign until the user logs what happened. Oldest first.
+   */
+  readonly overdueCallbacks: readonly { readonly taskId: string; readonly enrollmentId: string; readonly campaignId: string; readonly callbackAt: string; readonly dueAt: string }[];
   readonly stalledInboxes: readonly { readonly accountId: string; readonly holding: readonly string[] }[];
   readonly heldTracks: readonly { readonly enrollmentId: string; readonly trackId: string; readonly reason: HoldReasonApi }[];
   readonly accountWaits: readonly { readonly accountId: string; readonly reason: "quota" | "rate_limited"; readonly until: string | null }[];
@@ -552,11 +570,30 @@ export interface EmailProviderStatus {
 // Calls (ticket 14, part a): phone tracks, the user's call list, and the outcomes the user logs.
 // The user dials on their own phone; the application never dials and has no telephony provider.
 
-/** What the user logs on a call task. Not interested, callback and redial arrive with tickets 15 and 16. */
+/**
+ * What the user logs on a call task. A callback requested carries `callbackAt`; no answer, voicemail and
+ * gatekeeper may carry `redial` (ticket 15). Not interested arrives with ticket 16.
+ */
 export type CallOutcomeApi = import("../domain/sequence/state.ts").CallOutcome;
 
-/** Why a call is on the list: due today, or rolled over from an earlier day. Overdue callbacks arrive with ticket 15. */
-export type CallReasonApi = "due" | "rolled_over" | "overdue";
+/**
+ * Why a call is on the list (ticket 15): `due` today; `rolled_over` from an earlier day, unworked; `redial`,
+ * moved onto today by the user's redial; `callback`, before the time the prospect asked for; `overdue`, a
+ * callback whose time has passed with no outcome logged.
+ */
+export type CallReasonApi = import("../domain/sequence/calls.ts").CallReason;
+
+/** One logged call, as the task's touches and the lead's progress show it. */
+export interface CallRecordView {
+  readonly outcome: CallOutcomeApi;
+  readonly at: string;
+  readonly number: RecordedNumberView | null;
+  readonly note: string;
+  /** The user asked for a redial with it. */
+  readonly redial: boolean;
+  /** With a callback requested: the date and time the prospect asked for. */
+  readonly callbackAt: string | null;
+}
 
 /** GET and PUT /api/call-settings: the user's daily call capacity and the zone the call list's day is counted in. */
 export interface CallSettingsView {
@@ -589,11 +626,20 @@ export interface CallQueueItem {
   readonly zone: string;
   readonly localTime: string;
   readonly reason: CallReasonApi;
-  /** The call step's original due time. */
+  /** A callback holds the lead's other outreach in this campaign until its outcome. */
+  readonly kind: "call" | "callback";
+  /** For a callback: the date and time the prospect asked for. */
+  readonly callbackAt: string | null;
+  /**
+   * The call step's original due time. The skip limit counts from it, whatever rolled the call over or
+   * redialed it.
+   */
   readonly dueAt: string;
   readonly bucket: "ready_now" | "later_today";
-  /** For later today: when the prospect's calling hours open. */
+  /** For later today: when the prospect's calling hours open, or a callback's time. */
   readonly opensAt: string | null;
+  /** Left unworked today, this call is skipped at the end of the day (the skip limit) and the tracks after it start. */
+  readonly skippedTonight: boolean;
 }
 
 /** A track that can change when a campaign's emails go, so the load is not projected (Before launch). */
@@ -637,6 +683,10 @@ export interface TodayView {
   readonly capacityReached: boolean;
   /** The next calls, in queue order: ready now first, then later today. */
   readonly upNext: readonly CallQueueItem[];
+  /** Needs attention (ticket 15): every overdue callback on the list, oldest first, each holding its lead's outreach. */
+  readonly overdueCallbacks: readonly CallQueueItem[];
+  /** Calls on today's list carried from an earlier day: rolled over or redialed. */
+  readonly carriedOver: number;
 }
 
 /** GET /api/calls: the focus queue. The focused task is the first ready now; the queue moves on only after an outcome. */
@@ -676,7 +726,7 @@ export interface CallOutcomeAnswer {
 export type TouchView =
   | { readonly kind: "email" | "sms"; readonly at: string; readonly stepId: string; readonly copy: { readonly subject: string; readonly body: string } | null }
   | { readonly kind: "reply"; readonly channel: "email" | "sms"; readonly at: string }
-  | { readonly kind: "call"; readonly at: string; readonly outcome: CallOutcomeApi; readonly number: RecordedNumberView | null; readonly note: string };
+  | ({ readonly kind: "call" } & CallRecordView);
 
 /**
  * The number a past call was logged on, as the detail it stands for now: what was dialled, kept through
@@ -750,6 +800,15 @@ export interface CallTaskView {
   readonly colleagues: readonly CallColleagueView[];
   /** The outcomes the user can log now; empty when the task is not listed. */
   readonly outcomes: readonly CallOutcomeApi[];
+  /** Of those, the ones the user may log with a redial (no answer, voicemail, gatekeeper). */
+  readonly redialOutcomes: readonly CallOutcomeApi[];
+  /** A callback holds the lead's other outreach in this campaign until its outcome (ticket 15). */
+  readonly kind: "call" | "callback";
+  readonly callbackAt: string | null;
+  /** The call step's original due time, which the skip limit counts from. */
+  readonly dueAt: string;
+  /** The user's date the call is listed for, YYYY-MM-DD: a redial moves it to the next day. */
+  readonly listedFor: string;
   /**
    * The request id of every outcome stored on this task, skips for now included: the server's word on
    * whether a press was logged, whoever received its answer (ADR 0003 4.4.1, "One reconciliation").

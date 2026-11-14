@@ -279,6 +279,8 @@ function Sheet({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sna
                 "Company with no named decision maker"
               )}
             </p>
+            {/* Why the call is on the list, as the server gives it: a redial or a callback included, which this page has no control for yet. */}
+            {task.task && <p className="mt-1 text-[13px] text-band-muted">{reasonLine(task.task, userZone).text}</p>}
           </div>
           <div className="text-right">
             <div className="text-[34px] font-medium leading-none tracking-[-0.02em]">{task.localTime}</div>

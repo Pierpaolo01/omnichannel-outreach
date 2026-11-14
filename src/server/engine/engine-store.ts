@@ -208,13 +208,24 @@ export interface EngineStore {
   callDay(now: number): Promise<import("../../domain/sequence/state.ts").CallDay>;
   /** Who a subject is: its person (null for a company lead), company and campaign. */
   subjectParties(subjectId: string): Promise<{ readonly personId: string | null; readonly companyId: string; readonly campaignId: string } | null>;
-  setCallSettings(settings: CallSettings): Promise<void>;
+  /**
+   * Writes the call settings. With `catchUp`, every lead with an open call task is first brought up to `now`
+   * under the old settings, in the same transaction (council on 228cd3b).
+   */
+  setCallSettings(settings: CallSettings, catchUp?: { readonly now: number; readonly asOf: (state: SubjectState) => SubjectState }): Promise<void>;
+  /** Brings every lead with an open call task up to `now`, inside the caller's transaction. */
+  catchUpWithin(now: number, asOf: (state: SubjectState) => SubjectState): void;
   /** The task a request id was logged on, whichever subject's it is, or null. */
   callRequestTask(requestId: string): Promise<string | null>;
   /** The subject a call task belongs to, or null for an unknown task. */
   callTaskSubject(taskId: string): Promise<string | null>;
   /** Subjects with an open call task, whatever their state: the call list is built from them. */
   subjectsWithOpenCallTasks(): Promise<string[]>;
+  /**
+   * The instants open callbacks of leads that have not ended change on the user's list (ticket 15): the
+   * start of each callback's user day, when it is listed, and its time, when it is ready.
+   */
+  openCallbackInstants(): Promise<number[]>;
   /** Notes on a person or a company, newest first. */
   notesOf(owner: "person" | "company", ownerId: string): Promise<StoredNote[]>;
   /** The latest call made with a note on each of these subjects; a skip for now is not a call. */

@@ -33,10 +33,17 @@ const body = (subject: string, save: { session: string; seq: number; base: numbe
   save,
 });
 
-/** Takes a database back to just before migration 13: no sessions' saves. */
+/** Takes a database back to just before migration 13: no sessions' saves, and none of migration 14's call fields (ticket 15a). */
 function beforeMigration13(file: string): void {
   const db = new DatabaseSync(file);
-  db.exec("DROP TABLE definition_saves; DELETE FROM schema_migrations WHERE version > 12;");
+  db.exec(`
+    DROP TABLE definition_saves;
+    DROP INDEX call_tasks_open_callbacks;
+    ALTER TABLE call_attempts DROP COLUMN redial;
+    ALTER TABLE call_attempts DROP COLUMN callback_at;
+    ALTER TABLE call_tasks DROP COLUMN reckoned_through;
+    DELETE FROM schema_migrations WHERE version > 12;
+  `);
   db.close();
 }
 

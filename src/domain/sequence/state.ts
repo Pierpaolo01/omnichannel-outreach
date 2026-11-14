@@ -200,8 +200,12 @@ export interface Reply {
   readonly providerRef: string;
 }
 
-/** What the user logged on a call task (ADR 0003 2.4 "Calls"; ticket 14 builds these, without redial, callback or not interested). */
-export type CallOutcome = "no_answer" | "voicemail" | "gatekeeper" | "wrong_number" | "interested" | "skip_for_now";
+/**
+ * What the user logged on a call task (ADR 0003 2.4 "Calls"). Ticket 14 built these without redial,
+ * callback or not interested; ticket 15 adds the callback and the redial (a choice on no answer,
+ * voicemail and gatekeeper). Not interested arrives with ticket 16.
+ */
+export type CallOutcome = "no_answer" | "voicemail" | "gatekeeper" | "wrong_number" | "interested" | "callback_requested" | "skip_for_now";
 
 /**
  * One call step's task on the user's list (ADR 0003 1.3): one per step, never a second. `listDay`
@@ -228,6 +232,13 @@ export interface CallTask {
   readonly closedWall: number | null;
   /** "Skip for now": the task moved to the end of that day's queue at this instant. */
   readonly skippedWall: number | null;
+  /**
+   * The instant through which the skip limit has been judged (ADR 0003 3.5; council on 228cd3b): its
+   * placement, then each user-day rollover the engine has judged, or the instant a change of the user's
+   * zone or another timing input was made. A rollover at or before it is never judged again, so a later
+   * input never reinterprets a day already past.
+   */
+  readonly reckonedThrough: number;
 }
 
 /** One logged outcome on a call task. Skip for now is recorded too, but is not a call made. */
@@ -237,6 +248,10 @@ export interface CallAttempt {
   readonly requestId: string;
   readonly taskId: string;
   readonly outcome: CallOutcome;
+  /** The user asked for a redial (no answer, voicemail or gatekeeper): the task moved to their next day. */
+  readonly redial: boolean;
+  /** For a callback requested: the date and time the prospect asked for, a wall instant. */
+  readonly callbackAt: number | null;
   /** The number the user chose to dial; none for skip for now. */
   readonly numberDetailId: string | null;
   readonly note: string;

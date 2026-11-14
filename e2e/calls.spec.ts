@@ -295,6 +295,7 @@ test.describe("whatever the server decides by the clock is refreshed when it can
         senderProblems: [{ accountId: "sms-1", channel: "sms", label: "+44 7700 900999", problem: "disconnected" }],
         heldCapacity: [],
         anomalies: [],
+        overdueCallbacks: [],
       });
     });
     await page.clock.install({ time: f.harness.clock });
@@ -490,4 +491,19 @@ test("opening the next call keeps refusals that wait behind the count, with thei
   expect(await page.evaluate(() => Object.keys(window.localStorage).filter((k) => k.startsWith("outreach.calls.outbox.")).length)).toBe(3);
   await page.getByText("2 more outcomes not logged").click();
   await expect(page.getByRole("list", { name: "More outcomes not logged" })).toContainText("Line busy twice, try the mobile.");
+});
+
+test("a callback logged over HTTP, which this page has no control for yet, is listed with the reason the server gives (merge of ticket 15a)", async ({ page }) => {
+  const f = await freshCalls("ready", "callback-over-http");
+  const t = await focused(f);
+  const out = await f.harness.request("POST", `/api/call-tasks/${t.taskId}/outcome`, { requestId: "callback-1", outcome: "callback_requested", callbackAt: "2026-11-09T12:00:00.000Z", numberId: t.numberId });
+  expect(out.status).toBe(200);
+  await page.goto(`${f.url}/`);
+  // Today's "Later today" names it as a callback, not as calling hours opening.
+  await expect(page.getByText(/Amira Hassan \(callback asked for at 12:00\)/)).toBeVisible();
+  await page.goto(`${f.url}/calls`);
+  const queue = page.getByRole("complementary", { name: "Call queue" });
+  await expect(queue.getByRole("listitem").filter({ hasText: "Amira Hassan" })).toContainText("Callback asked for at 12:00");
+  // The page still offers only what it offers today: callback requested stays in its not-yet state.
+  await expect(page.getByRole("button", { name: "Callback requested" })).toBeDisabled();
 });
