@@ -182,6 +182,8 @@ test("a reload while a bulk is on its way sends the stored press again, and it i
   expect((await f.harness.request("POST", `/api/enrollments/${daniel}/controls`, { requestId: "elsewhere-daniel", action: "resume" })).status).toBe(200);
   await page.reload();
   await expect.poll(() => page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith("outreach.bulk.")).length)).toBe(0);
+  // The recovered press's answer is shown, from the server's first answer (review bot on 9daf7c0).
+  await expect(page.getByRole("status").filter({ hasText: "Paused 1 campaign enrollment." })).toBeVisible();
   expect(held).toBeGreaterThanOrEqual(2);
   expect(await statusIn(f, "Daniel Price", f.campaigns.followUp)).not.toBe("paused");
 });

@@ -361,6 +361,15 @@ export type NoteBoxProps = { readonly kind: "person"; readonly path: string; rea
 type NoteSend = { readonly requestId: string; readonly body: string; readonly scope: "person" | "company" };
 
 /**
+ * The press of Add note (review bot on 9daf7c0): the unchanged note of a send that had no answer keeps its request id, so
+ * the server stores it once whether the first send arrived or not; a changed note or scope is a new note.
+ */
+export function nextNotePress(unanswered: NoteSend | null, text: string, scope: NoteSend["scope"], newId: () => string): NoteSend {
+  const body = text.trim();
+  return unanswered !== null && unanswered.body === body && unanswered.scope === scope ? unanswered : { requestId: newId(), body, scope };
+}
+
+/**
  * The prototype's note box: a note about the person, or, ticked, a company note shown for everyone at the company. A
  * company lead's notes are company notes. The request id is fixed at the press, so Try again stores the note once.
  */
@@ -401,7 +410,7 @@ function NoteBox(props: NoteBoxProps & { onAdded: () => void }) {
       onSubmit={(e) => {
         e.preventDefault();
         if (saving || tooLong || text.trim() === "") return;
-        send({ requestId: crypto.randomUUID(), body: text.trim(), scope: props.kind === "company" || share ? "company" : "person" });
+        send(nextNotePress(sending, text, props.kind === "company" || share ? "company" : "person", () => crypto.randomUUID()));
       }}
     >
       <label htmlFor={fieldId} className="sr-only">

@@ -196,3 +196,14 @@ export class BulkRequests {
     this.ports.onChange();
   }
 }
+
+/**
+ * Which answer the page shows after `incoming` arrives (review bot on 9daf7c0), on the controls' rule (17b): an answer to
+ * this page's own press replaces what is shown; any other answer, such as a press this page sent again after a reload,
+ * shows when nothing of this page's own is shown, and never replaces it.
+ */
+export function shownBulkResult(current: BulkResult | null, incoming: BulkResult, own: ReadonlySet<string>): BulkResult {
+  if (own.has(incoming.press.bulkId)) return incoming;
+  if (current !== null && own.has(current.press.bulkId)) return current;
+  return incoming;
+}

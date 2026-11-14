@@ -36,6 +36,12 @@ import { invalidBodyMessage, requestObject } from "./request-body.ts";
 
 /** The search's bound: a selection is at most the rows one search can show. */
 export const BULK_MAX = 500;
+/**
+ * The bound on items: a preview of at most BULK_MAX rows, each in every campaign it is in, has at most this many, and
+ * its press carries all it allowed (review bot on 9daf7c0: a 500-item bound refused a valid all-campaign press). A
+ * preview over it is refused, so a confirmation is never shown that its press cannot send.
+ */
+export const BULK_ITEMS_MAX = 5_000;
 export const BULK_REQUEST_REUSED = "This request id was already used for another action: send a new one.";
 
 /**
@@ -82,7 +88,7 @@ const pressBody = requestObject({
   action,
   campaignId: campaignId.nullable(),
   rows: rows.optional(),
-  items: z.array(item).min(1, "Send at least one item.").max(BULK_MAX, `Send at most ${BULK_MAX} items.`).optional(),
+  items: z.array(item).min(1, "Send at least one item.").max(BULK_ITEMS_MAX, `Send at most ${BULK_ITEMS_MAX} items.`).optional(),
 })
   .refine((b) => b.action !== "add" || (b.campaignId !== null && b.rows !== undefined && b.items === undefined), { message: "Add to campaign sends the campaign and the selected rows.", path: ["rows"] })
   .refine((b) => b.action === "add" || (b.items !== undefined && b.rows === undefined), { message: "A bulk pause, resume or stop sends the items its confirmation showed.", path: ["items"] });
@@ -167,6 +173,9 @@ export function bulkRoutes(app: Hono, deps: BulkDependencies): void {
         if (!control) continue;
         items.push({ row: view, enrollmentId: e.id, campaign: e.campaign, status: read.status, control });
       }
+    }
+    if (items.length > BULK_ITEMS_MAX) {
+      return c.json<ApiError>({ error: { code: "invalid_request", message: `These rows are in more than ${BULK_ITEMS_MAX.toLocaleString("en-GB")} campaign enrollments. Filter by a campaign, or select fewer.` } }, 400);
     }
     const refused = items.flatMap((i) => (i.control.allowed ? [] : [i.control]));
     const reasons = [...new Map(refused.map((r: Extract<ControlView, { allowed: false }>) => [r.reason, refused.filter((x) => x.reason === r.reason).length])).entries()].map(([reason, count]) => ({ reason, count }));

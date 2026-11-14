@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { ActivityEntry, DependentTrackState, TrackLabel } from "../shared/api.ts";
-import { describeEntry } from "./activity.tsx";
+import { describeEntry, nextNotePress } from "./activity.tsx";
 
 const campaign = { id: "c1", name: "Autumn physio" };
 const at = "2026-11-02T09:05:00.000Z";
@@ -203,5 +203,19 @@ describe("what the timeline says of the controls the user applied (ticket 17b), 
   test("the campaign's pause and resume", () => {
     expect(say({ campaign, at, kind: "campaign_paused" })).toEqual(["Campaign paused", "Its calls left your list and its waits froze.", null]);
     expect(say({ campaign, at, kind: "campaign_resumed" })).toEqual(["Campaign resumed", null, null]);
+  });
+});
+
+describe("a note's request id (review bot on 9daf7c0)", () => {
+  test("submitting the unchanged note again after an unanswered send reuses its request id, so it is stored once", () => {
+    const sent = { requestId: "r1", body: "Prefers mornings.", scope: "person" as const };
+    expect(nextNotePress(sent, "Prefers mornings.", "person", () => "r2")).toEqual(sent);
+    expect(nextNotePress(sent, "  Prefers mornings. ", "person", () => "r2")).toEqual(sent);
+  });
+  test("a changed note, or another scope, is a new note with a new id", () => {
+    const sent = { requestId: "r1", body: "Prefers mornings.", scope: "person" as const };
+    expect(nextNotePress(sent, "Prefers afternoons.", "person", () => "r2")).toEqual({ requestId: "r2", body: "Prefers afternoons.", scope: "person" });
+    expect(nextNotePress(sent, "Prefers mornings.", "company", () => "r2")).toEqual({ requestId: "r2", body: "Prefers mornings.", scope: "company" });
+    expect(nextNotePress(null, "Prefers mornings.", "person", () => "r2")).toEqual({ requestId: "r2", body: "Prefers mornings.", scope: "person" });
   });
 });

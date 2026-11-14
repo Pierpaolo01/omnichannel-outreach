@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { KeyValue } from "../calls/callDesk.ts";
-import { BulkRequests, NoBulkAnswer, type BulkPress, type BulkResult, type BulkSendAnswer } from "./requests.ts";
+import { BulkRequests, NoBulkAnswer, shownBulkResult, type BulkPress, type BulkResult, type BulkSendAnswer } from "./requests.ts";
 
 /**
  * Bulk presses on Leads (ticket 18), on the controls' request rule (17b): stored under the bulk id before the first send;
@@ -139,5 +139,17 @@ describe("a bulk press is stored before its first send, and sent with the same i
     await w.settle();
     expect(a.results).toHaveLength(1);
     expect(a.requests.stored()).toEqual([]);
+  });
+});
+
+describe("which bulk answer a page shows (review bot on 9daf7c0)", () => {
+  const answer = (bulkId: string): BulkResult => ({ kind: "answered", press: { v: 1, bulkId, action: "pause", body: {}, labels: {}, campaign: null, pressedAt: 1 }, body: {} });
+  test("an answer to a press this page did not make, a reload's recovered press, shows when nothing of its own is shown", () => {
+    expect(shownBulkResult(null, answer("recovered"), new Set())).toEqual(answer("recovered"));
+  });
+  test("an answer to this page's own press replaces what is shown; another's never replaces this page's own", () => {
+    const own = new Set(["mine"]);
+    expect(shownBulkResult(answer("other"), answer("mine"), own)).toEqual(answer("mine"));
+    expect(shownBulkResult(answer("mine"), answer("other"), own)).toEqual(answer("mine"));
   });
 });

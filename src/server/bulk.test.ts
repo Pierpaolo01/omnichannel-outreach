@@ -177,6 +177,16 @@ describe("a bulk control applies each per-lead control once, through the engine"
     expect((await w.press({ bulkId: "a/b", action: "pause", campaignId: clinics, items: [{ enrollmentId: "x", expect: { status: "active", preview: "d" } }] })).status).toBe(400);
   });
 
+  test("a press may carry every item a preview can show: more items than rows when the rows are in several campaigns (review bot on 9daf7c0)", async () => {
+    const w = await world();
+    const clinics = await w.campaign("Clinics", [PAT]);
+    // 500 rows in two or more campaigns each give a preview of over 500 items; its press must not be refused for size.
+    const items = Array.from({ length: 1_000 }, (_, i) => ({ enrollmentId: `nobody-${i}`, expect: { status: "active", preview: "d" } }));
+    const res = await w.press<BulkControlAnswer>({ bulkId: "bulk-big", action: "pause", campaignId: clinics, items });
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toEqual({ applied: 0, refused: 1_000 });
+  });
+
   test("an enrollment that does not exist is answered per item, never by refusing the bulk", async () => {
     const w = await world();
     const clinics = await w.campaign("Clinics", [PAT]);

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { ApiError, BulkAction } from "../../shared/api.ts";
 import { browserStorage } from "../calls/storage.ts";
-import { BulkRequests, NoBulkAnswer, isBulkKey, type BulkLabel, type BulkPress, type BulkPressOutcome, type BulkResult, type BulkSendAnswer } from "./requests.ts";
+import { BulkRequests, NoBulkAnswer, isBulkKey, shownBulkResult, type BulkLabel, type BulkPress, type BulkPressOutcome, type BulkResult, type BulkSendAnswer } from "./requests.ts";
 
 /** A 4xx whose code says the server refused the bulk is definite; anything else is no answer. */
 const DEFINITE = new Set(["bulk_refused", "not_found", "invalid_request"]);
@@ -62,7 +62,8 @@ export function useBulk(refresh: () => void): Bulk {
 
   useEffect(() => {
     if (answered === null) return;
-    if (own.current.has(answered.press.bulkId)) setResult(answered);
+    // A press recovered after a reload, or sent by this page for another tab, still has its answer shown (review bot on 9daf7c0).
+    setResult((current) => shownBulkResult(current, answered, own.current));
     refresh();
   }, [answered, refresh]);
 
