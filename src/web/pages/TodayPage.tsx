@@ -1,7 +1,7 @@
 import { Link } from "wouter";
 import type { CallQueueItem, TodayView } from "../../shared/api.ts";
 import { useLiveToday } from "../calls/useLiveToday.ts";
-import { BEHIND_LINE, CAPACITY_USED, attentionItems, dateHeading, reasonLine, todayLede, zonePlace } from "../calls/wording.ts";
+import { CAPACITY_USED, attentionItems, dateHeading, reasonLine, todayLede, zonePlace } from "../calls/wording.ts";
 import { ErrorState, StaleNotice } from "../components.tsx";
 import { Icon } from "../icons.tsx";
 import { greeting, todayHeading, useNow } from "../time.ts";
@@ -39,11 +39,6 @@ export function TodayPage() {
           </Link>
         )}
       </div>
-      {view?.behind && (
-        <p role="status" className="mt-4 rounded-box bg-raised px-4 py-2.5 text-[14px] text-ink-2">
-          {BEHIND_LINE}
-        </p>
-      )}
       {live.freshness.stale && <StaleNotice freshness={live.freshness} onRetry={live.retry} rescue={2} />}
       <div className="grid grid-cols-1 gap-12 pt-7 lg:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]">
         <section aria-labelledby="up-next">

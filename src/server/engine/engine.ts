@@ -32,13 +32,7 @@ export interface EngineHooks {
   afterAuthorization?(attemptId: string): void;
   /** Named points at which a test may simulate a crash by throwing. */
   crashPoint?(point: CrashPoint, attemptId: string | null): void;
-  /** After each step of a tick's pass (ADR 0003 4.4): the tests move the clock here, between every pair of steps. */
-  afterStep?(step: TickStep): void;
 }
-
-/** A tick's steps, in the order each pass runs them (ADR 0003 2.6, 4.4). */
-export const TICK_STEPS = ["sync accounts", "observe", "correlate", "expire claims", "recover stuck answers", "settle", "fall back held replies", "withdraw", "evaluate", "place calls", "claim", "hand over"] as const;
-export type TickStep = (typeof TICK_STEPS)[number];
 
 /**
  * Serializes, per inbox, a send's authorization, its provider call and the pacing slot it takes,
@@ -125,17 +119,7 @@ export class Engine {
   private readonly ports: Record<Channel, SendPort>;
   /** Each sender account's channel, so its attempts reach the right port. */
   private readonly channels = new Map<string, Channel>();
-  /**
-   * The clock. A tick reads it once, at its start, and passes that instant to every step (ADR 0003
-   * 4.4, "One instant per tick"); only the entry points and the send act read it (eslint.config.js).
-   */
-  private readonly clock: () => number;
-  /**
-   * The latest instant a send act recorded in the running tick (its pre-send check, authorization,
-   * call start or answer). The tick's next pass is as of no earlier instant, so nothing it records
-   * runs before a send already recorded (ADR 0003 4.4, "One instant per tick").
-   */
-  private lastActAt = 0;
+  private readonly now: () => number;
   private readonly newId: () => string;
   private readonly rules: Rules;
   private readonly hooks: EngineHooks;
@@ -159,7 +143,7 @@ export class Engine {
   constructor(deps: EngineDependencies) {
     this.store = deps.store;
     this.ports = { email: deps.port, sms: deps.smsPort ?? new UnprovisionedSmsPort() };
-    this.clock = deps.now;
+    this.now = deps.now;
     this.newId = deps.newId;
     this.rules = { ...DEFAULT_RULES, ...deps.rules };
     this.hooks = deps.hooks ?? {};
@@ -185,11 +169,11 @@ export class Engine {
   /** Launches a campaign if nothing blocks it, and runs a tick. */
   launch(campaignId: string, expectedDefinitionVersion?: number): Promise<{ ok: true; stored: StoredDefinition } | { ok: false; reason: string; check: LaunchCheck | null }> {
     return this.ticks.run(async () => {
-      const now = this.clock();
-      await this.syncAccounts(now);
+      await this.syncAccounts();
+      const now = this.now();
       const outcome = await this.store.launch(campaignId, now, launchCheck, (s) => this.rules.evaluate(this.rules.enterMain(s, now), now), expectedDefinitionVersion);
       if (!outcome.ok) return outcome;
-      await this.runTick(now);
+      await this.runTick();
       return { ok: true as const, stored: outcome.stored };
     });
   }
@@ -201,101 +185,48 @@ export class Engine {
    */
   recover(): Promise<void> {
     return this.ticks.run(async () => {
-      const now = this.clock();
+      const now = this.now();
       for (const r of await this.store.pendingReplies()) await this.store.updateReplyEvent(r.eventId, { lastCountedWall: now });
       for (const a of await this.store.openAttempts()) {
         // The crash row of 5.3: a call whose answer was never recorded is an unknown answer.
         if ((a.state === "handed" || a.state === "accepted") && a.awaitingAnswer) {
-          await this.applyAttempt(a, { kind: "call_answer", answer: { kind: "unknown" }, now }, now);
+          await this.applyAttempt(a, { kind: "call_answer", answer: { kind: "unknown" }, now: this.now() });
         }
       }
-      await this.observe(now);
-      await this.settle(now);
-      await this.runTick(now);
+      await this.observe();
+      await this.settle();
+      await this.runTick();
     });
   }
 
   tick(): Promise<void> {
-    return this.ticks.run(() => this.runTick(this.clock()));
+    return this.ticks.run(() => this.runTick());
   }
 
-  /**
-   * One tick, as of the one instant `now` (ADR 0003 4.4, "One instant per tick"): every step and
-   * every pass decides as of it, and the call placement's marker is set to it. No step reads the
-   * clock; only the send act takes its own instants, for the provider exchange it is (5.5 step 6).
-   */
-  private async runTick(start: number): Promise<void> {
-    const step = (name: TickStep) => this.hooks.afterStep?.(name);
-    let now = start;
-    this.lastActAt = start;
-    await this.syncAccounts(now);
-    step("sync accounts");
+  private async runTick(): Promise<void> {
+    await this.syncAccounts();
     for (let pass = 0; pass < MAX_PASSES; pass++) {
-      // A pass after a send act is as of the latest instant that act recorded; no step reads the clock.
-      now = Math.max(now, this.lastActAt);
       let changed = false;
-      const observed = await this.observe(now);
+      const observed = await this.observe();
       changed = observed.changed || changed;
-      step("observe");
-      changed = (await this.correlate(now, observed.ok, false)) || changed;
-      step("correlate");
-      changed = (await this.expireClaims(now)) || changed;
-      step("expire claims");
-      changed = (await this.recoverStuckAnswers(now)) || changed;
-      step("recover stuck answers");
-      changed = (await this.settle(now)) || changed;
-      step("settle");
+      changed = (await this.correlate(observed.ok, false)) || changed;
+      changed = (await this.expireClaims()) || changed;
+      changed = (await this.recoverStuckAnswers()) || changed;
+      changed = (await this.settle()) || changed;
       // A held reply falls back only after this pass's lookups have had their chance to attach its reference.
-      changed = (await this.correlate(now, false, true)) || changed;
-      step("fall back held replies");
-      changed = (await this.withdraw(now)) || changed;
-      step("withdraw");
-      changed = (await this.evaluateAll(now)) || changed;
-      step("evaluate");
-      changed = (await this.placeCallsAll(now)) || changed;
-      step("place calls");
-      changed = (await this.claimAll(now)) || changed;
-      step("claim");
-      changed = (await this.handOverAll(now)) || changed;
-      step("hand over");
+      changed = (await this.correlate(false, true)) || changed;
+      changed = (await this.withdraw()) || changed;
+      changed = (await this.evaluateAll()) || changed;
+      changed = (await this.placeCallsAll()) || changed;
+      changed = (await this.claimAll()) || changed;
+      changed = (await this.handOverAll()) || changed;
       if (!changed) return;
     }
   }
 
-  /** The instant through which call placement is complete and stored (ADR 0003 4.4); null before the first pass. */
-  callsPlacedThrough(): Promise<number | null> {
-    return this.store.callsPlacedThrough();
-  }
-
-  /**
-   * The earliest instant after `after` at which the call list can change by placement (ADR 0003 4.4):
-   * a phone track due to start, a due call step not yet placed (at its due time, or, once due, at the
-   * next user day after `after`, when hours and room are counted again). Email and SMS work is left out.
-   */
-  async nextCallWakeAt(after: number, now: number = this.clock()): Promise<number | null> {
-    const times: number[] = [];
-    for (const id of await this.store.runningSubjectIds()) {
-      const s = await this.store.subject(id, now);
-      if (!s) continue;
-      const lead = leadNow(s.subject.clock, now);
-      for (const p of s.tracks) {
-        if (s.campaign.definition.tracks.find((t) => t.id === p.trackId)?.channel !== "call" || p.finishedAt !== null) continue;
-        if (p.startedAt === null) {
-          if (p.startAt !== null) times.push(now + (p.startAt - lead));
-          continue;
-        }
-        if (p.nextStepId === null || p.dueAt === null || s.callTasks.some((t) => t.stepId === p.nextStepId)) continue;
-        const due = now + (p.dueAt - lead);
-        times.push(due > after ? due : await this.nextUserDay(after));
-      }
-    }
-    const later = times.filter((t) => t > after);
-    return later.length > 0 ? Math.min(...later) : null;
-  }
-
   /** The next instant at which a tick could change something, for the worker loop and the tests' clock. */
-  async nextWakeAt(now: number = this.clock()): Promise<number | null> {
-    const from = now;
+  async nextWakeAt(): Promise<number | null> {
+    const now = this.now();
     const times: number[] = [];
     for (const [id, version] of await this.store.runningSubjectVersions()) {
       let cached = this.wakeCache.get(id);
@@ -317,11 +248,11 @@ export class Engine {
         this.wakeCache.set(id, cached);
       }
       for (const d of cached.due) {
-        if (d.wall > from) times.push(d.wall);
-        else if (d.window === null) times.push(await this.nextUserDay(from));
+        if (d.wall > now) times.push(d.wall);
+        else if (d.window === null) times.push(await this.nextUserDay(now));
         else {
-          const opens = nextWindowOpen(d.window, d.zone, from);
-          if (opens !== null && opens > from) times.push(opens);
+          const opens = nextWindowOpen(d.window, d.zone, now);
+          if (opens !== null && opens > now) times.push(opens);
         }
       }
     }
@@ -339,9 +270,9 @@ export class Engine {
     for (const acc of accounts.values()) {
       if (acc.waitUntil !== null && acc.waitUntil !== QUOTA_WAIT) times.push(acc.waitUntil);
       // Capacity frees at the account's next reset day.
-      times.push(startOfLocalDay(localDayNumber(from, acc.resetZone) + 1, acc.resetZone));
+      times.push(startOfLocalDay(localDayNumber(now, acc.resetZone) + 1, acc.resetZone));
     }
-    const future = times.filter((t) => t > from);
+    const future = times.filter((t) => t > now);
     return future.length > 0 ? Math.min(...future) : null;
   }
 
@@ -350,22 +281,21 @@ export class Engine {
     return this.ticks.run(async () => {
       const a = await this.store.attempt(attemptId);
       if (!a) return false;
-      const now = this.clock();
-      return this.applyWork(a.subjectId, a.idempotencyKey, { kind: mark === "sent" ? "mark_sent" : "mark_not_sent", now }, now);
+      return this.applyWork(a.subjectId, a.idempotencyKey, { kind: mark === "sent" ? "mark_sent" : "mark_not_sent", now: this.now() });
     });
   }
 
   // -------------------------------------------------------------------------------------------
   // Accounts.
 
-  private async syncAccounts(now: number): Promise<void> {
+  private async syncAccounts(): Promise<void> {
     for (const channel of CHANNELS) {
       const statuses = await this.bounded(() => this.ports[channel].accounts(), null);
       if (statuses === null) continue;
       await this.store.upsertAccounts(statuses);
       // An account its provider no longer lists is disconnected: claims for it wait, and Needs attention lists it.
       await this.store.disconnectUnlisted(channel, statuses.map((a) => a.id));
-      const known = new Map((await this.store.accounts(now)).map((a) => [a.id, a]));
+      const known = new Map((await this.store.accounts(this.now())).map((a) => [a.id, a]));
       for (const s of statuses) {
         this.channels.set(s.id, channel);
         if (s.quotaAvailable && known.get(s.id)?.waitReason === "quota") await this.store.updateAccount(s.id, { waitUntil: null, waitReason: null });
@@ -374,10 +304,10 @@ export class Engine {
   }
 
   /** The port an account's sends travel by. */
-  private async portOf(accountId: string, now: number): Promise<SendPort> {
+  private async portOf(accountId: string): Promise<SendPort> {
     let channel = this.channels.get(accountId);
     if (channel === undefined) {
-      for (const a of await this.store.accounts(now)) this.channels.set(a.id, a.channel);
+      for (const a of await this.store.accounts(this.now())) this.channels.set(a.id, a.channel);
       channel = this.channels.get(accountId) ?? "email";
     }
     return this.ports[channel];
@@ -391,16 +321,16 @@ export class Engine {
   }
 
   /** Applies one attempt event and its consequences in one transaction. True if anything changed. */
-  private async applyAttempt(attempt: Pick<Attempt, "id" | "subjectId">, event: AttemptEvent, now: number): Promise<boolean> {
-    return this.applyChange(now, attempt.subjectId, attempt.id, (s) => {
+  private async applyAttempt(attempt: Pick<Attempt, "id" | "subjectId">, event: AttemptEvent): Promise<boolean> {
+    return this.applyChange(attempt.subjectId, attempt.id, (s, now) => {
       if (!s.attempts.some((a) => a.id === attempt.id)) return null;
       return { out: this.rules.applyToAttempt(s, attempt.id, event, now), accountId: s.attempts.find((a) => a.id === attempt.id)?.accountId ?? "" };
     }, event.kind === "call_answer" && event.answer.kind === "accepted");
   }
 
   /** Applies one event about provider work, to the work and every attempt carrying it, in one transaction. */
-  private async applyWork(subjectId: string, key: string, event: WorkEvent, now: number): Promise<boolean> {
-    return this.applyChange(now, subjectId, null, (s) => {
+  private async applyWork(subjectId: string, key: string, event: WorkEvent): Promise<boolean> {
+    return this.applyChange(subjectId, null, (s, now) => {
       const w = s.work.find((x) => x.key === key);
       if (!w) return null;
       return { out: this.rules.applyToWork(s, key, event, now, { resetDay: this.resetDay(s), point: this.rules.sendPoint }), accountId: w.accountId };
@@ -408,15 +338,15 @@ export class Engine {
   }
 
   private async applyChange(
-    now: number,
     subjectId: string,
     attemptId: string | null,
-    decide: (s: SubjectState) => { out: { state: SubjectState; effects: readonly AttemptEffect[] }; accountId: string } | null,
+    decide: (s: SubjectState, now: number) => { out: { state: SubjectState; effects: readonly AttemptEffect[] }; accountId: string } | null,
     accepted: boolean,
   ): Promise<boolean> {
+    const now = this.now();
     const anomalies: string[] = [];
     const written = await this.store.update(subjectId, now, (s) => {
-      const decided = decide(s);
+      const decided = decide(s, now);
       if (!decided) return null;
       let next = decided.out.state;
       const accountId = decided.accountId;
@@ -442,7 +372,7 @@ export class Engine {
    * Observes every provider; `ok` is false when the email provider could not be observed, which is
    * what a held email reply's running time depends on.
    */
-  private async observe(now: number): Promise<{ changed: boolean; ok: boolean }> {
+  private async observe(): Promise<{ changed: boolean; ok: boolean }> {
     let changed = false;
     let ok = true;
     for (const channel of CHANNELS) {
@@ -454,7 +384,7 @@ export class Engine {
       }
       const { events, checkpoint: next } = observed;
       for (const event of events) {
-        changed = (await (channel === "sms" ? this.applySmsEvent(event, now) : this.applyEvent(event, now))) || changed;
+        changed = (await (channel === "sms" ? this.applySmsEvent(event) : this.applyEvent(event))) || changed;
         this.hooks.crashPoint?.("after_observe_event", null);
       }
       if (next !== checkpoint) await this.store.setMeta(OBSERVE_CHECKPOINT[channel], next);
@@ -468,13 +398,14 @@ export class Engine {
    * stops that lead in its campaign, and nothing else. It is applied before its event is kept, so a
    * crash in between replays it harmlessly. Sends, failures and refusals are matched by their work.
    */
-  private async applySmsEvent(event: ProviderEvent, now: number): Promise<boolean> {
+  private async applySmsEvent(event: ProviderEvent): Promise<boolean> {
+    const now = this.now();
     if (event.kind === "reply") {
       const eventId = `sms:${event.id}`;
       if (await this.store.replyEvent(eventId)) return false;
       const owner = this.rules.smsReplyOwner(await this.store.smsBindingsOf(event.from), event.inbox);
       const reply: ReplyEvent = { eventId, providerRef: null, inbox: event.inbox, address: event.from, atWall: Math.min(event.at, now), receivedWall: now, state: owner ? "resolved" : "unmatched", waitedMs: 0, lastCountedWall: now };
-      if (owner) await this.recordReply([owner], { id: eventId, at: reply.atWall }, now, "sms");
+      if (owner) await this.recordReply([owner], { id: eventId, at: reply.atWall }, "sms");
       else await this.store.recordAnomaly(null, "a text from a mobile no number of the app's has a conversation with", now);
       await this.store.recordReplyEvent(reply);
       return owner !== null;
@@ -484,11 +415,12 @@ export class Engine {
       await this.store.recordAnomaly(null, `an SMS ${event.kind} event the app cannot match`, now);
       return false;
     }
-    return this.applyEvent(event, now, w);
+    return this.applyEvent(event, w);
   }
 
   /** Records a reply on each subject it belongs to. */
-  private async recordReply(subjects: readonly string[], reply: { id: string; at: number }, now: number, channel: Channel = "email"): Promise<boolean> {
+  private async recordReply(subjects: readonly string[], reply: { id: string; at: number }, channel: Channel = "email"): Promise<boolean> {
+    const now = this.now();
     let changed = false;
     for (const subjectId of subjects) {
       const written = await this.store.update(subjectId, now, (s) => {
@@ -504,7 +436,8 @@ export class Engine {
    * The subjects a reply outside every known thread falls back to by the inbox it reached and the
    * bare address it came from (2.4): the rule `replyMatches` decides, work by work.
    */
-  private async replyByAddress(reply: ReplyEvent, now: number): Promise<string[]> {
+  private async replyByAddress(reply: ReplyEvent): Promise<string[]> {
+    const now = this.now();
     const subjects = new Set<string>();
     for (const w of await this.store.workReachedFrom(reply.inbox, reply.address)) {
       if (subjects.has(w.subjectId)) continue;
@@ -515,13 +448,13 @@ export class Engine {
   }
 
   /** Resolves a reply event on its subjects, or keeps it unmatched by its reference. */
-  private async resolveReply(reply: ReplyEvent, subjects: readonly string[], now: number): Promise<void> {
+  private async resolveReply(reply: ReplyEvent, subjects: readonly string[]): Promise<void> {
     if (subjects.length === 0) {
-      await this.store.recordAnomaly(null, "a reply from an address the app never wrote to from that inbox", now);
+      await this.store.recordAnomaly(null, "a reply from an address the app never wrote to from that inbox", this.now());
       await this.store.updateReplyEvent(reply.eventId, { state: "unmatched" });
       return;
     }
-    await this.recordReply(subjects, { id: reply.eventId, at: reply.atWall }, now);
+    await this.recordReply(subjects, { id: reply.eventId, at: reply.atWall });
     await this.store.updateReplyEvent(reply.eventId, { state: "resolved" });
   }
 
@@ -532,8 +465,9 @@ export class Engine {
    * inbox to the address, until its reference attaches or it has waited one settling period of
    * running time, then falls back. One that matches nothing stays unmatched by its reference.
    */
-  private async applyReplyEvent(event: Extract<ProviderEvent, { kind: "reply" }>, now: number): Promise<boolean> {
+  private async applyReplyEvent(event: Extract<ProviderEvent, { kind: "reply" }>): Promise<boolean> {
     if (await this.store.replyEvent(event.id)) return false;
+    const now = this.now();
     const reply: ReplyEvent = {
       eventId: event.id,
       providerRef: event.providerRef,
@@ -547,20 +481,21 @@ export class Engine {
     };
     await this.store.recordReplyEvent(reply);
     const owner = event.providerRef === null ? null : await this.store.workByProviderRef(event.providerRef);
-    if (owner) await this.resolveReply(reply, [owner.subjectId], now);
-    else if (event.providerRef === null) await this.resolveReply(reply, await this.replyByAddress(reply, now), now);
+    if (owner) await this.resolveReply(reply, [owner.subjectId]);
+    else if (event.providerRef === null) await this.resolveReply(reply, await this.replyByAddress(reply));
     return true;
   }
 
-  private async applyEvent(event: ProviderEvent, now: number, matched: ProviderWork | null = null): Promise<boolean> {
-    if (event.kind === "reply") return this.applyReplyEvent(event, now);
+  private async applyEvent(event: ProviderEvent, matched: ProviderWork | null = null): Promise<boolean> {
+    if (event.kind === "reply") return this.applyReplyEvent(event);
+    const now = this.now();
     const w = matched ?? (await this.store.workByProviderRef(event.providerRef)) ?? (await this.store.work(event.key));
     if (!w) {
       await this.store.recordAnomaly(null, `a ${event.kind} event the app cannot match`, now);
       return false;
     }
-    if (event.kind === "sent") return this.applyWork(w.subjectId, w.key, { kind: "sent_observed", providerTime: event.sentAt, providerRef: event.providerRef }, now);
-    if (event.kind === "rejected") return this.applyWork(w.subjectId, w.key, { kind: "provider_rejected", reason: event.reason }, now);
+    if (event.kind === "sent") return this.applyWork(w.subjectId, w.key, { kind: "sent_observed", providerTime: event.sentAt, providerRef: event.providerRef });
+    if (event.kind === "rejected") return this.applyWork(w.subjectId, w.key, { kind: "provider_rejected", reason: event.reason });
     // A bounce after a send marks the address bad and fails the track if it is unfinished. It
     // applies only to work some attempt handed over; for other work nothing is applied, so nothing
     // is recorded (PR 41 council, item 5). Handing over is never undone, so this check and the
@@ -593,12 +528,13 @@ export class Engine {
    * could be observed. Then (`fallback`), after the pass's lookups, a held reply that has waited
    * one settling period falls back by address.
    */
-  private async correlate(now: number, countTime: boolean, fallback: boolean): Promise<boolean> {
+  private async correlate(countTime: boolean, fallback: boolean): Promise<boolean> {
+    const now = this.now();
     let changed = false;
     for (const reply of await this.store.openReplyEvents()) {
       const owner = reply.providerRef === null ? null : await this.store.workByProviderRef(reply.providerRef);
       if (owner) {
-        await this.resolveReply(reply, [owner.subjectId], now);
+        await this.resolveReply(reply, [owner.subjectId]);
         changed = true;
         continue;
       }
@@ -609,7 +545,7 @@ export class Engine {
         continue;
       }
       if (reply.waitedMs < ENGINE_PARAMS.SETTLING) continue;
-      await this.resolveReply(reply, await this.replyByAddress(reply, now), now);
+      await this.resolveReply(reply, await this.replyByAddress(reply));
       changed = true;
     }
     return changed;
@@ -618,10 +554,11 @@ export class Engine {
   // -------------------------------------------------------------------------------------------
   // Bounded waiting states (5.3, 5.5 step 5).
 
-  private async expireClaims(now: number): Promise<boolean> {
+  private async expireClaims(): Promise<boolean> {
+    const now = this.now();
     let changed = false;
     for (const a of await this.store.openAttempts()) {
-      if (a.state === "claimed" && now - a.claimedWall >= ENGINE_PARAMS.SETTLING) changed = (await this.applyAttempt(a, { kind: "claim_expired", now }, now)) || changed;
+      if (a.state === "claimed" && now - a.claimedWall >= ENGINE_PARAMS.SETTLING) changed = (await this.applyAttempt(a, { kind: "claim_expired", now })) || changed;
     }
     return changed;
   }
@@ -630,11 +567,12 @@ export class Engine {
    * A call whose answer was never recorded, though no call is in progress (an error while applying
    * it), is the crash row of 5.3, without waiting for a restart (ruling 5).
    */
-  private async recoverStuckAnswers(now: number): Promise<boolean> {
+  private async recoverStuckAnswers(): Promise<boolean> {
+    const now = this.now();
     let changed = false;
     for (const a of await this.store.openAttempts()) {
       if (!a.awaitingAnswer || this.locks.calling.has(a.id) || now - (a.lastCallWall ?? a.claimedWall) < ENGINE_PARAMS.CALL_TIMEOUT) continue;
-      changed = (await this.applyAttempt(a, { kind: "call_answer", answer: { kind: "unknown" }, now }, now)) || changed;
+      changed = (await this.applyAttempt(a, { kind: "call_answer", answer: { kind: "unknown" }, now })) || changed;
     }
     return changed;
   }
@@ -644,38 +582,38 @@ export class Engine {
   }
 
   /** Looks up provider work whose lookup is due, one call per work (5.3, 5.6). */
-  private async settle(now: number): Promise<boolean> {
+  private async settle(): Promise<boolean> {
     let changed = false;
     for (const due of await this.store.openWork()) {
-      if (due.nextLookupWall === null || due.nextLookupWall > now) continue;
+      if (due.nextLookupWall === null || due.nextLookupWall > this.now()) continue;
       const live = (await this.store.openAttempts()).find((a) => a.idempotencyKey === due.key);
       if (live?.awaitingAnswer) continue;
       // Settlement runs on its own clock: a retry still waiting for its slot when the lookup is due
       // is refused, and the work settles (ruling 5).
       if (live && (live.retry === "wanted" || live.retry === "wanted_after_not_sent")) {
-        await this.applyAttempt(live, { kind: "retry_refused", now }, now);
+        await this.applyAttempt(live, { kind: "retry_refused", now: this.now() });
         changed = true;
         const after = await this.store.work(due.key);
-        if (!after || after.settled !== null || after.nextLookupWall === null || after.nextLookupWall > now) continue;
+        if (!after || after.settled !== null || after.nextLookupWall === null || after.nextLookupWall > this.now()) continue;
       }
       const w = (await this.store.work(due.key)) ?? due;
-      const port = await this.portOf(w.accountId, now);
+      const port = await this.portOf(w.accountId);
       const answer = await this.bounded(() => port.lookup(this.ref(w)), { kind: "unknown" as const });
       this.hooks.crashPoint?.("after_lookup", live?.id ?? null);
-      changed = (await this.applyWork(w.subjectId, w.key, { kind: "lookup_answer", answer, now }, now)) || changed;
+      changed = (await this.applyWork(w.subjectId, w.key, { kind: "lookup_answer", answer, now: this.now() })) || changed;
     }
     return changed;
   }
 
-  private async withdraw(now: number): Promise<boolean> {
+  private async withdraw(): Promise<boolean> {
     let changed = false;
     for (const a of await this.store.openAttempts()) {
       if (!a.withdrawRequested || a.withdrawCalled || (a.state !== "handed" && a.state !== "accepted")) continue;
       const w = await this.store.work(a.idempotencyKey);
       if (!w) continue;
-      const port = await this.portOf(w.accountId, now);
+      const port = await this.portOf(w.accountId);
       const answer = await this.bounded(() => port.withdraw(this.ref(w)), "unknown" as const);
-      changed = (await this.applyAttempt(a, { kind: "withdraw_answer", answer, now }, now)) || changed;
+      changed = (await this.applyAttempt(a, { kind: "withdraw_answer", answer, now: this.now() })) || changed;
     }
     return changed;
   }
@@ -683,9 +621,10 @@ export class Engine {
   // -------------------------------------------------------------------------------------------
   // Evaluation (2.6) with the version guard (2.5).
 
-  private async evaluateAll(now: number): Promise<boolean> {
+  private async evaluateAll(): Promise<boolean> {
     let changed = false;
     for (const [id, version] of await this.store.runningSubjectVersions()) {
+      const now = this.now();
       const known = this.settled.get(id);
       if (known?.key === version && now < known.until) continue;
       const snapshot = await this.store.subject(id, now);
@@ -722,47 +661,37 @@ export class Engine {
   }
 
   /**
-   * Places due calls on today's list in priority order (4.4), as of the tick's instant `now`, in one
-   * transaction with the completed-placement marker (ADR 0003 4.4, "One instant per tick"): each
-   * candidate subject is evaluated as of `now` in that transaction, so a track that starts by `now` is
-   * started before its calls are looked for, then its ready calls are placed, each re-checking the
-   * day's capacity, and the marker is set to `now`. A call that does not fit waits for the next user
-   * day and is never dropped.
+   * Places due calls on today's list in priority order (4.4), each in its own transaction that
+   * re-checks the day's capacity against current state. A call that does not fit waits for the next
+   * user day and is never dropped.
    */
-  private async placeCallsAll(now: number): Promise<boolean> {
+  private async placeCallsAll(): Promise<boolean> {
+    const now = this.now();
     const settings = JSON.stringify(await this.store.callSettings());
-    const candidates: { id: string; key: string }[] = [];
+    const ready: { item: ReadyItem; snapshot: SubjectState }[] = [];
     for (const [id, version] of await this.store.runningSubjectVersions()) {
       const key = `${version}|${settings}`;
       const known = this.noCallsReady.get(id);
       if (known?.key === key && now < known.until) continue;
-      candidates.push({ id, key });
-    }
-    const nextDay = await this.nextUserDay(now);
-    const idle: { id: string; key: string; until: number }[] = [];
-    const placed = await this.store.placeCalls(now, (tx) => {
-      const ready: ReadyItem[] = [];
-      for (const { id, key } of candidates) {
-        const base = tx.subject(id);
-        if (!base) continue;
-        const evaluated = this.rules.evaluate(base, now);
-        const s = same(evaluated, base) ? base : (tx.apply(id, () => evaluated) ?? base);
-        const items = this.rules.readyCalls(s, now);
-        if (items.length === 0) {
-          // Nothing to place until a call falls due, a track starts, or the next user day (its hours may open then).
-          const lead = leadNow(s.subject.clock, now);
-          const later = s.tracks.flatMap((p) => [p.finishedAt === null ? p.dueAt : null, p.startedAt === null ? p.startAt : null]).filter((t): t is number => t !== null && t > lead);
-          idle.push({ id, key, until: Math.min(nextDay, ...later.map((t) => now + (t - lead))) });
-        }
-        ready.push(...items);
+      const snapshot = await this.store.subject(id, now);
+      if (!snapshot) continue;
+      const items = this.rules.readyCalls(snapshot, now);
+      if (items.length === 0) {
+        // Nothing to place until a call falls due, or the next user day (its hours may open then).
+        const lead = leadNow(snapshot.subject.clock, now);
+        const dues = snapshot.tracks.filter((p) => p.finishedAt === null && p.dueAt !== null && p.dueAt > lead).map((p) => now + ((p.dueAt ?? 0) - lead));
+        this.noCallsReady.set(id, { key, until: Math.min(await this.nextUserDay(now), ...dues) });
       }
-      ready.sort((a, b) => this.rules.callOrder(a, b));
-      let count = 0;
-      for (const item of ready) if (tx.apply(item.subjectId, (s) => this.rules.placeCall(s, item, now, this.newId()))) count++;
-      return count;
-    });
-    for (const x of idle) this.noCallsReady.set(x.id, { key: x.key, until: x.until });
-    return placed > 0;
+      for (const item of items) ready.push({ item, snapshot });
+    }
+    ready.sort((a, b) => this.rules.callOrder(a.item, b.item));
+    let changed = false;
+    for (const { item } of ready) {
+      const taskId = this.newId();
+      const written = await this.store.update(item.subjectId, now, (s) => this.rules.placeCall(s, item, now, taskId));
+      changed = written !== null || changed;
+    }
+    return changed;
   }
 
   /**
@@ -776,7 +705,7 @@ export class Engine {
       // A key logged on another subject's call: the subject's own transaction cannot see it.
       const loggedOn = await this.store.callRequestTask(input.requestId);
       if (loggedOn !== null && loggedOn !== taskId) return { ok: false as const, reason: REQUEST_ID_REUSED };
-      const now = this.clock();
+      const now = this.now();
       const refused: { reason: string | null } = { reason: null };
       const ids = { attempt: this.newId(), note: this.newId() };
       try {
@@ -794,7 +723,7 @@ export class Engine {
         throw error;
       }
       if (refused.reason !== null) return { ok: false as const, reason: refused.reason };
-      await this.runTick(now);
+      await this.runTick();
       return { ok: true as const };
     });
   }
@@ -802,7 +731,8 @@ export class Engine {
   // -------------------------------------------------------------------------------------------
   // Claims (4.2) in priority order (4.3).
 
-  private async claimAll(now: number): Promise<boolean> {
+  private async claimAll(): Promise<boolean> {
+    const now = this.now();
     const ready: { item: ReadyItem; snapshot: SubjectState }[] = [];
     for (const [id, version] of await this.store.runningSubjectVersions()) {
       const known = this.nothingReady.get(id);
@@ -854,24 +784,25 @@ export class Engine {
   // -------------------------------------------------------------------------------------------
   // Handovers and retries (5.5, 5.6), per account in priority order.
 
-  private async handOverAll(now: number): Promise<boolean> {
+  private async handOverAll(): Promise<boolean> {
     let changed = false;
     const waiting = new Set(
       (await this.store.openAttempts())
         .filter((a) => a.state === "claimed" || (a.state === "handed" && (a.retry === "wanted" || a.retry === "wanted_after_not_sent")))
         .map((a) => a.accountId),
     );
-    for (const account of await this.store.accounts(now)) {
+    for (const account of await this.store.accounts(this.now())) {
       if (!waiting.has(account.id)) continue;
       const skipped = new Set<string>();
       for (let i = 0; i < 100; i++) {
+        const now = this.now();
         const current = (await this.store.accounts(now)).find((a) => a.id === account.id);
         const next = await this.nextForSlot(account.id, skipped, now);
         if (!current || !next) break;
         // A claim waits for the slot before its pre-send check (5.5 steps 2-3); a retry's own
         // authorization decides whether it waits (5.6).
         if (!next.retry && now < current.nextSlotAt) break;
-        const outcome = next.retry ? await this.tryRetry(next.attempt, now) : await this.tryHandover(next.attempt, now);
+        const outcome = next.retry ? await this.tryRetry(next.attempt) : await this.tryHandover(next.attempt);
         if (outcome === "skip") skipped.add(next.attempt.id);
         else changed = true;
         if (outcome === "waiting") break;
@@ -895,18 +826,13 @@ export class Engine {
     return candidates[0] ?? null;
   }
 
-  /**
-   * ADR 0002's pre-send check, recorded on the attempt. False when it could not run or found a reply.
-   * Part of the send act: it is recorded at the instant it is made, since the authorization measures
-   * its age (`PRESEND_MAX_AGE`) at the instant of the call.
-   */
+  /** ADR 0002's pre-send check, recorded on the attempt. False when it could not run or found a reply. */
   private async presend(a: Attempt): Promise<boolean> {
-    const now = this.clock();
-    this.lastActAt = Math.max(this.lastActAt, now);
+    const now = this.now();
     if (a.presendCheckedWall !== null && a.presendCheckedWall >= now - ENGINE_PARAMS.PRESEND_MAX_AGE && !a.presendFoundReply) return true;
     const subject = await this.store.subject(a.subjectId, now);
     const threadRefs = (subject?.work ?? []).flatMap((w) => (w.providerRef === null ? [] : [w.providerRef]));
-    const port = await this.portOf(a.accountId, now);
+    const port = await this.portOf(a.accountId);
     const channel = port === this.ports.sms ? "sms" : "email";
     const result = await this.bounded(() => port.presendCheck({ sender: a.accountId, destination: a.destination, threadRefs }), { kind: "unavailable" as const });
     if (result.kind === "unavailable") return false;
@@ -923,8 +849,7 @@ export class Engine {
   receiveLateAnswer(attemptId: string, answer: CallAnswer): Promise<void> {
     return this.ticks.run(async () => {
       const a = await this.store.attempt(attemptId);
-      const now = this.clock();
-      if (a && a.state !== "claimed") await this.applyAttempt(a, { kind: "call_answer", answer, now }, now);
+      if (a && a.state !== "claimed") await this.applyAttempt(a, { kind: "call_answer", answer, now: this.now() });
     });
   }
 
@@ -955,19 +880,15 @@ export class Engine {
     a: Attempt,
     authorize: (now: number) => { authorized: Attempt | null; onlySlot: boolean; skip?: boolean },
     crashPoint: CrashPoint,
-    now: number,
-  ): Promise<{ outcome: "handed" | "withdrawn" | "waiting" | "skip"; answer?: CallAnswer; authorized?: Attempt; answeredAt?: number }> {
-    const port = await this.portOf(a.accountId, now);
+  ): Promise<{ outcome: "handed" | "withdrawn" | "waiting" | "skip"; answer?: CallAnswer; authorized?: Attempt }> {
+    const port = await this.portOf(a.accountId);
     return this.locks.run(a.accountId, async () => {
-      const authorizedAt = this.clock();
-      this.lastActAt = Math.max(this.lastActAt, authorizedAt);
-      const { authorized, onlySlot, skip } = authorize(authorizedAt);
+      const { authorized, onlySlot, skip } = authorize(this.now());
       if (!authorized) return { outcome: skip ? "skip" : onlySlot ? "waiting" : "withdrawn" };
       const request = this.request(authorized);
       this.hooks.crashPoint?.(crashPoint, a.id);
       this.hooks.afterAuthorization?.(a.id);
-      const callStart = this.clock();
-      this.lastActAt = Math.max(this.lastActAt, callStart);
+      const callStart = this.now();
       this.locks.calling.add(a.id);
       let pending: Promise<CallAnswer>;
       try {
@@ -978,16 +899,14 @@ export class Engine {
       try {
         const answer = await this.waitFor(pending.catch((): CallAnswer => ({ kind: "unknown" })), ENGINE_PARAMS.CALL_TIMEOUT, { kind: "unknown" });
         await this.store.pushSlot(a.accountId, callStart);
-        const answeredAt = this.clock();
-        this.lastActAt = Math.max(this.lastActAt, answeredAt);
-        return { outcome: "handed", answer, authorized, answeredAt };
+        return { outcome: "handed", answer, authorized };
       } finally {
         this.locks.calling.delete(a.id);
       }
     });
   }
 
-  private async tryHandover(a: Attempt, now: number): Promise<"handed" | "withdrawn" | "waiting" | "skip"> {
+  private async tryHandover(a: Attempt): Promise<"handed" | "withdrawn" | "waiting" | "skip"> {
     if (!(await this.presend(a))) {
       const after = await this.store.attempt(a.id);
       return after?.state === "claimed" ? "skip" : "withdrawn";
@@ -1021,20 +940,18 @@ export class Engine {
         return out;
       },
       "after_handover_commit",
-      now,
     );
     if (result.outcome !== "handed" || !result.answer || !result.authorized) return result.outcome;
     this.hooks.crashPoint?.("after_call", a.id);
-    const answeredAt = result.answeredAt ?? now;
-    await this.applyAttempt(result.authorized, { kind: "call_answer", answer: result.answer, now: answeredAt }, answeredAt);
+    await this.applyAttempt(result.authorized, { kind: "call_answer", answer: result.answer, now: this.now() });
     return "handed";
   }
 
-  private async tryRetry(a: Attempt, now: number): Promise<"handed" | "withdrawn" | "waiting" | "skip"> {
-    const snapshot = await this.store.subject(a.subjectId, now);
+  private async tryRetry(a: Attempt): Promise<"handed" | "withdrawn" | "waiting" | "skip"> {
+    const snapshot = await this.store.subject(a.subjectId, this.now());
     const account = snapshot?.accounts[a.accountId];
     if (snapshot && account) {
-      const pending = this.rules.retryFailures(snapshot, a, account, now).filter((f) => f !== "predicate 14");
+      const pending = this.rules.retryFailures(snapshot, a, account, this.now()).filter((f) => f !== "predicate 14");
       if (pending.length > 0 && pending.every((f) => f === "slot")) return "waiting";
     }
     await this.hooks.beforeRetry?.(a.id);
@@ -1066,12 +983,10 @@ export class Engine {
         return out;
       },
       "after_retry_commit",
-      now,
     );
     if (result.outcome !== "handed" || !result.answer || !result.authorized) return result.outcome;
     this.hooks.crashPoint?.("after_call", a.id);
-    const answeredAt = result.answeredAt ?? now;
-    await this.applyAttempt(result.authorized, { kind: "call_answer", answer: result.answer, now: answeredAt }, answeredAt);
+    await this.applyAttempt(result.authorized, { kind: "call_answer", answer: result.answer, now: this.now() });
     return "handed";
   }
 }

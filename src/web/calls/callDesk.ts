@@ -1,22 +1,19 @@
 /**
  * The call focus queue's state (ADR 0003 4.4.1): one object the Calls page binds (useCallDesk.ts) and
  * the generated test drives directly (callDesk.generated.test.ts). The server decides the queue, the
- * focus it names and every outcome's effect, and answers a repeated request id with its first result.
- * This object relies on that:
+ * focus it names and every outcome's effect, answers a repeated request id with its first result, and
+ * says in each read of a call which presses are stored on it. This object relies on that:
  *
  * - The outbox (shared by the user's tabs) is the only shared state. Log writes an entry before the
- *   first send; any desk sends any unanswered entry it sees, with backoff, until the server answers.
- * - A definite answer is written by whichever desk got it, in one storage write: accepted removes
- *   the entry; refused rewrites it as refused, keeping the typed note until the user acknowledges it.
- *   A refusal storage cannot record is shown from memory and its write retried on the same backoff;
- *   the entry is not sent again meanwhile.
- * - What the page shows for a call is derived from the server's read of it and its outbox entry.
- * - A draft belongs to one task and carries an edit id; a press captures it. An accepted answer
- *   clears only the draft its press captured, and the focus moves only then, on the call the page is
- *   on, or on Open the next call. A desk no longer on screen writes only the outbox.
+ *   first send; any desk sends any unanswered entry it sees, on one backoff, until the server answers.
+ * - An answer only updates the outbox: accepted removes the entry; refused rewrites it as refused,
+ *   keeping the typed note until the user acknowledges it. An answer never touches a draft.
+ * - Everything shown for the call on screen is `reconcile` of three inputs: the server's latest read
+ *   of the call, the outbox entries for it, and the user's draft in memory.
+ * - Reads are serial per resource (refresher.ts), and every failure counts toward the page's freshness.
  */
 import type { CallNumberView, CallOffListView, CallOutcomeAnswer, CallOutcomeApi, CallsView, CallTaskView } from "../../shared/api.ts";
-import { FRESH, Refresher, type Freshness } from "./refresher.ts";
+import { FRESH, REFRESH_INTERVAL_MS, Refresher, type Freshness } from "./refresher.ts";
 
 /** The server's limit on a call note (POST /api/call-tasks/:id/outcome). */
 export const NOTE_MAX = 10_000;
@@ -36,8 +33,8 @@ export interface OutboxEntry {
   /** The lead's name, so any page can say whose outcome it is. */
   readonly who: string;
   readonly body: OutcomeBody;
-  /** The edit of the call's draft this press was made from: an accepted answer clears that draft only. */
-  readonly draftEdit?: string | null;
+  /** When it was pressed (ms since the epoch, this device's clock): kept refusals are listed oldest first. */
+  readonly pressedAt?: number;
   /** Set when the server refused it: kept, with the note, until the user acknowledges it. */
   readonly refused?: { readonly message: string; readonly offList: CallOffListView | null };
 }
@@ -56,10 +53,13 @@ export class NoAnswer extends Error {
 export class Refused extends Error {
   readonly status: number;
   readonly code: string | null;
-  constructor(status: number, message: string, code: string | null = "outcome_refused") {
+  /** Why the call is off the list, as the server read it when it refused. */
+  readonly offList: CallOffListView | null;
+  constructor(status: number, message: string, code: string | null = "outcome_refused", offList: CallOffListView | null = null) {
     super(message);
     this.status = status;
     this.code = code;
+    this.offList = offList;
   }
 }
 
@@ -76,16 +76,18 @@ export interface KeyValue {
 }
 
 export interface CallDeskPorts {
-  /** The queue, naming the focus; `expected` is the server's own `nextChangeAt` on the read it asked for. */
-  calls(focus: string | null, expected?: string | null): Promise<CallsView>;
+  /** The queue, naming the focus. */
+  calls(focus: string | null): Promise<CallsView>;
   task(taskId: string): Promise<CallTaskView>;
   /** One POST of an outcome: rejects with `NoAnswer` or `Refused`. */
   post(taskId: string, body: OutcomeBody): Promise<CallOutcomeAnswer>;
   /** Shared by the user's tabs (localStorage). */
   readonly local: KeyValue;
-  /** This tab only (sessionStorage). */
+  /** This tab only (sessionStorage): a convenience copy of the focus and the draft. */
   readonly session: KeyValue;
   newId(): string;
+  /** This device's clock, used only to order kept refusals. */
+  now(): number;
   /** Runs `fire` after `ms`; returns a cancel. */
   setTimer(fire: () => void, ms: number): () => void;
   /**
@@ -104,12 +106,16 @@ export type DeskFault =
   | "substitute_bad_number"
   | "pending_kept_after_answer"
   | "disposed_desk_applies"
-  | "only_own_entries_retried"
+  | "only_focused_entries_retried"
   | "refusal_dropped"
   | "focused_refusal_hidden"
   | "stale_copy_written_back"
-  | "answer_clears_newer_draft"
-  | "refusal_resent_at_once";
+  | "refusal_resent_at_once"
+  | "stored_press_left_as_draft"
+  | "answer_clears_draft"
+  | "first_read_skips_reconcile"
+  | "task_failures_uncounted"
+  | "reads_overlap";
 
 export interface Draft {
   readonly outcome: CallOutcomeApi | null;
@@ -117,11 +123,84 @@ export interface Draft {
   readonly numberId: string | null;
   readonly note: string;
   readonly noteScope: "person" | "company";
-  /** A new id on every edit by the user; null for the draft's first making. A press captures it. */
-  readonly edit: string | null;
+  /** The request id of the press made from this draft, until it is found stored or settled as not stored. */
+  readonly pressId: string | null;
+  /** The count of call reads started when this press's entry was found gone: a read started after it settles it. */
+  readonly goneAtRead: number | null;
 }
 
 export type Load<T> = { readonly state: "loading" } | { readonly state: "error"; readonly message: string } | { readonly state: "ready"; readonly view: T };
+
+/** What `reconcile` found stored for this tab's press: the status line shows it after moving on. */
+export interface LoggedRecord {
+  readonly requestId: string;
+  readonly who: string;
+  readonly body: OutcomeBody;
+  readonly task: CallTaskView;
+}
+
+/** The call on screen, as `reconcile` decides it (ADR 0003 4.4.1, "One reconciliation"). */
+export interface CallState {
+  readonly kind: "stored" | "pending" | "confirming" | "off_list" | "draft";
+  /** Every outcome control reads this one value. */
+  readonly locked: boolean;
+  /** The unanswered entry for the call; `own` when it is this tab's press, `unconfirmed` when its last attempt here had no answer. */
+  readonly pending: (OutboxEntry & { readonly own: boolean; readonly unconfirmed: boolean }) | null;
+  /** This tab's press, found stored. */
+  readonly logged: LoggedRecord | null;
+  /** Why the call is off the list, and this tab's typed note when the server does not hold it. */
+  readonly away: { readonly taskId: string; readonly who: string; readonly offList: CallOffListView; readonly note: string } | null;
+  /** The press's entry is gone and no read has been started since: start one. */
+  readonly pressGone: boolean;
+  /** A read started after the entry went does not hold the press: it was never stored. */
+  readonly pressSettled: boolean;
+}
+
+/**
+ * Everything the page shows for the call it is on, from exactly three inputs: the server's latest
+ * read of the call (`view`, read number `readSeq`), the outbox entries, and the user's draft in
+ * memory. Pure: the desk applies its decisions.
+ */
+export function reconcile(input: {
+  readonly view: CallTaskView;
+  readonly readSeq: number;
+  readonly entries: readonly OutboxEntry[];
+  readonly draft: Draft;
+  readonly unanswered: ReadonlySet<string>;
+  readonly unstored: ReadonlySet<string>;
+  readonly ignoreStored?: boolean;
+}): CallState {
+  const { view, readSeq, entries, draft, unanswered, unstored } = input;
+  const who = whoOf(view);
+  const base: CallState = { kind: "draft", locked: false, pending: null, logged: null, away: null, pressGone: false, pressSettled: false };
+  const press = draft.pressId;
+  // 1. Stored: this tab's press is logged, whoever got the answer and whenever.
+  if (press !== null && input.ignoreStored !== true && view.storedRequestIds.includes(press) && draft.outcome !== null) {
+    const body: OutcomeBody = { requestId: press, outcome: draft.outcome, numberId: draft.numberId, note: draft.note, noteScope: draft.noteScope };
+    return { ...base, kind: "stored", locked: true, logged: { requestId: press, who, body, task: view } };
+  }
+  // 2. On its way.
+  const waiting = entries.find((e) => e.taskId === view.taskId && !e.refused && !unstored.has(e.body.requestId));
+  if (waiting) {
+    const own = waiting.body.requestId === press;
+    return { ...base, kind: "pending", locked: true, pending: { ...waiting, own, unconfirmed: own && unanswered.has(waiting.body.requestId) } };
+  }
+  // 3. Being confirmed: the press's entry is gone, and no read started after that has answered.
+  let pressSettled = false;
+  if (press !== null && !entries.some((e) => e.body.requestId === press)) {
+    if (draft.goneAtRead === null || readSeq <= draft.goneAtRead) return { ...base, kind: "confirming", locked: true, pressGone: draft.goneAtRead === null };
+    pressSettled = true;
+  }
+  // 4. Off the list.
+  if (view.offList !== null) {
+    const typed = draft.note.trim();
+    const held = typed !== "" && ([...view.personNotes, ...view.companyNotes].some((n) => n.body === typed) || view.touches.some((t) => t.kind === "call" && t.note === typed));
+    const kept = typed !== "" && entries.some((e) => e.refused && e.taskId === view.taskId && e.body.note.trim() === typed);
+    return { ...base, kind: "off_list", locked: true, pressSettled, away: { taskId: view.taskId, who, offList: view.offList, note: typed === "" || held || kept ? "" : draft.note } };
+  }
+  // 5. A draft, ready to work.
+  return { ...base, pressSettled };
+}
 
 export interface DeskSnapshot {
   readonly queue: Load<CallsView>;
@@ -129,36 +208,29 @@ export interface DeskSnapshot {
   readonly focus: string | null;
   readonly task: Load<CallTaskView> | null;
   readonly draft: Draft;
-  /** The unanswered outbox entry for the call the page is on; `unconfirmed` once an attempt here had no answer, or if another page made it. */
-  readonly pending: (OutboxEntry & { readonly unconfirmed: boolean }) | null;
+  /** The unanswered outbox entry for the call the page is on (`reconcile`). */
+  readonly pending: CallState["pending"];
+  /** This tab's press is no longer in the outbox, and the server's word on it is being read (`reconcile`). */
+  readonly confirming: boolean;
   /** Unanswered entries for other calls, which this page is sending too. */
   readonly recovering: readonly OutboxEntry[];
-  /**
-   * Every refused entry, whichever tab pressed it and whichever call the page is on, kept with its
-   * note until the user dismisses it or moves on from that call: one path for every refusal.
-   */
+  /** Every refused entry, oldest press first, whichever tab pressed it and whichever call the page is on. */
   readonly refusedRecords: readonly RefusedRecord[];
-  /** The last outcome this page saw accepted for the call it was on, with the call as the server answered. */
-  readonly logged: { readonly requestId: string; readonly who: string; readonly body: OutcomeBody; readonly task: CallTaskView } | null;
-  /**
-   * The call the page is on is off the list, as the server's read says: why, until the user moves on.
-   * `note` is this tab's typed note only when the server's read does not hold it (never a claim from
-   * what the desk happens to hold) and no kept refusal already shows it.
-   */
-  readonly away: { readonly taskId: string; readonly who: string; readonly offList: CallOffListView; readonly note: string } | null;
+  /** The last press of this tab `reconcile` found stored, with the call as the server read it. */
+  readonly logged: LoggedRecord | null;
+  /** The call the page is on is off the list, as the server's read says (`reconcile`). */
+  readonly away: CallState["away"];
   /** The number the user chose can no longer be logged on: marked bad, or no longer the lead's. Log waits for a new choice. */
   readonly numberProblem: { readonly kind: "bad" | "gone"; readonly value: string | null } | null;
-  /** The queue as of its last successful read (ADR 0003 4.4.1, "Freshness"). */
+  /** The queue and the call, as of their last successful reads; stale when either is failing. */
   readonly freshness: Freshness;
-  /** Every outcome control reads this one value: the call has an unanswered entry, or is shown off the list. */
   readonly locked: boolean;
   /** The note is over the server's limit; Log sends nothing. */
   readonly noteTooLong: boolean;
-  /**
-   * The last press could not be queued: this device's storage refused the outbox entry, so nothing was
-   * sent (an outcome is not pressed until its entry is stored). The draft and number stay; Log is available.
-   */
+  /** The last press could not be queued: this device's storage refused the outbox entry, so nothing was sent. */
   readonly notQueued: boolean;
+  /** The draft's copy in this tab's storage failed: the note is not kept if the user leaves the page. */
+  readonly draftNotKept: boolean;
   /** Counts transitions that replace the controls under the user's keyboard focus, so the page can place it. */
   readonly transition: { readonly seq: number; readonly kind: "logged" | "refused" | "away" | "moved" | "focus" } | null;
 }
@@ -169,7 +241,7 @@ const FOCUS = "outreach.calls.focus";
 /** Backoff after no answer, in milliseconds; the last repeats. */
 export const RETRY_MS = [1_000, 2_000, 4_000, 8_000] as const;
 
-const EMPTY_DRAFT: Draft = { outcome: null, numberId: null, note: "", noteScope: "person", edit: null };
+const EMPTY_DRAFT: Draft = { outcome: null, numberId: null, note: "", noteScope: "person", pressId: null, goneAtRead: null };
 
 export const whoOf = (view: Pick<CallTaskView, "person" | "company">): string => view.person?.name ?? view.company.name;
 
@@ -190,7 +262,7 @@ function readDraft(raw: string | null): Draft | null {
   try {
     const d = JSON.parse(raw) as Partial<Draft> | null;
     if (!d || typeof d.note !== "string" || (d.noteScope !== "person" && d.noteScope !== "company")) return null;
-    return { outcome: d.outcome ?? null, numberId: d.numberId ?? null, note: d.note, noteScope: d.noteScope, edit: typeof d.edit === "string" ? d.edit : null };
+    return { outcome: d.outcome ?? null, numberId: d.numberId ?? null, note: d.note, noteScope: d.noteScope, pressId: typeof d.pressId === "string" ? d.pressId : null, goneAtRead: null };
   } catch {
     return null;
   }
@@ -204,6 +276,9 @@ function numberProblemOf(draft: Draft, task: Load<CallTaskView> | null): DeskSna
   return n.bad ? { kind: "bad", value: n.value } : null;
 }
 
+/** The page's freshness: the queue's last read, failing or stale if either read is. */
+const worse = (queue: Freshness, task: Freshness): Freshness => ({ failures: Math.max(queue.failures, task.failures), lastReadAt: queue.lastReadAt, stale: queue.stale || task.stale });
+
 /** This desk's sending of one entry. */
 interface Sending {
   tries: number;
@@ -216,29 +291,46 @@ export class CallDesk {
   private readonly listeners = new Set<() => void>();
   private readonly ports: CallDeskPorts;
   private live = false;
-  private readonly refresher: Refresher<CallsView & { readonly named: string | null }>;
-  private adoptAs: "focus" | "moved" = "focus";
+  private readonly queueReader: Refresher<CallsView & { readonly named: string | null }>;
+  private readonly taskReader: Refresher<{ readonly view: CallTaskView | null; readonly seq: number }>;
+  private adoptAs: "focus" | "moved" | "logged" = "focus";
   /** Entries this desk is sending, by request id. */
   private readonly sending = new Map<string, Sending>();
-  /** Entries pressed on this page, and those whose last attempt here had no answer. */
-  private readonly pressedHere = new Set<string>();
+  /** Entries whose last attempt here had no answer. */
   private readonly unanswered = new Set<string>();
   /** Refusals this desk got that storage would not record: shown from here, their write retried on the backoff. */
   private readonly unstored = new Map<string, RefusedRecord>();
+  /** Call reads started, and the number of the read the call on screen comes from. */
+  private taskReads = 0;
+  private taskSeq = 0;
   private seq = 0;
-  /** Bumped on every focus change, so a load for an earlier focus is ignored. */
-  private loadGeneration = 0;
 
   constructor(ports: CallDeskPorts) {
     this.ports = ports;
-    this.refresher = new Refresher({
-      read: async (expected) => {
+    const overlapFault = this.fault("reads_overlap");
+    const setTimer = (fire: () => void, ms: number) => ports.setTimer(fire, ms);
+    this.queueReader = new Refresher({
+      read: async () => {
         const named = this.state.focus;
-        return { ...(await ports.calls(named, expected)), named };
+        return { ...(await ports.calls(named)), named };
       },
       onRead: (read) => this.applyQueue(read),
-      onFailure: (error, freshness) => this.readFailed(error, freshness),
-      setTimer: (fire, ms) => ports.setTimer(fire, ms),
+      onFailure: (error) => this.readFailed("queue", error),
+      setTimer,
+      // The call is read with every read of the queue, so the interval covers both.
+      interval: REFRESH_INTERVAL_MS,
+      overlapFault,
+    });
+    this.taskReader = new Refresher({
+      read: async () => {
+        const focus = this.state.focus;
+        const seq = ++this.taskReads;
+        return { view: focus === null ? null : await ports.task(focus), seq };
+      },
+      onRead: (read) => this.applyTask(read.view, read.seq),
+      onFailure: (error) => this.readFailed("task", error),
+      setTimer,
+      overlapFault,
     });
     this.state = {
       queue: { state: "loading" },
@@ -246,6 +338,7 @@ export class CallDesk {
       task: null,
       draft: EMPTY_DRAFT,
       pending: null,
+      confirming: false,
       recovering: [],
       refusedRecords: [],
       logged: null,
@@ -255,6 +348,7 @@ export class CallDesk {
       locked: false,
       noteTooLong: false,
       notQueued: false,
+      draftNotKept: false,
       transition: null,
     };
   }
@@ -270,12 +364,7 @@ export class CallDesk {
     return this.ports.faults?.has(f) ?? false;
   }
 
-  /** Whether this desk is on screen; read through a method, since `dispose` may run while a read is awaited. */
-  private isLive(): boolean {
-    return this.live;
-  }
-
-  /** Whether this desk is on screen (or, under a test fault, behaves as if it were). */
+  /** Whether this desk is on screen (or, under a test fault, behaves as if it were); a method, since `dispose` may run while a read is awaited. */
   private onScreen(): boolean {
     return this.live || this.fault("disposed_desk_applies");
   }
@@ -293,48 +382,90 @@ export class CallDesk {
   }
 
   /**
-   * Every change goes through here: the snapshot's derived parts (pending, refusals, the lock) are
-   * recomputed from the outbox and the last server read, never kept apart from them.
+   * Every change goes through here. The call's state is `reconcile` of the server's read, the outbox
+   * and the draft; the rest is derived from the outbox and the reads. Then the desk acts on what
+   * `reconcile` decided: a stored press moves on, a gone press is read again, a settled one is cleared.
    */
   private set(patch: Partial<DeskSnapshot>, transition?: NonNullable<DeskSnapshot["transition"]>["kind"]): void {
     if (!this.onScreen()) return;
     const next = { ...this.state, ...patch };
     const entries = this.entries();
-    const waiting = (e: OutboxEntry) => !e.refused && !this.unstored.has(e.body.requestId);
-    const unanswered = entries.find((e) => e.taskId === next.focus && waiting(e)) ?? null;
-    let pending: DeskSnapshot["pending"] = unanswered ? { ...unanswered, unconfirmed: !this.pressedHere.has(unanswered.body.requestId) || this.unanswered.has(unanswered.body.requestId) } : null;
+    const task = next.task?.state === "ready" && next.task.view.taskId === next.focus ? next.task.view : null;
+    const call = task
+      ? reconcile({ view: task, readSeq: this.taskSeq, entries, draft: next.draft, unanswered: this.unanswered, unstored: new Set(this.unstored.keys()), ignoreStored: this.fault("stored_press_left_as_draft") })
+      : null;
+    let pending = call?.pending ?? null;
     if (!pending && this.fault("pending_kept_after_answer") && this.state.pending?.taskId === next.focus) pending = this.state.pending;
-    const locked = (pending !== null && !this.fault("no_lock_while_pending")) || next.away !== null;
+    const waiting = (e: OutboxEntry) => !e.refused && !this.unstored.has(e.body.requestId);
+    const refused = [...entries.filter((e): e is RefusedRecord => e.refused !== undefined && !(this.fault("focused_refusal_hidden") && e.taskId === next.focus)), ...entries.flatMap((e) => this.unstored.get(e.body.requestId) ?? [])];
+    const away = call?.away ?? null;
+    const kind = transition ?? (away !== null && this.state.away === null ? "away" : undefined);
     this.state = {
       ...next,
       pending,
+      confirming: call?.kind === "confirming",
+      away,
       recovering: entries.filter((e) => waiting(e) && e.taskId !== next.focus),
-      // One path for every refusal: kept, with its note, wherever the page's focus is; one storage would not record shows from here.
-      refusedRecords: [
-        ...entries.filter((e): e is RefusedRecord => e.refused !== undefined && !(this.fault("focused_refusal_hidden") && e.taskId === next.focus)),
-        ...entries.flatMap((e) => this.unstored.get(e.body.requestId) ?? []),
-      ],
-      locked,
+      refusedRecords: refused.sort((a, b) => (a.pressedAt ?? 0) - (b.pressedAt ?? 0)),
+      locked: call === null ? false : call.kind === "pending" && this.fault("no_lock_while_pending") ? false : call.locked,
       numberProblem: numberProblemOf(next.draft, next.task),
       noteTooLong: next.draft.note.length > NOTE_MAX,
-      transition: transition ? { seq: ++this.seq, kind: transition } : next.transition,
+      freshness: this.fault("task_failures_uncounted") ? this.queueReader.freshness() : worse(this.queueReader.freshness(), this.taskReader.freshness()),
+      transition: kind ? { seq: ++this.seq, kind } : next.transition,
     };
     for (const l of this.listeners) l();
+    if (call) this.act(call);
+  }
+
+  /** What the desk does on `reconcile`'s decisions, for the call on screen. */
+  private act(call: CallState): void {
+    const focus = this.state.focus;
+    if (focus === null) return;
+    if (call.logged) {
+      // This tab's press is stored: show it, drop the draft and move on to the call the server puts first.
+      this.ports.session.remove(DRAFT + focus);
+      this.ports.session.remove(FOCUS);
+      this.set({ logged: call.logged, focus: null, task: null, draft: EMPTY_DRAFT }, "logged");
+      void this.refresh("logged");
+    } else if (call.pressGone) {
+      this.keepDraft({ ...this.state.draft, goneAtRead: this.taskReads });
+      void this.taskReader.now();
+    } else if (call.pressSettled) {
+      this.keepDraft({ ...this.state.draft, pressId: null, goneAtRead: null });
+    }
+  }
+
+  /** The draft in memory, and its convenience copy in this tab's storage; a failed copy is only said. */
+  private keepDraft(draft: Draft, patch: Partial<DeskSnapshot> = {}): void {
+    const focus = this.state.focus;
+    if (focus === null || !this.onScreen()) return;
+    const kept = this.ports.session.set(DRAFT + focus, JSON.stringify({ ...draft, goneAtRead: null }));
+    this.set({ ...patch, draft, draftNotKept: !kept });
   }
 
   /** Opens the page (again, after `dispose`): sends every unanswered entry it sees, then loads the queue. */
   async start(): Promise<void> {
     this.live = true;
-    this.refresher.start();
-    this.state = { ...this.state, focus: this.ports.session.get(FOCUS) };
+    this.queueReader.start();
+    this.taskReader.start();
+    this.state = { ...this.state, focus: this.ports.session.get(FOCUS), task: null, draft: EMPTY_DRAFT };
     this.sendAll();
     this.set({});
     await this.refresh();
   }
 
+  /** The page was hidden or shown (ADR 0003 4.4.1, "Freshness"): hidden, nothing is read on a timer; shown, both are read now. */
+  setVisible(visible: boolean): void {
+    this.queueReader.setVisible(visible);
+    this.taskReader.setVisible(visible);
+  }
+
   dispose(): void {
     this.live = false;
-    this.refresher.stop();
+    if (!this.fault("disposed_desk_applies")) {
+      this.queueReader.stop();
+      this.taskReader.stop();
+    }
     for (const s of this.sending.values()) s.cancel?.();
     this.sending.clear();
     this.unstored.clear();
@@ -345,7 +476,7 @@ export class CallDesk {
     if (!this.live) return;
     for (const entry of this.entries()) {
       if (entry.refused || this.sending.has(entry.body.requestId)) continue;
-      if (this.fault("only_own_entries_retried") && !this.pressedHere.has(entry.body.requestId)) continue;
+      if (this.fault("only_focused_entries_retried") && entry.taskId !== this.state.focus) continue;
       const s: Sending = { tries: 0, inFlight: false, cancel: null };
       this.sending.set(entry.body.requestId, s);
       void this.send(entry, s);
@@ -353,64 +484,64 @@ export class CallDesk {
   }
 
   /** Reads the queue (and the call on screen) now, and sends whatever the outbox holds. Never moves a focus it names. */
-  async refresh(adoptAs: "focus" | "moved" = "focus"): Promise<void> {
+  async refresh(adoptAs: "focus" | "moved" | "logged" = "focus"): Promise<void> {
     if (!this.live) return;
     this.sendAll();
-    this.adoptAs = adoptAs;
-    await this.refresher.now();
+    if (adoptAs !== "focus") this.adoptAs = adoptAs;
+    this.set({});
+    await this.queueReader.now();
   }
 
-  private readFailed(error: unknown, freshness: Freshness): void {
-    if (!this.live) return;
-    if (this.state.queue.state !== "ready") this.set({ queue: { state: "error", message: messageOf(error) }, freshness });
-    else this.set({ freshness });
+  private readFailed(which: "queue" | "task", error: unknown): void {
+    if (!this.onScreen()) return;
+    if (which === "queue" && this.state.queue.state !== "ready") this.set({ queue: { state: "error", message: messageOf(error) } });
+    else if (which === "task" && this.state.focus !== null && this.state.task?.state !== "ready") this.set({ task: { state: "error", message: messageOf(error) } });
+    else this.set({});
   }
 
   private async applyQueue(read: CallsView & { readonly named: string | null }): Promise<void> {
     const { named, ...view } = read;
+    if (!this.onScreen() || this.state.focus !== named) return;
     const adoptAs = this.adoptAs;
     this.adoptAs = "focus";
-    if (!this.live || this.state.focus !== named) return;
-    this.set({ queue: { state: "ready", view }, freshness: this.refresher.freshness() });
-    if (named === null || this.fault("refresh_adopts_focus")) {
-      if (view.focusTaskId !== named) this.focusOn(view.focusTaskId, adoptAs);
-      else if (named !== null) await this.loadTask(named);
-      return;
-    }
-    await this.loadTask(named);
-    // The call on screen is off the list and has no unanswered entry: say why, from the server's read, until the user moves on.
-    const task = this.state.task;
-    if (this.isLive() && view.focusTaskId !== named && this.state.focus === named && this.state.pending === null && this.state.away === null && task?.state === "ready" && task.view.offList !== null) {
-      this.set({ away: { taskId: named, who: whoOf(task.view), offList: task.view.offList, note: this.unsavedNote(task.view, this.state.draft.note) } }, "away");
-    }
+    this.set({ queue: { state: "ready", view } });
+    if ((named === null || this.fault("refresh_adopts_focus")) && view.focusTaskId !== named) this.focusOn(view.focusTaskId, adoptAs);
+    else if (named !== null) await this.taskReader.now();
   }
 
-  /**
-   * This tab's typed note, if the server's read of the call does not hold it (as its logged call's
-   * note, or a person or company note) and no kept refusal shows it already; otherwise empty. Whether a
-   * note was saved is the server's fact, never the desk's.
-   */
-  private unsavedNote(view: CallTaskView, note: string): string {
-    const typed = note.trim();
-    if (typed === "") return "";
-    const stored = [...view.personNotes, ...view.companyNotes].some((n) => n.body === typed) || view.touches.some((t) => t.kind === "call" && t.note === typed);
-    const kept = this.entries().some((e) => e.refused && e.taskId === view.taskId && e.body.note.trim() === typed);
-    return stored || kept ? "" : note;
+  /** Every successful read of the call goes through `reconcile` (in `set`); a read for a call the page left is dropped. */
+  private applyTask(view: CallTaskView | null, seq: number): void {
+    if (!this.onScreen() || view === null || view.taskId !== this.state.focus) return;
+    this.taskSeq = seq;
+    let draft = this.state.draft;
+    let draftNotKept = this.state.draftNotKept;
+    const first = this.state.task?.state !== "ready" || this.state.task.view.taskId !== view.taskId;
+    if (first) {
+      // The draft is made once in this tab: from its copy, or with the first good number, as the server lists them (direct first).
+      const copy = readDraft(this.ports.session.get(DRAFT + view.taskId));
+      draft = copy ?? { ...EMPTY_DRAFT, numberId: view.numbers.find((n) => !n.bad)?.detailId ?? null, noteScope: view.person === null ? "company" : "person" };
+      draftNotKept = copy === null ? !this.ports.session.set(DRAFT + view.taskId, JSON.stringify(draft)) : false;
+      if (this.fault("first_read_skips_reconcile")) {
+        this.state = { ...this.state, task: { state: "ready", view }, draft, away: null, locked: false };
+        for (const l of this.listeners) l();
+        return;
+      }
+    } else if (this.fault("substitute_bad_number") && !view.numbers.some((n) => n.detailId === draft.numberId && !n.bad)) {
+      draft = { ...draft, numberId: view.numbers.find((n) => !n.bad)?.detailId ?? null };
+    }
+    this.set({ task: { state: "ready", view }, draft, draftNotKept });
   }
 
-  /** The user changes the draft of the call on screen; refused while locked. The only writer of a draft but its first making. */
-  setDraft(patch: Partial<Draft>): void {
+  /** The user changes the draft of the call on screen; refused while locked. An edit is no longer a press. */
+  setDraft(patch: Partial<Pick<Draft, "outcome" | "numberId" | "note" | "noteScope">>): void {
     if (!this.live || this.state.locked || this.state.focus === null) return;
-    const draft = { ...this.state.draft, ...patch, edit: this.ports.newId() };
-    this.ports.session.set(DRAFT + this.state.focus, JSON.stringify(draft));
-    this.set({ draft, notQueued: false });
+    this.keepDraft({ ...this.state.draft, ...patch, pressId: null, goneAtRead: null }, { notQueued: false });
   }
 
-  /** The user presses Log: the draft becomes one entry, stored before it is sent. */
+  /** The user presses Log: the draft becomes one entry, stored before it is sent, and the draft remembers its id. */
   log(): void {
     const { draft, focus, task } = this.state;
-    if (!this.live || this.state.locked || (this.state.pending !== null && !this.fault("no_lock_while_pending"))) return;
-    if (focus === null || task?.state !== "ready" || draft.outcome === null || this.state.noteTooLong) return;
+    if (!this.live || this.state.locked || focus === null || task?.state !== "ready" || draft.outcome === null || this.state.noteTooLong) return;
     const needsNumber = draft.outcome !== "skip_for_now";
     if (needsNumber && (draft.numberId === null || this.state.numberProblem !== null)) return;
     const body: OutcomeBody = {
@@ -420,17 +551,15 @@ export class CallDesk {
       note: draft.note,
       noteScope: task.view.person === null ? "company" : draft.noteScope,
     };
-    const entry: OutboxEntry = { v: 2, taskId: focus, who: whoOf(task.view), body, draftEdit: draft.edit };
+    const entry: OutboxEntry = { v: 2, taskId: focus, who: whoOf(task.view), body, pressedAt: this.ports.now() };
     // The boundary: an outcome is not pressed until its entry is stored. If storage refuses it, nothing is
-    // sent, since a request this page could not track could neither be retried nor reconciled after
-    // the user leaves; the page says so, and the draft and number stay for another try.
+    // sent; the page says so, and the draft and number stay for another try.
     if (!this.ports.local.set(OUTBOX + body.requestId, JSON.stringify(entry))) {
       this.set({ notQueued: true });
       return;
     }
-    this.pressedHere.add(body.requestId);
-    if (this.fault("logged_when_sent")) this.set({ notQueued: false, logged: { requestId: body.requestId, who: entry.who, body, task: task.view } });
-    else this.set({ notQueued: false });
+    const pressed: Draft = { ...draft, pressId: body.requestId, goneAtRead: null };
+    this.keepDraft(pressed, this.fault("logged_when_sent") ? { notQueued: false, logged: { requestId: body.requestId, who: entry.who, body, task: task.view } } : { notQueued: false });
     this.sendAll();
   }
 
@@ -455,12 +584,13 @@ export class CallDesk {
     this.sendAll();
   }
 
-  /** The user has read a kept refusal: it goes. */
+  /** The user has read a kept refusal: it goes. A refused press is never stored, so its draft is a draft again. */
   dismiss(requestId: string): void {
     if (!this.live) return;
     this.ports.local.remove(OUTBOX + requestId);
     this.forgetUnstored(requestId);
-    this.set({});
+    if (this.state.draft.pressId === requestId) this.keepDraft({ ...this.state.draft, pressId: null, goneAtRead: null });
+    else this.set({});
   }
 
   /** After the page said the call is off the list: open the call the server puts first now. */
@@ -469,15 +599,13 @@ export class CallDesk {
     if (!this.live || !away || this.state.pending !== null) return;
     // Moving on from the call acknowledges every refusal kept for it, which the page showed with its note.
     for (const e of this.entries()) {
-      if (!e.refused && !this.unstored.has(e.body.requestId)) continue;
-      if (e.taskId !== away.taskId) continue;
+      if ((!e.refused && !this.unstored.has(e.body.requestId)) || e.taskId !== away.taskId) continue;
       this.ports.local.remove(OUTBOX + e.body.requestId);
       this.forgetUnstored(e.body.requestId);
     }
-    this.ports.session.remove(DRAFT + away.taskId);
+    // The call's draft stays in this tab: if the server lists the call again and puts it first, it is still there.
     this.ports.session.remove(FOCUS);
-    this.loadGeneration++;
-    this.set({ away: null, focus: null, task: null, draft: EMPTY_DRAFT }, "moved");
+    this.set({ focus: null, task: null, draft: EMPTY_DRAFT }, "moved");
     await this.refresh("moved");
   }
 
@@ -487,7 +615,6 @@ export class CallDesk {
       this.ports.local.remove(OUTBOX + body.requestId);
       body = { ...body, requestId: this.ports.newId() };
       entry = { ...entry, body };
-      this.pressedHere.add(body.requestId);
       this.ports.local.set(OUTBOX + body.requestId, JSON.stringify(entry));
       this.sending.set(body.requestId, s);
     }
@@ -496,12 +623,11 @@ export class CallDesk {
     s.inFlight = true;
     const posted = this.ports.post(entry.taskId, body);
     if (this.fault("outbox_removed_when_sent")) this.ports.local.remove(key);
-    let answer: CallOutcomeAnswer;
     try {
-      answer = await posted;
+      await posted;
     } catch (error) {
       s.inFlight = false;
-      if (isRefusal(error)) return this.refused(entry, error.message, s);
+      if (isRefusal(error)) return this.refused(entry, error, s);
       // No answer: the same entry again after the backoff, while this desk is on screen and the entry is unanswered.
       if (!this.live || this.sending.get(id) !== s) return;
       this.unanswered.add(id);
@@ -527,65 +653,28 @@ export class CallDesk {
       return;
     }
     s.inFlight = false;
-    // Accepted: the entry goes, whichever desk got the answer.
+    // Accepted: the entry goes, whichever desk got the answer. The next read says the rest.
     this.ports.local.remove(key);
     if (this.sending.get(id) === s) this.sending.delete(id);
     this.unanswered.delete(id);
-    if (!this.onScreen()) return;
-    // The answer clears the draft its press captured, and only that one: anything typed since is kept.
-    if (this.consumeDraft(entry) && this.state.focus === entry.taskId) {
-      // The press's own draft, on the call the page is on: shown as logged, and the focus moves on.
-      // Otherwise the page only refreshes: the server's read then says where the call stands, and the draft on screen stays.
-      this.set({ logged: { requestId: id, who: entry.who, body, task: answer.task }, away: null });
-      this.focusOn(answer.nextFocusTaskId, "logged");
-    } else {
-      this.set({});
-      void this.refresh();
-    }
+    if (this.fault("answer_clears_draft") && this.onScreen()) this.keepDraft({ ...EMPTY_DRAFT, numberId: this.state.draft.numberId });
+    await this.refresh();
   }
 
-  /**
-   * Whether an accepted answer for `entry` clears a draft here: only the draft its press captured
-   * (same edit), on screen or kept in this tab. A desk no longer on screen writes no draft.
-   */
-  private consumeDraft(entry: OutboxEntry): boolean {
-    if (!this.onScreen()) return false;
-    const key = DRAFT + entry.taskId;
-    // The tab keeps its drafts in session storage, which a reopened page reads before the call loads.
-    const drafts = [readDraft(this.ports.session.get(key)), this.state.focus === entry.taskId ? this.state.draft : null];
-    const captured = this.fault("answer_clears_newer_draft") ? this.pressedHere.has(entry.body.requestId) : entry.draftEdit !== undefined && drafts.some((d) => d !== null && d.edit === entry.draftEdit);
-    if (!captured) return false;
-    this.ports.session.remove(key);
-    return true;
-  }
-
-  /** A refusal: the entry is rewritten as refused, in one write, with the off-list facts the server gives. */
-  private async refused(entry: OutboxEntry, message: string, s: Sending): Promise<void> {
+  /** A refusal: the entry is rewritten as refused, in one write, with the off-list facts the server's refusal gives. */
+  private async refused(entry: OutboxEntry, refusal: Refused, s: Sending): Promise<void> {
     const id = entry.body.requestId;
     const key = OUTBOX + id;
     this.unanswered.delete(id);
-    // Still this desk's while the refusal is recorded: nothing sends it again meanwhile.
-    s.inFlight = true;
-    let view: CallTaskView | null = null;
-    try {
-      view = await this.ports.task(entry.taskId);
-    } catch {
-      view = null;
-    }
-    s.inFlight = false;
     const stored = readEntry(this.ports.local.get(key));
     if (this.fault("refusal_dropped")) {
       this.ports.local.remove(key);
       if (this.sending.get(id) === s) this.sending.delete(id);
-    } else if (stored && !stored.refused) this.keepRefusal({ ...stored, refused: { message, offList: view?.offList ?? null } }, s);
+    } else if (stored && !stored.refused) this.keepRefusal({ ...stored, refused: { message: refusal.message, offList: refusal.offList } }, s);
     else if (this.sending.get(id) === s) this.sending.delete(id);
-    // One path, whichever call the page is on and whichever tab pressed: the kept refusal shows with its note,
-    // and the page reads the server again to show where the call stands.
-    if (!this.live) return;
-    this.set({});
     await this.refresh();
     // On the call the page is on and still listed, focus goes to the kept refusal; off the list, the server's read already said why.
-    if (this.isLive() && this.state.focus === entry.taskId && this.state.away === null) this.set({}, "refused");
+    if (this.live && this.state.focus === entry.taskId && this.state.away === null) this.set({}, "refused");
   }
 
   /**
@@ -598,7 +687,7 @@ export class CallDesk {
     const id = record.body.requestId;
     const key = OUTBOX + id;
     const current = readEntry(this.ports.local.get(key));
-    const entry: OutboxEntry = { v: 2, taskId: record.taskId, who: record.who, body: record.body, refused: record.refused, ...(record.draftEdit === undefined ? {} : { draftEdit: record.draftEdit }) };
+    const entry: OutboxEntry = { v: 2, taskId: record.taskId, who: record.who, body: record.body, refused: record.refused, ...(record.pressedAt === undefined ? {} : { pressedAt: record.pressedAt }) };
     // Gone (accepted or dismissed elsewhere) or already recorded refused: nothing left to write.
     if (!current || current.refused || this.ports.local.set(key, JSON.stringify(entry))) {
       this.forgetUnstored(id);
@@ -630,41 +719,13 @@ export class CallDesk {
     this.sending.delete(id);
   }
 
-  /** The one writer of the tab's saved focus, while on screen. */
+  /** The one writer of the tab's saved focus, while on screen. The new call's draft comes with its first read. */
   private focusOn(taskId: string | null, kind: "logged" | "focus" | "moved"): void {
     if (!this.onScreen()) return;
-    this.loadGeneration++;
     if (taskId === null) this.ports.session.remove(FOCUS);
     else this.ports.session.set(FOCUS, taskId);
-    const draft = (taskId === null ? null : readDraft(this.ports.session.get(DRAFT + taskId))) ?? EMPTY_DRAFT;
-    this.set({ focus: taskId, task: taskId === null ? null : { state: "loading" }, draft, away: null }, kind);
-    if (kind === "logged") void this.refresh();
-    else if (taskId !== null) void this.loadTask(taskId);
-  }
-
-  private async loadTask(taskId: string): Promise<void> {
-    const generation = this.loadGeneration;
-    try {
-      const view = await this.ports.task(taskId);
-      if (!this.live || generation !== this.loadGeneration || this.state.focus !== taskId) return;
-      let draft = this.state.draft;
-      const firstLoad = this.state.task?.state !== "ready" || this.state.task.view.taskId !== taskId;
-      if (firstLoad) {
-        const stored = readDraft(this.ports.session.get(DRAFT + taskId));
-        if (stored) draft = stored;
-        else if (draft.numberId === null) {
-          // The draft is made once: the first good number, as the server lists them (direct first).
-          draft = { ...draft, numberId: view.numbers.find((n) => !n.bad)?.detailId ?? null, noteScope: view.person === null ? "company" : draft.noteScope };
-          this.ports.session.set(DRAFT + taskId, JSON.stringify(draft));
-        }
-      } else if (this.fault("substitute_bad_number") && !view.numbers.some((n) => n.detailId === draft.numberId && !n.bad)) {
-        draft = { ...draft, numberId: view.numbers.find((n) => !n.bad)?.detailId ?? null };
-      }
-      this.set({ task: { state: "ready", view }, draft });
-    } catch (error) {
-      if (!this.live || generation !== this.loadGeneration || this.state.focus !== taskId) return;
-      if (this.state.task?.state !== "ready") this.set({ task: { state: "error", message: messageOf(error) } });
-    }
+    this.set({ focus: taskId, task: taskId === null ? null : { state: "loading" }, draft: EMPTY_DRAFT }, kind);
+    if (taskId !== null) void this.taskReader.now();
   }
 }
 

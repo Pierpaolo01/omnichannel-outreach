@@ -1,5 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
-import type { CallOutcomeAnswer, CallsView, CallTaskView } from "../../shared/api.ts";
+import type { CallOffListView, CallOutcomeAnswer, CallsView, CallTaskView } from "../../shared/api.ts";
 import { getJson } from "../api.ts";
 import { CallDesk, NoAnswer, Refused, type DeskSnapshot, type OutcomeBody } from "./callDesk.ts";
 import { browserStorage } from "./storage.ts";
@@ -30,8 +30,9 @@ async function post(taskId: string, body: OutcomeBody): Promise<CallOutcomeAnswe
   // A 4xx carries the server's code; the desk counts only a refusal code as definite (isRefusal), so 408
   // or 429 is sent again. Anything else may or may not have been logged.
   if (response.status >= 400 && response.status < 500) {
-    const error = (json as { error?: { message?: unknown; code?: unknown } } | null)?.error;
-    throw new Refused(response.status, typeof error?.message === "string" ? error.message : `The server answered ${response.status}.`, typeof error?.code === "string" ? error.code : null);
+    const refusal = json as { error?: { message?: unknown; code?: unknown }; offList?: CallOffListView | null } | null;
+    const error = refusal?.error;
+    throw new Refused(response.status, typeof error?.message === "string" ? error.message : `The server answered ${response.status}.`, typeof error?.code === "string" ? error.code : null, refusal?.offList ?? null);
   }
   throw new NoAnswer();
 }
@@ -40,18 +41,13 @@ const newId = (): string => (typeof crypto.randomUUID === "function" ? crypto.ra
 
 function browserDesk(): CallDesk {
   return new CallDesk({
-    calls: async (focus, expected) => {
-      const query = new URLSearchParams();
-      if (focus) query.set("focus", focus);
-      if (expected) query.set("expected", expected);
-      const q = query.toString();
-      return (await getJson(`/api/calls${q ? `?${q}` : ""}`)) as CallsView;
-    },
+    calls: async (focus) => (await getJson(`/api/calls${focus ? `?focus=${encodeURIComponent(focus)}` : ""}`)) as CallsView,
     task: async (id) => (await getJson(`/api/call-tasks/${encodeURIComponent(id)}`)) as CallTaskView,
     post,
     local: browserStorage(() => window.localStorage),
     session: browserStorage(() => window.sessionStorage),
     newId,
+    now: () => Date.now(),
     setTimer: (fire, ms) => {
       const t = setTimeout(fire, ms);
       return () => clearTimeout(t);
@@ -72,9 +68,8 @@ export function useCallDesk(): { desk: CallDesk; snap: DeskSnapshot } {
   useEffect(() => {
     void desk.start();
     const refresh = () => void desk.refresh();
-    const onVisible = () => {
-      if (document.visibilityState === "visible") refresh();
-    };
+    // Hidden, the page does not poll; shown again, it reads at once (ADR 0003 4.4.1, "Freshness").
+    const onVisible = () => desk.setVisible(document.visibilityState === "visible");
     // Another window's outcome, answer or refusal (any shared calls key) is an action here too.
     const onStorage = (e: StorageEvent) => {
       if (e.key?.startsWith("outreach.calls.")) refresh();

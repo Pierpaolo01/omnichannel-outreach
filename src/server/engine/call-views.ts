@@ -118,9 +118,9 @@ async function callList(store: OutreachStore, now: number, rules: CallViewRules 
   return { day, readyNow, laterToday, listed, changes };
 }
 
-/** The next instant the list can change by the clock: its own instants, and the engine's next wake (a call placed, a track started). */
-function nextChange(changes: readonly number[], nextWake: number | null, now: number): string | null {
-  const next = [...changes, ...(nextWake === null ? [] : [nextWake])].filter((t) => t > now);
+/** A hint of the next instant the list changes by the clock: calling hours opening or closing, the next user day. */
+function nextChange(changes: readonly number[], now: number): string | null {
+  const next = changes.filter((t) => t > now);
   return next.length === 0 ? null : iso(Math.min(...next));
 }
 
@@ -128,14 +128,13 @@ function nextChange(changes: readonly number[], nextWake: number | null, now: nu
  * The focus queue. `focus` is the call the user's screen is on: it keeps the focus while it is listed,
  * so the queue moves on only after an outcome (or a skip for now) is logged on it.
  */
-export async function callsView(store: OutreachStore, now: number, options: { readonly focus?: string | null; readonly rules?: CallViewRules; readonly nextWake?: number | null; readonly behind?: boolean } = {}): Promise<CallsView> {
+export async function callsView(store: OutreachStore, now: number, options: { readonly focus?: string | null; readonly rules?: CallViewRules } = {}): Promise<CallsView> {
   const { day, readyNow, laterToday, listed, changes } = await callList(store, now, options.rules);
   const focus = options.focus ?? null;
   return {
     date: dateIn(day.userZone, now),
     asOf: iso(now),
-    nextChangeAt: nextChange(changes, options.nextWake ?? null, now),
-    behind: options.behind ?? false,
+    nextChangeAt: nextChange(changes, now),
     userZone: day.userZone,
     dailyCapacity: day.capacity,
     defaultDailyCapacity: DEFAULT_DAILY_CALL_CAPACITY,
@@ -154,9 +153,9 @@ export async function callsView(store: OutreachStore, now: number, options: { re
 /** How many calls Up next shows on Today. */
 const UP_NEXT = 5;
 
-export async function todayView(store: OutreachStore, now: number, rules?: CallViewRules, nextWake: number | null = null, behind = false): Promise<TodayView> {
+export async function todayView(store: OutreachStore, now: number, rules?: CallViewRules): Promise<TodayView> {
   const { day, readyNow, laterToday, changes } = await callList(store, now, rules);
-  return { date: dateIn(day.userZone, now), asOf: iso(now), nextChangeAt: nextChange(changes, nextWake, now), behind, userZone: day.userZone, readyNow: readyNow.length, laterToday: laterToday.length, capacityReached: !dayHasRoom(day), upNext: [...readyNow, ...laterToday].slice(0, UP_NEXT) };
+  return { date: dateIn(day.userZone, now), asOf: iso(now), nextChangeAt: nextChange(changes, now), userZone: day.userZone, readyNow: readyNow.length, laterToday: laterToday.length, capacityReached: !dayHasRoom(day), upNext: [...readyNow, ...laterToday].slice(0, UP_NEXT) };
 }
 
 /**
@@ -233,5 +232,6 @@ export async function callTaskView(store: OutreachStore, taskId: string, now: nu
     companyNotes: (await store.engine.notesOf("company", parties.company.id)).map(noteView),
     colleagues,
     outcomes: listed ? CALL_OUTCOMES : [],
+    storedRequestIds: s.callAttempts.filter((c) => c.taskId === taskId).map((c) => c.requestId),
   };
 }

@@ -3,9 +3,6 @@ import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
 import type { ActivityView, CallsView, CallTaskView, LeadSearchResult, TodayView } from "../../shared/api.ts";
-import { TICK_MS, Worker } from "../worker.ts";
-import { placeCall, readyCalls } from "../../domain/sequence/calls.ts";
-import { Crash } from "../../../test/support/engine-harness.ts";
 
 /**
  * What the Today page and the call focus queue read (ticket 14, part b), through the real HTTP app,
@@ -63,6 +60,8 @@ describe("why a call is off the list, from the server's facts (ADR 0003 4.4.1, o
     const again = await log(patTask, { outcome: "voicemail", numberId: direct });
     expect(again.status).toBe(409);
     expect(again.body.error?.code).toBe("outcome_refused");
+    // The refusal carries why the call is off the list, as the server read it then.
+    expect((again.body as { offList?: unknown }).offList).toMatchObject({ reason: "logged", outcome: "no_answer" });
 
     const niaTask = await taskOf("Nia Cole");
     expect(h.fake.prospectReplies("nia@harbour.example", true, null)).toBe(true);
@@ -75,6 +74,20 @@ describe("why a call is off the list, from the server's facts (ADR 0003 4.4.1, o
     const patTask = await taskOf("Pat Oneil");
     expect((await log(patTask, { outcome: "skip_for_now" })).status).toBe(200);
     expect((await task(patTask)).offList).toBeNull();
+  });
+
+  test("the call's read names the request id of every outcome stored on it, a skip for now included, so a page knows its press is logged whoever got the answer (council on b8c65f9)", async () => {
+    const { task, taskOf, log } = await world();
+    const patTask = await taskOf("Pat Oneil");
+    expect((await task(patTask)).storedRequestIds).toEqual([]);
+    expect((await log(patTask, { requestId: "skip-1", outcome: "skip_for_now" })).status).toBe(200);
+    expect((await task(patTask)).storedRequestIds).toEqual(["skip-1"]);
+    const direct = (await task(patTask)).numbers[0]?.detailId;
+    expect((await log(patTask, { requestId: "call-2", outcome: "no_answer", numberId: direct })).status).toBe(200);
+    // A repeated id stores nothing twice; a refused one is not stored.
+    expect((await log(patTask, { requestId: "call-2", outcome: "no_answer", numberId: direct })).status).toBe(200);
+    expect((await log(patTask, { requestId: "call-3", outcome: "voicemail", numberId: direct })).status).toBe(409);
+    expect((await task(patTask)).storedRequestIds).toEqual(["skip-1", "call-2"]);
   });
 });
 
@@ -128,7 +141,7 @@ describe("a phone track's skip and release in Activity, from its stored finish (
   });
 });
 
-describe("when the call list next changes by the clock (ADR 0003 4.4.1, review bot on e6872eb)", () => {
+describe("a hint of when the call list changes by the clock (ADR 0003 4.4.1, \"Freshness\": the page reads every 20 seconds anyway)", () => {
   test("before calling hours, the instant they open; inside them, the instant they close; after them, the user's next day", async () => {
     const h = new EngineHarness({ start: MONDAY_9 - 3 * H, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
     await h.tick();
@@ -145,241 +158,5 @@ describe("when the call list next changes by the clock (ADR 0003 4.4.1, review b
     for (const v of await views()) expect(v).toMatchObject({ asOf: "2026-11-02T10:00:00.000Z", nextChangeAt: "2026-11-02T17:00:00.000Z" });
     await h.advanceTo(MONDAY_9 + 9 * H);
     for (const v of await views()) expect(v).toMatchObject({ nextChangeAt: "2026-11-03T00:00:00.000Z" });
-  });
-
-  test("a call that starts after an email track: the engine's next wake, when the email goes", async () => {
-    const h = new EngineHarness({ start: MONDAY_9 - 3 * H, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
-    await h.tick();
-    await h.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "Europe/London" });
-    h.clock = MONDAY_9 - H;
-    const { campaign: c } = await h.createCampaign("Call after an email", { businesses: [HARBOUR], people: [PAT] });
-    // The call starts when the email track finishes, which the call list alone cannot foresee: the engine's next wake names it.
-    await h.defineSequence(c.id, definition([track("e1", "email", [email("s1")], WEEKDAYS_9_TO_17), { ...track("p1", "call", [call("c1")], ALWAYS), start: { kind: "after", trackId: "e1", delayDays: 0 } }]));
-    expect((await h.launch(c.id)).status).toBe(200);
-    await h.advanceTo(MONDAY_9 - 30 * MIN);
-    const view = (await h.request<CallsView>("GET", "/api/calls")).body;
-    expect(view.readyNow).toEqual([]);
-    expect(view.nextChangeAt).toBe("2026-11-02T09:00:00.000Z");
-  });
-});
-
-describe("the instant the server advertises is one at which its answer shows the change (review bot on b15a769, item 7)", () => {
-  test("a call placed at the user's midnight: a read at the advertised instant, before the worker's tick, waits for that tick and shows it", async () => {
-    // The worker as the running app has it: TICK_MS between ticks, on timers this test steps by hand.
-    const timers: { at: number; fire: () => void }[] = [];
-    const box: { h: EngineHarness | null } = { h: null };
-    const worker = new Worker({
-      recover: async () => undefined,
-      tick: () => (box.h ? box.h.tick() : Promise.resolve()),
-      now: () => box.h?.clock ?? 0,
-      setTimer: (fire, ms) => {
-        const t = { at: (box.h?.clock ?? 0) + ms, fire };
-        timers.push(t);
-        return () => timers.splice(timers.indexOf(t), 1);
-      },
-    });
-    const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }], worker });
-    box.h = h;
-    await h.tick();
-    await h.request("PUT", "/api/call-settings", { dailyCapacity: 1, userZone: "Europe/London" });
-    const { campaign: c } = await h.createCampaign("Midnight", { businesses: [HARBOUR], people: [PAT, NIA] });
-    await h.defineSequence(c.id, definition([track("p1", "call", [call("c1")], ALWAYS)]));
-    expect((await h.launch(c.id)).status).toBe(200);
-    await h.tick();
-    // Monday: one call fits the capacity; it is worked. The other waits for Tuesday.
-    const monday = (await h.request<CallsView>("GET", "/api/calls")).body;
-    expect(monday.readyNow).toHaveLength(1);
-    const first = (await h.request<CallTaskView>("GET", `/api/call-tasks/${monday.focusTaskId}`)).body;
-    expect((await h.request("POST", `/api/call-tasks/${first.taskId}/outcome`, { requestId: "r1", outcome: "no_answer", numberId: first.numbers[0]?.detailId })).status).toBe(200);
-
-    // 23:59:50 London; the worker's last tick started at 23:59:45, so its next starts at 00:00:00.
-    h.clock = Date.parse("2026-11-02T23:59:45Z");
-    worker.start();
-    await new Promise((r) => setImmediate(r));
-    h.clock = Date.parse("2026-11-02T23:59:50Z");
-    const before = (await h.request<CallsView>("GET", "/api/calls")).body;
-    expect(before).toMatchObject({ readyNow: [], nextChangeAt: "2026-11-03T00:00:00.000Z" });
-
-    // The page reads at the advertised instant; the worker's timer has not fired yet.
-    h.clock = Date.parse("2026-11-03T00:00:00Z");
-    let answered: CallsView | null = null;
-    const read = h.request<CallsView>("GET", `/api/calls?expected=${encodeURIComponent(before.nextChangeAt ?? "")}`).then((x) => (answered = x.body));
-    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
-    expect(answered).toBeNull();
-    // The worker's tick at 00:00:00 (TICK_MS after the last) places Tuesday's call; then the read answers with it.
-    expect(timers[0]?.at).toBe(Date.parse("2026-11-02T23:59:45Z") + TICK_MS);
-    timers.shift()?.fire();
-    await read;
-    expect(answered!.readyNow.map((x) => x.person?.name)).toEqual(["Nia Cole"]);
-    worker.stop();
-  });
-
-  test("an ordinary read never waits for the worker", async () => {
-    const worker = { tickEnded: () => new Promise<void>(() => undefined), nextTickAt: () => null };
-    const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }], worker });
-    await h.tick();
-    expect((await h.request<CallsView>("GET", "/api/calls")).status).toBe(200);
-    expect((await h.request<TodayView>("GET", "/api/today")).status).toBe(200);
-  });
-});
-
-describe("a read and the worker's placements: the completed-placement marker is stored with the placements (ADR 0003 4.4; review bot on 9c3ad27)", () => {
-  const SAM = person({ person_id: "p3", business_id: "b1", full_name: "Sam Lee", email: "sam@harbour.example" });
-  const ANA = person({ person_id: "p4", business_id: "b1", full_name: "Ana Ruiz", email: "ana@harbour.example" });
-  type Ending = "succeeds" | "throws before placing" | "throws after placing some" | "is killed mid-tick" | "the database refuses the commit" | "two ticks overlap";
-
-  /**
-   * Monday: two calls fit the capacity and are worked; the other two wait for Tuesday. At 00:00:05 on
-   * Tuesday the tick that places them ends as `ending` says.
-   */
-  async function midnight(ending: Ending) {
-    let fault: "before" | "after" | "crash" | null = null;
-    let placed = 0;
-    const h = new EngineHarness({
-      start: MONDAY_9,
-      accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
-      rules: {
-        readyCalls: (s, now) => {
-          if (fault === "before") throw new Error("a failure before placing");
-          if (fault === "crash") throw new Crash("mid-tick");
-          return readyCalls(s, now);
-        },
-        placeCall: (s, item, now, id) => {
-          if (fault === "after" && ++placed === 2) throw new Error("a failure after placing one");
-          return placeCall(s, item, now, id);
-        },
-      },
-    });
-    await h.tick();
-    await h.request("PUT", "/api/call-settings", { dailyCapacity: 2, userZone: "Europe/London" });
-    const { campaign: c } = await h.createCampaign("Endings", { businesses: [HARBOUR], people: [PAT, NIA, SAM, ANA] });
-    await h.defineSequence(c.id, definition([track("p1", "call", [call("c1")], ALWAYS)]));
-    expect((await h.launch(c.id)).status).toBe(200);
-    await h.tick();
-    for (const item of (await h.request<CallsView>("GET", "/api/calls")).body.readyNow) {
-      const t = (await h.request<CallTaskView>("GET", `/api/call-tasks/${item.taskId}`)).body;
-      expect((await h.request("POST", `/api/call-tasks/${t.taskId}/outcome`, { requestId: `r-${t.taskId}`, outcome: "no_answer", numberId: t.numbers[0]?.detailId })).status).toBe(200);
-    }
-    h.clock = Date.parse("2026-11-02T23:59:45Z");
-    await h.tick();
-    h.clock = Date.parse("2026-11-03T00:00:05Z");
-    const tick = () => h.engine.tick().catch(() => undefined);
-    if (ending === "succeeds") await tick();
-    if (ending === "throws before placing") {
-      fault = "before";
-      await tick();
-    }
-    if (ending === "throws after placing some") {
-      fault = "after";
-      await tick();
-    }
-    if (ending === "is killed mid-tick") {
-      fault = "crash";
-      await tick();
-      fault = null;
-      await h.restart();
-    }
-    if (ending === "the database refuses the commit") {
-      const store = h.store.engine;
-      const original = store.placeCalls.bind(store);
-      store.placeCalls = () => Promise.reject(new Error("SQLITE_BUSY: the commit was refused"));
-      await tick();
-      store.placeCalls = original;
-    }
-    if (ending === "two ticks overlap") await Promise.all([tick(), tick()]);
-    fault = null;
-    return h;
-  }
-
-  /** Each ending, and how many of the two due calls its stored state holds (a restart's own settlement places them). */
-  const ENDINGS: readonly [Ending, number][] = [
-    ["succeeds", 2],
-    ["throws before placing", 0],
-    ["throws after placing some", 0],
-    ["is killed mid-tick", 2],
-    ["the database refuses the commit", 0],
-    ["two ticks overlap", 2],
-  ];
-  for (const [ending, placedAfter] of ENDINGS) {
-    test(`a tick that ${ending}: a read never says the list is current while a due call is unplaced`, async () => {
-      const h = await midnight(ending);
-      const now = h.clock;
-      for (const view of [(await h.request<CallsView>("GET", "/api/calls")).body, (await h.request<TodayView>("GET", "/api/today")).body]) {
-        const ready = "readyNow" in view && Array.isArray(view.readyNow) ? view.readyNow.length : (view as TodayView).readyNow;
-        expect(ready).toBe(placedAfter);
-        // Work due and unplaced is never reported current, nor announced as far off.
-        expect(view.behind).toBe(ready < 2);
-        if (view.behind) expect(Date.parse(view.nextChangeAt ?? "")).toBeLessThanOrEqual(now + TICK_MS);
-      }
-      // The next tick that succeeds places them and the list is current again.
-      await h.engine.tick();
-      const after = (await h.request<CallsView>("GET", "/api/calls")).body;
-      expect(after.readyNow).toHaveLength(2);
-      expect(after.behind).toBe(false);
-    });
-  }
-
-  test("a read that waited is as of the instant it answers: its marker, wakes and view are all taken then (review bot on 12f0303, audit)", async () => {
-    // An engine whose next wake is 00:00:01 until then, and 00:01:00 after; the worker's tick ends at 00:00:02.
-    const T0 = Date.parse("2026-11-03T00:00:00Z");
-    let clock = T0;
-    let marker = T0 - TICK_MS;
-    const ended: (() => void)[] = [];
-    const worker = { tickEnded: () => new Promise<void>((resolve) => ended.push(resolve)), nextTickAt: () => T0 + TICK_MS };
-    const h = new EngineHarness({ start: T0, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
-    const app = (await import("../app.ts")).createApp({
-      store: h.store,
-      now: () => new Date(clock).toISOString(),
-      newId: () => `n${Math.random()}`,
-      engine: {
-        launch: () => Promise.reject(new Error("no")),
-        logCallOutcome: () => Promise.reject(new Error("no")),
-        nextWakeAt: async (at?: number) => ((at ?? clock) < T0 + 1_000 ? T0 + 1_000 : T0 + MIN),
-        callsPlacedThrough: async () => marker,
-        nextCallWakeAt: async () => null,
-      },
-      worker,
-    });
-    let answered: CallsView | null = null;
-    const read = Promise.resolve(app.request(`/api/calls?expected=${encodeURIComponent(new Date(T0).toISOString())}`)).then(async (r: Response) => (answered = (await r.json()) as CallsView));
-    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
-    expect(answered).toBeNull();
-    clock = T0 + 2_000;
-    marker = T0 + 2_000;
-    ended.shift()?.();
-    await read;
-    expect(answered!.asOf).toBe("2026-11-03T00:00:02.000Z");
-    // The engine's next wake after the read's own instant: not the one it had before the wait, now past.
-    expect(answered!.nextChangeAt).toBe("2026-11-03T00:01:00.000Z");
-  });
-
-  test("a read at the advertised instant waits at most 3 seconds for the marker, then answers what is stored, marked behind", async () => {
-    const timers: { at: number; fire: () => void }[] = [];
-    const box: { h: EngineHarness | null } = { h: null };
-    const worker = new Worker({
-      recover: async () => undefined,
-      tick: async () => undefined,
-      now: () => box.h?.clock ?? 0,
-      setTimer: (fire, ms) => {
-        const t = { at: (box.h?.clock ?? 0) + ms, fire };
-        timers.push(t);
-        return () => {
-          const i = timers.indexOf(t);
-          if (i >= 0) timers.splice(i, 1);
-        };
-      },
-    });
-    const h = await midnight("throws before placing");
-    box.h = h;
-    let answered: CallsView | null = null;
-    const app = (await import("../app.ts")).createApp({ store: h.store, now: () => new Date(h.clock).toISOString(), newId: () => `n${Math.random()}`, engine: { launch: () => Promise.reject(new Error("no")), logCallOutcome: () => Promise.reject(new Error("no")), nextWakeAt: (at) => h.engine.nextWakeAt(at), callsPlacedThrough: () => h.engine.callsPlacedThrough(), nextCallWakeAt: (a, at) => h.engine.nextCallWakeAt(a, at) }, worker });
-    const read = Promise.resolve(app.request(`/api/calls?expected=${encodeURIComponent("2026-11-03T00:00:00.000Z")}`)).then(async (r: Response) => (answered = (await r.json()) as CallsView));
-    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
-    expect(answered).toBeNull();
-    h.clock += 3_000;
-    for (const t of timers.filter((x) => x.at <= h.clock)) t.fire();
-    await read;
-    expect(answered!.readyNow).toEqual([]);
-    expect(answered!.behind).toBe(true);
   });
 });

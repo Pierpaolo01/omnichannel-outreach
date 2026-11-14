@@ -329,6 +329,27 @@ export const JUNIPER_LATER_ROW = {
   limit: 100,
 } satisfies LeadSearchResult;
 
+/**
+ * Calls with three kept refusals from earlier presses, oldest first (council on b8c65f9, item 4): the
+ * first shows, the rest wait behind a count, and the call stays on screen.
+ */
+export async function openWithKeptRefusals(page: Page, name: string): Promise<FakeCallsApp> {
+  const f = await freshCalls("ready", name);
+  const t = await focused(f);
+  await page.addInitScript(([taskId, numberId]) => {
+    const notes = ["Spoke to the front desk; call back after 3.", "Left with the practice manager.", "Line busy twice, try the mobile."];
+    notes.forEach((note, i) => {
+      const body = { requestId: `kept-${i}`, outcome: "no_answer", numberId, note, noteScope: "person" };
+      const refused = { message: "That number is marked bad: choose another of the lead's numbers.", offList: null };
+      window.localStorage.setItem(`outreach.calls.outbox.kept-${i}`, JSON.stringify({ v: 2, taskId, who: "Amira Hassan", body, pressedAt: 1_000 + i, refused }));
+    });
+  }, [t.taskId, t.numberId] as const);
+  await page.clock.setFixedTime(f.harness.clock);
+  await page.goto(`${f.url}/calls`);
+  await settle(page, "2 more outcomes not logged");
+  return f;
+}
+
 export const SCREENS: readonly Screen[] = [
   { name: "today", open: async (page) => { await page.goto("/"); await settle(page, "Nothing to call right now."); } },
   { name: "calls", open: async (page) => { await page.goto("/calls"); await settle(page, "Calls appear here once a launched campaign reaches a call step."); } },
@@ -407,7 +428,7 @@ export const SCREENS: readonly Screen[] = [
       const t = await focused(f);
       await logElsewhere(f, t.taskId, "voicemail", t.numberId);
       await logWithMouse(page, "No answer", "Spoke to the front desk.");
-      await settle(page, "already logged:");
+      await settle(page, "already logged from another window or device:");
     },
   },
   {
@@ -450,6 +471,12 @@ export const SCREENS: readonly Screen[] = [
       await page.clock.setFixedTime(f.harness.clock);
       await page.goto(`${f.url}/calls`);
       await settle(page, "Not logged: no answer for Amira Hassan.");
+    },
+  },
+  {
+    name: "calls, three kept refusals",
+    open: async (page) => {
+      await openWithKeptRefusals(page, "screen-three-refusals");
     },
   },
   {
@@ -1202,6 +1229,9 @@ export interface FocusTransition {
   readonly focused: (page: Page) => Locator;
 }
 
+/** The call the "next call fails to load" transition logs, whose own reads still succeed. */
+let loadErrorCall = "";
+
 export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
   {
     name: "the chosen number invalidated under the keyboard moves focus to a number that can still be chosen (re-check on b15a769)",
@@ -1264,9 +1294,15 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
   },
   {
     name: "logging an outcome when the next call fails to load moves focus to its Try again (verifier on e6872eb)",
-    open: async (page) => { const f = await freshCalls("ready", "focus-load-error"); await page.goto(`${f.url}/calls`); await page.getByText(/^Calling hours /).waitFor(); },
+    open: async (page) => {
+      const f = await freshCalls("ready", "focus-load-error");
+      loadErrorCall = (await focused(f)).taskId;
+      await page.goto(`${f.url}/calls`);
+      await page.getByText(/^Calling hours /).waitFor();
+    },
     act: async (page) => {
-      await page.route("**/api/call-tasks/*", (route) => (route.request().method() === "GET" ? serverError(route) : route.continue()));
+      // Reads of the next call fail; the call just logged is still read, so the page learns its outcome is stored.
+      await page.route("**/api/call-tasks/*", (route) => (route.request().method() === "GET" && !route.request().url().includes(loadErrorCall) ? serverError(route) : route.continue()));
       await page.getByRole("button", { name: "No answer", exact: true }).focus();
       await page.keyboard.press("Enter");
       await page.getByRole("button", { name: "Log and open next call" }).focus();

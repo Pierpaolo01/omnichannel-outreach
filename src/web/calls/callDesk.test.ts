@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
-import type { ApiError, CallOutcomeAnswer, CallsView, CallTaskView } from "../../shared/api.ts";
+import type { ApiError, CallOutcomeRefusal, CallOutcomeAnswer, CallsView, CallTaskView } from "../../shared/api.ts";
 import { CallDesk, NoAnswer, Refused, type CallDeskPorts, type DeskFault, type KeyValue, type OutcomeBody } from "./callDesk.ts";
 
 /**
@@ -69,6 +69,7 @@ async function world() {
   const timers: (() => void)[] = [];
   let ids = 0;
   let posts = 0;
+  let pressClock = 0;
   const deliver = async (x: Held) => h.request<unknown>("POST", `/api/call-tasks/${x.taskId}/outcome`, x.body);
   /** Delivers a held POST and passes its answer back, or loses the answer. */
   const answer = async (x: Held, lost = false) => {
@@ -76,10 +77,10 @@ async function world() {
     const out = await deliver(x);
     if (lost) x.reject(new NoAnswer());
     else if (out.status === 200) x.resolve(out.body as CallOutcomeAnswer);
-    else x.reject(new Refused(out.status, (out.body as ApiError).error.message));
+    else x.reject(new Refused(out.status, (out.body as ApiError).error.message, "outcome_refused", (out.body as CallOutcomeRefusal).offList));
     await flush();
   };
-  const desk = (session: MapStore, faults: ReadonlySet<DeskFault> = new Set()) =>
+  const desk = (session: MapStore, faults: ReadonlySet<DeskFault> = new Set(), patch: Partial<CallDeskPorts> = {}) =>
     new CallDesk({
       faults,
       calls: async (focus) => (await h.request<CallsView>("GET", `/api/calls${focus ? `?focus=${focus}` : ""}`)).body,
@@ -97,10 +98,12 @@ async function world() {
       local,
       session,
       newId: () => `id-${++ids}`,
+      now: () => ++pressClock,
       setTimer: (fire) => {
         timers.push(fire);
         return () => timers.splice(timers.indexOf(fire), 1);
       },
+      ...patch,
     } satisfies CallDeskPorts);
   const fireTimers = async () => {
     for (const fire of timers.splice(0)) fire();
@@ -301,7 +304,8 @@ describe("what a desk shows is derived from the server and the outbox (council o
     a.setDraft({ outcome: "no_answer", note: "Rang out twice." });
     a.log();
     await flush();
-    await w.answer(w.held[0]!, true);
+    // The request never reaches the server.
+    w.held.splice(0, 1)[0]!.reject(new NoAnswer());
     a.dispose();
 
     const b = w.desk(new MapStore());
@@ -343,7 +347,9 @@ describe("what a desk shows is derived from the server and the outbox (council o
     await flush();
     await a.refresh();
     await flush();
-    expect(a.getSnapshot().away).toMatchObject({ offList: { reason: "logged", outcome: "voicemail" } });
+    // The server's read holds this tab's press: it is shown as logged, whoever got the answer.
+    expect(a.getSnapshot().logged).toMatchObject({ requestId: sent.body.requestId, body: { outcome: "voicemail" } });
+    expect(a.getSnapshot().focus).not.toBe(sent.taskId);
   });
 });
 
@@ -369,7 +375,11 @@ describe("only an answer that says the outcome was refused is a refusal (council
 describe("liveness: an outcome left by a tab that leaves is sent by a tab still open, with no user action (council on b15a769, item 9)", () => {
   const abandoned = async (faults: ReadonlySet<DeskFault> = new Set()) => {
     const w = await world();
-    const b = w.desk(new MapStore(), faults);
+    // The tab still open is on another call than the one pressed.
+    const bSession = new MapStore();
+    const second = (await w.h.request<CallsView>("GET", "/api/calls")).body.readyNow[1]?.taskId ?? "";
+    bSession.set("outreach.calls.focus", second);
+    const b = w.desk(bSession, faults);
     await b.start();
     await flush();
     const a = w.desk(new MapStore(), faults);
@@ -398,8 +408,8 @@ describe("liveness: an outcome left by a tab that leaves is sent by a tab still 
     expect(await w.stored(id)).toBe(true);
   });
 
-  test("a desk that retries only the entries it pressed itself (the fault) leaves it unsent", async () => {
-    const { w } = await abandoned(new Set(["only_own_entries_retried"]));
+  test("a desk that retries only the entries for the call it is on (the fault) leaves it unsent", async () => {
+    const { w } = await abandoned(new Set(["only_focused_entries_retried"]));
     await w.fireTimers();
     expect(w.held).toEqual([]);
     expect(w.outbox()).toHaveLength(1);
@@ -524,57 +534,83 @@ describe("storage is the only truth: a dismissal is final, and a press storage r
   });
 });
 
-describe("an answer clears only the draft its press captured (review bot on 12f0303; ADR 0003 4.4.1)", () => {
-  // Every outcome: those that keep the call on screen (skip for now) let the user type again before the late answer.
+describe("a press the server has stored is logged, whoever got its answer and whenever (council on b8c65f9, item 1; ADR 0003 4.4.1)", () => {
   for (const outcome of ["skip_for_now", "no_answer", "voicemail", "gatekeeper", "interested", "wrong_number"] as const) {
-    test(`${outcome}: another tab replays the press first; the original answer, arriving after a later edit, keeps that edit and the focus`, async () => {
+    test(`${outcome}: the user leaves Calls before the answer; back on Calls, the press shows as logged and is not offered again`, async () => {
       const w = await world();
-      const sessionA = new MapStore();
-      const a = w.desk(sessionA);
+      const session = new MapStore();
+      const a = w.desk(session);
       await a.start();
       await w.fireTimers();
-      const focus = a.getSnapshot().focus;
+      const pressedOn = a.getSnapshot().focus;
       a.setDraft({ outcome, note: "Typed with the press." });
       a.log();
       await flush();
-      const original = w.held[0]!;
-      // Another tab opens Calls, sends the same entry, and its answer comes first: the entry goes.
-      const b = w.desk(new MapStore());
-      await b.start();
+      // The user clicks Today; the request completes while this desk is gone.
+      a.dispose();
+      await w.answer(w.held[0]!);
+      const back = w.desk(session);
+      await back.start();
       await flush();
-      const replay = w.held.find((x) => x !== original && x.body.requestId === original.body.requestId)!;
-      await w.answer(replay);
-      // The pressing tab hears of it as a storage change and reads the server.
-      await a.refresh();
+      const snap = back.getSnapshot();
+      expect(snap.logged).toMatchObject({ body: { outcome, note: "Typed with the press." } });
+      expect(snap.draft.pressId).toBeNull();
+      // Nothing on screen offers that press again: no draft carries it, and Log on what shows stores nothing twice.
+      expect(snap.focus === pressedOn ? snap.draft.note : "").not.toBe("Typed with the press.");
+      back.log();
       await flush();
-      const snap = a.getSnapshot();
-      if (snap.locked) {
-        // The call is off the list: the page says why and keeps the call; nothing can be typed on it.
-        expect(snap.away?.offList.reason).toBe("logged");
-        expect(outcome).not.toBe("skip_for_now");
-        // The late answer is to the draft its press captured, untouched since: shown as logged, and the focus moves on.
-        await w.answer(original);
-        expect(a.getSnapshot().logged?.requestId).toBe(original.body.requestId);
-        return;
-      }
-      // Still listed (skip for now): the call is unlocked and the user types again.
-      expect(outcome).toBe("skip_for_now");
-      a.setDraft({ note: "Typed after the skip was logged." });
-      await w.answer(original);
-      expect(a.getSnapshot().focus).toBe(focus);
-      expect(a.getSnapshot().draft.note).toBe("Typed after the skip was logged.");
-      expect(JSON.parse(sessionA.get(`outreach.calls.draft.${focus}`) ?? "{}")).toMatchObject({ note: "Typed after the skip was logged." });
-      expect(a.getSnapshot().logged).toBeNull();
+      for (const x of [...w.held]) await w.answer(x);
+      const stored = (await w.h.request<CallTaskView>("GET", `/api/call-tasks/${pressedOn}`)).body.storedRequestIds;
+      expect(stored).toHaveLength(1);
     });
   }
 
-  test("the fault that lets any answer to this desk's press clear the draft is caught", async () => {
+  test("another tab gets the answer and this tab's own answer is lost: the skip shows as logged, and its draft is not actionable", async () => {
     const w = await world();
-    const sessionA = new MapStore();
-    const a = w.desk(sessionA, new Set(["answer_clears_newer_draft"]));
+    const a = w.desk(new MapStore());
     await a.start();
     await w.fireTimers();
-    a.setDraft({ outcome: "skip_for_now", note: "Typed with the press." });
+    a.setDraft({ outcome: "skip_for_now", note: "Skipped once." });
+    a.log();
+    await flush();
+    const original = w.held[0]!;
+    const b = w.desk(new MapStore());
+    await b.start();
+    await flush();
+    await w.answer(w.held.find((x) => x !== original)!);
+    await w.answer(original, true);
+    await a.refresh();
+    await flush();
+    expect(a.getSnapshot().logged).toMatchObject({ requestId: original.body.requestId, body: { outcome: "skip_for_now" } });
+    expect(a.getSnapshot().draft).toMatchObject({ outcome: null, note: "", pressId: null });
+  });
+
+  test("the fault that ignores the server's stored ids leaves the stored skip as an actionable draft", async () => {
+    const w = await world();
+    const session = new MapStore();
+    const a = w.desk(session, new Set(["stored_press_left_as_draft"]));
+    await a.start();
+    await w.fireTimers();
+    a.setDraft({ outcome: "skip_for_now", note: "Skipped once." });
+    a.log();
+    await flush();
+    a.dispose();
+    await w.answer(w.held[0]!);
+    const back = w.desk(session, new Set(["stored_press_left_as_draft"]));
+    await back.start();
+    await flush();
+    expect(back.getSnapshot().logged).toBeNull();
+  });
+});
+
+describe("an answer never touches a draft; a failed copy of it in this tab is only said (council on b8c65f9, item 6; re-check 5, R8)", () => {
+  test("another tab's answer comes first, this tab's storage refuses the draft's copy, the user types, then the original answer arrives: the typing stays", async () => {
+    const w = await world();
+    const session = new MapStore();
+    const a = w.desk(session);
+    await a.start();
+    await w.fireTimers();
+    a.setDraft({ outcome: "skip_for_now", note: "First skipped note." });
     a.log();
     await flush();
     const original = w.held[0]!;
@@ -584,9 +620,161 @@ describe("an answer clears only the draft its press captured (review bot on 12f0
     await w.answer(w.held.find((x) => x !== original)!);
     await a.refresh();
     await flush();
-    a.setDraft({ note: "Typed after the skip was logged." });
+    // The page moved on from its stored skip; on the call now on screen the copy in this tab fails.
+    const focus = a.getSnapshot().focus;
+    session.full = true;
+    a.setDraft({ note: "A newer note, not kept on this device." });
+    expect(a.getSnapshot().draftNotKept).toBe(true);
     await w.answer(original);
-    expect(a.getSnapshot().draft.note).not.toBe("Typed after the skip was logged.");
+    await flush();
+    expect(a.getSnapshot().focus).toBe(focus);
+    expect(a.getSnapshot().draft.note).toBe("A newer note, not kept on this device.");
+  });
+
+  test("the fault that lets an answer clear the draft on screen is caught", async () => {
+    const w = await world();
+    const a = w.desk(new MapStore(), new Set(["answer_clears_draft"]));
+    await a.start();
+    await w.fireTimers();
+    a.setDraft({ outcome: "skip_for_now", note: "First skipped note." });
+    a.log();
+    await flush();
+    const original = w.held[0]!;
+    const b = w.desk(new MapStore());
+    await b.start();
+    await flush();
+    await w.answer(w.held.find((x) => x !== original)!);
+    await a.refresh();
+    await flush();
+    a.setDraft({ note: "A newer note." });
+    await w.answer(original);
+    await flush();
+    expect(a.getSnapshot().draft.note).not.toBe("A newer note.");
+  });
+});
+
+describe("every read of the call goes through the one reconciliation, and every failure counts (council on b8c65f9, item 7; re-check 5, R5 and R6)", () => {
+  /** A desk whose tab is on Pat's call, which another window has already logged. */
+  const onLoggedCall = async (faults: ReadonlySet<DeskFault> = new Set()) => {
+    const w = await world();
+    const first = (await w.h.request<CallsView>("GET", "/api/calls")).body.readyNow[0]!.taskId;
+    const view = (await w.h.request<CallTaskView>("GET", `/api/call-tasks/${first}`)).body;
+    expect((await w.h.request("POST", `/api/call-tasks/${first}/outcome`, { requestId: "elsewhere-1", outcome: "interested", numberId: view.numbers[0]?.detailId })).status).toBe(200);
+    const session = new MapStore();
+    session.set("outreach.calls.focus", first);
+    const a = w.desk(session, faults);
+    return { w, a, first };
+  };
+
+  test("on first opening, a named call the server has off the list is locked, with why", async () => {
+    const { a, first } = await onLoggedCall();
+    await a.start();
+    await flush();
+    expect(a.getSnapshot().focus).toBe(first);
+    expect(a.getSnapshot().away).toMatchObject({ offList: { reason: "logged", outcome: "interested" } });
+    expect(a.getSnapshot().locked).toBe(true);
+  });
+
+  test("on first opening, a call the queue names but the call's own read has off the list (the lead ended in between) is locked, with why", async () => {
+    const w = await world();
+    const queue = (await w.h.request<CallsView>("GET", "/api/calls")).body;
+    const first = queue.readyNow[0]!.taskId;
+    const view = (await w.h.request<CallTaskView>("GET", `/api/call-tasks/${first}`)).body;
+    expect((await w.h.request("POST", `/api/call-tasks/${first}/outcome`, { requestId: "elsewhere-3", outcome: "interested", numberId: view.numbers[0]?.detailId })).status).toBe(200);
+    // The queue the page reads was answered just before that: it still names the call.
+    let stale = true;
+    const a = w.desk(new MapStore(), new Set(), {
+      calls: async (focus) => {
+        if (stale) {
+          stale = false;
+          return queue;
+        }
+        return (await w.h.request<CallsView>("GET", `/api/calls${focus ? `?focus=${focus}` : ""}`)).body;
+      },
+    });
+    await a.start();
+    await flush();
+    expect(a.getSnapshot().focus).toBe(first);
+    expect(a.getSnapshot().away).toMatchObject({ offList: { reason: "logged", outcome: "interested" } });
+    expect(a.getSnapshot().locked).toBe(true);
+  });
+
+  test("the fault that skips the reconciliation on a first read leaves it workable", async () => {
+    const { a } = await onLoggedCall(new Set(["first_read_skips_reconcile"]));
+    await a.start();
+    await flush();
+    expect(a.getSnapshot().locked).toBe(false);
+  });
+
+  test("reads of the call that fail while the queue's succeed are counted: after two, the page says it may be out of date; then the server's word locks it", async () => {
+    const w = await world();
+    const a = w.desk(new MapStore());
+    await a.start();
+    await w.fireTimers();
+    const focus = a.getSnapshot().focus ?? "";
+    const view = (await w.h.request<CallTaskView>("GET", `/api/call-tasks/${focus}`)).body;
+    expect((await w.h.request("POST", `/api/call-tasks/${focus}/outcome`, { requestId: "elsewhere-2", outcome: "interested", numberId: view.numbers[0]?.detailId })).status).toBe(200);
+    w.failTaskReads(2);
+    await a.refresh();
+    await flush();
+    await a.refresh();
+    await flush();
+    expect(a.getSnapshot().freshness.stale).toBe(true);
+    await a.refresh();
+    await flush();
+    expect(a.getSnapshot().freshness.stale).toBe(false);
+    expect(a.getSnapshot().locked).toBe(true);
+    expect(a.getSnapshot().away?.offList.reason).toBe("logged");
+  });
+
+  test("the fault that leaves the call's read failures uncounted is caught", async () => {
+    const w = await world();
+    const a = w.desk(new MapStore(), new Set(["task_failures_uncounted"]));
+    await a.start();
+    await w.fireTimers();
+    w.failTaskReads(2);
+    await a.refresh();
+    await flush();
+    await a.refresh();
+    await flush();
+    expect(a.getSnapshot().freshness.stale).toBe(false);
+  });
+
+  test("an off-list reason gives way to a later read that lists the call again, and moving on keeps the call's draft", async () => {
+    const w = await world();
+    let offNext = false;
+    const session = new MapStore();
+    const a = w.desk(session, new Set(), {
+      task: async (id): Promise<CallTaskView> => {
+        const view = (await w.h.request<CallTaskView>("GET", `/api/call-tasks/${id}`)).body;
+        if (!offNext) return view;
+        // One read says the call is off the list (its hours closed, say); the next lists it again.
+        offNext = false;
+        return { ...view, listed: false, offList: { reason: "not_listed_today", status: view.status } };
+      },
+    });
+    await a.start();
+    await w.fireTimers();
+    const focus = a.getSnapshot().focus;
+    a.setDraft({ outcome: "no_answer", note: "Typed before the hours closed." });
+    offNext = true;
+    await a.refresh();
+    await flush();
+    expect(a.getSnapshot().away?.offList.reason).toBe("not_listed_today");
+    await a.refresh();
+    await flush();
+    expect(a.getSnapshot().away).toBeNull();
+    expect(a.getSnapshot().locked).toBe(false);
+    expect(a.getSnapshot().focus).toBe(focus);
+    expect(a.getSnapshot().draft.note).toBe("Typed before the hours closed.");
+    // Shown off the list again, the user moves on; the server still puts this call first, and its draft is there.
+    offNext = true;
+    await a.refresh();
+    await flush();
+    await a.moveOn();
+    await flush();
+    expect(a.getSnapshot().focus).toBe(focus);
+    expect(a.getSnapshot().draft.note).toBe("Typed before the hours closed.");
   });
 });
 

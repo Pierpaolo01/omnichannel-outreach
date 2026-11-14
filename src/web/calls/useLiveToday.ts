@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { NeedsAttention, TodayView } from "../../shared/api.ts";
 import { getJson } from "../api.ts";
-import { FRESH, Refresher, type Freshness } from "./refresher.ts";
+import { FRESH, REFRESH_INTERVAL_MS, Refresher, type Freshness } from "./refresher.ts";
 
 export interface LiveToday {
   /** Today's calls and Needs attention, read together, as of the last successful read. */
@@ -14,18 +14,19 @@ export interface LiveToday {
 
 /**
  * Today's reads on the one freshness mechanism Calls uses too (refresher.ts; ADR 0003 4.4.1,
- * "Freshness"): read on opening, at the server's `nextChangeAt`, on showing the tab or focusing the
- * window, on coming back online and on another window's calls action (a storage event); a failed read
- * keeps what shows, is retried with backoff, and after two in a row the page says it may be out of date.
+ * "Freshness"): read on opening, every `REFRESH_INTERVAL_MS` while visible (sooner at the server's
+ * `nextChangeAt` hint), on showing the tab or focusing the window, on coming back online and on another
+ * window's calls action (a storage event); a failed read keeps what shows, is retried with backoff, and
+ * after two in a row the page says it may be out of date.
  */
 export function useLiveToday(): LiveToday {
   const [state, setState] = useState<Omit<LiveToday, "retry">>({ data: null, error: null, freshness: FRESH });
   const [refresher] = useState(
     () =>
       new Refresher<TodayView & { readonly attention: NeedsAttention }>({
-        read: async (expected) => {
+        read: async () => {
           const [today, attention] = await Promise.all([
-            getJson(`/api/today${expected ? `?expected=${encodeURIComponent(expected)}` : ""}`) as Promise<TodayView>,
+            getJson("/api/today") as Promise<TodayView>,
             getJson("/api/needs-attention") as Promise<NeedsAttention>,
           ]);
           return { ...today, attention };
@@ -36,6 +37,7 @@ export function useLiveToday(): LiveToday {
           const t = setTimeout(fire, ms);
           return () => clearTimeout(t);
         },
+        interval: REFRESH_INTERVAL_MS,
       }),
   );
 
@@ -43,9 +45,8 @@ export function useLiveToday(): LiveToday {
     refresher.start();
     void refresher.now();
     const read = () => void refresher.now();
-    const onVisible = () => {
-      if (document.visibilityState === "visible") read();
-    };
+    // Hidden, the page does not poll; shown again, it reads at once.
+    const onVisible = () => refresher.setVisible(document.visibilityState === "visible");
     const onStorage = (e: StorageEvent) => {
       if (e.key?.startsWith("outreach.calls.")) read();
     };

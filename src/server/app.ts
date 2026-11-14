@@ -4,7 +4,7 @@ import { z } from "zod";
 import { planImport } from "../domain/import-plan.ts";
 import { isOutreachStatus } from "../domain/outreach-status.ts";
 import { checkScraperFile, parseScraperExport } from "../domain/scraper-export.ts";
-import type { ApiError, CallOutcomeAnswer, Campaign, FileCheckResult, SmsProviderStatus } from "../shared/api.ts";
+import type { ApiError, CallOutcomeAnswer, CallOutcomeRefusal, Campaign, FileCheckResult, SmsProviderStatus } from "../shared/api.ts";
 import { CAMPAIGN_NAME_MAX, DEFINITION_MAX_BYTES, STEP_BODY_MAX, STEP_SUBJECT_MAX } from "../shared/limits.ts";
 import { checkApiRequest } from "./guard.ts";
 import { invalidBodyMessage, requestObject } from "./request-body.ts";
@@ -16,7 +16,6 @@ import type { StoredDefinition } from "./engine/engine-store.ts";
 import { UnconnectedEmailPort, UnprovisionedSmsPort } from "./engine/ports.ts";
 import { accountView, needsAttention, progressView } from "./engine/views.ts";
 import { callsView, callTaskView, todayView } from "./engine/call-views.ts";
-import { READ_WAIT_MS, TICK_MS, type WorkerProgress } from "./worker.ts";
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
 import type { CampaignDetail, CampaignListItem, CampaignSequenceSummary, SequenceView } from "../shared/api.ts";
 import { beforeLaunchView, copyPreview } from "./before-launch.ts";
@@ -29,12 +28,7 @@ export interface AppDependencies {
   readonly now: () => string;
   readonly newId: () => string;
   /** The sequence engine. Without one, the app runs an engine with no connected email provider. */
-  readonly engine?: Pick<Engine, "launch" | "logCallOutcome" | "nextWakeAt" | "callsPlacedThrough" | "nextCallWakeAt">;
-  /**
-   * The engine's worker, when one runs (the running app). A clock-driven read the server asked for
-   * (`expected`, its own `nextChangeAt`) that the worker has not reached yet waits for its next tick.
-   */
-  readonly worker?: WorkerProgress;
+  readonly engine?: Pick<Engine, "launch" | "logCallOutcome">;
   /** The email provider's own description, for GET /api/email-provider; absent when none is connected. */
   readonly emailProvider?: EmailProviderSource | null;
   /**
@@ -140,7 +134,7 @@ const launchBody = requestObject({ definitionVersion: z.number().int().optional(
 const checkBody = requestObject({ businessesCsv: z.string().optional(), peopleCsv: z.string().optional() });
 
 /** The HTTP interface. Every route is under /api; the web client is served separately. */
-export function createApp({ store, now, newId, engine: givenEngine, worker, emailProvider, smsProvider = "none", rules: givenRules }: AppDependencies): Hono {
+export function createApp({ store, now, newId, engine: givenEngine, emailProvider, smsProvider = "none", rules: givenRules }: AppDependencies): Hono {
   const rules: Rules = { ...DEFAULT_RULES, ...givenRules };
   const engine = givenEngine ?? new Engine({ store: store.engine, port: new UnconnectedEmailPort(), smsPort: new UnprovisionedSmsPort(), now: () => Date.parse(now()), newId });
   const app = new Hono().basePath("/api");
@@ -433,42 +427,10 @@ export function createApp({ store, now, newId, engine: givenEngine, worker, emai
     return c.json(await store.engine.callSettings());
   });
 
-  /**
-   * A read and the worker's placements (ADR 0003 4.4): the completed-placement marker, stored in the
-   * transaction that stores the placements, says what the call list covers. A read at the instant the
-   * server advertised (`expected`) waits, at most READ_WAIT_MS (3 seconds), for the marker to reach it.
-   * A read whose list is behind (a call wake after the marker and at or before now) is marked `behind`
-   * and advertises no later than the worker's next tick, so due work is never announced as far off.
-   */
-  const readWake = async (expected: string | undefined): Promise<{ at: number; wake: number | null; behind: boolean }> => {
-    const asked = expected ? Date.parse(expected) : Number.NaN;
-    // The stored marker, written with the placements it vouches for, is the only progress a read trusts.
-    if (worker && !Number.isNaN(asked) && asked <= Date.parse(now())) {
-      const until = Date.parse(now()) + READ_WAIT_MS;
-      while (((await engine.callsPlacedThrough()) ?? Number.NEGATIVE_INFINITY) < asked && Date.parse(now()) < until) await worker.tickEnded(until - Date.parse(now()));
-    }
-    // Then the read is as of one instant: the marker, the wakes and the view are all taken at `at`.
-    const at = Date.parse(now());
-    const wake = await engine.nextWakeAt(at);
-    const through = await engine.callsPlacedThrough();
-    const due = through === null ? at : await engine.nextCallWakeAt(through, at);
-    if (due === null || due > at) return { at, wake, behind: false };
-    const next = worker?.nextTickAt() ?? null;
-    const soon = next !== null && next > at ? next : at + TICK_MS;
-    return { at, wake: wake === null ? soon : Math.min(wake, soon), behind: true };
-  };
-
-  // `nextChangeAt` includes the engine's next wake: a call can be placed or a track start then (ADR 0003 4.4.1).
-  app.get("/today", async (c) => {
-    const { at, wake, behind } = await readWake(c.req.query("expected"));
-    return c.json(await todayView(store, at, rules, wake, behind));
-  });
+  app.get("/today", async (c) => c.json(await todayView(store, Date.parse(now()), rules)));
 
   // `focus`: the call the user's screen is on. It stays the focus while it is listed.
-  app.get("/calls", async (c) => {
-    const { at, wake, behind } = await readWake(c.req.query("expected"));
-    return c.json(await callsView(store, at, { focus: c.req.query("focus") || null, rules, nextWake: wake, behind }));
-  });
+  app.get("/calls", async (c) => c.json(await callsView(store, Date.parse(now()), { focus: c.req.query("focus") || null, rules })));
 
   app.get("/call-tasks/:id", async (c) => {
     const view = await callTaskView(store, c.req.param("id"), Date.parse(now()));
@@ -481,7 +443,11 @@ export function createApp({ store, now, newId, engine: givenEngine, worker, emai
     const id = c.req.param("id");
     if ((await store.engine.callTaskSubject(id)) === null) return notFound(c, "call task");
     const outcome = await engine.logCallOutcome(id, { requestId: body.data.requestId, outcome: body.data.outcome, numberId: body.data.numberId ?? null, note: body.data.note, noteScope: body.data.noteScope });
-    if (!outcome.ok) return c.json<ApiError>({ error: { code: "outcome_refused", message: outcome.reason } }, 409);
+    if (!outcome.ok) {
+      // The refusal carries why the call is off the list, as read now, so the page records it without another read.
+      const offList = (await callTaskView(store, id, Date.parse(now())))?.offList ?? null;
+      return c.json<CallOutcomeRefusal>({ error: { code: "outcome_refused", message: outcome.reason }, offList }, 409);
+    }
     // The answer names the next focus: the queue moves on only now that an outcome is logged.
     const at = Date.parse(now());
     const task = await callTaskView(store, id, at);

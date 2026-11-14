@@ -2,7 +2,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import type { ActivityView } from "../src/shared/api.ts";
 import { fakeCallsApp, type FakeCallsApp } from "./fake-provider.ts";
 import { respond, serverError } from "./mocks.ts";
-import { focused, freshCalls, logElsewhere, logWithMouse } from "./screens.ts";
+import { focused, freshCalls, logElsewhere, logWithMouse, openWithKeptRefusals } from "./screens.ts";
 
 /**
  * Today and the call focus queue (ticket 14, part b), on the app over the fake email provider with
@@ -147,7 +147,7 @@ test("a second tab on the same call is told it was logged there, keeps its unsav
   await logWithMouse(page, "No answer");
   await expect(page.getByRole("heading", { name: "Tom" })).toBeVisible();
   // The other tab learns it from the outbox change, says so, and keeps the call and the note on screen.
-  await expect(other.getByRole("alert")).toContainText("Amira Hassan’s call is already logged: no answer at 10:00.");
+  await expect(other.getByRole("alert")).toContainText("Amira Hassan’s call was already logged from another window or device: no answer at 10:00.");
   await expect(other.getByRole("alert")).toContainText("Your note wasn’t saved: Typed in the second tab.");
   await expect(other.getByRole("heading", { name: "Amira Hassan" })).toBeVisible();
   await expect(outcome(other, "Interested")).toBeDisabled();
@@ -167,7 +167,7 @@ test("a call logged from another window is refused here, explained, and the queu
   await expect(notLogged).toContainText("Not logged: left voicemail for Amira Hassan.");
   await expect(notLogged).toContainText("The note typed with it: Typed here.");
   await expect(notLogged).not.toContainText("saved");
-  await expect(page.getByRole("alert").filter({ hasText: "Open the next call" })).toContainText("Amira Hassan’s call is already logged: interested at 10:00.");
+  await expect(page.getByRole("alert").filter({ hasText: "Open the next call" })).toContainText("Amira Hassan’s call was already logged from another window or device: interested at 10:00.");
   await expect(outcomeStatus(page)).not.toContainText("logged.");
   await page.getByRole("button", { name: "Open the next call" }).click();
   await expect(page.getByRole("heading", { name: "Tom" })).toBeVisible();
@@ -355,7 +355,7 @@ test("an outcome left by a closed tab and refused on recovery is listed with its
 
   await page.goto(`${f.url}/calls`);
   const notLogged = page.getByRole("list", { name: "Outcomes not logged" });
-  await expect(notLogged).toContainText("Not logged: no answer for Amira Hassan. Amira Hassan’s call is already logged: interested at 10:00.");
+  await expect(notLogged).toContainText("Not logged: no answer for Amira Hassan. Amira Hassan’s call was already logged from another window or device: interested at 10:00.");
   await expect(notLogged).toContainText("The note typed with it: Orphan refusal note must remain visible");
   await notLogged.getByRole("button", { name: "Dismiss" }).click();
   await expect(notLogged).toHaveCount(0);
@@ -457,4 +457,21 @@ test("a press this device cannot store sends nothing, says so, and keeps the dra
   await logButton(page).click();
   await expect(outcomeStatus(page)).toContainText("Amira Hassan: left voicemail logged.");
   expect(posts).toHaveLength(1);
+});
+
+test("three kept refusals leave the call on screen: the oldest shows, the rest wait behind a count, and the number choice stays in view above the log bar (council on b8c65f9, item 4)", async ({ page }) => {
+  await page.setViewportSize({ width: 1360, height: 900 });
+  await openWithKeptRefusals(page, "kept-refusals-layout");
+  const shown = page.getByRole("list", { name: "Outcomes not logged" });
+  await expect(shown.getByRole("listitem")).toHaveCount(1);
+  await expect(shown).toContainText("Spoke to the front desk; call back after 3.");
+  await expect(page.getByText("2 more outcomes not logged")).toBeVisible();
+  const numbers = page.getByRole("group", { name: "Number you dial" });
+  await expect(numbers).toBeInViewport();
+  const groupBox = await numbers.boundingBox();
+  const barTop = await page.getByRole("button", { name: "Log and open next call" }).evaluate((el) => el.closest("div.sticky, [class*='sticky']")?.getBoundingClientRect().top ?? Infinity);
+  expect((groupBox?.y ?? Infinity) + (groupBox?.height ?? 0)).toBeLessThanOrEqual(barTop);
+  // The rest open on request, oldest first.
+  await page.getByText("2 more outcomes not logged").click();
+  await expect(page.getByRole("list", { name: "More outcomes not logged" }).getByRole("listitem").first()).toContainText("Left with the practice manager.");
 });

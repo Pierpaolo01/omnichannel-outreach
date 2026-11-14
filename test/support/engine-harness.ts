@@ -32,8 +32,6 @@ export interface EngineHarnessOptions {
   readonly databasePath?: string;
   /** A fake SMS provider's numbers (ticket 13). Without them the engine has the unprovisioned SMS port. */
   readonly sms?: { readonly numbers: readonly FakeNumber[]; readonly modes?: readonly FakeSmsMode[] };
-  /** A worker the HTTP app reads its progress from (ticket 14b's freshness rule); the harness ticks itself otherwise. */
-  readonly worker?: import("../../src/server/worker.ts").WorkerProgress;
 }
 
 /** A provider the harness can drive: it acts on its own at instants the harness advances to. */
@@ -102,11 +100,10 @@ export class EngineHarness {
       store: this.store,
       now: () => new Date(this.clock).toISOString(),
       newId: sequentialIds(),
-      engine: { launch: (id, expected) => this.engine.launch(id, expected), logCallOutcome: (id, input) => this.engine.logCallOutcome(id, input), nextWakeAt: (at) => this.engine.nextWakeAt(at), callsPlacedThrough: () => this.engine.callsPlacedThrough(), nextCallWakeAt: (after, at) => this.engine.nextCallWakeAt(after, at) },
+      engine: { launch: (id, expected) => this.engine.launch(id, expected), logCallOutcome: (id, input) => this.engine.logCallOutcome(id, input) },
       emailProvider: "status" in this.provider ? (this.provider as Provider & EmailProviderSource) : null,
       smsProvider: this.smsProvider ? "test-simulator" : "none",
       ...(options.rules ? { rules: options.rules } : {}),
-      ...(options.worker ? { worker: options.worker } : {}),
     });
   }
 
@@ -149,7 +146,6 @@ export class EngineHarness {
         beforeRetry: async (id) => this.hooks.beforeRetry?.(id),
         afterAuthorization: (id) => this.hooks.afterAuthorization?.(id),
         crashPoint: (point, id) => this.hooks.crashPoint?.(point, id),
-        afterStep: (step) => this.hooks.afterStep?.(step),
       },
     });
   }

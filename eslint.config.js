@@ -13,21 +13,6 @@ const domainClockAndIdentity = [
   { selector: "CallExpression[callee.name='setTimeout'], CallExpression[callee.name='setInterval']", message: "Domain code has no timers." },
 ];
 
-const requestBodies = { selector: "CallExpression[callee.object.name='z'][callee.property.name=/^(object|looseObject|passthrough)$/]", message: "Declare a request body with requestObject from src/server/request-body.ts: it refuses unknown fields." };
-
-/**
- * The engine reads the clock only where an instant begins (ADR 0003 4.4, "One instant per tick"):
- * an entry point, once, or the send act, whose provider exchange is timed at the call (5.5 step 6).
- * Every other method takes the instant as a parameter.
- */
-const CLOCK_READERS = "constructor|launch|recover|tick|logCallOutcome|markAttempt|receiveLateAnswer|nextWakeAt|nextCallWakeAt|presend|authorizeAndCall";
-const engineClock = [
-  { selector: `MethodDefinition[key.name!=/^(${CLOCK_READERS})$/] MemberExpression[object.type='ThisExpression'][property.name='clock']`, message: "A tick reads the clock once and passes the instant down (ADR 0003 4.4): take `now` as a parameter." },
-  { selector: "NewExpression[callee.name='Date'][arguments.length=0]", message: "The engine reads time only through its clock, where an instant begins." },
-  { selector: "CallExpression[callee.object.name='Date'][callee.property.name='now']", message: "The engine reads time only through its clock, where an instant begins." },
-  { selector: "MemberExpression[object.name='performance'][property.name='now']", message: "The engine reads time only through its clock, where an instant begins." },
-];
-
 export default tseslint.config(
   { ignores: ["dist/", "node_modules/", "test-results/", "playwright-report/"] },
   js.configs.recommended,
@@ -64,12 +49,12 @@ export default tseslint.config(
     // Request bodies refuse unknown fields: every one is declared with requestObject (src/server/request-body.ts).
     files: ["src/server/**/*.ts"],
     ignores: ["src/server/**/*.test.ts", "src/server/request-body.ts"],
-    rules: { "no-restricted-syntax": ["error", requestBodies] },
-  },
-  {
-    // A tick reads the clock once (ADR 0003 4.4, "One instant per tick"): the engine's tick path has no clock in reach.
-    files: ["src/server/engine/engine.ts"],
-    rules: { "no-restricted-syntax": ["error", requestBodies, ...engineClock] },
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        { selector: "CallExpression[callee.object.name='z'][callee.property.name=/^(object|looseObject|passthrough)$/]", message: "Declare a request body with requestObject from src/server/request-body.ts: it refuses unknown fields." },
+      ],
+    },
   },
   {
     // The SQLite adapter satisfies an asynchronous interface over a synchronous driver.

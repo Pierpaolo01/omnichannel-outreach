@@ -31,7 +31,7 @@ import type {
   WorkSettlement,
 } from "../../domain/sequence/state.ts";
 import { isOutreachStatus } from "../../domain/outreach-status.ts";
-import type { BounceEvent, CallNoteRecord, CallSettings, CampaignEngineRow, DefinitionSave, EngineStore, LaunchOutcome, PlacementTransaction, ReplyEvent, SaveResult, SenderAccountConfig, StoredDefinition, StoredNote } from "../engine/engine-store.ts";
+import type { BounceEvent, CallNoteRecord, CallSettings, CampaignEngineRow, DefinitionSave, EngineStore, LaunchOutcome, ReplyEvent, SaveResult, SenderAccountConfig, StoredDefinition, StoredNote } from "../engine/engine-store.ts";
 import { liveDetailRowOf } from "./sqlite-store.ts";
 
 type Row = Record<string, SQLOutputValue>;
@@ -178,33 +178,13 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   updateNow(subjectId: string, now: number, decide: (state: SubjectState) => SubjectState | null): SubjectState | null {
-    return this.transaction(() => this.applyNow(subjectId, now, decide));
-  }
-
-  /** One subject's decision inside a transaction the caller holds. */
-  private applyNow(subjectId: string, now: number, decide: (state: SubjectState) => SubjectState | null): SubjectState | null {
-    const base = this.load(subjectId, now);
-    if (!base) return null;
-    const next = decide(base);
-    if (!next) return null;
-    return this.write(base, next, now);
-  }
-
-  async placeCalls(through: number, plan: (tx: PlacementTransaction) => number): Promise<number> {
     return this.transaction(() => {
-      const placed = plan({ subject: (id) => this.load(id, through), apply: (id, decide) => this.applyNow(id, through, decide) });
-      // The marker is written with the placements it vouches for, never lowered.
-      this.run(
-        "INSERT INTO engine_meta (key, value) VALUES ('calls_placed_through', ?) ON CONFLICT(key) DO UPDATE SET value = CAST(MAX(CAST(engine_meta.value AS INTEGER), CAST(excluded.value AS INTEGER)) AS TEXT)",
-        [String(through)],
-      );
-      return placed;
+      const base = this.load(subjectId, now);
+      if (!base) return null;
+      const next = decide(base);
+      if (!next) return null;
+      return this.write(base, next, now);
     });
-  }
-
-  async callsPlacedThrough(): Promise<number | null> {
-    const row = this.sql("SELECT value FROM engine_meta WHERE key = 'calls_placed_through'").get();
-    return row ? Number(str(row, "value")) : null;
   }
 
   async runningSubjectIds(): Promise<string[]> {

@@ -6,8 +6,9 @@ import { CallDesk, NOTE_MAX, whoOf, type DeskSnapshot } from "../calls/callDesk.
 import { useCallDesk } from "../calls/useCallDesk.ts";
 import { useFocusRescue } from "../focusRescue.ts";
 import {
-  BEHIND_LINE,
+  DRAFT_NOT_KEPT_LINE,
   NOT_QUEUED_LINE,
+  confirmingLine,
   REFUSED_NOTE_LEAD,
   UNSTORED_REFUSAL_LINE,
   CAPACITY_USED,
@@ -90,7 +91,8 @@ function useKeyboardFocus(snap: DeskSnapshot): (el: HTMLElement | null, role: "n
 }
 
 function Status({ snap }: { snap: DeskSnapshot }) {
-  const text = snap.pending ? pendingLine(snap.pending) : snap.logged ? loggedLine(snap.logged) : "";
+  const confirming = snap.confirming && snap.task?.state === "ready" ? confirmingLine(whoOf(snap.task.view)) : "";
+  const text = snap.pending ? pendingLine(snap.pending) : confirming || (snap.logged ? loggedLine(snap.logged) : "");
   return (
     <>
       <p role="status" className={text ? `rounded-field px-4 py-2.5 text-[14px] ${snap.pending?.unconfirmed ? "bg-pause-soft text-base-content" : "bg-you-soft text-base-content"}` : "sr-only"}>
@@ -107,13 +109,38 @@ function Status({ snap }: { snap: DeskSnapshot }) {
   );
 }
 
-/** Refusals no page showed on its call: kept, with the note typed, until the user dismisses them. */
+/**
+ * Kept refusals, oldest press first, each with the note typed with it, until the user dismisses them.
+ * The first is shown and the rest wait behind a count, so the call stays on screen (council on b8c65f9, item 4).
+ */
 function Records({ desk, snap, placeFocus }: { desk: CallDesk; snap: DeskSnapshot; placeFocus: ReturnType<typeof useKeyboardFocus> }) {
   if (snap.refusedRecords.length === 0) return null;
   const zone = snap.queue.state === "ready" ? snap.queue.view.userZone : Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const [first, ...rest] = snap.refusedRecords;
+  const item = (r: (typeof snap.refusedRecords)[number]) => <RecordItem key={r.body.requestId} desk={desk} snap={snap} record={r} zone={zone} placeFocus={placeFocus} />;
   return (
-    <ul aria-label="Outcomes not logged" className="flex flex-col gap-2">
-      {snap.refusedRecords.map((r) => (
+    <div className="flex flex-col gap-2">
+      <ul aria-label="Outcomes not logged" className="flex flex-col gap-2">
+        {first && item(first)}
+      </ul>
+      {rest.length > 0 && (
+        <details className="group">
+          <summary className="w-fit cursor-pointer text-[13px] font-semibold text-muted">
+            {rest.length === 1 ? "One more outcome not logged" : `${rest.length} more outcomes not logged`}
+          </summary>
+          <ul aria-label="More outcomes not logged" className="mt-2 flex max-h-[40vh] flex-col gap-2 overflow-y-auto">
+            {rest.map(item)}
+          </ul>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function RecordItem({ desk, snap, record: r, zone, placeFocus }: { desk: CallDesk; snap: DeskSnapshot; record: DeskSnapshot["refusedRecords"][number]; zone: string; placeFocus: ReturnType<typeof useKeyboardFocus> }) {
+  return (
+    <>
+      {[r].map((r) => (
         <li key={r.body.requestId} className="flex flex-col gap-2 rounded-field bg-crit-soft px-4 py-3 text-[14px]">
           <p role="alert" className="text-base-content [overflow-wrap:anywhere]">
             {refusedRecordLine(r, zone)}
@@ -137,7 +164,7 @@ function Records({ desk, snap, placeFocus }: { desk: CallDesk; snap: DeskSnapsho
           </div>
         </li>
       ))}
-    </ul>
+    </>
   );
 }
 
@@ -151,7 +178,6 @@ function Queue({ snap }: { snap: DeskSnapshot }) {
       <h2 className="mb-1.5 ml-2.5 text-[13px] font-semibold text-muted">Later today, {view ? view.laterToday.length : "…"}</h2>
       {view && view.laterToday.length > 0 ? <ol className="mb-[22px] flex flex-col gap-0.5">{view.laterToday.map(item)}</ol> : <p className="mb-[22px] px-2.5 text-[12.5px] leading-[1.45] text-faint">{view ? "Nothing else today." : "Loading the list."}</p>}
       <p className="px-2.5 text-[12.5px] leading-[1.45] text-faint">Calls inside the prospect’s calling hours come first, oldest first. The next call opens when you log an outcome.</p>
-      {view?.behind && <p className="mt-2 px-2.5 text-[12.5px] leading-[1.45] text-faint">{BEHIND_LINE}</p>}
       {view && (
         <p className="mt-2 px-2.5 text-[12.5px] leading-[1.45] text-faint">
           {capacityLine(view)}
@@ -477,6 +503,7 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
           aria-describedby={snap.noteTooLong ? `${noteId}-long` : undefined}
           onChange={(e) => desk.setDraft({ note: e.target.value })}
         />
+        {snap.draftNotKept && <p className="text-[13px] text-pause">{DRAFT_NOT_KEPT_LINE}</p>}
         {snap.noteTooLong && (
           <p id={`${noteId}-long`} className="text-[13px] text-crit">
             The note is {draft.note.length.toLocaleString("en-GB")} characters; the limit is {NOTE_MAX.toLocaleString("en-GB")}. Shorten it to log the call.

@@ -116,13 +116,6 @@ export interface DefinitionSave {
  * function decide, and writes back whatever changed, bumping the subject's version and storing
  * its derived status in the same transaction.
  */
-/** Subjects read and written inside the transaction `placeCalls` holds, all as of its one instant. */
-export interface PlacementTransaction {
-  subject(subjectId: string): SubjectState | null;
-  /** Loads, decides and writes; a null decision writes nothing and returns null. */
-  apply(subjectId: string, decide: (state: SubjectState) => SubjectState | null): SubjectState | null;
-}
-
 export interface EngineStore {
   campaign(campaignId: string): Promise<CampaignEngineRow | null>;
   /**
@@ -149,15 +142,6 @@ export interface EngineStore {
   subject(subjectId: string, now: number): Promise<SubjectState | null>;
   /** Loads, decides and writes in one transaction. A null decision writes nothing. */
   update(subjectId: string, now: number, decide: (state: SubjectState) => SubjectState | null): Promise<SubjectState | null>;
-  /**
-   * One pass of call placement (ADR 0003 4.4) in one transaction, as of the one instant `through`:
-   * `plan` reads and writes subjects through the transaction (each write as `update` would make it),
-   * and the **completed-placement marker** is set to `through` (never lowered) in the same
-   * transaction. If anything throws, nothing is stored, the marker included. Returns `plan`'s count.
-   */
-  placeCalls(through: number, plan: (tx: PlacementTransaction) => number): Promise<number>;
-  /** The instant through which call placement is complete and stored; null before the first pass. */
-  callsPlacedThrough(): Promise<number | null>;
   /**
    * `update`, committed before it returns: a send's authorization uses it so that nothing
    * asynchronous runs between the commit and the provider call (ADR 0003 5.5 step 6).

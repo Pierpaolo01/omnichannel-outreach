@@ -169,6 +169,11 @@ export interface ApiError {
   readonly error: { readonly code: string; readonly message: string; readonly problems?: readonly { file: string; message: string }[] };
 }
 
+/** A refused call outcome: the call's off-list facts as the server read them when it refused (ticket 14b). */
+export interface CallOutcomeRefusal extends ApiError {
+  readonly offList: CallOffListView | null;
+}
+
 // ---------------------------------------------------------------------------------------------
 // The sequence engine (ADR 0003), ticket 12b: one email track, launch, and each lead's progress.
 
@@ -620,15 +625,11 @@ export interface TodayView {
   /** The server's instant for this answer. */
   readonly asOf: string;
   /**
-   * The next instant this answer can change by the clock alone (ADR 0003 4.4.1): calling hours opening
-   * or closing, a call falling due, the engine's next wake, or the user's next day. Screens refresh then.
+   * A hint (ADR 0003 4.4.1, "Freshness"): an instant at which this answer is known to change by the
+   * clock (calling hours opening or closing, the user's next day). A screen may refresh then, sooner
+   * than its interval; nothing depends on it being complete.
    */
   readonly nextChangeAt: string | null;
-  /**
-   * The worker has work due at or before now that it has not finished (ADR 0003 4.4): what this
-   * shows may lag by up to one tick, and `nextChangeAt` is no later than the worker's next tick.
-   */
-  readonly behind: boolean;
   readonly userZone: string;
   readonly readyNow: number;
   readonly laterToday: number;
@@ -643,10 +644,8 @@ export interface CallsView {
   readonly date: string;
   /** The server's instant for this answer. */
   readonly asOf: string;
-  /** As on TodayView: when the queue next changes by the clock alone. */
+  /** As on TodayView: a hint of when the queue changes by the clock. */
   readonly nextChangeAt: string | null;
-  /** As on TodayView: the worker is behind, so the queue may lag by up to one tick. */
-  readonly behind: boolean;
   readonly userZone: string;
   readonly dailyCapacity: number;
   /** The capacity the user has until they set one. */
@@ -751,4 +750,9 @@ export interface CallTaskView {
   readonly colleagues: readonly CallColleagueView[];
   /** The outcomes the user can log now; empty when the task is not listed. */
   readonly outcomes: readonly CallOutcomeApi[];
+  /**
+   * The request id of every outcome stored on this task, skips for now included: the server's word on
+   * whether a press was logged, whoever received its answer (ADR 0003 4.4.1, "One reconciliation").
+   */
+  readonly storedRequestIds: readonly string[];
 }

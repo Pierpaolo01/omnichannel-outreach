@@ -110,7 +110,14 @@ export function clockLine(task: Pick<CallTaskView, "task" | "listed">, userZone:
 /** While an action is on its way. */
 export function pendingLine(pending: NonNullable<DeskSnapshot["pending"]>): string {
   const what = pending.body.outcome === "skip_for_now" ? `Skipping ${pending.who} for now` : `Logging ${OUTCOME_LABEL[pending.body.outcome].toLowerCase()} for ${pending.who}`;
+  // Another window's press: nothing has failed, it is simply being logged there (council on b8c65f9, item 5).
+  if (!pending.own) return `${what} from another window. It is logged only once.`;
   return pending.unconfirmed ? `${what}: not confirmed yet. It is being sent again, and it is logged only once.` : `${what}…`;
+}
+
+/** While the server's word on this tab's press is read: its outbox entry has just gone. */
+export function confirmingLine(who: string): string {
+  return `Checking with the server whether ${who}’s outcome is logged…`;
 }
 
 /** What the server did with the last accepted action, read from its answer. */
@@ -134,7 +141,8 @@ export function offListLine(who: string, off: CallOffListView | null, message: s
   if (off === null) return message ?? `${who}’s call is no longer on the list.`;
   switch (off.reason) {
     case "logged":
-      return `${who}’s call is already logged: ${OUTCOME_LABEL[off.outcome].toLowerCase()} at ${timeIn(zone, off.at)}.`;
+      // This tab's own press, once stored, is shown as logged by it (reconcile); this one came from elsewhere.
+      return `${who}’s call was already logged from another window or device: ${OUTCOME_LABEL[off.outcome].toLowerCase()} at ${timeIn(zone, off.at)}.`;
     case "lead_ended":
       if (off.status === "replied") return `${who} replied, so automation stopped and the call left the list.`;
       if (off.status === "interested_on_call") return `${who} was marked interested on another call, so automation stopped and the call left the list.`;
@@ -234,8 +242,6 @@ export function numberProblemLine(problem: { readonly kind: "bad" | "gone"; read
   return problem.kind === "bad" ? `The number you chose, ${problem.value ?? ""}, is now marked wrong. Choose the number you dial.` : "The number you chose is no longer one of this lead’s. Choose the number you dial.";
 }
 
-/** When the server says its worker has work due that it has not finished (ADR 0003 4.4). */
-export const BEHIND_LINE = "Calls that have just fallen due may still be being placed. This page updates when they are.";
 
 /** A press this device's storage refused (ADR 0003 4.4.1, the boundary): nothing was sent. */
 /**
@@ -246,5 +252,8 @@ export const REFUSED_NOTE_LEAD = "The note typed with it:";
 
 /** A refusal this device's storage would not record: shown from the page, its write retried. */
 export const UNSTORED_REFUSAL_LINE = "This device’s storage is full or blocked, so this refusal could not be recorded on it.";
+
+/** The draft's copy in this tab's storage failed (ADR 0003 4.4.1): what it means, and only that. */
+export const DRAFT_NOT_KEPT_LINE = "This note is not being kept on this device if you leave the page.";
 
 export const NOT_QUEUED_LINE = "This outcome couldn’t be queued on this device: its storage is full or blocked, so nothing was sent. Your choice and note are kept. Free some space, or allow this site to store data, then press Log again.";
