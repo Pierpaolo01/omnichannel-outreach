@@ -52,6 +52,9 @@ test.describe("the phone track on the canvas and in its inspector", () => {
     await expect(paths.getByRole("radio", { name: /^Win back/ })).toBeDisabled();
     await expect(inspector.getByText("The win-back branch has no tracks: add a track to it, or choose stop or continue.")).toBeVisible();
     await expect(page.getByRole("button", { name: /^Phone track: .*If declined: stop, not chosen yet\./ })).toBeVisible();
+    // The per-lead path is chosen on the Calls page since ticket 16c, and the hint says so.
+    await expect(inspector.getByText("No path calls the lead again. When you log a declined call on the Calls page, you can choose another path for that one lead.")).toBeVisible();
+    await expect(inspector.getByText("choosing another path there for one lead, arrives with a later release", { exact: false })).toHaveCount(0);
     // Together with the email track: both hang from Launch.
     await expect(page.getByRole("list", { name: "Tracks that start at launch" }).getByRole("button")).toHaveCount(2);
 

@@ -426,7 +426,7 @@ describe("not interested: the phone track's declined path (ticket 16; ADR 0003 2
   });
 
   test("refused plainly, changing nothing: win back with no win-back branch, and a declined path with another outcome", () => {
-    expect(logCallOutcome(world("stop", false), "task-1", declined({ declinedPath: "win_back" }), AT, { attempt: "a1", note: "n1" })).toEqual({ ok: false, reason: "This campaign has no win-back branch: choose stop or continue." });
+    expect(logCallOutcome(world("stop", false), "task-1", declined({ declinedPath: "win_back" }), AT, { attempt: "a1", note: "n1" })).toEqual({ ok: false, reason: "The win-back branch has no tracks: choose stop or continue." });
     expect(logCallOutcome(world("stop"), "task-1", declined({ outcome: "no_answer", declinedPath: "continue" }), AT, { attempt: "a1", note: "n1" })).toEqual({ ok: false, reason: "A declined path goes with not interested only." });
     expect(logCallOutcome(world("stop"), "task-1", declined({ redial: true }), AT, { attempt: "a1", note: "n1" })).toEqual({ ok: false, reason: "A redial follows no answer, voicemail left, or gatekeeper or not reached." });
   });

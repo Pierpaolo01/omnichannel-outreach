@@ -136,6 +136,11 @@ test.describe("the declined path and the win-back branch in the campaign editor 
     const copy = page.getByRole("region", { name: "If they decline: the win-back branch" });
     await expect(copy.getByRole("list", { name: "The win-back branch’s messages" }).getByRole("listitem")).toHaveCount(3);
     await expect(copy.getByRole("listitem").first()).toContainText("Only if they decline");
+    // A step of the branch is named for it, as everywhere since ticket 16c ("Win-back email 1", never "Email 1").
+    const branchMessages = copy.getByRole("list", { name: "The win-back branch’s messages" }).getByRole("listitem");
+    await expect(branchMessages.nth(0)).toContainText("Win-back email 1");
+    await expect(branchMessages.nth(1)).toContainText("Win-back email 2");
+    await expect(branchMessages.nth(2)).toContainText("Win-back text 1");
     await blocker.getByRole("button", { name: "Open track" }).click();
     await expect(page.getByTestId("inspector").getByRole("heading", { name: "Win-back SMS track" })).toBeVisible();
   });

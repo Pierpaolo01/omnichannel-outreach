@@ -644,7 +644,7 @@ export const SCREENS: readonly Screen[] = [
       await calls(page, "ready", "/calls");
       await page.getByText(/^Calling hours /).waitFor();
       await page.getByRole("button", { name: "Not interested", exact: true }).click();
-      await settle(page, "(this campaign has none)");
+      await settle(page, "(the win-back branch has no tracks)");
     },
   },
   {
@@ -656,7 +656,7 @@ export const SCREENS: readonly Screen[] = [
       await page.addInitScript(([id, n]) => window.sessionStorage.setItem(`outreach.calls.draft.${id}`, JSON.stringify({ outcome: "not_interested", numberId: n, note: "", noteScope: "person", redial: false, callbackDay: null, callbackTime: "", callbackAt: null, declinedPath: "win_back", pressId: null })), [t.taskId, t.numberId] as const);
       await page.clock.setFixedTime(f.harness.clock);
       await page.goto(`${f.url}/calls`);
-      await settle(page, "This campaign has no win-back branch now");
+      await settle(page, "The win-back branch has no tracks now");
     },
   },
   {

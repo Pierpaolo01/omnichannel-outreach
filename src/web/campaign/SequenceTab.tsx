@@ -1099,7 +1099,7 @@ function DeclinedPathControl({ track, editor, onEditBranch }: { track: TrackDefi
         </p>
       )}
       <p id={hintId} className="text-[12.5px] text-muted">
-        No path calls the lead again. Logging a declined call on the Calls page, and choosing another path there for one lead, arrives with a later release.
+        No path calls the lead again. When you log a declined call on the Calls page, you can choose another path for that one lead.
       </p>
     </fieldset>
   );

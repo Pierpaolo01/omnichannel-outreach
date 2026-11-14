@@ -1,6 +1,7 @@
 import { useId, useRef, useState, type ReactNode } from "react";
 import { Link, useLocation } from "wouter";
 import type { BeforeLaunchView, CampaignDefinition, CopyPreview, CopySegment, LoadProjectionView, PreviewLead, SmsProviderStatus } from "../../shared/api.ts";
+import { stepNoun, trackLabel } from "../../shared/track-label.ts";
 import { useApi } from "../api.ts";
 import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
@@ -551,7 +552,7 @@ function LeadCopy({ campaignId, enrollmentId, version, def, horizonDays }: { cam
           <p className="-mt-1 text-[13px] text-muted">{WIN_BACK_ENTRY[preview.winBackEntry]}</p>
           <ol className="flex flex-col gap-3" aria-label="The win-back branch’s messages">
             {preview.winBack.map((s) => (
-              <PreviewMessage key={s.stepId} s={s} def={def} named horizonDays={horizonDays} entry={preview.winBackEntry} />
+              <PreviewMessage key={s.stepId} s={s} def={def} named={trackLabel(def, { id: s.trackId, channel: s.channel }).several} horizonDays={horizonDays} entry={preview.winBackEntry} />
             ))}
           </ol>
         </section>
@@ -571,7 +572,8 @@ const WIN_BACK_ENTRY: Record<CopyPreview["winBackEntry"], string> = {
 function PreviewMessage({ s, def, named, horizonDays, entry }: { s: CopyPreview["steps"][number]; def: CampaignDefinition; named: boolean; horizonDays: number | null; entry?: CopyPreview["winBackEntry"] }) {
   const track = def.tracks.find((t) => t.id === s.trackId);
   const sms = s.channel === "sms";
-  const noun = `${sms ? "Text" : "Email"} ${s.number}`;
+  // A step of the win-back branch is named for it, as the shared label says (ticket 16c): "Win-back email 1".
+  const noun = `${stepNoun(trackLabel(def, { id: s.trackId, channel: s.channel }), sms ? "sms" : "email")} ${s.number}`;
   return (
     <li className="overflow-hidden rounded-field border border-line">
       <div className="flex items-center justify-between gap-3 border-b border-line bg-raised px-3.5 py-2 text-[13px]">

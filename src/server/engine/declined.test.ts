@@ -204,7 +204,7 @@ describe("the three paths (spec: Declined calls and the win-back branch; ticket 
     await h.advanceTo(MONDAY_9 + H);
     const winBack = await decline(pat, { declinedPath: "win_back" });
     expect(winBack.status).toBe(409);
-    expect(winBack.body.error?.message).toBe("This campaign has no win-back branch: choose stop or continue.");
+    expect(winBack.body.error?.message).toBe("The win-back branch has no tracks: choose stop or continue.");
     const withAnother = await decline(pat, { outcome: "no_answer", declinedPath: "continue" });
     expect(withAnother.status).toBe(409);
     expect(withAnother.body.error?.message).toBe("A declined path goes with not interested only.");
