@@ -285,8 +285,10 @@ describe("while sending is interrupted, the reads say so", () => {
     const cutAt = h.clock;
     h.cutProvidersOff(TUESDAY_0 + 2 * H);
     await h.advanceTo(cutAt + 10 * MIN);
-    expect((await today()).sendingInterrupted).toEqual({ since: iso(cutAt), cause: "providers_unreachable" });
-    expect((await h.request<CallsView>("GET", "/api/calls")).body.sendingInterrupted).toEqual({ since: iso(cutAt), cause: "providers_unreachable" });
+    // Every read failed: the last to fail is named, with its channel and part.
+    const interrupted = { since: iso(cutAt), cause: "providers_unreachable", lastFailedRead: { channel: "email", part: "observation" } };
+    expect((await today()).sendingInterrupted).toMatchObject(interrupted);
+    expect((await h.request<CallsView>("GET", "/api/calls")).body.sendingInterrupted).toMatchObject(interrupted);
     await h.advanceTo(TUESDAY_0 + 3 * H);
     expect((await today()).sendingInterrupted).toBeNull();
     expect((await today()).interruption).toEqual({ from: iso(cutAt), to: iso(TUESDAY_0 + 2 * H), rescheduled: 3 });
@@ -301,7 +303,7 @@ describe("while sending is interrupted, the reads say so", () => {
     // From here only the engine's own ticks could write a heartbeat, and they fail.
     h.stopMarkingAlive();
     await h.advanceTo(lastGood + 20 * MIN);
-    expect((await today()).sendingInterrupted).toEqual({ since: iso(lastGood), cause: "ticks_failing" });
+    expect((await today()).sendingInterrupted).toEqual({ since: iso(lastGood), cause: "ticks_failing", lastFailedRead: null });
     failing = false;
     await h.advanceTo(h.clock + MIN);
     expect((await today()).sendingInterrupted).toBeNull();

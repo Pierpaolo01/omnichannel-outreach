@@ -92,6 +92,11 @@ export interface Rules {
    * the tick's start (a machine can sleep in between).
    */
   readonly dispatchInstant: (tickStarted: number, now: number) => number;
+  /**
+   * Ticket 20a (PR 56 review bot): whether a round with a provider is contact. Every read the engine relies on for safety
+   * must have answered in it: the account read and the observation. A partial answer is not contact.
+   */
+  readonly contactFrom: (answered: { readonly accounts: boolean; readonly observation: boolean }) => boolean;
   /** The answer a call whose answer was never recorded is taken to have (5.3's crash row): unknown. */
   readonly lostAnswer: CallAnswer;
 }
@@ -145,5 +150,6 @@ export const DEFAULT_RULES: Rules = {
   rescheduled: rescheduledSteps,
   answerInstant: (_asked, answered) => answered,
   dispatchInstant: (_started, now) => now,
+  contactFrom: (answered) => answered.accounts && answered.observation,
   lostAnswer: { kind: "unknown" },
 };

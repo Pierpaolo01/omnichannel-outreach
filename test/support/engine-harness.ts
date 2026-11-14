@@ -170,6 +170,12 @@ export class EngineHarness {
    * minute's polling interval twice over.
    */
   cachedPolls = false;
+  /**
+   * Ticket 20a (PR 56 review bot): during an outage only the reads that carry replies, bounces and sends fail (the
+   * observation, the pre-send check, lookups); account reads, send calls and withdrawals still answer.
+   */
+  partialOutage = false;
+  private static readonly PARTIAL = new Set(["observe", "presendCheck", "lookup"]);
   /** Send calls an outage swallowed: committed by the engine, never received by the provider (the app cannot know which). */
   /** Withdrawal asks an outage swallowed: the engine asked, the provider never heard; the engine counts it as an ask answered unknown. */
   readonly swallowedWithdrawals: { readonly channel: string; readonly key: string; readonly at: number }[] = [];
@@ -191,9 +197,10 @@ export class EngineHarness {
         const value: unknown = Reflect.get(target, prop, receiver);
         if (typeof prop !== "string" || !PORT_CALLS.has(prop) || typeof value !== "function") return value;
         return (...args: unknown[]) => {
-          if (!this.reachable && this.cachedPolls && prop === "observe") return Promise.resolve({ events: [], checkpoint: args[0] ?? "" });
-          if (!this.reachable && this.cachedPolls && prop === "accounts" && this.cachedAccounts.has(target)) return Promise.resolve(this.cachedAccounts.get(target));
-          if (!this.reachable) {
+          const failing = !this.reachable && (!this.partialOutage || EngineHarness.PARTIAL.has(prop));
+          if (failing && this.cachedPolls && prop === "observe") return Promise.resolve({ events: [], checkpoint: args[0] ?? "" });
+          if (failing && this.cachedPolls && prop === "accounts" && this.cachedAccounts.has(target)) return Promise.resolve(this.cachedAccounts.get(target));
+          if (failing) {
             if (prop === "withdraw") {
               const r = args[0] as AttemptRef;
               this.swallowedWithdrawals.push({ channel: target.channel, key: r.idempotencyKey, at: this.clock });
@@ -204,7 +211,8 @@ export class EngineHarness {
             }
             return Promise.reject(new Error("the provider is unreachable"));
           }
-          if (prop === "accounts" || prop === "observe") this.lastReal.set(target, this.clock);
+          // As the adapter does: contact only once the observation, the last read relied on, has answered.
+          if (prop === "observe" && (this.reachable || !this.partialOutage)) this.lastReal.set(target, this.clock);
           const held = this.heldAnswer;
           if (held && held.kind === prop) {
             this.heldAnswer = null;
@@ -342,7 +350,10 @@ export class EngineHarness {
     // Yield to the event loop, so the test runner's worker can answer its RPC on long runs.
     await new Promise((resolve) => setImmediate(resolve));
     this.advanceProviders();
-    if (this.providersDownUntil !== null && this.clock >= this.providersDownUntil) this.providersDownUntil = null;
+    if (this.providersDownUntil !== null && this.clock >= this.providersDownUntil) {
+      this.providersDownUntil = null;
+      this.partialOutage = false;
+    }
     if (this.live && this.standsIn) await this.store.engine.setMeta(HEARTBEAT_KEY, String(this.clock));
     this.beforeTick?.();
     try {

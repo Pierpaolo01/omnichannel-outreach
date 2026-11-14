@@ -1148,7 +1148,11 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
       const from = h.clock;
       await noteWorld("providers-cut-off", from, from + ms);
       features.add(`providers-cut-off-for-${label}`);
-      pending = { x: from, y: from + ms, what: `an outage from ${isoOf(from)} to ${isoOf(from + ms)}` };
+      // Half the outages of runs whose providers report no freshness of their own fail only the reads that carry
+      // replies, bounces and sends (PR 56 review bot): the account reads still answer.
+      h.partialOutage = !h.cachedPolls && random(seed ^ 0x20d ^ Math.floor(from / 60_000))() < 0.5;
+      if (h.partialOutage) features.add("providers-partly-cut-off");
+      pending = { x: from, y: from + ms, what: `${h.partialOutage ? "a partial" : "an"} outage from ${isoOf(from)} to ${isoOf(from + ms)}` };
       outageFrom = from;
       h.cutProvidersOff(from + ms);
       return;

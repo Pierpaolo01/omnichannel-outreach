@@ -26,7 +26,7 @@ function outcomeBody(input: OutcomeInput): string {
 }
 import { UnprovisionedSmsPort, type AttemptRef, type HandoverRequest, type ProviderEvent, type SendPort } from "./ports.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
-import { HEARTBEAT_KEY, NOTICE_KEY, parseInstant, TICK_ENDED_KEY, TICK_FAILED_KEY } from "./worker-state.ts";
+import { FAILED_READ_KEY, HEARTBEAT_KEY, NOTICE_KEY, parseInstant, TICK_ENDED_KEY, TICK_FAILED_KEY } from "./worker-state.ts";
 
 export type CrashPoint = "after_claim" | "after_presend" | "after_handover_commit" | "after_call" | "after_retry_commit" | "after_lookup" | "after_observe_event";
 
@@ -140,6 +140,23 @@ export class Engine {
   private applyingAt: number | null = null;
   /** Ticket 20a: each provider's last actual answer, for a port that does not report its own (`SendPort.contact`). */
   private readonly answeredAt: Record<Channel, number | null> = { email: null, sms: null };
+  /** Ticket 20a: which reads of each provider answered in the current round (a tick, or the dispatch gate's own asking). */
+  private round: Record<Channel, { accounts: boolean; observation: boolean }> = { email: { accounts: false, observation: false }, sms: { accounts: false, observation: false } };
+
+  private newRound(): void {
+    this.round = { email: { accounts: false, observation: false }, sms: { accounts: false, observation: false } };
+  }
+
+  /** A read answered: the round is contact only once every read the engine relies on has answered in it (`contactFrom`). */
+  private readAnswered(channel: Channel, part: "accounts" | "observation"): void {
+    this.round[channel][part] = true;
+    if (this.rules.contactFrom(this.round[channel])) this.answeredAt[channel] = this.clockNow();
+  }
+
+  /** A read failed: the round is not contact, and the read model says which channel and part (ticket 20a). */
+  private async readFailed(channel: Channel, part: "accounts" | "observation"): Promise<void> {
+    await this.store.setMeta(FAILED_READ_KEY, JSON.stringify({ channel, part, at: this.clockNow() }));
+  }
   /** The heartbeat as last read or written by this engine; the dispatch gate re-reads the store before acting on a gap. */
   private heartbeatSeen: number | null = null;
   /** The instant the running tick started, for the rule a mutation replaces (`dispatchInstant`). */
@@ -276,7 +293,10 @@ export class Engine {
     this.heartbeatSeen = parseInstant(await this.store.meta(HEARTBEAT_KEY));
     const decided = this.rules.dispatchInstant(this.tickStarted, this.now());
     if (this.heartbeatSeen !== null && this.rules.interruptionOf(this.heartbeatSeen, decided) === null) return true;
+    // Asked again, every read the engine relies on: the accounts and the observation (whose events are applied as ever).
+    this.newRound();
     await this.syncAccounts();
+    await this.observe();
     const at = this.rules.dispatchInstant(this.tickStarted, this.now());
     const fresh = this.freshHeartbeat(at);
     if (fresh === null) return false;
@@ -303,6 +323,7 @@ export class Engine {
 
   private async runTick(): Promise<void> {
     this.tickStarted = this.now();
+    this.newRound();
     this.heartbeatSeen = parseInstant(await this.store.meta(HEARTBEAT_KEY));
     await this.syncAccounts();
     for (let pass = 0; pass < MAX_PASSES; pass++) {
@@ -423,9 +444,10 @@ export class Engine {
       const statuses = await this.bounded(() => this.ports[channel].accounts(), null);
       if (statuses === null) {
         all = false;
+        await this.readFailed(channel, "accounts");
         continue;
       }
-      this.answeredAt[channel] = this.clockNow();
+      this.readAnswered(channel, "accounts");
       await this.store.upsertAccounts(statuses);
       // An account its provider no longer lists is disconnected: claims for it wait, and Needs attention lists it.
       await this.store.disconnectUnlisted(channel, statuses.map((a) => a.id));
@@ -535,9 +557,10 @@ export class Engine {
       if (observed === null) {
         if (channel === "email") ok = false;
         all = false;
+        await this.readFailed(channel, "observation");
         continue;
       }
-      this.answeredAt[channel] = this.clockNow();
+      this.readAnswered(channel, "observation");
       const { events, checkpoint: next } = observed;
       await this.answered(asked, async () => {
         for (const event of events) {

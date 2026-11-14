@@ -14,6 +14,8 @@ export const NOTICE_KEY = "engine_interruption";
 export const TICK_ENDED_KEY = "engine_tick_ended";
 /** The last instant a tick threw. */
 export const TICK_FAILED_KEY = "engine_tick_failed";
+/** The last read of a provider that failed: `{ channel, part, at }` (ticket 20a: a partial answer is not contact). */
+export const FAILED_READ_KEY = "engine_failed_read";
 /** The worker's lease: `WorkerLease` as JSON. */
 export const LEASE_KEY = "worker_lease";
 
@@ -61,11 +63,28 @@ export async function interruptionNotice(store: Pick<EngineStore, "meta">): Prom
  * to end threw; the last tick ended but a provider did not answer; or no tick has ended since the heartbeat. A database
  * no worker has run on yet (no heartbeat) is not interrupted: nothing is due on it that a worker missed.
  */
-export async function sendingInterrupted(store: Pick<EngineStore, "meta">, now: number): Promise<{ readonly since: number; readonly cause: InterruptionCause } | null> {
+export interface FailedRead {
+  readonly channel: "email" | "sms";
+  readonly part: "accounts" | "observation";
+  readonly at: number;
+}
+
+export function parseFailedRead(raw: string | null): FailedRead | null {
+  try {
+    const v = raw === null ? null : (JSON.parse(raw) as Record<string, unknown>);
+    return v && (v["channel"] === "email" || v["channel"] === "sms") && (v["part"] === "accounts" || v["part"] === "observation") && finite(v["at"]) ? { channel: v["channel"], part: v["part"], at: v["at"] } : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function sendingInterrupted(store: Pick<EngineStore, "meta">, now: number): Promise<{ readonly since: number; readonly cause: InterruptionCause; readonly lastFailedRead: FailedRead | null } | null> {
   const heartbeat = parseInstant(await store.meta(HEARTBEAT_KEY));
   if (heartbeat === null || now - heartbeat <= INTERRUPTION_GAP) return null;
   const ended = parseInstant(await store.meta(TICK_ENDED_KEY)) ?? -Infinity;
   const failed = parseInstant(await store.meta(TICK_FAILED_KEY)) ?? -Infinity;
   const cause: InterruptionCause = failed > heartbeat && failed >= ended ? "ticks_failing" : ended > heartbeat ? "providers_unreachable" : "worker_stalled";
-  return { since: heartbeat, cause };
+  // The provider read that failed last since the heartbeat, if any: which channel and which part.
+  const failedRead = parseFailedRead(await store.meta(FAILED_READ_KEY));
+  return { since: heartbeat, cause, lastFailedRead: failedRead !== null && failedRead.at > heartbeat ? failedRead : null };
 }

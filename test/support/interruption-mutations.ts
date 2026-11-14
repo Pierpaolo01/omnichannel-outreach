@@ -65,6 +65,9 @@ const RULES: Record<string, Partial<Rules>> = {
   // R7, the same rule (PR 56 review bot): the dispatch judged at the tick's start, so a sleep in the middle of a tick
   // dispatches overdue work before the interruption is counted.
   "a dispatch is judged at the tick's start": { dispatchInstant: (started) => started },
+  // R7, the same rule (PR 56 review bot on 13dad92): an account read alone counts as contact, so a provider whose
+  // observation fails while its account reads answer keeps the heartbeat fresh.
+  "contact is marked after the account read only": { contactFrom: (answered) => answered.accounts },
   // R9 (follow-up 42 item 39): a provider answer applied at the instant its request was made.
   "a late answer is applied at the instant its request was made": { answerInstant: (asked) => asked },
 };
@@ -102,6 +105,7 @@ const EXPECTED: Record<string, { invariant: string; seed: number; options?: Part
   "a gap of any length is an interruption": { invariant: "R7", seed: 2 },
   "a late answer is applied at the instant its request was made": { invariant: "P12", seed: 16 },
   "a dispatch is judged at the tick's start": { invariant: "R7", seed: 0 },
+  "contact is marked after the account read only": { invariant: "R7", seed: 5 },
   "no withdrawal retries after recovery": { invariant: "A", seed: 3, options: { withdrawalAcrossARecovery: true } },
 };
 

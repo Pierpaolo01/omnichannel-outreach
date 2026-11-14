@@ -53,6 +53,7 @@ export const INTERRUPTION_FEATURES: readonly string[] = [
   "providers-cut-off-while-paused",
   "providers-cut-off-with-work-unsettled",
   "providers-answering-from-a-cache",
+  "providers-partly-cut-off",
 ];
 
 export const RETIRED_INTERRUPTION_FEATURES: Readonly<Record<string, string>> = {
@@ -61,7 +62,7 @@ export const RETIRED_INTERRUPTION_FEATURES: Readonly<Record<string, string>> = {
 };
 
 /** The names of this family: everything the interruption events add. Other names the runs reach belong to the control runs' lists. */
-const OURS = /^(a-withdrawal-asked-across-a-recovery|app-stopped|providers-cut-off|providers-answering-from-a-cache|a-sleep-in-the-middle-of-a-tick|a-recovery-tick-that-sleeps|a-notice|a-gap|a-crash-during|a-(observe|lookup)-answer|a-reply-during-an-outage)/;
+const OURS = /^(providers-partly-cut-off|a-withdrawal-asked-across-a-recovery|app-stopped|providers-cut-off|providers-answering-from-a-cache|a-sleep-in-the-middle-of-a-tick|a-recovery-tick-that-sleeps|a-notice|a-gap|a-crash-during|a-(observe|lookup)-answer|a-reply-during-an-outage)/;
 /** Whether a behaviour name is the interruption family's: the control runs' own lists leave these to this file's. */
 export const isInterruptionFeature = (name: string): boolean => OURS.test(name);
 const known = (name: string) => INTERRUPTION_FEATURES.includes(name) || name in RETIRED_INTERRUPTION_FEATURES;

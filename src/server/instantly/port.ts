@@ -173,8 +173,14 @@ export class InstantlyEmailPort implements SendPort {
   private readonly subjectCampaign: (subjectId: string) => Promise<SendContext | null>;
   private readonly followUps: FollowUpTransport | null;
   private inboxes: InstantlyAccount[] | null = null;
-  /** The last actual round trip with Instantly (an inbox read or a committed poll); a cached answer is not one (ticket 20a). */
+  /**
+   * The last round trip with Instantly in which every read the engine relies on for safety answered (ticket 20a): the
+   * inbox read and the email observation (replies, bounces, sends; the pre-send check reads the same endpoint), marked
+   * after the poll's commit, never before. An inbox read alone, or a cached or deferred answer, is not contact.
+   */
   private lastRoundTrip: number | null = null;
+  /** The last poll that failed, and which part of its round trip failed. */
+  private lastPollFailure: { readonly at: number; readonly part: "inboxes" | "emails" | "lead_statuses" | "commit" } | null = null;
   private analyticsReadWall: number | null = null;
   private readonly crashPoint: ((point: string) => void) | null;
   /**
@@ -222,7 +228,6 @@ export class InstantlyEmailPort implements SendPort {
     // An inbox list that did not reach its end is not the inbox list.
     if (!read.complete) throw new Error("Instantly accounts could not be read to the end");
     this.inboxes = [...read.items].sort((a, b) => (a.email < b.email ? -1 : a.email > b.email ? 1 : 0));
-    this.lastRoundTrip = this.now();
     return this.inboxes;
   }
 
@@ -304,6 +309,7 @@ export class InstantlyEmailPort implements SendPort {
       followUps: this.followUps ? "available" : "unavailable",
       quota: this.quotaHeld() ? "exhausted" : "available",
       lastPolledAt: lastPoll === null ? null : iso(Number(lastPoll)),
+      lastPollFailure: this.lastPollFailure === null ? null : { at: iso(this.lastPollFailure.at), part: this.lastPollFailure.part },
       inboxes: (this.inboxes ?? []).map((a) => this.inboxView(a)),
     };
   }
@@ -521,19 +527,46 @@ export class InstantlyEmailPort implements SendPort {
     this.store.setMeta(META.lastPollRun, String(now));
     const draft: Draft = { meta: new Map() };
     const previous = this.previousBatch(checkpoint);
-    const inboxes = await this.readInboxes();
+    // Which part of the round trip is under way, so a failure says which part failed (ticket 20a).
+    let part: "inboxes" | "emails" | "lead_statuses" | "commit" = "inboxes";
+    const failed = (error: unknown): never => {
+      this.lastPollFailure = { at: this.now(), part };
+      throw error;
+    };
+    const inboxes = await this.readInboxes().catch(failed);
     await this.readAnalytics();
     const events = new Map<string, ProviderEvent>(previous.replay.map((e) => [e.id, e]));
     const changes: Record<string, readonly [number, number | null]> = { ...previous.unapplied };
     if (this.store.anyDispatched()) {
-      const mailComplete = await this.pollEmails(inboxes, events, draft);
-      await this.pollLeadStatuses(events, changes, draft, previous.applied);
-      await this.releaseHeldReplies(events, draft, mailComplete);
+      part = "emails";
+      const mailComplete = await this.pollEmails(inboxes, events, draft).catch(failed);
+      part = "lead_statuses";
+      await this.pollLeadStatuses(events, changes, draft, previous.applied).catch(failed);
+      await this.releaseHeldReplies(events, draft, mailComplete).catch(failed);
     } else {
+      // Nothing has been handed to Instantly: there is no thread, send or bounce for the observation to carry, and the
+      // first handover's own pre-send check reads the emails before anything goes.
       draft.meta.set(META.lastMailScan, String(now));
     }
+    part = "commit";
     this.crash("observe:before_commit");
     const box: { batch?: Batch } = {};
+    try {
+      this.commitPoll(previous, events, changes, draft, now, box);
+    } catch (error) {
+      failed(error);
+    }
+    const committed = box.batch;
+    if (!committed) throw new Error("the poll was not committed");
+    this.previousPollCommitted = true;
+    // Contact: every read this poll made answered, and it is committed. Marked now, after the last of them.
+    this.lastRoundTrip = this.now();
+    this.crash("observe:after_commit");
+    return { events: committed.events, checkpoint: committed.token };
+  }
+
+  /** The poll's commit: its batch, cursors and held replies, only if no other poll committed since it began. */
+  private commitPoll(previous: ReturnType<InstantlyEmailPort["previousBatch"]>, events: Map<string, ProviderEvent>, changes: Record<string, readonly [number, number | null]>, draft: Draft, now: number, box: { batch?: Batch }): void {
     this.store.transaction(() => {
       // Commit only if no other poll committed since this one began: another process's poll would
       // otherwise be overwritten with its batch, cursors and held replies (ADR 0002 as built, rule 7).
@@ -546,12 +579,6 @@ export class InstantlyEmailPort implements SendPort {
       this.store.setMeta(META.batchSeq, String(seq));
       this.store.setMeta(META.batch, JSON.stringify(batch));
     });
-    const committed = box.batch;
-    if (!committed) throw new Error("the poll was not committed");
-    this.previousPollCommitted = true;
-    this.lastRoundTrip = this.now();
-    this.crash("observe:after_commit");
-    return { events: committed.events, checkpoint: committed.token };
   }
 
   private crash(point: string): void {

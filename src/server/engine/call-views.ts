@@ -305,7 +305,7 @@ export async function callsView(store: OutreachStore, now: number, options: { re
 /** Whether sending is interrupted now, and since when and why (ticket 20a; follow-up 42 item 45). */
 async function sendingInterruptedView(store: OutreachStore, now: number): Promise<SendingInterruptedView | null> {
   const state = await sendingInterrupted(store.engine, now);
-  return state ? { since: iso(state.since), cause: state.cause } : null;
+  return state ? { since: iso(state.since), cause: state.cause, lastFailedRead: state.lastFailedRead ? { channel: state.lastFailedRead.channel, part: state.lastFailedRead.part, at: iso(state.lastFailedRead.at) } : null } : null;
 }
 
 /** The current interruption notice (ticket 20a): one line, kept until the next interruption replaces it (question Q18). */

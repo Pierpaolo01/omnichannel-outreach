@@ -790,6 +790,12 @@ export interface EmailProviderStatus {
   /** "exhausted" after a 402 or an exhausted lead quota: every dispatch handover waits. */
   readonly quota: "available" | "exhausted";
   readonly lastPolledAt: string | null;
+  /**
+   * The last poll that failed, and the part of its round trip that failed (ticket 20a): `inboxes`, `emails` (the
+   * observation that carries replies, bounces and sends), `lead_statuses` or `commit`. A partial answer is not contact
+   * with the provider. Null when none has failed since the application started.
+   */
+  readonly lastPollFailure: { readonly at: string; readonly part: "inboxes" | "emails" | "lead_statuses" | "commit" } | null;
   readonly inboxes: readonly {
     readonly id: string;
     /** Instantly's account status: 1 Active, 2 Paused, 3 maintenance, -1 to -3 errors. */
@@ -1012,6 +1018,8 @@ export interface InterruptionNoticeView {
 export interface SendingInterruptedView {
   readonly since: string;
   readonly cause: "ticks_failing" | "providers_unreachable" | "worker_stalled";
+  /** The provider read that failed last since then, and which part of the round: a partial answer is not contact. */
+  readonly lastFailedRead: { readonly channel: "email" | "sms"; readonly part: "accounts" | "observation"; readonly at: string } | null;
 }
 
 /** GET /api/calls: the focus queue. The focused task is the first ready now; the queue moves on only after an outcome. */

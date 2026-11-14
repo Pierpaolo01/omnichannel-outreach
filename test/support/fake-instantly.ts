@@ -74,6 +74,8 @@ export class FakeInstantly {
   readonly skipping = new Map<string, VerificationStatusCode | null>();
   /** Answer every request with this status and its documented error body (402, 429, 500). */
   failWith: number | null = null;
+  /** Ticket 20a (PR 56 review bot): one endpoint failing with a status while the rest answer, by path. */
+  readonly failPaths = new Map<string, number>();
   /** Answer only `bulkAddLeads` with this status. */
   failAddWith: number | null = null;
   /** `bulkAddLeads` processes the lead, then the connection drops before its answer arrives. */
@@ -119,6 +121,8 @@ export class FakeInstantly {
     if (!headers.get("user-agent")) return error(403, "Forbidden", "Forbidden");
     if (headers.get("authorization") !== `Bearer ${this.apiKey}`) return error(401, "Unauthorized", "Unauthorized");
     if (this.failWith !== null) return this.failure(this.failWith);
+    const failing = this.failPaths.get(url.pathname);
+    if (failing !== undefined) return this.failure(failing);
     const gate = this.gates.get(`${method} ${url.pathname}`);
     if (gate) await gate.promise;
     return this.route(method, url, body);

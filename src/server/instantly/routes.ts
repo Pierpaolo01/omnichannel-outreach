@@ -7,7 +7,7 @@ import type { InstantlyStatus } from "./port.ts";
 /** The email port when it can describe itself: the Instantly adapter. */
 export type EmailProviderSource = Pick<SendPort, "transportFor"> & { status(): InstantlyStatus };
 
-const NONE: EmailProviderStatus = { provider: "none", sending: "off", followUps: "unavailable", quota: "available", lastPolledAt: null, inboxes: [], waitingFollowUps: [] };
+const NONE: EmailProviderStatus = { provider: "none", sending: "off", followUps: "unavailable", quota: "available", lastPolledAt: null, lastPollFailure: null, inboxes: [], waitingFollowUps: [] };
 
 /**
  * GET /api/email-provider (ticket 12c), additive and read-only: the email provider, its sender
