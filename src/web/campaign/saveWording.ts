@@ -16,8 +16,8 @@ export interface SaveWording {
 
 const NOTHING: SaveWording = { label: null, problem: false, conflict: null };
 
-export function saveWording(save: SaveStatus, launched: boolean): SaveWording {
-  if (launched) return NOTHING;
+export function saveWording(save: SaveStatus, launched: boolean, unsaved = false): SaveWording {
+  if (launched) return runningWording(save, unsaved);
   switch (save.kind) {
     case "idle":
       return NOTHING;
@@ -34,5 +34,27 @@ export function saveWording(save: SaveStatus, launched: boolean): SaveWording {
       return save.saved
         ? { label: "Changed elsewhere", problem: true, conflict: "Your last change was saved, then changed there. Load the saved version to carry on." }
         : { label: "Not saved", problem: true, conflict: "What you typed is still here, but it is not saved. Loading the saved version replaces it." };
+  }
+}
+
+/**
+ * A running campaign's changes stay on the page until the user applies them (ADR 0003 "Ticket 19", Q20): "Not applied"
+ * while the page holds changes, "Applying…" while they go, "Applied" once the server took them.
+ */
+function runningWording(save: SaveStatus, unsaved: boolean): SaveWording {
+  switch (save.kind) {
+    case "idle":
+      return unsaved ? { label: "Not applied", problem: false, conflict: null } : NOTHING;
+    case "saving":
+      return { label: "Applying…", problem: false, conflict: null };
+    case "saved":
+      return unsaved ? { label: "Not applied", problem: false, conflict: null } : { label: "Applied", problem: false, conflict: null };
+    case "error":
+    case "invalid":
+      return { label: "Not applied", problem: true, conflict: null };
+    case "conflict":
+      return save.saved
+        ? { label: "Changed elsewhere", problem: true, conflict: "Your last change was applied, then changed there. Load the saved version to carry on." }
+        : { label: "Not applied", problem: true, conflict: "What you changed is still here, but it is not applied. Loading the saved version replaces it." };
   }
 }

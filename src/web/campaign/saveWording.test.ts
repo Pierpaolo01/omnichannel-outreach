@@ -25,9 +25,24 @@ describe("one wording for every save state", () => {
     for (const [status, wording] of cases as [SaveStatus, SaveWording][]) {
       test(`${kind}${status.kind === "conflict" ? (status.saved ? ", this page's change saved" : ", not saved") : ""}`, () => {
         expect(saveWording(status, false)).toEqual(wording);
-        // Once launched, no save state is shown.
-        expect(saveWording(status, true)).toEqual({ label: null, problem: false, conflict: null });
       });
     }
+  }
+});
+
+describe("a running campaign's changes are applied, not saved as typed (ticket 19, Q20)", () => {
+  const cases: [SaveStatus, boolean, string | null][] = [
+    [{ kind: "idle" }, false, null],
+    [{ kind: "idle" }, true, "Not applied"],
+    [{ kind: "saving" }, true, "Applying…"],
+    [{ kind: "saved" }, false, "Applied"],
+    [{ kind: "saved" }, true, "Not applied"],
+    [{ kind: "error", message: "Refused." }, true, "Not applied"],
+    [{ kind: "invalid", message: "Empty." }, true, "Not applied"],
+  ];
+  for (const [status, unsaved, label] of cases) {
+    test(`${status.kind}${unsaved ? ", with changes on the page" : ""}`, () => {
+      expect(saveWording(status, true, unsaved).label).toBe(label);
+    });
   }
 });

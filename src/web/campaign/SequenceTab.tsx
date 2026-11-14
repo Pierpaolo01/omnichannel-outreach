@@ -31,6 +31,7 @@ import {
   withFallback,
 } from "./model.ts";
 import { saveWording } from "./saveWording.ts";
+import { RunningChanges } from "./RunningChanges.tsx";
 import type { SequenceEditor } from "./useSequence.ts";
 
 /** The address for every email collapsed. */
@@ -172,6 +173,8 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
   }
 
   return (
+    <div className="flex flex-col gap-4">
+    {editor.launched && <RunningChanges campaignId={campaignId} editor={editor} />}
     <div className={`grid grid-cols-1 items-start gap-4 ${selected ? "min-[1020px]:grid-cols-[minmax(0,1fr)_430px]" : ""}`}>
       <Canvas tracks={tracks} branchTracks={branchTracks} selectedId={selected?.id ?? null} editor={editor} onSelect={(id) => select(selected?.id === id ? null : id)} onAdd={add} />
       {selected?.channel === "call" && (
@@ -218,6 +221,7 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
           }}
         />
       )}
+    </div>
     </div>
   );
 }
@@ -333,7 +337,7 @@ function Canvas({
   const node = (t: TrackDefinition) => <TrackNode track={t} def={editor.draft} selected={selectedId === t.id} blockers={editor.view.launch.blockers} launched={editor.launched} onSelect={() => onSelect(t.id)} />;
   const tree = (of: ReturnType<typeof treeOf>, count: number, root: string, name: string, room: number) => <Tree of={of} count={count} node={node} rootLabel={root} name={name} def={editor.draft} stacked={stacked} room={room} />;
   const box = showBranch && (
-    <WinBackBox empty={branchTracks.length === 0} launched={editor.launched} locked={editor.locked} stacked={stacked} gutter={gutter} width={branchWidth} onAdd={(channel) => onAdd(channel, "win_back")}>
+    <WinBackBox empty={branchTracks.length === 0} launched={false} locked={editor.locked} stacked={stacked} gutter={gutter} width={branchWidth} onAdd={(channel) => onAdd(channel, "win_back")}>
       {branchTracks.length > 0 && tree(branch, branchTracks.length, branchRootLabel, "Win-back tracks that start when a lead enters the branch", (width ?? 0) - 2 * BRANCH_INSET)}
     </WinBackBox>
   );
@@ -352,7 +356,7 @@ function Canvas({
             </span>
           )}
         </p>
-        {!editor.launched && <AddTrackMenu disabled={editor.locked} onAdd={onAdd} />}
+        <AddTrackMenu disabled={editor.locked} onAdd={onAdd} />
       </div>
       {/* A tree, centred, while the tracks fit side by side; an outline when they would not. Launch
           stays in view as the canvas scrolls. */}
@@ -811,7 +815,7 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
               onRemove={() => {
                 // Focus goes to the message that takes this one's place, or the one before the last.
                 const survivor = steps[i + 1] ?? steps[i - 1];
-                changeTrack((t) => removeStep(t, step.id));
+                changeTrack((t) => removeStep(t, step.id, editor.launched));
                 if (survivor) onFocusStep(survivor.id);
               }}
             />
@@ -885,7 +889,6 @@ function EditorNotices({ editor, onLoadedStored }: { editor: SequenceEditor; onL
           {editor.problems.join(" ")} Nothing is saved until this is fixed.
         </p>
       )}
-      {editor.launched && <p className="rounded-field bg-raised px-3 py-2 text-[13.5px] text-ink-2">This campaign is running. Editing a running campaign arrives with a later release.</p>}
       {(editor.launching || editor.loading) && (
         <p role="status" className="rounded-field bg-raised px-3 py-2 text-[13.5px] text-ink-2">
           {editor.launching ? "Launching. Editing is paused until the launch answers." : "Loading the saved version. Editing is paused until it arrives."}
@@ -900,7 +903,8 @@ function RemoveTrack({ track, editor, onRemoved }: { track: TrackDefinition; edi
   const [removal, setRemoval] = useState<string | null>(null);
   const removalId = useId();
   const name = trackName(editor.draft, track);
-  if (editor.launched) return null;
+  // On a running campaign a track is marked removed, never deleted: leads that started it keep running it (ticket 19).
+  const op = { kind: "remove" as const, trackId: track.id, mark: editor.launched };
   return (
     <div className="flex flex-col items-start gap-1.5 border-t border-line pt-3.5">
       <button
@@ -909,14 +913,14 @@ function RemoveTrack({ track, editor, onRemoved }: { track: TrackDefinition; edi
         disabled={editor.locked}
         aria-describedby={removal ? removalId : undefined}
         onClick={() => {
-          const out = arrange(editor.draft, { kind: "remove", trackId: track.id });
+          const out = arrange(editor.draft, op);
           if (!out.ok) {
             setRemoval(out.reason);
             return;
           }
           let result = out.definition;
           editor.update((d) => {
-            const again = arrange(d, { kind: "remove", trackId: track.id });
+            const again = arrange(d, op);
             if (again.ok) result = again.definition;
             return again.ok ? again.definition : d;
           });
@@ -967,8 +971,7 @@ function PhoneInspector({ track, editor, onEditBranch, onLoadedStored, onClose, 
             value={editor.draft.callScript ?? ""}
             // Once running, the script is read, not edited: read-only, so it can still be reached,
             // scrolled and copied. While a launch or a load is pending, authoring is locked (1.1.1).
-            readOnly={editor.launched}
-            disabled={locked && !editor.launched}
+            disabled={locked}
             placeholder="Talking points for your calls"
             aria-describedby={scriptHint}
             onChange={(e) => editor.update((d) => ({ ...d, callScript: e.target.value }))}
@@ -1113,7 +1116,7 @@ const messageCount = (t: TrackDefinition): string => {
 };
 
 function SaveStatus({ editor }: { editor: SequenceEditor }) {
-  const text = saveWording(editor.save, editor.launched).label ?? "";
+  const text = saveWording(editor.save, editor.launched, editor.unsaved).label ?? "";
   return (
     <span role="status" className="text-[12.5px] text-muted">
       {text}
@@ -1249,7 +1252,7 @@ function StepBlock({ channel, step, index, steps, open, facts, editor, onToggle,
               )}
             </div>
             {/* Once launched the counts would leave out leads that ended, so none is shown (PR 41 council, item 4). */}
-            <Fallbacks step={step} noun={noun} facts={locked ? null : facts} onChange={onChange} />
+            <Fallbacks step={step} noun={noun} facts={locked || editor.launched ? null : facts} onChange={onChange} />
             {steps.length > 1 && !locked && (
               <div>
                 <button type="button" className="btn btn-sm btn-ghost px-2 font-medium text-muted" onClick={onRemove}>
@@ -1478,7 +1481,6 @@ function StartsControl({ track, editor }: { track: TrackDefinition; editor: Sequ
     });
     return true;
   };
-  if (editor.launched) return <>{capitalise(startsText(editor.draft, track))}</>;
   const after = track.start.kind === "after" ? track.start : null;
   return (
     <div className="flex flex-col gap-1.5">
@@ -1586,7 +1588,7 @@ export function ConflictNotice({ editor, onLoaded }: { editor: SequenceEditor; o
     <div role="alert" className="flex flex-wrap items-center gap-3 rounded-box bg-crit-soft px-4 py-3 text-[14px]">
       <span className="min-w-0 flex-[1_1_320px]">
         <b className="font-semibold text-crit">This campaign was changed elsewhere since this page loaded it.</b>{" "}
-        <span className="text-ink-2">{saveWording(editor.save, editor.launched).conflict}</span>
+        <span className="text-ink-2">{saveWording(editor.save, editor.launched, editor.unsaved).conflict}</span>
       </span>
       <button
         type="button"

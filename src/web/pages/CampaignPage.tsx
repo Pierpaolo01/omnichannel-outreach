@@ -62,7 +62,7 @@ function Campaign({ detail, editor, tab, controls }: { detail: CampaignDetail; e
   const { campaign, imports, leadCount } = detail;
   const { view } = editor;
   const blockers = view.launch.blockers.length;
-  const wording = saveWording(editor.save, editor.launched);
+  const wording = saveWording(editor.save, editor.launched, editor.unsaved);
   const lastImport = imports[0];
   // The header, with Pause campaign or Resume campaign once the read allows either (ticket 17b), its confirmation and
   // its state under it, then the Paused banner.
@@ -114,12 +114,9 @@ function Campaign({ detail, editor, tab, controls }: { detail: CampaignDetail; e
           <PausedBanner read={detail} />
         </div>
       )}
-      {editor.launched && (
-        <p className="mt-4 rounded-box border border-line bg-base-100 px-4 py-3 text-[14px] text-ink-2">
-          {/* While paused, nothing goes out on its own: the Paused banner says so, and this sentence would not be true (ticket 17b). */}
-          {detail.pause.paused ? "" : `${sendsOnItsOwn(editor.view.definition)} `}Editing a running campaign arrives with a later release.
-        </p>
-      )}
+      {/* While paused, nothing goes out on its own: the Paused banner says so, and this sentence would not be true (ticket 17b).
+          How the running campaign is edited is said on its Sequence tab (ticket 19). */}
+      {editor.launched && !detail.pause.paused && <p className="mt-4 rounded-box border border-line bg-base-100 px-4 py-3 text-[14px] text-ink-2">{sendsOnItsOwn(editor.view.definition)}</p>}
 
       <nav aria-label="Campaign" className="mt-3.5 flex flex-wrap gap-1 border-b border-line">
         <TabLink href={campaignPath(campaign.id)} current={tab === "sequence"}>

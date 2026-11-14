@@ -23,8 +23,14 @@ export interface SequenceEditor {
   readonly launching: boolean;
   /** The stored version is loading after a conflict: authoring is locked until it arrives. */
   readonly loading: boolean;
-  /** Editing is locked (launched, or a launch or load pending): every authoring control reads this, and edits are refused. */
+  /** Editing is locked (a launch, a load or an apply pending): every authoring control reads this, and edits are refused. */
   readonly locked: boolean;
+  /** A running campaign's changes are being applied (ticket 19). */
+  readonly applying: boolean;
+  /** Applies a running campaign's changes, through the same ordered save path. */
+  readonly apply: () => Promise<void>;
+  /** Sets aside a running campaign's changes that were not applied. */
+  readonly discard: () => void;
   readonly update: (change: (draft: CampaignDefinition) => CampaignDefinition) => void;
   readonly retrySave: () => void;
   /** After a conflict: replaces the draft with the stored version, setting aside what was typed. Resolves true once it has. */
@@ -90,6 +96,12 @@ export function useSequence(campaignId: string) {
       if (event.persisted) void store.restored();
     };
     const online = () => store.online();
+    // A running campaign's changes go only when applied (ticket 19, Q20): leaving with some asks first.
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      const now = store.getSnapshot();
+      if (now.view.launchedAt !== null && now.unsaved) event.preventDefault();
+    };
+    window.addEventListener("beforeunload", beforeUnload);
     window.addEventListener("pagehide", leavePage);
     window.addEventListener("pageshow", back);
     window.addEventListener("online", online);
@@ -97,6 +109,7 @@ export function useSequence(campaignId: string) {
       window.removeEventListener("pagehide", leavePage);
       window.removeEventListener("pageshow", back);
       window.removeEventListener("online", online);
+      window.removeEventListener("beforeunload", beforeUnload);
       store.dispose();
     };
   }, [store]);
@@ -113,6 +126,9 @@ export function useSequence(campaignId: string) {
           launching: snapshot.pending === "launch",
           loading: snapshot.pending === "load",
           locked: snapshot.locked,
+          applying: snapshot.pending === "apply",
+          apply: () => store.apply(),
+          discard: () => store.discard(),
           update: (change) => store.update(change),
           retrySave: () => store.retrySave(),
           loadStored: async () => {
