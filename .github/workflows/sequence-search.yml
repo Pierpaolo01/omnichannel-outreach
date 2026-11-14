@@ -12,6 +12,9 @@ name: sequence-search
 # The same command runs the ticket 13 track generator (src/server/sequence-runs-tracks*.test.ts)
 # and the ticket 14 call generator (src/server/sequence-runs-calls*.test.ts): their 100 seeds and a
 # seed search per mutation, sharded the same way; each of their runs takes a few seconds.
+# Each shard then runs its share of the save rule's generated test (ADR 0003 1.1.1,
+# src/web/campaign/saveQueue.generated.test.ts): 2,000 seeds in all, every eighth to a shard, each
+# run a few dozen milliseconds. `pnpm check` runs 200 of them and every seed that once failed.
 
 on:
   workflow_dispatch:
@@ -40,6 +43,13 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm test:sequence-search
         timeout-minutes: 80
+        env:
+          CI: "true"
+          SEQUENCE_SHARD: ${{ matrix.shard }}/8
+      - run: pnpm test:save-search
+        # Its own result, whatever the engine's search found in this shard.
+        if: ${{ !cancelled() }}
+        timeout-minutes: 15
         env:
           CI: "true"
           SEQUENCE_SHARD: ${{ matrix.shard }}/8

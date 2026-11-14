@@ -106,6 +106,18 @@ describe("no answer replaces a draft newer than the one it answered (invariant 6
     expect(h.puts.map((p) => [p.subject, p.version])).toEqual([["After loading", 2]]);
   });
 
+  test("an edit that makes the draft one that cannot be saved shows Not saved at once, never Saving…, and fixing it saves", async () => {
+    const h = harness();
+    h.store.update((d) => ({ ...d, tracks: d.tracks.map((t) => ({ ...t, window: [] })) }));
+    expect(h.store.getSnapshot().save).toEqual({ kind: "invalid", message: "Choose at least one sending day." });
+    h.fire();
+    await h.settle();
+    expect(h.puts).toHaveLength(0);
+    expect(h.store.getSnapshot().save.kind).toBe("invalid");
+    h.store.update((d) => ({ ...d, tracks: d.tracks.map((t) => ({ ...t, window: [{ day: 2, start: 9, end: 17 }] })) }));
+    expect(h.store.getSnapshot().save.kind).toBe("saving");
+  });
+
   test("a save's answer replaces the draft only if no edit came after it", async () => {
     const h = harness();
     h.type("First");

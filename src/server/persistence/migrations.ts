@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { OUTREACH_STATUSES } from "../../domain/outreach-status.ts";
 
@@ -16,6 +17,8 @@ interface Migration {
   readonly version: number;
   readonly name: string;
   readonly sql: string;
+  /** What SQL alone cannot compute, run after `sql` in the same transaction. */
+  readonly data?: (db: DatabaseSync) => void;
 }
 
 const statusList = OUTREACH_STATUSES.map((s) => `'${s}'`).join(", ");
@@ -530,6 +533,33 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX notes_by_owner ON notes(owner_kind, owner_id, at_wall);
     `,
   },
+  {
+    version: 13,
+    name: "each editing session's newest accepted save of a campaign's definition (ADR 0003 1.1.1, the generated save test's seeds 7369 and 7729)",
+    // The campaign row names only the session that wrote last, so once another page saved, a late or
+    // retried save of a page that had saved before was refused as a conflict, and that page said its
+    // change was not saved. Each session's newest accepted number, and a hash of what it stored, are
+    // kept here. The writer at the time of this migration is known from the campaign row.
+    sql: `
+      CREATE TABLE definition_saves (
+        campaign_id TEXT NOT NULL REFERENCES campaigns(id),
+        session TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        content_sha256 TEXT,
+        PRIMARY KEY (campaign_id, session)
+      );
+      INSERT INTO definition_saves (campaign_id, session, seq, content_sha256)
+        SELECT id, definition_session, definition_seq, NULL FROM campaigns WHERE definition_session IS NOT NULL AND definition_seq IS NOT NULL;
+    `,
+    // The hash of what the writer stored, as `saveDefinition` hashes a save, so a retry of its save
+    // after another page replaced it is `replaced` on an upgraded database too (council on aebeb80, item 1).
+    data: (db) => {
+      const update = db.prepare("UPDATE definition_saves SET content_sha256 = ? WHERE campaign_id = ?");
+      for (const row of db.prepare("SELECT s.campaign_id, c.definition FROM definition_saves s JOIN campaigns c ON c.id = s.campaign_id WHERE c.definition IS NOT NULL").all()) {
+        update.run(createHash("sha256").update(String(row["definition"])).digest("hex"), String(row["campaign_id"]));
+      }
+    },
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string): void {
@@ -555,6 +585,7 @@ export function migrate(db: DatabaseSync, appliedAt: () => string): void {
     db.exec("BEGIN IMMEDIATE");
     try {
       db.exec(migration.sql);
+      migration.data?.(db);
       db.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(
         migration.version,
         migration.name,
