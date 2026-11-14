@@ -10,7 +10,7 @@ import type { CallsView, CallTaskView, EnrollmentProgress, LeadSearchResult } fr
 
 /**
  * Migration 13 (ticket 15a): call records gain whether the user asked for a redial and the time a
- * prospect asked to be called back. A database written before it holds calls logged by ticket 14,
+ * prospect asked to be called back, and call tasks how far their skip limit has been judged. A database written before it holds calls logged by ticket 14,
  * which had neither: after the upgrade they read as no redial and no callback time, and the lead's
  * open call carries on under the new rules. Fictitious data only.
  */
@@ -48,6 +48,7 @@ describe("migration 13 on a database with calls logged before it", () => {
       DROP INDEX call_tasks_open_callbacks;
       ALTER TABLE call_attempts DROP COLUMN redial;
       ALTER TABLE call_attempts DROP COLUMN callback_at;
+      ALTER TABLE call_tasks DROP COLUMN reckoned_through;
       DELETE FROM schema_migrations WHERE version >= 13;
     `);
     db.close();
@@ -58,6 +59,9 @@ describe("migration 13 on a database with calls logged before it", () => {
     const enrollment = (await after.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows[0]?.enrollments[0]?.id ?? "";
     const progress = (await after.request<EnrollmentProgress>("GET", `/api/enrollments/${enrollment}`)).body;
     expect(progress.tracks.find((t) => t.trackId === "p1")?.steps[0]?.calls).toEqual([expect.objectContaining({ outcome: "no_answer", note: "Rang out.", redial: false, callbackAt: null })]);
+    // An open task is judged from its placement: no day of it had been judged before the skip limit existed.
+    const open = (await after.store.engine.subject(enrollment, after.clock))?.callTasks.find((t) => t.open);
+    expect(open?.reckonedThrough).toBe(open?.placedWall);
     expect((await after.request("POST", `/api/call-tasks/${second?.taskId}/outcome`, { requestId: "r2", outcome: "callback_requested", callbackAt: "2026-11-03T10:00:00Z", numberId: number })).status).toBe(200);
     expect((await after.request<EnrollmentProgress>("GET", `/api/enrollments/${enrollment}`)).body.status).toBe("callback_scheduled");
     await after.store.close();
