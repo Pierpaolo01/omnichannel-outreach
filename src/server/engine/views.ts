@@ -9,7 +9,7 @@ import { relevantChannels, waitingOn } from "../../domain/sequence/providers.ts"
 import { providerEvidence, sendingInterrupted } from "./worker-state.ts";
 import { channelOf, deriveStatus, liveTracksFor, unreachableWhy, wallAtLead } from "../../domain/sequence/progress.ts";
 import type { AccountState, SubjectState } from "../../domain/sequence/state.ts";
-import type { EnrollmentProgress, NeedsAttention, SenderAccountViewApi } from "../../shared/api.ts";
+import type { AttentionLead, EnrollmentProgress, NeedsAttention, SenderAccountViewApi } from "../../shared/api.ts";
 import type { EngineStore } from "./engine-store.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 
@@ -124,12 +124,21 @@ export function accountView(a: AccountState, label: string): SenderAccountViewAp
   };
 }
 
+/**
+ * Needs attention as the engine decides it: every list of the HTTP read, with each lead entry by its ids only. The
+ * route adds whose lead each is (`needsAttentionView` in call-views.ts, ticket 20b); nothing else is added there.
+ */
+export type EngineNeedsAttention = Omit<NeedsAttention, "waitingForCapacity" | "noUsableChannel"> & {
+  readonly waitingForCapacity: readonly Omit<NeedsAttention["waitingForCapacity"][number], keyof AttentionLead>[];
+  readonly noUsableChannel: readonly Omit<NeedsAttention["noUsableChannel"][number], keyof AttentionLead>[];
+};
+
 export async function needsAttention(
   store: EngineStore,
   now: number,
   rules: Pick<Rules, "asOfAction" | "evaluate"> = DEFAULT_RULES,
   transportAvailable: (channel: "email" | "sms", threading: "new_subject" | "continue_thread") => boolean = () => true,
-): Promise<NeedsAttention> {
+): Promise<EngineNeedsAttention> {
   const accounts = await store.accounts(now);
   const open = await store.openAttempts();
   // Unresolved provider work keeps its reservation; each inbox it holds is listed with how many of
@@ -157,7 +166,7 @@ export async function needsAttention(
     heldCapacity.push({ accountId: acc.id, held: held.length, capacity: acc.capacity, sentToday: await store.sentToday(acc.id, now), work });
   }
   const heldTracks: NeedsAttention["heldTracks"][number][] = [];
-  const waitingForCapacity: NeedsAttention["waitingForCapacity"][number][] = [];
+  const waitingForCapacity: EngineNeedsAttention["waitingForCapacity"][number][] = [];
   const waitingOnTransport: NeedsAttention["waitingOnTransport"][number][] = [];
   // Ticket 20a (council B): while sending is interrupted, which providers the gate holds due sends on, by its own function.
   const interrupted = await sendingInterrupted(store, now);
@@ -200,7 +209,7 @@ export async function needsAttention(
   }
   // Ticket 20a (follow-up 42 item 50): every lead that ended with no usable channel, from any cause, most recent first,
   // with why each channel of its branch cannot reach it. It stays listed: the ending is final (question Q20).
-  const noUsableChannel: NeedsAttention["noUsableChannel"][number][] = [];
+  const noUsableChannel: EngineNeedsAttention["noUsableChannel"][number][] = [];
   for (const id of await store.endedSubjectIds("finished_no_usable_channel")) {
     const s = await store.subject(id, now);
     if (!s) continue;

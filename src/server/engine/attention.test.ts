@@ -35,17 +35,31 @@ async function world(capacity: number, def: CampaignDefinition, people = [PAT, N
   expect((await h.launch(campaign.id)).status).toBe(200);
   const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows;
   const lead = (who: string) => rows.find((r) => r.name === who)?.enrollments[0]?.id ?? "";
+  const personId = (who: string) => rows.find((r) => r.name === who)?.id ?? "";
   const attention = async () => (await h.request<NeedsAttention>("GET", "/api/needs-attention")).body;
-  return { h, campaignId: campaign.id, lead, attention };
+  return { h, campaignId: campaign.id, lead, personId, attention };
 }
 
 describe("leads waiting for sending capacity", () => {
   test("a lead whose step is due and claimable but whose inbox is full for the day, until the inbox resets", async () => {
-    const { h, campaignId, lead, attention } = await world(2, definition([track("e1", "email", [email("s1")])]));
+    const { h, campaignId, lead, personId, attention } = await world(2, definition([track("e1", "email", [email("s1")])]));
     await h.advanceTo(MONDAY_9 + H);
     expect(h.fake.handoverLog).toHaveLength(2);
     expect((await attention()).waitingForCapacity).toEqual([
-      { enrollmentId: lead("Sam Reed"), campaignId, trackId: "e1", stepId: "s1", channel: "email", dueAt: new Date(MONDAY_9).toISOString(), accountIds: ["inbox-a"], resetsAt: "2026-11-03T00:00:00.000Z" },
+      {
+        enrollmentId: lead("Sam Reed"),
+        campaignId,
+        // Ticket 20b: whose lead it is and in which campaign, so Today names them and links to the record.
+        person: { id: personId("Sam Reed"), name: "Sam Reed" },
+        company: { id: expect.any(String), name: "Harbour Lane Physio" },
+        campaign: { id: campaignId, name: "Clinics" },
+        trackId: "e1",
+        stepId: "s1",
+        channel: "email",
+        dueAt: new Date(MONDAY_9).toISOString(),
+        accountIds: ["inbox-a"],
+        resetsAt: "2026-11-03T00:00:00.000Z",
+      },
     ]);
     await h.advanceTo(Date.parse("2026-11-03T01:00:00Z"));
     expect((await attention()).waitingForCapacity).toEqual([]);
@@ -64,11 +78,17 @@ describe("leads left with no usable channel", () => {
   test("from any cause, with why each channel of the branch cannot reach them", async () => {
     const def = definition([track("e1", "email", [email("s1"), email("s2", 1)])]);
     // Rob has no email: he ends at launch. Pat's only email bounces.
-    const { h, campaignId, lead, attention } = await world(50, def, [PAT, ROB], ["pat@harbour.example"]);
+    const { h, campaignId, lead, personId, attention } = await world(50, def, [PAT, ROB], ["pat@harbour.example"]);
     await h.advanceTo(MONDAY_9 + 2 * H);
     const listed = (await attention()).noUsableChannel;
     expect(listed.map((x) => x.enrollmentId).sort()).toEqual([lead("Pat Oneil"), lead("Rob Lane")].sort());
-    expect(listed.find((x) => x.enrollmentId === lead("Rob Lane"))).toMatchObject({ campaignId, channels: [{ channel: "email", why: "missing" }] });
+    expect(listed.find((x) => x.enrollmentId === lead("Rob Lane"))).toMatchObject({
+      campaignId,
+      person: { id: personId("Rob Lane"), name: "Rob Lane" },
+      company: { name: "Harbour Lane Physio" },
+      campaign: { id: campaignId, name: "Clinics" },
+      channels: [{ channel: "email", why: "missing" }],
+    });
     expect(listed.find((x) => x.enrollmentId === lead("Pat Oneil"))).toMatchObject({ campaignId, channels: [{ channel: "email", why: "bad" }] });
   });
 });

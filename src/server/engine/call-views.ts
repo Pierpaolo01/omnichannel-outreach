@@ -5,11 +5,13 @@
  */
 import { bucketOf, CALL_OUTCOMES, callNumbers, callWindow, dayHasRoom, goodNumbers, isListed, listedForDay, queueRank, queueWall, recordedNumberOf, REDIAL_OUTCOMES, skipLimitOf, skippedTonight, unworkedSkipDay, type CallBucket } from "../../domain/sequence/calls.ts";
 import { interruptionNotice, sendingInterrupted } from "./worker-state.ts";
+import { needsAttention } from "./views.ts";
 import { displayPhone } from "../../domain/phone.ts";
 import { localDayNumber, nextWindowClose, nextWindowOpen, startOfLocalDay, windowOpen } from "../../domain/sequence/clock.ts";
 import { declinedPathOf, liveTracks, winBackAvailable, type DeclinedPath } from "../../domain/sequence/definition.ts";
 import { callbackHold, deriveStatus } from "../../domain/sequence/progress.ts";
 import type { CallAttempt, CallNumber, CallTask, RecordedNumber, SubjectState } from "../../domain/sequence/state.ts";
+import type { AttentionLead, NeedsAttention } from "../../shared/api.ts";
 import type { CallColleagueView, CallNumberView, CallOffListView, CallQueueItem, CallRecordView, CallTaskView, CallsView, DeclinePreviewView, InterruptionNoticeView, NoteView, PausedCampaignCalls, RecordCallView, RecordCalls, RecordedNumberView, SendingInterruptedView, SkipLimitView, TodayView, TouchView } from "../../shared/api.ts";
 import type { OutreachStore } from "../persistence/store.ts";
 import { DEFAULT_DAILY_CALL_CAPACITY } from "../persistence/sqlite-engine-store.ts";
@@ -338,6 +340,31 @@ async function sendingInterruptedView(store: OutreachStore, now: number): Promis
 async function noticeView(store: OutreachStore): Promise<InterruptionNoticeView | null> {
   const notice = await interruptionNotice(store.engine);
   return notice ? { from: iso(notice.from), to: iso(notice.to), rescheduled: notice.rescheduled } : null;
+}
+
+/**
+ * GET /api/needs-attention (ticket 20b): the engine's read, with whose lead each lead entry is, by the same parties the
+ * call list names. Names only: every state, count and instant is the engine's, from its one read.
+ */
+export async function needsAttentionView(store: OutreachStore, now: number, rules: Pick<Rules, "asOfAction" | "evaluate">, transportAvailable: Parameters<typeof needsAttention>[3]): Promise<NeedsAttention> {
+  const read = await needsAttention(store.engine, now, rules, transportAvailable);
+  const named = new Map<string, AttentionLead>();
+  const lead = async (enrollmentId: string): Promise<AttentionLead> => {
+    const known = named.get(enrollmentId);
+    if (known) return known;
+    const p = await partiesOf(store, enrollmentId);
+    const out: AttentionLead = p
+      ? { person: p.person ? { id: p.person.id, name: p.person.name } : null, company: p.company, campaign: p.campaign }
+      : // Unreachable: every engine subject is an enrollment row. Named blank rather than dropped, so no entry is hidden.
+        { person: null, company: { id: "", name: "" }, campaign: { id: "", name: "" } };
+    named.set(enrollmentId, out);
+    return out;
+  };
+  const waitingForCapacity = [];
+  for (const w of read.waitingForCapacity) waitingForCapacity.push({ ...w, ...(await lead(w.enrollmentId)) });
+  const noUsableChannel = [];
+  for (const n of read.noUsableChannel) noUsableChannel.push({ ...n, ...(await lead(n.enrollmentId)) });
+  return { ...read, waitingForCapacity, noUsableChannel };
 }
 
 /** How many calls Up next shows on Today. */
