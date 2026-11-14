@@ -16,20 +16,15 @@ import { FULL_SEARCH, inShard, SEED } from "./sequence-chunks.ts";
  * behaviour the runs report (`stats.features`). Which behaviours those are is `CALL_FEATURES`, and
  * `pnpm check` asserts that the fixed seeds' runs reach every one of them, so a change to the generator
  * cannot silently drop one. Refresh both when the generator changes (last swept on 14 November 2026, ticket
- * 16a: 98 behaviours. Ticket 16's draws moved the ticket 15 runs that declines touch, and "callback-worked:
- * gatekeeper+redial", a redial off a callback after a gatekeeper, is reached by none of the 100 seeds now; the
- * same rule is reached after no answer and voicemail, which stay listed).
+ * 16a after the verifier on 654907b: 102 behaviours, among them a decline on each path with main-sequence work
+ * claimed or with the provider, late sends, and a redial off a callback after a gatekeeper, restored by a
+ * targeted draw).
  */
-export const CALL_FIXED_SEEDS: readonly number[] = [9, 16, 20, 21, 30, 35, 38, 42, 46, 57, 60, 61, 78, 92, 98];
+export const CALL_FIXED_SEEDS: readonly number[] = [0, 6, 8, 9, 13, 16, 21, 37, 42, 43, 60, 61, 98];
 
 /** Every behaviour the fixed seeds must reach between them. */
 export const CALL_FEATURES: readonly string[] = [
-  "activity-of-a-dropped-track",
-  "activity-in-win-back",
-  "activity-compared-in-win-back",
-  "activity-compared-beside-a-branch-never-entered",
   "a-company-zone-moved",
-  "a-held-lead-lost-its-last-number",
   "a-later-phone-track-skipped-as-declined",
   "a-person-zone-moved",
   "a-phone-track-released-by-the-decline-skipped",
@@ -41,6 +36,10 @@ export const CALL_FEATURES: readonly string[] = [
   "acted-after-a-callback-time-before-the-tick",
   "acted-after-a-rollover-before-the-tick",
   "acted-just-before-a-due-instant",
+  "activity-compared-beside-a-branch-never-entered",
+  "activity-compared-in-win-back",
+  "activity-in-win-back",
+  "activity-of-a-dropped-track",
   "after-a-call",
   "an-expiry-released-a-track",
   "an-open-call-skipped-as-declined",
@@ -50,9 +49,9 @@ export const CALL_FEATURES: readonly string[] = [
   "callback-for-a-later-day",
   "callback-hold",
   "callback-later-today",
-  "callback-with-no-good-number",
   "callback-worked:callback_requested",
   "callback-worked:gatekeeper",
+  "callback-worked:gatekeeper+redial",
   "callback-worked:interested",
   "callback-worked:no_answer",
   "callback-worked:no_answer+redial",
@@ -68,12 +67,16 @@ export const CALL_FEATURES: readonly string[] = [
   "closed-on-interest",
   "declined-path-overridden",
   "declined-path-with-another-outcome",
+  "declined-with-a-main-claim-waiting",
+  "declined-with-a-main-send-with-the-provider",
   "declined-with-another-call-open",
   "declined-with-no-path-set",
+  "declined-with-work-in-flight:continue",
+  "declined-with-work-in-flight:stop",
+  "declined-with-work-in-flight:win_back",
   "declined:continue",
   "declined:stop",
   "declined:win_back",
-  "drain-skipped-a-callback-it-cannot-log",
   "email-reply",
   "ended:declined_on_call",
   "ended:finished_no_usable_channel",
@@ -81,6 +84,7 @@ export const CALL_FEATURES: readonly string[] = [
   "ended:replied",
   "ended:sequence_finished_no_response",
   "in-win-back",
+  "late-sends",
   "later-today",
   "limit:1",
   "limit:2",

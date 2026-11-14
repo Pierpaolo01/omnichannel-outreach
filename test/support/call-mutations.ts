@@ -253,6 +253,26 @@ const RULES: Record<string, Partial<Rules>> = {
       return { ok: true, state: { ...out.state, tracks: out.state.tracks.map((p) => (p.finishReason === "dropped_for_win_back" ? (progressOf(s, p.trackId) ?? p) : p)) } };
     },
   },
+  // Verifier on 654907b: work in flight when a lead declines.
+  "a dropped track's claim is handed over after the decline": {
+    logCallOutcome: (s, taskId, input, now, ids, listed) => {
+      const out = R.logCallOutcome(s, taskId, input, now, ids, listed);
+      if (!out.ok || out.replayed || input.outcome !== "not_interested") return out;
+      // Claims on the main tracks the decline dropped are kept, not withdrawn, with their work unsettled.
+      const claims = s.attempts.filter((a) => a.state === "claimed" && out.state.tracks.find((p) => p.trackId === a.trackId)?.finishReason === "dropped_for_win_back");
+      return {
+        ok: true,
+        state: {
+          ...out.state,
+          attempts: out.state.attempts.map((a) => claims.find((c) => c.id === a.id) ?? a),
+          work: out.state.work.map((w) => (claims.some((c) => c.idempotencyKey === w.key) ? (s.work.find((x) => x.key === w.key) ?? w) : w)),
+        },
+      };
+    },
+    // And the handover reads a dropped track as if it still ran.
+    handoverFailures: (s, attempt, account, now) =>
+      R.handoverFailures({ ...s, tracks: s.tracks.map((p) => (p.finishReason === "dropped_for_win_back" ? (s.attempts.some((a) => a.trackId === p.trackId && a.state === "claimed") ? { ...p, finishedAt: null, finishedWall: null, finishReason: null } : p) : p)) }, attempt, account, now),
+  },
   "win-back entered at the campaign's start": {
     logCallOutcome: (s, taskId, input, now, ids, listed) => {
       const out = R.logCallOutcome(s, taskId, input, now, ids, listed);
@@ -292,7 +312,7 @@ const EXPECTED: Record<string, { invariant: string; seed: number }> = {
   "a callback does not freeze the clock": { invariant: "9", seed: 0 },
   "a callback's outcome logged on the frozen clock": { invariant: "7", seed: 0 },
   "unworked calls never expire": { invariant: "7", seed: 0 },
-  "carried calls not at the top": { invariant: "16", seed: 8 },
+  "carried calls not at the top": { invariant: "16", seed: 11 },
   "overdue callbacks shown as callbacks": { invariant: "16", seed: 2 },
   "a redial after any outcome": { invariant: "16", seed: 0 },
   "a user action judged on stale state": { invariant: "16", seed: 3 },
@@ -303,6 +323,7 @@ const EXPECTED: Record<string, { invariant: string; seed: number }> = {
   "the user's declined path ignored": { invariant: "20", seed: 79 },
   "win-back keeps the main sequence running": { invariant: "7", seed: 38 },
   "win-back entered at the campaign's start": { invariant: "7", seed: 9 },
+  "a dropped track's claim is handed over after the decline": { invariant: "6", seed: 6 },
 };
 
 export const CALL_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number }> = Object.fromEntries(

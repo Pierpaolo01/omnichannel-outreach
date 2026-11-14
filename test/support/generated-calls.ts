@@ -206,7 +206,11 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     };
   });
 
-  const h = new EngineHarness({ start, accounts: inboxes, modes: ["honest"], random: random(seed ^ 0xca11), engine: { waitFor: quickWait }, sms: { numbers, modes: ["honest"] }, ...(options.rules ? { rules: options.rules } : {}) });
+  // Ticket 16 (verifier on 654907b): in some runs the providers send up to an hour after the handover and are
+  // observed later still, so a lead may decline while its email or text is with the provider.
+  const lateSends = random(seed ^ 0x16d)() < 0.4;
+  if (lateSends) features.add("late-sends");
+  const h = new EngineHarness({ start, accounts: inboxes, modes: lateSends ? ["honest", "late-send"] : ["honest"], random: random(seed ^ 0xca11), engine: { waitFor: quickWait }, sms: { numbers, modes: lateSends ? ["honest", "late-send"] : ["honest"] }, ...(options.rules ? { rules: options.rules } : {}) });
   h.maxWrites = options.maxWrites ?? null;
   h.stopAt = options.deadline ?? null;
   const email = h.fake;
@@ -552,7 +556,9 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
         if (e <= lo) continue;
         if (e > seg.to || e > h.clock) break;
         if (e >= end) return null;
-        if (e < deadline || heldStrictly(s, e)) continue;
+        // A rollover at the instant an outcome releases a hold is judged before the release (the tick before the
+        // request, or the request's own catch-up, runs while held), so it counts as held (seed 20261195).
+        if (e < deadline || holdsOf(s).some((x) => x.from < e && e <= x.to)) continue;
         const st = taskStateAt(s, t.id, e, true);
         const d = k - 1;
         if (st.kind === "callback" || d < st.listDay || !hoursOn(s, t.id, d, seg.zone, zoneFor(s, e, true))) continue;
@@ -857,7 +863,12 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     const drawn: CallOutcomeApi = drain ? pick(["no_answer", "voicemail", "gatekeeper"]) : pick(["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "callback_requested", "callback_requested", "skip_for_now", "skip_for_now"]);
     // Ticket 16: sometimes the prospect declines; the user keeps the preselected path or overrides it for this lead.
     const declining = !drain && declineRand() < 0.14;
-    const outcome: CallOutcomeApi = declining ? "not_interested" : drawn;
+    // On a callback, sometimes the gatekeeper answers and the user redials (verifier on 654907b: a redial off a
+    // callback after a gatekeeper, which the draws above no longer reach on any seed).
+    const k = knownTasks.get(focus);
+    const onCallback = k !== undefined && subjects.get(k.subjectId) !== undefined && taskStateAt(subjects.get(k.subjectId)!, k.trackId, h.clock).kind === "callback";
+    const gatekeeperRedial = !drain && !declining && onCallback && callbackRand() < 0.3;
+    const outcome: CallOutcomeApi = declining ? "not_interested" : gatekeeperRedial ? "gatekeeper" : drawn;
     // In the drain the user works every call through. A callback whose lead has no good number left cannot be
     // logged (Q13): the user skips it for now, once a day, and works the calls behind it.
     if (drain && !(await workable(focus))) {
@@ -868,7 +879,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       features.add("drain-skipped-a-callback-it-cannot-log");
       return true;
     }
-    const extra = drain ? {} : { redial: REDIAL.includes(outcome) && chance(0.4), callbackAt: outcome === "callback_requested" ? callbackTime() : null, declinedPath: declining && declineRand() < 0.35 ? dpick(["stop", "continue", "win_back"] as const) : null };
+    const extra = drain ? {} : { redial: gatekeeperRedial || (REDIAL.includes(outcome) && chance(0.4)), callbackAt: outcome === "callback_requested" ? callbackTime() : null, declinedPath: declining && declineRand() < 0.35 ? dpick(["stop", "continue", "win_back"] as const) : null };
     await logOutcome(focus, outcome, (view) => {
       const good = view.numbers.filter((n) => !n.bad);
       const choices = good;
@@ -889,6 +900,33 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
   }
 
   /** Logs a wrong number on a shared main line that is the only good number of a lead a callback holds. True if it did. */
+  /**
+   * Declines, on a path drawn for it, a listed call of a lead whose email or text of the main sequence is with the
+   * provider or claimed and waiting for its slot (verifier on 654907b): what was handed over may still complete
+   * by the attempt rules, and nothing of a dropped track is handed over afterwards. True if it did.
+   */
+  async function declineWithWorkInFlight(): Promise<boolean> {
+    for (const [taskId, k] of knownTasks) {
+      const s = subjects.get(k.subjectId);
+      if (!s || !listedByRecord(taskId, h.clock) || !goodPhoneAt(s, h.clock)) continue;
+      const live = ((await h.store.engine.subject(s.id, h.clock))?.attempts ?? []).filter((a) => (a.state === "claimed" || a.state === "handed" || a.state === "accepted") && def(s).tracks.find((t) => t.id === a.trackId)?.branch === "main");
+      if (live.length === 0) continue;
+      const hasBranch = def(s).tracks.some((t) => t.branch === "win_back");
+      const path = dpickFlight(hasBranch ? (["win_back", "stop", "continue"] as const) : (["stop", "continue"] as const));
+      await logOutcome(taskId, "not_interested", (view) => view.numbers.find((n) => !n.bad)?.detailId ?? null, { declinedPath: path });
+      if (logged.at(-1)?.accepted) {
+        features.add(`declined-with-work-in-flight:${path}`);
+        if (live.some((a) => a.state === "claimed")) features.add("declined-with-a-main-claim-waiting");
+        if (live.some((a) => a.state !== "claimed")) features.add("declined-with-a-main-send-with-the-provider");
+      }
+      return true;
+    }
+    return false;
+  }
+  const flightRand = random(seed ^ 0x16e);
+  const callbackRand = random(seed ^ 0x16f);
+  const dpickFlight = <T>(items: readonly T[]): T => items[Math.floor(flightRand() * items.length)] ?? items[0]!;
+
   async function strandACallback(): Promise<boolean> {
     const now = h.clock;
     for (const held of subjects.values()) {
@@ -1067,7 +1105,9 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
           const seen = i === 0 ? startSeenAt(s, t) : due;
           // Not across a move of the prospect's zone: the window is read in the zone of the moment of each claim.
           const moved = [s.person?.key, s.company.key].some((key) => (zoneChanges.get(key ?? "") ?? []).some((z) => z.at >= (prev?.at ?? at) && z.at <= deadline));
-          if (moved || seen === null || seen > opens || deadline > now || !runningAt(s, deadline) || heldWithin(s, opens, deadline) || !inWindow(t.window, zoneFor(s, deadline), deadline - 1) || !reachesAt(s, ch, deadline)) continue;
+          // A main track dropped for win-back before the hour was up sends nothing more (its claim is withdrawn).
+          const droppedFirst = ended?.reason === "dropped_for_win_back" && ended.at <= deadline;
+          if (droppedFirst || moved || seen === null || seen > opens || deadline > now || !runningAt(s, deadline) || heldWithin(s, opens, deadline) || !inWindow(t.window, zoneFor(s, deadline), deadline - 1) || !reachesAt(s, ch, deadline)) continue;
           if (!handed || handed.at > deadline) problem(`18: ${id}/${step.id} was due at ${new Date(due).toISOString()} and its window open from ${new Date(opens).toISOString()}, but it was not handed over within an hour`);
           if (handed && st.callTasks.some((x) => x.open && x.placedWall <= handed.at)) features.add("a-send-beside-an-open-call");
         }
@@ -1412,6 +1452,14 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
 
   // ------------------------------------------------------------------------------------------
   // Events.
+
+  // Right after launch, several emails wait on one inbox for their pacing slot, and in a run with late sends the
+  // first ones are with the provider: sometimes the user declines a lead then (verifier on 654907b).
+  if (flightRand() < 0.7) {
+    await h.advanceTo(h.clock + MINUTE);
+    await queue();
+    if (await declineWithWorkInFlight()) await checkAll(false);
+  }
 
   const eventCount = options.events ?? 24;
   for (let e = 0; e < eventCount && problems.length === 0 && !h.stopped; e++) {
