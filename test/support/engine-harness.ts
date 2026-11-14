@@ -272,8 +272,9 @@ export class EngineHarness {
     if (this.live) await this.store.engine.setMeta(HEARTBEAT_KEY, String(this.clock));
     try {
       await this.engine.tick();
-      // The first tick after an outage, every port answering, is the engine's to record; the world runs again after it.
-      if (this.providersDownUntil === null) this.live = true;
+      // The world runs again once the engine itself has recorded a heartbeat (the first tick after a stop, an outage or
+      // a long sleep inside a tick is the engine's to report).
+      if (!this.live && this.providersDownUntil === null && (await this.store.engine.meta(HEARTBEAT_KEY)) === String(this.clock)) this.live = true;
     } catch (error) {
       if (error instanceof TransientError) return;
       if (!(error instanceof Crash)) throw error;

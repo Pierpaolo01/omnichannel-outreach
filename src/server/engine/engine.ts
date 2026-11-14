@@ -26,6 +26,7 @@ function outcomeBody(input: OutcomeInput): string {
 }
 import { UnprovisionedSmsPort, type AttemptRef, type HandoverRequest, type ProviderEvent, type SendPort } from "./ports.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
+import { INTERRUPTION_GAP } from "../../domain/sequence/interruption.ts";
 import { HEARTBEAT_KEY, NOTICE_KEY, parseInstant, TICK_ENDED_KEY, TICK_FAILED_KEY } from "./worker-state.ts";
 
 export type CrashPoint = "after_claim" | "after_presend" | "after_handover_commit" | "after_call" | "after_retry_commit" | "after_lookup" | "after_observe_event";
@@ -279,7 +280,10 @@ export class Engine {
       if (!changed) break;
     }
     const ended = this.now();
-    await this.store.setMetas(reachable ? { [TICK_ENDED_KEY]: String(ended), [HEARTBEAT_KEY]: String(ended) } : { [TICK_ENDED_KEY]: String(ended) });
+    // A tick that itself ran longer than the gap (the machine slept in the middle of a request) was not sending all that
+    // time: the heartbeat stays where it was, and the next tick reports the interruption from before it.
+    const sending = reachable && ended - started <= INTERRUPTION_GAP;
+    await this.store.setMetas(sending ? { [TICK_ENDED_KEY]: String(ended), [HEARTBEAT_KEY]: String(ended) } : { [TICK_ENDED_KEY]: String(ended) });
   }
 
   /** The next instant at which a tick could change something, for the worker loop and the tests' clock. */

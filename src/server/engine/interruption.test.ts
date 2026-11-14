@@ -144,6 +144,32 @@ describe("the application stopped", () => {
   });
 });
 
+describe("the machine slept in the middle of a tick", () => {
+  test("an answer held across midnight: the tick that took it records no heartbeat, and the next reports the interruption from before it", async () => {
+    const { h, campaign, today } = await world();
+    await campaign("Clinics");
+    await h.advanceTo(TUESDAY_0 - 10 * MIN);
+    const asked = h.clock;
+    h.stopMarkingAlive();
+    h.heldAnswer = { kind: "observe", ms: 6 * H };
+    await h.tick();
+    expect(h.heldAnswers).toEqual([{ kind: "observe", askedAt: asked, answeredAt: asked + 6 * H }]);
+    await h.tick();
+    expect((await today()).interruption).toMatchObject({ from: iso(asked), to: iso(asked + 6 * H) });
+  });
+
+  test("an answer held for a minute is not an interruption", async () => {
+    const { h, campaign, today } = await world();
+    await campaign("Clinics");
+    await h.advanceTo(TUESDAY_0 - 30_000);
+    h.stopMarkingAlive();
+    h.heldAnswer = { kind: "observe", ms: MIN };
+    await h.tick();
+    await h.tick();
+    expect((await today()).interruption).toBeNull();
+  });
+});
+
 describe("capacity across two campaigns after an interruption", () => {
   test("missed work waits for the next reset day instead of bursting past the inbox's capacity", async () => {
     // Capacity 4 a day, shared: six first emails on Monday would need two days.
