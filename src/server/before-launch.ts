@@ -9,9 +9,10 @@ import { isLive, isUncertain } from "../domain/sequence/attempt.ts";
 import { mergeUses } from "../domain/sequence/copy.ts";
 import { liveSteps, liveTracks, ownSubject, poolOf, type CampaignDefinition, type TrackDefinition } from "../domain/sequence/definition.ts";
 import { goodEmail, hasGoodNumber, progressOf, runs } from "../domain/sequence/progress.ts";
-import type { AccountState, SubjectState } from "../domain/sequence/state.ts";
+import type { AccountState, CallDay, SubjectState } from "../domain/sequence/state.ts";
 import type { BeforeLaunchView, ContactDetailView, CopyPreview, LeadRow, LoadProjectionView, PreviewLead, WithheldBy, WithheldTrack } from "../shared/api.ts";
 import { trackLabel, trackPhrase } from "../shared/track-label.ts";
+import type { Rules } from "./engine/rules.ts";
 import { projectLoad, type Projection } from "./load-projection.ts";
 import type { OutreachStore } from "./persistence/store.ts";
 
@@ -205,7 +206,7 @@ interface ProjectionResult {
  * engine holds them, the running subjects of every other campaign that competes for an account
  * with this one (closed over shared accounts), and the engine's own account records.
  */
-async function projectionOf(store: OutreachStore, campaignId: string, definition: CampaignDefinition, leads: readonly CampaignLead[], now: number): Promise<ProjectionResult> {
+async function projectionOf(store: OutreachStore, campaignId: string, definition: CampaignDefinition, leads: readonly CampaignLead[], now: number, broken: ProjectionMutation = {}): Promise<ProjectionResult> {
   if (liveTracks(definition, "main").length === 0) return { projection: null, withheldBy: null, callsNotCounted: [], held: [] };
   const all = await store.engine.accounts(now);
   const withheld = withheldTracks(definition, all);
@@ -238,7 +239,8 @@ async function projectionOf(store: OutreachStore, campaignId: string, definition
     accounts: all,
     zone: definition.timezone,
     horizonDays: PROJECTION_HORIZON_DAYS,
-    ...(calls ? { callDay: await store.engine.callDay(now) } : {}),
+    ...(calls ? { callDay: (broken.callDay ?? ((d: CallDay) => d))(await store.engine.callDay(now)) } : {}),
+    ...(broken.rules ? { rules: broken.rules } : {}),
   });
   return { projection, withheldBy: null, callsNotCounted, held: [] };
 }
@@ -308,10 +310,16 @@ async function unsettled(store: OutreachStore, subjects: readonly SubjectState[]
 }
 
 /** The projected sends for a campaign's leads, for tests that compare them with the engine's. */
-export async function projectedSends(store: OutreachStore, campaignId: string, now: number): Promise<Projection | null> {
+export async function projectedSends(store: OutreachStore, campaignId: string, now: number, broken: ProjectionMutation = {}): Promise<Projection | null> {
   const row = await store.engine.campaign(campaignId);
   if (!row?.definition) return null;
-  return (await projectionOf(store, campaignId, row.definition, await campaignLeads(store, campaignId, row.definition, now), now)).projection;
+  return (await projectionOf(store, campaignId, row.definition, await campaignLeads(store, campaignId, row.definition, now), now, broken)).projection;
+}
+
+/** A deliberately broken projection, for the comparison test's mutations only: other rules, or another starting call day. */
+export interface ProjectionMutation {
+  readonly rules?: Rules;
+  readonly callDay?: (stored: CallDay) => CallDay;
 }
 
 async function loadProjection(store: OutreachStore, campaignId: string, definition: CampaignDefinition, leads: readonly CampaignLead[], now: number): Promise<LoadProjectionView> {

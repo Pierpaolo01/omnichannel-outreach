@@ -1471,7 +1471,9 @@ Days count from launch day as day 1, in the campaign's zone, as before.
 2. In generated worlds where nothing is logged and the day's room never binds, the projected sends and placements are both exactly the engine's.
 3. A world with a phone track after a phone track withholds the figure and names that track.
 
-A mutation of the projection alone, placing ready calls in reversed `callOrder`, must fail invariant 1 in some world; so must leaving out the stored committed tasks.
+A mutation of the projection alone, placing ready calls in reversed `callOrder`, must fail invariant 1 in some world; so must leaving out the stored committed tasks. Both are killed (`before-launch-projection.test.ts`, "generated: calls placed within a tight daily call capacity"): 30 worlds in `pnpm check`, 100 run once on 14 November 2026, all exact; some worlds start from calls the user left unworked on the earlier campaign, so the store's committed count binds the first day.
+
+**A limit the comparison found.** A logged call touches its lead (2.4), and a touched lead's later calls go before untouched leads' (4.4, the priority classes of 4.3). The projection applies no outcome, so where one lead has two calls in one campaign that compete for one day's room, the projection can place another lead's call where the engine places that lead's second call: the count per day is the same, which lead it is may differ. The tight worlds therefore give each campaign one phone track; two phone tracks of one lead start together or one after the other, and the second, after a phone track, withholds the figure anyway. The test user works the list in the last second of each user day, so a call placed late in the evening (a launch at 23:58) is worked on its day, as the assumption says.
 
 **Inputs** (the 13b table's `call_tasks` row is replaced): `call_tasks` of every simulated subject, as stored, and the store's call day (`EngineStore.callDay`) at the projection's instant; the call settings. `call_attempts` and notes decide nothing the projection reads.
 
