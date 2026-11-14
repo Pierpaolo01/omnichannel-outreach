@@ -102,8 +102,10 @@ export class FakeEmailPort implements SendPort {
   readonly deliveryLog: DeliveryLogEntry[] = [];
   /** `at`: when the reply's event became visible; `providerAt`: the reply's own time as the provider reports it. */
   readonly replyLog: { at: number; providerAt: number; destination: string; id: string; threadRef: string | null; inbox: string; onThread: boolean; subjectId: string }[] = [];
-  /** Every pre-send check asked, with its instant (ticket 17a). */
-  readonly presendLog: { at: number; destination: string }[] = [];
+  /** Every pre-send check asked: its instant, the threads it read and the reply it answered with (ticket 17a). */
+  readonly presendLog: { at: number; threadRefs: string[]; answered: string | null; repliesSeen: number }[] = [];
+  /** The pre-send defect of ca8baee, for a mutation: answer with the first thread's reply, known or not. */
+  presendFirstReply = false;
   readonly withdrawLog: { at: number; key: string; answer: string }[] = [];
   /** Every lookup the fake answered. */
   readonly lookupLog: { at: number; key: string; answer: LookupResult["kind"] }[] = [];
@@ -165,8 +167,12 @@ export class FakeEmailPort implements SendPort {
     if (this.portHangs) return new Promise<never>(() => undefined);
     if (this.presendUnavailable) return Promise.resolve({ kind: "unavailable" as const });
     // Any reply in the lead's threads that its record does not hold, as the adapter reads every thread (ticket 17a).
-    this.presendLog.push({ at: this.now(), destination: request.destination });
-    const reply = this.replyLog.find((r) => r.destination === request.destination && r.threadRef !== null && request.threadRefs.includes(r.threadRef) && r.at <= this.now() && !request.knownReplies.includes(r.id));
+    // `presendFirstReply` is the defect the review bot found on ca8baee, for a mutation: the first thread with any reply answers.
+    const inThreads = this.replyLog.filter((r) => r.destination === request.destination && r.threadRef !== null && request.threadRefs.includes(r.threadRef) && r.at <= this.now());
+    const reply = this.presendFirstReply
+      ? request.threadRefs.flatMap((ref) => inThreads.filter((r) => r.threadRef === ref).slice(-1))[0]
+      : inThreads.find((r) => !request.knownReplies.includes(r.id));
+    this.presendLog.push({ at: this.now(), threadRefs: [...request.threadRefs], answered: reply?.id ?? null, repliesSeen: this.replyLog.length });
     return Promise.resolve(reply ? { kind: "reply" as const, providerRef: reply.id, at: reply.at } : { kind: "clear" as const });
   }
 
@@ -333,16 +339,21 @@ export class FakeEmailPort implements SendPort {
    * none. `providerAt`: the reply's time as the provider reports it, earlier than now for a reply the
    * app only observes now (its event becomes visible now either way).
    */
-  prospectReplies(destination: string, onThread = true, providerAt: number | null = null): boolean {
+  /**
+   * The prospect replies. `inThreadOf`: the delivery whose thread it is in (else the latest to that address);
+   * `hiddenForMs`: the reply event becomes visible to observation only that much later, while the pre-send check
+   * reads it at once (a reply that arrives after a tick's observation and before a handover, ticket 17a).
+   */
+  prospectReplies(destination: string, onThread = true, providerAt: number | null = null, options: { readonly inThreadOf?: DeliveryLogEntry; readonly hiddenForMs?: number } = {}): boolean {
     const now = this.now();
-    const last = this.deliveryLog.filter((d) => d.destination === destination && d.at <= now).at(-1);
+    const last = options.inThreadOf ?? this.deliveryLog.filter((d) => d.destination === destination && d.at <= now).at(-1);
     if (!last) return false;
     const id = `reply-${this.replyLog.length + 1}`;
     // Off the thread: from the lead's address to the inbox, as a new conversation with no thread.
     const threadRef = onThread ? last.providerRef : null;
     const at = providerAt ?? now;
     this.replyLog.push({ at: now, providerAt: at, destination, id, threadRef, inbox: last.sender, onThread, subjectId: last.subjectId });
-    this.emit(now, { id, kind: "reply", providerRef: threadRef, at, inbox: last.sender, from: destination });
+    this.emit(now + (options.hiddenForMs ?? 0), { id, kind: "reply", providerRef: threadRef, at, inbox: last.sender, from: destination });
     return true;
   }
 

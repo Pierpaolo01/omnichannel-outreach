@@ -6,7 +6,7 @@ import { business, person } from "./export-builder.ts";
 import type { FakeAccount } from "./fake-email-port.ts";
 import type { FakeNumber } from "./fake-sms-port.ts";
 import { random } from "./generated-sequences.ts";
-import { dueAfter } from "./sequence-model.ts";
+import { dueAfter, local, startOfDay } from "./sequence-model.ts";
 
 /**
  * Generated control runs (ADR 0003 "Ticket 17a"): the user skips, stops, restarts and moves leads to win-back, and
@@ -44,6 +44,10 @@ export interface ControlRunOptions {
   readonly rules?: Partial<Rules>;
   readonly events?: number;
   readonly maxWrites?: number;
+  /** The pre-send defect of ca8baee, for a mutation: the fake email provider answers with the first thread's reply. */
+  readonly presendFirstReply?: boolean;
+  /** For a mutation: the senders' pacing gap the engine is given, while the record keeps expecting 5 minutes (P3). */
+  readonly gapMs?: number;
 }
 
 export interface ControlRunResult {
@@ -88,12 +92,21 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   if (lateSends) features.add("late-sends");
   const keepsSending = lateSends && chance(0.4);
   if (keepsSending) features.add("withdrawals-answered-unknown-and-sent");
-  const inboxes: FakeAccount[] = [{ id: "inbox-a", capacity: 50, gapMs: 5 * MINUTE, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }];
+  const gap = options.gapMs ?? 5 * MINUTE;
+  const inboxes: FakeAccount[] = [{ id: "inbox-a", capacity: 50, gapMs: gap, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }];
   // One SMS number per campaign, so no conversation is another campaign's (question Q7's hold is the track runs').
-  const numbers: FakeNumber[] = [0, 1].map((i) => ({ id: `+44770090001${i}`, capacity: 50, gapMs: 5 * MINUTE, k: 2, healthy: true, resetZone: ZONE }));
-  const h = new EngineHarness({ start, accounts: inboxes, modes: lateSends ? ["honest", "late-send"] : ["honest"], random: random(seed ^ 0x17c), engine: { waitFor: quickWait }, sms: { numbers, modes: ["honest"] }, ...(options.rules ? { rules: options.rules } : {}) });
+  const numbers: FakeNumber[] = [0, 1].map((i) => ({ id: `+44770090001${i}`, capacity: 50, gapMs: gap, k: 2, healthy: true, resetZone: ZONE }));
+  // Review bot and verifier on ca8baee, from a stream of their own: providers whose lookups lag behind acceptance (work
+  // withdrawn on a non-final "not sent" while still uncertain), and replies the pre-send check reads before observation.
+  const r17 = random(seed ^ 0x17d);
+  const lookupLags = r17() < 0.4;
+  if (lookupLags) features.add("lookups-lag");
+  const h = new EngineHarness({ start, accounts: inboxes, modes: lookupLags ? ["lookup-lags"] : lateSends ? ["honest", "late-send"] : ["honest"], random: random(seed ^ 0x17c), engine: { waitFor: quickWait }, sms: { numbers, modes: ["honest"] }, ...(options.rules ? { rules: options.rules } : {}) });
   h.maxWrites = options.maxWrites ?? null;
-  if (keepsSending) h.fake.withdrawAnswers = "unknown-sends";
+  // A provider that keeps what it was asked to withdraw: in the runs whose lookups lag too, so a pause meets work withdrawn
+  // on a non-final "not sent" while still uncertain (the reviewer's reproduction, review bot on ca8baee, item 2).
+  if (keepsSending || lookupLags) h.fake.withdrawAnswers = "unknown-sends";
+  if (options.presendFirstReply === true) h.fake.presendFirstReply = true;
   const email = h.fake;
   const sms = h.sms;
 
@@ -168,7 +181,9 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     const out: Interval[] = [];
     for (const x of all) {
       const last = out.at(-1);
-      if (last && x.from <= last.to) last.to = Math.max(last.to, x.to);
+      // Overlapping holds merge; ones that only touch stay apart: a release and a new hold at one instant leave a running
+      // moment, in which the worker's tick after the release may send (two actions at one instant).
+      if (last && x.from < last.to) last.to = Math.max(last.to, x.to);
       else out.push({ ...x });
     }
     return out;
@@ -255,13 +270,17 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     const start = startOf(s, t);
     const f = finishOf(s, t);
     if (start === null || start > now || (f !== null && f.seen <= now)) return null;
-    // A start that falls due while the lead is held happens when it is released: nothing is evaluated while held.
+    // A start that falls due, or that the app first learns of (a predecessor's late send), while the lead is held happens
+    // when it is released: nothing is evaluated while held.
+    const rule = t.start;
+    const before = rule.kind === "after" ? def(s).tracks.find((x) => x.id === rule.trackId) : undefined;
+    const known = Math.max(start, before ? (finishOf(s, before)?.seen ?? start) : start);
     const hold = holdsOf(s).find((x) => x.from <= now && now < x.to);
-    if (hold && start >= hold.from) return null;
+    if (hold && known >= hold.from) return null;
     for (const [i, st] of t.steps.entries()) {
       const r = resolution(s, t, st.id);
+      // A step the provider sent stays the pending step until the app learns of the send.
       if (r !== null && r.seen <= now) continue;
-      if (r !== null) return null;
       if (i === 0) return { stepId: st.id, due: start, unheld: start, lead: leadOfWall(s, start) };
       const prev = resolution(s, t, t.steps[i - 1]!.id)!;
       const unheld = dueAfter(prev.at, st.waitDays, ZONE);
@@ -282,15 +301,18 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     const seen = tracksIn(s, branch).map((tr) => finishOf(s, tr)?.seen ?? Infinity);
     const at = Math.max(...seen);
     if (!Number.isFinite(at)) return Infinity;
-    // Learned while held: it ends when the hold is released.
-    return holdsOf(s).find((x) => x.from <= at && at < x.to)?.to ?? at;
+    // Learned while held: it ends when the hold is released. A hold that begins at that very instant came after it
+    // (the worker's tick runs before the action at an instant).
+    return holdsOf(s).find((x) => x.from < at && at < x.to)?.to ?? at;
   }
   const endedAt = (s: Subject, t: number) => endingAt(s, t) !== null || finishedAt(s) <= t;
   /** Whether a step is with a provider: handed over, not delivered, and not withdrawn on the provider's word. */
   function inFlight(t: TrackDefinition, s: Subject, stepId: string): boolean {
     const ch = t.channel;
     if (ch === "call") return false;
-    return handovers(ch).some((c) => c.subjectId === s.id && c.stepId === stepId && !deliveries(ch).some((d) => d.key === c.key) && !(ch === "email" && email.withdrawLog.some((w) => w.key === c.key && w.answer === "withdrawn")));
+    // Sent, but not known to the app yet, is still with the provider as far as the app can tell.
+    const known = (d: { key: string; at: number; visibleAt: number }) => Math.min(d.visibleAt, ch === "email" ? (email.lookupLog.find((l) => l.key === d.key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity) : Infinity) <= h.clock;
+    return handovers(ch).some((c) => c.subjectId === s.id && c.stepId === stepId && !deliveries(ch).some((d) => d.key === c.key && known(d)) && !(ch === "email" && email.withdrawLog.some((w) => w.key === c.key && w.answer === "withdrawn")));
   }
   /** The lead's current step (question Q3's interim): the pending step due first, ties by track id. */
   function currentStep(s: Subject, now: number): { track: TrackDefinition; stepId: string; lead: number } | null {
@@ -332,7 +354,43 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
 
   const seenResults = new Map<string, Set<string>>();
   async function checkAll(): Promise<void> {
+    settleHidden();
     const now = h.clock;
+    // P3: no burst. Two send calls from one sender are never closer than its gap (5 minutes), across every resume.
+    for (const provider of [email, sms]) {
+      const bySender = new Map<string, number[]>();
+      for (const c of provider.handoverLog) bySender.set(c.sender, [...(bySender.get(c.sender) ?? []), c.at]);
+      for (const [sender, ats] of bySender) {
+        const sorted = [...ats].sort((a, b) => a - b);
+        for (let i = 1; i < sorted.length; i++) if (sorted[i]! - sorted[i - 1]! < 5 * MINUTE) problem(`P3: ${sender} made two send calls ${Math.round((sorted[i]! - sorted[i - 1]!) / 1000)} s apart, at ${isoOf(sorted[i])}`);
+      }
+    }
+    // P1 after a reply: no email is handed over to a lead after a pre-send check that could read a reply its record did
+    // not hold, until the user restarts it (review bot on ca8baee, item 1).
+    for (const [index, r] of email.replyLog.entries()) {
+      for (const c of email.handoverLog.filter((x) => x.subjectId === r.subjectId && x.at > r.at)) {
+        const restarted = endings.some((e) => e.subjectId === r.subjectId && e.restartedAt >= r.at && e.restartedAt <= c.at);
+        // A check after the reply existed (by the provider's own order of events), not one earlier at the same instant.
+        const sawIt = email.presendLog.some((p) => p.repliesSeen > index && p.at <= c.at && p.threadRefs.includes(r.threadRef ?? ""));
+        if (!restarted && sawIt) problem(`P1: ${r.subjectId}/${c.stepId} was handed over at ${isoOf(c.at)}, after a reply at ${isoOf(r.at)} that a pre-send check could read and before any restart${process.env["CONTROLS_DEBUG"] ? ` [reply ${JSON.stringify(r)}; checks ${JSON.stringify(email.presendLog.filter((p) => p.at >= r.at - HOUR && p.at <= c.at + MINUTE).map((p) => [isoOf(p.at), p.threadRefs, p.answered, p.repliesSeen]))}; endings ${JSON.stringify(endings.filter((e) => e.subjectId === r.subjectId).map((e) => [e.kind, isoOf(e.at), isoOf(e.restartedAt)]))}; app replies ${JSON.stringify((await h.store.engine.subject(r.subjectId, now))?.replies)}; handover ${JSON.stringify([c.key, c.destination, isoOf(c.at)])}; index ${index}]` : ""}`);
+      }
+    }
+    // P12: the day's committed calls, by the record: carried calls open at the day's start, of leads not held then.
+    const dayStart = startOfDay(local(now, ZONE).day, ZONE);
+    let committed = 0;
+    for (const s of subjects.values()) {
+      const st = await h.store.engine.subject(s.id, now);
+      for (const task of st?.callTasks ?? []) {
+        if (task.placedWall >= dayStart) continue;
+        const tr = def(s).tracks.find((t) => t.id === task.trackId)!;
+        const f = finishOf(s, tr);
+        if (f !== null && f.at <= dayStart) continue;
+        if (holdsOf(s).some((x) => x.from <= dayStart && dayStart < x.to) || finishedAt(s) <= dayStart) continue;
+        committed++;
+      }
+    }
+    const engineDay = await h.store.engine.callDay(now);
+    if (engineDay.committed !== committed) problem(`P12: ${engineDay.committed} calls are committed on ${isoOf(dayStart)}'s day; the record counts ${committed}`);
     const q = (await h.request<CallsView>("GET", "/api/calls")).body;
     const listed = new Set([...q.readyNow, ...q.laterToday].map((x) => x.enrollmentId));
     for (const s of subjects.values()) {
@@ -345,7 +403,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
       if ((held || endedAt(s, now)) && listed.has(s.id)) problem(`P1: ${s.id}'s call is listed at ${isoOf(now)} while it is ${ending ? ending.kind : "held"}`);
       for (const ch of ["email", "sms"] as const) {
         for (const c of handovers(ch).filter((x) => x.subjectId === s.id)) {
-          if (heldStrictly(s, c.at)) problem(`P1: ${s.id}/${c.stepId} was handed over at ${isoOf(c.at)} while the lead was held or ended (${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))})`);
+          if (heldStrictly(s, c.at)) problem(`P1: ${s.id}/${c.stepId} was handed over at ${isoOf(c.at)} while the lead was held or ended (${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))})${process.env["CONTROLS_DEBUG"] ? ` [lead pauses ${JSON.stringify(leadPauses.filter((p) => p.subjectId === s.id).map((p) => [isoOf(p.from), isoOf(p.to)]))}; campaign pauses ${JSON.stringify(campaignPauses.filter((p) => p.campaign === s.campaign).map((p) => [isoOf(p.from), isoOf(p.to)]))}; endings ${JSON.stringify(endings.filter((e) => e.subjectId === s.id).map((e) => [e.kind, isoOf(e.at), isoOf(e.restartedAt)]))}; hidden ${JSON.stringify(hidden.filter((x) => x.subjectId === s.id))}]` : ""}`);
           // P4: a skipped step is never handed over after its skip, and never delivered.
           const skip = skips.find((x) => x.subjectId === s.id && x.stepId === c.stepId);
           if (skip && c.at >= skip.at) problem(`P4: ${s.id}/${c.stepId} was handed over at ${isoOf(c.at)}, after the user skipped it at ${isoOf(skip.at)}`);
@@ -373,7 +431,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
         : branchOf(s, now) === "win_back" ? "in_win_back"
         : null;
       if (want !== null && status !== want) problem(`status: ${s.id} is ${status} at ${isoOf(now)}; the record says ${want}${process.env["CONTROLS_DEBUG"] ? ` [finishes ${JSON.stringify(def(s).tracks.map((x) => [x.id, startOf(s, x), finishOf(s, x)]))}; winBack ${isoOf(winBack.get(s.id))}; endings ${JSON.stringify(endings.filter((e) => e.subjectId === s.id))}; holds ${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))}; engine ${JSON.stringify(st.tracks.map((p) => [p.trackId, p.startedAt, p.finishReason, isoOf(p.finishedWall)]))}; results ${JSON.stringify(st.results.map((r) => [r.stepId, r.result, isoOf(r.atWall)]))}]` : ""}`);
-      if (want === null && !["queued", "active", "waiting_on_call"].includes(status)) problem(`status: ${s.id} is ${status} at ${isoOf(now)}; the record says it runs in the main sequence`);
+      if (want === null && !["queued", "active", "waiting_on_call"].includes(status)) problem(`status: ${s.id} is ${status} at ${isoOf(now)}; the record says it runs in the main sequence${process.env["CONTROLS_DEBUG"] ? ` [finishes ${JSON.stringify(def(s).tracks.map((x) => [x.id, isoOf(startOf(s, x)), finishOf(s, x)]).map(([id, a, f]) => [id, a, f && typeof f === "object" ? [isoOf(f.at), isoOf(f.seen), f.reason] : null]))}; winBack ${isoOf(winBack.get(s.id))}; endings ${JSON.stringify(endings.filter((e) => e.subjectId === s.id).map((e) => [e.kind, isoOf(e.at), isoOf(e.restartedAt)]))}; holds ${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))}; engine ${JSON.stringify(st.tracks.map((p) => [p.trackId, p.finishReason, isoOf(p.finishedWall)]))}; ended ${isoOf(st.subject.endedWall)}; deliveries ${JSON.stringify([...email.deliveryLog, ...sms.deliveryLog].filter((d) => d.subjectId === s.id).map((d) => [d.stepId, isoOf(d.at), isoOf(d.visibleAt)]))}]` : ""}`);
       // P2: every pending email or text is due where the record says: moved by every hold since its basis while
       // the lead runs; the wall it was resolved to while it is held. No step is handed over before it is due.
       for (const t of tracksIn(s, branchOf(s, now))) {
@@ -389,7 +447,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
         }
         const want = held || endedAt(s, now) ? pending.unheld : pending.due;
         // A step already due shows when lead time reached its deadline on today's clock: compared only while still to come.
-        if (want > now && Date.parse(shown.dueAt) !== want) problem(`P2: ${s.id}/${pending.stepId} is due ${shown.dueAt} at ${isoOf(now)}; the record says ${isoOf(want)} (${held ? "held: the wall it was resolved to" : "moved by every hold since its basis"}; holds ${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))})`);
+        if (want > now && Date.parse(shown.dueAt) !== want) problem(`P2: ${s.id}/${pending.stepId} is due ${shown.dueAt} at ${isoOf(now)}; the record says ${isoOf(want)} (${held ? "held: the wall it was resolved to" : "moved by every hold since its basis"}; holds ${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))})${process.env["CONTROLS_DEBUG"] ? ` [unheld ${isoOf(pending.unheld)}; prev ${JSON.stringify(t.steps.map((x) => resolution(s, t, x.id)).map((r) => (r ? [isoOf(r.at), isoOf(r.seen), r.kind] : null)))}; deliveries ${JSON.stringify(deliveries(t.channel === "sms" ? "sms" : "email").filter((d) => d.subjectId === s.id && t.steps.some((x) => x.id === d.stepId)).map((d) => [d.stepId, isoOf(d.at), isoOf(d.visibleAt)]))}; engine ${JSON.stringify(st.tracks.find((p) => p.trackId === t.id))}; results ${JSON.stringify(st.results.filter((r) => r.trackId === t.id).map((r) => [r.stepId, r.at, isoOf(r.atWall)]))}; freezes ${JSON.stringify(st.freezes.map((f) => [isoOf(f.fromWall), isoOf(f.toWall)]))}]` : ""}`);
         if (pending.due > pending.unheld && !held) features.add("a-wait-moved-by-a-hold");
       }
       for (const ch of ["email", "sms"] as const) {
@@ -437,23 +495,31 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
 
   let requests = 0;
   /** One control on one lead, checked against the record, the read before it, and its own repeat. */
-  async function control(s: Subject, action: LeadControlApi): Promise<void> {
+  async function control(s: Subject, action: LeadControlApi, options: { readonly othersMayMove?: boolean } = {}): Promise<void> {
+    // What the app found while the clock moved (a hidden reply at a pre-send check) is in the record before any action.
+    settleHidden();
     const now = h.clock;
     const expected = accepts(s, action, now);
     const read = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${s.id}`)).body;
     const offered = read.controls.find((c) => c.action === action);
-    if (!offered || offered.allowed !== expected) problem(`P11: ${s.id}'s read ${offered?.allowed ? "offers" : "refuses"} ${action} at ${isoOf(now)}; the record says it must be ${expected ? "accepted" : "refused"}${offered && !offered.allowed ? ` ("${offered.reason}")` : ""}`);
+    if (!offered || offered.allowed !== expected) problem(`P11: ${s.id}'s read ${offered?.allowed ? "offers" : "refuses"} ${action} at ${isoOf(now)}; the record says it must be ${expected ? "accepted" : "refused"}${offered && !offered.allowed ? ` ("${offered.reason}")` : ""}${process.env["CONTROLS_DEBUG"] ? ` [current ${currentStep(s, now)?.stepId ?? "none"}; starts ${JSON.stringify(def(s).tracks.map((x) => [x.id, JSON.stringify(x.start), isoOf(startOf(s, x)), finishOf(s, x)]))}; lookups ${JSON.stringify(email.lookupLog.filter((l) => l.key === "att-122").map((l) => [isoOf(l.at), l.answer]))}; engineTracks ${JSON.stringify((await h.store.engine.subject(s.id, now))?.tracks.map((p) => [p.trackId, p.startAt, p.startedAt, p.finishReason, isoOf(p.finishedWall)]))}; clock ${JSON.stringify((await h.store.engine.subject(s.id, now))?.subject.clock)}; work ${JSON.stringify((await h.store.engine.subject(s.id, now))?.work.map((w) => [w.stepId, w.key, w.calls, w.settled, w.lookupAnswer]))}; attempts ${JSON.stringify((await h.store.engine.subject(s.id, now))?.attempts.map((a) => [a.stepId, a.idempotencyKey, a.state, a.endedBy]))}; handovers ${JSON.stringify(email.handoverLog.filter((c) => c.subjectId === s.id).map((c) => [c.stepId, c.key, isoOf(c.at), c.mode]))}; deliveries ${JSON.stringify(email.deliveryLog.filter((c) => c.subjectId === s.id).map((c) => [c.stepId, c.key, isoOf(c.at)]))}; withdrawals ${JSON.stringify(email.withdrawLog)}]` : ""}`);
     const current = currentStep(s, now);
     if (action === "skip" && offered?.allowed && current && (offered.skips?.trackId !== current.track.id || offered.skips.stepId !== current.stepId)) problem(`P11: ${s.id}'s read would skip ${offered.skips?.stepId ?? "nothing"}; the record's current step is ${current.stepId}${process.env["CONTROLS_DEBUG"] ? ` [pending ${JSON.stringify(tracksIn(s, branchOf(s, now)).map((t) => [t.id, pendingOf(s, t, now)]).map(([id, p]) => [id, p && typeof p === "object" ? [p.stepId, isoOf(p.due), isoOf(p.unheld)] : null]))}; holds ${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))}; engine ${JSON.stringify((read.tracks).map((t) => [t.trackId, t.nextStep]))}]` : ""}`);
     if (action === "skip" && current && inFlight(current.track, s, current.stepId)) features.add("skip-refused-with-work-at-the-provider");
     const live = (await h.store.engine.subject(s.id, now))?.attempts.filter((a) => a.state === "claimed" || a.state === "handed" || a.state === "accepted") ?? [];
     const before = await others(s, null);
     const requestId = `c-${++requests}`;
-    const res = await h.request<{ error?: { message: string }; replayed?: boolean }>("POST", `/api/enrollments/${s.id}/controls`, { requestId, action });
+    const uncertain = (await h.store.engine.subject(s.id, now))?.work.some((w) => w.settled === null && w.calls > 0) ?? false;
+    const res = await h.request<{ error?: { message: string }; replayed?: boolean; effect?: unknown }>("POST", `/api/enrollments/${s.id}/controls`, { requestId, action });
     const accepted = res.status === 200;
+    // The answer's effect is the read's preview at that instant, field for field (verifier B4).
+    if (accepted && offered?.allowed && JSON.stringify(res.body.effect) !== JSON.stringify(offered)) problem(`P11: ${action} on ${s.id} at ${isoOf(now)} answered the effect ${JSON.stringify(res.body.effect)}; the read previewed ${JSON.stringify(offered)}`);
+    if (!accepted && res.body.error) refused.push({ path: `/api/enrollments/${s.id}/controls`, body: { requestId, action }, message: res.body.error.message });
+    if (uncertain) features.add(accepted ? `${action}-with-uncertain-work` : `${action}-refused-with-uncertain-work`);
     if (accepted !== expected) problem(`P11: ${action} on ${s.id} at ${isoOf(now)} was ${accepted ? "accepted" : `refused (${res.body.error?.message ?? res.status})`}; the record says it must be ${expected ? "accepted" : "refused"}`);
     if (offered && !offered.allowed && !accepted && offered.reason !== res.body.error?.message) problem(`P11: ${s.id}'s read refuses ${action} with "${offered.reason}"; the action says "${res.body.error?.message ?? ""}"`);
-    await unchanged(before, `${action} on ${s.id}`);
+    // Acting before the worker's tick at a due instant, the tick the control runs may apply what fell due to other leads.
+    if (options.othersMayMove !== true) await unchanged(before, `${action} on ${s.id}`);
     if (expected) {
       const ending = endingAt(s, now);
       switch (action) {
@@ -496,15 +562,138 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     }
   }
   let listedBefore = new Set<string>();
+  /** Requests the app refused, to send again later with the same id (P7; verifier B5). */
+  const refused: { path: string; body: Record<string, string>; message: string }[] = [];
+  /** A refused request sent again, after whatever changed since: the same refusal, and nothing changes. */
+  async function retryRefused(): Promise<void> {
+    settleHidden();
+    const r = refused[Math.floor(r17() * refused.length)];
+    if (!r) return;
+    const before = await others(null, null);
+    const again = await h.request<{ error?: { message: string } }>("POST", r.path, r.body);
+    if (again.status !== 409 || again.body.error?.message !== r.message) problem(`P7: ${r.body["requestId"] ?? ""} (${r.path}) was refused ("${r.message}"); sent again at ${isoOf(h.clock)} it was answered ${again.status}${again.body.error ? ` ("${again.body.error.message}")` : ""}`);
+    await unchanged(before, `a refused request sent again`);
+    features.add("a-refused-request-sent-again-later");
+  }
+
+  /**
+   * The reviewer's sequence (review bot on ca8baee, item 2): a lead whose email is with a provider whose lookup lags is
+   * paused, the first lookup answers a non-final "not sent" (the attempt is withdrawn, the work stays uncertain), then the
+   * user asks to skip that step. The record refuses it while the work may still be sent.
+   */
+  async function pauseThenSkip(): Promise<void> {
+    for (const s of subjects.values()) {
+      const st = await h.store.engine.subject(s.id, h.clock);
+      // The step the skip will name has its email with the provider.
+      const current = currentStep(s, h.clock);
+      if (!st || endedAt(s, h.clock) || !current || !st.attempts.some((a) => a.stepId === current.stepId && (a.state === "handed" || a.state === "accepted"))) continue;
+      if (!leadPausedAt(s, h.clock)) await control(s, "pause");
+      await h.advanceTo(h.clock + 16 * MINUTE);
+      settleHidden();
+      if (process.env["CONTROLS_DEBUG"]) {
+        const after = await h.store.engine.subject(s.id, h.clock);
+        console.info(`pauseThenSkip ${s.id} ${current.stepId}: ${JSON.stringify(after?.attempts.filter((a) => a.stepId === current.stepId).map((a) => [a.state, a.endedBy, a.calls]))} ${JSON.stringify(after?.work.filter((w) => w.stepId === current.stepId).map((w) => [w.settled, w.calls, w.lookupAnswer]))}`);
+      }
+      await control(s, "skip");
+      features.add("skip-after-a-pause-with-a-lookup-lagging");
+      return;
+    }
+  }
+
+  /**
+   * The reviewer's restart (review bot on ca8baee, item 1): a lead with two emails sent in two threads replies in one, is
+   * resumed from its next step, then replies again in the other, hidden from observation, so only a pre-send check that
+   * reads every thread for a reply the record does not hold stops its next email. Either thread first.
+   */
+  async function replyRestartReply(): Promise<void> {
+    settleHidden();
+    for (const s of subjects.values()) {
+      const sent = email.deliveryLog.filter((d) => d.subjectId === s.id && d.visibleAt <= h.clock);
+      if (sent.length < 2 || endedAt(s, h.clock) || heldAt(s, h.clock)) continue;
+      const [a, b] = r17() < 0.5 ? [sent[0]!, sent[1]!] : [sent[1]!, sent[0]!];
+      if (!email.prospectReplies(a.destination, true, null, { inThreadOf: a })) return;
+      await h.tick();
+      replied(s, h.clock);
+      if (!accepts(s, "resume_from_next_step", h.clock)) return;
+      await control(s, "resume_from_next_step");
+      await h.advanceTo(h.clock + MINUTE);
+      if (!email.prospectReplies(b.destination, true, null, { inThreadOf: b, hiddenForMs: 12 * HOUR })) return;
+      const r = email.replyLog.at(-1)!;
+      hidden.push({ id: r.id, subjectId: s.id, thread: r.threadRef ?? "", at: h.clock, visibleAt: h.clock + 12 * HOUR });
+      features.add(a === sent[0] ? "a-new-reply-in-a-later-thread-after-a-restart" : "a-new-reply-in-an-earlier-thread-after-a-restart");
+      return;
+    }
+  }
+
+  /**
+   * A control at an instant just after something fell due for its lead (a step or a track start), before the worker's
+   * tick: the read's preview and the action both apply what fell due first, so they agree (verifier B4).
+   */
+  async function actAtADueInstant(): Promise<void> {
+    const now = h.clock;
+    let best: { s: Subject; at: number } | null = null;
+    for (const s of subjects.values()) {
+      if (endedAt(s, now) || heldAt(s, now)) continue;
+      for (const t of tracksIn(s, branchOf(s, now))) {
+        const start = startOf(s, t);
+        const p = pendingOf(s, t, now);
+        for (const at of [start, p?.due ?? null]) if (at !== null && at > now + MINUTE && at < now + 3 * DAY && (!best || at < best.at)) best = { s, at };
+      }
+    }
+    if (!best) return;
+    await h.advanceTo(best.at - MINUTE);
+    if (endedAt(best.s, h.clock) || heldAt(best.s, h.clock)) return;
+    h.clock = best.at + 1000;
+    settleHidden();
+    const fitting = ACTIONS.filter((x) => accepts(best.s, x, h.clock));
+    if (fitting.length === 0) return;
+    await control(best.s, pick(fitting), { othersMayMove: true });
+    features.add("a-control-just-after-a-due-instant");
+    await h.tick();
+  }
+
+  /** Replies the observation has not seen yet: each ends its lead when the pre-send check or the observation finds it. */
+  const hidden: { id: string; subjectId: string; thread: string; at: number; visibleAt: number }[] = [];
+  /** Applies to the record every hidden reply the app has found by now: at the pre-send check that answered it, or when observed. */
+  function settleHidden(): void {
+    // In the order the app found them: a later one finds the lead already replied.
+    const found = hidden
+      .map((r) => {
+        const byCheck = email.presendLog.find((p) => p.at >= r.at && p.answered === r.id)?.at ?? Infinity;
+        return { r, byCheck, at: Math.min(byCheck, r.visibleAt) };
+      })
+      .filter((x) => x.at <= h.clock)
+      .sort((a, b) => a.at - b.at);
+    for (const { r, byCheck, at } of found) {
+      hidden.splice(hidden.indexOf(r), 1);
+      const s = subjects.get(r.subjectId);
+      if (!s) continue;
+      replied(s, at);
+      features.add(byCheck < r.visibleAt ? "a-hidden-reply-found-by-the-pre-send-check" : "a-hidden-reply-observed");
+    }
+  }
+  /** The record's reply: ends a running, held, stopped or finished lead as replied at `at` (2.1); a replied one stays. */
+  function replied(s: Subject, at: number): void {
+    if (endingAt(s, at)?.kind === "replied") return;
+    const stopped = endingAt(s, at);
+    if (stopped) {
+      stopped.restartedAt = at;
+      endings.push({ subjectId: s.id, kind: "replied", at: stopped.at, restartedAt: Infinity });
+      features.add("a-reply-to-a-stopped-lead");
+    } else endings.push({ subjectId: s.id, kind: "replied", at, restartedAt: Infinity });
+  }
 
   async function campaignControl(ci: number, action: "pause" | "resume"): Promise<void> {
+    settleHidden();
     const now = h.clock;
     const paused = campaignPausedAt(ci, now);
     const expected = action === "pause" ? !paused : paused;
     const offered = (await h.request<CampaignDetail>("GET", `/api/campaigns/${campaignIds[ci]!}`)).body.controls.find((c) => c.action === action);
     if (offered?.allowed !== expected) problem(`P11: campaign ${ci + 1}'s read ${offered?.allowed ? "offers" : "refuses"} ${action}; the record says ${expected ? "accept" : "refuse"}`);
     const before = await others(null, ci);
-    const res = await h.request("POST", `/api/campaigns/${campaignIds[ci]!}/${action}`, { requestId: `c-${++requests}` });
+    const body = { requestId: `c-${++requests}` };
+    const res = await h.request<{ error?: { message: string } }>("POST", `/api/campaigns/${campaignIds[ci]!}/${action}`, body);
+    if (res.status !== 200 && res.body.error) refused.push({ path: `/api/campaigns/${campaignIds[ci]!}/${action}`, body, message: res.body.error.message });
     if ((res.status === 200) !== expected) problem(`P11: ${action} of campaign ${ci + 1} at ${isoOf(now)} was ${res.status === 200 ? "accepted" : "refused"}; the record says ${expected ? "accept" : "refuse"}`);
     await unchanged(before, `${action} of campaign ${ci + 1}`);
     if (!expected) return;
@@ -513,11 +702,27 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     features.add(`campaign-${action}d`);
   }
 
-  /** The lead auto-replies to its latest email: the app ends it as replied when it observes the reply, at once here. */
+  /**
+   * The lead auto-replies: to its latest email, seen at once; or, from a stream of its own, in the thread of any email
+   * it was sent, before or after a restart, hidden from observation for some hours, so the pre-send check must find it
+   * among every thread (review bot on ca8baee, item 1).
+   */
   async function autoReply(): Promise<void> {
+    settleHidden();
     const sent = email.deliveryLog.filter((d) => d.visibleAt <= h.clock);
     if (sent.length === 0) return;
     const d = pick(sent);
+    if (r17() < 0.5) {
+      const s = subjects.get(d.subjectId);
+      if (!s) return;
+      const hiddenForMs = Math.round((1 + r17() * 5) * HOUR);
+      if (!email.prospectReplies(d.destination, true, null, { inThreadOf: d, hiddenForMs })) return;
+      const r = email.replyLog.at(-1)!;
+      hidden.push({ id: r.id, subjectId: s.id, thread: r.threadRef ?? "", at: h.clock, visibleAt: h.clock + hiddenForMs });
+      const latest = email.deliveryLog.filter((x) => x.subjectId === s.id).at(-1);
+      features.add(endings.some((e) => e.subjectId === s.id && e.kind === "replied" && Number.isFinite(e.restartedAt)) ? (latest?.key === d.key ? "a-new-reply-in-the-latest-thread-after-a-restart" : "a-new-reply-in-an-earlier-thread-after-a-restart") : "a-hidden-reply");
+      return;
+    }
     if (!email.prospectReplies(d.destination, true, null)) return;
     // The reply is on the thread of the person's latest email, whichever campaign sent it.
     const s = subjects.get(email.replyLog.at(-1)?.subjectId ?? "");
@@ -529,12 +734,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     await h.tick();
     // A reply ends a lead that has not ended, and turns a stopped one into replied (2.1); a replied one stays.
     if (wasRunningOrHeld) {
-      const stopped = endingAt(s, h.clock);
-      if (stopped) {
-        stopped.restartedAt = h.clock;
-        endings.push({ subjectId: s.id, kind: "replied", at: stopped.at, restartedAt: Infinity });
-        features.add("a-reply-to-a-stopped-lead");
-      } else endings.push({ subjectId: s.id, kind: "replied", at: h.clock, restartedAt: Infinity });
+      replied(s, h.clock);
       features.add(leadPausedAt(s, h.clock) ? "a-reply-while-paused" : "an-auto-reply");
     }
   }
@@ -545,6 +745,16 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   for (let e = 0; e < eventCount && problems.length === 0 && !h.stopped; e++) {
     const r = rand();
     await h.advanceTo(h.clock + (r < 0.5 ? MINUTE : pick([10 * MINUTE, HOUR, 5 * HOUR, 12 * HOUR, DAY])));
+    settleHidden();
+    // From their own stream: a refused request sent again; a pause and a skip while a lookup lags; a reply, a restart
+    // and a new reply hidden in another thread; a control just after a due instant, before the worker's tick.
+    const extra = r17();
+    if (extra < 0.1) await retryRefused();
+    else if (extra < 0.25 && lookupLags) await pauseThenSkip();
+    else if (extra < 0.4) await replyRestartReply();
+    else if (extra < 0.55) await actAtADueInstant();
+    // One user action per instant: the event's own action comes a minute after an extra one.
+    if (extra < 0.55) await h.advanceTo(h.clock + MINUTE);
     listedBefore = new Set([...(await h.request<CallsView>("GET", "/api/calls")).body.readyNow].map((x) => x.enrollmentId));
     const kind = rand();
     if (kind < 0.6) {

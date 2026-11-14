@@ -12,8 +12,8 @@ import { FULL_SEARCH, inShard } from "./sequence-chunks.ts";
  */
 
 export const CONTROL_SEED = 17_000;
-/** Offsets from CONTROL_SEED, chosen greedily from a sweep of all 100 (14 November 2026) to reach every behaviour below. */
-export const CONTROL_FIXED_SEEDS: readonly number[] = [7, 18, 19, 44, 96];
+/** Offsets from CONTROL_SEED, chosen greedily from a sweep of all 100 (14 November 2026, after the review bot and the verifier on ca8baee) to reach every behaviour below. */
+export const CONTROL_FIXED_SEEDS: readonly number[] = [6, 8, 33, 37, 40, 48, 61, 76, 86, 87, 96];
 const SEARCH_SEEDS = 100;
 const MAX_SEEDS = 30;
 const RUN_WRITES = 10_000;
@@ -21,9 +21,17 @@ const RUN_WRITES = 10_000;
 /** Every behaviour the fixed seeds must reach between them. A name leaves it only into RETIRED_CONTROL_FEATURES, with its reason. */
 export const CONTROL_FEATURES: readonly string[] = [
   "a-call-track",
+  "a-control-just-after-a-due-instant",
   "a-control-sent-again",
   "a-email-track",
   "a-email-track-in-win-back",
+  "a-hidden-reply",
+  "a-hidden-reply-found-by-the-pre-send-check",
+  "a-hidden-reply-observed",
+  "a-new-reply-in-a-later-thread-after-a-restart",
+  "a-new-reply-in-an-earlier-thread-after-a-restart",
+  "a-new-reply-in-the-latest-thread-after-a-restart",
+  "a-refused-request-sent-again-later",
   "a-reply-after-the-sequence-finished",
   "a-reply-to-a-stopped-lead",
   "a-reply-while-paused",
@@ -33,29 +41,43 @@ export const CONTROL_FEATURES: readonly string[] = [
   "campaign-paused",
   "campaign-resumed",
   "late-sends",
+  "lookups-lag",
   "move_to_win_back-accepted",
   "move_to_win_back-inside-a-paused-campaign",
   "move_to_win_back-refused",
+  "move_to_win_back-refused-with-uncertain-work",
+  "move_to_win_back-with-a-call-listed",
   "pause-accepted",
   "pause-inside-a-paused-campaign",
   "pause-refused",
   "pause-with-a-call-listed",
   "pause-with-a-claim-open",
+  "pause-with-uncertain-work",
   "pause-with-work-at-the-provider",
   "restarted-after-a-reply",
   "restarted-after-a-stop",
   "resume-accepted",
   "resume-inside-a-paused-campaign",
   "resume-refused",
+  "resume-refused-with-uncertain-work",
+  "resume-with-uncertain-work",
   "resume_from_next_step-accepted",
   "resume_from_next_step-inside-a-paused-campaign",
   "resume_from_next_step-refused",
+  "resume_from_next_step-refused-with-uncertain-work",
+  "resume_from_next_step-with-a-call-listed",
+  "resume_from_next_step-with-uncertain-work",
+  "resume_from_next_step-with-work-at-the-provider",
   "skip-accepted",
+  "skip-after-a-pause-with-a-lookup-lagging",
   "skip-inside-a-paused-campaign",
   "skip-refused",
+  "skip-refused-with-uncertain-work",
   "skip-refused-with-work-at-the-provider",
   "skip-with-a-call-listed",
   "skip-with-a-claim-open",
+  "skip-with-uncertain-work",
+  "skip-with-work-at-the-provider",
   "skipped-a-call-step",
   "skipped-a-email-step",
   "skipped-a-sms-step",
@@ -64,21 +86,21 @@ export const CONTROL_FEATURES: readonly string[] = [
   "stop-refused",
   "stop-with-a-call-listed",
   "stop-with-a-claim-open",
+  "stop-with-uncertain-work",
   "stop-with-work-at-the-provider",
   "withdrawals-answered-unknown-and-sent",
 ];
 
 export const RETIRED_CONTROL_FEATURES: Readonly<Record<string, string>> = {
-  "move_to_win_back-with-a-call-listed": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
   "move_to_win_back-with-a-claim-open": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
+  "move_to_win_back-with-uncertain-work": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
   "move_to_win_back-with-work-at-the-provider": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
+  "pause-refused-with-uncertain-work": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
   "resume-with-a-call-listed": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
   "resume-with-a-claim-open": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
   "resume-with-work-at-the-provider": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
-  "resume_from_next_step-with-a-call-listed": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
   "resume_from_next_step-with-a-claim-open": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
-  "resume_from_next_step-with-work-at-the-provider": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
-  "skip-with-work-at-the-provider": "Cannot happen: a skip is refused while its step is with the provider, which the runs reach as skip-refused-with-work-at-the-provider.",
+  "stop-refused-with-uncertain-work": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
 };
 
 const known = (name: string) => CONTROL_FEATURES.includes(name) || name in RETIRED_CONTROL_FEATURES;
@@ -123,12 +145,12 @@ export function controlOracle(): void {
     run(`the generated control runs fail ${mutation.invariant} for an engine with "${name}"`, async () => {
       const breaks = (problems: readonly string[]) => problems.some((p) => controlInvariantsOf(p).includes(mutation.invariant));
       if (!FULL_SEARCH) {
-        const { problems } = await runControls(CONTROL_SEED + mutation.seed, { rules: mutation.rules, maxWrites: RUN_WRITES });
+        const { problems } = await runControls(CONTROL_SEED + mutation.seed, { ...mutation.options, rules: mutation.rules, maxWrites: RUN_WRITES });
         expect(breaks(problems), `seed ${CONTROL_SEED + mutation.seed} no longer breaks ${mutation.invariant}; run the sequence-search workflow and update its seed. Problems: ${problems.join("; ")}`).toBe(true);
         return;
       }
-      let caught: number | null = breaks((await runControls(CONTROL_SEED + mutation.seed, { rules: mutation.rules, maxWrites: RUN_WRITES })).problems) ? mutation.seed : null;
-      for (let o = 0; o < MAX_SEEDS && caught === null; o++) if (breaks((await runControls(CONTROL_SEED + o, { rules: mutation.rules, maxWrites: RUN_WRITES })).problems)) caught = o;
+      let caught: number | null = breaks((await runControls(CONTROL_SEED + mutation.seed, { ...mutation.options, rules: mutation.rules, maxWrites: RUN_WRITES })).problems) ? mutation.seed : null;
+      for (let o = 0; o < MAX_SEEDS && caught === null; o++) if (breaks((await runControls(CONTROL_SEED + o, { ...mutation.options, rules: mutation.rules, maxWrites: RUN_WRITES })).problems)) caught = o;
       console.info(`killing seed: control mutation "${name}" (${mutation.invariant}): ${caught ?? "none"}; recorded ${mutation.seed}`);
       expect(caught).not.toBeNull();
     }, 1_800_000);

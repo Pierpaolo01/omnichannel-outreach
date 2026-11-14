@@ -927,7 +927,7 @@ export class Engine {
     // The replies the lead's record holds are not news (a restart after an auto-reply): the port reports any other reply,
     // in any of the lead's threads (ticket 17a; review bot on ca8baee, item 1; ADR 0002's correlation rules).
     const knownReplies = (subject?.replies ?? []).filter((r) => r.channel === channel).map((r) => r.providerRef);
-    const result = await this.bounded(() => port.presendCheck({ sender: a.accountId, destination: a.destination, threadRefs, knownReplies }), { kind: "unavailable" as const });
+    const result = this.rules.presendAnswer(await this.bounded(() => port.presendCheck({ sender: a.accountId, destination: a.destination, threadRefs, knownReplies }), { kind: "unavailable" as const }), knownReplies);
     if (result.kind === "unavailable") return false;
     await this.store.update(a.subjectId, now, (s) => {
       let next: SubjectState = { ...s, attempts: s.attempts.map((x) => (x.id === a.id ? { ...x, presendCheckedWall: now, presendFoundReply: result.kind === "reply" } : x)) };

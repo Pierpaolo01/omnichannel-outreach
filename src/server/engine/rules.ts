@@ -69,6 +69,8 @@ export interface Rules {
   readonly campaignResumed: typeof campaignResumed;
   /** How a request id stands against its stored first answer (verifier B5): new, a replay of it, or reused. */
   readonly requestStanding: (stored: StoredRequest | null, target: string, action: string) => RequestStanding;
+  /** What the engine makes of the pre-send check's answer (ADR 0002): as given; the mutation of ca8baee's defect clears a known reply. */
+  readonly presendAnswer: <T extends { readonly kind: string }>(answer: T, knownReplies: readonly string[]) => T | { readonly kind: "clear" };
   /** What the reads apply first when they preview a control: what fell due by the read's instant, as the action does. */
   readonly previewAsOf: typeof asOfAction;
   /** The version guard (2.5): a change computed from `computedFrom` applies only if nothing it read has changed. */
@@ -109,6 +111,7 @@ export const DEFAULT_RULES: Rules = {
   campaignResumed,
   requestStanding: (stored, target, action) => (stored === null ? "new" : stored.target === target && stored.action === action ? "replay" : "reused"),
   previewAsOf: asOfAction,
+  presendAnswer: (answer) => answer,
   // Everything an evaluation reads: the subject's and campaign's versions cover its progress and the
   // definition; the lead's facts (contact details and their marks, zone, merge data) change without
   // bumping them (an import, a mark elsewhere), so they are compared as they were read.
