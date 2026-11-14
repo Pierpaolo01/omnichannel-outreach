@@ -4,6 +4,7 @@
  * worker per database. A value that cannot be parsed reads as absent: nothing is invented from it (the boundary).
  */
 import { INTERRUPTION_GAP } from "../../domain/sequence/interruption.ts";
+import type { ProviderEvidence } from "../../domain/sequence/providers.ts";
 import type { EngineStore, WorkerLease } from "./engine-store.ts";
 
 /** The last instant a tick completed with every port answering (or the instant sending resumed). */
@@ -14,8 +15,11 @@ export const NOTICE_KEY = "engine_interruption";
 export const TICK_ENDED_KEY = "engine_tick_ended";
 /** The last instant a tick threw. */
 export const TICK_FAILED_KEY = "engine_tick_failed";
-/** The last read of a provider that failed: `{ channel, part, at }` (ticket 20a: a partial answer is not contact). */
-export const FAILED_READ_KEY = "engine_failed_read";
+/**
+ * Each provider's evidence (ticket 20a, council G): its last contact and how long that stands, and its last failed read
+ * with its part (`ProviderEvidence` per channel, as JSON). The gate and the reads decide by it.
+ */
+export const PROVIDERS_KEY = "engine_providers";
 /** The worker's lease: `WorkerLease` as JSON. */
 export const LEASE_KEY = "worker_lease";
 
@@ -25,7 +29,7 @@ export interface InterruptionNotice {
   readonly rescheduled: number;
 }
 
-export type InterruptionCause = "ticks_failing" | "providers_unreachable" | "worker_stalled";
+export type InterruptionCause = "ticks_failing" | "providers_unreachable" | "not_running";
 
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
@@ -69,13 +73,27 @@ export interface FailedRead {
   readonly at: number;
 }
 
-export function parseFailedRead(raw: string | null): FailedRead | null {
+const emptyEvidence: ProviderEvidence = { contactAt: null, freshForMs: 0, failedAt: null, failedPart: null };
+
+/** The providers' evidence as the worker last saved it; a value that cannot be parsed is no evidence. */
+export function parseEvidence(raw: string | null): Record<"email" | "sms", ProviderEvidence> {
+  const one = (v: unknown): ProviderEvidence => {
+    if (typeof v !== "object" || v === null) return emptyEvidence;
+    const o = v as Record<string, unknown>;
+    const n = (x: unknown) => (finite(x) ? x : null);
+    const part = o["failedPart"] === "accounts" || o["failedPart"] === "observation" ? o["failedPart"] : null;
+    return { contactAt: n(o["contactAt"]), freshForMs: n(o["freshForMs"]) ?? 0, failedAt: n(o["failedAt"]), failedPart: part };
+  };
   try {
     const v = raw === null ? null : (JSON.parse(raw) as Record<string, unknown>);
-    return v && (v["channel"] === "email" || v["channel"] === "sms") && (v["part"] === "accounts" || v["part"] === "observation") && finite(v["at"]) ? { channel: v["channel"], part: v["part"], at: v["at"] } : null;
+    return { email: one(v?.["email"]), sms: one(v?.["sms"]) };
   } catch {
-    return null;
+    return { email: emptyEvidence, sms: emptyEvidence };
   }
+}
+
+export async function providerEvidence(store: Pick<EngineStore, "meta">): Promise<Record<"email" | "sms", ProviderEvidence>> {
+  return parseEvidence(await store.meta(PROVIDERS_KEY));
 }
 
 export async function sendingInterrupted(store: Pick<EngineStore, "meta">, now: number): Promise<{ readonly since: number; readonly cause: InterruptionCause; readonly lastFailedRead: FailedRead | null } | null> {
@@ -83,8 +101,15 @@ export async function sendingInterrupted(store: Pick<EngineStore, "meta">, now: 
   if (heartbeat === null || now - heartbeat <= INTERRUPTION_GAP) return null;
   const ended = parseInstant(await store.meta(TICK_ENDED_KEY)) ?? -Infinity;
   const failed = parseInstant(await store.meta(TICK_FAILED_KEY)) ?? -Infinity;
-  const cause: InterruptionCause = failed > heartbeat && failed >= ended ? "ticks_failing" : ended > heartbeat ? "providers_unreachable" : "worker_stalled";
+  // From evidence, not timing (council G): a tick that threw and none ended since; a provider read that failed since the
+  // heartbeat; otherwise the worker has not been running (stopped, asleep, or a tick that never ends).
+  const evidence = await providerEvidence(store);
+  const failures = (["email", "sms"] as const).flatMap((channel) => {
+    const e = evidence[channel];
+    return e.failedAt !== null && e.failedPart !== null && e.failedAt > heartbeat ? [{ channel, part: e.failedPart, at: e.failedAt }] : [];
+  });
+  const cause: InterruptionCause = failed > heartbeat && failed >= ended ? "ticks_failing" : failures.length > 0 ? "providers_unreachable" : "not_running";
   // The provider read that failed last since the heartbeat, if any: which channel and which part.
-  const failedRead = parseFailedRead(await store.meta(FAILED_READ_KEY));
-  return { since: heartbeat, cause, lastFailedRead: failedRead !== null && failedRead.at > heartbeat ? failedRead : null };
+  const lastFailedRead = failures.sort((a, b) => b.at - a.at)[0] ?? null;
+  return { since: heartbeat, cause, lastFailedRead };
 }

@@ -5,6 +5,8 @@ import { callRecordView, dateOfDay } from "./call-views.ts";
 import { leadNow } from "../../domain/sequence/clock.ts";
 import { accountAvailable, candidatesFor, claimRefusal, heldReason, inheritedWork, readyItems, stalledAccounts } from "../../domain/sequence/dispatch.ts";
 import { localDayNumber, startOfLocalDay } from "../../domain/sequence/clock.ts";
+import { relevantChannels, waitingOn } from "../../domain/sequence/providers.ts";
+import { providerEvidence, sendingInterrupted } from "./worker-state.ts";
 import { channelOf, deriveStatus, liveTracksFor, unreachableWhy, wallAtLead } from "../../domain/sequence/progress.ts";
 import type { AccountState, SubjectState } from "../../domain/sequence/state.ts";
 import type { EnrollmentProgress, NeedsAttention, SenderAccountViewApi } from "../../shared/api.ts";
@@ -157,6 +159,10 @@ export async function needsAttention(
   const heldTracks: NeedsAttention["heldTracks"][number][] = [];
   const waitingForCapacity: NeedsAttention["waitingForCapacity"][number][] = [];
   const waitingOnTransport: NeedsAttention["waitingOnTransport"][number][] = [];
+  // Ticket 20a (council B): while sending is interrupted, which providers the gate holds due sends on, by its own function.
+  const interrupted = await sendingInterrupted(store, now);
+  const evidence = interrupted ? await providerEvidence(store) : null;
+  const providerWaits = new Map<"email" | "sms", number>();
   for (const id of await store.runningSubjectIds()) {
     const stored = await store.subject(id, now);
     if (!stored) continue;
@@ -176,6 +182,11 @@ export async function needsAttention(
       if (!transportAvailable(channel, step?.threading ?? "new_subject")) {
         waitingOnTransport.push(base);
         continue;
+      }
+      if (evidence) {
+        const waits = waitingOn(evidence, relevantChannels(s, item.trackId), now);
+        for (const c of waits) providerWaits.set(c, (providerWaits.get(c) ?? 0) + 1);
+        if (waits.length > 0) continue;
       }
       // A claim carrying uncertain work already holds its reservation: it never waits for capacity.
       if (inheritedWork(s, item.stepId)) continue;
@@ -228,6 +239,7 @@ export async function needsAttention(
     waitingForCapacity,
     noUsableChannel,
     waitingOnTransport,
+    waitingOnProvider: [...providerWaits].map(([channel, sends]) => ({ channel, since: iso(evidence?.[channel].contactAt ?? null), sends })),
     anomalies: (await store.anomalies()).map((x) => ({ what: x.what, at: new Date(x.atWall).toISOString() })),
   };
 }

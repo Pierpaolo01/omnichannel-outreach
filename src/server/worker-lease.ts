@@ -31,10 +31,23 @@ export class WorkerLeaseHolder {
     this.owner = owner;
   }
 
+  /** The instant of this process's last successful take or renewal. */
+  private lastHeld: number | null = null;
+
+  /**
+   * Whether this process still holds the lease at `now` (council E): its last successful renewal is within the lease's
+   * staleness window, so no other process can have taken it. The engine's dispatch gate reads this.
+   */
+  heldAt(now: number): boolean {
+    return this.lastHeld !== null && now - this.lastHeld <= LEASE_STALE_MS;
+  }
+
   /** Takes the lease, or says plainly who holds it. */
   async take(): Promise<{ readonly ok: true } | { readonly ok: false; readonly message: string }> {
     const now = this.owner.now();
     const result = await this.store.takeLease({ id: this.owner.id, pid: this.owner.pid, renewedWall: now }, now, LEASE_STALE_MS, this.owner.alive);
+    if (result.ok) this.lastHeld = now;
+    else this.lastHeld = null;
     if (result.ok) return { ok: true };
     return {
       ok: false,
@@ -48,6 +61,7 @@ export class WorkerLeaseHolder {
   }
 
   async release(): Promise<void> {
+    this.lastHeld = null;
     await this.store.releaseLease(this.owner.id);
   }
 }

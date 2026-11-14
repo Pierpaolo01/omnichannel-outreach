@@ -13,7 +13,7 @@ import { OUTREACH_STATUSES } from "../../domain/outreach-status.ts";
  * migration first, renumber yours when merging the integration branch tip (see
  * docs/agents/delivery-workflow.md, "Standing checks").
  */
-interface Migration {
+export interface Migration {
   readonly version: number;
   readonly name: string;
   readonly sql: string;
@@ -635,25 +635,25 @@ export const MIGRATIONS: readonly Migration[] = [
   },
 ];
 
-export function migrate(db: DatabaseSync, appliedAt: () => string): void {
+export function migrate(db: DatabaseSync, appliedAt: () => string, migrations: readonly Migration[] = MIGRATIONS): void {
   db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
     applied_at TEXT NOT NULL
   )`);
   const versions = db.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((r) => Number(r["version"]));
-  const known = new Set(MIGRATIONS.map((m) => m.version));
+  const known = new Set(migrations.map((m) => m.version));
   const unknown = versions.filter((v) => !known.has(v));
   if (unknown.length > 0 || versions.some((v, i) => v !== i + 1)) {
     throw new Error(
-      `This database's schema versions are ${versions.join(", ")}, which is not a prefix of this code's migrations (1 to ${MIGRATIONS.length})` +
+      `This database's schema versions are ${versions.join(", ")}, which is not a prefix of this code's migrations (1 to ${migrations.length})` +
         (unknown.length > 0 ? `: it records a version this code does not know (${unknown.join(", ")})` : ": a version is missing") +
         ". It was written by other code; it is not migrated.",
     );
   }
   const current = versions.length;
 
-  for (const migration of MIGRATIONS) {
+  for (const migration of migrations) {
     if (migration.version <= current) continue;
     db.exec("BEGIN IMMEDIATE");
     // Another process starting on the same new database may have applied it while this one waited for the lock (ticket 20a).

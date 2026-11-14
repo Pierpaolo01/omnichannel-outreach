@@ -29,7 +29,7 @@ import type {
   UnenrolledReason,
 } from "../../shared/api.ts";
 import type { EngineStore } from "../engine/engine-store.ts";
-import { migrate } from "./migrations.ts";
+import { migrate, MIGRATIONS, type Migration } from "./migrations.ts";
 import { SqliteEngineStore } from "./sqlite-engine-store.ts";
 import { SqliteInstantlyStore } from "./sqlite-instantly-store.ts";
 import type { InstantlyStore } from "../instantly/store.ts";
@@ -57,14 +57,27 @@ function toWal(db: DatabaseSync): void {
 
 /** Opens (creating if needed) the SQLite database at `path` and applies pending migrations. */
 export function openSqliteStore(path: string): OutreachStore {
+  return openStoreOn(openDatabase(path));
+}
+
+/**
+ * The store on a database opened by `openDatabase`, its pending migrations applied first (ticket 20a, council F: `main.ts`
+ * takes the worker's lease between the two, so a refused process never migrates). `migrations` is for tests.
+ */
+export function openStoreOn(db: DatabaseSync, migrations: readonly Migration[] = MIGRATIONS): OutreachStore {
+  migrate(db, () => new Date().toISOString(), migrations);
+  return new SqliteStore(db);
+}
+
+/** Opens (creating if needed) the SQLite database at `path`, with its settings, and migrates nothing. */
+export function openDatabase(path: string): DatabaseSync {
   const db = new DatabaseSync(path);
   // The busy timeout first: switching a new database to WAL takes a lock, and two applications started at once on an empty
   // data folder must wait for each other there, not fail (ticket 20a; the second is then refused by the worker's lease).
   db.exec("PRAGMA busy_timeout = 5000");
   db.exec("PRAGMA foreign_keys = ON");
   if (path !== ":memory:") toWal(db);
-  migrate(db, () => new Date().toISOString());
-  return new SqliteStore(db);
+  return db;
 }
 
 /**

@@ -438,6 +438,11 @@ export interface NeedsAttention {
     readonly endedAt: string;
     readonly channels: readonly { readonly channel: "email" | "sms" | "call"; readonly why: "missing" | "bad" | "declined" }[];
   }[];
+  /**
+   * While sending is interrupted, the providers the dispatch gate waits on (ticket 20a, council B): each not answering,
+   * since its last contact, and how many due sends wait on it, decided by the gate's own function (`waitingOn`).
+   */
+  readonly waitingOnProvider: readonly { readonly channel: "email" | "sms"; readonly since: string | null; readonly sends: number }[];
   /** Due steps waiting for a transport the provider cannot use yet, such as continue-thread follow-ups (follow-up 42 item 12). */
   readonly waitingOnTransport: readonly { readonly enrollmentId: string; readonly trackId: string; readonly stepId: string; readonly channel: "email" | "sms"; readonly dueAt: string }[];
 }
@@ -1013,11 +1018,11 @@ export interface InterruptionNoticeView {
 /**
  * Sending interrupted now (ADR 0003 "Ticket 20a"): no tick has completed with every provider answering for more than five
  * minutes. `ticks_failing`: the worker's ticks throw; `providers_unreachable`: they run, but a provider does not answer;
- * `worker_stalled`: no tick has ended since.
+ * `not_running`: no tick has ended since and no provider read failed: the worker is stopped, asleep or stalled.
  */
 export interface SendingInterruptedView {
   readonly since: string;
-  readonly cause: "ticks_failing" | "providers_unreachable" | "worker_stalled";
+  readonly cause: "ticks_failing" | "providers_unreachable" | "not_running";
   /** The provider read that failed last since then, and which part of the round: a partial answer is not contact. */
   readonly lastFailedRead: { readonly channel: "email" | "sms"; readonly part: "accounts" | "observation"; readonly at: string } | null;
 }

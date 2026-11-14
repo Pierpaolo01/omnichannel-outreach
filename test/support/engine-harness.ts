@@ -189,6 +189,15 @@ export class EngineHarness {
     return this.providersDownUntil === null || this.clock >= this.providersDownUntil;
   }
 
+  /** While set, only these channels' providers are cut off by an outage (council on 13dad92: an SMS outage alone). */
+  outageChannels: ReadonlySet<string> | null = null;
+  /** Every call of this kind takes `ms` of the clock before it answers (council on 13dad92: a slow tick with no outage). */
+  slowCalls: { readonly kind: string; readonly ms: number } | null = null;
+
+  private reachableFor(channel: string): boolean {
+    return this.reachable || (this.outageChannels !== null && !this.outageChannels.has(channel));
+  }
+
   /** The port as the engine sees it: unreachable during an outage, and with a held answer arriving late. */
   private gated(port: SendPort): SendPort {
     return new Proxy(port, {
@@ -197,7 +206,11 @@ export class EngineHarness {
         const value: unknown = Reflect.get(target, prop, receiver);
         if (typeof prop !== "string" || !PORT_CALLS.has(prop) || typeof value !== "function") return value;
         return (...args: unknown[]) => {
-          const failing = !this.reachable && (!this.partialOutage || EngineHarness.PARTIAL.has(prop));
+          const failing = !this.reachableFor(target.channel) && (!this.partialOutage || EngineHarness.PARTIAL.has(prop));
+          if (this.slowCalls && this.slowCalls.kind === prop && !failing) {
+            this.clock += this.slowCalls.ms;
+            this.advanceProviders();
+          }
           if (failing && this.cachedPolls && prop === "observe") return Promise.resolve({ events: [], checkpoint: args[0] ?? "" });
           if (failing && this.cachedPolls && prop === "accounts" && this.cachedAccounts.has(target)) return Promise.resolve(this.cachedAccounts.get(target));
           if (failing) {
@@ -353,6 +366,7 @@ export class EngineHarness {
     if (this.providersDownUntil !== null && this.clock >= this.providersDownUntil) {
       this.providersDownUntil = null;
       this.partialOutage = false;
+      this.outageChannels = null;
     }
     if (this.live && this.standsIn) await this.store.engine.setMeta(HEARTBEAT_KEY, String(this.clock));
     this.beforeTick?.();

@@ -64,6 +64,7 @@ const NEEDS_ATTENTION = {
   waitingForCapacity: [],
   noUsableChannel: [],
   waitingOnTransport: [],
+  waitingOnProvider: [],
   overdueCallbacks: [],
 } as const;
 
