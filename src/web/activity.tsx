@@ -1,5 +1,5 @@
 import { useId, useState } from "react";
-import type { ActivityEntry, ActivityView } from "../shared/api.ts";
+import type { ActivityEntry, ActivityView, DependentTrackState } from "../shared/api.ts";
 import { useApi } from "./api.ts";
 import { ErrorState, Section } from "./components.tsx";
 import { DECLINED_PATH_LINE, OUTCOME_TITLE, dateIn, dialledLine } from "./calls/wording.ts";
@@ -108,18 +108,7 @@ export function describeEntry(entry: ActivityEntry, userZone: string): { icon: I
           const limit = entry.limitDays === 1 ? "a day" : `${entry.limitDays} days`;
           // What each track after it has done at this read, from the server: never a start that has not happened (verifier on eac9f6c, F2).
           // An ended lead's track never starts; a held one has no day yet (council on 32454ea, D).
-          const after = entry.after.map((a) => {
-            switch (a.state) {
-              case "started":
-                return `${a.track.label} started after it.`;
-              case "stopped":
-                return `${a.track.label} did not start: their outreach in this campaign stopped.`;
-              case "waiting":
-                return a.startsAt ? `${a.track.label} starts after its delay, on ${dateIn(userZone, a.startsAt)}.` : `${a.track.label} starts after its delay.`;
-              case "held":
-                return `${a.track.label} starts after its delay, once their outreach is no longer held.`;
-            }
-          });
+          const after = entry.after.map((a) => dependentLine(a, userZone));
           // The engine's own calendar date, said as a date: never re-derived from an instant (council on 32454ea, C).
           return { icon: "system", tone: PLAIN, title: `${entry.track.label} skipped, not called`, body: [`Not called within ${limit} of its due date, ${dayLabel(entry.dueDate)}, so the call was skipped.`, ...after].join(" "), track: null };
         }
@@ -171,6 +160,43 @@ const at = (iso: string, zone: string) => `${dateIn(zone, iso)} at ${timeIn(zone
 function releasedWhy(because: "skipped" | "failed" | "unworked", after: string): string {
   if (because === "unworked") return "was skipped: its call wasn’t made within its skip limit";
   return because === "skipped" ? "was skipped for this lead" : `ended on a bad ${after.startsWith("SMS") ? "number" : "address"}`;
+}
+
+/**
+ * What Activity says of a track that starts after an unworked skip, from the state the server read (verifier on
+ * 2027f24): one sentence per state, in an exhaustive switch, so a state a later ticket adds fails typecheck until it
+ * has one. Only `waiting` and `held` say the track will start, because the server read says so.
+ */
+export function dependentLine(a: { readonly track: { readonly label: string } } & DependentTrackState, userZone: string): string {
+  const name = a.track.label;
+  switch (a.state) {
+    case "started":
+      return `${name} started after it.`;
+    case "finished":
+      return `${name} has finished.`;
+    case "waiting":
+      return `${name} starts after its delay, on ${dateIn(userZone, a.startsAt)}.`;
+    case "held":
+      return `${name} starts after its delay, once their outreach is no longer held.`;
+    case "dropped_for_win_back":
+      return `${name} will not start: they moved to this campaign’s win-back branch.`;
+    case "skipped_declined":
+      return `${name} was skipped: they declined on a call.`;
+    case "skipped_unworked":
+      return `${name} was skipped: its call wasn’t made within its skip limit.`;
+    case "skipped_no_channel":
+      return `${name} was skipped: there is nothing to reach them on for it.`;
+    case "skipped":
+      return `${name} was skipped.`;
+    case "stopped":
+      return `${name} did not start: their outreach in this campaign stopped.`;
+    case "not_started":
+      return `${name} has not started.`;
+    default: {
+      const unhandled: never = a;
+      throw new Error(`A track state Activity has no sentence for: ${JSON.stringify(unhandled)}`);
+    }
+  }
 }
 
 /**

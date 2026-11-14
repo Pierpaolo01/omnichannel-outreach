@@ -269,7 +269,27 @@ export const callsDefinition = (afterCallDelayDays = 0): CampaignDefinition => (
   ],
 });
 
-export type CallsScenario = "ready" | "early" | "full" | "delayed";
+export type CallsScenario = "ready" | "early" | "full" | "delayed" | "after-skip";
+
+/**
+ * The verifier's reproduction on 2027f24 (`after-skip`): two phone tracks with skip limits 2 and 8, the email after the
+ * first phone track three days after it ends, and a win-back branch.
+ */
+export const afterSkipDefinition = (): CampaignDefinition => {
+  const base = callsDefinition(3);
+  const [email, phone, afterCall] = base.tracks;
+  if (!email || !phone || !afterCall) throw new Error("the calls definition changed");
+  return {
+    ...base,
+    tracks: [
+      email,
+      { ...phone, callSkipLimitDays: 2 },
+      { ...phone, id: "phone2", steps: [step("c2", { threading: "new_subject" })], callSkipLimitDays: 8 },
+      afterCall,
+      { id: "win-back", channel: "email", branch: "win_back", window: WEEKDAYS_9_TO_17, steps: [step("w1", { subject: "One more idea", body: "Hi {{first_name|there}},\n\nOne more idea for {{company}}.\n\nAlex", threading: "new_subject" })], start: { kind: "entry" }, removed: false },
+    ],
+  };
+};
 
 export interface FakeCallsApp {
   readonly url: string;
@@ -302,7 +322,7 @@ async function startCalls(scenario: CallsScenario): Promise<FakeCallsApp> {
   const csv = { businessesCsv: readFileSync(fixture("businesses-run1.csv"), "utf8"), peopleCsv: readFileSync(fixture("people-run1.csv"), "utf8") };
   const campaign = (await harness.request<{ campaign: Campaign }>("POST", "/api/campaigns", { name: "Clinics, London", defaultTimezone: "Europe/London", ...csv })).body.campaign.id;
   await harness.tick();
-  await harness.defineSequence(campaign, callsDefinition(scenario === "delayed" ? 2 : 0));
+  await harness.defineSequence(campaign, scenario === "after-skip" ? afterSkipDefinition() : callsDefinition(scenario === "delayed" ? 2 : 0));
   harness.clock = MONDAY_8 - H;
   const launched = await harness.launch(campaign);
   if (launched.status !== 200) throw new Error(`the calls campaign did not launch: ${JSON.stringify(launched.body)}`);

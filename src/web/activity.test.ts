@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import type { ActivityEntry } from "../shared/api.ts";
+import type { ActivityEntry, DependentTrackState } from "../shared/api.ts";
 import { describeEntry } from "./activity.tsx";
 
 const campaign = { id: "c1", name: "Autumn physio" };
@@ -96,5 +96,31 @@ describe("what the timeline says of a declined call (ticket 16)", () => {
     expect(say(declined("win_back"))).toEqual(["Call: not interested", "Moved to this campaign’s win-back branch, with no more calls. +44 20 7946 0111, direct. Happy with their supplier.", null]);
     // Any other call has no path.
     expect(say({ campaign, at, kind: "call", channel: "call", track: one("Phone track"), outcome: "no_answer", number, note: "", declinedPath: null, redial: false, callbackAt: null, onCallback: null, zone: "Europe/London", redialListedFrom: null, callbackOpen: false })).toEqual(["Call: no answer", "+44 20 7946 0111, direct", null]);
+  });
+});
+
+describe("every track state the server sends after an unworked skip has its own sentence, and only a server state promises a start (verifier on 2027f24)", () => {
+  test("the table walks every state", async () => {
+    const { dependentLine } = await import("./activity.tsx");
+    const track = { label: "Email track 2", several: false };
+    const table: Record<DependentTrackState["state"], string> = {
+      started: "Email track 2 started after it.",
+      finished: "Email track 2 has finished.",
+      waiting: "Email track 2 starts after its delay, on Sat 14 Nov.",
+      held: "Email track 2 starts after its delay, once their outreach is no longer held.",
+      dropped_for_win_back: "Email track 2 will not start: they moved to this campaign’s win-back branch.",
+      skipped_declined: "Email track 2 was skipped: they declined on a call.",
+      skipped_unworked: "Email track 2 was skipped: its call wasn’t made within its skip limit.",
+      skipped_no_channel: "Email track 2 was skipped: there is nothing to reach them on for it.",
+      skipped: "Email track 2 was skipped.",
+      stopped: "Email track 2 did not start: their outreach in this campaign stopped.",
+      not_started: "Email track 2 has not started.",
+    };
+    for (const [state, sentence] of Object.entries(table) as [DependentTrackState["state"], string][]) {
+      const a = (state === "waiting" ? { track, state, startsAt: "2026-11-14T01:05:00.000Z" } : { track, state, startsAt: null }) as { track: typeof track } & DependentTrackState;
+      expect(dependentLine(a, "Europe/London"), state).toBe(sentence);
+    }
+    // Only waiting and held, states the server read, say it will start.
+    expect(Object.entries(table).filter(([, s]) => s.includes("starts after")).map(([k]) => k).sort()).toEqual(["held", "waiting"]);
   });
 });

@@ -1,5 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import type { CallTaskView } from "../src/shared/api.ts";
+import type { CallQueueItem, CallTaskView } from "../src/shared/api.ts";
 import { respond } from "./mocks.ts";
 import { SCREENS, callbackWithNoGoodNumber, callOf, carriedAndOverdue, carriedOnly, freshCalls, galleryRecord, openCalls, seedData } from "./screens.ts";
 
@@ -86,7 +86,7 @@ test("a redial: the page says where the call goes and when its skip limit still 
   await at(page, f, "2026-11-11T11:00:00Z");
   await page.reload();
   await expect(page.getByText("Phone track skipped, not called")).toBeVisible();
-  await expect(page.getByText("Not called within 2 days of its due date, Mon 9 Nov, so the call was skipped. Email track 2 started after it.")).toBeVisible();
+  await expect(page.getByText("Not called within 2 days of its due date, Mon 9 Nov, so the call was skipped. Email track 2 has finished.")).toBeVisible();
   await expect(page.getByText("It starts after the phone track, which was skipped: its call wasn’t made within its skip limit.")).toBeVisible();
   await expect(page.getByText(/Their call/)).toHaveCount(0);
   await shot(page, "record-skipped-unworked");
@@ -409,7 +409,8 @@ test("an unworked skip says what the track after it has done: waiting out its de
   await at(page, f, "2026-11-13T10:00:00Z");
   for (const path of records) {
     await page.goto(f.url + path);
-    await expect(page.getByRole("listitem").filter({ hasText: /^Phone track skipped, not called/ })).toContainText("Email track 2 started after it.");
+    // Its one email has gone: the track has finished, as the engine stores it; the release says it started because of the skip.
+    await expect(page.getByRole("listitem").filter({ hasText: /^Phone track skipped, not called/ })).toContainText("Email track 2 has finished.");
     await expect(page.getByRole("listitem").filter({ hasText: /^Email track 2 started/ })).toContainText("It starts after the phone track, which was skipped: its call wasn’t made within its skip limit.");
   }
 });
@@ -495,6 +496,42 @@ test("after a reply, a callback's Activity entry is history: what was asked for 
       await expect(page.getByText("held until", { exact: false })).toHaveCount(0);
     }
     if (late) await shot(page, "record-company-replied-after-callback-time");
+  }
+});
+
+test("after an unworked skip, Activity says the email track after it as the engine stores it: dropped for win-back, not started because outreach stopped, or waiting to a stated day; on a person's and a company lead's record (verifier on 2027f24)", async ({ page }) => {
+  const SAID = {
+    win_back: "Email track 2 will not start: they moved to this campaign’s win-back branch.",
+    stop: "Email track 2 did not start: their outreach in this campaign stopped.",
+    continue: "Email track 2 starts after its delay, on Sat 14 Nov.",
+  } as const;
+  for (const path of ["win_back", "stop", "continue"] as const) {
+    const f = await freshCalls("after-skip", `after-skip-${path}`);
+    const leads = ["Amira Hassan", "Riverside Sports Clinic"];
+    const post = async (taskId: string, body: Record<string, unknown>) => {
+      const numbers = (await f.harness.request<CallTaskView>("GET", `/api/call-tasks/${taskId}`)).body.numbers;
+      const out = await f.harness.request("POST", `/api/call-tasks/${taskId}/outcome`, { requestId: `${path}-${taskId}-${String(body["outcome"])}`, numberId: numbers.find((n) => !n.bad)?.detailId, ...body });
+      expect(out.status, JSON.stringify(out.body)).toBe(200);
+    };
+    const tasksOn = async (trackId: string) => {
+      const q = (await f.harness.request<{ readyNow: CallQueueItem[]; laterToday: CallQueueItem[] }>("GET", "/api/calls")).body;
+      return [...q.readyNow, ...q.laterToday].filter((x) => x.track.id === trackId && leads.includes(x.person?.name ?? x.company.name));
+    };
+    // Monday: the first call redialed. Wednesday 10:00: skipped unworked at midnight; a callback for 11:00 on the second
+    // phone track's call; at 11:05 they decline it, with the path.
+    for (const x of await tasksOn("phone")) await post(x.taskId, { outcome: "no_answer", redial: true });
+    await f.harness.advanceTo(Date.parse("2026-11-11T10:00:00Z"));
+    for (const x of await tasksOn("phone2")) await post(x.taskId, { outcome: "callback_requested", callbackAt: "2026-11-11T11:00:00+00:00" });
+    await f.harness.advanceTo(Date.parse("2026-11-11T11:05:00Z"));
+    for (const x of await tasksOn("phone2")) await post(x.taskId, { outcome: "not_interested", declinedPath: path });
+    await page.clock.setFixedTime(f.harness.clock);
+    for (const path_ of [`/leads/people/${f.person("Amira Hassan")}`, `/leads/companies/${f.company("Riverside Sports Clinic")}`]) {
+      await page.goto(f.url + path_);
+      const skip = page.getByRole("listitem").filter({ hasText: /skipped, not called/ });
+      await expect(skip).toContainText(SAID[path]);
+      for (const [other, said] of Object.entries(SAID)) if (other !== path) await expect(skip).not.toContainText(said);
+    }
+    if (path === "win_back") await shot(page, "record-skip-then-win-back");
   }
 });
 

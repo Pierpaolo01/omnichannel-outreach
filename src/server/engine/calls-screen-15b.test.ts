@@ -3,7 +3,8 @@ import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
 import { end } from "../../domain/sequence/progress.ts";
-import type { ActivityView, CallsView, CallTaskView, CompanyRecord, LeadSearchResult, PersonRecord, RecordCalls, TodayView } from "../../shared/api.ts";
+import type { FinishReason } from "../../domain/sequence/state.ts";
+import type { ActivityView, CallsView, CallTaskView, CompanyRecord, EnrollmentProgress, LeadSearchResult, PersonRecord, RecordCalls, TodayView } from "../../shared/api.ts";
 
 /**
  * What the redial, callback, rolled-over and overdue screens read (ticket 15, part b), through the real
@@ -383,7 +384,8 @@ describe("an unworked skip says what each track after it has done at the read: s
       expect(skip).toMatchObject({ reason: "unworked", after: [{ track: { label: "Email track 2" }, state: "waiting", startsAt: "2026-11-06T00:00:00.000Z" }] });
     }
     await h.advanceTo(Date.parse("2026-11-06T10:00:00Z"));
-    for (const skip of await skips()) expect(skip).toMatchObject({ reason: "unworked", after: [{ track: { label: "Email track 2" }, state: "started", startsAt: null }] });
+    // Its one email went at 09:00 on Friday: the track has finished, as the engine stores it.
+    for (const skip of await skips()) expect(skip).toMatchObject({ reason: "unworked", after: [{ track: { label: "Email track 2" }, state: "finished", startsAt: null }] });
   });
 });
 
@@ -501,4 +503,96 @@ describe("a declined lead's retained call tasks are not open calls on the record
       expect(activity.find((e) => e.kind === "call" && e.outcome === "not_interested")).toMatchObject({ declinedPath: path });
     });
   }
+});
+
+describe("what Activity says of a track after an unworked skip is the engine's own track state at the read (verifier on 2027f24)", () => {
+  test("every finish reason the engine stores has a state, through one exhaustive switch", async () => {
+    const { finishedStateOf } = await import("../activity.ts");
+    const table: Record<FinishReason, ReturnType<typeof finishedStateOf>> = {
+      completed: "finished",
+      failed_bad_destination: "finished",
+      closed_on_interest: "finished",
+      skipped: "skipped",
+      skipped_by_user: "skipped",
+      skipped_missing_channel: "skipped_no_channel",
+      skipped_declined: "skipped_declined",
+      skipped_unworked: "skipped_unworked",
+      dropped_for_win_back: "dropped_for_win_back",
+    };
+    for (const [reason, state] of Object.entries(table)) expect(finishedStateOf(reason as FinishReason), reason).toBe(state);
+  });
+
+  /**
+   * Monday 9 November 2026: phone tracks with skip limits 2 and 8, an email track three days after the first, and a
+   * win-back branch. The first call is redialed; on Wednesday 10:00 it has been skipped unworked; a callback is asked for
+   * at 11:00 on the second phone track's call, and at 11:05 the lead declines on it with `path`.
+   */
+  async function declinedAfterTheSkip(path: "stop" | "continue" | "win_back") {
+    const start = Date.parse("2026-11-09T09:00:00Z");
+    const h = new EngineHarness({ start: start - H, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+    await h.tick();
+    await h.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "Europe/London" });
+    h.clock = start;
+    const { campaign: c } = await h.createCampaign(`After the skip, ${path}`, { businesses: [HARBOUR, ELM], people: [PAT] });
+    await h.defineSequence(
+      c.id,
+      definition([
+        track("e1", "email", [email("s1")]),
+        { ...track("p1", "call", [call("c1")], WEEKDAYS_9_TO_17), callSkipLimitDays: 2 },
+        { ...track("p2", "call", [call("c2")], WEEKDAYS_9_TO_17), callSkipLimitDays: 8 },
+        track("e2", "email", [email("a1")], ALWAYS, { kind: "after", trackId: "p1", delayDays: 3 }),
+        { ...track("w1", "email", [email("w1s1")]), branch: "win_back" },
+      ]),
+    );
+    expect((await h.launch(c.id)).status).toBe(200);
+    await h.advanceTo(start + H);
+    const list = async () => (await h.request<CallsView>("GET", "/api/calls")).body;
+    const of = async (trackId: string) => [...(await list()).readyNow, ...(await list()).laterToday].filter((x) => x.track.id === trackId);
+    const numberOf = async (taskId: string) => (await h.request<CallTaskView>("GET", `/api/call-tasks/${taskId}`)).body.numbers.find((n) => !n.bad)?.detailId;
+    let n = 0;
+    const post = async (taskId: string, body: Record<string, unknown>) => {
+      const out = await h.request<{ error?: { message: string } }>("POST", `/api/call-tasks/${taskId}/outcome`, { requestId: `r${++n}`, numberId: await numberOf(taskId), ...body });
+      expect(out.status, JSON.stringify(out.body)).toBe(200);
+    };
+    for (const x of await of("p1")) await post(x.taskId, { outcome: "no_answer", redial: true });
+    await h.advanceTo(Date.parse("2026-11-11T10:00:00Z"));
+    const second = await of("p2");
+    expect(second).toHaveLength(2);
+    for (const x of second) await post(x.taskId, { outcome: "callback_requested", callbackAt: "2026-11-11T11:00:00+00:00" });
+    await h.advanceTo(Date.parse("2026-11-11T11:05:00Z"));
+    for (const x of second) await post(x.taskId, { outcome: "not_interested", declinedPath: path });
+    const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${c.id}`)).body.rows;
+    const reads = [];
+    for (const r of rows) {
+      const kind = r.kind === "person" ? "people" : "companies";
+      const skip = (await h.request<ActivityView>("GET", `/api/${kind}/${r.id}/activity`)).body.entries.find((e) => e.kind === "skipped" && e.channel === "call" && e.reason === "unworked");
+      const progress = (await h.request<EnrollmentProgress>("GET", `/api/enrollments/${r.enrollments[0]?.id ?? ""}`)).body.tracks.find((t) => t.trackId === "e2");
+      reads.push({ kind, skip, progress });
+    }
+    return reads;
+  }
+
+  test("win back: the email track after the skip was dropped for win-back, and Activity says it will not start (a person and a company lead)", async () => {
+    const reads = await declinedAfterTheSkip("win_back");
+    expect(reads.map((r) => r.kind).sort()).toEqual(["companies", "people"]);
+    for (const { skip, progress } of reads) {
+      expect(progress?.finishReason).toBe("dropped_for_win_back");
+      expect(skip).toMatchObject({ after: [{ track: { label: "Email track 2" }, state: "dropped_for_win_back", startsAt: null }] });
+    }
+  });
+
+  test("stop: the lead's outreach stopped, so the email track after the skip did not start", async () => {
+    for (const { skip, progress } of await declinedAfterTheSkip("stop")) {
+      expect(progress).toMatchObject({ started: false, finishReason: null });
+      expect(skip).toMatchObject({ after: [{ state: "stopped", startsAt: null }] });
+    }
+  });
+
+  test("continue: the email track after the skip waits out its three days, to Saturday", async () => {
+    for (const { skip, progress } of await declinedAfterTheSkip("continue")) {
+      expect(progress).toMatchObject({ started: false, finishReason: null });
+      // Saturday 00:00, moved by the 65 minutes the callback held the lead (2.2: a hold moves every stored deadline).
+      expect(skip).toMatchObject({ after: [{ state: "waiting", startsAt: "2026-11-14T01:05:00.000Z" }] });
+    }
+  });
 });

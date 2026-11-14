@@ -597,12 +597,8 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
           /** The call's original due date, the user's calendar date the engine counted the limit from (YYYY-MM-DD). */
           readonly dueDate: string;
           readonly limitDays: number;
-          /**
-           * Each track that starts after this phone track, as its stored progress stands at the read (verifier on
-           * eac9f6c, F2): `started`; `waiting` out its delay, to start at `startsAt` if the lead keeps running; `held`
-           * while the lead's outreach is held, so no day can be named; or `stopped`, never to start, the lead having ended.
-           */
-          readonly after: readonly { readonly track: TrackLabel; readonly state: "started" | "waiting" | "held" | "stopped"; readonly startsAt: string | null }[];
+          /** Each track that starts after this phone track, as the engine's stored track state stands at the read. */
+          readonly after: readonly ({ readonly track: TrackLabel } & DependentTrackState)[];
         }
       | { readonly kind: "released"; readonly after: TrackLabel; readonly because: "skipped" | "failed" | "unworked" }
       /**
@@ -612,6 +608,22 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
       | { readonly kind: "callback_overdue"; readonly callbackAt: string; readonly zone: string }
     ))
 );
+
+/**
+ * A track's state at a read, as Activity says it of a track that starts after another (verifier on 2027f24): every state
+ * the engine's stored progress can be in, mapped once on the server (`dependentStateOf`). `started` and still running;
+ * `finished` (its steps done, or ended on a bad destination or an interested call); skipped (`skipped_declined`,
+ * `skipped_unworked`, `skipped_no_channel`, or `skipped` by the user); `dropped_for_win_back`, never to start; `waiting`
+ * out its delay, to start at `startsAt` if the lead keeps running; `held`, waiting while the lead's outreach is held, so
+ * no day can be named; `stopped`, never to start, the lead's outreach having stopped or ended; `not_started`, no start
+ * resolved yet.
+ */
+export type DependentTrackState =
+  | { readonly state: "waiting"; readonly startsAt: string }
+  | {
+      readonly state: "started" | "finished" | "skipped_declined" | "skipped_unworked" | "skipped_no_channel" | "skipped" | "dropped_for_win_back" | "held" | "stopped" | "not_started";
+      readonly startsAt: null;
+    };
 
 export interface ActivityView {
   readonly entries: readonly ActivityEntry[];
