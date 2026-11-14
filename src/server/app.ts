@@ -4,7 +4,7 @@ import { z } from "zod";
 import { planImport } from "../domain/import-plan.ts";
 import { isOutreachStatus } from "../domain/outreach-status.ts";
 import { checkScraperFile, parseScraperExport } from "../domain/scraper-export.ts";
-import type { ApiError, CallOutcomeAnswer, Campaign, FileCheckResult, SmsProviderStatus } from "../shared/api.ts";
+import type { ApiError, CallOutcomeAnswer, CallOutcomeRefusal, Campaign, FileCheckResult, SmsProviderStatus } from "../shared/api.ts";
 import { CAMPAIGN_NAME_MAX, DEFINITION_MAX_BYTES, STEP_BODY_MAX, STEP_SUBJECT_MAX } from "../shared/limits.ts";
 import { checkApiRequest } from "./guard.ts";
 import { invalidBodyMessage, requestObject } from "./request-body.ts";
@@ -470,7 +470,11 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
       note: body.data.note,
       noteScope: body.data.noteScope,
     });
-    if (!outcome.ok) return c.json<ApiError>({ error: { code: "outcome_refused", message: outcome.reason } }, 409);
+    if (!outcome.ok) {
+      // The refusal carries why the call is off the list, as read now, so the page records it without another read.
+      const offList = (await callTaskView(store, id, Date.parse(now()), rules))?.offList ?? null;
+      return c.json<CallOutcomeRefusal>({ error: { code: "outcome_refused", message: outcome.reason }, offList }, 409);
+    }
     // The answer names the next focus: the queue moves on only now that an outcome is logged.
     const at = Date.parse(now());
     const task = await callTaskView(store, id, at, rules);

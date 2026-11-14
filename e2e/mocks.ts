@@ -8,6 +8,7 @@ import type {
   FileCheckResult,
   ImportRecord,
   LeadSearchResult,
+  NeedsAttention,
   PersonRecord,
 } from "../src/shared/api.ts";
 
@@ -24,7 +25,8 @@ export type MockBody =
   | PersonRecord
   | CompanyRecord
   | FileCheckResult
-  | BeforeLaunchView;
+  | BeforeLaunchView
+  | NeedsAttention;
 
 export function respond(route: Route, body: MockBody, status = 200): Promise<void> {
   // eslint-disable-next-line no-restricted-syntax -- the one typed entry point

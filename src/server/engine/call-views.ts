@@ -3,14 +3,15 @@
  * task with everything the call screen shows. Built from the engine's stored facts and the CRM, so
  * the screens render them without recomputing anything.
  */
-import { bucketOf, CALL_OUTCOMES, callNumbers, isListed, listedForDay, queueRank, queueWall, recordedNumberOf, REDIAL_OUTCOMES, skippedTonight, type CallBucket } from "../../domain/sequence/calls.ts";
+import { bucketOf, CALL_OUTCOMES, callNumbers, callWindow, dayHasRoom, isListed, listedForDay, queueRank, queueWall, recordedNumberOf, REDIAL_OUTCOMES, skippedTonight, type CallBucket } from "../../domain/sequence/calls.ts";
 import { displayPhone } from "../../domain/phone.ts";
-import { localDayNumber } from "../../domain/sequence/clock.ts";
+import { localDayNumber, nextWindowClose, nextWindowOpen, startOfLocalDay, windowOpen } from "../../domain/sequence/clock.ts";
 import { liveTracks } from "../../domain/sequence/definition.ts";
 import { deriveStatus } from "../../domain/sequence/progress.ts";
 import type { CallAttempt, CallNumber, CallTask, RecordedNumber, SubjectState } from "../../domain/sequence/state.ts";
-import type { CallColleagueView, CallNumberView, CallQueueItem, CallRecordView, RecordedNumberView, CallsView, CallTaskView, NoteView, TodayView, TouchView } from "../../shared/api.ts";
+import type { CallColleagueView, CallNumberView, CallOffListView, CallQueueItem, CallRecordView, RecordedNumberView, CallsView, CallTaskView, NoteView, TodayView, TouchView } from "../../shared/api.ts";
 import type { OutreachStore } from "../persistence/store.ts";
+import { DEFAULT_DAILY_CALL_CAPACITY } from "../persistence/sqlite-engine-store.ts";
 import type { StoredNote } from "./engine-store.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 
@@ -108,6 +109,8 @@ function queueItem(s: SubjectState, task: CallTask, parties: Parties, place: { b
 async function callList(store: OutreachStore, now: number, rules: CallViewRules = DEFAULT_RULES) {
   const day = await store.engine.callDay(now);
   const items: { item: CallQueueItem; task: CallTask; skippedToday: boolean; subjectId: string; opensAt: number; rank: 0 | 1 | 2 }[] = [];
+  /** Instants at which the list changes by the clock: hours opening (later today) and closing (ready now). */
+  const changes: number[] = [startOfLocalDay(day.day + 1, day.userZone)];
   /** Every open task listed now, in a queue part or not (its hours closed for the day). */
   const listed = new Set<string>();
   for (const id of await store.engine.subjectsWithOpenCallTasks()) {
@@ -119,6 +122,9 @@ async function callList(store: OutreachStore, now: number, rules: CallViewRules 
       if (!place) continue;
       const parties = await partiesOf(store, id);
       if (!parties) continue;
+      if (place.bucket === "later_today" && place.opensAt !== null) changes.push(place.opensAt);
+      const closes = place.bucket === "ready_now" ? nextWindowClose(callWindow(s, task.trackId), s.lead.zone, now) : null;
+      if (closes !== null) changes.push(closes);
       const skippedToday = task.skippedWall !== null && localDayNumber(task.skippedWall, day.userZone) === day.day;
       items.push({ item: queueItem(s, task, parties, place, now, rules), task, skippedToday, subjectId: id, opensAt: place.opensAt ?? now, rank: queueRank(s, task, now) });
     }
@@ -134,7 +140,13 @@ async function callList(store: OutreachStore, now: number, rules: CallViewRules 
     .filter((x) => x.item.bucket === "later_today")
     .sort((a, b) => a.opensAt - b.opensAt || byDue(a, b))
     .map((x) => x.item);
-  return { day, readyNow, laterToday, listed };
+  return { day, readyNow, laterToday, listed, changes };
+}
+
+/** A hint of the next instant the list changes by the clock: calling hours opening or closing, the next user day. */
+function nextChange(changes: readonly number[], now: number): string | null {
+  const next = changes.filter((t) => t > now);
+  return next.length === 0 ? null : iso(Math.min(...next));
 }
 
 /**
@@ -142,12 +154,16 @@ async function callList(store: OutreachStore, now: number, rules: CallViewRules 
  * so the queue moves on only after an outcome (or a skip for now) is logged on it.
  */
 export async function callsView(store: OutreachStore, now: number, options: { readonly focus?: string | null; readonly rules?: CallViewRules } = {}): Promise<CallsView> {
-  const { day, readyNow, laterToday, listed } = await callList(store, now, options.rules);
+  const { day, readyNow, laterToday, listed, changes } = await callList(store, now, options.rules);
   const focus = options.focus ?? null;
   return {
     date: dateIn(day.userZone, now),
+    asOf: iso(now),
+    nextChangeAt: nextChange(changes, now),
     userZone: day.userZone,
     dailyCapacity: day.capacity,
+    defaultDailyCapacity: DEFAULT_DAILY_CALL_CAPACITY,
+    capacityReached: !dayHasRoom(day),
     placedToday: day.placedToday,
     committed: day.committed,
     readyNow,
@@ -163,18 +179,43 @@ export async function callsView(store: OutreachStore, now: number, options: { re
 const UP_NEXT = 5;
 
 export async function todayView(store: OutreachStore, now: number, rules?: CallViewRules): Promise<TodayView> {
-  const { day, readyNow, laterToday } = await callList(store, now, rules);
+  const { day, readyNow, laterToday, changes } = await callList(store, now, rules);
   const listed = [...readyNow, ...laterToday];
   return {
     date: dateIn(day.userZone, now),
+    asOf: iso(now),
+    nextChangeAt: nextChange(changes, now),
     userZone: day.userZone,
     readyNow: readyNow.length,
     laterToday: laterToday.length,
+    capacityReached: !dayHasRoom(day),
     upNext: listed.slice(0, UP_NEXT),
     // Oldest first, by the time the prospect asked for.
     overdueCallbacks: readyNow.filter((x) => x.reason === "overdue").sort((a, b) => Date.parse(a.callbackAt ?? "") - Date.parse(b.callbackAt ?? "") || (a.taskId < b.taskId ? -1 : 1)),
     carriedOver: listed.filter((x) => x.reason === "rolled_over" || x.reason === "redial").length,
   };
+}
+
+/**
+ * Why a task is not on today's list (ADR 0003 4.4.1), read from the stored task and its call records:
+ * an outcome logged on it comes first, then the lead's ending, then its track's finish.
+ */
+function offListOf(s: SubjectState, task: CallTask, listed: boolean): CallOffListView | null {
+  if (listed) return null;
+  const status = deriveStatus(s);
+  const logged = s.callAttempts.filter((a) => a.taskId === task.id && a.outcome !== "skip_for_now").at(-1);
+  if (logged) return { reason: "logged", outcome: logged.outcome, at: iso(logged.atWall), status };
+  if (s.subject.ended !== null) return { reason: "lead_ended", status };
+  if (!task.open) return { reason: "track_finished", finish: s.tracks.find((p) => p.trackId === task.trackId)?.finishReason ?? null, status };
+  return { reason: "not_listed_today", status };
+}
+
+/** Whether the hours are open at `now`, by the engine's window rule, and, if not, when they open later on the user's day. */
+function callingHoursAt(window: ReturnType<typeof callWindow>, zone: string, now: number, userZone: string): CallTaskView["callingHoursNow"] {
+  if (windowOpen(window, zone, now)) return { open: true, opensLaterToday: null };
+  const opens = nextWindowOpen(window, zone, now);
+  const today = opens !== null && localDayNumber(opens, userZone) === localDayNumber(now, userZone);
+  return { open: false, opensLaterToday: today ? iso(opens) : null };
 }
 
 /** One call task with everything the call screen shows, or null for an unknown task. */
@@ -224,18 +265,22 @@ export async function callTaskView(store: OutreachStore, taskId: string, now: nu
     enrollmentId: s.subject.id,
     open: task.open,
     listed,
+    offList: offListOf(s, task, listed),
     status: deriveStatus(s),
     ...parties,
     track: { id: task.trackId, label: trackLabel(s, task.trackId) },
     zone: s.lead.zone,
     localTime: localTimeIn(s.lead.zone, now),
     numbers: numbers.map(numberView),
+    callingHours: callWindow(s, task.trackId),
+    callingHoursNow: callingHoursAt(callWindow(s, task.trackId), s.lead.zone, now, s.callDay.userZone),
     script: s.campaign.definition.callScript ?? "",
     touches: touches.map((x) => x.touch),
     personNotes: parties.person ? (await store.engine.notesOf("person", parties.person.id)).map(noteView) : [],
     companyNotes: (await store.engine.notesOf("company", parties.company.id)).map(noteView),
     colleagues,
     outcomes: listed ? CALL_OUTCOMES : [],
+    storedRequestIds: s.callAttempts.filter((c) => c.taskId === taskId).map((c) => c.requestId),
     redialOutcomes: listed ? REDIAL_OUTCOMES : [],
     kind: task.kind,
     callbackAt: task.callbackAt === null ? null : iso(task.callbackAt),

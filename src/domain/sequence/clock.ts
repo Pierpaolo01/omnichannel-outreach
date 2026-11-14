@@ -228,6 +228,23 @@ export function nextWindowOpen(rules: readonly WindowRule[], zone: string, t: nu
   return best;
 }
 
+/** The first instant after `t` outside the window, while it is open at `t`; null when it is closed at `t` (ticket 14b: when a ready call stops being ready). */
+export function nextWindowClose(rules: readonly WindowRule[], zone: string, t: number): number | null {
+  if (!windowOpen(rules, zone, t)) return null;
+  const today = localDayNumber(t, zone);
+  let best: number | null = null;
+  for (let d = -1; d <= 8; d++) {
+    const day = today + d;
+    const weekday = (((day + 4) % 7) + 7) % 7;
+    for (const r of rules) {
+      if (r.day !== weekday) continue;
+      const ends = r.start < r.end ? localInstant(day, r.end * 60, zone) : localInstant(day + 1, r.end * 60, zone);
+      if (ends > t && !windowOpen(rules, zone, ends) && (best === null || ends < best)) best = ends;
+    }
+  }
+  return best;
+}
+
 /** The calendar date, as YYYY-MM-DD, of instant `t` in `zone`: an account's capacity reset day. */
 /**
  * Running time between two observations of a wait: the one definition, in the codebase, of time the

@@ -2,8 +2,9 @@
  * Each entry kind reads one stored fact (council on 10121d3, item 8): `sent`, an attempt in state
  * `sent` and its work's `sent_wall`; `failed` and a step's `skipped`, a step result; a track's
  * `skipped`, its progress's finish reason `skipped_missing_channel` with no step result; `released`,
- * a started track whose start rule names a track that finished skipped or failed; `bounced`, a stored
- * bounce event; `address_bad`, a finish on a bad destination with neither; `replied`, the stored
+ * a started track whose start rule names a track that finished skipped or failed; `call`, a stored
+ * call attempt (ticket 14b: every outcome the user logged, skip for now included, with the number
+ * dialled and its note); `bounced`, a stored bounce event; `address_bad`, a finish on a bad destination with neither; `replied`, the stored
  * stopping reply; `ended`, the lead's stored ending. The one exception is said where it is built.
  *
  * The person and company-lead timeline's campaign activity (tickets 12c and 13b): built from each
@@ -18,6 +19,7 @@
  */
 import type { ActivityEntry, EnrollmentView } from "../shared/api.ts";
 import { displayPhone } from "../domain/phone.ts";
+import { goodNumbers } from "../domain/sequence/calls.ts";
 import { goodEmail, goodMobile, wallAtLead } from "../domain/sequence/progress.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
 import { trackLabel } from "../shared/track-label.ts";
@@ -37,20 +39,24 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
     const def = state.campaign.definition;
     const companyLead = kind === "company";
     const bounces = await store.engine.bouncesOf(enrollment.id);
-    const channelOfTrack = (trackId: string): "email" | "sms" => (def.tracks.find((t) => t.id === trackId)?.channel === "sms" ? "sms" : "email");
+    const channelOfTrack = (trackId: string): "email" | "sms" | "call" => def.tracks.find((t) => t.id === trackId)?.channel ?? "email";
     const labelOf = (trackId: string) => trackLabel(def, def.tracks.find((t) => t.id === trackId) ?? { id: trackId, channel: channelOfTrack(trackId) });
     // A text goes to a mobile's E.164 form; it is shown grouped for reading.
     const shown = (channel: "email" | "sms", destination: string) => (channel === "sms" ? displayPhone(destination) : destination);
     for (const b of bounces) {
       const track = progress.tracks.find((t) => t.trackId === b.trackId);
       const step = track?.steps.find((st) => st.stepId === b.stepId);
-      const channel = channelOfTrack(b.trackId);
+      const channel = channelOfTrack(b.trackId) === "sms" ? "sms" : "email";
       entries.push({ campaign, at: new Date(b.atWall).toISOString(), kind: "bounced", channel, track: labelOf(b.trackId), stepNumber: step?.number ?? null, to: shown(channel, b.destination) });
     }
     // Ended for want of a usable channel before any track started: the only case Activity says more
     // than the stored outcomes (council on 10121d3, item 8).
     const endedAtLaunch = progress.status === "finished_no_usable_channel" && !progress.tracks.some((t) => t.started);
     for (const track of progress.tracks) {
+      if (track.channel === "call") {
+        callEntries(track, state, progress, campaign, labelOf, endedAtLaunch, now, entries);
+        continue;
+      }
       if (track.channel !== "email" && track.channel !== "sms") continue;
       const channel = track.channel;
       const label = labelOf(track.trackId);
@@ -110,4 +116,37 @@ function startedWall(state: SubjectState, trackId: string, now: number): number 
   const p = state.tracks.find((t) => t.trackId === trackId);
   if (!p || p.startedAt === null) return null;
   return wallAtLead(state.subject.clock, state.freezes, p.startedAt, now);
+}
+
+/**
+ * A phone track's entries (ticket 14b), each from a stored fact, as every other kind: each call
+ * attempt the user logged (`calls` on its step, skip for now included); a skip for want of a good
+ * number, from its finish reason `skipped_missing_channel` (or, for a lead ended at launch, the same
+ * exception the other channels have); and its release after a track that was skipped or failed.
+ */
+function callEntries(
+  track: ReturnType<typeof progressView>["tracks"][number],
+  state: SubjectState,
+  progress: ReturnType<typeof progressView>,
+  campaign: ActivityEntry["campaign"],
+  labelOf: (trackId: string) => ReturnType<typeof trackLabel>,
+  endedAtLaunch: boolean,
+  now: number,
+  entries: ActivityEntry[],
+): void {
+  const def = state.campaign.definition;
+  const label = labelOf(track.trackId);
+  for (const step of track.steps) for (const c of step.calls) entries.push({ campaign, at: c.at, kind: "call", channel: "call", track: label, outcome: c.outcome, number: c.number, note: c.note });
+  if (endedAtLaunch && progress.endedAt !== null && goodNumbers(state).length === 0) {
+    entries.push({ campaign, at: progress.endedAt, kind: "skipped", channel: "call", track: label, stepNumber: null, reason: "no_number" });
+    return;
+  }
+  const startedAt = startedWall(state, track.trackId, now);
+  const rule = def.tracks.find((t) => t.id === track.trackId)?.start;
+  if (startedAt !== null && rule?.kind === "after") {
+    const before = progress.tracks.find((t) => t.trackId === rule.trackId);
+    const because = before?.finishReason === "skipped_missing_channel" || before?.finishReason === "skipped" ? "skipped" : before?.finishReason === "failed_bad_destination" ? "failed" : null;
+    if (because) entries.push({ campaign, at: new Date(startedAt).toISOString(), kind: "released", channel: "call", track: label, after: labelOf(rule.trackId), because });
+  }
+  if (track.finishedAt !== null && track.finishReason === "skipped_missing_channel") entries.push({ campaign, at: track.finishedAt, kind: "skipped", channel: "call", track: label, stepNumber: null, reason: "no_number" });
 }

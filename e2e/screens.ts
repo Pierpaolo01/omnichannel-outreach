@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { OUTREACH_STATUSES } from "../src/domain/outreach-status.ts";
 import type { BeforeLaunchView, CampaignDefinition, CompanyRecord, ImportRecord, LeadSearchResult, PersonRecord, SequenceView, SummaryEntry } from "../src/shared/api.ts";
 import { refusedPair, respond, serverError } from "./mocks.ts";
-import { FAKE_INBOX, FAKE_NUMBERS, TWO_CHANNELS, fakeProviderApp, type FakeProviderApp } from "./fake-provider.ts";
+import { FAKE_INBOX, FAKE_NUMBERS, TWO_CHANNELS, fakeCallsApp, fakeProviderApp, type CallsScenario, type FakeCallsApp, type FakeProviderApp } from "./fake-provider.ts";
 import { fixture } from "./support.ts";
 
 /** Opens a path on the app over the fake email provider. */
@@ -11,6 +11,58 @@ async function fake(page: Page, path: string): Promise<void> {
   const f = await fakeProviderApp();
   await page.goto(f.url + path);
 }
+
+let fresh = 0;
+/** A calls app of its own, for a screen that logs: the scans open each screen several times. */
+export const freshCalls = (scenario: CallsScenario, name: string): Promise<FakeCallsApp> => fakeCallsApp(scenario, `${name}-${++fresh}`);
+
+/** Opens a path on a calls app (ticket 14b): the campaign has a phone track, defined over HTTP. A name gives a fresh app. */
+async function calls(page: Page, scenario: CallsScenario, path: string, name?: string): Promise<FakeCallsApp> {
+  const f = name ? await freshCalls(scenario, name) : await fakeCallsApp(scenario);
+  // The browser's clock reads the app's, so the date and the clocks on screen agree with the calls.
+  await page.clock.setFixedTime(f.harness.clock);
+  await page.goto(f.url + path);
+  return f;
+}
+
+/** Holds a calls app's outcome POSTs open, for the pending state. */
+async function holdOutcomes(page: Page): Promise<void> {
+  await page.route("**/api/call-tasks/*/outcome", () => new Promise(() => undefined));
+}
+
+/** Logs an outcome on a task over HTTP, as another tab or window would. */
+export async function logElsewhere(f: FakeCallsApp, taskId: string, outcome: string, numberId: string | null): Promise<void> {
+  const out = await f.harness.request("POST", `/api/call-tasks/${taskId}/outcome`, { requestId: `elsewhere-${taskId}-${Date.now()}`, outcome, numberId });
+  if (out.status !== 200) throw new Error(`logging elsewhere failed: ${JSON.stringify(out.body)}`);
+}
+
+/** The focused call's task id and its first good number, from the server. */
+export async function focused(f: FakeCallsApp): Promise<{ taskId: string; numberId: string | null }> {
+  const view = (await f.harness.request<{ focusTaskId: string | null }>("GET", "/api/calls")).body;
+  const taskId = view.focusTaskId ?? "";
+  const task = (await f.harness.request<{ numbers: { detailId: string; bad: boolean }[] }>("GET", `/api/call-tasks/${taskId}`)).body;
+  return { taskId, numberId: task.numbers.find((n) => !n.bad)?.detailId ?? null };
+}
+
+/** Picks an outcome and logs it with the mouse; waits for the answer. */
+export async function logWithMouse(page: Page, outcome: string, note = ""): Promise<void> {
+  if (note) await page.getByLabel("Notes from this call").fill(note);
+  await page.getByRole("group", { name: "Call outcome" }).getByRole("button", { name: outcome, exact: true }).click();
+  await page.getByRole("button", { name: "Log and open next call" }).click();
+}
+
+const NEEDS_ATTENTION = {
+  stalledInboxes: [],
+  heldTracks: [{ enrollmentId: "e1", trackId: "sms", reason: "sms_conversation_taken" }],
+  accountWaits: [{ accountId: "outreach@northlight-mail.example", reason: "rate_limited", until: "2026-11-09T11:30:00.000Z" }],
+  senderProblems: [
+    { accountId: "sms-1", channel: "sms", label: "+44 7700 900999", problem: "disconnected" },
+    { accountId: "inbox-2", channel: "email", label: "alex@northlight-mail.example", problem: "sending_off" },
+  ],
+  heldCapacity: [],
+  anomalies: [],
+  overdueCallbacks: [],
+} as const;
 
 /**
  * Every route and state the app can show, for the standing accessibility and layout checks.
@@ -309,9 +361,169 @@ export const JUNIPER_LATER_ROW = {
   limit: 100,
 } satisfies LeadSearchResult;
 
+/**
+ * Calls with three kept refusals from earlier presses, oldest first (council on b8c65f9, item 4): the
+ * first shows, the rest wait behind a count, and the call stays on screen.
+ */
+export async function openWithKeptRefusals(page: Page, name: string): Promise<FakeCallsApp> {
+  const f = await freshCalls("ready", name);
+  const t = await focused(f);
+  await page.addInitScript(([taskId, numberId]) => {
+    const notes = ["Spoke to the front desk; call back after 3.", "Left with the practice manager.", "Line busy twice, try the mobile."];
+    notes.forEach((note, i) => {
+      const body = { requestId: `kept-${i}`, outcome: "no_answer", numberId, note, noteScope: "person" };
+      const refused = { message: "That number is marked bad: choose another of the lead's numbers.", offList: null };
+      window.localStorage.setItem(`outreach.calls.outbox.kept-${i}`, JSON.stringify({ v: 2, taskId, who: "Amira Hassan", body, pressedAt: 1_000 + i, refused }));
+    });
+  }, [t.taskId, t.numberId] as const);
+  await page.clock.setFixedTime(f.harness.clock);
+  await page.goto(`${f.url}/calls`);
+  await settle(page, "2 more outcomes not logged");
+  return f;
+}
+
 export const SCREENS: readonly Screen[] = [
   { name: "today", open: async (page) => { await page.goto("/"); await settle(page, "Nothing to call right now."); } },
-  { name: "calls", open: async (page) => { await page.goto("/calls"); await settle(page, "No calls today"); } },
+  { name: "calls", open: async (page) => { await page.goto("/calls"); await settle(page, "Calls appear here once a launched campaign reaches a call step."); } },
+  // Today and the call focus queue with calls (ticket 14b), on a campaign with a phone track.
+  { name: "today with calls ready", open: async (page) => { await calls(page, "ready", "/"); await settle(page, "4 calls are ready now."); } },
+  { name: "today before calling hours", open: async (page) => { await calls(page, "early", "/"); await settle(page, "Later today:"); } },
+  { name: "today with the day's call capacity used", open: async (page) => { await calls(page, "full", "/"); await settle(page, "Today’s call capacity is used."); } },
+  {
+    name: "today with sender accounts that can't send and tracks on hold",
+    open: async (page) => {
+      await page.route("**/api/needs-attention", (route) => respond(route, NEEDS_ATTENTION));
+      await calls(page, "ready", "/");
+      await settle(page, "Your SMS number +44 7700 900999 can’t send");
+    },
+  },
+  { name: "today loading", open: async (page) => { await hold(page, "**/api/today"); await hold(page, "**/api/needs-attention"); await page.goto("/"); await page.getByLabel("Loading up next").waitFor(); } },
+  { name: "today error", open: async (page) => { await fail(page, "**/api/today"); await fail(page, "**/api/needs-attention"); await page.goto("/"); await settle(page, "Today’s calls didn’t load."); await settle(page, "Needs attention didn’t load."); } },
+  { name: "calls, the focused call", open: async (page) => { await calls(page, "ready", "/calls"); await settle(page, "Calling hours Mon–Fri, 09:00–17:00"); } },
+  {
+    name: "calls, a company lead's call",
+    open: async (page) => {
+      const f = await freshCalls("ready", "screen-company-lead");
+      for (let i = 0; i < 3; i++) await logElsewhere(f, (await focused(f)).taskId, "skip_for_now", null);
+      await page.goto(`${f.url}/calls`);
+      await settle(page, "Company with no named decision maker");
+    },
+  },
+  { name: "calls, before calling hours", open: async (page) => { await calls(page, "early", "/calls"); await settle(page, "Nothing to call right now"); } },
+  { name: "calls, the day's capacity used", open: async (page) => { await calls(page, "full", "/calls"); await settle(page, "Today’s call capacity is used."); } },
+  { name: "calls loading", open: async (page) => { const f = await fakeCallsApp("ready"); await hold(page, "**/api/calls*"); await page.goto(`${f.url}/calls`); await page.getByLabel("Loading the call").waitFor(); } },
+  { name: "calls error", open: async (page) => { const f = await fakeCallsApp("ready"); await fail(page, "**/api/calls*"); await page.goto(`${f.url}/calls`); await settle(page, "The call list didn’t load."); } },
+  { name: "calls, the call didn't load", open: async (page) => { const f = await fakeCallsApp("ready"); await fail(page, "**/api/call-tasks/*"); await page.goto(`${f.url}/calls`); await settle(page, "This call didn’t load."); } },
+  {
+    name: "calls, an outcome chosen with a note",
+    open: async (page) => {
+      await calls(page, "ready", "/calls");
+      await page.getByLabel("Notes from this call").fill("Receptionist says she is in clinic until 3.");
+      await page.getByRole("button", { name: "Interested", exact: true }).click();
+      await settle(page, "You take it from here.");
+    },
+  },
+  {
+    name: "calls, an outcome being logged",
+    open: async (page) => {
+      await calls(page, "ready", "/calls");
+      await holdOutcomes(page);
+      await page.getByText(/^Calling hours /).waitFor();
+      await logWithMouse(page, "No answer");
+      await settle(page, "Logging no answer for");
+    },
+  },
+  {
+    name: "calls, an outcome not confirmed yet",
+    open: async (page) => {
+      await calls(page, "ready", "/calls");
+      await page.route("**/api/call-tasks/*/outcome", (route) => route.abort());
+      await page.getByText(/^Calling hours /).waitFor();
+      await logWithMouse(page, "No answer");
+      await settle(page, "not confirmed yet");
+    },
+  },
+  {
+    name: "calls, an outcome logged and the next call open",
+    open: async (page) => {
+      await calls(page, "ready", "/calls", "screen-logged");
+      await page.getByText(/^Calling hours /).waitFor();
+      await logWithMouse(page, "Wrong number", "Number rings out to a fax tone.");
+      await settle(page, "is marked wrong.");
+    },
+  },
+  {
+    name: "calls, the call was logged in another window",
+    open: async (page) => {
+      const f = await calls(page, "ready", "/calls", "screen-elsewhere");
+      await page.getByText(/^Calling hours /).waitFor();
+      const t = await focused(f);
+      await logElsewhere(f, t.taskId, "voicemail", t.numberId);
+      await logWithMouse(page, "No answer", "Spoke to the front desk.");
+      await settle(page, "already logged from another window or device:");
+    },
+  },
+  {
+    name: "calls, the list done",
+    open: async (page) => {
+      const f = await freshCalls("full", "screen-done");
+      const t = await focused(f);
+      await logElsewhere(f, t.taskId, "no_answer", t.numberId);
+      await page.goto(`${f.url}/calls`);
+      await page.getByText(/^Calling hours /).waitFor();
+      await logWithMouse(page, "Interested");
+      await settle(page, "List done");
+    },
+  },
+  {
+    name: "calls, the number chosen went bad",
+    open: async (page) => {
+      const f = await calls(page, "ready", "/calls", "screen-number-bad");
+      await page.getByText(/^Calling hours /).waitFor();
+      await page.getByRole("radio", { name: /7946 0101/ }).check();
+      await page.getByRole("button", { name: "Wrong number", exact: true }).click();
+      const tom = (await f.harness.request<{ readyNow: { taskId: string; person: { name: string } | null }[] }>("GET", "/api/calls")).body.readyNow.find((x) => x.person?.name === "Tom");
+      const main = (await f.harness.request<{ numbers: { detailId: string; kind: string }[] }>("GET", `/api/call-tasks/${tom?.taskId}`)).body.numbers.find((n) => n.kind === "main_line");
+      await logElsewhere(f, tom?.taskId ?? "", "wrong_number", main?.detailId ?? null);
+      await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+      await settle(page, "is now marked wrong");
+    },
+  },
+  {
+    name: "calls, an outcome from a closed tab not logged",
+    open: async (page) => {
+      const f = await freshCalls("ready", "screen-refused-record");
+      const t = await focused(f);
+      await logElsewhere(f, t.taskId, "interested", t.numberId);
+      // What a closed tab left: its entry, refused when this page sends it.
+      await page.addInitScript(([taskId, numberId]) => {
+        const body = { requestId: "left-by-a-closed-tab", outcome: "no_answer", numberId, note: "Spoke to the front desk; call back after 3.", noteScope: "person" };
+        window.localStorage.setItem("outreach.calls.outbox.left-by-a-closed-tab", JSON.stringify({ v: 2, taskId, who: "Amira Hassan", body }));
+      }, [t.taskId, t.numberId] as const);
+      await page.clock.setFixedTime(f.harness.clock);
+      await page.goto(`${f.url}/calls`);
+      await settle(page, "Not logged: no answer for Amira Hassan.");
+    },
+  },
+  {
+    name: "calls, three kept refusals",
+    open: async (page) => {
+      await openWithKeptRefusals(page, "screen-three-refusals");
+    },
+  },
+  {
+    name: "a person's Activity with logged calls",
+    open: async (page) => {
+      const f = await calls(page, "ready", "/calls", "screen-activity");
+      await page.getByText(/^Calling hours /).waitFor();
+      await logWithMouse(page, "Skip for now", "In clinic, try after lunch.");
+      await settle(page, "skipped for now");
+      await logWithMouse(page, "Didn’t reach them", "Receptionist took a message.");
+      await settle(page, "didn’t reach them logged");
+      await page.goto(`${f.url}/leads/people/${f.person("Tom")}`);
+      await settle(page, "Call: didn’t reach them");
+    },
+  },
   { name: "campaigns list", open: async (page) => { await page.goto("/campaigns"); await settle(page, "See result"); } },
   {
     name: "campaigns empty",
@@ -1147,7 +1359,169 @@ export interface FocusTransition {
   readonly focused: (page: Page) => Locator;
 }
 
+/** The call the "next call fails to load" transition logs, whose own reads still succeed. */
+let loadErrorCall = "";
+
 export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
+  {
+    name: "the chosen number invalidated under the keyboard moves focus to a number that can still be chosen (re-check on b15a769)",
+    open: async (page) => {
+      const f = await freshCalls("ready", "focus-number-gone");
+      await page.goto(`${f.url}/calls`);
+      await page.getByText(/^Calling hours /).waitFor();
+      // Chosen from the keyboard: the mobile is first, the main line next.
+      await page.getByRole("radio", { name: /7700 900101/ }).focus();
+      await page.keyboard.press("ArrowDown");
+      await page.getByRole("radio", { name: /7946 0101/, checked: true }).waitFor();
+      (page as Page & { calls?: FakeCallsApp }).calls = f;
+    },
+    act: async (page) => {
+      const f = (page as Page & { calls?: FakeCallsApp }).calls!;
+      const tom = (await f.harness.request<{ readyNow: { taskId: string; person: { name: string } | null }[] }>("GET", "/api/calls")).body.readyNow.find((x) => x.person?.name === "Tom");
+      const main = (await f.harness.request<{ numbers: { detailId: string; kind: string }[] }>("GET", `/api/call-tasks/${tom?.taskId}`)).body.numbers.find((n) => n.kind === "main_line");
+      await logElsewhere(f, tom?.taskId ?? "", "wrong_number", main?.detailId ?? null);
+      await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+      await page.getByText("is now marked wrong").waitFor();
+    },
+    focused: (page) => page.getByRole("radio", { name: /7700 900101/ }),
+  },
+  {
+    name: "a retry that succeeds after the call failed to load moves focus to the call's number (re-check on b15a769)",
+    open: async (page) => {
+      const f = await freshCalls("ready", "focus-retry");
+      await page.route("**/api/call-tasks/*", (route) => (route.request().method() === "GET" ? serverError(route) : route.continue()));
+      await page.goto(`${f.url}/calls`);
+      await page.getByText("This call didn’t load.").waitFor();
+    },
+    act: async (page) => {
+      await page.unrouteAll({ behavior: "ignoreErrors" });
+      await page.getByRole("button", { name: "Try again" }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByText(/^Calling hours /).waitFor();
+    },
+    focused: (page) => page.getByRole("group", { name: "Number you dial" }).getByRole("radio", { checked: true }),
+  },
+  {
+    name: "dismissing the last kept refusal moves focus to the call's number (re-check on b15a769)",
+    open: async (page) => {
+      const f = await freshCalls("ready", "focus-dismiss");
+      const t = await focused(f);
+      await logElsewhere(f, t.taskId, "interested", t.numberId);
+      await page.addInitScript(([taskId, numberId]) => {
+        const body = { requestId: "left-by-a-closed-tab", outcome: "no_answer", numberId, note: "Front desk.", noteScope: "person" };
+        window.localStorage.setItem("outreach.calls.outbox.left-by-a-closed-tab", JSON.stringify({ v: 2, taskId, who: "Amira Hassan", body }));
+      }, [t.taskId, t.numberId] as const);
+      await page.goto(`${f.url}/calls`);
+      await page.getByRole("button", { name: "Dismiss" }).waitFor();
+      await page.getByText(/^Calling hours /).waitFor();
+    },
+    act: async (page) => {
+      await page.getByRole("button", { name: "Dismiss" }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByRole("button", { name: "Dismiss" }).waitFor({ state: "detached" });
+    },
+    focused: (page) => page.getByRole("group", { name: "Number you dial" }).getByRole("radio", { checked: true }),
+  },
+  {
+    name: "logging an outcome when the next call fails to load moves focus to its Try again (verifier on e6872eb)",
+    open: async (page) => {
+      const f = await freshCalls("ready", "focus-load-error");
+      loadErrorCall = (await focused(f)).taskId;
+      await page.goto(`${f.url}/calls`);
+      await page.getByText(/^Calling hours /).waitFor();
+    },
+    act: async (page) => {
+      // Reads of the next call fail; the call just logged is still read, so the page learns its outcome is stored.
+      await page.route("**/api/call-tasks/*", (route) => (route.request().method() === "GET" && !route.request().url().includes(loadErrorCall) ? serverError(route) : route.continue()));
+      await page.getByRole("button", { name: "No answer", exact: true }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByRole("button", { name: "Log and open next call" }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByText("This call didn’t load.").waitFor();
+    },
+    focused: (page) => page.getByRole("button", { name: "Try again" }),
+  },
+  // The calling loop (ticket 14b): every transition that replaces the controls under the keyboard.
+  {
+    name: "logging an outcome by keyboard moves focus to the next call's number",
+    open: async (page) => { const f = await freshCalls("ready", "focus-logged"); await page.goto(`${f.url}/calls`); await page.getByText(/^Calling hours /).waitFor(); },
+    act: async (page) => {
+      await page.getByRole("button", { name: "No answer", exact: true }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByRole("button", { name: "Log and open next call" }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByText("no answer logged").waitFor();
+      await page.getByRole("heading", { name: "Tom" }).waitFor();
+    },
+    focused: (page) => page.getByRole("group", { name: "Number you dial" }).getByRole("radio", { checked: true }),
+  },
+  {
+    name: "while an outcome is pending, focus stays on Log, which says it is logging",
+    open: async (page) => { const f = await freshCalls("ready", "focus-pending"); await page.goto(`${f.url}/calls`); await page.getByText(/^Calling hours /).waitFor(); },
+    act: async (page) => {
+      await page.route("**/api/call-tasks/*/outcome", () => new Promise(() => undefined));
+      await page.getByRole("button", { name: "Left voicemail", exact: true }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByRole("button", { name: "Log and open next call" }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByRole("button", { name: "Logging…" }).waitFor();
+    },
+    focused: (page) => page.getByRole("button", { name: "Logging…" }),
+  },
+  {
+    name: "logging the last call moves focus to Back to Today",
+    open: async (page) => {
+      const f = await freshCalls("full", "focus-last");
+      const t = await focused(f);
+      await logElsewhere(f, t.taskId, "no_answer", t.numberId);
+      await page.goto(`${f.url}/calls`);
+      await page.getByText(/^Calling hours /).waitFor();
+    },
+    act: async (page) => {
+      await page.getByRole("button", { name: "Skip for now", exact: true }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByRole("button", { name: "Log and open next call" }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByText("skipped for now").waitFor();
+      // The only call left is the one skipped: it opens again. Interested ends it.
+      await page.getByRole("button", { name: "Interested", exact: true }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByRole("button", { name: "Log and open next call" }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByRole("heading", { name: "List done" }).waitFor();
+    },
+    focused: (page) => page.getByRole("link", { name: "Back to Today" }),
+  },
+  {
+    name: "a refused outcome moves focus to Open the next call",
+    open: async (page) => { const f = await freshCalls("ready", "focus-refused"); await page.goto(`${f.url}/calls`); await page.getByText(/^Calling hours /).waitFor(); const t = await focused(f); await logElsewhere(f, t.taskId, "voicemail", t.numberId); },
+    act: async (page) => {
+      await page.getByRole("button", { name: "No answer", exact: true }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByRole("button", { name: "Log and open next call" }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByRole("button", { name: "Open the next call" }).waitFor();
+    },
+    focused: (page) => page.getByRole("button", { name: "Open the next call" }),
+  },
+  {
+    name: "opening the next call after a refusal moves focus to its number",
+    open: async (page) => {
+      const f = await freshCalls("ready", "focus-move-on");
+      await page.goto(`${f.url}/calls`);
+      await page.getByText(/^Calling hours /).waitFor();
+      const t = await focused(f);
+      await logElsewhere(f, t.taskId, "voicemail", t.numberId);
+      await logWithMouse(page, "No answer");
+      await page.getByRole("button", { name: "Open the next call" }).waitFor();
+    },
+    act: async (page) => {
+      await page.getByRole("button", { name: "Open the next call" }).focus();
+      await page.keyboard.press("Enter");
+      await page.getByRole("heading", { name: "Tom" }).waitFor();
+    },
+    focused: (page) => page.getByRole("group", { name: "Number you dial" }).getByRole("radio", { checked: true }),
+  },
   {
     name: "removing an email moves focus to the email that takes its place",
     open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.ready}?track=email&step=s2`); await settle(page, "Timing and sender"); },
