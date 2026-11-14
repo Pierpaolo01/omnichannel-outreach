@@ -133,3 +133,18 @@ describe("the editor's read of what a draft would do (ADR 0003 \"Ticket 19\")", 
     expect((await w.h.request<{ definitionVersion: number }>("GET", `/api/campaigns/${w.id}/sequence`)).body.definitionVersion).toBe(read.body.definitionVersion);
   });
 });
+
+describe("a page opened before launch cannot save as you type onto the running campaign (ADR 0003 \"Ticket 19\", Q20)", () => {
+  test("launch moves the revision on and forgets the writing session, so that page's next save is a conflict", async () => {
+    const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+    await h.tick();
+    const { campaign } = await h.createCampaign("Clinics", { businesses: [HARBOUR], people: [PAT] });
+    const saved = await h.request<{ definitionVersion: number }>("PUT", `/api/campaigns/${campaign.id}/sequence`, { ...THREE, save: { session: "other-tab", seq: 1, base: 0 } });
+    expect(saved.status).toBe(200);
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    const typed = def([track("e1", [email("s1", 0, "Half typ"), email("s2", 2), email("s3", 3)])]);
+    const late = await h.request<{ error?: { code: string } }>("PUT", `/api/campaigns/${campaign.id}/sequence`, { ...typed, save: { session: "other-tab", seq: 2, base: saved.body.definitionVersion } });
+    expect(late.status).toBe(409);
+    expect(late.body.error?.code).toBe("edit_conflict");
+  });
+});

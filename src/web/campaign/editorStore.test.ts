@@ -29,13 +29,13 @@ interface Held<T> {
   reject(error: Error): void;
 }
 
-function harness() {
+function harness(initial: SequenceView = view("Stored", 1)) {
   const puts: (Held<SequenceView> & { subject: string | undefined; version: number })[] = [];
   const launches: Held<SequenceView>[] = [];
   const loads: Held<SequenceView>[] = [];
   let timer: (() => void) | null = null;
   let version = 1;
-  const store = new EditorStore(view("Stored", 1), {
+  const store = new EditorStore(initial, {
     session: "page",
     wait: () => Promise.resolve(),
     put: (body) =>
@@ -82,8 +82,8 @@ describe("no answer replaces a draft newer than the one it answered (invariant 6
     h.launches[0]!.resolve(view("Ready to launch", 2, true));
     await launched;
     expect([subjectOf(h.store), h.store.getSnapshot().pending]).toEqual(["Ready to launch", null]);
-    // Launched: still locked, for good.
-    expect(h.store.getSnapshot().locked).toBe(true);
+    // Launched: open again for running edits (ticket 19), which wait for Apply.
+    expect(h.store.getSnapshot().locked).toBe(false);
   });
 
   test("while the saved version loads, typing is refused, so the load never erases copy typed after choosing it (re-check B12)", async () => {
@@ -208,3 +208,44 @@ describe("the SMS pool follows the connected SMS numbers, in the same one pool s
   });
 });
 
+
+describe("a running campaign: changes stay on the page until the user applies them (ADR 0003 \"Ticket 19\", Q20)", () => {
+  test("typing saves nothing and leaving sends nothing; Apply sends the draft through the queue; Discard puts the stored one back", async () => {
+    const h = harness(view("Stored", 4, true));
+    expect(h.store.getSnapshot().locked).toBe(false);
+    h.type("Half typ");
+    h.fire();
+    h.store.leavePage();
+    await h.settle();
+    expect(h.puts).toHaveLength(0);
+    expect(h.store.getSnapshot()).toMatchObject({ unsaved: true, save: { kind: "idle" } });
+    h.store.discard();
+    expect(subjectOf(h.store)).toBe("Stored");
+    expect(h.store.getSnapshot().unsaved).toBe(false);
+    h.type("Better subject");
+    const applying = h.store.apply();
+    await h.settle();
+    expect(h.store.getSnapshot()).toMatchObject({ locked: true, pending: "apply" });
+    expect(h.puts.map((p) => [p.subject, p.version])).toEqual([["Better subject", 4]]);
+    await h.accept();
+    await applying;
+    expect(h.store.getSnapshot()).toMatchObject({ locked: false, pending: null, unsaved: false, save: { kind: "saved" } });
+  });
+
+  test("a page shown again from the back-forward cache sends nothing it was not told to apply (found by the generated save test, run 7025)", async () => {
+    const h = harness(view("Stored", 4, true));
+    h.type("Typed, not applied");
+    h.store.leavePage();
+    await h.store.restored();
+    await h.settle();
+    expect(h.puts).toHaveLength(0);
+  });
+
+  test("a draft the running campaign would refuse (a deleted message) says why and cannot be applied", async () => {
+    const h = harness(view("Stored", 4, true));
+    h.store.update((d) => ({ ...d, tracks: d.tracks.map((t) => ({ ...t, steps: [] })) }));
+    expect(h.store.getSnapshot().problems.join(" ")).toContain("cannot be deleted on a running campaign");
+    await h.store.apply();
+    expect(h.puts).toHaveLength(0);
+  });
+});

@@ -62,7 +62,9 @@ import { NoAnswer, draftProblems, type SaveStatus } from "./saveQueue.ts";
  * - no generation gate, so an answer, or a queued save, from before the page loaded the saved version
  *   still changes it (saveQueue.ts `send`, `save` and `step`; council on aebeb80, item 2): invariant 6.
  *
- * Faults injected on every push (ticket 16b; `SaveFault` in editorStore.ts), each killed by its recorded
+ * Faults injected on every push (ticket 16b; `SaveFault` in editorStore.ts; since ticket 19 also a running campaign's
+ * edit saved as it is typed, without Apply, which invariant R catches: once launched, a save is stored only during an
+ * Apply), each killed by its recorded
  * fixed seed (FAULT_SEEDS): a save that leaves out each phone track's declined path, and a save that leaves
  * out the win-back branch's tracks; and (council on aaf82b7) a save that sends the branch's copy of the save before it.
  */
@@ -88,7 +90,7 @@ const REGRESSIONS = [7369, 7412, 7642, 7729, 7889, 845691, 463057];
  * seeds. The recorded seeds above replay the trajectories they were recorded with, so the generated user
  * makes no declined-path or branch edit on them.
  */
-const FAULT_SEEDS: Record<SaveFault, number> = { declined_path_not_sent: 7003, win_back_tracks_not_sent: 7004, stale_win_back_copy: 7016 };
+const FAULT_SEEDS: Record<SaveFault, number> = { declined_path_not_sent: 7003, win_back_tracks_not_sent: 7004, stale_win_back_copy: 7016, running_saved_as_typed: 7025 };
 /** The commit the moving window is derived from: CI's, else the checkout's HEAD, else none. */
 function commitOf(): string {
   if (process.env["GITHUB_SHA"]) return process.env["GITHUB_SHA"];
@@ -187,11 +189,15 @@ interface Page {
   newestSendable: string | null;
   /** What this page chose for the declined paths and the win-back branch in its newest typed draft (ticket 16b). */
   shape: Shape;
+  /** Applies to a running campaign in progress (ticket 19): only while one is may a save of a launched campaign be sent. */
+  applying: number;
 }
 
 interface Request {
   readonly page: Page;
   readonly kind: "put" | "launch" | "load";
+  /** A put the page sent while an Apply of a running campaign was in progress (ticket 19). */
+  readonly applying?: boolean;
   readonly body: Record<string, unknown> & { save?: { session: string; seq: number; base: number }; definitionVersion?: number };
   readonly keepalive: boolean;
   /** How many times the page had loaded the saved version when the request was sent. */
@@ -287,6 +293,7 @@ async function run(seed: number, faults?: ReadonlySet<SaveFault>) {
 
   let typed = 0;
   let copyBesideInFlight = false;
+  let appliedRunning = false;
   let inboxes = 1;
   let numbers = 0;
   /**
@@ -442,13 +449,13 @@ async function run(seed: number, faults?: ReadonlySet<SaveFault>) {
   const pages: Page[] = [];
   const held = (page: Page, kind: Request["kind"], body: Request["body"], keepalive = false, draftAtLaunch?: CampaignDefinition) =>
     new Promise<SequenceView>((resolve, reject) => {
-      requests.push({ page, kind, body, keepalive, loads: page.store.loads, answer: null, resolve, reject, ...(draftAtLaunch ? { draftAtLaunch } : {}) });
+      requests.push({ page, kind, body, keepalive, loads: page.store.loads, applying: page.applying > 0, answer: null, resolve, reject, ...(draftAtLaunch ? { draftAtLaunch } : {}) });
     });
 
   const openPage = async (): Promise<Page> => {
     const view = (await h.request<SequenceView>("GET", path)).body;
     const session = `s${pages.length}`;
-    const page = { session, frozen: false, gone: false, timer: null, newestTyped: null, newestSendable: null, shape: NO_SHAPE } as Omit<Page, "store"> as Page;
+    const page = { session, frozen: false, gone: false, timer: null, newestTyped: null, newestSendable: null, shape: NO_SHAPE, applying: 0 } as Omit<Page, "store"> as Page;
     (page as { store: EditorStore }).store = new EditorStore(view, {
       session,
       put: (body, options) => held(page, "put", body as unknown as Request["body"], options.keepalive === true),
@@ -465,7 +472,15 @@ async function run(seed: number, faults?: ReadonlySet<SaveFault>) {
   };
 
   const deliver = async (req: Request) => {
-    if (req.kind === "put") req.answer = await putRaw(req.body);
+    if (req.kind === "put") {
+      const running = launchedOnce();
+      req.answer = await putRaw(req.body);
+      // Ticket 19 (Q20): once launched, a save is stored only when the user applied it; never one sent as they typed.
+      if (running && req.answer.status === 200) {
+        if (!req.applying) problems.push(`R: ${req.page.session}'s save was stored on the running campaign without Apply`);
+        else appliedRunning = true;
+      }
+    }
     else if (req.kind === "load") {
       const out = await h.request<unknown>("GET", path);
       req.answer = { status: out.status, json: out.body };
@@ -475,6 +490,9 @@ async function run(seed: number, faults?: ReadonlySet<SaveFault>) {
       req.answer = { status: out.status, json: out.body };
       if (out.status === 200) {
         flags.launched = true;
+        // Ticket 19: the launch moves the revision on and forgets the session that wrote last.
+        server.version = (out.body as SequenceView).definitionVersion;
+        server.writer = null;
         // Invariant 4: what started is what the page showed when it asked.
         const started = (await h.request<SequenceView>("GET", path)).body.definition;
         if (req.draftAtLaunch && JSON.stringify(started.tracks) !== JSON.stringify(req.draftAtLaunch.tracks)) problems.push("4: launch started a definition other than the page's");
@@ -588,6 +606,10 @@ async function run(seed: number, faults?: ReadonlySet<SaveFault>) {
       });
     } else if (roll < 0.77 && live && !launchedOnce() && page.store.getSnapshot().pending === null) {
       void page.store.launch().catch(() => undefined);
+    } else if (roll < 0.79 && launchedOnce() && live && page.store.getSnapshot().pending === null) {
+      // Ticket 19: on a running campaign the generated user applies what they typed.
+      page.applying++;
+      void page.store.apply().finally(() => page.applying--);
     } else if (roll < 0.79 && !launchedOnce()) {
       // Another inbox or SMS number connects: the pages learn it with their next answer, and save the pool.
       if (r() < 0.5) h.fake.accountsById.set(`inbox-${++inboxes}`, inbox(`inbox-${inboxes}`));
@@ -655,16 +677,16 @@ async function run(seed: number, faults?: ReadonlySet<SaveFault>) {
   }
   const stored = (await h.request<SequenceView>("GET", path)).body.definition;
   const smsSaved = stored.tracks.some((t) => !t.removed && t.channel === "sms") && (stored.smsPool ?? []).length > 0;
-  return { problems, pending: requests.length, launchedOnce: launchedOnce(), smsSaved, phoneSaved: phoneCoverage.phoneSaved, phoneAny: phoneCoverage.phoneAny, lateAfterLoad, winBackSaved: phoneCoverage.winBackSaved, declinedSaved: phoneCoverage.declinedSaved, branchArranged: phoneCoverage.branchArranged, branchCopySaved: phoneCoverage.branchCopySaved, copyBesideInFlight };
+  return { problems, pending: requests.length, launchedOnce: launchedOnce(), smsSaved, phoneSaved: phoneCoverage.phoneSaved, phoneAny: phoneCoverage.phoneAny, lateAfterLoad, winBackSaved: phoneCoverage.winBackSaved, declinedSaved: phoneCoverage.declinedSaved, branchArranged: phoneCoverage.branchArranged, branchCopySaved: phoneCoverage.branchCopySaved, copyBesideInFlight, appliedRunning };
 }
 
 describe("saving the definition, generated over the real editor state (ADR 0003 1.1.1)", () => {
   // What each coverage seed's run reached; the window's runs are checked for every invariant and counted for nothing.
-  const reached: { launched: boolean; smsSaved: boolean; phoneSaved: boolean; lateAfterLoad: number; winBackSaved: boolean; declinedSaved: boolean; branchArranged: boolean; branchCopySaved: boolean; copyBesideInFlight: boolean }[] = [];
+  const reached: { launched: boolean; smsSaved: boolean; phoneSaved: boolean; lateAfterLoad: number; winBackSaved: boolean; declinedSaved: boolean; branchArranged: boolean; branchCopySaved: boolean; copyBesideInFlight: boolean; appliedRunning: boolean }[] = [];
   for (const seed of RUN_SEEDS) {
     test(`run ${seed}`, async () => {
       const out = await run(seed);
-      if (COVERAGE_SEEDS.has(seed)) reached.push({ launched: out.launchedOnce, smsSaved: out.smsSaved, phoneSaved: out.phoneSaved, lateAfterLoad: out.lateAfterLoad, winBackSaved: out.winBackSaved, declinedSaved: out.declinedSaved, branchArranged: out.branchArranged, branchCopySaved: out.branchCopySaved, copyBesideInFlight: out.copyBesideInFlight });
+      if (COVERAGE_SEEDS.has(seed)) reached.push({ launched: out.launchedOnce, smsSaved: out.smsSaved, phoneSaved: out.phoneSaved, lateAfterLoad: out.lateAfterLoad, winBackSaved: out.winBackSaved, declinedSaved: out.declinedSaved, branchArranged: out.branchArranged, branchCopySaved: out.branchCopySaved, copyBesideInFlight: out.copyBesideInFlight, appliedRunning: out.appliedRunning });
       expect(out.pending).toBe(0);
       expect(out.problems).toEqual([]);
     });
@@ -690,6 +712,9 @@ describe("saving the definition, generated over the real editor state (ADR 0003 
   test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs save the branch's copy, subjects, threading and waits, some typed while an older save was unanswered (council on aaf82b7)", () => {
     expect(count((r) => r.branchCopySaved)).toBeGreaterThan(atLeast(1 / 20));
     expect(count((r) => r.copyBesideInFlight)).toBeGreaterThan(atLeast(1 / 40));
+  });
+  test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs apply edits to a running campaign (ticket 19)", () => {
+    expect(count((r) => r.appliedRunning)).toBeGreaterThan(0);
   });
   // Each fault in the editor's saving is killed by its recorded fixed seed (ticket 16b).
   for (const fault of Object.keys(FAULT_SEEDS) as SaveFault[]) {

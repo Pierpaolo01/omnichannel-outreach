@@ -14,7 +14,18 @@
  *   much they type meanwhile.
  */
 import type { CampaignDefinition, SequenceView } from "../../shared/api.ts";
+import { definitionProblems } from "../../domain/sequence/definition.ts";
 import { SaveQueue, draftProblems, type SaveIdentity, type SaveOutcome, type SaveStatus } from "./saveQueue.ts";
+
+/**
+ * Why a draft can't be saved as it stands: the editor's own checks, and on a running campaign the boundary the save
+ * would refuse (ADR 0003 "Ticket 19": a deleted track or message, a restored one, a move between branches).
+ */
+export function problemsOf(draft: CampaignDefinition, view: SequenceView): string[] {
+  const own = draftProblems(draft);
+  if (view.launchedAt === null) return own;
+  return [...own, ...definitionProblems(draft, view.definition, { launched: true }).filter((p) => !own.includes(p))];
+}
 
 export interface EditorSnapshot {
   readonly view: SequenceView;
@@ -22,10 +33,10 @@ export interface EditorSnapshot {
   readonly save: SaveStatus;
   /** The draft differs from what the server accepted: launch waits until it is saved. */
   readonly unsaved: boolean;
-  /** A launch or a load of the stored version is in flight: authoring is locked until it answers. */
-  readonly pending: "launch" | "load" | null;
+  /** A launch, a load of the stored version, or applying changes to a running campaign is in flight: authoring is locked until it answers. */
+  readonly pending: "launch" | "load" | "apply" | null;
   /**
-   * Editing is locked: the campaign has launched, or a launch or a load is pending. The one value
+   * Editing is locked: a launch, a load or an apply is pending (since ticket 19 a running campaign is edited too). The one value
    * both `update` and every authoring control read, so no control can stay enabled while its edit
    * would be dropped (PR 41 review).
    */
@@ -53,7 +64,7 @@ export interface EditorDeps {
  * Faults the generated save test injects to prove it notices them (ticket 16b): a save whose body leaves
  * out each phone track's declined path, or the win-back branch's tracks. Never set by the page.
  */
-export type SaveFault = "declined_path_not_sent" | "win_back_tracks_not_sent" | "stale_win_back_copy";
+export type SaveFault = "declined_path_not_sent" | "win_back_tracks_not_sent" | "stale_win_back_copy" | "running_saved_as_typed";
 
 function withFaults(definition: CampaignDefinition, faults: ReadonlySet<SaveFault> | undefined, previous: CampaignDefinition | null): CampaignDefinition {
   if (!faults || faults.size === 0) return definition;
@@ -88,7 +99,7 @@ export class EditorStore {
 
   constructor(initial: SequenceView, deps: EditorDeps) {
     this.deps = deps;
-    this.state = { view: initial, draft: initial.definition, save: { kind: "idle" }, unsaved: false, pending: null, locked: initial.launchedAt !== null, problems: draftProblems(initial.definition) };
+    this.state = { view: initial, draft: initial.definition, save: { kind: "idle" }, unsaved: false, pending: null, locked: false, problems: problemsOf(initial.definition, initial) };
     this.queue = new SaveQueue({
       read: () => ({ draft: this.state.draft, accountIds: emailInboxIds(this.state.view), smsNumberIds: smsNumberIds(this.state.view), version: this.state.view.definitionVersion }),
       put: (definition, options, save) => {
@@ -131,7 +142,7 @@ export class EditorStore {
 
   private set(change: Partial<EditorSnapshot>): void {
     const next = { ...this.state, ...change };
-    this.state = { ...next, problems: change.draft ? draftProblems(next.draft) : next.problems, locked: next.view.launchedAt !== null || next.pending !== null };
+    this.state = { ...next, problems: change.draft || change.view ? problemsOf(next.draft, next.view) : next.problems, locked: next.pending !== null };
     for (const l of this.listeners) l();
   }
 
@@ -146,7 +157,7 @@ export class EditorStore {
   }
 
   /** Runs a launch or a load with authoring locked; one at a time. */
-  private async locked(kind: "launch" | "load", run: () => Promise<void>): Promise<void> {
+  private async locked(kind: "launch" | "load" | "apply", run: () => Promise<void>): Promise<void> {
     if (this.state.pending !== null) return;
     if (this.timer !== null) this.deps.clearTimer(this.timer);
     this.timer = null;
@@ -162,7 +173,10 @@ export class EditorStore {
     return this.state.view.launchedAt !== null;
   }
 
-  /** An edit by the user. Ignored once launched, and while a launch or a load is in flight. */
+  /**
+   * An edit by the user. Ignored while a launch, a load or an apply is in flight. Before launch it is saved a moment
+   * later; on a running campaign it stays on the page until the user applies it (ADR 0003 "Ticket 19", Q20).
+   */
   update(change: (draft: CampaignDefinition) => CampaignDefinition): void {
     if (this.state.locked) return;
     // Shown at once, so a change is never labelled saved while it waits; a conflict stays shown,
@@ -170,13 +184,32 @@ export class EditorStore {
     const now = this.state.save;
     const draft = change(this.state.draft);
     // Never "Saving…" for a draft that cannot be saved as it stands: nothing of it is sent.
-    const problems = draftProblems(draft);
-    const pending: SaveStatus = problems.length > 0 ? { kind: "invalid", message: problems.join(" ") } : { kind: "saving" };
+    const problems = problemsOf(draft, this.state.view);
+    const pending: SaveStatus = problems.length > 0 ? { kind: "invalid", message: problems.join(" ") } : this.launched() ? { kind: "idle" } : { kind: "saving" };
     const save: SaveStatus = !this.queue.inConflict ? pending : now.kind === "conflict" ? { ...now, saved: false } : now;
     this.set({ draft, unsaved: true, save });
     // Once the new draft is readable: the queue records each number's draft, and the newest valid one.
     this.queue.edited();
-    this.schedule();
+    // Fault only (ticket 19): a running campaign's edit saved as it is typed, without Apply.
+    if (!this.launched() || this.deps.faults?.has("running_saved_as_typed")) this.schedule();
+  }
+
+  /**
+   * Applies the draft to a running campaign (ADR 0003 "Ticket 19"): through the same queue as every save, with
+   * authoring locked until it answers. A draft that cannot be saved as it stands sends nothing.
+   */
+  apply(): Promise<void> {
+    if (!this.launched() || this.state.problems.length > 0) return Promise.resolve();
+    return this.locked("apply", async () => {
+      await this.queue.save();
+    });
+  }
+
+  /** Sets aside a running campaign's unapplied changes: the stored definition is the draft again. */
+  discard(): void {
+    if (!this.launched() || this.state.locked) return;
+    this.queue.edited();
+    this.set({ draft: this.state.view.definition, unsaved: false, save: { kind: "idle" } });
   }
 
   private schedule(): void {
@@ -203,11 +236,15 @@ export class EditorStore {
   leavePage(): void {
     if (this.timer !== null) this.deps.clearTimer(this.timer);
     this.timer = null;
+    // A running campaign's changes go only when the user applies them (Q20): leaving sends nothing.
+    if (this.launched()) return;
     this.queue.sendNow();
   }
 
   /** Back from the back-forward cache (`pageshow` with `persisted`). */
   restored(): Promise<SaveOutcome> {
+    // A running campaign's changes go only when the user applies them (Q20).
+    if (this.launched()) return Promise.resolve({ ok: true });
     return this.queue.restored();
   }
 

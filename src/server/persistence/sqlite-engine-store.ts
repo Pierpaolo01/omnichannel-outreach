@@ -314,7 +314,9 @@ export class SqliteEngineStore implements EngineStore {
       const { leads, accounts } = this.launchInputsNow(campaignId);
       const check = decide(parseDefinition(row), leads, accounts);
       if (!check.canLaunch) return { ok: false, check, reason: "blocked" };
-      this.run("UPDATE campaigns SET launched_at = ?, version = version + 1 WHERE id = ?", [now, campaignId]);
+      // The launch moves the revision on and forgets the session that wrote last (ticket 19): a page that loaded the
+      // draft before launch saves as you type, so its next save must be a conflict, never a running edit no one applied.
+      this.run("UPDATE campaigns SET launched_at = ?, version = version + 1, definition_version = definition_version + 1, definition_session = NULL, definition_seq = NULL WHERE id = ?", [now, campaignId]);
       // A launched campaign takes saves too (ticket 19), so its sessions' newest accepted saves are kept (ADR 0003 1.1.1).
       const launchedRow = this.sql("SELECT * FROM campaigns WHERE id = ?").get(campaignId);
       for (const e of this.sql("SELECT id FROM enrollments WHERE campaign_id = ? ORDER BY enrolled_at, id").all(campaignId)) {
