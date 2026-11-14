@@ -116,7 +116,8 @@ function Campaign({ detail, editor, tab, controls }: { detail: CampaignDetail; e
       )}
       {editor.launched && (
         <p className="mt-4 rounded-box border border-line bg-base-100 px-4 py-3 text-[14px] text-ink-2">
-          {sendsOnItsOwn(editor.view.definition)} Editing a running campaign arrives with a later release.
+          {/* While paused, nothing goes out on its own: the Paused banner says so, and this sentence would not be true (ticket 17b). */}
+          {detail.pause.paused ? "" : `${sendsOnItsOwn(editor.view.definition)} `}Editing a running campaign arrives with a later release.
         </p>
       )}
 

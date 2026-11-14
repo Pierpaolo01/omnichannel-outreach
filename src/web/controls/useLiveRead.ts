@@ -6,7 +6,8 @@ import { isControlKey } from "./requests.ts";
 export type LiveRead<T> =
   | { readonly state: "loading" }
   | { readonly state: "error"; readonly message: string; readonly notFound: boolean }
-  | { readonly state: "ready"; readonly data: T; readonly freshness: Freshness };
+  /** `reads`: how many reads have succeeded, so a part of the page read separately can follow this one. */
+  | { readonly state: "ready"; readonly data: T; readonly freshness: Freshness; readonly reads: number };
 
 /**
  * One server read a page shows and acts on, on the one reader Today and Calls use (`Refresher`; ADR 0003 4.4.1): reads
@@ -19,7 +20,7 @@ export function useLiveRead<T>(path: string): { read: LiveRead<T>; refresh: () =
   const refresher = useMemo(() => {
     const r: Refresher<T> = new Refresher<T>({
       read: () => getJson(path) as Promise<T>,
-      onRead: (data: T): void => setRead({ path, value: { state: "ready", data, freshness: r.freshness() } }),
+      onRead: (data: T): void => setRead((prev) => ({ path, value: { state: "ready", data, freshness: r.freshness(), reads: (prev?.path === path && prev.value.state === "ready" ? prev.value.reads : 0) + 1 } })),
       onFailure: (error, freshness) =>
         setRead((prev) =>
           prev?.path === path && prev.value.state === "ready"

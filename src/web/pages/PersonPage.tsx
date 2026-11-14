@@ -23,13 +23,13 @@ export function PersonPage({ id }: { id: string }) {
           <ErrorState title="This record didn’t load." message={read.message} onRetry={() => void refresh()} />
         )
       ) : (
-        <Person person={read.data} controls={controls} />
+        <Person person={read.data} controls={controls} reads={read.reads} />
       )}
     </div>
   );
 }
 
-function Person({ person, controls }: { person: PersonRecord & RecordCalls & RecordControls; controls: Controls }) {
+function Person({ person, controls, reads }: { person: PersonRecord & RecordCalls & RecordControls; controls: Controls; reads: number }) {
   const { company } = person;
   return (
     <article className="flex max-w-[780px] flex-col gap-10">
@@ -69,7 +69,7 @@ function Person({ person, controls }: { person: PersonRecord & RecordCalls & Rec
         </Section>
       )}
 
-      <Activity path={`/api/people/${encodeURIComponent(person.id)}/activity`} />
+      <Activity path={`/api/people/${encodeURIComponent(person.id)}/activity`} reads={reads} />
     </article>
   );
 }

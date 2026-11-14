@@ -153,7 +153,12 @@ export function CampaignRows({
             <div className="flex flex-wrap items-center justify-between gap-2.5">
               <span className="min-w-0 font-semibold [overflow-wrap:anywhere]">
                 {enrollment.campaign.name}
-                {lead?.campaignState.paused && <CampaignPausedMarker />}
+                {lead?.campaignState.paused && (
+                  <>
+                    {" "}
+                    <CampaignPausedMarker />
+                  </>
+                )}
               </span>
               <StatusBadge status={status} />
             </div>

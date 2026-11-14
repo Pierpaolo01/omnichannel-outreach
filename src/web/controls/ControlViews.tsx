@@ -249,7 +249,7 @@ export function LeadSentence({ lead, userZone }: { lead: RecordLead; userZone: s
 
 /** "(campaign paused)", beside a campaign's name on a record's row, as the prototype marks it. */
 export function CampaignPausedMarker() {
-  return <span className="ml-1.5 text-[13px] font-normal text-muted">(campaign paused)</span>;
+  return <span className="text-[13px] font-normal text-muted">(campaign paused)</span>;
 }
 
 /**

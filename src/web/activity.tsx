@@ -1,6 +1,6 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import type { ActivityEntry, ActivityView, DependentTrackState } from "../shared/api.ts";
-import { useApi } from "./api.ts";
+import { useLiveRead } from "./controls/useLiveRead.ts";
 import { ErrorState, Section } from "./components.tsx";
 import { DECLINED_PATH_LINE, OUTCOME_TITLE, dateIn, declineTrackLine, dialledLine } from "./calls/wording.ts";
 import { dayLabel } from "./calls/callbackTime.ts";
@@ -14,8 +14,13 @@ import { useNow } from "./time.ts";
  * and date only. Calls show each logged outcome with the number dialled and its note (ticket 14b).
  * The note box arrives with the ticket that adds notes.
  */
-export function Activity({ path }: { path: string }) {
-  const { result, retry } = useApi<ActivityView>(path);
+export function Activity({ path, reads }: { path: string; reads: number }) {
+  // Read live (ticket 17b), and again each time the record reads: a control's entry shows once it is applied.
+  const { read: result, refresh } = useLiveRead<ActivityView>(path);
+  const retry = () => void refresh();
+  useEffect(() => {
+    if (reads > 0) void refresh();
+  }, [reads, refresh]);
   const [campaign, setCampaign] = useState("");
   const filterId = useId();
   const entries = result.state === "ready" ? result.data.entries : null;

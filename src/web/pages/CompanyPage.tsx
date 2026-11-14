@@ -30,13 +30,13 @@ export function CompanyPage({ id }: { id: string }) {
       ) : read.data.enrollments.length === 0 && read.data.people.length > 0 ? (
         <Redirect to={`/leads?company=${read.data.id}`} replace />
       ) : (
-        <Company company={read.data} controls={controls} />
+        <Company company={read.data} controls={controls} reads={read.reads} />
       )}
     </div>
   );
 }
 
-function Company({ company, controls }: { company: CompanyRecord & RecordCalls & RecordControls; controls: Controls }) {
+function Company({ company, controls, reads }: { company: CompanyRecord & RecordCalls & RecordControls; controls: Controls; reads: number }) {
   return (
     <article className="flex max-w-[780px] flex-col gap-10">
       <header className="flex flex-wrap items-end justify-between gap-5">
@@ -66,7 +66,7 @@ function Company({ company, controls }: { company: CompanyRecord & RecordCalls &
         </Section>
       )}
 
-      {company.enrollments.length > 0 && <Activity path={`/api/companies/${encodeURIComponent(company.id)}/activity`} />}
+      {company.enrollments.length > 0 && <Activity path={`/api/companies/${encodeURIComponent(company.id)}/activity`} reads={reads} />}
     </article>
   );
 }
