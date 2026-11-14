@@ -86,9 +86,13 @@ export function hasGoodNumber(state: SubjectState): boolean {
   return state.lead.phones.some((p) => !p.bad);
 }
 
-/** Whether a track on `channel` can reach the lead now. */
+/**
+ * Whether a track on `channel` can reach the lead now. A phone track cannot once the lead declined: it is never
+ * called again in this campaign (council on f5fdeee, item 1), so a lead with nothing else left ends with no usable
+ * channel at the decline. `startTrack` still skips a phone track after a decline as `skipped_declined`.
+ */
 export function channelReaches(state: SubjectState, channel: TrackChannel): boolean {
-  return channel === "call" ? hasGoodNumber(state) : destinationFor(state.lead.details, channel) !== null;
+  return channel === "call" ? hasGoodNumber(state) && !state.subject.noMoreCalls : destinationFor(state.lead.details, channel) !== null;
 }
 
 /** Channels in the lead's branch that can reach the lead now (2.1). */

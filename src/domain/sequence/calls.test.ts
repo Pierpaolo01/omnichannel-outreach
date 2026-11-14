@@ -463,3 +463,52 @@ describe("not interested: the phone track's declined path (ticket 16; ADR 0003 2
     expect(deriveStatus(s)).toBe("finished_no_usable_channel");
   });
 });
+
+describe("a lead that declined with continue is never called again, so a phone track no longer reaches it (council on f5fdeee, item 1; ADR 0003 2.1)", () => {
+  const ok = (r: ReturnType<typeof logCallOutcome>) => {
+    if (!r.ok) throw new Error(r.reason);
+    return r.state;
+  };
+  const EVERY_HOUR = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
+  const emailTrack = (id: string, steps: TrackDefinition["steps"], start: TrackDefinition["start"] = { kind: "entry" }): TrackDefinition => ({ id, channel: "email", branch: "main", window: EVERY_HOUR, steps, start, removed: false });
+  const emailStep = (id: string, waitDays = 0): TrackDefinition["steps"][number] => ({ id, waitDays, subject: "Hello", body: "A note.", threading: "new_subject", removed: false });
+  const phoneTrack = (id: string, stepId: string, fields: Partial<TrackDefinition> = {}) => callTrack({ id, window: EVERY_HOUR, steps: [{ id: stepId, waitDays: 0, subject: "", body: "", threading: "new_subject", removed: false }], ...fields });
+  /** Phone A (continue) at entry, phone B three days after it, and any other tracks; A's call placed at launch. */
+  function launchedWith(tracks: TrackDefinition[], details: "none" | "email"): SubjectState {
+    const base = subjectState();
+    let s: SubjectState = {
+      ...base,
+      campaign: { ...base.campaign, launchedAt: MONDAY_9, definition: tracksDefinition([phoneTrack("pa", "ca", { declinedPath: "continue" }), phoneTrack("pb", "cb", { start: { kind: "after", trackId: "pa", delayDays: 3 } }), ...tracks]) },
+      lead: { ...base.lead, ...(details === "none" ? { details: [], resolved: {} } : {}), phones: [phone("d-direct", "direct", 2)] },
+      callDay: { userZone: "Europe/London", day: localDayNumber(MONDAY_9, "Europe/London"), capacity: 5, placedToday: 0, committed: 0 },
+    };
+    s = evaluate(enterMain(s, MONDAY_9), MONDAY_9);
+    const item = readyCalls(s, MONDAY_9).find((r) => r.trackId === "pa");
+    return placeCall(s, item!, MONDAY_9, "task-a")!;
+  }
+  const AT = MONDAY_9 + H;
+  const decline = (s: SubjectState) => ok(logCallOutcome(s, "task-a", { requestId: "r-a", outcome: "not_interested", numberId: "d-direct", note: "", noteScope: "person" }, AT, { attempt: "a1", note: "n1" }));
+
+  test("with no email or mobile, nothing left can reach the lead: it ends at the decline with no usable channel, not three days later with no response", () => {
+    const s = decline(launchedWith([], "none"));
+    expect(s.subject).toMatchObject({ ended: "finished_no_usable_channel", endedWall: AT, noMoreCalls: true });
+    expect(deriveStatus(s)).toBe("finished_no_usable_channel");
+    expect(s.tracks.find((t) => t.trackId === "pb")).toBeUndefined();
+  });
+
+  test("a lead with a live email track runs on, and a track waiting on the skipped phone track still starts when it should", () => {
+    const s = decline(launchedWith([emailTrack("e1", [emailStep("e1s1"), emailStep("e1s2", 7)]), emailTrack("e2", [emailStep("e2s1")], { kind: "after", trackId: "pb", delayDays: 1 })], "email"));
+    expect(s.subject.ended).toBeNull();
+    expect(deriveStatus(s)).toBe("active");
+    // Three days on, phone B starts as arranged and is skipped as declined at its start, and e2 starts a day after that.
+    const b = AT + 3 * DAY;
+    const atB = evaluate(atDay(s, b), b);
+    const pb = atB.tracks.find((t) => t.trackId === "pb")!;
+    expect(pb).toMatchObject({ finishReason: "skipped_declined", finishedAt: pb.startedAt, startedAt: pb.startAt });
+    expect(pb.startBasisWall).toBe(AT);
+    expect(pb.finishedWall).toBeGreaterThan(AT + 2 * DAY);
+    expect(atB.subject.ended).toBeNull();
+    const e2 = b + DAY;
+    expect(evaluate(atDay(atB, e2), e2).tracks.find((t) => t.trackId === "e2")).toMatchObject({ startBasisWall: pb.finishedWall, nextStepId: "e2s1", startedAt: expect.any(Number) });
+  });
+});

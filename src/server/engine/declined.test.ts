@@ -271,3 +271,44 @@ describe("a branch the lead has not entered is in none of its reads (review bot 
     expect(entries.map((e) => (e.kind === "sent" ? `sent ${e.track.label} ${e.stepNumber}` : e.kind === "call" ? `call ${e.outcome} ${e.declinedPath ?? ""}` : e.kind))).toEqual(["sent Win-back email track 1 1", "call not_interested win_back", "sent Email track 1 1"]);
   });
 });
+
+describe("win back while a main email is with the provider (council on f5fdeee, item 2)", () => {
+  test("the withdrawal does not succeed, the app restarts, and the late send is recorded once on the dropped track; nothing of it or after it is claimed or sent again", async () => {
+    // The provider sends every email about half an hour after the handover, and answers a withdrawal "unknown" while still sending it.
+    const h = new EngineHarness({ start: MONDAY_9 - H, modes: ["late-send"], accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+    h.fake.withdrawAnswers = "unknown-sends";
+    await h.tick();
+    expect((await h.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "Europe/London" })).status).toBe(200);
+    const { campaign: c } = await h.createCampaign("Spring physio", { businesses: [HARBOUR], people: [PAT] });
+    await h.defineSequence(c.id, definition("win_back"));
+    h.clock = MONDAY_9;
+    expect((await h.launch(c.id)).status).toBe(200);
+    const pat = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${c.id}`)).body.rows[0]!.enrollments[0]!.id;
+    await h.advanceTo(MONDAY_9 + 2 * MIN);
+    // The first email is with the provider: handed over and accepted, not yet sent.
+    const before = await h.progress(pat);
+    expect(before.tracks.find((t) => t.trackId === "e1")?.steps[0]?.sends.map((x) => x.state)).toEqual(["accepted"]);
+    expect(h.fake.deliveryLog).toEqual([]);
+
+    const taskId = before.tracks.find((t) => t.trackId === "p1")?.callTask?.taskId ?? "";
+    const number = (await h.request<CallTaskView>("GET", `/api/call-tasks/${taskId}`)).body.numbers.find((n) => n.kind === "direct")?.detailId;
+    expect((await h.request("POST", `/api/call-tasks/${taskId}/outcome`, { requestId: "r-decline", outcome: "not_interested", numberId: number })).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + 5 * MIN);
+    expect(h.fake.withdrawLog.map((w) => w.answer)).toEqual(["unknown"]);
+    await h.restart();
+    // The provider sends it late, and the app observes it after the restart.
+    await h.advanceTo(MONDAY_9 + 14 * DAY);
+
+    const sent = h.fake.deliveryLog.filter((d) => d.subjectId === pat);
+    expect(sent.filter((d) => d.stepId === "e1s1")).toHaveLength(1);
+    const after = await h.progress(pat);
+    const e1 = after.tracks.find((t) => t.trackId === "e1")!;
+    expect(e1.finishReason).toBe("dropped_for_win_back");
+    expect(e1.steps.map((st) => st.result)).toEqual(["sent", null]);
+    expect(e1.steps[0]?.sends.filter((x) => x.state === "sent")).toHaveLength(1);
+    // Nothing of the dropped track or the tracks after it is handed over afterwards; only the branch's emails go.
+    expect(h.fake.handoverLog.filter((x) => x.subjectId === pat).map((x) => x.stepId)).toEqual(["e1s1", "w1s1", "w2s1"]);
+    expect(after.tracks.find((t) => t.trackId === "e2")?.finishReason).toBe("dropped_for_win_back");
+    expect(after.status).toBe("sequence_finished_no_response");
+  });
+});

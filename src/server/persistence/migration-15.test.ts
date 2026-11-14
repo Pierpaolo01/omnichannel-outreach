@@ -58,8 +58,9 @@ describe("migration 15 on a database with calls logged before it", () => {
     const progress = (await after.request<EnrollmentProgress>("GET", `/api/enrollments/${enrollment}`)).body;
     expect(progress.tracks.find((t) => t.trackId === "p1")?.steps[0]?.calls).toEqual([expect.objectContaining({ outcome: "no_answer", declinedPath: null })]);
     expect(progress.declined).toBeNull();
+    // A call-only campaign: once the lead declined, no phone track reaches it, so it has no usable channel left (ADR 0003 2.1).
     expect((await after.request("POST", `/api/call-tasks/${second?.taskId}/outcome`, { requestId: "r2", outcome: "not_interested", numberId: number })).status).toBe(200);
-    expect((await after.request<EnrollmentProgress>("GET", `/api/enrollments/${enrollment}`)).body).toMatchObject({ status: "sequence_finished_no_response", declined: { path: "continue", trackId: "p2" } });
+    expect((await after.request<EnrollmentProgress>("GET", `/api/enrollments/${enrollment}`)).body).toMatchObject({ status: "finished_no_usable_channel", declined: { path: "continue", trackId: "p2" } });
     await after.store.close();
   });
 });

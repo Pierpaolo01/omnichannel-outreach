@@ -412,7 +412,8 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
    * included after a decline (ADR 0003 2.1), until the lead enters win-back; the branch's channels from then.
    */
   function noChannelAt(s: Subject): number {
-    const lostAt = (c: TrackDefinition["channel"]) => (c === "email" ? (addressOf(s) ? Infinity : -Infinity) : c === "sms" ? (mobileOf(s) ? badAt(mobileOf(s) ?? "") : -Infinity) : allPhonesBadAt(s));
+    // A phone track no longer reaches a lead that declined: it is never called again (ADR 0003 2.1).
+    const lostAt = (c: TrackDefinition["channel"]) => (c === "email" ? (addressOf(s) ? Infinity : -Infinity) : c === "sms" ? (mobileOf(s) ? badAt(mobileOf(s) ?? "") : -Infinity) : Math.min(allPhonesBadAt(s), declineOf(s)?.at ?? Infinity));
     const of = (branch: "main" | "win_back") => [...new Set(def(s).tracks.filter((t) => t.branch === branch).map((t) => t.channel))];
     const mainLost = Math.max(runStartOf(s), ...of("main").map(lostAt));
     const w = winBackAt(s);
@@ -928,12 +929,14 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       const live = ((await h.store.engine.subject(s.id, h.clock))?.attempts ?? []).filter((a) => (a.state === "claimed" || a.state === "handed" || a.state === "accepted") && def(s).tracks.find((t) => t.id === a.trackId)?.branch === "main");
       if (live.length === 0) continue;
       const hasBranch = def(s).tracks.some((t) => t.branch === "win_back");
-      const path = dpickFlight(hasBranch ? (["win_back", "stop", "continue"] as const) : (["stop", "continue"] as const));
+      const withProvider = live.some((a) => a.state !== "claimed");
+      // Win back most often when the provider holds the work: the case that must never send a dropped track's next step.
+      const path = withProvider && hasBranch && flightRand() < 0.7 ? "win_back" : dpickFlight(hasBranch ? (["win_back", "stop", "continue"] as const) : (["stop", "continue"] as const));
       await logOutcome(taskId, "not_interested", (view) => view.numbers.find((n) => !n.bad)?.detailId ?? null, { declinedPath: path });
       if (logged.at(-1)?.accepted) {
-        features.add(`declined-with-work-in-flight:${path}`);
-        if (live.some((a) => a.state === "claimed")) features.add("declined-with-a-main-claim-waiting");
-        if (live.some((a) => a.state !== "claimed")) features.add("declined-with-a-main-send-with-the-provider");
+        // One behaviour per pair: the path taken, and the state of the main work at the decline (council on f5fdeee, item 2).
+        if (live.some((a) => a.state === "claimed")) features.add(`declined-with-work-in-flight:${path}:claim-waiting`);
+        if (withProvider) features.add(`declined-with-work-in-flight:${path}:with-the-provider`);
       }
       return true;
     }
@@ -1489,6 +1492,11 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       // instant and the worker's tick (review bot on eda5fa0); the worker's tick then follows.
       // Sometimes, when a lead held by a callback has only the company main line left, a colleague's call on that
       // line is a wrong number: the callback is then one no call can be logged on (Q13).
+      // In a run with late sends, main work stays with the provider for up to an hour and a half after its handover.
+      if (lateSends && flightRand() < 0.25 && (await declineWithWorkInFlight())) {
+        await checkAll(false);
+        continue;
+      }
       if (staleRand() < 0.5 && (await strandACallback())) {
         await checkAll(false);
         continue;
