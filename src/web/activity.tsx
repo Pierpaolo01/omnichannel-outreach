@@ -1,5 +1,6 @@
-import { useEffect, useId, useState } from "react";
-import type { ActivityEntry, ActivityView, DependentTrackState } from "../shared/api.ts";
+import { useEffect, useId, useRef, useState } from "react";
+import type { ActivityEntry, ActivityNote, ActivityView, DependentTrackState, NoteAnswer } from "../shared/api.ts";
+import { postJson } from "./api.ts";
 import { useLiveRead } from "./controls/useLiveRead.ts";
 import { ErrorState, Section } from "./components.tsx";
 import { DECLINED_PATH_LINE, OUTCOME_TITLE, dateIn, declineTrackLine, dialledLine } from "./calls/wording.ts";
@@ -12,9 +13,10 @@ import { useNow } from "./time.ts";
  * The record's Activity: one timeline across campaigns, newest first, as in the approved
  * daily-workspace prototype. Sent emails and texts expand to the copy that went; a reply shows its channel
  * and date only. Calls show each logged outcome with the number dialled and its note (ticket 14b).
- * The note box arrives with the ticket that adds notes.
+ * Ticket 18: the note box (a person note, or a company note shown for everyone at the company), and the record's notes on
+ * the timeline, shown whatever campaign the filter picks, since a note belongs to no campaign.
  */
-export function Activity({ path, reads }: { path: string; reads: number }) {
+export function Activity({ path, reads, notes }: { path: string; reads: number; notes: NoteBoxProps }) {
   // Read live (ticket 17b), and again each time the record reads: a control's entry shows once it is applied.
   const { read: result, refresh } = useLiveRead<ActivityView>(path);
   const retry = () => void refresh();
@@ -28,6 +30,11 @@ export function Activity({ path, reads }: { path: string; reads: number }) {
   const userZone = result.state === "ready" ? result.data.userZone : null;
   const campaigns = entries ? [...new Map(entries.map((e) => [e.campaign.id, e.campaign.name])).entries()] : [];
   const shown = entries?.filter((e) => campaign === "" || e.campaign.id === campaign) ?? [];
+  const noteRows = result.state === "ready" ? result.data.notes : [];
+  const timeline: ({ kind: "entry"; at: string; entry: ActivityEntry } | { kind: "note"; at: string; note: ActivityNote })[] = [
+    ...shown.map((entry) => ({ kind: "entry" as const, at: entry.at, entry })),
+    ...noteRows.map((note) => ({ kind: "note" as const, at: note.at, note })),
+  ].sort((a, b) => b.at.localeCompare(a.at));
   return (
     <Section
       title="Activity"
@@ -49,6 +56,7 @@ export function Activity({ path, reads }: { path: string; reads: number }) {
         ) : undefined
       }
     >
+      <NoteBox {...notes} onAdded={retry} />
       {result.state === "error" ? (
         <ErrorState title="The activity didn’t load." message={result.message} onRetry={retry} />
       ) : entries === null ? (
@@ -56,13 +64,17 @@ export function Activity({ path, reads }: { path: string; reads: number }) {
           <div className="skeleton h-9 w-full" />
           <div className="skeleton h-9 w-full" />
         </div>
-      ) : shown.length === 0 ? (
+      ) : timeline.length === 0 ? (
         <p className="py-3 text-[14px] text-muted">Nothing has happened yet.</p>
       ) : (
-        <ul>
-          {shown.map((entry, i) => (
-            userZone !== null && <Line key={`${entry.at}-${i}`} entry={entry} userZone={userZone} />
-          ))}
+        <ul className="mt-2">
+          {timeline.map((row, i) =>
+            userZone === null ? null : row.kind === "note" ? (
+              <NoteLine key={row.note.id} note={row.note} userZone={userZone} />
+            ) : (
+              <Line key={`${row.at}-${i}`} entry={row.entry} userZone={userZone} />
+            ),
+          )}
         </ul>
       )}
     </Section>
@@ -321,6 +333,125 @@ function Line({ entry, userZone }: { entry: ActivityEntry; userZone: string }) {
         </div>
       )}
     </li>
+  );
+}
+
+/** A note on the timeline: a person's own, or a company note, which shows for everyone at the company. */
+function NoteLine({ note, userZone }: { note: ActivityNote; userZone: string }) {
+  const now = useNow();
+  return (
+    <li className="grid grid-cols-[32px_minmax(0,1fr)_auto] gap-x-3 gap-y-0.5 border-line py-3 [&+&]:border-t">
+      <span className="grid size-8 place-items-center rounded-full bg-pause-soft text-pause">
+        <Icon name="file" className="size-4" />
+      </span>
+      <div className="min-w-0 pt-[5px] font-medium">{note.scope === "company" ? "Company note" : "Note"}</div>
+      <time dateTime={note.at} className="whitespace-nowrap pt-1.5 text-right text-[13px] text-muted">
+        {when(note.at, now, userZone)}
+      </time>
+      <div className="col-start-2 col-end-4 mt-[3px] min-w-0 whitespace-pre-wrap text-[14px] text-ink-2 [overflow-wrap:anywhere]">{note.body}</div>
+    </li>
+  );
+}
+
+const NOTE_MAX = 10_000;
+
+/** Whose record the note box is on: a person (person note, or a company note) or a company lead (company notes only). */
+export type NoteBoxProps = { readonly kind: "person"; readonly path: string; readonly firstName: string; readonly company: string } | { readonly kind: "company"; readonly path: string; readonly company: string };
+
+type NoteSend = { readonly requestId: string; readonly body: string; readonly scope: "person" | "company" };
+
+/**
+ * The prototype's note box: a note about the person, or, ticked, a company note shown for everyone at the company. A
+ * company lead's notes are company notes. The request id is fixed at the press, so Try again stores the note once.
+ */
+function NoteBox(props: NoteBoxProps & { onAdded: () => void }) {
+  const fieldId = useId();
+  const shareId = useId();
+  const [text, setText] = useState("");
+  const [share, setShare] = useState(props.kind === "company");
+  const [sending, setSending] = useState<NoteSend | null>(null);
+  const [state, setState] = useState<{ kind: "idle" } | { kind: "saving" } | { kind: "saved"; scope: "person" | "company" } | { kind: "failed"; message: string }>({ kind: "idle" });
+  const field = useRef<HTMLTextAreaElement | null>(null);
+  const statusRef = useRef<HTMLElement | null>(null);
+  const tooLong = text.length > NOTE_MAX;
+  const send = (press: NoteSend) => {
+    setSending(press);
+    setState({ kind: "saving" });
+    const body = props.kind === "company" ? { requestId: press.requestId, body: press.body } : press;
+    postJson(`${props.path}/notes`, body)
+      .then((answer) => {
+        const { note } = answer as NoteAnswer;
+        setSending(null);
+        setText((t) => (t === press.body ? "" : t));
+        setState({ kind: "saved", scope: note.scope });
+        props.onAdded();
+      })
+      .catch((e: unknown) => setState({ kind: "failed", message: e instanceof Error ? e.message : "The server didn’t answer." }));
+  };
+  useEffect(() => {
+    if (state.kind === "saved" || state.kind === "failed") statusRef.current?.focus();
+  }, [state]);
+  const setStatusRef = (el: HTMLElement | null) => {
+    statusRef.current = el;
+  };
+  const saving = state.kind === "saving";
+  return (
+    <form
+      className="mt-2 flex flex-col gap-2 rounded-box border border-line bg-base-100 p-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (saving || tooLong || text.trim() === "") return;
+        send({ requestId: crypto.randomUUID(), body: text.trim(), scope: props.kind === "company" || share ? "company" : "person" });
+      }}
+    >
+      <label htmlFor={fieldId} className="sr-only">
+        {props.kind === "person" ? `A note about ${props.firstName}` : `A note about ${props.company}`}
+      </label>
+      <textarea
+        id={fieldId}
+        ref={field}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        readOnly={saving}
+        rows={2}
+        placeholder={props.kind === "person" ? `Add a note about ${props.firstName}` : `Add a note about ${props.company}`}
+        aria-describedby={tooLong ? `${fieldId}-long` : undefined}
+        className="textarea min-h-[64px] w-full resize-y border-line-strong bg-base-100 text-[14.5px] focus:border-call focus:outline-none"
+      />
+      {tooLong && (
+        <p id={`${fieldId}-long`} className="text-[13px] text-crit">
+          A note can be at most 10,000 characters. This one has {text.length.toLocaleString("en-GB")}.
+        </p>
+      )}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        {props.kind === "person" ? (
+          <label htmlFor={shareId} className="flex items-start gap-2 text-[14px] text-ink-2">
+            <input id={shareId} type="checkbox" className="checkbox checkbox-sm mt-0.5 border-line-strong checked:border-call checked:bg-call checked:text-base-100" checked={share} disabled={saving} onChange={(e) => setShare(e.target.checked)} />
+            <span>Show for everyone at {props.company}</span>
+          </label>
+        ) : (
+          <p className="text-[13px] text-muted">Notes on a company lead are company notes, shown for everyone at {props.company}.</p>
+        )}
+        <button type="submit" className="btn btn-sm border-line-strong bg-base-100 font-medium" disabled={saving || tooLong || text.trim() === ""}>
+          {saving ? "Adding…" : "Add note"}
+        </button>
+      </div>
+      {state.kind === "saved" && (
+        <p role="status" tabIndex={-1} ref={setStatusRef} className="rounded-field bg-you-soft px-3 py-2 text-[14px] text-base-content outline-offset-2">
+          {state.scope === "company" ? `Company note added. It shows for everyone at ${props.company}.` : "Note added."}
+        </p>
+      )}
+      {state.kind === "failed" && sending && (
+        <div role="alert" tabIndex={-1} ref={setStatusRef} className="flex flex-wrap items-center gap-3 rounded-field bg-crit-soft px-3 py-2 text-[14px] outline-offset-2">
+          <span className="min-w-0 flex-[1_1_240px]">
+            <b className="font-semibold text-crit">The note wasn’t added.</b> <span className="text-ink-2">{state.message}</span>
+          </span>
+          <button type="button" className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={() => send(sending)}>
+            Try again
+          </button>
+        </div>
+      )}
+    </form>
   );
 }
 

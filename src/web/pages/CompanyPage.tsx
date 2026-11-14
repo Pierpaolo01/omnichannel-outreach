@@ -1,5 +1,5 @@
 import { Redirect } from "wouter";
-import type { CompanyRecord, RecordCalls, RecordControls } from "../../shared/api.ts";
+import type { CompanyRecord, RecordCalls, RecordColleagues, RecordControls } from "../../shared/api.ts";
 import type { Controls } from "../controls/useControls.ts";
 import { Activity } from "../activity.tsx";
 import { useControls } from "../controls/useControls.ts";
@@ -13,7 +13,7 @@ import { NoSuchRecord } from "./PersonPage.tsx";
  */
 export function CompanyPage({ id }: { id: string }) {
   // Read live (ticket 17b): after a control's answer, on another tab's control and while visible.
-  const { read, refresh } = useLiveRead<CompanyRecord & RecordCalls & RecordControls>(`/api/companies/${encodeURIComponent(id)}`);
+  const { read, refresh } = useLiveRead<CompanyRecord & RecordCalls & RecordControls & RecordColleagues>(`/api/companies/${encodeURIComponent(id)}`);
   const targets = read.state === "ready" ? read.data.leads.map((l) => ({ kind: "lead" as const, id: l.id })) : [];
   const controls = useControls(targets, refresh);
   return (
@@ -36,7 +36,7 @@ export function CompanyPage({ id }: { id: string }) {
   );
 }
 
-function Company({ company, controls, reads }: { company: CompanyRecord & RecordCalls & RecordControls; controls: Controls; reads: number }) {
+function Company({ company, controls, reads }: { company: CompanyRecord & RecordCalls & RecordControls & RecordColleagues; controls: Controls; reads: number }) {
   return (
     <article className="flex max-w-[780px] flex-col gap-10">
       <header className="flex flex-wrap items-end justify-between gap-5">
@@ -62,11 +62,13 @@ function Company({ company, controls, reads }: { company: CompanyRecord & Record
 
       {company.people.length > 0 && (
         <Section title="People on record">
-          <PeopleRows people={company.people} />
+          <PeopleRows people={company.people} lastCallNotes={company.colleagueNotes} userZone={company.userZone} />
         </Section>
       )}
 
-      {company.enrollments.length > 0 && <Activity path={`/api/companies/${encodeURIComponent(company.id)}/activity`} reads={reads} />}
+      {company.enrollments.length > 0 && (
+        <Activity path={`/api/companies/${encodeURIComponent(company.id)}/activity`} reads={reads} notes={{ kind: "company", path: `/api/companies/${encodeURIComponent(company.id)}`, company: company.name }} />
+      )}
     </article>
   );
 }

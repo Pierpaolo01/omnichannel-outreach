@@ -17,6 +17,15 @@ export const STATUS_LABEL = {
   finished_no_usable_channel: "Finished, no usable channel",
 } as const satisfies Record<OutreachStatus, string>;
 
+/** The spec's five status groups, as every screen names them (ticket 18: one wording, with `statusGroup` the one grouping). */
+export const STATUS_GROUP_LABEL = {
+  running: "Running",
+  waiting_on_you: "Waiting on you",
+  handed_to_you: "Handed to you",
+  paused: "Paused",
+  ended: "Ended",
+} as const satisfies Record<StatusGroup, string>;
+
 export const STATUS_OPTIONS = OUTREACH_STATUSES.map((status) => ({ value: status, label: STATUS_LABEL[status] }));
 
 const GROUP_STYLE = {
