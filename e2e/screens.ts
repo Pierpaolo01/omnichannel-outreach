@@ -2116,6 +2116,26 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
     focused: (page) => page.getByRole("button", { name: "Add a win-back email track" }),
   },
   {
+    name: "removing the branch's last track when no phone track is left, so the branch goes, moves focus to Add track",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: the branch goes", { ...TWO_CHANNELS, emailPool: [], smsPool: [], tracks: [...TWO_CHANNELS.tracks, winBackTrack("wb-email", "email")] });
+      await page.goto(`/campaigns/${id}?track=wb-email&step=none`);
+      await page.getByRole("button", { name: "Remove this win-back email track" }).focus();
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByRole("button", { name: "Add track" }),
+  },
+  {
+    name: "removing the branch's last track when nothing else is left, so the canvas is empty, moves focus to its first Add",
+    open: async (page) => {
+      const id = await campaignWith(page, "Focus: the canvas empties", { ...TWO_CHANNELS, emailPool: [], smsPool: [], tracks: [winBackTrack("wb-email", "email")] });
+      await page.goto(`/campaigns/${id}?track=wb-email&step=none`);
+      await page.getByRole("button", { name: "Remove this win-back email track" }).focus();
+    },
+    act: (page) => page.keyboard.press("Enter"),
+    focused: (page) => page.getByRole("button", { name: "Email track", exact: true }),
+  },
+  {
     name: "a refused removal of the branch's last track keeps focus on Remove, which the definition's sentence describes",
     open: async (page) => {
       const id = await campaignWith(page, "Focus: last win-back track refused", { ...WITH_A_BRANCH, tracks: WITH_A_BRANCH.tracks.filter((t) => t.id !== "wb-sms") });

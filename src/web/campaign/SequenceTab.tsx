@@ -44,7 +44,8 @@ type FocusTarget =
   | { readonly to: "script"; readonly trackId: string }
   | { readonly to: "first" }
   | { readonly to: "add" }
-  | { readonly to: "add-win-back" }
+  /** A control by its id, decided when the operation is (council on aaf82b7): the one that exists afterwards. */
+  | { readonly to: "id"; readonly id: string }
   | { readonly to: "subject" | "toggle" | "body"; readonly stepId: string };
 
 const liveMain = (def: CampaignDefinition) => def.tracks.filter((t) => !t.removed && t.branch === "main");
@@ -97,7 +98,7 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
     if (next.to === "node") target = document.getElementById(nodeId(next.trackId));
     else if (next.to === "script") target = document.getElementById(scriptId(next.trackId));
     else if (next.to === "add") target = document.getElementById(ADD_TRACK_ID);
-    else if (next.to === "add-win-back") target = document.getElementById(ADD_WIN_BACK_ID);
+    else if (next.to === "id") target = document.getElementById(next.id);
     else if (next.to === "first") target = first ? (document.getElementById(`subject-${first.id}`) ?? document.getElementById(`body-${first.id}`) ?? document.getElementById(`step-toggle-${first.id}`)) : null;
     else target = document.getElementById(`${next.to === "toggle" ? "step-toggle" : next.to}-${next.stepId}`) ?? (next.to === "subject" ? document.getElementById(`body-${next.stepId}`) : null);
     if (target) {
@@ -189,9 +190,9 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
             select(null);
             setFocusNext({ to: "node", trackId: selected.id });
           }}
-          onRemoved={() => {
+          onRemoved={(result) => {
             select(null);
-            setFocusNext({ to: "add" });
+            setFocusNext({ to: "id", id: addAfterRemoving(selected, result) });
           }}
         />
       )}
@@ -211,10 +212,9 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
             select(null);
             setFocusNext({ to: "node", trackId: selected.id });
           }}
-          onRemoved={() => {
+          onRemoved={(result) => {
             select(null);
-            // A branch track's place is its branch: focus goes to the branch's own Add.
-            setFocusNext({ to: selected.branch === "win_back" ? "add-win-back" : "add" });
+            setFocusNext({ to: "id", id: addAfterRemoving(selected, result) });
           }}
         />
       )}
@@ -458,7 +458,23 @@ function Tree({ of, count, node, rootLabel, name, def, stacked, room }: { of: Re
   );
 }
 
+/** The win-back branch's Add menu, and the empty branch's first button: two controls, two ids (council on aaf82b7). */
 const ADD_WIN_BACK_ID = "add-win-back-track";
+const ADD_FIRST_WIN_BACK_ID = "add-first-win-back-track";
+
+/**
+ * Where focus goes once `removed` is gone, decided from the definition the removal produced (council on aaf82b7):
+ * a branch track's place is its branch, so the branch's Add menu while it has tracks, or the empty branch's first
+ * button while it still shows (a phone track remains); otherwise the canvas's Add track, which is also the empty
+ * canvas's first button.
+ */
+function addAfterRemoving(removed: TrackDefinition, result: CampaignDefinition): string {
+  if (removed.branch === "win_back") {
+    if (liveWinBack(result).length > 0) return ADD_WIN_BACK_ID;
+    if (liveMain(result).some((t) => t.channel === "call")) return ADD_FIRST_WIN_BACK_ID;
+  }
+  return ADD_TRACK_ID;
+}
 
 /**
  * The win-back branch on the canvas (ticket 16b; variant A draws it as a labelled box holding its own
@@ -489,7 +505,7 @@ function WinBackBox({ empty, launched, locked, stacked, gutter, width, onAdd, ch
           <p className="text-[13.5px] text-ink-2">No tracks yet. A lead who declines on a call can move here, to email and SMS tracks of its own, with no more calls. Add one to offer win back on a phone track.</p>
           {!launched && (
             <div role="group" aria-label="Add a win-back track" className="flex flex-wrap gap-2">
-              <button id={ADD_WIN_BACK_ID} type="button" className="btn btn-sm gap-1.5 border-line-strong bg-base-100 font-medium" disabled={locked} aria-label="Add a win-back email track" onClick={() => onAdd("email")}>
+              <button id={ADD_FIRST_WIN_BACK_ID} type="button" className="btn btn-sm gap-1.5 border-line-strong bg-base-100 font-medium" disabled={locked} aria-label="Add a win-back email track" onClick={() => onAdd("email")}>
                 <Icon name="email" className="size-4" />
                 Email track
               </button>
@@ -759,7 +775,8 @@ interface InspectorProps {
   onFocusStep: (stepId: string) => void;
   onLoadedStored: () => void;
   onClose: () => void;
-  onRemoved: () => void;
+  /** After the track is removed, with the definition the removal produced. */
+  onRemoved: (result: CampaignDefinition) => void;
 }
 
 function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, onOpenStep, onFocusStep, onLoadedStored, onClose, onRemoved }: InspectorProps) {
@@ -879,7 +896,7 @@ function EditorNotices({ editor, onLoadedStored }: { editor: SequenceEditor; onL
 }
 
 /** Remove, through the arrangement rule: refused in plain words beside the button while another track starts after this one. */
-function RemoveTrack({ track, editor, onRemoved }: { track: TrackDefinition; editor: SequenceEditor; onRemoved: () => void }) {
+function RemoveTrack({ track, editor, onRemoved }: { track: TrackDefinition; editor: SequenceEditor; onRemoved: (result: CampaignDefinition) => void }) {
   const [removal, setRemoval] = useState<string | null>(null);
   const removalId = useId();
   const name = trackName(editor.draft, track);
@@ -897,11 +914,13 @@ function RemoveTrack({ track, editor, onRemoved }: { track: TrackDefinition; edi
             setRemoval(out.reason);
             return;
           }
+          let result = out.definition;
           editor.update((d) => {
             const again = arrange(d, { kind: "remove", trackId: track.id });
+            if (again.ok) result = again.definition;
             return again.ok ? again.definition : d;
           });
-          onRemoved();
+          onRemoved(result);
         }}
       >
         Remove {name.replace(/^the /, "this ")}
@@ -921,7 +940,7 @@ function RemoveTrack({ track, editor, onRemoved }: { track: TrackDefinition; edi
  * skip limit, how it starts and its calling hours. Every control writes through the one editor state
  * and reads its `locked` value (ADR 0003 1.1.1). What later releases add says so in its place.
  */
-function PhoneInspector({ track, editor, onEditBranch, onLoadedStored, onClose, onRemoved }: { track: TrackDefinition; editor: SequenceEditor; onEditBranch: () => void; onLoadedStored: () => void; onClose: () => void; onRemoved: () => void }) {
+function PhoneInspector({ track, editor, onEditBranch, onLoadedStored, onClose, onRemoved }: { track: TrackDefinition; editor: SequenceEditor; onEditBranch: () => void; onLoadedStored: () => void; onClose: () => void; onRemoved: (result: CampaignDefinition) => void }) {
   const titleId = useId();
   const scriptHint = useId();
   const skipHint = useId();
