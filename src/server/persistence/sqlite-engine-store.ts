@@ -889,7 +889,11 @@ export class SqliteEngineStore implements EngineStore {
       const before = base.callTasks.find((b) => b.id === t.id);
       if (same(before, t)) continue;
       if (before && !before.open && t.open) throw new Error(`a closed call task never reopens (${t.id})`);
-      if (before && before.dueAt !== t.dueAt) throw new Error(`a call task keeps its original due time (${t.id})`);
+      // Fixed when the task is placed, and never updated below: a change is refused, not silently dropped (review bot on e489037).
+      if (before && (before.dueAt !== t.dueAt || before.dueWall !== t.dueWall || before.dueZone !== t.dueZone)) throw new Error(`a call task keeps its original due time (${t.id})`);
+      if (before && (before.placedWall !== t.placedWall || before.trackId !== t.trackId || before.stepId !== t.stepId || before.subjectId !== t.subjectId)) {
+        throw new Error(`a call task keeps its placement, track and step (${t.id})`);
+      }
       // The skip deadline changes only as the re-resolution of an edited limit from the task's own due time (ADR 0003
       // 3.5, 5.2): with the limit in force for its track and the user's zone now. Nothing else moves it.
       if (before && before.skipDeadline !== t.skipDeadline && t.skipDeadline !== skipDeadlineOf(t, skipLimitOf(next.campaign.definition, t.trackId), next.callDay.userZone)) {
@@ -900,7 +904,7 @@ export class SqliteEngineStore implements EngineStore {
       this.run(
         `INSERT INTO call_tasks (id, subject_id, track_id, step_id, due_at, due_wall, due_zone, skip_deadline, list_day, placed_wall, kind, callback_at, open, closed_wall, skipped_wall, reckoned_through)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET list_day = excluded.list_day, kind = excluded.kind, callback_at = excluded.callback_at,
+         ON CONFLICT(id) DO UPDATE SET skip_deadline = excluded.skip_deadline, list_day = excluded.list_day, kind = excluded.kind, callback_at = excluded.callback_at,
            open = excluded.open, closed_wall = excluded.closed_wall, skipped_wall = excluded.skipped_wall, reckoned_through = excluded.reckoned_through`,
         [t.id, id, t.trackId, t.stepId, t.dueAt, t.dueWall, t.dueZone, t.skipDeadline, t.listDay, t.placedWall, t.kind, t.callbackAt, t.open ? 1 : 0, t.closedWall, t.skippedWall, t.reckonedThrough],
       );

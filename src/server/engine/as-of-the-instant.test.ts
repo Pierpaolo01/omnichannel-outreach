@@ -1,7 +1,11 @@
-import { describe, expect, test } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, test } from "vitest";
 import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, csvOf, person } from "../../../test/support/export-builder.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
+import type { CallTask as SubjectStateTask } from "../../domain/sequence/state.ts";
 import type { CallsView, CallTaskView, EnrollmentProgress, LeadSearchResult, NeedsAttention, TodayView } from "../../shared/api.ts";
 
 /**
@@ -178,5 +182,55 @@ describe("an edited skip limit re-resolves an open call's deadline, and nothing 
     const reresolved = await h.store.engine.update(subjectId, h.clock, (s) => ({ ...s, callTasks: s.callTasks.map((t) => ({ ...t, skipDeadline: t.dueAt + deadlineAfter(4) })) }));
     expect(reresolved?.callTasks[0]?.skipDeadline).toBe(reresolved!.callTasks[0]!.dueAt + deadlineAfter(4));
     await expect(h.store.engine.update(subjectId, h.clock, (s) => ({ ...s, callTasks: s.callTasks.map((t) => ({ ...t, skipDeadline: t.skipDeadline + DAY })) }))).rejects.toThrow("keeps its skip deadline unless its limit is edited");
+  });
+});
+
+describe("what the store accepts of a call task is what it stores (review bot on e489037)", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  async function onFile() {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "call-task-columns-"));
+    dirs.push(dir);
+    const file = path.join(dir, "app.db");
+    const h = new EngineHarness({ start: MONDAY_9, databasePath: file, accounts: [] });
+    await h.tick();
+    expect((await h.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "Europe/London" })).status).toBe(200);
+    const { campaign } = await h.createCampaign("Columns", { businesses: [HARBOUR], people: [pat()] });
+    await h.defineSequence(campaign.id, definition([phone("p1")]));
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    const taskId = (await h.request<CallsView>("GET", "/api/calls")).body.focusTaskId ?? "";
+    const subjectId = (await h.store.engine.callTaskSubject(taskId)) ?? "";
+    return { h, file, campaign, subjectId };
+  }
+
+  test("a re-resolved skip deadline, written, the store closed and reopened, is the deadline read back", async () => {
+    const { h, file, campaign, subjectId } = await onFile();
+    const db = (h.store.engine as unknown as { db: { prepare(sql: string): { get(...a: unknown[]): Record<string, unknown> | undefined; run(...a: unknown[]): unknown } } }).db;
+    const row = db.prepare("SELECT definition FROM campaigns WHERE id = ?").get(campaign.id);
+    db.prepare("UPDATE campaigns SET definition = ?, version = version + 1, definition_version = definition_version + 1 WHERE id = ?").run(JSON.stringify({ ...JSON.parse(String(row?.["definition"])), callSkipLimitDays: 4 }), campaign.id);
+    const reresolved = Date.parse("2026-11-06T00:00:00Z") - MONDAY_9;
+    await h.store.engine.update(subjectId, h.clock, (s) => ({ ...s, callTasks: s.callTasks.map((t) => ({ ...t, skipDeadline: t.dueAt + reresolved })) }));
+    await h.store.close();
+    const reopened = new EngineHarness({ start: h.clock, databasePath: file, accounts: [] });
+    const task = (await reopened.store.engine.subject(subjectId, reopened.clock))?.callTasks[0];
+    expect(task?.skipDeadline).toBe((task?.dueAt ?? 0) + reresolved);
+    await reopened.store.close();
+  });
+
+  test("a change to a column the store never updates (its due wall time and zone, placement, track or step) is refused, not silently dropped", async () => {
+    const { h, subjectId } = await onFile();
+    const changes: Record<string, (t: SubjectStateTask) => SubjectStateTask> = {
+      dueWall: (t) => ({ ...t, dueWall: t.dueWall + H }),
+      dueZone: (t) => ({ ...t, dueZone: "America/New_York" }),
+      placedWall: (t) => ({ ...t, placedWall: t.placedWall + H }),
+      trackId: (t) => ({ ...t, trackId: "p2" }),
+      stepId: (t) => ({ ...t, stepId: "p2c" }),
+    };
+    for (const [field, change] of Object.entries(changes)) {
+      await expect(h.store.engine.update(subjectId, h.clock, (s) => ({ ...s, callTasks: s.callTasks.map(change) })), field).rejects.toThrow("a call task keeps");
+    }
+    await h.store.close();
   });
 });
