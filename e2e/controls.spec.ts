@@ -192,6 +192,14 @@ test("a confirmation the read no longer allows closes, and the control the read 
   await expect(page.getByRole("heading", { name: /^Paused since/ })).toBeVisible();
   await expect(page.getByRole("group")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Resume campaign: Clinics, London" })).toBeEnabled();
+  // The reverse: Resume's confirmation open while another client resumes it.
+  await page.getByRole("button", { name: "Resume campaign: Clinics, London" }).click();
+  await expect(page.getByRole("group")).toContainText("Each lead continues where it was");
+  expect((await f.harness.request("POST", `/api/campaigns/${f.campaign}/resume`, { requestId: "elsewhere-resume" })).status).toBe(200);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(page.getByRole("heading", { name: /^Paused since/ })).toHaveCount(0);
+  await expect(page.getByRole("group")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Pause campaign: Clinics, London" })).toBeEnabled();
 
   await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
   await press(page, "Pause").click();

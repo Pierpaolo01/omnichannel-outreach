@@ -121,7 +121,9 @@ const flush = async () => {
 /** A fake server: answers from a queue per call, records every request id and body it was sent. */
 function server() {
   const sent: PressEntry[] = [];
-  const answers: (SendAnswer | "none")[] = [];
+  const answers: (SendAnswer | "none" | "hang")[] = [];
+  /** Settles every send that was left hanging, with this answer. */
+  let settleHung: (answer: SendAnswer) => void = () => undefined;
   return {
     sent,
     answers,
@@ -129,8 +131,10 @@ function server() {
       sent.push(entry);
       const next = answers.shift() ?? "none";
       if (next === "none") throw new NoControlAnswer();
+      if (next === "hang") return new Promise<SendAnswer>((resolve) => (settleHung = resolve));
       return next;
     },
+    settle: (answer: SendAnswer) => settleHung(answer),
   };
 }
 
@@ -339,6 +343,33 @@ describe("one press per lead or campaign at a time, across tabs and reloads", ()
     expect(srv.sent.map((e) => e.requestId)).toEqual(["id-a", "id-a"]);
     expect(b.requests.pendingFor(CLINICS)).toBeNull();
     expect(b.results.map((r) => r.kind)).toEqual(["accepted"]);
+  });
+
+  test("a page that stops while its send is still in flight lets go of the lock: the next page sends the press with its id before the old send settles, and the old answer publishes nothing (review bot on e5330c2)", async () => {
+    const storage = sharedStorage();
+    const srv = server();
+    const time = clock();
+    const before = tab(storage, srv, time, ["id-1"]);
+    srv.answers.push("hang");
+    void before.requests.press(PAT, "pause");
+    await flush();
+    // An in-app navigation: the component unmounts, the document stays, so only stop() can release the lock.
+    before.requests.stop();
+    await flush();
+    const after = tab(storage, srv, time, ["id-2"]);
+    srv.answers.push({ kind: "accepted", body: { replayed: true } });
+    after.requests.watch([PAT]);
+    await flush();
+    expect(srv.sent.map((e) => e.requestId)).toEqual(["id-1", "id-1"]);
+    expect(after.results.map((r) => r.kind)).toEqual(["accepted"]);
+    expect(after.requests.pendingFor(PAT)).toBeNull();
+    // A newer press, then the stopped page's old send settles: nothing is removed or said.
+    void after.requests.press(PAT, "resume");
+    await flush();
+    srv.settle({ kind: "accepted", body: null });
+    await flush();
+    expect(before.results).toEqual([]);
+    expect(after.requests.pendingFor(PAT)?.requestId).toBe("id-2");
   });
 
   test("a newer press on the target, after the first was answered, is not removed by a late answer to the first", async () => {

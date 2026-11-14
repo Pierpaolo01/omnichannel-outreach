@@ -93,9 +93,17 @@ export class ControlRequests {
   /** Request ids whose last send here had no answer. */
   private readonly unanswered = new Set<string>();
   private stopped = false;
+  /** Settles when the page stops: a send still in flight is let go then, so the lock goes with it (review bot on e5330c2). */
+  private stopping: Promise<"stopped">;
+  private signalStop: () => void = () => undefined;
 
   constructor(ports: ControlRequestPorts) {
     this.ports = ports;
+    this.stopping = this.stopSignal();
+  }
+
+  private stopSignal(): Promise<"stopped"> {
+    return new Promise<"stopped">((resolve) => (this.signalStop = () => resolve("stopped")));
   }
 
   /** The press stored for a target, whichever tab made it. */
@@ -165,12 +173,15 @@ export class ControlRequests {
 
   /** The page shows these controls again (React sets an effect up again after its cleanup in development; review bot on 07fab27, P2). */
   start(): void {
+    if (!this.stopped) return;
     this.stopped = false;
+    this.stopping = this.stopSignal();
   }
 
   /** The page stops: every press it holds is let go with its lock, still stored, for the next page to send. */
   stop(): void {
     this.stopped = true;
+    this.signalStop();
     for (const wake of [...this.wakers.values()]) wake();
   }
 
@@ -186,13 +197,15 @@ export class ControlRequests {
       if (this.halted()) return;
       const entry = this.pendingFor(target);
       if (!entry) return;
-      let answer: SendAnswer | null = null;
+      let answer: SendAnswer | "stopped" | null = null;
       try {
-        answer = await this.ports.send(entry);
+        // The page stopping ends the wait, not the request: its answer, if it comes, is dropped, and the press stays
+        // stored for the next page or tab to send with its id.
+        answer = await Promise.race([this.ports.send(entry), this.stopping]);
       } catch {
         answer = null;
       }
-      if (this.halted()) return;
+      if (answer === "stopped" || this.halted()) return;
       if (answer === null) {
         this.unanswered.add(entry.requestId);
         const n = this.attempts.get(entry.requestId) ?? 0;
