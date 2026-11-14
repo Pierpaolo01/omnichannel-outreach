@@ -74,8 +74,8 @@ describe("migration 13 on a database written before it (council on aebeb80, item
   });
 });
 
-describe("the sessions' saves are kept only while the campaign can be edited (council on aebeb80, item 7)", () => {
-  test("launch deletes the campaign's rows in its own transaction; another campaign's stay", async () => {
+describe("the sessions' saves are kept while the campaign can be edited (council on aebeb80, item 7; ticket 19)", () => {
+  test("a running campaign takes saves, so launch keeps its sessions' rows", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "outreach-migration-"));
     dirs.push(dir);
     const file = path.join(dir, "outreach.sqlite");
@@ -89,7 +89,7 @@ describe("the sessions' saves are kept only while the campaign can be edited (co
     const rows = () => new DatabaseSync(file).prepare("SELECT campaign_id FROM definition_saves ORDER BY campaign_id").all().map((r) => String(r["campaign_id"]));
     expect(rows()).toEqual([one.id, two.id].sort());
     expect((await h.launch(one.id)).status).toBe(200);
-    expect(rows()).toEqual([two.id]);
+    expect(rows()).toEqual([one.id, two.id].sort());
     await h.store.close();
   });
 });

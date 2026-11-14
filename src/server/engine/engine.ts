@@ -9,12 +9,13 @@ import { launchCheck, type LaunchCheck } from "../../domain/sequence/blockers.ts
 import { REQUEST_ID_DIFFERENT, REQUEST_ID_REUSED, type OutcomeInput } from "../../domain/sequence/calls.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
-import { runs } from "../../domain/sequence/progress.ts";
+import { runs, sealReckoning } from "../../domain/sequence/progress.ts";
+import { definitionProblems, type CampaignDefinition } from "../../domain/sequence/definition.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
 import { judgeCampaignControl, type LeadControl, type LeadExpectation } from "../../domain/sequence/controls.ts";
 import type { ControlView } from "../../shared/api.ts";
 import { effectOf } from "./controls-view.ts";
-import type { ControlRecord, EngineStore, ReplyEvent, StoredDefinition } from "./engine-store.ts";
+import type { ControlRecord, DefinitionSave, EngineStore, ReplyEvent, SaveResult, StoredDefinition } from "./engine-store.ts";
 
 /** A control's answer. `effect`: the control's own effect, which the read previewed at that instant; null for a campaign's. */
 export type ControlAnswer = { readonly ok: true; readonly replayed: boolean; readonly effect: ControlView | null } | { readonly ok: false; readonly reason: string };
@@ -188,6 +189,28 @@ export class Engine {
       if (!outcome.ok) return outcome;
       await this.runTick();
       return { ok: true as const, stored: outcome.stored };
+    });
+  }
+
+  /**
+   * Saves a campaign's definition by the save rule (ADR 0003 1.1.1). On a launched campaign (ticket 19) the save is
+   * applied in its transaction: the boundary and the three launch blockers, then each lead caught up under the old
+   * definition and reconciled under the new one (ADR 0003 "Ticket 19"); it queues behind the running tick as a launch
+   * does, and a tick follows an accepted one.
+   */
+  saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save: DefinitionSave | null): Promise<SaveResult> {
+    return this.ticks.run(async () => {
+      await this.syncAccounts();
+      const now = this.now();
+      const result = await this.store.saveDefinition(campaignId, definition, editedAt, save, {
+        now,
+        problems: (next, previous) => definitionProblems(next, previous, { launched: true }),
+        check: launchCheck,
+        catchUp: (s) => sealReckoning(this.rules.asOfAction(s, now), now),
+        reconcile: (s, previous, previousZone) => this.rules.reconcileEdit(s, previous, previousZone, now),
+      });
+      if (result.outcome === "saved" && result.stored.launchedAt !== null) await this.runTick();
+      return result;
     });
   }
 

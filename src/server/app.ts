@@ -33,7 +33,7 @@ export interface AppDependencies {
   readonly now: () => string;
   readonly newId: () => string;
   /** The sequence engine. Without one, the app runs an engine with no connected email provider. */
-  readonly engine?: Pick<Engine, "launch" | "logCallOutcome" | "controlLead" | "setCampaignPause">;
+  readonly engine?: Pick<Engine, "launch" | "logCallOutcome" | "controlLead" | "setCampaignPause" | "saveDefinition">;
   /** The email provider's own description, for GET /api/email-provider; absent when none is connected. */
   readonly emailProvider?: EmailProviderSource | null;
   /**
@@ -400,12 +400,17 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     const { save, ...fields } = body.data;
     // A declined path is stored only when the canvas set one; the phone track's fields travel in the same save (ADR 0003 1.1.1).
     const definition: CampaignDefinition = { ...fields, tracks: fields.tracks.map(({ declinedPath, callSkipLimitDays, ...t }) => ({ ...t, ...(declinedPath ? { declinedPath } : {}), ...(callSkipLimitDays !== undefined ? { callSkipLimitDays } : {}) })) };
-    const previous = (await store.engine.campaign(campaign.id))?.definition ?? null;
-    const problems = definitionProblems(definition, previous);
+    const row = await store.engine.campaign(campaign.id);
+    const problems = definitionProblems(definition, row?.definition ?? null, { launched: row?.launchedAt != null });
     if (problems.length > 0) return c.json<ApiError>({ error: { code: "invalid_sequence", message: problems.join(" ") } }, 400);
-    const result = await store.engine.saveDefinition(campaign.id, definition, now(), save ?? null);
+    // Through the engine (ticket 19): a launched campaign's save reconciles its leads in the save's transaction.
+    const result = await engine.saveDefinition(campaign.id, definition, now(), save ?? null);
     const saved = result.outcome;
     if (saved === "missing") return notFound(c, "campaign");
+    if (saved === "invalid") return c.json<ApiError>({ error: { code: "invalid_sequence", message: result.problems.join(" ") } }, 400);
+    if (saved === "blocked") {
+      return c.json<ApiError>({ error: { code: "blocked", message: `This change was not applied: ${result.check.blockers.map((b) => b.message).join(" ")}` } }, 409);
+    }
     if (saved === "superseded") {
       return c.json<ApiError>({ error: { code: "superseded", message: "A later change from this page was already saved." } }, 409);
     }

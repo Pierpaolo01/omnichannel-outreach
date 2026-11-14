@@ -103,7 +103,7 @@ export class EngineHarness {
       store: this.store,
       now: () => new Date(this.clock).toISOString(),
       newId: sequentialIds(),
-      engine: { launch: (id, expected) => this.engine.launch(id, expected), logCallOutcome: (id, input) => this.engine.logCallOutcome(id, input), controlLead: (id, action, requestId, expected) => this.engine.controlLead(id, action, requestId, expected), setCampaignPause: (id, pause, requestId, expected) => this.engine.setCampaignPause(id, pause, requestId, expected) },
+      engine: { launch: (id, expected) => this.engine.launch(id, expected), logCallOutcome: (id, input) => this.engine.logCallOutcome(id, input), controlLead: (id, action, requestId, expected) => this.engine.controlLead(id, action, requestId, expected), setCampaignPause: (id, pause, requestId, expected) => this.engine.setCampaignPause(id, pause, requestId, expected), saveDefinition: (id, definition, editedAt, save) => this.engine.saveDefinition(id, definition, editedAt, save) },
       emailProvider: "status" in this.provider ? (this.provider as Provider & EmailProviderSource) : null,
       smsProvider: this.smsProvider ? "test-simulator" : "none",
       ...(options.rules ? { rules: options.rules } : {}),

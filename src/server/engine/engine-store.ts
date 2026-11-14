@@ -143,7 +143,25 @@ export interface StoredDefinition {
  * `replaced`: this session's save was accepted before, then another page that had seen it saved over
  * it (ADR 0003 1.1.1): its retry is not a conflict of its own, and its page's change was saved.
  */
-export type SaveResult = { readonly outcome: "saved" | "unchanged" | "launched" | "superseded" | "replaced" | "conflict"; readonly stored: StoredDefinition } | { readonly outcome: "missing" };
+export type SaveResult =
+  | { readonly outcome: "saved" | "unchanged" | "launched" | "superseded" | "replaced" | "conflict"; readonly stored: StoredDefinition }
+  /** A running campaign's save refused by its boundary (ADR 0003 "Ticket 19"): nothing stored. */
+  | { readonly outcome: "invalid"; readonly problems: readonly string[]; readonly stored: StoredDefinition }
+  /** A running campaign's save refused by one of the three launch blockers (7.2): nothing stored. */
+  | { readonly outcome: "blocked"; readonly check: LaunchCheck; readonly stored: StoredDefinition }
+  | { readonly outcome: "missing" };
+
+/**
+ * How the store applies a save to a launched campaign (ADR 0003 "Ticket 19"), every step inside the save's transaction:
+ * the boundary and the three blockers, each lead caught up under the old definition, then reconciled under the new one.
+ */
+export interface RunningSave {
+  readonly problems: (definition: CampaignDefinition, previous: CampaignDefinition) => readonly string[];
+  readonly check: (definition: CampaignDefinition, leads: readonly MergeData[], accounts: readonly SenderAccountView[]) => LaunchCheck;
+  readonly catchUp: (state: SubjectState) => SubjectState;
+  readonly reconcile: (state: SubjectState, previous: CampaignDefinition, previousZone: string) => SubjectState;
+  readonly now: number;
+}
 
 /** Who wrote a save (ADR 0003 1.1.1): the editing session, its number in it, and the revision it last saw. */
 export interface DefinitionSave {
@@ -162,10 +180,10 @@ export interface EngineStore {
   campaign(campaignId: string): Promise<CampaignEngineRow | null>;
   /**
    * Saves a definition before launch, by the rule of ADR 0003 1.1.1: decided and stored in one
-   * transaction. Without `save` (API clients, tests) it is stored as before. Editing a launched
-   * campaign arrives with ticket 19.
+   * transaction. Without `save` (API clients, tests) it is stored as before. A launched campaign's
+   * save is applied by `running` (ticket 19); without it, a launched campaign's save is refused as `launched`.
    */
-  saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save?: DefinitionSave | null): Promise<SaveResult>;
+  saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save?: DefinitionSave | null, running?: RunningSave): Promise<SaveResult>;
   /** The merge data of every enrollment of the campaign that has not ended, and the sender accounts. */
   launchInputs(campaignId: string): Promise<{ leads: MergeData[]; accounts: SenderAccountView[] }>;
   /**

@@ -33,7 +33,7 @@ import type {
   WorkSettlement,
 } from "../../domain/sequence/state.ts";
 import { isOutreachStatus } from "../../domain/outreach-status.ts";
-import type { BounceEvent, CallNoteRecord, CallSettings, CampaignEngineRow, DefinitionSave, EngineStore, LaunchOutcome, ReplyEvent, SaveResult, SenderAccountConfig, StoredDefinition, StoredNote } from "../engine/engine-store.ts";
+import type { BounceEvent, CallNoteRecord, CallSettings, CampaignEngineRow, DefinitionSave, EngineStore, LaunchOutcome, RunningSave, ReplyEvent, SaveResult, SenderAccountConfig, StoredDefinition, StoredNote } from "../engine/engine-store.ts";
 import { liveDetailRowOf } from "./sqlite-store.ts";
 
 type Row = Record<string, SQLOutputValue>;
@@ -182,9 +182,14 @@ export class SqliteEngineStore implements EngineStore {
     return Object.fromEntries(this.sql("SELECT status, COUNT(*) AS n FROM enrollments WHERE campaign_id = ? GROUP BY status").all(campaignId).map((r) => [str(r, "status"), num(r, "n")]));
   }
 
-  async saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save: DefinitionSave | null = null): Promise<SaveResult> {
+  async saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save: DefinitionSave | null = null, running?: RunningSave): Promise<SaveResult> {
     return this.transaction((): SaveResult => {
       const text = JSON.stringify(definition);
+      const current = this.sql("SELECT * FROM campaigns WHERE id = ?").get(campaignId);
+      if (current && current["launched_at"] != null && running) {
+        const accepted = this.runningSave(campaignId, current, definition, text, editedAt, save, running);
+        if (accepted) return accepted;
+      }
       // ADR 0003 1.1.1, in the statement that stores: accepted if it continues the stored session
       // with a higher number, or starts from the stored revision. A save with no session is stored.
       const changed = this.sql(
@@ -209,7 +214,7 @@ export class SqliteEngineStore implements EngineStore {
         }
         return { outcome: "saved", stored };
       }
-      if (row["launched_at"] != null) return { outcome: "launched", stored };
+      if (row["launched_at"] != null && !running) return { outcome: "launched", stored };
       if (save && strOrNull(row, "definition_session") === save.session) {
         const seq = numOrNull(row, "definition_seq") ?? 0;
         if (seq > save.seq) return { outcome: "superseded", stored };
@@ -228,6 +233,55 @@ export class SqliteEngineStore implements EngineStore {
       }
       return { outcome: "conflict", stored };
     });
+  }
+
+  /**
+   * A launched campaign's save (ADR 0003 "Ticket 19"), inside the save's transaction: if the save rule (1.1.1) would
+   * accept it, the boundary and the three launch blockers are checked; then every enrollment is caught up under the old
+   * definition, the definition is stored, and every enrollment is reconciled under the new one. Returns null when the
+   * save rule refuses it, so the caller answers as before.
+   */
+  private runningSave(campaignId: string, row: Record<string, SQLOutputValue>, definition: CampaignDefinition, text: string, editedAt: string, save: DefinitionSave | null, running: RunningSave): SaveResult | null {
+    const accepts =
+      save === null ||
+      (strOrNull(row, "definition_session") === save.session && (numOrNull(row, "definition_seq") ?? 0) < save.seq) ||
+      num(row, "definition_version") === save.base;
+    if (!accepts) return null;
+    const previous = this.definitionOf(row);
+    const stored = storedDefinitionOf(row);
+    const problems = running.problems(definition, previous);
+    if (problems.length > 0) return { outcome: "invalid", problems, stored };
+    const { leads, accounts } = this.launchInputsNow(campaignId);
+    const check = running.check(definition, leads, accounts);
+    if (check.blockers.length > 0) return { outcome: "blocked", check, stored };
+    const now = running.now;
+    const ids = this.sql("SELECT id FROM enrollments WHERE campaign_id = ? ORDER BY enrolled_at, id").all(campaignId).map((e) => str(e, "id"));
+    const zones = new Map<string, string>();
+    for (const id of ids) {
+      const base = this.load(id, now);
+      if (!base) continue;
+      zones.set(id, base.lead.zone);
+      this.write(base, running.catchUp(base), now);
+    }
+    this.run(
+      `UPDATE campaigns SET definition = ?, definition_version = definition_version + 1, definition_edited_at = ?, version = version + 1,
+         definition_session = ?, definition_seq = ? WHERE id = ?`,
+      [text, editedAt, save?.session ?? null, save?.seq ?? null, campaignId],
+    );
+    if (save) {
+      this.run(
+        `INSERT INTO definition_saves (campaign_id, session, seq, content_sha256) VALUES (?, ?, ?, ?)
+         ON CONFLICT(campaign_id, session) DO UPDATE SET seq = excluded.seq, content_sha256 = excluded.content_sha256 WHERE excluded.seq >= definition_saves.seq`,
+        [campaignId, save.session, save.seq, createHash("sha256").update(text).digest("hex")],
+      );
+    }
+    for (const id of ids) {
+      const base = this.load(id, now);
+      if (!base) continue;
+      this.write(base, running.reconcile(base, previous, zones.get(id) ?? base.lead.zone), now);
+    }
+    const after = this.sql("SELECT * FROM campaigns WHERE id = ?").get(campaignId);
+    return { outcome: "saved", stored: storedDefinitionOf(after ?? row) };
   }
 
   async launchInputs(campaignId: string): Promise<{ leads: MergeData[]; accounts: SenderAccountView[] }> {
@@ -260,9 +314,7 @@ export class SqliteEngineStore implements EngineStore {
       const check = decide(parseDefinition(row), leads, accounts);
       if (!check.canLaunch) return { ok: false, check, reason: "blocked" };
       this.run("UPDATE campaigns SET launched_at = ?, version = version + 1 WHERE id = ?", [now, campaignId]);
-      // A launched campaign's definition takes no more saves (until ticket 19), so its sessions' saves
-      // answer nothing any more: they go with the launch (ADR 0003 1.1.1, council on aebeb80, item 7).
-      this.run("DELETE FROM definition_saves WHERE campaign_id = ?", [campaignId]);
+      // A launched campaign takes saves too (ticket 19), so its sessions' newest accepted saves are kept (ADR 0003 1.1.1).
       const launchedRow = this.sql("SELECT * FROM campaigns WHERE id = ?").get(campaignId);
       for (const e of this.sql("SELECT id FROM enrollments WHERE campaign_id = ? ORDER BY enrolled_at, id").all(campaignId)) {
         const base = this.load(str(e, "id"), now);

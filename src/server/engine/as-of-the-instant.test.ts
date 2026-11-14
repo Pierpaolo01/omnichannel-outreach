@@ -95,11 +95,15 @@ describe("a route that changes an input the engine's timing reads first applies 
       "POST /api/campaigns": async (h) => (await h.request("POST", "/api/campaigns", { name: "Another", defaultTimezone: "Europe/London", ...csvOf({ businesses: [HARBOUR], people: [pat("America/New_York")] }) })).status,
       "POST /api/campaigns/:id/imports": async (h, campaignId) => (await h.request("POST", `/api/campaigns/${campaignId}/imports`, csvOf({ businesses: [HARBOUR], people: [pat("America/New_York")] }))).status,
       "PUT /api/call-settings": async (h) => (await h.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "America/New_York" })).status,
+      // Ticket 19: a running edit (here a longer skip limit) catches every lead up under the old definition first.
+      "PUT /api/campaigns/:id/sequence": async (h, campaignId) => {
+        const stored = (await h.request<{ definition: CampaignDefinition }>("GET", `/api/campaigns/${campaignId}/sequence`)).body.definition;
+        return (await h.request("PUT", `/api/campaigns/${campaignId}/sequence`, { ...stored, tracks: stored.tracks.map((t) => (t.channel === "call" ? { ...t, callSkipLimitDays: 9 } : t)) })).status;
+      },
     };
     // Every other route that writes, and why it changes no timing input of a running lead.
     const none: Record<string, string> = {
       "POST /api/scraper-files/check": "checks files; writes nothing",
-      "PUT /api/campaigns/:id/sequence": "refused once the campaign has launched (ticket 19); before launch no lead of it runs",
       "POST /api/campaigns/:id/launch": "enters and evaluates each lead at its own instant",
       "POST /api/call-tasks/:id/outcome": "judged as of its own instant (asOfAction)",
       "POST /api/enrollments/:id/controls": "judged as of its own instant (asOfAction, ticket 17a); a pause holds the clock, which every stored deadline reads",

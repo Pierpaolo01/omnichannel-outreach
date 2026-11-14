@@ -18,6 +18,7 @@ import {
 import { compareReadyNow, focusOf, isListed, logCallOutcome, placeCall, readyCalls, reasonOf } from "../../domain/sequence/calls.ts";
 import { applyBadDestination, applyReply, applyToAttempt, applyToWork, asOfAction, enterMain, evaluate, replyMatches, smsReplyOwner, withdrawalDue } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
+import { reconcileEdit } from "../../domain/sequence/reconcile.ts";
 import { applyControl, campaignPaused, campaignPrecondition, campaignResumed, controlPrecondition, judgeControl } from "../../domain/sequence/controls.ts";
 import type { RequestStanding, StoredRequest } from "./engine-store.ts";
 
@@ -80,6 +81,8 @@ export interface Rules {
   readonly presendAnswer: <T extends { readonly kind: string }>(answer: T, knownReplies: readonly string[]) => T | { readonly kind: "clear" };
   /** What the reads apply first when they preview a control: what fell due by the read's instant, as the action does. */
   readonly previewAsOf: typeof asOfAction;
+  /** Brings one lead's progress in line with an edit of a running campaign (ticket 19, ADR 0003 "Ticket 19"). */
+  readonly reconcileEdit: typeof reconcileEdit;
   /** The version guard (2.5): a change computed from `computedFrom` applies only if nothing it read has changed. */
   readonly versionsMatch: (computedFrom: SubjectState, current: SubjectState) => boolean;
 }
@@ -122,6 +125,7 @@ export const DEFAULT_RULES: Rules = {
   withdrawalDue,
   requestStanding: (stored, request) => (stored === null ? "new" : stored.target !== request.target || stored.action !== request.action ? "reused" : stored.body !== request.body ? "different" : "replay"),
   previewAsOf: asOfAction,
+  reconcileEdit,
   presendAnswer: (answer) => answer,
   // Everything an evaluation reads: the subject's and campaign's versions cover its progress and the
   // definition; the lead's facts (contact details and their marks, zone, merge data) change without
