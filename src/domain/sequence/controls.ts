@@ -7,7 +7,7 @@
  */
 import { leadNow, wallOfLead } from "./clock.ts";
 import type { TrackDefinition } from "./definition.ts";
-import { advanceTrack, end, enterMain, enterWinBack, evaluate, finishTrack, hasWorkLeft, liveTracksFor, progressOf, quiesce, reachable, runs, synced } from "./progress.ts";
+import { advanceTrack, channelReaches, end, enterMain, enterWinBack, evaluate, finishTrack, hasWorkLeft, liveTracksFor, progressOf, quiesce, runs, synced } from "./progress.ts";
 import { isUncertain } from "./attempt.ts";
 import type { SubjectState } from "./state.ts";
 
@@ -52,13 +52,26 @@ export function campaignResumed(state: SubjectState, now: number): SubjectState 
  * not started, or finished.
  */
 export function currentStep(state: SubjectState): { readonly track: TrackDefinition; readonly stepId: string; readonly dueAt: number | null } | null {
+  return pendingSteps(state)[0] ?? null;
+}
+
+/**
+ * The step a skip skips (council D2 on 56d599c, as 2.4's interim says): the lead's pending steps in order (`currentStep`),
+ * the first whose provider work may not still be sent. Null when there is none, with every pending step with a provider.
+ */
+export function skipTarget(state: SubjectState): { readonly track: TrackDefinition; readonly stepId: string; readonly dueAt: number | null } | null {
+  return pendingSteps(state).find((p) => !withProvider(state, p.stepId)) ?? null;
+}
+
+/** Every pending step of the lead's started, unfinished tracks, due first in lead time, ties by track id. */
+function pendingSteps(state: SubjectState): { readonly track: TrackDefinition; readonly stepId: string; readonly dueAt: number | null }[] {
   const candidates = liveTracksFor(state).flatMap((track) => {
     const p = progressOf(state, track.id);
     if (!p || p.startedAt === null || p.finishedAt !== null || p.nextStepId === null) return [];
     return [{ track, stepId: p.nextStepId, dueAt: p.dueAt }];
   });
   candidates.sort((a, b) => (a.dueAt ?? Infinity) - (b.dueAt ?? Infinity) || (a.track.id < b.track.id ? -1 : a.track.id > b.track.id ? 1 : 0));
-  return candidates[0] ?? null;
+  return candidates;
 }
 
 /** Why a lead has no step to skip: what it is waiting for. */
@@ -81,8 +94,9 @@ const PROVIDER_NAME = { email: "email provider", sms: "SMS provider", call: "cal
 
 /** Skip the current step (ADR 0003 "Ticket 17a", "Skip step"): exactly one step, never sent. */
 function skip(state: SubjectState, now: number): ControlResult {
-  const current = currentStep(state);
-  if (!current) return refuse(noStepReason(state));
+  const first = currentStep(state);
+  if (!first) return refuse(noStepReason(state));
+  const current = skipTarget(state) ?? first;
   const { track, stepId } = current;
   // Refused while the provider may still send it: an attempt past its claim, or provider work that was called and
   // has not settled, whether or not a live attempt carries it (a non-final "not sent" withdraws the attempt and keeps
@@ -107,9 +121,21 @@ function skip(state: SubjectState, now: number): ControlResult {
 }
 
 /** Why nothing would run after a restart: the reason the engine would end the lead with at once. */
-function nothingLeft(state: SubjectState): string | null {
+/**
+ * Why nothing would run after a restart (question Q16; council D1 on 56d599c): no track is left, or none of the tracks left
+ * can reach the lead (a finished track's channel does not count), or the engine's own transition, applied to a copy as if
+ * no hold remained, ends the lead at once. Null when the lead would run.
+ */
+function nothingLeft(state: SubjectState, now: number): string | null {
   if (!hasWorkLeft(state)) return "every track has finished";
-  if (reachable(state).size === 0) return "no channel left in it can reach them";
+  const runnable = liveTracksFor(state).some((t) => {
+    const p = progressOf(state, t.id);
+    return (!p || p.finishedAt === null) && channelReaches(state, t.channel);
+  });
+  if (!runnable) return "no track left in it can reach them";
+  const copy = released({ ...state, campaign: { ...state.campaign, pausedSince: null }, subject: { ...state.subject, leadPaused: false } }, now);
+  if (copy.subject.ended === "sequence_finished_no_response") return "every track left would finish at once";
+  if (copy.subject.ended === "finished_no_usable_channel") return "no track left in it can reach them";
   return null;
 }
 
@@ -147,7 +173,7 @@ export function applyControl(state: SubjectState, action: LeadControl, now: numb
     case "resume_from_next_step": {
       if (!restartable(state)) return refuse(NOT_RESTARTABLE);
       const s = unended(state);
-      const why = nothingLeft(s);
+      const why = nothingLeft(s, now);
       if (why !== null) return refuse(`Nothing is left to send them in this campaign: ${why}.`);
       return accept(released(s, now));
     }
@@ -156,7 +182,8 @@ export function applyControl(state: SubjectState, action: LeadControl, now: numb
       if (subject.branch === "win_back") return refuse("They are already in the win-back branch.");
       if (!campaign.definition.tracks.some((t) => t.branch === "win_back" && !t.removed)) return refuse("This campaign has no win-back branch.");
       const s = enterWinBack(unended(state), now);
-      if (reachable(s).size === 0) return refuse("The win-back branch cannot reach them: none of its channels has a usable address or number for them.");
+      // The branch's tracks, judged as a restart's are (council D1): refused when none of them can run.
+      if (nothingLeft(s, now) !== null) return refuse("The win-back branch cannot reach them: none of its channels has a usable address or number for them.");
       return accept(released(s, now));
     }
     default: {

@@ -446,5 +446,36 @@ describe("one lead's controls", () => {
     expect(most).toBe(1);
   });
 
+
+  // Council on 56d599c, item J: mayStillSend counts only work with no final answer; every final answer settles it.
+  const finalAnswers = [
+    { channel: "email", answer: "withdrawn", pauseAt: MIN, check: 2 * MIN },
+    { channel: "email", answer: "too-late", pauseAt: 31 * MIN, check: 32 * MIN },
+    { channel: "email", answer: "sent, observed later", pauseAt: MIN, check: 50 * MIN },
+    { channel: "sms", answer: "withdrawn", pauseAt: MIN, check: 2 * MIN },
+    { channel: "sms", answer: "too-late", pauseAt: 31 * MIN, check: 32 * MIN },
+  ] as const;
+  for (const c of finalAnswers) {
+    test(`mayStillSend falls to 0 on a final answer: ${c.channel}, ${c.answer} (council J)`, async () => {
+      // Sent at 09:30:30, observed at 09:45:30 (random 0.5); unknown-sends keeps what an "unknown" withdrawal asks for.
+      const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }], modes: ["late-send"], random: () => 0.5, sms: { numbers: [{ id: "+447700900010", capacity: 50, gapMs: MIN, k: 1, healthy: true, resetZone: "Europe/London" }], modes: ["late-send"] } });
+      if (c.answer === "sent, observed later") h.fake.withdrawAnswers = "unknown-sends";
+      await h.tick();
+      const withMobile = person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example", dial_phone: "+447700900101", dial_phone_type: "mobile" });
+      const { campaign } = await h.createCampaign("Clinics", { businesses: [HARBOUR], people: [withMobile] });
+      const track = c.channel === "email" ? { ...DEFINITION.tracks[0]!, steps: [email("s1")] } : { id: "x1", channel: "sms" as const, branch: "main" as const, window: ALWAYS, steps: [{ ...email("x1s1"), subject: "" }], start: { kind: "entry" as const }, removed: false };
+      await h.defineSequence(campaign.id, { ...DEFINITION, smsPool: ["+447700900010"], tracks: [track] });
+      expect((await h.launch(campaign.id)).status).toBe(200);
+      const pat = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows[0]!.enrollments[0]!.id;
+      await h.advanceTo(MONDAY_9 + c.pauseAt);
+      const paused = await h.request<{ enrollment: EnrollmentRead }>("POST", `/api/enrollments/${pat}/controls`, { requestId: "p", action: "pause" });
+      expect(paused.status).toBe(200);
+      await h.advanceTo(MONDAY_9 + c.check);
+      expect((await h.request<EnrollmentRead>("GET", `/api/enrollments/${pat}`)).body.mayStillSend).toBe(0);
+      expect((await h.request<CampaignDetail>("GET", `/api/campaigns/${campaign.id}`)).body.mayStillSend).toBe(0);
+      const log = c.channel === "email" ? h.fake.withdrawLog.map((w) => w.answer) : null;
+      if (log) expect(log[0]).toBe(c.answer === "sent, observed later" ? "unknown" : c.answer);
+    });
+  }
 });
 

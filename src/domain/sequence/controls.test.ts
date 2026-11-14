@@ -1,9 +1,10 @@
 import { describe, expect, test } from "vitest";
-import { attempt, DAY, H, handed, MONDAY_9, subjectState, withAttempts, work } from "../../../test/support/sequence-state.ts";
+import { attempt, DAY, H, handed, MONDAY_9, step, subjectState, withAttempts, work } from "../../../test/support/sequence-state.ts";
 import { leadNow } from "./clock.ts";
 import { applyControl, campaignPaused, campaignResumed } from "./controls.ts";
 import { deriveStatus, enterMain, evaluate, runs } from "./progress.ts";
 import type { SubjectState } from "./state.ts";
+import type { TrackDefinition } from "./definition.ts";
 
 /** The user's controls as pure transitions (ADR 0003 "Ticket 17a"). Data is fictitious. */
 
@@ -143,3 +144,28 @@ describe("skip step", () => {
     expect(reason(applyControl(between, "skip", MONDAY_9 + H))).toMatch(/No step is waiting/);
   });
 });
+
+describe("council on 56d599c, items D1 and D2", () => {
+  const sms = (id: string, start: TrackDefinition["start"] = { kind: "entry" }): TrackDefinition => ({ id, channel: "sms", branch: "main", window: [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 })), steps: [step(`${id}s1`, { subject: "", threading: "new_subject" })], start, removed: false });
+  test("a restart is refused when no track left can run: the email track finished, an SMS track left and no mobile", () => {
+    const base = subjectState();
+    const tracks = [{ ...base.campaign.definition.tracks[0]!, steps: [step("s1", { threading: "new_subject" })] }, sms("x1", { kind: "after", trackId: "t1", delayDays: 2 })];
+    const s0 = evaluate(enterMain({ ...base, campaign: { ...base.campaign, launchedAt: MONDAY_9, definition: { ...base.campaign.definition, tracks } } }, MONDAY_9), MONDAY_9);
+    const sent = evaluate({ ...s0, results: [{ stepId: "s1", trackId: "t1", result: "sent", reason: null, at: 0, atWall: MONDAY_9, attemptId: null }], tracks: s0.tracks.map((t) => ({ ...t, nextStepId: null })) }, MONDAY_9 + H);
+    const stopped = ok(applyControl(sent, "stop", MONDAY_9 + 2 * H));
+    expect(reason(applyControl(stopped, "resume_from_next_step", MONDAY_9 + 3 * H))).toMatch(/no track left in it can reach them/);
+  });
+
+  test("skip names the earliest pending step that is not with a provider; refused only when every pending step is", () => {
+    const base = subjectState();
+    const tracks = [base.campaign.definition.tracks[0]!, { ...sms("x1"), steps: [step("x1s1", { subject: "", waitDays: 0, threading: "new_subject" })] }];
+    const s = evaluate(enterMain({ ...base, campaign: { ...base.campaign, launchedAt: MONDAY_9, definition: { ...base.campaign.definition, tracks } }, lead: { ...base.lead, details: [...base.lead.details, { id: "d-mobile", channel: "phone", ownEmail: false, mobile: true, key: "+447700900101", value: "+44 7700 900101", bad: false, order: 2 }], resolved: { ...base.lead.resolved, "d-mobile": { liveId: "d-mobile", bad: false, owned: true } } } }, MONDAY_9), MONDAY_9);
+    // Both first steps are due at launch; t1's email is with the provider.
+    const withEmail = withAttempts(s, [handed()]);
+    const skipped = ok(applyControl(withEmail, "skip", MONDAY_9 + H));
+    expect(skipped.results.map((r) => r.stepId)).toEqual(["x1s1"]);
+    const both = withAttempts(s, [handed(), handed({ id: "a-2", idempotencyKey: "a-2", trackId: "x1", stepId: "x1s1", accountId: "+447700900001" })]);
+    expect(reason(applyControl(both, "skip", MONDAY_9 + H))).toMatch(/already with the/);
+  });
+});
+

@@ -324,6 +324,21 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     all.sort((a, b) => a.lead - b.lead || (a.track.id < b.track.id ? -1 : 1));
     return all[0] ?? null;
   }
+  /** The step a skip skips: the first pending step, in the same order, that is not with a provider (council D2 on 56d599c). */
+  function skipTargetOf(s: Subject, now: number): { track: TrackDefinition; stepId: string; lead: number } | null {
+    const all = tracksIn(s, branchOf(s, now)).flatMap((t) => {
+      const p = pendingOf(s, t, now);
+      return p ? [{ track: t, stepId: p.stepId, lead: p.lead }] : [];
+    });
+    all.sort((a, b) => a.lead - b.lead || (a.track.id < b.track.id ? -1 : 1));
+    return all.find((c) => !inFlight(c.track, s, c.stepId)) ?? null;
+  }
+  /** A track left that can run for the lead: unfinished, and its channel reaches the lead (council D1 on 56d599c). */
+  const runnableLeft = (s: Subject, branch: "main" | "win_back", now: number) =>
+    tracksIn(s, branch).some((t) => {
+      const f = finishOf(s, t);
+      return (f === null || f.seen > now) && reaches(s, t);
+    });
   /** Whether the record says the app must accept `action` on the lead at `now`. */
   function accepts(s: Subject, action: LeadControlApi, now: number): boolean {
     const ending = endingAt(s, now);
@@ -335,15 +350,12 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
         return !ended && leadPausedAt(s, now);
       case "stop":
         return !ended;
-      case "skip": {
-        if (ended) return false;
-        const c = currentStep(s, now);
-        return c !== null && !inFlight(c.track, s, c.stepId);
-      }
+      case "skip":
+        return !ended && skipTargetOf(s, now) !== null;
       case "resume_from_next_step":
-        return ending !== null && !finishedBy(s, now);
+        return ending !== null && !finishedBy(s, now) && runnableLeft(s, branchOf(s, now), now);
       case "move_to_win_back":
-        return ending !== null && branchOf(s, now) === "main" && tracksIn(s, "win_back").length > 0;
+        return ending !== null && branchOf(s, now) === "main" && tracksIn(s, "win_back").length > 0 && runnableLeft(s, "win_back", now);
       default:
         return false;
     }
@@ -430,7 +442,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
         : leadPausedAt(s, now) ? "paused"
         : branchOf(s, now) === "win_back" ? "in_win_back"
         : null;
-      if (want !== null && status !== want) problem(`status: ${s.id} is ${status} at ${isoOf(now)}; the record says ${want}${process.env["CONTROLS_DEBUG"] ? ` [finishes ${JSON.stringify(def(s).tracks.map((x) => [x.id, startOf(s, x), finishOf(s, x)]))}; winBack ${isoOf(winBack.get(s.id))}; endings ${JSON.stringify(endings.filter((e) => e.subjectId === s.id))}; holds ${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))}; engine ${JSON.stringify(st.tracks.map((p) => [p.trackId, p.startedAt, p.finishReason, isoOf(p.finishedWall)]))}; results ${JSON.stringify(st.results.map((r) => [r.stepId, r.result, isoOf(r.atWall)]))}]` : ""}`);
+      if (want !== null && status !== want) problem(`status: ${s.id} is ${status} at ${isoOf(now)}; the record says ${want}${process.env["CONTROLS_DEBUG"] ? ` [finishes ${JSON.stringify(def(s).tracks.map((x) => [x.id, startOf(s, x), finishOf(s, x)]))}; winBack ${isoOf(winBack.get(s.id))}; endings ${JSON.stringify(endings.filter((e) => e.subjectId === s.id))}; holds ${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))}; engine ${JSON.stringify(st.tracks.map((p) => [p.trackId, p.startedAt, p.finishReason, isoOf(p.finishedWall)]))}; results ${JSON.stringify(st.results.map((r) => [r.stepId, r.result, isoOf(r.atWall)]))}; app replies ${JSON.stringify(st.replies)}; fake replies ${JSON.stringify(email.replyLog.filter((r) => r.subjectId === s.id))}; checks ${JSON.stringify(email.presendLog.filter((p) => p.answered !== null).map((p) => [isoOf(p.at), p.answered, p.threadRefs]))}; leadPaused ${String(st.subject.leadPaused)}]` : ""}`);
       if (want === null && !["queued", "active", "waiting_on_call"].includes(status)) problem(`status: ${s.id} is ${status} at ${isoOf(now)}; the record says it runs in the main sequence${process.env["CONTROLS_DEBUG"] ? ` [finishes ${JSON.stringify(def(s).tracks.map((x) => [x.id, isoOf(startOf(s, x)), finishOf(s, x)]).map(([id, a, f]) => [id, a, f && typeof f === "object" ? [isoOf(f.at), isoOf(f.seen), f.reason] : null]))}; winBack ${isoOf(winBack.get(s.id))}; endings ${JSON.stringify(endings.filter((e) => e.subjectId === s.id).map((e) => [e.kind, isoOf(e.at), isoOf(e.restartedAt)]))}; holds ${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))}; engine ${JSON.stringify(st.tracks.map((p) => [p.trackId, p.finishReason, isoOf(p.finishedWall)]))}; ended ${isoOf(st.subject.endedWall)}; deliveries ${JSON.stringify([...email.deliveryLog, ...sms.deliveryLog].filter((d) => d.subjectId === s.id).map((d) => [d.stepId, isoOf(d.at), isoOf(d.visibleAt)]))}]` : ""}`);
       // P2: every pending email or text is due where the record says: moved by every hold since its basis while
       // the lead runs; the wall it was resolved to while it is held. No step is handed over before it is due.
@@ -503,7 +515,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     const read = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${s.id}`)).body;
     const offered = read.controls.find((c) => c.action === action);
     if (!offered || offered.allowed !== expected) problem(`P11: ${s.id}'s read ${offered?.allowed ? "offers" : "refuses"} ${action} at ${isoOf(now)}; the record says it must be ${expected ? "accepted" : "refused"}${offered && !offered.allowed ? ` ("${offered.reason}")` : ""}${process.env["CONTROLS_DEBUG"] ? ` [current ${currentStep(s, now)?.stepId ?? "none"}; starts ${JSON.stringify(def(s).tracks.map((x) => [x.id, JSON.stringify(x.start), isoOf(startOf(s, x)), finishOf(s, x)]))}; lookups ${JSON.stringify(email.lookupLog.filter((l) => l.key === "att-122").map((l) => [isoOf(l.at), l.answer]))}; engineTracks ${JSON.stringify((await h.store.engine.subject(s.id, now))?.tracks.map((p) => [p.trackId, p.startAt, p.startedAt, p.finishReason, isoOf(p.finishedWall)]))}; clock ${JSON.stringify((await h.store.engine.subject(s.id, now))?.subject.clock)}; work ${JSON.stringify((await h.store.engine.subject(s.id, now))?.work.map((w) => [w.stepId, w.key, w.calls, w.settled, w.lookupAnswer]))}; attempts ${JSON.stringify((await h.store.engine.subject(s.id, now))?.attempts.map((a) => [a.stepId, a.idempotencyKey, a.state, a.endedBy]))}; handovers ${JSON.stringify(email.handoverLog.filter((c) => c.subjectId === s.id).map((c) => [c.stepId, c.key, isoOf(c.at), c.mode]))}; deliveries ${JSON.stringify(email.deliveryLog.filter((c) => c.subjectId === s.id).map((c) => [c.stepId, c.key, isoOf(c.at)]))}; withdrawals ${JSON.stringify(email.withdrawLog)}]` : ""}`);
-    const current = currentStep(s, now);
+    const current = action === "skip" ? (skipTargetOf(s, now) ?? currentStep(s, now)) : currentStep(s, now);
     if (action === "skip" && offered?.allowed && current && (offered.skips?.trackId !== current.track.id || offered.skips.stepId !== current.stepId)) problem(`P11: ${s.id}'s read would skip ${offered.skips?.stepId ?? "nothing"}; the record's current step is ${current.stepId}${process.env["CONTROLS_DEBUG"] ? ` [pending ${JSON.stringify(tracksIn(s, branchOf(s, now)).map((t) => [t.id, pendingOf(s, t, now)]).map(([id, p]) => [id, p && typeof p === "object" ? [p.stepId, isoOf(p.due), isoOf(p.unheld)] : null]))}; holds ${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))}; engine ${JSON.stringify((read.tracks).map((t) => [t.trackId, t.nextStep]))}]` : ""}`);
     if (action === "skip" && current && inFlight(current.track, s, current.stepId)) features.add("skip-refused-with-work-at-the-provider");
     const live = (await h.store.engine.subject(s.id, now))?.attempts.filter((a) => a.state === "claimed" || a.state === "handed" || a.state === "accepted") ?? [];
@@ -723,8 +735,9 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
       features.add(endings.some((e) => e.subjectId === s.id && e.kind === "replied" && Number.isFinite(e.restartedAt)) ? (latest?.key === d.key ? "a-new-reply-in-the-latest-thread-after-a-restart" : "a-new-reply-in-an-earlier-thread-after-a-restart") : "a-hidden-reply");
       return;
     }
-    if (!email.prospectReplies(d.destination, true, null)) return;
-    // The reply is on the thread of the person's latest email, whichever campaign sent it.
+    // In the thread of an email the app has observed (a reply in a thread it does not know yet is held for correlation,
+    // ADR 0003 2.4, which these runs do not model).
+    if (!email.prospectReplies(d.destination, true, null, { inThreadOf: d })) return;
     const s = subjects.get(email.replyLog.at(-1)?.subjectId ?? "");
     if (!s) return;
     const wasEnded = endedAt(s, h.clock);

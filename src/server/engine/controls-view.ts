@@ -5,7 +5,7 @@
  * same reason (P11).
  */
 import { leadNow } from "../../domain/sequence/clock.ts";
-import { campaignRefusal, currentStep, LEAD_CONTROLS, type LeadControl } from "../../domain/sequence/controls.ts";
+import { campaignRefusal, currentStep, LEAD_CONTROLS, skipTarget, type LeadControl } from "../../domain/sequence/controls.ts";
 import { isLive } from "../../domain/sequence/attempt.ts";
 import { deriveStatus, runs } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
@@ -46,7 +46,8 @@ export function controlView(stored: SubjectState, action: LeadControl, now: numb
  * send due at once) is not part of it: the action's answer carries that as the read after the worker ran.
  */
 export function effectOf(before: SubjectState, action: LeadControl, after: SubjectState, now: number): ControlView {
-  const skipped = action === "skip" ? currentStep(before) : null;
+  // The step a skip skips: the first pending step not with a provider (council D2), as the transition chooses it.
+  const skipped = action === "skip" ? skipTarget(before) : null;
   const next = currentStep(after);
   return {
     action,

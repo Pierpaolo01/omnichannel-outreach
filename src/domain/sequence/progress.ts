@@ -558,12 +558,15 @@ export function applyToWork(
     const attended = attend(s, now);
     return { state: runs(attended) ? evaluate(attended, now) : attended, effects };
   };
-  const sentFact = event.kind === "sent_observed" || (event.kind === "lookup_answer" && event.answer.kind === "sent") || event.kind === "mark_sent";
+  // A withdrawal answered "too late" is the provider's final word that the message went (council on 56d599c, item J):
+  // it settles the work as sent, at the answer's instant when no lookup has told the send time.
+  const tooLate = event.kind === "withdraw_answer" && event.answer === "too-late";
+  const sentFact = event.kind === "sent_observed" || (event.kind === "lookup_answer" && event.answer.kind === "sent") || event.kind === "mark_sent" || tooLate;
   if (sentFact) {
     const byUser = event.kind === "mark_sent";
     if (byUser && !markable(w)) return { state, effects: [{ kind: "ignored", what: "mark sent is only for unresolved work" }] };
     const ref = event.kind === "sent_observed" ? event.providerRef : event.kind === "lookup_answer" ? (event.answer.providerRef ?? null) : null;
-    const providerTime = event.kind === "sent_observed" ? event.providerTime : event.kind === "lookup_answer" ? (event.answer.sentAt ?? event.now) : event.now;
+    const providerTime = event.kind === "sent_observed" ? event.providerTime : event.kind === "lookup_answer" ? (event.answer.sentAt ?? event.now) : event.kind === "withdraw_answer" ? event.now : event.now;
     const referenced = withRef(event.kind === "lookup_answer" ? { ...w, lookupAnswer: "sent" } : w, ref);
     if (w.settled === "sent" || w.settled === "user_sent") return { state: withWork(state, referenced), effects: [{ kind: "ignored", what: "the work was already settled as sent" }] };
     const at = Math.min(Math.max(providerTime, w.firstHandedWall ?? providerTime), now);
@@ -573,8 +576,8 @@ export function applyToWork(
       const counted = w.sentWall === null ? { ...referenced, sentWall: at, sentDay: options.resetDay(w.accountId, at) } : referenced;
       return { state: withWork(state, counted), effects: [{ kind: "anomaly", what: `the provider sent work that was ${w.settled === "user_not_sent" ? "marked not sent" : (w.settled ?? "never handed over")}` }] };
     }
-    const settled: ProviderWork = { ...referenced, settled: byUser ? "user_sent" : "sent", nextLookupWall: null, sentWall: at, sentDay: options.resetDay(w.accountId, at) };
-    const endedBy = byUser ? "user" : event.kind === "lookup_answer" ? "lookup" : "observed";
+    const settled: ProviderWork = { ...referenced, settled: byUser ? "user_sent" : "sent", nextLookupWall: null, sentWall: at, sentDay: options.resetDay(w.accountId, at), withdrawWanted: false };
+    const endedBy = byUser ? "user" : event.kind === "lookup_answer" ? "lookup" : tooLate ? "provider" : "observed";
     let s = withWork(state, settled);
     // Every other live attempt carrying the work is settled by the same statement.
     for (const a of s.attempts) {
@@ -618,9 +621,8 @@ export function applyToWork(
         for (const a of s.attempts) if (a.idempotencyKey === key && isLive(a)) s = withAttempt(s, { ...a, state: "withdrawn", endedBy: a.state === "claimed" ? "guard" : "provider", awaitingAnswer: false });
         return done(s, []);
       }
-      // "too-late": the provider sent or is sending it, which the lookup settles; nothing more to ask. "unknown": asked
-      // again one settling period on, and looked up meanwhile.
-      const next: ProviderWork = event.answer === "too-late" ? { ...w, withdrawWanted: false, withdrawLastWall: event.now } : { ...w, withdrawLastWall: event.now, nextLookupWall: w.nextLookupWall ?? event.now + ENGINE_PARAMS.SETTLING };
+      // "unknown": asked again one settling period on, and looked up meanwhile. ("too-late" settled the work above.)
+      const next: ProviderWork = { ...w, withdrawLastWall: event.now, nextLookupWall: w.nextLookupWall ?? event.now + ENGINE_PARAMS.SETTLING };
       return done(withWork(s, next), []);
     }
     case "mark_not_sent": {

@@ -639,6 +639,14 @@ export class Engine {
       if (!this.rules.withdrawalDue(w, this.now())) continue;
       const port = await this.portOf(w.accountId);
       const answer = await this.bounded(() => port.withdraw(this.ref(w)), "unknown" as const);
+      // "Too late" means it went: the lookup is asked for its send time first, so its successor counts from the real send.
+      if (answer === "too-late") {
+        const looked = await this.bounded(() => port.lookup(this.ref(w)), { kind: "unknown" as const });
+        if (looked.kind === "sent") {
+          changed = (await this.applyWork(w.subjectId, w.key, { kind: "lookup_answer", answer: looked, now: this.now() })) || changed;
+          continue;
+        }
+      }
       changed = (await this.applyWork(w.subjectId, w.key, { kind: "withdraw_answer", answer, now: this.now() })) || changed;
     }
     return changed;
