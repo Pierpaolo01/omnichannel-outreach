@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import { Crash, EngineHarness, TransientError } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import { interruptionOf } from "../../domain/sequence/interruption.ts";
+import type { Rules } from "./rules.ts";
 import type { CampaignDefinition, StepDefinition } from "../../domain/sequence/definition.ts";
 import type { CallsView, EnrollmentRead, LeadSearchResult, TodayView } from "../../shared/api.ts";
 
@@ -167,6 +168,37 @@ describe("the machine slept in the middle of a tick", () => {
     await h.tick();
     await h.tick();
     expect((await today()).interruption).toBeNull();
+  });
+});
+
+describe("a provider answer that arrives after midnight (follow-up 42 item 39; R9)", () => {
+  /** s1 handed over at 23:40 on Monday; the provider sends it at 00:10:30 on Tuesday (late-send, half an hour). */
+  async function heldAcrossMidnight(rules: Partial<Rules> = {}) {
+    const MONDAY_2340 = Date.parse("2026-11-02T23:40:00Z");
+    const h = new EngineHarness({ start: MONDAY_2340, accounts: [{ id: "inbox-a", capacity: 50, gapMs: 10 * MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }], modes: ["late-send"], rules });
+    await h.tick();
+    const { campaign } = await h.createCampaign("Clinics", { businesses: [HARBOUR], people: [PEOPLE[0]!] });
+    await h.defineSequence(campaign.id, DEFINITION);
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    await h.advanceTo(TUESDAY_0 - MIN);
+    // Asked at 23:59; the machine sleeps; the answer, holding the 00:10:30 send, arrives at 05:59.
+    h.stopMarkingAlive();
+    h.heldAnswer = { kind: "observe", ms: 6 * H };
+    await h.tick();
+    expect(h.heldAnswers).toHaveLength(1);
+    await h.advanceTo(TUESDAY_0 + DAY + H);
+    return h.fake.handoverLog.filter((c) => c.stepId === "s2").map((c) => c.at);
+  }
+
+  test("the send it reports counts from its own time, so a one-day follow-up waits for Wednesday", async () => {
+    const s2 = await heldAcrossMidnight();
+    expect(s2).toHaveLength(1);
+    expect(s2[0]!).toBeGreaterThanOrEqual(TUESDAY_0 + DAY);
+  });
+
+  test("applied at the instant the request was made, the follow-up would go on Tuesday: the test above bites", async () => {
+    const s2 = await heldAcrossMidnight({ answerInstant: (asked) => asked });
+    expect(s2[0]!).toBeLessThan(TUESDAY_0 + DAY);
   });
 });
 

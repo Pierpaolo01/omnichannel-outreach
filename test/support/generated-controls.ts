@@ -1,7 +1,8 @@
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../src/domain/sequence/definition.ts";
 import type { Rules } from "../../src/server/engine/rules.ts";
-import type { CallsView, CampaignDetail, CallTaskView, EnrollmentRead, LeadSearchResult, LeadControlApi, OutreachStatus } from "../../src/shared/api.ts";
-import { EngineHarness, quickWait } from "./engine-harness.ts";
+import type { CallsView, CampaignDetail, CallTaskView, EnrollmentRead, InterruptionNoticeView, LeadSearchResult, LeadControlApi, OutreachStatus, TodayView } from "../../src/shared/api.ts";
+import { Crash, EngineHarness, quickWait } from "./engine-harness.ts";
+import type { CrashPoint } from "../../src/server/engine/engine.ts";
 import { business, person } from "./export-builder.ts";
 import type { FakeAccount } from "./fake-email-port.ts";
 import type { FakeNumber } from "./fake-sms-port.ts";
@@ -54,6 +55,13 @@ export interface ControlRunOptions {
   readonly occupancyKeepsSettled?: boolean;
   /** For a mutation (verifier R2-2 on 612aa05): every text confirmed withdrawn keeps its number's place for good. */
   readonly occupancyKeepsWithdrawnTexts?: boolean;
+  /**
+   * Ticket 20a's family (ADR 0003 "Ticket 20a", the generated test): the application stops (cleanly or by a crash at a
+   * named point, sometimes crashing again while it recovers), the providers are cut off while it runs, and a provider's
+   * answer is held while the clock moves on, from a stream of their own; one inbox of capacity 3 a day shared by both
+   * campaigns; a world starting in the week of the 25 October 2026 clock change.
+   */
+  readonly interruptions?: boolean;
 }
 
 export interface ControlRunResult {
@@ -93,13 +101,18 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   };
   const features = new Set<string>();
 
-  const start = Date.parse("2026-11-02T00:00:00Z") + Math.floor(rand() * 7) * DAY + Math.floor(rand() * 24) * HOUR;
+  const usual = Date.parse("2026-11-02T00:00:00Z") + Math.floor(rand() * 7) * DAY + Math.floor(rand() * 24) * HOUR;
+  // Ticket 20a: interruptions come from a stream of their own, so a run without them is the run it was.
+  const interrupting = options.interruptions === true;
+  const r20 = random(seed ^ 0x20a);
+  const start = interrupting ? Date.parse("2026-10-21T00:00:00Z") + Math.floor(r20() * 7) * DAY + Math.floor(r20() * 24) * HOUR : usual;
+  const CAPACITY = interrupting ? 3 : 50;
   const lateSends = chance(0.5);
   if (lateSends) features.add("late-sends");
   const keepsSending = lateSends && chance(0.4);
   if (keepsSending) features.add("withdrawals-answered-unknown-and-sent");
   const gap = options.gapMs ?? 5 * MINUTE;
-  const inboxes: FakeAccount[] = [{ id: "inbox-a", capacity: 50, gapMs: gap, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }];
+  const inboxes: FakeAccount[] = [{ id: "inbox-a", capacity: CAPACITY, gapMs: gap, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }];
   // One SMS number per campaign, so no conversation is another campaign's (question Q7's hold is the track runs').
   const numbers: FakeNumber[] = [0, 1].map((i) => ({ id: `+44770090001${i}`, capacity: 50, gapMs: gap, k: 2, healthy: true, resetZone: ZONE }));
   // Review bot and verifier on ca8baee, from a stream of their own: providers whose lookups lag behind acceptance (work
@@ -235,8 +248,41 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   const branchOf = (s: Subject, t: number) => ((winBack.get(s.id) ?? Infinity) <= t ? "win_back" : "main");
   const tracksIn = (s: Subject, branch: "main" | "win_back") => def(s).tracks.filter((t) => t.branch === branch);
 
-  const deliveries = (ch: "email" | "sms") => (ch === "sms" ? sms.deliveryLog : email.deliveryLog);
-  const handovers = (ch: "email" | "sms") => (ch === "sms" ? sms.handoverLog : email.handoverLog);
+  /**
+   * Ticket 20a: while the record counts the sends an interruption rescheduled, it reads the providers' logs as they stood
+   * when the application came back, before its first tick handed anything over (the engine counts before it claims).
+   */
+  /** Ticket 20a: the intervals in which the application could not act on the providers (stopped, cut off, asleep mid-request). */
+  const downs: Interval[] = [];
+  // Open at the start: the tick at an interruption's first instant ran before it began, and saw what was there then.
+  const downAt = (t: number) => downs.some((d) => d.from < t && t < d.to) || (h.providersDownUntil !== null && t > (outageFrom ?? Infinity));
+  /** The first instant at or after `t` at which the application could act. */
+  const upFrom = (t: number) => {
+    let at = t;
+    for (const d of [...downs].sort((a, b) => a.from - b.from)) if (d.from < at && at < d.to) at = d.to;
+    return h.providersDownUntil !== null && at > (outageFrom ?? Infinity) ? Infinity : at;
+  };
+  /** The deadline for a provider request due at `t`: when the app is up again, and if a down interval swallowed an ask, one settling period after it ended. */
+  const askedBy = (asked: number, t: number, now: number) => {
+    const swallowed = downs.filter((d) => d.to > asked && d.from < now).map((d) => d.to);
+    return swallowed.length > 0 ? Math.max(upFrom(t), Math.max(...swallowed) + 15 * MINUTE) : upFrom(t);
+  };
+  let outageFrom: number | null = null;
+  let cut: { readonly email: { readonly h: number; readonly d: number }; readonly sms: { readonly h: number; readonly d: number }; readonly presend: number } | null = null;
+  /**
+   * Handovers a crash interrupted after their commit and before the call: the app cannot know the provider never got them,
+   * so by the notice's definition (nothing of the step with a provider) the step is not counted. Each is an attempt id the
+   * crash point named; the record reads only which lead and step it was for.
+   */
+  const committedUncalled: string[] = [];
+  const deliveries = (ch: "email" | "sms") => {
+    const log = ch === "sms" ? sms.deliveryLog : email.deliveryLog;
+    return cut ? log.slice(0, cut[ch].d) : log;
+  };
+  const handovers = (ch: "email" | "sms") => {
+    const log = ch === "sms" ? sms.handoverLog : email.handoverLog;
+    return cut ? log.slice(0, cut[ch].h) : log;
+  };
   const delivered = (ch: "email" | "sms", s: Subject, stepId: string) => deliveries(ch).find((d) => d.subjectId === s.id && d.stepId === stepId);
 
   /** How a step was resolved, by the record: delivered (at the point the clock stood at its send) or skipped by the user. */
@@ -255,7 +301,8 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     // withdrawal, at that instant: ordered after the control (council J).
     const firstAsk = port.withdrawLog.find((w) => w.key === d.key);
     const looked = firstAsk && firstAsk.answer === "too-late" && firstAsk.at === lookedAt ? lookedAt + 1 : lookedAt;
-    const seen = Math.min(d.visibleAt, looked);
+    // The app learns of it only once it can observe the provider again (ticket 20a: a stop or an outage).
+    const seen = upFrom(Math.min(d.visibleAt, looked));
     return { at: pointOf(s, Math.max(d.at, call?.at ?? d.at)), seen, kind: "sent" };
   }
   /** A track's start (wall), or null while its rule is not met. */
@@ -350,9 +397,30 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     if (ch === "call") return false;
     // Sent, but not known to the app yet, is still with the provider as far as the app can tell.
     const port = ch === "sms" ? sms : email;
-    const known = (d: { key: string; at: number; visibleAt: number }) => Math.min(d.visibleAt, port.lookupLog.find((l) => l.key === d.key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity) <= h.clock;
+    const known = (d: { key: string; at: number; visibleAt: number }) => upFrom(Math.min(d.visibleAt, port.lookupLog.find((l) => l.key === d.key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity)) <= h.clock;
     return handovers(ch).some((c) => c.subjectId === s.id && c.stepId === stepId && !deliveries(ch).some((d) => d.key === c.key && known(d)) && !port.withdrawLog.some((w) => w.key === c.key && w.answer === "withdrawn"));
   }
+  /**
+   * Ticket 20a, R7: the sends the interruption [x, y) rescheduled, by the record, at y (the clock), as the app knows them
+   * then: each pending email or text of a lead not ended, nothing of it with the provider, which at some instant of the
+   * interruption was due while the lead was neither held nor ended. (The windows are open all day in these runs.)
+   */
+  function rescheduledByRecord(x: number, y: number, uncalled: ReadonlySet<string>): number {
+    let n = 0;
+    for (const s of subjects.values()) {
+      if (endedAt(s, y)) continue;
+      for (const t of tracksIn(s, branchOf(s, y))) {
+        if (t.channel === "call" || !reaches(s, t)) continue;
+        const p = pendingOf(s, t, y);
+        if (!p || inFlight(t, s, p.stepId) || uncalled.has(`${s.id}/${p.stepId}`)) continue;
+        const from = Math.max(x, p.due);
+        const instants = [from, ...holdsOf(s).map((hold) => hold.to).filter((at) => at > from && at < y)];
+        if (instants.some((at) => at < y && !heldAt(s, at) && !endedAt(s, at))) n++;
+      }
+    }
+    return n;
+  }
+
   /** The lead's current step (question Q3's interim): the pending step due first, ties by track id. */
   function currentStep(s: Subject, now: number): { track: TrackDefinition; stepId: string; lead: number } | null {
     const all = tracksIn(s, branchOf(s, now)).flatMap((t) => {
@@ -416,6 +484,13 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
         for (let i = 1; i < sorted.length; i++) if (sorted[i]! - sorted[i - 1]! < 5 * MINUTE) problem(`P3: ${sender} made two send calls ${Math.round((sorted[i]! - sorted[i - 1]!) / 1000)} s apart, at ${isoOf(sorted[i])}`);
       }
     }
+    // R3 (ticket 20a): no inbox delivers more than its capacity on a reset day (UTC for inbox-a), across every recovery
+    // and both campaigns.
+    {
+      const perDay = new Map<string, number>();
+      for (const d of email.deliveryLog) perDay.set(isoOf(d.at).slice(0, 10), (perDay.get(isoOf(d.at).slice(0, 10)) ?? 0) + 1);
+      for (const [day, n] of perDay) if (n > CAPACITY) problem(`R3: inbox-a delivered ${n} emails on ${day}, over its capacity of ${CAPACITY}`);
+    }
     // P1 after a reply: no email is handed over to a lead after a pre-send check that could read a reply its record did
     // not hold, until the user restarts it (review bot on ca8baee, item 1).
     for (const [index, r] of email.replyLog.entries()) {
@@ -432,13 +507,14 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     for (const key of new Set(email.withdrawLog.map((w) => w.key))) {
       const asks = email.withdrawLog.filter((w) => w.key === key);
       const last = asks.at(-1)!;
-      if (last.answer !== "unknown" || now < last.at + SETTLING + MINUTE) continue;
+      const deadline = askedBy(last.at, last.at + SETTLING, now);
+      if (last.answer !== "unknown" || now < deadline + MINUTE) continue;
       const d = email.deliveryLog.find((x) => x.key === key);
       const known = d ? Math.min(d.visibleAt, email.lookupLog.find((l) => l.key === key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity) : Infinity;
-      if (known <= last.at + SETTLING) continue;
+      if (known <= deadline) continue;
       const owner = email.handoverLog.find((c) => c.key === key)?.subjectId ?? "";
       const st = await h.store.engine.subject(owner, now);
-      problem(`A: the withdrawal of ${key} answered unknown at ${isoOf(last.at)} and was not asked again by ${isoOf(last.at + SETTLING)}, though its work had no final answer${process.env["CONTROLS_DEBUG"] ? ` [work ${JSON.stringify(st?.work.find((w) => w.key === key))}; attempts ${JSON.stringify(st?.attempts.filter((a) => a.idempotencyKey === key).map((a) => [a.state, a.endedBy, a.withdrawRequested, a.withdrawCalled]))}; handovers ${JSON.stringify(email.handoverLog.filter((c) => c.key === key).map((c) => isoOf(c.at)))}; lookups ${JSON.stringify(email.lookupLog.filter((l) => l.key === key).map((l) => [isoOf(l.at), l.answer]))}; asks ${JSON.stringify(asks.map((w) => [isoOf(w.at), w.answer]))}]` : ""}`);
+      problem(`A: the withdrawal of ${key} answered unknown at ${isoOf(last.at)} and was not asked again by ${isoOf(deadline)}, though its work had no final answer${process.env["CONTROLS_DEBUG"] ? ` [work ${JSON.stringify(st?.work.find((w) => w.key === key))}; attempts ${JSON.stringify(st?.attempts.filter((a) => a.idempotencyKey === key).map((a) => [a.state, a.endedBy, a.withdrawRequested, a.withdrawCalled]))}; handovers ${JSON.stringify(email.handoverLog.filter((c) => c.key === key).map((c) => isoOf(c.at)))}; lookups ${JSON.stringify(email.lookupLog.filter((l) => l.key === key).map((l) => [isoOf(l.at), l.answer]))}; asks ${JSON.stringify(asks.map((w) => [isoOf(w.at), w.answer]))}]` : ""}`);
     }
     // Council B: each email handover finds fewer than the inbox's k = 2 other pieces of work handed over and unsettled, by
     // the provider's own logs (settled once the app knows it sent, or the provider confirmed a withdrawal).
@@ -478,6 +554,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
       }
       const touched = (s: Subject, T: number) => (["email", "sms"] as const).some((ch) => deliveries(ch).some((d) => d.subjectId === s.id && d.visibleAt <= T)) || [...callsDone].some(([k, at]) => k.startsWith(`${s.id}/`) && at <= T) || skips.some((x) => x.subjectId === s.id && x.at <= T && def(s).tracks.find((t) => t.id === x.trackId)?.channel === "call");
       const eligible = (y: Item, T: number) =>
+        !downAt(T) && !downAt(T - MINUTE) &&
         y.due <= T - MINUTE && y.known <= T - MINUTE && !holdsOf(y.s).some((x) => x.from <= T && x.to > T - MINUTE) && !endedAt(y.s, T) && branchOf(y.s, T) === y.t.branch &&
         !skips.some((x) => x.subjectId === y.s.id && x.stepId === y.stepId && x.at <= T) && !((finishOf(y.s, y.t)?.at ?? Infinity) <= T) && !hidden.some((r) => r.subjectId === y.s.id && r.at <= T);
       const ranksAbove = (y: Item, x: Item, T: number) => {
@@ -500,6 +577,13 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
       // place, and for the next 20 minutes (four pacing gaps) nothing is handed over on it, no step for it may be waiting
       // that was claimable throughout.
       const SLACK = 20 * MINUTE;
+      /** inbox-a's day, by the providers' logs: sends delivered that UTC day by T, and work handed over and not final by T. */
+      const nearlyFull = (T: number) => {
+        const day = isoOf(T).slice(0, 10);
+        const sentThatDay = email.deliveryLog.filter((d) => d.at <= T && isoOf(d.at).slice(0, 10) === day).length;
+        const open = firstCalls.filter((c) => c.at <= T && settledAt(c.key) > T).length;
+        return sentThatDay + open >= CAPACITY - 1;
+      };
       for (const ch of ["email", "sms"] as const) {
         const port = ch === "email" ? email : sms;
         const firsts = handovers(ch).filter((c, i, all) => all.findIndex((x) => x.key === c.key) === i);
@@ -521,6 +605,8 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
           for (const y of items) {
             if (y.sender !== sender || y.claim <= f + SLACK || y.inherited) continue;
             if (![f + MINUTE, f + SLACK / 2, f + SLACK].every((T) => eligible(y, T))) continue;
+            // With a small daily capacity (ticket 20a's family), a sender at or near its day's capacity may rightly wait.
+            if (sender === "inbox-a" && [f + MINUTE, f + SLACK / 2, f + SLACK].some((T) => nearlyFull(T))) continue;
             problem(`F: ${sender} had a free in-flight place from ${isoOf(f)} (a final answer for ${freed.key}) and handed nothing over for ${SLACK / MINUTE} minutes while ${y.s.id}/${y.stepId}, due ${isoOf(y.due)}, waited (claimed ${isoOf(y.claim)})`);
           }
         }
@@ -772,6 +858,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
    */
   async function replyRestartReply(): Promise<void> {
     settleHidden();
+    if (outageUnderWay()) return;
     for (const s of subjects.values()) {
       const sent = email.deliveryLog.filter((d) => d.subjectId === s.id && d.visibleAt <= h.clock);
       if (sent.length < 2 || endedAt(s, h.clock) || heldAt(s, h.clock)) continue;
@@ -824,8 +911,8 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     // In the order the app found them: a later one finds the lead already replied.
     const found = hidden
       .map((r) => {
-        const byCheck = email.presendLog.find((p) => p.at >= r.at && p.answered === r.id)?.at ?? Infinity;
-        return { r, byCheck, at: Math.min(byCheck, r.visibleAt) };
+        const byCheck = (cut ? email.presendLog.slice(0, cut.presend) : email.presendLog).find((p) => p.at >= r.at && p.answered === r.id)?.at ?? Infinity;
+        return { r, byCheck, at: Math.min(byCheck, upFrom(r.visibleAt)) };
       })
       .filter((x) => x.at <= h.clock)
       .sort((a, b) => a.at - b.at);
@@ -893,6 +980,13 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     if (!email.prospectReplies(d.destination, true, null, { inThreadOf: d })) return;
     const s = subjects.get(email.replyLog.at(-1)?.subjectId ?? "");
     if (!s) return;
+    if (outageUnderWay()) {
+      // Ticket 20a: the providers are cut off, so the app finds the reply when it can observe them again.
+      const r = email.replyLog.at(-1)!;
+      hidden.push({ id: r.id, subjectId: s.id, thread: r.threadRef ?? "", at: h.clock, visibleAt: h.clock });
+      features.add("a-reply-during-an-outage");
+      return;
+    }
     const wasEnded = endedAt(s, h.clock);
     // Any reply makes the lead replied unless it already is (2.1): a running, held, stopped or finished lead alike.
     const wasRunningOrHeld = endingAt(s, h.clock)?.kind !== "replied";
@@ -906,6 +1000,150 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   }
 
   const ACTIONS: readonly LeadControlApi[] = ["pause", "resume", "skip", "skip", "stop", "resume_from_next_step", "move_to_win_back"];
+
+  // ----------------------------------------------------------------------------------------------
+  // Ticket 20a: interruptions, and the record's notice (R7).
+
+  const GAP = 5 * MINUTE;
+  /** The notice the app must show: the record's last interruption longer than the gap. */
+  let expectedNotice: InterruptionNoticeView | null = null;
+  /** The interruption under way, by the world the run made: from the last instant it could send to the instant it came back. */
+  let pending: { x: number; y: number; what: string } | null = null;
+  const takeCut = () => {
+    cut = { email: { h: email.handoverLog.length, d: email.deliveryLog.length }, sms: { h: sms.handoverLog.length, d: sms.deliveryLog.length }, presend: email.presendLog.length };
+  };
+  /** At the tick the application came back: the record's count, against the notice the app shows. */
+  async function resolvePending(): Promise<void> {
+    if (!pending || !cut) return;
+    const { x, y, what } = pending;
+    downs.push({ from: x, to: y });
+    outageFrom = null;
+    settleHidden();
+    const uncalled = new Set<string>();
+    for (const id of committedUncalled.splice(0)) {
+      const a = await h.store.engine.attempt(id);
+      if (a) uncalled.add(`${a.subjectId}/${a.stepId}`);
+    }
+    if (y - x > GAP) {
+      const rescheduled = rescheduledByRecord(x, y, uncalled);
+      expectedNotice = { from: isoOf(x), to: isoOf(y), rescheduled };
+      features.add(rescheduled > 0 ? "a-notice-with-sends-rescheduled" : "a-notice-with-none-rescheduled");
+    } else features.add("a-gap-below-the-threshold");
+    cut = null;
+    pending = null;
+    const shown = (await h.request<TodayView>("GET", "/api/today")).body.interruption;
+    if (JSON.stringify(shown) !== JSON.stringify(expectedNotice)) {
+      let detail = "";
+      if (process.env["CONTROLS_DEBUG"]) {
+        for (const s of subjects.values()) {
+          const st = await h.store.engine.subject(s.id, h.clock);
+          detail += ` [${s.id} ended ${String(endedAt(s, y))} holds ${JSON.stringify(holdsOf(s).map((x2) => [isoOf(x2.from), isoOf(x2.to)]))} record ${JSON.stringify(tracksIn(s, branchOf(s, y)).map((t) => [t.id, pendingOf(s, t, y)?.stepId, isoOf(pendingOf(s, t, y)?.due)]))} engine ${JSON.stringify(st?.tracks.map((p2) => [p2.trackId, p2.nextStepId, isoOf(p2.dueWall)]))} attempts ${JSON.stringify(st?.attempts.map((a2) => [a2.stepId, a2.state, isoOf(a2.claimedWall)]))} work ${JSON.stringify(st?.work.map((w) => [w.stepId, w.settled, w.calls]))} freezes ${JSON.stringify(st?.freezes)}]`;
+        }
+      }
+      problem(`R7: after ${what} the notice is ${JSON.stringify(shown)}; the record says ${JSON.stringify(expectedNotice)}${detail}`);
+    }
+  }
+  if (interrupting) {
+    h.onStop = (from, to) => {
+      pending = { x: from, y: to, what: `a stop from ${isoOf(from)} to ${isoOf(to)}` };
+      takeCut();
+    };
+    h.onResumed = resolvePending;
+    h.beforeTick = () => {
+      if (pending && !cut && h.clock >= pending.y) takeCut();
+    };
+    h.afterTick = async () => {
+      if (pending && cut && !h.recovering) await resolvePending();
+    };
+  }
+  const outageUnderWay = () => h.providersDownUntil !== null;
+  /** No interruption under way, and the run still going: another may begin. (A function: the hooks change `pending`.) */
+  const calm = () => !outageUnderWay() && pending === null && problems.length === 0 && !h.stopped;
+  const LENGTHS: readonly (readonly [number, string])[] = [[2 * MINUTE, "minutes"], [20 * MINUTE, "minutes"], [5 * HOUR, "hours"], [DAY, "days"], [3 * DAY, "days"]];
+  const CRASH_POINTS: readonly CrashPoint[] = ["after_claim", "after_presend", "after_handover_commit", "after_call", "after_retry_commit", "after_lookup", "after_observe_event"];
+  const CLOCK_CHANGE = Date.parse("2026-10-25T01:00:00Z");
+  /** What the interruption under way meets, for the coverage list. */
+  async function noteWorld(prefix: string, from: number, to: number): Promise<void> {
+    if ([...subjects.values()].some((s) => heldAt(s, from) && !endedAt(s, from))) features.add(`${prefix}-while-paused`);
+    if (local(from, ZONE).day !== local(to, ZONE).day) features.add(`${prefix}-across-a-rollover`);
+    if (from < CLOCK_CHANGE && to > CLOCK_CHANGE) features.add(`${prefix}-across-the-clock-change`);
+    for (const s of subjects.values()) {
+      const st = await h.store.engine.subject(s.id, from);
+      if (st?.work.some((w) => w.settled === null && w.calls > 0)) features.add(`${prefix}-with-work-unsettled`);
+    }
+  }
+  /** One interruption, of a kind and a length chosen from the run's own stream. */
+  async function interrupt(): Promise<void> {
+    settleHidden();
+    // The world was up and sending at this instant: the heartbeat stands here.
+    await h.tick();
+    const [ms, label] = LENGTHS[Math.floor(r20() * LENGTHS.length)]!;
+    const kind = r20();
+    if (kind < 0.45) {
+      await noteWorld("app-stopped", h.clock, h.clock + ms);
+      features.add(`app-stopped-for-${label}`);
+      if (r20() < 0.6) {
+        // A crash at a named point, at the next instant something reaches it; sometimes a second one while recovering.
+        const point = CRASH_POINTS[Math.floor(r20() * CRASH_POINTS.length)]!;
+        const again = r20() < 0.35;
+        let fired = 0;
+        h.downAfterCrash = ms;
+        h.hooks = {
+          ...h.hooks,
+          crashPoint: (at, attemptId) => {
+            if (fired === 0 && at === point) {
+              if (at === "after_handover_commit" && attemptId !== null) committedUncalled.push(attemptId);
+              fired = 1;
+              features.add(`app-stopped-mid-${point}`);
+              throw new Crash(at);
+            }
+            if (fired === 1 && again && h.recovering) {
+              fired = 2;
+              features.add("a-crash-during-recovery");
+              throw new Crash(at);
+            }
+          },
+        };
+        await h.advanceTo(h.clock + 6 * HOUR);
+        h.hooks = { ...h.hooks, crashPoint: () => undefined };
+        if (fired > 0) return;
+        h.downAfterCrash = null;
+      }
+      await h.tick();
+      await h.stopFor(ms);
+      return;
+    }
+    if (kind < 0.7) {
+      const from = h.clock;
+      await noteWorld("providers-cut-off", from, from + ms);
+      features.add(`providers-cut-off-for-${label}`);
+      pending = { x: from, y: from + ms, what: `an outage from ${isoOf(from)} to ${isoOf(from + ms)}` };
+      outageFrom = from;
+      h.cutProvidersOff(from + ms);
+      return;
+    }
+    // A provider's answer held across the user's midnight (follow-up 42 item 39): asked minutes before it.
+    const midnight = startOfDay(local(h.clock, ZONE).day + 1, ZONE);
+    await h.advanceTo(midnight - Math.round((1 + r20() * 9) * MINUTE));
+    if (h.stopped || outageUnderWay() || pending) return;
+    await h.tick();
+    const asked = h.clock;
+    const held = r20() < 0.25 ? 3 * MINUTE + Math.round(r20() * 10 * MINUTE) : Math.round((1 + r20() * 6) * HOUR);
+    h.stopMarkingAlive();
+    h.heldAnswer = { kind: r20() < 0.6 ? "observe" : "lookup", ms: held };
+    await h.tick();
+    const answer = h.heldAnswers.find((x) => x.askedAt === asked);
+    h.heldAnswer = null;
+    if (!answer) {
+      // No such request in that tick: nothing was held; the world runs on.
+      await h.tick();
+      return;
+    }
+    features.add(`a-${answer.kind}-answer-held-across-midnight`);
+    pending = { x: asked, y: answer.answeredAt, what: `an answer held from ${isoOf(asked)} to ${isoOf(answer.answeredAt)}` };
+    await h.tick();
+  }
+
   const eventCount = options.events ?? 22;
   await checkAll();
   for (let e = 0; e < eventCount && problems.length === 0 && !h.stopped; e++) {
@@ -918,7 +1156,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     if (extra < 0.1) await retryRefused();
     else if (extra < 0.25 && lookupLags) await pauseThenSkip();
     else if (extra < 0.4) await replyRestartReply();
-    else if (extra < 0.55) await actAtADueInstant();
+    else if (extra < 0.55 && !outageUnderWay()) await actAtADueInstant();
     // One user action per instant: the event's own action comes a minute after an extra one.
     if (extra < 0.55) await h.advanceTo(h.clock + MINUTE);
     listedBefore = new Set([...(await h.request<CallsView>("GET", "/api/calls")).body.readyNow].map((x) => x.enrollmentId));
@@ -933,6 +1171,10 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
       await campaignControl(ci, campaignPausedAt(ci, h.clock) ? "resume" : "pause");
     } else if (kind < 0.9) await autoReply();
     await checkAll();
+    if (interrupting && r20() < 0.4 && calm()) {
+      await interrupt();
+      await checkAll();
+    }
   }
 
   // The drain: every pause resumed, then each day every listed call logged no answer, until every lead has ended.

@@ -2075,23 +2075,32 @@ The control runs (`test/support/generated-controls.ts`) gain a run family, `inte
 
 The record knows the truth of each interruption from the world it ran: `X` is the last instant the world was up with the providers reachable before it, `Y` the instant it came back. It computes N by the four conditions above from its own model (the record's pending steps as the app knows them at `Y`, its own hold intervals, the providers' logs), imports nothing from `src/domain/sequence/`, and compares it with `GET /api/today` after every recovery (R7). P1, P2, P3, P4, P6, the order check, B and F are asserted after every event as before, and the providers' delivery logs are checked per reset day against the inbox's capacity (R3). The harness marks the application alive at every tick it runs while the world is up (production's quiet 15-second ticks, which the harness skips), so only the generated stops and outages are interruptions.
 
-**Mutations, one per invariant, each killed by a known seed in `pnpm check`:**
+**Mutations, one per invariant, each killed by a known seed in `pnpm check`** (as built; `test/support/interruption-mutations.ts`, seeds offset from 20000; the check each fails is the record's label):
 
-| Mutation | Invariant |
-| - | - |
-| a call whose answer a crash lost is taken as refused, so its step is claimed again with a new key | R1 (P6 on the delivery logs) |
-| the steps that fell due during an interruption are skipped (`afterInterruption`) | R2 (P2, and the drain) |
-| claims older than the interruption gap are handed over without the pacing slot | R3 (P3) |
-| the claim order ignores "follow-ups first" | R4 (the order check) |
-| an interruption releases the leads' pauses (`afterInterruption`) | R5 (P1) |
-| an interruption freezes the clock like a pause (`afterInterruption`) | R6 (P2) |
-| the count is the steps due during the interruption (`rescheduled`) | R7 |
-| a gap of any length is an interruption | R7 |
-| a late answer is applied at the instant its request was made (`answerInstant`) | R9 (P2) |
+| Mutation | Invariant | Seed: the check that fails |
+| - | - | - |
+| a call whose answer a crash lost is taken as refused, so its step is claimed again with new work and a new key | R1 | 16: P2 (the reclaimed step's timing departs from the providers' logs before a second delivery shows) |
+| the steps that fell due during an interruption are skipped (`afterInterruption`) | R2 | 0: P2 |
+| the pacing gap ignored while missed work catches up | R3 | 0: P3 |
+| the claim order ignores "follow-ups first" | R4 | 5: 18 (the order check) |
+| an interruption releases the leads' pauses (`afterInterruption`) | R5 | 2: P1 |
+| an interruption freezes the clock like a pause (`afterInterruption`) | R6 | 1: P2 |
+| the count is the steps due during the interruption (`rescheduled`) | R7 | 0: R7 |
+| a gap of any length is an interruption (`interruptionOf`) | R7 | 2: R7 |
+| a late answer is applied at the instant its request was made (`answerInstant`) | R9 | 16: P12 (the day's committed calls); and directly, `interruption.test.ts` "a provider answer that arrives after midnight", where the follow-up goes on Tuesday instead of Wednesday under the mutation |
 
 **Not mutable as a rule, and guarded by example tests instead:** R8 (the notice and the heartbeat are one write: `interruption.test.ts` crashes at every point of the first tick after an interruption and checks the second recovery's notice), R10 (the lease is the store's transaction: two connections to one file, a live, a dead and a stale owner), and R11's reads (example tests through HTTP for each list and each cause, and the rule that a step is listed once).
 
 **Coverage lists.** The family's behaviours are named in a list of their own (`INTERRUPTION_FEATURES`); a name in neither it nor the retired list fails the check.
+
+### As built (the 20a implementer, after the code)
+
+- **Code.** `src/domain/sequence/interruption.ts` (`INTERRUPTION_GAP`, `interruptionOf`, `afterInterruption`, `rescheduledSteps`), each a `Rules` entry with `answerInstant` and `lostAnswer`; `Engine.recordResume`, the heartbeat at the end of `runTick`, `noteTickFailed`, `answered` (a provider answer applied at the instant it arrived); `src/server/engine/worker-state.ts` (the `meta` keys and the reads); `src/server/worker-lease.ts` and the store's `takeLease` and `releaseLease`, used by `main.ts`; `needsAttention`'s three lists; `unreachableWhy` in `progress.ts`. No migration.
+- **A tick that runs longer than the gap writes no heartbeat** (found while building the held answer, before the generated runs): with the machine asleep in the middle of a request, the tick that took the answer ended hours after it began, and its end-of-tick heartbeat hid the interruption. Such a tick now leaves the heartbeat where it was, so the next tick reports the interruption from before it. `interruption.test.ts` "the machine slept in the middle of a tick".
+- **The record, not the engine, was wrong four times while the family was built**, each a gap in what the record knew of an interruption: a reply or a send the providers held during an outage is learned when they answer again, not at once; something visible at an interruption's first instant was seen by the tick just before it; a reply the pre-send check finds in the first tick after an interruption is found after the count; and a handover whose commit a crash interrupted before its call is, by the count's definition, with the provider. The 17a checks A (a withdrawal asked again each settling period) and F (a freed in-flight place used) now leave out instants the application could not act, and F leaves out an inbox at or near its day's capacity, which the family's capacity of 3 makes common. All 100 seeds of the family pass.
+- **The generated family as built.** `interruptions: true` in `generated-controls.ts`; `pnpm check` runs seeds 20011, 20016, 20019, 20023, 20027, 20034, 20040, 20070 and 20088 (about 18 seconds), which reach the 27 behaviours of `INTERRUPTION_FEATURES`; the search runs all 100 in the eight shards (`sequence-runs-interruptions*.test.ts`). No seed of the 100 held a lookup's answer across midnight (no lookup fell due in the held tick), so that name is retired with its reason; the held observation reaches the same rule.
+- **The demonstration** (`interruption-demo.test.ts`, with `DEMO_TRANSCRIPT=1` it prints the HTTP exchanges): two campaigns of email, SMS and a call, three leads each, one inbox of capacity 4 a day; one lead paused; the application stopped from Monday 12:00 to Wednesday 12:00. The notice reads from Monday 12:00 to Wednesday 12:00 with 8 sends rescheduled; the calls are on Wednesday's list as rolled over; nothing is delivered twice; no day exceeds 4 emails on the inbox; the paused lead sends nothing and stays paused.
+- **Not reached by a generated run, and what guards it:** windows that close during an interruption (the control runs' windows are open all day; `interruption.test.ts` in the domain), ticks that fail (`interruption.test.ts`, "ticks failing"), the lease (`worker-lease.test.ts`, and a manual run of two processes on one data directory), the attention lists (`attention.test.ts`), and the real providers (unverified).
 
 ### Questions for the human (each with the interim built)
 

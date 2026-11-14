@@ -179,15 +179,44 @@ export class EngineHarness {
     });
   }
 
+  /** Called when a stop ends, with its first and last instant, the clock at the restart and the providers caught up, before restart settlement. */
+  onStop: ((from: number, to: number) => void) | null = null;
+  /** Called once restart settlement after a stop has run. */
+  onResumed: (() => Promise<void>) | null = null;
+  /** Called at each tick, after the providers act and before the engine runs. */
+  beforeTick: (() => void) | null = null;
+  /** Called after each tick the engine completed. */
+  afterTick: (() => Promise<void>) | null = null;
+  /** When set, the next simulated crash stops the application for this long before it restarts. */
+  downAfterCrash: number | null = null;
+  /** True while restart settlement runs. */
+  recovering = false;
+  /** Set by a crash that stopped the application: the advance under way ends, as the world it was advancing stopped. */
+  private halt = false;
+
   /**
    * Stops the application for `ms`: nothing ticks while the providers carry on; then a fresh engine on the same store
    * runs restart settlement. The heartbeat stays where the last tick left it.
    */
   async stopFor(ms: number): Promise<void> {
     this.live = false;
+    const from = this.clock;
     this.clock += ms;
+    this.advanceProviders();
+    this.onStop?.(from, this.clock);
     await this.restart();
-    this.live = true;
+    await this.resumeLive();
+    await this.onResumed?.();
+  }
+
+  /** Whether a crash stopped the world during the advance under way (a method: the tick it ran in sets it). */
+  private halted(): boolean {
+    return this.halt;
+  }
+
+  /** The world runs again once the engine has recorded a heartbeat at this instant. */
+  private async resumeLive(): Promise<void> {
+    if ((await this.store.engine.meta(HEARTBEAT_KEY)) === String(this.clock)) this.live = true;
   }
 
   /** The application keeps ticking, but the harness stops standing in for its quiet ticks: until a tick of the engine's own succeeds. */
@@ -270,6 +299,7 @@ export class EngineHarness {
     this.advanceProviders();
     if (this.providersDownUntil !== null && this.clock >= this.providersDownUntil) this.providersDownUntil = null;
     if (this.live) await this.store.engine.setMeta(HEARTBEAT_KEY, String(this.clock));
+    this.beforeTick?.();
     try {
       await this.engine.tick();
       // The world runs again once the engine itself has recorded a heartbeat (the first tick after a stop, an outage or
@@ -279,8 +309,24 @@ export class EngineHarness {
       if (error instanceof TransientError) return;
       if (!(error instanceof Crash)) throw error;
       this.crashes.push(error.message);
+      if (this.downAfterCrash !== null) {
+        // The crash stops the application: it stays down, then restarts.
+        const ms = this.downAfterCrash;
+        this.downAfterCrash = null;
+        this.live = false;
+        this.halt = true;
+        const from = this.clock;
+        this.clock += ms;
+        this.advanceProviders();
+        this.onStop?.(from, this.clock);
+        await this.restart();
+        await this.resumeLive();
+        await this.onResumed?.();
+        return;
+      }
       await this.restart();
     }
+    await this.afterTick?.();
   }
 
   /**
@@ -296,19 +342,24 @@ export class EngineHarness {
   /** A fresh engine on the same store and provider, settling what the crash left open. */
   async restart(): Promise<void> {
     this.engine = this.newEngine();
-    for (let i = 0; i < 20; i++) {
-      try {
-        this.advanceProviders();
-        await this.engine.recover();
-        return;
-      } catch (error) {
-        if (error instanceof TransientError) return;
-        if (!(error instanceof Crash)) throw error;
-        this.crashes.push(error.message);
-        this.engine = this.newEngine();
+    this.recovering = true;
+    try {
+      for (let i = 0; i < 20; i++) {
+        try {
+          this.advanceProviders();
+          await this.engine.recover();
+          return;
+        } catch (error) {
+          if (error instanceof TransientError) return;
+          if (!(error instanceof Crash)) throw error;
+          this.crashes.push(error.message);
+          this.engine = this.newEngine();
+        }
       }
+      throw new Error("the engine crashed on every restart");
+    } finally {
+      this.recovering = false;
     }
-    throw new Error("the engine crashed on every restart");
   }
 
   /** Advances the clock to `target`, ticking at every instant the engine or the provider has work. */
@@ -325,8 +376,9 @@ export class EngineHarness {
   }
 
   async advanceTo(target: number, onInstant?: () => Promise<void>): Promise<void> {
+    this.halt = false;
     await this.tick();
-    for (let guard = 0; guard < 100_000 && this.clock < target && !this.stopped; guard++) {
+    for (let guard = 0; guard < 100_000 && this.clock < target && !this.stopped && !this.halted(); guard++) {
       const wakes = [await this.engine.nextWakeAt(), this.provider.nextActivityAt(), this.smsProvider?.nextActivityAt() ?? null, this.providersDownUntil, target].filter((t): t is number => t !== null && t > this.clock);
       this.clock = Math.min(...wakes);
       await this.tick();
