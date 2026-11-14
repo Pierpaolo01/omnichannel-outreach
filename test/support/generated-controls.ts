@@ -50,6 +50,10 @@ export interface ControlRunOptions {
   readonly gapMs?: number;
   /** For a mutation: the store counts an account's in-flight places by live attempts, as before council B on 56d599c. */
   readonly occupancyCountsAttempts?: boolean;
+  /** For a mutation: every live attempt holds its place, whatever its work's answer, as on 612aa05 (review bot). */
+  readonly occupancyKeepsSettled?: boolean;
+  /** For a mutation (verifier R2-2 on 612aa05): every text confirmed withdrawn keeps its number's place for good. */
+  readonly occupancyKeepsWithdrawnTexts?: boolean;
 }
 
 export interface ControlRunResult {
@@ -103,8 +107,16 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   const r17 = random(seed ^ 0x17d);
   const lookupLags = r17() < 0.4;
   if (lookupLags) features.add("lookups-lag");
-  const h = new EngineHarness({ start, accounts: inboxes, modes: lookupLags ? ["lookup-lags"] : lateSends ? ["honest", "late-send"] : ["honest"], random: random(seed ^ 0x17c), engine: { waitFor: quickWait }, sms: { numbers, modes: ["honest"] }, ...(options.rules ? { rules: options.rules } : {}) });
+  // Review bot on 612aa05, from a stream of its own: emails the provider sends but never reports (no event, lookups
+  // unknown), so a pause meets a too-late answer whose send time stays unknown.
+  const silentSends = random(seed ^ 0x17f)() < 0.3;
+  if (silentSends) features.add("sends-never-reported");
+  // Verifier R2-2 on 612aa05, from a stream of its own: texts the provider sends late, so a pause can withdraw one.
+  const lateTexts = random(seed ^ 0x180)() < 0.5;
+  if (lateTexts) features.add("texts-sent-late");
+  const h = new EngineHarness({ start, accounts: inboxes, modes: [...(lookupLags ? ["lookup-lags" as const] : lateSends ? ["honest" as const, "late-send" as const] : ["honest" as const]), ...(silentSends ? ["silent-send" as const] : [])], random: random(seed ^ 0x17c), engine: { waitFor: quickWait }, sms: { numbers, modes: lateTexts ? ["honest", "late-send"] : ["honest"] }, ...(options.rules ? { rules: options.rules } : {}) });
   h.maxWrites = options.maxWrites ?? null;
+  if (silentSends) h.fake.silentRevealAfterMs = DAY;
   // A provider that keeps what it was asked to withdraw: in the runs whose lookups lag too, so a pause meets work withdrawn
   // on a non-final "not sent" while still uncertain (the reviewer's reproduction, review bot on ca8baee, item 2).
   if (keepsSending || lookupLags) h.fake.withdrawAnswers = "unknown-sends";
@@ -113,6 +125,17 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     // The mutation replaces the store's own count (`occupancy`) with live attempts only.
     const store = h.store.engine as unknown as { db: { prepare(sql: string): { get(...a: unknown[]): Record<string, unknown> | undefined } }; occupancy: (id: string) => number };
     store.occupancy = (id: string) => Number(store.db.prepare("SELECT COUNT(*) AS n FROM attempts WHERE account_id = ? AND state IN ('claimed', 'handed', 'accepted')").get(id)?.["n"] ?? 0);
+  }
+  if (options.occupancyKeepsWithdrawnTexts === true) {
+    const store = h.store.engine as unknown as { db: { prepare(sql: string): { get(...a: unknown[]): Record<string, unknown> | undefined } }; occupancy: (id: string) => number };
+    const own = store.occupancy.bind(store);
+    store.occupancy = (id: string) => own(id) + (id.startsWith("+") ? Number(store.db.prepare("SELECT COUNT(*) AS n FROM provider_work WHERE account_id = ? AND settled = 'withdrawn'").get(id)?.["n"] ?? 0) : 0);
+  }
+  if (options.occupancyKeepsSettled === true) {
+    // The mutation restores 612aa05's count: every live attempt's key, plus work that may still be sent.
+    const store = h.store.engine as unknown as { db: { prepare(sql: string): { get(...a: unknown[]): Record<string, unknown> | undefined } }; occupancy: (id: string) => number };
+    store.occupancy = (id: string) =>
+      Number(store.db.prepare("SELECT COUNT(*) AS n FROM (SELECT idempotency_key AS k FROM attempts WHERE account_id = ? AND state IN ('claimed', 'handed', 'accepted') UNION SELECT key FROM provider_work WHERE account_id = ? AND settled IS NULL AND calls > 0 AND went_wall IS NULL)").get(id, id)?.["n"] ?? 0);
   }
   const email = h.fake;
   const sms = h.sms;
@@ -225,10 +248,12 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     if (!d) return null;
     const call = handovers(t.channel).find((c) => c.key === d.key);
     // The app learns of a send from the provider's event or from a lookup that answers sent, whichever is first.
-    const lookedAt = t.channel === "email" ? (email.lookupLog.find((l) => l.key === d.key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity) : Infinity;
+    // Either channel (verifier R2-2 on 612aa05: texts are withdrawn and looked up too).
+    const port = t.channel === "sms" ? sms : email;
+    const lookedAt = port.lookupLog.find((l) => l.key === d.key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity;
     // A lookup the first withdrawal's "too late" asks for runs in the worker's pass after the control that wanted the
     // withdrawal, at that instant: ordered after the control (council J).
-    const firstAsk = email.withdrawLog.find((w) => w.key === d.key);
+    const firstAsk = port.withdrawLog.find((w) => w.key === d.key);
     const looked = firstAsk && firstAsk.answer === "too-late" && firstAsk.at === lookedAt ? lookedAt + 1 : lookedAt;
     const seen = Math.min(d.visibleAt, looked);
     return { at: pointOf(s, Math.max(d.at, call?.at ?? d.at)), seen, kind: "sent" };
@@ -291,8 +316,9 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     if (hold && known >= hold.from) return null;
     for (const [i, st] of t.steps.entries()) {
       const r = resolution(s, t, st.id);
-      // A step the provider sent stays the pending step until the app learns of the send.
-      if (r !== null && r.seen <= now) continue;
+      // A step the provider sent stays the pending step until the app learns of the send. The checks run after the
+      // worker's pass at `now`, so a send learned in that pass (ordered just after a control at `now`) is known to them.
+      if (r !== null && r.seen <= now + 1) continue;
       if (i === 0) return { stepId: st.id, due: start, unheld: start, lead: leadOfWall(s, start) };
       const prev = resolution(s, t, t.steps[i - 1]!.id)!;
       const unheld = dueAfter(prev.at, st.waitDays, ZONE);
@@ -323,8 +349,9 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     const ch = t.channel;
     if (ch === "call") return false;
     // Sent, but not known to the app yet, is still with the provider as far as the app can tell.
-    const known = (d: { key: string; at: number; visibleAt: number }) => Math.min(d.visibleAt, ch === "email" ? (email.lookupLog.find((l) => l.key === d.key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity) : Infinity) <= h.clock;
-    return handovers(ch).some((c) => c.subjectId === s.id && c.stepId === stepId && !deliveries(ch).some((d) => d.key === c.key && known(d)) && !(ch === "email" && email.withdrawLog.some((w) => w.key === c.key && w.answer === "withdrawn")));
+    const port = ch === "sms" ? sms : email;
+    const known = (d: { key: string; at: number; visibleAt: number }) => Math.min(d.visibleAt, port.lookupLog.find((l) => l.key === d.key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity) <= h.clock;
+    return handovers(ch).some((c) => c.subjectId === s.id && c.stepId === stepId && !deliveries(ch).some((d) => d.key === c.key && known(d)) && !port.withdrawLog.some((w) => w.key === c.key && w.answer === "withdrawn"));
   }
   /** The lead's current step (question Q3's interim): the pending step due first, ties by track id. */
   function currentStep(s: Subject, now: number): { track: TrackDefinition; stepId: string; lead: number } | null {
@@ -466,6 +493,51 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
           if (y === x || y.sender !== x.sender || y.claim <= x.claim || !eligible(y, x.claim) || !ranksAbove(y, x, x.claim)) continue;
           problem(`18: ${x.s.id}/${x.stepId} was claimed on ${x.sender} at ${isoOf(x.claim)} while ${y.s.id}/${y.stepId}, due ${isoOf(y.due)} and ranked higher, waited (claimed ${isoOf(y.claim)})`);
         }
+      }
+      // F (review bot on 612aa05): a place is freed at every final answer. A piece of work holds its sender's place from
+      // its first handover until the app has any final answer for it, by the providers' own logs: the send known (event or
+      // lookup), a withdrawal answered withdrawn or too late, or a refusal. When a final answer leaves the sender with a free
+      // place, and for the next 20 minutes (four pacing gaps) nothing is handed over on it, no step for it may be waiting
+      // that was claimable throughout.
+      const SLACK = 20 * MINUTE;
+      for (const ch of ["email", "sms"] as const) {
+        const port = ch === "email" ? email : sms;
+        const firsts = handovers(ch).filter((c, i, all) => all.findIndex((x) => x.key === c.key) === i);
+        const finalAt = (key: string, attemptIds: readonly string[]) => {
+          const d = deliveries(ch).find((x) => x.key === key);
+          const sent = d ? Math.min(d.visibleAt, port.lookupLog.find((l) => l.key === key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity) : Infinity;
+          const withdrawn = port.withdrawLog.find((w) => w.key === key && w.answer !== "unknown")?.at ?? Infinity;
+          const refused = port.refusals.find((r) => attemptIds.includes(r.attemptId))?.at ?? Infinity;
+          return Math.min(sent, withdrawn, refused);
+        };
+        const spans = firsts.map((c) => ({ key: c.key, sender: c.sender, from: c.at, to: finalAt(c.key, handovers(ch).filter((x) => x.key === c.key).map((x) => x.attemptId)) }));
+        for (const freed of spans) {
+          const f = freed.to;
+          if (!Number.isFinite(f) || f + SLACK > now) continue;
+          const sender = freed.sender;
+          const held = spans.filter((x) => x.sender === sender && x.from <= f && x.to > f).length;
+          if (held >= 2) continue;
+          if (firsts.some((c) => c.sender === sender && c.at > f && c.at <= f + SLACK)) continue;
+          for (const y of items) {
+            if (y.sender !== sender || y.claim <= f + SLACK || y.inherited) continue;
+            if (![f + MINUTE, f + SLACK / 2, f + SLACK].every((T) => eligible(y, T))) continue;
+            problem(`F: ${sender} had a free in-flight place from ${isoOf(f)} (a final answer for ${freed.key}) and handed nothing over for ${SLACK / MINUTE} minutes while ${y.s.id}/${y.stepId}, due ${isoOf(y.due)}, waited (claimed ${isoOf(y.claim)})`);
+          }
+        }
+      }
+      // F, one definition (verifier R2-1 on 612aa05): the place count and `mayStillSend` never disagree. When no lead's
+      // read says a message may still be sent, every sender's in-flight places are held only by claims not yet handed over.
+      let mayStill = 0;
+      const inFlightOf = new Map<string, number>();
+      const claimsOf = new Map<string, number>();
+      for (const s of subjects.values()) {
+        mayStill += (await h.request<EnrollmentRead>("GET", `/api/enrollments/${s.id}`)).body.mayStillSend;
+        const st = await h.store.engine.subject(s.id, now);
+        for (const [id, acc] of Object.entries(st?.accounts ?? {})) inFlightOf.set(id, acc.inFlight);
+        for (const a of st?.attempts ?? []) if (a.state === "claimed") claimsOf.set(a.accountId, (claimsOf.get(a.accountId) ?? 0) + 1);
+      }
+      if (mayStill === 0) {
+        for (const [id, n] of inFlightOf) if (n > (claimsOf.get(id) ?? 0)) problem(`F: no lead may still be sent anything at ${isoOf(now)}, yet ${id} holds ${n} in-flight places for ${claimsOf.get(id) ?? 0} claims`);
       }
     }
     // P12: the day's committed calls, by the record: carried calls open at the day's start, of leads not held then.

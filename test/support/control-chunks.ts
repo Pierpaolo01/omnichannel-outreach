@@ -12,8 +12,12 @@ import { FULL_SEARCH, inShard } from "./sequence-chunks.ts";
  */
 
 export const CONTROL_SEED = 17_000;
-/** Offsets from CONTROL_SEED, chosen greedily from a sweep of all 100 (14 November 2026, after the review bot and the verifier on ca8baee) to reach every behaviour below. */
-export const CONTROL_FIXED_SEEDS: readonly number[] = [0, 8, 31, 33, 37, 45, 48, 61, 76, 86, 96];
+/**
+ * Offsets from CONTROL_SEED, chosen greedily from a sweep of all 100 (14 November 2026, after the review bot and the
+ * verifier on 612aa05, with sends never reported and texts sent late) to reach every behaviour below; 35 added, a run in
+ * which a text is withdrawn and a second lead then needs its number's place (verifier R2-2).
+ */
+export const CONTROL_FIXED_SEEDS: readonly number[] = [17, 19, 33, 35, 48, 64, 72, 86, 91, 99];
 const SEARCH_SEEDS = 100;
 const MAX_SEEDS = 30;
 const RUN_WRITES = 10_000;
@@ -50,6 +54,7 @@ export const CONTROL_FEATURES: readonly string[] = [
   "pause-accepted",
   "pause-inside-a-paused-campaign",
   "pause-refused",
+  "pause-refused-with-uncertain-work",
   "pause-with-a-call-listed",
   "pause-with-a-claim-open",
   "pause-with-uncertain-work",
@@ -61,6 +66,7 @@ export const CONTROL_FEATURES: readonly string[] = [
   "resume-refused",
   "resume-refused-with-uncertain-work",
   "resume-with-uncertain-work",
+  "resume-with-work-at-the-provider",
   "resume_from_next_step-accepted",
   "resume_from_next_step-inside-a-paused-campaign",
   "resume_from_next_step-refused",
@@ -68,6 +74,7 @@ export const CONTROL_FEATURES: readonly string[] = [
   "resume_from_next_step-with-a-call-listed",
   "resume_from_next_step-with-uncertain-work",
   "resume_from_next_step-with-work-at-the-provider",
+  "sends-never-reported",
   "skip-accepted",
   "skip-after-a-pause-with-a-lookup-lagging",
   "skip-inside-a-paused-campaign",
@@ -84,10 +91,12 @@ export const CONTROL_FEATURES: readonly string[] = [
   "stop-accepted",
   "stop-inside-a-paused-campaign",
   "stop-refused",
+  "stop-refused-with-uncertain-work",
   "stop-with-a-call-listed",
   "stop-with-a-claim-open",
   "stop-with-uncertain-work",
   "stop-with-work-at-the-provider",
+  "texts-sent-late",
   "withdrawals-answered-unknown-and-sent",
 ];
 
@@ -95,12 +104,9 @@ export const RETIRED_CONTROL_FEATURES: Readonly<Record<string, string>> = {
   "move_to_win_back-with-a-claim-open": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
   "move_to_win_back-with-uncertain-work": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
   "move_to_win_back-with-work-at-the-provider": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
-  "pause-refused-with-uncertain-work": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
   "resume-with-a-call-listed": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
   "resume-with-a-claim-open": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
-  "resume-with-work-at-the-provider": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
   "resume_from_next_step-with-a-claim-open": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
-  "stop-refused-with-uncertain-work": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
 };
 
 const known = (name: string) => CONTROL_FEATURES.includes(name) || name in RETIRED_CONTROL_FEATURES;
