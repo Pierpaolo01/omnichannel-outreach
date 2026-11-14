@@ -530,6 +530,18 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX notes_by_owner ON notes(owner_kind, owner_id, at_wall);
     `,
   },
+  {
+    // Ticket 15a, numbered after 14a's 12.
+    version: 13,
+    name: "redials and callbacks on the call records (ADR 0003 1.3, 2.4; ticket 15)",
+    // A call record keeps whether the user asked for a redial, and the time a prospect asked to be
+    // called back. Earlier records had neither: no redial, no callback time.
+    sql: `
+      ALTER TABLE call_attempts ADD COLUMN redial INTEGER NOT NULL DEFAULT 0 CHECK (redial IN (0, 1));
+      ALTER TABLE call_attempts ADD COLUMN callback_at INTEGER;
+      CREATE INDEX call_tasks_open_callbacks ON call_tasks(open, kind, subject_id);
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string): void {

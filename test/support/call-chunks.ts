@@ -17,10 +17,14 @@ import { FULL_SEARCH, inShard, SEED } from "./sequence-chunks.ts";
  * waiting behind committed calls, later today and rolled-over calls, every outcome, a refused one and one on a number already marked bad, a wrong mobile failing its SMS track, one action posted
  * twice at once, again, and again after a restart,
  * two phone tracks and interested closing the other's task, a track after a call and one beside it,
- * a phone track skipped when no good number is left, replies by email and SMS, and all four endings.
- * Refresh it when the generator changes.
+ * a phone track skipped when no good number is left, replies by email and SMS, and all four endings;
+ * and, since ticket 15, redials (one refused the same day, one asked for with the wrong outcome),
+ * callbacks later today and for a later day, worked with every outcome, moved, skipped for now and
+ * overdue for days, every reason on the list, sends moved by a hold, calls skipped at the skip limit
+ * (a redialed one, one releasing a track) and a callback left with no good number.
+ * Refresh it when the generator changes (last swept on 14 November 2026, ticket 15a: 65 behaviours).
  */
-export const CALL_FIXED_SEEDS: readonly number[] = [12, 16, 27, 36, 45, 70, 93];
+export const CALL_FIXED_SEEDS: readonly number[] = [2, 7, 16, 19, 35, 55, 59, 98];
 const SEARCH_SEEDS = 100;
 /** Seed offsets each mutation's search tries after its recorded seed. */
 const MAX_SEEDS = 30;

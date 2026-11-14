@@ -5,17 +5,30 @@
  */
 import type { OutreachStatus } from "../outreach-status.ts";
 import { applyAttemptEvent, applyLookup, isLive, isUncertain, markable, withRef, type AttemptEffect, type AttemptEvent, type WorkEvent } from "./attempt.ts";
-import { leadNow, sendPoint, span, syncClock, wallOfLead, type Freeze, type LeadClock } from "./clock.ts";
+import { leadNow, localDayNumber, nextWindowOpen, sendPoint, span, startOfLocalDay, syncClock, wallOfLead, type Freeze, type LeadClock } from "./clock.ts";
 import { liveSteps, type TrackChannel, type TrackDefinition } from "./definition.ts";
 import type { Attempt, EndReason, FinishReason, LeadDetail, ProviderWork, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Running, status and reach.
 
-/** `runs(s)` (2.2). Ticket 12b has no callback tasks; campaign and lead pauses arrive in #17. */
+/**
+ * The callback hold (ADR 0003 2.3, ticket 15): an open callback task. It *is* the hold, so "held by a
+ * callback" and "has an open callback task" cannot disagree.
+ */
+export function callbackHold(state: SubjectState): boolean {
+  return state.callTasks.some((t) => t.open && t.kind === "callback");
+}
+
+/**
+ * `runs(s)` (2.2): launched, its campaign not paused, not ended, and held by none of the three holds
+ * (2.3): the lead pause, the callback hold (ticket 15), and the campaign pause. Every change to any of
+ * these ends with `synced`, which freezes or thaws the lead's clock. Campaign and lead pauses arrive
+ * with ticket 17 on this same function.
+ */
 export function runs(state: SubjectState): boolean {
   const { subject, campaign } = state;
-  return campaign.launchedAt !== null && campaign.pausedSince === null && subject.ended === null && !subject.leadPaused;
+  return campaign.launchedAt !== null && campaign.pausedSince === null && subject.ended === null && !subject.leadPaused && !callbackHold(state);
 }
 
 /** The status (2.1): rules in order, first match wins. */
@@ -23,6 +36,8 @@ export function deriveStatus(state: SubjectState): OutreachStatus {
   const { subject } = state;
   if (subject.ended !== null) return subject.ended;
   if (subject.leadPaused) return "paused";
+  // Rule 3: the callback hold (ticket 15).
+  if (callbackHold(state)) return "callback_scheduled";
   if (subject.branch === "win_back") return "in_win_back";
   // Rule 5: an open call task, whatever today's listing (ticket 14).
   if (state.callTasks.some((t) => t.open)) return "waiting_on_call";
@@ -233,6 +248,10 @@ export function evaluate(state: SubjectState, now: number, options: { readonly e
   // `endingsFirst: false` exists only for the oracle's broken engine (ADR 0003 9.2, "ending check too late").
   let s = options.endingsFirst === false ? state : checkEndings(state, now);
   if (!runs(s)) return s;
+  // Unworked calls past the skip limit are skipped at the rollover they expired at, before any start,
+  // so the tracks after them start in this same evaluation (3.5; ticket 15).
+  s = expireUnworked(s, now);
+  if (!runs(s)) return s;
   const lead = leadNow(s.subject.clock, now);
 
   // Starts, until nothing more starts: a track skipped at its start finishes then, so a track
@@ -269,6 +288,43 @@ export function evaluate(state: SubjectState, now: number, options: { readonly e
   }
 
   return attend(checkEndings(s, now), now);
+}
+
+/**
+ * The call skip limit (ADR 0003 3.5; ticket 15). An open call task (not a callback) expires at the end
+ * of a user day d, the rollover e = start of day d + 1, when all of these held:
+ * - it was listed on day d: d is on or after its list day (a redial moves that to the next day), and
+ *   the prospect's calling hours open at some point of day d;
+ * - the lead ran at e, read from its freezes record, so a hold (a callback, a pause, an ending) at the
+ *   rollover means no expiry then; and so it was listed at the last moment of day d;
+ * - lead time at e had reached its skip deadline, which was resolved once from the call's original
+ *   due time and is frozen with the lead's clock.
+ * It is checked day by day from its first listed day, so a rollover the app was off for expires it
+ * where it expired. The call step is skipped (`unworked`), and the track finishes `skipped_unworked`
+ * at e, closing the task; the tracks after it start after their delay. A task worked on day d is not
+ * open with a list day at or before d (a redial moves it on, a callback holds the lead, any other
+ * outcome closes it), so "not worked" needs no record of its own.
+ */
+export function expireUnworked(state: SubjectState, now: number): SubjectState {
+  let s = state;
+  const zone = s.callDay.userZone;
+  const today = localDayNumber(now, zone);
+  for (const task of state.callTasks) {
+    if (!task.open || task.kind !== "call") continue;
+    const window = s.campaign.definition.tracks.find((t) => t.id === task.trackId)?.window ?? [];
+    for (let d = Math.max(task.listDay, localDayNumber(task.placedWall, zone)); d < today; d++) {
+      const e = startOfLocalDay(d + 1, zone);
+      const point = sendPoint(s.subject.clock, s.freezes, e, e, now);
+      // `atWall` is the start of the freeze holding e; e itself only while the lead ran at e.
+      if (point.atWall !== e || point.at < task.skipDeadline) continue;
+      const opens = nextWindowOpen(window, s.lead.zone, startOfLocalDay(d, zone));
+      if (opens === null || opens >= e) continue;
+      s = { ...s, results: [...s.results, { stepId: task.stepId, trackId: task.trackId, result: "skipped", reason: "unworked", at: point.at, atWall: e, attemptId: null }] };
+      s = finishTrack(s, task.trackId, "skipped_unworked", point.at, e);
+      break;
+    }
+  }
+  return s;
 }
 
 /**

@@ -474,6 +474,8 @@ export function projectLoad(input: ProjectionInput): Projection {
         if (next === loaded) {
           const lead = leadNow(s.subject.clock, t);
           const starts = s.tracks.filter((p) => p.startedAt === null && p.startAt !== null).map((p) => t + ((p.startAt ?? 0) - lead)).filter((x) => x > t);
+          // An open call task may be skipped at the user's next day (the skip limit, ticket 15), as `Engine.evaluateAll` looks then.
+          if (s.callTasks.some((x) => x.open)) starts.push(startOfLocalDay(localDayNumber(t, s.callDay.userZone) + 1, s.callDay.userZone));
           const until = Math.min(Infinity, ...starts);
           evalUntil.set(id, { state: s, until });
           wakes.push(until, id);

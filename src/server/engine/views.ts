@@ -1,7 +1,7 @@
 /** Read models for the HTTP interface, built from the engine's stored facts. */
 import { isLive, markable } from "../../domain/sequence/attempt.ts";
-import { isListed, recordedNumberOf } from "../../domain/sequence/calls.ts";
-import { recordedView } from "./call-views.ts";
+import { isListed, listedForDay, reasonOf } from "../../domain/sequence/calls.ts";
+import { callRecordView, dateOfDay } from "./call-views.ts";
 import { leadNow } from "../../domain/sequence/clock.ts";
 import { heldReason, stalledAccounts } from "../../domain/sequence/dispatch.ts";
 import { deriveStatus, liveTracksFor } from "../../domain/sequence/progress.ts";
@@ -35,7 +35,18 @@ export function progressView(s: SubjectState, now: number): EnrollmentProgress {
         return {
           trackId: track.id,
           channel: track.channel,
-          callTask: task ? { taskId: task.id, open: task.open, placedAt: new Date(task.placedWall).toISOString(), listed: isListed(s, task) } : null,
+          callTask: task
+            ? {
+                taskId: task.id,
+                open: task.open,
+                placedAt: new Date(task.placedWall).toISOString(),
+                listed: isListed(s, task),
+                kind: task.kind,
+                callbackAt: iso(task.callbackAt),
+                listedFor: dateOfDay(listedForDay(s, task)),
+                dueAt: new Date(task.dueWall).toISOString(),
+              }
+            : null,
           started: p?.startedAt != null,
           finishReason: p?.finishReason ?? null,
           finishedAt: iso(p?.finishedWall ?? null),
@@ -53,7 +64,7 @@ export function progressView(s: SubjectState, now: number): EnrollmentProgress {
               result: result?.result ?? null,
               calls: s.callAttempts
                 .filter((c) => s.callTasks.some((t) => t.id === c.taskId && t.stepId === st.id))
-                .map((c) => ({ outcome: c.outcome, at: new Date(c.atWall).toISOString(), number: recordedView(recordedNumberOf(s, c.numberDetailId)), note: c.note })),
+                .map((c) => callRecordView(s, c)),
               reason: result?.reason ?? null,
               at: iso(result?.atWall ?? null),
               sends: s.attempts
@@ -126,7 +137,21 @@ export async function needsAttention(store: EngineStore, now: number): Promise<N
       if (reason) heldTracks.push({ enrollmentId: id, trackId: p.trackId, reason });
     }
   }
+  // Overdue callbacks (ticket 15): listed callbacks whose time has passed (the queue's own two rules). Each
+  // holds its lead's outreach in that campaign until the user logs its outcome; none expires.
+  const overdueCallbacks: NeedsAttention["overdueCallbacks"][number][] = [];
+  for (const id of await store.subjectsWithOpenCallTasks()) {
+    const s = await store.subject(id, now);
+    if (!s) continue;
+    for (const t of s.callTasks) {
+      if (isListed(s, t) && reasonOf(s, t, now) === "overdue") {
+        overdueCallbacks.push({ taskId: t.id, enrollmentId: id, campaignId: s.campaign.id, callbackAt: new Date(t.callbackAt ?? now).toISOString(), dueAt: new Date(t.dueWall).toISOString() });
+      }
+    }
+  }
+  overdueCallbacks.sort((a, b) => Date.parse(a.callbackAt) - Date.parse(b.callbackAt) || (a.taskId < b.taskId ? -1 : 1));
   return {
+    overdueCallbacks,
     stalledInboxes: stalledAccounts(accounts, open, now),
     heldTracks,
     accountWaits: accounts.flatMap((a) =>

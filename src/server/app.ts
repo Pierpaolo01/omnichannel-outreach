@@ -77,14 +77,21 @@ const callSettingsBody = requestObject({
   dailyCapacity: z.number().int("The daily call capacity is a whole number.").positive("The daily call capacity is at least 1.").max(1_000),
   userZone: z.string().trim().refine((z) => isTimeZone(z), "Use an IANA time zone such as Europe/London."),
 });
-// Not interested, callback and redial arrive with tickets 15 and 16; they are refused here until then.
+// Not interested arrives with ticket 16 and is refused here until then. Redial and callback are ticket 15's;
+// which outcome each goes with is the domain's rule (`logCallOutcome`), refused there with a plain reason.
 const outcomeBody = requestObject({
   /**
    * The client's key for this one action: the same key answers with the first result and stores
    * nothing again, so a retry or a double click never logs an outcome or a note twice (verifier B3).
    */
   requestId: z.string().trim().min(1, "Send a request id with each outcome.").max(200),
-  outcome: z.enum(["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "skip_for_now"], { message: "Choose one of the outcomes this release offers: no answer, voicemail left, gatekeeper or not reached, wrong or dead number, interested, or skip for now." }),
+  outcome: z.enum(["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "callback_requested", "skip_for_now"], {
+    message: "Choose one of the outcomes this release offers: no answer, voicemail left, gatekeeper or not reached, wrong or dead number, interested, callback requested, or skip for now.",
+  }),
+  /** With no answer, voicemail or gatekeeper: move the call onto the user's next day. */
+  redial: z.boolean().optional(),
+  /** With a callback requested: the date and time the prospect asked for, with its offset (ISO 8601). */
+  callbackAt: z.iso.datetime({ offset: true, message: "Give the callback's date and time as an ISO 8601 instant with its offset, such as 2026-11-03T15:00:00+00:00." }).optional(),
   numberId: z.string().min(1).max(200).nullish(),
   note: z.string().max(10_000).default(""),
   noteScope: z.enum(["person", "company"]).default("person"),
@@ -439,7 +446,15 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     if (!body.success) return invalid(c, body.error);
     const id = c.req.param("id");
     if ((await store.engine.callTaskSubject(id)) === null) return notFound(c, "call task");
-    const outcome = await engine.logCallOutcome(id, { requestId: body.data.requestId, outcome: body.data.outcome, numberId: body.data.numberId ?? null, note: body.data.note, noteScope: body.data.noteScope });
+    const outcome = await engine.logCallOutcome(id, {
+      requestId: body.data.requestId,
+      outcome: body.data.outcome,
+      redial: body.data.redial ?? false,
+      callbackAt: body.data.callbackAt === undefined ? null : Date.parse(body.data.callbackAt),
+      numberId: body.data.numberId ?? null,
+      note: body.data.note,
+      noteScope: body.data.noteScope,
+    });
     if (!outcome.ok) return c.json<ApiError>({ error: { code: "outcome_refused", message: outcome.reason } }, 409);
     // The answer names the next focus: the queue moves on only now that an outcome is logged.
     const at = Date.parse(now());

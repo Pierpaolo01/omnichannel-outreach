@@ -15,7 +15,7 @@ import {
   readyItems,
   retryFailures,
 } from "../../domain/sequence/dispatch.ts";
-import { compareReadyNow, focusOf, isListed, logCallOutcome, placeCall, readyCalls } from "../../domain/sequence/calls.ts";
+import { compareReadyNow, focusOf, isListed, logCallOutcome, placeCall, readyCalls, reasonOf } from "../../domain/sequence/calls.ts";
 import { applyBadDestination, applyReply, applyToAttempt, applyToWork, enterMain, evaluate, replyMatches, smsReplyOwner } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
 
@@ -56,6 +56,8 @@ export interface Rules {
   readonly readyNowOrder: typeof compareReadyNow;
   /** Which call the focus queue shows (part b): the one the user is on while it is listed. */
   readonly focusOf: typeof focusOf;
+  /** Why a call is on the list (ticket 15): due, rolled over, a redial, a callback, or an overdue callback. */
+  readonly callReason: typeof reasonOf;
   /** The version guard (2.5): a change computed from `computedFrom` applies only if nothing it read has changed. */
   readonly versionsMatch: (computedFrom: SubjectState, current: SubjectState) => boolean;
 }
@@ -87,6 +89,7 @@ export const DEFAULT_RULES: Rules = {
   logCallOutcome,
   readyNowOrder: compareReadyNow,
   focusOf,
+  callReason: reasonOf,
   // Everything an evaluation reads: the subject's and campaign's versions cover its progress and the
   // definition; the lead's facts (contact details and their marks, zone, merge data) change without
   // bumping them (an import, a mark elsewhere), so they are compared as they were read.

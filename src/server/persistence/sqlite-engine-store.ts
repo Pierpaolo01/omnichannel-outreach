@@ -405,6 +405,19 @@ export class SqliteEngineStore implements EngineStore {
     return this.sql("SELECT DISTINCT subject_id FROM call_tasks WHERE open = 1 ORDER BY subject_id").all().map((r) => str(r, "subject_id"));
   }
 
+  async openCallbackInstants(): Promise<number[]> {
+    const { userZone } = this.callSettingsNow();
+    return this.sql(
+      `SELECT t.callback_at FROM call_tasks t JOIN enrollments e ON e.id = t.subject_id
+       WHERE t.open = 1 AND t.kind = 'callback' AND t.callback_at IS NOT NULL AND e.ended IS NULL`,
+    )
+      .all()
+      .flatMap((r) => {
+        const at = num(r, "callback_at");
+        return [startOfLocalDay(localDayNumber(at, userZone), userZone), at];
+      });
+  }
+
   async notesOf(owner: "person" | "company", ownerId: string): Promise<StoredNote[]> {
     return this.sql("SELECT * FROM notes WHERE owner_kind = ? AND owner_id = ? ORDER BY at_wall DESC, rowid DESC")
       .all(owner, ownerId)
@@ -432,15 +445,18 @@ export class SqliteEngineStore implements EngineStore {
     const end = startOfLocalDay(day + 1, userZone);
     const placed = num(this.sql("SELECT COUNT(*) AS n FROM call_tasks WHERE placed_wall >= :start AND placed_wall < :end").get({ start, end }) ?? {}, "n");
     // A carried call counts only on a day it can be listed: its prospect's calling hours open that day
-    // (council on 7902093), so a weekday call left on Friday takes none of the weekend's room.
+    // (council on 7902093), so a weekday call left on Friday takes none of the weekend's room; a callback
+    // from its own day on, at any hour (ticket 15). A task closed at the instant the day starts (a call
+    // skipped by the skip limit at that rollover) was not carried into it.
     const committed = this.sql(
-      `SELECT t.track_id, c.id AS campaign_id, c.definition_version, c.definition, c.default_timezone, p.timezone AS person_zone, co.timezone AS company_zone
+      `SELECT t.track_id, t.kind, t.callback_at, c.id AS campaign_id, c.definition_version, c.definition, c.default_timezone, p.timezone AS person_zone, co.timezone AS company_zone
        FROM call_tasks t JOIN enrollments e ON e.id = t.subject_id JOIN campaigns c ON c.id = e.campaign_id
          LEFT JOIN people p ON p.id = e.person_id JOIN companies co ON co.id = e.company_id
-       WHERE t.placed_wall < :start AND (t.closed_wall IS NULL OR t.closed_wall >= :start) AND (e.ended_wall IS NULL OR e.ended_wall >= :start)`,
+       WHERE t.placed_wall < :start AND (t.closed_wall IS NULL OR t.closed_wall > :start) AND (e.ended_wall IS NULL OR e.ended_wall >= :start)`,
     )
       .all({ start })
       .filter((r) => {
+        if (str(r, "kind") === "callback") return localDayNumber(num(r, "callback_at"), userZone) <= day;
         const definition = r["definition"] == null ? null : this.definitionOf({ ...r, id: str(r, "campaign_id") });
         const window = definition?.tracks.find((t) => t.id === str(r, "track_id"))?.window ?? [];
         const zone = prospectZone([strOrNull(r, "person_zone"), strOrNull(r, "company_zone")], definition?.timezone ?? "UTC");
@@ -565,7 +581,7 @@ export class SqliteEngineStore implements EngineStore {
     const attempts = this.sql("SELECT * FROM attempts WHERE subject_id = ? ORDER BY claimed_wall, rowid").all(subjectId).map(toAttempt);
     const callAttempts = this.sql("SELECT * FROM call_attempts WHERE subject_id = ? ORDER BY at_wall, rowid")
       .all(subjectId)
-      .map((r): CallAttempt => ({ id: str(r, "id"), requestId: str(r, "request_id"), taskId: str(r, "task_id"), outcome: str(r, "outcome") as CallOutcome, numberDetailId: strOrNull(r, "number_detail_id"), note: str(r, "note"), at: num(r, "at"), atWall: num(r, "at_wall") }));
+      .map((r): CallAttempt => ({ id: str(r, "id"), requestId: str(r, "request_id"), taskId: str(r, "task_id"), outcome: str(r, "outcome") as CallOutcome, redial: num(r, "redial") === 1, callbackAt: numOrNull(r, "callback_at"), numberDetailId: strOrNull(r, "number_detail_id"), note: str(r, "note"), at: num(r, "at"), atWall: num(r, "at_wall") }));
     // Every id that can name one of the lead's numbers resolves through the merge pointer (ADR 0001, ticket 12a):
     // the numbers recorded on its calls, and every detail a re-import folded into one of its numbers, so a
     // screen read before the merge names the same number.
@@ -820,7 +836,7 @@ export class SqliteEngineStore implements EngineStore {
       if (base.callAttempts.some((b) => b.id === a.id)) continue;
       changed = true;
       // The unique request id refuses a second record of one action, even from another process.
-      this.run("INSERT INTO call_attempts (id, request_id, task_id, subject_id, outcome, number_detail_id, note, at, at_wall) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [a.id, a.requestId, a.taskId, id, a.outcome, a.numberDetailId, a.note, a.at, a.atWall]);
+      this.run("INSERT INTO call_attempts (id, request_id, task_id, subject_id, outcome, redial, callback_at, number_detail_id, note, at, at_wall) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [a.id, a.requestId, a.taskId, id, a.outcome, a.redial ? 1 : 0, a.callbackAt, a.numberDetailId, a.note, a.at, a.atWall]);
     }
     if (next.newNotes.length > 0) {
       const e = this.sql("SELECT person_id, company_id FROM enrollments WHERE id = ?").get(id);

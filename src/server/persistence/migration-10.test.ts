@@ -93,9 +93,9 @@ describe("migration 10 on a database with a bounce observed before it (re-check 
     expect(entries.filter((e) => e.kind === "bounced")).toEqual([]);
     expect(entries[0]).toMatchObject({ kind: "ended", status: "finished_no_usable_channel" });
     expect(entries[1]).toMatchObject({ kind: "address_bad", to: "sam@harbour.example" });
-    // The upgrade itself ran 10 and 11 (and 12, ticket 14a's call tables), and later bounces are recorded again.
+    // The upgrade itself ran 10 and 11 (and 12, ticket 14a's call tables, and 13, ticket 15a's redial and callback fields), and later bounces are recorded again.
     const versions = new DatabaseSync(file).prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((r) => Number(r["version"]));
-    expect(versions.filter((v) => v >= 9)).toEqual([9, 10, 11, 12]);
+    expect(versions.filter((v) => v >= 9)).toEqual([9, 10, 11, 12, 13]);
     await after.store.close();
   });
 });

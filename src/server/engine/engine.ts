@@ -9,6 +9,7 @@ import { launchCheck, type LaunchCheck } from "../../domain/sequence/blockers.ts
 import { REQUEST_ID_REUSED, type OutcomeInput } from "../../domain/sequence/calls.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
+import { runs } from "../../domain/sequence/progress.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
 import type { EngineStore, ReplyEvent, StoredDefinition } from "./engine-store.ts";
 import { UnprovisionedSmsPort, type AttemptRef, type HandoverRequest, type ProviderEvent, type SendPort } from "./ports.ts";
@@ -138,7 +139,7 @@ export class Engine {
   /** Subjects with no due call to place, by version key and call settings, until a wall instant. */
   private readonly noCallsReady = new Map<string, { key: string; until: number }>();
   /** Per subject and version: the wall instants its pending steps fall due, with their windows. */
-  private readonly wakeCache = new Map<string, { version: string; due: { wall: number; window: ReturnType<typeof windowOf> | null; zone: string }[] }>();
+  private readonly wakeCache = new Map<string, { version: string; due: { wall: number; window: ReturnType<typeof windowOf> | null; zone: string }[]; openCall: boolean }>();
 
   constructor(deps: EngineDependencies) {
     this.store = deps.store;
@@ -228,12 +229,20 @@ export class Engine {
   async nextWakeAt(): Promise<number | null> {
     const now = this.now();
     const times: number[] = [];
+    const nextDay = await this.nextUserDay(now);
     for (const [id, version] of await this.store.runningSubjectVersions()) {
       let cached = this.wakeCache.get(id);
       if (cached?.version !== version) {
         const state = await this.store.subject(id, now);
         if (!state) continue;
         const s = state;
+        // A held lead's clock is frozen: nothing of it falls due by time (ADR 0003 3.2). Its callback's
+        // instants are below.
+        if (!runs(s)) {
+          cached = { version, due: [], openCall: s.callTasks.some((t) => t.open) };
+          this.wakeCache.set(id, cached);
+          continue;
+        }
         // A running subject's lead time advances with the wall, so a deadline's wall instant is fixed.
         const isCall = (trackId: string) => s.campaign.definition.tracks.find((t) => t.id === trackId)?.channel === "call";
         const due = s.tracks
@@ -244,12 +253,14 @@ export class Engine {
           .map((p) => ({ wall: now + ((p.dueAt ?? 0) - leadNow(s.subject.clock, now)), window: isCall(p.trackId) ? null : windowOf(s, p.trackId), zone: s.lead.zone }));
         // A track waiting to start after another (ticket 13) starts at its resolved instant; it has no window of its own to wait for then.
         for (const p of s.tracks) if (p.startedAt === null && p.startAt !== null) due.push({ wall: now + (p.startAt - leadNow(s.subject.clock, now)), window: [], zone: s.lead.zone });
-        cached = { version, due };
+        // An open call task can expire at the user's next day (the skip limit, ticket 15).
+        cached = { version, due, openCall: s.callTasks.some((t) => t.open && t.kind === "call") };
         this.wakeCache.set(id, cached);
       }
+      if (cached.openCall) times.push(nextDay);
       for (const d of cached.due) {
         if (d.wall > now) times.push(d.wall);
-        else if (d.window === null) times.push(await this.nextUserDay(now));
+        else if (d.window === null) times.push(nextDay);
         else {
           const opens = nextWindowOpen(d.window, d.zone, now);
           if (opens !== null && opens > now) times.push(opens);
@@ -264,6 +275,9 @@ export class Engine {
       if (a.retry === "wanted" || a.retry === "wanted_after_not_sent") times.push(slot);
     }
     for (const w of await this.store.openWork()) if (w.nextLookupWall !== null) times.push(w.nextLookupWall);
+    // A callback changes on the list by the clock (ticket 15): listed from the start of its day, ready at
+    // its time. No engine write happens then; the wake is there so the screens' next change covers it.
+    for (const t of await this.store.openCallbackInstants()) times.push(t);
     // A held reply falls back once it has waited one settling period of running time.
     // Each observation credits at most MAX_RUNNING_CREDIT, so the worker wakes at least that often while one waits.
     for (const r of await this.store.pendingReplies()) times.push(r.lastCountedWall + Math.min(ENGINE_PARAMS.SETTLING - r.waitedMs, ENGINE_PARAMS.MAX_RUNNING_CREDIT));
@@ -623,7 +637,10 @@ export class Engine {
 
   private async evaluateAll(): Promise<boolean> {
     let changed = false;
-    for (const [id, version] of await this.store.runningSubjectVersions()) {
+    // The user's zone decides the day an unworked call expires at, so it is part of the cache key.
+    const settings = JSON.stringify(await this.store.callSettings());
+    for (const [id, subjectVersion] of await this.store.runningSubjectVersions()) {
+      const version = `${subjectVersion}|${settings}`;
       const now = this.now();
       const known = this.settled.get(id);
       if (known?.key === version && now < known.until) continue;
@@ -633,6 +650,8 @@ export class Engine {
       if (same(next, snapshot)) {
         const lead = leadNow(snapshot.subject.clock, now);
         const starts = snapshot.tracks.filter((p) => p.startedAt === null && p.startAt !== null).map((p) => now + ((p.startAt ?? 0) - lead));
+        // An open call task may expire at the next user day (ticket 15); a held lead's callback is looked at then too.
+        if (snapshot.callTasks.some((t) => t.open)) starts.push(await this.nextUserDay(now));
         this.settled.set(id, { key: version, until: Math.min(Infinity, ...starts.filter((t) => t > now)) });
         continue;
       }

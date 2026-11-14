@@ -3,19 +3,19 @@
  * task with everything the call screen shows. Built from the engine's stored facts and the CRM, so
  * the screens render them without recomputing anything.
  */
-import { bucketOf, CALL_OUTCOMES, callNumbers, isListed, reasonOf, recordedNumberOf, type CallBucket } from "../../domain/sequence/calls.ts";
+import { bucketOf, CALL_OUTCOMES, callNumbers, isListed, listedForDay, queueRank, queueWall, recordedNumberOf, REDIAL_OUTCOMES, skippedTonight, type CallBucket } from "../../domain/sequence/calls.ts";
 import { displayPhone } from "../../domain/phone.ts";
 import { localDayNumber } from "../../domain/sequence/clock.ts";
 import { liveTracks } from "../../domain/sequence/definition.ts";
 import { deriveStatus } from "../../domain/sequence/progress.ts";
-import type { CallNumber, CallTask, RecordedNumber, SubjectState } from "../../domain/sequence/state.ts";
-import type { CallColleagueView, CallNumberView, CallQueueItem, RecordedNumberView, CallsView, CallTaskView, NoteView, TodayView, TouchView } from "../../shared/api.ts";
+import type { CallAttempt, CallNumber, CallTask, RecordedNumber, SubjectState } from "../../domain/sequence/state.ts";
+import type { CallColleagueView, CallNumberView, CallQueueItem, CallRecordView, RecordedNumberView, CallsView, CallTaskView, NoteView, TodayView, TouchView } from "../../shared/api.ts";
 import type { OutreachStore } from "../persistence/store.ts";
 import type { StoredNote } from "./engine-store.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 
 /** The decisions the call read models make: the queue order and the focus, from the engine's rules. */
-export type CallViewRules = Pick<Rules, "readyNowOrder" | "focusOf">;
+export type CallViewRules = Pick<Rules, "readyNowOrder" | "focusOf" | "callReason">;
 
 const iso = (t: number) => new Date(t).toISOString();
 
@@ -26,8 +26,21 @@ export function localTimeIn(zone: string, t: number): string {
 
 /** The user's date, YYYY-MM-DD in their zone. */
 function dateIn(zone: string, t: number): string {
-  return new Date(localDayNumber(t, zone) * 86_400_000).toISOString().slice(0, 10);
+  return dateOfDay(localDayNumber(t, zone));
 }
+
+/** A user-local day number as YYYY-MM-DD. */
+export const dateOfDay = (day: number): string => new Date(day * 86_400_000).toISOString().slice(0, 10);
+
+/** One logged call as the screens show it: the number dialled, and a redial or the callback time asked for. */
+export const callRecordView = (s: SubjectState, c: CallAttempt): CallRecordView => ({
+  outcome: c.outcome,
+  at: iso(c.atWall),
+  number: recordedView(recordedNumberOf(s, c.numberDetailId)),
+  note: c.note,
+  redial: c.redial,
+  callbackAt: c.callbackAt === null ? null : iso(c.callbackAt),
+});
 
 /** A phone track's name as the canvas gives it: "Phone track", or "Phone track 2" when the campaign has several. */
 function trackLabel(s: SubjectState, trackId: string): string {
@@ -61,7 +74,7 @@ async function partiesOf(store: OutreachStore, subjectId: string): Promise<Parti
   };
 }
 
-function queueItem(s: SubjectState, task: CallTask, parties: Parties, place: { bucket: CallBucket; opensAt: number | null }, now: number): CallQueueItem {
+function queueItem(s: SubjectState, task: CallTask, parties: Parties, place: { bucket: CallBucket; opensAt: number | null }, now: number, rules: CallViewRules = DEFAULT_RULES): CallQueueItem {
   return {
     taskId: task.id,
     enrollmentId: s.subject.id,
@@ -69,10 +82,13 @@ function queueItem(s: SubjectState, task: CallTask, parties: Parties, place: { b
     track: { id: task.trackId, label: trackLabel(s, task.trackId) },
     zone: s.lead.zone,
     localTime: localTimeIn(s.lead.zone, now),
-    reason: reasonOf(s, task),
+    reason: rules.callReason(s, task, now),
+    kind: task.kind,
+    callbackAt: task.callbackAt === null ? null : iso(task.callbackAt),
     dueAt: iso(task.dueWall),
     bucket: place.bucket,
     opensAt: place.opensAt === null ? null : iso(place.opensAt),
+    skippedTonight: skippedTonight(s, task, now),
   };
 }
 
@@ -82,7 +98,7 @@ function queueItem(s: SubjectState, task: CallTask, parties: Parties, place: { b
  */
 async function callList(store: OutreachStore, now: number, rules: CallViewRules = DEFAULT_RULES) {
   const day = await store.engine.callDay(now);
-  const items: { item: CallQueueItem; task: CallTask; skippedToday: boolean; subjectId: string; opensAt: number }[] = [];
+  const items: { item: CallQueueItem; task: CallTask; skippedToday: boolean; subjectId: string; opensAt: number; rank: 0 | 1 | 2 }[] = [];
   /** Every open task listed now, in a queue part or not (its hours closed for the day). */
   const listed = new Set<string>();
   for (const id of await store.engine.subjectsWithOpenCallTasks()) {
@@ -95,12 +111,12 @@ async function callList(store: OutreachStore, now: number, rules: CallViewRules 
       const parties = await partiesOf(store, id);
       if (!parties) continue;
       const skippedToday = task.skippedWall !== null && localDayNumber(task.skippedWall, day.userZone) === day.day;
-      items.push({ item: queueItem(s, task, parties, place, now), task, skippedToday, subjectId: id, opensAt: place.opensAt ?? now });
+      items.push({ item: queueItem(s, task, parties, place, now, rules), task, skippedToday, subjectId: id, opensAt: place.opensAt ?? now, rank: queueRank(s, task, now) });
     }
   }
   const byDue = (a: (typeof items)[number], b: (typeof items)[number]) =>
     a.task.dueWall - b.task.dueWall || (a.subjectId < b.subjectId ? -1 : a.subjectId > b.subjectId ? 1 : 0) || (a.task.stepId < b.task.stepId ? -1 : 1);
-  const entry = (x: (typeof items)[number]) => ({ taskId: x.task.id, subjectId: x.subjectId, stepId: x.task.stepId, dueWall: x.task.dueWall, skippedWall: x.skippedToday ? x.task.skippedWall : null });
+  const entry = (x: (typeof items)[number]) => ({ taskId: x.task.id, subjectId: x.subjectId, stepId: x.task.stepId, rank: x.rank, dueWall: queueWall(x.task), skippedWall: x.skippedToday ? x.task.skippedWall : null });
   const readyNow = items
     .filter((x) => x.item.bucket === "ready_now")
     .sort((a, b) => rules.readyNowOrder(entry(a), entry(b)))
@@ -139,7 +155,17 @@ const UP_NEXT = 5;
 
 export async function todayView(store: OutreachStore, now: number, rules?: CallViewRules): Promise<TodayView> {
   const { day, readyNow, laterToday } = await callList(store, now, rules);
-  return { date: dateIn(day.userZone, now), userZone: day.userZone, readyNow: readyNow.length, laterToday: laterToday.length, upNext: [...readyNow, ...laterToday].slice(0, UP_NEXT) };
+  const listed = [...readyNow, ...laterToday];
+  return {
+    date: dateIn(day.userZone, now),
+    userZone: day.userZone,
+    readyNow: readyNow.length,
+    laterToday: laterToday.length,
+    upNext: listed.slice(0, UP_NEXT),
+    // Oldest first, by the time the prospect asked for.
+    overdueCallbacks: readyNow.filter((x) => x.reason === "overdue").sort((a, b) => Date.parse(a.callbackAt ?? "") - Date.parse(b.callbackAt ?? "") || (a.taskId < b.taskId ? -1 : 1)),
+    carriedOver: listed.filter((x) => x.reason === "rolled_over" || x.reason === "redial").length,
+  };
 }
 
 /** One call task with everything the call screen shows, or null for an unknown task. */
@@ -163,7 +189,7 @@ export async function callTaskView(store: OutreachStore, taskId: string, now: nu
   for (const r of s.replies) touches.push({ touch: { kind: "reply", channel: r.channel, at: iso(r.atWall) }, t: r.atWall });
   for (const c of s.callAttempts) {
     if (c.outcome === "skip_for_now") continue;
-    touches.push({ touch: { kind: "call", at: iso(c.atWall), outcome: c.outcome, number: recordedView(recordedNumberOf(s, c.numberDetailId)), note: c.note }, t: c.atWall });
+    touches.push({ touch: { kind: "call", ...callRecordView(s, c) }, t: c.atWall });
   }
   touches.sort((a, b) => a.t - b.t);
 
@@ -200,5 +226,10 @@ export async function callTaskView(store: OutreachStore, taskId: string, now: nu
     companyNotes: (await store.engine.notesOf("company", parties.company.id)).map(noteView),
     colleagues,
     outcomes: listed ? CALL_OUTCOMES : [],
+    redialOutcomes: listed ? REDIAL_OUTCOMES : [],
+    kind: task.kind,
+    callbackAt: task.callbackAt === null ? null : iso(task.callbackAt),
+    dueAt: iso(task.dueWall),
+    listedFor: dateOfDay(listedForDay(s, task)),
   };
 }

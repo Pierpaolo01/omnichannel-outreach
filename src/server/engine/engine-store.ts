@@ -211,6 +211,11 @@ export interface EngineStore {
   callTaskSubject(taskId: string): Promise<string | null>;
   /** Subjects with an open call task, whatever their state: the call list is built from them. */
   subjectsWithOpenCallTasks(): Promise<string[]>;
+  /**
+   * The instants open callbacks of leads that have not ended change on the user's list (ticket 15): the
+   * start of each callback's user day, when it is listed, and its time, when it is ready.
+   */
+  openCallbackInstants(): Promise<number[]>;
   /** Notes on a person or a company, newest first. */
   notesOf(owner: "person" | "company", ownerId: string): Promise<StoredNote[]>;
   /** The latest call made with a note on each of these subjects; a skip for now is not a call. */
