@@ -995,7 +995,9 @@ export const SCREENS: readonly Screen[] = [
   {
     name: "fake provider: before launch with a phone track, its calls projected",
     open: async (page) => {
-      const f = await fakeProviderApp("phone-track");
+      // An app of its own: on the app the running phone campaign shares, two of these leads' texts wait
+      // on that campaign's conversations past the estimate's 120 days, and the screen rightly shows no figure.
+      const f = await fakeProviderApp("calls-projected");
       const id = await f.freshTwoChannelCampaign(`Calls projected ${Date.now()}`);
       await page.request.put(`${f.url}/api/campaigns/${id}/sequence`, { data: { ...TWO_CHANNELS, callScript: "Ask who books the evening appointments.", tracks: [...TWO_CHANNELS.tracks, phoneTrack("call", { kind: "entry" })] } });
       await page.goto(`${f.url}/campaigns/${id}/before-launch`);
