@@ -8,6 +8,7 @@ import { WIN_BACK_HAS_NO_TRACKS } from "../../domain/sequence/definition.ts";
 import { STATUS_LABEL } from "../status.tsx";
 import type { DeskSnapshot } from "./callDesk.ts";
 import { dayLabel, zonedInstants, type CallbackChoice } from "./callbackTime.ts";
+import { capacityItems, noUsableChannelItem, providerWaitItems, sendingInterruptedItem } from "./interruption.ts";
 
 /** The outcome buttons, as the approved prototype labels them. */
 export const OUTCOME_LABEL = {
@@ -48,13 +49,13 @@ export const numberKind = (n: Pick<CallNumberView, "kind">): string => NUMBER_KI
 /** "+44 20 7946 0111, direct": the number a past call was logged on. */
 export const dialledLine = (n: RecordedNumberView | null): string | null => (n ? `${n.value}, ${NUMBER_KIND[n.kind]}` : null);
 
-const timeIn = (zone: string, iso: string): string => new Intl.DateTimeFormat("en-GB", { timeZone: zone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(iso));
+export const timeIn = (zone: string, iso: string): string => new Intl.DateTimeFormat("en-GB", { timeZone: zone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(iso));
 
 /** "Thu 5 Nov": the date of an instant in a zone. */
 export const dateIn = (zone: string, iso: string): string => new Intl.DateTimeFormat("en-GB", { timeZone: zone, weekday: "short", day: "numeric", month: "short" }).format(new Date(iso)).replace(",", "");
 
 /** YYYY-MM-DD of an instant in a zone. */
-const isoDateIn = (zone: string, iso: string): string => new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(iso));
+export const isoDateIn = (zone: string, iso: string): string => new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(iso));
 
 /**
  * A callback's time, the one way every page says it (council on 32454ea, C): in the prospect's time, with their date
@@ -295,8 +296,11 @@ export interface AttentionItem {
   readonly tone: "crit" | "pause" | "end";
   readonly title: string;
   readonly body: string;
-  /** Where to act: Calls for an overdue callback, Campaigns otherwise. */
-  readonly action?: { readonly label: string; readonly href: string };
+  /**
+   * Where to act: Calls for an overdue callback, a lead's record, a campaign, Campaigns when omitted; null when no page
+   * acts on it. `ariaLabel` names the target when the visible label alone would repeat on the list.
+   */
+  readonly action?: { readonly label: string; readonly href: string; readonly ariaLabel?: string } | null;
 }
 
 /**
@@ -345,13 +349,38 @@ export function carriedItem(today: Pick<TodayView, "carriedOver" | "carriedOverL
   };
 }
 
-/** Everything Needs attention reports, each once; with Today's read, overdue callbacks first, then calls carried over. */
-export function attentionItems(n: NeedsAttention, userZone: string, today: Pick<TodayView, "overdueCallbacks" | "userZone" | "date" | "carriedOver" | "carriedOverLastDay"> | null): AttentionItem[] {
+/**
+ * Where Today says each list GET /api/needs-attention reports (ticket 20b). A list added to the read fails typecheck
+ * here until it has a place, so nothing the read reports is silently left off the page.
+ */
+export const SAID_ON_TODAY: Record<keyof NeedsAttention, string> = {
+  overdueCallbacks: "from Today's own read, which names whose they are (overdueItem)",
+  waitingOnProvider: "providerWaitItems",
+  senderProblems: "one entry per account",
+  accountWaits: "one entry per account",
+  stalledInboxes: "one entry per account",
+  heldCapacity: "one entry per account",
+  heldTracks: "one entry per hold reason",
+  waitingForCapacity: "capacityItems",
+  anomalies: "one entry each",
+  noUsableChannel: "noUsableChannelItem",
+  waitingOnTransport: "not on Today: the email provider's read lists these steps (follow-up 42 item 12), and ticket 20 does not add them here",
+};
+
+/**
+ * Everything Needs attention reports, each once, in the prototype's order: calls first (overdue callbacks, then calls
+ * carried over), then sending and its providers (ticket 20b), sender accounts, held work, leads waiting for capacity,
+ * anomalies, and leads with no way left to reach them last. Today's read (`today`) gives the user's zone and date.
+ */
+export function attentionItems(n: NeedsAttention, today: Pick<TodayView, "overdueCallbacks" | "userZone" | "date" | "carriedOver" | "carriedOverLastDay" | "sendingInterrupted">): AttentionItem[] {
+  const userZone = today.userZone;
   const items: AttentionItem[] = [];
-  const overdue = today ? overdueItem(today) : null;
+  const overdue = overdueItem(today);
   if (overdue) items.push(overdue);
-  const carried = today ? carriedItem(today) : null;
+  const carried = carriedItem(today);
   if (carried) items.push(carried);
+  if (today.sendingInterrupted) items.push(sendingInterruptedItem(today.sendingInterrupted, today.date, userZone));
+  items.push(...providerWaitItems(n.waitingOnProvider, today.date, userZone));
   for (const p of n.senderProblems) {
     items.push({
       key: `sender-${p.accountId}`,
@@ -379,7 +408,10 @@ export function attentionItems(n: NeedsAttention, userZone: string, today: Pick<
   for (const [reason, count] of byReason) {
     items.push({ key: `tracks-${reason}`, tone: "pause", title: count === 1 ? "One lead’s track is on hold" : `${count} leads’ tracks are on hold`, body: `On hold because ${HOLD_REASON[reason] ?? reason}. Nothing is dropped.` });
   }
+  items.push(...capacityItems(n.waitingForCapacity, today.date, userZone));
   for (const [i, a] of n.anomalies.entries()) items.push({ key: `anomaly-${i}`, tone: "end", title: "The provider reported something unexpected", body: a.what });
+  const ended = noUsableChannelItem(n.noUsableChannel, today.date, userZone);
+  if (ended) items.push(ended);
   return items;
 }
 

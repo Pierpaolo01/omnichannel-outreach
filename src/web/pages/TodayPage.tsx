@@ -2,6 +2,7 @@ import { Link } from "wouter";
 import type { CallQueueItem, TodayView } from "../../shared/api.ts";
 import { useLiveToday } from "../calls/useLiveToday.ts";
 import { CAPACITY_USED, attentionItems, dateHeading, reasonLine, todayLede, zonePlace, pausedCallsLine } from "../calls/wording.ts";
+import { interruptionLine } from "../calls/interruption.ts";
 import { ErrorState, StaleNotice } from "../components.tsx";
 import { Icon } from "../icons.tsx";
 import { greeting, todayHeading, useNow } from "../time.ts";
@@ -25,10 +26,18 @@ export function TodayPage() {
           <p className="mb-1.5 text-[15px] text-muted">{view ? dateHeading(view.date, now, view.userZone) : todayHeading(now)}</p>
           <h1 className="text-[38px] leading-[1.15] tracking-[-0.02em]">{greeting(now)}</h1>
           {view ? (
-            <p className="mt-2 max-w-[46ch] text-[18px] text-ink-2">
-              {todayLede(view.readyNow, view.laterToday)}
-              {view.capacityReached ? ` ${CAPACITY_USED}` : ""}
-            </p>
+            <>
+              <p className="mt-2 max-w-[46ch] text-[18px] text-ink-2">
+                {todayLede(view.readyNow, view.laterToday)}
+                {view.capacityReached ? ` ${CAPACITY_USED}` : ""}
+              </p>
+              {/* The spec's one line about the latest interruption, as the read gives it; no history (ticket 20b). */}
+              {view.interruption && (
+                <p data-testid="interruption-line" className="mt-2 max-w-[70ch] text-[14px] text-muted [overflow-wrap:anywhere]">
+                  {interruptionLine(view.interruption, view.date, view.userZone)}
+                </p>
+              )}
+            </>
           ) : live.error === null ? (
             <div role="status" aria-label="Loading today’s calls" className="skeleton mt-3 h-6 w-80 max-w-full" />
           ) : null}
@@ -72,12 +81,12 @@ export function TodayPage() {
           <h2 id="needs-attention" className="mb-3.5 text-[19px]">
             Needs attention
           </h2>
-          {attention === null && live.error !== null ? (
+          {(attention === null || view === null) && live.error !== null ? (
             <ErrorState title="Needs attention didn’t load." message={live.error} onRetry={live.retry} rescue={2} />
-          ) : attention === null ? (
+          ) : attention === null || view === null ? (
             <div role="status" aria-busy="true" aria-label="Loading needs attention" className="skeleton h-20 w-full" />
           ) : (
-            <Attention items={attentionItems(attention, view?.userZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone, view)} />
+            <Attention items={attentionItems(attention, view)} />
           )}
         </section>
       </div>
@@ -144,11 +153,14 @@ function Attention({ items }: { items: ReturnType<typeof attentionItems> }) {
             <b className="font-semibold">{i.title}</b>
             <p className="mt-0.5 text-[13.5px] text-muted">{i.body}</p>
           </div>
-          <div className="col-start-2 mt-2">
-            <Link href={i.action?.href ?? "/campaigns"} className="btn btn-sm border-line-strong bg-base-100 font-medium">
-              {i.action?.label ?? "Open campaigns"}
-            </Link>
-          </div>
+          {/* Omitted, an entry links to Campaigns; null, no page acts on it (sending not running). */}
+          {i.action !== null && (
+            <div className="col-start-2 mt-2">
+              <Link href={i.action?.href ?? "/campaigns"} aria-label={i.action?.ariaLabel} className="btn btn-sm border-line-strong bg-base-100 font-medium">
+                {i.action?.label ?? "Open campaigns"}
+              </Link>
+            </div>
+          )}
         </li>
       ))}
     </ul>
