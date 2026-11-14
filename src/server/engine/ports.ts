@@ -87,6 +87,12 @@ export interface SendPort {
   transportFor(step: { readonly threading: "new_subject" | "continue_thread" }): Transport;
   accounts(): Promise<AccountStatus[]>;
   /**
+   * The provider's freshness (ADR 0003 "Ticket 20a"): the instant of its last actual round trip, and for how long that
+   * stands for "it answers". A port that answers some calls from a cache (the Instantly adapter between polls) reports
+   * this; for any other port the engine takes the instant a call to it resolved, fresh for ENGINE_CONTACT_FRESH_MS.
+   */
+  contact?(): { readonly at: number | null; readonly freshForMs: number };
+  /**
    * ADR 0002's pre-send reply check: a reply in any of the lead's threads that is not one of `knownReplies` (the replies
    * the lead's record holds, by the identity the reply event carries) stops the send; `unavailable` when every thread
    * could not be read whole (ticket 17a; review bot on ca8baee, item 1).
@@ -151,5 +157,75 @@ export class UnprovisionedSmsPort implements SendPort {
   }
   lookup(): Promise<LookupResult> {
     return Promise.resolve({ kind: "unknown" });
+  }
+}
+
+/** A provider call's result, as the engine classifies it (ticket 20a; review bot on 592d679). */
+export type PortCallResult =
+  | { readonly call: "presendCheck"; readonly result: Awaited<ReturnType<SendPort["presendCheck"]>> }
+  | { readonly call: "handover"; readonly result: CallAnswer }
+  | { readonly call: "withdraw"; readonly result: Awaited<ReturnType<SendPort["withdraw"]>> }
+  | { readonly call: "lookup"; readonly result: LookupResult };
+
+/** Whether a call reached the provider and was answered, or failed. Only `answered` is contact. */
+export type CallOutcome = "answered" | "failed";
+
+const unreachable = (value: never): never => {
+  throw new Error(`a provider result the engine does not know: ${JSON.stringify(value)}`);
+};
+
+/**
+ * The one classification of a provider call's result (ticket 20a; review bot on 592d679): an answer the provider gave is
+ * contact; a failure resolved as a value (`unavailable`, `unknown`) is evidence of failure, never of contact, as are a
+ * timeout and a thrown error, which never reach here. Exhaustive: a result kind a port adds fails typecheck until it is
+ * classified.
+ */
+export function callOutcome(r: PortCallResult): CallOutcome {
+  switch (r.call) {
+    case "presendCheck":
+      switch (r.result.kind) {
+        case "clear":
+        case "reply":
+          return "answered";
+        case "unavailable":
+          return "failed";
+        default:
+          return unreachable(r.result);
+      }
+    case "handover":
+      switch (r.result.kind) {
+        case "accepted":
+        case "rejected":
+          return "answered";
+        case "unknown":
+          return "failed";
+        default:
+          return unreachable(r.result);
+      }
+    case "withdraw": {
+      const answer = r.result;
+      switch (answer) {
+        case "withdrawn":
+        case "too-late":
+          return "answered";
+        case "unknown":
+          return "failed";
+        default:
+          return unreachable(answer);
+      }
+    }
+    case "lookup":
+      switch (r.result.kind) {
+        case "sent":
+        case "queued":
+        case "not-sent":
+          return "answered";
+        case "unknown":
+          return "failed";
+        default:
+          return unreachable(r.result);
+      }
+    default:
+      return unreachable(r);
   }
 }

@@ -23,10 +23,10 @@ export function resolveDataDir(input: {
   const { env, home, projectRoot, profile = "app", realpath = defaultRealpath } = input;
   const real = (p: string) => canonical(p, realpath);
   const base = env["XDG_DATA_HOME"] || path.join(home, ".local", "share");
-  const appDir = path.resolve(env["OUTREACH_DATA_DIR"] || path.join(base, "omnichannel-outreach"));
+  const appDir = path.resolve(chosen(env, "OUTREACH_DATA_DIR") ?? path.join(base, "omnichannel-outreach"));
   const dir =
     profile === "development"
-      ? path.resolve(env["OUTREACH_DEV_DATA_DIR"] || path.join(base, "omnichannel-outreach-dev"))
+      ? path.resolve(chosen(env, "OUTREACH_DEV_DATA_DIR") ?? path.join(base, "omnichannel-outreach-dev"))
       : appDir;
   // Compare real directories, through symlinks and aliases such as /tmp and /private/tmp.
   if (profile === "development") {
@@ -42,6 +42,17 @@ export function resolveDataDir(input: {
     throw new Error(`The data directory ${dir} is inside the repository. Choose a directory outside it.`);
   }
   return dir;
+}
+
+/**
+ * A data-folder variable as given: null only when unset, which means the default. Set but empty or blank (a shell variable
+ * a failed step left unset, ticket 20a) is an error, never the default folder, which may hold the user's real data.
+ */
+function chosen(env: Env, name: "OUTREACH_DATA_DIR" | "OUTREACH_DEV_DATA_DIR"): string | null {
+  const value = env[name];
+  if (value === undefined) return null;
+  if (value.trim() === "") throw new Error(`${name} is set but empty. Unset it to use the default data directory, or give the directory to use.`);
+  return value;
 }
 
 function defaultRealpath(existing: string): string {

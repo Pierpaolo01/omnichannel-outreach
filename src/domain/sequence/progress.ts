@@ -95,6 +95,16 @@ export function channelReaches(state: SubjectState, channel: TrackChannel): bool
   return channel === "call" ? hasGoodNumber(state) && !state.subject.noMoreCalls : destinationFor(state.lead.details, channel) !== null;
 }
 
+/**
+ * Why a channel cannot reach the lead (ticket 20a, Needs attention): null when it can; `declined` for calls after a
+ * decline; `bad` when the lead has such a detail but every one is marked bad; `missing` when it has none.
+ */
+export function unreachableWhy(state: SubjectState, channel: TrackChannel): "missing" | "bad" | "declined" | null {
+  if (channelReaches(state, channel)) return null;
+  if (channel === "call") return state.subject.noMoreCalls && hasGoodNumber(state) ? "declined" : state.lead.phones.length > 0 ? "bad" : "missing";
+  return destinationFor(state.lead.details.map((d) => ({ ...d, bad: false })), channel) !== null ? "bad" : "missing";
+}
+
 /** Channels in the lead's branch that can reach the lead now (2.1). */
 export function reachable(state: SubjectState): Set<string> {
   const channels = new Set<string>();

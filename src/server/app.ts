@@ -33,7 +33,7 @@ export interface AppDependencies {
   readonly now: () => string;
   readonly newId: () => string;
   /** The sequence engine. Without one, the app runs an engine with no connected email provider. */
-  readonly engine?: Pick<Engine, "launch" | "logCallOutcome" | "controlLead" | "setCampaignPause">;
+  readonly engine?: Pick<Engine, "launch" | "logCallOutcome" | "controlLead" | "setCampaignPause"> & Partial<Pick<Engine, "transportAvailable">>;
   /** The email provider's own description, for GET /api/email-provider; absent when none is connected. */
   readonly emailProvider?: EmailProviderSource | null;
   /**
@@ -571,7 +571,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     return c.json<CallOutcomeAnswer>({ task, nextFocusTaskId: (await callsView(store, at, { rules })).focusTaskId });
   });
 
-  app.get("/needs-attention", async (c) => c.json(await needsAttention(store.engine, Date.parse(now()), rules)));
+  app.get("/needs-attention", async (c) => c.json(await needsAttention(store.engine, Date.parse(now()), rules, (channel, threading) => engine.transportAvailable?.(channel, threading) ?? true)));
 
   // No SMS provider is provisioned or chosen (#28): the running app reports none, honestly.
   app.get("/sms-provider", async (c) => {

@@ -33,8 +33,9 @@ import type {
   WorkSettlement,
 } from "../../domain/sequence/state.ts";
 import { isOutreachStatus } from "../../domain/outreach-status.ts";
-import type { BounceEvent, CallNoteRecord, CallSettings, CampaignEngineRow, DefinitionSave, EngineStore, LaunchOutcome, ReplyEvent, SaveResult, SenderAccountConfig, StoredDefinition, StoredNote } from "../engine/engine-store.ts";
+import type { BounceEvent, CallNoteRecord, CallSettings, CampaignEngineRow, DefinitionSave, EngineStore, LaunchOutcome, ReplyEvent, SaveResult, SenderAccountConfig, StoredDefinition, StoredNote, WorkerLease } from "../engine/engine-store.ts";
 import { liveDetailRowOf } from "./sqlite-store.ts";
+import { holdsLeaseOn, releaseLeaseOn, takeLeaseOn } from "./lease-table.ts";
 
 type Row = Record<string, SQLOutputValue>;
 
@@ -299,6 +300,10 @@ export class SqliteEngineStore implements EngineStore {
       .map((r) => str(r, "id"));
   }
 
+  async endedSubjectIds(reason: EndReason): Promise<string[]> {
+    return this.sql("SELECT id FROM enrollments WHERE ended = ? ORDER BY ended_wall DESC, id").all(reason).map((r) => str(r, "id"));
+  }
+
   async runningSubjectVersions(): Promise<Map<string, string>> {
     // The subject's and campaign's versions, plus the lead facts decisions read that no subject
     // write bumps: the lead's live details and their bad marks, and its records' last update.
@@ -460,6 +465,24 @@ export class SqliteEngineStore implements EngineStore {
 
   async setMeta(key: string, value: string): Promise<void> {
     this.run("INSERT INTO engine_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [key, value]);
+  }
+
+  async setMetas(values: Readonly<Record<string, string>>): Promise<void> {
+    this.transaction(() => {
+      for (const [key, value] of Object.entries(values)) this.run("INSERT INTO engine_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [key, value]);
+    });
+  }
+
+  async takeLease(owner: WorkerLease, now: number, staleMs: number, alive: (pid: number) => boolean): Promise<{ readonly ok: true } | { readonly ok: false; readonly holder: WorkerLease }> {
+    return takeLeaseOn(this.db, owner, now, staleMs, alive);
+  }
+
+  holdsLease(ownerId: string, now: number, staleMs: number): boolean {
+    return holdsLeaseOn(this.db, ownerId, now, staleMs);
+  }
+
+  async releaseLease(ownerId: string): Promise<void> {
+    releaseLeaseOn(this.db, ownerId);
   }
 
   async recordBounce(b: BounceEvent): Promise<void> {
