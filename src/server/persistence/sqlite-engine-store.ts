@@ -35,7 +35,7 @@ import type {
 import { isOutreachStatus } from "../../domain/outreach-status.ts";
 import type { BounceEvent, CallNoteRecord, CallSettings, CampaignEngineRow, DefinitionSave, EngineStore, LaunchOutcome, ReplyEvent, SaveResult, SenderAccountConfig, StoredDefinition, StoredNote, WorkerLease } from "../engine/engine-store.ts";
 import { liveDetailRowOf } from "./sqlite-store.ts";
-import { releaseLeaseOn, takeLeaseOn } from "./lease-table.ts";
+import { holdsLeaseOn, releaseLeaseOn, takeLeaseOn } from "./lease-table.ts";
 
 type Row = Record<string, SQLOutputValue>;
 
@@ -465,6 +465,10 @@ export class SqliteEngineStore implements EngineStore {
 
   async takeLease(owner: WorkerLease, now: number, staleMs: number, alive: (pid: number) => boolean): Promise<{ readonly ok: true } | { readonly ok: false; readonly holder: WorkerLease }> {
     return takeLeaseOn(this.db, owner, now, staleMs, alive);
+  }
+
+  holdsLease(ownerId: string, now: number, staleMs: number): boolean {
+    return holdsLeaseOn(this.db, ownerId, now, staleMs);
   }
 
   async releaseLease(ownerId: string): Promise<void> {

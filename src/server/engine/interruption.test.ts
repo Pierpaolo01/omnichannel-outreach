@@ -303,6 +303,21 @@ describe("only sends the interruption delayed are rescheduled (question Q21's in
   });
 });
 
+describe("the room and the window must overlap (review bot on 592d679)", () => {
+  test("a full Monday, a stop to Tuesday 08:00, and a window that opens at 09:00: none rescheduled", async () => {
+    const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 1, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+    await h.tick();
+    const nineToTen = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 9, end: 10 }));
+    const { campaign } = await h.createCampaign("Clinics", { businesses: [HARBOUR], people: PEOPLE.slice(0, 2) });
+    await h.defineSequence(campaign.id, { ...DEFINITION, timezone: "UTC", tracks: DEFINITION.tracks.map((t) => ({ ...t, window: nineToTen })) });
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + 30 * MIN);
+    expect(h.fake.deliveryLog).toHaveLength(1);
+    await h.stopFor(TUESDAY_0 + 8 * H - h.clock);
+    expect((await h.request<TodayView>("GET", "/api/today")).body.interruption).toMatchObject({ rescheduled: 0 });
+  });
+});
+
 describe("capacity across two campaigns after an interruption", () => {
   test("missed work waits for the next reset day instead of bursting past the inbox's capacity", async () => {
     // Capacity 4 a day, shared: six first emails on Monday would need two days.

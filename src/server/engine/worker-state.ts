@@ -69,7 +69,7 @@ export async function interruptionNotice(store: Pick<EngineStore, "meta">): Prom
  */
 export interface FailedRead {
   readonly channel: "email" | "sms";
-  readonly part: "accounts" | "observation";
+  readonly part: "accounts" | "observation" | "call";
   readonly at: number;
 }
 
@@ -81,7 +81,7 @@ export function parseEvidence(raw: string | null): Record<"email" | "sms", Provi
     if (typeof v !== "object" || v === null) return emptyEvidence;
     const o = v as Record<string, unknown>;
     const n = (x: unknown) => (finite(x) ? x : null);
-    const part = o["failedPart"] === "accounts" || o["failedPart"] === "observation" ? o["failedPart"] : null;
+    const part = o["failedPart"] === "accounts" || o["failedPart"] === "observation" || o["failedPart"] === "call" ? o["failedPart"] : null;
     return { contactAt: n(o["contactAt"]), freshForMs: n(o["freshForMs"]) ?? 0, failedAt: n(o["failedAt"]), failedPart: part };
   };
   try {

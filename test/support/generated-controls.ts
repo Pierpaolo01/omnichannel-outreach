@@ -416,20 +416,25 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
    * send call before y, answered or swallowed, plus the gap) came before y, and some reset day within [x, y) had fewer
    * sends than its capacity, counting deliveries the app knew of by y.
    */
-  function roomDuring(sender: string, x: number, y: number): boolean {
+  function roomDuring(sender: string, x: number, y: number): { from: number; to: number }[] {
     const ch = sender.startsWith("+") ? "sms" : "email";
     const calls = [...handovers(ch).filter((c) => c.sender === sender && c.at < y).map((c) => c.at), ...[...h.swallowedHandovers, ...uncalledHandovers].filter((c) => c.sender === sender && c.at < y).map((c) => c.at)];
-    if (calls.length > 0 && Math.max(...calls) + gap >= y) return false;
+    const slot = calls.length > 0 ? Math.max(...calls) + gap : -Infinity;
     const capacity = ch === "sms" ? 50 : CAPACITY;
     const zone = ch === "sms" ? ZONE : "UTC";
     const port = ch === "sms" ? sms : email;
     const known = (d: { key: string; at: number; visibleAt: number }) => upFrom(Math.min(d.visibleAt, port.lookupLog.find((l) => l.key === d.key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity)) <= y;
-    for (let t = x; t < y; t = startOfDay(local(t, zone).day + 1, zone)) {
+    const out: { from: number; to: number }[] = [];
+    for (let t = x; t < y; ) {
       const day = local(t, zone).day;
+      const next = startOfDay(day + 1, zone);
       const sent = deliveries(ch).filter((d) => d.sender === sender && local(d.at, zone).day === day && known(d)).length;
-      if (sent < capacity) return true;
+      const from = Math.max(t, slot);
+      const to = Math.min(next, y);
+      if (sent < capacity && from < to) out.push({ from, to });
+      t = next;
     }
-    return false;
+    return out;
   }
 
   function rescheduledByRecord(x: number, y: number, uncalled: ReadonlySet<string>): number {
@@ -443,8 +448,11 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
         const from = Math.max(x, p.due);
         const instants = [from, ...holdsOf(s).map((hold) => hold.to).filter((at) => at > from && at < y)];
         const sender = t.channel === "sms" ? numbers[s.campaign]!.id : "inbox-a";
-        if (!roomDuring(sender, x, y)) continue;
-        if (instants.some((at) => at < y && !heldAt(s, at) && !endedAt(s, at))) {
+        // One common instant: due, the lead neither held nor ended, and the sender with room and its slot (the windows are
+        // open all day in these runs).
+        const rooms = roomDuring(sender, x, y);
+        const candidates = [...instants, ...rooms.map((r) => r.from)].filter((at) => at >= from && at < y);
+        if (candidates.some((at) => !heldAt(s, at) && !endedAt(s, at) && rooms.some((r) => r.from <= at && at < r.to))) {
           n++;
           if (process.env["CONTROLS_DEBUG"]) console.info(`counted y=${isoOf(y)} cut=${JSON.stringify(cut)} logs=${email.handoverLog.length}/${sms.handoverLog.length} ${s.id}/${p.stepId} due ${isoOf(p.due)} handovers ${JSON.stringify(handovers(t.channel === "sms" ? "sms" : "email").filter((c) => c.subjectId === s.id && c.stepId === p.stepId).map((c) => [c.key, isoOf(c.at)]))} withdrawals ${JSON.stringify((t.channel === "sms" ? sms : email).withdrawLog.filter((w) => handovers(t.channel === "sms" ? "sms" : "email").some((c) => c.key === w.key && c.subjectId === s.id && c.stepId === p.stepId)).map((w) => [isoOf(w.at), w.answer]))}`);
         }

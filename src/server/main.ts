@@ -17,7 +17,7 @@ import { DATABASE_FILE, resolveDataDir } from "./config.ts";
 import { checkHost, isLoopbackAddress } from "./guard.ts";
 import { leaseTable } from "./persistence/lease-table.ts";
 import { openDatabase, openStoreOn } from "./persistence/sqlite-store.ts";
-import { LEASE_RENEW_MS, processAlive, WorkerLeaseHolder } from "./worker-lease.ts";
+import { LEASE_RENEW_MS, LEASE_STALE_MS, processAlive, WorkerLeaseHolder } from "./worker-lease.ts";
 
 /**
  * Runs the whole application locally: the HTTP interface under /api and the web client.
@@ -50,7 +50,8 @@ mkdirSync(dataDir, { recursive: true, mode: 0o700 });
 // listens, so two processes never recover and send from one database at once; and before it migrates (council F), so a
 // newer build started beside a running one changes nothing. The lease lives in a table of its own, needing no schema.
 const database = openDatabase(path.join(dataDir, DATABASE_FILE));
-const lease = new WorkerLeaseHolder(leaseTable(database), { id: randomUUID(), pid: process.pid, now: () => Date.now(), alive: processAlive });
+const leaseId = randomUUID();
+const lease = new WorkerLeaseHolder(leaseTable(database), { id: leaseId, pid: process.pid, now: () => Date.now(), alive: processAlive });
 const taken = await lease.take();
 if (!taken.ok) {
   console.error(JSON.stringify({ level: "error", event: "worker_refused", message: taken.message }));
@@ -79,7 +80,7 @@ const emailPort: SendPort = instantly
 console.info(JSON.stringify({ level: "info", event: "email_provider", provider: instantly ? "instantly" : "none", sending: instantly?.writes ? "on" : "off" }));
 // No SMS provider is provisioned or chosen (#28): SMS has no connected sender, so SMS tracks cannot launch.
 console.info(JSON.stringify({ level: "info", event: "sms_provider", provider: "none" }));
-const engine = new Engine({ store: store.engine, port: emailPort, smsPort: new UnprovisionedSmsPort(), now: () => Date.now(), newId: randomUUID, leaseHeld: () => lease.heldAt(Date.now()) });
+const engine = new Engine({ store: store.engine, port: emailPort, smsPort: new UnprovisionedSmsPort(), now: () => Date.now(), newId: randomUUID, leaseHeld: () => lease.heldAt(Date.now()), leaseOwner: { id: leaseId, staleMs: LEASE_STALE_MS } });
 const api = getRequestListener(
   createApp({ store, now: () => new Date().toISOString(), newId: randomUUID, engine, emailProvider: emailPort instanceof InstantlyEmailPort ? emailPort : null }).fetch,
 );

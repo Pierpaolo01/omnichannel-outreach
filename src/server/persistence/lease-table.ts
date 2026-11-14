@@ -47,3 +47,14 @@ export function leaseTable(db: DatabaseSync): { takeLease: (owner: WorkerLease, 
     releaseLease: (ownerId) => Promise.resolve(releaseLeaseOn(db, ownerId)),
   };
 }
+
+/**
+ * Whether `ownerId` holds the lease at `now`: it is the stored holder and renewed it within `staleMs` (ticket 20a, review
+ * bot and verifier on 592d679). Read inside the transaction that authorizes a send, and again right before each provider
+ * call, so a process that lost the lease records no handover and makes no call.
+ */
+export function holdsLeaseOn(db: DatabaseSync, ownerId: string, now: number, staleMs: number): boolean {
+  ensure(db);
+  const row = db.prepare("SELECT owner, renewed_wall FROM worker_lease WHERE id = 1").get();
+  return row !== undefined && String(row["owner"]) === ownerId && now - Number(row["renewed_wall"]) <= staleMs;
+}

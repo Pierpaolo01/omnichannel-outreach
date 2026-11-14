@@ -53,7 +53,10 @@ function runningSpans(freezes: readonly Freeze[], from: number, to: number, now:
  * and its window was open, and which some account it may use could have taken then (`roomDuring`: room on a reset day and
  * a free pacing slot; question Q21). Read at `now`, the instant sending resumed, after evaluation.
  */
-export function rescheduledSteps(state: SubjectState, interruption: Interruption, now: number, roomDuring: (accountId: string) => boolean = () => true): { trackId: string; stepId: string }[] {
+/** The stretches of an interruption in which an account could have taken a send: room on its reset day and its pacing slot free. */
+export type RoomDuring = (accountId: string) => readonly { readonly from: number; readonly to: number }[];
+
+export function rescheduledSteps(state: SubjectState, interruption: Interruption, now: number, roomDuring: RoomDuring = () => [interruption]): { trackId: string; stepId: string }[] {
   if (state.subject.ended !== null) return [];
   const out: { trackId: string; stepId: string }[] = [];
   for (const p of state.tracks) {
@@ -69,13 +72,19 @@ export function rescheduledSteps(state: SubjectState, interruption: Interruption
     if (leadNow(state.subject.clock, now) < p.dueAt) continue;
     const due = wallAtLead(state.subject.clock, state.freezes, p.dueAt, now);
     const window = windowOf(state, p.trackId);
-    const sendable = runningSpans(state.freezes, Math.max(interruption.from, due), interruption.to, now).some((span) => {
-      const opens = nextWindowOpen(window, state.lead.zone, span.from);
-      return opens !== null && opens < span.to;
-    });
-    // Question Q21's interim: only a send the interruption delayed: some account it may use had room on a reset day and a
-    // free pacing slot at some instant of the interruption. A send waiting on a full inbox throughout was not delayed by it.
-    if (sendable && candidatesFor(state, p.trackId).some(roomDuring)) out.push({ trackId: p.trackId, stepId });
+    // Question Q21's interim, one common instant (review bot on 592d679): the lead ran with the step due, its window was
+    // open, and an account it may use had room and its pacing slot, all at the same instant of the interruption.
+    const rooms = candidatesFor(state, p.trackId).flatMap((id) => roomDuring(id));
+    const delayed = runningSpans(state.freezes, Math.max(interruption.from, due), interruption.to, now).some((span) =>
+      rooms.some((room) => {
+        const from = Math.max(span.from, room.from);
+        const to = Math.min(span.to, room.to);
+        if (from >= to) return false;
+        const opens = nextWindowOpen(window, state.lead.zone, from);
+        return opens !== null && opens < to;
+      }),
+    );
+    if (delayed) out.push({ trackId: p.trackId, stepId });
   }
   return out;
 }

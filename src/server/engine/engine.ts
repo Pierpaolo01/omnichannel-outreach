@@ -24,7 +24,7 @@ export const CONTROL_REQUEST_REUSED = "This request id was already used for anot
 function outcomeBody(input: OutcomeInput): string {
   return JSON.stringify({ outcome: input.outcome, redial: input.redial, callbackAt: input.callbackAt, declinedPath: input.declinedPath, numberId: input.numberId, note: input.note, noteScope: input.noteScope });
 }
-import { UnprovisionedSmsPort, type AttemptRef, type HandoverRequest, type ProviderEvent, type SendPort } from "./ports.ts";
+import { callOutcome, UnprovisionedSmsPort, type AttemptRef, type CallOutcome, type PortCallResult, type HandoverRequest, type ProviderEvent, type SendPort } from "./ports.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 import { HEARTBEAT_KEY, NOTICE_KEY, parseInstant, PROVIDERS_KEY, TICK_ENDED_KEY, TICK_FAILED_KEY } from "./worker-state.ts";
 import { relevantChannels, waitingOn, type ProviderEvidence } from "../../domain/sequence/providers.ts";
@@ -122,6 +122,11 @@ export interface EngineDependencies {
    * the lease's staleness window. While false, the dispatch gate sends nothing. Absent: always held (tests).
    */
   readonly leaseHeld?: () => boolean;
+  /**
+   * This process's lease, checked against the stored holder (ticket 20a; review bot and verifier on 592d679): inside the
+   * transaction that authorizes a send, and immediately before each provider call. Absent: always held (tests).
+   */
+  readonly leaseOwner?: { readonly id: string; readonly staleMs: number };
   /** Where this engine's ticks queue; the process's by default. A test's second worker stands for another process. */
   readonly ticks?: TickQueue;
 }
@@ -152,7 +157,7 @@ export class Engine {
   /** Ticket 20a (council D): the last call each provider answered while its contact stood, extending it. */
   private readonly extendedAt: Record<Channel, number | null> = { email: null, sms: null };
   /** Ticket 20a (council G): each provider's last failed read, as evidence. */
-  private readonly failedRead: Record<Channel, { at: number; part: "accounts" | "observation" } | null> = { email: null, sms: null };
+  private readonly failedRead: Record<Channel, { at: number; part: "accounts" | "observation" | "call" } | null> = { email: null, sms: null };
   /** Whether the dispatch gate has asked every provider again in this round. */
   private askedThisRound = false;
 
@@ -186,6 +191,8 @@ export class Engine {
   private callAnswered(channel: Channel): void {
     const now = this.clockNow();
     this.anyAnswer(now);
+    // A port that reports its own contact (the adapter) is never extended from call results: only its round trips count.
+    if (this.ports[channel].contact) return;
     const { at, freshForMs } = this.contactOf(channel);
     if (at !== null && now - at <= freshForMs) this.extendedAt[channel] = now;
     this.advanceHeartbeat(now);
@@ -226,7 +233,7 @@ export class Engine {
   }
 
   /** A read failed: the round is not contact, and the read model says which channel and part (ticket 20a). */
-  private async readFailed(channel: Channel, part: "accounts" | "observation"): Promise<void> {
+  private async readFailed(channel: Channel, part: "accounts" | "observation" | "call"): Promise<void> {
     this.failedRead[channel] = { at: this.clockNow(), part };
     await this.saveEvidence();
   }
@@ -242,6 +249,7 @@ export class Engine {
   private readonly locks: InboxLocks;
   private readonly ticks: TickQueue;
   private readonly leaseHeld: (() => boolean) | null;
+  private readonly leaseOwner: { readonly id: string; readonly staleMs: number } | null;
   /**
    * Subjects known to need nothing, by version key, until a wall instant: evaluated with no
    * change, or with nothing ready to claim. A change to the subject, its campaign or its lead
@@ -268,10 +276,11 @@ export class Engine {
     this.locks = deps.locks ?? PROCESS_LOCKS;
     this.ticks = deps.ticks ?? PROCESS_TICKS;
     this.leaseHeld = deps.leaseHeld ?? null;
+    this.leaseOwner = deps.leaseOwner ?? null;
   }
 
   /** A port call bounded by CALL_TIMEOUT; a throw counts as the timed-out answer. */
-  private bounded<T>(call: () => Promise<T>, timedOut: T, channel: Channel | null = null): Promise<T> {
+  private bounded<T>(call: () => Promise<T>, timedOut: T, channel: Channel | null = null, classify: ((value: T) => PortCallResult) | null = null): Promise<T> {
     let started: Promise<T>;
     let answered = false;
     try {
@@ -285,9 +294,21 @@ export class Engine {
     } catch {
       return Promise.resolve(timedOut);
     }
-    return this.waitFor(started, ENGINE_PARAMS.CALL_TIMEOUT, timedOut).then((value) => {
-      // Ticket 20a (council D): a call the provider answered extends a contact that still stands.
-      if (answered && channel !== null) this.callAnswered(channel);
+    return this.waitFor(started, ENGINE_PARAMS.CALL_TIMEOUT, timedOut).then(async (value) => {
+      if (channel === null || classify === null) return value;
+      // Ticket 20a (council D; review bot on 592d679): only a call the provider answered is contact, decided by the one
+      // classification of its result; a timeout, an error or a failure resolved as a value is evidence of failure.
+      const outcome: CallOutcome = answered ? callOutcome(classify(value)) : "failed";
+      switch (outcome) {
+        case "answered":
+          this.callAnswered(channel);
+          break;
+        case "failed":
+          await this.readFailed(channel, "call");
+          break;
+        default:
+          throw new Error(`an outcome the engine does not know: ${String(outcome satisfies never)}`);
+      }
       return value;
     });
   }
@@ -414,22 +435,26 @@ export class Engine {
       return true;
     }
     this.silenceFrom = null;
-    // Question Q21's interim: an account could have taken a send during the interruption if its pacing slot came before
-    // the end and some reset day within it had room (sends counted that day under capacity).
-    const room = new Map<string, boolean>();
+    // Question Q21's interim, as intervals (review bot on 592d679): each reset day's part of the interruption in which the
+    // account had room (sends counted that day under capacity), from its pacing slot on.
+    const room = new Map<string, { from: number; to: number }[]>();
     for (const a of await this.store.accounts(this.now())) {
-      let fits = false;
-      if (a.nextSlotAt < gap.to) {
-        for (let t = gap.from; t < gap.to && !fits; t = startOfLocalDay(localDayNumber(t, a.resetZone) + 1, a.resetZone)) fits = (await this.store.sentToday(a.id, t)) < a.capacity;
+      const stretches: { from: number; to: number }[] = [];
+      for (let t = gap.from; t < gap.to; ) {
+        const next = startOfLocalDay(localDayNumber(t, a.resetZone) + 1, a.resetZone);
+        const from = Math.max(t, a.nextSlotAt);
+        const to = Math.min(next, gap.to);
+        if (from < to && (await this.store.sentToday(a.id, t)) < a.capacity) stretches.push({ from, to });
+        t = next;
       }
-      room.set(a.id, fits);
+      room.set(a.id, stretches);
     }
     let rescheduled = 0;
     for (const id of await this.store.runningSubjectIds()) {
       const now = this.now();
       const s = await this.store.subject(id, now);
       if (!s) continue;
-      rescheduled += this.rules.rescheduled(s, gap, now, (accountId) => room.get(accountId) ?? false).length;
+      rescheduled += this.rules.rescheduled(s, gap, now, (accountId) => room.get(accountId) ?? []).length;
       const after = this.rules.afterInterruption(s, gap, now);
       if (!same(after, s)) await this.store.update(id, now, (current) => (this.rules.versionsMatch(s, current) ? { ...after, accounts: current.accounts } : null));
     }
@@ -541,6 +566,11 @@ export class Engine {
     }
     const future = times.filter((t) => t > now);
     return future.length > 0 ? Math.min(...future) : null;
+  }
+
+  /** Whether this process holds the lease at `now`, by the stored holder and its renewal: synchronous, no await. */
+  private leaseIsMine(now: number): boolean {
+    return this.leaseOwner === null || this.store.holdsLease(this.leaseOwner.id, now, this.leaseOwner.staleMs);
   }
 
   /** Whether a step on `channel` with `threading` can be handed to its port now (a transport may be unavailable: ADR 0002 X2). */
@@ -903,8 +933,9 @@ export class Engine {
       }
       const w = (await this.store.work(due.key)) ?? due;
       const port = await this.portOf(w.accountId);
+      if (!this.leaseIsMine(this.clockNow())) return changed;
       const asked = this.now();
-      const answer = await this.bounded(() => port.lookup(this.ref(w)), { kind: "unknown" as const }, port.channel);
+      const answer = await this.bounded(() => port.lookup(this.ref(w)), { kind: "unknown" as const }, port.channel, (result) => ({ call: "lookup", result }));
       this.hooks.crashPoint?.("after_lookup", live?.id ?? null);
       changed = (await this.answered(asked, () => this.applyWork(w.subjectId, w.key, { kind: "lookup_answer", answer, now: this.now() }))) || changed;
     }
@@ -922,11 +953,13 @@ export class Engine {
     for (const w of await this.store.workToWithdraw()) {
       if (!this.rules.withdrawalDue(w, this.now(), carried.has(w.key))) continue;
       const port = await this.portOf(w.accountId);
-      const answer = await this.bounded(() => port.withdraw(this.ref(w)), "unknown" as const, port.channel);
+      if (!this.leaseIsMine(this.clockNow())) return changed;
+      const answer = await this.bounded(() => port.withdraw(this.ref(w)), "unknown" as const, port.channel, (result) => ({ call: "withdraw", result }));
       // "Too late" means it went: the lookup is asked for its send time first, so its successor counts from the real send.
       if (answer === "too-late") {
+        if (!this.leaseIsMine(this.clockNow())) return changed;
         const asked = this.now();
-        const looked = await this.bounded(() => port.lookup(this.ref(w)), { kind: "unknown" as const }, port.channel);
+        const looked = await this.bounded(() => port.lookup(this.ref(w)), { kind: "unknown" as const }, port.channel, (result) => ({ call: "lookup", result }));
         if (looked.kind === "sent") {
           changed = (await this.answered(asked, () => this.applyWork(w.subjectId, w.key, { kind: "lookup_answer", answer: looked, now: this.now() }))) || changed;
           continue;
@@ -1229,7 +1262,7 @@ export class Engine {
     // The replies the lead's record holds are not news (a restart after an auto-reply): the port reports any other reply,
     // in any of the lead's threads (ticket 17a; review bot on ca8baee, item 1; ADR 0002's correlation rules).
     const knownReplies = (subject?.replies ?? []).filter((r) => r.channel === channel).map((r) => r.providerRef);
-    const result = this.rules.presendAnswer(await this.bounded(() => port.presendCheck({ sender: a.accountId, destination: a.destination, threadRefs, knownReplies }), { kind: "unavailable" as const }, port.channel), knownReplies);
+    const result = this.rules.presendAnswer(await this.bounded(() => port.presendCheck({ sender: a.accountId, destination: a.destination, threadRefs, knownReplies }), { kind: "unavailable" as const }, port.channel, (result) => ({ call: "presendCheck", result })), knownReplies);
     if (result.kind === "unavailable") return false;
     await this.store.update(a.subjectId, now, (s) => {
       let next: SubjectState = { ...s, attempts: s.attempts.map((x) => (x.id === a.id ? { ...x, presendCheckedWall: now, presendFoundReply: result.kind === "reply" } : x)) };
@@ -1283,6 +1316,10 @@ export class Engine {
       const request = this.request(authorized);
       this.hooks.crashPoint?.(crashPoint, a.id);
       this.hooks.afterAuthorization?.(a.id);
+      // Ownership again, immediately before the call: a process frozen since its authorization, whose lease another took,
+      // makes no call and leaves the work as committed, for the new owner to settle (the stated limit is the instant
+      // between this check and the call itself).
+      if (!this.leaseIsMine(this.clockNow())) return { outcome: "skip" };
       const callStart = this.now();
       this.locks.calling.add(a.id);
       let pending: Promise<CallAnswer>;
@@ -1312,6 +1349,11 @@ export class Engine {
       (now) => {
         const out: { authorized: Attempt | null; onlySlot: boolean; skip?: boolean } = { authorized: null, onlySlot: false };
         this.store.updateNow(a.subjectId, now, (s) => {
+          // Ownership, in the transaction that authorizes the send: a process that lost the lease records no handover.
+          if (!this.leaseIsMine(now)) {
+            out.skip = true;
+            return null;
+          }
           const current = s.attempts.find((x) => x.id === a.id);
           const account = current ? s.accounts[current.accountId] : undefined;
           if (!current || current.state !== "claimed" || !account) return null;
@@ -1356,6 +1398,11 @@ export class Engine {
       (now) => {
         const out: { authorized: Attempt | null; onlySlot: boolean; skip?: boolean } = { authorized: null, onlySlot: false };
         this.store.updateNow(a.subjectId, now, (s) => {
+          // Ownership, in the transaction that authorizes the send: a process that lost the lease records no handover.
+          if (!this.leaseIsMine(now)) {
+            out.skip = true;
+            return null;
+          }
           const current = s.attempts.find((x) => x.id === a.id);
           const acc = current ? s.accounts[current.accountId] : undefined;
           if (!current || !acc || (current.retry !== "wanted" && current.retry !== "wanted_after_not_sent")) return null;

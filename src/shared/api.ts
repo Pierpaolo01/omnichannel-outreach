@@ -1024,7 +1024,7 @@ export interface SendingInterruptedView {
   readonly since: string;
   readonly cause: "ticks_failing" | "providers_unreachable" | "not_running";
   /** The provider read that failed last since then, and which part of the round: a partial answer is not contact. */
-  readonly lastFailedRead: { readonly channel: "email" | "sms"; readonly part: "accounts" | "observation"; readonly at: string } | null;
+  readonly lastFailedRead: { readonly channel: "email" | "sms"; readonly part: "accounts" | "observation" | "call"; readonly at: string } | null;
 }
 
 /** GET /api/calls: the focus queue. The focused task is the first ready now; the queue moves on only after an outcome. */

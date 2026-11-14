@@ -18,7 +18,8 @@ export interface ProviderEvidence {
   readonly freshForMs: number;
   /** The last failed read, and its part. */
   readonly failedAt: number | null;
-  readonly failedPart: "accounts" | "observation" | null;
+  /** `call`: a send call, pre-send check, lookup or withdrawal that failed or resolved as a failure. */
+  readonly failedPart: "accounts" | "observation" | "call" | null;
 }
 
 export function providerFresh(e: ProviderEvidence, at: number): boolean {

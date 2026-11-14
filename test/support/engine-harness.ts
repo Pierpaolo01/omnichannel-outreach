@@ -13,6 +13,9 @@ import { FakeEmailPort, type FakeAccount, type FakeMode } from "./fake-email-por
 import { FakeSmsPort, type FakeNumber, type FakeSmsMode } from "./fake-sms-port.ts";
 import { HEARTBEAT_KEY } from "../../src/server/engine/worker-state.ts";
 
+/** The values a failed call resolves with when `failuresResolve` is set, as the Instantly adapter's do (review bot on 592d679). */
+const FAILURE_VALUES: Readonly<Record<string, unknown>> = { presendCheck: { kind: "unavailable" }, lookup: { kind: "unknown" }, withdraw: "unknown", handover: { kind: "unknown" } };
+
 /** The port calls an outage refuses, and the ones a held answer delays (ticket 20a). */
 const PORT_CALLS = new Set(["accounts", "presendCheck", "handover", "withdraw", "observe", "lookup"]);
 
@@ -170,6 +173,8 @@ export class EngineHarness {
    * minute's polling interval twice over.
    */
   cachedPolls = false;
+  /** During an outage, the calls that have a failure value resolve with it (pre-send unavailable, lookup and withdrawal unknown), as the adapter's do. */
+  failuresResolve = false;
   /**
    * Ticket 20a (PR 56 review bot): during an outage only the reads that carry replies, bounces and sends fail (the
    * observation, the pre-send check, lookups); account reads, send calls and withdrawals still answer.
@@ -211,6 +216,8 @@ export class EngineHarness {
             this.clock += this.slowCalls.ms;
             this.advanceProviders();
           }
+          // As the adapter does (review bot on 592d679): a failed call that resolves with a failure value instead of throwing.
+          if (failing && this.failuresResolve && FAILURE_VALUES[prop] !== undefined) return Promise.resolve(FAILURE_VALUES[prop]);
           if (failing && this.cachedPolls && prop === "observe") return Promise.resolve({ events: [], checkpoint: args[0] ?? "" });
           if (failing && this.cachedPolls && prop === "accounts" && this.cachedAccounts.has(target)) return Promise.resolve(this.cachedAccounts.get(target));
           if (failing) {

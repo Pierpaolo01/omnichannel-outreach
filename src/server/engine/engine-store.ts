@@ -279,6 +279,8 @@ export interface EngineStore {
    * the holder, when another owner holds it, renewed it within `staleMs` and `alive` says its process runs.
    */
   takeLease(owner: WorkerLease, now: number, staleMs: number, alive: (pid: number) => boolean): Promise<{ readonly ok: true } | { readonly ok: false; readonly holder: WorkerLease }>;
+  /** Whether this owner holds the lease at `now` (synchronous: read inside the authorizing transaction and before each call). */
+  holdsLease(ownerId: string, now: number, staleMs: number): boolean;
   /** Releases the lease if this owner holds it. */
   releaseLease(ownerId: string): Promise<void>;
   recordAnomaly(attemptId: string | null, what: string, atWall: number): Promise<void>;

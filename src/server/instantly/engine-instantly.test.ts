@@ -339,6 +339,29 @@ describe("a sustained Instantly outage is an interruption (ticket 20a; PR 56 rev
     expect(status.lastPollFailure).toMatchObject({ part: "emails" });
   });
 
+  test("email reads failing from 23:59:30, just before a midnight follow-up, while the last contact is still fresh: failed pre-send reads are no contact (review bot on 592d679)", async () => {
+    const { h, fake, every15s, today } = polling(true);
+    const allDay = twoEmails();
+    const def: CampaignDefinition = { ...allDay, tracks: allDay.tracks.map((t) => ({ ...t, window: [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 })), steps: t.steps.map((st) => ({ ...st, threading: "new_subject" as const, subject: st.subject || "Again" })) })) };
+    h.clock = Date.parse("2026-11-16T23:55:00Z");
+    await h.tick();
+    const { campaign } = await enrolled(h);
+    await h.defineSequence(campaign.id, def);
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    const failFrom = Date.parse("2026-11-16T23:59:30Z");
+    await every15s(failFrom);
+    const openers = fake.writes().length;
+    fake.failPaths.set("/api/v2/emails", 500);
+    await every15s(failFrom + 10 * 60_000);
+    expect(fake.writes().length).toBe(openers);
+    expect((await today()).sendingInterrupted).toMatchObject({ cause: "providers_unreachable" });
+    fake.failPaths.delete("/api/v2/emails");
+    await every15s(failFrom + 13 * 60_000);
+    const { interruption } = await today();
+    expect(interruption).not.toBeNull();
+    expect(Date.parse((interruption as { from: string }).from)).toBeLessThanOrEqual(failFrom);
+  });
+
   test("ten minutes of failing HTTP, answered from the adapter's cache in between, ages the heartbeat and ends in a notice", async () => {
     const { h, fake, every15s, today } = polling();
     await h.tick();

@@ -88,7 +88,20 @@ describe("the sends an interruption rescheduled", () => {
   test("a step whose every account was full or had no pacing slot through the interruption is not counted: it was not delayed by it (question Q21)", () => {
     const due = WEDNESDAY_0 + 2 * H;
     // The lead's pool is inbox-a and inbox-b.
-    expect(rescheduledSteps(s, { from: WEDNESDAY_0 - H, to: due }, due, () => false).map((x) => x.stepId)).toEqual([]);
-    expect(rescheduledSteps(s, { from: WEDNESDAY_0 - H, to: due }, due, (id) => id === "inbox-b").map((x) => x.stepId)).toEqual(["s2"]);
+    expect(rescheduledSteps(s, { from: WEDNESDAY_0 - H, to: due }, due, () => []).map((x) => x.stepId)).toEqual([]);
+    expect(rescheduledSteps(s, { from: WEDNESDAY_0 - H, to: due }, due, (id) => (id === "inbox-b" ? [{ from: WEDNESDAY_0 - H, to: due }] : [])).map((x) => x.stepId)).toEqual(["s2"]);
+  });
+
+  test("the room and the window must overlap: room only while the window is closed is no delay (review bot on 592d679)", () => {
+    const nineToTen = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 9, end: 10 }));
+    const narrowed: SubjectState = { ...s, campaign: { ...s.campaign, definition: { ...s.campaign.definition, tracks: s.campaign.definition.tracks.map((t) => ({ ...t, window: nineToTen })) } } };
+    // s2 is due Wednesday 00:00; the interruption runs from Wednesday 09:30 to Thursday 08:00.
+    const gap = { from: WEDNESDAY_0 + 9 * H + 30 * MIN, to: WEDNESDAY_0 + DAY + 8 * H };
+    // The inbox is full for Wednesday and has room from Thursday 00:00, when the window is closed until 09:00.
+    const thursdayOnly = () => [{ from: WEDNESDAY_0 + DAY, to: gap.to }];
+    expect(rescheduledSteps(narrowed, gap, gap.to, thursdayOnly)).toEqual([]);
+    // With room on Wednesday while the window was still open (09:30 to 10:00), it was delayed.
+    const wednesdayToo = () => [{ from: gap.from, to: WEDNESDAY_0 + DAY }];
+    expect(rescheduledSteps(narrowed, gap, gap.to, wednesdayToo).map((x) => x.stepId)).toEqual(["s2"]);
   });
 });
