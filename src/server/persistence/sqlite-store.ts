@@ -37,12 +37,32 @@ import type { LeadQuery, OutreachStore, StoredContactDetail } from "./store.ts";
 
 type Row = Record<string, SQLOutputValue>;
 
+/**
+ * Switches a database to WAL. SQLite does not consult the busy timeout for this switch, so when another process opening
+ * the same new database holds the lock, it is tried again every 20 ms for up to five seconds (ticket 20a: two
+ * applications started at once on an empty data folder; the second is then refused by the worker's lease).
+ */
+function toWal(db: DatabaseSync): void {
+  const until = Date.now() + 5000;
+  for (;;) {
+    try {
+      db.exec("PRAGMA journal_mode = WAL");
+      return;
+    } catch (error) {
+      if (!(error instanceof Error && /locked|busy/i.test(error.message)) || Date.now() >= until) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+  }
+}
+
 /** Opens (creating if needed) the SQLite database at `path` and applies pending migrations. */
 export function openSqliteStore(path: string): OutreachStore {
   const db = new DatabaseSync(path);
-  db.exec("PRAGMA foreign_keys = ON");
-  if (path !== ":memory:") db.exec("PRAGMA journal_mode = WAL");
+  // The busy timeout first: switching a new database to WAL takes a lock, and two applications started at once on an empty
+  // data folder must wait for each other there, not fail (ticket 20a; the second is then refused by the worker's lease).
   db.exec("PRAGMA busy_timeout = 5000");
+  db.exec("PRAGMA foreign_keys = ON");
+  if (path !== ":memory:") toWal(db);
   migrate(db, () => new Date().toISOString());
   return new SqliteStore(db);
 }

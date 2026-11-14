@@ -656,6 +656,11 @@ export function migrate(db: DatabaseSync, appliedAt: () => string): void {
   for (const migration of MIGRATIONS) {
     if (migration.version <= current) continue;
     db.exec("BEGIN IMMEDIATE");
+    // Another process starting on the same new database may have applied it while this one waited for the lock (ticket 20a).
+    if (db.prepare("SELECT 1 FROM schema_migrations WHERE version = ?").get(migration.version) !== undefined) {
+      db.exec("COMMIT");
+      continue;
+    }
     try {
       db.exec(migration.sql);
       migration.data?.(db);
