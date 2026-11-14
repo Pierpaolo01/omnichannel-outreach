@@ -276,6 +276,8 @@ test("a decline logged in another window while this page is on the lead's other 
 });
 
 test("the demonstration (ticket 16): all three paths and an override, the main sequence replaced, no further cold call, and a reply stopping the lead in win-back", async ({ page }) => {
+  // Recorded, each step lingers long enough to read.
+  if (process.env["RECORD_DEMO"]) test.setTimeout(120_000);
   const f = await freshCalls("win-back", "declined-demonstration");
   await page.clock.install({ time: f.harness.clock });
   await page.goto(`${f.url}/calls`);
