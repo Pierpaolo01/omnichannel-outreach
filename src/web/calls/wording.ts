@@ -4,6 +4,7 @@
  * attention); none decides anything about order, counts, hours, capacity or an outcome's effect.
  */
 import type { CallNumberView, CallOffListView, CallOutcomeApi, DeclinedPathApi, DeclinePreviewView, DeclineTrackView, CallQueueItem, CallsView, CallTaskView, FinishReasonApi, NeedsAttention, OutreachStatus, RecordCallView, RecordCalls, RecordedNumberView, TodayView, WindowRule } from "../../shared/api.ts";
+import { WIN_BACK_HAS_NO_TRACKS } from "../../domain/sequence/definition.ts";
 import { STATUS_LABEL } from "../status.tsx";
 import type { DeskSnapshot } from "./callDesk.ts";
 import { dayLabel, zonedInstants, type CallbackChoice } from "./callbackTime.ts";
@@ -541,7 +542,7 @@ export const DECLINED_PATH_CHOICE = {
 } as const satisfies Record<DeclinedPathApi, string>;
 
 /** Beside a path the call's read does not offer: the read offers win back only while the campaign has a win-back branch. */
-export const PATH_NOT_OFFERED = "(this campaign has none)";
+export const PATH_NOT_OFFERED = `(${WIN_BACK_HAS_NO_TRACKS})`;
 
 /**
  * Under the radios: where the preselected path comes from, from the read's `declinedPathSet` (never inferred), and, when
@@ -568,7 +569,8 @@ export function declinedPathSourceLine(task: Pick<CallTaskView, "declinedPath" |
 }
 
 /** A chosen path the call's read does not offer (the boundary, ticket 16c): Log sends nothing. */
-export const PATH_NOT_OFFERED_LINE = "This campaign has no win-back branch now, so that path can’t be logged. Choose another.";
+/** Why win back cannot be logged now, in the definition's own words (`WIN_BACK_HAS_NO_TRACKS`; council on aaf82b7). */
+export const PATH_NOT_OFFERED_LINE = `${WIN_BACK_HAS_NO_TRACKS.charAt(0).toUpperCase()}${WIN_BACK_HAS_NO_TRACKS.slice(1)} now, so that path can’t be logged. Choose another.`;
 
 /** What logging not interested on a path does to the lead as a whole, from the preview's status after it. */
 /** "In win-back" as "in win-back": a status label inside a sentence. */

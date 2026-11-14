@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { launchCheck } from "./blockers.ts";
 import { skipLimitOf } from "./calls.ts";
 import { render } from "./copy.ts";
-import { declinedPathOf, definitionProblems, ownSubject, winBackAvailable, type CampaignDefinition, type StepDefinition, type TrackDefinition } from "./definition.ts";
+import { declinedPathOf, definitionIssues, definitionProblems, ownSubject, winBackAvailable, winBackEntry, type CampaignDefinition, type StepDefinition, type TrackDefinition } from "./definition.ts";
 import { renderStep } from "./dispatch.ts";
 import { subjectState } from "../../../test/support/sequence-state.ts";
 
@@ -35,6 +35,26 @@ const definition = (fields: Partial<CampaignDefinition> = {}): CampaignDefinitio
   ...fields,
 });
 
+describe("each refusal has a stable identity, from which its sentence is rendered (council on aaf82b7)", () => {
+  test("a problem names its kind and the track or step it is about, whatever the track is called", () => {
+    const w1 = emailTrack({ id: "w1", branch: "win_back", steps: [step("w1s1", { threading: "new_subject" })] });
+    const w2 = emailTrack({ id: "w2", branch: "win_back", window: [], steps: [step("w2s1", { threading: "new_subject" })] });
+    const bad = emailTrack({ steps: [step("s1", { threading: "new_subject" }), step("s2", { waitDays: 1.5 })] });
+    const both = definition({ tracks: [bad, w1, w2] });
+    expect(definitionIssues(both).map(({ kind, trackId, stepId }) => ({ kind, trackId, stepId }))).toEqual([
+      { kind: "wait_not_whole", trackId: "t1", stepId: "s2" },
+      { kind: "window_empty", trackId: "w2", stepId: undefined },
+    ]);
+    // Removing w1 renames w2 ("Win-back email track 2" becomes "the win-back email track"); its problem keeps its identity.
+    const one = definition({ tracks: [bad, w2] });
+    expect(definitionProblems(both)).toContain("Win-back email track 2's sending window has no days.");
+    expect(definitionProblems(one)).toContain("The win-back email track's sending window has no days.");
+    expect(definitionIssues(one).map(({ kind, trackId }) => `${kind} ${trackId}`)).toEqual(["wait_not_whole t1", "window_empty w2"]);
+    // The sentences are the issues' own, in the same order.
+    expect(definitionProblems(both)).toEqual(definitionIssues(both).map((i) => i.text));
+  });
+});
+
 describe("definitions refused at the boundary (ADR 0003 7.1)", () => {
   test("one email track with ordered follow-ups is accepted", () => {
     expect(definitionProblems(definition())).toEqual([]);
@@ -46,6 +66,21 @@ describe("definitions refused at the boundary (ADR 0003 7.1)", () => {
     expect(definitionProblems(definition({ smsPool: ["+447700900001"], tracks: [emailTrack(), sms, together] }))).toEqual([]);
     // An SMS step has no subject and no thread: its threading is not read.
     expect(definitionProblems(definition({ tracks: [emailTrack({ channel: "sms", steps: [step("m1")] })] }))).toEqual([]);
+  });
+
+  describe("how a lead can enter the win-back branch (council on aaf82b7)", () => {
+    const call = (fields: Partial<TrackDefinition> = {}): TrackDefinition => emailTrack({ id: "p1", channel: "call", steps: [step("c1", { subject: "", body: "" })], ...fields });
+    const branch = emailTrack({ id: "w1", branch: "win_back", steps: [step("w1s1", { threading: "new_subject" })] });
+    test("by a phone track's declined path; or only when win back is chosen for one lead; or never", () => {
+      expect(winBackEntry(definition({ tracks: [emailTrack(), call({ declinedPath: "win_back" }), branch] }))).toBe("declined_path");
+      // A path left unset reads as stop (Q14), so only the per-lead choice enters the branch.
+      expect(winBackEntry(definition({ tracks: [emailTrack(), call({ declinedPath: "continue" }), branch] }))).toBe("chosen_for_a_lead");
+      expect(winBackEntry(definition({ tracks: [emailTrack(), call(), branch] }))).toBe("chosen_for_a_lead");
+      // No live phone track, or no live branch track: nobody enters it.
+      expect(winBackEntry(definition({ tracks: [emailTrack(), branch] }))).toBe("never");
+      expect(winBackEntry(definition({ tracks: [emailTrack(), call({ declinedPath: "stop", removed: true }), branch] }))).toBe("never");
+      expect(winBackEntry(definition({ tracks: [emailTrack(), call({ declinedPath: "stop" })] }))).toBe("never");
+    });
   });
 
   describe("the win-back branch and the declined path (ticket 16)", () => {
@@ -66,7 +101,7 @@ describe("definitions refused at the boundary (ADR 0003 7.1)", () => {
     });
 
     test("a declined path of win back needs a win-back branch with a live track", () => {
-      const refused = "The phone track's declined path is win back, but the campaign has no win-back branch: add a track to the win-back branch, or choose stop or continue.";
+      const refused = "The phone track's declined path is win back, but the win-back branch has no tracks: add a track to it, or choose stop or continue.";
       expect(definitionProblems(definition({ tracks: [emailTrack(), call({ declinedPath: "win_back" })] }))).toEqual([refused]);
       expect(definitionProblems(definition({ tracks: [emailTrack(), call({ declinedPath: "win_back" }), winBack({ removed: true })] }))).toEqual([refused]);
     });

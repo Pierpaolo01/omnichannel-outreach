@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { render } from "../../domain/sequence/copy.ts";
 import { launchCheck } from "../../domain/sequence/blockers.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../shared/api.ts";
-import { fallbackIn, newTrack, removeStep, sendsOnItsOwn, setWindow, stepUsing, threadSubjectOf, withFallback } from "./model.ts";
+import { fallbackIn, newTrack, removeStep, sendsOnItsOwn, setWindow, stepUsing, threadSubjectOf, trackName, withFallback } from "./model.ts";
 import { draftProblems } from "./saveQueue.ts";
 
 describe("the editor's fallback field rewrites every use of the field in a step", () => {
@@ -97,5 +97,20 @@ describe("what a running campaign does on its own, in its banner (council on 2cf
     expect(sendsOnItsOwn(def(["call"]))).toBe("Due calls appear on your list within your daily call capacity; work them during each lead’s calling hours.");
     expect(sendsOnItsOwn(def(["email", "call"]))).toBe("Email goes out on its own, inside each lead’s sending window. Due calls appear on your list within your daily call capacity; work them during each lead’s calling hours.");
     expect(sendsOnItsOwn(def(["email", "sms"]))).toBe("Email and texts go out on their own, inside each lead’s sending window.");
+  });
+});
+
+describe("a track's name inside a sentence, in the main sequence and the win-back branch (ticket 16b)", () => {
+  const t = (id: string, channel: TrackDefinition["channel"], branch: TrackDefinition["branch"] = "main"): TrackDefinition => ({ id, channel, branch, window: [{ day: 1, start: 9, end: 17 }], steps: [], start: { kind: "entry" }, removed: false });
+  test("SMS keeps its capitals; every other word, the branch's included, is lower case mid-sentence", () => {
+    const def = { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: [], smsPool: [], tracks: [t("e", "email"), t("m", "sms"), t("we", "email", "win_back"), t("wm", "sms", "win_back"), t("wm2", "sms", "win_back")] };
+    const name = (id: string) => trackName(def, def.tracks.find((x) => x.id === id)!);
+    expect(name("e")).toBe("the email track");
+    expect(name("m")).toBe("the SMS track");
+    expect(name("we")).toBe("the win-back email track");
+    expect(name("wm")).toBe("win-back SMS track 1");
+    expect(name("wm2")).toBe("win-back SMS track 2");
+    const one = { ...def, tracks: def.tracks.filter((x) => x.id !== "wm2") };
+    expect(trackName(one, one.tracks.find((x) => x.id === "wm")!)).toBe("the win-back SMS track");
   });
 });

@@ -115,7 +115,7 @@ test("continue preselected, win back unavailable with its reason; stop chosen fo
   await expect(page.getByRole("heading", { name: "Amira Hassan" })).toBeVisible();
   await outcome(page, "Not interested").click();
   await expect(path(page, /Keep the email and SMS steps going/)).toBeChecked();
-  await expect(path(page, /Move to the win-back messages \(this campaign has none\)/)).toBeDisabled();
+  await expect(path(page, /Move to the win-back messages \(the win-back branch has no tracks\)/)).toBeDisabled();
   await expect(page.getByText("Logging this keeps their remaining tracks in this campaign going. No call is made to them again.")).toBeVisible();
   await expect(trackLines(page)).toContainText("Email track 1 carries on.");
   await expect(trackLines(page)).toContainText(/Email track 2 starts after its delay, on Tue 10 Nov\./);
@@ -138,7 +138,7 @@ test("a phone track with no path set: stop is preselected as what logging does, 
   await outcome(page, "Not interested").click();
   await expect(path(page, /Stop all outreach in this campaign/)).toBeChecked();
   await expect(paths(page)).toHaveAccessibleDescription("No path is set on the phone track for a declined call, so the one logging uses without a choice is preselected.");
-  await expect(path(page, /Move to the win-back messages \(this campaign has none\)/)).toBeDisabled();
+  await expect(path(page, /Move to the win-back messages \(the win-back branch has no tracks\)/)).toBeDisabled();
   await shot(page, "declined-no-path-set");
   // Overridden on a track with no path set: no setting is claimed for the track (review bot on d478d6d).
   await path(page, /Keep the email and SMS steps going/).check();
@@ -159,7 +159,7 @@ test("a path the read no longer offers is refused in place: nothing is sent, the
   await page.clock.setFixedTime(f.harness.clock);
   await page.goto(`${f.url}/calls`);
   await expect(path(page, /Move to the win-back messages/)).toBeChecked();
-  await expect(page.getByText("This campaign has no win-back branch now, so that path can’t be logged. Choose another.")).toBeVisible();
+  await expect(page.getByText("The win-back branch has no tracks now, so that path can’t be logged. Choose another.")).toBeVisible();
   await expect(logButton(page)).toBeDisabled();
   await expect(page.getByText("Choose another path.")).toBeVisible();
   await shot(page, "declined-path-not-offered");

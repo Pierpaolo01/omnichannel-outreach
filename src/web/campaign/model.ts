@@ -32,13 +32,14 @@ export const DEFAULT_SKIP_LIMIT_DAYS = 2;
 /**
  * A new track on `channel`, starting at launch, with weekdays from 09:00 to 17:00 in the lead's time
  * (for a phone track, its calling hours): an empty first message, or for a phone track its one call,
- * which has no copy, and the default skip limit (ADR 0003, ticket 14c).
+ * which has no copy, and the default skip limit (ADR 0003, ticket 14c). In the win-back branch
+ * (ticket 16b) it starts when the lead enters the branch, which is what `entry` means there.
  */
-export function newTrack(channel: "email" | "sms" | "call"): TrackDefinition {
+export function newTrack(channel: "email" | "sms" | "call", branch: TrackDefinition["branch"] = "main"): TrackDefinition {
   return {
     id: newId("track"),
     channel,
-    branch: "main",
+    branch,
     window: [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 })),
     steps: [newStep(true)],
     start: { kind: "entry" },

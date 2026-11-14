@@ -45,6 +45,28 @@ export interface EditorDeps {
   /** The queue's backoff between tries after no answer. */
   wait?: (ms: number) => Promise<void>;
   session?: string;
+  /** Deliberately broken saving, for the generated save test's faults only (ticket 16b). */
+  faults?: ReadonlySet<SaveFault>;
+}
+
+/**
+ * Faults the generated save test injects to prove it notices them (ticket 16b): a save whose body leaves
+ * out each phone track's declined path, or the win-back branch's tracks. Never set by the page.
+ */
+export type SaveFault = "declined_path_not_sent" | "win_back_tracks_not_sent" | "stale_win_back_copy";
+
+function withFaults(definition: CampaignDefinition, faults: ReadonlySet<SaveFault> | undefined, previous: CampaignDefinition | null): CampaignDefinition {
+  if (!faults || faults.size === 0) return definition;
+  let tracks = definition.tracks;
+  // The branch's copy of the save before this one (council on aaf82b7).
+  if (faults.has("stale_win_back_copy") && previous) tracks = tracks.map((t) => (t.branch === "win_back" ? { ...t, steps: previous.tracks.find((p) => p.id === t.id)?.steps ?? t.steps } : t));
+  if (faults.has("win_back_tracks_not_sent")) tracks = tracks.filter((t) => t.branch !== "win_back");
+  if (faults.has("declined_path_not_sent")) tracks = tracks.map((t) => {
+    const without = { ...t };
+    delete without.declinedPath;
+    return without;
+  });
+  return { ...definition, tracks };
 }
 
 /** The connected email inboxes: the email pool follows them; the engine's SMS numbers are not inboxes. */
@@ -61,13 +83,19 @@ export class EditorStore {
   private readonly queue: SaveQueue;
   private readonly deps: EditorDeps;
   private timer: unknown = null;
+  /** The body of the last save sent, for the generated save test's `stale_win_back_copy` fault only. */
+  private lastSent: CampaignDefinition | null = null;
 
   constructor(initial: SequenceView, deps: EditorDeps) {
     this.deps = deps;
     this.state = { view: initial, draft: initial.definition, save: { kind: "idle" }, unsaved: false, pending: null, locked: initial.launchedAt !== null, problems: draftProblems(initial.definition) };
     this.queue = new SaveQueue({
       read: () => ({ draft: this.state.draft, accountIds: emailInboxIds(this.state.view), smsNumberIds: smsNumberIds(this.state.view), version: this.state.view.definitionVersion }),
-      put: (definition, options, save) => deps.put({ ...definition, save }, options),
+      put: (definition, options, save) => {
+        const sent = withFaults(definition, deps.faults, this.lastSent);
+        this.lastSent = definition;
+        return deps.put({ ...sent, save }, options);
+      },
       onStatus: (status) => this.set({ save: status, unsaved: status.kind !== "saved" && status.kind !== "idle" }),
       // Saves land in order, so each accepted view is the newest; the draft only if no edit came after.
       onAccepted: (view, seq) => {
