@@ -38,7 +38,8 @@ const EXPECTED: Record<string, { invariant: string; seed: number | null; unlimit
   "sender fixed at claim": { invariant: "1.3", seed: 0 },
   "withdrawal clears deadline": { invariant: "9", seed: 1 },
   "basis from observation": { invariant: "9", seed: 5 },
-  "clamp fallback": { invariant: "9", seed: 5 },
+  // Seed 5 no longer reaches this case after the 17a changes to in-flight places and withdrawals (council A, B, J); offset 10 does, found by a local search of offsets 0 to 29.
+  "clamp fallback": { invariant: "9", seed: 10 },
   "late send resolves successor": { invariant: "9", seed: 5 },
   "capacity off by one": { invariant: "10", seed: 3 },
   window: { invariant: "13", seed: 5 },
