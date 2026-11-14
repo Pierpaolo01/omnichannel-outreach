@@ -95,7 +95,7 @@ describe("one request id, two processes at once: one execution, one answer", () 
   });
 
   test("a campaign pause and resume: one pause, one hold interval, the same answer; a refused resume stays refused", async () => {
-    const { h, campaign, engines } = await world();
+    const { campaign, engines } = await world();
     const answers = await Promise.all(engines.map((e) => e.setCampaignPause(campaign.id, true, "same-pause")));
     expect(answers.map((a) => a.ok)).toEqual([true, true]);
     const db = new DatabaseSync(path.join(dirs.at(-1)!, "app.db"));
@@ -107,7 +107,6 @@ describe("one request id, two processes at once: one execution, one answer", () 
     expect((await engines[0]!.setCampaignPause(campaign.id, true, "pause-2")).ok).toBe(true);
     expect(await engines[1]!.setCampaignPause(campaign.id, false, "late-resume")).toEqual({ ok: false, reason: "This campaign is not paused." });
     db.close();
-    void h;
   });
 
   test("a call outcome, accepted: one call record; refused: refused alike, and still refused once the call could take it", async () => {
