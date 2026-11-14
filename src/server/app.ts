@@ -60,6 +60,8 @@ const trackBody = requestObject({
   start: z.union([requestObject({ kind: z.literal("entry") }), requestObject({ kind: z.literal("after"), trackId: z.string(), delayDays: z.number() })]).default({ kind: "entry" }),
   removed: z.boolean().default(false),
   declinedPath: z.enum(["stop", "continue", "win_back"]).optional(),
+  /** A phone track's own call skip limit in days (ADR 0003, ticket 14c); the validator checks it. */
+  callSkipLimitDays: z.number().optional(),
 });
 const definitionBody = requestObject({
   timezone: z.string().trim().min(1),
@@ -352,7 +354,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     if (!body.success) return invalid(c, body.error);
     const { save, ...fields } = body.data;
     // A declined path is stored only when the canvas set one; the phone track's fields travel in the same save (ADR 0003 1.1.1).
-    const definition: CampaignDefinition = { ...fields, tracks: fields.tracks.map(({ declinedPath, ...t }) => (declinedPath ? { ...t, declinedPath } : t)) };
+    const definition: CampaignDefinition = { ...fields, tracks: fields.tracks.map(({ declinedPath, callSkipLimitDays, ...t }) => ({ ...t, ...(declinedPath ? { declinedPath } : {}), ...(callSkipLimitDays !== undefined ? { callSkipLimitDays } : {}) })) };
     const previous = (await store.engine.campaign(campaign.id))?.definition ?? null;
     const problems = definitionProblems(definition, previous);
     if (problems.length > 0) return c.json<ApiError>({ error: { code: "invalid_sequence", message: problems.join(" ") } }, 400);

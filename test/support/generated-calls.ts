@@ -156,6 +156,8 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     return item;
   };
   const chance = (p: number) => rand() < p;
+  /** The phone tracks' own skip limits (ticket 14c): a stream of its own, so the rest of each world is as it was. */
+  const trackLimits = random(seed + 1_000_003);
   /**
    * Ticket 16's draws (declined paths, win-back branches, declines) come from their own stream, so the ticket
    * 14 and 15 draws, and the seeds recorded for their mutations, are the same wherever no decline happens.
@@ -249,6 +251,18 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     // The skip limit varies (1, 2 or 3 days), so Q5's interim and the case it distinguishes are both reached.
     const limit = pick([1, 2, 2, 3]);
     features.add(`limit:${limit}`);
+    // Each phone track may hold its own limit (ticket 14c), else it reads the campaign's. From a stream of
+    // its own, so every other draw of the world, and the seeds recorded for it, are unchanged.
+    for (const [ti, t] of tracks.entries()) {
+      if (t.channel !== "call") continue;
+      const own = trackLimits() < 0.5 ? null : 1 + Math.floor(trackLimits() * 3);
+      if (own === null) {
+        features.add("limit:the-campaign's");
+        continue;
+      }
+      tracks[ti] = { ...t, callSkipLimitDays: own };
+      features.add(own === limit ? "limit:a-track's-own" : "limit:a-track's-own-not-the-campaign's");
+    }
     // Ticket 16: often a win-back branch of one or two email and SMS tracks, together or after (delay 0-2), with
     // its own copy and windows; each phone track's declined path, sometimes unset (stop, question Q14).
     const branch: TrackDefinition[] = [];
@@ -544,7 +558,9 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     if (placed === undefined || due === null || !Number.isFinite(due)) return null;
     // Resolved when the call was placed, in the user's zone then.
     const placedZone = uz(placed);
-    const deadline = afterHolds(s, due, startOfDay(local(due, placedZone).day + def(s).callSkipLimitDays, placedZone));
+    // The limit in force for this track (ADR 0003 3.5, ticket 14c): its own, else the campaign's.
+    const limitDays = def(s).tracks.find((x) => x.id === t.id)?.callSkipLimitDays ?? def(s).callSkipLimitDays;
+    const deadline = afterHolds(s, due, startOfDay(local(due, placedZone).day + limitDays, placedZone));
     if (deadline > h.clock) return null;
     const end = endLimitOf(s);
     const segments = userZones.map((z, i) => ({ from: z.at, to: userZones[i + 1]?.at ?? Infinity, zone: z.zone }));

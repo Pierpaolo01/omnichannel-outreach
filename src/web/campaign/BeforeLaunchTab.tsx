@@ -54,7 +54,7 @@ export function BeforeLaunchTab({ campaignId, editor }: { campaignId: string; ed
               <DailyLoad facts={facts} editor={editor} />
             </Card>
           </div>
-          <Preview campaignId={campaignId} editor={editor} leads={facts.leads} />
+          <Preview campaignId={campaignId} editor={editor} leads={facts.leads} horizonDays={facts.load?.horizonDays ?? null} />
         </div>
       )}
     </div>
@@ -157,7 +157,7 @@ function Blockers({ campaignId, editor }: { campaignId: string; editor: Sequence
           <span>
             <b className="font-semibold">{nothingToLaunch ? "No track yet." : "Nothing blocks launch."}</b>
             <span className="block text-ink-2">
-              {nothingToLaunch ? "With a track, launch is blocked only by empty copy, a merge field with no fallback that a lead lacks, or no connected sender." : "Every message has copy, every merge field has a fallback where a lead lacks it, and every track has a sender."}
+              {nothingToLaunch ? "With a track, launch is blocked only by empty copy, a merge field with no fallback that a lead lacks, or no connected sender." : "Every message has copy, every merge field has a fallback where a lead lacks it, and every email and SMS track has a sender."}
             </span>
           </span>
         </div>
@@ -195,14 +195,22 @@ function Warnings({ facts, editor }: { facts: BeforeLaunchView; editor: Sequence
   const live = editor.view.definition.tracks.filter((t) => !t.removed && t.branch === "main");
   const noEmail = facts.coverage.leads - facts.coverage.email;
   const noMobile = facts.coverage.leads - facts.coverage.mobile;
-  const after = (channel: "email" | "sms") => live.some((t) => t.start.kind === "after" && live.find((x) => x.id === (t.start as { trackId: string }).trackId)?.channel === channel);
+  const noPhone = facts.coverage.leads - facts.coverage.phone;
+  const after = (channel: "email" | "sms" | "call") => live.some((t) => t.start.kind === "after" && live.find((x) => x.id === (t.start as { trackId: string }).trackId)?.channel === channel);
   // Each warning names the tracks it is about, by their own channel and order.
-  const tracksOn = (channel: "email" | "sms") => and(live.filter((t) => t.channel === channel).map((t) => trackName(editor.view.definition, t)));
+  const tracksOn = (channel: "email" | "sms" | "call") => and(live.filter((t) => t.channel === channel).map((t) => trackName(editor.view.definition, t)));
   if (live.some((t) => t.channel === "email") && noEmail > 0) {
     items.push({ title: `${noEmail} ${noEmail === 1 ? "lead has" : "leads have"} no email`, detail: `They skip ${tracksOn("email")}${after("email") ? ", and the tracks after it start sooner" : ""}.` });
   }
   if (live.some((t) => t.channel === "sms") && noMobile > 0) {
     items.push({ title: `${noMobile} ${noMobile === 1 ? "lead has" : "leads have"} no mobile of their own`, detail: `They skip ${tracksOn("sms")}${after("sms") ? ", and the tracks after it start sooner" : ""}. Company leads are never texted.` });
+  }
+  if (live.some((t) => t.channel === "call") && noPhone > 0) {
+    items.push({ title: `${noPhone} ${noPhone === 1 ? "lead has" : "leads have"} no phone number`, detail: `They skip ${tracksOn("call")}${after("call") ? ", and the tracks after it start sooner" : ""}. A company’s main line counts for everyone at the company.` });
+  }
+  // ADR 0003 7.2: an empty call script is a warning, never a blocker.
+  if (live.some((t) => t.channel === "call") && !(editor.view.definition.callScript ?? "").trim()) {
+    items.push({ title: "The call script is empty", detail: "Your call tasks will show no talking points. Write them in a phone track, in the sequence." });
   }
   for (const a of facts.load?.accounts ?? []) {
     if (a.usedToday > 0) items.push({ title: `${a.label} has ${a.usedToday} of its ${a.capacity} sends a day used today`, detail: `Other campaigns sent or reserved them, so fewer first ${a.channel === "sms" ? "texts" : "emails"} can go today.` });
@@ -210,8 +218,8 @@ function Warnings({ facts, editor }: { facts: BeforeLaunchView; editor: Sequence
   for (const a of editor.view.accounts.filter((x) => !x.healthy && live.some((t) => t.channel === x.channel))) {
     items.push({ title: `${a.label} ${CANNOT_SEND}`, detail: "Its leads wait until it can send again." });
   }
-  if (facts.load && facts.load.notStartedWithinHorizon > 0) {
-    items.push({ title: `${facts.load.notStartedWithinHorizon} leads would not start within ${facts.load.horizonDays} days`, detail: "The senders’ daily capacity is too small for this many leads, or their texts wait for a free number." });
+  if (facts.load?.someNotStartedWithinHorizon) {
+    items.push({ title: `Some leads would not start within ${facts.load.horizonDays} days`, detail: "The senders’ daily capacity is too small for this many leads, or their texts wait for a free number." });
   }
   return (
     <section aria-labelledby="warnings">
@@ -305,11 +313,12 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
   if (!def.tracks.some((t) => !t.removed && t.branch === "main")) return <p className="text-[14px] text-muted">Add a track to see the load it puts on each sender.</p>;
   // No figure that could contradict the engine: a track the server names (no sender, or after a
   // call), or a sender with no known end.
-  const blocked = load.withheldBy !== null || load.cannotProject.length > 0;
+  const blocked = load.withheldBy !== null || load.cannotProject.length > 0 || load.stoppedEarly !== null;
   const calls = def.tracks.some((t) => !t.removed && t.branch === "main" && t.channel === "call");
+  const callRow = load.calls;
   return (
     <>
-      {load.accounts.length > 0 && (
+      {(load.accounts.length > 0 || callRow !== null) && (
         <table className="table text-[14px] max-[560px]:block">
           <thead className="max-[560px]:sr-only">
             <tr className="border-b border-line text-[13px] text-muted">
@@ -344,14 +353,40 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
                 </td>
               </tr>
             ))}
+            {callRow !== null && (
+              <tr className="border-line max-[560px]:flex max-[560px]:flex-col max-[560px]:gap-1 max-[560px]:py-2 [&+&]:border-t">
+                <td className="px-0 py-2.5 max-[560px]:p-0">
+                  <span className="flex items-start gap-1.5">
+                    <Icon name="call" className="mt-0.5 size-4 text-muted" />
+                    <span>
+                      Your calls
+                      <span className="block text-[12.5px] text-muted">At most {callRow.capacity} new calls a day on your list, across campaigns</span>
+                    </span>
+                  </span>
+                </td>
+                <td className="py-2.5 max-[560px]:p-0">{blocked || callRow.busiestDay === null ? "—" : `${callRow.busiestDay} a day`}</td>
+                <td className="py-2.5 max-[560px]:p-0">
+                  <span className={callRow.onListToday >= callRow.capacity ? "font-medium text-pause" : ""}>
+                    {callRow.onListToday} of {callRow.capacity}
+                  </span>
+                  <span className="mt-1 block h-1 w-24 overflow-hidden rounded-sm bg-line" aria-hidden="true">
+                    <span className={`block h-full ${callRow.onListToday >= callRow.capacity ? "bg-pause" : "bg-base-content"}`} style={{ width: `${Math.min(100, (callRow.onListToday / Math.max(1, callRow.capacity)) * 100)}%` }} />
+                  </span>
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       )}
       {load.withheldBy !== null ? (
-        <p className={`${load.accounts.length > 0 ? "mt-2" : ""} text-[13.5px] ${load.withheldBy.tracks.some((t) => t.why === "no_sender") ? "text-crit" : "text-ink-2"}`}>
+        <p className={`${load.accounts.length > 0 || callRow !== null ? "mt-2" : ""} text-[13.5px] text-crit`}>
           {/* Worded from the tracks the server names, never guessed from this campaign's channels. */}
           {withheldExplanation(load.withheldBy)}
         </p>
+      ) : load.stoppedEarly === "bound" ? (
+        <p className="mt-2 text-[13.5px] text-ink-2">This campaign is too large to estimate here: working out its daily load would take too long, so no figure is shown. Nothing else on this page is affected.</p>
+      ) : load.stoppedEarly === "horizon" ? (
+        <p className="mt-2 text-[13.5px] text-ink-2">This campaign runs past the estimate’s {load.horizonDays} days: some of its leads, messages or calls come later than that, so no figure is shown. Nothing else on this page is affected.</p>
       ) : load.cannotProject.length > 0 ? (
         <p className="mt-2 text-[13px] text-ink-2">
           Can’t project the load while {and(load.cannotProject.map(heldSaid))}. Nothing says when that ends.
@@ -362,9 +397,9 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
             ? "No lead has a channel these tracks use yet."
             : load.daysUntilAllStart !== null
               ? `All ${load.leadsToStart} leads start within ${load.daysUntilAllStart} ${load.daysUntilAllStart === 1 ? "day" : "days"} of launch.`
-              : `${load.notStartedWithinHorizon} of ${load.leadsToStart} leads would not start within ${load.horizonDays} days.`}{" "}
-          Every email and text counts: tracks that start together and tracks that wait for another.{" "}
-          {callCaveat(calls, load.callsNotCounted, load.onlyCalled)} Follow-ups always go before first messages when a sender is full. What other running campaigns have waiting on these senders is counted; every send is assumed to succeed, and replies, bounces, bad numbers and pauses are not foreseen.
+              : ""}{" "}
+          {calls ? "A lead starts with its first email or text, or when its first call goes on your list. " : ""}Every email and text counts: tracks that start together and tracks that wait for another.{" "}
+          {callCaveat(calls, load.callsNotCounted)} Follow-ups always go before first messages when a sender is full. What other running campaigns have waiting on these senders is counted; every send is assumed to succeed, and replies, bounces, bad numbers and pauses are not foreseen.
         </p>
       )}
     </>
@@ -386,20 +421,21 @@ function heldSaid(c: LoadProjectionView["cannotProject"][number]): string {
 }
 
 /**
- * What the estimate leaves to the user's calls, here and in competing campaigns (council on 10121d3,
- * item 1): calls are tasks, not sends, and it assumes none is logged, while a logged call touches the
- * lead, whose emails and texts then go first.
+ * What the estimate assumes about the user's calls, here and in the campaigns sharing these senders
+ * or the call list (ADR 0003, ticket 14c; review bot on 5cd8a93): every call on the list is worked on
+ * its day and gets no answer. The engine's own rules then finish its phone track, start the tracks
+ * after it, and put that lead's later messages and calls first. Any other outcome changes it, as a
+ * reply would.
  */
-function callCaveat(here: boolean, elsewhere: readonly { readonly name: string }[], onlyCalled: number): string {
+function callCaveat(here: boolean, elsewhere: readonly { readonly name: string }[]): string {
   if (!here && elsewhere.length === 0) return "";
   const where = and([...(here ? ["this campaign"] : []), ...elsewhere.map((c) => c.name)]);
-  const only = onlyCalled > 0 ? ` ${onlyCalled} ${onlyCalled === 1 ? "lead is" : "leads are"} reached only by your calls.` : "";
-  return `Calls are tasks on your list, not sends: they are not counted, and the estimate assumes no call is logged in ${where}, though a logged call moves that lead’s emails and texts ahead.${only} `;
+  return `For calls in ${where}, it assumes you log every call on your list at the end of the day it is there, after its calling hours, and that each one gets no answer: its phone track then finishes, the tracks after it start from then, and that lead’s later messages and calls go first. A call logged earlier in the day can bring the messages after it forward and change the order of that day’s sends; another outcome changes the estimate too, as a reply would. `;
 }
 
 const gap = (seconds: number) => (seconds < 120 ? `${seconds} seconds` : `${Math.round(seconds / 60)} minutes`);
 
-function Preview({ campaignId, editor, leads }: { campaignId: string; editor: SequenceEditor; leads: readonly PreviewLead[] }) {
+function Preview({ campaignId, editor, leads, horizonDays }: { campaignId: string; editor: SequenceEditor; leads: readonly PreviewLead[]; horizonDays: number | null }) {
   const [chosen, setChosen] = useState<string | null>(null);
   const index = Math.max(0, leads.findIndex((l) => l.id === chosen));
   const lead = leads[index];
@@ -410,6 +446,7 @@ function Preview({ campaignId, editor, leads }: { campaignId: string; editor: Se
     const parts: string[] = [];
     if (live.some((t) => t.channel === "email")) parts.push(l.email ? `Email to ${l.email}.` : "No email, so the email track is skipped for them.");
     if (live.some((t) => t.channel === "sms")) parts.push(l.mobile ? "Texts to their own mobile." : l.kind === "company" ? "A company lead is never texted, so the SMS track is skipped." : "No mobile of their own, so the SMS track is skipped for them.");
+    if (live.some((t) => t.channel === "call")) parts.push(l.phone ? "Calls on your list, to a number of theirs or their company’s main line." : `No phone number, so ${live.filter((t) => t.channel === "call").length > 1 ? "the phone tracks are" : "the phone track is"} skipped for them.`);
     return parts.join(" ");
   };
   return (
@@ -453,16 +490,31 @@ function Preview({ campaignId, editor, leads }: { campaignId: string; editor: Se
             {lead.kind === "company" ? "Company lead" : `${lead.title ? `${lead.title}, ` : ""}${lead.company}`}. {reach(lead)}
           </p>
           <p className="text-[12.5px] text-muted">
-            <mark className="bg-transparent text-inherit underline decoration-hand decoration-dotted decoration-2 underline-offset-[3px]">dotted</mark> fallback text, because this lead lacks the field. Days count from launch day, day 1; a sending window can move a message later.
+            <mark className="bg-transparent text-inherit underline decoration-hand decoration-dotted decoration-2 underline-offset-[3px]">dotted</mark> fallback text, because this lead lacks the field. Each day is the day the estimate below sends the message, counted from launch day, day 1; a message the estimate does not reach shows no day, and says why.
           </p>
-          <LeadCopy campaignId={campaignId} enrollmentId={lead.id} version={editor.view.definitionVersion} def={def} />
+          <LeadCopy campaignId={campaignId} enrollmentId={lead.id} version={editor.view.definitionVersion} def={def} horizonDays={horizonDays} />
         </>
       ) : null}
     </section>
   );
 }
 
-function LeadCopy({ campaignId, enrollmentId, version, def }: { campaignId: string; enrollmentId: string; version: number; def: CampaignDefinition }) {
+/** When a message goes, as Copy for a lead heads it: the estimate's day, or why it has none. One source for every day shown. */
+function whenSent(s: CopyPreview["steps"][number], horizonDays: number | null): string {
+  if (s.day !== null) return s.waitsOnCall ? `Day ${s.day}, after ${s.waitsOnCall}’s call` : `Day ${s.day}`;
+  switch (s.noDay) {
+    case "skipped":
+      return "Skipped";
+    case "beyond_horizon":
+      return horizonDays === null ? "After the estimate ends" : `After the estimate’s ${horizonDays} days`;
+    case "not_sent":
+      return "Not sent";
+    default:
+      return "No day: no estimate";
+  }
+}
+
+function LeadCopy({ campaignId, enrollmentId, version, def, horizonDays }: { campaignId: string; enrollmentId: string; version: number; def: CampaignDefinition; horizonDays: number | null }) {
   const { result, retry } = useApi<CopyPreview>(`/api/campaigns/${encodeURIComponent(campaignId)}/preview/${encodeURIComponent(enrollmentId)}?v=${version}`);
   if (result.state === "error") return <ErrorState title="This lead’s copy didn’t load." message={result.message} onRetry={retry} />;
   // Only copy for this lead and this version: never the previous lead's copy under this name.
@@ -490,7 +542,7 @@ function LeadCopy({ campaignId, enrollmentId, version, def }: { campaignId: stri
                   {several && track ? <span className="font-normal text-muted"> · {trackTitle(def, track)}</span> : null}
                 </span>
               </span>
-              <span className="whitespace-nowrap text-muted">{s.day !== null ? `Day ${s.day}` : `After ${s.waitsOnCall ?? "a call"}’s call`}</span>
+              <span className="whitespace-nowrap text-muted">{whenSent(s, horizonDays)}</span>
             </div>
             <div className="px-3.5 py-3 text-[14px] leading-[1.55]">
               {s.skipped ? (

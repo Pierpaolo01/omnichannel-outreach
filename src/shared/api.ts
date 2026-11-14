@@ -407,8 +407,8 @@ export interface LoadProjectionView {
    */
   readonly leadsToStart: number | null;
   /**
-   * Leads only a phone track can reach. A call is a task on the user's list, not a send: the estimate
-   * counts emails and texts only, and assumes no call outcome is logged (ADR 0003, ticket 13b).
+   * Leads only a phone track can reach. Since ticket 14c they start when their first call goes on the
+   * user's list, and are counted in `leadsToStart` and `daysUntilAllStart`.
    */
   readonly onlyCalled: number;
   /** Every sender account in a live track's pool, on either channel. */
@@ -425,12 +425,12 @@ export interface LoadProjectionView {
   }[];
   /**
    * Calendar days, counting launch day as day 1, until every lead some live track can reach has had
-   * its first message on any channel; null when nothing is projected, or not all start within the
-   * projection's horizon.
+   * its first message on any channel or its first call placed on the user's list; null when nothing
+   * is projected, or not all start within the projection's horizon.
    */
   readonly daysUntilAllStart: number | null;
-  /** Leads that would not have started within the projection's horizon. */
-  readonly notStartedWithinHorizon: number;
+  /** Some lead would not have started within the projection's horizon (said without a count: that run stopped at the horizon). */
+  readonly someNotStartedWithinHorizon: boolean;
   readonly horizonDays: number;
   /**
    * Pool accounts that cannot send now with no known end: the provider reports them unable to send
@@ -449,21 +449,44 @@ export interface LoadProjectionView {
     readonly reason: "cannot_send" | "quota" | "unsettled_work" | "reply_being_matched";
   }[];
   /**
-   * The tracks that withhold the figure, and why, whenever one does (ADR 0003, ticket 13b): a track
-   * whose channel has no connected sender (launch blocker 3), or an email or SMS track that waits,
-   * through its chain, on a phone track, which starts only when the user logs the call. The screen
-   * words any "no figure because" from these alone (`src/web/campaign/withheld.ts`). Null when none does.
+   * The tracks that withhold the figure, whenever one does (ADR 0003, ticket 13b): a track whose
+   * channel has no connected sender (launch blocker 3). A track after a phone track is projected since
+   * ticket 14c, under the stated assumption about calls. The screen words any "no figure because" from
+   * these alone (`src/web/campaign/withheld.ts`). Null when none does.
    */
   readonly withheldBy: WithheldBy | null;
   /**
-   * Competing campaigns on these senders where a call can still be logged. The estimate assumes no call
-   * is logged anywhere: a logged call there touches that lead, whose emails and texts then go first.
+   * Why the projection stopped before its end, as the run says on itself, so no figure is shown
+   * (ADR 0003, ticket 14c): `bound`, it reached its bound on work (`PROJECTION_MAX_STEPS`, calls into
+   * the engine's rules) and the campaign is too large to estimate; `horizon`, something it would do lies
+   * past its `horizonDays`. Null when it reached its end, or did not run (see `withheldBy` and `cannotProject`).
+   */
+  readonly stoppedEarly: "bound" | "horizon" | null;
+  /**
+   * The user's calls, when the campaign has a live phone track (ADR 0003, ticket 14c); null otherwise.
+   * A call is a task on the user's list, not a send: the projection places due calls by the engine's
+   * own rules within the daily call capacity, assuming the user works through each day's list, and
+   * foresees no call outcome.
+   */
+  readonly calls: {
+    /** The user's daily call capacity, across every campaign (GET /api/call-settings). */
+    readonly capacity: number;
+    /** Calls on today's list across every campaign: placed today, and carried from earlier days. */
+    readonly onListToday: number;
+    /** The most calls of this campaign placed on one day; null when nothing is projected. */
+    readonly busiestDay: number | null;
+  } | null;
+  /**
+   * Other campaigns, sharing these senders or the call list, whose calls the estimate also assumes are
+   * worked on their day with no answer (ADR 0003, ticket 14c). The screen names them.
    */
   readonly callsNotCounted: readonly { readonly id: string; readonly name: string }[];
   /**
-   * This campaign has a win-back branch (ticket 16). Its emails and texts go only to leads who decline on a
-   * call, and the estimate assumes no call outcome is logged, so it counts none of them. A competing lead
-   * already in win-back when the estimate is taken is counted: its branch runs by the engine's own rules.
+   * The estimate's run counted none of this campaign's win-back branch (ticket 16): its emails and texts go
+   * only to leads who decline on a call, and the assumed user logs every call no answer (ticket 14c). False
+   * when the campaign has no branch, or no figure is shown.
+   * A competing lead already in win-back when the estimate is taken is counted: its branch runs by the
+   * engine's own rules.
    */
   readonly winBackNotCounted: boolean;
 }
@@ -486,16 +509,17 @@ export interface CopyPreview {
     readonly channel: "email" | "sms";
     /** Its number within its track: Email 2, Text 1. */
     readonly number: number;
-    /**
-     * The earliest day it can go for this lead, counting launch day as day 1: its track's start (at
-     * launch, or after the track it follows has finished all its steps, plus the delay) and every
-     * wait before it. Sending windows can move it later.
-     */
+    /** The day the projection sends it to this lead, counting launch day as day 1; null with `noDay` otherwise. */
     readonly day: number | null;
     /**
-     * The phone track this message waits on, through its track's chain, when `day` is null: it goes
-     * only after the user logs that call, so no day can be given (ADR 0003, ticket 13b).
+     * Why the message shows no day, when it shows none (review bot on 93bcc0c): every day shown is the
+     * day the projection sends it, and nothing else. `skipped`: the lead skips its track. `no_estimate`:
+     * no figure is projected (withheld, too large, or the campaign has launched). `beyond_horizon`: the
+     * projection's horizon ends before it. `not_sent`: a merge field with no fallback the lead lacks
+     * holds it. The rest of its track then shows no day either, for the same reason.
      */
+    readonly noDay: "skipped" | "no_estimate" | "beyond_horizon" | "not_sent" | null;
+    /** The phone track this message waits on, through its track's chain, if any. */
     readonly waitsOnCall: string | null;
     /** This lead lacks the track's channel (no email; no mobile of their own, or a company lead), so the track is skipped and the tracks after it start sooner. */
     readonly skipped: boolean;
@@ -676,25 +700,17 @@ export interface CallQueueItem {
   readonly skippedTonight: boolean;
 }
 
-/** A track that can change when a campaign's emails go, so the load is not projected (Before launch). */
+/** A track whose channel has no connected sender, so the load is not projected (Before launch). */
 export interface WithheldTrack {
   readonly trackId: string;
   readonly channel: "email" | "sms" | "call";
-  /** As the canvas names it: "the phone track", "SMS track 2". */
+  /** As the canvas names it: "the SMS track", "email track 2". */
   readonly label: string;
-  /**
-   * `no_sender`: its channel has no connected sender, so its leads and every track after it would
-   * wait; `after_a_phone_track`: an email or SMS track that starts, through its chain, after a phone
-   * track, which finishes only when the user logs its call, which no estimate can know.
-   */
-  readonly why: "no_sender" | "after_a_phone_track";
-  /** For `after_a_phone_track`: the phone track it waits on. */
-  readonly phoneTrack?: string;
+  /** Its channel has no connected sender, so its leads and every track after it would wait. */
+  readonly why: "no_sender";
 }
 
 export interface WithheldBy {
-  /** Null for this campaign's own tracks; else the competing campaign whose tracks they are (ticket 14a; council on 10121d3). */
-  readonly campaign: { readonly id: string; readonly name: string } | null;
   readonly tracks: readonly WithheldTrack[];
 }
 

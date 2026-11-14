@@ -67,7 +67,7 @@ test.describe("a merge field with no fallback, named by every track and message 
 });
 
 test.describe("the Add track menu button (council on 10121d3, item 4)", () => {
-  test("a click outside or focus leaving closes the menu, and its phone item adds nothing", async ({ page, request }) => {
+  test("a click outside or focus leaving closes the menu", async ({ page, request }) => {
     const created = await request.post("/api/campaigns", { data: { name: "Menu closes", businessesCsv: readFileSync(fixture("businesses-run1.csv"), "utf8"), peopleCsv: readFileSync(fixture("people-run1.csv"), "utf8") } });
     const id = ((await created.json()) as { campaign: Campaign }).campaign.id;
     await page.goto(`/campaigns/${id}`);
@@ -79,10 +79,7 @@ test.describe("the Add track menu button (council on 10121d3, item 4)", () => {
     await page.getByRole("heading", { name: "Email track" }).click();
     await expect(page.getByRole("menu")).toHaveCount(0);
     await button.click();
-    // Disabled with aria-disabled, so it stays focusable and says why; a click on it still does nothing.
-    await page.getByRole("menuitem", { name: /^Phone track/ }).click({ force: true });
     await expect(page.getByRole("menu")).toBeVisible();
-    await expect(page.getByRole("button", { name: /^Phone track: / })).toHaveCount(0);
     await page.keyboard.press("Tab");
     await expect(page.getByRole("menu")).toHaveCount(0);
   });

@@ -16,21 +16,23 @@ import { FULL_SEARCH, inShard, SEED } from "./sequence-chunks.ts";
  * behaviour the runs report (`stats.features`). Which behaviours those are is `CALL_FEATURES`, and
  * `pnpm check` asserts that the fixed seeds' runs reach every one of them, so a change to the generator
  * cannot silently drop one. Refresh both when the generator changes (last swept on 14 November 2026, ticket
- * 16a after the verifier on 654907b: 102 behaviours, among them a decline on each path with main-sequence work
- * claimed or with the provider, late sends, and a redial off a callback after a gatekeeper, restored by a
- * targeted draw).
+ * 16a merged with ticket 14c's per-track skip limits: 109 behaviours, among them a decline on each path with
+ * main-sequence work claimed or with the provider, late sends, each phone track's own limit, and a redial off a
+ * callback after a gatekeeper, restored by a targeted draw).
  */
-export const CALL_FIXED_SEEDS: readonly number[] = [0, 6, 8, 9, 13, 16, 21, 37, 42, 43, 60, 61, 98];
+export const CALL_FIXED_SEEDS: readonly number[] = [0, 4, 6, 8, 9, 16, 20, 21, 42, 50, 60, 78, 82, 98];
 
 /** Every behaviour the fixed seeds must reach between them. */
 export const CALL_FEATURES: readonly string[] = [
   "a-company-zone-moved",
+  "a-held-lead-lost-its-last-number",
   "a-later-phone-track-skipped-as-declined",
   "a-person-zone-moved",
   "a-phone-track-released-by-the-decline-skipped",
   "a-redial-skipped-from-its-original-due-date",
   "a-send-beside-an-open-call",
   "a-send-in-win-back",
+  "a-send-moved-by-a-callback",
   "a-started-main-track-dropped",
   "a-win-back-branch",
   "acted-after-a-callback-time-before-the-tick",
@@ -49,6 +51,7 @@ export const CALL_FEATURES: readonly string[] = [
   "callback-for-a-later-day",
   "callback-hold",
   "callback-later-today",
+  "callback-with-no-good-number",
   "callback-worked:callback_requested",
   "callback-worked:gatekeeper",
   "callback-worked:gatekeeper+redial",
@@ -77,6 +80,7 @@ export const CALL_FEATURES: readonly string[] = [
   "declined:continue",
   "declined:stop",
   "declined:win_back",
+  "drain-skipped-a-callback-it-cannot-log",
   "email-reply",
   "ended:declined_on_call",
   "ended:finished_no_usable_channel",
@@ -89,6 +93,9 @@ export const CALL_FEATURES: readonly string[] = [
   "limit:1",
   "limit:2",
   "limit:3",
+  "limit:a-track's-own",
+  "limit:a-track's-own-not-the-campaign's",
+  "limit:the-campaign's",
   "outcome-on-a-redial-for-tomorrow",
   "outcome-refused",
   "outcome:callback_requested",

@@ -1,4 +1,4 @@
-import { callbackDay, REDIAL_OUTCOMES } from "../../src/domain/sequence/calls.ts";
+import { callbackDay, REDIAL_OUTCOMES, skipLimitOf } from "../../src/domain/sequence/calls.ts";
 import { evaluate, finishTrack, progressOf, runs, synced } from "../../src/domain/sequence/progress.ts";
 import { leadNow, localDayNumber, span, wallOfLead } from "../../src/domain/sequence/clock.ts";
 import type { CallTask, SubjectState } from "../../src/domain/sequence/state.ts";
@@ -118,10 +118,9 @@ const RULES: Record<string, Partial<Rules>> = {
   "redial resets the deadline": {
     // The skip limit counted from the latest redial instead of the call's original due time.
     evaluate: (s, now, options) => {
-      const limit = s.campaign.definition.callSkipLimitDays;
       const fromRedial = mapTasks(s, (t) => {
         const r = s.callAttempts.filter((a) => a.taskId === t.id && a.redial).at(-1);
-        return r ? { ...t, skipDeadline: r.at + span(r.atWall, limit, s.callDay.userZone) } : t;
+        return r ? { ...t, skipDeadline: r.at + span(r.atWall, skipLimitOf(s.campaign.definition, t.trackId), s.callDay.userZone) } : t;
       });
       return keepStored(s, R.evaluate(fromRedial, now, options));
     },
@@ -139,7 +138,7 @@ const RULES: Record<string, Partial<Rules>> = {
     // A missed callback dropped after the skip limit, counted in days from its day: the call is skipped and outreach resumes.
     evaluate: (s, now, options) => {
       const cb = s.callTasks.find((t) => t.open && t.kind === "callback");
-      if (!cb || s.subject.ended !== null || callbackDay(s, cb) + s.campaign.definition.callSkipLimitDays > localDayNumber(now, s.callDay.userZone)) return R.evaluate(s, now, options);
+      if (!cb || s.subject.ended !== null || callbackDay(s, cb) + skipLimitOf(s.campaign.definition, cb.trackId) > localDayNumber(now, s.callDay.userZone)) return R.evaluate(s, now, options);
       const released = synced(mapTasks(s, (t) => (t.id === cb.id ? { ...t, kind: "call", callbackAt: null } : t)), now);
       return R.evaluate(finishTrack(released, cb.trackId, "skipped_unworked", leadNow(released.subject.clock, now), now), now, options);
     },
@@ -289,7 +288,7 @@ const EXPECTED: Record<string, { invariant: string; seed: number }> = {
   "outcome on an unlisted task": { invariant: "16", seed: 7 },
   "interested closes only its own task": { invariant: "16", seed: 54 },
   "daily call capacity ignored": { invariant: "17", seed: 0 },
-  "committed calls not counted": { invariant: "17", seed: 1 },
+  "committed calls not counted": { invariant: "17", seed: 2 },
   "a call placed on a day its calling hours have closed": { invariant: "17", seed: 1 },
   "an unworked call holds the parallel tracks": { invariant: "18", seed: 6 },
   "the tracks after a call start when it is placed": { invariant: "7", seed: 4 },
@@ -305,14 +304,14 @@ const EXPECTED: Record<string, { invariant: string; seed: number }> = {
   "redial resets the deadline": { invariant: "16", seed: 23 },
   "redial listed the same day": { invariant: "16", seed: 0 },
   "callback listed before its day": { invariant: "16", seed: 20 },
-  "callback expires": { invariant: "16", seed: 9 },
+  "callback expires": { invariant: "16", seed: 4 },
   "a task never listed expires": { invariant: "7", seed: 27 },
   "callback outcome refused when the callback is the only hold": { invariant: "16", seed: 0 },
   "a callback does not hold the lead": { invariant: "16", seed: 2 },
   "a callback does not freeze the clock": { invariant: "9", seed: 0 },
   "a callback's outcome logged on the frozen clock": { invariant: "7", seed: 0 },
   "unworked calls never expire": { invariant: "7", seed: 0 },
-  "carried calls not at the top": { invariant: "16", seed: 11 },
+  "carried calls not at the top": { invariant: "16", seed: 42 },
   "overdue callbacks shown as callbacks": { invariant: "16", seed: 2 },
   "a redial after any outcome": { invariant: "16", seed: 0 },
   "a user action judged on stale state": { invariant: "16", seed: 3 },
@@ -321,7 +320,7 @@ const EXPECTED: Record<string, { invariant: string; seed: number }> = {
   "open task survives a decline": { invariant: "15", seed: 40 },
   "a decline does not bar later calls": { invariant: "15", seed: 98 },
   "the user's declined path ignored": { invariant: "20", seed: 79 },
-  "win-back keeps the main sequence running": { invariant: "7", seed: 38 },
+  "win-back keeps the main sequence running": { invariant: "7", seed: 6 },
   "win-back entered at the campaign's start": { invariant: "7", seed: 9 },
   "a dropped track's claim is handed over after the decline": { invariant: "6", seed: 6 },
 };

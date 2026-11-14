@@ -4,7 +4,8 @@ import { arrange, naive, type ArrangeMutation, type ArrangeOperation } from "./a
 
 /**
  * The arrangement rule's generated test (ADR 0003, ticket 13b): generated valid definitions, phone
- * tracks among them (a track like any other: others may start after one), then
+ * tracks among them (a track like any other: others may start after one, and the editor adds them
+ * since ticket 14c), then
  * generated sequences of every operation the editor offers, including ones the rule must refuse.
  * After each operation it asserts the rule's five invariants. Each named mutation of the rule must
  * make it fail.
@@ -47,7 +48,7 @@ function generateOperation(r: () => number, def: CampaignDefinition): ArrangeOpe
   const after = live.filter((t) => t.start.kind === "after");
   const kinds = live.length === 0 ? ["add"] : ["add", "remove", "start", "start", "start", ...(after.length > 0 ? ["delay"] : [])];
   const kind = pick(r, kinds);
-  if (kind === "add" || live.length === 0) return { kind: "add", channel: pick(r, ["email", "sms"] as const) };
+  if (kind === "add" || live.length === 0) return { kind: "add", channel: pick(r, ["email", "sms", "call"] as const) };
   if (kind === "remove") return { kind: "remove", trackId: pick(r, live).id };
   if (kind === "delay") return { kind: "delay", trackId: pick(r, after).id, days: pick(r, [0, 1, 2, 3, -1, 1.5, Number.NaN]) };
   const subject = pick(r, live);
@@ -94,7 +95,7 @@ describe("the arrangement rule, generated (ADR 0003, ticket 13b)", () => {
     for (let seed = 1; seed <= SEEDS; seed++) runSeed(seed);
   });
 
-  const mutations: ArrangeMutation[] = ["no_cycle_check", "remove_ignores_dependants", "refusal_changes_draft", "refuse_every_after"];
+  const mutations: ArrangeMutation[] = ["no_cycle_check", "remove_ignores_dependants", "refusal_changes_draft", "refuse_every_after", "phone_track_with_a_follow_up"];
   for (const mutation of mutations) {
     test(`the mutation "${mutation}" fails it`, () => {
       let failed = 0;
