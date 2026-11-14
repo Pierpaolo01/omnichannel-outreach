@@ -73,6 +73,17 @@ test.describe("the phone track on the canvas and in its inspector", () => {
     expect((await stored(page, id)).tracks.some((t) => t.id === "call" && !t.removed)).toBe(true);
   });
 
+  test("the skip limit's hint is worded from the value shown: a phone track saved without its own limit shows the campaign's (council on 2cf1d90, item 4)", async ({ page }) => {
+    const id = await newCampaign(page, "A call saved before 14c");
+    // A phone track as saved before ticket 14c: no skip limit of its own.
+    const older = { ...phoneTrack("call", { kind: "entry" }), callSkipLimitDays: undefined };
+    await page.request.put(`/api/campaigns/${id}/sequence`, { data: { ...TWO_CHANNELS, emailPool: [], smsPool: [], callSkipLimitDays: 3, tracks: [...TWO_CHANNELS.tracks, older] } });
+    await page.goto(`/campaigns/${id}?track=call`);
+    await expect(page.getByLabel("Days before an unworked call is skipped")).toHaveValue("3");
+    await expect(page.getByText("This phone track uses the campaign’s limit, 3 days, until you change it here.", { exact: false })).toBeVisible();
+    await expect(page.getByText("2 days is the default", { exact: false })).toHaveCount(0);
+  });
+
   test("a skip limit below 1 is said in place and nothing is saved until it is fixed", async ({ page }) => {
     const id = await newCampaign(page, "Skip limit refused");
     await page.request.put(`/api/campaigns/${id}/sequence`, { data: WITH_A_CALL });
@@ -126,7 +137,7 @@ test.describe("calls in Before launch", () => {
     await expect(calls).toContainText("2 a day");
     await expect(calls).toContainText("of 2");
     await expect(page.getByText("A lead starts with its first email or text, or when its first call goes on your list.", { exact: false })).toBeVisible();
-    await expect(page.getByText("For calls in this campaign, it assumes you work every call on your list on the day it is there, and that each one gets no answer", { exact: false })).toBeVisible();
+    await expect(page.getByText("For calls in this campaign, it assumes you work every call on your list by the end of the day it is there, and that each one gets no answer", { exact: false })).toBeVisible();
     await page.getByRole("button", { name: "Launch campaign" }).click();
     await expect(page.getByText(/^Launched .*\.$/)).toBeVisible();
     await f.harness.tick();
@@ -134,6 +145,14 @@ test.describe("calls in Before launch", () => {
     const mine = [...list.readyNow, ...list.laterToday].filter((c) => c.campaign.id === id);
     expect(mine.length).toBeGreaterThan(0);
     expect(mine.every((c) => c.track.label === "Phone track")).toBe(true);
+  });
+
+  test("with nothing blocking launch, the line says every email and SMS track has a sender: a phone track needs none (council on 2cf1d90, item 5)", async ({ page }) => {
+    const f = await fakeProviderApp("phone-editor");
+    const id = await f.freshTwoChannelCampaign("Nothing blocks");
+    await page.request.put(`${f.url}/api/campaigns/${id}/sequence`, { data: { ...TWO_CHANNELS, callScript: "Ask who books.", tracks: [...TWO_CHANNELS.tracks, phoneTrack("call", { kind: "entry" })] } });
+    await page.goto(`${f.url}/campaigns/${id}/before-launch`);
+    await expect(page.getByText("every email and SMS track has a sender.", { exact: false })).toBeVisible();
   });
 
   test("a running campaign's phone track is read-only, and says why", async ({ page }) => {

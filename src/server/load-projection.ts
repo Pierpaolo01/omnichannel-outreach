@@ -367,13 +367,14 @@ export function projectLoad(input: ProjectionInput): Projection {
   const callers = new Set<string>();
   if (callSettings) for (const [id, s] of states) if (liveTracks(s.campaign.definition, "main").some((t) => t.channel === "call")) callers.add(id);
   /**
-   * The assumed user (ADR 0003, ticket 14c): in the last second of each user day, every call on the
-   * list is worked and logged as no answer on the lead's first good number, by the engine's own
-   * `logCallOutcome`. That finishes the phone track (the tracks after it start after their delay),
-   * touches the lead (its later messages and calls go first) and continues the lead, as the engine
-   * does with that outcome.
+   * The assumed user (ADR 0003, ticket 14c): by the end of each user day, in its last second, every
+   * call on the list is worked and logged as no answer on the lead's first good number, by the engine's
+   * own `logCallOutcome`. That finishes the phone track (the tracks after it start after their delay),
+   * touches the lead (its later messages and calls go first) and continues the lead, as the engine does
+   * with that outcome. A call it releases at once is placed by the passes that follow and worked too:
+   * the sweep repeats at that instant until no call on the list is left to work (council on 2cf1d90,
+   * item 1). Each sweep closes a task, so it ends.
    */
-  let workedAt = Number.NaN;
   let workSeq = 0;
   const workTheList = (t: number): boolean => {
     let any = false;
@@ -688,11 +689,9 @@ export function projectLoad(input: ProjectionInput): Projection {
     }
 
     // The day's list is worked in its last second, after this instant's passes (as the engine's user
-    // logs between ticks); the passes then run again at the same instant.
-    if (callSettings && t === lastSecondOf(t) && workedAt !== t) {
-      workedAt = t;
-      if (workTheList(t)) continue;
-    }
+    // logs between ticks); the passes then run again at the same instant, placing any call a logged one
+    // released, and the list is worked again, until a sweep finds nothing left to work.
+    if (callSettings && t === lastSecondOf(t) && workTheList(t)) continue;
 
     // The next instant anything can change, as `Engine.nextWakeAt`.
     const candidates: number[] = [wakes.peek()];

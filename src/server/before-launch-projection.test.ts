@@ -925,19 +925,28 @@ describe("generated: a competing campaign whose email track waits on its calls, 
 });
 
 /**
- * The user the projection assumes (ADR 0003, ticket 14c): every call on the list is worked on its user
- * day and logged as no answer, in the day's last second, on a good number of the lead's.
+ * The user the projection assumes (ADR 0003, ticket 14c): every call on the list is worked by the end
+ * of its user day, in the day's last second, and logged as no answer on a good number of the lead's.
+ * A logged call can release another phone track at once, whose call the engine then places: the user
+ * works that one too, so the sweep repeats, with a tick between, until no call on the list is left
+ * that an outcome is accepted on (council on 2cf1d90, item 1).
  */
 async function workTheList(h: EngineHarness, campaignIds: readonly string[]) {
-  for (const cid of campaignIds) {
-    for (const id of await h.store.engine.subjectsOf(cid)) {
-      const s = (await h.store.engine.subject(id, h.clock))!;
-      const number = s.lead.phones.find((n) => !n.bad);
-      for (const task of s.callTasks.filter((t) => t.open)) {
-        if (!number) continue;
-        await h.request("POST", `/api/call-tasks/${task.id}/outcome`, { requestId: `w-${task.id}`, outcome: "no_answer", numberId: number.id, note: "" });
+  for (let sweep = 0; sweep < 50; sweep++) {
+    let logged = 0;
+    for (const cid of campaignIds) {
+      for (const id of await h.store.engine.subjectsOf(cid)) {
+        const s = (await h.store.engine.subject(id, h.clock))!;
+        const number = s.lead.phones.find((n) => !n.bad);
+        for (const task of s.callTasks.filter((t) => t.open)) {
+          if (!number) continue;
+          const res = await h.request("POST", `/api/call-tasks/${task.id}/outcome`, { requestId: `w-${task.id}`, outcome: "no_answer", numberId: number.id, note: "" });
+          if (res.status === 200) logged++;
+        }
       }
     }
+    if (logged === 0) return;
+    await h.tick();
   }
 }
 /** The last second of the user day `t` falls in. */
@@ -954,6 +963,37 @@ async function advanceWorking(h: EngineHarness, campaignIds: readonly string[], 
     await h.advanceTo(Math.min(end + 2000, until));
   }
 }
+
+describe("a call released by a worked call is worked the same day (council on 2cf1d90, item 1)", () => {
+  test("an older campaign's call B right after call A: both its calls and the target's two calls take Tuesday's room of 2, as the engine places them", async () => {
+    const start = Date.parse("2026-11-02T09:00:00Z");
+    const h = new EngineHarness({ start, accounts: [{ id: "inbox-0", capacity: 50, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+    expect((await h.request("PUT", "/api/call-settings", { dailyCapacity: 2, userZone: "Europe/London" })).status).toBe(200);
+    const allDay = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
+    const call = (id: string, start: CampaignDefinition["tracks"][number]["start"]) => ({ id, channel: "call" as const, branch: "main" as const, window: allDay, steps: [{ id: `${id}1`, waitDays: 0, subject: "", body: "", threading: "new_subject" as const, removed: false }], start, removed: false, callSkipLimitDays: 2 });
+    const rows = (prefix: string, n: number) => ({
+      businesses: Array.from({ length: n }, (_, i) => business({ business_id: `${prefix}b${i}`, business_name: `${prefix} Clinic ${i}`, timezone: "Europe/London", phone_e164: `+4420794622${prefix === "o" ? 1 : 2}${i}`, phone_original: "", country: "GB" })),
+      people: Array.from({ length: n }, (_, i) => person({ person_id: `${prefix}p${i}`, business_id: `${prefix}b${i}`, full_name: `${prefix} Person${i}`, email: "", timezone: "" })),
+    });
+    const { campaign: older } = await h.createCampaign("Older", rows("o", 1));
+    const { campaign: target } = await h.createCampaign("Target", rows("t", 2));
+    await h.tick();
+    await h.defineSequence(older.id, { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: [], smsPool: [], callScript: "", tracks: [call("a", { kind: "entry" }), call("b", { kind: "after", trackId: "a", delayDays: 0 })] });
+    expect((await h.launch(older.id)).status).toBe(200);
+    const email = { id: "e", channel: "email" as const, branch: "main" as const, window: allDay, steps: [{ id: "e1", waitDays: 0, subject: "Hello", body: "A note.", threading: "new_subject" as const, removed: false }], start: { kind: "entry" as const }, removed: false };
+    await h.defineSequence(target.id, { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: ["inbox-0"], smsPool: [], callScript: "", tracks: [email, call("c", { kind: "after", trackId: "e", delayDays: 1 })] });
+    const projected = await projectedSends(h.store, target.id, h.clock);
+    expect((await h.launch(target.id)).status).toBe(200);
+    await advanceWorking(h, [older.id, target.id], "Europe/London", start + 6 * DAY);
+    const days: number[] = [];
+    for (const id of await h.store.engine.subjectsOf(target.id)) for (const task of (await h.store.engine.subject(id, h.clock))!.callTasks) days.push(task.listDay - localDayNumber(start, "Europe/London") + 1);
+    // The engine: Monday A and B (B released by A's outcome, worked the same day); Tuesday both target calls.
+    expect(days.sort()).toEqual([2, 2]);
+    expect(projected?.calls.map((c) => c.day - localDayNumber(start, "Europe/London") + 1).sort()).toEqual([2, 2]);
+    expect(projected?.busiestCallDay).toBe(2);
+    expect(projected?.daysUntilAllStart).toBe(2);
+  });
+});
 
 describe("a worked call touches its lead, whose next call then goes first: the start horizon is the engine's (review bot on 5cd8a93)", () => {
   test("three leads reached only by phone, capacity 1, call A at launch and call B a day after a skipped email track: the last lead starts on day 5, as the engine starts it", async () => {
@@ -1069,6 +1109,25 @@ describe("generated: calls placed within a tight daily call capacity, the user w
       if (w.idleBefore) await h.advanceTo(h.clock + c.launchAfterMs + 2 * DAY);
       else await advanceWorking(h, ids, w.userZone, h.clock + c.launchAfterMs + 2 * H);
     }
+    // The projection also starts from calls the user has already logged today on the earlier campaigns
+    // (council on 2cf1d90, item 6), on a stream of its own so the worlds stay as generated: a call
+    // skipped for now (still on today's list, at its end), a voicemail (finished, the lead touched),
+    // and a wrong number (marked bad: the assumed user then logs on the lead's next good number, and a
+    // lead whose only number it was is skipped). People are shared, so the marks reach the last campaign.
+    const r3 = rng(seed + 991);
+    const startedFrom = new Set<string>();
+    for (const cid of ids.slice(0, -1)) {
+      for (const sid of await h.store.engine.subjectsOf(cid)) {
+        const st = (await h.store.engine.subject(sid, h.clock))!;
+        const task = st.callTasks.find((t) => t.open);
+        const number = st.lead.phones.find((n) => !n.bad);
+        if (!task || !number || r3() < 0.25) continue;
+        const outcome = pick(r3, ["skip_for_now", "voicemail", "wrong_number"] as const);
+        const res = await h.request("POST", `/api/call-tasks/${task.id}/outcome`, { requestId: `s-${task.id}`, outcome, numberId: outcome === "skip_for_now" ? null : number.id, note: "" });
+        if (res.status === 200) startedFrom.add(outcome);
+      }
+    }
+    await h.tick();
     const carried = (await h.store.engine.callDay(h.clock)).committed > 0;
     const target = ids.at(-1)!;
     const launchedAt = h.clock;
@@ -1110,11 +1169,12 @@ describe("generated: calls placed within a tight daily call capacity, the user w
       spread: new Set(calls.map((a) => a.split(" ")[0])).size > 1,
       carried,
       twoCalls: w.campaigns.some((c) => c.definition.tracks.filter((t) => t.channel === "call").length > 1),
+      startedFrom,
     };
   }
 
   const SEEDS = Number(process.env["PROJECTION_SEEDS"] ?? 30);
-  const coverage = { spread: 0, carried: 0, twoCalls: 0, horizons: 0 };
+  const coverage = { spread: 0, carried: 0, twoCalls: 0, horizons: 0, startedFrom: new Set<string>() };
   for (const seed of Array.from({ length: SEEDS }, (_, i) => 14_300 + i)) {
     test(`generated calling world ${seed}`, async () => {
       const out = await compareCalls(seed);
@@ -1130,6 +1190,7 @@ describe("generated: calls placed within a tight daily call capacity, the user w
       coverage.spread += out.spread ? 1 : 0;
       coverage.carried += out.carried ? 1 : 0;
       coverage.twoCalls += out.twoCalls ? 1 : 0;
+      for (const x of out.startedFrom) coverage.startedFrom.add(x);
     });
   }
   test("the worlds' calls take more than one day's room, some start from calls carried on the list, many have several phone tracks, and the horizon is compared", () => {
@@ -1137,6 +1198,8 @@ describe("generated: calls placed within a tight daily call capacity, the user w
     expect(coverage.carried).toBeGreaterThan(0);
     expect(coverage.twoCalls).toBeGreaterThan(SEEDS / 3);
     expect(coverage.horizons).toBeGreaterThan(SEEDS / 3);
+    // The worlds start from a call skipped for now today, a voicemail and a wrong number.
+    expect([...coverage.startedFrom].sort()).toEqual(["skip_for_now", "voicemail", "wrong_number"]);
   });
 
   // Each mutation of the projection alone must make some world disagree with the engine (ADR 0003, ticket 14c).

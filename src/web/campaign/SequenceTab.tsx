@@ -16,6 +16,7 @@ import {
   fieldsOf,
   hourLabel,
   liveSteps,
+  DEFAULT_SKIP_LIMIT_DAYS,
   newStep,
   removeStep,
   setWindow,
@@ -726,7 +727,9 @@ function PhoneInspector({ track, editor, onLoadedStored, onClose, onRemoved }: {
             days
           </label>
           <p id={skipHint} className="text-[12.5px] text-muted">
-            Counted from the day the call falls due; 2 days unless you change it. Skipping an unworked call arrives with a later release: until then a call stays on your list until you log it.
+            Counted from the day the call falls due.{" "}
+            {track.callSkipLimitDays === undefined ? `This phone track uses the campaign’s limit, ${skipLimit} ${skipLimit === 1 ? "day" : "days"}, until you change it here.` : skipLimit === DEFAULT_SKIP_LIMIT_DAYS ? `${DEFAULT_SKIP_LIMIT_DAYS} days is the default.` : ""}{" "}
+            Skipping an unworked call arrives with a later release: until then a call stays on your list until you log it.
           </p>
         </div>
       </div>

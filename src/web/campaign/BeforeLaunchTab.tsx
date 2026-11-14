@@ -156,7 +156,7 @@ function Blockers({ campaignId, editor }: { campaignId: string; editor: Sequence
           <span>
             <b className="font-semibold">{nothingToLaunch ? "No track yet." : "Nothing blocks launch."}</b>
             <span className="block text-ink-2">
-              {nothingToLaunch ? "With a track, launch is blocked only by empty copy, a merge field with no fallback that a lead lacks, or no connected sender." : "Every message has copy, every merge field has a fallback where a lead lacks it, and every track has a sender."}
+              {nothingToLaunch ? "With a track, launch is blocked only by empty copy, a merge field with no fallback that a lead lacks, or no connected sender." : "Every message has copy, every merge field has a fallback where a lead lacks it, and every email and SMS track has a sender."}
             </span>
           </span>
         </div>
@@ -425,7 +425,7 @@ function heldSaid(c: LoadProjectionView["cannotProject"][number]): string {
 function callCaveat(here: boolean, elsewhere: readonly { readonly name: string }[]): string {
   if (!here && elsewhere.length === 0) return "";
   const where = and([...(here ? ["this campaign"] : []), ...elsewhere.map((c) => c.name)]);
-  return `For calls in ${where}, it assumes you work every call on your list on the day it is there, and that each one gets no answer: its phone track then finishes, the tracks after it start, and that lead’s later messages and calls go first. Another outcome changes this, as a reply would. `;
+  return `For calls in ${where}, it assumes you work every call on your list by the end of the day it is there, and that each one gets no answer: its phone track then finishes, the tracks after it start, and that lead’s later messages and calls go first. Another outcome changes this, as a reply would. `;
 }
 
 const gap = (seconds: number) => (seconds < 120 ? `${seconds} seconds` : `${Math.round(seconds / 60)} minutes`);

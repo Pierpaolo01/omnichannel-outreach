@@ -6,6 +6,7 @@
  */
 import { missingFields, renderSegments, type Segment } from "../domain/copy-preview.ts";
 import { isLive, isUncertain } from "../domain/sequence/attempt.ts";
+import { localDayNumber } from "../domain/sequence/clock.ts";
 import { mergeUses } from "../domain/sequence/copy.ts";
 import { liveSteps, liveTracks, ownSubject, poolOf, type CampaignDefinition, type TrackDefinition } from "../domain/sequence/definition.ts";
 import { goodEmail, hasGoodNumber, progressOf, runs } from "../domain/sequence/progress.ts";
@@ -333,8 +334,15 @@ async function callsView(store: OutreachStore, now: number, projection: Projecti
 export async function copyPreview(store: OutreachStore, campaignId: string, enrollmentId: string, definition: CampaignDefinition, now: number): Promise<CopyPreview | null> {
   const state = await store.engine.subject(enrollmentId, now);
   if (!state || state.subject.campaignId !== campaignId) return null;
-  const lead = (await campaignLeads(store, campaignId, definition, now)).find((l) => l.lead.id === enrollmentId)?.lead;
+  const leads = await campaignLeads(store, campaignId, definition, now);
+  const lead = leads.find((l) => l.lead.id === enrollmentId)?.lead;
   if (!lead) return null;
+  // One screen, one answer (council on 2cf1d90, item 2): before launch, a message's day is the day the
+  // same projection that makes the load figure sends it to this lead. Where it makes none (no figure is
+  // projected, or the lead does not reach that step), the earliest day below is shown.
+  const projected = (await store.engine.campaign(campaignId))?.launchedAt == null ? (await projectionOf(store, campaignId, definition, leads, now)).projection : null;
+  const dayOfLaunch = localDayNumber(now, definition.timezone);
+  const projectedDay = new Map((projected?.sends ?? []).filter((x) => x.leadId === enrollmentId).map((x) => [x.stepId, localDayNumber(x.at, definition.timezone) - dayOfLaunch + 1] as const));
   const data = state.lead.mergeData;
   const all = liveTracks(definition, "main");
   const tracks = all.filter((t) => t.channel !== "call");
@@ -343,9 +351,9 @@ export async function copyPreview(store: OutreachStore, campaignId: string, enro
   const skipped = (t: TrackDefinition) => (t.channel === "email" ? lead.email === null : t.channel === "sms" ? !lead.mobile : !lead.phone);
   /**
    * The earliest day offset a track starts on, and the phone track it waits on through its chain, if
-   * any. A phone track's call is worked, at the earliest, on the day it falls due (the projection's
-   * assumption, ADR 0003 ticket 14c), so what follows it starts that day plus its delay; a call that
-   * waits for room on the list moves it later, as a sending window does.
+   * any. A phone track's call is worked by the end of the day it falls due, at the earliest (the
+   * projection's assumption, ADR 0003 ticket 14c), so what follows it starts the next day, or after its
+   * delay if that is longer; a call that waits for room on the list moves it later, as a window does.
    */
   const startDay = new Map<string, { day: number; phone: TrackDefinition | null }>();
   const startOf = (t: TrackDefinition, depth = 0): { day: number; phone: TrackDefinition | null } => {
@@ -358,7 +366,8 @@ export async function copyPreview(store: OutreachStore, campaignId: string, enro
       if (before) {
         const at = startOf(before, depth + 1);
         const length = skipped(before) ? 0 : liveSteps(before).reduce((sum, st) => sum + st.waitDays, 0);
-        out = { day: at.day + length + delay, phone: before.channel === "call" && !skipped(before) ? before : at.phone };
+        const afterCall = before.channel === "call" && !skipped(before);
+        out = { day: at.day + length + (afterCall ? Math.max(delay, 1) : delay), phone: afterCall ? before : at.phone };
       }
     }
     startDay.set(t.id, out);
@@ -373,13 +382,14 @@ export async function copyPreview(store: OutreachStore, campaignId: string, enro
     let threadSubject: Segment[] = [];
     liveSteps(track).forEach((step, i) => {
       if (!skip && day !== null) day += step.waitDays;
+      const shownDay = projectedDay.get(step.id) ?? day;
       const email = track.channel === "email";
       const own = email ? renderSegments(ownSubject(step), data) : [];
       const subject = email && step.threading === "continue_thread" ? [{ text: "Re: ", kind: "literal" as const }, ...threadSubject] : own;
       if (email && step.threading === "new_subject") threadSubject = own;
       const body = renderSegments(step.body, data);
       steps.push({
-        step: { trackId: track.id, stepId: step.id, channel: track.channel === "sms" ? "sms" : "email", number: i + 1, day, waitsOnCall: waitsOn, skipped: skip, threading: step.threading, subject, body, missing: missingFields([...own, ...body]) },
+        step: { trackId: track.id, stepId: step.id, channel: track.channel === "sms" ? "sms" : "email", number: i + 1, day: shownDay, waitsOnCall: waitsOn, skipped: skip, threading: step.threading, subject, body, missing: missingFields([...own, ...body]) },
         order: trackIndex * 10_000 + i,
       });
     });

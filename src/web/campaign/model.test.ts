@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { render } from "../../domain/sequence/copy.ts";
 import { launchCheck } from "../../domain/sequence/blockers.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../shared/api.ts";
-import { fallbackIn, removeStep, setWindow, stepUsing, threadSubjectOf, withFallback } from "./model.ts";
+import { fallbackIn, newTrack, removeStep, sendsOnItsOwn, setWindow, stepUsing, threadSubjectOf, withFallback } from "./model.ts";
 import { draftProblems } from "./saveQueue.ts";
 
 describe("the editor's fallback field rewrites every use of the field in a step", () => {
@@ -88,5 +88,14 @@ describe("the screen finds a field's step with the domain's own parser (PR 41 re
     const def = definition([email("s1", "Hello", "Hi."), email("s2", "{{city}}", "Hello.", "continue_thread")]);
     expect(blockedFields(def)).toEqual([]);
     expect(stepUsing(def.tracks[0]!, "city")).toBeUndefined();
+  });
+});
+
+describe("what a running campaign does on its own, in its banner (council on 2cf1d90, item 3)", () => {
+  test("due calls appear on the list within the daily capacity, to be worked in calling hours: the engine places them at once and shows them later today until the hours open", () => {
+    const def = (channels: ("email" | "sms" | "call")[]): CampaignDefinition => ({ timezone: "UTC", callSkipLimitDays: 2, emailPool: [], tracks: channels.map((c) => newTrack(c)) });
+    expect(sendsOnItsOwn(def(["call"]))).toBe("Due calls appear on your list within your daily call capacity; work them during each lead’s calling hours.");
+    expect(sendsOnItsOwn(def(["email", "call"]))).toBe("Email goes out on its own, inside each lead’s sending window. Due calls appear on your list within your daily call capacity; work them during each lead’s calling hours.");
+    expect(sendsOnItsOwn(def(["email", "sms"]))).toBe("Email and texts go out on their own, inside each lead’s sending window.");
   });
 });

@@ -155,7 +155,9 @@ export function threadSubjectOf(steps: readonly StepDefinition[], index: number)
 export function sendsOnItsOwn(def: CampaignDefinition): string {
   const channels = new Set(def.tracks.filter((t) => !t.removed).map((t) => t.channel));
   // A call is never made on its own: it goes on the user's list, and the user dials it (ticket 14c).
-  const calls = channels.has("call") ? "Calls go on your list when they fall due, inside each lead’s calling hours." : "";
+  // The engine places a due call at once, within the daily capacity, and lists it as later today until
+  // the lead's calling hours open (ADR 0003 4.4; council on 2cf1d90, item 3).
+  const calls = channels.has("call") ? "Due calls appear on your list within your daily call capacity; work them during each lead’s calling hours." : "";
   const own =
     channels.has("email") && channels.has("sms") ? "Email and texts go out on their own, inside each lead’s sending window."
     : channels.has("sms") ? "Texts go out on their own, inside each lead’s sending window."

@@ -970,10 +970,10 @@ export const SCREENS: readonly Screen[] = [
     open: async (page) => {
       const id = await campaignWith(page, "Two channels and a call", WITH_A_CALL);
       await page.goto(`/campaigns/${id}?track=call`);
-      // Held, so the shared campaign keeps its limit.
-      await page.route("**/api/campaigns/*/sequence", (route) => (route.request().method() === "PUT" ? new Promise(() => undefined) : route.continue()));
+      // Its own campaign, and a draft that cannot be saved is never sent: the state as the user meets it.
       await page.getByLabel("Days before an unworked call is skipped").fill("0");
       await settle(page, "call skip limit is a whole number of days, at least 1");
+      await page.getByTestId("inspector").getByRole("status").filter({ hasText: "Not saved" }).waitFor();
     },
   },
   {

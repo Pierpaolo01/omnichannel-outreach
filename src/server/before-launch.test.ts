@@ -4,6 +4,8 @@ import { business, person } from "../../test/support/export-builder.ts";
 import type { FakeAccount } from "../../test/support/fake-email-port.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../domain/sequence/definition.ts";
 import type { ApiError, BeforeLaunchView, CampaignDetail, CampaignListItem, CopyPreview } from "../shared/api.ts";
+import { localDayNumber } from "../domain/sequence/clock.ts";
+import { projectedSends } from "./before-launch.ts";
 
 /**
  * The Before launch tab's read models (ticket 12c), through the real HTTP app and store with the
@@ -184,6 +186,29 @@ describe("Before launch: copy for one lead across both channels, by track, dated
       ["t2", "m1", "sms", 1, 2, false],
       ["t2", "m2", "sms", 2, 4, false],
     ]);
+  });
+
+  test("a message after a phone track is dated by the same simulation as the figure: the call is worked by the end of its day, so the email after it goes the next morning (council on 2cf1d90, item 2)", async () => {
+    const { h, id } = await campaign([inbox("inbox-a")]);
+    await h.defineSequence(id, {
+      timezone: "Europe/London",
+      callSkipLimitDays: 2,
+      emailPool: ["inbox-a"],
+      smsPool: [],
+      callScript: "Ask who books.",
+      tracks: [
+        { id: "p1", channel: "call", branch: "main", window: weekdays, start: { kind: "entry" }, removed: false, steps: [step("c1", { subject: "", body: "" })] },
+        { id: "t1", channel: "email", branch: "main", window: weekdays, start: { kind: "after", trackId: "p1", delayDays: 0 }, removed: false, steps: [step("s1", { subject: "After the call", threading: "new_subject" })] },
+      ],
+    });
+    const lead = (await beforeLaunch(h, id)).leads.find((l) => l.name === "Pat Oneil")!;
+    const copy = (await h.request<CopyPreview>("GET", `/api/campaigns/${id}/preview/${lead.id}`)).body;
+    const projected = (await projectedSends(h.store, id, h.clock))!;
+    const sent = projected.sends.find((x) => x.leadId === lead.id && x.stepId === "s1")!;
+    const projectedDay = localDayNumber(sent.at, "Europe/London") - localDayNumber(h.clock, "Europe/London") + 1;
+    // Launch Monday 08:00; the call is placed Monday and worked by the end of Monday; the email goes Tuesday at 09:00.
+    expect(projectedDay).toBe(2);
+    expect(copy.steps.find((x) => x.stepId === "s1")).toMatchObject({ day: projectedDay, waitsOnCall: "Phone track" });
   });
 
   test("a company lead is never texted: its SMS tracks are skipped (ADR 0003 Q10)", async () => {
