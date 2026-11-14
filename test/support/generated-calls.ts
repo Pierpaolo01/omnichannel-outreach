@@ -1340,11 +1340,18 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       const rule = t.start;
       const before = rule.kind === "after" ? def(s).tracks.find((x) => x.id === rule.trackId) : undefined;
       const released = before ? finishFacts(s, before)?.reason : undefined;
-      if (released === "skipped_missing_channel" || released === "failed_bad_destination") expected.push(`released|${ch}|${label}|-`);
-      if (f?.reason === "skipped_missing_channel") expected.push(`skipped|${ch}|${label}|-`);
+      // Ticket 15b: a track started after an unworked skip says so, as after any other skip.
+      if (released === "skipped_missing_channel" || released === "failed_bad_destination" || released === "skipped_unworked") expected.push(`released|${ch}|${label}|-`);
+      if (f?.reason === "skipped_missing_channel" || f?.reason === "skipped_unworked") expected.push(`skipped|${ch}|${label}|-`);
       if (f?.reason === "failed_bad_destination") expected.push(`address_bad|${ch}|${label}|-`);
       if (t.branch === "win_back") features.add("activity-in-win-back");
       if (f?.reason === "dropped_for_win_back") features.add("activity-of-a-dropped-track");
+    }
+    // Ticket 15b: a callback the record lists now, past the time asked for, shows as overdue at that time (Q12).
+    for (const [taskId, k] of knownTasks) {
+      if (k.subjectId !== s.id || !listedByRecord(taskId, now)) continue;
+      const st = taskStateAt(s, k.trackId, now);
+      if (st.kind === "callback" && st.callbackAt !== null && st.callbackAt <= now) expected.push(`callback_overdue|call|${trackLabel(def(s), { id: k.trackId, channel: "call" }).label}|-`);
     }
     if (progress.status === "replied") {
       // The first reply stopped it; replies on both channels at one instant reach the app in an order the record does not model.

@@ -1,11 +1,11 @@
 import { Link } from "wouter";
-import type { PersonRecord } from "../../shared/api.ts";
+import type { PersonRecord, RecordCalls } from "../../shared/api.ts";
 import { Activity } from "../activity.tsx";
 import { useApi } from "../api.ts";
 import { BackToLeads, CampaignRows, ContactRow, ErrorState, LocalTime, PeopleRows, RecordSkeleton, Section } from "../components.tsx";
 
 export function PersonPage({ id }: { id: string }) {
-  const { result, retry } = useApi<PersonRecord>(`/api/people/${encodeURIComponent(id)}`);
+  const { result, retry } = useApi<PersonRecord & RecordCalls>(`/api/people/${encodeURIComponent(id)}`);
   return (
     <div>
       <BackToLeads />
@@ -24,7 +24,7 @@ export function PersonPage({ id }: { id: string }) {
   );
 }
 
-function Person({ person }: { person: PersonRecord }) {
+function Person({ person }: { person: PersonRecord & RecordCalls }) {
   const { company } = person;
   return (
     <article className="flex max-w-[780px] flex-col gap-10">
@@ -51,6 +51,7 @@ function Person({ person }: { person: PersonRecord }) {
           unenrolledReason={person.unenrolledReason}
           who="person"
           companyIsLead={person.companyIsLead}
+          calls={person}
         />
       </Section>
 

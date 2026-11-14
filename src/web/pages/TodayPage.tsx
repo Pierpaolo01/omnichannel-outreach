@@ -65,7 +65,7 @@ export function TodayPage() {
           ) : attention === null ? (
             <div role="status" aria-busy="true" aria-label="Loading needs attention" className="skeleton h-20 w-full" />
           ) : (
-            <Attention items={attentionItems(attention, view?.userZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone)} />
+            <Attention items={attentionItems(attention, view?.userZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone, view)} />
           )}
         </section>
       </div>
@@ -84,7 +84,7 @@ function UpNext({ view }: { view: TodayView }) {
       {ready.length > 0 ? (
         <ul>
           {ready.map((x) => (
-            <Row key={x.taskId} item={x} userZone={view.userZone} />
+            <Row key={x.taskId} item={x} userZone={view.userZone} today={view.date} />
           ))}
         </ul>
       ) : (
@@ -92,7 +92,7 @@ function UpNext({ view }: { view: TodayView }) {
       )}
       {later.length > 0 && (
         <p className="mt-3.5 text-[13px] text-muted">
-          Later today: {later.map((x) => `${x.person?.name ?? x.company.name} (${lower(reasonLine(x, view.userZone).text)})`).join("; ")}.
+          Later today: {later.map((x) => `${x.person?.name ?? x.company.name} (${lower(reasonLine(x, view.userZone, view.date).text)})`).join("; ")}.
         </p>
       )}
     </>
@@ -101,8 +101,8 @@ function UpNext({ view }: { view: TodayView }) {
 
 const lower = (s: string) => s.charAt(0).toLowerCase() + s.slice(1);
 
-function Row({ item, userZone }: { item: CallQueueItem; userZone: string }) {
-  const why = reasonLine(item, userZone);
+function Row({ item, userZone, today }: { item: CallQueueItem; userZone: string; today: string }) {
+  const why = reasonLine(item, userZone, today);
   return (
     <li className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-1 border-line py-3.5 [&+&]:border-t">
       <div className="min-w-0">
@@ -130,8 +130,8 @@ function Attention({ items }: { items: ReturnType<typeof attentionItems> }) {
             <p className="mt-0.5 text-[13.5px] text-muted">{i.body}</p>
           </div>
           <div className="col-start-2 mt-2">
-            <Link href="/campaigns" className="btn btn-sm border-line-strong bg-base-100 font-medium">
-              Open campaigns
+            <Link href={i.action?.href ?? "/campaigns"} className="btn btn-sm border-line-strong bg-base-100 font-medium">
+              {i.action?.label ?? "Open campaigns"}
             </Link>
           </div>
         </li>
