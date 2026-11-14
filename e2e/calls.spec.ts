@@ -547,7 +547,8 @@ test("not interested has no control here yet (ticket 16b): the page shows its no
   // The server offers not interested (the task read lists it), but this page has no working control for it.
   const notInterested = outcome(page, "Not interested");
   await expect(notInterested).toBeDisabled();
-  await expect(page.getByText("Callback requested, not interested and calling again tomorrow arrive with later releases.")).toBeVisible();
+  // Ticket 15b built callback requested and the redial: only not interested waits for a later release.
+  await expect(page.getByText("Not interested arrives with a later release.")).toBeVisible();
   const t = await focused(f);
   await logElsewhere(f, t.taskId, "not_interested", t.numberId);
   await logWithMouse(page, "No answer", "Typed here.");
