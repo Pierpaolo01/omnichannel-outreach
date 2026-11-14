@@ -198,7 +198,7 @@ export class Engine {
    * definition and reconciled under the new one (ADR 0003 "Ticket 19"); it queues behind the running tick as a launch
    * does, and a tick follows an accepted one.
    */
-  saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save: DefinitionSave | null): Promise<SaveResult> {
+  saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save: DefinitionSave | null, options: { readonly tick?: boolean } = {}): Promise<SaveResult> {
     return this.ticks.run(async () => {
       await this.syncAccounts();
       const now = this.now();
@@ -209,7 +209,7 @@ export class Engine {
         catchUp: (s) => sealReckoning(this.rules.asOfAction(s, now), now),
         reconcile: (s, previous, previousZone) => this.rules.reconcileEdit(s, previous, previousZone, now),
       });
-      if (result.outcome === "saved" && result.stored.launchedAt !== null) await this.runTick();
+      if (result.outcome === "saved" && result.stored.launchedAt !== null && options.tick !== false) await this.runTick();
       return result;
     });
   }

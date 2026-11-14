@@ -220,6 +220,15 @@ export class EngineHarness {
     await new Engine({ ...this.options.engine, ticks: new TickQueue(), store: this.store.engine, port: this.provider, ...(this.smsProvider ? { smsPort: this.smsProvider } : {}), now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) }).tick();
   }
 
+  /**
+   * A running edit saved by another process on the same store (ticket 19): it does not queue behind this process's
+   * tick, so a test can save from inside a hook, between a claim and its handover.
+   */
+  async otherProcessSave(campaignId: string, definition: CampaignDefinition): Promise<string> {
+    const other = new Engine({ ...this.options.engine, ticks: new TickQueue(), store: this.store.engine, port: this.provider, ...(this.smsProvider ? { smsPort: this.smsProvider } : {}), now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) });
+    return (await other.saveDefinition(campaignId, definition, new Date(this.clock).toISOString(), null, { tick: false })).outcome;
+  }
+
   /** A fresh engine on the same store and provider, settling what the crash left open. */
   async restart(): Promise<void> {
     this.engine = this.newEngine();
