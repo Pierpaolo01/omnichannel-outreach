@@ -166,3 +166,17 @@ describe("what an edit does to one lead (the editor's read)", () => {
     expect(editImpact(ended, edit(ended, next, MONDAY_9 + H), changesBetween(def0, next))).toEqual(["untouched"]);
   });
 });
+
+describe("a change of the campaign's default zone (ADR 0003 \"Ticket 19\", step 3)", () => {
+  test("a lead on the default zone has its pending deadline re-resolved in the new zone, from the same basis", () => {
+    const before = sent(launchedWith(tracksDefinition([emailTrack()])), "s1", MONDAY_9);
+    expect(progress(before)?.dueWall).toBe(Date.parse("2026-11-04T00:00:00Z"));
+    const next = { ...tracksDefinition([emailTrack()]), timezone: "America/New_York" };
+    const moved = { ...withDefinition(before, next), lead: { ...before.lead, zone: "America/New_York" } };
+    const after = reconcileEdit(moved, before.campaign.definition, "Europe/London", MONDAY_9 + H);
+    // Two days after Monday 09:00 London (04:00 in New York): Wednesday 00:00 in New York, 05:00 UTC.
+    expect(progress(after)).toMatchObject({ nextStepId: "s2", dueZone: "America/New_York", dueWall: Date.parse("2026-11-04T05:00:00Z") });
+    // A lead whose zone is its own (it did not move) keeps its deadline.
+    expect(progress(reconcileEdit(withDefinition(before, next), before.campaign.definition, "Europe/London", MONDAY_9 + H))).toEqual(progress(before));
+  });
+});
