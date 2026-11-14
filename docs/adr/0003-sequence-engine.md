@@ -2052,9 +2052,9 @@ A running campaign's definition is refused, with the validator's own sentence an
 | `channel_changed` (as before) | a track changes channel | "A track cannot change channel: remove it and add a new one." |
 | `step_moved` (as before) | a step moves to another track | "A step cannot move to another track: remove it and add a new one." |
 | `branch_changed` (new, all campaigns, issue 42 item 49) | a track moves between the main sequence and the win-back branch | "A track cannot move between the main sequence and the win-back branch: remove it and add a new one." |
-| `track_deleted` (new, launched only) | a track of the stored definition is missing | "{Track} is running for some leads, so it cannot be deleted: it is marked removed instead." |
-| `step_deleted` (new, launched only) | a step of the stored definition is missing | "A step of {track} is running for some leads, so it cannot be deleted: it is marked removed instead." |
-| `restored` (new, launched only) | a track or step stored as removed is live again | "A removed track or step cannot come back on a running campaign: add a new one." |
+| `track_deleted` (new, launched only) | a track of the stored definition is missing | "A track leads may have started cannot be deleted on a running campaign: it is marked removed instead." |
+| `step_deleted` (new, launched only) | a step of the stored definition is missing | "A step leads may have reached cannot be deleted on a running campaign: it is marked removed instead." |
+| `restored` (new, launched only) | a track or step stored as removed is live again | "A removed track cannot come back on a running campaign: add a new one." (or "A removed step …") |
 
 and when it has any of the **same three launch blockers** (7.2), checked against the campaign's enrollments that have not ended and the connected accounts in the save's transaction: 409 `blocked`, with the check, and nothing stored. "Nothing to launch" (Q9) is not a blocker and is not checked on a running campaign: leads that started a removed track run on, and a lead enrolled later with no live track ends with nothing to send. A refused save changes nothing, so the editor keeps the draft and says why.
 

@@ -514,6 +514,10 @@ function carrierOf(state: SubjectState, key: string): Attempt | undefined {
  * or the user settles it.
  */
 export function attend(state: SubjectState, now: number): SubjectState {
+  return alignPending(attendWork(state, now), now);
+}
+
+function attendWork(state: SubjectState, now: number): SubjectState {
   let s = state;
   for (const a of state.attempts) {
     if (a.state === "claimed" && state.work.some((w) => w.key === a.idempotencyKey && w.settled !== null)) s = withAttempt(s, { ...a, state: "withdrawn", endedBy: "guard" });
@@ -710,6 +714,63 @@ export function replyMatches(state: SubjectState, work: ProviderWork, reply: { r
 export function smsReplyOwner(bindings: readonly SmsBindingRecord[], sender: string): string | null {
   const pair = bindings.filter((b) => b.sender === sender);
   return pair.find((b) => !b.released)?.owner ?? pair.filter((b) => b.released).at(-1)?.owner ?? null;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The pending step under the definition in force (ADR 0003 "Ticket 19", step 4).
+
+/**
+ * Whether a started track's pending step is in flight (ADR 0003 "Ticket 19"): a live attempt past its claim, provider
+ * work called and without a final answer, or an open call task. Such a track is left as it is by an edit, and brought
+ * in line once that work settles.
+ */
+export function inFlight(state: SubjectState, trackId: string): boolean {
+  return (
+    state.attempts.some((a) => a.trackId === trackId && isLive(a) && a.state !== "claimed") ||
+    state.work.some((w) => w.trackId === trackId && isUncertain(w)) ||
+    state.callTasks.some((t) => t.trackId === trackId && t.open)
+  );
+}
+
+/** Withdraws the track's `claimed` attempts (ruling 1, 2.5): a later claim renders the definition current at its handover. */
+export function withdrawClaims(state: SubjectState, trackId: string): SubjectState {
+  let s = state;
+  for (const a of state.attempts) {
+    if (a.trackId !== trackId || a.state !== "claimed") continue;
+    const step = applyAttemptEvent(a, workOf(s, a.idempotencyKey), { kind: "quiesce" });
+    s = withWork(withAttempt(s, step.attempt), step.work);
+  }
+  return s;
+}
+
+/**
+ * Brings every started, unfinished track that is not in flight in line with the definition in force (ADR 0003
+ * "Ticket 19", step 4; invariant 22): its pending step is the step 5.1 names (`nextStepOf`), due at its stored basis
+ * plus that step's wait, in the zone its deadline was resolved in. With nothing edited this changes nothing: both hold
+ * by construction. When 5.1 names no step (an edit removed every step left), the track finishes at the lead's current
+ * instant (question Q19). A change withdraws the track's claim.
+ */
+export function alignPending(state: SubjectState, now: number): SubjectState {
+  let s = state;
+  for (const p of state.tracks) {
+    if (p.startedAt === null || p.finishedAt !== null || p.nextStepId === null || p.basisAt === null || p.basisWall === null) continue;
+    const track = s.campaign.definition.tracks.find((t) => t.id === p.trackId);
+    if (!track || inFlight(s, p.trackId)) continue;
+    const want = nextStepOf(s, track);
+    if (want === null) {
+      const own = s.results.filter((r) => r.trackId === track.id);
+      const reason: FinishReason = own.length > 0 && own.every((r) => r.result === "skipped") ? "skipped" : "completed";
+      s = finishTrack(withdrawClaims(s, track.id), track.id, reason, leadNow(s.subject.clock, now), wallOfLead(s.subject.clock, now));
+      continue;
+    }
+    const zone = p.dueZone ?? s.lead.zone;
+    const wait = span(p.basisWall, track.steps.find((x) => x.id === want)?.waitDays ?? 0, zone);
+    if (want === p.nextStepId && p.dueAt === p.basisAt + wait && p.dueWall === p.basisWall + wait && p.dueZone === zone) continue;
+    const basisAt = p.basisAt;
+    const basisWall = p.basisWall;
+    s = withTrack(withdrawClaims(s, track.id), track.id, (t) => ({ ...t, nextStepId: want, dueAt: basisAt + wait, dueWall: basisWall + wait, dueZone: zone }));
+  }
+  return s;
 }
 
 // ---------------------------------------------------------------------------------------------
