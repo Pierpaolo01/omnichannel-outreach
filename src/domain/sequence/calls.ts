@@ -6,6 +6,7 @@
  * current state inside the transaction that writes it.
  */
 import { leadNow, localDayNumber, nextWindowOpen, span, startOfLocalDay, wallOfLead, windowOpen, type WindowRule } from "./clock.ts";
+import type { CampaignDefinition } from "./definition.ts";
 import type { ReadyItem } from "./dispatch.ts";
 import { advanceTrack, callbackHold, end, evaluate, finishTrack, markDetailBad, progressOf, quiesce, runs, synced } from "./progress.ts";
 import type { CallAttempt, CallNumber, CallOutcome, CallTask, NoteDraft, RecordedNumber, SubjectState } from "./state.ts";
@@ -174,6 +175,14 @@ export function skippedTonight(state: SubjectState, task: CallTask, now: number)
   return leadNow(state.subject.clock, now) + (userDay(state).end - now) >= task.skipDeadline;
 }
 
+/** Whether the task's calling hours opened on some user day in [from, to). */
+function listedBetween(state: SubjectState, task: CallTask, from: number, to: number): boolean {
+  const { userZone } = state.callDay;
+  const window = callWindow(state, task.trackId);
+  for (let d = Math.max(from, to - 60); d < to; d++) if (callableOnDay(window, state.lead.zone, startOfLocalDay(d, userZone), startOfLocalDay(d + 1, userZone))) return true;
+  return false;
+}
+
 export type CallReason = "due" | "rolled_over" | "redial" | "callback" | "overdue";
 
 /**
@@ -185,9 +194,11 @@ export type CallReason = "due" | "rolled_over" | "redial" | "callback" | "overdu
 export function reasonOf(state: SubjectState, task: CallTask, now: number): CallReason {
   if (task.kind === "callback") return task.callbackAt !== null && now < task.callbackAt ? "callback" : "overdue";
   const today = state.callDay.day;
-  if (task.listDay < today) return "rolled_over";
   const redialed = state.callAttempts.some((a) => a.taskId === task.id && a.redial && userDayOf(a.atWall, state.callDay.userZone) + 1 === task.listDay);
-  return redialed && task.listDay === today ? "redial" : "due";
+  // A redial stays a redial until its first listed day has passed: one logged on a Friday for Saturday,
+  // with weekday calling hours, is still a redial on Monday (council on 228cd3b).
+  if (task.listDay < today && (!redialed || listedBetween(state, task, task.listDay, today))) return "rolled_over";
+  return redialed ? "redial" : "due";
 }
 
 /**
@@ -231,7 +242,7 @@ export function placeCall(state: SubjectState, item: ReadyItem, now: number, tas
     dueAt: p.dueAt,
     dueWall: p.dueWall,
     dueZone: p.dueZone ?? state.lead.zone,
-    skipDeadline: p.dueAt + span(p.dueWall, state.campaign.definition.callSkipLimitDays, userZone),
+    skipDeadline: skipDeadlineOf({ dueAt: p.dueAt, dueWall: p.dueWall }, skipLimitOf(state.campaign.definition, item.trackId), userZone),
     listDay: day,
     placedWall: now,
     kind: "call",
@@ -239,8 +250,27 @@ export function placeCall(state: SubjectState, item: ReadyItem, now: number, tas
     open: true,
     closedWall: null,
     skippedWall: null,
+    reckonedThrough: now,
   };
   return { ...state, callTasks: [...state.callTasks, task], callDay: { ...state.callDay, placedToday: state.callDay.placedToday + 1 } };
+}
+
+/**
+ * The skip limit in force for a phone track, in days (ADR 0003 3.5): the track's own when it has one (pull
+ * request 47 adds `callSkipLimitDays` to a phone track), else the campaign's. It is read here, and only here.
+ */
+export function skipLimitOf(definition: CampaignDefinition, trackId: string): number {
+  const track = definition.tracks.find((t) => t.id === trackId) as { readonly callSkipLimitDays?: number } | undefined;
+  return track?.callSkipLimitDays ?? definition.callSkipLimitDays;
+}
+
+/**
+ * A call task's skip deadline, in lead time (3.5): the start of the user's day `limit` days after the call's
+ * original due date, from its stored `dueAt` and `dueWall`. Resolved when the task is placed, and again only
+ * when the limit is edited (5.2); the store refuses any other change to it, so a redial can never reset it.
+ */
+export function skipDeadlineOf(task: Pick<CallTask, "dueAt" | "dueWall">, limitDays: number, userZone: string): number {
+  return task.dueAt + span(task.dueWall, limitDays, userZone);
 }
 
 export interface OutcomeInput {
@@ -291,7 +321,13 @@ export function logCallOutcome(
   if (earlier) return earlier.taskId === taskId ? { ok: true, state, replayed: true } : { ok: false, reason: REQUEST_ID_REUSED };
   const task = state.callTasks.find((t) => t.id === taskId);
   if (!task) return { ok: false, reason: "There is no such call task." };
-  if (!task.open) return { ok: false, reason: "This call is no longer on the list: its outcome was logged or its track has finished." };
+  if (!task.open) {
+    // Said plainly when the skip limit closed it: an action is judged as of its own instant, so a call that
+    // expired at a rollover before the action arrived is refused even if the screen still showed it.
+    const finish = progressOf(state, task.trackId);
+    if (finish?.finishReason === "skipped_unworked" && task.closedWall !== null) return { ok: false, reason: `This call was skipped at ${new Date(task.closedWall).toISOString()}: it was not worked within its skip limit, so it is no longer on the list.` };
+    return { ok: false, reason: "This call is no longer on the list: its outcome was logged or its track has finished." };
+  }
   if (!listed(state, task)) {
     return { ok: false, reason: state.subject.ended !== null ? "This lead's outreach has ended in this campaign, so its call is not on today's list." : "This call is not on today's list." };
   }

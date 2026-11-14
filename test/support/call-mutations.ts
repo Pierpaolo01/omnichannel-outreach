@@ -184,6 +184,17 @@ const RULES: Record<string, Partial<Rules>> = {
   "overdue callbacks shown as callbacks": {
     callReason: (s, task, now) => (R.callReason(s, task, now) === "overdue" ? "callback" : R.callReason(s, task, now)),
   },
+  // Council on 228cd3b: the past reinterpreted, and a redial's reason.
+  "a day already judged is judged again": {
+    // The skip limit judged from the placement every time, with today's zones, as if no day had been judged.
+    evaluate: (s, now, options) => {
+      const out = R.evaluate(mapTasks(s, (t) => ({ ...t, reckonedThrough: t.placedWall })), now, options);
+      return mapTasks(out, (t) => ({ ...t, reckonedThrough: Math.max(t.reckonedThrough, s.callTasks.find((x) => x.id === t.id)?.reckonedThrough ?? t.reckonedThrough) }));
+    },
+  },
+  "a redial rolled over at its first listed day": {
+    callReason: (s, task, now) => (R.callReason(s, task, now) === "redial" && task.listDay < s.callDay.day ? "rolled_over" : R.callReason(s, task, now)),
+  },
   // Review bot on eda5fa0: an action judged on the state of the worker's last tick, not as of its own instant.
   "a user action judged on stale state": {
     asOfAction: (s) => s,
@@ -204,15 +215,15 @@ const RULES: Record<string, Partial<Rules>> = {
 
 /** The invariant each mutation must break, and the seed offset known to show it (refreshed by the CI search). */
 const EXPECTED: Record<string, { invariant: string; seed: number }> = {
-  "outcome on an unlisted task": { invariant: "16", seed: 0 },
+  "outcome on an unlisted task": { invariant: "16", seed: 7 },
   "interested closes only its own task": { invariant: "16", seed: 54 },
   "daily call capacity ignored": { invariant: "17", seed: 0 },
   "committed calls not counted": { invariant: "17", seed: 1 },
   "a call placed on a day its calling hours have closed": { invariant: "17", seed: 1 },
   "an unworked call holds the parallel tracks": { invariant: "18", seed: 6 },
-  "the tracks after a call start when it is placed": { invariant: "7", seed: 3 },
+  "the tracks after a call start when it is placed": { invariant: "7", seed: 4 },
   "skip for now finishes the call": { invariant: "7", seed: 4 },
-  "a wrong number leaves the number good": { invariant: "19", seed: 24 },
+  "a wrong number leaves the number good": { invariant: "19", seed: 3 },
   "an outcome on a bad number accepted": { invariant: "16", seed: 49 },
   "calls placed newest due first": { invariant: "12", seed: 3 },
   "a replayed action is logged again": { invariant: "16", seed: 2 },
@@ -220,20 +231,22 @@ const EXPECTED: Record<string, { invariant: string; seed: number }> = {
   "a track that finishes without closing its call task": { invariant: "16", seed: 0 },
   "ready now newest due first": { invariant: "16", seed: 6 },
   "the focus moves to the oldest ready call": { invariant: "16", seed: 2 },
-  "redial resets the deadline": { invariant: "16", seed: 16 },
+  "redial resets the deadline": { invariant: "16", seed: 9 },
   "redial listed the same day": { invariant: "16", seed: 0 },
-  "callback listed before its day": { invariant: "16", seed: 0 },
-  "callback expires": { invariant: "16", seed: 4 },
+  "callback listed before its day": { invariant: "16", seed: 20 },
+  "callback expires": { invariant: "16", seed: 9 },
   "a task never listed expires": { invariant: "7", seed: 27 },
   "callback outcome refused when the callback is the only hold": { invariant: "16", seed: 0 },
   "a callback does not hold the lead": { invariant: "16", seed: 2 },
   "a callback does not freeze the clock": { invariant: "9", seed: 0 },
   "a callback's outcome logged on the frozen clock": { invariant: "7", seed: 0 },
   "unworked calls never expire": { invariant: "7", seed: 0 },
-  "carried calls not at the top": { invariant: "16", seed: 14 },
+  "carried calls not at the top": { invariant: "16", seed: 8 },
   "overdue callbacks shown as callbacks": { invariant: "16", seed: 2 },
   "a redial after any outcome": { invariant: "16", seed: 0 },
-  "a user action judged on stale state": { invariant: "16", seed: 12 },
+  "a user action judged on stale state": { invariant: "16", seed: 3 },
+  "a day already judged is judged again": { invariant: "7", seed: 96 },
+  "a redial rolled over at its first listed day": { invariant: "16", seed: 27 },
 };
 
 export const CALL_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number }> = Object.fromEntries(

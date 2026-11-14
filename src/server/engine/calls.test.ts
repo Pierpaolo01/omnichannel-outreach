@@ -770,7 +770,8 @@ describe("a user action is judged as of its own instant, whether or not the work
       // The worker has not ticked since Tuesday 23:59; the user acts at Wednesday 00:00:01.
       h.clock = WED_0 + 1_000;
       const res = await log(id, { ...body, numberId: direct });
-      expect(res).toMatchObject({ status: 409, body: { error: { message: "This call is no longer on the list: its outcome was logged or its track has finished." } } });
+      // Refused, and it says why: the call was skipped at that rollover, before this action arrived.
+      expect(res).toMatchObject({ status: 409, body: { error: { message: "This call was skipped at 2026-11-04T00:00:00.000Z: it was not worked within its skip limit, so it is no longer on the list." } } });
       const progress = await h.progress(c.lead("Pat Oneil"));
       // Never reached: the call was skipped unworked, and the email after it has only just started.
       expect(progress.status).toBe("queued");

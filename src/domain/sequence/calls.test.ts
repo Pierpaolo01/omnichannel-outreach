@@ -3,7 +3,7 @@ import { DAY, H, MONDAY_9, subjectState, tracksDefinition } from "../../../test/
 import { bucketOf, callNumbers, compareReadyNow, isListed, logCallOutcome, placeCall, readyCalls, reasonOf } from "./calls.ts";
 import { localDayNumber } from "./clock.ts";
 import type { TrackDefinition } from "./definition.ts";
-import { deriveStatus, enterMain, evaluate, runs } from "./progress.ts";
+import { deriveStatus, enterMain, evaluate, runs, sealReckoning } from "./progress.ts";
 import type { CallNumber, SubjectState } from "./state.ts";
 
 /** Call tasks as pure rules (ADR 0003 2.3, 2.4 "Calls", 4.4; ticket 14). Data is fictitious. */
@@ -275,4 +275,36 @@ describe("why a call is on the list, and its place in ready now (ticket 15; ADR 
     const entries = [entry("today-old", 2, MONDAY_9 - 5 * DAY), entry("carried", 1, MONDAY_9 - DAY), entry("callback-late", 0, MONDAY_9 + H), entry("callback", 0, MONDAY_9), entry("skipped-carried", 1, MONDAY_9 - 3 * DAY, MONDAY_9)];
     expect([...entries].sort(compareReadyNow).map((e) => e.taskId)).toEqual(["callback", "callback-late", "carried", "today-old", "skipped-carried"]);
   });
+});
+
+describe("the past is not reinterpreted (ADR 0003 3.5; council on 228cd3b)", () => {
+  // Calling hours Monday 09:00-17:00 and Wednesday 01:00-02:00, London. The deadline is Wednesday 00:00.
+  const window = [
+    { day: 1, start: 9, end: 17 },
+    { day: 3, start: 1, end: 2 },
+  ];
+  const WED_0 = Date.parse("2026-11-04T00:00:00Z");
+  const WED_10 = WED_0 + 10 * H;
+  /** Placed Monday 09:00; judged at Wednesday 00:00 under London: Tuesday had no calling hours, so it is kept. */
+  function judgedUnderLondon(): SubjectState {
+    const s = placed(MONDAY_9);
+    const withHours = { ...s, campaign: { ...s.campaign, definition: { ...s.campaign.definition, tracks: s.campaign.definition.tracks.map((t) => ({ ...t, window })) } } };
+    const at = WED_0 + MIN;
+    const judged = evaluate(atDay(withHours, at), at);
+    expect(judged.callTasks[0]).toMatchObject({ open: true, reckonedThrough: WED_0 });
+    return judged;
+  }
+  const inNewYork = (s: SubjectState, t: number): SubjectState => ({ ...s, callDay: { ...s.callDay, userZone: "America/New_York", day: localDayNumber(t, "America/New_York") } });
+
+  test("a change of the user's zone, sealed at its instant, judges only the new zone's days that end after it", () => {
+    const sealed = sealReckoning(judgedUnderLondon(), WED_10);
+    const at = evaluate(inNewYork(sealed, WED_10), WED_10);
+    expect(at.callTasks[0]).toMatchObject({ open: true, reckonedThrough: WED_10 });
+  });
+
+  test("unsealed, the new zone's Tuesday, already over in London's reckoning, would be judged after the fact and skip the call in the past", () => {
+    const at = evaluate(inNewYork(judgedUnderLondon(), WED_10), WED_10);
+    expect(at.tracks[0]).toMatchObject({ finishReason: "skipped_unworked", finishedWall: Date.parse("2026-11-04T05:00:00Z") });
+  });
+
 });

@@ -244,13 +244,13 @@ const emptyProgress = (trackId: string): TrackProgress => ({
  * endings again. Ready items are the dispatcher's (dispatch.ts). Reads no clock and no store.
  */
 export function evaluate(state: SubjectState, now: number, options: { readonly endingsFirst?: boolean } = {}): SubjectState {
-  if (!runs(state)) return state;
+  // Unworked calls past the skip limit are skipped at the rollover they expired at, before any start, so
+  // the tracks after them start in this same evaluation (3.5; ticket 15). Judged for a held lead too, which
+  // only records the rollovers judged (it did not run at them), so none is judged later under other inputs.
+  const judged = state.subject.ended === null && state.campaign.launchedAt !== null ? expireUnworked(state, now) : state;
+  if (!runs(judged)) return judged;
   // `endingsFirst: false` exists only for the oracle's broken engine (ADR 0003 9.2, "ending check too late").
-  let s = options.endingsFirst === false ? state : checkEndings(state, now);
-  if (!runs(s)) return s;
-  // Unworked calls past the skip limit are skipped at the rollover they expired at, before any start,
-  // so the tracks after them start in this same evaluation (3.5; ticket 15).
-  s = expireUnworked(s, now);
+  let s = options.endingsFirst === false ? judged : checkEndings(judged, now);
   if (!runs(s)) return s;
   const lead = leadNow(s.subject.clock, now);
 
@@ -294,36 +294,53 @@ export function evaluate(state: SubjectState, now: number, options: { readonly e
  * A user action is judged on the lead's state as of the action's own instant (ADR 0003 2.4, review bot
  * on eda5fa0): in the transaction that records it, everything already due at or before that instant is
  * applied first, by the same evaluation the worker's tick runs (an expiry at a rollover, the starts and
- * endings it releases), whether or not the worker has ticked since. A held lead has nothing due by time.
+ * endings it releases), whether or not the worker has ticked since. Read models and every route that
+ * changes a timing input use it too (council on 228cd3b).
  */
 export function asOfAction(state: SubjectState, now: number, evaluateAt: typeof evaluate = evaluate): SubjectState {
-  return runs(state) ? evaluateAt(state, now) : state;
+  return evaluateAt(state, now);
 }
 
 /**
- * The call skip limit (ADR 0003 3.5; ticket 15). An open call task (not a callback) expires at the end
- * of a user day d, the rollover e = start of day d + 1, when all of these held:
+ * Marks every open call task as judged through `now` (council on 228cd3b): run after `asOfAction` by a
+ * route that changes an input the skip limit reads (the user's zone, a prospect's zone), so the days
+ * already past are never judged again under the new input, and the new zone's days count from now.
+ */
+export function sealReckoning(state: SubjectState, now: number): SubjectState {
+  return { ...state, callTasks: state.callTasks.map((t) => (t.open && t.kind === "call" && t.reckonedThrough < now ? { ...t, reckonedThrough: now } : t)) };
+}
+
+/**
+ * The call skip limit (ADR 0003 3.5; ticket 15). An open call task (not a callback) expires at a user-day
+ * rollover e, the end of day d, when all of these held:
  * - it was listed on day d: d is on or after its list day (a redial moves that to the next day), and
  *   the prospect's calling hours open at some point of day d;
  * - the lead ran at e, read from its freezes record, so a hold (a callback, a pause, an ending) at the
  *   rollover means no expiry then; and so it was listed at the last moment of day d;
  * - lead time at e had reached its skip deadline, which was resolved once from the call's original
  *   due time and is frozen with the lead's clock.
- * It is checked day by day from its first listed day, so a rollover the app was off for expires it
- * where it expired. The call step is skipped (`unworked`), and the track finishes `skipped_unworked`
- * at e, closing the task; the tracks after it start after their delay. A task worked on day d is not
- * open with a list day at or before d (a redial moves it on, a callback holds the lead, any other
- * outcome closes it), so "not worked" needs no record of its own.
+ * Only rollovers after `reckonedThrough` are judged, and it moves on to the last one judged: a rollover is
+ * judged once, with the inputs in force then, and never again (council on 228cd3b). A rollover the app was
+ * off for is judged where it fell. The call step is skipped (`unworked`), and the track finishes
+ * `skipped_unworked` at e, closing the task; the tracks after it start after their delay. A task worked on
+ * day d is not open with a list day at or before d (a redial moves it on, a callback holds the lead, any
+ * other outcome closes it), so "not worked" needs no record of its own.
  */
 export function expireUnworked(state: SubjectState, now: number): SubjectState {
   let s = state;
   const zone = s.callDay.userZone;
-  const today = localDayNumber(now, zone);
   for (const task of state.callTasks) {
     if (!task.open || task.kind !== "call") continue;
     const window = s.campaign.definition.tracks.find((t) => t.id === task.trackId)?.window ?? [];
-    for (let d = Math.max(task.listDay, localDayNumber(task.placedWall, zone)); d < today; d++) {
-      const e = startOfLocalDay(d + 1, zone);
+    let judged = task.reckonedThrough;
+    let expired = false;
+    for (let k = localDayNumber(task.reckonedThrough, zone) + 1; ; k++) {
+      const e = startOfLocalDay(k, zone);
+      if (e > now) break;
+      if (e <= task.reckonedThrough) continue;
+      judged = e;
+      const d = k - 1;
+      if (d < task.listDay) continue;
       const point = sendPoint(s.subject.clock, s.freezes, e, e, now);
       // `atWall` is the start of the freeze holding e; e itself only while the lead ran at e.
       if (point.atWall !== e || point.at < task.skipDeadline) continue;
@@ -331,8 +348,10 @@ export function expireUnworked(state: SubjectState, now: number): SubjectState {
       if (opens === null || opens >= e) continue;
       s = { ...s, results: [...s.results, { stepId: task.stepId, trackId: task.trackId, result: "skipped", reason: "unworked", at: point.at, atWall: e, attemptId: null }] };
       s = finishTrack(s, task.trackId, "skipped_unworked", point.at, e);
+      expired = true;
       break;
     }
+    if (!expired && judged > task.reckonedThrough) s = { ...s, callTasks: s.callTasks.map((t) => (t.id === task.id ? { ...t, reckonedThrough: judged } : t)) };
   }
   return s;
 }

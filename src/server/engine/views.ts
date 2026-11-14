@@ -8,6 +8,7 @@ import { deriveStatus, liveTracksFor } from "../../domain/sequence/progress.ts";
 import type { AccountState, SubjectState } from "../../domain/sequence/state.ts";
 import type { EnrollmentProgress, NeedsAttention, SenderAccountViewApi } from "../../shared/api.ts";
 import type { EngineStore } from "./engine-store.ts";
+import { DEFAULT_RULES, type Rules } from "./rules.ts";
 
 const iso = (t: number | null) => (t === null ? null : new Date(t).toISOString());
 
@@ -101,7 +102,7 @@ export function accountView(a: AccountState, label: string): SenderAccountViewAp
   };
 }
 
-export async function needsAttention(store: EngineStore, now: number): Promise<NeedsAttention> {
+export async function needsAttention(store: EngineStore, now: number, rules: Pick<Rules, "asOfAction" | "evaluate"> = DEFAULT_RULES): Promise<NeedsAttention> {
   const accounts = await store.accounts(now);
   const open = await store.openAttempts();
   // Unresolved provider work keeps its reservation; each inbox it holds is listed with how many of
@@ -141,7 +142,9 @@ export async function needsAttention(store: EngineStore, now: number): Promise<N
   // holds its lead's outreach in that campaign until the user logs its outcome; none expires.
   const overdueCallbacks: NeedsAttention["overdueCallbacks"][number][] = [];
   for (const id of await store.subjectsWithOpenCallTasks()) {
-    const s = await store.subject(id, now);
+    // As of the instant read: a call the worker has not yet skipped at a rollover is not shown (council on 228cd3b).
+    const stored = await store.subject(id, now);
+    const s = stored ? rules.asOfAction(stored, now, rules.evaluate) : null;
     if (!s) continue;
     for (const t of s.callTasks) {
       if (isListed(s, t) && reasonOf(s, t, now) === "overdue") {

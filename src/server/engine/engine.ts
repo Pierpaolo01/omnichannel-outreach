@@ -295,7 +295,8 @@ export class Engine {
     return this.ticks.run(async () => {
       const a = await this.store.attempt(attemptId);
       if (!a) return false;
-      return this.applyWork(a.subjectId, a.idempotencyKey, { kind: mark === "sent" ? "mark_sent" : "mark_not_sent", now: this.now() });
+      // A user action, judged as of its own instant (ADR 0003 2.4): what fell due is applied first.
+      return this.applyWork(a.subjectId, a.idempotencyKey, { kind: mark === "sent" ? "mark_sent" : "mark_not_sent", now: this.now() }, true);
     });
   }
 
@@ -343,8 +344,9 @@ export class Engine {
   }
 
   /** Applies one event about provider work, to the work and every attempt carrying it, in one transaction. */
-  private async applyWork(subjectId: string, key: string, event: WorkEvent): Promise<boolean> {
-    return this.applyChange(subjectId, null, (s, now) => {
+  private async applyWork(subjectId: string, key: string, event: WorkEvent, userAction = false): Promise<boolean> {
+    return this.applyChange(subjectId, null, (stored, now) => {
+      const s = userAction ? this.rules.asOfAction(stored, now, this.rules.evaluate) : stored;
       const w = s.work.find((x) => x.key === key);
       if (!w) return null;
       return { out: this.rules.applyToWork(s, key, event, now, { resetDay: this.resetDay(s), point: this.rules.sendPoint }), accountId: w.accountId };

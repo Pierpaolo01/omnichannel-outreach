@@ -540,6 +540,9 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE call_attempts ADD COLUMN redial INTEGER NOT NULL DEFAULT 0 CHECK (redial IN (0, 1));
       ALTER TABLE call_attempts ADD COLUMN callback_at INTEGER;
       CREATE INDEX call_tasks_open_callbacks ON call_tasks(open, kind, subject_id);
+      -- The instant through which the skip limit has been judged; a task placed before it starts at its placement.
+      ALTER TABLE call_tasks ADD COLUMN reckoned_through INTEGER;
+      UPDATE call_tasks SET reckoned_through = placed_wall;
     `,
   },
 ];

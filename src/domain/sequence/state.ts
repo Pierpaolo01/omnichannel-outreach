@@ -232,6 +232,13 @@ export interface CallTask {
   readonly closedWall: number | null;
   /** "Skip for now": the task moved to the end of that day's queue at this instant. */
   readonly skippedWall: number | null;
+  /**
+   * The instant through which the skip limit has been judged (ADR 0003 3.5; council on 228cd3b): its
+   * placement, then each user-day rollover the engine has judged, or the instant a change of the user's
+   * zone or another timing input was made. A rollover at or before it is never judged again, so a later
+   * input never reinterprets a day already past.
+   */
+  readonly reckonedThrough: number;
 }
 
 /** One logged outcome on a call task. Skip for now is recorded too, but is not a call made. */

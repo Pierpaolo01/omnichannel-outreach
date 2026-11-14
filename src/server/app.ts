@@ -17,6 +17,8 @@ import { UnconnectedEmailPort, UnprovisionedSmsPort } from "./engine/ports.ts";
 import { accountView, needsAttention, progressView } from "./engine/views.ts";
 import { callsView, callTaskView, todayView } from "./engine/call-views.ts";
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
+import { sealReckoning } from "../domain/sequence/progress.ts";
+import type { SubjectState } from "../domain/sequence/state.ts";
 import type { CampaignDetail, CampaignListItem, CampaignSequenceSummary, SequenceView } from "../shared/api.ts";
 import { beforeLaunchView, copyPreview } from "./before-launch.ts";
 import { activityOf } from "./activity.ts";
@@ -145,6 +147,13 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   const rules: Rules = { ...DEFAULT_RULES, ...givenRules };
   const engine = givenEngine ?? new Engine({ store: store.engine, port: new UnconnectedEmailPort(), smsPort: new UnprovisionedSmsPort(), now: () => Date.parse(now()), newId });
   const app = new Hono().basePath("/api");
+  /**
+   * For a route that changes an input the engine's timing reads (an import that may move a lead's or a
+   * company's zone, the call settings): every lead with an open call task is first brought up to `at` under
+   * the old inputs, in the route's own transaction, and its skip limit sealed there (ADR 0003 2.4, council on
+   * 228cd3b). The routes are listed in ADR 0003 and walked by `as-of-the-instant.test.ts`.
+   */
+  const catchUpAt = (at: number) => ({ now: at, asOf: (s: SubjectState) => sealReckoning(rules.asOfAction(s, at, rules.evaluate), at) });
   app.use(async (c, next) => {
     const verdict = checkApiRequest({
       method: c.req.method,
@@ -199,6 +208,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
       importedAt,
       fileNames: { people: body.fileNames?.people ?? null, businesses: body.fileNames?.businesses ?? null },
       plan: (directory) => planImport({ directory, scraped: parsed.value, now: importedAt, newId }),
+      catchUp: catchUpAt(Date.parse(importedAt)),
     });
     return c.json({ campaign: await store.campaign(record.campaignId), import: record }, 201);
   };
@@ -427,7 +437,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   app.put("/call-settings", async (c) => {
     const body = callSettingsBody.safeParse(await readJson(c));
     if (!body.success) return invalid(c, body.error);
-    await store.engine.setCallSettings(body.data);
+    await store.engine.setCallSettings(body.data, catchUpAt(Date.parse(now())));
     return c.json(await store.engine.callSettings());
   });
 
@@ -437,7 +447,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   app.get("/calls", async (c) => c.json(await callsView(store, Date.parse(now()), { focus: c.req.query("focus") || null, rules })));
 
   app.get("/call-tasks/:id", async (c) => {
-    const view = await callTaskView(store, c.req.param("id"), Date.parse(now()));
+    const view = await callTaskView(store, c.req.param("id"), Date.parse(now()), rules);
     return view ? c.json(view) : notFound(c, "call task");
   });
 
@@ -458,12 +468,12 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     if (!outcome.ok) return c.json<ApiError>({ error: { code: "outcome_refused", message: outcome.reason } }, 409);
     // The answer names the next focus: the queue moves on only now that an outcome is logged.
     const at = Date.parse(now());
-    const task = await callTaskView(store, id, at);
+    const task = await callTaskView(store, id, at, rules);
     if (!task) return notFound(c, "call task");
     return c.json<CallOutcomeAnswer>({ task, nextFocusTaskId: (await callsView(store, at, { rules })).focusTaskId });
   });
 
-  app.get("/needs-attention", async (c) => c.json(await needsAttention(store.engine, Date.parse(now()))));
+  app.get("/needs-attention", async (c) => c.json(await needsAttention(store.engine, Date.parse(now()), rules)));
 
   // No SMS provider is provisioned or chosen (#28): the running app reports none, honestly.
   app.get("/sms-provider", async (c) => {

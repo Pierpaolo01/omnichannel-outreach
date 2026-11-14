@@ -1,3 +1,4 @@
+import type { SubjectState } from "../../domain/sequence/state.ts";
 import { DatabaseSync, type SQLInputValue, type SQLOutputValue, type StatementSync } from "node:sqlite";
 import { digitsOf, foldText, isNewerDetail, type Channel, type PhoneKind } from "../../domain/contact-details.ts";
 import { displayPhone, parsePhone } from "../../domain/phone.ts";
@@ -124,8 +125,11 @@ class SqliteStore implements OutreachStore {
     importedAt: string;
     fileNames: ImportFileNames;
     plan: (directory: Directory) => ImportPlan;
+    catchUp?: { readonly now: number; readonly asOf: (state: SubjectState) => SubjectState };
   }): Promise<ImportRecord> {
     return this.transaction(() => {
+      // What fell due is applied under the zones in force before this import changes them.
+      if (input.catchUp) this.engine.catchUpWithin(input.catchUp.now, input.catchUp.asOf);
       const campaignId = "create" in input.campaign ? input.campaign.create.id : input.campaign.id;
       if ("create" in input.campaign) this.insertCampaign(input.campaign.create);
       const plan = input.plan(this.directory(campaignId));

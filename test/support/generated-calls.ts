@@ -158,7 +158,14 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
   const features = new Set<string>();
 
   const start = Date.parse("2026-10-19T00:00:00Z") + Math.floor(rand() * 11 * DAY) + Math.floor(rand() * 24) * HOUR;
-  const userZone = pick(["Europe/London", "America/New_York"]);
+  const firstUserZone = pick(["Europe/London", "America/New_York"]);
+  /**
+   * The call list's zone over time (council on 228cd3b): the settings may move it once in a run. A change at
+   * `at` holds from `at` on; a rollover at exactly `at` was judged under the zone before it (the route catches
+   * up first), which `strict` asks for.
+   */
+  const userZones: { at: number; zone: string }[] = [{ at: -Infinity, zone: firstUserZone }];
+  const uz = (t: number, strict = false) => userZones.filter((z) => (strict ? z.at < t : z.at <= t)).at(-1)?.zone ?? firstUserZone;
   const capacity = pick([1, 2, 3, 5]);
   features.add(`capacity:${capacity}`);
 
@@ -224,7 +231,10 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       const id = `c${ci}t${ti + 1}`;
       tracks.push({ id, channel, branch: "main", window: channel === "call" ? callingHours() : sendingWindow(), steps: stepsOf(channel, id), start: startRule, removed: false });
     }
-    const definition: CampaignDefinition = { timezone: pick(["Europe/London", "America/New_York"]), callSkipLimitDays: 2, emailPool: ["inbox-a"], smsPool: [numbers[ci]!.id], callScript: "Ask who handles bookings.", tracks };
+    // The skip limit varies (1, 2 or 3 days), so Q5's interim and the case it distinguishes are both reached.
+    const limit = pick([1, 2, 2, 3]);
+    features.add(`limit:${limit}`);
+    const definition: CampaignDefinition = { timezone: pick(["Europe/London", "America/New_York"]), callSkipLimitDays: limit, emailPool: ["inbox-a"], smsPool: [numbers[ci]!.id], callScript: "Ask who handles bookings.", tracks };
     campaigns.push({ id: "", definition, companies: ci === 0 ? [0, 1, 2] : [0, 1], launchedAt: null });
   }
   for (const c of campaigns) {
@@ -233,19 +243,22 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     if (c.definition.tracks.some((t) => t.channel !== "call" && t.start.kind === "entry")) features.add("parallel-with-a-call");
   }
 
+  /** Each person's and company's zone over time: a re-import may move one (council on 228cd3b). */
+  const zoneChanges = new Map<string, { at: number; zone: string }[]>();
+  const zoneOfKey = (key: string, initial: string, t: number, strict = false) => (zoneChanges.get(key) ?? []).filter((z) => (strict ? z.at < t : z.at <= t)).at(-1)?.zone ?? initial;
   const rowsFor = (c: Campaign): ExportRows => ({
     businesses: c.companies.map((i) => {
       const co = companies[i]!;
-      return business({ business_id: co.key, business_name: co.name, timezone: co.zone, phone_e164: co.line ?? "", general_emails: co.inbox ?? "" });
+      return business({ business_id: co.key, business_name: co.name, timezone: zoneOfKey(co.key, co.zone, Infinity), phone_e164: co.line ?? "", general_emails: co.inbox ?? "" });
     }),
     people: people
       .filter((p) => c.companies.includes(p.company))
       .map((p) =>
-        person({ person_id: p.key, business_id: companies[p.company]!.key, full_name: p.name, timezone: p.zone, email: p.email ?? "", direct_phone: p.direct ?? "", ...(p.mobile ? { dial_phone: p.mobile, dial_phone_type: "mobile" } : {}) }),
+        person({ person_id: p.key, business_id: companies[p.company]!.key, full_name: p.name, timezone: zoneOfKey(p.key, p.zone, Infinity), email: p.email ?? "", direct_phone: p.direct ?? "", ...(p.mobile ? { dial_phone: p.mobile, dial_phone_type: "mobile" } : {}) }),
       ),
   });
 
-  const settings = await h.request("PUT", "/api/call-settings", { dailyCapacity: capacity, userZone });
+  const settings = await h.request("PUT", "/api/call-settings", { dailyCapacity: capacity, userZone: firstUserZone });
   if (settings.status !== 200) problem(`settings refused: ${JSON.stringify(settings.body)}`);
 
   const subjects = new Map<string, Subject>();
@@ -298,7 +311,9 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
   const notePlacement = (subjectId: string, task: CallTask) => placedAt.set(`${subjectId}/${task.trackId}`, task.placedWall);
 
   const def = (s: Subject) => campaigns[s.campaign]!.definition;
-  const zoneFor = (s: Subject) => zoneOf(s.person?.zone ?? "", s.company.zone, def(s).timezone);
+  /** The prospect's zone at `t` (the person's, else the company's, else the campaign's); `strict`: before any change at `t`. */
+  const zoneFor = (s: Subject, t: number = h.clock, strict = false) =>
+    zoneOf(s.person ? zoneOfKey(s.person.key, s.person.zone, t, strict) : "", zoneOfKey(s.company.key, s.company.zone, t, strict), def(s).timezone);
   const runStartOf = (s: Subject) => Math.max(s.enrolledAt, campaigns[s.campaign]!.launchedAt ?? Infinity);
   const addressOf = (s: Subject) => s.person?.email ?? (s.person ? null : s.company.inbox);
   const mobileOf = (s: Subject) => s.person?.mobile ?? null;
@@ -406,7 +421,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     const rule = t.start;
     const before = def(s).tracks.find((x) => x.id === rule.trackId);
     const f = before ? finishFacts(s, before) : null;
-    return f === null ? null : leadOfWall(s, f.at) + (dueAfter(f.at, rule.delayDays, zoneFor(s)) - f.at);
+    return f === null ? null : leadOfWall(s, f.at) + (dueAfter(f.at, rule.delayDays, zoneFor(s, f.at)) - f.at);
   }
   /** Lead time at wall instant `w`: the time the lead has run since it started, less every hold before `w` (3.2). */
   function leadOfWall(s: Subject, w: number): number {
@@ -417,7 +432,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
   /** The phone track's task at `t`, by the user's accepted outcomes on it at or before `t` (strictly before, with `strict`). */
   function taskStateAt(s: Subject, trackId: string, t: number, strict = false): { kind: "call" | "callback"; callbackAt: number | null; listDay: number; redialedTo: number | null } {
     const placed = placedAt.get(`${s.id}/${trackId}`);
-    const st = { kind: "call" as "call" | "callback", callbackAt: null as number | null, listDay: placed === undefined ? -Infinity : local(placed, userZone).day, redialedTo: null as number | null };
+    const st = { kind: "call" as "call" | "callback", callbackAt: null as number | null, listDay: placed === undefined ? -Infinity : local(placed, uz(placed)).day, redialedTo: null as number | null };
     for (const o of acceptedOn(s, trackId)) {
       if (strict ? o.at >= t : o.at > t) break;
       if (o.outcome === "callback_requested") {
@@ -426,7 +441,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       } else if (o.redial) {
         st.kind = "call";
         st.callbackAt = null;
-        st.listDay = local(o.at, userZone).day + 1;
+        st.listDay = local(o.at, uz(o.at)).day + 1;
         st.redialedTo = st.listDay;
       } else if (o.outcome !== "skip_for_now") {
         // Its outcome: the call is done (a callback's outcome releases the hold first, so it closes as a call).
@@ -451,21 +466,37 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     expiryMemo.set(key, found);
     return found;
   }
+  /**
+   * The rollovers are each zone's day starts, the zone in force for them: those at or before a change of the
+   * call list's zone are the old zone's (the route judged them first), those after it the new zone's. Each is
+   * judged with the prospect's zone in force just before it, and never again (the app stores how far it judged).
+   */
   function expiryWalk(s: Subject, t: TrackDefinition): number | null {
     const placed = placedAt.get(`${s.id}/${t.id}`);
     const due = placed === undefined ? null : startOf(s, t);
     if (placed === undefined || due === null || !Number.isFinite(due)) return null;
-    const deadline = afterHolds(s, due, startOfDay(local(due, userZone).day + def(s).callSkipLimitDays, userZone));
+    // Resolved when the call was placed, in the user's zone then.
+    const placedZone = uz(placed);
+    const deadline = afterHolds(s, due, startOfDay(local(due, placedZone).day + def(s).callSkipLimitDays, placedZone));
     if (deadline > h.clock) return null;
     const end = endLimitOf(s);
-    for (let d = Math.max(local(placed, userZone).day, local(deadline, userZone).day - 1); ; d++) {
-      const e = startOfDay(d + 1, userZone);
-      if (e > h.clock || e >= end) return null;
-      if (e < deadline || heldStrictly(s, e)) continue;
-      const st = taskStateAt(s, t.id, e, true);
-      if (st.kind === "callback" || d < st.listDay || !hoursOnUserDay(s, t.id, startOfDay(d, userZone))) continue;
-      return e;
+    const segments = userZones.map((z, i) => ({ from: z.at, to: userZones[i + 1]?.at ?? Infinity, zone: z.zone }));
+    for (const seg of segments) {
+      const lo = Math.max(seg.from, placed);
+      if (lo >= seg.to) continue;
+      for (let k = Math.max(local(lo, seg.zone).day + 1, local(deadline, seg.zone).day); ; k++) {
+        const e = startOfDay(k, seg.zone);
+        if (e <= lo) continue;
+        if (e > seg.to || e > h.clock) break;
+        if (e >= end) return null;
+        if (e < deadline || heldStrictly(s, e)) continue;
+        const st = taskStateAt(s, t.id, e, true);
+        const d = k - 1;
+        if (st.kind === "callback" || d < st.listDay || !hoursOn(s, t.id, d, seg.zone, zoneFor(s, e, true))) continue;
+        return e;
+      }
     }
+    return null;
   }
 
   function startOf(s: Subject, t: TrackDefinition): number | null {
@@ -475,7 +506,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     const rule = t.start;
     const before = def(s).tracks.find((x) => x.id === rule.trackId);
     const f = before ? finishFacts(s, before) : null;
-    return f === null ? null : afterHolds(s, f.at, dueAfter(f.at, rule.delayDays, zoneFor(s)));
+    return f === null ? null : afterHolds(s, f.at, dueAfter(f.at, rule.delayDays, zoneFor(s, f.at)));
   }
   function startSeenAt(s: Subject, t: TrackDefinition): number | null {
     const at = startOf(s, t);
@@ -525,26 +556,29 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     return Number.isFinite(bad) && bad <= end ? { at: bad, seen: bad, reason: "failed_bad_destination" } : null;
   }
 
-  /** The user day of instant `t`, as wall instants. */
+  /** The user day of instant `t`, as wall instants, in the call list's zone at `t`. */
   function userDay(t: number): { start: number; end: number } {
-    const day = local(t, userZone).day;
-    return { start: startOfDay(day, userZone), end: startOfDay(day + 1, userZone) };
+    const zone = uz(t);
+    const day = local(t, zone).day;
+    return { start: startOfDay(day, zone), end: startOfDay(day + 1, zone) };
   }
   const windowOf = (s: Subject, trackId: string) => def(s).tracks.find((x) => x.id === trackId)?.window ?? [];
   const hoursMemo = new Map<string, boolean>();
-  /** Whether the prospect's calling hours open at some point of the user day of `t`. */
-  function hoursOnUserDay(s: Subject, trackId: string, t: number): boolean {
-    const { start: from, end } = userDay(t);
-    const key = `${s.campaign}/${trackId}/${zoneFor(s)}/${from}`;
+  /** Whether the prospect's calling hours, in `prospectZone`, open at some point of user day `d` reckoned in `dayZone`. */
+  function hoursOn(s: Subject, trackId: string, d: number, dayZone: string, prospectZone: string): boolean {
+    const from = startOfDay(d, dayZone);
+    const key = `${s.campaign}/${trackId}/${prospectZone}/${dayZone}/${d}`;
     let open = hoursMemo.get(key);
     if (open === undefined) {
-      open = firstOpen(windowOf(s, trackId), zoneFor(s), from) < end;
+      open = firstOpen(windowOf(s, trackId), prospectZone, from) < startOfDay(d + 1, dayZone);
       hoursMemo.set(key, open);
     }
     return open;
   }
+  /** Whether the prospect's calling hours open at some point of the user day of `t`, with the zones at `t`. */
+  const hoursOnUserDay = (s: Subject, trackId: string, t: number) => hoursOn(s, trackId, local(t, uz(t)).day, uz(t), zoneFor(s, t));
   /** Open now or later on the user day of `t`. */
-  const hoursLeftToday = (s: Subject, trackId: string, t: number) => firstOpen(windowOf(s, trackId), zoneFor(s), t) < userDay(t).end;
+  const hoursLeftToday = (s: Subject, trackId: string, t: number) => firstOpen(windowOf(s, trackId), zoneFor(s, t), t) < userDay(t).end;
   /**
    * Running at `t`: launched, not stopped, with work left before `t` (a call logged at `t` may finish it at
    * `t`), and not held by a callback. At the instant of a user action the engine passes twice, before the
@@ -581,17 +615,22 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     if (f !== null && f.at <= t) return false;
     if (!(runStartOf(s) <= t && t < endLimitOf(s) && !sequenceDoneAt(s, t, true))) return false;
     const st = taskStateAt(s, tr.id, t);
-    const today = local(t, userZone).day;
-    if (st.kind === "callback") return local(st.callbackAt ?? Infinity, userZone).day <= today;
+    const today = local(t, uz(t)).day;
+    if (st.kind === "callback") return local(st.callbackAt ?? Infinity, uz(t)).day <= today;
     return !heldAt(s, t) && st.listDay <= today && hoursOnUserDay(s, tr.id, t);
   }
   /** Why a listed task is on the list by the record: a callback before its time, then overdue; rolled over from an earlier list day; a redial on its day; due. */
   function reasonByRecord(s: Subject, trackId: string, t: number): CallReasonApi {
     const st = taskStateAt(s, trackId, t);
     if (st.kind === "callback") return t < (st.callbackAt ?? Infinity) ? "callback" : "overdue";
-    const today = local(t, userZone).day;
-    if (st.listDay < today) return "rolled_over";
-    return st.redialedTo === today ? "redial" : "due";
+    const zone = uz(t);
+    const today = local(t, zone).day;
+    // A redial is a redial until its first listed day has passed (one logged Friday for Saturday is a redial on Monday).
+    const redialed = st.redialedTo !== null && st.redialedTo === st.listDay;
+    let listedSince = false;
+    for (let d = st.listDay; d < today && !listedSince; d++) listedSince = hoursOn(s, trackId, d, zone, zoneFor(s, t));
+    if (st.listDay < today && (!redialed || listedSince)) return "rolled_over";
+    return redialed ? "redial" : "due";
   }
   function touchedAt(s: Subject, t: number, strict: boolean): boolean {
     const before = (x: number) => (strict ? x < t : x <= t);
@@ -604,20 +643,11 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
 
   /** The call the user's screen is on: named on every read of the queue, so it keeps the focus while it is listed. */
   let focus: string | null = null;
-  /**
-   * Set while the user acts between a due instant and the worker's tick: what the user reads then is the
-   * app's state as of its last tick (the read side's freshness is ticket 14b's rule, not checked here),
-   * and the action must still be judged as of its own instant (2.4; review bot on eda5fa0).
-   */
-  let staleRead = false;
   async function queue(): Promise<CallsView> {
+    // Read as of its own instant, even between a due instant and the worker's tick (council on 228cd3b, item 2).
     const q = (await h.request<CallsView>("GET", `/api/calls${focus ? `?focus=${focus}` : ""}`)).body;
     const held = focus;
     focus = q.focusTaskId;
-    if (staleRead) {
-      for (const item of [...q.readyNow, ...q.laterToday]) knownTasks.set(item.taskId, { subjectId: item.enrollmentId, trackId: item.track.id });
-      return q;
-    }
     // The focus moves only when the call the user is on leaves the list (an outcome, or its lead stopping).
     const expected = held !== null && knownTasks.has(held) && listedByRecord(held, h.clock) ? held : ((await recordReadyNow())[0] ?? null);
     if (q.focusTaskId !== expected) problem(`16: the focus is ${q.focusTaskId ?? "none"} at ${new Date(h.clock).toISOString()}; the user was on ${held ?? "nothing"}, and the record says ${expected ?? "none"}`);
@@ -633,7 +663,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
   }
   const redialedLast = (s: Subject, trackId: string) => acceptedOn(s, trackId).at(-1)?.redial === true;
   /** The user's date of `t`, YYYY-MM-DD. */
-  const dateIn = (t: number) => new Date(local(t, userZone).day * DAY).toISOString().slice(0, 10);
+  const dateIn = (t: number) => new Date(local(t, uz(t)).day * DAY).toISOString().slice(0, 10);
 
   async function logOutcome(taskId: string, outcome: CallOutcomeApi, chooseNumber: (view: CallTaskView) => string | null, extra: { redial?: boolean; callbackAt?: number | null } = {}): Promise<void> {
     const view = (await h.request<CallTaskView>("GET", `/api/call-tasks/${taskId}`)).body;
@@ -697,7 +727,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     else features.add("outcome-refused");
     if (!expected && redial && !REDIAL.includes(outcome)) features.add("redial-with-the-wrong-outcome");
     if (!expected && view.task === null && view.open && view.listedFor > dateIn(now) && redialedLast(s, view.track.id)) features.add("outcome-on-a-redial-for-tomorrow");
-    if (expected && outcome === "callback_requested") features.add(local(callbackAt ?? now, userZone).day > local(now, userZone).day ? "callback-for-a-later-day" : "callback-later-today");
+    if (expected && outcome === "callback_requested") features.add(local(callbackAt ?? now, uz(now)).day > local(now, uz(now)).day ? "callback-for-a-later-day" : "callback-later-today");
     if (expected && taskStateAt(s, view.track.id, now - 1).kind === "callback") features.add(`callback-worked:${outcome}${redial ? "+redial" : ""}`);
   }
 
@@ -708,8 +738,16 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     if (!focus) return false;
     // A wrong number on a mobile also marks it bad for texts, so an SMS track on it fails.
     const outcome: CallOutcomeApi = drain ? pick(["no_answer", "voicemail", "gatekeeper"]) : pick(["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "callback_requested", "callback_requested", "skip_for_now", "skip_for_now"]);
-    // In the drain the user works every call through. A callback whose lead has no good number left cannot be logged: it waits for the user (ticket 17's skip step).
-    if (drain && !(await workable(focus))) return false;
+    // In the drain the user works every call through. A callback whose lead has no good number left cannot be
+    // logged (Q13): the user skips it for now, once a day, and works the calls behind it.
+    if (drain && !(await workable(focus))) {
+      const today = local(h.clock, uz(h.clock)).day;
+      if (stuckSkipped.get(focus) === today) return false;
+      stuckSkipped.set(focus, today);
+      await logOutcome(focus, "skip_for_now", () => null);
+      features.add("drain-skipped-a-callback-it-cannot-log");
+      return true;
+    }
     const extra = drain ? {} : { redial: REDIAL.includes(outcome) && chance(0.4), callbackAt: outcome === "callback_requested" ? callbackTime() : null };
     await logOutcome(focus, outcome, (view) => {
       const good = view.numbers.filter((n) => !n.bad);
@@ -721,19 +759,42 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
           return bad.detailId;
         }
       }
+      // A wrong number is often the shared main line: a colleague can lose their last good number that way,
+      // even while a callback holds them (Q13).
+      const mainLine = good.find((n) => n.kind === "main_line");
+      if (outcome === "wrong_number" && mainLine && staleRand() < 0.6) return mainLine.detailId;
       return choices.length > 0 ? pick(choices).detailId : (good[0]?.detailId ?? null);
     }, extra);
     return true;
   }
 
+  /** Logs a wrong number on a shared main line that is the only good number of a lead a callback holds. True if it did. */
+  async function strandACallback(): Promise<boolean> {
+    const now = h.clock;
+    for (const held of subjects.values()) {
+      if (!heldAt(held, now) || held.company.line === null || badAt(held.company.line) <= now) continue;
+      if (phonesOf(held).some((p) => p.key !== held.company.line && badAt(p.key) > now)) continue;
+      for (const [taskId, k] of knownTasks) {
+        const colleague = subjects.get(k.subjectId);
+        if (!colleague || colleague.id === held.id || colleague.company.key !== held.company.key || !listedByRecord(taskId, now)) continue;
+        await logOutcome(taskId, "wrong_number", (view) => view.numbers.find((n) => n.kind === "main_line" && !n.bad)?.detailId ?? null);
+        features.add("a-held-lead-lost-its-last-number");
+        return true;
+      }
+    }
+    return false;
+  }
+  /** Callbacks with no good number the drain skipped for now, and the user day it did. */
+  const stuckSkipped = new Map<string, number>();
   /** A time the prospect asks to be called back: later today, tomorrow, or in a few days, in the user's day. */
   function callbackTime(): number {
     const now = h.clock;
-    const today = local(now, userZone).day;
+    const zone = uz(now);
+    const today = local(now, zone).day;
     const kind = rand();
     if (kind < 0.35) return now + pick([30 * MINUTE, HOUR, 3 * HOUR]);
-    if (kind < 0.75) return startOfDay(today + 1, userZone) + pick([10, 15, 19]) * HOUR;
-    return startOfDay(today + pick([2, 3]), userZone) + pick([9, 14]) * HOUR;
+    if (kind < 0.75) return startOfDay(today + 1, zone) + pick([10, 15, 19]) * HOUR;
+    return startOfDay(today + pick([2, 3]), zone) + pick([9, 14]) * HOUR;
   }
   /** Whether the task offers a good number to log a call on. */
   const workable = async (taskId: string) => (await h.request<CallTaskView>("GET", `/api/call-tasks/${taskId}`)).body.numbers.some((n) => !n.bad);
@@ -831,7 +892,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
         if (!hoursLeftToday(s, t.id, now) || !goodPhoneAt(s, now)) continue;
         const day = dayCounts(allTasks, now);
         features.add(day.committed > 0 ? "waits-behind-committed" : "waits-for-room");
-        if (day.placed < capacity - day.committed) problem(`17: ${id}/${t.id}'s call has been due since ${new Date(seen).toISOString()} and today's list has room (${day.placed} placed, ${day.committed} committed, capacity ${capacity}), but it is not placed`);
+        if (day.placed < capacity - day.committed) problem(`17: ${id}/${t.id}'s call has been due since ${new Date(seen).toISOString()} and today's list has room (${day.placed} placed, ${day.committed} committed, capacity ${capacity}), but it is not placed${process.env["CALLS_DEBUG"] ? ` [now ${isoOf(now)}; zones ${JSON.stringify(userZones)}; engine day ${JSON.stringify(await h.store.engine.callDay(now))}; tasks ${JSON.stringify(allTasks.map((x) => [x.s.id, x.task.trackId, isoOf(x.task.placedWall), x.task.open, x.task.kind]))}; track ${JSON.stringify(st.tracks.find((p) => p.trackId === t.id))}; clock ${JSON.stringify(st.subject.clock)}]` : ""}`);
       }
 
       // 18, during the run: a due email or text goes within an hour of its window opening while the lead runs (a call never holds them).
@@ -845,17 +906,20 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
           const prev = i > 0 ? deliveryOf(ch, id, t.steps[i - 1]!.id) : undefined;
           if (i > 0 && !prev) break;
           // A wait counts in lead time: every callback hold after its basis moves it by the time held (3.2, 3.3).
-          const unheld = prev ? dueAfter(prev.at, step.waitDays, zoneFor(s)) : at;
+          // Resolved at the basis, in the prospect's zone then.
+          const unheld = prev ? dueAfter(prev.at, step.waitDays, zoneFor(s, prev.at)) : at;
           const due = prev ? afterHolds(s, prev.at, unheld) : at;
           if (!reachesAt(s, ch, at) || !Number.isFinite(due)) break;
           // 8 and 9. Never handed over before its due time, the holds included.
           const handed = firstCall(ch, id, step.id);
           if (handed && handed.at < due) problem(`9: ${id}/${step.id} was handed over at ${new Date(handed.at).toISOString()}, before its due time ${new Date(due).toISOString()} (${new Date(unheld).toISOString()} moved by the lead's callback holds)`);
           if (handed && due > unheld) features.add("a-send-moved-by-a-callback");
-          const opens = firstOpen(t.window, zoneFor(s), due);
+          const opens = firstOpen(t.window, zoneFor(s, due), due);
           const deadline = opens + HOUR;
           const seen = i === 0 ? startSeenAt(s, t) : due;
-          if (seen === null || seen > opens || deadline > now || !runningAt(s, deadline) || heldWithin(s, opens, deadline) || !inWindow(t.window, zoneFor(s), deadline - 1) || !reachesAt(s, ch, deadline)) continue;
+          // Not across a move of the prospect's zone: the window is read in the zone of the moment of each claim.
+          const moved = [s.person?.key, s.company.key].some((key) => (zoneChanges.get(key ?? "") ?? []).some((z) => z.at >= (prev?.at ?? at) && z.at <= deadline));
+          if (moved || seen === null || seen > opens || deadline > now || !runningAt(s, deadline) || heldWithin(s, opens, deadline) || !inWindow(t.window, zoneFor(s, deadline), deadline - 1) || !reachesAt(s, ch, deadline)) continue;
           if (!handed || handed.at > deadline) problem(`18: ${id}/${step.id} was due at ${new Date(due).toISOString()} and its window open from ${new Date(opens).toISOString()}, but it was not handed over within an hour`);
           if (handed && st.callTasks.some((x) => x.open && x.placedWall <= handed.at)) features.add("a-send-beside-an-open-call");
         }
@@ -903,10 +967,14 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     checkedNotes.clear();
 
     // 17. Each user day's new tasks stay within the capacity left after committed tasks.
-    const days = new Set(allTasks.map((x) => local(x.task.placedWall, userZone).day));
-    for (const d of days) {
-      const counts = dayCounts(allTasks, startOfDay(d, userZone));
-      if (counts.placed > capacity - counts.committed) problem(`17: ${counts.placed} new calls were placed on ${new Date(d * DAY).toISOString().slice(0, 10)} with ${counts.committed} committed and a capacity of ${capacity}${process.env["CALLS_DEBUG"] ? ` engine day ${JSON.stringify(await h.store.engine.callDay(startOfDay(d, userZone)))} ${JSON.stringify(allTasks.map((x) => ({ s: x.s.id, t: x.task.trackId, placed: isoOf(x.task.placedWall), closed: isoOf(x.task.closedWall), kind: x.task.kind, hours: hoursOnUserDay(x.s, x.task.trackId, startOfDay(d, userZone)), outcomes: acceptedOn(x.s, x.task.trackId).map((o) => [isoOf(o.at), o.outcome, isoOf(o.callbackAt)]) })))}` : ""}`);
+    // A day the call list's zone changed in has two reckonings of its bounds; only days reckoned in one zone are checked.
+    const days = new Set(allTasks.map((x) => `${uz(x.task.placedWall)}|${local(x.task.placedWall, uz(x.task.placedWall)).day}`));
+    for (const key of days) {
+      const [zone = firstUserZone, dayText = "0"] = key.split("|");
+      const d = Number(dayText);
+      if (userZones.some((z) => z.at >= startOfDay(d, zone) - DAY && z.at < startOfDay(d + 1, zone) + DAY)) continue;
+      const counts = dayCounts(allTasks, startOfDay(d, zone));
+      if (counts.placed > capacity - counts.committed) problem(`17: ${counts.placed} new calls were placed on ${new Date(d * DAY).toISOString().slice(0, 10)} with ${counts.committed} committed and a capacity of ${capacity}${process.env["CALLS_DEBUG"] ? ` engine day ${JSON.stringify(await h.store.engine.callDay(startOfDay(d, zone)))}` : ""}`);
     }
 
     // 12 for calls. At every placement, no call ready then with a higher priority was left unplaced.
@@ -937,12 +1005,12 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       const listed = task.open && listedByRecord(task.id, now);
       const st = taskStateAt(s, task.trackId, now);
       const isCallback = st.kind === "callback";
-      const ready = listed && (isCallback ? now >= (st.callbackAt ?? Infinity) : inWindow(windowOf(s, task.trackId), zoneFor(s), now));
+      const ready = listed && (isCallback ? now >= (st.callbackAt ?? Infinity) : inWindow(windowOf(s, task.trackId), zoneFor(s, now), now));
       const later = listed && !ready && (isCallback || hoursLeftToday(s, task.trackId, now));
       const item = [...q.readyNow, ...q.laterToday].find((x) => x.taskId === task.id);
       const inReady = q.readyNow.some((x) => x.taskId === task.id);
       const inLater = q.laterToday.some((x) => x.taskId === task.id);
-      if (inReady && !isCallback && !inWindow(windowOf(s, task.trackId), zoneFor(s), now)) problem(`13: ${s.id}/${task.trackId} is ready now outside the prospect's calling hours (${zoneFor(s)})`);
+      if (inReady && !isCallback && !inWindow(windowOf(s, task.trackId), zoneFor(s, now), now)) problem(`13: ${s.id}/${task.trackId} is ready now outside the prospect's calling hours (${zoneFor(s, now)})`);
       if (inReady !== ready || inLater !== later) problem(`16: ${s.id}/${task.trackId} is ${inReady ? "ready now" : inLater ? "later today" : "not on the list"}; the record says ${ready ? "ready now" : later ? "later today" : "not on the list"}${isCallback ? ` (a callback at ${new Date(st.callbackAt ?? 0).toISOString()})` : ""}`);
       if (item) {
         const reason = reasonByRecord(s, task.trackId, now);
@@ -951,7 +1019,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
         if (due !== null && Number.isFinite(due) && item.dueAt !== new Date(due).toISOString()) problem(`16: ${s.id}/${task.trackId} shows due ${item.dueAt}; its original due time by the record is ${new Date(due).toISOString()}`);
         features.add(`reason:${reason}`);
         if (reason === "overdue") recordOverdue.push(task.id);
-        if (reason === "overdue" && local(st.callbackAt ?? now, userZone).day < local(now, userZone).day) features.add("overdue-callback-for-days");
+        if (reason === "overdue" && local(st.callbackAt ?? now, uz(now)).day < local(now, uz(now)).day) features.add("overdue-callback-for-days");
       }
     }
     // Today's Needs attention lists every overdue callback, and so does GET /api/needs-attention.
@@ -984,7 +1052,9 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
    * closed at that very instant, such as a call skipped at that rollover, was not carried into it), for
    * leads not stopped by then, on a day they can be listed: a call on a day its calling hours open, a
    * callback from its own day. A task counts as it stood at the day's start (a callback if the user's last
-   * outcome on it before then asked for one), so the count is the same all day.
+   * outcome on it before then asked for one), so the count is the same all day. Not counted: a call of a lead
+   * a callback held at the day's start, and any call of a lead with no good number left (Q13), as of `t` (for
+   * a past day, its last instant, when the most numbers had gone bad: the app's count only falls by that).
    */
   function dayCounts(all: readonly { s: Subject; task: CallTask }[], t: number): { placed: number; committed: number } {
     const { start: from, end } = userDay(t);
@@ -997,7 +1067,12 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       const interested = interestedAt(x.s) < from;
       if (closed || interested || endLimitOf(x.s) < from || sequenceDoneAt(x.s, from - 1)) return false;
       const st = taskStateAt(x.s, x.task.trackId, from, true);
-      return st.kind === "callback" ? local(st.callbackAt ?? Infinity, userZone).day <= local(from, userZone).day : hoursOnUserDay(x.s, x.task.trackId, from);
+      const heldByAnother = all.some((y) => y.s.id === x.s.id && y.task.id !== x.task.id && y.task.placedWall < from && taskStateAt(y.s, y.task.trackId, from, true).kind === "callback" && !((finishFacts(y.s, def(y.s).tracks.find((z) => z.id === y.task.trackId)!)?.at ?? Infinity) <= from));
+      if (heldByAnother || !goodPhoneAt(x.s, Math.min(end - 1, h.clock))) return false;
+      // The day is the one of `t`, reckoned in the zones of `t`, as the app reckons it when asked.
+      const zone = uz(t);
+      const day = local(t, zone).day;
+      return st.kind === "callback" ? local(st.callbackAt ?? Infinity, zone).day <= day : hoursOn(x.s, x.task.trackId, day, zone, zoneFor(x.s, t));
     }).length;
     return { placed, committed };
   }
@@ -1033,7 +1108,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
         notePlacement(id, task);
         if (!listedByRecord(task.id, now)) continue;
         const state = taskStateAt(s, task.trackId, now);
-        if (state.kind === "callback" ? now < (state.callbackAt ?? Infinity) : !inWindow(windowOf(s, task.trackId), zoneFor(s), now)) continue;
+        if (state.kind === "callback" ? now < (state.callbackAt ?? Infinity) : !inWindow(windowOf(s, task.trackId), zoneFor(s, now), now)) continue;
         const tr = def(s).tracks.find((t) => t.id === task.trackId)!;
         const skippedAt = skips.get(task.id) ?? null;
         const reason = reasonByRecord(s, task.trackId, now);
@@ -1082,17 +1157,41 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
    */
   async function aroundADueInstant(): Promise<boolean> {
     const now = h.clock;
-    const instants = [startOfDay(local(now, userZone).day + 1, userZone), ...logged.filter((o) => o.accepted && o.callbackAt !== null && o.callbackAt > now + 5_000).map((o) => o.callbackAt ?? 0)];
+    const instants = [startOfDay(local(now, uz(now)).day + 1, uz(now)), ...logged.filter((o) => o.accepted && o.callbackAt !== null && o.callbackAt > now + 5_000).map((o) => o.callbackAt ?? 0)];
     const target = instants[Math.floor(staleRand() * instants.length)] ?? now;
     const side = [-1_000, 0, 1_000, 30_000][Math.floor(staleRand() * 4)] ?? 0;
     if (target + side <= now + 2_000) return false;
     await h.advanceTo(target - 2_000);
     h.clock = Math.max(h.clock, target + side);
-    staleRead = true;
     features.add(side < 0 ? "acted-just-before-a-due-instant" : target === instants[0] ? "acted-after-a-rollover-before-the-tick" : "acted-after-a-callback-time-before-the-tick");
     return true;
   }
   const staleRand = random(seed ^ 0x15a);
+  const staleItem = <T>(items: readonly T[]): T => items[Math.floor(staleRand() * items.length)] ?? items[0]!;
+
+  /**
+   * An input the engine's timing reads moves (council on 228cd3b): the call list's zone (the settings), or one
+   * person's or company's zone (a re-import). Done at the instant reached by `aroundADueInstant`, before the
+   * worker's tick: the route applies what fell due under the old zone first, and the record judges each
+   * rollover with the zones in force just before it.
+   */
+  async function moveAZone(): Promise<void> {
+    const now = h.clock;
+    if (staleRand() < 0.4 && userZones.length < 3) {
+      const zone = staleItem(["Europe/London", "America/New_York", "Asia/Kolkata"].filter((z) => z !== uz(now)));
+      const res = await h.request("PUT", "/api/call-settings", { dailyCapacity: capacity, userZone: zone });
+      if (res.status !== 200) problem(`settings refused: ${JSON.stringify(res.body)}`);
+      userZones.push({ at: now, zone });
+      features.add("call-list-zone-moved");
+      return;
+    }
+    const entity = staleItem([...people.map((p) => ({ key: p.key, initial: p.zone, company: p.company })), ...companies.map((c, i) => ({ key: c.key, initial: c.zone, company: i }))]);
+    const zone = staleItem(ZONES.filter((z) => z !== "" && z !== zoneOfKey(entity.key, entity.initial, now)));
+    zoneChanges.set(entity.key, [...(zoneChanges.get(entity.key) ?? []), { at: now, zone }]);
+    const campaign = campaigns.find((c) => c.companies.includes(entity.company));
+    if (campaign) await h.reimport(campaign.id, rowsFor(campaign));
+    features.add(entity.key.startsWith("p") ? "a-person-zone-moved" : "a-company-zone-moved");
+  }
 
   // ------------------------------------------------------------------------------------------
   // Events.
@@ -1107,10 +1206,16 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     } else if (r < 0.7) {
       // Work the list: every call the user starts is the focused one. Sometimes the user acts between a due
       // instant and the worker's tick (review bot on eda5fa0); the worker's tick then follows.
+      // Sometimes, when a lead held by a callback has only the company main line left, a colleague's call on that
+      // line is a wrong number: the callback is then one no call can be logged on (Q13).
+      if (staleRand() < 0.5 && (await strandACallback())) {
+        await checkAll(false);
+        continue;
+      }
       const stale = staleRand() < 0.3 && (await aroundADueInstant());
+      if (stale && staleRand() < 0.35) await moveAZone();
       const worked = await workFocus(false);
       if (stale) {
-        staleRead = false;
         await h.tick();
       } else if (worked) await checkNumbers();
       else await h.advanceTo(h.clock + pick([HOUR, 3 * HOUR]));

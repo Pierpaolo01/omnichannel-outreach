@@ -14,8 +14,17 @@ import type { OutreachStore } from "../persistence/store.ts";
 import type { StoredNote } from "./engine-store.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 
-/** The decisions the call read models make: the queue order and the focus, from the engine's rules. */
-export type CallViewRules = Pick<Rules, "readyNowOrder" | "focusOf" | "callReason">;
+/**
+ * The decisions the call read models make, from the engine's rules: each lead's state as of the instant read
+ * (the same catch-up a user action gets, council on 228cd3b), the queue order, the focus and the reasons.
+ */
+export type CallViewRules = Pick<Rules, "readyNowOrder" | "focusOf" | "callReason" | "asOfAction" | "evaluate">;
+
+/** A lead's state as of `now`: what fell due since the worker's last tick is applied (nothing is written). */
+async function asOfNow(store: OutreachStore, id: string, now: number, rules: CallViewRules): Promise<SubjectState | null> {
+  const stored = await store.engine.subject(id, now);
+  return stored ? rules.asOfAction(stored, now, rules.evaluate) : null;
+}
 
 const iso = (t: number) => new Date(t).toISOString();
 
@@ -102,7 +111,7 @@ async function callList(store: OutreachStore, now: number, rules: CallViewRules 
   /** Every open task listed now, in a queue part or not (its hours closed for the day). */
   const listed = new Set<string>();
   for (const id of await store.engine.subjectsWithOpenCallTasks()) {
-    const s = await store.engine.subject(id, now);
+    const s = await asOfNow(store, id, now, rules);
     if (!s) continue;
     for (const task of s.callTasks) {
       if (task.open && isListed(s, task)) listed.add(task.id);
@@ -169,14 +178,15 @@ export async function todayView(store: OutreachStore, now: number, rules?: CallV
 }
 
 /** One call task with everything the call screen shows, or null for an unknown task. */
-export async function callTaskView(store: OutreachStore, taskId: string, now: number): Promise<CallTaskView | null> {
+export async function callTaskView(store: OutreachStore, taskId: string, now: number, rules: CallViewRules = DEFAULT_RULES): Promise<CallTaskView | null> {
   const subjectId = await store.engine.callTaskSubject(taskId);
-  const s = subjectId === null ? null : await store.engine.subject(subjectId, now);
+  const s = subjectId === null ? null : await asOfNow(store, subjectId, now, rules);
   const task = s?.callTasks.find((t) => t.id === taskId);
   const parties = subjectId === null ? null : await partiesOf(store, subjectId);
   if (!s || !task || !parties) return null;
   const place = task.open ? bucketOf(s, task, now) : null;
   const numbers = callNumbers(s);
+  const item = place ? queueItem(s, task, parties, place, now, rules) : null;
   const listed = isListed(s, task);
 
   const touches: { touch: TouchView; t: number }[] = [];
@@ -209,7 +219,7 @@ export async function callTaskView(store: OutreachStore, taskId: string, now: nu
   });
 
   return {
-    task: place ? queueItem(s, task, parties, place, now) : null,
+    task: item,
     taskId,
     enrollmentId: s.subject.id,
     open: task.open,

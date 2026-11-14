@@ -204,7 +204,13 @@ export interface EngineStore {
   callDay(now: number): Promise<import("../../domain/sequence/state.ts").CallDay>;
   /** Who a subject is: its person (null for a company lead), company and campaign. */
   subjectParties(subjectId: string): Promise<{ readonly personId: string | null; readonly companyId: string; readonly campaignId: string } | null>;
-  setCallSettings(settings: CallSettings): Promise<void>;
+  /**
+   * Writes the call settings. With `catchUp`, every lead with an open call task is first brought up to `now`
+   * under the old settings, in the same transaction (council on 228cd3b).
+   */
+  setCallSettings(settings: CallSettings, catchUp?: { readonly now: number; readonly asOf: (state: SubjectState) => SubjectState }): Promise<void>;
+  /** Brings every lead with an open call task up to `now`, inside the caller's transaction. */
+  catchUpWithin(now: number, asOf: (state: SubjectState) => SubjectState): void;
   /** The task a request id was logged on, whichever subject's it is, or null. */
   callRequestTask(requestId: string): Promise<string | null>;
   /** The subject a call task belongs to, or null for an unknown task. */
