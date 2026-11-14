@@ -69,7 +69,7 @@ test("pause during a wait and a pending call, the frozen skip limit, a smooth re
     await page.getByRole("button", { name: "Resume campaign: Clinics, London" }).click();
     await linger(page);
     await page.getByRole("group").getByRole("button", { name: "Resume campaign" }).click();
-    await expect(page.getByText("Resumed. Each lead continues where it was.")).toBeVisible();
+    await expect(page.getByText("Resumed. Each lead continued where it was.")).toBeVisible();
     await linger(page);
     // The call keeps its original due time; email 2 is due three days later than it was, by the time paused.
     expect(await callDue()).toBe(dueBefore);

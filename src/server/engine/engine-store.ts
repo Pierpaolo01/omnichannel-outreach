@@ -205,7 +205,7 @@ export interface EngineStore {
   setCampaignPause(
     campaignId: string,
     now: number,
-    request: { readonly id: string; readonly pause: boolean },
+    request: { readonly id: string; readonly pause: boolean; readonly expect?: { readonly pausedSince: number | null } },
     standing: (stored: StoredRequest | null, request: { readonly target: string; readonly action: string; readonly body: string }) => RequestStanding,
     refusal: (row: { readonly launchedAt: number | null; readonly pausedSince: number | null }) => string | null,
     perLead: (state: SubjectState) => SubjectState,

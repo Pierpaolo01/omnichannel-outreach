@@ -36,6 +36,8 @@ export const CONTROL_FEATURES: readonly string[] = [
   "a-new-reply-in-an-earlier-thread-after-a-restart",
   "a-new-reply-in-the-latest-thread-after-a-restart",
   "a-refused-request-sent-again-later",
+  // Ticket 17b: a Skip confirmed on an earlier read, after its step changed, is refused (P13).
+  "a-stale-skip-confirmation-refused",
   "a-reply-after-the-sequence-finished",
   "a-reply-to-a-stopped-lead",
   "a-reply-while-paused",

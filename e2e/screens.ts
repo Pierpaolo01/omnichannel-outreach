@@ -2453,7 +2453,7 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
       await page.keyboard.press("Enter");
     },
     act: (page) => page.keyboard.press("Enter"),
-    focused: (page) => page.getByRole("status").filter({ hasText: /^Paused\./ }),
+    focused: (page) => page.getByRole("status").filter({ hasText: /^Paused before the call\./ }),
   },
   {
     name: "Dismiss on a refused lead control returns focus to the row's first control",
@@ -2492,6 +2492,6 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
       await page.keyboard.press("Enter");
     },
     act: (page) => page.keyboard.press("Enter"),
-    focused: (page) => page.getByRole("status").filter({ hasText: /^Paused\. Its calls are off your list/ }),
+    focused: (page) => page.getByRole("status").filter({ hasText: /^Paused\. Its calls left your list/ }),
   },
 ];

@@ -1,5 +1,5 @@
 import { expect, test, type Page, type Request } from "@playwright/test";
-import type { ActivityView, CampaignDetail, LeadSearchResult } from "../src/shared/api.ts";
+import type { ActivityView, CampaignDetail, EnrollmentRead, LeadSearchResult } from "../src/shared/api.ts";
 import { fakeCallsApp, type FakeCallsApp } from "./fake-provider.ts";
 import { respond } from "./mocks.ts";
 
@@ -41,7 +41,7 @@ test("the person page: each control is offered as the read allows, confirmed wit
     await expect(confirmStrip(page)).toContainText("Nothing more goes out to them in this campaign and every wait freezes until you resume them. The call waits.");
     await expect(confirmStrip(page).getByRole("button", { name: "Pause" })).toBeFocused();
     await confirmStrip(page).getByRole("button", { name: "Pause" }).click();
-    await expect(row(page).getByRole("status").filter({ hasText: "Paused. The call waits until you resume them." })).toBeVisible();
+    await expect(row(page).getByRole("status").filter({ hasText: "Paused before the call." })).toBeVisible();
     await expect(row(page).getByText("Paused", { exact: true })).toBeVisible();
     await expect(row(page).getByText("Paused before the call. Waiting times are frozen.")).toBeVisible();
     await expect(row(page).getByRole("button")).toHaveText(["Resume", "Skip this step", "Stop"]);
@@ -50,7 +50,7 @@ test("the person page: each control is offered as the read allows, confirmed wit
   await test.step("resume", async () => {
     await press(page, "Resume").click();
     await confirmStrip(page).getByRole("button", { name: "Resume" }).click();
-    await expect(row(page).getByText("Resumed.", { exact: false }).first()).toBeVisible();
+    await expect(row(page).getByRole("status").filter({ hasText: /^Resumed[.,]/ })).toBeVisible();
     await expect(row(page).getByText("Waiting on call")).toBeVisible();
   });
 
@@ -111,7 +111,7 @@ test("by keyboard: Cancel and Escape return focus to the control; a confirmed co
   await expect(press(page, "Pause")).toBeFocused();
   await page.keyboard.press("Enter");
   await page.keyboard.press("Enter");
-  await expect(row(page).getByRole("status").filter({ hasText: /^Paused\./ })).toBeFocused();
+  await expect(row(page).getByRole("status").filter({ hasText: /^Paused before the call\./ })).toBeFocused();
 });
 
 test("a refusal is shown in place with the server's reason, and Dismiss returns focus to the row", async ({ page }) => {
@@ -154,31 +154,46 @@ test("a reload mid-request sends the same request id again, and the control appl
   expect(await controlsRecorded(f, "Amira Hassan")).toEqual(["skip"]);
 });
 
-test("two tabs: while one tab's press is on its way, the other shows it on its way, offers no control on that lead, and the control applies once (review bot on 07fab27, P1)", async ({ context }) => {
+test("two tabs: a press that never answers in one tab is sent by the other with its original id, and applies once (verifier B2 on 8a1732a)", async ({ context }) => {
   const f = await app("tabs");
   const a = await context.newPage();
   const b = await context.newPage();
   const ids: string[] = [];
   for (const p of [a, b]) p.on("request", (r) => r.method() === "POST" && r.url().includes("/controls") && ids.push((JSON.parse(r.postData() ?? "{}") as { requestId: string }).requestId));
-  // Tab A's send is held until released, as a slow network would.
-  let release = (): void => undefined;
-  const held = new Promise<void>((r) => (release = r));
-  await a.route("**/api/enrollments/*/controls", async (route) => {
-    await held;
-    await route.continue();
-  });
+  // Tab A stays open; its own send never answers.
+  await a.route("**/api/enrollments/*/controls", () => new Promise(() => undefined));
   await open(a, f, `/leads/people/${f.person("Amira Hassan")}`);
   await open(b, f, `/leads/people/${f.person("Amira Hassan")}`);
   await press(a, "Stop").click();
   await confirmStrip(a).getByRole("button", { name: "Stop" }).click();
-  // Tab B sees the stored press on its way: no control is offered there until it is answered.
-  await expect(row(b).getByRole("status").filter({ hasText: "Stopping…" })).toBeVisible();
-  for (const button of await row(b).getByRole("button").all()) await expect(button).toBeDisabled();
-  release();
-  await expect(row(a).getByText("Stopped manually")).toBeVisible();
+  // Tab B sees the stored press and sends it with A's id: the lead is stopped once, while A's request still hangs.
   await expect(row(b).getByText("Stopped manually")).toBeVisible();
+  await a.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(row(a).getByText("Stopped manually")).toBeVisible();
   expect(new Set(ids).size).toBe(1);
   expect(await controlsRecorded(f, "Amira Hassan")).toEqual(["stop"]);
+});
+
+test("a Skip confirmation left open on the call, confirmed after another tab skipped the call, is refused in place and skips nothing more (verifier B1 on 8a1732a)", async ({ page }) => {
+  const f = await app("stale-skip");
+  await open(page, f, `/leads/people/${f.person("Amira Hassan")}`);
+  await press(page, "Skip this step").click();
+  await expect(confirmStrip(page)).toContainText("The call is skipped and never made.");
+  // This tab's reads are slow from now on: the confirmation stays as it was shown.
+  await page.route("**/api/people/*", async (route) => {
+    await new Promise((r) => setTimeout(r, 1_500));
+    await route.continue();
+  });
+  // Another tab skips the call, on its own fresh read.
+  const lead = (await f.harness.request<LeadSearchResult>("GET", `/api/leads?campaign=${f.campaign}`)).body.rows.find((r) => r.name === "Amira Hassan")?.enrollments[0]?.id ?? "";
+  const fresh = (await f.harness.request<EnrollmentRead>("GET", `/api/enrollments/${lead}`)).body;
+  expect((await f.harness.request("POST", `/api/enrollments/${lead}/controls`, { requestId: "other-tab-skip", action: "skip", expect: { status: fresh.status, step: "c1" } })).status).toBe(200);
+  await confirmStrip(page).getByRole("button", { name: "Skip this step" }).click();
+  const alert = row(page).getByRole("alert");
+  await expect(alert).toContainText("Skip this step was not applied. This lead changed since you confirmed this, so nothing was changed.");
+  await expect(alert.getByRole("button", { name: "Dismiss" })).toBeFocused();
+  const after = (await f.harness.request<EnrollmentRead>("GET", `/api/enrollments/${lead}`)).body;
+  expect(after.tracks.flatMap((t) => t.steps.filter((s) => s.result === "skipped").map((s) => s.stepId))).toEqual(["c1"]);
 });
 
 test("a confirmation the read no longer allows closes, and the control the read allows now is offered (review bot on 07fab27, P2)", async ({ page }) => {
@@ -192,6 +207,8 @@ test("a confirmation the read no longer allows closes, and the control the read 
   await expect(page.getByRole("heading", { name: /^Paused since/ })).toBeVisible();
   await expect(page.getByRole("group")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Resume campaign: Clinics, London" })).toBeEnabled();
+  // Focus returns to the campaign's control, never the page body (verifier F2 on 8a1732a).
+  await expect(page.getByRole("button", { name: "Resume campaign: Clinics, London" })).toBeFocused();
   // The reverse: Resume's confirmation open while another client resumes it.
   await page.getByRole("button", { name: "Resume campaign: Clinics, London" }).click();
   await expect(page.getByRole("group")).toContainText("Each lead continues where it was");
@@ -200,6 +217,7 @@ test("a confirmation the read no longer allows closes, and the control the read 
   await expect(page.getByRole("heading", { name: /^Paused since/ })).toHaveCount(0);
   await expect(page.getByRole("group")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Pause campaign: Clinics, London" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Pause campaign: Clinics, London" })).toBeFocused();
 
   await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
   await press(page, "Pause").click();
@@ -248,7 +266,7 @@ test("a campaign paused from the list and resumed from its page: the Paused bann
     await page.getByRole("button", { name: "Resume campaign: Clinics, London" }).click();
     await expect(page.getByRole("group")).toContainText("Resume Clinics, London? Each lead continues where it was, spread across the sending window.");
     await page.getByRole("group").getByRole("button", { name: "Resume campaign" }).click();
-    await expect(page.getByText("Resumed. Each lead continues where it was.")).toBeVisible();
+    await expect(page.getByText("Resumed. Each lead continued where it was.")).toBeVisible();
     await expect(page.getByRole("heading", { name: /^Paused since/ })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Pause campaign: Clinics, London" })).toBeVisible();
   });

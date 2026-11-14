@@ -7,7 +7,8 @@
  */
 import { leadNow, wallOfLead } from "./clock.ts";
 import type { TrackDefinition } from "./definition.ts";
-import { advanceTrack, channelReaches, end, enterMain, enterWinBack, evaluate, finishTrack, hasWorkLeft, liveTracksFor, progressOf, quiesce, runs, synced } from "./progress.ts";
+import type { OutreachStatus } from "../outreach-status.ts";
+import { advanceTrack, channelReaches, deriveStatus, end, enterMain, enterWinBack, evaluate, finishTrack, hasWorkLeft, liveTracksFor, progressOf, quiesce, runs, synced } from "./progress.ts";
 import { isUncertain } from "./attempt.ts";
 import type { SubjectState } from "./state.ts";
 
@@ -199,4 +200,51 @@ export function campaignRefusal(row: { readonly launchedAt: number | null; reado
   if (row === null) return "There is no such campaign.";
   if (pause) return row.launchedAt === null ? "This campaign has not launched." : row.pausedSince !== null ? "This campaign is already paused." : null;
   return row.pausedSince === null ? "This campaign is not paused." : null;
+}
+
+/**
+ * What a control was confirmed on (coordinator's ruling on the verifier's B1 at 8a1732a): the lead's status in the read
+ * the confirmation showed, and the step its preview named (the step a skip skips; the step a restart resumes at). Sent
+ * with the request, so a confirmation shown on one state never applies to another, whichever tab or process sent first.
+ */
+export interface LeadExpectation {
+  readonly status: OutreachStatus;
+  readonly step: string | null;
+}
+
+export const CHANGED_SINCE_CONFIRMED = "This lead changed since you confirmed this, so nothing was changed. Look at the row again and confirm what it shows now.";
+export const SKIP_STEP_CHANGED = "The step you confirmed skipping is no longer the step waiting, so nothing was skipped. Look at the row again and confirm the step it names now.";
+export const RESTART_STEP_CHANGED = "The step they would resume at changed since you confirmed this, so nothing was changed. Look at the row again and confirm the step it names now.";
+
+/**
+ * Why a control no longer applies as confirmed, or null when it does (or carries no expectation). The status is the stored
+ * lead's, as every read says it (`stored`); a skip's step is the step it would skip as of the action's instant (`before`), as
+ * the read's preview judges it; a restart's step is the step the transition's result resumes at (`after`, null when refused).
+ */
+export function controlPrecondition(stored: SubjectState, before: SubjectState, action: LeadControl, after: SubjectState | null, expected: LeadExpectation | null): string | null {
+  if (expected === null) return null;
+  if (deriveStatus(stored) !== expected.status) return CHANGED_SINCE_CONFIRMED;
+  switch (action) {
+    case "skip":
+      return (skipTarget(before)?.stepId ?? null) === expected.step ? null : SKIP_STEP_CHANGED;
+    case "resume_from_next_step":
+    case "move_to_win_back":
+      return after === null || (currentStep(after)?.stepId ?? null) === expected.step ? null : RESTART_STEP_CHANGED;
+    case "pause":
+    case "resume":
+    case "stop":
+      return null;
+    default: {
+      const unhandled: never = action;
+      throw new Error(`A control with no precondition: ${String(unhandled)}`);
+    }
+  }
+}
+
+export const CAMPAIGN_CHANGED_SINCE_CONFIRMED = "This campaign was paused or resumed since you confirmed this, so nothing was changed. Look at it again and confirm what it shows now.";
+
+/** A campaign's pause or resume confirmed on the pause read `expected` (its `pausedSince`, wall ms or null): null when it still holds. */
+export function campaignPrecondition(row: { readonly pausedSince: number | null } | null, expected: { readonly pausedSince: number | null } | null): string | null {
+  if (expected === null || row === null) return null;
+  return row.pausedSince === expected.pausedSince ? null : CAMPAIGN_CHANGED_SINCE_CONFIRMED;
 }

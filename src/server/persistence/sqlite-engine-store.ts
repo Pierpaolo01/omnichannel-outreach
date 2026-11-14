@@ -127,14 +127,15 @@ export class SqliteEngineStore implements EngineStore {
   async setCampaignPause(
     campaignId: string,
     now: number,
-    request: { readonly id: string; readonly pause: boolean },
+    request: { readonly id: string; readonly pause: boolean; readonly expect?: { readonly pausedSince: number | null } },
     standing: (stored: StoredRequest | null, request: { readonly target: string; readonly action: string; readonly body: string }) => RequestStanding,
     refusal: (row: { readonly launchedAt: number | null; readonly pausedSince: number | null }) => string | null,
     perLead: (state: SubjectState) => SubjectState,
   ): Promise<ControlRecord> {
     const action = request.pause ? "pause_campaign" : "resume_campaign";
     return this.transaction((): ControlRecord => {
-      const body = JSON.stringify({ action });
+      // The precondition is part of the body an id is bound to (ticket 17b).
+      const body = JSON.stringify(request.expect === undefined ? { action } : { action, expect: request.expect });
       const known = this.standingOf(request.id, { target: campaignId, action, body }, standing);
       if (known) return known;
       const row = this.sql("SELECT launched_at, paused_since FROM campaigns WHERE id = ?").get(campaignId);

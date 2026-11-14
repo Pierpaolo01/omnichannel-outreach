@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import type { CampaignDetail, CampaignPauseRead, ControlAnswer, LeadControlApi, OutreachStatus, RecordLead } from "../../shared/api.ts";
+import type { CampaignPauseRead, ControlAnswer, LeadControlApi, OutreachStatus, RecordLead } from "../../shared/api.ts";
 import type { Controls } from "./useControls.ts";
-import type { ControlTarget } from "./requests.ts";
+import type { ControlTarget, LeadExpectation } from "./requests.ts";
 import {
   CAMPAIGN_DONE,
   CONTROL_LABEL,
@@ -122,6 +122,29 @@ function ControlStatus({
   );
 }
 
+/**
+ * What a confirmation showed, sent with the control so the server applies it only while it still holds (coordinator's
+ * ruling on the verifier's B1 at 8a1732a): the lead's status in the read, and the step the preview named, the step a skip
+ * skips or a restart resumes at.
+ */
+export function expectationOf(lead: Pick<RecordLead, "status">, control: AllowedControl): LeadExpectation {
+  switch (control.action) {
+    case "skip":
+      return { status: lead.status, step: control.skips?.stepId ?? null };
+    case "resume_from_next_step":
+    case "move_to_win_back":
+      return { status: lead.status, step: control.next?.stepId ?? null };
+    case "pause":
+    case "resume":
+    case "stop":
+      return { status: lead.status, step: null };
+    default: {
+      const unhandled: never = control.action;
+      throw new Error(`A control with no precondition: ${String(unhandled)}`);
+    }
+  }
+}
+
 /** The controls the spec's user expects in a status, so a refusal of one is said where they would look for it. */
 const EXPECTED = {
   queued: ["skip"],
@@ -170,7 +193,7 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
   const confirm = (c: AllowedControl) => {
     setConfirming(null);
     focusNext.current = "status";
-    void controls.press(target, c.action).then((out) => setUnstored(!out.ok && out.why === "unstored"));
+    void controls.press(target, c.action, expectationOf(lead, c)).then((out) => setUnstored(!out.ok && out.why === "unstored"));
   };
   const placeStatus = (el: HTMLElement | null) => {
     if (el && focusNext.current === "status") {
@@ -302,6 +325,7 @@ export function CampaignPauseControl({
   const target: ControlTarget = { kind: "campaign", id: campaignId };
   const [confirming, setConfirming] = useState<"pause" | "resume" | null>(null);
   const [unstored, setUnstored] = useState(false);
+  const [refocus, setRefocus] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const focusNext = useRef<"status" | null>(null);
   const allowed = read.controls.find((c) => c.allowed);
@@ -309,7 +333,14 @@ export function CampaignPauseControl({
   const busy = controls.pending(target) !== null;
   // A confirmation of an action the read no longer allows (another tab paused or resumed the campaign) closes, so the
   // action the read allows now is never left disabled behind it (review bot on 07fab27, P2).
-  if (confirming !== null && confirming !== action) setConfirming(null);
+  if (confirming !== null && confirming !== action) {
+    setConfirming(null);
+    setRefocus(true);
+  }
+  // Focus goes back to the campaign's control once a confirmation another tab's change closed (verifier F2 on 8a1732a).
+  useEffect(() => {
+    if (refocus) triggerRef.current?.focus();
+  }, [refocus]);
   const button = action ? (
     <button
       type="button"
@@ -320,6 +351,7 @@ export function CampaignPauseControl({
       onClick={() => {
         controls.dismiss(target);
         setUnstored(false);
+        setRefocus(false);
         setConfirming(action);
       }}
     >
@@ -343,7 +375,8 @@ export function CampaignPauseControl({
             const action = confirming;
             setConfirming(null);
             focusNext.current = "status";
-            void controls.press(target, action).then((out) => setUnstored(!out.ok && out.why === "unstored"));
+            // What the confirmation showed: the server applies it only while the campaign's pause is still as read (ticket 17b).
+            void controls.press(target, action, { pausedSince: read.pause.pausedSince }).then((out) => setUnstored(!out.ok && out.why === "unstored"));
           }}
           onCancel={() => {
             setConfirming(null);
@@ -355,10 +388,9 @@ export function CampaignPauseControl({
         controls={controls}
         target={target}
         pendingText={(a) => (a === "pause" ? "Pausing the campaign…" : "Resuming the campaign…")}
-        effectText={(body, a) => {
-          const done = a === "pause" || a === "resume" ? CAMPAIGN_DONE[a] : "Done.";
-          return [done, mayStillSendText((body as CampaignDetail | null)?.mayStillSend ?? 0)].filter(Boolean).join(" ");
-        }}
+        // History only: what may still be sent is a present state, said by the current read's banner, never by this line
+        // (verifier B3 on 8a1732a).
+        effectText={(_body, a) => (a === "pause" || a === "resume" ? CAMPAIGN_DONE[a] : "Done.")}
         unstored={unstored}
         onDismiss={() => {
           controls.dismiss(target);

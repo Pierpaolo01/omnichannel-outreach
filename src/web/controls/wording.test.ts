@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import { OUTREACH_STATUSES } from "../../domain/outreach-status.ts";
 import type { CampaignPauseRead, ControlStepView, ControlView, LeadControlApi, OutreachStatus, RecordLead } from "../../shared/api.ts";
 import {
+  CAMPAIGN_DONE,
   CONTROL_LABEL,
   LEAD_CONTROL_ORDER,
   campaignConfirmText,
@@ -135,22 +136,24 @@ describe("what a control will do (the read's preview) and what it did (the answe
   const paused = { launched: true, paused: false, pausedSince: null };
   test("pause", () => {
     expect(controlPreviewText(allowed("pause", { statusAfter: "paused", next: step() }), paused, ZONE)).toBe("Nothing more goes out to them in this campaign and every wait freezes until you resume them. Email 2 of 3 waits.");
-    expect(controlEffectText(allowed("pause", { statusAfter: "paused", next: step() }), ZONE)).toBe("Paused. Email 2 of 3 waits until you resume them.");
+    expect(controlEffectText(allowed("pause", { statusAfter: "paused", next: step() }), ZONE)).toBe("Paused before email 2 of 3.");
   });
   test("pause with a message already with a provider says it may still be sent", () => {
     expect(controlPreviewText(allowed("pause", { statusAfter: "paused", withProvider: 1 }), paused, ZONE)).toBe("Nothing more goes out to them in this campaign and every wait freezes until you resume them. One message already handed to a provider may still be sent.");
-    expect(controlEffectText(allowed("stop", { statusAfter: "stopped_manually", withProvider: 2 }), ZONE)).toBe("Stopped. 2 messages already handed to a provider may still be sent.");
+    // What it did is history: what may still be sent is the current read's to say, never this line's (verifier B3 on 8a1732a).
+    expect(controlEffectText(allowed("stop", { statusAfter: "stopped_manually", withProvider: 2 }), ZONE)).toBe("Stopped.");
+    expect(controlEffectText(allowed("pause", { statusAfter: "paused", withProvider: 1 }), ZONE)).toBe("Paused.");
   });
   test("resume: the next step and its due time, or the hold that remains", () => {
     expect(controlPreviewText(allowed("resume", { next: step({ dueAt: "2026-11-03T09:00:00.000Z" }) }), paused, ZONE)).toBe("Their outreach continues where it was: email 2 of 3, due Tue 3 Nov at 09:00.");
     expect(controlPreviewText(allowed("resume", { next: step() }), { launched: true, paused: true, pausedSince: "2026-11-02T10:00:00.000Z" }, ZONE)).toBe("Their own pause ends. Email 2 of 3 still waits while this campaign is paused.");
     expect(controlPreviewText(allowed("resume", { statusAfter: "callback_scheduled", next: null }), paused, ZONE)).toBe("Their own pause ends. Their callback still holds their outreach until you log how it went.");
-    expect(controlEffectText(allowed("resume", { next: step({ dueAt: "2026-11-03T09:00:00.000Z" }) }), ZONE)).toBe("Resumed. Next: email 2 of 3, due Tue 3 Nov at 09:00.");
+    expect(controlEffectText(allowed("resume", { next: step({ dueAt: "2026-11-03T09:00:00.000Z" }) }), ZONE)).toBe("Resumed, with email 2 of 3 next (due Tue 3 Nov at 09:00).");
   });
   test("skip", () => {
     const skip = allowed("skip", { skips: step(), next: step({ stepId: "s3", number: 3, dueAt: "2026-11-06T09:00:00.000Z" }) });
     expect(controlPreviewText(skip, paused, ZONE)).toBe("Email 2 of 3 is skipped and never sent. Next: email 3 of 3, due Fri 6 Nov at 09:00.");
-    expect(controlEffectText(skip, ZONE)).toBe("Email 2 of 3 skipped. Next: email 3 of 3, due Fri 6 Nov at 09:00.");
+    expect(controlEffectText(skip, ZONE)).toBe("Email 2 of 3 skipped. Email 3 of 3 was next (due Fri 6 Nov at 09:00).");
     const call = allowed("skip", { skips: step({ channel: "call", track: { label: "Phone track", several: false, branch: "main" }, number: 1, of: 1 }), next: null });
     expect(controlPreviewText(call, paused, ZONE)).toBe("The call is skipped and never made.");
     expect(controlEffectText(call, ZONE)).toBe("Call skipped.");
@@ -162,10 +165,10 @@ describe("what a control will do (the read's preview) and what it did (the answe
   test("the restarts name the step that runs next, never step 1 unless the read says so", () => {
     const resume = allowed("resume_from_next_step", { next: step({ number: 3, dueAt: "2026-11-03T09:00:00.000Z" }) });
     expect(controlPreviewText(resume, paused, ZONE)).toBe("They resume at the next unsent step: email 3 of 3, due Tue 3 Nov at 09:00. Nothing already sent goes again.");
-    expect(controlEffectText(resume, ZONE)).toBe("Resumed from the next step: email 3 of 3, due Tue 3 Nov at 09:00.");
+    expect(controlEffectText(resume, ZONE)).toBe("Resumed from the next step, at email 3 of 3 (due Tue 3 Nov at 09:00).");
     const wb = allowed("move_to_win_back", { statusAfter: "in_win_back", next: step({ track: { label: "Win-back email track", several: false, branch: "win_back" }, branch: "win_back", number: 1, of: 2, dueAt: "2026-11-03T09:00:00.000Z" }) });
     expect(controlPreviewText(wb, paused, ZONE)).toBe("They move to this campaign’s win-back branch, starting with win-back email 1 of 2, due Tue 3 Nov at 09:00. Their remaining main-sequence steps are dropped.");
-    expect(controlEffectText(wb, ZONE)).toBe("Moved to the win-back branch. Next: win-back email 1 of 2, due Tue 3 Nov at 09:00.");
+    expect(controlEffectText(wb, ZONE)).toBe("Moved to the win-back branch, starting at win-back email 1 of 2 (due Tue 3 Nov at 09:00).");
   });
 });
 
@@ -196,6 +199,9 @@ describe("the campaign's pause", () => {
     expect(campaignConfirmText("pause", "Roofers, Antwerp", read({ pause: { paused: false, pausedSince: null } }))).toBe("Pause Roofers, Antwerp? Messages stop, its calls leave your list, and every waiting time freezes.");
     expect(campaignConfirmText("pause", "Roofers, Antwerp", read({ pause: { paused: false, pausedSince: null }, mayStillSend: 3 }))).toBe("Pause Roofers, Antwerp? Messages stop, its calls leave your list, and every waiting time freezes. 3 messages already handed to a provider may still be sent.");
     expect(campaignConfirmText("resume", "Roofers, Antwerp", read())).toBe("Resume Roofers, Antwerp? Each lead continues where it was, spread across the sending window.");
+  });
+  test("what a campaign's pause or resume did is history, with no present claim", () => {
+    expect(CAMPAIGN_DONE).toEqual({ pause: "Paused. Its calls left your list and its waits froze.", resume: "Resumed. Each lead continued where it was." });
   });
   test("mayStillSend: nothing at zero", () => {
     expect(mayStillSendText(0)).toBeNull();

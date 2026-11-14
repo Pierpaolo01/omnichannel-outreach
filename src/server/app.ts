@@ -87,10 +87,18 @@ const callSettingsBody = requestObject({
 // Ticket 17a. Each control carries the client's key for that one action: the same key answers with the first
 // answer and applies nothing again, so a retry after a lost answer cannot skip a second step or pause again.
 const controlRequestId = z.string().trim().min(1, "Send a request id with each action.").max(200);
-const campaignControlBody = requestObject({ requestId: controlRequestId });
+// Ticket 17b: what the confirmation was shown on, so a control applies only on it (coordinator's ruling on the verifier's
+// B1 at 8a1732a). Optional at this boundary; the screens always send it.
+const campaignControlBody = requestObject({
+  requestId: controlRequestId,
+  expect: z.strictObject({ pausedSince: z.iso.datetime({ offset: true }).nullable() }, { message: "Send the campaign's pause as the confirmation read it." }).optional(),
+});
 const leadControlBody = requestObject({
   requestId: controlRequestId,
   action: z.enum(LEAD_CONTROLS, { message: "Choose one of: pause, resume, skip, stop, resume_from_next_step, move_to_win_back." }),
+  expect: z
+    .strictObject({ status: z.enum(OUTREACH_STATUSES), step: z.string().min(1).max(200).nullable() }, { message: "Send the lead's status and the step the confirmation named." })
+    .optional(),
 });
 // Redial and callback are ticket 15's, not interested and its declined path ticket 16's; which outcome each
 // goes with is the domain's rule (`logCallOutcome`), refused there with a plain reason.
@@ -278,7 +286,8 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
       if (!body.success) return invalid(c, body.error);
       const id = c.req.param("id");
       if (!(await store.campaign(id))) return notFound(c, "campaign");
-      const answer = await engine.setCampaignPause(id, pause, body.data.requestId);
+      const expectation = body.data.expect === undefined ? null : { pausedSince: body.data.expect.pausedSince === null ? null : Date.parse(body.data.expect.pausedSince) };
+      const answer = await engine.setCampaignPause(id, pause, body.data.requestId, expectation);
       if (!answer.ok) return controlRefused(c, answer.reason);
       return c.json({ ...(await pauseRead(id)), replayed: answer.replayed });
     });
@@ -520,7 +529,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     if (!body.success) return invalid(c, body.error);
     const id = c.req.param("id");
     if (!(await store.engine.subject(id, Date.parse(now())))) return notFound(c, "enrollment");
-    const answer = await engine.controlLead(id, body.data.action, body.data.requestId);
+    const answer = await engine.controlLead(id, body.data.action, body.data.requestId, body.data.expect ?? null);
     if (!answer.ok) return controlRefused(c, answer.reason);
     // `effect` is the control's own effect, the read's preview at that instant; `enrollment` is the read after the worker ran (verifier B4).
     return c.json({ effect: answer.effect, enrollment: await enrollmentRead(id), replayed: answer.replayed });

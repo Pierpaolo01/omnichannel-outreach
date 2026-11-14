@@ -175,26 +175,30 @@ export function controlPreviewText(control: AllowedControl, campaign: RecordLead
   }
 }
 
-/** What a control did, from its answer's `effect` (the preview at that instant): history, in the past tense. */
+/**
+ * What a control did, from its answer's `effect` (the preview at that instant): history, in the past tense. It never says
+ * what may still be sent: that is a present state, said only by the current read (`mayStillSendText` on the record's
+ * `mayStillSend` and the banner), and gone when the read says zero (verifier B3 on 8a1732a).
+ */
 export function controlEffectText(effect: AllowedControl, userZone: string): string {
-  const provider = mayStillSendText(effect.withProvider);
   const next = effect.next;
-  const thenNext = next && next.dueAt ? `Next: ${stepPhrase(next)}${due(next.dueAt, userZone)}.` : null;
+  const dueThen = (iso: string | null) => (iso ? ` (due ${whenIn(userZone, iso)})` : "");
   switch (effect.action) {
     case "pause":
-      return join(next ? `Paused. ${capital(stepPhrase(next))} waits until you resume them.` : "Paused.", provider);
+      return next ? `Paused before ${stepPhrase(next)}.` : "Paused.";
     case "resume":
-      return join("Resumed.", thenNext);
+      return next?.dueAt ? `Resumed, with ${stepPhrase(next)} next${dueThen(next.dueAt)}.` : "Resumed.";
     case "skip": {
       const skips = effect.skips;
-      return join(!skips ? "Step skipped." : skips.channel === "call" ? "Call skipped." : `${capital(stepPhrase(skips))} skipped.`, next ? `Next: ${stepPhrase(next)}${due(next.dueAt, userZone)}.` : null);
+      const what = !skips ? "Step skipped." : skips.channel === "call" ? "Call skipped." : `${capital(stepPhrase(skips))} skipped.`;
+      return join(what, next ? `${capital(stepPhrase(next))} was next${dueThen(next.dueAt)}.` : null);
     }
     case "stop":
-      return join("Stopped.", provider);
+      return "Stopped.";
     case "resume_from_next_step":
-      return next ? `Resumed from the next step: ${stepPhrase(next)}${due(next.dueAt, userZone)}.` : "Resumed from the next step.";
+      return next ? `Resumed from the next step, at ${stepPhrase(next)}${dueThen(next.dueAt)}.` : "Resumed from the next step.";
     case "move_to_win_back":
-      return join("Moved to the win-back branch.", next ? `Next: ${stepPhrase(next)}${due(next.dueAt, userZone)}.` : null);
+      return `Moved to the win-back branch${next ? `, starting at ${stepPhrase(next)}${dueThen(next.dueAt)}` : ""}.`;
     default: {
       const unhandled: never = effect.action;
       throw new Error(`A control with no effect sentence: ${String(unhandled)}`);
@@ -239,4 +243,4 @@ export function campaignConfirmText(action: "pause" | "resume", name: string, re
 }
 
 /** What a campaign's pause or resume did. */
-export const CAMPAIGN_DONE = { pause: "Paused. Its calls are off your list and every wait is frozen until you resume it.", resume: "Resumed. Each lead continues where it was." } as const;
+export const CAMPAIGN_DONE = { pause: "Paused. Its calls left your list and its waits froze.", resume: "Resumed. Each lead continued where it was." } as const;
