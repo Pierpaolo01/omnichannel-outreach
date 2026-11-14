@@ -32,12 +32,19 @@ if (!isLoopbackAddress(host)) {
   process.exit(1);
 }
 
-const dataDir = resolveDataDir({
-  env: process.env,
-  home: os.homedir(),
-  projectRoot,
-  profile: production ? "app" : "development",
-});
+// Resolved before anything is opened: a data-folder variable set but empty is refused, never the default folder (ticket 20a).
+let dataDir: string;
+try {
+  dataDir = resolveDataDir({
+    env: process.env,
+    home: os.homedir(),
+    projectRoot,
+    profile: production ? "app" : "development",
+  });
+} catch (error) {
+  console.error(JSON.stringify({ level: "error", event: "data_dir_refused", message: error instanceof Error ? error.message : String(error) }));
+  process.exit(1);
+}
 mkdirSync(dataDir, { recursive: true, mode: 0o700 });
 // One worker per database (ADR 0003 "Ticket 20a"): a second application on this data directory is refused before it
 // listens, so two processes never recover and send from one database at once; and before it migrates (council F), so a
