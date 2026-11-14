@@ -285,14 +285,14 @@ function LeadTable({ result, query, loading, selected, onSelect, scopeName }: { 
           {/* The approved table: body-size cells, identity columns a quarter each, campaigns wider. */}
           <table className="table text-[15px]">
             <colgroup>
-              <col className="w-11" />
+              <col className="w-8 sm:w-11" />
               <col className="w-[27%]" />
               <col className="w-[27%]" />
               <col />
             </colgroup>
             <thead>
               <tr className="border-line text-[13px] font-medium text-muted">
-                <th className="py-3 pl-3.5 pr-0 font-medium">
+                <th className="py-3 pl-1.5 pr-0 font-medium sm:pl-3.5">
                   <input
                     type="checkbox"
                     className="checkbox checkbox-sm border-line-strong checked:border-call checked:bg-call checked:text-base-100"
@@ -305,9 +305,9 @@ function LeadTable({ result, query, loading, selected, onSelect, scopeName }: { 
                     onChange={(e) => onSelect(keys, e.target.checked)}
                   />
                 </th>
-                <th className="px-3.5 py-3 font-medium">Person</th>
-                <th className="px-3.5 py-3 font-medium">Company</th>
-                <th className="px-3.5 py-3 font-medium">Campaigns</th>
+                <th className="px-1.5 py-3 font-medium sm:px-3.5">Person</th>
+                <th className="px-1.5 py-3 font-medium sm:px-3.5">Company</th>
+                <th className="px-1.5 py-3 font-medium sm:px-3.5">Campaigns</th>
               </tr>
             </thead>
             <tbody>
@@ -326,7 +326,7 @@ function LeadTable({ result, query, loading, selected, onSelect, scopeName }: { 
           </table>
         </div>
       </div>
-      <p className="mt-3 text-[13px] text-muted">{scopeNote(scopeName)}</p>
+      <p className="mt-3 text-[13px] text-muted [overflow-wrap:anywhere]">{scopeNote(scopeName)}</p>
       {result.total > result.rows.length && (
         <p className="mt-3 text-[13px] text-muted">
           Showing the first {result.rows.length} of {result.total}. Narrow the search to see the rest.
@@ -346,7 +346,7 @@ function LeadTableRow({ row, selected, onSelect }: { row: LeadRow; selected: boo
         if (!(event.target instanceof Element) || !event.target.closest("a, input, label")) navigate(href);
       }}
     >
-      <td className="py-3.5 pl-3.5 pr-0">
+      <td className="py-3.5 pl-1.5 pr-0 sm:pl-3.5">
         <input
           type="checkbox"
           className="checkbox checkbox-sm mt-0.5 border-line-strong checked:border-call checked:bg-call checked:text-base-100"
@@ -355,7 +355,7 @@ function LeadTableRow({ row, selected, onSelect }: { row: LeadRow; selected: boo
           onChange={(e) => onSelect(e.target.checked)}
         />
       </td>
-      <td className="px-3.5 py-3.5">
+      <td className="px-1.5 py-3.5 sm:px-3.5">
         <Link href={href} className="font-semibold no-underline hover:underline">
           {row.name}
         </Link>
@@ -371,7 +371,7 @@ function LeadTableRow({ row, selected, onSelect }: { row: LeadRow; selected: boo
                   : `${row.peopleReachable} of its ${row.peopleOnRecord} decision makers can now be reached`}
         </div>
       </td>
-      <td className="px-3.5 py-3.5">
+      <td className="px-1.5 py-3.5 sm:px-3.5">
         {row.kind === "person" ? (
           <>
             {row.company.name}
@@ -388,7 +388,7 @@ function LeadTableRow({ row, selected, onSelect }: { row: LeadRow; selected: boo
           )
         )}
       </td>
-      <td className="px-3.5 py-3.5">
+      <td className="px-1.5 py-3.5 sm:px-3.5">
         <EnrollmentList
           enrollments={row.enrollments}
           empty={[

@@ -178,7 +178,7 @@ test("a company lead's explanation stays true once a later import makes a decisi
 
   await page.route("**/api/leads?*", (route) => respond(route, JUNIPER_LATER_ROW));
   await page.goto("/leads?q=Juniper");
-  const row = page.getByRole("row", { name: /^Juniper Pilates Studio/ });
+  const row = page.getByRole("row", { name: /^Select Juniper Pilates Studio / });
   await expect(row).toContainText("1 of its 2 decision makers can now be reached");
   await expect(row).not.toContainText("can’t be reached");
 });
@@ -193,7 +193,7 @@ test("a company that is not a lead shows no bare label in the Company column", a
   } satisfies LeadSearchResult;
   await page.route("**/api/leads?*", (route) => respond(route, leads));
   await page.goto("/leads?q=Copper");
-  const cells = page.getByRole("row", { name: /^Copper Kettle Osteopathy/ }).getByRole("cell");
+  const cells = page.getByRole("row", { name: /^Select Copper Kettle Osteopathy / }).getByRole("cell");
   await expect(cells.nth(1)).not.toHaveText("Company");
   await expect(cells.nth(1)).toContainText("Not a company lead");
 });

@@ -109,7 +109,7 @@ export function BulkChecking({ error, onRetry, onCancel }: { error: string | nul
           <button type="button" className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={onRetry}>
             Try again
           </button>
-          <button type="button" className="btn btn-ghost btn-sm font-medium text-muted hover:text-base-content" onClick={onCancel}>
+          <button type="button" className="btn btn-ghost btn-sm font-medium text-ink-2 hover:text-base-content" onClick={onCancel}>
             Cancel
           </button>
         </span>
@@ -203,7 +203,7 @@ export function BulkStatus({ bulk, unstored, onDismissUnstored, onDismissed }: {
           </>
         )}
       </div>
-      <button type="button" className="btn btn-ghost btn-sm font-medium text-muted hover:text-base-content" onClick={() => {
+      <button type="button" className="btn btn-ghost btn-sm font-medium text-ink-2 hover:text-base-content" onClick={() => {
           bulk.dismiss();
           onDismissed();
         }}>

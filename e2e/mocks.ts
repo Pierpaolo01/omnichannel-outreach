@@ -12,6 +12,7 @@ import type {
   NeedsAttention,
   PersonRecord,
   RecordCalls,
+  RecordColleagues,
   RecordControls,
   CampaignDetail,
   ControlRefusal,
@@ -27,8 +28,8 @@ export type MockBody =
   | LeadSearchResult
   | { campaigns: CampaignListItem[] }
   | { campaign: Campaign; imports: ImportRecord[] }
-  | (PersonRecord & RecordCalls & RecordControls)
-  | (CompanyRecord & RecordCalls & RecordControls)
+  | (PersonRecord & RecordCalls & RecordControls & RecordColleagues)
+  | (CompanyRecord & RecordCalls & RecordControls & RecordColleagues)
   | CampaignDetail
   | ControlRefusal
   | FileCheckResult
