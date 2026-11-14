@@ -27,9 +27,10 @@ export const CALL_FIXED_SEEDS: readonly number[] = [0, 4, 6, 8, 9, 16, 20, 21, 4
 /**
  * The pause runs (ticket 17a, `pauses: true`): the generated user also pauses and resumes campaigns and leads. Chosen
  * greedily from a sweep of offsets 0 to 39 (14 November 2026) to reach every pause behaviour between them; the full
- * search runs every seed in this family too.
+ * search runs every seed in this family too. Recorded: 56 (seed 20261169, failed in the search on ca8baee: the record's
+ * check 18 assumed an inbox free for the hour after a resume, while late sends held both its in-flight places).
  */
-export const CALL_PAUSE_SEEDS: readonly number[] = [0, 2, 7, 13, 14, 20, 26];
+export const CALL_PAUSE_SEEDS: readonly number[] = [0, 2, 7, 13, 14, 20, 26, 56];
 
 /** Every behaviour the fixed seeds must reach between them. */
 export const CALL_FEATURES: readonly string[] = [

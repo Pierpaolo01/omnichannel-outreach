@@ -302,6 +302,11 @@ const RULES: Record<string, Partial<Rules>> = {
   "a paused campaign's calls stay on the list": {
     isListed: (s, task) => R.isListed({ ...s, campaign: { ...s.campaign, pausedSince: null } }, task),
   },
+  // Seed 20261169 (search on ca8baee): 18 now waits for an hour with a free in-flight place; this proves it still
+  // catches a step really left unsent after a resume.
+  "steps that fell due while held are never sent after the release": {
+    readyItems: (s, now) => R.readyItems(s, now).filter((item) => !s.freezes.some((f) => f.toWall !== null && f.fromWall > 0 && f.toWall > item.dueWall && f.toWall - f.fromWall > 0)),
+  },
   "resuming the campaign releases the lead's own pause": {
     campaignResumed: (s, now) => R.campaignResumed({ ...s, subject: { ...s.subject, leadPaused: false } }, now),
   },
@@ -358,6 +363,7 @@ const EXPECTED: Record<string, { invariant: string; seed: number; pauses?: boole
   "a pause does not stop sends": { invariant: "2", seed: 7, pauses: true },
   "a paused campaign's calls stay on the list": { invariant: "16", seed: 2, pauses: true },
   "resuming the campaign releases the lead's own pause": { invariant: "1", seed: 2, pauses: true },
+  "steps that fell due while held are never sent after the release": { invariant: "18", seed: 7, pauses: true },
 };
 
 export const CALL_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number; readonly pauses?: boolean }> = Object.fromEntries(

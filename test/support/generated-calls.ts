@@ -704,6 +704,31 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     return Number.isFinite(bad) && bad <= end ? { at: bad, seen: bad, reason: "failed_bad_destination" } : null;
   }
 
+  /**
+   * The first instant from `from` on at which the sender has a free in-flight place (fewer than its k = 2 attempts
+   * handed over and not yet known sent or withdrawn) for a whole hour, read from the provider's own logs; Infinity when
+   * no such hour has passed. A step due then must go within that hour (18): a step left unsent while its inbox sat with
+   * a free place for an hour is the defect; one waiting behind other work holding every place is not.
+   */
+  function freeHourFrom(ch: "email" | "sms", sender: string, from: number): number {
+    const provider = ch === "sms" ? sms : email;
+    const busy = provider.handoverLog
+      .filter((c) => c.sender === sender)
+      .map((c) => {
+        const d = provider.deliveryLog.find((x) => x.key === c.key);
+        const withdrawn = ch === "email" ? email.withdrawLog.find((w) => w.key === c.key && w.answer === "withdrawn")?.at : undefined;
+        return { from: c.at, to: Math.min(d ? knownAt(ch, d) : Infinity, withdrawn ?? Infinity) };
+      });
+    const fullAt = (t: number) => busy.filter((b) => b.from <= t && t < b.to).length >= 2;
+    const candidates = [...new Set([from, ...busy.map((b) => b.to).filter((t) => t > from && Number.isFinite(t))])].sort((a, b) => a - b);
+    for (const t0 of candidates) {
+      if (t0 + HOUR > h.clock) return Infinity;
+      const changes = [t0, ...busy.flatMap((b) => [b.from, b.to]).filter((t) => t > t0 && t < t0 + HOUR)];
+      if (!changes.some(fullAt)) return t0;
+    }
+    return Infinity;
+  }
+
   /** The user day of instant `t`, as wall instants, in the call list's zone at `t`. */
   function userDay(t: number): { start: number; end: number } {
     const zone = uz(t);
@@ -1161,14 +1186,16 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
           if (handed && handed.at < due) problem(`9: ${id}/${step.id} was handed over at ${new Date(handed.at).toISOString()}, before its due time ${new Date(due).toISOString()} (${new Date(unheld).toISOString()} moved by the lead's callback holds)`);
           if (handed && due > unheld) features.add("a-send-moved-by-a-callback");
           const opens = firstOpen(t.window, zoneFor(s, due), due);
-          const deadline = opens + HOUR;
+          // The hour starts once the sender has a free in-flight place for all of it (ticket 17a, seed 20261169): after a
+          // resume many due steps compete for an inbox's k places, which late sends hold for up to an hour each.
+          const deadline = freeHourFrom(ch, ch === "sms" ? numbers[s.campaign]!.id : "inbox-a", opens) + HOUR;
           const seen = i === 0 ? startSeenAt(s, t) : due;
           // Not across a move of the prospect's zone: the window is read in the zone of the moment of each claim.
           const moved = [s.person?.key, s.company.key].some((key) => (zoneChanges.get(key ?? "") ?? []).some((z) => z.at >= (prev?.at ?? at) && z.at <= deadline));
           // A main track dropped for win-back before the hour was up sends nothing more (its claim is withdrawn).
           const droppedFirst = ended?.reason === "dropped_for_win_back" && ended.at <= deadline;
           if (droppedFirst || moved || seen === null || seen > opens || deadline > now || !runningAt(s, deadline) || heldWithin(s, opens, deadline) || !inWindow(t.window, zoneFor(s, deadline), deadline - 1) || !reachesAt(s, ch, deadline)) continue;
-          if (!handed || handed.at > deadline) problem(`18: ${id}/${step.id} was due at ${new Date(due).toISOString()} and its window open from ${new Date(opens).toISOString()}, but it was not handed over within an hour`);
+          if (!handed || handed.at > deadline) problem(`18: ${id}/${step.id} was due at ${new Date(due).toISOString()} and its window open from ${new Date(opens).toISOString()}, but it was not handed over within an hour${process.env["CALLS_DEBUG"] ? ` [now ${isoOf(now)}; handed ${isoOf(handed?.at)}; holds ${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))}; pauses ${JSON.stringify(pausesOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))}; callbacks ${JSON.stringify(callbackHoldsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))}; prev ${JSON.stringify(prev ? [isoOf(prev.at), prev.key] : null)}; clock ${JSON.stringify(st.subject.clock)}; ended ${st.subject.ended}; paused ${st.subject.leadPaused}/${String(st.campaign.pausedSince)}; tracks ${JSON.stringify(st.tracks.map((p) => [p.trackId, p.startAt, p.startedAt, p.nextStepId, p.dueAt, isoOf(p.dueWall), p.finishReason]))}; attempts ${JSON.stringify(st.attempts.filter((a) => a.trackId === t.id).map((a) => [a.stepId, a.state, a.endedBy, isoOf(a.claimedWall)]))}; tasks ${JSON.stringify(st.callTasks.map((x) => [x.trackId, x.kind, x.open]))}; freezes ${JSON.stringify(st.freezes.map((f) => [isoOf(f.fromWall), isoOf(f.toWall)]))}; inbox ${JSON.stringify((ch === "sms" ? sms : email).handoverLog.filter((c) => c.at >= due - HOUR && c.at <= deadline + HOUR).map((c) => [isoOf(c.at), c.subjectId, c.stepId, c.mode, isoOf((ch === "sms" ? sms : email).deliveryLog.find((d) => d.key === c.key)?.at)]))}]` : ""}`);
           if (handed && st.callTasks.some((x) => x.open && x.placedWall <= handed.at)) features.add("a-send-beside-an-open-call");
         }
       }
