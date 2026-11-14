@@ -278,7 +278,7 @@ function nextChange(changes: readonly number[], now: number): string | null {
  * The focus queue. `focus` is the call the user's screen is on: it keeps the focus while it is listed,
  * so the queue moves on only after an outcome (or a skip for now) is logged on it.
  */
-export async function callsView(store: OutreachStore, now: number, options: { readonly focus?: string | null; readonly rules?: CallViewRules } = {}): Promise<CallsView> {
+export async function callsView(store: OutreachStore, now: number, options: { readonly focus?: string | null; readonly rules?: CallViewRules } = {}): Promise<Omit<CallsView, "pausedCampaigns">> {
   const { day, readyNow, laterToday, listed, changes } = await callList(store, now, options.rules);
   const focus = options.focus ?? null;
   return {
@@ -303,7 +303,7 @@ export async function callsView(store: OutreachStore, now: number, options: { re
 /** How many calls Up next shows on Today. */
 const UP_NEXT = 5;
 
-export async function todayView(store: OutreachStore, now: number, rules?: CallViewRules): Promise<TodayView> {
+export async function todayView(store: OutreachStore, now: number, rules?: CallViewRules): Promise<Omit<TodayView, "pausedCampaigns">> {
   const { day, readyNow, laterToday, changes } = await callList(store, now, rules);
   const listed = [...readyNow, ...laterToday];
   return {

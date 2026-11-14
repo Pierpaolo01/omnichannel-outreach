@@ -11,6 +11,7 @@ import { deriveStatus, runs } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
 import type { CampaignControlView, ControlStepView, ControlView } from "../../shared/api.ts";
 import type { Rules } from "./rules.ts";
+import { trackLabel } from "../../shared/track-label.ts";
 
 const iso = (t: number) => new Date(t).toISOString();
 
@@ -19,6 +20,8 @@ function stepView(state: SubjectState, step: NonNullable<ReturnType<typeof curre
   const lead = leadNow(state.subject.clock, now);
   return {
     trackId: step.track.id,
+    // The track's name as everywhere else (ticket 17b): "Email track 2" when the campaign has several on its channel.
+    track: trackLabel(state.campaign.definition, step.track),
     channel: step.track.channel,
     branch: step.track.branch,
     stepId: step.stepId,

@@ -4,6 +4,15 @@ import type { CampaignDefinition } from "../../domain/sequence/definition.ts";
 import type { AccountState, Attempt, ProviderWork, SmsBindingRecord, SubjectState } from "../../domain/sequence/state.ts";
 
 /** A sender account as the provider port reports it. */
+/** One accepted control request, as `control_requests` keeps it: its target, the action, the effect it answered with (lead controls) and when. */
+export interface AcceptedControl {
+  readonly target: string;
+  readonly action: string;
+  /** The control's effect as answered, JSON (`effectOf`); null for a campaign's pause and resume. */
+  readonly effect: string | null;
+  readonly atWall: number;
+}
+
 export interface SenderAccountConfig {
   readonly id: string;
   readonly channel: "email" | "sms";
@@ -205,6 +214,11 @@ export interface EngineStore {
   uncertainWorkOf(campaignId: string): Promise<number>;
   /** The count of the campaign's leads in each outreach status (ticket 17a). */
   statusCounts(campaignId: string): Promise<Record<string, number>>;
+  /**
+   * The accepted control requests on these targets (enrollment and campaign ids), oldest first, as the engine recorded each in
+   * the transaction that applied it (ticket 17a's `control_requests`): Activity says them (ticket 17b). Refusals and call outcomes are left out.
+   */
+  acceptedControls(targets: readonly string[]): Promise<AcceptedControl[]>;
   /** Loads, decides and writes in one transaction. A null decision writes nothing. */
   update(subjectId: string, now: number, decide: (state: SubjectState) => SubjectState | null): Promise<SubjectState | null>;
   /**

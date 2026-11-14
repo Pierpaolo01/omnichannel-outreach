@@ -692,6 +692,8 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
       const path = rec.kind === "person" ? `/api/people/${rec.recordId}/activity` : `/api/companies/${rec.recordId}/activity`;
       const shown = (await h.request<ActivityView>("GET", path)).body.entries
         .filter((e) => e.campaign.id === campaignId)
+        // The controls' entries (ticket 17b) are checked by example, in controls-screens.test.ts.
+        .filter((e): e is Exclude<ActivityView["entries"][number], { kind: "control" | "campaign_paused" | "campaign_resumed" }> => e.kind !== "control" && e.kind !== "campaign_paused" && e.kind !== "campaign_resumed")
         .map((e) => (e.kind === "replied" ? `replied|${e.channel}` : e.kind === "ended" ? "ended" : `${e.kind}|${e.channel}|${e.track.label}|${"stepNumber" in e && e.stepNumber !== null ? e.stepNumber : "-"}`))
         .sort();
 

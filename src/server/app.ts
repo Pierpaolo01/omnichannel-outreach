@@ -22,7 +22,7 @@ import { callsView, callTaskView, recordCalls, todayView } from "./engine/call-v
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
 import { sealReckoning } from "../domain/sequence/progress.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
-import type { ControlRefusal, EnrollmentRead, CampaignDetail, CampaignListItem, CampaignSequenceSummary, SequenceView } from "../shared/api.ts";
+import type { ControlRefusal, EnrollmentRead, CampaignDetail, CampaignListItem, CampaignPauseRead, CampaignSequenceSummary, PausedCampaignCalls, RecordControls, RecordLead, SequenceView } from "../shared/api.ts";
 import { beforeLaunchView, copyPreview } from "./before-launch.ts";
 import { activityOf } from "./activity.ts";
 import { registerEmailProviderRoutes, type EmailProviderSource } from "./instantly/routes.ts";
@@ -239,7 +239,8 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
 
   app.get("/campaigns", async (c) => {
     const campaigns: CampaignListItem[] = [];
-    for (const item of await store.listCampaigns()) campaigns.push({ ...item, sequence: await sequenceSummary(item.id) });
+    // Each row carries the campaign's pause as its own read does (ticket 17b): the list shows the Paused banner too.
+    for (const item of await store.listCampaigns()) campaigns.push({ ...item, sequence: await sequenceSummary(item.id), ...(await pauseRead(item.id)) });
     return c.json({ campaigns });
   });
 
@@ -263,7 +264,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   });
 
   // Ticket 17a: the campaign pause, its date, the count of leads in each status, and the controls allowed now.
-  const pauseRead = async (campaignId: string) => {
+  const pauseRead = async (campaignId: string): Promise<CampaignPauseRead> => {
     const row = await store.engine.campaign(campaignId);
     const stored = await store.engine.statusCounts(campaignId);
     const statusCounts = Object.fromEntries(OUTREACH_STATUSES.map((status) => [status, stored[status] ?? 0])) as Record<OutreachStatus, number>;
@@ -339,12 +340,12 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   app.get("/people/:id", async (c) => {
     const person = await store.person(c.req.param("id"));
     // Each enrollment's open calls, as of now, by the engine's rules (ticket 15b).
-    return person ? c.json<PersonRecord & RecordCalls>({ ...person, ...(await recordCalls(store, person.enrollments.map((e) => e.id), Date.parse(now()), rules)) }) : notFound(c, "person");
+    return person ? c.json<PersonRecord & RecordCalls & RecordControls>({ ...person, ...(await recordCalls(store, person.enrollments.map((e) => e.id), Date.parse(now()), rules)), ...(await recordControls(person.enrollments.map((e) => e.id))) }) : notFound(c, "person");
   });
 
   app.get("/companies/:id", async (c) => {
     const company = await store.company(c.req.param("id"));
-    return company ? c.json<CompanyRecord & RecordCalls>({ ...company, ...(await recordCalls(store, company.enrollments.map((e) => e.id), Date.parse(now()), rules)) }) : notFound(c, "company");
+    return company ? c.json<CompanyRecord & RecordCalls & RecordControls>({ ...company, ...(await recordCalls(store, company.enrollments.map((e) => e.id), Date.parse(now()), rules)), ...(await recordControls(company.enrollments.map((e) => e.id))) }) : notFound(c, "company");
   });
 
   // -------------------------------------------------------------------------------------------
@@ -470,6 +471,33 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     return state ? { ...progressView(state, at), controls: controlsView(state, at, rules), mayStillSend: state.work.filter(maySend).length } : null;
   };
 
+  // Ticket 17b: each enrollment's read on the record, with its campaign's launch and pause, so each campaign row shows
+  // the controls allowed in its status, what each will do, and its sentence. The same read as GET /api/enrollments/:id.
+  const recordControls = async (enrollmentIds: readonly string[]): Promise<RecordControls> => {
+    const leads: RecordLead[] = [];
+    for (const id of enrollmentIds) {
+      const read = await enrollmentRead(id);
+      if (!read) continue;
+      const row = await store.engine.campaign(read.campaignId);
+      const iso = (t: number | null | undefined) => (t == null ? null : new Date(t).toISOString());
+      leads.push({ ...read, campaignState: { launched: row?.launchedAt != null, paused: row?.pausedSince != null, pausedSince: iso(row?.pausedSince) } });
+    }
+    return { leads, userZone: (await store.engine.callSettings()).userZone };
+  };
+
+  // Ticket 17b: the paused campaigns whose leads wait on a call or a callback, whose calls are off the list while paused.
+  // Counted from the campaign's own status counts, the numbers its Paused banner shows.
+  const pausedCampaigns = async (): Promise<PausedCampaignCalls[]> => {
+    const out: PausedCampaignCalls[] = [];
+    for (const item of await store.listCampaigns()) {
+      const read = await pauseRead(item.id);
+      if (!read.pause.paused || read.pause.pausedSince === null) continue;
+      const calls = read.statusCounts.waiting_on_call + read.statusCounts.callback_scheduled;
+      if (calls > 0) out.push({ id: item.id, name: item.name, pausedSince: read.pause.pausedSince, calls });
+    }
+    return out;
+  };
+
   app.get("/enrollments/:id", async (c) => {
     const read = await enrollmentRead(c.req.param("id"));
     return read ? c.json(read) : notFound(c, "enrollment");
@@ -499,10 +527,10 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     return c.json(await store.engine.callSettings());
   });
 
-  app.get("/today", async (c) => c.json(await todayView(store, Date.parse(now()), rules)));
+  app.get("/today", async (c) => c.json({ ...(await todayView(store, Date.parse(now()), rules)), pausedCampaigns: await pausedCampaigns() }));
 
   // `focus`: the call the user's screen is on. It stays the focus while it is listed.
-  app.get("/calls", async (c) => c.json(await callsView(store, Date.parse(now()), { focus: c.req.query("focus") || null, rules })));
+  app.get("/calls", async (c) => c.json({ ...(await callsView(store, Date.parse(now()), { focus: c.req.query("focus") || null, rules })), pausedCampaigns: await pausedCampaigns() }));
 
   app.get("/call-tasks/:id", async (c) => {
     const view = await callTaskView(store, c.req.param("id"), Date.parse(now()), rules);
