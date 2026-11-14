@@ -461,16 +461,17 @@ export interface CopyPreview {
     readonly channel: "email" | "sms";
     /** Its number within its track: Email 2, Text 1. */
     readonly number: number;
-    /**
-     * The earliest day it can go for this lead, counting launch day as day 1: its track's start (at
-     * launch, or after the track it follows has finished all its steps, plus the delay) and every
-     * wait before it. Sending windows can move it later.
-     */
+    /** The day the projection sends it to this lead, counting launch day as day 1; null with `noDay` otherwise. */
     readonly day: number | null;
     /**
-     * The phone track this message waits on, through its track's chain, if any. Its day counts the call
-     * as worked on the day it falls due, the projection's assumption (ADR 0003, ticket 14c).
+     * Why the message shows no day, when it shows none (review bot on 93bcc0c): every day shown is the
+     * day the projection sends it, and nothing else. `skipped`: the lead skips its track. `no_estimate`:
+     * no figure is projected (withheld, too large, or the campaign has launched). `beyond_horizon`: the
+     * projection's horizon ends before it. `not_sent`: a merge field with no fallback the lead lacks
+     * holds it. The rest of its track then shows no day either, for the same reason.
      */
+    readonly noDay: "skipped" | "no_estimate" | "beyond_horizon" | "not_sent" | null;
+    /** The phone track this message waits on, through its track's chain, if any. */
     readonly waitsOnCall: string | null;
     /** This lead lacks the track's channel (no email; no mobile of their own, or a company lead), so the track is skipped and the tracks after it start sooner. */
     readonly skipped: boolean;

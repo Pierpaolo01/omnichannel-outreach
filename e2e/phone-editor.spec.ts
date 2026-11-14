@@ -138,6 +138,10 @@ test.describe("calls in Before launch", () => {
     await expect(page.getByRole("region", { name: "Blocks launch" }).getByText(/phone track/i)).toHaveCount(0);
     const calls = page.getByRole("row", { name: /Your calls/ });
     await expect(calls).toContainText("At most 50 new calls a day");
+    // No estimate here (no email or SMS provider), so Copy for a lead shows no day for any message,
+    // and says why, rather than a day worked out another way (review bot on 93bcc0c).
+    await expect(page.getByText("No day: no estimate").first()).toBeVisible();
+    await expect(page.getByText(/^Day \d/)).toHaveCount(0);
   });
 
   test("over the fake providers: calls per day against the capacity and how long until every lead has started, then launch puts the calls on the list", async ({ page }) => {

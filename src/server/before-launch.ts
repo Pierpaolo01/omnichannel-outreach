@@ -17,6 +17,9 @@ import type { Rules } from "./engine/rules.ts";
 import { projectLoad, type Projection } from "./load-projection.ts";
 import type { OutreachStore } from "./persistence/store.ts";
 
+/** Why Copy for a lead shows a message with no day. */
+type NoDay = NonNullable<CopyPreview["steps"][number]["noDay"]>;
+
 /** How far ahead the load projection looks. */
 export const PROJECTION_HORIZON_DAYS = 120;
 
@@ -357,47 +360,45 @@ export async function copyPreview(store: OutreachStore, campaignId: string, enro
   // The lead skips a track whose channel it lacks; a skipped track finishes as it starts, so the
   // tracks after it start then (spec "a skipped or failed track counts as finished").
   const skipped = (t: TrackDefinition) => (t.channel === "email" ? lead.email === null : t.channel === "sms" ? !lead.mobile : !lead.phone);
-  /**
-   * The earliest day offset a track starts on, and the phone track it waits on through its chain, if
-   * any. A phone track's call is worked by the end of the day it falls due, at the earliest (the
-   * projection's assumption, ADR 0003 ticket 14c), so what follows it starts the next day, or after its
-   * delay if that is longer; a call that waits for room on the list moves it later, as a window does.
-   */
-  const startDay = new Map<string, { day: number; phone: TrackDefinition | null }>();
-  const startOf = (t: TrackDefinition, depth = 0): { day: number; phone: TrackDefinition | null } => {
-    const known = startDay.get(t.id);
-    if (known !== undefined) return known;
-    let out: { day: number; phone: TrackDefinition | null } = { day: 0, phone: null };
-    if (t.start.kind === "after" && depth <= all.length) {
-      const delay = t.start.delayDays;
-      const before = all.find((x) => x.id === (t.start as { trackId: string }).trackId);
-      if (before) {
-        const at = startOf(before, depth + 1);
-        const length = skipped(before) ? 0 : liveSteps(before).reduce((sum, st) => sum + st.waitDays, 0);
-        const afterCall = before.channel === "call" && !skipped(before);
-        out = { day: at.day + length + (afterCall ? Math.max(delay, 1) : delay), phone: afterCall ? before : at.phone };
-      }
+  /** The phone track a track waits on through its chain of `after` starts, if any (and the lead does not skip it). */
+  const phoneBefore = (t: TrackDefinition): TrackDefinition | null => {
+    const seen = new Set<string>();
+    for (let x: TrackDefinition | undefined = t; x && x.start.kind === "after" && !seen.has(x.id); ) {
+      seen.add(x.id);
+      const before: string = x.start.trackId;
+      x = all.find((y) => y.id === before);
+      if (x?.channel === "call" && !skipped(x)) return x;
     }
-    startDay.set(t.id, out);
-    return out;
+    return null;
   };
+  // One timeline per lead (review bot on 93bcc0c): every day shown is the day the projection sends the
+  // message. Where it does not (no estimate, past its horizon, or a field with no fallback the lead
+  // lacks), the message and every later one in its track show no day, and say why; no day is ever
+  // worked out another way beside projected ones.
   const steps: { step: CopyPreview["steps"][number]; order: number }[] = [];
   tracks.forEach((track, trackIndex) => {
     const skip = skipped(track);
-    const start = startOf(track);
-    let day: number | null = 1 + start.day;
-    const waitsOn = start.phone ? trackLabel(definition, start.phone).label : null;
+    const phone = phoneBefore(track);
+    const waitsOn = phone ? trackLabel(definition, phone).label : null;
+    let stopped: NoDay | null = null;
     let threadSubject: Segment[] = [];
     liveSteps(track).forEach((step, i) => {
-      if (!skip && day !== null) day += step.waitDays;
-      const shownDay = projectedDay.get(step.id) ?? day;
       const email = track.channel === "email";
       const own = email ? renderSegments(ownSubject(step), data) : [];
       const subject = email && step.threading === "continue_thread" ? [{ text: "Re: ", kind: "literal" as const }, ...threadSubject] : own;
       if (email && step.threading === "new_subject") threadSubject = own;
       const body = renderSegments(step.body, data);
+      const missing = missingFields([...own, ...body]);
+      const projectedOn = projectedDay.get(step.id);
+      let day: number | null = null;
+      let noDay: NoDay | null = null;
+      if (skip) noDay = "skipped";
+      else if (!projected) noDay = "no_estimate";
+      else if (stopped) noDay = stopped;
+      else if (projectedOn !== undefined) day = projectedOn;
+      else noDay = stopped = missing.length > 0 ? "not_sent" : "beyond_horizon";
       steps.push({
-        step: { trackId: track.id, stepId: step.id, channel: track.channel === "sms" ? "sms" : "email", number: i + 1, day: shownDay, waitsOnCall: waitsOn, skipped: skip, threading: step.threading, subject, body, missing: missingFields([...own, ...body]) },
+        step: { trackId: track.id, stepId: step.id, channel: track.channel === "sms" ? "sms" : "email", number: i + 1, day, noDay, waitsOnCall: waitsOn, skipped: skip, threading: step.threading, subject, body, missing },
         order: trackIndex * 10_000 + i,
       });
     });

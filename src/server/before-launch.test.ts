@@ -36,8 +36,8 @@ const PEOPLE = [
   person({ person_id: "p2", business_id: "b1", full_name: "Sam Lee", title: "Practice manager", direct_phone: "+44 20 7946 0303" }),
 ];
 
-async function campaign(accounts: FakeAccount[] = [inbox("inbox-a")], people = PEOPLE, businesses = [HARBOUR, NORTHGATE]) {
-  const h = new EngineHarness({ start: MONDAY_8, accounts });
+async function campaign(accounts: FakeAccount[] = [inbox("inbox-a")], people = PEOPLE, businesses = [HARBOUR, NORTHGATE], smsNumbers: string[] = []) {
+  const h = new EngineHarness({ start: MONDAY_8, accounts, ...(smsNumbers.length > 0 ? { sms: { numbers: smsNumbers.map((id) => ({ id, capacity: 50, gapMs: null, k: 1, healthy: true, resetZone: "Europe/London" })) } } : {}) });
   const { campaign } = await h.createCampaign("Autumn physio", { businesses, people });
   // The engine learns the provider's inboxes on its first tick.
   await h.tick();
@@ -141,13 +141,70 @@ describe("Before launch: copy rendered for one lead", () => {
   });
 });
 
+/**
+ * One timeline per lead (review bot on 93bcc0c): along a track the days shown never decrease, a message
+ * without a day is followed only by messages without one in its track, and a track's first day never
+ * precedes the last day of the track it starts after.
+ */
+function expectOneTimeline(p: CopyPreview, def: CampaignDefinition): void {
+  const byTrack = new Map<string, (number | null)[]>();
+  for (const st of p.steps) if (!st.skipped) byTrack.set(st.trackId, [...(byTrack.get(st.trackId) ?? []), st.day]);
+  for (const [trackId, days] of byTrack) {
+    for (let i = 1; i < days.length; i++) {
+      const [a, b] = [days[i - 1] ?? null, days[i] ?? null];
+      if (a === null) expect([trackId, i, b]).toEqual([trackId, i, null]);
+      else if (b !== null) expect(b).toBeGreaterThanOrEqual(a);
+    }
+    const track = def.tracks.find((t) => t.id === trackId);
+    if (track?.start.kind !== "after") continue;
+    const before = byTrack.get(track.start.trackId)?.filter((d): d is number => d !== null) ?? [];
+    const first = days[0];
+    if (first != null && before.length > 0) expect(first).toBeGreaterThanOrEqual(Math.max(...before));
+  }
+}
+
+describe("Before launch: copy for a lead past the estimate's horizon (review bot on 93bcc0c)", () => {
+  test("50 leads, one email a day, a follow-up 45 days on: the last lead's follow-up is past the estimate, so it shows no day, never one before its first email", async () => {
+    const many = Array.from({ length: 50 }, (_, i) => person({ person_id: `h${i}`, business_id: "b1", full_name: `Horizon Lead${String(i).padStart(2, "0")}`, email: `h${i}@harbour.example` }));
+    const { h, id } = await campaign([inbox("inbox-a", { capacity: 1 })], many, [HARBOUR]);
+    const daily = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 9, end: 17 }));
+    const def: CampaignDefinition = { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: ["inbox-a"], smsPool: [], tracks: [{ id: "t1", channel: "email", branch: "main", window: daily, start: { kind: "entry" }, removed: false, steps: [step("s1", { subject: "Hi", threading: "new_subject" }), step("s2", { waitDays: 45 })] }] };
+    await h.defineSequence(id, def);
+    const projected = (await projectedSends(h.store, id, h.clock))!;
+    const firsts = projected.sends.filter((x) => x.stepId === "s1");
+    const last = firsts.reduce((a, b) => (b.at > a.at ? b : a));
+    const copy = (await h.request<CopyPreview>("GET", `/api/campaigns/${id}/preview/${last.leadId}`)).body;
+    const dayOf = (at: number) => localDayNumber(at, "Europe/London") - localDayNumber(h.clock, "Europe/London") + 1;
+    const one = copy.steps.find((x) => x.stepId === "s1")!;
+    const two = copy.steps.find((x) => x.stepId === "s2")!;
+    expect(one.day).toBe(dayOf(last.at));
+    expect(dayOf(last.at) + 45).toBeGreaterThan(120);
+    expect([two.day, two.noDay]).toEqual([null, "beyond_horizon"]);
+    expectOneTimeline(copy, def);
+  });
+
+  test("with no estimate at all (an SMS track with no number withholds it), no message shows a day, and each says why", async () => {
+    const ANA = person({ person_id: "p4", business_id: "b1", full_name: "Ana Ruiz", title: "Owner", dial_phone: "+447700900244", dial_phone_type: "mobile" });
+    const { h, id } = await campaign([inbox("inbox-a")], [...PEOPLE, ANA]);
+    const def: CampaignDefinition = { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: ["inbox-a"], smsPool: [], tracks: [{ id: "t1", channel: "email", branch: "main", window: weekdays, start: { kind: "entry" }, removed: false, steps: [step("s1", { subject: "Hi", threading: "new_subject" })] }, { id: "t2", channel: "sms", branch: "main", window: weekdays, start: { kind: "entry" }, removed: false, steps: [step("m1", { body: "A text.", threading: "new_subject" })] }] };
+    await h.defineSequence(id, def);
+    const lead = (await beforeLaunch(h, id)).leads.find((l) => l.name === "Pat Oneil")!;
+    const copy = (await h.request<CopyPreview>("GET", `/api/campaigns/${id}/preview/${lead.id}`)).body;
+    expect(copy.steps.map((x) => [x.stepId, x.day, x.noDay])).toEqual([
+      ["s1", null, "no_estimate"],
+      ["m1", null, "no_estimate"],
+    ]);
+  });
+});
+
 describe("Before launch: copy for one lead across both channels, by track, dated from launch (ticket 13b)", () => {
   const text = (id: string, fields: Partial<StepDefinition> = {}): StepDefinition => step(id, { threading: "new_subject", ...fields });
   const tracks: CampaignDefinition = {
     timezone: "Europe/London",
     callSkipLimitDays: 2,
     emailPool: ["inbox-a"],
-    smsPool: [],
+    // A connected SMS number, so the estimate runs and every day shown is its own (review bot on 93bcc0c).
+    smsPool: ["+447700900001"],
     tracks: [
       { id: "t1", channel: "email", branch: "main", window: weekdays, start: { kind: "entry" }, removed: false, steps: [step("s1", { subject: "Hi {{company}}", threading: "new_subject" }), step("s2", { waitDays: 3 })] },
       { id: "t2", channel: "sms", branch: "main", window: weekdays, start: { kind: "after", trackId: "t1", delayDays: 1 }, removed: false, steps: [text("m1", { body: "Hi {{first_name|there}}, a text." }), text("m2", { waitDays: 2 })] },
@@ -156,21 +213,25 @@ describe("Before launch: copy for one lead across both channels, by track, dated
   };
   const ANA = person({ person_id: "p4", business_id: "b1", full_name: "Ana Ruiz", title: "Owner", dial_phone: "+447700900244", dial_phone_type: "mobile" });
   const preview = async (name: string) => {
-    const { h, id } = await campaign([inbox("inbox-a")], [...PEOPLE, ANA]);
+    const { h, id } = await campaign([inbox("inbox-a")], [...PEOPLE, ANA], [HARBOUR, NORTHGATE], ["+447700900001"]);
     await h.defineSequence(id, tracks);
     const lead = (await beforeLaunch(h, id)).leads.find((l) => l.name === name)!;
-    return (await h.request<CopyPreview>("GET", `/api/campaigns/${id}/preview/${lead.id}`)).body;
+    const copy = (await h.request<CopyPreview>("GET", `/api/campaigns/${id}/preview/${lead.id}`)).body;
+    expectOneTimeline(copy, tracks);
+    return copy;
   };
   const rows = (p: CopyPreview) => p.steps.map((s) => [s.trackId, s.stepId, s.channel, s.number, s.day, s.skipped]);
 
   test("every track's messages, in the order they can go: an SMS track after the emails starts the day after they finish", async () => {
     const pat = await preview("Pat Oneil");
+    // The estimate's days, launch Monday: Text 2 waits two days after Friday's Text 1, which is
+    // Sunday, outside the weekday window, so it goes on Monday, day 8.
     expect(rows(pat)).toEqual([
       ["t1", "s1", "email", 1, 1, false],
       ["t3", "m3", "sms", 1, 1, false],
       ["t1", "s2", "email", 2, 4, false],
       ["t2", "m1", "sms", 1, 5, false],
-      ["t2", "m2", "sms", 2, 7, false],
+      ["t2", "m2", "sms", 2, 8, false],
     ]);
     const m1 = pat.steps.find((s) => s.stepId === "m1")!;
     // A text has no subject.
@@ -179,12 +240,13 @@ describe("Before launch: copy for one lead across both channels, by track, dated
   });
 
   test("a lead with no email skips the email track, so the SMS track after it starts a day after launch, not after the emails", async () => {
+    // The skipped email track shows no day (`skipped`), and comes after the messages that go.
     expect(rows(await preview("Ana Ruiz"))).toEqual([
-      ["t1", "s1", "email", 1, 1, true],
-      ["t1", "s2", "email", 2, 1, true],
       ["t3", "m3", "sms", 1, 1, false],
       ["t2", "m1", "sms", 1, 2, false],
       ["t2", "m2", "sms", 2, 4, false],
+      ["t1", "s1", "email", 1, null, true],
+      ["t1", "s2", "email", 2, null, true],
     ]);
   });
 

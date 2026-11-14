@@ -53,3 +53,33 @@ describe("the projection's work is bounded by a count of engine steps (re-check 
     expect(await projectedSends(h.store, id, h.clock, { maxSteps: 10_000 })).toBeNull();
   });
 });
+
+describe("no bound yields part of a projection (review bot on 93bcc0c, the horizon)", () => {
+  test("an email track with a follow-up 120 days on and an SMS track after it: every bound below the full run gives no figure or the whole of it", { timeout: 300_000 }, async () => {
+    const start = Date.parse("2026-11-02T09:00:00Z");
+    const h = new EngineHarness({ start, accounts: [{ id: "inbox-a", capacity: 30, gapMs: 60_000, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }], sms: { numbers: [{ id: "+447700900001", capacity: 30, gapMs: null, k: 1, healthy: true, resetZone: "UTC" }] } });
+    const { campaign } = await h.createCampaign("Horizon", {
+      businesses: [business({ business_id: "b1", business_name: "Clinic One", timezone: "UTC" })],
+      people: [person({ person_id: "p1", business_id: "b1", full_name: "Lead One", email: "one@clinic1.example", timezone: "", dial_phone: "+447700900211", dial_phone_type: "mobile" })],
+    });
+    await h.tick();
+    const daily = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 9, end: 17 }));
+    await h.defineSequence(campaign.id, {
+      timezone: "UTC",
+      callSkipLimitDays: 2,
+      emailPool: ["inbox-a"],
+      smsPool: ["+447700900001"],
+      tracks: [
+        { id: "e", channel: "email", branch: "main", window: daily, start: { kind: "entry" }, removed: false, steps: [{ id: "e1", waitDays: 0, subject: "Hi", body: "A note.", threading: "new_subject", removed: false }, { id: "e2", waitDays: 120, subject: "", body: "Again.", threading: "continue_thread", removed: false }] },
+        { id: "m", channel: "sms", branch: "main", window: daily, start: { kind: "after", trackId: "e", delayDays: 0 }, removed: false, steps: [{ id: "s1", waitDays: 0, subject: "", body: "A text.", threading: "new_subject", removed: false }] },
+      ],
+    });
+    const full = await projectedSends(h.store, campaign.id, h.clock);
+    expect(full?.sends.map((x) => x.stepId)).toEqual(["e1", "e2", "s1"]);
+    const whole = JSON.stringify(full?.sends);
+    for (let bound = 0; bound < (full?.steps ?? 0); bound++) {
+      const partial = await projectedSends(h.store, campaign.id, h.clock, { maxSteps: bound });
+      if (partial !== null) expect([bound, JSON.stringify(partial.sends)]).toEqual([bound, whole]);
+    }
+  });
+});

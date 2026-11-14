@@ -54,7 +54,7 @@ export function BeforeLaunchTab({ campaignId, editor }: { campaignId: string; ed
               <DailyLoad facts={facts} editor={editor} />
             </Card>
           </div>
-          <Preview campaignId={campaignId} editor={editor} leads={facts.leads} />
+          <Preview campaignId={campaignId} editor={editor} leads={facts.leads} horizonDays={facts.load?.horizonDays ?? null} />
         </div>
       )}
     </div>
@@ -433,7 +433,7 @@ function callCaveat(here: boolean, elsewhere: readonly { readonly name: string }
 
 const gap = (seconds: number) => (seconds < 120 ? `${seconds} seconds` : `${Math.round(seconds / 60)} minutes`);
 
-function Preview({ campaignId, editor, leads }: { campaignId: string; editor: SequenceEditor; leads: readonly PreviewLead[] }) {
+function Preview({ campaignId, editor, leads, horizonDays }: { campaignId: string; editor: SequenceEditor; leads: readonly PreviewLead[]; horizonDays: number | null }) {
   const [chosen, setChosen] = useState<string | null>(null);
   const index = Math.max(0, leads.findIndex((l) => l.id === chosen));
   const lead = leads[index];
@@ -488,16 +488,31 @@ function Preview({ campaignId, editor, leads }: { campaignId: string; editor: Se
             {lead.kind === "company" ? "Company lead" : `${lead.title ? `${lead.title}, ` : ""}${lead.company}`}. {reach(lead)}
           </p>
           <p className="text-[12.5px] text-muted">
-            <mark className="bg-transparent text-inherit underline decoration-hand decoration-dotted decoration-2 underline-offset-[3px]">dotted</mark> fallback text, because this lead lacks the field. Days count from launch day, day 1; a sending window can move a message later.
+            <mark className="bg-transparent text-inherit underline decoration-hand decoration-dotted decoration-2 underline-offset-[3px]">dotted</mark> fallback text, because this lead lacks the field. Each day is the day the estimate below sends the message, counted from launch day, day 1; a message the estimate does not reach shows no day, and says why.
           </p>
-          <LeadCopy campaignId={campaignId} enrollmentId={lead.id} version={editor.view.definitionVersion} def={def} />
+          <LeadCopy campaignId={campaignId} enrollmentId={lead.id} version={editor.view.definitionVersion} def={def} horizonDays={horizonDays} />
         </>
       ) : null}
     </section>
   );
 }
 
-function LeadCopy({ campaignId, enrollmentId, version, def }: { campaignId: string; enrollmentId: string; version: number; def: CampaignDefinition }) {
+/** When a message goes, as Copy for a lead heads it: the estimate's day, or why it has none. One source for every day shown. */
+function whenSent(s: CopyPreview["steps"][number], horizonDays: number | null): string {
+  if (s.day !== null) return s.waitsOnCall ? `Day ${s.day}, after ${s.waitsOnCall}’s call` : `Day ${s.day}`;
+  switch (s.noDay) {
+    case "skipped":
+      return "Skipped";
+    case "beyond_horizon":
+      return horizonDays === null ? "After the estimate ends" : `After the estimate’s ${horizonDays} days`;
+    case "not_sent":
+      return "Not sent";
+    default:
+      return "No day: no estimate";
+  }
+}
+
+function LeadCopy({ campaignId, enrollmentId, version, def, horizonDays }: { campaignId: string; enrollmentId: string; version: number; def: CampaignDefinition; horizonDays: number | null }) {
   const { result, retry } = useApi<CopyPreview>(`/api/campaigns/${encodeURIComponent(campaignId)}/preview/${encodeURIComponent(enrollmentId)}?v=${version}`);
   if (result.state === "error") return <ErrorState title="This lead’s copy didn’t load." message={result.message} onRetry={retry} />;
   // Only copy for this lead and this version: never the previous lead's copy under this name.
@@ -525,7 +540,7 @@ function LeadCopy({ campaignId, enrollmentId, version, def }: { campaignId: stri
                   {several && track ? <span className="font-normal text-muted"> · {trackTitle(def, track)}</span> : null}
                 </span>
               </span>
-              <span className="whitespace-nowrap text-muted">{s.day === null ? `When ${s.waitsOnCall ?? "a phone track"}’s call is worked` : s.waitsOnCall ? `Day ${s.day}, after ${s.waitsOnCall}’s call` : `Day ${s.day}`}</span>
+              <span className="whitespace-nowrap text-muted">{whenSent(s, horizonDays)}</span>
             </div>
             <div className="px-3.5 py-3 text-[14px] leading-[1.55]">
               {s.skipped ? (

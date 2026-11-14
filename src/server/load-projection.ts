@@ -729,6 +729,14 @@ export function projectLoad(input: ProjectionInput): Projection {
       if (!changed && observed.length === 0) break;
     }
 
+    // The bound ran out during this instant's passes: what is left of the instant was not run, so the
+    // projection is incomplete, and is marked so before time moves on, here or past the horizon
+    // (review bot on 93bcc0c).
+    if (steps > maxSteps) {
+      tooLarge = true;
+      break;
+    }
+
     // The day's list is worked in its last second, after this instant's passes (as the engine's user
     // logs between ticks); the passes then run again at the same instant, placing any call a logged one
     // released, and the list is worked again, until a sweep finds nothing left to work.
