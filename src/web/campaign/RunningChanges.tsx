@@ -110,7 +110,8 @@ function whatItDoes(change: EditImpactChange): string {
   return `${sentence.charAt(0).toUpperCase()}${sentence.slice(1)}.`;
 }
 
-const timeOf = (iso: string) => new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+/** The read's instant in the campaign's own zone, named, never the browser's (as every screen states a time). */
+const timeOf = (iso: string, zone: string) => `${new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: zone })} (${zone.replace(/_/g, " ")})`;
 
 export function RunningChanges({ campaignId, editor }: { campaignId: string; editor: SequenceEditor }) {
   const enabled = editor.unsaved && !editor.applying && editor.problems.length === 0;
@@ -169,7 +170,7 @@ export function RunningChanges({ campaignId, editor }: { campaignId: string; edi
           {view && (
             <>
               <p className="text-[12.5px] text-muted">
-                Of the {plural(view.leads, "lead", "leads")} in this campaign, as of {timeOf(view.asOf)}:
+                Of the {plural(view.leads, "lead", "leads")} in this campaign, as of {timeOf(view.asOf, editor.view.definition.timezone)}:
               </p>
               <ul className="flex flex-col divide-y divide-line rounded-field border border-line">
                 {view.changes.map((change) => (
