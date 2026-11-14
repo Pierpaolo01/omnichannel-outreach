@@ -5,7 +5,7 @@
  */
 import { isLive, isUncertain } from "./attempt.ts";
 import { leadNow, nextWindowOpen, type Freeze } from "./clock.ts";
-import { heldReason, windowOf } from "./dispatch.ts";
+import { candidatesFor, heldReason, windowOf } from "./dispatch.ts";
 import { channelOf, wallAtLead } from "./progress.ts";
 import type { SubjectState } from "./state.ts";
 
@@ -50,9 +50,10 @@ function runningSpans(freezes: readonly Freeze[], from: number, to: number, now:
  * The sends the interruption `[from, to)` rescheduled for this lead (ADR 0003 "Ticket 20a"): each
  * pending email or SMS step with no result, nothing of it with a provider, on a track not held, of
  * a lead that has not ended, which at some instant of the interruption was due while the lead ran
- * and its window was open. Read at `now`, the instant sending resumed, after evaluation.
+ * and its window was open, and which some account it may use could have taken then (`roomDuring`: room on a reset day and
+ * a free pacing slot; question Q21). Read at `now`, the instant sending resumed, after evaluation.
  */
-export function rescheduledSteps(state: SubjectState, interruption: Interruption, now: number): { trackId: string; stepId: string }[] {
+export function rescheduledSteps(state: SubjectState, interruption: Interruption, now: number, roomDuring: (accountId: string) => boolean = () => true): { trackId: string; stepId: string }[] {
   if (state.subject.ended !== null) return [];
   const out: { trackId: string; stepId: string }[] = [];
   for (const p of state.tracks) {
@@ -72,7 +73,9 @@ export function rescheduledSteps(state: SubjectState, interruption: Interruption
       const opens = nextWindowOpen(window, state.lead.zone, span.from);
       return opens !== null && opens < span.to;
     });
-    if (sendable) out.push({ trackId: p.trackId, stepId });
+    // Question Q21's interim: only a send the interruption delayed: some account it may use had room on a reset day and a
+    // free pacing slot at some instant of the interruption. A send waiting on a full inbox throughout was not delayed by it.
+    if (sendable && candidatesFor(state, p.trackId).some(roomDuring)) out.push({ trackId: p.trackId, stepId });
   }
   return out;
 }

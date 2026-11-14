@@ -84,4 +84,11 @@ describe("the sends an interruption rescheduled", () => {
     expect(ids(ok(applyControl(s, "stop", WEDNESDAY_0 + H)), WEDNESDAY_0 - H, due)).toEqual([]);
     expect(ids(launched(), MONDAY_9 + H, MONDAY_9 + 2 * H)).toEqual(["s1"]);
   });
+
+  test("a step whose every account was full or had no pacing slot through the interruption is not counted: it was not delayed by it (question Q21)", () => {
+    const due = WEDNESDAY_0 + 2 * H;
+    // The lead's pool is inbox-a and inbox-b.
+    expect(rescheduledSteps(s, { from: WEDNESDAY_0 - H, to: due }, due, () => false).map((x) => x.stepId)).toEqual([]);
+    expect(rescheduledSteps(s, { from: WEDNESDAY_0 - H, to: due }, due, (id) => id === "inbox-b").map((x) => x.stepId)).toEqual(["s2"]);
+  });
 });

@@ -166,6 +166,23 @@ export class Engine {
     this.lastAnyAnswer = Math.max(this.lastAnyAnswer ?? now, now);
   }
 
+  /** The contact each self-reporting port last reported, to see it jump (below). */
+  private readonly reportedSeen: Record<Channel, number | null> = { email: null, sms: null };
+
+  /**
+   * A port that reports its own contact (the adapter, which answers from a cache between polls) may answer every call
+   * while not reaching its provider: when its contact moves forward by more than the gap, that span was a silence for
+   * it, evidence of an interruption. For any other port a silence is read from its answers (`anyAnswer`).
+   */
+  private noteReportedContact(channel: Channel): void {
+    if (!this.ports[channel].contact) return;
+    const at = this.contactOf(channel).at;
+    if (at === null) return;
+    const before = this.reportedSeen[channel];
+    if (before !== null && this.rules.interruptionOf(before, at) !== null) this.silenceFrom = Math.min(this.silenceFrom ?? before, before);
+    this.reportedSeen[channel] = at;
+  }
+
   private callAnswered(channel: Channel): void {
     const now = this.clockNow();
     this.anyAnswer(now);
@@ -203,6 +220,7 @@ export class Engine {
   private readAnswered(channel: Channel, part: "accounts" | "observation"): void {
     this.round[channel][part] = true;
     this.anyAnswer(this.clockNow());
+    this.noteReportedContact(channel);
     if (this.rules.contactFrom(this.round[channel])) this.answeredAt[channel] = this.clockNow();
     this.advanceHeartbeat(this.clockNow());
   }
@@ -396,12 +414,22 @@ export class Engine {
       return true;
     }
     this.silenceFrom = null;
+    // Question Q21's interim: an account could have taken a send during the interruption if its pacing slot came before
+    // the end and some reset day within it had room (sends counted that day under capacity).
+    const room = new Map<string, boolean>();
+    for (const a of await this.store.accounts(this.now())) {
+      let fits = false;
+      if (a.nextSlotAt < gap.to) {
+        for (let t = gap.from; t < gap.to && !fits; t = startOfLocalDay(localDayNumber(t, a.resetZone) + 1, a.resetZone)) fits = (await this.store.sentToday(a.id, t)) < a.capacity;
+      }
+      room.set(a.id, fits);
+    }
     let rescheduled = 0;
     for (const id of await this.store.runningSubjectIds()) {
       const now = this.now();
       const s = await this.store.subject(id, now);
       if (!s) continue;
-      rescheduled += this.rules.rescheduled(s, gap, now).length;
+      rescheduled += this.rules.rescheduled(s, gap, now, (accountId) => room.get(accountId) ?? false).length;
       const after = this.rules.afterInterruption(s, gap, now);
       if (!same(after, s)) await this.store.update(id, now, (current) => (this.rules.versionsMatch(s, current) ? { ...after, accounts: current.accounts } : null));
     }

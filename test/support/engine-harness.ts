@@ -179,7 +179,7 @@ export class EngineHarness {
   /** Send calls an outage swallowed: committed by the engine, never received by the provider (the app cannot know which). */
   /** Withdrawal asks an outage swallowed: the engine asked, the provider never heard; the engine counts it as an ask answered unknown. */
   readonly swallowedWithdrawals: { readonly channel: string; readonly key: string; readonly at: number }[] = [];
-  readonly swallowedHandovers: { readonly channel: string; readonly key: string; readonly subjectId: string; readonly stepId: string; readonly at: number }[] = [];
+  readonly swallowedHandovers: { readonly channel: string; readonly key: string; readonly subjectId: string; readonly stepId: string; readonly sender: string; readonly at: number }[] = [];
   private readonly lastReal = new Map<SendPort, number>();
   private readonly cachedAccounts = new Map<SendPort, unknown>();
   /** The instants held answers arrived at, as asked and as answered. */
@@ -220,7 +220,7 @@ export class EngineHarness {
             }
             if (prop === "handover") {
               const r = args[0] as HandoverRequest;
-              this.swallowedHandovers.push({ channel: target.channel, key: r.idempotencyKey, subjectId: r.subjectId, stepId: r.stepId, at: this.clock });
+              this.swallowedHandovers.push({ channel: target.channel, key: r.idempotencyKey, subjectId: r.subjectId, stepId: r.stepId, sender: r.sender, at: this.clock });
             }
             return Promise.reject(new Error("the provider is unreachable"));
           }

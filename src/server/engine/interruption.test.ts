@@ -260,6 +260,49 @@ describe("a provider answer that arrives after midnight (follow-up 42 item 39; R
   });
 });
 
+describe("a call whose answer a crash lost (council I: the lost-answer mutation's named example)", () => {
+  /** The follow-up handed over and accepted by the provider (which sends it half an hour later); the process crashes before recording the answer. */
+  async function crashAfterTheCall(rules: Partial<Rules>) {
+    const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }], modes: ["late-send"], rules });
+    await h.tick();
+    const { campaign } = await h.createCampaign("Clinics", { businesses: [HARBOUR], people: [PEOPLE[0]!] });
+    await h.defineSequence(campaign.id, DEFINITION);
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    let crashed = false;
+    h.hooks = {
+      crashPoint: (point) => {
+        if (point === "after_call" && !crashed) {
+          crashed = true;
+          throw new Crash(point);
+        }
+      },
+    };
+    await h.advanceTo(TUESDAY_0 + 3 * H);
+    expect(crashed).toBe(true);
+    return h.fake.deliveryLog.filter((d) => d.stepId === "s2");
+  }
+
+  test("recovered as the crash row says (unknown: a same-key retry or a lookup), the follow-up is delivered once", async () => {
+    expect(await crashAfterTheCall({})).toHaveLength(1);
+  });
+
+  test("taken as refused, the step is claimed again with a new key and the follow-up is delivered twice: the mutation is a real double send", async () => {
+    expect(await crashAfterTheCall({ lostAnswer: { kind: "rejected", reason: "rate_limited" } })).toHaveLength(2);
+  });
+});
+
+describe("only sends the interruption delayed are rescheduled (question Q21's interim)", () => {
+  test("a full inbox with first emails waiting, then a ten-minute stop: none rescheduled", async () => {
+    // Capacity 2 a day: of three first emails on Monday, two go and the third waits for Tuesday whatever happens.
+    const { h, campaign, today } = await world(2);
+    await campaign("Clinics");
+    await h.advanceTo(MONDAY_9 + H);
+    expect(h.fake.deliveryLog).toHaveLength(2);
+    await h.stopFor(10 * MIN);
+    expect((await today()).interruption).toMatchObject({ rescheduled: 0 });
+  });
+});
+
 describe("capacity across two campaigns after an interruption", () => {
   test("missed work waits for the next reset day instead of bursting past the inbox's capacity", async () => {
     // Capacity 4 a day, shared: six first emails on Monday would need two days.
