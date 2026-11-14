@@ -246,6 +246,11 @@ export class CallDesk {
     return this.ports.faults?.has(f) ?? false;
   }
 
+  /** Whether this desk is on screen; read through a method, since `dispose` may run while a read is awaited. */
+  private isLive(): boolean {
+    return this.live;
+  }
+
   /** Whether this desk is on screen (or, under a test fault, behaves as if it were). */
   private onScreen(): boolean {
     return this.live || this.fault("disposed_desk_applies");
@@ -354,7 +359,7 @@ export class CallDesk {
     await this.loadTask(named);
     // The call on screen is off the list and has no entry here: say why, and keep showing it until the user moves on.
     const task = this.state.task;
-    if (this.live && view.focusTaskId !== named && this.state.focus === named && this.state.pending === null && this.state.away === null && task?.state === "ready" && task.view.offList !== null) {
+    if (this.isLive() && view.focusTaskId !== named && this.state.focus === named && this.state.pending === null && this.state.away === null && task?.state === "ready" && task.view.offList !== null) {
       this.set({ away: { taskId: named, who: whoOf(task.view), offList: task.view.offList, requestId: null, message: null, note: this.state.draft.note } }, "away");
     }
   }
