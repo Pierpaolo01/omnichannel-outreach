@@ -58,6 +58,8 @@ const trackBody = requestObject({
   start: z.union([requestObject({ kind: z.literal("entry") }), requestObject({ kind: z.literal("after"), trackId: z.string(), delayDays: z.number() })]).default({ kind: "entry" }),
   removed: z.boolean().default(false),
   declinedPath: z.enum(["stop", "continue", "win_back"]).optional(),
+  /** A phone track's own call skip limit in days (ADR 0003, ticket 14c); the validator checks it. */
+  callSkipLimitDays: z.number().optional(),
 });
 const definitionBody = requestObject({
   timezone: z.string().trim().min(1),

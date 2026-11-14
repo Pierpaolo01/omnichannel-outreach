@@ -68,6 +68,21 @@ describe("the sequence interface (tickets 12b and 13)", () => {
     expect(view.launch.blockers.map((b) => b.message)).toEqual(["The email track has no connected sender inbox.", "The SMS track has no connected sender number."]);
   });
 
+  test("a phone track after the email track is saved with its own calling hours and skip limit, and the campaign's call script; it needs no sender (ticket 14c)", async () => {
+    const api = testApi();
+    const campaign = await api.createCampaign("Autumn", "Europe/London");
+    const call = track({ id: "t2", channel: "call", window: [{ day: 2, start: 10, end: 16 }], steps: [{ id: "c1", waitDays: 0, body: "", threading: "new_subject" }], start: { kind: "after", trackId: "t1", delayDays: 1 }, callSkipLimitDays: 3 });
+    const saved = await put(api, campaign.id, { timezone: "Europe/London", emailPool: [], callScript: "Ask who handles bookings.", tracks: [track(), call] });
+    expect(saved.status).toBe(200);
+    const view = (await saved.json()) as SequenceView;
+    expect(view.definition.callScript).toBe("Ask who handles bookings.");
+    expect(view.definition.tracks[1]).toMatchObject({ channel: "call", callSkipLimitDays: 3, window: [{ day: 2, start: 10, end: 16 }], start: { kind: "after", trackId: "t1", delayDays: 1 } });
+    expect(view.launch.blockers.map((b) => b.message)).toEqual(["The email track has no connected sender inbox."]);
+    const bad = await put(api, campaign.id, { timezone: "Europe/London", emailPool: [], tracks: [track(), { ...call, callSkipLimitDays: 0 }] });
+    expect(bad.status).toBe(400);
+    expect(((await bad.json()) as ApiError).error.message).toContain("The phone track's call skip limit is a whole number of days, at least 1.");
+  });
+
   test("the running app reports that no SMS provider is connected, so an SMS track cannot launch", async () => {
     const api = testApi();
     expect((await api.get<SmsProviderStatus>("/api/sms-provider")).body).toEqual({ provider: "none", message: "No SMS provider is connected, so SMS tracks cannot launch.", numbers: [] });

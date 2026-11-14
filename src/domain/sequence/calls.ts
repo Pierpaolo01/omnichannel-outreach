@@ -6,6 +6,7 @@
  * current state inside the transaction that writes it.
  */
 import { leadNow, localDayNumber, nextWindowOpen, span, startOfLocalDay, wallOfLead, windowOpen, type WindowRule } from "./clock.ts";
+import { skipLimitOf } from "./definition.ts";
 import type { ReadyItem } from "./dispatch.ts";
 import { advanceTrack, end, evaluate, finishTrack, markDetailBad, progressOf, runs } from "./progress.ts";
 import type { CallAttempt, CallNumber, CallOutcome, CallTask, NoteDraft, RecordedNumber, SubjectState } from "./state.ts";
@@ -162,13 +163,16 @@ export function callRoom(state: SubjectState): boolean {
 
 /**
  * Places a ready call on today's list (4.4), or returns null when it is not ready or the list has no
- * room. The task keeps the step's original due time, and the skip deadline is resolved once from it (3.5).
+ * room. The task keeps the step's original due time, and the skip deadline is resolved once from it (3.5),
+ * with the phone track's own skip limit (ticket 14c).
  */
 export function placeCall(state: SubjectState, item: ReadyItem, now: number, taskId: string): SubjectState | null {
   if (!readyCalls(state, now).some((r) => r.stepId === item.stepId) || !callRoom(state)) return null;
   const p = progressOf(state, item.trackId);
   if (!p || p.dueAt === null || p.dueWall === null) return null;
   const { userZone, day } = state.callDay;
+  const track = state.campaign.definition.tracks.find((t) => t.id === item.trackId);
+  if (!track) return null;
   const task: CallTask = {
     id: taskId,
     subjectId: state.subject.id,
@@ -177,7 +181,7 @@ export function placeCall(state: SubjectState, item: ReadyItem, now: number, tas
     dueAt: p.dueAt,
     dueWall: p.dueWall,
     dueZone: p.dueZone ?? state.lead.zone,
-    skipDeadline: p.dueAt + span(p.dueWall, state.campaign.definition.callSkipLimitDays, userZone),
+    skipDeadline: p.dueAt + span(p.dueWall, skipLimitOf(state.campaign.definition, track), userZone),
     listDay: day,
     placedWall: now,
     kind: "call",

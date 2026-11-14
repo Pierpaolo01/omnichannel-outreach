@@ -1428,7 +1428,7 @@ Recorded on 14 November 2026 by the 14c implementer, before the code. Three chan
 - the limit of a phone track is `skipLimitOf(definition, track)`: its own, else the campaign's `callSkipLimitDays` (a phone track saved over HTTP before ticket 14c has none of its own);
 - placement resolves the task's skip deadline (3.5) from `skipLimitOf`, and nothing else reads the limit yet. Expiry is ticket 15's. The editor writes the limit on every phone track it adds (2, the spec's default) and never reads the campaign's value for a track that has its own.
 
-Invariant (asserted in `calls.test.ts` and by the ticket 14 generator, which now gives its phone tracks limits of 1 to 3): a placed task's `skipDeadline` is `dueAt + span(dueWall, skipLimitOf(definition, track), userZone)`.
+Invariant (asserted by worked examples in `calls.test.ts`, with dates written out, for a track's own limit and for the campaign's): a placed task's `skipDeadline` is `dueAt + span(dueWall, skipLimitOf(definition, track), userZone)`. The ticket 14 generator is left as it is, so its recorded seeds keep their meaning: nothing in it reads the deadline until ticket 15 builds expiry, which will generate per-track limits.
 
 **The call script** is the campaign's (ticket 14a: "the campaign's call script shows on every call task"). The call task shows it as written: no merge field is filled in on it, so the inspector offers no merge fields for it. An empty script is a warning, never a blocker (7.2).
 
