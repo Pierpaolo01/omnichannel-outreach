@@ -9,7 +9,7 @@ import { localDayNumber, nextWindowClose, nextWindowOpen, startOfLocalDay, windo
 import { declinedPathOf, liveTracks, winBackAvailable, type DeclinedPath } from "../../domain/sequence/definition.ts";
 import { callbackHold, deriveStatus } from "../../domain/sequence/progress.ts";
 import type { CallAttempt, CallNumber, CallTask, RecordedNumber, SubjectState } from "../../domain/sequence/state.ts";
-import type { DeclinePreviewView, CallColleagueView, CallNumberView, CallOffListView, CallQueueItem, CallRecordView, RecordCallView, RecordCalls, RecordedNumberView, CallsView, CallTaskView, NoteView, SkipLimitView, TodayView, TouchView } from "../../shared/api.ts";
+import type { PausedCampaignCalls, DeclinePreviewView, CallColleagueView, CallNumberView, CallOffListView, CallQueueItem, CallRecordView, RecordCallView, RecordCalls, RecordedNumberView, CallsView, CallTaskView, NoteView, SkipLimitView, TodayView, TouchView } from "../../shared/api.ts";
 import type { OutreachStore } from "../persistence/store.ts";
 import { DEFAULT_DAILY_CALL_CAPACITY } from "../persistence/sqlite-engine-store.ts";
 import type { StoredNote } from "./engine-store.ts";
@@ -246,9 +246,20 @@ async function callList(store: OutreachStore, now: number, rules: CallViewRules 
   const changes: number[] = [startOfLocalDay(day.day + 1, day.userZone)];
   /** Every open task listed now, in a queue part or not (its hours closed for the day). */
   const listed = new Set<string>();
+  /**
+   * Per paused campaign, the calls its pause keeps off today's list (ticket 17b; council on 57d874f, items 4d, 6 and 7):
+   * each open task the engine's listing rule lists today with the campaign's pause lifted, judged on the same loaded lead
+   * as the list itself, so no call is both listed and counted as held by a pause.
+   */
+  const held = new Map<string, { pausedSince: number; calls: number }>();
   for (const id of await store.engine.subjectsWithOpenCallTasks()) {
     const s = await asOfNow(store, id, now, rules);
     if (!s) continue;
+    if (s.campaign.pausedSince !== null) {
+      const lifted = { ...s, campaign: { ...s.campaign, pausedSince: null } };
+      const calls = s.callTasks.filter((task) => task.open && rules.isListed(lifted, task)).length;
+      if (calls > 0) held.set(s.campaign.id, { pausedSince: s.campaign.pausedSince, calls: (held.get(s.campaign.id)?.calls ?? 0) + calls });
+    }
     for (const task of s.callTasks) {
       if (task.open && isListed(s, task)) listed.add(task.id);
       const place = task.open ? bucketOf(s, task, now) : null;
@@ -273,7 +284,13 @@ async function callList(store: OutreachStore, now: number, rules: CallViewRules 
     .filter((x) => x.item.bucket === "later_today")
     .sort((a, b) => a.opensAt - b.opensAt || byDue(a, b))
     .map((x) => x.item);
-  return { day, readyNow, laterToday, listed, changes };
+  const pausedCampaigns: PausedCampaignCalls[] = [];
+  for (const [campaignId, h] of held) {
+    const campaign = await store.campaign(campaignId);
+    pausedCampaigns.push({ id: campaignId, name: campaign?.name ?? "", pausedSince: iso(h.pausedSince), calls: h.calls });
+  }
+  pausedCampaigns.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+  return { day, readyNow, laterToday, listed, changes, pausedCampaigns };
 }
 
 /** A hint of the next instant the list changes by the clock: calling hours opening or closing, the next user day. */
@@ -286,8 +303,8 @@ function nextChange(changes: readonly number[], now: number): string | null {
  * The focus queue. `focus` is the call the user's screen is on: it keeps the focus while it is listed,
  * so the queue moves on only after an outcome (or a skip for now) is logged on it.
  */
-export async function callsView(store: OutreachStore, now: number, options: { readonly focus?: string | null; readonly rules?: CallViewRules } = {}): Promise<Omit<CallsView, "pausedCampaigns">> {
-  const { day, readyNow, laterToday, listed, changes } = await callList(store, now, options.rules);
+export async function callsView(store: OutreachStore, now: number, options: { readonly focus?: string | null; readonly rules?: CallViewRules } = {}): Promise<CallsView> {
+  const { day, readyNow, laterToday, listed, changes, pausedCampaigns } = await callList(store, now, options.rules);
   const focus = options.focus ?? null;
   return {
     date: dateIn(day.userZone, now),
@@ -305,14 +322,15 @@ export async function callsView(store: OutreachStore, now: number, options: { re
       readyNow.map((x) => x.taskId),
       focus === null ? null : { taskId: focus, listed: listed.has(focus) },
     ),
+    pausedCampaigns,
   };
 }
 
 /** How many calls Up next shows on Today. */
 const UP_NEXT = 5;
 
-export async function todayView(store: OutreachStore, now: number, rules?: CallViewRules): Promise<Omit<TodayView, "pausedCampaigns">> {
-  const { day, readyNow, laterToday, changes } = await callList(store, now, rules);
+export async function todayView(store: OutreachStore, now: number, rules?: CallViewRules): Promise<TodayView> {
+  const { day, readyNow, laterToday, changes, pausedCampaigns } = await callList(store, now, rules);
   const listed = [...readyNow, ...laterToday];
   return {
     date: dateIn(day.userZone, now),
@@ -327,6 +345,7 @@ export async function todayView(store: OutreachStore, now: number, rules?: CallV
     overdueCallbacks: readyNow.filter((x) => x.reason === "overdue").sort((a, b) => Date.parse(a.callbackAt ?? "") - Date.parse(b.callbackAt ?? "") || (a.taskId < b.taskId ? -1 : 1)),
     carriedOver: listed.filter((x) => x.reason === "rolled_over" || x.reason === "redial").length,
     carriedOverLastDay: listed.filter((x) => (x.reason === "rolled_over" || x.reason === "redial") && x.skippedTonight).length,
+    pausedCampaigns,
   };
 }
 

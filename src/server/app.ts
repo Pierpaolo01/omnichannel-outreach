@@ -22,7 +22,7 @@ import { callsView, callTaskView, recordCalls, todayView } from "./engine/call-v
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
 import { sealReckoning } from "../domain/sequence/progress.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
-import type { ControlRefusal, EnrollmentRead, CampaignDetail, CampaignListItem, CampaignPauseRead, CampaignSequenceSummary, PausedCampaignCalls, RecordControls, RecordLead, SequenceView } from "../shared/api.ts";
+import type { ControlRefusal, EnrollmentRead, CampaignDetail, CampaignListItem, CampaignPauseRead, CampaignSequenceSummary, RecordControls, RecordLead, SequenceView } from "../shared/api.ts";
 import { beforeLaunchView, copyPreview } from "./before-launch.ts";
 import { activityOf } from "./activity.ts";
 import { registerEmailProviderRoutes, type EmailProviderSource } from "./instantly/routes.ts";
@@ -97,7 +97,7 @@ const leadControlBody = requestObject({
   requestId: controlRequestId,
   action: z.enum(LEAD_CONTROLS, { message: "Choose one of: pause, resume, skip, stop, resume_from_next_step, move_to_win_back." }),
   expect: z
-    .strictObject({ status: z.enum(OUTREACH_STATUSES), step: z.string().min(1).max(200).nullable() }, { message: "Send the lead's status and the step the confirmation named." })
+    .strictObject({ status: z.enum(OUTREACH_STATUSES), preview: z.string().max(500) }, { message: "Send the lead's status and the preview the confirmation showed." })
     .optional(),
 });
 // Redial and callback are ticket 15's, not interested and its declined path ticket 16's; which outcome each
@@ -496,26 +496,13 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     const leads: RecordLead[] = [];
     for (const id of enrollmentIds) {
       const state = loaded.get(id) ?? null;
-      const read = state ? readOf(state, at) : null;
-      if (!read) continue;
-      const row = await store.engine.campaign(read.campaignId);
-      const iso = (t: number | null | undefined) => (t == null ? null : new Date(t).toISOString());
-      leads.push({ ...read, campaignState: { launched: row?.launchedAt != null, paused: row?.pausedSince != null, pausedSince: iso(row?.pausedSince) } });
+      if (!state) continue;
+      // The campaign's launch and pause as the loaded lead holds them: the same snapshot as its calls and controls, so a
+      // pause landing during this read never makes one row both on hold and on today's list (council on 57d874f, item 6).
+      const { launchedAt, pausedSince } = state.campaign;
+      leads.push({ ...readOf(state, at), campaignState: { launched: launchedAt !== null, paused: pausedSince !== null, pausedSince: pausedSince === null ? null : new Date(pausedSince).toISOString() } });
     }
     return { leads, userZone: (await store.engine.callSettings()).userZone };
-  };
-
-  // Ticket 17b: the paused campaigns whose leads wait on a call or a callback, whose calls are off the list while paused.
-  // Counted from the campaign's own status counts, the numbers its Paused banner shows.
-  const pausedCampaigns = async (): Promise<PausedCampaignCalls[]> => {
-    const out: PausedCampaignCalls[] = [];
-    for (const item of await store.listCampaigns()) {
-      const read = await pauseRead(item.id);
-      if (!read.pause.paused || read.pause.pausedSince === null) continue;
-      const calls = read.statusCounts.waiting_on_call + read.statusCounts.callback_scheduled;
-      if (calls > 0) out.push({ id: item.id, name: item.name, pausedSince: read.pause.pausedSince, calls });
-    }
-    return out;
   };
 
   app.get("/enrollments/:id", async (c) => {
@@ -547,10 +534,10 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     return c.json(await store.engine.callSettings());
   });
 
-  app.get("/today", async (c) => c.json({ ...(await todayView(store, Date.parse(now()), rules)), pausedCampaigns: await pausedCampaigns() }));
+  app.get("/today", async (c) => c.json(await todayView(store, Date.parse(now()), rules)));
 
   // `focus`: the call the user's screen is on. It stays the focus while it is listed.
-  app.get("/calls", async (c) => c.json({ ...(await callsView(store, Date.parse(now()), { focus: c.req.query("focus") || null, rules })), pausedCampaigns: await pausedCampaigns() }));
+  app.get("/calls", async (c) => c.json(await callsView(store, Date.parse(now()), { focus: c.req.query("focus") || null, rules })));
 
   app.get("/call-tasks/:id", async (c) => {
     const view = await callTaskView(store, c.req.param("id"), Date.parse(now()), rules);

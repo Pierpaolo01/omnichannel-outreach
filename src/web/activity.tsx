@@ -180,10 +180,17 @@ export function describeEntry(entry: ActivityEntry, userZone: string): { icon: I
   }
 }
 
+/** What a skipped call step was, from the server's record of its attempts then (council on 57d874f, item 8). */
+function callSkipHistory(call: { readonly attempts: number; readonly callback: boolean } | null): string | null {
+  if (call === null) return null;
+  if (call.callback) return "No further call was made on this phone track.";
+  return call.attempts > 0 ? "Its remaining attempts were skipped: no further call was made on this phone track." : "It was never made.";
+}
+
 /** One control the user applied, as history: the step it named is said by its track's own name for a step. */
 function controlEntry(entry: Extract<ActivityEntry, { kind: "control" }>): { icon: IconName; tone: string; title: string; body: string | null; track: string | null } {
   const step = entry.step;
-  const name = step === null ? null : step.channel === "call" ? "Call" : `${stepNoun(step.track, step.channel)} ${step.number}`;
+  const name = step === null ? null : step.channel === "call" ? (step.call?.callback ? "Callback" : "Call") : `${stepNoun(step.track, step.channel)} ${step.number}`;
   const track = step?.track.several ? step.track.label : null;
   const at = name === null ? null : name === "Call" ? "the call" : name.charAt(0).toLowerCase() + name.slice(1);
   const plain = (title: string, body: string | null = null) => ({ icon: "system" as const, tone: PLAIN, title, body, track });
@@ -193,7 +200,7 @@ function controlEntry(entry: Extract<ActivityEntry, { kind: "control" }>): { ico
     case "resume":
       return plain("Resumed by you");
     case "skip":
-      return plain(`${name ?? "Step"} skipped by you`, step?.channel === "call" ? "It was never made." : "It was never sent.");
+      return plain(`${name ?? "Step"} skipped by you`, step?.channel === "call" ? callSkipHistory(step.call) : "It was never sent.");
     case "stop":
       return plain("Stopped by you");
     case "resume_from_next_step":

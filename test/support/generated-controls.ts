@@ -54,6 +54,11 @@ export interface ControlRunOptions {
   readonly occupancyKeepsSettled?: boolean;
   /** For a mutation (verifier R2-2 on 612aa05): every text confirmed withdrawn keeps its number's place for good. */
   readonly occupancyKeepsWithdrawnTexts?: boolean;
+  /**
+   * For a mutation (council on 57d874f, item 1): a confirmation left open sends the precondition of the read current when it
+   * is confirmed, not of the read it opened on, as a confirmation that re-targets on a live read would.
+   */
+  readonly clickTimeExpectation?: boolean;
 }
 
 export interface ControlRunResult {
@@ -665,10 +670,9 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
    * What a confirmation shown on `read` sends with the control (ticket 17b): the lead's status, and the step the preview
    * named, the step a skip skips or a restart resumes at. A control is applied only while it still holds.
    */
-  const expectOf = (read: EnrollmentRead, action: LeadControlApi): { status: string; step: string | null } => {
+  const expectOf = (read: EnrollmentRead, action: LeadControlApi): { status: string; preview: string } => {
     const c = read.controls.find((x) => x.action === action);
-    const p = c?.allowed ? c : null;
-    return { status: read.status, step: action === "skip" ? (p?.skips?.stepId ?? null) : action === "resume_from_next_step" || action === "move_to_win_back" ? (p?.next?.stepId ?? null) : null };
+    return { status: read.status, preview: c?.allowed ? c.digest : "" };
   };
   /** Each lead's last read a control was judged on, for a confirmation left open on it (the stale-confirmation stream). */
   const lastReads = new Map<string, EnrollmentRead>();
@@ -766,8 +770,15 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     const before = await others(null, null);
     const results = async () => JSON.stringify((await h.store.engine.subject(chosen.s.id, h.clock))?.results.map((r) => [r.stepId, r.result, r.reason]).sort());
     const was = await results();
-    const res = await h.request<{ error?: { message: string } }>("POST", `/api/enrollments/${chosen.s.id}/controls`, { requestId: `stale-${++requests}`, action: "skip", expect: expectOf(chosen.read, "skip") });
+    const current = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${chosen.s.id}`)).body;
+    // The confirmation is a snapshot: it sends the read it opened on (unless the mutation re-targets it on the newest read).
+    const shown = options.clickTimeExpectation === true ? current : chosen.read;
+    const res = await h.request<{ error?: { message: string } }>("POST", `/api/enrollments/${chosen.s.id}/controls`, { requestId: `stale-${++requests}`, action: "skip", expect: expectOf(shown, "skip") });
     if (res.status !== 409) problem(`P13: a Skip confirmed on ${chosen.s.id}'s read naming ${chosen.named.stepId}, sent at ${isoOf(now)} after that step changed, was answered ${res.status}`);
+    // One refusal order for the read and the action (judgeControl): where the current read refuses the skip, the stale
+    // request gets the same reason, whatever its precondition says (the search on 54f3a73).
+    const nowOffered = current.controls.find((c) => c.action === "skip");
+    if (nowOffered && !nowOffered.allowed && res.body.error?.message !== nowOffered.reason) problem(`P11: ${chosen.s.id}'s read refuses skip with "${nowOffered.reason}"; a stale Skip sent then was refused with "${res.body.error?.message ?? ""}"`);
     if ((await results()) !== was) problem(`P13: a stale Skip on ${chosen.s.id} changed its step results (${was} to ${await results()})`);
     await unchanged(before, `a stale Skip on ${chosen.s.id}`);
     features.add("a-stale-skip-confirmation-refused");

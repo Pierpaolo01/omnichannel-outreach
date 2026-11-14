@@ -146,6 +146,37 @@ export function nextStepSentence(lead: RecordLead, userZone: string): string {
   }
 }
 
+/**
+ * Whether a row in this status says where it stands by its open call's line (`recordCallLine`, "Their call is on today's
+ * list…"), when the record has one, instead of the next-step sentence beside it: one sentence per row, as the prototype
+ * says it (council on 57d874f, item 4b). Every other status says it by `nextStepSentence`.
+ */
+export const CALL_LINE_IS_THE_SENTENCE = {
+  queued: false,
+  active: false,
+  in_win_back: false,
+  waiting_on_call: true,
+  callback_scheduled: true,
+  replied: false,
+  interested_on_call: false,
+  paused: false,
+  declined_on_call: false,
+  stopped_manually: false,
+  sequence_finished_no_response: false,
+  finished_no_usable_channel: false,
+} as const satisfies Record<OutreachStatus, boolean>;
+
+/**
+ * What skipping a call step does, from the server's record of it (council on 57d874f, item 8): a callback is skipped; a call
+ * already tried has its remaining attempts skipped; only an untried call is never made.
+ */
+function callSkipPreview(skips: ControlStepView): string {
+  const on = skips.track.several ? `on ${lower(skips.track.label)}` : "on this phone track";
+  if (skips.call?.callback) return `The callback is skipped: no further call is made ${on}.`;
+  if ((skips.call?.attempts ?? 0) > 0) return `The call’s remaining attempts are skipped: no further call is made ${on}.`;
+  return `${capital(stepPhrase(skips))} is skipped and never made.`;
+}
+
 /** What a control will do, before the user confirms: the read's preview, the engine's transition on a copy of the lead. */
 export function controlPreviewText(control: AllowedControl, campaign: RecordLead["campaignState"], userZone: string): string {
   const provider = mayStillSendText(control.withProvider);
@@ -159,7 +190,7 @@ export function controlPreviewText(control: AllowedControl, campaign: RecordLead
       return next ? `Their outreach continues where it was: ${stepPhrase(next)}${due(next.dueAt, userZone)}.` : "Their outreach continues where it was.";
     case "skip": {
       const skips = control.skips;
-      const what = !skips ? "The current step is skipped and never sent." : skips.channel === "call" ? `${capital(stepPhrase(skips))} is skipped and never made.` : `${capital(stepPhrase(skips))} is skipped and never sent.`;
+      const what = !skips ? "The current step is skipped and never sent." : skips.channel === "call" ? callSkipPreview(skips) : `${capital(stepPhrase(skips))} is skipped and never sent.`;
       return join(what, next ? `Next: ${stepPhrase(next)}${due(next.dueAt, userZone)}.` : null);
     }
     case "stop":
@@ -180,25 +211,23 @@ export function controlPreviewText(control: AllowedControl, campaign: RecordLead
  * what may still be sent: that is a present state, said only by the current read (`mayStillSendText` on the record's
  * `mayStillSend` and the banner), and gone when the read says zero (verifier B3 on 8a1732a).
  */
-export function controlEffectText(effect: AllowedControl, userZone: string): string {
-  const next = effect.next;
-  const dueThen = (iso: string | null) => (iso ? ` (due ${whenIn(userZone, iso)})` : "");
+export function controlEffectText(effect: AllowedControl): string {
+  // Only what changed (council on 57d874f, item 4a): the row's sentence, read again after the answer, says where they stand now.
   switch (effect.action) {
     case "pause":
-      return next ? `Paused before ${stepPhrase(next)}.` : "Paused.";
+      return "Paused.";
     case "resume":
-      return next?.dueAt ? `Resumed, with ${stepPhrase(next)} next${dueThen(next.dueAt)}.` : "Resumed.";
+      return "Resumed.";
     case "skip": {
       const skips = effect.skips;
-      const what = !skips ? "Step skipped." : skips.channel === "call" ? "Call skipped." : `${capital(stepPhrase(skips))} skipped.`;
-      return join(what, next ? `${capital(stepPhrase(next))} was next${dueThen(next.dueAt)}.` : null);
+      return !skips ? "Step skipped." : skips.channel === "call" ? (skips.call?.callback ? "Callback skipped." : (skips.call?.attempts ?? 0) > 0 ? "Remaining call attempts skipped." : "Call skipped.") : `${capital(stepPhrase(skips))} skipped.`;
     }
     case "stop":
       return "Stopped.";
     case "resume_from_next_step":
-      return next ? `Resumed from the next step, at ${stepPhrase(next)}${dueThen(next.dueAt)}.` : "Resumed from the next step.";
+      return "Resumed from the next step.";
     case "move_to_win_back":
-      return `Moved to the win-back branch${next ? `, starting at ${stepPhrase(next)}${dueThen(next.dueAt)}` : ""}.`;
+      return "Moved to the win-back branch.";
     default: {
       const unhandled: never = effect.action;
       throw new Error(`A control with no effect sentence: ${String(unhandled)}`);

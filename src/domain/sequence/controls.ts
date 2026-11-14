@@ -203,42 +203,42 @@ export function campaignRefusal(row: { readonly launchedAt: number | null; reado
 }
 
 /**
- * What a control was confirmed on (coordinator's ruling on the verifier's B1 at 8a1732a): the lead's status in the read
- * the confirmation showed, and the step its preview named (the step a skip skips; the step a restart resumes at). Sent
- * with the request, so a confirmation shown on one state never applies to another, whichever tab or process sent first.
+ * What a control was confirmed on (coordinator's ruling on the verifier's B1 at 8a1732a; the precondition is the whole
+ * preview since the verifier's R1 on 57d874f): the lead's status in the read the confirmation showed, and the digest of
+ * the preview it showed (`previewDigest`). Sent with the request, so a confirmation shown on one state never applies to
+ * another, whichever tab or process sent first.
  */
 export interface LeadExpectation {
   readonly status: OutreachStatus;
-  readonly step: string | null;
+  readonly preview: string;
 }
 
 export const CHANGED_SINCE_CONFIRMED = "This lead changed since you confirmed this, so nothing was changed. Look at the row again and confirm what it shows now.";
-export const SKIP_STEP_CHANGED = "The step you confirmed skipping is no longer the step waiting, so nothing was skipped. Look at the row again and confirm the step it names now.";
-export const RESTART_STEP_CHANGED = "The step they would resume at changed since you confirmed this, so nothing was changed. Look at the row again and confirm the step it names now.";
+export const PREVIEW_CHANGED = "What this would do changed since you confirmed it, so nothing was changed. Look at the row again and confirm what it shows now.";
+
+const stepKey = (step: { readonly track: TrackDefinition; readonly stepId: string } | null): string => (step ? `${step.track.id}/${step.stepId}@${step.track.branch}` : "-");
+
+/**
+ * What a control's preview names, as one short string (verifier R1 on 57d874f): the action, the lead's status after it, the
+ * step it skips and the next step it leaves the lead on (track, step and branch). The same facts the preview shows
+ * (`effectOf`: `skipTarget` before, `currentStep` and the status after), and nothing that moves with the clock (a due time)
+ * or with a provider's answer (what may still be sent). The read carries it with each allowed control; the press sends it.
+ */
+export function previewDigest(before: SubjectState, action: LeadControl, after: SubjectState): string {
+  return `${action}|${deriveStatus(after)}|${action === "skip" ? stepKey(skipTarget(before)) : "-"}|${stepKey(currentStep(after))}`;
+}
 
 /**
  * Why a control no longer applies as confirmed, or null when it does (or carries no expectation). The status is the stored
- * lead's, as every read says it (`stored`); a skip's step is the step it would skip as of the action's instant (`before`), as
- * the read's preview judges it; a restart's step is the step the transition's result resumes at (`after`, null when refused).
+ * lead's, as every read says it (`stored`); the preview is the digest of what the action would do now, from the lead as
+ * of the action's instant (`before`) and the transition's result (`after`, null when the action is refused: then its own
+ * refusal comes first, `judgeControl`).
  */
 export function controlPrecondition(stored: SubjectState, before: SubjectState, action: LeadControl, after: SubjectState | null, expected: LeadExpectation | null): string | null {
   if (expected === null) return null;
   if (deriveStatus(stored) !== expected.status) return CHANGED_SINCE_CONFIRMED;
-  switch (action) {
-    case "skip":
-      return (skipTarget(before)?.stepId ?? null) === expected.step ? null : SKIP_STEP_CHANGED;
-    case "resume_from_next_step":
-    case "move_to_win_back":
-      return after === null || (currentStep(after)?.stepId ?? null) === expected.step ? null : RESTART_STEP_CHANGED;
-    case "pause":
-    case "resume":
-    case "stop":
-      return null;
-    default: {
-      const unhandled: never = action;
-      throw new Error(`A control with no precondition: ${String(unhandled)}`);
-    }
-  }
+  if (after === null) return null;
+  return previewDigest(before, action, after) === expected.preview ? null : PREVIEW_CHANGED;
 }
 
 export const CAMPAIGN_CHANGED_SINCE_CONFIRMED = "This campaign was paused or resumed since you confirmed this, so nothing was changed. Look at it again and confirm what it shows now.";

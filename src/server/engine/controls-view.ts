@@ -5,7 +5,7 @@
  * same reason (P11).
  */
 import { leadNow } from "../../domain/sequence/clock.ts";
-import { currentStep, judgeCampaignControl, LEAD_CONTROLS, skipTarget, type LeadControl } from "../../domain/sequence/controls.ts";
+import { currentStep, judgeCampaignControl, previewDigest, LEAD_CONTROLS, skipTarget, type LeadControl } from "../../domain/sequence/controls.ts";
 import { isLive } from "../../domain/sequence/attempt.ts";
 import { deriveStatus, runs } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
@@ -23,12 +23,20 @@ function stepView(state: SubjectState, step: NonNullable<ReturnType<typeof curre
     // The track's name as everywhere else (ticket 17b): "Email track 2" when the campaign has several on its channel.
     track: trackLabel(state.campaign.definition, step.track),
     channel: step.track.channel,
+    call: step.track.channel === "call" ? callRecordOf(state, step.stepId) : null,
     branch: step.track.branch,
     stepId: step.stepId,
     number: live.findIndex((s) => s.id === step.stepId) + 1,
     of: live.length,
     dueAt: due && step.dueAt !== null && runs(state) ? iso(now + Math.max(0, step.dueAt - lead)) : null,
   };
+}
+
+/** A call step's record: its calls logged so far (skip for now is no call), and whether its open task is a callback. */
+function callRecordOf(state: SubjectState, stepId: string): { attempts: number; callback: boolean } {
+  const tasks = state.callTasks.filter((t) => t.stepId === stepId);
+  const attempts = state.callAttempts.filter((a) => a.outcome !== "skip_for_now" && tasks.some((t) => t.id === a.taskId)).length;
+  return { attempts, callback: tasks.some((t) => t.open && t.kind === "callback") };
 }
 
 /** Work with a provider the change asks to withdraw: live past its claim, asked now and not before. */
@@ -60,6 +68,8 @@ export function effectOf(before: SubjectState, action: LeadControl, after: Subje
     skips: skipped ? stepView(before, skipped, now, false) : null,
     next: next ? stepView(after, next, now, true) : null,
     withProvider: newlyWithdrawn(before, after),
+    // What the preview names, which a confirmation sends back as its precondition (verifier R1 on 57d874f).
+    digest: previewDigest(before, action, after),
   };
 }
 

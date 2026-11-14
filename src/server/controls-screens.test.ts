@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { EngineHarness } from "../../test/support/engine-harness.ts";
 import { business, person } from "../../test/support/export-builder.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../domain/sequence/definition.ts";
-import type { ActivityView, CallsView, CampaignDetail, CampaignListItem, CompanyRecord, EnrollmentRead, LeadSearchResult, PersonRecord, RecordControls, TodayView } from "../shared/api.ts";
+import type { ActivityView, CallsView, CampaignDetail, CampaignListItem, CompanyRecord, EnrollmentRead, LeadSearchResult, PersonRecord, RecordCalls, RecordControls, TodayView } from "../shared/api.ts";
 
 /**
  * The reads ticket 17b's screens show (ADR 0003 "Ticket 17a", "Reads"), each a read-only addition built by the engine's
@@ -159,6 +159,104 @@ describe("Today and Calls name the paused campaigns whose calls left the list", 
   });
 });
 
+describe("each read is one snapshot of a campaign's pause (council on 57d874f, items 6 and 7)", () => {
+  /** Pauses the campaign through its route the first time a lead is loaded during `read`, between this read's loads. */
+  async function pauseDuring<T>(h: EngineHarness, campaignId: string, read: () => Promise<T>): Promise<T> {
+    const load = h.store.engine.subject.bind(h.store.engine);
+    let armed = true;
+    h.store.engine.subject = async (id: string, now: number) => {
+      const st = await load(id, now);
+      if (armed) {
+        armed = false;
+        expect((await h.request("POST", `/api/campaigns/${campaignId}/pause`, { requestId: "pause-between-loads" })).status).toBe(200);
+      }
+      return st;
+    };
+    try {
+      return await read();
+    } finally {
+      h.store.engine.subject = load;
+    }
+  }
+
+  test("a record: a pause landing after its leads were loaded does not make a row both on hold and on today's list", async () => {
+    const { h, campaign, get } = await world();
+    const clinics = await campaign("Clinics");
+    await h.advanceTo(MONDAY_9 + H);
+    const record = await pauseDuring(h, clinics.id, () => get<PersonRecord & RecordCalls & RecordControls>(`/api/people/${clinics.record("Pat Oneil")}`));
+    for (const lead of record.leads) {
+      const listed = record.calls.filter((c) => c.enrollmentId === lead.id && c.listed);
+      expect(lead.campaignState.paused && listed.length > 0, JSON.stringify({ campaignState: lead.campaignState, listed })).toBe(false);
+    }
+  });
+
+  test("Today and Calls: no call is both on the list and counted as off it for the pause, whichever leads were loaded before the pause landed", async () => {
+    const { h, campaign, get } = await world();
+    const clinics = await campaign("Clinics");
+    await h.advanceTo(MONDAY_9 + H);
+    const before = await get<CallsView>("/api/calls");
+    const calls = before.readyNow.length + before.laterToday.length;
+    expect(calls).toBe(3);
+    const seen = await pauseDuring(h, clinics.id, () => get<CallsView>("/api/calls"));
+    const off = seen.pausedCampaigns.reduce((n, p) => n + p.calls, 0);
+    expect(seen.readyNow.length + seen.laterToday.length + off).toBe(calls);
+    const today = await pauseDuring(h, clinics.id, () => get<TodayView>("/api/today"));
+    expect(today.readyNow + today.laterToday + today.pausedCampaigns.reduce((n, p) => n + p.calls, 0)).toBe(calls);
+  });
+
+  test("the pause line counts calls the list would show with the pause lifted: two parallel phone tracks are two calls; a callback for next week is none", async () => {
+    const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: 10 * MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+    await h.tick();
+    expect((await h.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "Europe/London" })).status).toBe(200);
+    const { campaign: c } = await h.createCampaign("Two calls", { businesses: [HARBOUR], people: [PAT] });
+    const call = (id: string) => track(id, "call", [{ ...email(`${id}-c`), subject: "", body: "" }]);
+    await h.defineSequence(c.id, { ...DEFINITION, tracks: [track("e1", "email", [email("s1")]), call("p1"), call("p2")] });
+    expect((await h.launch(c.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + H);
+    const listed = (await h.request<CallsView>("GET", "/api/calls")).body;
+    expect(listed.readyNow.length).toBe(2);
+    // One of Pat's calls becomes a callback for next Monday: off today's list, paused or not.
+    const task = listed.readyNow[0]!.taskId;
+    const numberId = (await h.request<{ numbers: { detailId: string; bad: boolean }[] }>("GET", `/api/call-tasks/${task}`)).body.numbers.find((n) => !n.bad)?.detailId;
+    expect((await h.request("POST", `/api/call-tasks/${task}/outcome`, { requestId: "cb", outcome: "callback_requested", callbackAt: new Date(MONDAY_9 + 7 * DAY).toISOString(), numberId, note: "" })).status).toBe(200);
+    const { body: twoCalls } = await h.request<CallsView>("GET", "/api/calls");
+    expect(twoCalls.readyNow.length + twoCalls.laterToday.length).toBe(0);
+    expect((await h.request("POST", `/api/campaigns/${c.id}/pause`, { requestId: "p" })).status).toBe(200);
+    expect((await h.request<CallsView>("GET", "/api/calls")).body.pausedCampaigns).toEqual([]);
+    expect((await h.request("POST", `/api/campaigns/${c.id}/resume`, { requestId: "r" })).status).toBe(200);
+    // Without the callback: the call it held is listed; with a second lead's two calls, the pause line counts calls.
+    const { campaign: c2 } = await h.createCampaign("Two calls, again", { businesses: [HARBOUR], people: [PAT] });
+    await h.defineSequence(c2.id, { ...DEFINITION, tracks: [track("e1", "email", [email("s1")]), call("p1"), call("p2")] });
+    expect((await h.launch(c2.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    const { body: ready } = await h.request<CallsView>("GET", "/api/calls");
+    const inC2 = ready.readyNow.filter((x) => x.campaign.id === c2.id).length;
+    expect(inC2).toBe(2);
+    expect((await h.request("POST", `/api/campaigns/${c2.id}/pause`, { requestId: "p2" })).status).toBe(200);
+    expect((await h.request<CallsView>("GET", "/api/calls")).body.pausedCampaigns).toEqual([{ id: c2.id, name: "Two calls, again", pausedSince: new Date(MONDAY_9 + 2 * H).toISOString(), calls: 2 }]);
+  });
+});
+
+describe("a skipped call says what is true of its attempts (council on 57d874f, item 8)", () => {
+  test("a call already tried and redialed: the skip names its attempts in the preview, the answer and Activity; an untried call names none", async () => {
+    const { h, campaign, control, get } = await world();
+    const clinics = await campaign("Clinics");
+    await h.advanceTo(MONDAY_9 + H);
+    const pat = clinics.lead("Pat Oneil");
+    const task = (await get<CallsView>("/api/calls")).readyNow.find((x) => x.enrollmentId === pat)!.taskId;
+    const numberId = (await h.request<{ numbers: { detailId: string; bad: boolean }[] }>("GET", `/api/call-tasks/${task}`)).body.numbers.find((n) => !n.bad)?.detailId;
+    expect((await h.request("POST", `/api/call-tasks/${task}/outcome`, { requestId: "redial", outcome: "no_answer", redial: true, numberId, note: "" })).status).toBe(200);
+    const read = await get<EnrollmentRead>(`/api/enrollments/${pat}`);
+    expect(read.controls.find((c) => c.action === "skip")).toMatchObject({ allowed: true, skips: { channel: "call", call: { attempts: 1, callback: false } } });
+    const answer = await control(pat, "skip");
+    expect(answer.status).toBe(200);
+    const activity = await get<ActivityView>(`/api/people/${clinics.record("Pat Oneil")}/activity`);
+    expect(activity.entries.find((e) => e.kind === "control")).toMatchObject({ action: "skip", step: { channel: "call", call: { attempts: 1, callback: false } } });
+    const nia = clinics.lead("Nia Cole");
+    expect((await get<EnrollmentRead>(`/api/enrollments/${nia}`)).controls.find((c) => c.action === "skip")).toMatchObject({ skips: { channel: "call", call: { attempts: 0, callback: false } } });
+  });
+});
+
 describe("Activity says each control, from the engine's record of accepted requests", () => {
   test("pause, resume, skip, stop, restart and the campaign's pause, each once, newest first; a refused control says nothing", async () => {
     const { h, campaign, control, campaignControl, get } = await world();
@@ -193,14 +291,14 @@ describe("Activity says each control, from the engine's record of accepted reque
     const campaignRef = { id: clinics.id, name: "Clinics" };
     const EMAIL = { label: "Email track", several: false, branch: "main" };
     expect(controls).toEqual([
-      { campaign: campaignRef, at: at(MONDAY_9 + 10 * H), kind: "control", action: "move_to_win_back", step: { channel: "email", track: { label: "Win-back email track", several: false, branch: "win_back" }, number: 1 } },
+      { campaign: campaignRef, at: at(MONDAY_9 + 10 * H), kind: "control", action: "move_to_win_back", step: { channel: "email", track: { label: "Win-back email track", several: false, branch: "win_back" }, number: 1, call: null } },
       { campaign: campaignRef, at: at(MONDAY_9 + 9 * H), kind: "control", action: "stop", step: null },
-      { campaign: campaignRef, at: at(MONDAY_9 + 8 * H), kind: "control", action: "resume_from_next_step", step: { channel: "email", track: EMAIL, number: 3 } },
+      { campaign: campaignRef, at: at(MONDAY_9 + 8 * H), kind: "control", action: "resume_from_next_step", step: { channel: "email", track: EMAIL, number: 3, call: null } },
       { campaign: campaignRef, at: at(MONDAY_9 + 7 * H), kind: "control", action: "stop", step: null },
       { campaign: campaignRef, at: at(MONDAY_9 + 6 * H), kind: "campaign_resumed" },
       { campaign: campaignRef, at: at(MONDAY_9 + 5 * H), kind: "campaign_paused" },
-      { campaign: campaignRef, at: at(MONDAY_9 + 4 * H), kind: "control", action: "skip", step: { channel: "email", track: EMAIL, number: 2 } },
-      { campaign: campaignRef, at: at(MONDAY_9 + 3 * H), kind: "control", action: "skip", step: { channel: "call", track: { label: "Phone track", several: false, branch: "main" }, number: 1 } },
+      { campaign: campaignRef, at: at(MONDAY_9 + 4 * H), kind: "control", action: "skip", step: { channel: "email", track: EMAIL, number: 2, call: null } },
+      { campaign: campaignRef, at: at(MONDAY_9 + 3 * H), kind: "control", action: "skip", step: { channel: "call", track: { label: "Phone track", several: false, branch: "main" }, number: 1, call: { attempts: 0, callback: false } } },
       { campaign: campaignRef, at: at(MONDAY_9 + 2 * H), kind: "control", action: "resume", step: null },
       { campaign: campaignRef, at: at(MONDAY_9 + H), kind: "control", action: "pause", step: null },
     ]);

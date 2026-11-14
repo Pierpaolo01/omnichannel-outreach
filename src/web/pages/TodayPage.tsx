@@ -89,6 +89,9 @@ function UpNext({ view }: { view: TodayView }) {
   const ready = view.upNext.filter((x) => x.bucket === "ready_now");
   const later = view.upNext.filter((x) => x.bucket === "later_today");
   if (ready.length === 0 && later.length === 0) {
+    // While a pause holds calls off the list, the line under this says so; "no calls… once a campaign reaches a call step"
+    // would contradict it (council on 57d874f, item 4c).
+    if (view.pausedCampaigns.length > 0 && !view.capacityReached) return null;
     return <p className="py-3.5 text-[14px] text-muted">{view.capacityReached ? CAPACITY_USED : "No calls on your list. Calls appear here once a launched campaign reaches a call step."}</p>;
   }
   return (

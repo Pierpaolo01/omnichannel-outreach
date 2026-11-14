@@ -3,7 +3,7 @@
  * resume, on the call desk's rule (ADR 0003 4.4.1), with no lock:
  *
  * - **A press is stored before its first send**, in shared storage (`localStorage`), under the request id made at the
- *   press, with **what its confirmation showed** (`expect`: the lead's status and the step its preview named, or the
+ *   press, with **what its confirmation showed** (`expect`: the lead's status and its preview's digest, or the
  *   campaign's pause). A press storage will not take is not sent: one the page could not track could not be recovered.
  * - **Any page sends any stored press for the leads or campaigns it shows**: once when it first sees it, then only on that
  *   press's own backoff (1, 2, 4, 8 seconds, then every 8). Every send reads the stored press, so a retry, a reload or
@@ -20,10 +20,10 @@ import type { KeyValue } from "../calls/callDesk.ts";
 
 export type ControlTarget = { readonly kind: "lead"; readonly id: string } | { readonly kind: "campaign"; readonly id: string };
 
-/** What a lead control's confirmation showed: the lead's status, and the step a skip skips or a restart resumes at. */
+/** What a lead control's confirmation showed: the lead's status, and its preview's digest (the whole preview: verifier R1 on 57d874f). */
 export interface LeadExpectation {
   readonly status: OutreachStatus;
-  readonly step: string | null;
+  readonly preview: string;
 }
 /** What a campaign's pause or resume confirmation showed: the pause read. */
 export interface CampaignExpectation {
@@ -90,8 +90,15 @@ function parse(text: string | null): PressEntry | null {
 
 export class ControlRequests {
   private readonly ports: ControlRequestPorts;
-  /** Per request id: a send in flight from this page, and the timer of its next send. */
-  private readonly inFlight = new Set<string>();
+  /**
+   * The generation this page's requests belong to (council on 57d874f, item 5). `stop` ends one and `start` begins the
+   * next: a send records the generation it was made in, and one from an older generation neither counts as in flight nor
+   * decides anything when it settles (its answer is dropped, nothing is rescheduled). One rule for every stop and start,
+   * React's setup, cleanup and setup in development included (the replay review bot P2 on 07fab27 found first).
+   */
+  private generation = 0;
+  /** Per request id: the generation of the send in flight from this page, and the timer of its next send. */
+  private readonly inFlight = new Map<string, number>();
   private readonly timers = new Map<string, () => void>();
   private readonly attempts = new Map<string, number>();
   /** Request ids whose last send here had no answer. */
@@ -148,7 +155,7 @@ export class ControlRequests {
   watch(targets: readonly ControlTarget[]): void {
     for (const e of this.stored()) {
       if (!targets.some((t) => sameTarget(t, e.target))) continue;
-      if (!this.inFlight.has(e.requestId) && !this.timers.has(e.requestId)) void this.send(e.requestId);
+      if (this.inFlight.get(e.requestId) !== this.generation && !this.timers.has(e.requestId)) void this.send(e.requestId);
     }
   }
 
@@ -174,9 +181,10 @@ export class ControlRequests {
     this.stopping = this.stopSignal();
   }
 
-  /** The page stops: its timers end, its sends in flight are let go, and every press stays stored for the next page. */
+  /** The page stops: its generation ends, its timers end, its sends in flight are let go, and every press stays stored. */
   stop(): void {
     this.stopped = true;
+    this.generation++;
     this.signalStop();
     for (const cancel of this.timers.values()) cancel();
     this.timers.clear();
@@ -188,19 +196,21 @@ export class ControlRequests {
   }
 
   private async send(requestId: string): Promise<void> {
-    if (this.halted() || this.inFlight.has(requestId)) return;
+    const generation = this.generation;
+    if (this.halted() || this.inFlight.get(requestId) === generation) return;
     // Sent only while it is still stored: an answer another page got removed it.
     const entry = parse(this.ports.local.get(keyOf(requestId)));
     if (!entry) return;
-    this.inFlight.add(requestId);
+    this.inFlight.set(requestId, generation);
     let answer: SendAnswer | "stopped" | null = null;
     try {
       answer = await Promise.race([this.ports.send(entry), this.stopping]);
     } catch {
       answer = null;
     }
-    this.inFlight.delete(requestId);
-    if (answer === "stopped" || this.halted()) return;
+    if (this.inFlight.get(requestId) === generation) this.inFlight.delete(requestId);
+    // A send of an ended generation decides nothing: the generation after it sends the press itself.
+    if (answer === "stopped" || generation !== this.generation || this.halted()) return;
     if (answer === null) {
       this.unanswered.add(requestId);
       const n = this.attempts.get(requestId) ?? 0;
@@ -221,4 +231,15 @@ export class ControlRequests {
     this.ports.onResult(answer.kind === "accepted" ? { kind: "accepted", entry, body: answer.body } : { kind: "refused", entry, message: answer.message });
     this.ports.onChange();
   }
+}
+
+/**
+ * Which answer a row shows after `incoming` arrives (verifier R2 on 57d874f): each tab's line belongs to its own press. An
+ * answer to this tab's press (`own`, by request id) replaces what is shown; an answer to another tab's press shows only
+ * when nothing of this tab's own is shown, and never replaces it. The row's read is refreshed either way.
+ */
+export function shownResult(current: ControlResult | null, incoming: ControlResult, own: ReadonlySet<string>): ControlResult | null {
+  if (own.has(incoming.entry.requestId)) return incoming;
+  if (current !== null && own.has(current.entry.requestId)) return current;
+  return incoming;
 }

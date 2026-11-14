@@ -1,7 +1,7 @@
 import type { APIRequestContext, Locator, Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { OUTREACH_STATUSES } from "../src/domain/outreach-status.ts";
-import type { BeforeLaunchView, CampaignDefinition, CampaignListItem, CompanyRecord, ControlStepView, ControlView, ImportRecord, LeadControlApi, LeadSearchResult, OutreachStatus, PersonRecord, RecordCalls, RecordControls, RecordLead, SequenceView, SummaryEntry } from "../src/shared/api.ts";
+import type { BeforeLaunchView, CampaignDefinition, CampaignListItem, CompanyRecord, ControlStepView, ControlView, EnrollmentRead, ImportRecord, LeadControlApi, LeadSearchResult, OutreachStatus, PersonRecord, RecordCalls, RecordControls, RecordLead, SequenceView, SummaryEntry } from "../src/shared/api.ts";
 import { refusedPair, respond, serverError } from "./mocks.ts";
 import { FAKE_INBOX, FAKE_NUMBERS, TWO_CHANNELS, fakeCallsApp, fakeProviderApp, type CallsScenario, type FakeCallsApp, type FakeProviderApp } from "./fake-provider.ts";
 import { fixture } from "./support.ts";
@@ -167,9 +167,9 @@ const BUSINESS_HEADER_ONLY_MISSING_PLACE =
  * them, so every status shows its sentence and its controls. Fictitious.
  */
 export function galleryLead(id: string, campaignId: string, status: OutreachStatus, fields: Partial<RecordLead> = {}): RecordLead {
-  const email = (number: number, dueAt: string | null = null): ControlStepView => ({ trackId: "e1", track: { label: "Email track", several: false, branch: "main" }, channel: "email", branch: "main", stepId: `s${number}`, number, of: 3, dueAt });
+  const email = (number: number, dueAt: string | null = null): ControlStepView => ({ trackId: "e1", track: { label: "Email track", several: false, branch: "main" }, channel: "email", call: null, branch: "main", stepId: `s${number}`, number, of: 3, dueAt });
   const ended = `Outreach to them has ended in this campaign (${status.replaceAll("_", " ")}).`;
-  const ok = (action: LeadControlApi, more: Partial<Extract<ControlView, { allowed: true }>> = {}): ControlView => ({ action, allowed: true, statusAfter: status, skips: null, next: null, withProvider: 0, ...more });
+  const ok = (action: LeadControlApi, more: Partial<Extract<ControlView, { allowed: true }>> = {}): ControlView => ({ action, allowed: true, statusAfter: status, skips: null, next: null, withProvider: 0, digest: `${action}|gallery`, ...more });
   const no = (action: LeadControlApi, reason: string): ControlView => ({ action, allowed: false, reason });
   const running = [ok("pause", { statusAfter: "paused", next: email(2) }), no("resume", "They are not paused."), ok("skip", { skips: email(2), next: email(3, "2026-11-13T09:00:00.000Z") }), ok("stop", { statusAfter: "stopped_manually" }), no("resume_from_next_step", "Only a lead that replied or was stopped can be resumed (question Q6)."), no("move_to_win_back", "Only a lead that replied or was stopped can be moved to win-back.")];
   const controls: ControlView[] =
@@ -531,6 +531,16 @@ export async function leadControl(f: FakeCallsApp, who: string, action: string):
   const enrollment = rows.find((r) => r.name === who)?.enrollments[0]?.id ?? "";
   const out = await f.harness.request("POST", `/api/enrollments/${enrollment}/controls`, { requestId: `elsewhere-${action}-${enrollment}-${Date.now()}`, action });
   if (out.status !== 200) throw new Error(`the control was refused: ${JSON.stringify(out.body)}`);
+}
+
+/** Skips a lead's current step over HTTP, on a fresh read's precondition, as another tab would (ticket 17b). */
+export async function skipElsewhere(f: FakeCallsApp, who: string): Promise<void> {
+  const rows = (await f.harness.request<LeadSearchResult>("GET", `/api/leads?campaign=${f.campaign}&limit=500`)).body.rows;
+  const enrollment = rows.find((r) => r.name === who)?.enrollments[0]?.id ?? "";
+  const read = (await f.harness.request<EnrollmentRead>("GET", `/api/enrollments/${enrollment}`)).body;
+  const skip = read.controls.find((c) => c.action === "skip");
+  const out = await f.harness.request("POST", `/api/enrollments/${enrollment}/controls`, { requestId: `elsewhere-skip-${enrollment}-${Date.now()}`, action: "skip", expect: { status: read.status, preview: skip?.allowed ? skip.digest : "" } });
+  if (out.status !== 200) throw new Error(`the skip was refused: ${JSON.stringify(out.body)}`);
 }
 
 /** A win-back calls app of its own whose campaign is paused, at Monday 10:00 London (ticket 17b); one per name. */
@@ -1777,7 +1787,7 @@ export const SCREENS: readonly Screen[] = [
   { name: "record not found", open: async (page) => { await page.goto("/leads/people/nobody"); await settle(page, "No one found"); } },
   { name: "page not found", open: async (page) => { await page.goto("/nowhere"); await settle(page, "Page not found"); } },
   // Ticket 17b: pause, resume, skip, stop and restart on the record, the campaign page and the list.
-  { name: "controls: a person's campaign row, running, with its sentence and controls", open: async (page) => { const f = await calls(page, "win-back", "/"); await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`); await settle(page, "Next: the call."); } },
+  { name: "controls: a person's campaign row, running, with its sentence and controls", open: async (page) => { const f = await calls(page, "win-back", "/"); await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`); await settle(page, "Their call is on today’s list."); } },
   {
     name: "controls: a lead control's confirmation, with the read's preview",
     open: async (page) => {
@@ -1809,12 +1819,13 @@ export const SCREENS: readonly Screen[] = [
     },
   },
   {
+    // A real refusal, never a mock (council on 57d874f, item 3): a Skip confirmed on the call after another tab skipped it.
     name: "controls: a lead control refused in place",
     open: async (page) => {
-      await page.route("**/api/enrollments/*/controls", (route) => respond(route, { error: { code: "control_refused", message: "No step is waiting: the next track has not started yet." } }, 409));
-      const f = await calls(page, "win-back", "/");
+      const f = await calls(page, "win-back", "/", "controls-refused");
       await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
       await page.getByRole("button", { name: "Skip this step: Amira Hassan in Clinics, London" }).click();
+      await skipElsewhere(f, "Amira Hassan");
       await page.getByRole("group").getByRole("button", { name: "Skip this step", exact: true }).click();
       await settle(page, "Skip this step was not applied.");
     },
@@ -2453,7 +2464,7 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
       await page.keyboard.press("Enter");
     },
     act: (page) => page.keyboard.press("Enter"),
-    focused: (page) => page.getByRole("status").filter({ hasText: /^Paused before the call\./ }),
+    focused: (page) => page.getByRole("status").filter({ hasText: /^Paused\.$/ }),
   },
   {
     name: "Dismiss on a refused lead control returns focus to the row's first control",

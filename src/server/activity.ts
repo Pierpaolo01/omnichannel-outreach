@@ -124,7 +124,7 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
       if (!action) continue;
       const effect = accepted.effect === null ? null : (JSON.parse(accepted.effect) as ControlView);
       const named = effect?.allowed ? (action === "skip" ? effect.skips : action === "resume_from_next_step" || action === "move_to_win_back" ? effect.next : null) : null;
-      entries.push({ campaign, at, kind: "control", action, step: named ? { channel: named.channel, track: labelOf(named.trackId), number: named.number } : null });
+      entries.push({ campaign, at, kind: "control", action, step: named ? { channel: named.channel, track: labelOf(named.trackId), number: named.number, call: named.call ?? null } : null });
     }
     if (progress.reply) entries.push({ campaign, at: progress.reply.at, kind: "replied", channel: progress.reply.channel });
     else if (progress.endedAt !== null && (progress.status === "sequence_finished_no_response" || progress.status === "finished_no_usable_channel")) {

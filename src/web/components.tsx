@@ -5,6 +5,7 @@ import { declinedRecordLine, recordCallLine } from "./calls/wording.ts";
 import { Icon } from "./icons.tsx";
 import { StatusBadge } from "./status.tsx";
 import { CampaignPausedMarker, LeadControls, LeadSentence } from "./controls/ControlViews.tsx";
+import { CALL_LINE_IS_THE_SENTENCE } from "./controls/wording.ts";
 import type { Controls } from "./controls/useControls.ts";
 import { clockIn, useNow } from "./time.ts";
 import type { Freshness } from "./calls/refresher.ts";
@@ -162,7 +163,8 @@ export function CampaignRows({
               </span>
               <StatusBadge status={status} />
             </div>
-            {lead && <LeadSentence lead={lead} userZone={leads.userZone} />}
+            {/* One sentence per row: a row waiting on a call or a callback says it by its call line, when it has one (council on 57d874f, item 4b). */}
+            {lead && !(CALL_LINE_IS_THE_SENTENCE[status] && (calls?.calls.some((c) => c.enrollmentId === enrollment.id) ?? false)) && <LeadSentence lead={lead} userZone={leads.userZone} />}
             {/* A decline on a call and the path it took (ticket 16c), beside the status the server reads now. */}
             {calls?.declines
               .filter((d) => d.enrollmentId === enrollment.id)

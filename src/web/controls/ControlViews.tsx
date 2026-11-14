@@ -1,7 +1,8 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { CampaignPauseRead, ControlAnswer, LeadControlApi, OutreachStatus, RecordLead } from "../../shared/api.ts";
 import type { Controls } from "./useControls.ts";
-import type { ControlTarget, LeadExpectation } from "./requests.ts";
+import type { ControlTarget } from "./requests.ts";
+import { campaignConfirmationChanged, confirmationChanged, openCampaignConfirmation, openLeadConfirmation, type CampaignConfirmation, type LeadConfirmation } from "./confirmation.ts";
 import {
   CAMPAIGN_DONE,
   CONTROL_LABEL,
@@ -15,7 +16,6 @@ import {
   pausedBannerText,
   refusalOf,
   statusGroupCounts,
-  type AllowedControl,
 } from "./wording.ts";
 
 /**
@@ -23,7 +23,23 @@ import {
  * Cancel. It is not a modal: focus moves to the action when it opens, Escape or Cancel closes it and returns focus to the
  * control that opened it.
  */
-export function ConfirmStrip({ text, action, onConfirm, onCancel }: { text: string; action: string; onConfirm: () => void; onCancel: () => void }) {
+export function ConfirmStrip({
+  text,
+  action,
+  onConfirm,
+  onCancel,
+  changed = null,
+  busy = null,
+}: {
+  text: string;
+  action: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+  /** A newer read differs from the snapshot shown: said beside it, never changing what is sent. */
+  changed?: string | null;
+  /** Another press on the same lead or campaign is on its way: the action waits, and says why. */
+  busy?: string | null;
+}) {
   const textId = useId();
   const confirmRef = useRef<HTMLButtonElement | null>(null);
   useEffect(() => confirmRef.current?.focus(), []);
@@ -41,9 +57,11 @@ export function ConfirmStrip({ text, action, onConfirm, onCancel }: { text: stri
     >
       <span id={textId} className="min-w-0 flex-[1_1_320px] text-base-content [overflow-wrap:anywhere]">
         {text}
+        {changed && <span className="mt-1 block text-ink-2">{changed}</span>}
+        {busy && <span className="mt-1 block text-ink-2">{busy}</span>}
       </span>
       <span className="flex flex-wrap gap-2">
-        <button type="button" ref={confirmRef} className="btn btn-primary btn-sm font-semibold" onClick={onConfirm}>
+        <button type="button" ref={confirmRef} className="btn btn-primary btn-sm font-semibold" disabled={busy !== null} onClick={onConfirm}>
           {action}
         </button>
         <button type="button" className="btn btn-ghost btn-sm font-medium text-muted hover:text-base-content" onClick={onCancel}>
@@ -122,29 +140,6 @@ function ControlStatus({
   );
 }
 
-/**
- * What a confirmation showed, sent with the control so the server applies it only while it still holds (coordinator's
- * ruling on the verifier's B1 at 8a1732a): the lead's status in the read, and the step the preview named, the step a skip
- * skips or a restart resumes at.
- */
-export function expectationOf(lead: Pick<RecordLead, "status">, control: AllowedControl): LeadExpectation {
-  switch (control.action) {
-    case "skip":
-      return { status: lead.status, step: control.skips?.stepId ?? null };
-    case "resume_from_next_step":
-    case "move_to_win_back":
-      return { status: lead.status, step: control.next?.stepId ?? null };
-    case "pause":
-    case "resume":
-    case "stop":
-      return { status: lead.status, step: null };
-    default: {
-      const unhandled: never = control.action;
-      throw new Error(`A control with no precondition: ${String(unhandled)}`);
-    }
-  }
-}
-
 /** The controls the spec's user expects in a status, so a refusal of one is said where they would look for it. */
 const EXPECTED = {
   queued: ["skip"],
@@ -168,7 +163,8 @@ const EXPECTED = {
  */
 export function LeadControls({ lead, userZone, controls, who, campaignName }: { lead: RecordLead; userZone: string; controls: Controls; who: string; campaignName: string }) {
   const target: ControlTarget = { kind: "lead", id: lead.id };
-  const [confirming, setConfirming] = useState<LeadControlApi | null>(null);
+  // The confirmation open, as a snapshot of the read it opened on (council on 57d874f, item 1): what it shows and sends.
+  const [opened, setOpened] = useState<LeadConfirmation | null>(null);
   const [unstored, setUnstored] = useState(false);
   const triggers = useRef(new Map<LeadControlApi, HTMLButtonElement>());
   const firstControl = useRef<HTMLButtonElement | null>(null);
@@ -179,21 +175,29 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
   const sentence = nextStepSentence(lead, userZone);
   // Before launch every control is refused for that one reason, which the sentence already says.
   const reasons = lead.campaignState.launched ? [...new Set(EXPECTED[lead.status].map((a) => refusalOf(lead, a)).filter((r): r is string => r !== null && r !== sentence))] : [];
-  const control = confirming ? (offered.find((c) => c.action === confirming) ?? null) : null;
 
-  // A confirmation whose control the read no longer allows (another tab, the worker) closes, and focus stays in the row.
-  if (confirming !== null && control === null) {
-    setConfirming(null);
+  // A confirmation whose control the read no longer allows (another tab, the worker) closes, and focus stays in the row;
+  // one still allowed keeps its snapshot, and says when the row changed.
+  if (opened !== null && !offered.some((c) => c.action === opened.action)) {
+    setOpened(null);
     setRefocus(true);
   }
   useEffect(() => {
     if (refocus) firstControl.current?.focus();
   }, [refocus]);
 
-  const confirm = (c: AllowedControl) => {
-    setConfirming(null);
+  const confirm = (snapshot: LeadConfirmation) => {
     focusNext.current = "status";
-    void controls.press(target, c.action, expectationOf(lead, c)).then((out) => setUnstored(!out.ok && out.why === "unstored"));
+    // The snapshot's precondition, never the newest read's: a step that changed since is the server's to refuse.
+    void controls.press(target, snapshot.action, snapshot.expect).then((out) => {
+      // A press refused here as busy keeps its confirmation open, saying why; it is never dropped without a word.
+      if (!out.ok && out.why === "busy") {
+        focusNext.current = null;
+        return;
+      }
+      setOpened(null);
+      setUnstored(!out.ok && out.why === "unstored");
+    });
   };
   const placeStatus = (el: HTMLElement | null) => {
     if (el && focusNext.current === "status") {
@@ -217,7 +221,7 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
         pendingText={(a) => `${CONTROL_PENDING[a]}…`}
         effectText={(body) => {
           const answer = body as ControlAnswer | null;
-          return answer?.effect ? controlEffectText(answer.effect, userZone) : "Done.";
+          return answer?.effect ? controlEffectText(answer.effect) : "Done.";
         }}
         unstored={unstored}
         onDismiss={() => {
@@ -227,7 +231,7 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
         }}
         focusRef={placeStatus}
       />
-      {offered.length > 0 && !control && (
+      {offered.length > 0 && !opened && (
         <div className="flex flex-wrap gap-1.5">
           {offered.map((c, i) => (
             <button
@@ -244,7 +248,7 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
                 controls.dismiss(target);
                 setUnstored(false);
                 setRefocus(false);
-                setConfirming(c.action);
+                setOpened(openLeadConfirmation(lead, c.action));
               }}
             >
               {CONTROL_LABEL[c.action]}
@@ -252,22 +256,28 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
           ))}
         </div>
       )}
-      {control && (
+      {opened && (
         <ConfirmStrip
-          text={controlPreviewText(control, lead.campaignState, userZone)}
-          action={CONTROL_LABEL[control.action]}
-          onConfirm={() => confirm(control)}
+          text={controlPreviewText(opened.control, opened.campaignState, userZone)}
+          action={CONTROL_LABEL[opened.action]}
+          changed={confirmationChanged(opened, lead) ? ROW_CHANGED : null}
+          busy={busy ? "Another change to this lead is on its way." : null}
+          onConfirm={() => confirm(opened)}
           onCancel={() => {
-            const back = triggers.current.get(control.action);
-            setConfirming(null);
+            const back = triggers.current.get(opened.action);
+            const action = opened.action;
+            setOpened(null);
             // The trigger is drawn again once the strip closes.
-            requestAnimationFrame(() => (triggers.current.get(control.action) ?? back ?? firstControl.current)?.focus());
+            requestAnimationFrame(() => (triggers.current.get(action) ?? back ?? firstControl.current)?.focus());
           }}
         />
       )}
     </>
   );
 }
+
+/** Beside a confirmation whose row a newer read changed: what it shows, and sends, is still what was opened. */
+export const ROW_CHANGED = "This row changed since you opened this.";
 
 /** The plain next-step sentence under a campaign row's status (one wording function, `nextStepSentence`). */
 export function LeadSentence({ lead, userZone }: { lead: RecordLead; userZone: string }) {
@@ -323,7 +333,9 @@ export function CampaignPauseControl({
   layout: (button: ReactNode, strip: ReactNode) => ReactNode;
 }) {
   const target: ControlTarget = { kind: "campaign", id: campaignId };
-  const [confirming, setConfirming] = useState<"pause" | "resume" | null>(null);
+  // The confirmation open, as a snapshot of the read it opened on (council on 57d874f, item 1).
+  const [opened, setOpened] = useState<CampaignConfirmation | null>(null);
+  const confirming = opened?.action ?? null;
   const [unstored, setUnstored] = useState(false);
   const [refocus, setRefocus] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
@@ -334,7 +346,7 @@ export function CampaignPauseControl({
   // A confirmation of an action the read no longer allows (another tab paused or resumed the campaign) closes, so the
   // action the read allows now is never left disabled behind it (review bot on 07fab27, P2).
   if (confirming !== null && confirming !== action) {
-    setConfirming(null);
+    setOpened(null);
     setRefocus(true);
   }
   // Focus goes back to the campaign's control once a confirmation another tab's change closed (verifier F2 on 8a1732a).
@@ -345,14 +357,14 @@ export function CampaignPauseControl({
     <button
       type="button"
       ref={triggerRef}
-      disabled={busy || confirming !== null}
+      disabled={busy || opened !== null}
       aria-label={`${action === "pause" ? "Pause campaign" : "Resume campaign"}: ${name}`}
       className="btn border-line-strong bg-base-100 font-medium"
       onClick={() => {
         controls.dismiss(target);
         setUnstored(false);
         setRefocus(false);
-        setConfirming(action);
+        setOpened(openCampaignConfirmation(read, action));
       }}
     >
       {action === "pause" ? "Pause campaign" : "Resume campaign"}
@@ -364,22 +376,31 @@ export function CampaignPauseControl({
       el.focus();
     }
   };
-  const showing = (confirming !== null && confirming === action) || busy || unstored || controls.result(target) !== null;
+  const showing = opened !== null || busy || unstored || controls.result(target) !== null;
   const strip = !showing ? null : (
       <div className="flex flex-col gap-2">
-      {confirming && confirming === action && (
+      {opened && (
         <ConfirmStrip
-          text={campaignConfirmText(confirming, name, read)}
-          action={confirming === "pause" ? "Pause campaign" : "Resume campaign"}
+          text={campaignConfirmText(opened.action, name, opened.read)}
+          action={opened.action === "pause" ? "Pause campaign" : "Resume campaign"}
+          changed={campaignConfirmationChanged(opened, read) ? "This campaign changed since you opened this." : null}
+          busy={busy ? "Another change to this campaign is on its way." : null}
           onConfirm={() => {
-            const action = confirming;
-            setConfirming(null);
+            const snapshot = opened;
             focusNext.current = "status";
-            // What the confirmation showed: the server applies it only while the campaign's pause is still as read (ticket 17b).
-            void controls.press(target, action, { pausedSince: read.pause.pausedSince }).then((out) => setUnstored(!out.ok && out.why === "unstored"));
+            // The snapshot's pause read: the server applies it only while the campaign's pause is still as it was then.
+            void controls.press(target, snapshot.action, snapshot.expect).then((out) => {
+              // A press refused here as busy keeps its confirmation open, saying why; never dropped without a word.
+              if (!out.ok && out.why === "busy") {
+                focusNext.current = null;
+                return;
+              }
+              setOpened(null);
+              setUnstored(!out.ok && out.why === "unstored");
+            });
           }}
           onCancel={() => {
-            setConfirming(null);
+            setOpened(null);
             requestAnimationFrame(() => triggerRef.current?.focus());
           }}
         />

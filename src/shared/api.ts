@@ -69,6 +69,11 @@ export interface ControlStepView {
   readonly trackId: string;
   /** The track's name, as the editor and Activity name it (ticket 17b). */
   readonly track: TrackLabel;
+  /**
+   * A call step's record (council on 57d874f, item 8): the calls logged on it so far (skip for now is not a call), and
+   * whether it is a callback the prospect asked for. Null for an email or a text.
+   */
+  readonly call: { readonly attempts: number; readonly callback: boolean } | null;
   readonly channel: "email" | "sms" | "call";
   readonly branch: "main" | "win_back";
   readonly stepId: string;
@@ -94,6 +99,11 @@ export type ControlView =
       readonly skips: ControlStepView | null;
       readonly next: ControlStepView | null;
       readonly withProvider: number;
+      /**
+       * What this preview names (the action, the status after, the step it skips, the next step and its branch), as one
+       * string: a confirmation sends it back with the press, and the control applies only while it is unchanged (ticket 17b).
+       */
+      readonly digest: string;
     };
 
 /** GET /api/enrollments/:id: the lead's progress and the controls allowed now (ticket 17a). */
@@ -126,7 +136,10 @@ export interface ControlAnswer {
   readonly replayed: boolean;
 }
 
-/** A paused campaign whose calls are off Today's and Calls' lists while it is paused (ticket 17b): the leads in it waiting on a call or a callback. */
+/**
+ * A paused campaign whose calls are off Today's and Calls' lists while it is paused (ticket 17b): `calls`, the open call
+ * tasks the engine's listing rule lists today with the pause lifted, judged on the same loaded leads as the list.
+ */
 export interface PausedCampaignCalls {
   readonly id: string;
   readonly name: string;
@@ -671,7 +684,7 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
   | {
       readonly kind: "control";
       readonly action: LeadControlApi;
-      readonly step: { readonly channel: "email" | "sms" | "call"; readonly track: TrackLabel; readonly number: number } | null;
+      readonly step: { readonly channel: "email" | "sms" | "call"; readonly track: TrackLabel; readonly number: number; readonly call: ControlStepView["call"] } | null;
     }
   /** The lead's campaign was paused or resumed while they were enrolled (ticket 17b), from the same record. */
   | { readonly kind: "campaign_paused" }

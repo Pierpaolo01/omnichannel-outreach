@@ -1,4 +1,4 @@
-import { currentStep } from "../../src/domain/sequence/controls.ts";
+import { currentStep, previewDigest } from "../../src/domain/sequence/controls.ts";
 import type { SubjectState } from "../../src/domain/sequence/state.ts";
 import { DEFAULT_RULES, type Rules } from "../../src/server/engine/rules.ts";
 import type { ControlRunOptions } from "./generated-controls.ts";
@@ -125,6 +125,12 @@ const RULES: Record<string, Partial<Rules>> = {
       return changed !== null ? { ok: false, reason: changed } : out;
     },
   },
+  // Verifier R1 on 57d874f: the precondition as it was before it became the whole preview, the status alone.
+  "the precondition checks only the status": {
+    controlPrecondition: (stored, before, action, after, expected) => R.controlPrecondition(stored, before, action, after, expected === null ? null : { ...expected, preview: after ? previewDigest(before, action, after) : expected.preview }),
+  },
+  // Council on 57d874f, item 1: the client re-targets an open confirmation on the newest read (the run option below).
+  "a confirmation sends the click-time expectation": {},
   "a reply the record holds clears the pre-send check": {
     presendAnswer: (answer, known) => (answer.kind === "reply" && "providerRef" in answer && known.includes(String(answer.providerRef)) ? { kind: "clear" as const } : answer),
   },
@@ -157,7 +163,11 @@ const EXPECTED: Record<string, { invariant: string; seed: number; options?: Part
   // With the provider answering the first thread's reply, as the adapter did on ca8baee: the defect restored.
   "a reply the record holds clears the pre-send check": { invariant: "P1", seed: 24, options: { presendFirstReply: true } },
   "a control applied after its precondition changed": { invariant: "P13", seed: 0 },
-  "the precondition checked before the lead's state": { invariant: "P11", seed: 85 },
+  // Seed 17 since the precondition became the whole preview (verifier R1 on 57d874f): the stale-confirmation stream sends a
+  // Skip to a lead that ended since its read, and the read's reason must be the action's (seed 85 found the order first).
+  "the precondition checked before the lead's state": { invariant: "P11", seed: 17 },
+  "the precondition checks only the status": { invariant: "P13", seed: 0 },
+  "a confirmation sends the click-time expectation": { invariant: "P13", seed: 0, options: { clickTimeExpectation: true } },
 };
 
 export const CONTROL_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number; readonly options?: Partial<ControlRunOptions> }> = Object.fromEntries(

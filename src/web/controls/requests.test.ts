@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { KeyValue } from "../calls/callDesk.ts";
-import { ControlRequests, NoControlAnswer, type ControlResult, type ControlTarget, type PressEntry, type SendAnswer } from "./requests.ts";
+import { ControlRequests, NoControlAnswer, shownResult, type ControlResult, type ControlTarget, type PressEntry, type SendAnswer } from "./requests.ts";
 
 /**
  * The controls' requests (ticket 17b), on the call desk's rule (ADR 0003 4.4.1), with no lock: a press is stored, under
@@ -140,7 +140,7 @@ const PAT: ControlTarget = { kind: "lead", id: "en-pat" };
 const NIA: ControlTarget = { kind: "lead", id: "en-nia" };
 const CLINICS: ControlTarget = { kind: "campaign", id: "c-clinics" };
 /** What a Skip confirmation on Pat's read showed: waiting on a call, the call named. */
-const ON_THE_CALL = { status: "waiting_on_call", step: "c1" } as const;
+const ON_THE_CALL = { status: "waiting_on_call", preview: "skip|active|p1/c1@main|e1/s2@main" } as const;
 
 describe("a press", () => {
   test("is stored before its first send, with its id and what its confirmation showed, and leaves on the accepted answer", async () => {
@@ -163,7 +163,7 @@ describe("a press", () => {
     const srv = server();
     const time = clock();
     const a = tab(storage, srv, time, ["id-1"]);
-    await a.requests.press(PAT, "stop", { status: "active", step: null });
+    await a.requests.press(PAT, "stop", { status: "active", preview: "" });
     await flush();
     expect(a.requests.unconfirmed(PAT)).toBe(true);
     a.requests.watch([PAT]);
@@ -173,7 +173,7 @@ describe("a press", () => {
     expect(srv.sent).toHaveLength(2);
     srv.answers.push({ kind: "accepted", body: null });
     await time.advance(2_000);
-    expect(srv.sent.map((e) => [e.requestId, e.expect])).toEqual([0, 1, 2].map(() => ["id-1", { status: "active", step: null }]));
+    expect(srv.sent.map((e) => [e.requestId, e.expect])).toEqual([0, 1, 2].map(() => ["id-1", { status: "active", preview: "" }]));
     expect(a.requests.pendingFor(PAT)).toBeNull();
     expect(a.results.map((r) => r.kind)).toEqual(["accepted"]);
   });
@@ -183,7 +183,7 @@ describe("a press", () => {
     const srv = server();
     const time = clock();
     const a = tab(storage, srv, time, ["id-1"]);
-    await a.requests.press(PAT, "pause", { status: "active", step: null });
+    await a.requests.press(PAT, "pause", { status: "active", preview: "" });
     await flush();
     srv.answers.push({ kind: "accepted", body: null });
     a.requests.retryNow();
@@ -198,7 +198,7 @@ describe("a press", () => {
     const time = clock();
     const a = tab(storage, srv, time, ["id-1"]);
     srv.answers.push({ kind: "refused", message: "They are already paused." });
-    await a.requests.press(PAT, "pause", { status: "active", step: null });
+    await a.requests.press(PAT, "pause", { status: "active", preview: "" });
     await flush();
     await time.advance(20_000);
     expect(srv.sent).toHaveLength(1);
@@ -212,7 +212,7 @@ describe("a press", () => {
     const srv = server();
     const time = clock();
     const a = tab(storage, srv, time, ["id-1"]);
-    expect(await a.requests.press(PAT, "stop", { status: "active", step: null })).toEqual({ ok: false, why: "unstored" });
+    expect(await a.requests.press(PAT, "stop", { status: "active", preview: "" })).toEqual({ ok: false, why: "unstored" });
     await flush();
     expect(srv.sent).toEqual([]);
   });
@@ -226,7 +226,7 @@ describe("a press", () => {
     await a.requests.press(PAT, "skip", ON_THE_CALL);
     expect(await a.requests.press(PAT, "skip", ON_THE_CALL)).toEqual({ ok: false, why: "busy" });
     srv.answers.push({ kind: "accepted", body: null });
-    expect(await a.requests.press(NIA, "pause", { status: "active", step: null })).toMatchObject({ ok: true, entry: { requestId: "id-2" } });
+    expect(await a.requests.press(NIA, "pause", { status: "active", preview: "" })).toMatchObject({ ok: true, entry: { requestId: "id-2" } });
   });
 
   test("stopped and started again, as React's effect replay does in development, it still sends (review bot on 07fab27, P2)", async () => {
@@ -237,10 +237,63 @@ describe("a press", () => {
     a.requests.stop();
     a.requests.start();
     srv.answers.push({ kind: "accepted", body: null });
-    expect(await a.requests.press(PAT, "pause", { status: "active", step: null })).toMatchObject({ ok: true });
+    expect(await a.requests.press(PAT, "pause", { status: "active", preview: "" })).toMatchObject({ ok: true });
     await flush();
     expect(srv.sent.map((e) => e.requestId)).toEqual(["id-1"]);
     expect(a.requests.pendingFor(PAT)).toBeNull();
+  });
+});
+
+describe("a manager generation owns its sends (council on 57d874f, item 5)", () => {
+  for (const target of [{ kind: "lead", id: "en-pat" }, { kind: "campaign", id: "c-clinics" }] as const) {
+    test(`a ${target.kind}'s press already stored, across setup, cleanup and setup in one go (StrictMode's replay): the new generation sends it and gets its answer; the old send decides nothing`, async () => {
+      const storage = sharedStorage();
+      const srv = server();
+      const time = clock();
+      const before = tab(storage, srv, time, ["id-1"]);
+      srv.answers.push("hang");
+      await before.requests.press(target, "pause", target.kind === "lead" ? { status: "active", preview: "" } : { pausedSince: null });
+      before.requests.stop();
+      // A reload: the page sets its effect up, cleans it up and sets it up again, synchronously.
+      const page = tab(storage, srv, time, []);
+      srv.answers.push("hang");
+      page.requests.start();
+      page.requests.watch([target]);
+      page.requests.stop();
+      page.requests.start();
+      srv.answers.push({ kind: "accepted", body: { ok: true } });
+      page.requests.watch([target]);
+      await flush();
+      expect(page.results).toEqual([{ kind: "accepted", entry: expect.objectContaining({ requestId: "id-1" }), body: { ok: true } }]);
+      expect(page.requests.pendingFor(target)).toBeNull();
+      // The sends left hanging by the first generations settle late: nothing is reported or rescheduled for them.
+      srv.settleHung({ kind: "accepted", body: null });
+      srv.settleHung({ kind: "accepted", body: null });
+      await flush();
+      await time.advance(60_000);
+      expect(page.results).toHaveLength(1);
+      expect(before.results).toEqual([]);
+      expect(srv.sent.map((e) => e.requestId)).toEqual(["id-1", "id-1", "id-1"]);
+    });
+  }
+
+  test("the replay with no answer either: the new generation keeps the press on its backoff, and Try again now sends it", async () => {
+    const storage = sharedStorage();
+    const srv = server();
+    const time = clock();
+    const page = tab(storage, srv, time, ["id-1"]);
+    srv.answers.push("hang");
+    await page.requests.press(PAT, "stop", { status: "active", preview: "" });
+    page.requests.stop();
+    page.requests.start();
+    page.requests.watch([PAT]);
+    await flush();
+    expect(page.requests.unconfirmed(PAT)).toBe(true);
+    srv.answers.push({ kind: "accepted", body: null });
+    page.requests.retryNow();
+    await flush();
+    expect(page.requests.pendingFor(PAT)).toBeNull();
+    expect(page.results.map((r) => r.kind)).toEqual(["accepted"]);
   });
 });
 
@@ -266,7 +319,7 @@ describe("any page sends any stored press, with its id; nothing waits behind one
     expect(b.requests.pendingFor(PAT)).toBeNull();
     // A newer press, then A's old send settles: the newer press stays.
     srv.answers.push("hang");
-    await b.requests.press(PAT, "pause", { status: "active", step: null });
+    await b.requests.press(PAT, "pause", { status: "active", preview: "" });
     srv.settleHung({ kind: "accepted", body: null });
     await flush();
     expect(b.requests.pendingFor(PAT)?.requestId).toBe("id-b");
@@ -327,5 +380,22 @@ describe("any page sends any stored press, with its id; nothing waits behind one
     await a.requests.press(CLINICS, "resume", { pausedSince: "2026-11-09T10:00:00.000Z" });
     await flush();
     expect(srv.sent).toEqual([expect.objectContaining({ requestId: "id-1", target: CLINICS, expect: { pausedSince: "2026-11-09T10:00:00.000Z" } })]);
+  });
+});
+
+describe("each tab's answer line belongs to its own press (verifier R2 on 57d874f)", () => {
+  const entry = (requestId: string, action: PressEntry["action"]): PressEntry => ({ v: 2, requestId, target: PAT, action, expect: { status: "active", preview: "" }, pressedAt: 0 });
+  const refusedSkip: ControlResult = { kind: "refused", entry: entry("b-skip", "skip"), message: "This lead changed since you confirmed this, so nothing was changed." };
+  const acceptedPause: ControlResult = { kind: "accepted", entry: entry("a-pause", "pause"), body: null };
+
+  test("another tab's accepted answer never replaces this tab's own refusal", () => {
+    expect(shownResult(refusedSkip, acceptedPause, new Set(["b-skip"]))).toBe(refusedSkip);
+  });
+  test("this tab's own answer replaces what was shown; with nothing of its own shown, another tab's answer shows", () => {
+    expect(shownResult(acceptedPause, refusedSkip, new Set(["b-skip"]))).toBe(refusedSkip);
+    expect(shownResult(null, acceptedPause, new Set(["b-skip"]))).toBe(acceptedPause);
+    // Another tab's refusal does not replace this tab's own accepted line either.
+    const ownAccepted: ControlResult = { kind: "accepted", entry: entry("b-pause", "pause"), body: null };
+    expect(shownResult(ownAccepted, refusedSkip, new Set(["b-pause"]))).toBe(ownAccepted);
   });
 });

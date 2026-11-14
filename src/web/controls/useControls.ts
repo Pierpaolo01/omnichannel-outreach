@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { ApiError, LeadControlApi } from "../../shared/api.ts";
 import { browserStorage } from "../calls/storage.ts";
-import { ControlRequests, NoControlAnswer, controlKey, isControlKey, type CampaignExpectation, type ControlResult, type ControlTarget, type LeadExpectation, type PressEntry, type PressOutcome, type SendAnswer } from "./requests.ts";
+import { ControlRequests, NoControlAnswer, controlKey, shownResult, isControlKey, type CampaignExpectation, type ControlResult, type ControlTarget, type LeadExpectation, type PressEntry, type PressOutcome, type SendAnswer } from "./requests.ts";
 
 /** A 4xx whose code says the server refused the request is definite; anything else is no answer (as the call desk reads it). */
 const DEFINITE = new Set(["control_refused", "not_found", "invalid_request"]);
@@ -45,6 +45,8 @@ export function useControls(targets: readonly ControlTarget[], refresh: () => Pr
   const [, render] = useReducer((n: number) => n + 1, 0);
   const [results, setResults] = useState<ReadonlyMap<string, ControlResult>>(new Map());
   const targetsRef = useRef(targets);
+  /** The request ids this tab pressed: its answer lines are its own. */
+  const ownRef = useRef(new Set<string>());
   useEffect(() => {
     targetsRef.current = targets;
   });
@@ -59,7 +61,13 @@ export function useControls(targets: readonly ControlTarget[], refresh: () => Pr
           return () => clearTimeout(t);
         },
         send: sendControl,
-        onResult: (r) => setResults((prev) => new Map(prev).set(controlKey(r.entry.target), r)),
+        // Each tab's line belongs to its own press (verifier R2 on 57d874f): another tab's answer re-reads the row but never
+        // replaces this tab's own refusal or answer.
+        onResult: (r) =>
+          setResults((prev) => {
+            const shown = shownResult(prev.get(controlKey(r.entry.target)) ?? null, r, ownRef.current);
+            return shown === prev.get(controlKey(r.entry.target)) ? new Map(prev) : new Map(prev).set(controlKey(r.entry.target), shown ?? r);
+          }),
         onChange: () => render(),
       }),
   );
@@ -98,7 +106,10 @@ export function useControls(targets: readonly ControlTarget[], refresh: () => Pr
         next.delete(controlKey(target));
         return next;
       });
-      return requests.press(target, action, expect);
+      return requests.press(target, action, expect).then((out) => {
+        if (out.ok) ownRef.current.add(out.entry.requestId);
+        return out;
+      });
     },
     [requests],
   );
