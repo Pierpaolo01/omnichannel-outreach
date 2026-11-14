@@ -312,7 +312,7 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
   if (!def.tracks.some((t) => !t.removed && t.branch === "main")) return <p className="text-[14px] text-muted">Add a track to see the load it puts on each sender.</p>;
   // No figure that could contradict the engine: a track the server names (no sender, or after a
   // call), or a sender with no known end.
-  const blocked = load.withheldBy !== null || load.cannotProject.length > 0;
+  const blocked = load.withheldBy !== null || load.cannotProject.length > 0 || load.tooLarge;
   const calls = def.tracks.some((t) => !t.removed && t.branch === "main" && t.channel === "call");
   const callRow = load.calls;
   return (
@@ -382,6 +382,8 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
           {/* Worded from the tracks the server names, never guessed from this campaign's channels. */}
           {withheldExplanation(load.withheldBy)}
         </p>
+      ) : load.tooLarge ? (
+        <p className="mt-2 text-[13.5px] text-ink-2">This campaign is too large to estimate here: working out its daily load would take too long, so no figure is shown. Nothing else on this page is affected.</p>
       ) : load.cannotProject.length > 0 ? (
         <p className="mt-2 text-[13px] text-ink-2">
           Can’t project the load while {and(load.cannotProject.map(heldSaid))}. Nothing says when that ends.
@@ -425,7 +427,7 @@ function heldSaid(c: LoadProjectionView["cannotProject"][number]): string {
 function callCaveat(here: boolean, elsewhere: readonly { readonly name: string }[]): string {
   if (!here && elsewhere.length === 0) return "";
   const where = and([...(here ? ["this campaign"] : []), ...elsewhere.map((c) => c.name)]);
-  return `For calls in ${where}, it assumes you work every call on your list by the end of the day it is there, and that each one gets no answer: its phone track then finishes, the tracks after it start, and that lead’s later messages and calls go first. Another outcome changes this, as a reply would. `;
+  return `For calls in ${where}, it assumes you log every call on your list at the end of the day it is there, after its calling hours, and that each one gets no answer: its phone track then finishes, the tracks after it start from then, and that lead’s later messages and calls go first. A call logged earlier in the day can bring the messages after it forward and change the order of that day’s sends; another outcome changes the estimate too, as a reply would. `;
 }
 
 const gap = (seconds: number) => (seconds < 120 ? `${seconds} seconds` : `${Math.round(seconds / 60)} minutes`);

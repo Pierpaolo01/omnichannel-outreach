@@ -964,6 +964,59 @@ async function advanceWorking(h: EngineHarness, campaignIds: readonly string[], 
   }
 }
 
+describe("the time of day a call is logged is part of the stated assumption (re-check on 2cf1d90, B2)", () => {
+  /** Two leads with an email; only Caller One has a phone number. A phone track at launch, an email track right after it. */
+  async function twoLeads() {
+    const start = Date.parse("2026-11-09T08:00:00Z");
+    const h = new EngineHarness({ start, accounts: [{ id: "inbox-0", capacity: 30, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+    expect((await h.request("PUT", "/api/call-settings", { dailyCapacity: 1, userZone: "Europe/London" })).status).toBe(200);
+    const { campaign } = await h.createCampaign("Two leads", {
+      businesses: [business({ business_id: "b1", business_name: "Clinic One", timezone: "Europe/London" }), business({ business_id: "b2", business_name: "Clinic Two", timezone: "Europe/London" })],
+      people: [
+        person({ person_id: "p1", business_id: "b1", full_name: "Caller One", email: "one@clinic1.example", timezone: "", direct_phone: "+442079462301" }),
+        person({ person_id: "p2", business_id: "b2", full_name: "Email Two", email: "two@clinic2.example", timezone: "" }),
+      ],
+    });
+    await h.tick();
+    const nineToFive = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 9, end: 17 }));
+    await h.defineSequence(campaign.id, {
+      timezone: "Europe/London",
+      callSkipLimitDays: 2,
+      emailPool: ["inbox-0"],
+      smsPool: [],
+      callScript: "Ask who books.",
+      tracks: [
+        { id: "p", channel: "call", branch: "main", window: nineToFive, steps: [{ id: "c", waitDays: 0, subject: "", body: "", threading: "new_subject", removed: false }], start: { kind: "entry" }, removed: false, callSkipLimitDays: 2 },
+        { id: "e", channel: "email", branch: "main", window: nineToFive, steps: [{ id: "s", waitDays: 0, subject: "Hi", body: "A note.", threading: "new_subject", removed: false }], start: { kind: "after", trackId: "p", delayDays: 0 }, removed: false },
+      ],
+    });
+    const projected = await projectedSends(h.store, campaign.id, h.clock);
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    const busiest = () => Math.max(...[...h.fake.deliveryLog.reduce((m, d) => m.set(localDayNumber(d.at, "Europe/London"), (m.get(localDayNumber(d.at, "Europe/London")) ?? 0) + 1), new Map<number, number>()).values()]);
+    return { h, id: campaign.id, start, projected, busiest };
+  }
+
+  test("logged at the end of the day, as the screen now states, the engine sends one email a day, the projected busiest day", async () => {
+    const { h, id, start, projected, busiest } = await twoLeads();
+    expect(projected?.busiestDay.get("inbox-0")).toBe(1);
+    await advanceWorking(h, [id], "Europe/London", start + 3 * DAY);
+    expect(h.fake.deliveryLog).toHaveLength(2);
+    expect(busiest()).toBe(1);
+  });
+
+  test("logged at 10:00 instead, the email after the call goes that day too: two in one day, which is why the screen names the time", async () => {
+    const { h, id, start, busiest } = await twoLeads();
+    await h.advanceTo(start + 2 * 60 * MIN);
+    for (const sid of await h.store.engine.subjectsOf(id)) {
+      const s = (await h.store.engine.subject(sid, h.clock))!;
+      const task = s.callTasks.find((t) => t.open);
+      if (task) expect((await h.request("POST", `/api/call-tasks/${task.id}/outcome`, { requestId: `ten-${task.id}`, outcome: "no_answer", numberId: s.lead.phones[0]!.id, note: "" })).status).toBe(200);
+    }
+    await h.advanceTo(start + 3 * DAY);
+    expect(busiest()).toBe(2);
+  });
+});
+
 describe("a call released by a worked call is worked the same day (council on 2cf1d90, item 1)", () => {
   test("an older campaign's call B right after call A: both its calls and the target's two calls take Tuesday's room of 2, as the engine places them", async () => {
     const start = Date.parse("2026-11-02T09:00:00Z");

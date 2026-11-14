@@ -137,7 +137,7 @@ test.describe("calls in Before launch", () => {
     await expect(calls).toContainText("2 a day");
     await expect(calls).toContainText("of 2");
     await expect(page.getByText("A lead starts with its first email or text, or when its first call goes on your list.", { exact: false })).toBeVisible();
-    await expect(page.getByText("For calls in this campaign, it assumes you work every call on your list by the end of the day it is there, and that each one gets no answer", { exact: false })).toBeVisible();
+    await expect(page.getByText("For calls in this campaign, it assumes you log every call on your list at the end of the day it is there, after its calling hours, and that each one gets no answer", { exact: false })).toBeVisible();
     await page.getByRole("button", { name: "Launch campaign" }).click();
     await expect(page.getByText(/^Launched .*\.$/)).toBeVisible();
     await f.harness.tick();

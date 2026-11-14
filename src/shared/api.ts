@@ -418,6 +418,11 @@ export interface LoadProjectionView {
    */
   readonly withheldBy: WithheldBy | null;
   /**
+   * The projection reached its bound on work (`PROJECTION_MAX_STEPS`, calls into the engine's rules)
+   * and stopped, so no figure is shown: the campaign is too large to estimate (ADR 0003, ticket 14c).
+   */
+  readonly tooLarge: boolean;
+  /**
    * The user's calls, when the campaign has a live phone track (ADR 0003, ticket 14c); null otherwise.
    * A call is a task on the user's list, not a send: the projection places due calls by the engine's
    * own rules within the daily call capacity, assuming the user works through each day's list, and

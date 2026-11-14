@@ -152,6 +152,8 @@ function callingCampaigns(others: readonly SubjectState[]): string[] {
 
 interface ProjectionResult {
   readonly projection: Projection | null;
+  /** The projection reached its bound on work and stopped: the campaign is too large to estimate. */
+  readonly tooLarge?: boolean;
   readonly withheldBy: WithheldBy | null;
   readonly callsNotCounted: readonly { readonly id: string; readonly name: string }[];
   readonly held: readonly { accountId: string; reason: "unsettled_work" | "reply_being_matched" }[];
@@ -210,7 +212,10 @@ async function projectionOf(store: OutreachStore, campaignId: string, definition
     horizonDays: PROJECTION_HORIZON_DAYS,
     ...(calls ? { callDay: (broken.callDay ?? ((d: CallDay) => d))(await store.engine.callDay(now)) } : {}),
     ...(broken.rules ? { rules: broken.rules } : {}),
+    ...(broken.maxSteps !== undefined ? { maxSteps: broken.maxSteps } : {}),
   });
+  // Past its bound the projection's figures are partial: none is shown, and the screen says why.
+  if (projection.tooLarge) return { projection: null, tooLarge: true, withheldBy: null, callsNotCounted, held: [] };
   return { projection, withheldBy: null, callsNotCounted, held: [] };
 }
 
@@ -289,13 +294,15 @@ export async function projectedSends(store: OutreachStore, campaignId: string, n
 export interface ProjectionMutation {
   readonly rules?: Rules;
   readonly callDay?: (stored: CallDay) => CallDay;
+  /** A smaller bound on the projection's work, for the test that it stops. */
+  readonly maxSteps?: number;
 }
 
 async function loadProjection(store: OutreachStore, campaignId: string, definition: CampaignDefinition, leads: readonly CampaignLead[], now: number): Promise<LoadProjectionView> {
   const labels = await store.engine.accountLabels();
   const all = await store.engine.accounts(now);
   const pool = poolAccounts(definition, all);
-  const { projection, withheldBy, callsNotCounted, held } = await projectionOf(store, campaignId, definition, leads, now);
+  const { projection, withheldBy, callsNotCounted, held, tooLarge } = await projectionOf(store, campaignId, definition, leads, now);
   return {
     leadsToStart: projection?.leadsToStart ?? null,
     onlyCalled: projection?.onlyCalled ?? 0,
@@ -319,6 +326,7 @@ async function loadProjection(store: OutreachStore, campaignId: string, definiti
       ...held.map((h) => ({ accountId: h.accountId, label: labels[h.accountId] ?? h.accountId, channel: all.find((a) => a.id === h.accountId)?.channel ?? ("email" as const), reason: h.reason })),
     ],
     withheldBy,
+    tooLarge: tooLarge === true,
     callsNotCounted,
     calls: liveTracks(definition, "main").some((t) => t.channel === "call") ? await callsView(store, now, projection) : null,
   };

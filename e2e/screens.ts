@@ -1,7 +1,7 @@
 import type { APIRequestContext, Locator, Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { OUTREACH_STATUSES } from "../src/domain/outreach-status.ts";
-import type { CampaignDefinition, CompanyRecord, ImportRecord, LeadSearchResult, PersonRecord, SequenceView, SummaryEntry } from "../src/shared/api.ts";
+import type { BeforeLaunchView, CampaignDefinition, CompanyRecord, ImportRecord, LeadSearchResult, PersonRecord, SequenceView, SummaryEntry } from "../src/shared/api.ts";
 import { refusedPair, respond, serverError } from "./mocks.ts";
 import { FAKE_INBOX, FAKE_NUMBERS, TWO_CHANNELS, fakeProviderApp, type FakeProviderApp } from "./fake-provider.ts";
 import { fixture } from "./support.ts";
@@ -1013,6 +1013,23 @@ export const SCREENS: readonly Screen[] = [
     },
   },
   {
+    // The projection's bound on work (ADR 0003, ticket 14c): past it, no figure and the reason. A real
+    // campaign that large would take minutes to build here, so the answer is marked too large in transit.
+    name: "fake provider: before launch for a campaign too large to estimate",
+    open: async (page) => {
+      const f = await fakeProviderApp("phone-track");
+      const id = await f.freshTwoChannelCampaign(`Too large ${Date.now()}`);
+      await page.request.put(`${f.url}/api/campaigns/${id}/sequence`, { data: { ...TWO_CHANNELS, callScript: "Ask who books.", tracks: [...TWO_CHANNELS.tracks, phoneTrack("call", { kind: "entry" })] } });
+      await page.route("**/api/campaigns/*/before-launch?v=*", async (route) => {
+        const body = (await (await route.fetch()).json()) as BeforeLaunchView;
+        const load = body.load && { ...body.load, tooLarge: true, leadsToStart: null, daysUntilAllStart: null, calls: body.load.calls && { ...body.load.calls, busiestDay: null } };
+        await respond(route, { ...body, load });
+      });
+      await page.goto(`${f.url}/campaigns/${id}/before-launch`);
+      await settle(page, "This campaign is too large to estimate here");
+    },
+  },
+  {
     name: "fake provider: a running campaign's phone track, read-only",
     open: async (page) => {
       const f = await fakeProviderApp("phone-track");
@@ -1031,7 +1048,7 @@ export const SCREENS: readonly Screen[] = [
       const definition = { ...TWO_CHANNELS, tracks: [...TWO_CHANNELS.tracks.map((t) => (t.id === "email-2" ? { ...t, start: { kind: "after" as const, trackId: "call", delayDays: 0 } } : t)), call] };
       await page.request.put(`${f.url}/api/campaigns/${id}/sequence`, { data: definition });
       await page.goto(`${f.url}/campaigns/${id}/before-launch`);
-      await settle(page, "For calls in this campaign, it assumes you work every call");
+      await settle(page, "For calls in this campaign, it assumes you log every call");
     },
   },
   // Chains the outline must fit at every width (review bot on 7401eb2): four tracks deep, as the bot

@@ -22,7 +22,7 @@ import { isLive } from "../domain/sequence/attempt.ts";
 import { ENGINE_PARAMS } from "../domain/sequence/attempt.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, startOfLocalDay, windowOpen, type WindowRule } from "../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../domain/sequence/dispatch.ts";
-import { callableOnDay, callWindow, goodNumbers } from "../domain/sequence/calls.ts";
+import { callableOnDay, callRoom, callWindow, goodNumbers } from "../domain/sequence/calls.ts";
 import { liveSteps, liveTracks, poolOf, type CampaignDefinition, type TrackChannel } from "../domain/sequence/definition.ts";
 import { channelReaches } from "../domain/sequence/progress.ts";
 import type { AccountState, Attempt, CallDay, SmsBinding, SubjectState } from "../domain/sequence/state.ts";
@@ -51,7 +51,19 @@ export interface ProjectionInput {
    */
   readonly callDay?: CallDay;
   readonly rules?: Rules;
+  /** The most calls into the engine's rules the projection may make before it stops (`PROJECTION_MAX_STEPS`). */
+  readonly maxSteps?: number;
 }
+
+/**
+ * The bound on a projection's work, counted in calls into the engine's own rules (each evaluation,
+ * readiness, claim, handover, placement or outcome is one), never in time: past it, the projection
+ * stops and shows no figure, saying the campaign is too large to estimate (ADR 0003, ticket 14c; the
+ * re-check on 2cf1d90 measured a read that ran most of a minute). About three times what a campaign
+ * of 2,000 leads with a phone track and an email track after it takes (484,581 steps, measured on
+ * 14 November 2026), so a read stays within tens of seconds at worst.
+ */
+export const PROJECTION_MAX_STEPS = 1_500_000;
 
 /** One call the projection places on the user's list. */
 export interface ProjectedCall {
@@ -93,6 +105,10 @@ export interface Projection {
   readonly calls: readonly ProjectedCall[];
   /** The most calls of this campaign placed on one user day. */
   readonly busiestCallDay: number;
+  /** Calls into the engine's rules the projection made: its work, bounded by `PROJECTION_MAX_STEPS`. */
+  readonly steps: number;
+  /** It reached the bound and stopped: no figure in it may be shown. */
+  readonly tooLarge: boolean;
 }
 
 /** A tiny min-heap of (instant, subject) wake-ups; stale entries only cost an extra look. */
@@ -141,7 +157,13 @@ class Wakes {
 }
 
 export function projectLoad(input: ProjectionInput): Projection {
-  const rules = input.rules ?? DEFAULT_RULES;
+  // Every call into the engine's rules is one step of work; the projection stops past the bound.
+  let steps = 0;
+  const maxSteps = input.maxSteps ?? PROJECTION_MAX_STEPS;
+  const given = input.rules ?? DEFAULT_RULES;
+  const rules = Object.fromEntries(
+    Object.entries(given).map(([name, rule]) => [name, typeof rule === "function" ? (...args: unknown[]) => (steps++, (rule as (...a: unknown[]) => unknown)(...args)) : rule]),
+  ) as unknown as Rules;
   const now = input.now;
   const end = now + input.horizonDays * 86_400_000;
   const records = new Map(input.accounts.map((a) => [a.id, a]));
@@ -234,9 +256,11 @@ export function projectLoad(input: ProjectionInput): Projection {
   const callSettings = input.callDay;
   const day0 = callSettings ? localDayNumber(now, callSettings.userZone) : 0;
   const placedOn = new Map<number, number>();
-  const committedMemo = { day: Number.NaN, written: -1, value: 0 };
+  // A day's committed count is fixed once the day has begun: it counts tasks placed before its start
+  // and open at it, which nothing later in the day changes. So it is counted once per day.
+  const committedMemo = { day: Number.NaN, value: 0 };
   const committedOn = (day: number, zone: string): number => {
-    if (committedMemo.day === day && committedMemo.written === written) return committedMemo.value;
+    if (committedMemo.day === day) return committedMemo.value;
     const start = startOfLocalDay(day, zone);
     const end = startOfLocalDay(day + 1, zone);
     let n = 0;
@@ -247,7 +271,7 @@ export function projectLoad(input: ProjectionInput): Projection {
         if (callableOnDay(callWindow(s, task.trackId), s.lead.zone, start, end)) n++;
       }
     }
-    Object.assign(committedMemo, { day, written, value: n });
+    Object.assign(committedMemo, { day, value: n });
     return n;
   };
   const callDayAt = (t: number): CallDay | null => {
@@ -376,6 +400,8 @@ export function projectLoad(input: ProjectionInput): Projection {
    * item 1). Each sweep closes a task, so it ends.
    */
   let workSeq = 0;
+  /** The user day on which the list is known to be full (`callRoom` refused): no placement is tried again that day. */
+  let fullDay = Number.NaN;
   const workTheList = (t: number): boolean => {
     let any = false;
     for (const [id, s] of [...states]) {
@@ -532,15 +558,20 @@ export function projectLoad(input: ProjectionInput): Projection {
   };
 
   let t = now;
+  let tooLarge = false;
   for (let guard = 0; guard < 2_000_000 && t <= end; guard++) {
     if (oursIds.size === 0 || oursDone()) break;
+    if (steps > maxSteps) {
+      tooLarge = true;
+      break;
+    }
     // Subjects whose time-driven change (a start, a due step) has come.
     while (wakes.peek() <= t) {
       const id = wakes.pop();
       if (id !== undefined) dirty.add(id);
     }
 
-    for (let pass = 0; pass < 10_000; pass++) {
+    for (let pass = 0; pass < 10_000 && steps <= maxSteps; pass++) {
       let changed = false;
 
       // Observe: the previous pass's sends, at their send instant (the provider's send time).
@@ -607,7 +638,11 @@ export function projectLoad(input: ProjectionInput): Projection {
 
       // Calls (4.4), exactly as `Engine.placeCallsAll`: every caller's ready calls, in `callOrder`,
       // each placed by `placeCall` on the subject as the store would load it now, with the day's room.
-      if (callSettings) {
+      // Once the engine's `callRoom` refuses, the day's list is full for the rest of that day: its
+      // committed count is fixed at the day's start and its placed count only rises. So every placement
+      // the engine would try that day is refused, and the projection tries none (the cost the re-check
+      // on 2cf1d90 measured: every waiting call re-checked and refused at every instant of a full day).
+      if (callSettings && localDayNumber(t, callSettings.userZone) !== fullDay) {
         const day = localDayNumber(t, callSettings.userZone);
         const items: ReadyItem[] = [];
         for (const id of callers) {
@@ -626,8 +661,14 @@ export function projectLoad(input: ProjectionInput): Projection {
           }
         }
         items.sort(rules.callOrder);
-        for (const item of items) {
+        for (const [k, item] of items.entries()) {
           const loaded = load(item.subjectId, t);
+          if (!callRoom(loaded)) {
+            // No room left today: every call still ready waits for the next user day, never dropped.
+            fullDay = day;
+            for (const rest of items.slice(k)) wakes.push(nextUserDay(t), rest.subjectId);
+            break;
+          }
           const next = rules.placeCall(loaded, item, t, `projected-call-${++callSeq}`);
           if (!next) {
             // No room today: it waits for the next user day, and is never dropped.
@@ -769,5 +810,7 @@ export function projectLoad(input: ProjectionInput): Projection {
     sends,
     calls,
     busiestCallDay: Math.max(0, ...perCallDay.values()),
+    steps,
+    tooLarge,
   };
 }

@@ -1,6 +1,7 @@
 import type { Route } from "@playwright/test";
 import type {
   ApiError,
+  BeforeLaunchView,
   Campaign,
   CampaignListItem,
   CompanyRecord,
@@ -22,7 +23,8 @@ export type MockBody =
   | { campaign: Campaign; imports: ImportRecord[] }
   | PersonRecord
   | CompanyRecord
-  | FileCheckResult;
+  | FileCheckResult
+  | BeforeLaunchView;
 
 export function respond(route: Route, body: MockBody, status = 200): Promise<void> {
   // eslint-disable-next-line no-restricted-syntax -- the one typed entry point
