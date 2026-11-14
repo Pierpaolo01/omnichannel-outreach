@@ -173,6 +173,8 @@ export class InstantlyEmailPort implements SendPort {
   private readonly subjectCampaign: (subjectId: string) => Promise<SendContext | null>;
   private readonly followUps: FollowUpTransport | null;
   private inboxes: InstantlyAccount[] | null = null;
+  /** The last actual round trip with Instantly (an inbox read or a committed poll); a cached answer is not one (ticket 20a). */
+  private lastRoundTrip: number | null = null;
   private analyticsReadWall: number | null = null;
   private readonly crashPoint: ((point: string) => void) | null;
   /**
@@ -220,6 +222,7 @@ export class InstantlyEmailPort implements SendPort {
     // An inbox list that did not reach its end is not the inbox list.
     if (!read.complete) throw new Error("Instantly accounts could not be read to the end");
     this.inboxes = [...read.items].sort((a, b) => (a.email < b.email ? -1 : a.email > b.email ? 1 : 0));
+    this.lastRoundTrip = this.now();
     return this.inboxes;
   }
 
@@ -274,6 +277,14 @@ export class InstantlyEmailPort implements SendPort {
       .dispatchCampaigns()
       .filter((c) => c.instantlyId !== null && c.key.endsWith(`|${inbox}`))
       .every((c) => within(this.store.meta(META.statusScanComplete(c.key))));
+  }
+
+  /**
+   * Freshness (ADR 0003 "Ticket 20a"): between polls the adapter answers from its cache, so only a real round trip counts,
+   * and it stands for two polling intervals (a poll runs at the first tick one interval after the last), at least a minute.
+   */
+  contact(): { readonly at: number | null; readonly freshForMs: number } {
+    return { at: this.lastRoundTrip, freshForMs: Math.max(2 * this.config.pollIntervalMs, MINUTE) };
   }
 
   async accounts(): Promise<AccountStatus[]> {
@@ -538,6 +549,7 @@ export class InstantlyEmailPort implements SendPort {
     const committed = box.batch;
     if (!committed) throw new Error("the poll was not committed");
     this.previousPollCommitted = true;
+    this.lastRoundTrip = this.now();
     this.crash("observe:after_commit");
     return { events: committed.events, checkpoint: committed.token };
   }

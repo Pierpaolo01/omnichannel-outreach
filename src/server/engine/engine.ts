@@ -26,7 +26,6 @@ function outcomeBody(input: OutcomeInput): string {
 }
 import { UnprovisionedSmsPort, type AttemptRef, type HandoverRequest, type ProviderEvent, type SendPort } from "./ports.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
-import { INTERRUPTION_GAP } from "../../domain/sequence/interruption.ts";
 import { HEARTBEAT_KEY, NOTICE_KEY, parseInstant, TICK_ENDED_KEY, TICK_FAILED_KEY } from "./worker-state.ts";
 
 export type CrashPoint = "after_claim" | "after_presend" | "after_handover_commit" | "after_call" | "after_retry_commit" | "after_lookup" | "after_observe_event";
@@ -126,6 +125,8 @@ const OBSERVE_CHECKPOINT: Record<Channel, string> = { email: "email_observe_chec
 const CHANNELS: readonly Channel[] = ["email", "sms"];
 const MAX_PASSES = 50;
 const QUOTA_WAIT = Number.MAX_SAFE_INTEGER;
+/** Ticket 20a: how long a port's last answer stands for "it answers", for a port that does not report its own freshness: four ticks. */
+export const ENGINE_CONTACT_FRESH_MS = 60_000;
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -137,6 +138,12 @@ export class Engine {
   private readonly now: () => number;
   /** While a provider's answer is applied: the instant the rules say it is applied at (`answerInstant`); null otherwise. */
   private applyingAt: number | null = null;
+  /** Ticket 20a: each provider's last actual answer, for a port that does not report its own (`SendPort.contact`). */
+  private readonly answeredAt: Record<Channel, number | null> = { email: null, sms: null };
+  /** The heartbeat as last read or written by this engine; the dispatch gate re-reads the store before acting on a gap. */
+  private heartbeatSeen: number | null = null;
+  /** The instant the running tick started, for the rule a mutation replaces (`dispatchInstant`). */
+  private tickStarted = 0;
   private readonly clockNow: () => number;
   private readonly newId: () => string;
   private readonly rules: Rules;
@@ -237,14 +244,49 @@ export class Engine {
     }
   }
 
+  /** Ticket 20a: the instant of a provider's last actual answer, and how long it stands for "it answers". */
+  private contactOf(channel: Channel): { at: number | null; freshForMs: number } {
+    return this.ports[channel].contact?.() ?? { at: this.answeredAt[channel], freshForMs: ENGINE_CONTACT_FRESH_MS };
+  }
+
+  /** The heartbeat the providers' actual answers support at `at`: the oldest of their last answers, if every one is fresh; else null. */
+  private freshHeartbeat(at: number): number | null {
+    let oldest = Infinity;
+    for (const channel of CHANNELS) {
+      const { at: contact, freshForMs } = this.contactOf(channel);
+      if (contact === null || at - contact > freshForMs) return null;
+      oldest = Math.min(oldest, contact);
+    }
+    return Math.min(oldest, at);
+  }
+
   /**
-   * The first tick after an interruption (ADR 0003 "Ticket 20a"), once every port has answered and every lead has been
-   * evaluated, before anything is claimed: each running lead goes through `afterInterruption` (unchanged), the sends the
-   * interruption rescheduled are counted, and the notice and the heartbeat are written in one store write.
+   * The dispatch gate (ADR 0003 "Ticket 20a"): judged at the instant of each dispatch decision, read then. With a
+   * heartbeat within the gap, work goes. Otherwise sending was interrupted until now: every provider is asked again, and
+   * if each actually answers, the interruption is recorded, with the sends it rescheduled, before anything is sent; if
+   * not, nothing is dispatched yet. Synchronous on the common path, so no ordinary decision waits on anything more.
    */
-  private async recordResume(at: number): Promise<void> {
-    const gap = this.rules.interruptionOf(parseInstant(await this.store.meta(HEARTBEAT_KEY)), at);
-    if (gap === null) return;
+  private dispatchAllowed(at: number): true | Promise<boolean> {
+    // The rule decides what a gap is, here as everywhere: synchronous, so an ordinary decision waits on nothing more.
+    if (this.heartbeatSeen !== null && this.rules.interruptionOf(this.heartbeatSeen, at) === null) return true;
+    return this.resumeIfAnswering();
+  }
+
+  private async resumeIfAnswering(): Promise<boolean> {
+    this.heartbeatSeen = parseInstant(await this.store.meta(HEARTBEAT_KEY));
+    const decided = this.rules.dispatchInstant(this.tickStarted, this.now());
+    if (this.heartbeatSeen !== null && this.rules.interruptionOf(this.heartbeatSeen, decided) === null) return true;
+    await this.syncAccounts();
+    const at = this.rules.dispatchInstant(this.tickStarted, this.now());
+    const fresh = this.freshHeartbeat(at);
+    if (fresh === null) return false;
+    const gap = this.rules.interruptionOf(this.heartbeatSeen, at);
+    if (gap === null) {
+      // No heartbeat before (a new database): nothing was missed that a worker could know of.
+      await this.store.setMeta(HEARTBEAT_KEY, String(fresh));
+      this.heartbeatSeen = fresh;
+      return true;
+    }
     let rescheduled = 0;
     for (const id of await this.store.runningSubjectIds()) {
       const now = this.now();
@@ -255,15 +297,17 @@ export class Engine {
       if (!same(after, s)) await this.store.update(id, now, (current) => (this.rules.versionsMatch(s, current) ? { ...after, accounts: current.accounts } : null));
     }
     await this.store.setMetas({ [NOTICE_KEY]: JSON.stringify({ from: gap.from, to: gap.to, rescheduled }), [HEARTBEAT_KEY]: String(at) });
+    this.heartbeatSeen = at;
+    return true;
   }
 
   private async runTick(): Promise<void> {
-    const started = this.now();
-    let reachable = await this.syncAccounts();
+    this.tickStarted = this.now();
+    this.heartbeatSeen = parseInstant(await this.store.meta(HEARTBEAT_KEY));
+    await this.syncAccounts();
     for (let pass = 0; pass < MAX_PASSES; pass++) {
       let changed = false;
       const observed = await this.observe();
-      if (pass === 0) reachable = reachable && observed.all;
       changed = observed.changed || changed;
       changed = (await this.correlate(observed.ok, false)) || changed;
       changed = (await this.expireClaims()) || changed;
@@ -273,17 +317,18 @@ export class Engine {
       changed = (await this.correlate(false, true)) || changed;
       changed = (await this.withdraw()) || changed;
       changed = (await this.evaluateAll()) || changed;
-      if (pass === 0 && reachable) await this.recordResume(started);
       changed = (await this.placeCallsAll()) || changed;
       changed = (await this.claimAll()) || changed;
       changed = (await this.handOverAll()) || changed;
       if (!changed) break;
     }
     const ended = this.now();
-    // A tick that itself ran longer than the gap (the machine slept in the middle of a request) was not sending all that
-    // time: the heartbeat stays where it was, and the next tick reports the interruption from before it.
-    const sending = reachable && ended - started <= INTERRUPTION_GAP;
-    await this.store.setMetas(sending ? { [TICK_ENDED_KEY]: String(ended), [HEARTBEAT_KEY]: String(ended) } : { [TICK_ENDED_KEY]: String(ended) });
+    // The heartbeat comes only from the providers' actual answers (ticket 20a): the oldest of them, while every one is
+    // fresh. It never moves back, and a gap the dispatch gate has not recorded yet is left for it to record.
+    const fresh = this.freshHeartbeat(ended);
+    const beat = fresh !== null && (this.heartbeatSeen === null || (fresh >= this.heartbeatSeen && this.rules.interruptionOf(this.heartbeatSeen, fresh) === null));
+    await this.store.setMetas(beat ? { [TICK_ENDED_KEY]: String(ended), [HEARTBEAT_KEY]: String(fresh) } : { [TICK_ENDED_KEY]: String(ended) });
+    if (beat) this.heartbeatSeen = fresh;
   }
 
   /** The next instant at which a tick could change something, for the worker loop and the tests' clock. */
@@ -380,6 +425,7 @@ export class Engine {
         all = false;
         continue;
       }
+      this.answeredAt[channel] = this.clockNow();
       await this.store.upsertAccounts(statuses);
       // An account its provider no longer lists is disconnected: claims for it wait, and Needs attention lists it.
       await this.store.disconnectUnlisted(channel, statuses.map((a) => a.id));
@@ -491,6 +537,7 @@ export class Engine {
         all = false;
         continue;
       }
+      this.answeredAt[channel] = this.clockNow();
       const { events, checkpoint: next } = observed;
       await this.answered(asked, async () => {
         for (const event of events) {
@@ -930,6 +977,9 @@ export class Engine {
     }
     ready.sort((a, b) => this.rules.claimOrder(a.item, b.item));
     let changed = false;
+    // Ticket 20a: the dispatch phase is a decision too, so an interruption is recorded even when nothing is ready.
+    const opening = this.dispatchAllowed(this.rules.dispatchInstant(this.tickStarted, this.now()));
+    if (opening !== true && !(await opening)) return false;
     // A subject's own claims bump its version: its later items in this pass are checked against the
     // state its claim wrote, not the snapshot it superseded, so a lead with items on two channels
     // keeps each item's priority turn (found by ticket 13a's generated priority check).
@@ -944,6 +994,8 @@ export class Engine {
       const transport = this.ports[track?.channel === "sms" ? "sms" : "email"].transportFor({ threading: step?.threading ?? "new_subject" });
       // A step the port cannot send yet is not claimed: it waits, and nothing is sent for it.
       if (transport.available === false) continue;
+      const allowed = this.dispatchAllowed(this.rules.dispatchInstant(this.tickStarted, this.now()));
+      if (allowed !== true && !(await allowed)) return changed;
       const attemptId = this.newId();
       const written = await this.store.update(item.subjectId, now, (s) => {
         if (!this.rules.versionsMatch(snapshot, s)) return null;
@@ -983,6 +1035,9 @@ export class Engine {
         // A claim waits for the slot before its pre-send check (5.5 steps 2-3); a retry's own
         // authorization decides whether it waits (5.6).
         if (!next.retry && now < current.nextSlotAt) break;
+        // Ticket 20a: judged at this decision's own instant, before anything is sent.
+        const allowed = this.dispatchAllowed(this.rules.dispatchInstant(this.tickStarted, this.now()));
+        if (allowed !== true && !(await allowed)) return changed;
         const outcome = next.retry ? await this.tryRetry(next.attempt) : await this.tryHandover(next.attempt);
         if (outcome === "skip") skipped.add(next.attempt.id);
         else changed = true;

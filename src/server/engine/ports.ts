@@ -87,6 +87,12 @@ export interface SendPort {
   transportFor(step: { readonly threading: "new_subject" | "continue_thread" }): Transport;
   accounts(): Promise<AccountStatus[]>;
   /**
+   * The provider's freshness (ADR 0003 "Ticket 20a"): the instant of its last actual round trip, and for how long that
+   * stands for "it answers". A port that answers some calls from a cache (the Instantly adapter between polls) reports
+   * this; for any other port the engine takes the instant a call to it resolved, fresh for ENGINE_CONTACT_FRESH_MS.
+   */
+  contact?(): { readonly at: number | null; readonly freshForMs: number };
+  /**
    * ADR 0002's pre-send reply check: a reply in any of the lead's threads that is not one of `knownReplies` (the replies
    * the lead's record holds, by the identity the reply event carries) stops the send; `unavailable` when every thread
    * could not be read whole (ticket 17a; review bot on ca8baee, item 1).

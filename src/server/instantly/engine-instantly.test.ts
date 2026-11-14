@@ -265,3 +265,64 @@ describe("the engine through the Instantly adapter", () => {
     expect(fake.deliveries()).toHaveLength(1);
   });
 });
+
+describe("a sustained Instantly outage is an interruption (ticket 20a; PR 56 review bot)", () => {
+  /** The real adapter with its default polling interval (one minute), the worker ticking every 15 seconds as in production. */
+  function polling() {
+    const built: { fake?: FakeInstantly } = {};
+    const h = new EngineHarness({
+      start: MONDAY_9,
+      accounts: [],
+      port: (store, now) => {
+        const fake = new FakeInstantly({ now, accounts: INBOXES });
+        const client = new InstantlyClient({ apiKey: "test-key-not-real", fetch: fake.fetch, writes: false, now, timeoutMs: 10_000 });
+        const port = new InstantlyEmailPort({ client, store: store.instantly, now, config: { resetZone: "UTC" } });
+        built.fake = fake;
+        return Object.assign(port, { advance: () => fake.advance(), nextActivityAt: () => fake.nextActivityAt() }) satisfies Provider;
+      },
+    });
+    // Every tick here is one the test runs: the harness does not stand in for quiet ones.
+    h.standsIn = false;
+    const fake = built.fake;
+    if (!fake) throw new Error("no fake");
+    const every15s = async (until: number) => {
+      while (h.clock + 15_000 <= until) {
+        h.clock += 15_000;
+        await h.tick();
+      }
+    };
+    const today = async () => (await h.request<{ interruption: unknown; sendingInterrupted: unknown }>("GET", "/api/today")).body;
+    return { h, fake, every15s, today };
+  }
+
+  test("the verifier's reproduction: ticks at 09:00 and 09:01, HTTP 500 for forty 15-second ticks, then answers again at 09:12", async () => {
+    const { h, fake, every15s, today } = polling();
+    await h.tick();
+    h.clock = MONDAY_9 + 60_000;
+    await h.tick();
+    fake.failWith = 500;
+    await every15s(MONDAY_9 + 11 * 60_000);
+    expect((await today()).sendingInterrupted).toEqual({ since: new Date(MONDAY_9 + 60_000).toISOString(), cause: "providers_unreachable" });
+    fake.failWith = null;
+    h.clock = MONDAY_9 + 12 * 60_000;
+    await h.tick();
+    expect(await today()).toMatchObject({ sendingInterrupted: null, interruption: { from: new Date(MONDAY_9 + 60_000).toISOString(), to: new Date(MONDAY_9 + 12 * 60_000).toISOString(), rescheduled: 0 } });
+  });
+
+  test("ten minutes of failing HTTP, answered from the adapter's cache in between, ages the heartbeat and ends in a notice", async () => {
+    const { h, fake, every15s, today } = polling();
+    await h.tick();
+    await every15s(MONDAY_9 + 2 * 60_000);
+    // The last round trip: the poll at 09:02 (one a minute).
+    const lastPoll = MONDAY_9 + 2 * 60_000;
+    fake.failWith = 500;
+    await every15s(lastPoll + 7 * 60_000);
+    expect((await today()).sendingInterrupted).toEqual({ since: new Date(lastPoll).toISOString(), cause: "providers_unreachable" });
+    await every15s(lastPoll + 10 * 60_000);
+    fake.failWith = null;
+    await every15s(lastPoll + 12 * 60_000);
+    const { interruption, sendingInterrupted } = await today();
+    expect(sendingInterrupted).toBeNull();
+    expect(interruption).toMatchObject({ from: new Date(lastPoll).toISOString(), rescheduled: 0 });
+  });
+});

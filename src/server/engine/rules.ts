@@ -87,6 +87,11 @@ export interface Rules {
   readonly rescheduled: typeof rescheduledSteps;
   /** Ticket 20a, follow-up 42 item 39: the instant a provider's answer is applied at: when it arrived, not when it was asked for. */
   readonly answerInstant: (askedAt: number, answeredAt: number) => number;
+  /**
+   * Ticket 20a (PR 56 review bot): the instant a dispatch decision is judged at: the clock read at that decision, never
+   * the tick's start (a machine can sleep in between).
+   */
+  readonly dispatchInstant: (tickStarted: number, now: number) => number;
   /** The answer a call whose answer was never recorded is taken to have (5.3's crash row): unknown. */
   readonly lostAnswer: CallAnswer;
 }
@@ -139,5 +144,6 @@ export const DEFAULT_RULES: Rules = {
   afterInterruption,
   rescheduled: rescheduledSteps,
   answerInstant: (_asked, answered) => answered,
+  dispatchInstant: (_started, now) => now,
   lostAnswer: { kind: "unknown" },
 };

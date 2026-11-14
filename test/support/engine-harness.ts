@@ -1,6 +1,6 @@
 import { createApp } from "../../src/server/app.ts";
 import { Engine, TickQueue, type EngineDependencies, type EngineHooks } from "../../src/server/engine/engine.ts";
-import type { SendPort } from "../../src/server/engine/ports.ts";
+import type { AttemptRef, HandoverRequest, SendPort } from "../../src/server/engine/ports.ts";
 import type { EmailProviderSource } from "../../src/server/instantly/routes.ts";
 import type { Rules } from "../../src/server/engine/rules.ts";
 import { openSqliteStore } from "../../src/server/persistence/sqlite-store.ts";
@@ -126,7 +126,7 @@ export class EngineHarness {
    * store writes it synchronously; nothing is awaited, so no request's interleaving with others changes.
    */
   private markAliveForRequest(): void {
-    if (this.live && this.reachable) void this.store.engine.setMeta(HEARTBEAT_KEY, String(this.clock));
+    if (this.live && this.standsIn && this.reachable) void this.store.engine.setMeta(HEARTBEAT_KEY, String(this.clock));
   }
 
   /** The fake SMS provider. */
@@ -156,10 +156,26 @@ export class EngineHarness {
    * it does run, as those quiet ticks would have. Only the stops and outages a test makes are interruptions.
    */
   private live = true;
+  /** False when a test runs every tick itself, production-like: the harness then never stands in for a quiet tick. */
+  standsIn = true;
   /** While set, every provider call the engine makes fails, as with the network down (the providers still act). */
   providersDownUntil: number | null = null;
   /** A provider answer held while the clock moves on (follow-up 42 item 39): the next call of this kind arrives `ms` later. */
   heldAnswer: { readonly kind: "observe" | "lookup"; readonly ms: number } | null = null;
+  /** Called when a held answer arrives, the clock already moved and the providers caught up, before the call returns. */
+  onHeldAnswer: ((askedAt: number, answeredAt: number) => void) | null = null;
+  /**
+   * Ticket 20a (PR 56 review bot): providers that, like the Instantly adapter between polls, answer their account read and
+   * observation from a cache while unreachable, and report their freshness: the last real answer, standing for one
+   * minute's polling interval twice over.
+   */
+  cachedPolls = false;
+  /** Send calls an outage swallowed: committed by the engine, never received by the provider (the app cannot know which). */
+  /** Withdrawal asks an outage swallowed: the engine asked, the provider never heard; the engine counts it as an ask answered unknown. */
+  readonly swallowedWithdrawals: { readonly channel: string; readonly key: string; readonly at: number }[] = [];
+  readonly swallowedHandovers: { readonly channel: string; readonly key: string; readonly subjectId: string; readonly stepId: string; readonly at: number }[] = [];
+  private readonly lastReal = new Map<SendPort, number>();
+  private readonly cachedAccounts = new Map<SendPort, unknown>();
   /** The instants held answers arrived at, as asked and as answered. */
   readonly heldAnswers: { readonly kind: string; readonly askedAt: number; readonly answeredAt: number }[] = [];
 
@@ -171,10 +187,24 @@ export class EngineHarness {
   private gated(port: SendPort): SendPort {
     return new Proxy(port, {
       get: (target, prop, receiver) => {
+        if (prop === "contact" && this.cachedPolls) return () => ({ at: this.lastReal.get(target) ?? null, freshForMs: 2 * 60_000 });
         const value: unknown = Reflect.get(target, prop, receiver);
         if (typeof prop !== "string" || !PORT_CALLS.has(prop) || typeof value !== "function") return value;
         return (...args: unknown[]) => {
-          if (!this.reachable) return Promise.reject(new Error("the provider is unreachable"));
+          if (!this.reachable && this.cachedPolls && prop === "observe") return Promise.resolve({ events: [], checkpoint: args[0] ?? "" });
+          if (!this.reachable && this.cachedPolls && prop === "accounts" && this.cachedAccounts.has(target)) return Promise.resolve(this.cachedAccounts.get(target));
+          if (!this.reachable) {
+            if (prop === "withdraw") {
+              const r = args[0] as AttemptRef;
+              this.swallowedWithdrawals.push({ channel: target.channel, key: r.idempotencyKey, at: this.clock });
+            }
+            if (prop === "handover") {
+              const r = args[0] as HandoverRequest;
+              this.swallowedHandovers.push({ channel: target.channel, key: r.idempotencyKey, subjectId: r.subjectId, stepId: r.stepId, at: this.clock });
+            }
+            return Promise.reject(new Error("the provider is unreachable"));
+          }
+          if (prop === "accounts" || prop === "observe") this.lastReal.set(target, this.clock);
           const held = this.heldAnswer;
           if (held && held.kind === prop) {
             this.heldAnswer = null;
@@ -182,8 +212,12 @@ export class EngineHarness {
             this.clock += held.ms;
             this.advanceProviders();
             this.heldAnswers.push({ kind: prop, askedAt, answeredAt: this.clock });
+            this.lastReal.set(target, this.clock);
+            this.onHeldAnswer?.(askedAt, this.clock);
           }
-          return (value as (...a: unknown[]) => unknown).apply(target, args);
+          const result = (value as (...a: unknown[]) => unknown).apply(target, args);
+          if (prop === "accounts") void (result as Promise<unknown>).then((answer) => this.cachedAccounts.set(target, answer), () => undefined);
+          return result;
         };
       },
     });
@@ -309,7 +343,7 @@ export class EngineHarness {
     await new Promise((resolve) => setImmediate(resolve));
     this.advanceProviders();
     if (this.providersDownUntil !== null && this.clock >= this.providersDownUntil) this.providersDownUntil = null;
-    if (this.live) await this.store.engine.setMeta(HEARTBEAT_KEY, String(this.clock));
+    if (this.live && this.standsIn) await this.store.engine.setMeta(HEARTBEAT_KEY, String(this.clock));
     this.beforeTick?.();
     try {
       await this.engine.tick();

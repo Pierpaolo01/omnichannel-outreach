@@ -1,7 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { Crash, EngineHarness, TransientError } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
-import { interruptionOf } from "../../domain/sequence/interruption.ts";
 import type { Rules } from "./rules.ts";
 import type { CampaignDefinition, StepDefinition } from "../../domain/sequence/definition.ts";
 import type { CallsView, EnrollmentRead, LeadSearchResult, TodayView } from "../../shared/api.ts";
@@ -35,17 +34,18 @@ const HARBOUR = business({ business_id: "b1", business_name: "Harbour Lane Physi
 const PEOPLE = ["Pat Oneil", "Nia Cole", "Sam Reed"].map((name, i) => person({ person_id: `p${i + 1}`, business_id: "b1", full_name: name, email: `${name.split(" ")[0]!.toLowerCase()}@harbour.example` }));
 
 let failing = false;
-async function world(capacity = 50) {
+async function world(capacity = 50, extraRules: Partial<Rules> = {}) {
   failing = false;
   const h = new EngineHarness({
     start: MONDAY_9,
     accounts: [{ id: "inbox-a", capacity, gapMs: 10 * MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
     rules: {
-      // Every tick in which the providers answer asks whether an interruption ended: failing here fails every tick.
-      interruptionOf: (last, now) => {
+      // Every tick judges its dispatch at an instant: failing here fails every tick.
+      dispatchInstant: (_started, now) => {
         if (failing) throw new TransientError("a tick");
-        return interruptionOf(last, now);
+        return now;
       },
+      ...extraRules,
     },
   });
   await h.tick();
@@ -146,17 +146,37 @@ describe("the application stopped", () => {
 });
 
 describe("the machine slept in the middle of a tick", () => {
-  test("an answer held across midnight: the tick that took it records no heartbeat, and the next reports the interruption from before it", async () => {
+  test("an answer held across midnight: the interruption is recorded, with its count, when the tick decides to dispatch, before the overdue follow-ups go (PR 56 review bot)", async () => {
     const { h, campaign, today } = await world();
     await campaign("Clinics");
+    // The three first emails went on Monday; their follow-ups fall due at midnight.
     await h.advanceTo(TUESDAY_0 - 10 * MIN);
     const asked = h.clock;
+    // At each follow-up's handover, the notice as stored then: it must already count the follow-ups.
+    const atHandover: (string | null)[] = [];
+    h.hooks = { beforeHandover: async () => void atHandover.push(await h.store.engine.meta("engine_interruption")) };
     h.stopMarkingAlive();
+    // The machine sleeps for six hours in the middle of the tick's observation.
     h.heldAnswer = { kind: "observe", ms: 6 * H };
     await h.tick();
     expect(h.heldAnswers).toEqual([{ kind: "observe", askedAt: asked, answeredAt: asked + 6 * H }]);
+    const notice = { from: iso(asked), to: iso(asked + 6 * H), rescheduled: 3 };
+    expect((await today()).interruption).toEqual(notice);
+    expect(atHandover.length).toBeGreaterThan(0);
+    for (const stored of atHandover) expect(stored === null ? null : JSON.parse(stored)).toEqual({ from: asked, to: asked + 6 * H, rescheduled: 3 });
+    // Under the mutation that decides at the tick's start, the follow-ups go before anything is counted.
+    expect(h.fake.handoverLog.filter((c) => c.stepId === "s2").every((c) => c.at >= asked + 6 * H)).toBe(true);
+  });
+
+  test("decided at the tick's start instead, the follow-ups go uncounted: the test above bites", async () => {
+    const { h, campaign, today } = await world(50, { dispatchInstant: (started) => started });
+    await campaign("Clinics");
+    await h.advanceTo(TUESDAY_0 - 10 * MIN);
+    h.stopMarkingAlive();
+    h.heldAnswer = { kind: "observe", ms: 6 * H };
     await h.tick();
-    expect((await today()).interruption).toMatchObject({ from: iso(asked), to: iso(asked + 6 * H) });
+    await h.tick();
+    expect((await today()).interruption?.rescheduled ?? 0).toBeLessThan(3);
   });
 
   test("an answer held for a minute is not an interruption", async () => {
@@ -168,6 +188,44 @@ describe("the machine slept in the middle of a tick", () => {
     await h.tick();
     await h.tick();
     expect((await today()).interruption).toBeNull();
+  });
+});
+
+describe("the verifier's reproductions on 2f7cd20 (one lead, one inbox: capacity 100, gap one minute, k = 1)", () => {
+  async function oneLead() {
+    const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 100, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+    await h.tick();
+    const { campaign } = await h.createCampaign("Clinics", { businesses: [HARBOUR], people: [PEOPLE[0]!] });
+    await h.defineSequence(campaign.id, DEFINITION);
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    const today = async () => (await h.request<TodayView>("GET", "/api/today")).body;
+    return { h, today };
+  }
+
+  test("A: an observation held from Monday 23:50 to Tuesday 05:50 counts the midnight follow-up (N = 1) before it is sent", async () => {
+    const { h, today } = await oneLead();
+    await h.advanceTo(TUESDAY_0 - 10 * MIN);
+    h.stopMarkingAlive();
+    h.heldAnswer = { kind: "observe", ms: 6 * H };
+    await h.tick();
+    await h.tick();
+    expect((await today()).interruption).toEqual({ from: iso(TUESDAY_0 - 10 * MIN), to: iso(TUESDAY_0 + 5 * H + 50 * MIN), rescheduled: 1 });
+    expect(h.fake.handoverLog.filter((c) => c.stepId === "s2").map((c) => c.at)).toEqual([TUESDAY_0 + 5 * H + 50 * MIN]);
+  });
+
+  test("B: a 24-hour gap, then a recovery tick that sleeps six hours: one notice, from the last heartbeat to the end of the sleep", async () => {
+    const { h, today } = await oneLead();
+    const monday10 = MONDAY_9 + H;
+    await h.advanceTo(monday10);
+    // Nothing ticks for 24 hours; the recovery tick's first observation is then held another six.
+    h.stopMarkingAlive();
+    h.clock = monday10 + DAY;
+    h.heldAnswer = { kind: "observe", ms: 6 * H };
+    await h.tick();
+    const notice = { from: iso(monday10), to: iso(monday10 + DAY + 6 * H), rescheduled: 1 };
+    expect((await today()).interruption).toEqual(notice);
+    await h.tick();
+    expect((await today()).interruption).toEqual(notice);
   });
 });
 
