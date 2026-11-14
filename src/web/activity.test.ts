@@ -1,10 +1,10 @@
 import { describe, expect, test } from "vitest";
-import type { ActivityEntry, DependentTrackState } from "../shared/api.ts";
+import type { ActivityEntry, DependentTrackState, TrackLabel } from "../shared/api.ts";
 import { describeEntry } from "./activity.tsx";
 
 const campaign = { id: "c1", name: "Autumn physio" };
 const at = "2026-11-02T09:05:00.000Z";
-const one = (label: string) => ({ label, several: false });
+const one = (label: string): TrackLabel => ({ label, several: false, branch: "main" });
 
 describe("what the timeline says of a track that ended on a bad address (re-check B14)", () => {
   test("it says what the stored ending says, and does not claim another campaign marked the address", () => {
@@ -29,15 +29,23 @@ describe("what the timeline says of SMS, skipped and released tracks (ticket 13b
     expect(say({ campaign, at, kind: "bounced", channel: "sms", track: one("SMS track"), stepNumber: 1, to: "+44 7700 900222" })).toEqual(["Text 1: bad number", "+44 7700 900222 was reported invalid and is marked wrong. Nothing more is texted to it.", null]);
   });
 
+  test("a step of the win-back branch is named for it, through the track's label (council on 4fd9ca4, item 5)", () => {
+    const winBack: TrackLabel = { label: "Win-back email track", several: false, branch: "win_back" };
+    expect(say({ campaign, at, kind: "sent", channel: "email", track: winBack, stepNumber: 1, from: "a", to: "b", copy: null })).toEqual(["Win-back email 1 sent", null, null]);
+    expect(say({ campaign, at, kind: "bounced", channel: "email", track: winBack, stepNumber: 2, to: "pat@harbour.example" })[0]).toBe("Win-back email 2 bounced");
+    expect(say({ campaign, at, kind: "failed", channel: "sms", track: { label: "Win-back SMS track", several: false, branch: "win_back" }, stepNumber: 1, to: "+44 7700 900111", reason: "invalid number" })[0]).toBe("Win-back text 1 failed");
+    expect(say({ campaign, at, kind: "sent", channel: "email", track: one("Email track"), stepNumber: 1, from: "a", to: "b", copy: null })[0]).toBe("Email 1 sent");
+  });
+
   test("with two tracks on one channel, the entry names its track, never its position", () => {
-    expect(say({ campaign, at, kind: "sent", channel: "email", track: { label: "Email track 2", several: true }, stepNumber: 1, from: "a", to: "b", copy: null })).toEqual(["Email 1 sent", null, "Email track 2"]);
+    expect(say({ campaign, at, kind: "sent", channel: "email", track: { label: "Email track 2", several: true, branch: "main" }, stepNumber: 1, from: "a", to: "b", copy: null })).toEqual(["Email 1 sent", null, "Email track 2"]);
   });
 
   test("skipped and released tracks are said plainly", () => {
     expect(say({ campaign, at, kind: "skipped", channel: "sms", track: one("SMS track"), stepNumber: null, reason: "no_mobile" })).toEqual(["SMS track skipped", "No mobile of their own.", null]);
     expect(say({ campaign, at, kind: "skipped", channel: "sms", track: one("SMS track"), stepNumber: null, reason: "company_lead" })).toEqual(["SMS track skipped", "A company lead is never texted: a main line isn’t a mobile.", null]);
     expect(say({ campaign, at, kind: "released", channel: "sms", track: one("SMS track"), after: one("Email track"), because: "skipped" })).toEqual(["SMS track started", "It starts after the email track, which was skipped for this lead.", null]);
-    expect(say({ campaign, at, kind: "released", channel: "email", track: { label: "Email track 2", several: true }, after: one("SMS track"), because: "failed" })).toEqual(["Email track 2 started", "It starts after the SMS track, which ended on a bad number.", null]);
+    expect(say({ campaign, at, kind: "released", channel: "email", track: { label: "Email track 2", several: true, branch: "main" }, after: one("SMS track"), because: "failed" })).toEqual(["Email track 2 started", "It starts after the SMS track, which ended on a bad number.", null]);
   });
 });
 
@@ -103,7 +111,7 @@ describe("what the timeline says of a declined call (ticket 16)", () => {
 describe("every track state the server sends after an unworked skip has its own sentence, and only a server state promises a start (verifier on 2027f24)", () => {
   test("the table walks every state", async () => {
     const { dependentLine } = await import("./activity.tsx");
-    const track = { label: "Email track 2", several: false };
+    const track: TrackLabel = { label: "Email track 2", several: false, branch: "main" };
     const table: Record<DependentTrackState["state"], string> = {
       started: "Email track 2 started after it.",
       finished: "Email track 2 has finished.",
@@ -116,6 +124,7 @@ describe("every track state the server sends after an unworked skip has its own 
       skipped: "Email track 2 was skipped.",
       stopped: "Email track 2 did not start: their outreach in this campaign stopped.",
       stopped_after_start: "Email track 2 started after it, then stopped: their outreach in this campaign stopped.",
+      started_held: "Email track 2 started after it, and is waiting while their outreach is held.",
       no_more_calls: "Email track 2 will not call them: they declined on a call.",
       not_started: "Email track 2 has not started.",
     };
@@ -130,7 +139,7 @@ describe("every track state the server sends after an unworked skip has its own 
 
 describe("what a decline did to each remaining track, as the server's read holds it now (ticket 16c)", () => {
   const number = { detailId: "d1", kind: "direct" as const, owner: "person" as const, value: "+44 20 7946 0111" };
-  const several = (label: string) => ({ label, several: true });
+  const several = (label: string): TrackLabel => ({ label, several: true, branch: label.startsWith("Win-back") ? "win_back" : "main" });
   test("history in the past tense; a present state only as the read's state says it", () => {
     const entry: ActivityEntry = {
       campaign,
@@ -149,17 +158,17 @@ describe("what a decline did to each remaining track, as the server's read holds
       redialListedFrom: null,
       callbackOpen: false,
       afterDecline: [
-        { track: several("Email track 1"), branch: "main", state: "dropped_for_win_back", startsAt: null },
-        { track: several("Phone track 2"), branch: "main", state: "dropped_for_win_back", startsAt: null },
-        { track: several("Win-back email track 1"), branch: "win_back", state: "started", startsAt: null },
-        { track: several("Win-back email track 2"), branch: "win_back", state: "waiting", startsAt: "2026-11-04T00:00:00.000Z" },
+        { track: several("Email track 1"), state: "dropped_for_win_back", startsAt: null },
+        { track: several("Phone track 2"), state: "dropped_for_win_back", startsAt: null },
+        { track: several("Win-back email track 1"), state: "started", startsAt: null },
+        { track: several("Win-back email track 2"), state: "waiting", startsAt: "2026-11-04T00:00:00.000Z" },
       ],
     };
     expect(describeEntry(entry, "Europe/London").body).toBe(
       "Moved to this campaign’s win-back branch, with no more calls. Email track 1 was dropped for the win-back branch. Phone track 2 was dropped for the win-back branch. Win-back email track 1 started, and is running. Win-back email track 2 starts after its delay, on Wed 4 Nov. +44 20 7946 0111, direct",
     );
     // After a reply in win-back the same entry reads the lead as it stands: the branch's unstarted track never starts.
-    const replied = { ...entry, afterDecline: [{ track: several("Win-back email track 1"), branch: "win_back" as const, state: "finished" as const, startsAt: null }, { track: several("Win-back email track 2"), branch: "win_back" as const, state: "stopped" as const, startsAt: null }] };
+    const replied = { ...entry, afterDecline: [{ track: several("Win-back email track 1"), state: "finished" as const, startsAt: null }, { track: several("Win-back email track 2"), state: "stopped" as const, startsAt: null }] };
     expect(describeEntry(replied, "Europe/London").body).toBe("Moved to this campaign’s win-back branch, with no more calls. Win-back email track 1 has finished. Win-back email track 2 did not start: their outreach in this campaign stopped. +44 20 7946 0111, direct");
   });
 });

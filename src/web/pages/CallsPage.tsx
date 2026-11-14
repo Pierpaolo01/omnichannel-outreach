@@ -723,7 +723,7 @@ function DeclinedPathFields({ desk, snap, task, userZone, who }: { desk: CallDes
   const declined = snap.declined;
   if (declined === null) return null;
   const preview = task.declines?.find((d) => d.path === declined.path) ?? null;
-  const lines = preview ? declinePreviewLines(preview, task.campaign.name, userZone) : null;
+  const lines = preview ? declinePreviewLines(preview, userZone) : null;
   return (
     <>
       <fieldset className="flex flex-col gap-1.5" aria-describedby={sourceId}>
@@ -757,7 +757,10 @@ function DeclinedPathFields({ desk, snap, task, userZone, who }: { desk: CallDes
       ) : (
         lines && (
           <div aria-live="polite" className="flex flex-col gap-1.5">
-            <p>{lines.lead}</p>
+            <p>
+              {lines.lead}
+              {lines.noMoreCalls ? ` ${lines.noMoreCalls}` : ""}
+            </p>
             {lines.tracks.length > 0 && (
               <ul aria-label="What logging does to each track" className="flex flex-col gap-0.5 text-[13px] text-ink-2">
                 {lines.tracks.map((line) => (

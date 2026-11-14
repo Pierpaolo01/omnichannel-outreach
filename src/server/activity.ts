@@ -228,7 +228,7 @@ function callEntries(
     // Each track after it, as its stored progress stands now: never a start that has not happened (verifier on eac9f6c, F2).
     const after = def.tracks
       .filter((t) => !t.removed && t.start.kind === "after" && t.start.trackId === track.trackId)
-      .map((t) => ({ track: labelOf(t.id), ...dependentStateOf(live, live.tracks.find((x) => x.trackId === t.id), now) }));
+      .map((t) => ({ track: labelOf(t.id), ...dependentStateOf(live, t, now) }));
     entries.push({ campaign, at: track.finishedAt, kind: "skipped", channel: "call", track: label, stepNumber: null, reason: "unworked", dueDate: dateOfDay(localDayNumber(unworked.dueWall, live.callDay.userZone)), limitDays: skipLimitOf(def, track.trackId), after });
   }
 }

@@ -634,6 +634,7 @@ export type DependentTrackState =
         | "held"
         | "stopped"
         | "stopped_after_start"
+        | "started_held"
         | "no_more_calls"
         | "not_started";
       readonly startsAt: null;
@@ -644,7 +645,7 @@ export type DependentTrackState =
  * the declined call's own that had not finished before the decline, then the win-back branch's tracks once the lead
  * entered it. The same selection and the same mapping (`dependentStateOf`) for the preview before Log and for Activity.
  */
-export type DeclineTrackView = { readonly track: TrackLabel; readonly branch: "main" | "win_back" } & DependentTrackState;
+export type DeclineTrackView = { readonly track: TrackLabel } & DependentTrackState;
 
 /** What logging not interested on one path would do (ticket 16c): the engine's own outcome on a copy of the lead, stored nowhere. */
 export interface DeclinePreviewView {
@@ -652,6 +653,8 @@ export interface DeclinePreviewView {
   /** The lead's outreach status after it. */
   readonly status: OutreachStatus;
   readonly tracks: readonly DeclineTrackView[];
+  /** No call is made to the lead again in this campaign once this is logged: the engine's `noMoreCalls` on the copy. */
+  readonly noMoreCalls: boolean;
   /** Emails or texts already handed to a provider that the decline asks to withdraw: each may still go (ADR 0003 2.5). */
   readonly withProvider: number;
 }

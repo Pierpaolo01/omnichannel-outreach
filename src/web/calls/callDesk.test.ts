@@ -1040,7 +1040,7 @@ describe("the declined path is part of the press, like the outcome (ticket 16c; 
     expect(w.held[0]?.body).toEqual(first?.body);
     await w.answer(w.held[0]!);
     await flush();
-    expect(loggedLine(d.getSnapshot().logged!, "Europe/London")).toBe("Pat Oneil: not interested logged. Moved to this campaign’s win-back branch, with no more calls. In win-back in Desk. The note is saved on Pat Oneil.");
+    expect(loggedLine(d.getSnapshot().logged!, "Europe/London")).toBe("Pat Oneil: not interested logged. Moved to this campaign’s win-back branch, with no more calls. Now in win-back, in Desk. The note is saved on Pat Oneil.");
   });
 
   test("the user's own path for this lead is the press's; it stays in the draft whatever the outcome, and goes only with not interested", async () => {

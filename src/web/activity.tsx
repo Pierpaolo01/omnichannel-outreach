@@ -5,6 +5,7 @@ import { ErrorState, Section } from "./components.tsx";
 import { DECLINED_PATH_LINE, OUTCOME_TITLE, dateIn, declineTrackLine, dialledLine } from "./calls/wording.ts";
 import { dayLabel } from "./calls/callbackTime.ts";
 import { Icon, type IconName } from "./icons.tsx";
+import { stepNoun } from "../shared/track-label.ts";
 import { useNow } from "./time.ts";
 
 /**
@@ -142,7 +143,8 @@ export function describeEntry(entry: ActivityEntry, userZone: string): { icon: I
     }
   }
   const sms = entry.channel === "sms";
-  const noun = sms ? "Text" : "Email";
+  // What a step is called comes from its track's label, so a win-back step reads "Win-back email 1" (council on 4fd9ca4, item 5).
+  const noun = stepNoun(entry.track, entry.channel);
   const track = entry.track.several ? entry.track.label : null;
   const icon: IconName = sms ? "sms" : "email";
   switch (entry.kind) {
@@ -154,8 +156,8 @@ export function describeEntry(entry: ActivityEntry, userZone: string): { icon: I
       return { icon: "system", tone: PLAIN, title: entry.stepNumber === null ? `${entry.track.label} skipped` : `${noun} ${entry.stepNumber} skipped`, body: REASON[entry.reason] ?? entry.reason, track: entry.stepNumber === null ? null : track };
     case "bounced":
       return sms
-        ? { icon: "bad", tone: CRIT, title: entry.stepNumber === null ? "Bad number" : `Text ${entry.stepNumber}: bad number`, body: `${entry.to} was reported invalid and is marked wrong. Nothing more is texted to it.`, track }
-        : { icon: "bad", tone: CRIT, title: entry.stepNumber === null ? "Email bounced" : `Email ${entry.stepNumber} bounced`, body: `${entry.to} is marked wrong. Nothing more is sent to it.`, track };
+        ? { icon: "bad", tone: CRIT, title: entry.stepNumber === null ? "Bad number" : `${noun} ${entry.stepNumber}: bad number`, body: `${entry.to} was reported invalid and is marked wrong. Nothing more is texted to it.`, track }
+        : { icon: "bad", tone: CRIT, title: entry.stepNumber === null ? "Email bounced" : `${noun} ${entry.stepNumber} bounced`, body: `${entry.to} is marked wrong. Nothing more is sent to it.`, track };
     case "address_bad":
       return { icon: "system", tone: PLAIN, title: `${entry.track.label} ended`, body: `${entry.to} is marked wrong, so nothing more is sent to it.`, track: null };
     case "released":
@@ -208,6 +210,8 @@ export function dependentLine(a: { readonly track: { readonly label: string } } 
       return `${name} did not start: their outreach in this campaign stopped.`;
     case "stopped_after_start":
       return `${name} started after it, then stopped: their outreach in this campaign stopped.`;
+    case "started_held":
+      return `${name} started after it, and is waiting while their outreach is held.`;
     case "no_more_calls":
       return `${name} will not call them: they declined on a call.`;
     case "not_started":

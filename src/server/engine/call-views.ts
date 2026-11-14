@@ -140,9 +140,15 @@ export function firstListedDay(s: SubjectState, task: CallTask, rules: CallViewR
  */
 export async function recordCalls(store: OutreachStore, enrollmentIds: readonly string[], now: number, rules: CallViewRules = DEFAULT_RULES): Promise<RecordCalls> {
   const out: RecordCallView[] = [];
+  const day = await store.engine.callDay(now);
+  // Each enrollment's decline (ticket 16c), from the same snapshot as its calls (council on 4fd9ca4, item 6): the user's
+  // date it was logged on, as the engine counts the day, and its path.
+  const declines: RecordCalls["declines"][number][] = [];
   for (const id of enrollmentIds) {
     const s = await asOfNow(store, id, now, rules);
     if (!s) continue;
+    const declined = s.callAttempts.find((c) => c.outcome === "not_interested" && c.declinedPath !== null);
+    if (declined?.declinedPath) declines.push({ enrollmentId: id, date: dateOfDay(localDayNumber(declined.atWall, day.userZone)), path: declined.declinedPath });
     const shown = s.callTasks.flatMap((task) => {
       const first = task.open ? firstListedDay(s, task, rules) : null;
       return first === null ? [] : [{ task, first }];
@@ -166,14 +172,6 @@ export async function recordCalls(store: OutreachStore, enrollmentIds: readonly 
         heldByCallback: first === null,
       });
     }
-  }
-  const day = await store.engine.callDay(now);
-  // Each enrollment's decline (ticket 16c): the user's date it was logged on, as the engine counts the day, and its path.
-  const declines: RecordCalls["declines"][number][] = [];
-  for (const id of enrollmentIds) {
-    const s = await store.engine.subject(id, now);
-    const declined = s?.callAttempts.find((c) => c.outcome === "not_interested" && c.declinedPath !== null);
-    if (declined?.declinedPath) declines.push({ enrollmentId: id, date: dateOfDay(localDayNumber(declined.atWall, day.userZone)), path: declined.declinedPath });
   }
   return { calls: out, today: dateIn(day.userZone, now), declines };
 }
@@ -222,6 +220,7 @@ function declinePreviews(s: SubjectState, task: CallTask, now: number, rules: Ca
       path,
       status: deriveStatus(after),
       tracks: afterDeclineTracks(after, task.trackId, now, path, now),
+      noMoreCalls: after.subject.noMoreCalls,
       withProvider: [...withProvider(after)].filter((id) => !before.has(id)).length,
     });
   }

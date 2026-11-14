@@ -4,7 +4,7 @@
  * one here and a sentence on the page. Activity's unworked skip, Activity's decline, and the decline's preview before
  * Log all read tracks through `dependentStateOf`.
  */
-import type { DeclinedPath } from "../../domain/sequence/definition.ts";
+import type { DeclinedPath, TrackDefinition } from "../../domain/sequence/definition.ts";
 import { runs, wallAtLead } from "../../domain/sequence/progress.ts";
 import type { FinishReason, SubjectState } from "../../domain/sequence/state.ts";
 import type { DeclineTrackView, DependentTrackState } from "../../shared/api.ts";
@@ -36,17 +36,23 @@ export function finishedStateOf(reason: FinishReason): Exclude<DependentTrackSta
 }
 
 /**
- * A track's state from the engine's stored progress at the read (`live`), never from how another track ended: a
- * finished track by its stored finish; once the lead has stopped or ended, one that had started sends nothing more
- * (`stopped_after_start`) and one that had not will not start (`stopped`); a phone track of a lead that declined never
- * calls (`no_more_calls`: the engine skips it at its start, ticket 16a); a started one is started; with its start
- * resolved it waits out its delay, or waits while the lead is held (council on 32454ea, D; verifier on 2027f24).
+ * A track's state from the engine's stored progress at the read (`live`), never from how another track ended. It takes
+ * the track itself, so a track with no progress row yet is still judged by what it is (council on 4fd9ca4, item 1):
+ * - finished: by its stored finish;
+ * - once the lead has stopped or ended: one that had started sends nothing more (`stopped_after_start`), one that had not
+ *   will not start (`stopped`);
+ * - a phone track of a lead that declined never calls (`no_more_calls`), with a progress row or none: the engine skips it
+ *   at its start (ticket 16a);
+ * - started: `started` while the lead runs, `started_held` while a hold stops it (council on 4fd9ca4, item 2);
+ * - not started: no start resolved yet (`not_started`), or waiting out its delay, or waiting while the lead is held
+ *   (council on 32454ea, D; verifier on 2027f24).
  */
-export function dependentStateOf(live: SubjectState, p: SubjectState["tracks"][number] | undefined, now: number): DependentTrackState {
+export function dependentStateOf(live: SubjectState, track: Pick<TrackDefinition, "id" | "channel">, now: number): DependentTrackState {
+  const p = live.tracks.find((t) => t.trackId === track.id);
   if (p?.finishReason) return { state: finishedStateOf(p.finishReason), startsAt: null };
   if (live.subject.ended !== null) return { state: p && p.startedAt !== null ? "stopped_after_start" : "stopped", startsAt: null };
-  if (p && live.subject.noMoreCalls && live.campaign.definition.tracks.find((t) => t.id === p.trackId)?.channel === "call") return { state: "no_more_calls", startsAt: null };
-  if (p && p.startedAt !== null) return { state: "started", startsAt: null };
+  if (track.channel === "call" && live.subject.noMoreCalls) return { state: "no_more_calls", startsAt: null };
+  if (p && p.startedAt !== null) return { state: runs(live) ? "started" : "started_held", startsAt: null };
   if (!p || p.startAt === null) return { state: "not_started", startsAt: null };
   if (!runs(live)) return { state: "held", startsAt: null };
   return { state: "waiting", startsAt: new Date(wallAtLead(live.subject.clock, live.freezes, p.startAt, now)).toISOString() };
@@ -69,5 +75,5 @@ export function afterDeclineTracks(live: SubjectState, declinedTrackId: string, 
     return !p || p.finishedWall === null || p.finishedWall >= atWall;
   });
   const branch = path === "win_back" && live.subject.branch === "win_back" ? def.tracks.filter((t) => t.branch === "win_back" && (!t.removed || progress(t.id)?.startedAt != null)) : [];
-  return [...main, ...branch].map((t) => ({ track: trackLabel(def, t), branch: t.branch, ...dependentStateOf(live, progress(t.id), now) }));
+  return [...main, ...branch].map((t) => ({ track: trackLabel(def, t), ...dependentStateOf(live, t, now) }));
 }

@@ -3,6 +3,7 @@ import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { FakeMode } from "../../../test/support/fake-email-port.ts";
 import type { CampaignDefinition, DeclinedPath, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
+import { dependentStateOf } from "./track-states.ts";
 import type { ActivityEntry, ActivityView, CallTaskView, LeadSearchResult, PersonRecord, RecordCalls } from "../../shared/api.ts";
 
 /**
@@ -90,7 +91,7 @@ async function world(modes: readonly FakeMode[] = ["honest"]) {
   return { h, campaign, task, taskOf, decline, activity, declineEntry, record };
 }
 
-const label = (name: string) => ({ label: name, several: true });
+const label = (name: string) => ({ label: name, several: true, branch: name.startsWith("Win-back") ? "win_back" : "main" });
 const at = (state: string, startsAt: string | null = null) => ({ state, startsAt });
 
 describe("before Log: what a decline on each path offered would do, from the engine's own outcome on a copy (ADR 0003 4.4.1)", () => {
@@ -105,33 +106,36 @@ describe("before Log: what a decline on each path offered would do, from the eng
         path: "stop",
         status: "declined_on_call",
         tracks: [
-          { track: label("Email track 1"), branch: "main", ...at("stopped_after_start") },
-          { track: label("Email track 2"), branch: "main", ...at("stopped") },
-          { track: label("Phone track 2"), branch: "main", ...at("stopped") },
+          { track: label("Email track 1"), ...at("stopped_after_start") },
+          { track: label("Email track 2"), ...at("stopped") },
+          { track: label("Phone track 2"), ...at("stopped") },
         ],
+        noMoreCalls: true,
         withProvider: 0,
       },
       {
         path: "continue",
         status: "active",
         tracks: [
-          { track: label("Email track 1"), branch: "main", ...at("started") },
+          { track: label("Email track 1"), ...at("started") },
           // A day after the call, logged now on Monday: a delay counts calendar days, so it starts at the beginning of Tuesday.
-          { track: label("Email track 2"), branch: "main", ...at("waiting", "2026-11-03T00:00:00.000Z") },
-          { track: label("Phone track 2"), branch: "main", ...at("no_more_calls") },
+          { track: label("Email track 2"), ...at("waiting", "2026-11-03T00:00:00.000Z") },
+          { track: label("Phone track 2"), ...at("no_more_calls") },
         ],
+        noMoreCalls: true,
         withProvider: 0,
       },
       {
         path: "win_back",
         status: "in_win_back",
         tracks: [
-          { track: label("Email track 1"), branch: "main", ...at("dropped_for_win_back") },
-          { track: label("Email track 2"), branch: "main", ...at("dropped_for_win_back") },
-          { track: label("Phone track 2"), branch: "main", ...at("dropped_for_win_back") },
-          { track: label("Win-back email track 1"), branch: "win_back", ...at("started") },
-          { track: label("Win-back email track 2"), branch: "win_back", ...at("not_started") },
+          { track: label("Email track 1"), ...at("dropped_for_win_back") },
+          { track: label("Email track 2"), ...at("dropped_for_win_back") },
+          { track: label("Phone track 2"), ...at("dropped_for_win_back") },
+          { track: label("Win-back email track 1"), ...at("started") },
+          { track: label("Win-back email track 2"), ...at("not_started") },
         ],
+        noMoreCalls: true,
         withProvider: 0,
       },
     ]);
@@ -199,9 +203,9 @@ describe("after Log: the read agrees with the preview, and Activity says what th
     expect((await decline(c.lead)).status).toBe(200);
     await h.advanceTo(MONDAY_9 + DAY + 2 * H);
     expect((await declineEntry(c.id))?.afterDecline).toEqual([
-      { track: label("Email track 1"), branch: "main", ...at("started") },
-      { track: label("Email track 2"), branch: "main", ...at("finished") },
-      { track: label("Phone track 2"), branch: "main", ...at("skipped_declined") },
+      { track: label("Email track 1"), ...at("started") },
+      { track: label("Email track 2"), ...at("finished") },
+      { track: label("Phone track 2"), ...at("skipped_declined") },
     ]);
   });
 
@@ -216,11 +220,57 @@ describe("after Log: the read agrees with the preview, and Activity says what th
     expect((await record()).enrollments.find((e) => e.id === c.lead)?.status).toBe("replied");
     expect((await activity(c.id)).some((e) => e.kind === "replied")).toBe(true);
     expect((await declineEntry(c.id))?.afterDecline).toEqual([
-      { track: label("Email track 1"), branch: "main", ...at("dropped_for_win_back") },
-      { track: label("Email track 2"), branch: "main", ...at("dropped_for_win_back") },
-      { track: label("Phone track 2"), branch: "main", ...at("dropped_for_win_back") },
-      { track: label("Win-back email track 1"), branch: "win_back", ...at("finished") },
-      { track: label("Win-back email track 2"), branch: "win_back", ...at("stopped") },
+      { track: label("Email track 1"), ...at("dropped_for_win_back") },
+      { track: label("Email track 2"), ...at("dropped_for_win_back") },
+      { track: label("Phone track 2"), ...at("dropped_for_win_back") },
+      { track: label("Win-back email track 1"), ...at("finished") },
+      { track: label("Win-back email track 2"), ...at("stopped") },
     ]);
+  });
+});
+
+describe("council on 4fd9ca4", () => {
+  test("item 1: a later phone track with no progress yet never calls a lead who declined, in the preview and after Log", async () => {
+    const { h, campaign, task, taskOf, decline, declineEntry } = await world();
+    // The second phone track starts after a two-email track, which is still running when the first call is declined.
+    const def = definition(undefined, false);
+    const c = await campaign("Phone after email", { ...def, tracks: def.tracks.map((t) => (t.id === "p2" ? { ...t, start: after("e1", 0) } : t)) });
+    await h.advanceTo(MONDAY_9 + H);
+    const view = await task(await taskOf(c.lead));
+    const cont = view.declines?.find((d) => d.path === "continue");
+    expect(cont?.tracks.find((t) => t.track.label === "Phone track 2")).toEqual({ track: label("Phone track 2"), ...at("no_more_calls") });
+    expect((await decline(c.lead, "continue")).status).toBe(200);
+    expect((await declineEntry(c.id))?.afterDecline.find((t) => t.track.label === "Phone track 2")).toEqual({ track: label("Phone track 2"), ...at("no_more_calls") });
+  });
+
+  test("item 2: a track that has started is said as held, not running, while a hold stops the lead", async () => {
+    const { h, campaign, task, taskOf } = await world();
+    const c = await campaign("Held", definition(undefined, false));
+    await h.advanceTo(MONDAY_9 + H);
+    const id = await taskOf(c.lead);
+    const direct = (await task(id)).numbers.find((n) => n.kind === "direct")?.detailId;
+    // A callback holds the lead's outreach; its first email track had started.
+    expect((await h.request("POST", `/api/call-tasks/${id}/outcome`, { requestId: "cb", outcome: "callback_requested", callbackAt: new Date(MONDAY_9 + DAY).toISOString(), numberId: direct })).status).toBe(200);
+    const live = (await h.store.engine.subject(c.lead, h.clock))!;
+    const e1 = live.campaign.definition.tracks.find((t) => t.id === "e1")!;
+    expect(dependentStateOf(live, e1, h.clock)).toEqual({ state: "started_held", startsAt: null });
+  });
+
+  test("item 6: the record reads each enrollment's state once", async () => {
+    const { h, campaign, decline, record } = await world();
+    const c = await campaign("Loads", definition("stop"));
+    await campaign("Loads, again", definition("continue"));
+    await h.advanceTo(MONDAY_9 + H);
+    expect((await decline(c.lead)).status).toBe(200);
+    const subject = h.store.engine.subject.bind(h.store.engine);
+    const loads: string[] = [];
+    h.store.engine.subject = (id: string, now: number) => {
+      loads.push(id);
+      return subject(id, now);
+    };
+    const rec = await record();
+    expect(rec.enrollments).toHaveLength(2);
+    expect(rec.declines).toHaveLength(1);
+    expect(loads.filter((id) => rec.enrollments.some((e) => e.id === id)).length).toBe(2);
   });
 });

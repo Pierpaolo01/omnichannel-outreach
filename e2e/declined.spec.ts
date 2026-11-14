@@ -75,7 +75,7 @@ test("win back preselected from the phone track, by keyboard alone: the pill, th
   await expect(outcome(page, "Not interested")).toHaveAttribute("aria-pressed", "true");
   await expect(path(page, /Move to the win-back messages/)).toBeChecked();
   await expect(paths(page)).toHaveAccessibleDescription("Preselected from the phone track’s setting.");
-  await expect(page.getByText("Logging this moves them to Clinics, London’s win-back branch: its tracks replace the main sequence’s remaining ones.")).toBeVisible();
+  await expect(page.getByText("Logging this moves them to this campaign’s win-back branch: its tracks replace the main sequence’s remaining ones. No call is made to them again.")).toBeVisible();
   await expect(trackLines(page)).toContainText("Email track 1 is dropped for the win-back branch.");
   await expect(trackLines(page)).toContainText("Win-back email track starts now.");
   await shot(page, "declined-win-back-preselected", { narrow: paths(page) });
@@ -90,7 +90,7 @@ test("win back preselected from the phone track, by keyboard alone: the pill, th
   await expect(path(page, /Keep the email and SMS steps going/)).toBeChecked();
   await expect(path(page, /Keep the email and SMS steps going/)).toBeFocused();
   await expect(paths(page)).toHaveAccessibleDescription("For Amira Hassan only: the phone track is set to “Move to the win-back messages”.");
-  await expect(page.getByText("Logging this keeps their remaining tracks in Clinics, London going, with no call made to them again.")).toBeVisible();
+  await expect(page.getByText("Logging this keeps their remaining tracks in this campaign going. No call is made to them again.")).toBeVisible();
   await shot(page, "declined-overridden-continue");
   await linger(page);
   await page.keyboard.press("ArrowDown");
@@ -98,7 +98,7 @@ test("win back preselected from the phone track, by keyboard alone: the pill, th
   await tabTo(page, logButton(page));
   await page.keyboard.press("Enter");
 
-  await expect(outcomeStatus(page)).toHaveText("Amira Hassan: not interested logged. Moved to this campaign’s win-back branch, with no more calls. In win-back in Clinics, London.");
+  await expect(outcomeStatus(page)).toHaveText("Amira Hassan: not interested logged. Moved to this campaign’s win-back branch, with no more calls. Now in win-back, in Clinics, London.");
   await expect(page.getByRole("heading", { name: "Amira Hassan" })).toHaveCount(0);
   await expect(numberGroup(page).getByRole("radio", { checked: true })).toBeFocused();
   await shot(page, "declined-win-back-logged");
@@ -116,18 +116,18 @@ test("continue preselected, win back unavailable with its reason; stop chosen fo
   await outcome(page, "Not interested").click();
   await expect(path(page, /Keep the email and SMS steps going/)).toBeChecked();
   await expect(path(page, /Move to the win-back messages \(this campaign has none\)/)).toBeDisabled();
-  await expect(page.getByText("Logging this keeps their remaining tracks in Clinics, London going, with no call made to them again.")).toBeVisible();
+  await expect(page.getByText("Logging this keeps their remaining tracks in this campaign going. No call is made to them again.")).toBeVisible();
   await expect(trackLines(page)).toContainText("Email track 1 carries on.");
   await expect(trackLines(page)).toContainText(/Email track 2 starts after its delay, on Tue 10 Nov\./);
   await shot(page, "declined-continue-preselected", { narrow: paths(page) });
   await path(page, /Stop all outreach in this campaign/).check();
-  await expect(page.getByText("Logging this stops their outreach in Clinics, London, this campaign only. Their other campaigns and colleagues are not affected.")).toBeVisible();
+  await expect(page.getByText("Logging this stops their outreach in this campaign only. Their other campaigns and colleagues are not affected. No call is made to them again.")).toBeVisible();
   await expect(trackLines(page)).toContainText("Email track 1 stops.");
   await expect(trackLines(page)).toContainText("Email track 2 will not start.");
   await shot(page, "declined-overridden-stop");
   await page.getByLabel("Notes from this call").fill("Has a booking system they like.");
   await logButton(page).click();
-  await expect(outcomeStatus(page)).toHaveText("Amira Hassan: not interested logged. Stopped in this campaign. Declined on call in Clinics, London. The note is saved on Amira Hassan.");
+  await expect(outcomeStatus(page)).toHaveText("Amira Hassan: not interested logged. Stopped in this campaign. Now declined on call, in Clinics, London. The note is saved on Amira Hassan.");
   expect((await record(f, "Amira Hassan")).enrollments.map((e) => e.status)).toEqual(["declined_on_call"]);
 });
 

@@ -201,7 +201,8 @@ export function loggedLine(logged: NonNullable<DeskSnapshot["logged"]>, userZone
   }
   // Not interested (ticket 16c): the path the server stored with this press, and the lead's status as the read gives it.
   if (stored?.outcome === "not_interested" && stored.declinedPath !== null) {
-    return withNote([`${who}: not interested logged.`, DECLINED_PATH_LINE[stored.declinedPath], `${STATUS_LABEL[task.status]} in ${task.campaign.name}.`], body, task, who);
+    // The status said lower-case after "Now", so a campaign name with a comma or an apostrophe never reads as part of it (council on 4fd9ca4, item 4).
+    return withNote([`${who}: not interested logged.`, DECLINED_PATH_LINE[stored.declinedPath], `Now ${lowerFirst(STATUS_LABEL[task.status])}, in ${task.campaign.name}.`], body, task, who);
   }
   if (stored?.redial) {
     const parts = [`${who}: ${OUTCOME_LABEL[stored.outcome].toLowerCase()} logged, with a redial.`];
@@ -570,26 +571,34 @@ export function declinedPathSourceLine(task: Pick<CallTaskView, "declinedPath" |
 export const PATH_NOT_OFFERED_LINE = "This campaign has no win-back branch now, so that path can’t be logged. Choose another.";
 
 /** What logging not interested on a path does to the lead as a whole, from the preview's status after it. */
-function declineLeadLine(status: OutreachStatus, campaign: string): string {
+/** "In win-back" as "in win-back": a status label inside a sentence. */
+const lowerFirst = (label: string): string => label.charAt(0).toLowerCase() + label.slice(1);
+
+/**
+ * What logging not interested on a path does to the lead as a whole, from the preview's status after it. Said of "this
+ * campaign", as the logged line and the record say it, never with the campaign's name, which may itself hold a comma or
+ * an apostrophe (council on 4fd9ca4, item 4).
+ */
+function declineLeadLine(status: OutreachStatus): string {
   switch (status) {
     case "declined_on_call":
-      return `Logging this stops their outreach in ${campaign}, this campaign only. Their other campaigns and colleagues are not affected.`;
+      return "Logging this stops their outreach in this campaign only. Their other campaigns and colleagues are not affected.";
     case "in_win_back":
-      return `Logging this moves them to ${campaign}’s win-back branch: its tracks replace the main sequence’s remaining ones.`;
+      return "Logging this moves them to this campaign’s win-back branch: its tracks replace the main sequence’s remaining ones.";
     case "active":
     case "queued":
     case "waiting_on_call":
-      return `Logging this keeps their remaining tracks in ${campaign} going, with no call made to them again.`;
+      return "Logging this keeps their remaining tracks in this campaign going.";
     case "finished_no_usable_channel":
-      return `Logging this ends their outreach in ${campaign}: nothing is left to reach them on without a call (finished, no usable channel).`;
+      return "Logging this ends their outreach in this campaign: nothing is left to reach them on without a call (finished, no usable channel).";
     case "sequence_finished_no_response":
-      return `Logging this ends their outreach in ${campaign}: nothing is left to send (sequence finished, no response).`;
+      return "Logging this ends their outreach in this campaign: nothing is left to send (sequence finished, no response).";
     case "callback_scheduled":
     case "paused":
     case "replied":
     case "interested_on_call":
     case "stopped_manually":
-      return `Logging this leaves them ${STATUS_LABEL[status].toLowerCase()} in ${campaign}.`;
+      return `Logging this leaves them ${lowerFirst(STATUS_LABEL[status])} in this campaign.`;
     default: {
       const unhandled: never = status;
       throw new Error(`A status with no sentence: ${String(unhandled)}`);
@@ -608,8 +617,11 @@ export function declineTrackLine(a: DeclineTrackView, mode: "preview" | "record"
   const preview = mode === "preview";
   switch (a.state) {
     case "started":
-      if (a.branch === "win_back") return preview ? `${name} starts now.` : `${name} started, and is running.`;
+      if (a.track.branch === "win_back") return preview ? `${name} starts now.` : `${name} started, and is running.`;
       return preview ? `${name} carries on.` : `${name} carried on, and is running.`;
+    case "started_held":
+      // Started, while a hold stops the lead (a callback now; a pause from ticket 17): never said as running.
+      return preview ? `${name} has started, and waits while their outreach is held.` : `${name} has started, and is waiting while their outreach is held.`;
     case "finished":
       return `${name} has finished.`;
     case "waiting":
@@ -642,11 +654,17 @@ export function declineTrackLine(a: DeclineTrackView, mode: "preview" | "record"
   }
 }
 
-/** Before Log, for the path shown on the radios: the lead, each track, and the work already with a provider (the read's `declines`). */
-export function declinePreviewLines(preview: DeclinePreviewView, campaign: string, userZone: string): { lead: string; tracks: string[]; provider: string | null } {
+/** Every path says it, as the prototype does under the radios, from the preview's own fact (council on 4fd9ca4, item 3). */
+export const NO_MORE_CALLS_LINE = "No call is made to them again.";
+
+/**
+ * Before Log, for the path shown on the radios: the lead, whether a call is ever made to them again (the read's
+ * `noMoreCalls`), each track, and the work already with a provider (the read's `declines`).
+ */
+export function declinePreviewLines(preview: DeclinePreviewView, userZone: string): { lead: string; noMoreCalls: string | null; tracks: string[]; provider: string | null } {
   const n = preview.withProvider;
   const provider = n === 0 ? null : `${n === 1 ? "One email or text is" : `${n} emails or texts are`} already with the provider: logging this asks it to withdraw ${n === 1 ? "it" : "them"}, and ${n === 1 ? "it" : "they"} may still go.`;
-  return { lead: declineLeadLine(preview.status, campaign), tracks: preview.tracks.map((t) => declineTrackLine(t, "preview", userZone)), provider };
+  return { lead: declineLeadLine(preview.status), noMoreCalls: preview.noMoreCalls ? NO_MORE_CALLS_LINE : null, tracks: preview.tracks.map((t) => declineTrackLine(t, "preview", userZone)), provider };
 }
 
 /**
