@@ -194,6 +194,7 @@ test("a company that is not a lead shows no bare label in the Company column", a
   await page.route("**/api/leads?*", (route) => respond(route, leads));
   await page.goto("/leads?q=Copper");
   const cells = page.getByRole("row", { name: /^Select Copper Kettle Osteopathy / }).getByRole("cell");
-  await expect(cells.nth(1)).not.toHaveText("Company");
-  await expect(cells.nth(1)).toContainText("Not a company lead");
+  // The Company column: the third cell, after the selection checkbox and the name (ticket 18).
+  await expect(cells.nth(2)).not.toHaveText("Company");
+  await expect(cells.nth(2)).toContainText("Not a company lead");
 });
