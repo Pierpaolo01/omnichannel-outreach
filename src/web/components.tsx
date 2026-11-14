@@ -4,15 +4,16 @@ import type { ColleagueView, ContactDetailView, EnrollmentView, UnenrolledReason
 import { Icon } from "./icons.tsx";
 import { StatusBadge, enrollmentSentence } from "./status.tsx";
 import { clockIn, useNow } from "./time.ts";
+import type { Freshness } from "./calls/refresher.ts";
 
-export function ErrorState({ title, message, onRetry }: { title: string; message: string; onRetry?: () => void }) {
+export function ErrorState({ title, message, onRetry, retryRef, rescue }: { title: string; message: string; onRetry?: () => void; retryRef?: (el: HTMLButtonElement | null) => void; rescue?: number }) {
   return (
     <div role="alert" className="flex flex-wrap items-center gap-3 rounded-box bg-crit-soft px-4 py-3 text-[14px]">
       <span className="min-w-0 flex-[1_1_320px]">
         <b className="font-semibold text-crit">{title}</b> <span className="text-ink-2">{message}</span>
       </span>
       {onRetry && (
-        <button type="button" className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={onRetry}>
+        <button type="button" ref={retryRef} data-rescue={rescue} className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={onRetry}>
           Try again
         </button>
       )}
@@ -206,6 +207,24 @@ export function RecordSkeleton() {
         <div className="skeleton h-6 w-32" />
         <div className="skeleton h-12 w-full" />
       </div>
+    </div>
+  );
+}
+
+/**
+ * A clock-driven screen whose reads keep failing (ADR 0003 4.4.1, "Freshness"): what it shows stays,
+ * with this notice and Try again; refreshing carries on by itself meanwhile.
+ */
+export function StaleNotice({ freshness, onRetry, retryRef, rescue }: { freshness: Freshness; onRetry: () => void; retryRef?: (el: HTMLButtonElement | null) => void; rescue?: number }) {
+  const since = freshness.lastReadAt ? new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(freshness.lastReadAt)) : null;
+  return (
+    <div role="status" className="mt-4 flex flex-wrap items-center gap-3 rounded-box bg-pause-soft px-4 py-3 text-[14px]">
+      <span className="min-w-0 flex-[1_1_320px] text-base-content">
+        This may be out of date: the last {freshness.failures} updates didn’t load{since ? `, so it shows the list as of ${since}` : ""}. It keeps trying.
+      </span>
+      <button type="button" ref={retryRef} data-rescue={rescue} className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={onRetry}>
+        Try again
+      </button>
     </div>
   );
 }

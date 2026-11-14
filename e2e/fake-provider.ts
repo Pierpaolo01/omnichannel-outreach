@@ -203,14 +203,7 @@ async function start(): Promise<FakeProviderApp> {
     return found;
   };
 
-  const web = new Hono();
-  web.all("/api/*", (c) => harness.fetch(c.req.raw));
-  web.use("/assets/*", serveStatic({ root: "dist" }));
-  web.get("*", serveStatic({ root: "dist", path: "index.html" }));
-  const url = await new Promise<string>((resolve) => {
-    const server = serve({ fetch: web.fetch, port: 0, hostname: "127.0.0.1" }, (info: AddressInfo) => resolve(`http://127.0.0.1:${info.port}`));
-    server.unref();
-  });
+  const url = await serveHarness(harness);
 
   return {
     url,
@@ -231,4 +224,94 @@ async function start(): Promise<FakeProviderApp> {
       return id;
     },
   };
+}
+
+/** Serves the harness's HTTP app with the built client, on a port of its own. */
+async function serveHarness(harness: EngineHarness): Promise<string> {
+  const web = new Hono();
+  web.all("/api/*", (c) => harness.fetch(c.req.raw));
+  web.use("/assets/*", serveStatic({ root: "dist" }));
+  web.get("*", serveStatic({ root: "dist", path: "index.html" }));
+  return new Promise<string>((resolve) => {
+    const server = serve({ fetch: web.fetch, port: 0, hostname: "127.0.0.1" }, (info: AddressInfo) => resolve(`http://127.0.0.1:${info.port}`));
+    server.unref();
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Calls (ticket 14b). A campaign with a phone track beside the email track, and an email after
+// the call, defined over HTTP: the canvas has no phone track editor yet (a later part). Nothing is
+// dialled; the user dials on their own phone, and the app only lists calls and records outcomes.
+
+export const CALL_SCRIPT = "Ask for the clinic director or the practice owner.\nAsk how patients book after 18:00 today.\nIf they’re interested, offer a 20-minute walkthrough this week.";
+
+const WEEKDAYS_9_TO_17 = [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 }));
+
+export const callsDefinition = (): CampaignDefinition => ({
+  timezone: "Europe/London",
+  callSkipLimitDays: 2,
+  emailPool: [FAKE_INBOX],
+  smsPool: [],
+  callScript: CALL_SCRIPT,
+  tracks: [
+    { id: "email", channel: "email", branch: "main", window: WEEKDAYS_9_TO_17, steps: [COPY.first, COPY.second], start: { kind: "entry" }, removed: false },
+    { id: "phone", channel: "call", branch: "main", window: WEEKDAYS_9_TO_17, steps: [step("c1", { threading: "new_subject" })], start: { kind: "entry" }, removed: false },
+    {
+      id: "after-call",
+      channel: "email",
+      branch: "main",
+      window: WEEKDAYS_9_TO_17,
+      steps: [step("a1", { subject: "Following up on my call", body: "Hi {{first_name|there}},\n\nThanks for picking up earlier. Here is the two-minute video I mentioned for {{company}}.\n\nAlex", threading: "new_subject" })],
+      start: { kind: "after", trackId: "phone", delayDays: 0 },
+      removed: false,
+    },
+  ],
+});
+
+export type CallsScenario = "ready" | "early" | "full";
+
+export interface FakeCallsApp {
+  readonly url: string;
+  readonly harness: EngineHarness;
+  readonly campaign: string;
+  readonly person: (name: string) => string;
+  readonly company: (name: string) => string;
+}
+
+const callsStarted = new Map<string, Promise<FakeCallsApp>>();
+
+/**
+ * One calls app per name and test worker. `ready`: Monday 10:00 London, calls ready now. `early`:
+ * Monday 07:30, the calls wait for their calling hours. `full`: a daily call capacity of 2, used.
+ * The scans share each scenario's app and change nothing in it; a test that logs takes its own name.
+ */
+export function fakeCallsApp(scenario: CallsScenario, name: string = scenario): Promise<FakeCallsApp> {
+  let app = callsStarted.get(name);
+  if (!app) callsStarted.set(name, (app = startCalls(scenario)));
+  return app;
+}
+
+async function startCalls(scenario: CallsScenario): Promise<FakeCallsApp> {
+  const harness = new EngineHarness({
+    start: MONDAY_8 - 2 * H,
+    accounts: [{ id: FAKE_INBOX, capacity: 30, gapMs: 60_000, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
+  });
+  await harness.tick();
+  await harness.request("PUT", "/api/call-settings", { dailyCapacity: scenario === "full" ? 2 : 20, userZone: "Europe/London" });
+  const csv = { businessesCsv: readFileSync(fixture("businesses-run1.csv"), "utf8"), peopleCsv: readFileSync(fixture("people-run1.csv"), "utf8") };
+  const campaign = (await harness.request<{ campaign: Campaign }>("POST", "/api/campaigns", { name: "Clinics, London", defaultTimezone: "Europe/London", ...csv })).body.campaign.id;
+  await harness.tick();
+  await harness.defineSequence(campaign, callsDefinition());
+  harness.clock = MONDAY_8 - H;
+  const launched = await harness.launch(campaign);
+  if (launched.status !== 200) throw new Error(`the calls campaign did not launch: ${JSON.stringify(launched.body)}`);
+  await harness.advanceTo(scenario === "early" ? MONDAY_8 - 30 * 60_000 : MONDAY_8 + 2 * H);
+
+  const rows = (await harness.request<{ rows: { kind: string; id: string; name: string }[] }>("GET", "/api/leads?limit=500")).body.rows;
+  const row = (name: string) => {
+    const found = rows.find((r) => r.name === name);
+    if (!found) throw new Error(`no lead named ${name}`);
+    return found;
+  };
+  return { url: await serveHarness(harness), harness, campaign, person: (n) => row(n).id, company: (n) => row(n).id };
 }

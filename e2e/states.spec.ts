@@ -11,7 +11,7 @@ test("the four areas are reachable from the rail, and Today and Calls say honest
   await expect(page.getByRole("heading", { name: "Needs attention" })).toBeVisible();
 
   await nav(page, "Calls").click();
-  await expect(page.getByRole("heading", { name: "No calls today" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Nothing to call right now" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Ready now, 0" })).toBeVisible();
 
   await nav(page, "Leads").click();
