@@ -83,7 +83,7 @@ test.describe("the phone track on the canvas and in its inspector", () => {
     await page.goto(`/campaigns/${id}?track=call`);
     const inspector = page.getByTestId("inspector");
     await expect(inspector.getByRole("radio", { name: /^Win back/ })).toBeChecked();
-    await expect(inspector.getByRole("list", { name: "The win-back branch’s tracks" })).toContainText("Win-back email track · 1");
+    await expect(inspector.getByRole("list", { name: "The win-back branch’s tracks" })).toContainText("Win-back email track · 1 email");
     // The branch is drawn in its own box, not as part of the main sequence, and nothing says it is not shown.
     const box = page.getByTestId("win-back-branch");
     await expect(box.getByRole("button", { name: /^Win-back email track: / })).toBeVisible();

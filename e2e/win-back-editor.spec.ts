@@ -57,7 +57,7 @@ test.describe("the declined path and the win-back branch in the campaign editor 
     await page.keyboard.press("ArrowDown");
     await expect(paths.getByRole("radio", { name: /^Win back/ })).toBeChecked();
     await saved(page);
-    await expect(inspector.getByRole("list", { name: "The win-back branch’s tracks" })).toContainText("Win-back email track · 1");
+    await expect(inspector.getByRole("list", { name: "The win-back branch’s tracks" })).toContainText("Win-back email track · 1 email");
     await expect(page.locator('[data-edge-from="call"]')).toHaveCount(1);
     expect((await stored(page, id)).tracks.find((t) => t.id === "call")?.declinedPath).toBe("win_back");
 

@@ -491,7 +491,7 @@ function WinBackBox({ empty, launched, locked, stacked, gutter, width, onAdd, ch
       // sequence's width when that is wider: `contain: inline-size` keeps its name, Add and empty text from
       // widening the canvas past what was measured (review bot on 8147ba6); they wrap instead. Stacked, it
       // reaches under the edges' gutter, so each "if declined" edge ends on it.
-      className={`relative z-[1] mt-12 flex min-w-0 flex-col gap-1 rounded-box border-[1.5px] border-dashed border-hand/50 bg-hand-soft px-4 pb-5 pt-3 ${stacked ? "" : "self-stretch [contain:inline-size]"}`}
+      className={`relative z-[1] mt-12 flex min-w-0 flex-col gap-1 rounded-box border-[1.5px] border-dashed border-hand/50 bg-[color-mix(in_srgb,var(--color-hand-soft)_55%,transparent)] px-4 pb-5 pt-3 ${stacked ? "" : "self-stretch [contain:inline-size]"}`}
       style={stacked ? { width: `calc(100% + ${gutter}px)` } : { minWidth: width }}
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1054,7 +1054,7 @@ function DeclinedPathControl({ track, editor, onEditBranch }: { track: TrackDefi
           // Win back while the branch has no live track is not offered; one already set stays shown.
           const unavailable = path === "win_back" && !available && !on;
           return (
-            <div key={path} className={`flex min-w-0 flex-col gap-1.5 rounded-field px-3 py-2.5 ${on ? "bg-hand-soft shadow-[inset_0_0_0_1.5px_var(--color-hand)]" : "shadow-[inset_0_0_0_1px_var(--color-line-strong)]"}`}>
+            <div key={path} className={`flex min-w-0 flex-col gap-1.5 rounded-field px-3 py-2.5 ${on ? "bg-[color-mix(in_srgb,var(--color-hand-soft)_50%,var(--color-base-100))] shadow-[inset_0_0_0_1.5px_var(--color-hand)]" : "shadow-[inset_0_0_0_1px_var(--color-line-strong)]"}`}>
               <label className={`grid grid-cols-[auto_minmax(0,1fr)] gap-x-2.5 gap-y-0.5 text-[14px] ${unavailable || editor.locked ? "cursor-default" : "cursor-pointer"}`}>
                 <input
                   type="radio"
@@ -1066,7 +1066,7 @@ function DeclinedPathControl({ track, editor, onEditBranch }: { track: TrackDefi
                   onChange={() => choose(path)}
                 />
                 <b className="font-semibold">{label}</b>
-                {/* On the chosen path's tinted fill, secondary text is ink-2: muted falls short of AA on hand-soft. */}
+                {/* On the chosen path's tinted fill (the reference's hand-soft at 50% on the surface), secondary text is ink-2, as on the box. */}
                 <span className={`col-start-2 text-[13px] ${on ? "text-ink-2" : "text-muted"}`}>{detail}</span>
               </label>
               {path === "win_back" && unavailable && (
@@ -1080,7 +1080,7 @@ function DeclinedPathControl({ track, editor, onEditBranch }: { track: TrackDefi
                     {branch.map((t) => (
                       <li key={t.id} className="inline-flex max-w-full items-center gap-1.5 rounded-full px-2 py-0.5 text-[12.5px] text-hand shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-hand)_45%,transparent)] [overflow-wrap:anywhere]">
                         <Icon name={t.channel} className="size-3.5 flex-none" />
-                        {trackTitle(editor.draft, t)} · {liveSteps(t).length}
+                        {trackTitle(editor.draft, t)} · {messageCount(t)}
                       </li>
                     ))}
                   </ul>
@@ -1106,6 +1106,11 @@ function DeclinedPathControl({ track, editor, onEditBranch }: { track: TrackDefi
 }
 
 const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1);
+/** What a branch chip counts, said (council on aaf82b7): "1 email", "2 texts". */
+const messageCount = (t: TrackDefinition): string => {
+  const n = liveSteps(t).length;
+  return `${n} ${t.channel === "sms" ? (n === 1 ? "text" : "texts") : n === 1 ? "email" : "emails"}`;
+};
 
 function SaveStatus({ editor }: { editor: SequenceEditor }) {
   const text = saveWording(editor.save, editor.launched).label ?? "";
