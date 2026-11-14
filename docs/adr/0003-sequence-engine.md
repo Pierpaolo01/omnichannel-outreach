@@ -1661,7 +1661,7 @@ Recorded on 14 November 2026 by the 14c implementer, before the code. Three chan
 | The call skip limit (3.5) | **the track's `callSkipLimitDays`** (new, optional) | the phone track's inspector |
 | How it starts | the track's start rule (1.1) | the phone track's inspector, through the arrangement rule |
 | The call script | the campaign's `callScript` (1.1): one per campaign, shown on every call task | every phone track's inspector, which says it is the campaign's one script |
-| The declined path | the track's `declinedPath`, read from ticket 16 | not edited here: the inspector says it arrives with a later release |
+| The declined path | the track's `declinedPath`, read from ticket 16 | not edited here: the inspector said it arrives with a later release. Since ticket 16b, the phone track's inspector ("Ticket 16b" below) |
 
 **The skip limit on each phone track.** The coordinator's recorded reading is that calling hours and the skip limit are set on each phone track, and the reference puts "Skip it if unworked for N days" in the phone track's inspector. Until now the definition held one limit for the campaign. So:
 
@@ -1736,6 +1736,33 @@ Recorded on 14 November 2026, merging `integration/outreach-spec` at `4f77cb6`.
 - **Committed calls** on a later day follow the merged store rule (above).
 
 **Tests.** The 13b worlds start from these facts: the earlier campaigns log redials and callbacks a day or more ahead, and in some worlds (a random stream of their own) one to three days pass with calls unworked before the projection; a test requires, over the 40 worlds, leads held by a callback, calls redialed to the next day, phone tracks skipped at the skip limit and calls skipped tonight unless worked, all at the projection's instant, and every world still matches the engine exactly, calls and sends. The tight worlds' mutations are checked on recorded killing seeds instead of a search, so no test depends on machine speed.
+
+## Ticket 16b: the declined path and the win-back branch in the editor
+
+Recorded on 14 November 2026 by the 16b implementer. No change to the engine, the store, the validator's rule or any invariant of section 8; one read gains an additive field. Each change was built test-first.
+
+### The arrangement rule, with the branch (amends "The arrangement rule" of ticket 13b and 14c)
+
+- **add** takes a branch: an email or SMS track added to the win-back branch starts at `entry`, which there means when the lead enters the branch. A phone track is never added to the branch; the editor offers none, and the operation refuses it.
+- **declined** (new): sets a phone track's declined path to stop, continue or win back. Win back is refused while the branch has no live track (`winBackAvailable`), and a path on a track that is not a phone track is refused.
+- **remove** of the branch's last live track is refused while a phone track's declined path is win back.
+- **start** after a track of the other branch is refused.
+
+Each of these refusals is the validator's own sentence (7.1): the operation applies the change naively and refuses with the first problem `definitionProblems` newly reports, so the editor says what the server would. The clause the win-back refusal ends with is exported (`NO_WIN_BACK_BRANCH`) and shown under win back while it cannot be chosen; the problem text is unchanged.
+
+Invariants 1 to 5 are unchanged. `arrangement.generated.test.ts` now generates drafts with a branch of one to three email and SMS tracks arranged inside it and phone tracks with a declined path (sometimes unset), and operations that add to the branch (a phone track among them), set paths (win back with no branch among them), connect across branches and remove the branch's tracks. Four further mutations must fail it, and do (invariant 1 kills each): "phone track in the branch", "win back without a branch", "remove ignores win back", "after across branches".
+
+### Saving (1.1.1)
+
+The declined path and the branch's tracks are edits like any other, through the one editor state and save queue; no control saves on its own. `saveQueue.generated.test.ts` gains a third random stream (none on the recorded seeds, which replay the trajectories they were recorded with) with which the generated user sets declined paths and adds, arranges and removes branch tracks through the arrangement operations, one to three per draft. Each page keeps its own record of what it chose (each live phone track's path, each branch track's channel and start), built from the operations it applied, never read back from the editor. After every step the page's draft must have the record's paths and branch (invariant 6), and once settled the stored definition must have the writer's (invariant 1). Two faults in the editor's save (`SaveFault` in `editorStore.ts`, test-only) must fail it, each on its recorded fixed seed: a save whose body leaves out the declined paths (seed 7003) and one that leaves out the branch's tracks (seed 7004). Coverage over the fixed and recorded seeds requires runs that save win back beside a branch, stop or continue, and a branch track arranged after another.
+
+### Copy for a lead (amends "Calls in the projection")
+
+`GET /api/campaigns/:id/preview/:enrollmentId` gains `winBack`: the branch's messages, rendered for the lead in track order, each with no day (`noDay` `win_back`, or `skipped` for a channel the lead lacks, by the same rule as the main sequence). They are listed apart from `steps`, whose order is the order messages can go: the projection never enters the branch (`winBackNotCounted`), so no day is ever worked out for them. `before-launch.test.ts` "copy for a lead in the win-back branch".
+
+### The canvas
+
+The branch is drawn in its own box below the main sequence, its tracks hanging from the point a lead enters it, with a dashed "if declined" edge from each phone track whose path, as `declinedPathOf` reads it, is win back. `e2e/layout.spec.ts` now also checks, at every width, that every branch track is inside the box and below its parent, that the box is below the main sequence, and that each edge ends on the box without crossing any track node.
 
 ## Consequences
 
