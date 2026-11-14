@@ -269,3 +269,16 @@ export function judgeControl(
   const changed = rules.controlPrecondition(stored, before, action, out.state, expected);
   return changed === null ? out : { ok: false, reason: changed };
 }
+
+/**
+ * A campaign's pause or resume, in the same order as a lead's (`judgeControl`) for the read and the action: the campaign's
+ * own rule first (not launched, already paused, not paused), then whether it is still paused as the confirmation read it.
+ */
+export function judgeCampaignControl(
+  row: { readonly launchedAt: number | null; readonly pausedSince: number | null } | null,
+  pause: boolean,
+  expected: { readonly pausedSince: number | null } | null,
+  rules: { readonly campaignPrecondition: typeof campaignPrecondition },
+): string | null {
+  return campaignRefusal(row, pause) ?? rules.campaignPrecondition(row, expected);
+}

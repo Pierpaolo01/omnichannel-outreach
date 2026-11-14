@@ -11,7 +11,7 @@ import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, sta
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
 import { runs } from "../../domain/sequence/progress.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
-import { campaignRefusal, type LeadControl, type LeadExpectation } from "../../domain/sequence/controls.ts";
+import { judgeCampaignControl, type LeadControl, type LeadExpectation } from "../../domain/sequence/controls.ts";
 import type { ControlView } from "../../shared/api.ts";
 import { effectOf } from "./controls-view.ts";
 import type { ControlRecord, EngineStore, ReplyEvent, StoredDefinition } from "./engine-store.ts";
@@ -812,8 +812,8 @@ export class Engine {
         now,
         { id: requestId, pause, ...(expected === null ? {} : { expect: expected }) },
         this.rules.requestStanding,
-        // The pause read the confirmation showed, checked in the same transaction (ticket 17b), before the action's own rule.
-        (row) => this.rules.campaignPrecondition(row, expected) ?? campaignRefusal(row, pause),
+        // The campaign's own rule, then the pause read the confirmation showed, in the read's order (ticket 17b).
+        (row) => judgeCampaignControl(row, pause, expected, this.rules),
         (stored) => {
           const s = this.rules.asOfAction(stored, now, this.rules.evaluate);
           return pause ? this.rules.campaignPaused(s, now) : this.rules.campaignResumed(s, now);

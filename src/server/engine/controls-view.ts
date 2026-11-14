@@ -5,12 +5,12 @@
  * same reason (P11).
  */
 import { leadNow } from "../../domain/sequence/clock.ts";
-import { campaignRefusal, currentStep, LEAD_CONTROLS, skipTarget, type LeadControl } from "../../domain/sequence/controls.ts";
+import { currentStep, judgeCampaignControl, LEAD_CONTROLS, skipTarget, type LeadControl } from "../../domain/sequence/controls.ts";
 import { isLive } from "../../domain/sequence/attempt.ts";
 import { deriveStatus, runs } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
 import type { CampaignControlView, ControlStepView, ControlView } from "../../shared/api.ts";
-import type { Rules } from "./rules.ts";
+import { DEFAULT_RULES, type Rules } from "./rules.ts";
 import { trackLabel } from "../../shared/track-label.ts";
 
 const iso = (t: number) => new Date(t).toISOString();
@@ -71,7 +71,8 @@ export function controlsView(stored: SubjectState, now: number, rules: Rules): C
 /** The campaign's pause and resume, judged on its row exactly as `Engine.setCampaignPause` judges them. */
 export function campaignControls(row: { readonly launchedAt: number | null; readonly pausedSince: number | null } | null): CampaignControlView[] {
   return (["pause", "resume"] as const).map((action) => {
-    const reason = campaignRefusal(row, action === "pause");
+    // The action's order (`judgeCampaignControl`), with no expectation: a request confirmed on this read is judged the same.
+    const reason = judgeCampaignControl(row, action === "pause", null, DEFAULT_RULES);
     return reason === null ? { action, allowed: true } : { action, allowed: false, reason };
   });
 }
