@@ -539,3 +539,23 @@ test.describe("the sheet's calling-hours label says the server's fact about the 
     await expect(sheet).not.toContainText("inside calling hours");
   });
 });
+
+test("not interested has no control here yet (ticket 16b): the page shows its not-yet pill, and a call declined elsewhere is off the list with the server's reason", async ({ page }) => {
+  const f = await freshCalls("ready", "declined-elsewhere");
+  await page.goto(`${f.url}/calls`);
+  await expect(page.getByRole("heading", { name: "Amira Hassan" })).toBeVisible();
+  // The server offers not interested (the task read lists it), but this page has no working control for it.
+  const notInterested = outcome(page, "Not interested");
+  await expect(notInterested).toBeDisabled();
+  await expect(page.getByText("Callback requested, not interested and calling again tomorrow arrive with later releases.")).toBeVisible();
+  const t = await focused(f);
+  await logElsewhere(f, t.taskId, "not_interested", t.numberId);
+  await logWithMouse(page, "No answer", "Typed here.");
+  await expect(page.getByRole("alert").filter({ hasText: "Open the next call" })).toContainText("Amira Hassan’s call was already logged from another window or device: not interested at 10:00.");
+  await expect(page.getByRole("list", { name: "Outcomes not logged" })).toContainText("Not logged: no answer for Amira Hassan.");
+  // The decline is a call entry on her timeline, with the path it took (the track's: none set, so stop, Q14).
+  expect((await activity(f, "Amira Hassan")).filter((e) => e.kind === "call")).toEqual([expect.objectContaining({ outcome: "not_interested", declinedPath: "stop" })]);
+  await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
+  await expect(page.getByText("Call: not interested")).toBeVisible();
+  await expect(page.getByText(/Stopped in this campaign\./)).toBeVisible();
+});

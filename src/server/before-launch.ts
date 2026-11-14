@@ -147,7 +147,13 @@ const hasCalls = (definition: CampaignDefinition) => liveTracks(definition, "mai
  * A lead on which the user may still log a call: running, or held by a callback, whose outcome releases
  * it (ticket 15).
  */
-const awaitsACall = (s: SubjectState) => runs(s) || (s.subject.ended === null && callbackHold(s));
+/**
+ * A lead on which the user may still log a call: running, or held by a callback, whose outcome releases it;
+ * and not one that declined, which is never called again (ticket 16): its phone tracks are finished or are
+ * skipped at their start by the engine's own evaluation, so its campaign is not one whose calls the
+ * assumption covers on its account.
+ */
+const awaitsACall = (s: SubjectState) => (runs(s) || (s.subject.ended === null && callbackHold(s))) && !s.subject.noMoreCalls;
 
 /** Other campaigns whose calls the projection works too, as the assumed user works the whole list (the screen names them). */
 function callingCampaigns(others: readonly SubjectState[]): string[] {
@@ -357,6 +363,8 @@ async function loadProjection(store: OutreachStore, campaignId: string, definiti
     stoppedEarly: result.stoppedEarly ?? null,
     callsNotCounted,
     calls: liveTracks(definition, "main").some((t) => t.channel === "call") ? await callsView(store, now, projection) : null,
+    // From the finished run: only a decline enters the branch, which its assumed user (every call no answer) never logs (ticket 16).
+    winBackNotCounted: projection?.winBackNotCounted ?? false,
   };
 }
 

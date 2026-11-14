@@ -9,10 +9,7 @@ import { z } from "zod";
 export const requestObject = z.strictObject;
 
 /** Fields a later release adds, with what to tell the user who sends one now. */
-const LATER_RELEASE: Readonly<Record<string, string>> = {
-  declined: "Not interested arrives with a later release.",
-  declinedPath: "Not interested arrives with a later release.",
-};
+const LATER_RELEASE: Readonly<Record<string, string>> = {};
 
 /** One plain message for a body that did not parse; unknown fields are named, and nothing was changed. */
 export function invalidBodyMessage(error: z.ZodError): string {

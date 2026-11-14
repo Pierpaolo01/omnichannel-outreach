@@ -25,6 +25,7 @@ import {
   callingHoursLine,
   capacityLine,
   clockLine,
+  DECLINED_PATH_LINE,
   dialledLine,
   loggedLine,
   numberKind,
@@ -471,7 +472,7 @@ function touchRow(t: TouchView): { icon: "email" | "sms" | "reply" | "call"; ton
     case "reply":
       return { icon: "reply", tone: "bg-hand-soft text-hand", title: t.channel === "email" ? "Replied by email" : "Replied by text", body: null };
     case "call":
-      return { icon: "call", tone: "bg-call-soft text-call", title: OUTCOME_TITLE[t.outcome], body: [dialledLine(t.number), t.note].filter(Boolean).join(". ") || null };
+      return { icon: "call", tone: "bg-call-soft text-call", title: OUTCOME_TITLE[t.outcome], body: [t.declinedPath ? DECLINED_PATH_LINE[t.declinedPath].slice(0, -1) : null, dialledLine(t.number), t.note].filter(Boolean).join(". ") || null };
   }
 }
 

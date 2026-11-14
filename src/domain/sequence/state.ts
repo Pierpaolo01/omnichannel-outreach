@@ -6,7 +6,7 @@
 import type { OutreachStatus } from "../outreach-status.ts";
 import type { Freeze, LeadClock } from "./clock.ts";
 import type { MergeData } from "./copy.ts";
-import type { Branch, CampaignDefinition, Threading } from "./definition.ts";
+import type { Branch, CampaignDefinition, DeclinedPath, Threading } from "./definition.ts";
 
 export type EndReason = Extract<
   OutreachStatus,
@@ -203,9 +203,9 @@ export interface Reply {
 /**
  * What the user logged on a call task (ADR 0003 2.4 "Calls"). Ticket 14 built these without redial,
  * callback or not interested; ticket 15 adds the callback and the redial (a choice on no answer,
- * voicemail and gatekeeper). Not interested arrives with ticket 16.
+ * voicemail and gatekeeper); ticket 16 adds not interested, which takes the phone track's declined path.
  */
-export type CallOutcome = "no_answer" | "voicemail" | "gatekeeper" | "wrong_number" | "interested" | "callback_requested" | "skip_for_now";
+export type CallOutcome = "no_answer" | "voicemail" | "gatekeeper" | "wrong_number" | "interested" | "not_interested" | "callback_requested" | "skip_for_now";
 
 /**
  * One call step's task on the user's list (ADR 0003 1.3): one per step, never a second. `listDay`
@@ -252,6 +252,8 @@ export interface CallAttempt {
   readonly redial: boolean;
   /** For a callback requested: the date and time the prospect asked for, a wall instant. */
   readonly callbackAt: number | null;
+  /** For not interested: the declined path applied, the track's or the user's override for this lead (ticket 16). */
+  readonly declinedPath: DeclinedPath | null;
   /** The number the user chose to dial; none for skip for now. */
   readonly numberDetailId: string | null;
   readonly note: string;

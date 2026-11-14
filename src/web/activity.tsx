@@ -2,7 +2,7 @@ import { useId, useState } from "react";
 import type { ActivityEntry, ActivityView } from "../shared/api.ts";
 import { useApi } from "./api.ts";
 import { ErrorState, Section } from "./components.tsx";
-import { OUTCOME_TITLE, dateIn, dialledLine } from "./calls/wording.ts";
+import { DECLINED_PATH_LINE, OUTCOME_TITLE, dateIn, dialledLine } from "./calls/wording.ts";
 import { dayLabel } from "./calls/callbackTime.ts";
 import { Icon, type IconName } from "./icons.tsx";
 import { useNow } from "./time.ts";
@@ -101,8 +101,8 @@ export function describeEntry(entry: ActivityEntry, userZone: string): { icon: I
     const track = entry.track.several ? entry.track.label : null;
     switch (entry.kind) {
       case "call":
-        // The number dialled and the call's note, after what the call did to the lead's calls (ticket 15b); a skip for now has no number.
-        return { icon: "call", tone: CALL, title: OUTCOME_TITLE[entry.outcome], body: [callMeaning(entry), dialledLine(entry.number), entry.note.trim()].filter(Boolean).join(". ") || null, track };
+        // What a decline did (its stored path, ticket 16), what the call did to the lead's calls (ticket 15b), the number dialled and the call's note; a skip for now has no number.
+        return { icon: "call", tone: CALL, title: OUTCOME_TITLE[entry.outcome], body: [entry.declinedPath ? DECLINED_PATH_LINE[entry.declinedPath].slice(0, -1) : null, callMeaning(entry), dialledLine(entry.number), entry.note.trim()].filter(Boolean).join(". ") || null, track };
       case "skipped":
         if (entry.reason === "unworked") {
           const limit = entry.limitDays === 1 ? "a day" : `${entry.limitDays} days`;

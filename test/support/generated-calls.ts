@@ -1,7 +1,8 @@
-import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../src/domain/sequence/definition.ts";
+import type { CampaignDefinition, DeclinedPath, StepDefinition, TrackDefinition } from "../../src/domain/sequence/definition.ts";
 import type { CallTask, SubjectState } from "../../src/domain/sequence/state.ts";
 import type { Rules } from "../../src/server/engine/rules.ts";
-import type { CallOutcomeApi, CallReasonApi, CallsView, CallTaskView, EnrollmentProgress, LeadSearchResult, NeedsAttention, OutreachStatus, PersonRecord, CompanyRecord, TodayView } from "../../src/shared/api.ts";
+import { trackLabel } from "../../src/shared/track-label.ts";
+import type { ActivityView, CallOutcomeApi, CallReasonApi, CallsView, CallTaskView, EnrollmentProgress, LeadSearchResult, NeedsAttention, OutreachStatus, PersonRecord, CompanyRecord, TodayView } from "../../src/shared/api.ts";
 import { EngineHarness, quickWait } from "./engine-harness.ts";
 import { business, person, type ExportRows } from "./export-builder.ts";
 import type { FakeAccount, HandoverLogEntry } from "./fake-email-port.ts";
@@ -120,6 +121,10 @@ interface LoggedOutcome {
   readonly noteScope: "person" | "company";
   readonly redial: boolean;
   readonly callbackAt: number | null;
+  /** Not interested (ticket 16): the declined path the record says it takes, the user's override or the track's (stop when unset); else null. */
+  readonly declinedPath: DeclinedPath | null;
+  /** The path the user sent with the outcome, if any. */
+  readonly override: DeclinedPath | null;
 }
 
 /** The invariants a problem names: the numbers before its first colon. */
@@ -153,6 +158,12 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
   const chance = (p: number) => rand() < p;
   /** The phone tracks' own skip limits (ticket 14c): a stream of its own, so the rest of each world is as it was. */
   const trackLimits = random(seed + 1_000_003);
+  /**
+   * Ticket 16's draws (declined paths, win-back branches, declines) come from their own stream, so the ticket
+   * 14 and 15 draws, and the seeds recorded for their mutations, are the same wherever no decline happens.
+   */
+  const declineRand = random(seed ^ 0x16a);
+  const dpick = <T>(items: readonly T[]): T => items[Math.floor(declineRand() * items.length)] ?? items[0]!;
   const problems: string[] = [];
   const problem = (what: string) => {
     if (problems.length < 25 && !problems.includes(what)) problems.push(what);
@@ -197,7 +208,11 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     };
   });
 
-  const h = new EngineHarness({ start, accounts: inboxes, modes: ["honest"], random: random(seed ^ 0xca11), engine: { waitFor: quickWait }, sms: { numbers, modes: ["honest"] }, ...(options.rules ? { rules: options.rules } : {}) });
+  // Ticket 16 (verifier on 654907b): in some runs the providers send up to an hour after the handover and are
+  // observed later still, so a lead may decline while its email or text is with the provider.
+  const lateSends = random(seed ^ 0x16d)() < 0.4;
+  if (lateSends) features.add("late-sends");
+  const h = new EngineHarness({ start, accounts: inboxes, modes: lateSends ? ["honest", "late-send"] : ["honest"], random: random(seed ^ 0xca11), engine: { waitFor: quickWait }, sms: { numbers, modes: lateSends ? ["honest", "late-send"] : ["honest"] }, ...(options.rules ? { rules: options.rules } : {}) });
   h.maxWrites = options.maxWrites ?? null;
   h.stopAt = options.deadline ?? null;
   const email = h.fake;
@@ -248,13 +263,40 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       tracks[ti] = { ...t, callSkipLimitDays: own };
       features.add(own === limit ? "limit:a-track's-own" : "limit:a-track's-own-not-the-campaign's");
     }
-    const definition: CampaignDefinition = { timezone: pick(["Europe/London", "America/New_York"]), callSkipLimitDays: limit, emailPool: ["inbox-a"], smsPool: [numbers[ci]!.id], callScript: "Ask who handles bookings.", tracks };
+    // Ticket 16: often a win-back branch of one or two email and SMS tracks, together or after (delay 0-2), with
+    // its own copy and windows; each phone track's declined path, sometimes unset (stop, question Q14).
+    const branch: TrackDefinition[] = [];
+    if (declineRand() < 0.6) {
+      const count = 1 + Math.floor(declineRand() * 2);
+      for (let wi = 0; wi < count; wi++) {
+        const channel = dpick(["email", "email", "sms"] as const);
+        const earlier = branch[Math.floor(declineRand() * branch.length)];
+        const startRule: TrackDefinition["start"] = !earlier ? { kind: "entry" } : declineRand() < 0.35 ? earlier.start : { kind: "after", trackId: earlier.id, delayDays: dpick([0, 1, 2]) };
+        const id = `c${ci}w${wi + 1}`;
+        const steps: StepDefinition[] = Array.from({ length: 1 + Math.floor(declineRand() * 2) }, (_, i) => ({
+          id: `${id}s${i + 1}`,
+          waitDays: i === 0 ? 0 : dpick([1, 2]),
+          subject: channel === "email" ? "Another thought, {{first_name|there}}" : "",
+          body: channel === "email" ? "Still here if {{company}} needs us." : "One last text, {{first_name|there}}.",
+          threading: "new_subject",
+          removed: false,
+        }));
+        branch.push({ id, channel, branch: "win_back", window: declineRand() < 0.6 ? ALL_DAY : [1, 2, 3, 4, 5].map((day) => ({ day, start: 8, end: 18 })), steps, start: startRule, removed: false });
+      }
+    }
+    const paths: readonly (DeclinedPath | undefined)[] = [undefined, "stop", "continue", "continue", ...(branch.length > 0 ? (["win_back", "win_back", "win_back"] as const) : [])];
+    const withPaths = tracks.map((t): TrackDefinition => {
+      const path = t.channel === "call" ? dpick(paths) : undefined;
+      return path ? { ...t, declinedPath: path } : t;
+    });
+    const definition: CampaignDefinition = { timezone: pick(["Europe/London", "America/New_York"]), callSkipLimitDays: limit, emailPool: ["inbox-a"], smsPool: [numbers[ci]!.id], callScript: "Ask who handles bookings.", tracks: [...withPaths, ...branch] };
     campaigns.push({ id: "", definition, companies: ci === 0 ? [0, 1, 2] : [0, 1], launchedAt: null });
   }
   for (const c of campaigns) {
     if (c.definition.tracks.filter((t) => t.channel === "call").length > 1) features.add("two-phone-tracks");
     if (c.definition.tracks.some((t) => t.start.kind === "after" && c.definition.tracks.find((x) => x.id === (t.start.kind === "after" ? t.start.trackId : ""))?.channel === "call")) features.add("after-a-call");
-    if (c.definition.tracks.some((t) => t.channel !== "call" && t.start.kind === "entry")) features.add("parallel-with-a-call");
+    if (c.definition.tracks.some((t) => t.branch === "main" && t.channel !== "call" && t.start.kind === "entry")) features.add("parallel-with-a-call");
+    if (c.definition.tracks.some((t) => t.branch === "win_back")) features.add("a-win-back-branch");
   }
 
   /** Each person's and company's zone over time: a re-import may move one (council on 228cd3b). */
@@ -365,12 +407,37 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     const texts = sms.replyLog.filter((r) => r.to === number && r.from === mobileOf(s) && r.at >= firstText).map((r) => r.at);
     return Math.min(Infinity, ...mail, ...texts);
   }
-  /** The instant no channel of the campaign reaches the lead (2.1). */
+  /**
+   * The instant no channel of the lead's branch reaches it (2.1): the main sequence's channels, a phone track's
+   * included after a decline (ADR 0003 2.1), until the lead enters win-back; the branch's channels from then.
+   */
   function noChannelAt(s: Subject): number {
-    const channels = [...new Set(def(s).tracks.map((t) => t.channel))];
-    const lostAt = (c: TrackDefinition["channel"]) => (c === "email" ? (addressOf(s) ? Infinity : -Infinity) : c === "sms" ? (mobileOf(s) ? badAt(mobileOf(s) ?? "") : -Infinity) : allPhonesBadAt(s));
-    return Math.max(runStartOf(s), ...channels.map(lostAt));
+    // A phone track no longer reaches a lead that declined: it is never called again (ADR 0003 2.1).
+    const lostAt = (c: TrackDefinition["channel"]) => (c === "email" ? (addressOf(s) ? Infinity : -Infinity) : c === "sms" ? (mobileOf(s) ? badAt(mobileOf(s) ?? "") : -Infinity) : Math.min(allPhonesBadAt(s), declineOf(s)?.at ?? Infinity));
+    const of = (branch: "main" | "win_back") => [...new Set(def(s).tracks.filter((t) => t.branch === branch).map((t) => t.channel))];
+    const mainLost = Math.max(runStartOf(s), ...of("main").map(lostAt));
+    const w = winBackAt(s);
+    if (!Number.isFinite(w) || mainLost < w) return mainLost;
+    return Math.max(w, ...of("win_back").map(lostAt));
   }
+
+  // Ticket 16. The lead's decline, from the user's own accepted outcomes: a lead declines at most once.
+  const declineOf = (s: Subject) => {
+    const o = logged.find((x) => x.accepted && x.subjectId === s.id && x.outcome === "not_interested");
+    return o ? { at: o.at, trackId: o.trackId, path: o.declinedPath ?? "stop" } : null;
+  };
+  /** When the lead entered the win-back branch, or Infinity. */
+  const winBackAt = (s: Subject) => {
+    const d = declineOf(s);
+    return d?.path === "win_back" ? d.at : Infinity;
+  };
+  /** When the lead stopped declined on call (the stop path), or Infinity. */
+  const declinedStopAt = (s: Subject) => {
+    const d = declineOf(s);
+    return d?.path === "stop" ? d.at : Infinity;
+  };
+  /** The tracks the lead runs through: the main sequence, and the win-back branch once it took that path. */
+  const tracksOf = (s: Subject) => def(s).tracks.filter((t) => t.branch === "main" || Number.isFinite(winBackAt(s)));
   /**
    * When the lead stops running by the record: interested, its first reply, or no usable channel. A lead
    * held by a callback is not evaluated, so one that loses its last channel then does not end then; and,
@@ -378,7 +445,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
    */
   const endLimitOf = (s: Subject) => {
     const lost = noChannelAt(s);
-    return Math.min(interestedAt(s), replySeenAt(s), heldStrictly(s, lost) ? Infinity : lost);
+    return Math.min(interestedAt(s), replySeenAt(s), declinedStopAt(s), heldStrictly(s, lost) ? Infinity : lost);
   };
 
   // Ticket 15. Callback holds, the lead's frozen intervals (3.2), from the user's own accepted outcomes.
@@ -431,7 +498,8 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
    */
   function startLeadOf(s: Subject, t: TrackDefinition): number | null {
     if (!Number.isFinite(runStartOf(s))) return null;
-    if (t.start.kind === "entry") return 0;
+    if (t.branch === "win_back" && !Number.isFinite(winBackAt(s))) return null;
+    if (t.start.kind === "entry") return t.branch === "win_back" ? leadOfWall(s, winBackAt(s)) : 0;
     const rule = t.start;
     const before = def(s).tracks.find((x) => x.id === rule.trackId);
     const f = before ? finishFacts(s, before) : null;
@@ -505,7 +573,9 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
         if (e <= lo) continue;
         if (e > seg.to || e > h.clock) break;
         if (e >= end) return null;
-        if (e < deadline || heldStrictly(s, e)) continue;
+        // A rollover at the instant an outcome releases a hold is judged before the release (the tick before the
+        // request, or the request's own catch-up, runs while held), so it counts as held (seed 20261195).
+        if (e < deadline || holdsOf(s).some((x) => x.from < e && e <= x.to)) continue;
         const st = taskStateAt(s, t.id, e, true);
         const d = k - 1;
         if (st.kind === "callback" || d < st.listDay || !hoursOn(s, t.id, d, seg.zone, zoneFor(s, e, true))) continue;
@@ -518,7 +588,9 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
   function startOf(s: Subject, t: TrackDefinition): number | null {
     const runStart = runStartOf(s);
     if (!Number.isFinite(runStart)) return null;
-    if (t.start.kind === "entry") return runStart;
+    // The win-back branch starts when the lead declines with that path, and never otherwise.
+    if (t.branch === "win_back" && !Number.isFinite(winBackAt(s))) return null;
+    if (t.start.kind === "entry") return t.branch === "win_back" ? winBackAt(s) : runStart;
     const rule = t.start;
     const before = def(s).tracks.find((x) => x.id === rule.trackId);
     const f = before ? finishFacts(s, before) : null;
@@ -542,6 +614,30 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
    * went bad (another call's wrong number) while it was open. A lead's stop first leaves it unfinished.
    */
   function finishFacts(s: Subject, t: TrackDefinition): { at: number; seen: number; reason: string } | null {
+    const natural = naturalFinish(s, t);
+    const d = declineOf(s);
+    if (!d || t.branch === "win_back" || t.id === d.trackId) return natural;
+    // A track finished before the decline, as the app knew it then (an observation precedes an action), keeps its finish.
+    if (natural !== null && natural.seen <= d.at) return natural;
+    // Started by the decline: due at or before it, and not released by the declined call itself (its finish is the decline).
+    const at = startOf(s, t);
+    const rule = t.start;
+    const releasedByDecline = rule.kind === "after" && at === d.at && (() => {
+      const before = def(s).tracks.find((x) => x.id === rule.trackId);
+      const f = before ? finishFacts(s, before) : null;
+      return f !== null && f.at === d.at && (before?.id === d.trackId || f.reason === "skipped_declined" || f.reason === "dropped_for_win_back");
+    })();
+    const started = at !== null && at <= d.at && !releasedByDecline;
+    // Every other phone track it has started is skipped as declined at once, its task closed; a later one at its start.
+    if (t.channel === "call" && started) return { at: d.at, seen: d.at, reason: "skipped_declined" };
+    if (d.path === "win_back") return { at: d.at, seen: d.at, reason: "dropped_for_win_back" };
+    if (d.path === "stop") return null;
+    if (t.channel === "call") return at === null || at >= endLimitOf(s) ? null : { at, seen: at, reason: "skipped_declined" };
+    return natural;
+  }
+
+  /** A track's finish with no decline. */
+  function naturalFinish(s: Subject, t: TrackDefinition): { at: number; seen: number; reason: string } | null {
     const at = startOf(s, t);
     const end = endLimitOf(s);
     if (at === null || at >= end) return null;
@@ -607,14 +703,14 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     runStartOf(s) <= t && t < endLimitOf(s) && !sequenceDoneAt(s, t, true) && !(held === "engine" ? heldStrictly(s, t) : held === "after" ? heldAt(s, t) : holdsOf(s).some((x) => x.from <= t && t <= x.to));
   /** Every track of the campaign finished, by the record, and known to the app by `t` (strictly before, with `strict`). */
   function sequenceDoneAt(s: Subject, t: number, strict = false): boolean {
-    return def(s).tracks.every((tr) => {
+    return tracksOf(s).every((tr) => {
       const f = finishFacts(s, tr);
       return f !== null && (strict ? f.seen < t : f.seen <= t);
     });
   }
   /** When every track had finished and the app knew it, or Infinity. */
   function sequenceDoneInstant(s: Subject): number {
-    const seen = def(s).tracks.map((tr) => finishFacts(s, tr)?.seen ?? Infinity);
+    const seen = tracksOf(s).map((tr) => finishFacts(s, tr)?.seen ?? Infinity);
     return Math.max(...seen);
   }
   /**
@@ -681,11 +777,18 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
   /** The user's date of `t`, YYYY-MM-DD. */
   const dateIn = (t: number) => new Date(local(t, uz(t)).day * DAY).toISOString().slice(0, 10);
 
-  async function logOutcome(taskId: string, outcome: CallOutcomeApi, chooseNumber: (view: CallTaskView) => string | null, extra: { redial?: boolean; callbackAt?: number | null } = {}): Promise<void> {
+  async function logOutcome(taskId: string, outcome: CallOutcomeApi, chooseNumber: (view: CallTaskView) => string | null, extra: { redial?: boolean; callbackAt?: number | null; declinedPath?: DeclinedPath | null } = {}): Promise<void> {
     const view = (await h.request<CallTaskView>("GET", `/api/call-tasks/${taskId}`)).body;
     knownTasks.set(taskId, { subjectId: view.enrollmentId, trackId: view.track.id });
     const s = subjects.get(view.enrollmentId);
     if (!s) return;
+    // The task preselects its phone track's declined path, stop when the canvas set none (Q14), and offers win back only with a branch.
+    const trackDef = def(s).tracks.find((t) => t.id === view.track.id);
+    const configured: DeclinedPath = trackDef?.declinedPath ?? "stop";
+    const hasBranch = def(s).tracks.some((t) => t.branch === "win_back" && !t.removed);
+    if (view.declinedPath !== configured || view.declinedPaths.join() !== (hasBranch ? "stop,continue,win_back" : "stop,continue")) {
+      problem(`16: ${view.enrollmentId}/${view.track.id}'s call offers the declined path ${view.declinedPath} of ${view.declinedPaths.join(", ")}; the definition says ${configured}${hasBranch ? ", with a win-back branch" : ", with no win-back branch"}`);
+    }
     const numberId = outcome === "skip_for_now" ? null : chooseNumber(view);
     const number = view.numbers.find((n) => n.detailId === numberId);
     const key = number ? (phonesOf(s).find((p) => digits(p.key) === digits(number.value))?.key ?? null) : null;
@@ -696,13 +799,16 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     const numberOk = outcome === "skip_for_now" || (key !== null && badAt(key) > now);
     const redial = extra.redial === true;
     const callbackAt = extra.callbackAt ?? null;
-    // A redial follows only no answer, voicemail or gatekeeper; a callback needs a time still to come.
-    const shapeOk = (!redial || REDIAL.includes(outcome)) && (outcome === "callback_requested" ? callbackAt !== null && callbackAt > now : callbackAt === null);
+    const override = extra.declinedPath ?? null;
+    const path: DeclinedPath | null = outcome === "not_interested" ? (override ?? configured) : null;
+    // A redial follows only no answer, voicemail or gatekeeper; a callback needs a time still to come; a declined
+    // path goes only with not interested, and win back needs the campaign's win-back branch.
+    const shapeOk = (!redial || REDIAL.includes(outcome)) && (outcome === "callback_requested" ? callbackAt !== null && callbackAt > now : callbackAt === null) && (override === null || outcome === "not_interested") && (path !== "win_back" || hasBranch);
     const expected = listedByRecord(taskId, now) && numberOk && shapeOk;
     const note = chance(0.5) ? pick(["Rang out.", "Spoke to reception.", "Call back after lunch.", ""]) : "";
     const noteScope = chance(0.3) ? "company" : "person";
-    const body = { requestId: `action-${++actions}`, outcome, numberId, note, noteScope, ...(redial ? { redial: true } : {}), ...(callbackAt !== null ? { callbackAt: new Date(callbackAt).toISOString() } : {}) };
-    const entry: LoggedOutcome = { at: now, taskId, subjectId: view.enrollmentId, trackId: view.track.id, outcome, numberKey: key, accepted: expected, note: note.trim(), noteScope, redial, callbackAt };
+    const body = { requestId: `action-${++actions}`, outcome, numberId, note, noteScope, ...(redial ? { redial: true } : {}), ...(callbackAt !== null ? { callbackAt: new Date(callbackAt).toISOString() } : {}), ...(override !== null ? { declinedPath: override } : {}) };
+    const entry: LoggedOutcome = { at: now, taskId, subjectId: view.enrollmentId, trackId: view.track.id, outcome, numberKey: key, accepted: expected, note: note.trim(), noteScope, redial, callbackAt, declinedPath: path, override };
     const post = () => h.request<{ error?: { message: string }; nextFocusTaskId?: string | null }>("POST", `/api/call-tasks/${taskId}/outcome`, body);
     // The same action may reach the app twice: posted twice at once (a double click), or posted again after
     // its answer was lost, sometimes across a restart. It is one action: the record logs it once.
@@ -745,7 +851,25 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     if (!expected && view.task === null && view.open && view.listedFor > dateIn(now) && redialedLast(s, view.track.id)) features.add("outcome-on-a-redial-for-tomorrow");
     if (expected && outcome === "callback_requested") features.add(local(callbackAt ?? now, uz(now)).day > local(now, uz(now)).day ? "callback-for-a-later-day" : "callback-later-today");
     if (expected && taskStateAt(s, view.track.id, now - 1).kind === "callback") features.add(`callback-worked:${outcome}${redial ? "+redial" : ""}`);
+    if (expected && path !== null) {
+      features.add(`declined:${path}`);
+      if (override !== null && override !== configured) features.add("declined-path-overridden");
+      if (trackDef?.declinedPath === undefined && override === null) features.add("declined-with-no-path-set");
+      if (knownTasksOf(s).some((id) => id !== taskId && listedOrWaiting(id, now - 1))) features.add("declined-with-another-call-open");
+    }
+    if (!expected && override !== null && outcome !== "not_interested") features.add("declined-path-with-another-outcome");
+    if (!expected && path === "win_back" && !hasBranch && listedByRecord(taskId, now)) features.add("win-back-refused-without-a-branch");
   }
+  /** The tasks the user has seen of a lead. */
+  const knownTasksOf = (s: Subject) => [...knownTasks].filter(([, k]) => k.subjectId === s.id).map(([id]) => id);
+  /** An open task by the record: its track has not finished (listed now, or waiting for a later day). */
+  const listedOrWaiting = (taskId: string, t: number) => {
+    const k = knownTasks.get(taskId);
+    const s = k ? subjects.get(k.subjectId) : undefined;
+    const tr = s ? def(s).tracks.find((x) => x.id === k?.trackId) : undefined;
+    const f = s && tr ? finishFacts(s, tr) : null;
+    return s !== undefined && tr !== undefined && (f === null || f.at > t) && t < endLimitOf(s);
+  };
 
   /** Works the focused call with a generated outcome, on a number from the task. */
   async function workFocus(drain: boolean): Promise<boolean> {
@@ -753,7 +877,15 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     const focus = q.focusTaskId;
     if (!focus) return false;
     // A wrong number on a mobile also marks it bad for texts, so an SMS track on it fails.
-    const outcome: CallOutcomeApi = drain ? pick(["no_answer", "voicemail", "gatekeeper"]) : pick(["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "callback_requested", "callback_requested", "skip_for_now", "skip_for_now"]);
+    const drawn: CallOutcomeApi = drain ? pick(["no_answer", "voicemail", "gatekeeper"]) : pick(["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "callback_requested", "callback_requested", "skip_for_now", "skip_for_now"]);
+    // Ticket 16: sometimes the prospect declines; the user keeps the preselected path or overrides it for this lead.
+    const declining = !drain && declineRand() < 0.14;
+    // On a callback, sometimes the gatekeeper answers and the user redials (verifier on 654907b: a redial off a
+    // callback after a gatekeeper, which the draws above no longer reach on any seed).
+    const k = knownTasks.get(focus);
+    const onCallback = k !== undefined && subjects.get(k.subjectId) !== undefined && taskStateAt(subjects.get(k.subjectId)!, k.trackId, h.clock).kind === "callback";
+    const gatekeeperRedial = !drain && !declining && onCallback && callbackRand() < 0.3;
+    const outcome: CallOutcomeApi = declining ? "not_interested" : gatekeeperRedial ? "gatekeeper" : drawn;
     // In the drain the user works every call through. A callback whose lead has no good number left cannot be
     // logged (Q13): the user skips it for now, once a day, and works the calls behind it.
     if (drain && !(await workable(focus))) {
@@ -764,7 +896,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       features.add("drain-skipped-a-callback-it-cannot-log");
       return true;
     }
-    const extra = drain ? {} : { redial: REDIAL.includes(outcome) && chance(0.4), callbackAt: outcome === "callback_requested" ? callbackTime() : null };
+    const extra = drain ? {} : { redial: gatekeeperRedial || (REDIAL.includes(outcome) && chance(0.4)), callbackAt: outcome === "callback_requested" ? callbackTime() : null, declinedPath: declining && declineRand() < 0.35 ? dpick(["stop", "continue", "win_back"] as const) : null };
     await logOutcome(focus, outcome, (view) => {
       const good = view.numbers.filter((n) => !n.bad);
       const choices = good;
@@ -785,6 +917,35 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
   }
 
   /** Logs a wrong number on a shared main line that is the only good number of a lead a callback holds. True if it did. */
+  /**
+   * Declines, on a path drawn for it, a listed call of a lead whose email or text of the main sequence is with the
+   * provider or claimed and waiting for its slot (verifier on 654907b): what was handed over may still complete
+   * by the attempt rules, and nothing of a dropped track is handed over afterwards. True if it did.
+   */
+  async function declineWithWorkInFlight(): Promise<boolean> {
+    for (const [taskId, k] of knownTasks) {
+      const s = subjects.get(k.subjectId);
+      if (!s || !listedByRecord(taskId, h.clock) || !goodPhoneAt(s, h.clock)) continue;
+      const live = ((await h.store.engine.subject(s.id, h.clock))?.attempts ?? []).filter((a) => (a.state === "claimed" || a.state === "handed" || a.state === "accepted") && def(s).tracks.find((t) => t.id === a.trackId)?.branch === "main");
+      if (live.length === 0) continue;
+      const hasBranch = def(s).tracks.some((t) => t.branch === "win_back");
+      const withProvider = live.some((a) => a.state !== "claimed");
+      // Win back most often when the provider holds the work: the case that must never send a dropped track's next step.
+      const path = withProvider && hasBranch && flightRand() < 0.7 ? "win_back" : dpickFlight(hasBranch ? (["win_back", "stop", "continue"] as const) : (["stop", "continue"] as const));
+      await logOutcome(taskId, "not_interested", (view) => view.numbers.find((n) => !n.bad)?.detailId ?? null, { declinedPath: path });
+      if (logged.at(-1)?.accepted) {
+        // One behaviour per pair: the path taken, and the state of the main work at the decline (council on f5fdeee, item 2).
+        if (live.some((a) => a.state === "claimed")) features.add(`declined-with-work-in-flight:${path}:claim-waiting`);
+        if (withProvider) features.add(`declined-with-work-in-flight:${path}:with-the-provider`);
+      }
+      return true;
+    }
+    return false;
+  }
+  const flightRand = random(seed ^ 0x16e);
+  const callbackRand = random(seed ^ 0x16f);
+  const dpickFlight = <T>(items: readonly T[]): T => items[Math.floor(flightRand() * items.length)] ?? items[0]!;
+
   async function strandACallback(): Promise<boolean> {
     const now = h.clock;
     for (const held of subjects.values()) {
@@ -840,6 +1001,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       const expectedEnd: OutreachStatus | null =
         interestedAt(s) <= now && interestedAt(s) < replySeenAt(s) ? "interested_on_call"
         : replySeenAt(s) <= now ? "replied"
+        : declinedStopAt(s) <= now ? "declined_on_call"
         : firstEnd > now ? null
         : noChannelAt(s) === firstEnd ? "finished_no_usable_channel"
         : "sequence_finished_no_response";
@@ -850,9 +1012,18 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       const held = heldAt(s, now);
       if ((st.subject.clock.frozenSince !== null) !== (held || st.subject.ended !== null)) problem(`9: ${id}'s clock is ${st.subject.clock.frozenSince === null ? "running" : "frozen"} at ${new Date(now).toISOString()}; the record says the lead is ${held ? "held by a callback" : st.subject.ended !== null ? "ended" : "running"}`);
       if (held) features.add("callback-hold");
+      // 20 and 15 (ticket 16). The lead's branch and its decline, with the path taken, are the record's.
+      const d = declineOf(s);
+      const declined = d !== null && d.at <= now ? d : null;
+      const wantBranch = winBackAt(s) <= now ? "win_back" : "main";
+      if (progress.branch !== wantBranch) problem(`20: ${id} runs in the ${progress.branch} branch; the record says ${wantBranch}`);
+      if ((progress.declined?.path ?? null) !== (declined?.path ?? null) || (declined !== null && (progress.declined?.trackId !== declined.trackId || progress.declined.at !== new Date(declined.at).toISOString()))) {
+        problem(`20: ${id}'s decline is ${JSON.stringify(progress.declined)}; the record says ${declined ? `${declined.path} on ${declined.trackId} at ${new Date(declined.at).toISOString()}` : "none"}`);
+      }
+      if (wantBranch === "win_back" && expectedEnd === null) features.add("in-win-back");
       if (expectedEnd === null) {
         const open = st.callTasks.some((t) => t.open);
-        const want: OutreachStatus = held ? "callback_scheduled" : open ? "waiting_on_call" : touchedAt(s, now, false) ? "active" : "queued";
+        const want: OutreachStatus = held ? "callback_scheduled" : winBackAt(s) <= now ? "in_win_back" : open ? "waiting_on_call" : touchedAt(s, now, false) ? "active" : "queued";
         if (st.subject.ended !== null) problem(`20: ${id} ended ${st.subject.ended} at ${new Date(st.subject.endedWall ?? 0).toISOString()}; the record has it running`);
         else if (progress.status !== want) problem(`1: ${id} is ${progress.status}; the record says ${want} (${open ? "an open call task" : touchedAt(s, now, false) ? "touched" : "never reached"})`);
       }
@@ -871,8 +1042,9 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
           const bf = before ? finishFacts(s, before) : null;
           problem(`7: ${id}/${t.id} starts at ${isoOf(startWall)}; the record says ${isoOf(at)} (${rule}; the record's finish of it: ${bf ? `${bf.reason} at ${isoOf(bf.at)}` : "none"}; the lead stops at ${Number.isFinite(end) ? new Date(end).toISOString() : "never"})`);
         }
-        if (at !== null && seen !== null && seen <= now && at < end && p?.startedAt == null) problem(`7: ${id}/${t.id} was due to start at ${new Date(at).toISOString()} but has not`);
         const f = finishFacts(s, t);
+        const dropped = f?.reason === "dropped_for_win_back" && at !== null && f.at <= at;
+        if (at !== null && seen !== null && seen <= now && at < end && p?.startedAt == null && !dropped) problem(`7: ${id}/${t.id} was due to start at ${new Date(at).toISOString()} but has not`);
         if (p?.finishedWall != null) {
           const frozen = st.subject.endedWall !== null && p.finishedWall === st.subject.endedWall;
           const closedOnInterest = p.finishReason === "closed_on_interest" && p.finishedWall === interestedAt(s);
@@ -898,6 +1070,20 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
         if (!(runStartOf(s) <= task.placedWall && task.placedWall <= end && !sequenceDoneAt(s, task.placedWall, true))) problem(`2: ${id}/${task.trackId} was placed at ${new Date(task.placedWall).toISOString()} while the lead was not running (from ${new Date(runStartOf(s)).toISOString()} to ${Number.isFinite(endLimitOf(s)) ? new Date(endLimitOf(s)).toISOString() : "now"}${sequenceDoneAt(s, task.placedWall) ? ", sequence done" : ""})`);
       }
       if (new Set(st.callTasks.map((t) => t.stepId)).size !== st.callTasks.length) problem(`16: ${id} has two tasks for one call step`);
+      // 15. No call after a decline: none open from then on, none placed after it, and none in win-back.
+      for (const task of st.callTasks) {
+        if (declined !== null && task.open) problem(`15: ${id}/${task.trackId}'s call task is open after the lead declined at ${new Date(declined.at).toISOString()}`);
+        if (d !== null && task.placedWall > d.at) problem(`15: ${id}/${task.trackId} was placed at ${new Date(task.placedWall).toISOString()}, after the lead declined at ${new Date(d.at).toISOString()}`);
+        if (def(s).tracks.find((t) => t.id === task.trackId)?.branch === "win_back") problem(`15: ${id} has a call task in win-back`);
+      }
+      // 6. Nothing of a main track dropped for win-back is handed over after the lead entered the branch.
+      for (const ch of ["email", "sms"] as const) {
+        for (const c of (ch === "sms" ? sms.handoverLog : email.handoverLog).filter((x) => x.subjectId === id && x.at > winBackAt(s))) {
+          const tr = def(s).tracks.find((t) => t.steps.some((x) => x.id === c.stepId));
+          if (tr?.branch === "main") problem(`6: ${id}/${c.stepId} of the main sequence was handed over at ${new Date(c.at).toISOString()}, after the lead entered win-back at ${new Date(winBackAt(s)).toISOString()}`);
+          else features.add("a-send-in-win-back");
+        }
+      }
 
       // 18, during the run: a due call with room on today's list is placed (nothing waits for no reason).
       for (const t of def(s).tracks) {
@@ -926,6 +1112,9 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
           const unheld = prev ? dueAfter(prev.at, step.waitDays, zoneFor(s, prev.at)) : at;
           const due = prev ? afterHolds(s, prev.at, unheld) : at;
           if (!reachesAt(s, ch, at) || !Number.isFinite(due)) break;
+          // A main track dropped for win-back sends nothing due after the lead entered the branch.
+          const ended = finishFacts(s, t);
+          if (ended?.reason === "dropped_for_win_back" && due >= ended.at) break;
           // 8 and 9. Never handed over before its due time, the holds included.
           const handed = firstCall(ch, id, step.id);
           if (handed && handed.at < due) problem(`9: ${id}/${step.id} was handed over at ${new Date(handed.at).toISOString()}, before its due time ${new Date(due).toISOString()} (${new Date(unheld).toISOString()} moved by the lead's callback holds)`);
@@ -935,7 +1124,9 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
           const seen = i === 0 ? startSeenAt(s, t) : due;
           // Not across a move of the prospect's zone: the window is read in the zone of the moment of each claim.
           const moved = [s.person?.key, s.company.key].some((key) => (zoneChanges.get(key ?? "") ?? []).some((z) => z.at >= (prev?.at ?? at) && z.at <= deadline));
-          if (moved || seen === null || seen > opens || deadline > now || !runningAt(s, deadline) || heldWithin(s, opens, deadline) || !inWindow(t.window, zoneFor(s, deadline), deadline - 1) || !reachesAt(s, ch, deadline)) continue;
+          // A main track dropped for win-back before the hour was up sends nothing more (its claim is withdrawn).
+          const droppedFirst = ended?.reason === "dropped_for_win_back" && ended.at <= deadline;
+          if (droppedFirst || moved || seen === null || seen > opens || deadline > now || !runningAt(s, deadline) || heldWithin(s, opens, deadline) || !inWindow(t.window, zoneFor(s, deadline), deadline - 1) || !reachesAt(s, ch, deadline)) continue;
           if (!handed || handed.at > deadline) problem(`18: ${id}/${step.id} was due at ${new Date(due).toISOString()} and its window open from ${new Date(opens).toISOString()}, but it was not handed over within an hour`);
           if (handed && st.callTasks.some((x) => x.open && x.placedWall <= handed.at)) features.add("a-send-beside-an-open-call");
         }
@@ -962,7 +1153,10 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
           if (heldStrictly(s, c.at)) problem(`2: ${id}/${c.stepId} was handed over at ${new Date(c.at).toISOString()}, while a callback held the lead (${holdsOf(s).map((x) => `${new Date(x.from).toISOString()} to ${Number.isFinite(x.to) ? new Date(x.to).toISOString() : "now"}`).join(", ")})`);
         }
       }
-      if (drained) checkDrained(s, st, progress);
+      if (drained) {
+        checkDrained(s, st, progress);
+        await checkActivity(s, progress);
+      }
     }
 
     // Notes: each is where the user put it, once. A person's notes are the person-scoped notes of their calls,
@@ -1104,6 +1298,72 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     if (st.subject.ended === null) problem(`18: ${s.id} is ${progress.status} after the drain (${JSON.stringify(progress.tracks.map((t) => [t.trackId, t.finishReason]))})`);
     if (st.callTasks.some((t) => t.open) && st.subject.ended === null) problem(`18: ${s.id} still has an open call task after the drain`);
   }
+  /**
+   * Activity against the record, after the drain (ticket 16; the rule of ticket 13's track runs): the timeline
+   * lists exactly what the record derives from its own starts and finishes, the providers' logs and the replies.
+   * Email and SMS tracks of the main sequence, and of the win-back branch once the lead entered it; a branch the
+   * lead never entered says nothing, and neither does a main track dropped for win-back (review bot on 654907b).
+   * Entries are compared as kind, channel, track label and message number; "ended" against the stored ending.
+   */
+  async function checkActivity(s: Subject, progress: EnrollmentProgress): Promise<void> {
+    const now = h.clock;
+    const recordId = await recordOf(s);
+    if (recordId === null) return;
+    const campaignId = campaigns[s.campaign]!.id;
+    const shown = (await h.request<ActivityView>("GET", `/api/${s.person ? "people" : "companies"}/${recordId}/activity`)).body.entries
+      .filter((e) => e.campaign.id === campaignId)
+      .map((e) => (e.kind === "replied" ? `replied|${e.channel}` : e.kind === "ended" ? "ended" : e.kind === "call" ? `call|${e.track.label}|${e.outcome}|${e.declinedPath ?? "-"}` : `${e.kind}|${e.channel}|${e.track.label}|${"stepNumber" in e && e.stepNumber !== null ? e.stepNumber : "-"}`))
+      .sort();
+    const expected: string[] = [];
+    // Every outcome the user logged on the lead, skip for now included, a decline with the path it took (ticket 14b, 16).
+    for (const o of logged) if (o.accepted && o.subjectId === s.id) expected.push(`call|${trackLabel(def(s), { id: o.trackId, channel: "call" }).label}|${o.outcome}|${o.declinedPath ?? "-"}`);
+    const end = endLimitOf(s);
+    const atLaunch = noChannelAt(s) === runStartOf(s) && runStartOf(s) <= now;
+    for (const t of tracksOf(s)) {
+      const ch = t.channel;
+      const label = trackLabel(def(s), t).label;
+      if (atLaunch) {
+        // The one entry not read from a stored outcome: no usable channel at launch, said for each main track.
+        if (t.branch === "main") expected.push(`skipped|${ch}|${label}|-`);
+        continue;
+      }
+      if (ch !== "call") {
+        t.steps.forEach((st, i) => {
+          const d = deliveryOf(ch, s.id, st.id);
+          if (d && knownAt(ch, d) <= now) expected.push(`sent|${ch}|${label}|${i + 1}`);
+        });
+      }
+      const f = finishFacts(s, t);
+      const start = startOf(s, t);
+      const started = start !== null && start <= now && start < end && !(f?.reason === "dropped_for_win_back" && f.at <= start);
+      if (!started) continue;
+      const rule = t.start;
+      const before = rule.kind === "after" ? def(s).tracks.find((x) => x.id === rule.trackId) : undefined;
+      const released = before ? finishFacts(s, before)?.reason : undefined;
+      if (released === "skipped_missing_channel" || released === "failed_bad_destination") expected.push(`released|${ch}|${label}|-`);
+      if (f?.reason === "skipped_missing_channel") expected.push(`skipped|${ch}|${label}|-`);
+      if (f?.reason === "failed_bad_destination") expected.push(`address_bad|${ch}|${label}|-`);
+      if (t.branch === "win_back") features.add("activity-in-win-back");
+      if (f?.reason === "dropped_for_win_back") features.add("activity-of-a-dropped-track");
+    }
+    if (progress.status === "replied") {
+      // The first reply stopped it; replies on both channels at one instant reach the app in an order the record does not model.
+      const mail = Math.min(Infinity, ...email.replyLog.filter((r) => r.subjectId === s.id).map((r) => r.at));
+      const firstText = sms.deliveryLog.find((d) => d.subjectId === s.id)?.at ?? Infinity;
+      const text = Math.min(Infinity, ...sms.replyLog.filter((r) => r.to === numbers[s.campaign]!.id && r.from === mobileOf(s) && r.at >= firstText).map((r) => r.at));
+      expected.push(mail === text ? (shown.find((x) => x.startsWith("replied|")) ?? "replied|email") : `replied|${mail < text ? "email" : "sms"}`);
+    } else if (progress.status === "sequence_finished_no_response" || progress.status === "finished_no_usable_channel") expected.push("ended");
+    expected.sort();
+    if (def(s).tracks.some((t) => t.branch === "win_back")) features.add(Number.isFinite(winBackAt(s)) ? "activity-compared-in-win-back" : "activity-compared-beside-a-branch-never-entered");
+    if (JSON.stringify(shown) !== JSON.stringify(expected)) problem(`activity: ${s.id} shows ${JSON.stringify(shown)}; the record has ${JSON.stringify(expected)}`);
+  }
+  /** The person's record, or the company lead's. */
+  async function recordOf(s: Subject): Promise<string | null> {
+    const name = s.person ? s.person.name : s.company.name;
+    const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?q=${encodeURIComponent(name)}`)).body.rows;
+    return rows.find((r) => (s.person ? r.name === name && r.kind === "person" : r.kind === "company"))?.id ?? null;
+  }
+
   /** Held by a callback that cannot be logged: the lead has no good number left. */
   const stuck = (s: Subject) => heldAt(s, h.clock) && !goodPhoneAt(s, h.clock) && h.clock < endLimitOf(s);
 
@@ -1212,6 +1472,14 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
   // ------------------------------------------------------------------------------------------
   // Events.
 
+  // Right after launch, several emails wait on one inbox for their pacing slot, and in a run with late sends the
+  // first ones are with the provider: sometimes the user declines a lead then (verifier on 654907b).
+  if (flightRand() < 0.7) {
+    await h.advanceTo(h.clock + MINUTE);
+    await queue();
+    if (await declineWithWorkInFlight()) await checkAll(false);
+  }
+
   const eventCount = options.events ?? 24;
   for (let e = 0; e < eventCount && problems.length === 0 && !h.stopped; e++) {
     const r = rand();
@@ -1224,6 +1492,11 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       // instant and the worker's tick (review bot on eda5fa0); the worker's tick then follows.
       // Sometimes, when a lead held by a callback has only the company main line left, a colleague's call on that
       // line is a wrong number: the callback is then one no call can be logged on (Q13).
+      // In a run with late sends, main work stays with the provider for up to an hour and a half after its handover.
+      if (lateSends && flightRand() < 0.25 && (await declineWithWorkInFlight())) {
+        await checkAll(false);
+        continue;
+      }
       if (staleRand() < 0.5 && (await strandACallback())) {
         await checkAll(false);
         continue;
@@ -1247,7 +1520,10 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
         });
         const outcome = pick(OUTCOMES);
         const extra = { redial: chance(0.25), callbackAt: outcome === "callback_requested" ? callbackTime() : null };
-        await logOutcome(redialed.length > 0 && chance(0.5) ? pick(redialed) : pick(ids), outcome, (view) => view.numbers.find((n) => !n.bad)?.detailId ?? null, extra);
+        const target = redialed.length > 0 && chance(0.5) ? pick(redialed) : pick(ids);
+        // Ticket 16: sometimes a declined path with an outcome it does not go with, or not interested on any known task.
+        if (declineRand() < 0.2) await logOutcome(target, dpick(["no_answer", "not_interested", "not_interested"] as const), (view) => view.numbers.find((n) => !n.bad)?.detailId ?? null, { declinedPath: dpick(["stop", "continue", "win_back"] as const) });
+        else await logOutcome(target, outcome, (view) => view.numbers.find((n) => !n.bad)?.detailId ?? null, extra);
       }
     } else if (r < 0.9) {
       const visible = email.deliveryLog.filter((d) => d.visibleAt <= h.clock);
@@ -1292,6 +1568,16 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     for (const p of st?.tracks ?? []) if (p.finishReason === "failed_bad_destination") features.add("sms-failed-on-a-wrong-mobile");
     for (const p of st?.tracks ?? []) if (p.finishReason === "skipped_missing_channel" && def(subjects.get(id)!).tracks.find((t) => t.id === p.trackId)?.channel === "call") features.add("phone-skipped");
     const sj = subjects.get(id)!;
+    // Ticket 16's behaviours.
+    for (const p of st?.tracks ?? []) {
+      if (p.finishReason === "skipped_declined") {
+        const later = p.startedAt !== null && p.finishedAt === p.startedAt && (st?.callTasks.every((t) => t.trackId !== p.trackId) ?? true);
+        // A phone track that started after the decline instant, on a later tick, is the one a lifted bar would call.
+        features.add(!later ? "an-open-call-skipped-as-declined" : (p.finishedWall ?? 0) > (declineOf(sj)?.at ?? Infinity) ? "a-later-phone-track-skipped-as-declined" : "a-phone-track-released-by-the-decline-skipped");
+      }
+      if (p.finishReason === "dropped_for_win_back") features.add(p.startedAt === null ? "an-unstarted-main-track-dropped" : "a-started-main-track-dropped");
+    }
+    if (st?.subject.ended === "replied" && st.subject.branch === "win_back") features.add("replied-in-win-back");
     for (const p of st?.tracks ?? []) {
       if (p.finishReason !== "skipped_unworked") continue;
       features.add("skipped-unworked");

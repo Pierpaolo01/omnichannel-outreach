@@ -46,6 +46,15 @@ type FocusTarget =
   | { readonly to: "subject" | "toggle" | "body"; readonly stepId: string };
 
 const liveMain = (def: CampaignDefinition) => def.tracks.filter((t) => !t.removed && t.branch === "main");
+/** The win-back branch's live tracks (ticket 16a): set over HTTP for now, kept by every save, not drawn yet. */
+const winBackCount = (def: CampaignDefinition) => def.tracks.filter((t) => !t.removed && t.branch === "win_back").length;
+/** What a declined call on this phone track does now, as its definition holds it (ticket 16a; question Q14 for none). */
+const DECLINED_NOW = {
+  stop: "A declined call stops the lead in this campaign.",
+  continue: "After a declined call, the lead’s other channels continue, with no more calls in this campaign.",
+  win_back: "A declined call moves the lead to this campaign’s win-back branch, with no more calls.",
+  unset: "No path is set, so a declined call stops the lead in this campaign.",
+} as const;
 
 /** The Sequence tab: the canvas with every track and how they connect, and the selected track's inspector beside it. */
 export function SequenceTab({ campaignId, editor }: { campaignId: string; editor: SequenceEditor }) {
@@ -616,6 +625,11 @@ function EditorNotices({ editor, onLoadedStored }: { editor: SequenceEditor; onL
         </p>
       )}
       {editor.launched && <p className="rounded-field bg-raised px-3 py-2 text-[13.5px] text-ink-2">This campaign is running. Editing a running campaign arrives with a later release.</p>}
+      {winBackCount(editor.draft) > 0 && (
+        <p className="rounded-field bg-raised px-3 py-2 text-[13.5px] text-ink-2">
+          This campaign has a win-back branch of {winBackCount(editor.draft) === 1 ? "one track" : `${winBackCount(editor.draft)} tracks`}, for leads who decline on a call. It is kept as it is when you save here; showing and editing it here arrives with a later release.
+        </p>
+      )}
       {(editor.launching || editor.loading) && (
         <p role="status" className="rounded-field bg-raised px-3 py-2 text-[13.5px] text-ink-2">
           {editor.launching ? "Launching. Editing is paused until the launch answers." : "Loading the saved version. Editing is paused until it arrives."}
@@ -739,7 +753,10 @@ function PhoneInspector({ track, editor, onLoadedStored, onClose, onRemoved }: {
         <h3 id={declinedId} className="text-[13px] font-semibold text-muted">
           If they decline on the call
         </h3>
-        <p className="text-[13.5px] text-ink-2">Stop, continue on the other channels, or a win-back branch: choosing what a declined call does arrives with a later release.</p>
+        {/* The path this track holds, said as it is (ticket 16a): choosing it here is part b. */}
+        <p className="text-[13.5px] text-ink-2">
+          {DECLINED_NOW[track.declinedPath ?? "unset"]} Choosing stop, continue on the other channels, or the win-back branch here arrives with a later release.
+        </p>
       </section>
       <TimingAndSender track={track} editor={editor} onWindow={(window) => changeTrack((t) => ({ ...t, window }))} />
       <RemoveTrack track={track} editor={editor} onRemoved={onRemoved} />

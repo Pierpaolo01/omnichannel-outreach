@@ -44,15 +44,26 @@ export function trackChunks(from: number, to: number): void {
       test(`seeds ${chunk.map((o) => SEED + o).join(", ")}`, async () => {
         const failures: string[] = [];
         for (const offset of chunk) {
-          const { problems } = await runTracks(SEED + offset);
+          const { problems, stats } = await runTracks(SEED + offset);
+          for (const f of stats.features) reached.add(f);
           if (problems.length > 0) failures.push(`seed ${SEED + offset}: ${problems.join("; ")}`);
         }
         for (const failure of failures) console.error(failure);
         expect(failures).toEqual([]);
       }, 1_800_000);
     }
+    if (!FULL_SEARCH && from === 0) {
+      // Ticket 16 (review bot on 654907b): Activity and progress are compared for campaigns with a win-back branch
+      // that no lead here enters, including a lead with no usable channel at launch, whose skips Activity states.
+      test("the fixed seeds reach a never-entered branch beside a running lead and beside a lead with no channel at launch", () => {
+        expect(["a-lead-beside-a-branch-never-entered", "no-channel-at-launch-beside-a-branch"].filter((f) => !reached.has(f))).toEqual([]);
+      });
+    }
   });
 }
+
+/** The behaviours the runs of this process reached. */
+const reached = new Set<string>();
 
 /**
  * Each broken engine must fail the invariant it names: in `pnpm check` on its known seed; in the

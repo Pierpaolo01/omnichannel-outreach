@@ -57,6 +57,7 @@ describe("Activity is history; a present state or a day only from the server's r
     zone: "Europe/London",
     redialListedFrom: null,
     callbackOpen: false,
+    declinedPath: null,
     ...fields,
   });
   const body = (entry: ActivityEntry, zone = "Europe/London") => describeEntry(entry, zone).body;
@@ -78,5 +79,22 @@ describe("Activity is history; a present state or a day only from the server's r
     expect(body(skip([{ track: one("Email track 2"), state: "stopped", startsAt: null }]))).toBe("Not called within 2 days of its due date, Sun 1 Nov, so the call was skipped. Email track 2 did not start: their outreach in this campaign stopped.");
     expect(body(skip([{ track: one("Email track 2"), state: "held", startsAt: null }]))).toContain("Email track 2 starts after its delay, once their outreach is no longer held.");
     expect(body(skip([{ track: one("Email track 2"), state: "waiting", startsAt: "2026-11-06T00:00:00.000Z" }]), "Pacific/Honolulu")).toContain("Email track 2 starts after its delay, on Thu 5 Nov.");
+  });
+});
+
+describe("what the timeline says of a declined call (ticket 16)", () => {
+  const say = (entry: ActivityEntry) => {
+    const { title, body, track } = describeEntry(entry, "Europe/London");
+    return [title, body, track];
+  };
+  const number = { detailId: "d1", kind: "direct" as const, owner: "person" as const, value: "+44 20 7946 0111" };
+
+  test("it says the path the decline took, as stored, then the number and the note", () => {
+    const declined = (declinedPath: "stop" | "continue" | "win_back") => ({ campaign, at, kind: "call" as const, channel: "call" as const, track: one("Phone track"), outcome: "not_interested" as const, number, note: "Happy with their supplier.", declinedPath, redial: false, callbackAt: null, onCallback: null, zone: "Europe/London", redialListedFrom: null, callbackOpen: false });
+    expect(say(declined("stop"))).toEqual(["Call: not interested", "Stopped in this campaign. +44 20 7946 0111, direct. Happy with their supplier.", null]);
+    expect(say(declined("continue"))).toEqual(["Call: not interested", "No more calls in this campaign; the other channels continue. +44 20 7946 0111, direct. Happy with their supplier.", null]);
+    expect(say(declined("win_back"))).toEqual(["Call: not interested", "Moved to this campaign’s win-back branch, with no more calls. +44 20 7946 0111, direct. Happy with their supplier.", null]);
+    // Any other call has no path.
+    expect(say({ campaign, at, kind: "call", channel: "call", track: one("Phone track"), outcome: "no_answer", number, note: "", declinedPath: null, redial: false, callbackAt: null, onCallback: null, zone: "Europe/London", redialListedFrom: null, callbackOpen: false })).toEqual(["Call: no answer", "+44 20 7946 0111, direct", null]);
   });
 });

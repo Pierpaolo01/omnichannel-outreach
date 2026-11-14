@@ -23,7 +23,7 @@ import { ENGINE_PARAMS } from "../domain/sequence/attempt.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, startOfLocalDay, windowOpen, type WindowRule } from "../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../domain/sequence/dispatch.ts";
 import { callableOnDay, callRoom, callWindow, goodNumbers } from "../domain/sequence/calls.ts";
-import { liveSteps, liveTracks, poolOf, type CampaignDefinition, type TrackChannel } from "../domain/sequence/definition.ts";
+import { liveSteps, liveTracks, poolOf, winBackAvailable, type CampaignDefinition, type TrackChannel } from "../domain/sequence/definition.ts";
 import { channelReaches } from "../domain/sequence/progress.ts";
 import type { AccountState, Attempt, CallDay, SmsBinding, SubjectState } from "../domain/sequence/state.ts";
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
@@ -109,6 +109,11 @@ export interface Projection {
   readonly steps: number;
   /** Why the run stopped, set at the point it stopped. Only a `complete` run's figures may be shown. */
   readonly stop: ProjectionStop;
+  /**
+   * The campaign has a live win-back branch, and none of its simulated leads entered it (ticket 16): only a
+   * decline enters it, which the assumed user never logs, so none of its sends is counted.
+   */
+  readonly winBackNotCounted: boolean;
 }
 
 /**
@@ -872,5 +877,7 @@ export function projectLoad(input: ProjectionInput): Projection {
     busiestCallDay: Math.max(0, ...perCallDay.values()),
     steps,
     stop: stopped,
+    // Read from the run's own end state, by the engine's own facts: the branch is live, and no lead entered it.
+    winBackNotCounted: winBackAvailable(input.definition) && launched.every((s) => stateOf(s.subject.id).subject.branch === "main"),
   };
 }

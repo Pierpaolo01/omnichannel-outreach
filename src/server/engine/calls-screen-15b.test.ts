@@ -111,7 +111,7 @@ describe("when an unworked call is skipped, as the engine's skip limit decides i
     expect((await log(id, { requestId: "redial-1", outcome: "no_answer", redial: true, numberId: await numberOf(id, "direct") })).status).toBe(200);
     const after = await task(id);
     expect(after).toMatchObject({ open: true, listed: false, listedFor: "2026-11-03", skipLimit: { dueDate: "2026-11-02", ifUnworked: "2026-11-03" } });
-    expect(after.storedCalls).toEqual([{ requestId: "redial-1", outcome: "no_answer", redial: true, callbackAt: null, at: "2026-11-02T10:00:00.000Z", number: expect.objectContaining({ kind: "direct" }), note: "" }]);
+    expect(after.storedCalls).toEqual([{ requestId: "redial-1", outcome: "no_answer", redial: true, callbackAt: null, at: "2026-11-02T10:00:00.000Z", number: expect.objectContaining({ kind: "direct" }), note: "", declinedPath: null }]);
     await h.advanceTo(MONDAY_9 + DAY + H);
     const item = (await h.request<CallsView>("GET", "/api/calls")).body.readyNow.find((x) => x.taskId === id);
     expect(item).toMatchObject({ reason: "redial", skippedTonight: true, dueAt: "2026-11-02T09:00:00.000Z", noGoodNumber: false });
@@ -467,4 +467,38 @@ describe("Activity says a day, a time or a present state only from the server's 
       }
     }
   });
+});
+
+describe("a declined lead's retained call tasks are not open calls on the record or in Activity (merge of ticket 16a, 2f3ef8c)", () => {
+  for (const path of ["stop", "continue", "win_back"] as const) {
+    test(`declined with ${path}, while its other phone track holds a redial for tomorrow`, async () => {
+      const h = new EngineHarness({ start: MONDAY_9 - H, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+      await h.tick();
+      await h.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "Europe/London" });
+      h.clock = MONDAY_9;
+      const { campaign: c } = await h.createCampaign(`Declined ${path}`, { businesses: [HARBOUR], people: [PAT] });
+      await h.defineSequence(
+        c.id,
+        definition([track("e1", "email", [email("s1")]), track("p1", "call", [call("c1")], WEEKDAYS_9_TO_17), track("p2", "call", [call("c2")], WEEKDAYS_9_TO_17), { ...track("w1", "email", [email("w1s1")]), branch: "win_back" }]),
+      );
+      expect((await h.launch(c.id)).status).toBe(200);
+      await h.advanceTo(MONDAY_9 + H);
+      const [first, second] = (await h.request<CallsView>("GET", "/api/calls")).body.readyNow;
+      const number = (await h.request<CallTaskView>("GET", `/api/call-tasks/${first?.taskId ?? ""}`)).body.numbers[0]?.detailId;
+      expect((await h.request("POST", `/api/call-tasks/${first?.taskId ?? ""}/outcome`, { requestId: "redial", outcome: "no_answer", redial: true, numberId: number })).status).toBe(200);
+      const declined = await h.request<{ error?: { message: string } }>("POST", `/api/call-tasks/${second?.taskId ?? ""}/outcome`, { requestId: "declined", outcome: "not_interested", declinedPath: path, numberId: number });
+      expect(declined.status, JSON.stringify(declined.body)).toBe(200);
+      const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${c.id}`)).body.rows;
+      const rec = (await h.request<PersonRecord & RecordCalls>("GET", `/api/people/${rows[0]?.id ?? ""}`)).body;
+      // No call is made to a declined lead again in this campaign: the record shows none, and the redial's task is not listed or accepted.
+      expect(rec.calls).toEqual([]);
+      for (const id of [first?.taskId ?? "", second?.taskId ?? ""]) {
+        expect((await h.request<CallTaskView>("GET", `/api/call-tasks/${id}`)).body.listed).toBe(false);
+        expect((await h.request("POST", `/api/call-tasks/${id}/outcome`, { requestId: `after-${id}`, outcome: "skip_for_now" })).status).toBe(409);
+      }
+      const activity = (await h.request<ActivityView>("GET", `/api/people/${rows[0]?.id ?? ""}/activity`)).body.entries;
+      expect(activity.some((e) => e.kind === "callback_overdue" || (e.kind === "call" && e.callbackOpen))).toBe(false);
+      expect(activity.find((e) => e.kind === "call" && e.outcome === "not_interested")).toMatchObject({ declinedPath: path });
+    });
+  }
 });

@@ -6,12 +6,12 @@
  * current state inside the transaction that writes it.
  */
 import { leadNow, localDayNumber, nextWindowOpen, span, startOfLocalDay, wallOfLead, windowOpen, type WindowRule } from "./clock.ts";
-import type { CampaignDefinition } from "./definition.ts";
+import { declinedPathOf, winBackAvailable, type CampaignDefinition, type DeclinedPath } from "./definition.ts";
 import type { ReadyItem } from "./dispatch.ts";
-import { advanceTrack, callbackHold, end, evaluate, finishTrack, markDetailBad, progressOf, quiesce, runs, synced } from "./progress.ts";
+import { advanceTrack, callbackHold, decline, end, evaluate, finishTrack, markDetailBad, progressOf, quiesce, runs, synced } from "./progress.ts";
 import type { CallAttempt, CallDay, CallNumber, CallOutcome, CallTask, NoteDraft, RecordedNumber, SubjectState } from "./state.ts";
 
-export const CALL_OUTCOMES: readonly CallOutcome[] = ["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "callback_requested", "skip_for_now"];
+export const CALL_OUTCOMES: readonly CallOutcome[] = ["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "not_interested", "callback_requested", "skip_for_now"];
 
 /** The user-local day a task is listed for: a callback's own day, else its list day (a redial moves it on). */
 export const listedForDay = (state: SubjectState, task: CallTask): number => (task.kind === "callback" ? callbackDay(state, task) : task.listDay);
@@ -230,7 +230,8 @@ export function reasonOf(state: SubjectState, task: CallTask, now: number): Call
  * open later on the user's day, so a placed task is callable on the day whose capacity it takes.
  */
 export function readyCalls(state: SubjectState, now: number): ReadyItem[] {
-  if (!runs(state)) return [];
+  // No call is ever placed again for a lead that declined in this campaign (invariant 15).
+  if (!runs(state) || state.subject.noMoreCalls) return [];
   const lead = leadNow(state.subject.clock, now);
   return state.tracks.flatMap((p): ReadyItem[] => {
     const track = state.campaign.definition.tracks.find((t) => t.id === p.trackId);
@@ -311,6 +312,11 @@ export interface OutcomeInput {
   readonly redial?: boolean;
   /** A callback requested (ticket 15): the wall instant the prospect asked to be called back, still to come. */
   readonly callbackAt?: number | null;
+  /**
+   * Not interested (ticket 16): the declined path to apply to this one lead. Absent, the phone track's own
+   * (`declinedPathOf`); given, it overrides it. Only with not interested.
+   */
+  readonly declinedPath?: DeclinedPath | null;
   /** The number the user dialled; required for every outcome but skip for now. */
   readonly numberId: string | null;
   readonly note: string;
@@ -335,7 +341,9 @@ export const REDIAL_OUTCOMES: readonly CallOutcome[] = ["no_answer", "voicemail"
  * start after their delay. A wrong number also marks that number bad. Interested completes this track,
  * closes every other open call task of the lead, and ends the lead in this campaign only. Skip for now
  * moves the task to the end of today's queue and changes nothing else. Every outcome but skip for now
- * is a call made, so it touches the lead. Activity on the company main line is the intended lead's.
+ * is a call made, so it touches the lead. Not interested completes this track and takes the declined path,
+ * the phone track's unless the user overrides it for this lead (`decline`). Activity on the company main
+ * line is the intended lead's.
  */
 export function logCallOutcome(
   state: SubjectState,
@@ -367,6 +375,11 @@ export function logCallOutcome(
   if (input.outcome === "callback_requested" && callbackAt === null) return { ok: false, reason: "Give the date and time the prospect asked to be called back." };
   if (input.outcome !== "callback_requested" && callbackAt !== null) return { ok: false, reason: "A date and time goes with a callback requested only." };
   if (callbackAt !== null && callbackAt <= now) return { ok: false, reason: "A callback is for a date and time still to come." };
+  const override = input.declinedPath ?? null;
+  if (override !== null && input.outcome !== "not_interested") return { ok: false, reason: "A declined path goes with not interested only." };
+  const trackDef = state.campaign.definition.tracks.find((t) => t.id === task.trackId);
+  const path: DeclinedPath | null = input.outcome === "not_interested" ? (override ?? declinedPathOf(trackDef)) : null;
+  if (path === "win_back" && !winBackAvailable(state.campaign.definition)) return { ok: false, reason: "This campaign has no win-back branch: choose stop or continue." };
   const number = input.numberId === null ? null : numberOf(state, input.numberId);
   if (input.outcome !== "skip_for_now") {
     if (!number) return { ok: false, reason: "Choose the number you dialled from the lead's numbers." };
@@ -381,7 +394,7 @@ export function logCallOutcome(
   }
   const at = leadNow(s.subject.clock, now);
   const atWall = wallOfLead(s.subject.clock, now);
-  const attempt: CallAttempt = { id: ids.attempt, requestId: input.requestId, taskId, outcome: input.outcome, redial, callbackAt, numberDetailId: number?.id ?? null, note, at, atWall: now };
+  const attempt: CallAttempt = { id: ids.attempt, requestId: input.requestId, taskId, outcome: input.outcome, redial, callbackAt, declinedPath: path, numberDetailId: number?.id ?? null, note, at, atWall: now };
   // The note belongs where the user put it; never inferred from the lead's numbers (review bot on a1399ce).
   const notes: NoteDraft[] = note === "" ? [] : [{ id: ids.note, owner: input.noteScope, callAttemptId: attempt.id, body: note, atWall: now }];
   s = { ...s, callAttempts: [...s.callAttempts, attempt], newNotes: [...s.newNotes, ...notes] };
@@ -414,6 +427,8 @@ export function logCallOutcome(
     for (const other of s.callTasks) if (other.open) s = finishTrack(s, other.trackId, "closed_on_interest", at, atWall);
     return { ok: true, state: end(s, "interested_on_call", now) };
   }
+  // Not interested: the lead's declined path (stop, continue on the other channels, or win back); no path calls it again.
+  if (path !== null) return { ok: true, state: decline(s, path, at, atWall, now) };
   return { ok: true, state: runs(s) ? evaluate(s, now) : s };
 }
 

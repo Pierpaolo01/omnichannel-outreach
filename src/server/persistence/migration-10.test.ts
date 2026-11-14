@@ -96,7 +96,7 @@ describe("migration 10 on a database with a bounce observed before it (re-check 
     expect(entries[1]).toMatchObject({ kind: "address_bad", to: "sam@harbour.example" });
     // The upgrade itself ran 10 and 11 (and 12, ticket 14a's call tables, 13, pull request 49's sessions' saves, and 14, ticket 15a's redial, callback and skip-limit fields), and later bounces are recorded again.
     const versions = new DatabaseSync(file).prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((r) => Number(r["version"]));
-    expect(versions.filter((v) => v >= 9)).toEqual([9, 10, 11, 12, 13, 14]);
+    expect(versions.filter((v) => v >= 9)).toEqual([9, 10, 11, 12, 13, 14, 15]);
     await after.store.close();
   });
 });
