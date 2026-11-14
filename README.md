@@ -1,6 +1,6 @@
 # Evidence for ticket #16, part b
 
-Screenshots and a recording for the pull request "Ticket 16b: the declined path and the win-back branch in the campaign editor". Captured at the head `ff7054b`. All data is fictitious: the fixture set in `test/fixtures/scraper/`, invented clinics and people built in `e2e/fake-provider.ts`, and an invented sender inbox. Nothing is dialled or sent to anyone. No email, SMS or telephony provider is involved.
+Screenshots and a recording for the pull request "Ticket 16b: the declined path and the win-back branch in the campaign editor". The after set was recaptured at the head `8c716b2`, after the review bot's finding on the box's width (the first set, at `ff7054b`, is in this branch's history); the before set and the recording are from `ff7054b`, and the flow they show did not change. All data is fictitious: the fixture set in `test/fixtures/scraper/`, invented clinics and people built in `e2e/fake-provider.ts`, and an invented sender inbox. Nothing is dialled or sent to anyone. No email, SMS or telephony provider is involved.
 
 Captured with Chrome, full page, in the light and dark themes, from the standing screen list in `e2e/screens.ts`. Most are at 1360 px; some also at 1024, 768 and 390 px. Where the canvas holds more than its panel shows, a second capture (`canvas-end`) has the canvas scrolled to its end, where the win-back branch is.
 
@@ -17,6 +17,7 @@ Captured with Chrome, full page, in the light and dark themes, from the standing
 9. A save the server still refuses (a mocked 400), with the server's sentence.
 10. Before launch with a win-back branch: the branch track blockers, and the branch's messages in Copy for a lead.
 11. Before launch over the fake providers for a campaign with a win-back branch (the finished estimate's note from part a, with Copy for a lead now showing the branch).
+12. The review bot's case on `8147ba6`: a main sequence of one phone track with the inspector open and the branch empty, at 1360 and 1140 px. The box keeps to the width the canvas budgeted and its text wraps, so nothing scrolls sideways.
 
 `ticket-16b/before/` (the integration branch at `2f3ef8c`, before this pull request): the phone inspector saying that choosing a path arrives with a later release, a branch set over HTTP that the canvas does not draw, and the same Before launch screen.
 
