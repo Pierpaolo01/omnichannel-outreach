@@ -117,6 +117,14 @@ const RUN_SEEDS = [
 /** The coverage checks below hold over many runs, not over a few (council on aebeb80, item 5). */
 const ENOUGH_FOR_COVERAGE = SEEDS >= 100;
 /**
+ * How many coverage runs a behaviour must be reached in. In `pnpm check` the coverage seeds are the fixed and
+ * recorded ones, the same on every run, so a share of them is a fixed bar a change can only fail by changing
+ * what the generator reaches. One shard of the full search runs other seeds, a different set per shard, where
+ * a share is a matter of chance (CI shard 6 on 8147ba6: 4 arranged branches against 6.25), so there each
+ * behaviour must be reached at least once; the search is for broken invariants (review bot on 8147ba6).
+ */
+const atLeast = (share: number): number => (FULL_SEARCH && SHARD ? 0 : COVERAGE_SEEDS.size * share);
+/**
  * The seeds the coverage checks count over: the fixed and recorded ones, the same on every commit. The moving
  * window runs every invariant on its seeds but takes no part in coverage counts, so they cannot depend on the
  * commit (CI on 98927b6: a window of few SMS saves failed a share taken over every seed run).
@@ -598,21 +606,21 @@ describe("saving the definition, generated over the real editor state (ADR 0003 
   }
   const count = (f: (r: (typeof reached)[number]) => boolean) => reached.filter(f).length;
   test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs include launches that start, not only refused ones", () => {
-    expect(count((r) => r.launched)).toBeGreaterThan(COVERAGE_SEEDS.size / 10);
+    expect(count((r) => r.launched)).toBeGreaterThan(atLeast(1 / 10));
   });
   test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs answer saves sent before their page loaded the saved version, late (council on aebeb80, item 2)", () => {
     expect(count((r) => r.lateAfterLoad > 0)).toBeGreaterThan(0);
   });
   test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs save arranged SMS tracks with the numbers that connected (ticket 13b)", () => {
-    expect(count((r) => r.smsSaved)).toBeGreaterThan(COVERAGE_SEEDS.size / 20);
+    expect(count((r) => r.smsSaved)).toBeGreaterThan(atLeast(1 / 20));
   });
   test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs save phone tracks with their own calling hours and skip limits (ticket 14c)", () => {
     expect(count((r) => r.phoneSaved)).toBeGreaterThan(0);
   });
   test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs save phone tracks with a declined path of win back beside the win-back branch, with stop or continue, and branch tracks arranged after one another (ticket 16b)", () => {
-    expect(count((r) => r.winBackSaved)).toBeGreaterThan(COVERAGE_SEEDS.size / 20);
-    expect(count((r) => r.declinedSaved)).toBeGreaterThan(COVERAGE_SEEDS.size / 20);
-    expect(count((r) => r.branchArranged)).toBeGreaterThan(COVERAGE_SEEDS.size / 40);
+    expect(count((r) => r.winBackSaved)).toBeGreaterThan(atLeast(1 / 20));
+    expect(count((r) => r.declinedSaved)).toBeGreaterThan(atLeast(1 / 20));
+    expect(count((r) => r.branchArranged)).toBeGreaterThan(atLeast(1 / 40));
   });
   // Each fault in the editor's saving is killed by its recorded fixed seed (ticket 16b).
   for (const fault of Object.keys(FAULT_SEEDS) as SaveFault[]) {

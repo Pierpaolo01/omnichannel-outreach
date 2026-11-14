@@ -1764,6 +1764,13 @@ The declined path and the branch's tracks are edits like any other, through the 
 
 The branch is drawn in its own box below the main sequence, its tracks hanging from the point a lead enters it, with a dashed "if declined" edge from each phone track whose path, as `declinedPathOf` reads it, is win back. `e2e/layout.spec.ts` now also checks, at every width, that every branch track is inside the box and below its parent, that the box is below the main sequence, and that each edge ends on the box without crossing any track node.
 
+### Review bot on `8147ba6` (each reproduced first as a failing test)
+
+| Finding | Change | Test |
+| - | - | - |
+| The save test's new coverage bar failed CI shard 6 of the full search (4 arranged branches against 6.25): in a shard, the coverage seeds are that shard's own, so a share of them is chance | **The rule, for every coverage bar in the file:** a share of the coverage seeds is required only where they are `pnpm check`'s fixed and recorded seeds, the same on every run; in a full-search shard each behaviour must be reached at least once (`atLeast`) | `SAVE_QUEUE_SEARCH=full SEQUENCE_SHARD=6/8` failed before the change and passes after it |
+| Side by side, the win-back box could draw wider than the width the canvas chose its layout by (its name, Add and empty text, about 494px, against a 320px budget), so the canvas scrolled sideways between 1040 and 1220px with the inspector open, a width the layout scan does not visit | The box takes exactly its budgeted width, or the main sequence's when wider (`contain: inline-size`); its contents wrap. **The rule:** the layout scan checks that a side-by-side canvas never draws wider than its budget (`data-needed`), which does not depend on the window, so it holds at every width once it holds at one | `win-back-editor.spec.ts` sweeps 1020 to 1440px in 20px steps (failed by up to 166px before); a screen with one phone track and an empty branch, which the budget check failed (494 against 320) without the change |
+
 ## Consequences
 
 - **ADR 0001.** The merge that deletes a contact-detail row becomes a redirect in 12a. Enrollments gain the fields in 1.3. `status` stays the one stored status column.
