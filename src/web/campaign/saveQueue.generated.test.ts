@@ -54,10 +54,15 @@ function rng(seed: number): () => number {
   };
 }
 
-/** A definition whose first email has `subject`; `emails` long emails of `bodyLength` characters follow it. */
+/**
+ * A definition whose first email has `subject`; `emails` long emails of `bodyLength` characters follow
+ * it. The edit's marker is the campaign's call script, which every draft has whatever its tracks
+ * (ticket 14c: a phone track may come first, and a call has no subject).
+ */
 const definitionWith = (subject: string, emailPool: readonly string[], emails = 0, bodyLength = 0): CampaignDefinition => ({
   timezone: "Europe/London",
   callSkipLimitDays: 2,
+  callScript: subject,
   emailPool: [...emailPool],
   tracks: [
     {
@@ -74,7 +79,7 @@ const definitionWith = (subject: string, emailPool: readonly string[], emails = 
     },
   ],
 });
-const subjectOf = (d: CampaignDefinition) => d.tracks[0]?.steps[0]?.subject ?? "";
+const subjectOf = (d: CampaignDefinition) => d.callScript ?? "";
 /** Read through a function: the store changes a page's status, which the checker cannot see. */
 const kindOf = (store: EditorStore): SaveStatus["kind"] => store.getSnapshot().save.kind;
 const inbox = (id: string): FakeAccount => ({ id, capacity: 30, gapMs: null, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" });
@@ -122,11 +127,15 @@ async function run(seed: number) {
   const writerNow = (): string | null => server.writer;
   /** Every save the server accepted, as session/number. */
   const accepted = new Set<string>();
+  const coverage = { phoneSaved: false, phoneAny: false };
   const putRaw = async (body: Request["body"]) => {
     const out = await h.request<unknown>("PUT", path, body);
     if (out.status === 200) {
       const view = out.body as SequenceView;
       if (body.save) accepted.add(`${body.save.session}/${body.save.seq}`);
+      const tracks = (body as unknown as CampaignDefinition).tracks ?? [];
+      if (tracks.some((t) => !t.removed && t.channel === "call" && t.callSkipLimitDays !== undefined && t.callSkipLimitDays !== 2)) coverage.phoneSaved = true;
+      if (tracks.some((t) => !t.removed && t.channel === "call")) coverage.phoneAny = true;
       if (view.definitionVersion > server.version) {
         const session = body.save?.session ?? null;
         // Invariant 2: another session replaces a save only if it had seen it.
@@ -144,28 +153,39 @@ async function run(seed: number) {
   let inboxes = 1;
   let numbers = 0;
   /**
-   * An arrangement edit through the editor's own operations (ticket 13b), with the edit's marker in
-   * the first step's subject so invariants 1, 5 and 6 can tell which draft is which. New texts get
-   * copy, so a launch can start.
+   * An arrangement edit through the editor's own operations (ticket 13b), or an edit of a phone
+   * track's calling hours or skip limit (ticket 14c), with the edit's marker in the call script so
+   * invariants 1, 5 and 6 can tell which draft is which. New texts get copy, so a launch can start;
+   * a call keeps none. A skip limit of 0 is a draft that cannot be saved, as a bad wait is.
    */
+  const pick = <T,>(xs: readonly T[]): T => xs[Math.floor(r() * xs.length)]!;
   const arranged = (before: CampaignDefinition, subject: string): CampaignDefinition => {
     const live = before.tracks.filter((t) => !t.removed);
     const any = () => live[Math.floor(r() * live.length)]!;
+    const calls = live.filter((t) => t.channel === "call");
+    const phoneEdit = (): Partial<CampaignDefinition["tracks"][number]> =>
+      r() < 0.4 ? { window: [1, 2, 3, 4, 5, 6].filter(() => r() < 0.6).map((day) => ({ day, start: 8 + Math.floor(r() * 3), end: 16 + Math.floor(r() * 4) })) } : { callSkipLimitDays: pick([1, 3, 5, 0]) };
+    if (calls.length > 0 && r() < 0.4) {
+      const call = calls[Math.floor(r() * calls.length)]!;
+      const change = phoneEdit();
+      return { ...before, callScript: subject, tracks: before.tracks.map((t) => (t.id === call.id ? { ...t, ...change } : t)) };
+    }
     const roll = r();
     const op: ArrangeOperation =
-      live.length === 0 || roll < 0.35 ? { kind: "add", channel: r() < 0.6 ? "sms" : "email" }
+      live.length === 0 || roll < 0.35 ? { kind: "add", channel: pick(["sms", "sms", "sms", "email", "call"]) }
       : roll < 0.65 ? { kind: "start", trackId: any().id, start: r() < 0.3 ? { kind: "entry" } : { kind: "after", trackId: any().id, delayDays: Math.floor(r() * 3) } }
       : roll < 0.85 ? { kind: "delay", trackId: any().id, days: Math.floor(r() * 4) }
       : live.length > 1 ? { kind: "remove", trackId: any().id }
       : { kind: "add", channel: "sms" };
     const out = arrange(before, op);
-    const base = out.ok ? out.definition : before;
+    // A phone track just added is often given its hours or skip limit in the same draft, as the
+    // inspector it opens in invites; most drafts are replaced before their save goes.
+    const added = out.ok && out.added?.channel === "call" && r() < 0.6 ? { id: out.added.id, change: phoneEdit() } : null;
+    const base = out.ok ? { ...out.definition, tracks: out.definition.tracks.map((t) => (t.id === added?.id ? { ...t, ...added.change } : t)) } : before;
     return {
       ...base,
-      tracks: base.tracks.map((t, i) => ({
-        ...t,
-        steps: t.steps.map((st, k) => ({ ...st, body: st.body || "Text.", subject: i === 0 && k === 0 ? subject : t.channel === "email" && k === 0 && !st.subject ? "Hi" : st.subject })),
-      })),
+      callScript: subject,
+      tracks: base.tracks.map((t) => (t.channel === "call" ? t : { ...t, steps: t.steps.map((st, k) => ({ ...st, body: st.body || "Text.", subject: t.channel === "email" && k === 0 && !st.subject ? "Hi" : st.subject })) })),
     };
   };
   // Held in an object and read through a function: a closure sets it, which the checker cannot see.
@@ -347,17 +367,19 @@ async function run(seed: number) {
   }
   const stored = (await h.request<SequenceView>("GET", path)).body.definition;
   const smsSaved = stored.tracks.some((t) => !t.removed && t.channel === "sms") && (stored.smsPool ?? []).length > 0;
-  return { problems, pending: requests.length, launchedOnce: launchedOnce(), smsSaved };
+  return { problems, pending: requests.length, launchedOnce: launchedOnce(), smsSaved, phoneSaved: coverage.phoneSaved, phoneAny: coverage.phoneAny };
 }
 
 describe("saving the definition, generated over the real editor state (ADR 0003 1.1.1)", () => {
   const launched: boolean[] = [];
   const smsSaved: boolean[] = [];
+  const phoneSaved: boolean[] = [];
   for (const seed of Array.from({ length: SEEDS }, (_, i) => 7000 + i)) {
     test(`run ${seed}`, async () => {
       const out = await run(seed);
       launched.push(out.launchedOnce);
       smsSaved.push(out.smsSaved);
+      phoneSaved.push(out.phoneSaved);
       expect(out.pending).toBe(0);
       expect(out.problems).toEqual([]);
     });
@@ -367,5 +389,8 @@ describe("saving the definition, generated over the real editor state (ADR 0003 
   });
   test("the runs save arranged SMS tracks with the numbers that connected (ticket 13b)", () => {
     expect(smsSaved.filter(Boolean).length).toBeGreaterThan(SEEDS / 20);
+  });
+  test("the runs save phone tracks with their own calling hours and skip limits (ticket 14c)", () => {
+    expect(phoneSaved.filter(Boolean).length).toBeGreaterThan(SEEDS / 20);
   });
 });
