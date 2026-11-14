@@ -631,7 +631,9 @@ export class Engine {
   private async withdraw(): Promise<boolean> {
     let changed = false;
     for (const a of await this.store.openAttempts()) {
-      if (!a.withdrawRequested || a.withdrawCalled || (a.state !== "handed" && a.state !== "accepted")) continue;
+      // Asked once, then again each settling period while the provider's answer stays unknown (ticket 17a).
+      const due = !a.withdrawCalled || (a.withdrawLastWall !== null && this.now() >= a.withdrawLastWall + ENGINE_PARAMS.SETTLING);
+      if (!a.withdrawRequested || !due || (a.state !== "handed" && a.state !== "accepted")) continue;
       const w = await this.store.work(a.idempotencyKey);
       if (!w) continue;
       const port = await this.portOf(w.accountId);

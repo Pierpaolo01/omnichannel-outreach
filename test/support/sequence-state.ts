@@ -148,6 +148,7 @@ export function attempt(fields: Partial<Attempt> = {}): Attempt {
     endedBy: null,
     withdrawRequested: false,
     withdrawCalled: false,
+    withdrawLastWall: null,
     awaitingAnswer: false,
     retry: "none",
     rejectReason: null,

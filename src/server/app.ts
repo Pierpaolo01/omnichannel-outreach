@@ -4,6 +4,7 @@ import { z } from "zod";
 import { planImport } from "../domain/import-plan.ts";
 import { isOutreachStatus, OUTREACH_STATUSES, type OutreachStatus } from "../domain/outreach-status.ts";
 import { LEAD_CONTROLS } from "../domain/sequence/controls.ts";
+import { isUncertain } from "../domain/sequence/attempt.ts";
 import { campaignControls, controlsView } from "./engine/controls-view.ts";
 import { checkScraperFile, parseScraperExport } from "../domain/scraper-export.ts";
 import type { ActivityView, ApiError, CallOutcomeAnswer, CallOutcomeRefusal, Campaign, CompanyRecord, FileCheckResult, PersonRecord, RecordCalls, SmsProviderStatus } from "../shared/api.ts";
@@ -266,7 +267,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     const row = await store.engine.campaign(campaignId);
     const stored = await store.engine.statusCounts(campaignId);
     const statusCounts = Object.fromEntries(OUTREACH_STATUSES.map((status) => [status, stored[status] ?? 0])) as Record<OutreachStatus, number>;
-    return { pause: { paused: row?.pausedSince != null, pausedSince: row?.pausedSince != null ? new Date(row.pausedSince).toISOString() : null }, statusCounts, controls: campaignControls(row) };
+    return { pause: { paused: row?.pausedSince != null, pausedSince: row?.pausedSince != null ? new Date(row.pausedSince).toISOString() : null }, statusCounts, controls: campaignControls(row), mayStillSend: await store.engine.uncertainWorkOf(campaignId) };
   };
   const controlRefused = (c: Context, message: string) => c.json<ControlRefusal>({ error: { code: "control_refused", message } }, 409);
 
@@ -465,7 +466,8 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   const enrollmentRead = async (id: string): Promise<EnrollmentRead | null> => {
     const at = Date.parse(now());
     const state = await store.engine.subject(id, at);
-    return state ? { ...progressView(state, at), controls: controlsView(state, at, rules) } : null;
+    // Work handed over and not settled may still be sent (ticket 17a's provider limitation): the screens say so.
+    return state ? { ...progressView(state, at), controls: controlsView(state, at, rules), mayStillSend: state.work.filter(isUncertain).length } : null;
   };
 
   app.get("/enrollments/:id", async (c) => {

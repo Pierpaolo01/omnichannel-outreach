@@ -49,6 +49,7 @@ describe("migration 15 on a database with calls logged before it", () => {
       ALTER TABLE call_attempts DROP COLUMN declined_path;
       DROP TABLE IF EXISTS hold_intervals;
       DROP TABLE IF EXISTS control_requests;
+      ALTER TABLE attempts DROP COLUMN withdraw_last_wall;
       DELETE FROM schema_migrations WHERE version >= 15;
     `);
     db.close();

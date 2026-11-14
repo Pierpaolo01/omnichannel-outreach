@@ -58,6 +58,7 @@ function beforeMigration9(file: string): void {
     ALTER TABLE campaigns DROP COLUMN definition_seq;
     DROP TABLE IF EXISTS hold_intervals;
     DROP TABLE IF EXISTS control_requests;
+    ALTER TABLE attempts DROP COLUMN withdraw_last_wall;
     DELETE FROM schema_migrations WHERE version > 9;
     ALTER TABLE enrollments DROP COLUMN stop_reply_channel;
     ALTER TABLE enrollments DROP COLUMN stop_reply_at;

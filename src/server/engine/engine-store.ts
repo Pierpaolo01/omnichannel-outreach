@@ -201,6 +201,8 @@ export interface EngineStore {
     refusal: (row: { readonly launchedAt: number | null; readonly pausedSince: number | null }) => string | null,
     perLead: (state: SubjectState) => SubjectState,
   ): Promise<ControlRecord>;
+  /** Provider work of the campaign's leads that was handed over and has not settled: it may still be sent (ticket 17a). */
+  uncertainWorkOf(campaignId: string): Promise<number>;
   /** The count of the campaign's leads in each outreach status (ticket 17a). */
   statusCounts(campaignId: string): Promise<Record<string, number>>;
   /** Loads, decides and writes in one transaction. A null decision writes nothing. */

@@ -366,5 +366,22 @@ describe("one lead's controls", () => {
     const again = await h.request<{ error?: { message: string } }>("POST", `/api/call-tasks/${taskId}/outcome`, body);
     expect([again.status, again.body.error?.message]).toEqual([409, first.body.error?.message]);
   });
+
+  test("a pause asks the provider to withdraw again each settling period until its answer is final: the second ask cancels the email (verifier L1)", async () => {
+    // Accepted at 09:00 and sent at 09:54 unless withdrawn; the first withdrawal answers unknown and cancels nothing.
+    const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: 10 * MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }], modes: ["late-send"], random: () => 0.9 });
+    h.fake.withdrawAnswers = "unknown-once";
+    await h.tick();
+    const { campaign } = await h.createCampaign("Clinics", { businesses: [HARBOUR], people: [PAT] });
+    await h.defineSequence(campaign.id, { ...DEFINITION, tracks: [DEFINITION.tracks[0]!] });
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    const pat = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows[0]!.enrollments[0]!.id;
+    await h.advanceTo(MONDAY_9 + MIN);
+    expect((await h.request<{ enrollment: EnrollmentRead }>("POST", `/api/enrollments/${pat}/controls`, { requestId: "p", action: "pause" })).body.enrollment.mayStillSend).toBe(1);
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    expect(h.fake.withdrawLog.map((w) => w.answer)).toEqual(["unknown", "withdrawn"]);
+    expect(h.fake.deliveryLog).toEqual([]);
+    expect((await h.request<EnrollmentRead>("GET", `/api/enrollments/${pat}`)).body.mayStillSend).toBe(0);
+  });
 });
 

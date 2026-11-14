@@ -141,7 +141,13 @@ export function applyAttemptEvent(a: Attempt, w: ProviderWork, event: AttemptEve
         const work: ProviderWork = w.settled === null ? { ...w, settled: "withdrawn", nextLookupWall: null } : w;
         return { attempt: { ...a, withdrawCalled: true, state: "withdrawn", endedBy: "provider", awaitingAnswer: false }, work, effects: [] };
       }
-      return { attempt: { ...a, withdrawCalled: true }, work: w.settled === null ? { ...w, nextLookupWall: w.nextLookupWall ?? event.now + ENGINE_PARAMS.SETTLING } : w, effects: [] };
+      // "too-late" is final (the provider sent it); "unknown" is asked again one settling period on (`withdrawLastWall`),
+      // until the provider's answer is final or the work settles (ticket 17a: a pause or a stop retries its withdrawal).
+      return {
+        attempt: { ...a, withdrawCalled: true, withdrawLastWall: event.answer === "unknown" ? event.now : null },
+        work: w.settled === null ? { ...w, nextLookupWall: w.nextLookupWall ?? event.now + ENGINE_PARAMS.SETTLING } : w,
+        effects: [],
+      };
 
     case "retry_refused":
       if (a.retry === "wanted_after_not_sent") {

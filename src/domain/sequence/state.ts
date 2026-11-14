@@ -134,8 +134,10 @@ export interface Attempt {
   readonly presendFoundReply: boolean;
   readonly endedBy: EndedBy | null;
   readonly withdrawRequested: boolean;
-  /** The worker has asked the provider to withdraw; it is not asked again. */
+  /** The worker has asked the provider to withdraw. */
   readonly withdrawCalled: boolean;
+  /** When the last withdrawal answered "unknown": asked again one settling period later. Null once an answer was final. */
+  readonly withdrawLastWall: number | null;
   /** A send call was authorized and its answer has not been recorded (a crash leaves this set). */
   readonly awaitingAnswer: boolean;
   /** A same-key retry the worker should try to authorize (5.6); `after_not_sent` withdraws if refused. */

@@ -160,6 +160,10 @@ export class SqliteEngineStore implements EngineStore {
     });
   }
 
+  async uncertainWorkOf(campaignId: string): Promise<number> {
+    return num(this.sql("SELECT COUNT(*) AS n FROM provider_work w JOIN enrollments e ON e.id = w.subject_id WHERE e.campaign_id = ? AND w.settled IS NULL AND w.calls > 0").get(campaignId) ?? {}, "n");
+  }
+
   async statusCounts(campaignId: string): Promise<Record<string, number>> {
     return Object.fromEntries(this.sql("SELECT status, COUNT(*) AS n FROM enrollments WHERE campaign_id = ? GROUP BY status").all(campaignId).map((r) => [str(r, "status"), num(r, "n")]));
   }
@@ -933,18 +937,18 @@ export class SqliteEngineStore implements EngineStore {
       this.run(
         `INSERT INTO attempts (id, subject_id, track_id, step_id, account_id, destination_detail_id, destination, state, copy, threading, thread_ref,
            retryable, not_sent_final, idempotency_key, calls, claimed_wall, handed_at, handed_wall, last_call_wall, presend_checked_wall,
-           presend_found_reply, ended_by, withdraw_requested, withdraw_called, awaiting_answer, retry, reject_reason)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           presend_found_reply, ended_by, withdraw_requested, withdraw_called, awaiting_answer, retry, reject_reason, withdraw_last_wall)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET state = excluded.state, copy = excluded.copy, thread_ref = excluded.thread_ref,
            calls = excluded.calls, handed_at = excluded.handed_at, handed_wall = excluded.handed_wall,
            last_call_wall = excluded.last_call_wall, presend_checked_wall = excluded.presend_checked_wall, presend_found_reply = excluded.presend_found_reply,
            ended_by = excluded.ended_by, withdraw_requested = excluded.withdraw_requested,
-           withdraw_called = excluded.withdraw_called, awaiting_answer = excluded.awaiting_answer, retry = excluded.retry,
+           withdraw_called = excluded.withdraw_called, withdraw_last_wall = excluded.withdraw_last_wall, awaiting_answer = excluded.awaiting_answer, retry = excluded.retry,
            reject_reason = excluded.reject_reason`,
         [
           a.id, id, a.trackId, a.stepId, a.accountId, a.destinationDetailId, a.destination, a.state, a.copy ? JSON.stringify(a.copy) : null, a.threading, a.threadRef,
           a.retryable ? 1 : 0, a.notSentIsFinal ? 1 : 0, a.idempotencyKey, a.calls, a.claimedWall, a.handedAt, a.handedWall, a.lastCallWall, a.presendCheckedWall,
-          a.presendFoundReply ? 1 : 0, a.endedBy, a.withdrawRequested ? 1 : 0, a.withdrawCalled ? 1 : 0, a.awaitingAnswer ? 1 : 0, a.retry, a.rejectReason,
+          a.presendFoundReply ? 1 : 0, a.endedBy, a.withdrawRequested ? 1 : 0, a.withdrawCalled ? 1 : 0, a.awaitingAnswer ? 1 : 0, a.retry, a.rejectReason, a.withdrawLastWall,
         ],
       );
     }
@@ -1167,6 +1171,7 @@ function toAttempt(r: Row): Attempt {
     endedBy: strOrNull(r, "ended_by") as Attempt["endedBy"],
     withdrawRequested: num(r, "withdraw_requested") === 1,
     withdrawCalled: num(r, "withdraw_called") === 1,
+    withdrawLastWall: numOrNull(r, "withdraw_last_wall"),
     awaitingAnswer: num(r, "awaiting_answer") === 1,
     retry: str(r, "retry") as Attempt["retry"],
     rejectReason: strOrNull(r, "reject_reason") as RejectReason | null,

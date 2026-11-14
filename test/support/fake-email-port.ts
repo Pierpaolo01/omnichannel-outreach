@@ -123,7 +123,8 @@ export class FakeEmailPort implements SendPort {
   /** Pre-send checks and lookups that never answer; the engine's bounded waits must time them out. */
   portHangs = false;
   /** How a withdrawal is answered: honestly, or "unknown" with the work cancelled or not. */
-  withdrawAnswers: "honest" | "unknown-cancels" | "unknown-sends" = "honest";
+  /** `unknown-once`: the first withdrawal of a piece of work answers unknown and cancels nothing; a later one is honest. */
+  withdrawAnswers: "honest" | "unknown-cancels" | "unknown-sends" | "unknown-once" = "honest";
   /** How far back each observation reaches (ADR 0002's overlap). */
   overlapMs = 60 * MINUTE;
   /** Runs at every send call before it is answered: the tests' probe of the app's state at that moment. */
@@ -351,6 +352,7 @@ export class FakeEmailPort implements SendPort {
       if (!w) return "unknown";
       if (w.sentAt !== null) return "too-late";
       if (this.withdrawAnswers === "unknown-sends") return "unknown";
+      if (this.withdrawAnswers === "unknown-once" && !this.withdrawLog.some((x) => x.key === attempt.idempotencyKey)) return "unknown";
       w.cancelled = true;
       return this.withdrawAnswers === "unknown-cancels" || w.mode === "withdraw-unknown" || w.mode === "always-unknown" ? "unknown" : "withdrawn";
     })();

@@ -229,6 +229,7 @@ export function claim(
     endedBy: null,
     withdrawRequested: false,
     withdrawCalled: false,
+    withdrawLastWall: null,
     awaitingAnswer: false,
     retry: "none",
     rejectReason: null,

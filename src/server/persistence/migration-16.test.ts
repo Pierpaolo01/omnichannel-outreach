@@ -51,6 +51,7 @@ describe("migration 16 on a database written before it", () => {
     db.exec(`
       DROP TABLE hold_intervals;
       DROP TABLE control_requests;
+      ALTER TABLE attempts DROP COLUMN withdraw_last_wall;
       DELETE FROM schema_migrations WHERE version >= 16;
     `);
     db.close();

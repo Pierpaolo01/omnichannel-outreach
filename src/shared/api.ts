@@ -48,6 +48,8 @@ export interface CampaignDetail {
   readonly statusCounts: Readonly<Record<OutreachStatus, number>>;
   /** Pause and resume, each allowed now or refused with the reason the action would give (ticket 17a). */
   readonly controls: readonly CampaignControlView[];
+  /** Messages of the campaign's leads already handed to a provider whose outcome is not final: each may still be sent, also while paused (as `EnrollmentRead.mayStillSend`). */
+  readonly mayStillSend: number;
 }
 
 /** A campaign control as the campaign read offers it (ticket 17a). */
@@ -89,6 +91,12 @@ export type ControlView =
 /** GET /api/enrollments/:id: the lead's progress and the controls allowed now (ticket 17a). */
 export interface EnrollmentRead extends EnrollmentProgress {
   readonly controls: readonly ControlView[];
+  /**
+   * Messages already handed to a provider whose outcome is not final: each may still be sent, even while the lead is
+   * paused or stopped, until the provider's answer is final (ticket 17a, the provider limitation in ADR 0003). The
+   * withdrawal is asked again until then; a send is recorded once and starts nothing while the lead is held.
+   */
+  readonly mayStillSend: number;
 }
 
 /** A refused control (409 `control_refused`). */
