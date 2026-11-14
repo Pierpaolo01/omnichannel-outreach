@@ -11,18 +11,19 @@ import type { ActivityView, ApiError, CallOutcomeAnswer, CallOutcomeRefusal, Cam
 import { CAMPAIGN_NAME_MAX, DEFINITION_MAX_BYTES, STEP_BODY_MAX, STEP_SUBJECT_MAX } from "../shared/limits.ts";
 import { checkApiRequest } from "./guard.ts";
 import { invalidBodyMessage, requestObject } from "./request-body.ts";
+import { bulkRoutes, type BulkRules } from "./bulk.ts";
 import type { OutreachStore } from "./persistence/store.ts";
 import { launchCheck } from "../domain/sequence/blockers.ts";
 import { definitionProblems, emptyDefinition, liveTracks, type CampaignDefinition } from "../domain/sequence/definition.ts";
 import { Engine } from "./engine/engine.ts";
-import type { StoredDefinition } from "./engine/engine-store.ts";
+import type { StoredDefinition, StoredNote } from "./engine/engine-store.ts";
 import { UnconnectedEmailPort, UnprovisionedSmsPort } from "./engine/ports.ts";
 import { accountView, needsAttention, progressView } from "./engine/views.ts";
 import { callsView, callTaskView, recordCalls, todayView } from "./engine/call-views.ts";
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
 import { sealReckoning } from "../domain/sequence/progress.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
-import type { ControlRefusal, EnrollmentRead, CampaignDetail, CampaignListItem, CampaignPauseRead, CampaignSequenceSummary, RecordControls, RecordLead, SequenceView } from "../shared/api.ts";
+import type { ControlRefusal, EnrollmentRead, CampaignDetail, CampaignListItem, CampaignPauseRead, CampaignSequenceSummary, RecordControls, RecordLead, SequenceView, ActivityNote, CallOutcomeApi, ColleagueView, NoteAnswer, RecordColleagues } from "../shared/api.ts";
 import { beforeLaunchView, copyPreview } from "./before-launch.ts";
 import { activityOf } from "./activity.ts";
 import { registerEmailProviderRoutes, type EmailProviderSource } from "./instantly/routes.ts";
@@ -43,6 +44,8 @@ export interface AppDependencies {
   readonly smsProvider?: "none" | "test-simulator";
   /** The engine's rules, as the read models use them; the tests' broken engines replace entries (ADR 0003 9.2). */
   readonly rules?: Partial<Rules>;
+  /** The bulk rule's parts; the generated bulk runs' broken apps replace one (ADR 0003 "Ticket 18"). */
+  readonly bulkRules?: Partial<BulkRules>;
 }
 
 const windowRule = requestObject({ day: z.number().int().min(0).max(6), start: z.number().int().min(0).max(23), end: z.number().int().min(0).max(24) });
@@ -93,6 +96,10 @@ const campaignControlBody = requestObject({
   requestId: controlRequestId,
   expect: z.strictObject({ pausedSince: z.iso.datetime({ offset: true }).nullable() }, { message: "Send the campaign's pause as the confirmation read it." }).optional(),
 });
+// Ticket 18: a note typed on a record. Its request id names it, so a retry stores it once.
+const noteText = z.string().trim().min(1, "Type a note first.").max(10_000, "A note can be at most 10,000 characters.");
+const personNoteBody = requestObject({ requestId: z.string().trim().min(1, "Send a request id with each note.").max(200), body: noteText, scope: z.enum(["person", "company"], { message: "Choose who the note is for: person or company." }) });
+const companyNoteBody = requestObject({ requestId: z.string().trim().min(1, "Send a request id with each note.").max(200), body: noteText });
 const leadControlBody = requestObject({
   requestId: controlRequestId,
   action: z.enum(LEAD_CONTROLS, { message: "Choose one of: pause, resume, skip, stop, resume_from_next_step, move_to_win_back." }),
@@ -166,7 +173,7 @@ const launchBody = requestObject({ definitionVersion: z.number().int().optional(
 const checkBody = requestObject({ businessesCsv: z.string().optional(), peopleCsv: z.string().optional() });
 
 /** The HTTP interface. Every route is under /api; the web client is served separately. */
-export function createApp({ store, now, newId, engine: givenEngine, emailProvider, smsProvider = "none", rules: givenRules }: AppDependencies): Hono {
+export function createApp({ store, now, newId, engine: givenEngine, emailProvider, smsProvider = "none", rules: givenRules, bulkRules }: AppDependencies): Hono {
   const rules: Rules = { ...DEFAULT_RULES, ...givenRules };
   const engine = givenEngine ?? new Engine({ store: store.engine, port: new UnconnectedEmailPort(), smsPort: new UnprovisionedSmsPort(), now: () => Date.parse(now()), newId });
   const app = new Hono().basePath("/api");
@@ -350,13 +357,13 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     const person = await store.person(c.req.param("id"));
     // Each enrollment's open calls, as of now, by the engine's rules (ticket 15b).
     if (!person) return notFound(c, "person");
-    return c.json<PersonRecord & RecordCalls & RecordControls>({ ...person, ...(await recordReads(person.enrollments.map((e) => e.id))) });
+    return c.json<PersonRecord & RecordCalls & RecordControls & RecordColleagues>({ ...person, ...(await recordReads(person.enrollments.map((e) => e.id))), colleagueNotes: await colleagueNotes(person.colleagues) });
   });
 
   app.get("/companies/:id", async (c) => {
     const company = await store.company(c.req.param("id"));
     if (!company) return notFound(c, "company");
-    return c.json<CompanyRecord & RecordCalls & RecordControls>({ ...company, ...(await recordReads(company.enrollments.map((e) => e.id))) });
+    return c.json<CompanyRecord & RecordCalls & RecordControls & RecordColleagues>({ ...company, ...(await recordReads(company.enrollments.map((e) => e.id))), colleagueNotes: await colleagueNotes(company.people) });
   });
 
   // -------------------------------------------------------------------------------------------
@@ -467,12 +474,68 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   // The timeline's campaign activity on a person or company-lead record (ticket 12c).
   app.get("/people/:id/activity", async (c) => {
     const person = await store.person(c.req.param("id"));
-    return person ? c.json<ActivityView>({ entries: await activityOf(store, person.enrollments, Date.parse(now()), "person", rules), userZone: (await store.engine.callSettings()).userZone }) : notFound(c, "person");
+    if (!person) return notFound(c, "person");
+    return c.json<ActivityView>({
+      entries: await activityOf(store, person.enrollments, Date.parse(now()), "person", rules),
+      notes: await notesOnRecord({ person: person.id, company: person.company.id }, person.enrollments.map((e) => e.id)),
+      userZone: (await store.engine.callSettings()).userZone,
+    });
   });
 
   app.get("/companies/:id/activity", async (c) => {
     const company = await store.company(c.req.param("id"));
-    return company ? c.json<ActivityView>({ entries: await activityOf(store, company.enrollments, Date.parse(now()), "company", rules), userZone: (await store.engine.callSettings()).userZone }) : notFound(c, "company");
+    if (!company) return notFound(c, "company");
+    return c.json<ActivityView>({
+      entries: await activityOf(store, company.enrollments, Date.parse(now()), "company", rules),
+      notes: await notesOnRecord({ person: null, company: company.id }, company.enrollments.map((e) => e.id)),
+      userZone: (await store.engine.callSettings()).userZone,
+    });
+  });
+
+  // Ticket 18: notes on a record. The person's own notes and their company's, which show for everyone at the company; a
+  // note written with a call outcome shows on that call's entry on its own lead's record, so it is left out there only.
+  const notesOnRecord = async (owner: { person: string | null; company: string }, ownCalls: readonly string[]): Promise<ActivityNote[]> => {
+    const own = owner.person === null ? [] : await store.engine.notesOf("person", owner.person);
+    const shared = await store.engine.notesOf("company", owner.company);
+    const onOwnCall = (n: StoredNote) => n.callAttemptId !== null && n.subjectId !== null && ownCalls.includes(n.subjectId);
+    return [...own.filter((n) => n.callAttemptId === null), ...shared.filter((n) => !onOwnCall(n))]
+      .sort((a, b) => b.atWall - a.atWall)
+      .map((n) => ({ id: n.id, scope: n.owner, body: n.body, at: new Date(n.atWall).toISOString() }));
+  };
+
+  // Each colleague's last call note, as the call desk's colleagues read it (ticket 18).
+  const colleagueNotes = async (people: readonly ColleagueView[]): Promise<RecordColleagues["colleagueNotes"]> => {
+    const notes = await store.engine.lastCallNotes(people.flatMap((p) => p.enrollments.map((e) => e.id)));
+    return people.map((p) => {
+      const last = notes.filter((n) => p.enrollments.some((e) => e.id === n.subjectId)).sort((a, b) => b.atWall - a.atWall)[0];
+      return { personId: p.id, lastCallNote: last ? { note: last.note, outcome: last.outcome as CallOutcomeApi, at: new Date(last.atWall).toISOString() } : null };
+    });
+  };
+
+  const noteAnswer = async (c: Context, owner: { kind: "person" | "company"; id: string }, requestId: string, text: string) => {
+    const at = Date.parse(now());
+    const id = `record-note:${requestId}`;
+    const stored = await store.engine.addNote({ id, owner: owner.kind, ownerId: owner.id, body: text, atWall: at });
+    if (stored === "different") return c.json<ApiError>({ error: { code: "note_refused", message: "This request id was already used for another note: send a new one." } }, 409);
+    const note = (await store.engine.notesOf(owner.kind, owner.id)).find((n) => n.id === id);
+    if (!note) throw new Error(`note ${id} was not stored`);
+    return c.json<NoteAnswer>({ note: { id, scope: note.owner, body: note.body, at: new Date(note.atWall).toISOString() }, replayed: stored === "same" }, stored === "added" ? 201 : 200);
+  };
+
+  app.post("/people/:id/notes", async (c) => {
+    const body = personNoteBody.safeParse(await readJson(c));
+    if (!body.success) return invalid(c, body.error);
+    const person = await store.person(c.req.param("id"));
+    if (!person) return notFound(c, "person");
+    return noteAnswer(c, body.data.scope === "person" ? { kind: "person", id: person.id } : { kind: "company", id: person.company.id }, body.data.requestId, body.data.body);
+  });
+
+  app.post("/companies/:id/notes", async (c) => {
+    const body = companyNoteBody.safeParse(await readJson(c));
+    if (!body.success) return invalid(c, body.error);
+    const company = await store.company(c.req.param("id"));
+    if (!company) return notFound(c, "company");
+    return noteAnswer(c, { kind: "company", id: company.id }, body.data.requestId, body.data.body);
   });
 
   // Work handed over and not settled may still be sent (ticket 17a's provider limitation): the screens say so.
@@ -504,6 +567,9 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     }
     return { leads, userZone: (await store.engine.callSettings()).userZone };
   };
+
+  // Ticket 18: bulk add, pause, resume and stop on Leads, each per-lead effect through the engine's own control.
+  bulkRoutes(app, { store, engine, now, newId, readOf, ...(bulkRules ? { rules: bulkRules } : {}) });
 
   app.get("/enrollments/:id", async (c) => {
     const read = await enrollmentRead(c.req.param("id"));

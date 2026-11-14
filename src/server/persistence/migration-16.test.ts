@@ -71,7 +71,7 @@ describe("migration 16 on a database written before it", () => {
     expect((await after.request("POST", `/api/campaigns/${campaign.id}/resume`, { requestId: "r" })).status).toBe(200);
     expect((await after.request("POST", `/api/enrollments/${id}/controls`, { requestId: "s", action: "stop" })).status).toBe(200);
     const versions = new DatabaseSync(file).prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((r) => Number(r["version"]));
-    expect(versions.at(-1)).toBe(16);
+    expect(versions.at(-1)).toBe(17);
     await after.store.close();
   });
 

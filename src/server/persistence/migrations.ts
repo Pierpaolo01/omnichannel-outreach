@@ -633,6 +633,24 @@ export const MIGRATIONS: readonly Migration[] = [
         AND EXISTS (SELECT 1 FROM attempts a WHERE a.idempotency_key = provider_work.key AND a.withdraw_requested = 1);
     `,
   },
+  {
+    // Ticket 18.
+    version: 17,
+    name: "bulk actions' request ids (ADR 0003, ticket 18)",
+    // A bulk id is bound to its action and body (a hash of it): the same id with another body is refused whole. Each
+    // per-lead control of a bulk keeps its own id (bulkId/enrollmentId) in control_requests. An add to campaign keeps its
+    // whole answer here, written in the transaction that enrolls, so a retry replays it and never enrolls twice.
+    // IF NOT EXISTS: the older migrations' tests rewind a database to before their version and migrate it again.
+    sql: `
+      CREATE TABLE IF NOT EXISTS bulk_requests (
+        bulk_id TEXT PRIMARY KEY,
+        action TEXT NOT NULL CHECK (action IN ('add', 'pause', 'resume', 'stop')),
+        body_sha256 TEXT NOT NULL,
+        answer TEXT,
+        at_wall INTEGER NOT NULL
+      );
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string): void {

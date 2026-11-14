@@ -507,10 +507,7 @@ export function planImport(input: {
     const company = crm.company(companyId);
     const lead: LeadRef = { kind: "company", companyId };
     const reachable = { reach: companyLeadReach(company.details), via: companyLeadRoutes(company.details) };
-    if (people.length > 0) {
-      const anyoneReachable = people.some((p) => hasUsableChannel(personReach(p.id).reach));
-      if (!crm.isEnrolled(lead) && (anyoneReachable || !reachable.reach.email)) continue;
-    }
+    if (!crm.isEnrolled(lead) && !mayBeCompanyLead(people.map((p) => personReach(p.id).reach), reachable.reach)) continue;
     decide(lead, reachable, { name: company.fields.name, title: "", companyId });
   }
 
@@ -545,6 +542,91 @@ export function planImport(input: {
 }
 
 /** The name shown for a decision maker. A blank last name is kept as provided. */
+/**
+ * The company-lead rule (principal's decision, issue #11): a company is a company lead when it has no named decision
+ * maker, or when none of its decision makers can be reached and it has a shared inbox to contact.
+ */
+function mayBeCompanyLead(peopleReach: readonly Reach[], companyReach: Reach): boolean {
+  if (peopleReach.length === 0) return true;
+  return !peopleReach.some(hasUsableChannel) && companyReach.email;
+}
+
+/** What the import's enrollment rule decides for one lead added to a campaign by hand (ticket 18). */
+export type EnrollmentDecision =
+  | { readonly lead: LeadRef; readonly outcome: "new"; readonly enrollmentId: string }
+  | { readonly lead: LeadRef; readonly outcome: "already_enrolled" }
+  | {
+      readonly lead: LeadRef;
+      readonly outcome: "not_enrolled";
+      readonly reason: "no_usable_channel" | "decision_makers_on_record";
+    }
+  | {
+      readonly lead: LeadRef;
+      readonly outcome: "not_enrolled";
+      readonly reason: "shares_contact";
+      readonly shared: { readonly detail: DetailNote; readonly lead: string; readonly companyName: string; readonly enrolled: boolean };
+    };
+
+/**
+ * Add to campaign (ticket 18; ADR 0003 "Ticket 18"): the import's enrollment rule applied to leads already on record,
+ * with no rows. A lead already enrolled in the campaign is reported; a person with no usable channel is not enrolled; a
+ * company whose decision makers are on record is not a company lead unless the import's rule makes it one; and the
+ * destination safety net keeps one personal email, mobile or shared inbox to one enrolled lead in the campaign.
+ * `usable` is the rule's channel test, replaceable only by the generated test's mutation.
+ */
+export function planEnrollment(input: {
+  readonly directory: Directory;
+  readonly leads: readonly LeadRef[];
+  readonly now: string;
+  readonly newId: () => string;
+  readonly usable?: (reach: Reach) => boolean;
+}): { readonly decisions: readonly EnrollmentDecision[]; readonly enrollments: readonly NewEnrollment[] } {
+  const usable = input.usable ?? hasUsableChannel;
+  const crm = new WorkingDirectory(input.directory, input.now, input.newId);
+  const personReach = (personId: string): Reach => {
+    const person = crm.person(personId);
+    return decisionMakerReach(personal(person.details), crm.company(person.companyId).details);
+  };
+  const seen = new Set<string>();
+  const decisions: EnrollmentDecision[] = [];
+  const candidates: LeadRef[] = [];
+  for (const lead of input.leads) {
+    if (seen.has(leadKey(lead))) continue;
+    seen.add(leadKey(lead));
+    if (crm.isEnrolled(lead)) {
+      decisions.push({ lead, outcome: "already_enrolled" });
+      continue;
+    }
+    if (lead.kind === "company") {
+      const reach = companyLeadReach(crm.company(lead.companyId).details);
+      if (!mayBeCompanyLead(crm.peopleAt(lead.companyId).map((p) => personReach(p.id)), reach)) {
+        decisions.push({ lead, outcome: "not_enrolled", reason: "decision_makers_on_record" });
+        continue;
+      }
+      if (!usable(reach)) {
+        decisions.push({ lead, outcome: "not_enrolled", reason: "no_usable_channel" });
+        continue;
+      }
+    } else if (!usable(personReach(lead.personId))) {
+      decisions.push({ lead, outcome: "not_enrolled", reason: "no_usable_channel" });
+      continue;
+    }
+    candidates.push(lead);
+    decisions.push({ lead, outcome: "new", enrollmentId: "" });
+  }
+  const refused = crm.reserveDestinations(candidates);
+  const enrollments: NewEnrollment[] = [];
+  const out = decisions.map((d): EnrollmentDecision => {
+    if (d.outcome !== "new") return d;
+    const shared = refused.get(leadKey(d.lead));
+    if (shared) return { lead: d.lead, outcome: "not_enrolled", reason: "shares_contact", shared };
+    const id = input.newId();
+    enrollments.push({ id, lead: d.lead, status: ENROLLED_BY_IMPORT, enrolledAt: input.now });
+    return { lead: d.lead, outcome: "new", enrollmentId: id };
+  });
+  return { decisions: out, enrollments };
+}
+
 export function personDisplayName(fields: Pick<PersonFields, "fullName" | "firstName" | "lastName">): string {
   const joined = [fields.firstName, fields.lastName].filter(Boolean).join(" ");
   return fields.fullName || joined || "Unnamed decision maker";

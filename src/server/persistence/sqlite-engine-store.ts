@@ -581,6 +581,15 @@ export class SqliteEngineStore implements EngineStore {
       .map((r) => ({ id: str(r, "id"), owner, ownerId, body: str(r, "body"), atWall: num(r, "at_wall"), subjectId: strOrNull(r, "subject_id"), callAttemptId: strOrNull(r, "call_attempt_id") }));
   }
 
+  async addNote(note: { readonly id: string; readonly owner: "person" | "company"; readonly ownerId: string; readonly body: string; readonly atWall: number }): Promise<"added" | "same" | "different"> {
+    return this.transaction(() => {
+      const known = this.sql("SELECT owner_kind, owner_id, body, call_attempt_id FROM notes WHERE id = ?").get(note.id);
+      if (known) return str(known, "owner_kind") === note.owner && str(known, "owner_id") === note.ownerId && str(known, "body") === note.body && strOrNull(known, "call_attempt_id") === null ? "same" : "different";
+      this.sql("INSERT INTO notes (id, owner_kind, owner_id, body, at_wall, subject_id, call_attempt_id) VALUES (?, ?, ?, ?, ?, NULL, NULL)").run(note.id, note.owner, note.ownerId, note.body, note.atWall);
+      return "added";
+    });
+  }
+
   async lastCallNotes(subjectIds: readonly string[]): Promise<CallNoteRecord[]> {
     return subjectIds.flatMap((id) => {
       const r = this.sql("SELECT * FROM call_attempts WHERE subject_id = ? AND note <> '' AND outcome <> 'skip_for_now' ORDER BY at_wall DESC, rowid DESC LIMIT 1").get(id);
