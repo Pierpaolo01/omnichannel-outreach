@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ControlDecision, ControlRecord, RequestStanding, StoredRequest } from "../engine/engine-store.ts";
+import type { AcceptedControl, ControlDecision, ControlRecord, RequestStanding, StoredRequest } from "../engine/engine-store.ts";
 import type { DatabaseSync, SQLInputValue, SQLOutputValue, StatementSync } from "node:sqlite";
 import { displayPhone, displayPhonesIn } from "../../domain/phone.ts";
 import type { SenderAccountView } from "../../domain/sequence/blockers.ts";
@@ -127,14 +127,15 @@ export class SqliteEngineStore implements EngineStore {
   async setCampaignPause(
     campaignId: string,
     now: number,
-    request: { readonly id: string; readonly pause: boolean },
+    request: { readonly id: string; readonly pause: boolean; readonly expect?: { readonly pausedSince: number | null } },
     standing: (stored: StoredRequest | null, request: { readonly target: string; readonly action: string; readonly body: string }) => RequestStanding,
     refusal: (row: { readonly launchedAt: number | null; readonly pausedSince: number | null }) => string | null,
     perLead: (state: SubjectState) => SubjectState,
   ): Promise<ControlRecord> {
     const action = request.pause ? "pause_campaign" : "resume_campaign";
     return this.transaction((): ControlRecord => {
-      const body = JSON.stringify({ action });
+      // The precondition is part of the body an id is bound to (ticket 17b).
+      const body = JSON.stringify(request.expect === undefined ? { action } : { action, expect: request.expect });
       const known = this.standingOf(request.id, { target: campaignId, action, body }, standing);
       if (known) return known;
       const row = this.sql("SELECT launched_at, paused_since FROM campaigns WHERE id = ?").get(campaignId);
@@ -166,6 +167,15 @@ export class SqliteEngineStore implements EngineStore {
 
   async workToWithdraw(): Promise<ProviderWork[]> {
     return this.sql("SELECT * FROM provider_work WHERE settled IS NULL AND withdraw_wanted = 1 ORDER BY rowid").all().map(toWork);
+  }
+
+  async acceptedControls(targets: readonly string[]): Promise<AcceptedControl[]> {
+    if (targets.length === 0) return [];
+    const marks = targets.map(() => "?").join(", ");
+    return this.db
+      .prepare(`SELECT target, action, effect, at_wall FROM control_requests WHERE answer = 'accepted' AND action <> 'call_outcome' AND target IN (${marks}) ORDER BY at_wall, rowid`)
+      .all(...targets)
+      .map((r) => ({ target: str(r, "target"), action: str(r, "action"), effect: strOrNull(r, "effect"), atWall: num(r, "at_wall") }));
   }
 
   async statusCounts(campaignId: string): Promise<Record<string, number>> {

@@ -986,7 +986,8 @@ describe("each desk fault is caught by its known seed (ADR 0003 4.4.1)", () => {
     // Ticket 15b.
     ["redial_lost_on_resend", 9260, "14:"],
     ["answer_resets_callback_draft", 9105, "6:"],
-    ["past_callback_sent", 9101, "14:"],
+    // Re-chosen in ticket 17b (by the search below): the Calls read's paused campaigns add awaits that move the runs' interleaving.
+    ["past_callback_sent", 9126, "14:"],
     // Council on 32454ea, A: the body corrupted where it is first built, against the user's own choice.
     ["redial_dropped_at_press", 9107, "14:"],
     // A callback on the New York lead, reached at night in the March run (calling hours always open).

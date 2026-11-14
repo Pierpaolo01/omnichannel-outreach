@@ -18,7 +18,7 @@ import {
 import { compareReadyNow, focusOf, isListed, logCallOutcome, placeCall, readyCalls, reasonOf } from "../../domain/sequence/calls.ts";
 import { applyBadDestination, applyReply, applyToAttempt, applyToWork, asOfAction, enterMain, evaluate, replyMatches, smsReplyOwner, withdrawalDue } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
-import { applyControl, campaignPaused, campaignResumed } from "../../domain/sequence/controls.ts";
+import { applyControl, campaignPaused, campaignPrecondition, campaignResumed, controlPrecondition, judgeControl } from "../../domain/sequence/controls.ts";
 import type { RequestStanding, StoredRequest } from "./engine-store.ts";
 
 export interface Rules {
@@ -64,6 +64,11 @@ export interface Rules {
   readonly callReason: typeof reasonOf;
   /** One user control on one lead (ticket 17a): pause, resume, skip, stop, and the two restarts. */
   readonly applyControl: typeof applyControl;
+  /** Whether a control still applies as it was confirmed (ticket 17b): a mutation can replace it. */
+  readonly controlPrecondition: typeof controlPrecondition;
+  /** The one refusal order the read and the action share: the action's rule first, then the precondition. */
+  readonly judgeControl: typeof judgeControl;
+  readonly campaignPrecondition: typeof campaignPrecondition;
   /** The campaign pause and resume as each of its leads takes them (ticket 17a). */
   readonly campaignPaused: typeof campaignPaused;
   readonly campaignResumed: typeof campaignResumed;
@@ -109,6 +114,9 @@ export const DEFAULT_RULES: Rules = {
   focusOf,
   callReason: reasonOf,
   applyControl,
+  controlPrecondition,
+  judgeControl,
+  campaignPrecondition,
   campaignPaused,
   campaignResumed,
   withdrawalDue,

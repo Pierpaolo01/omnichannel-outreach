@@ -1,30 +1,35 @@
 import { Link } from "wouter";
-import type { PersonRecord, RecordCalls } from "../../shared/api.ts";
+import type { PersonRecord, RecordCalls, RecordControls } from "../../shared/api.ts";
+import type { Controls } from "../controls/useControls.ts";
 import { Activity } from "../activity.tsx";
-import { useApi } from "../api.ts";
+import { useControls } from "../controls/useControls.ts";
+import { useLiveRead } from "../controls/useLiveRead.ts";
 import { BackToLeads, CampaignRows, ContactRow, ErrorState, LocalTime, PeopleRows, RecordSkeleton, Section } from "../components.tsx";
 
 export function PersonPage({ id }: { id: string }) {
-  const { result, retry } = useApi<PersonRecord & RecordCalls>(`/api/people/${encodeURIComponent(id)}`);
+  // Read live (ticket 17b): after a control's answer, on another tab's control and while visible.
+  const { read, refresh } = useLiveRead<PersonRecord & RecordCalls & RecordControls>(`/api/people/${encodeURIComponent(id)}`);
+  const targets = read.state === "ready" ? read.data.leads.map((l) => ({ kind: "lead" as const, id: l.id })) : [];
+  const controls = useControls(targets, refresh);
   return (
     <div>
       <BackToLeads />
-      {result.state === "loading" ? (
+      {read.state === "loading" ? (
         <RecordSkeleton />
-      ) : result.state === "error" ? (
-        result.notFound ? (
+      ) : read.state === "error" ? (
+        read.notFound ? (
           <NoSuchRecord />
         ) : (
-          <ErrorState title="This record didn’t load." message={result.message} onRetry={retry} />
+          <ErrorState title="This record didn’t load." message={read.message} onRetry={() => void refresh()} />
         )
       ) : (
-        <Person person={result.data} />
+        <Person person={read.data} controls={controls} reads={read.reads} />
       )}
     </div>
   );
 }
 
-function Person({ person }: { person: PersonRecord & RecordCalls }) {
+function Person({ person, controls, reads }: { person: PersonRecord & RecordCalls & RecordControls; controls: Controls; reads: number }) {
   const { company } = person;
   return (
     <article className="flex max-w-[780px] flex-col gap-10">
@@ -52,6 +57,9 @@ function Person({ person }: { person: PersonRecord & RecordCalls }) {
           who="person"
           companyIsLead={person.companyIsLead}
           calls={person}
+          leads={person}
+          controls={controls}
+          name={person.name}
         />
       </Section>
 
@@ -61,7 +69,7 @@ function Person({ person }: { person: PersonRecord & RecordCalls }) {
         </Section>
       )}
 
-      <Activity path={`/api/people/${encodeURIComponent(person.id)}/activity`} />
+      <Activity path={`/api/people/${encodeURIComponent(person.id)}/activity`} reads={reads} />
     </article>
   );
 }

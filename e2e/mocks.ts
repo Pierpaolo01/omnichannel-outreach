@@ -12,6 +12,9 @@ import type {
   NeedsAttention,
   PersonRecord,
   RecordCalls,
+  RecordControls,
+  CampaignDetail,
+  ControlRefusal,
 } from "../src/shared/api.ts";
 
 /**
@@ -24,8 +27,10 @@ export type MockBody =
   | LeadSearchResult
   | { campaigns: CampaignListItem[] }
   | { campaign: Campaign; imports: ImportRecord[] }
-  | (PersonRecord & RecordCalls)
-  | (CompanyRecord & RecordCalls)
+  | (PersonRecord & RecordCalls & RecordControls)
+  | (CompanyRecord & RecordCalls & RecordControls)
+  | CampaignDetail
+  | ControlRefusal
   | FileCheckResult
   | BeforeLaunchView
   | NeedsAttention

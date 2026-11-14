@@ -1429,6 +1429,8 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     const campaignId = campaigns[s.campaign]!.id;
     const shown = (await h.request<ActivityView>("GET", `/api/${s.person ? "people" : "companies"}/${recordId}/activity`)).body.entries
       .filter((e) => e.campaign.id === campaignId)
+      // The controls' entries (ticket 17b) are checked by example, in controls-screens.test.ts.
+      .filter((e): e is Exclude<ActivityView["entries"][number], { kind: "control" | "campaign_paused" | "campaign_resumed" }> => e.kind !== "control" && e.kind !== "campaign_paused" && e.kind !== "campaign_resumed")
       .map((e) => (e.kind === "replied" ? `replied|${e.channel}` : e.kind === "ended" ? "ended" : e.kind === "call" ? `call|${e.track.label}|${e.outcome}|${e.declinedPath ?? "-"}` : `${e.kind}|${e.channel}|${e.track.label}|${"stepNumber" in e && e.stepNumber !== null ? e.stepNumber : "-"}`))
       .sort();
     const expected: string[] = [];

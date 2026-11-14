@@ -15,7 +15,7 @@ import { isOutreachStatus } from "../../domain/outreach-status.ts";
 import { companyLeadReach, decisionMakerReach, hasUsableChannel } from "../../domain/reach.ts";
 import type {
   Campaign,
-  CampaignListItem,
+  CampaignListItem, CampaignPauseRead,
   ImportFileNames,
   ColleagueView,
   CompanyRecord,
@@ -102,7 +102,7 @@ class SqliteStore implements OutreachStore {
     return row ? toCampaign(row) : null;
   }
 
-  async listCampaigns(): Promise<Omit<CampaignListItem, "sequence">[]> {
+  async listCampaigns(): Promise<Omit<CampaignListItem, "sequence" | keyof CampaignPauseRead>[]> {
     return this.db
       .prepare(
         `SELECT c.*, (SELECT COUNT(*) FROM enrollments e WHERE e.campaign_id = c.id) AS lead_count

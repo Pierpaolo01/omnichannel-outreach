@@ -22,7 +22,7 @@ import { callsView, callTaskView, recordCalls, todayView } from "./engine/call-v
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
 import { sealReckoning } from "../domain/sequence/progress.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
-import type { ControlRefusal, EnrollmentRead, CampaignDetail, CampaignListItem, CampaignSequenceSummary, SequenceView } from "../shared/api.ts";
+import type { ControlRefusal, EnrollmentRead, CampaignDetail, CampaignListItem, CampaignPauseRead, CampaignSequenceSummary, RecordControls, RecordLead, SequenceView } from "../shared/api.ts";
 import { beforeLaunchView, copyPreview } from "./before-launch.ts";
 import { activityOf } from "./activity.ts";
 import { registerEmailProviderRoutes, type EmailProviderSource } from "./instantly/routes.ts";
@@ -87,10 +87,18 @@ const callSettingsBody = requestObject({
 // Ticket 17a. Each control carries the client's key for that one action: the same key answers with the first
 // answer and applies nothing again, so a retry after a lost answer cannot skip a second step or pause again.
 const controlRequestId = z.string().trim().min(1, "Send a request id with each action.").max(200);
-const campaignControlBody = requestObject({ requestId: controlRequestId });
+// Ticket 17b: what the confirmation was shown on, so a control applies only on it (coordinator's ruling on the verifier's
+// B1 at 8a1732a). Optional at this boundary; the screens always send it.
+const campaignControlBody = requestObject({
+  requestId: controlRequestId,
+  expect: z.strictObject({ pausedSince: z.iso.datetime({ offset: true }).nullable() }, { message: "Send the campaign's pause as the confirmation read it." }).optional(),
+});
 const leadControlBody = requestObject({
   requestId: controlRequestId,
   action: z.enum(LEAD_CONTROLS, { message: "Choose one of: pause, resume, skip, stop, resume_from_next_step, move_to_win_back." }),
+  expect: z
+    .strictObject({ status: z.enum(OUTREACH_STATUSES), preview: z.string().max(500) }, { message: "Send the lead's status and the preview the confirmation showed." })
+    .optional(),
 });
 // Redial and callback are ticket 15's, not interested and its declined path ticket 16's; which outcome each
 // goes with is the domain's rule (`logCallOutcome`), refused there with a plain reason.
@@ -239,7 +247,8 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
 
   app.get("/campaigns", async (c) => {
     const campaigns: CampaignListItem[] = [];
-    for (const item of await store.listCampaigns()) campaigns.push({ ...item, sequence: await sequenceSummary(item.id) });
+    // Each row carries the campaign's pause as its own read does (ticket 17b): the list shows the Paused banner too.
+    for (const item of await store.listCampaigns()) campaigns.push({ ...item, sequence: await sequenceSummary(item.id), ...(await pauseRead(item.id)) });
     return c.json({ campaigns });
   });
 
@@ -263,11 +272,11 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   });
 
   // Ticket 17a: the campaign pause, its date, the count of leads in each status, and the controls allowed now.
-  const pauseRead = async (campaignId: string) => {
+  const pauseRead = async (campaignId: string): Promise<CampaignPauseRead> => {
     const row = await store.engine.campaign(campaignId);
     const stored = await store.engine.statusCounts(campaignId);
     const statusCounts = Object.fromEntries(OUTREACH_STATUSES.map((status) => [status, stored[status] ?? 0])) as Record<OutreachStatus, number>;
-    return { pause: { paused: row?.pausedSince != null, pausedSince: row?.pausedSince != null ? new Date(row.pausedSince).toISOString() : null }, statusCounts, controls: campaignControls(row), mayStillSend: await store.engine.uncertainWorkOf(campaignId) };
+    return { pause: { paused: row?.pausedSince != null, pausedSince: row?.pausedSince != null ? new Date(row.pausedSince).toISOString() : null }, statusCounts, controls: campaignControls(row), mayStillSend: await store.engine.uncertainWorkOf(campaignId), userZone: (await store.engine.callSettings()).userZone };
   };
   const controlRefused = (c: Context, message: string) => c.json<ControlRefusal>({ error: { code: "control_refused", message } }, 409);
 
@@ -277,7 +286,8 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
       if (!body.success) return invalid(c, body.error);
       const id = c.req.param("id");
       if (!(await store.campaign(id))) return notFound(c, "campaign");
-      const answer = await engine.setCampaignPause(id, pause, body.data.requestId);
+      const expectation = body.data.expect === undefined ? null : { pausedSince: body.data.expect.pausedSince === null ? null : Date.parse(body.data.expect.pausedSince) };
+      const answer = await engine.setCampaignPause(id, pause, body.data.requestId, expectation);
       if (!answer.ok) return controlRefused(c, answer.reason);
       return c.json({ ...(await pauseRead(id)), replayed: answer.replayed });
     });
@@ -339,12 +349,14 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   app.get("/people/:id", async (c) => {
     const person = await store.person(c.req.param("id"));
     // Each enrollment's open calls, as of now, by the engine's rules (ticket 15b).
-    return person ? c.json<PersonRecord & RecordCalls>({ ...person, ...(await recordCalls(store, person.enrollments.map((e) => e.id), Date.parse(now()), rules)) }) : notFound(c, "person");
+    if (!person) return notFound(c, "person");
+    return c.json<PersonRecord & RecordCalls & RecordControls>({ ...person, ...(await recordReads(person.enrollments.map((e) => e.id))) });
   });
 
   app.get("/companies/:id", async (c) => {
     const company = await store.company(c.req.param("id"));
-    return company ? c.json<CompanyRecord & RecordCalls>({ ...company, ...(await recordCalls(store, company.enrollments.map((e) => e.id), Date.parse(now()), rules)) }) : notFound(c, "company");
+    if (!company) return notFound(c, "company");
+    return c.json<CompanyRecord & RecordCalls & RecordControls>({ ...company, ...(await recordReads(company.enrollments.map((e) => e.id))) });
   });
 
   // -------------------------------------------------------------------------------------------
@@ -463,11 +475,34 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     return company ? c.json<ActivityView>({ entries: await activityOf(store, company.enrollments, Date.parse(now()), "company", rules), userZone: (await store.engine.callSettings()).userZone }) : notFound(c, "company");
   });
 
+  // Work handed over and not settled may still be sent (ticket 17a's provider limitation): the screens say so.
+  const readOf = (state: SubjectState, at: number): EnrollmentRead => ({ ...progressView(state, at), controls: controlsView(state, at, rules), mayStillSend: state.work.filter(maySend).length });
   const enrollmentRead = async (id: string): Promise<EnrollmentRead | null> => {
     const at = Date.parse(now());
     const state = await store.engine.subject(id, at);
-    // Work handed over and not settled may still be sent (ticket 17a's provider limitation): the screens say so.
-    return state ? { ...progressView(state, at), controls: controlsView(state, at, rules), mayStillSend: state.work.filter(maySend).length } : null;
+    return state ? readOf(state, at) : null;
+  };
+
+  // Ticket 17b: each enrollment's read on the record, with its campaign's launch and pause, so each campaign row shows
+  // the controls allowed in its status, what each will do, and its sentence. The same read as GET /api/enrollments/:id.
+  // Each enrollment is loaded once for the whole record read, at one instant (council on 4fd9ca4, item 6).
+  const recordReads = async (enrollmentIds: readonly string[]): Promise<RecordCalls & RecordControls> => {
+    const at = Date.parse(now());
+    const loaded = new Map<string, SubjectState | null>();
+    for (const id of enrollmentIds) loaded.set(id, await store.engine.subject(id, at));
+    return { ...(await recordCalls(store, enrollmentIds, at, rules, loaded)), ...(await recordControls(enrollmentIds, loaded, at)) };
+  };
+  const recordControls = async (enrollmentIds: readonly string[], loaded: ReadonlyMap<string, SubjectState | null>, at: number): Promise<RecordControls> => {
+    const leads: RecordLead[] = [];
+    for (const id of enrollmentIds) {
+      const state = loaded.get(id) ?? null;
+      if (!state) continue;
+      // The campaign's launch and pause as the loaded lead holds them: the same snapshot as its calls and controls, so a
+      // pause landing during this read never makes one row both on hold and on today's list (council on 57d874f, item 6).
+      const { launchedAt, pausedSince } = state.campaign;
+      leads.push({ ...readOf(state, at), campaignState: { launched: launchedAt !== null, paused: pausedSince !== null, pausedSince: pausedSince === null ? null : new Date(pausedSince).toISOString() } });
+    }
+    return { leads, userZone: (await store.engine.callSettings()).userZone };
   };
 
   app.get("/enrollments/:id", async (c) => {
@@ -481,7 +516,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     if (!body.success) return invalid(c, body.error);
     const id = c.req.param("id");
     if (!(await store.engine.subject(id, Date.parse(now())))) return notFound(c, "enrollment");
-    const answer = await engine.controlLead(id, body.data.action, body.data.requestId);
+    const answer = await engine.controlLead(id, body.data.action, body.data.requestId, body.data.expect ?? null);
     if (!answer.ok) return controlRefused(c, answer.reason);
     // `effect` is the control's own effect, the read's preview at that instant; `enrollment` is the read after the worker ran (verifier B4).
     return c.json({ effect: answer.effect, enrollment: await enrollmentRead(id), replayed: answer.replayed });

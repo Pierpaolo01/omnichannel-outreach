@@ -3,12 +3,14 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 
 /**
- * Standing check (council on 32454ea, C; ADR 0003 4.4.1, "Read, not computed"): every sentence about a call states a
+ * Standing check (council on 32454ea, C; ADR 0003 4.4.1, "Read, not computed"): every sentence about a call (and, since ticket 17b, about a control) states a
  * day, a time or a state from a field of the server's read, formatted in a zone passed in explicitly. So no module
  * under src/web/calls, and not Activity, reads the browser's zone, or takes a zone or `today` that may be left out.
  */
 const root = join(import.meta.dirname, "..");
-const files = [...readdirSync(join(root, "calls")).filter((f) => /\.tsx?$/.test(f) && !f.includes(".test.")).map((f) => join(root, "calls", f)), join(root, "activity.tsx")];
+const inDir = (dir: string) => readdirSync(join(root, dir)).filter((f) => /\.tsx?$/.test(f) && !f.includes(".test.")).map((f) => join(root, dir, f));
+// Ticket 17b's controls say days and times the same way.
+const files = [...inDir("calls"), ...inDir("controls"), join(root, "activity.tsx")];
 
 const FORBIDDEN: readonly [RegExp, string][] = [
   [/localZone\(/, "localZone()"],

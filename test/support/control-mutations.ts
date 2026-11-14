@@ -1,4 +1,4 @@
-import { currentStep } from "../../src/domain/sequence/controls.ts";
+import { currentStep, previewDigest } from "../../src/domain/sequence/controls.ts";
 import type { SubjectState } from "../../src/domain/sequence/state.ts";
 import { DEFAULT_RULES, type Rules } from "../../src/server/engine/rules.ts";
 import type { ControlRunOptions } from "./generated-controls.ts";
@@ -111,6 +111,26 @@ const RULES: Record<string, Partial<Rules>> = {
   "the in-flight bound counts live attempts": {},
   "a finally-settled place stays occupied": {},
   "a withdrawn text keeps its place": {},
+  // Ticket 17b (coordinator's ruling on the verifier's B1 at 8a1732a): a control applies on whatever the lead is now,
+  // not on what its confirmation showed, so a Skip confirmed on one step skips another.
+  "a control applied after its precondition changed": {
+    controlPrecondition: () => null,
+  },
+  // The search on 54f3a73: the precondition judged before the action's own rule, so a request on an ended lead is refused
+  // with another reason than its read gives (P11).
+  "the precondition checked before the lead's state": {
+    judgeControl: (stored, before, action, now, expected, rules) => {
+      const out = rules.applyControl(before, action, now);
+      const changed = rules.controlPrecondition(stored, before, action, out.ok ? out.state : null, expected);
+      return changed !== null ? { ok: false, reason: changed } : out;
+    },
+  },
+  // Verifier R1 on 57d874f: the precondition as it was before it became the whole preview, the status alone.
+  "the precondition checks only the status": {
+    controlPrecondition: (stored, before, action, after, expected) => R.controlPrecondition(stored, before, action, after, expected === null ? null : { ...expected, preview: after ? previewDigest(before, action, after) : expected.preview }),
+  },
+  // Council on 57d874f, item 1: the client re-targets an open confirmation on the newest read (the run option below).
+  "a confirmation sends the click-time expectation": {},
   "a reply the record holds clears the pre-send check": {
     presendAnswer: (answer, known) => (answer.kind === "reply" && "providerRef" in answer && known.includes(String(answer.providerRef)) ? { kind: "clear" as const } : answer),
   },
@@ -130,7 +150,8 @@ const EXPECTED: Record<string, { invariant: string; seed: number; options?: Part
   "a control's preview skips what fell due": { invariant: "P11", seed: 20 },
   "a refused request runs when sent again": { invariant: "P7", seed: 2 },
   "the pacing gap ignored": { invariant: "P3", seed: 0, options: { gapMs: 1000 } },
-  "a late send after a pause resolves its successor on the wall clock": { invariant: "P2", seed: 12 },
+  // Re-chosen in ticket 17b (seed 12 before): the stale-confirmation stream's refused requests move the runs' interleaving.
+  "a late send after a pause resolves its successor on the wall clock": { invariant: "P2", seed: 20 },
   "the order breaks after a hold is released": { invariant: "18", seed: 33 },
   "an overdue lead passed over while others are served": { invariant: "18", seed: 13 },
   "a withdrawal's retries stop when its attempt retires": { invariant: "A", seed: 1 },
@@ -141,6 +162,12 @@ const EXPECTED: Record<string, { invariant: string; seed: number; options?: Part
   "a withdrawn text keeps its place": { invariant: "F", seed: 35, options: { occupancyKeepsWithdrawnTexts: true } },
   // With the provider answering the first thread's reply, as the adapter did on ca8baee: the defect restored.
   "a reply the record holds clears the pre-send check": { invariant: "P1", seed: 24, options: { presendFirstReply: true } },
+  "a control applied after its precondition changed": { invariant: "P13", seed: 0 },
+  // Seed 17 since the precondition became the whole preview (verifier R1 on 57d874f): the stale-confirmation stream sends a
+  // Skip to a lead that ended since its read, and the read's reason must be the action's (seed 85 found the order first).
+  "the precondition checked before the lead's state": { invariant: "P11", seed: 17 },
+  "the precondition checks only the status": { invariant: "P13", seed: 0 },
+  "a confirmation sends the click-time expectation": { invariant: "P13", seed: 0, options: { clickTimeExpectation: true } },
 };
 
 export const CONTROL_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number; readonly options?: Partial<ControlRunOptions> }> = Object.fromEntries(

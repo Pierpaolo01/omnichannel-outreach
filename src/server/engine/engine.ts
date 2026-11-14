@@ -11,7 +11,7 @@ import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, sta
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
 import { runs } from "../../domain/sequence/progress.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
-import { campaignRefusal, type LeadControl } from "../../domain/sequence/controls.ts";
+import { judgeCampaignControl, type LeadControl, type LeadExpectation } from "../../domain/sequence/controls.ts";
 import type { ControlView } from "../../shared/api.ts";
 import { effectOf } from "./controls-view.ts";
 import type { ControlRecord, EngineStore, ReplyEvent, StoredDefinition } from "./engine-store.ts";
@@ -784,13 +784,17 @@ export class Engine {
   // The user's controls (ticket 17a). Each is judged as of its own instant (2.4) and recorded with its request id.
 
   /** One control on one lead: accepted, refused with its reason, or the answer to its request id's first send. */
-  controlLead(subjectId: string, action: LeadControl, requestId: string): Promise<ControlAnswer> {
+  controlLead(subjectId: string, action: LeadControl, requestId: string, expected: LeadExpectation | null = null): Promise<ControlAnswer> {
     return this.ticks.run(async () => {
       const now = this.now();
-      const record = await this.store.controlSubject(subjectId, now, { id: requestId, action, body: JSON.stringify({ action }) }, this.rules.requestStanding, (stored) => {
+      // The precondition is part of the body an id is bound to (ticket 17b): the same id with another is refused.
+      const body = JSON.stringify(expected === null ? { action } : { action, expect: expected });
+      const record = await this.store.controlSubject(subjectId, now, { id: requestId, action, body }, this.rules.requestStanding, (stored) => {
         const s = this.rules.asOfAction(stored, now, this.rules.evaluate);
         const caughtUp = same(s, stored) ? null : s;
-        const out = this.rules.applyControl(s, action, now);
+        // Judged in the transaction that checks the request id, in the one order the read uses (`judgeControl`): the lead's
+        // state first, then whether it still applies as confirmed, whichever tab or process sent first (ticket 17b).
+        const out = this.rules.judgeControl(stored, s, action, now, expected, this.rules);
         if (!out.ok) return { write: caughtUp, answer: "refused", reason: out.reason, effect: null };
         // The answer's effect is the read's preview at this instant: the same transition on the same state (verifier B4).
         return { write: out.state, answer: "accepted", reason: null, effect: JSON.stringify(effectOf(s, action, out.state, now)) };
@@ -800,15 +804,16 @@ export class Engine {
   }
 
   /** Pauses or resumes a campaign: every lead of it that has not ended, in one transaction. */
-  setCampaignPause(campaignId: string, pause: boolean, requestId: string): Promise<ControlAnswer> {
+  setCampaignPause(campaignId: string, pause: boolean, requestId: string, expected: { readonly pausedSince: number | null } | null = null): Promise<ControlAnswer> {
     return this.ticks.run(async () => {
       const now = this.now();
       const out = await this.store.setCampaignPause(
         campaignId,
         now,
-        { id: requestId, pause },
+        { id: requestId, pause, ...(expected === null ? {} : { expect: expected }) },
         this.rules.requestStanding,
-        (row) => campaignRefusal(row, pause),
+        // The campaign's own rule, then the pause read the confirmation showed, in the read's order (ticket 17b).
+        (row) => judgeCampaignControl(row, pause, expected, this.rules),
         (stored) => {
           const s = this.rules.asOfAction(stored, now, this.rules.evaluate);
           return pause ? this.rules.campaignPaused(s, now) : this.rules.campaignResumed(s, now);

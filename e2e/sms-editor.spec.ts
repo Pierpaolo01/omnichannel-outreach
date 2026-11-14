@@ -169,7 +169,7 @@ test.describe("on the app over the fake providers", () => {
 
     await test.step("Priya's text reply stops every track in this campaign: no second email, no second text, no later email track", async () => {
       await activity("Priya Shah");
-      await expect(page.getByText("Replied by text")).toBeVisible();
+      await expect(page.getByRole("region", { name: "Activity" }).getByText("Replied by text")).toBeVisible();
       await expect(page.getByText("Text 1 sent")).toBeVisible();
       await expect(page.getByText("Text 2 sent")).toHaveCount(0);
       await expect(page.getByText(/Email track 2/)).toHaveCount(0);

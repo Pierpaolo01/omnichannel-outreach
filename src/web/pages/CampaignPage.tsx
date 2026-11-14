@@ -2,6 +2,9 @@ import type { ReactNode } from "react";
 import { Link, useLocation, useSearch } from "wouter";
 import type { BeforeLaunchView, CampaignDetail, ImportRecord, LeadOutcome, LeadSearchResult } from "../../shared/api.ts";
 import { useApi } from "../api.ts";
+import { CampaignPauseControl, PausedBanner } from "../controls/ControlViews.tsx";
+import { useControls, type Controls } from "../controls/useControls.ts";
+import { useLiveRead } from "../controls/useLiveRead.ts";
 import { BeforeLaunchTab } from "../campaign/BeforeLaunchTab.tsx";
 import { SequenceTab } from "../campaign/SequenceTab.tsx";
 import { sendsOnItsOwn } from "../campaign/model.ts";
@@ -24,12 +27,14 @@ export const campaignPath = (id: string, tab: CampaignTab = "sequence") => `/cam
  * inspector", provisionally selected on 12 November 2026; DESIGN.md).
  */
 export function CampaignPage({ id, tab }: { id: string; tab: CampaignTab }) {
-  const detail = useApi<CampaignDetail>(`/api/campaigns/${encodeURIComponent(id)}`);
+  // Read live (ticket 17b): the pause and its counts after a pause or resume here or in another tab.
+  const detail = useLiveRead<CampaignDetail>(`/api/campaigns/${encodeURIComponent(id)}`);
+  const controls = useControls([{ kind: "campaign", id }], detail.refresh);
   const sequence = useSequence(id);
   const editor = sequence.editor;
 
-  if (detail.result.state === "error" || sequence.result.state === "error") {
-    const failed = detail.result.state === "error" ? detail.result : sequence.result.state === "error" ? sequence.result : null;
+  if (detail.read.state === "error" || sequence.result.state === "error") {
+    const failed = detail.read.state === "error" ? detail.read : sequence.result.state === "error" ? sequence.result : null;
     return (
       <div>
         <BackToCampaigns />
@@ -40,7 +45,7 @@ export function CampaignPage({ id, tab }: { id: string; tab: CampaignTab }) {
             title="This campaign didn’t load."
             message={failed?.message ?? ""}
             onRetry={() => {
-              detail.retry();
+              void detail.refresh();
               sequence.retry();
             }}
           />
@@ -48,25 +53,26 @@ export function CampaignPage({ id, tab }: { id: string; tab: CampaignTab }) {
       </div>
     );
   }
-  if (detail.result.state !== "ready" || !editor) return <CampaignSkeleton />;
-  return <Campaign detail={detail.result.data} editor={editor} tab={tab} />;
+  if (detail.read.state !== "ready" || !editor) return <CampaignSkeleton />;
+  return <Campaign detail={detail.read.data} editor={editor} tab={tab} controls={controls} />;
 }
 
-function Campaign({ detail, editor, tab }: { detail: CampaignDetail; editor: SequenceEditor; tab: CampaignTab }) {
+function Campaign({ detail, editor, tab, controls }: { detail: CampaignDetail; editor: SequenceEditor; tab: CampaignTab; controls: Controls }) {
   const now = useNow();
   const { campaign, imports, leadCount } = detail;
   const { view } = editor;
   const blockers = view.launch.blockers.length;
   const wording = saveWording(editor.save, editor.launched);
   const lastImport = imports[0];
-  return (
-    <div>
-      <BackToCampaigns />
+  // The header, with Pause campaign or Resume campaign once the read allows either (ticket 17b), its confirmation and
+  // its state under it, then the Paused banner.
+  const header = (pauseButton: ReactNode, strip: ReactNode) => (
+    <>
       <header className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-3">
             <h1 className="min-w-0 text-[30px] leading-[1.15] tracking-[-0.02em] [overflow-wrap:anywhere]">{campaign.name}</h1>
-            <LaunchBadge launchedAt={view.launchedAt} />
+            <LaunchBadge launchedAt={view.launchedAt} paused={detail.pause.paused} />
           </div>
           <p className="mt-1.5 text-[13.5px] text-muted">
             {view.launchedAt ? `Launched ${longDate(view.launchedAt)} · ` : ""}
@@ -94,10 +100,24 @@ function Campaign({ detail, editor, tab }: { detail: CampaignDetail; editor: Seq
             )}
           </div>
         )}
+        {pauseButton && <div className="sm:mt-1.5">{pauseButton}</div>}
       </header>
+      {strip && <div className="mt-3">{strip}</div>}
+    </>
+  );
+  return (
+    <div>
+      <BackToCampaigns />
+      <CampaignPauseControl campaignId={campaign.id} name={campaign.name} read={detail} controls={controls} layout={header} />
+      {detail.pause.paused && (
+        <div className="mt-3">
+          <PausedBanner read={detail} />
+        </div>
+      )}
       {editor.launched && (
         <p className="mt-4 rounded-box border border-line bg-base-100 px-4 py-3 text-[14px] text-ink-2">
-          {sendsOnItsOwn(editor.view.definition)} Pausing, resuming and editing a running campaign arrive with later releases.
+          {/* While paused, nothing goes out on its own: the Paused banner says so, and this sentence would not be true (ticket 17b). */}
+          {detail.pause.paused ? "" : `${sendsOnItsOwn(editor.view.definition)} `}Editing a running campaign arrives with a later release.
         </p>
       )}
 
@@ -151,7 +171,14 @@ function TabLink({ href, current, children }: { href: string; current: boolean; 
   );
 }
 
-export function LaunchBadge({ launchedAt }: { launchedAt: string | null }) {
+export function LaunchBadge({ launchedAt, paused = false }: { launchedAt: string | null; paused?: boolean }) {
+  // A launched campaign that is paused says so where Running would be (the prototype's campaign status, ticket 17b).
+  if (launchedAt && paused)
+    return (
+      <span className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-[5px] bg-pause-soft py-0.5 pl-[7px] pr-2 text-[13px] font-medium text-pause before:size-[7px] before:rounded-full before:bg-current before:content-['']">
+        Paused
+      </span>
+    );
   return launchedAt ? (
     <span className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-[5px] bg-you-soft py-0.5 pl-[7px] pr-2 text-[13px] font-medium text-you before:size-[7px] before:rounded-full before:bg-current before:content-['']">
       Running

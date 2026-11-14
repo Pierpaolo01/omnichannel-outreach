@@ -1,8 +1,11 @@
 import { Link } from "wouter";
 import type { CampaignListItem, LeadOutcome } from "../../shared/api.ts";
 import { PageTitle, QuickSearch } from "../App.tsx";
-import { useApi } from "../api.ts";
+import type { ReactNode } from "react";
 import { ErrorState } from "../components.tsx";
+import { CampaignPauseControl, PausedBanner } from "../controls/ControlViews.tsx";
+import { useControls, type Controls } from "../controls/useControls.ts";
+import { useLiveRead } from "../controls/useLiveRead.ts";
 import { Icon } from "../icons.tsx";
 import { whenImported } from "../importText.tsx";
 import { useNow } from "../time.ts";
@@ -12,8 +15,10 @@ const TRACK_NAME = { email: "Email track", sms: "SMS track", call: "Phone track"
 
 /** Campaigns: the list, with New campaign and Import again (guided import, chosen 12 November 2026). */
 export function CampaignsPage() {
-  const { result, retry } = useApi<{ campaigns: CampaignListItem[] }>("/api/campaigns");
+  // Read live (ticket 17b): each row's pause and counts after a pause or resume here or in another tab.
+  const { read: result, refresh } = useLiveRead<{ campaigns: CampaignListItem[] }>("/api/campaigns");
   const campaigns = result.state === "ready" ? result.data.campaigns : null;
+  const controls = useControls((campaigns ?? []).map((c) => ({ kind: "campaign" as const, id: c.id })), refresh);
 
   return (
     <div>
@@ -24,7 +29,7 @@ export function CampaignsPage() {
       </div>
       {result.state === "error" ? (
         <div className="mt-5">
-          <ErrorState title="Campaigns didn’t load." message={result.message} onRetry={retry} />
+          <ErrorState title="Campaigns didn’t load." message={result.message} onRetry={() => void refresh()} />
         </div>
       ) : campaigns === null ? (
         <div className="mt-5 flex flex-col gap-3" role="status" aria-busy="true" aria-label="Loading campaigns">
@@ -45,7 +50,7 @@ export function CampaignsPage() {
       ) : (
         <ul className="mt-5 flex flex-col gap-3">
           {campaigns.map((campaign) => (
-            <CampaignRow key={campaign.id} campaign={campaign} />
+            <CampaignRow key={campaign.id} campaign={campaign} controls={controls} />
           ))}
         </ul>
       )}
@@ -68,7 +73,7 @@ const COUNT_WORDS: readonly [LeadOutcome, string][] = [
   ["not_enrolled", "not enrolled"],
 ];
 
-function CampaignRow({ campaign }: { campaign: CampaignListItem }) {
+function CampaignRow({ campaign, controls }: { campaign: CampaignListItem; controls: Controls }) {
   const now = useNow();
   const last = campaign.lastImport;
   const changes = last
@@ -76,7 +81,7 @@ function CampaignRow({ campaign }: { campaign: CampaignListItem }) {
         .map(([key, word]) => `${last.counts[key]} ${word}`)
         .join(", ") || "no changes"
     : null;
-  return (
+  const row = (pauseButton: ReactNode, strip: ReactNode) => (
     <li className="grid grid-cols-1 items-center gap-x-5 gap-y-3 rounded-box border border-line bg-base-100 px-5 py-[18px] sm:grid-cols-[minmax(0,1fr)_auto]">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-3">
@@ -85,7 +90,7 @@ function CampaignRow({ campaign }: { campaign: CampaignListItem }) {
               {campaign.name}
             </Link>
           </h2>
-          <LaunchBadge launchedAt={campaign.sequence.launchedAt} />
+          <LaunchBadge launchedAt={campaign.sequence.launchedAt} paused={campaign.pause.paused} />
         </div>
         <p className="mt-1 text-[13.5px] text-muted">
           {campaign.leadCount} {campaign.leadCount === 1 ? "lead" : "leads"}.{" "}
@@ -119,8 +124,14 @@ function CampaignRow({ campaign }: { campaign: CampaignListItem }) {
             <span className="sr-only">Sequence: {campaign.sequence.tracks.map((c) => TRACK_NAME[c]).join(", ")}</span>
           </p>
         )}
+        {campaign.pause.paused && (
+          <div className="mt-3">
+            <PausedBanner read={campaign} compact />
+          </div>
+        )}
       </div>
       <div className="flex flex-wrap gap-2 justify-self-start sm:justify-self-end">
+        {pauseButton}
         <Link
           href={`/campaigns/${campaign.id}/import`}
           className="btn gap-1.5 border-line-strong bg-base-100 font-medium no-underline"
@@ -133,6 +144,8 @@ function CampaignRow({ campaign }: { campaign: CampaignListItem }) {
           Open
         </Link>
       </div>
+      {strip && <div className="min-w-0 sm:col-span-2">{strip}</div>}
     </li>
   );
+  return <CampaignPauseControl campaignId={campaign.id} name={campaign.name} read={campaign} controls={controls} layout={row} />;
 }
