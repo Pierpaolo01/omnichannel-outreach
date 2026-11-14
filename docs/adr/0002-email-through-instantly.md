@@ -148,6 +148,7 @@ The app has no public URL, so it polls.
 - **Known detection gaps (reported limitations).**
   - Replies from another address, or outside the thread, are not detected.
   - Instantly "can't check for replies if the sending accounts are paused or disconnected".
+  - A reply that reaches Instantly after the pre-send check's read cannot stop that send (ticket 17a, council K on `56d599c`). The engine runs the check afresh right before each handover's authorization, never reusing an earlier one: on the fakes the app's own part of the window is about a millisecond (at most 6.3 ms over 399 handovers). On the live service the window also holds the read's response, the handover request's transit, and any delay before Instantly shows a received reply to a read; none of these is measured (no test contact, #28). A reply the app has already stored stops the handover in any process (ADR 0003, ticket 17a, item K).
   - Auto-replies and replies that are not from leads appear only under the Unibox preferences in C2.
 - **Stale inboxes.** Sends from an inbox are held while it is not Active, or while its last successful poll is older than the freshness bound.
 
