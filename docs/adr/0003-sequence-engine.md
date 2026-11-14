@@ -1668,10 +1668,12 @@ Days count from launch day as day 1, in the campaign's zone, as before. **One sc
 
 Recorded on 14 November 2026, merging `integration/outreach-spec` at `4f77cb6`.
 
+**The inspector's words** (review bot on `72b7252`, checked against 2.2 to 2.4 and 3.5): a redial follows no answer, a voicemail or a gatekeeper and moves the call to the user's next day; a callback requested pauses the lead's other outreach in the campaign until the callback's outcome is logged, and a missed callback stays listed, overdue (2.3); the skip limit counts calendar days from the call's original due date, a redial does not restart it and a callback hold freezes it (3.5, lead time); an unworked call is carried to the next day ahead of that day's new calls (after callbacks, 4.4); past the limit it is skipped at the end of a day it was listed, and the tracks after it start after their delay; a call capacity kept off the list is never skipped.
+
 **Stored facts the projection starts from** (replaces the 15a table row "The load projection", which described 13b's withholding: under 14c nothing after a phone track is withheld). Under the stated assumption no redial, callback or expiry arises from the projection's own actions: every listed call is logged, no answer, in the last second of its user day, before the rollover that could expire it. Each can already be in the store when the projection is taken, and each is simulated by the engine's own rules:
 
 - **A lead held by a callback** (an open callback task): `runs` holds it, so none of its sends is claimed. The callback is listed from its own user day at any hour (`isListed`), so the assumed user logs it, no answer, in the last second of that day; the engine's `logCallOutcome` releases the hold first and completes the track. Its campaign is named in `callsNotCounted` (a lead held by a callback is one on which a call can still be logged).
-- **A redial moved to tomorrow** (`list_day`): not listed until that day (`isListed`), then worked that day.
+- **A redial moved to tomorrow** (`list_day`): not listed before that day (`isListed`), then worked on the first day from then on which its calling hours open.
 - **A call the skip limit skips tonight unless worked**: listed today, so worked in the day's last second, before the rollover. An expiry still happens where the engine's would, for a call not worked on a day it was listed (none under the assumption), through the engine's own `evaluate`, which the simulation runs at each subject's next user day as `Engine.evaluateAll` does; the tracks it releases are projected.
 - **Committed calls** on a later day follow the merged store rule (above).
 

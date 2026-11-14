@@ -183,3 +183,65 @@ describe("a projection says why it stopped, and only a whole run shows a figure 
     expect([...during].sort()).toEqual(["call_logging", "passes"]);
   });
 });
+
+/**
+ * The stop reason is decided in one place, in a fixed order (review bot on 72b7252; coordinator's ruling):
+ * finished first, at every instant after its passes; then the bound on work; then the horizon. Each pair
+ * that can conflict is tested. Fictitious data only.
+ */
+describe("the stop reason's order: finished, then the bound, then the horizon (review bot on 72b7252)", () => {
+  const H = 3_600_000;
+  const DAY = 24 * H;
+  const daily = (start: number, end: number) => [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start, end }));
+
+  /** One UTC lead and one inbox; an email at entry and follow-ups after the given waits. */
+  async function oneLead(resetZone: string, window: { day: number; start: number; end: number }[], waits: readonly number[], start = Date.parse("2026-11-02T09:00:00Z")) {
+    const h = new EngineHarness({ start, accounts: [{ id: "inbox-a", capacity: 30, gapMs: 60_000, k: 1, healthy: true, quotaAvailable: true, resetZone }] });
+    const { campaign } = await h.createCampaign("Order", {
+      businesses: [business({ business_id: "b1", business_name: "Clinic One", timezone: "UTC" })],
+      people: [person({ person_id: "p1", business_id: "b1", full_name: "Lead One", email: "one@clinic1.example", timezone: "" })],
+    });
+    await h.tick();
+    await h.defineSequence(campaign.id, {
+      timezone: "UTC",
+      callSkipLimitDays: 2,
+      emailPool: ["inbox-a"],
+      tracks: [{ id: "e", channel: "email", branch: "main", window, start: { kind: "entry" }, removed: false, steps: [0, ...waits].map((waitDays, i) => ({ id: `e${i + 1}`, waitDays, subject: i === 0 ? "Hi" : "", body: "A note.", threading: i === 0 ? ("new_subject" as const) : ("continue_thread" as const), removed: false })) }],
+    });
+    return { h, id: campaign.id };
+  }
+  const dayOf = (h: EngineHarness, at: number) => Math.floor((at - Date.parse("2026-11-02T00:00:00Z")) / DAY) + 1 - Math.floor((h.clock - Date.parse("2026-11-02T00:00:00Z")) / DAY);
+
+  test("finished, with a later wake past the horizon (the bot's case: the inbox resets in another zone): complete, and the figures are shown", async () => {
+    const { h, id } = await oneLead("Pacific/Honolulu", daily(10, 17), [119]);
+    const full = await projectedSends(h.store, id, h.clock);
+    expect(full?.sends.map((x) => [x.stepId, dayOf(h, x.at)])).toEqual([["e1", 1], ["e2", 120]]);
+    expect(full?.stop).toEqual({ reason: "complete" });
+    const res = await h.request<BeforeLaunchView>("GET", `/api/campaigns/${id}/before-launch`);
+    expect(res.body.load).toMatchObject({ stoppedEarly: null, leadsToStart: 1, daysUntilAllStart: 1, accounts: [expect.objectContaining({ busiestDay: 1 })] });
+  });
+
+  test("finished at the instant the bound is reached: complete, with the whole run's figures", async () => {
+    const { h, id } = await oneLead("Pacific/Honolulu", daily(10, 17), [119]);
+    const full = await projectedSends(h.store, id, h.clock);
+    const bound = (full?.steps ?? 0) - 1;
+    const atBound = await projectedSends(h.store, id, h.clock, { maxSteps: bound });
+    // The bound was reached (the run took more steps than it), in the instant that finished the lead.
+    expect(atBound?.steps).toBeGreaterThan(bound);
+    expect(atBound?.stop).toEqual({ reason: "complete" });
+    expect(JSON.stringify(atBound?.sends)).toBe(JSON.stringify(full?.sends));
+  });
+
+  test("the bound reached exactly at the horizon: stopped by the bound there, not by the horizon, no figure", async () => {
+    // Launched at midnight and sending all day, so the follow-up 120 days on (a wait ends at the start of a
+    // day) falls due exactly at the horizon's instant; another follows past it.
+    const { h, id } = await oneLead("UTC", daily(0, 24), [120, 10], Date.parse("2026-11-02T00:00:00Z"));
+    const end = h.clock + 120 * DAY;
+    const full = await projectedSends(h.store, id, h.clock);
+    expect(full?.sends.map((x) => [x.stepId, x.at === end])).toEqual([["e1", false], ["e2", true]]);
+    expect(full?.stop).toEqual({ reason: "horizon", at: end });
+    const bound = (full?.steps ?? 0) - 1;
+    expect(await projectionStop(h.store, id, h.clock, { maxSteps: bound })).toEqual({ reason: "bound", at: end, during: "passes" });
+    expect(await projectedSends(h.store, id, h.clock, { maxSteps: bound })).toBeNull();
+  });
+});

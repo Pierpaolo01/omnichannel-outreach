@@ -590,16 +590,23 @@ export function projectLoad(input: ProjectionInput): Projection {
     return "withdrawn";
   };
 
+  /**
+   * The one place a run's stop is decided (review bot on 72b7252; coordinator's ruling), in a fixed order,
+   * at every instant after its passes and after each call-logging sweep: finished first (every lead of
+   * this campaign has ended, so nothing of it remains), then the bound on work, and only when time would
+   * move on to `next`, nothing left to happen (the end) or the horizon.
+   */
+  const decide = (t: number, during: "passes" | "call_logging", next?: number): ProjectionStop | null => {
+    if (oursIds.size === 0 || oursDone()) return { reason: "complete" };
+    if (steps > maxSteps) return { reason: "bound", at: t, during };
+    if (next === undefined) return null;
+    if (!Number.isFinite(next)) return { reason: "complete" };
+    if (next > end) return { reason: "horizon", at: t };
+    return null;
+  };
+
   let t = now;
   for (let guard = 0; guard < 2_000_000; guard++) {
-    if (oursIds.size === 0 || oursDone()) {
-      stop = { reason: "complete" };
-      break;
-    }
-    if (steps > maxSteps) {
-      stop = { reason: "bound", at: t, during: "passes" };
-      break;
-    }
     // Subjects whose time-driven change (a start, a due step) has come.
     while (wakes.peek() <= t) {
       const id = wakes.pop();
@@ -766,13 +773,10 @@ export function projectLoad(input: ProjectionInput): Projection {
       if (!changed && observed.length === 0) break;
     }
 
-    // The bound ran out during this instant's passes: what is left of the instant was not run, so the
-    // projection is incomplete, and is marked so before time moves on, here or past the horizon
-    // (review bot on 93bcc0c).
-    if (steps > maxSteps) {
-      stop = { reason: "bound", at: t, during: "passes" };
-      break;
-    }
+    // After the instant's passes: finished, else the bound ran out during them (what is left of the instant
+    // was not run, so it is marked before time moves on: review bot on 93bcc0c).
+    stop = decide(t, "passes");
+    if (stop) break;
 
     // The day's list is worked in its last second, after this instant's passes (as the engine's user
     // logs between ticks); the passes then run again at the same instant, placing any call a logged one
@@ -780,7 +784,7 @@ export function projectLoad(input: ProjectionInput): Projection {
     if (callSettings && t === lastSecondOf(t)) {
       const worked = workTheList(t);
       if (worked === "bound") {
-        stop = { reason: "bound", at: t, during: "call_logging" };
+        stop = decide(t, "call_logging");
         break;
       }
       if (worked) continue;
@@ -822,16 +826,9 @@ export function projectLoad(input: ProjectionInput): Projection {
     // An open call is worked in the last second of its day.
     if (callSettings && [...states.values()].some((x) => x.callTasks.some((task) => task.open))) candidates.push(t < lastSecondOf(t) ? lastSecondOf(t) : lastSecondOf(t + 2000));
     const next = Math.min(...candidates.filter((c) => c > t));
-    // Nothing more can happen: the run has reached its end.
-    if (!Number.isFinite(next)) {
-      stop = { reason: "complete" };
-      break;
-    }
-    // The next thing that would happen lies past the horizon: the figures do not cover all of it.
-    if (next > end) {
-      stop = { reason: "horizon", at: t };
-      break;
-    }
+    // Moving on: nothing more can happen (the end), or the next thing lies past the horizon.
+    stop = decide(t, "passes", next);
+    if (stop) break;
     t = next;
   }
   // The loop's own guard on instants is a bound on work too.

@@ -683,7 +683,7 @@ function PhoneInspector({ track, editor, onLoadedStored, onClose, onRemoved }: {
     <InspectorFrame titleId={titleId} track={track} editor={editor} onClose={onClose}>
       <EditorNotices editor={editor} onLoadedStored={onLoadedStored} />
       <p className="rounded-field bg-raised px-3 py-2 text-[13.5px] text-ink-2">
-        A phone track is one call, placed on your list when it falls due. You dial it and log what happened. For a second planned attempt, add another phone track. The app already handles a redial, which puts the call on your next day’s list, and a callback, which holds the lead’s other outreach until the time the prospect asked for; logging them on the Calls page arrives with the next release.
+        A phone track is one call, placed on your list when it falls due. You dial it and log what happened. For a second planned attempt, add another phone track. The app already handles two more outcomes. A redial, after no answer, a voicemail or a gatekeeper, moves the call to your next day’s list. A callback requested pauses this lead’s other outreach in the campaign until you log the callback’s outcome; a missed callback stays on your list, overdue, until you do. Logging them on the Calls page arrives with the next release.
       </p>
       <div className="flex min-w-0 flex-col gap-[18px]">
         <div className="flex min-w-0 flex-col gap-1.5">
@@ -729,9 +729,9 @@ function PhoneInspector({ track, editor, onLoadedStored, onClose, onRemoved }: {
             days
           </label>
           <p id={skipHint} className="text-[12.5px] text-muted">
-            Counted in calendar days from the day the call falls due; a redial does not restart it.{" "}
+            Counted in calendar days from the day the call first falls due; a redial does not restart it, and time the lead is held by a callback doesn’t count.{" "}
             {track.callSkipLimitDays === undefined ? `This phone track uses the campaign’s limit, ${skipLimit} ${skipLimit === 1 ? "day" : "days"}, until you change it here.` : skipLimit === DEFAULT_SKIP_LIMIT_DAYS ? `${DEFAULT_SKIP_LIMIT_DAYS} days is the default.` : ""}{" "}
-            A call you don’t work rolls over to the top of your next day’s list. Once its limit has run out, it is skipped at the end of a day it was on your list, and the tracks after it start.
+            A call you don’t work is carried to your next day’s list, ahead of that day’s new calls. Once the limit has run out, an unworked call is skipped at the end of a day it was on your list, and the tracks after it start after their delay. A call your daily capacity keeps off the list is never skipped.
           </p>
         </div>
       </div>
