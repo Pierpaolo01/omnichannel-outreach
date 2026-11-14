@@ -81,7 +81,7 @@ async function enrolled(h: EngineHarness) {
 describe("the engine through the Instantly adapter", () => {
   test("with no provider configured, the status endpoint says so", async () => {
     const h = new EngineHarness({ start: MONDAY_9, accounts: [] });
-    expect((await h.request<EmailProviderStatus>("GET", "/api/email-provider")).body).toEqual({ provider: "none", sending: "off", followUps: "unavailable", quota: "available", lastPolledAt: null, inboxes: [], waitingFollowUps: [] });
+    expect((await h.request<EmailProviderStatus>("GET", "/api/email-provider")).body).toEqual({ provider: "none", sending: "off", followUps: "unavailable", quota: "available", lastPolledAt: null, lastPollFailure: null, inboxes: [], waitingFollowUps: [] });
   });
 
   test("with writes on: the inbox is read from Instantly, launch is allowed, the opener goes out once, a reply stops the lead, and the continue-thread follow-up waits unsent", async () => {
@@ -126,6 +126,7 @@ describe("the engine through the Instantly adapter", () => {
       quota: "available",
       // The start of the last mail scan that read to the end.
       lastPolledAt: expect.any(String),
+      lastPollFailure: null,
       inboxes: [{ id: "ada@sender.example", status: 1, dailyLimit: 30, capacity: 30, healthy: true, reason: null }],
       waitingFollowUps: [{ enrollmentId: lead("Pat Oneil"), trackId: "t1", stepId: "s2" }],
     });
@@ -295,5 +296,118 @@ describe("editing a running campaign through the Instantly adapter (ticket 19; A
     expect(fake.writes().filter((w) => w.method === "PATCH" && w.path === `/api/v2/campaigns/${dispatch.id}`)).toHaveLength(1);
     const stored = (await h.request<{ definition: CampaignDefinition }>("GET", `/api/campaigns/${campaign.id}/sequence`)).body.definition;
     expect(JSON.stringify(stored)).not.toContain("Edited in Instantly");
+  });
+});
+
+describe("a sustained Instantly outage is an interruption (ticket 20a; PR 56 review bot)", () => {
+  /** The real adapter with its default polling interval (one minute), the worker ticking every 15 seconds as in production. */
+  function polling(writes = false) {
+    const built: { fake?: FakeInstantly } = {};
+    const h = new EngineHarness({
+      start: MONDAY_9,
+      accounts: [],
+      port: (store, now) => {
+        const fake = new FakeInstantly({ now, accounts: INBOXES });
+        const client = new InstantlyClient({ apiKey: "test-key-not-real", fetch: fake.fetch, writes, now, timeoutMs: 10_000 });
+        const port = new InstantlyEmailPort({ client, store: store.instantly, now, config: { resetZone: "UTC" } });
+        built.fake = fake;
+        return Object.assign(port, { advance: () => fake.advance(), nextActivityAt: () => fake.nextActivityAt() }) satisfies Provider;
+      },
+    });
+    // Every tick here is one the test runs: the harness does not stand in for quiet ones.
+    h.standsIn = false;
+    const fake = built.fake;
+    if (!fake) throw new Error("no fake");
+    const every15s = async (until: number) => {
+      while (h.clock + 15_000 <= until) {
+        h.clock += 15_000;
+        await h.tick();
+      }
+    };
+    const today = async () => (await h.request<{ interruption: unknown; sendingInterrupted: unknown }>("GET", "/api/today")).body;
+    return { h, fake, every15s, today };
+  }
+
+  test("the verifier's reproduction: ticks at 09:00 and 09:01, HTTP 500 for forty 15-second ticks, then answers again at 09:12", async () => {
+    const { h, fake, every15s, today } = polling();
+    await h.tick();
+    h.clock = MONDAY_9 + 60_000;
+    await h.tick();
+    fake.failWith = 500;
+    await every15s(MONDAY_9 + 11 * 60_000);
+    expect((await today()).sendingInterrupted).toMatchObject({ since: new Date(MONDAY_9 + 60_000).toISOString(), cause: "providers_unreachable" });
+    fake.failWith = null;
+    h.clock = MONDAY_9 + 12 * 60_000;
+    await h.tick();
+    expect(await today()).toMatchObject({ sendingInterrupted: null, interruption: { from: new Date(MONDAY_9 + 60_000).toISOString(), to: new Date(MONDAY_9 + 12 * 60_000).toISOString(), rescheduled: 0 } });
+  });
+
+  test("a partial outage: inbox reads answer, the email observation returns 500 for ten minutes: an interruption, and nothing handed over meanwhile (PR 56 review bot)", async () => {
+    const { h, fake, every15s, today } = polling(true);
+    // One lead, two emails a day apart, every hour of every day.
+    const allDay = twoEmails();
+    const def: CampaignDefinition = { ...allDay, tracks: allDay.tracks.map((t) => ({ ...t, window: [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 })), steps: t.steps.map((st) => ({ ...st, threading: "new_subject" as const, subject: st.subject || "Again" })) })) };
+    h.clock = Date.parse("2026-11-16T23:55:00Z");
+    await h.tick();
+    const { campaign } = await enrolled(h);
+    await h.defineSequence(campaign.id, def);
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    await every15s(Date.parse("2026-11-16T23:58:00Z"));
+    const openers = fake.writes().length;
+    const lastGood = h.clock;
+    fake.failPaths.set("/api/v2/emails", 500);
+    await every15s(lastGood + 10 * 60_000);
+    // The follow-up fell due at midnight; nothing was handed over while the observation failed.
+    expect(fake.writes().length).toBe(openers);
+    expect((await today()).sendingInterrupted).toMatchObject({ cause: "providers_unreachable", lastFailedRead: { channel: "email", part: "observation" } });
+    fake.failPaths.delete("/api/v2/emails");
+    await every15s(lastGood + 13 * 60_000);
+    const { interruption, sendingInterrupted } = await today();
+    expect(sendingInterrupted).toBeNull();
+    expect(interruption).toMatchObject({ rescheduled: expect.any(Number) as number });
+    expect(Date.parse((interruption as { from: string }).from)).toBeLessThanOrEqual(lastGood);
+    // The adapter says which part of its round trip failed.
+    const status = (await h.request<EmailProviderStatus>("GET", "/api/email-provider")).body;
+    expect(status.lastPollFailure).toMatchObject({ part: "emails" });
+  });
+
+  test("email reads failing from 23:59:30, just before a midnight follow-up, while the last contact is still fresh: failed pre-send reads are no contact (review bot on 592d679)", async () => {
+    const { h, fake, every15s, today } = polling(true);
+    const allDay = twoEmails();
+    const def: CampaignDefinition = { ...allDay, tracks: allDay.tracks.map((t) => ({ ...t, window: [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 })), steps: t.steps.map((st) => ({ ...st, threading: "new_subject" as const, subject: st.subject || "Again" })) })) };
+    h.clock = Date.parse("2026-11-16T23:55:00Z");
+    await h.tick();
+    const { campaign } = await enrolled(h);
+    await h.defineSequence(campaign.id, def);
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    const failFrom = Date.parse("2026-11-16T23:59:30Z");
+    await every15s(failFrom);
+    const openers = fake.writes().length;
+    fake.failPaths.set("/api/v2/emails", 500);
+    await every15s(failFrom + 10 * 60_000);
+    expect(fake.writes().length).toBe(openers);
+    expect((await today()).sendingInterrupted).toMatchObject({ cause: "providers_unreachable" });
+    fake.failPaths.delete("/api/v2/emails");
+    await every15s(failFrom + 13 * 60_000);
+    const { interruption } = await today();
+    expect(interruption).not.toBeNull();
+    expect(Date.parse((interruption as { from: string }).from)).toBeLessThanOrEqual(failFrom);
+  });
+
+  test("ten minutes of failing HTTP, answered from the adapter's cache in between, ages the heartbeat and ends in a notice", async () => {
+    const { h, fake, every15s, today } = polling();
+    await h.tick();
+    await every15s(MONDAY_9 + 2 * 60_000);
+    // The last round trip: the poll at 09:02 (one a minute).
+    const lastPoll = MONDAY_9 + 2 * 60_000;
+    fake.failWith = 500;
+    await every15s(lastPoll + 7 * 60_000);
+    expect((await today()).sendingInterrupted).toMatchObject({ since: new Date(lastPoll).toISOString(), cause: "providers_unreachable" });
+    await every15s(lastPoll + 10 * 60_000);
+    fake.failWith = null;
+    await every15s(lastPoll + 12 * 60_000);
+    const { interruption, sendingInterrupted } = await today();
+    expect(sendingInterrupted).toBeNull();
+    expect(interruption).toMatchObject({ from: new Date(lastPoll).toISOString(), rescheduled: 0 });
   });
 });

@@ -104,6 +104,7 @@ describe("a route that changes an input the engine's timing reads first applies 
     // Every other route that writes, and why it changes no timing input of a running lead.
     const none: Record<string, string> = {
       "POST /api/scraper-files/check": "checks files; writes nothing",
+      "POST /api/campaigns/:id/sequence/impact": "a read of what a draft would do (ticket 19), each lead caught up on a copy; writes nothing",
       "POST /api/campaigns/:id/launch": "enters and evaluates each lead at its own instant",
       "POST /api/call-tasks/:id/outcome": "judged as of its own instant (asOfAction)",
       "POST /api/enrollments/:id/controls": "judged as of its own instant (asOfAction, ticket 17a); a pause holds the clock, which every stored deadline reads",

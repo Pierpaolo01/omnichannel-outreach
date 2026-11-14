@@ -21,6 +21,8 @@ import type { SubjectState } from "../../domain/sequence/state.ts";
 import { reconcileEdit } from "../../domain/sequence/reconcile.ts";
 import { applyControl, campaignPaused, campaignPrecondition, campaignResumed, controlPrecondition, judgeControl } from "../../domain/sequence/controls.ts";
 import type { RequestStanding, StoredRequest } from "./engine-store.ts";
+import { afterInterruption, interruptionOf, rescheduledSteps } from "../../domain/sequence/interruption.ts";
+import type { CallAnswer } from "../../domain/sequence/attempt.ts";
 
 export interface Rules {
   readonly evaluate: typeof evaluate;
@@ -85,6 +87,26 @@ export interface Rules {
   readonly reconcileEdit: typeof reconcileEdit;
   /** The version guard (2.5): a change computed from `computedFrom` applies only if nothing it read has changed. */
   readonly versionsMatch: (computedFrom: SubjectState, current: SubjectState) => boolean;
+  /** Ticket 20a: the interruption ending at an instant, from the last heartbeat (more than INTERRUPTION_GAP before it). */
+  readonly interruptionOf: typeof interruptionOf;
+  /** Ticket 20a: what an interruption does to a lead: nothing (it is not a pause). */
+  readonly afterInterruption: typeof afterInterruption;
+  /** Ticket 20a: the sends an interruption rescheduled, for its notice. */
+  readonly rescheduled: typeof rescheduledSteps;
+  /** Ticket 20a, follow-up 42 item 39: the instant a provider's answer is applied at: when it arrived, not when it was asked for. */
+  readonly answerInstant: (askedAt: number, answeredAt: number) => number;
+  /**
+   * Ticket 20a (PR 56 review bot): the instant a dispatch decision is judged at: the clock read at that decision, never
+   * the tick's start (a machine can sleep in between).
+   */
+  readonly dispatchInstant: (tickStarted: number, now: number) => number;
+  /**
+   * Ticket 20a (PR 56 review bot): whether a round with a provider is contact. Every read the engine relies on for safety
+   * must have answered in it: the account read and the observation. A partial answer is not contact.
+   */
+  readonly contactFrom: (answered: { readonly accounts: boolean; readonly observation: boolean }) => boolean;
+  /** The answer a call whose answer was never recorded is taken to have (5.3's crash row): unknown. */
+  readonly lostAnswer: CallAnswer;
 }
 
 export const DEFAULT_RULES: Rules = {
@@ -135,4 +157,11 @@ export const DEFAULT_RULES: Rules = {
     a.campaign.version === b.campaign.version &&
     a.campaign.definitionVersion === b.campaign.definitionVersion &&
     JSON.stringify(a.lead) === JSON.stringify(b.lead),
+  interruptionOf,
+  afterInterruption,
+  rescheduled: rescheduledSteps,
+  answerInstant: (_asked, answered) => answered,
+  dispatchInstant: (_started, now) => now,
+  contactFrom: (answered) => answered.accounts && answered.observation,
+  lostAnswer: { kind: "unknown" },
 };

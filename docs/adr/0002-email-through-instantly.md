@@ -361,6 +361,8 @@ The regressions are in `src/server/instantly/port.test.ts` ("signal identity", "
    - both creators read the old state, yet one id is adopted, the two same-key adds are identical, and the unsubscribe is seen;
    - two overlapping polls: the later commit fails, and the earlier batch is replayed until it is acknowledged.
 
+**Contact, and one worker per database (ticket 20a, 14 November 2026; ADR 0003 "Ticket 20a").** The adapter's contact with Instantly is a poll whose inbox read and email observation both answered, marked after its commit; a cached or deferred poll, an inbox read alone, and a call that resolved as a failure (`unavailable`, `unknown`) are not contact. The worker checks its lease against the stored holder in the transaction that authorizes a send and again immediately before every call to Instantly (adding a lead, deleting one, looking one up). **Stated limit:** no local check can fence a network request after it, so a process frozen in the instant between that last check and its request can still make the one request it was about to make. That work is already recorded as handed over under its idempotency key, so the process that takes over treats it as unsettled work under that same key, by lookup or a same-key retry (ADR 0003 5.3), and never under a new one. Whether Instantly then delivers it once rests on Instantly honouring the key: experiment X5, unverified.
+
 ## Sources (re-checked 12 November 2026)
 
 - **`api_v2.json` 2.0.0, 198 paths:**
