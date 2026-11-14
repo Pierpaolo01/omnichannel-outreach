@@ -66,6 +66,13 @@ export interface CampaignDefinition {
  */
 export const declinedPathOf = (track: Pick<TrackDefinition, "declinedPath"> | undefined): DeclinedPath => track?.declinedPath ?? "stop";
 
+/**
+ * What to do when a phone track's declined path is win back and the branch has no live track: the
+ * clause the validator's refusal ends with (7.1), which the editor also shows beside win back while it
+ * cannot be chosen (ticket 16b), so both say the same.
+ */
+export const NO_WIN_BACK_BRANCH = "the campaign has no win-back branch: add a track to the win-back branch, or choose stop or continue.";
+
 /** Whether a lead can enter the campaign's win-back branch: it has a live track. */
 export const winBackAvailable = (def: CampaignDefinition): boolean => def.tracks.some((t) => !t.removed && t.branch === "win_back");
 
@@ -135,7 +142,7 @@ export function definitionProblems(def: CampaignDefinition, previous: CampaignDe
   for (const track of live) {
     if (track.declinedPath !== undefined && track.channel !== "call") problems.push(`Only a phone track has a declined path: ${label(track)} has one.`);
     if (track.channel === "call" && track.branch === "main" && track.declinedPath === "win_back" && !winBackAvailable(def)) {
-      problems.push(`${capital(label(track))}'s declined path is win back, but the campaign has no win-back branch: add a track to the win-back branch, or choose stop or continue.`);
+      problems.push(`${capital(label(track))}'s declined path is win back, but ${NO_WIN_BACK_BRANCH}`);
     }
   }
 
