@@ -68,7 +68,8 @@ function decide(def: CampaignDefinition, op: ArrangeOperation, broken: ReadonlyS
     let added = newTrack(op.channel);
     while (used.has(added.id)) added = newTrack(op.channel);
     // Mutation only: a phone track added with a follow-up, which a phone track never has.
-    if (op.channel === "call" && broken.has("phone_track_with_a_follow_up")) added = { ...added, steps: [...added.steps, { ...added.steps[0]!, id: `${added.id}-again`, waitDays: 1 }] };
+    const call = added.steps[0];
+    if (op.channel === "call" && call && broken.has("phone_track_with_a_follow_up")) added = { ...added, steps: [...added.steps, { ...call, id: `${added.id}-again`, waitDays: 1 }] };
     return { ok: true, definition: { ...def, tracks: [...def.tracks, added] }, added };
   }
   const track = live(def).find((t) => t.id === op.trackId);
