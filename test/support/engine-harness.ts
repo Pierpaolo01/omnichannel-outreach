@@ -116,7 +116,17 @@ export class EngineHarness {
 
   /** Answers one HTTP request with the app, as a server would: the browser tests serve it this way. */
   fetch(request: Request): Promise<Response> {
+    this.markAliveForRequest();
     return Promise.resolve(this.app.fetch(request));
+  }
+
+  /**
+   * While the world runs, a request finds the worker alive at its instant, as production's 15-second ticks would leave
+   * it: the harness moves the clock between requests without ticking, so the heartbeat would otherwise look old. The
+   * store writes it synchronously; nothing is awaited, so no request's interleaving with others changes.
+   */
+  private markAliveForRequest(): void {
+    if (this.live && this.reachable) void this.store.engine.setMeta(HEARTBEAT_KEY, String(this.clock));
   }
 
   /** The fake SMS provider. */
@@ -251,6 +261,7 @@ export class EngineHarness {
   }
 
   async request<T>(method: string, path: string, body?: unknown): Promise<{ status: number; body: T }> {
+    this.markAliveForRequest();
     const response = await this.app.request(path, {
       method,
       ...(method === "GET" ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body ?? {}) }),

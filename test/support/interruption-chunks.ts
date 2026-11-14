@@ -56,6 +56,8 @@ export const RETIRED_INTERRUPTION_FEATURES: Readonly<Record<string, string>> = {
 
 /** The names of this family: everything the interruption events add. Other names the runs reach belong to the control runs' lists. */
 const OURS = /^(app-stopped|providers-cut-off|a-notice|a-gap|a-crash-during|a-(observe|lookup)-answer|a-reply-during-an-outage)/;
+/** Whether a behaviour name is the interruption family's: the control runs' own lists leave these to this file's. */
+export const isInterruptionFeature = (name: string): boolean => OURS.test(name);
 const known = (name: string) => INTERRUPTION_FEATURES.includes(name) || name in RETIRED_INTERRUPTION_FEATURES;
 const reached = new Set<string>();
 

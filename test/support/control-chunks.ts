@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 import { CONTROL_MUTATIONS } from "./control-mutations.ts";
 import { controlInvariantsOf, runControls } from "./generated-controls.ts";
+import { isInterruptionFeature } from "./interruption-chunks.ts";
 import { FULL_SEARCH, inShard } from "./sequence-chunks.ts";
 
 /**
@@ -137,7 +138,8 @@ export function controlChunks(): void {
       });
       test("every literal behaviour name in the generator is listed or retired", () => {
         const source = readFileSync(new URL("./generated-controls.ts", import.meta.url), "utf8");
-        const literals = [...source.matchAll(/features\.add\("([^"]+)"\)/g)].map((m) => m[1] ?? "");
+        // The interruption family's names are checked against its own lists (interruption-chunks.ts).
+        const literals = [...source.matchAll(/features\.add\("([^"]+)"\)/g)].map((m) => m[1] ?? "").filter((name) => !isInterruptionFeature(name));
         expect(literals.filter((name) => !known(name))).toEqual([]);
       });
     }
