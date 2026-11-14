@@ -12,9 +12,12 @@ import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
 import { runs } from "../../domain/sequence/progress.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
 import { campaignRefusal, type LeadControl } from "../../domain/sequence/controls.ts";
+import type { ControlView } from "../../shared/api.ts";
+import { effectOf } from "./controls-view.ts";
 import type { ControlRecord, EngineStore, ReplyEvent, StoredDefinition } from "./engine-store.ts";
 
-export type ControlAnswer = { readonly ok: true; readonly replayed: boolean } | { readonly ok: false; readonly reason: string };
+/** A control's answer. `effect`: the control's own effect, which the read previewed at that instant; null for a campaign's. */
+export type ControlAnswer = { readonly ok: true; readonly replayed: boolean; readonly effect: ControlView | null } | { readonly ok: false; readonly reason: string };
 export const CONTROL_REQUEST_REUSED = "This request id was already used for another action: send a new one.";
 import { UnprovisionedSmsPort, type AttemptRef, type HandoverRequest, type ProviderEvent, type SendPort } from "./ports.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
@@ -727,6 +730,12 @@ export class Engine {
     return this.ticks.run(async () => {
       const subjectId = await this.store.callTaskSubject(taskId);
       if (subjectId === null) return { ok: false as const, reason: "There is no such call task." };
+      // A request id is bound to its first answer, refused or accepted (verifier B5 on ca8baee): a refused outcome sent
+      // again is refused again, even when the call could take it now; an id used for another action is refused.
+      const standing = this.rules.requestStanding(await this.store.requestAnswer(input.requestId), taskId, "call_outcome");
+      if (standing === "reused") return { ok: false as const, reason: REQUEST_ID_REUSED };
+      const first = standing === "replay" ? await this.store.requestAnswer(input.requestId) : null;
+      if (first?.answer === "refused") return { ok: false as const, reason: first.reason ?? "Refused." };
       // A key logged on another subject's call: the subject's own transaction cannot see it.
       const loggedOn = await this.store.callRequestTask(input.requestId);
       if (loggedOn !== null && loggedOn !== taskId) return { ok: false as const, reason: REQUEST_ID_REUSED };
@@ -751,7 +760,11 @@ export class Engine {
         if (error instanceof Error && error.message.includes("call_attempts.request_id")) return { ok: false as const, reason: REQUEST_ID_REUSED };
         throw error;
       }
-      if (refused.reason !== null) return { ok: false as const, reason: refused.reason };
+      if (refused.reason !== null) {
+        await this.store.recordRequest(input.requestId, { target: taskId, action: "call_outcome", answer: "refused", reason: refused.reason, effect: null }, now);
+        return { ok: false as const, reason: refused.reason };
+      }
+      await this.store.recordRequest(input.requestId, { target: taskId, action: "call_outcome", answer: "accepted", reason: null, effect: null }, now);
       await this.runTick();
       return { ok: true as const };
     });
@@ -764,18 +777,15 @@ export class Engine {
   controlLead(subjectId: string, action: LeadControl, requestId: string): Promise<ControlAnswer> {
     return this.ticks.run(async () => {
       const now = this.now();
-      const refused: { reason: string | null } = { reason: null };
-      const record = await this.store.controlSubject(subjectId, now, { id: requestId, action }, (stored) => {
+      const record = await this.store.controlSubject(subjectId, now, { id: requestId, action }, this.rules.requestStanding, (stored) => {
         const s = this.rules.asOfAction(stored, now, this.rules.evaluate);
         const caughtUp = same(s, stored) ? null : s;
         const out = this.rules.applyControl(s, action, now);
-        if (!out.ok) {
-          refused.reason = out.reason;
-          return { write: caughtUp, accepted: false };
-        }
-        return { write: out.state, accepted: true };
+        if (!out.ok) return { write: caughtUp, answer: "refused", reason: out.reason, effect: null };
+        // The answer's effect is the read's preview at this instant: the same transition on the same state (verifier B4).
+        return { write: out.state, answer: "accepted", reason: null, effect: JSON.stringify(effectOf(s, action, out.state, now)) };
       });
-      return this.answerOf(record, refused.reason);
+      return this.answerOf(record);
     });
   }
 
@@ -787,21 +797,23 @@ export class Engine {
         campaignId,
         now,
         { id: requestId, pause },
+        this.rules.requestStanding,
         (row) => campaignRefusal(row, pause),
         (stored) => {
           const s = this.rules.asOfAction(stored, now, this.rules.evaluate);
           return pause ? this.rules.campaignPaused(s, now) : this.rules.campaignResumed(s, now);
         },
       );
-      return this.answerOf(out.record, out.reason);
+      return this.answerOf(out);
     });
   }
 
-  private async answerOf(record: ControlRecord, reason: string | null): Promise<ControlAnswer> {
-    if (record === "reused") return { ok: false, reason: CONTROL_REQUEST_REUSED };
-    if (record === "refused") return { ok: false, reason: reason ?? "There is no such lead." };
-    if (record === "accepted") await this.runTick();
-    return { ok: true, replayed: record === "replayed" };
+  /** A request's answer: its first answer, refused or accepted, whether given now or replayed (verifier B5). */
+  private async answerOf(record: ControlRecord): Promise<ControlAnswer> {
+    if (record.kind === "reused") return { ok: false, reason: CONTROL_REQUEST_REUSED };
+    if (record.answer === "refused") return { ok: false, reason: record.reason ?? "Refused." };
+    if (record.kind === "answered") await this.runTick();
+    return { ok: true, replayed: record.kind === "replayed", effect: record.effect === null ? null : (JSON.parse(record.effect) as ControlView) };
   }
 
   // -------------------------------------------------------------------------------------------

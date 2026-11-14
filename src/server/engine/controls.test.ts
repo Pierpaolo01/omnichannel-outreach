@@ -309,5 +309,62 @@ describe("one lead's controls", () => {
     expect((await h.request<EnrollmentRead>("GET", `/api/enrollments/${pat}`)).body.tracks[0]?.steps[0]?.result).toBe("sent");
     expect(h.fake.handoverLog.filter((c) => c.stepId === "s2")).toEqual([]);
   });
+
+  test("a request id is bound to its first answer, refused or accepted: a refused resume sent again after a pause is refused again and changes nothing (verifier B5)", async () => {
+    const { h, campaign, control, campaignControl, read } = await world();
+    const c = await campaign("Clinics");
+    const pat = c.lead("Pat Oneil");
+    await h.advanceTo(MONDAY_9 + H);
+    const first = await control(pat, "resume", "retry-refused");
+    expect(first.status).toBe(409);
+    expect((await control(pat, "pause", "a-pause")).status).toBe(200);
+    const again = await control(pat, "resume", "retry-refused");
+    expect([again.status, again.body.error?.message]).toEqual([409, first.body.error?.message]);
+    expect((await read(pat)).status).toBe("paused");
+    // The same for a campaign: a refused resume, then a pause, then the refused id again.
+    expect((await campaignControl(c.id, "resume", "c-retry")).status).toBe(409);
+    expect((await campaignControl(c.id, "pause", "c-pause")).status).toBe(200);
+    expect((await campaignControl(c.id, "resume", "c-retry")).status).toBe(409);
+    expect((await h.request<CampaignDetail>("GET", `/api/campaigns/${c.id}`)).body.pause.paused).toBe(true);
+  });
+
+  test("a control's answer is its preview: the effect the read showed at that instant, then the read after the worker ran (verifier B4)", async () => {
+    const window = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 10, end: 11 }));
+    const oneEmail: CampaignDefinition = { ...DEFINITION, tracks: [{ ...DEFINITION.tracks[0]!, window, steps: [email("s1")] }] };
+    const { h, campaign, control, read } = await world(oneEmail);
+    const c = await campaign("Clinics");
+    const pat = c.lead("Pat Oneil");
+    await h.advanceTo(MONDAY_9 + 30 * MIN);
+    expect((await control(pat, "pause")).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + H + MIN);
+    const preview = controlOf(await read(pat), "resume");
+    const answer = await h.request<{ effect?: ControlView; enrollment?: EnrollmentRead }>("POST", `/api/enrollments/${pat}/controls`, { requestId: "b4", action: "resume" });
+    expect(answer.status).toBe(200);
+    expect(answer.body.effect).toEqual(preview);
+    // The worker then ran: Pat's email is due, but Nia's took the inbox's 10:00 slot, so it waits for 10:10 and goes then.
+    expect(answer.body.enrollment?.status).toBe("queued");
+    await h.advanceTo(MONDAY_9 + H + 15 * MIN);
+    expect((await read(pat)).status).toBe("sequence_finished_no_response");
+    // A replay answers with the same effect.
+    expect((await h.request<{ effect?: ControlView }>("POST", `/api/enrollments/${pat}/controls`, { requestId: "b4", action: "resume" })).body.effect).toEqual(preview);
+  });
+
+  test("the call outcome route binds a refused request id to its refusal too (verifier B5, the same rule)", async () => {
+    const { h, campaign } = await world();
+    const c = await campaign("Clinics");
+    const pat = c.lead("Pat Oneil");
+    await h.advanceTo(MONDAY_9 + H);
+    const taskId = (await h.request<CallsView>("GET", "/api/calls")).body.readyNow.find((x) => x.enrollmentId === pat)!.taskId;
+    const view = (await h.request<{ numbers: { detailId: string; bad: boolean }[] }>("GET", `/api/call-tasks/${taskId}`)).body;
+    const numberId = view.numbers.find((n) => !n.bad)?.detailId;
+    // Redialed to tomorrow, so an outcome today is refused; the same id sent again tomorrow, when it would be listed, is refused again.
+    expect((await h.request("POST", `/api/call-tasks/${taskId}/outcome`, { requestId: "redial", outcome: "no_answer", redial: true, numberId, note: "" })).status).toBe(200);
+    const body = { requestId: "o-retry", outcome: "no_answer", numberId, note: "" };
+    const first = await h.request<{ error?: { message: string } }>("POST", `/api/call-tasks/${taskId}/outcome`, body);
+    expect(first.status).toBe(409);
+    await h.advanceTo(MONDAY_9 + DAY + H);
+    const again = await h.request<{ error?: { message: string } }>("POST", `/api/call-tasks/${taskId}/outcome`, body);
+    expect([again.status, again.body.error?.message]).toEqual([409, first.body.error?.message]);
+  });
 });
 

@@ -31,13 +31,32 @@ export interface CampaignEngineRow {
   readonly version: number;
 }
 
-/** What a control's transaction did with its request id (ADR 0003 "Ticket 17a", P7). */
-export type ControlRecord = "accepted" | "refused" | "replayed" | "reused";
+/**
+ * A request id's first answer (ADR 0003 "Ticket 17a", P7; verifier B5): accepted, with the control's effect as JSON,
+ * or refused, with its reason. The same id is answered with it again and changes nothing.
+ */
+export interface StoredRequest {
+  readonly target: string;
+  readonly action: string;
+  readonly answer: "accepted" | "refused";
+  readonly reason: string | null;
+  readonly effect: string | null;
+}
 
-/** A control's decision on the state it read: what to write (null for nothing), and whether it was accepted. */
+/** How a request id stands against its stored first answer: new, a repeat of it, or reused for something else. */
+export type RequestStanding = "new" | "replay" | "reused";
+
+/** What a control's transaction did: answered now, the first answer replayed, or refused as a reused id. */
+export type ControlRecord =
+  | { readonly kind: "answered" | "replayed"; readonly answer: "accepted" | "refused"; readonly reason: string | null; readonly effect: string | null }
+  | { readonly kind: "reused" };
+
+/** A control's decision on the state it read: what to write (null for nothing), and its answer. */
 export interface ControlDecision<S> {
   readonly write: S | null;
-  readonly accepted: boolean;
+  readonly answer: "accepted" | "refused";
+  readonly reason: string | null;
+  readonly effect: string | null;
 }
 
 /**
@@ -157,7 +176,17 @@ export interface EngineStore {
    * `reused`. Otherwise the lead is loaded, `decide` judges it, what it returns is written, and an accepted
    * control is recorded with its request id.
    */
-  controlSubject(subjectId: string, now: number, request: { readonly id: string; readonly action: string }, decide: (state: SubjectState) => ControlDecision<SubjectState>): Promise<ControlRecord>;
+  controlSubject(
+    subjectId: string,
+    now: number,
+    request: { readonly id: string; readonly action: string },
+    standing: (stored: StoredRequest | null, target: string, action: string) => RequestStanding,
+    decide: (state: SubjectState) => ControlDecision<SubjectState>,
+  ): Promise<ControlRecord>;
+  /** A request id's stored first answer, or null. */
+  requestAnswer(requestId: string): Promise<StoredRequest | null>;
+  /** Stores a request id's first answer (a refused call outcome, which stores nothing else). An id already stored is kept. */
+  recordRequest(requestId: string, request: { readonly target: string; readonly action: string; readonly answer: "accepted" | "refused"; readonly reason: string | null; readonly effect: string | null }, now: number): Promise<void>;
   /**
    * Pauses (`pause: true`) or resumes a campaign in one transaction (ticket 17a): `refusal` judges the campaign
    * row; then every enrollment that has not ended is loaded as it stood and written as `perLead` returns it, the
@@ -168,9 +197,10 @@ export interface EngineStore {
     campaignId: string,
     now: number,
     request: { readonly id: string; readonly pause: boolean },
+    standing: (stored: StoredRequest | null, target: string, action: string) => RequestStanding,
     refusal: (row: { readonly launchedAt: number | null; readonly pausedSince: number | null }) => string | null,
     perLead: (state: SubjectState) => SubjectState,
-  ): Promise<{ readonly record: ControlRecord; readonly reason: string | null }>;
+  ): Promise<ControlRecord>;
   /** The count of the campaign's leads in each outreach status (ticket 17a). */
   statusCounts(campaignId: string): Promise<Record<string, number>>;
   /** Loads, decides and writes in one transaction. A null decision writes nothing. */

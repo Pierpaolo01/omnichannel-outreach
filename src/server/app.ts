@@ -481,7 +481,8 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     if (!(await store.engine.subject(id, Date.parse(now())))) return notFound(c, "enrollment");
     const answer = await engine.controlLead(id, body.data.action, body.data.requestId);
     if (!answer.ok) return controlRefused(c, answer.reason);
-    return c.json({ enrollment: await enrollmentRead(id), replayed: answer.replayed });
+    // `effect` is the control's own effect, the read's preview at that instant; `enrollment` is the read after the worker ran (verifier B4).
+    return c.json({ effect: answer.effect, enrollment: await enrollmentRead(id), replayed: answer.replayed });
   });
 
   // -------------------------------------------------------------------------------------------

@@ -34,10 +34,18 @@ function newlyWithdrawn(before: SubjectState, after: SubjectState): number {
 }
 
 export function controlView(stored: SubjectState, action: LeadControl, now: number, rules: Rules): ControlView {
-  const before = rules.asOfAction(stored, now, rules.evaluate);
+  const before = rules.previewAsOf(stored, now, rules.evaluate);
   const out = rules.applyControl(before, action, now);
   if (!out.ok) return { action, allowed: false, reason: out.reason };
-  const after = out.state;
+  return effectOf(before, action, out.state, now);
+}
+
+/**
+ * A control's effect, from the lead as of the action's instant (`before`) and as the transition leaves it (`after`): the
+ * read previews it on a copy, and the action answers with it (verifier B4). What the worker does after the control (a
+ * send due at once) is not part of it: the action's answer carries that as the read after the worker ran.
+ */
+export function effectOf(before: SubjectState, action: LeadControl, after: SubjectState, now: number): ControlView {
   const skipped = action === "skip" ? currentStep(before) : null;
   const next = currentStep(after);
   return {

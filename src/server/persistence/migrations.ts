@@ -609,12 +609,19 @@ export const MIGRATIONS: readonly Migration[] = [
       -- Every lead that has ended holds an open ended interval from its ending (a restart closes it).
       INSERT INTO hold_intervals (scope, owner_id, from_wall, to_wall)
         SELECT 'ended', id, COALESCE(ended_wall, 0), NULL FROM enrollments WHERE ended IS NOT NULL;
+      -- Every answered request by its id, accepted or refused, with the refusal's reason or the accepted control's
+      -- effect: a request id is bound to its first answer (verifier B5 on ca8baee).
       CREATE TABLE control_requests (
         request_id TEXT PRIMARY KEY,
         target TEXT NOT NULL,
         action TEXT NOT NULL,
+        answer TEXT NOT NULL CHECK (answer IN ('accepted', 'refused')),
+        reason TEXT,
+        effect TEXT,
         at_wall INTEGER NOT NULL
       );
+      -- When a withdrawal was last asked of the provider: asked again each settling period until its answer is final.
+      ALTER TABLE attempts ADD COLUMN withdraw_last_wall INTEGER;
     `,
   },
 ];

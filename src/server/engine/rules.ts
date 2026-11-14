@@ -19,6 +19,7 @@ import { compareReadyNow, focusOf, isListed, logCallOutcome, placeCall, readyCal
 import { applyBadDestination, applyReply, applyToAttempt, applyToWork, asOfAction, enterMain, evaluate, replyMatches, smsReplyOwner } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
 import { applyControl, campaignPaused, campaignResumed } from "../../domain/sequence/controls.ts";
+import type { RequestStanding, StoredRequest } from "./engine-store.ts";
 
 export interface Rules {
   readonly evaluate: typeof evaluate;
@@ -66,6 +67,10 @@ export interface Rules {
   /** The campaign pause and resume as each of its leads takes them (ticket 17a). */
   readonly campaignPaused: typeof campaignPaused;
   readonly campaignResumed: typeof campaignResumed;
+  /** How a request id stands against its stored first answer (verifier B5): new, a replay of it, or reused. */
+  readonly requestStanding: (stored: StoredRequest | null, target: string, action: string) => RequestStanding;
+  /** What the reads apply first when they preview a control: what fell due by the read's instant, as the action does. */
+  readonly previewAsOf: typeof asOfAction;
   /** The version guard (2.5): a change computed from `computedFrom` applies only if nothing it read has changed. */
   readonly versionsMatch: (computedFrom: SubjectState, current: SubjectState) => boolean;
 }
@@ -102,6 +107,8 @@ export const DEFAULT_RULES: Rules = {
   applyControl,
   campaignPaused,
   campaignResumed,
+  requestStanding: (stored, target, action) => (stored === null ? "new" : stored.target === target && stored.action === action ? "replay" : "reused"),
+  previewAsOf: asOfAction,
   // Everything an evaluation reads: the subject's and campaign's versions cover its progress and the
   // definition; the lead's facts (contact details and their marks, zone, merge data) change without
   // bumping them (an import, a mark elsewhere), so they are compared as they were read.

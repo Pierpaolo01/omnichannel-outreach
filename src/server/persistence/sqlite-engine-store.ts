@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ControlDecision, ControlRecord } from "../engine/engine-store.ts";
+import type { ControlDecision, ControlRecord, RequestStanding, StoredRequest } from "../engine/engine-store.ts";
 import type { DatabaseSync, SQLInputValue, SQLOutputValue, StatementSync } from "node:sqlite";
 import { displayPhone, displayPhonesIn } from "../../domain/phone.ts";
 import type { SenderAccountView } from "../../domain/sequence/blockers.ts";
@@ -81,24 +81,50 @@ export class SqliteEngineStore implements EngineStore {
     };
   }
 
-  /** The request id's record, inside the caller's transaction: replayed, reused, or null when new. */
-  private requestRecord(id: string, target: string, action: string): "replayed" | "reused" | null {
-    const row = this.sql("SELECT target, action FROM control_requests WHERE request_id = ?").get(id);
+  private storedRequest(id: string): StoredRequest | null {
+    const row = this.sql("SELECT * FROM control_requests WHERE request_id = ?").get(id);
     if (!row) return null;
-    return str(row, "target") === target && str(row, "action") === action ? "replayed" : "reused";
+    return { target: str(row, "target"), action: str(row, "action"), answer: str(row, "answer") === "refused" ? "refused" : "accepted", reason: strOrNull(row, "reason"), effect: strOrNull(row, "effect") };
   }
 
-  async controlSubject(subjectId: string, now: number, request: { readonly id: string; readonly action: string }, decide: (state: SubjectState) => ControlDecision<SubjectState>): Promise<ControlRecord> {
+  /** The id's standing inside the caller's transaction: a stored first answer is replayed, or the id is refused as reused. */
+  private standingOf(id: string, target: string, action: string, standing: (stored: StoredRequest | null, target: string, action: string) => RequestStanding): ControlRecord | null {
+    const stored = this.storedRequest(id);
+    const s = standing(stored, target, action);
+    if (s === "reused") return { kind: "reused" };
+    if (s === "replay" && stored) return { kind: "replayed", answer: stored.answer, reason: stored.reason, effect: stored.effect };
+    return null;
+  }
+
+  private storeRequest(id: string, request: { readonly target: string; readonly action: string; readonly answer: "accepted" | "refused"; readonly reason: string | null; readonly effect: string | null }, now: number): void {
+    this.run("INSERT INTO control_requests (request_id, target, action, answer, reason, effect, at_wall) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(request_id) DO NOTHING", [id, request.target, request.action, request.answer, request.reason, request.effect, now]);
+  }
+
+  async requestAnswer(requestId: string): Promise<StoredRequest | null> {
+    return this.storedRequest(requestId);
+  }
+
+  async recordRequest(requestId: string, request: { readonly target: string; readonly action: string; readonly answer: "accepted" | "refused"; readonly reason: string | null; readonly effect: string | null }, now: number): Promise<void> {
+    this.transaction(() => this.storeRequest(requestId, request, now));
+  }
+
+  async controlSubject(
+    subjectId: string,
+    now: number,
+    request: { readonly id: string; readonly action: string },
+    standing: (stored: StoredRequest | null, target: string, action: string) => RequestStanding,
+    decide: (state: SubjectState) => ControlDecision<SubjectState>,
+  ): Promise<ControlRecord> {
     return this.transaction((): ControlRecord => {
-      const known = this.requestRecord(request.id, subjectId, request.action);
+      const known = this.standingOf(request.id, subjectId, request.action, standing);
       if (known) return known;
       const base = this.load(subjectId, now);
-      if (!base) return "refused";
+      if (!base) return { kind: "answered", answer: "refused", reason: "There is no such lead.", effect: null };
       const decision = decide(base);
       if (decision.write) this.write(base, decision.write, now);
-      if (!decision.accepted) return "refused";
-      this.run("INSERT INTO control_requests (request_id, target, action, at_wall) VALUES (?, ?, ?, ?)", [request.id, subjectId, request.action, now]);
-      return "accepted";
+      // Accepted or refused, the first answer is kept: the same id is answered with it again (verifier B5).
+      this.storeRequest(request.id, { target: subjectId, action: request.action, answer: decision.answer, reason: decision.reason, effect: decision.effect }, now);
+      return { kind: "answered", answer: decision.answer, reason: decision.reason, effect: decision.effect };
     });
   }
 
@@ -106,17 +132,21 @@ export class SqliteEngineStore implements EngineStore {
     campaignId: string,
     now: number,
     request: { readonly id: string; readonly pause: boolean },
+    standing: (stored: StoredRequest | null, target: string, action: string) => RequestStanding,
     refusal: (row: { readonly launchedAt: number | null; readonly pausedSince: number | null }) => string | null,
     perLead: (state: SubjectState) => SubjectState,
-  ): Promise<{ readonly record: ControlRecord; readonly reason: string | null }> {
+  ): Promise<ControlRecord> {
     const action = request.pause ? "pause_campaign" : "resume_campaign";
-    return this.transaction(() => {
-      const known = this.requestRecord(request.id, campaignId, action);
-      if (known) return { record: known, reason: null };
+    return this.transaction((): ControlRecord => {
+      const known = this.standingOf(request.id, campaignId, action, standing);
+      if (known) return known;
       const row = this.sql("SELECT launched_at, paused_since FROM campaigns WHERE id = ?").get(campaignId);
-      if (!row) return { record: "refused" as const, reason: "There is no such campaign." };
+      if (!row) return { kind: "answered", answer: "refused", reason: "There is no such campaign.", effect: null };
       const reason = refusal({ launchedAt: numOrNull(row, "launched_at"), pausedSince: numOrNull(row, "paused_since") });
-      if (reason !== null) return { record: "refused" as const, reason };
+      if (reason !== null) {
+        this.storeRequest(request.id, { target: campaignId, action, answer: "refused", reason, effect: null }, now);
+        return { kind: "answered", answer: "refused", reason, effect: null };
+      }
       // Every lead that has not ended, loaded as it stood before the change and written as the change leaves it.
       for (const e of this.sql("SELECT id FROM enrollments WHERE campaign_id = ? AND ended IS NULL ORDER BY enrolled_at, id").all(campaignId)) {
         const base = this.load(str(e, "id"), now);
@@ -125,8 +155,8 @@ export class SqliteEngineStore implements EngineStore {
       this.run("UPDATE campaigns SET paused_since = ?, version = version + 1 WHERE id = ?", [request.pause ? now : null, campaignId]);
       if (request.pause) this.run("INSERT INTO hold_intervals (scope, owner_id, from_wall) VALUES ('campaign', ?, ?)", [campaignId, now]);
       else this.run("UPDATE hold_intervals SET to_wall = ? WHERE scope = 'campaign' AND owner_id = ? AND to_wall IS NULL", [now, campaignId]);
-      this.run("INSERT INTO control_requests (request_id, target, action, at_wall) VALUES (?, ?, ?, ?)", [request.id, campaignId, action, now]);
-      return { record: "accepted" as const, reason: null };
+      this.storeRequest(request.id, { target: campaignId, action, answer: "accepted", reason: null, effect: null }, now);
+      return { kind: "answered", answer: "accepted", reason: null, effect: null };
     });
   }
 
