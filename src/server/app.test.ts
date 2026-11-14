@@ -2,8 +2,10 @@ import { beforeEach, describe, expect, test } from "vitest";
 import { business, csvOf, person } from "../../test/support/export-builder.ts";
 import { scraperExport } from "../../test/support/fixtures.ts";
 import { testApi, type TestApi } from "../../test/support/http.ts";
+import { openSqliteStore } from "./persistence/sqlite-store.ts";
 import type {
   ApiError,
+  CampaignDetail,
   CampaignListItem,
   CompanyRecord,
   ImportRecord,
@@ -52,6 +54,20 @@ describe("campaigns", () => {
     expect(res.body.campaigns).toEqual([
       expect.objectContaining({ id: campaign.id, leadCount: 6, lastImport: expect.objectContaining({ counts: expect.objectContaining({ new: 6 }) }) }),
     ]);
+  });
+
+  test("a campaign's read counts its own leads, by a query for that campaign alone (council G)", async () => {
+    const store = openSqliteStore(":memory:");
+    let listed = 0;
+    const counting = new Proxy(store, { get: (target, prop, receiver) => (prop === "listCampaigns" ? async () => { listed += 1; return target.listCampaigns(); } : Reflect.get(target, prop, receiver) as unknown) });
+    api = testApi({ store: counting });
+    const first = await api.createCampaign("Physio clinics, London", "Europe/London");
+    await api.importRun(first.id, "run1");
+    const second = await api.createCampaign("Dental clinics, Leeds", "Europe/London");
+    listed = 0;
+    expect((await api.get<CampaignDetail>(`/api/campaigns/${first.id}`)).body.leadCount).toBe(6);
+    expect((await api.get<CampaignDetail>(`/api/campaigns/${second.id}`)).body.leadCount).toBe(0);
+    expect(listed).toBe(0);
   });
 
   test("a campaign name is at most 100 characters, and the refusal says so", async () => {

@@ -258,7 +258,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   app.get("/campaigns/:id", async (c) => {
     const campaign = await store.campaign(c.req.param("id"));
     if (!campaign) return notFound(c, "campaign");
-    const leadCount = (await store.listCampaigns()).find((item) => item.id === campaign.id)?.leadCount ?? 0;
+    const leadCount = await store.leadCount(campaign.id);
     return c.json<CampaignDetail>({ campaign, imports: await store.listImports(campaign.id), leadCount, sequence: await sequenceSummary(campaign.id), ...(await pauseRead(campaign.id)) });
   });
 
