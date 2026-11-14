@@ -1,6 +1,7 @@
 import type { Route } from "@playwright/test";
 import type {
   ApiError,
+  BeforeLaunchView,
   Campaign,
   CampaignListItem,
   CompanyRecord,
@@ -24,6 +25,7 @@ export type MockBody =
   | PersonRecord
   | CompanyRecord
   | FileCheckResult
+  | BeforeLaunchView
   | NeedsAttention;
 
 export function respond(route: Route, body: MockBody, status = 200): Promise<void> {

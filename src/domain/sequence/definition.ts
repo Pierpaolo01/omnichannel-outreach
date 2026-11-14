@@ -38,12 +38,17 @@ export interface TrackDefinition {
   readonly removed: boolean;
   /** A phone track's declined path, when the canvas has set one. Read from ticket 16 on; nothing reads it yet. */
   readonly declinedPath?: DeclinedPath;
+  /**
+   * A phone track's call skip limit in days (ADR 0003 3.5; ticket 14c: set on each phone track). A
+   * phone track saved before ticket 14c has none of its own and reads the campaign's (`skipLimitOf` in calls.ts, the one reading of the limit).
+   */
+  readonly callSkipLimitDays?: number;
 }
 
 export interface CampaignDefinition {
   /** The campaign's default zone, used when neither the lead nor its company has one. */
   readonly timezone: string;
-  /** The call skip limit in days (ADR 0003 3.5); stored for later tickets. */
+  /** The call skip limit in days (ADR 0003 3.5), for a phone track that holds none of its own (`skipLimitOf` in calls.ts). */
   readonly callSkipLimitDays: number;
   /** Sender accounts email tracks may use. */
   readonly emailPool: readonly string[];
@@ -79,6 +84,7 @@ export const liveSteps = (track: TrackDefinition): StepDefinition[] => track.ste
 export const ownSubject = (step: StepDefinition): string => (step.threading === "new_subject" ? step.subject : "");
 
 const isWholeDays = (n: number) => Number.isInteger(n) && n >= 0;
+
 
 /**
  * Plain messages for a definition that cannot be saved (ADR 0003 7.1). Empty when it can.
@@ -126,6 +132,10 @@ export function definitionProblems(def: CampaignDefinition, previous: CampaignDe
       if (!Number.isInteger(w.day) || w.day < 0 || w.day > 6) problems.push(`${name}'s window names a day that does not exist.`);
       if (!Number.isInteger(w.start) || !Number.isInteger(w.end) || w.start < 0 || w.start > 23 || w.end < 0 || w.end > 24) problems.push(`${name}'s window hours are whole hours from 0 to 24.`);
       else if (w.start === w.end) problems.push(`${name}'s window starts and ends at the same hour.`);
+    }
+    if (track.callSkipLimitDays !== undefined) {
+      if (track.channel !== "call") problems.push("Only a phone track has a call skip limit.");
+      else if (!isWholeDays(track.callSkipLimitDays) || track.callSkipLimitDays === 0) problems.push(`${name}'s call skip limit is a whole number of days, at least 1.`);
     }
     const steps = liveSteps(track);
     // A phone track is one call with no follow-ups (spec "Phone tracks"); the call has no copy.

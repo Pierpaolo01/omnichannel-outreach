@@ -16,9 +16,11 @@ import { FULL_SEARCH, inShard, SEED } from "./sequence-chunks.ts";
  * behaviour the runs report (`stats.features`). Which behaviours those are is `CALL_FEATURES`, and
  * `pnpm check` asserts that the fixed seeds' runs reach every one of them, so a change to the generator
  * cannot silently drop one. Refresh both when the generator changes (last swept on 14 November 2026, ticket
- * 15a after the council on 228cd3b: 75 behaviours).
+ * 15a after the council on 228cd3b: 75 behaviours). The merge into ticket 14c added each phone track's own
+ * skip limit, drawn from a stream of its own, and three behaviours for it; seed 20 was added then, as the
+ * first seed reaching "outcome-on-a-redial-for-tomorrow", which the limits moved off the fixed seeds.
  */
-export const CALL_FIXED_SEEDS: readonly number[] = [9, 15, 35, 40, 46, 61, 73, 76, 79];
+export const CALL_FIXED_SEEDS: readonly number[] = [9, 15, 20, 35, 40, 46, 61, 73, 76, 79];
 
 /** Every behaviour the fixed seeds must reach between them. */
 export const CALL_FEATURES: readonly string[] = [
@@ -63,6 +65,9 @@ export const CALL_FEATURES: readonly string[] = [
   "limit:1",
   "limit:2",
   "limit:3",
+  "limit:a-track's-own",
+  "limit:a-track's-own-not-the-campaign's",
+  "limit:the-campaign's",
   "outcome-on-a-redial-for-tomorrow",
   "outcome-refused",
   "outcome:callback_requested",

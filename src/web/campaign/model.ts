@@ -26,8 +26,15 @@ export function newEmailTrack(): TrackDefinition {
   return newTrack("email");
 }
 
-/** A new track on `channel`, starting at launch: weekdays from 09:00 to 17:00 in the lead's time, and an empty first message. */
-export function newTrack(channel: "email" | "sms"): TrackDefinition {
+/** The skip limit every new phone track starts with (spec "Unfinished call tasks": default 2). */
+export const DEFAULT_SKIP_LIMIT_DAYS = 2;
+
+/**
+ * A new track on `channel`, starting at launch, with weekdays from 09:00 to 17:00 in the lead's time
+ * (for a phone track, its calling hours): an empty first message, or for a phone track its one call,
+ * which has no copy, and the default skip limit (ADR 0003, ticket 14c).
+ */
+export function newTrack(channel: "email" | "sms" | "call"): TrackDefinition {
   return {
     id: newId("track"),
     channel,
@@ -36,6 +43,7 @@ export function newTrack(channel: "email" | "sms"): TrackDefinition {
     steps: [newStep(true)],
     start: { kind: "entry" },
     removed: false,
+    ...(channel === "call" ? { callSkipLimitDays: DEFAULT_SKIP_LIMIT_DAYS } : {}),
   };
 }
 
@@ -146,7 +154,14 @@ export function threadSubjectOf(steps: readonly StepDefinition[], index: number)
 /** What a launched campaign does on its own, by the channels its tracks use. */
 export function sendsOnItsOwn(def: CampaignDefinition): string {
   const channels = new Set(def.tracks.filter((t) => !t.removed).map((t) => t.channel));
-  if (channels.has("email") && channels.has("sms")) return "Email and texts go out on their own, inside each lead’s sending window.";
-  if (channels.has("sms")) return "Texts go out on their own, inside each lead’s sending window.";
-  return "Email goes out on its own, inside each lead’s sending window.";
+  // A call is never made on its own: it goes on the user's list, and the user dials it (ticket 14c).
+  // The engine places a due call at once, within the daily capacity, and lists it as later today until
+  // the lead's calling hours open (ADR 0003 4.4; council on 2cf1d90, item 3).
+  const calls = channels.has("call") ? "Due calls appear on your list within your daily call capacity; work them during each lead’s calling hours." : "";
+  const own =
+    channels.has("email") && channels.has("sms") ? "Email and texts go out on their own, inside each lead’s sending window."
+    : channels.has("sms") ? "Texts go out on their own, inside each lead’s sending window."
+    : channels.has("email") ? "Email goes out on its own, inside each lead’s sending window."
+    : "";
+  return [own, calls].filter(Boolean).join(" ");
 }
