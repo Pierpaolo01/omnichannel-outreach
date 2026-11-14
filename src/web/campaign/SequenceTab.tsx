@@ -682,8 +682,7 @@ function PhoneInspector({ track, editor, onLoadedStored, onClose, onRemoved }: {
       <p className="rounded-field bg-raised px-3 py-2 text-[13.5px] text-ink-2">
         A phone track is one call, placed on your list when it falls due. You dial it and log what happened. For a second planned attempt, add another phone track. Redials and callbacks arrive with a later release.
       </p>
-      <fieldset disabled={locked} className="flex min-w-0 flex-col gap-[18px]">
-        <legend className="sr-only">The call</legend>
+      <div className="flex min-w-0 flex-col gap-[18px]">
         <div className="flex min-w-0 flex-col gap-1.5">
           <label htmlFor={scriptId(track.id)} className="text-[13px] font-semibold text-muted">
             Call script
@@ -692,6 +691,10 @@ function PhoneInspector({ track, editor, onLoadedStored, onClose, onRemoved }: {
             id={scriptId(track.id)}
             className="textarea min-h-[120px] w-full [field-sizing:content] border-line-strong text-[14px] leading-[1.55]"
             value={editor.draft.callScript ?? ""}
+            // Once running, the script is read, not edited: read-only, so it can still be reached,
+            // scrolled and copied. While a launch or a load is pending, authoring is locked (1.1.1).
+            readOnly={editor.launched}
+            disabled={locked && !editor.launched}
             placeholder="Talking points for your calls"
             aria-describedby={scriptHint}
             onChange={(e) => editor.update((d) => ({ ...d, callScript: e.target.value }))}
@@ -708,6 +711,7 @@ function PhoneInspector({ track, editor, onLoadedStored, onClose, onRemoved }: {
               min={1}
               step={1}
               inputMode="numeric"
+              disabled={locked}
               className="input input-sm w-[62px] border-line-strong text-right"
               value={skipText ?? String(skipLimit)}
               aria-label="Days before an unworked call is skipped"
@@ -725,7 +729,7 @@ function PhoneInspector({ track, editor, onLoadedStored, onClose, onRemoved }: {
             Counted from the day the call falls due; 2 days unless you change it. Skipping an unworked call arrives with a later release: until then a call stays on your list until you log it.
           </p>
         </div>
-      </fieldset>
+      </div>
       <section aria-labelledby={declinedId} className="flex flex-col gap-1">
         <h3 id={declinedId} className="text-[13px] font-semibold text-muted">
           If they decline on the call

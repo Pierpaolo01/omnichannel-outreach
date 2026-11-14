@@ -961,7 +961,8 @@ export const SCREENS: readonly Screen[] = [
     open: async (page) => {
       const id = await campaignWith(page, "Two channels and a call, no script", { ...WITH_A_CALL, callScript: "" });
       await page.goto(`/campaigns/${id}?track=call`);
-      await settle(page, "Talking points for your calls");
+      // The placeholder is not text: wait for the field itself to be shown empty.
+      await page.getByPlaceholder("Talking points for your calls").waitFor();
     },
   },
   {
