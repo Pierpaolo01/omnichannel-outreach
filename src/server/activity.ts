@@ -19,8 +19,8 @@
  */
 import type { ActivityEntry, EnrollmentView } from "../shared/api.ts";
 import { displayPhone } from "../domain/phone.ts";
-import { goodNumbers, skipLimitOf } from "../domain/sequence/calls.ts";
-import { goodEmail, goodMobile, wallAtLead } from "../domain/sequence/progress.ts";
+import { goodNumbers, isListed, skipLimitOf } from "../domain/sequence/calls.ts";
+import { goodEmail, goodMobile, runs, wallAtLead } from "../domain/sequence/progress.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
 import { trackLabel } from "../shared/track-label.ts";
 import { callRecordView } from "./engine/call-views.ts";
@@ -157,8 +157,9 @@ function callEntries(
       entries.push({ campaign, at: record.at, kind: "call", channel: "call", track: label, outcome: record.outcome, number: record.number, note: record.note, redial: record.redial, callbackAt: record.callbackAt, onCallback: askedFor, zone: state.lead.zone });
       if (c.outcome !== "skip_for_now") askedFor = c.outcome === "callback_requested" ? record.callbackAt : null;
     }
-    // A callback still open after the time asked for is overdue (Q12): shown at that time until its outcome.
-    if (task.open && task.kind === "callback" && task.callbackAt !== null && task.callbackAt <= now && state.subject.ended === null) {
+    // A callback still listed after the time asked for is overdue (Q12): shown at that time until its outcome. The
+    // listing rule decides, so a lead that replied or was stopped (its task kept for a restart) shows none.
+    if (task.kind === "callback" && task.callbackAt !== null && task.callbackAt <= now && isListed(state, task)) {
       const at = new Date(task.callbackAt).toISOString();
       entries.push({ campaign, at, kind: "callback_overdue", channel: "call", track: label, callbackAt: at, zone: state.lead.zone });
     }
@@ -177,6 +178,17 @@ function callEntries(
   if (track.finishedAt !== null && track.finishReason === "skipped_missing_channel") entries.push({ campaign, at: track.finishedAt, kind: "skipped", channel: "call", track: label, stepNumber: null, reason: "no_number" });
   const unworked = tasks.at(-1);
   if (track.finishedAt !== null && track.finishReason === "skipped_unworked" && unworked) {
-    entries.push({ campaign, at: track.finishedAt, kind: "skipped", channel: "call", track: label, stepNumber: null, reason: "unworked", dueAt: new Date(unworked.dueWall).toISOString(), limitDays: skipLimitOf(def, track.trackId) });
+    // Each track after it, as its stored progress stands now: never a start that has not happened (verifier on eac9f6c, F2).
+    const after = def.tracks
+      .filter((t) => !t.removed && t.start.kind === "after" && t.start.trackId === track.trackId)
+      .flatMap((t): Extract<ActivityEntry, { reason: "unworked" }>["after"][number][] => {
+        const p = state.tracks.find((x) => x.trackId === t.id);
+        if (!p) return [];
+        if (p.startedAt !== null) return [{ track: labelOf(t.id), state: "started" as const, startsAt: null }];
+        if (p.startAt === null) return [];
+        if (!runs(state)) return [{ track: labelOf(t.id), state: "held" as const, startsAt: null }];
+        return [{ track: labelOf(t.id), state: "waiting" as const, startsAt: new Date(wallAtLead(state.subject.clock, state.freezes, p.startAt, now)).toISOString() }];
+      });
+    entries.push({ campaign, at: track.finishedAt, kind: "skipped", channel: "call", track: label, stepNumber: null, reason: "unworked", dueAt: new Date(unworked.dueWall).toISOString(), limitDays: skipLimitOf(def, track.trackId), after });
   }
 }

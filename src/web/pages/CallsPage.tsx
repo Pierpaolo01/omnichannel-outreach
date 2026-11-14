@@ -10,7 +10,7 @@ import {
   CALLBACK_RELEASE_LINE,
   callbackHoldLine,
   callbackLine,
-  noGoodNumberLine,
+  noGoodNumberText,
   redialLines,
   skipLine,
   zonePlace,
@@ -100,7 +100,9 @@ function useKeyboardFocus(snap: DeskSnapshot): (el: HTMLElement | null, role: "n
 
 function Status({ snap }: { snap: DeskSnapshot }) {
   const confirming = snap.confirming && snap.task?.state === "ready" ? confirmingLine(whoOf(snap.task.view)) : "";
-  const text = snap.pending ? pendingLine(snap.pending) : confirming || (snap.logged ? loggedLine(snap.logged) : "");
+  // What was logged is said in the user's zone, from the queue's read: the call's own zone is the prospect's (review bot on eac9f6c).
+  const userZone = snap.queue.state === "ready" ? snap.queue.view.userZone : null;
+  const text = snap.pending ? pendingLine(snap.pending) : confirming || (snap.logged && userZone !== null ? loggedLine(snap.logged, userZone) : "");
   return (
     <>
       <p role="status" className={text ? `rounded-field px-4 py-2.5 text-[14px] ${snap.pending?.unconfirmed ? "bg-pause-soft text-base-content" : "bg-you-soft text-base-content"}` : "sr-only"}>
@@ -330,7 +332,7 @@ function Sheet({ desk, snap, task, userZone, today, placeFocus }: { desk: CallDe
           )}
           {task.kind === "callback" && task.listed && task.numbers.every((n) => n.bad) && (
             <p role="note" className="mt-3 max-w-[70ch] text-[14px] font-medium text-band-warn">
-              {noGoodNumberLine(who)}
+              {noGoodNumberText(who).full}
             </p>
           )}
           {snap.numberProblem && (
@@ -567,7 +569,7 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
                 {draft.outcome === "gatekeeper" && !pending ? "Add a note about who you spoke to. " : ""}
                 {outcomeNumberLine(draft.outcome, dialled && !snap.numberProblem ? dialled : null, pending)}
               </p>
-              {task.redialOutcomes.includes(draft.outcome) && <RedialChoice desk={desk} snap={snap} task={task} />}
+              {task.redialOutcomes.includes(draft.outcome) && task.redial && <RedialChoice desk={desk} snap={snap} task={task} redial={task.redial} />}
             </>
           )}
           {task.kind === "callback" && draft.outcome !== "skip_for_now" && draft.outcome !== "callback_requested" && <p className="text-[13px] text-muted">{CALLBACK_RELEASE_LINE}</p>}
@@ -626,8 +628,8 @@ function OutcomePill({ label, pressed, locked, onPress }: { label: string; press
 }
 
 /** "Call again tomorrow" (the prototype's redial check), with what the engine then does, from the call's read. */
-function RedialChoice({ desk, snap, task }: { desk: CallDesk; snap: DeskSnapshot; task: CallTaskView }) {
-  const lines = redialLines(task);
+function RedialChoice({ desk, snap, task, redial }: { desk: CallDesk; snap: DeskSnapshot; task: CallTaskView; redial: NonNullable<CallTaskView["redial"]> }) {
+  const lines = redialLines({ track: task.track, redial });
   const hint = useId();
   return (
     <label className="flex cursor-pointer items-start gap-2.5">

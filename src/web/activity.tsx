@@ -103,7 +103,11 @@ export function describeEntry(entry: ActivityEntry): { icon: IconName; tone: str
       case "skipped":
         if (entry.reason === "unworked") {
           const limit = entry.limitDays === 1 ? "a day" : `${entry.limitDays} days`;
-          return { icon: "system", tone: PLAIN, title: `${entry.track.label} skipped, not called`, body: `Not called within ${limit} of its due date, ${dateIn(localZone(), entry.dueAt)}, so the call was skipped. The tracks after it started.`, track: null };
+          // What each track after it has done at this read, from the server: never a start that has not happened (verifier on eac9f6c, F2).
+          const after = entry.after.map((a) =>
+            a.state === "started" ? `${a.track.label} started after it.` : a.state === "waiting" && a.startsAt ? `${a.track.label} starts after its delay, on ${dateIn(localZone(), a.startsAt)}.` : `${a.track.label} starts after its delay, once their outreach is no longer held.`,
+          );
+          return { icon: "system", tone: PLAIN, title: `${entry.track.label} skipped, not called`, body: [`Not called within ${limit} of its due date, ${dateIn(localZone(), entry.dueAt)}, so the call was skipped.`, ...after].join(" "), track: null };
         }
         return { icon: "system", tone: PLAIN, title: `${entry.track.label} skipped`, body: "No good number to call: every number is missing or marked wrong.", track: null };
       case "released":

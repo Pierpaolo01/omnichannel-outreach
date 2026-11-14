@@ -81,12 +81,16 @@ export function reasonLine(item: CallQueueItem, userZone: string, today?: string
       if (!item.callbackAt) return { text: "Callback", tone: "pause" };
       const yours = timeIn(userZone, item.callbackAt);
       const theirs = timeIn(item.zone, item.callbackAt);
-      return { text: `Callback they asked for at ${theirs} their time${theirs === yours ? "" : `, ${yours} yours`}`, tone: "pause" };
+      return { text: `Callback they asked for at ${theirs} their time${theirs === yours ? "" : `, ${yours} yours`}${item.noGoodNumber ? `; ${noGoodNumberText(null).short}` : ""}`, tone: "pause" };
     }
     case "overdue": {
       if (!item.callbackAt) return { text: "Callback overdue", tone: "crit" };
-      const day = today !== undefined && isoDateIn(item.zone, item.callbackAt) === today ? "today" : dateIn(item.zone, item.callbackAt);
-      return { text: `Callback overdue since ${day} at ${timeIn(item.zone, item.callbackAt)} their time${item.noGoodNumber ? ", no good number left" : ""}`, tone: "crit" };
+      // "today" only when it is today for the prospect and for the user alike.
+      const isToday = today !== undefined && isoDateIn(item.zone, item.callbackAt) === today && isoDateIn(userZone, item.callbackAt) === today;
+      const day = isToday ? "today" : dateIn(item.zone, item.callbackAt);
+      const theirs = timeIn(item.zone, item.callbackAt);
+      const yours = timeIn(userZone, item.callbackAt);
+      return { text: `Callback overdue since ${day} at ${theirs} their time${theirs === yours ? "" : `, ${yours} yours`}${item.noGoodNumber ? `; ${noGoodNumberText(null).short}` : ""}`, tone: "crit" };
     }
     case "due":
       return { text: `Due today${tonight}`, tone: "muted" };
@@ -166,7 +170,7 @@ export function confirmingLine(who: string): string {
 }
 
 /** What the server did with the last accepted action, read from its answer. */
-export function loggedLine(logged: NonNullable<DeskSnapshot["logged"]>, userZone: string = logged.task.zone): string {
+export function loggedLine(logged: NonNullable<DeskSnapshot["logged"]>, userZone: string): string {
   const { body, task, who } = logged;
   if (body.outcome === "skip_for_now") return `${who} skipped for now.${task.listed ? (task.kind === "callback" ? " The callback stays on today’s list, and their outreach stays held." : " The call stays on today’s list.") : ""}`;
   // What the server stored for this press: its outcome, redial and callback time (ticket 15b), never the draft's.
@@ -178,7 +182,7 @@ export function loggedLine(logged: NonNullable<DeskSnapshot["logged"]>, userZone
   }
   if (stored?.redial) {
     const parts = [`${who}: ${OUTCOME_LABEL[stored.outcome].toLowerCase()} logged, with a redial.`];
-    if (task.open && !task.listed) parts.push(`The call is on the list for ${dayLabel(task.listedFor)}, and the ${task.track.label.toLowerCase()} stays open.`);
+    if (task.open && !task.listed && task.listedFrom !== null) parts.push(`The call is on the list for ${dayLabel(task.listedFrom)}, and the ${task.track.label.toLowerCase()} stays open.`);
     if (task.open && task.skipLimit?.ifUnworked) parts.push(`If it isn’t worked, it is skipped at ${endOf(task.skipLimit.ifUnworked)}.`);
     return withNote(parts, body, task, who);
   }
@@ -255,10 +259,7 @@ function overdueItem(today: Pick<TodayView, "overdueCallbacks" | "userZone" | "d
   const name = (x: CallQueueItem) => x.person?.name ?? x.company.name;
   const asked = od.map((x) => `${name(x)} asked for ${x.callbackAt ? callbackWhen(x.callbackAt, x.zone, today.userZone) : "a callback"}.`).join(" ");
   const stuck = od.filter((x) => x.noGoodNumber);
-  const q13 =
-    stuck.length === 0
-      ? ""
-      : ` Every number for ${stuck.map(name).join(" and ")} is marked wrong, so nothing can be logged on ${stuck.length === 1 ? "that callback" : "those callbacks"} until a new number arrives by import or they reply.`;
+  const q13 = stuck.map((x) => ` ${noGoodNumberText(name(x)).full}`).join("");
   return {
     key: "overdue-callbacks",
     tone: "crit",
@@ -268,11 +269,38 @@ function overdueItem(today: Pick<TodayView, "overdueCallbacks" | "userZone" | "d
   };
 }
 
-/** Everything Needs attention reports, each once; with Today's read, overdue callbacks first. */
-export function attentionItems(n: NeedsAttention, userZone: string, today?: Pick<TodayView, "overdueCallbacks" | "userZone" | "date"> | null): AttentionItem[] {
+/**
+ * Calls carried over from earlier days (ticket 15b; spec: "overdue callbacks and rolled-over calls show in Needs
+ * attention"): one row from Today's counts, after overdue callbacks. Up next lists each with its reason.
+ */
+export function carriedItem(today: Pick<TodayView, "carriedOver" | "carriedOverLastDay">): AttentionItem | null {
+  const n = today.carriedOver;
+  const last = today.carriedOverLastDay;
+  if (n === 0) return null;
+  const lastLine =
+    last === 0
+      ? ""
+      : last === n
+        ? n === 1
+          ? " It is on its last day before it is skipped."
+          : ` All ${n} are on their last day before they are skipped.`
+        : ` ${last} of them ${last === 1 ? "is on its" : "are on their"} last day before ${last === 1 ? "it is" : "they are"} skipped.`;
+  return {
+    key: "carried-over",
+    tone: "pause",
+    title: n === 1 ? "One call carried over from an earlier day" : `${n} calls carried over from earlier days`,
+    body: `Rolled over or redialed, ${n === 1 ? "it is" : "each is"} on your list with ${n === 1 ? "its" : "its own"} original due date.${lastLine}`,
+    action: { label: "Open Calls", href: "/calls" },
+  };
+}
+
+/** Everything Needs attention reports, each once; with Today's read, overdue callbacks first, then calls carried over. */
+export function attentionItems(n: NeedsAttention, userZone: string, today?: Pick<TodayView, "overdueCallbacks" | "userZone" | "date" | "carriedOver" | "carriedOverLastDay"> | null): AttentionItem[] {
   const items: AttentionItem[] = [];
   const overdue = today ? overdueItem(today) : null;
   if (overdue) items.push(overdue);
+  const carried = today ? carriedItem(today) : null;
+  if (carried) items.push(carried);
   for (const p of n.senderProblems) {
     items.push({
       key: `sender-${p.accountId}`,
@@ -355,12 +383,16 @@ export const NOT_QUEUED_LINE = "This outcome couldn’t be queued on this device
 // Redials and callbacks (ticket 15b). What the engine does, said from the server's read of the call before
 // Log (its `redial` and `skipLimit` facts) and from its answer after; nothing here computes a date.
 
-/** Under "Call again tomorrow", from the call's read: where a redial puts the call, and when the skip limit still ends it. */
-export function redialLines(task: Pick<CallTaskView, "redial" | "skipLimit" | "track">): { checked: string; unchecked: string } {
+/**
+ * Under "Call again tomorrow", from the call's read: where a redial puts the call, and when the skip limit still
+ * ends it, both from the engine's own outcome applied to a copy of the call (`redial`, review bot on eac9f6c).
+ */
+export function redialLines(task: Pick<CallTaskView, "track"> & { readonly redial: NonNullable<CallTaskView["redial"]> }): { checked: string; unchecked: string } {
   const track = task.track.label.toLowerCase();
-  const moves = task.redial ? `The call moves to the list for ${dayLabel(task.redial.listedFor)}, and the ${track} stays open, so the tracks after it keep waiting.` : `The call moves to tomorrow’s list, and the ${track} stays open.`;
-  const limit = task.skipLimit
-    ? ` The skip limit still counts from ${dayLabel(task.skipLimit.dueDate)}, its original due date${task.redial?.ifUnworked ? `: if it isn’t worked, it is skipped at ${endOf(task.redial.ifUnworked)}` : ""}.`
+  const { listedFor, skipLimit } = task.redial;
+  const moves = `The call moves to the list for ${dayLabel(listedFor)}, and the ${track} stays open, so the tracks after it keep waiting.`;
+  const limit = skipLimit
+    ? ` The skip limit still counts from ${dayLabel(skipLimit.dueDate)}, its original due date${skipLimit.ifUnworked ? `: if it isn’t worked, it is skipped at ${endOf(skipLimit.ifUnworked)}` : ""}.`
     : "";
   return { checked: `${moves}${limit}`, unchecked: `Without a redial, this call is done: the ${track} finishes, and nothing calls them again unless you ask.` };
 }
@@ -400,9 +432,17 @@ export function skipLine(task: Pick<CallTaskView, "kind">): string {
   return task.kind === "callback" ? "The callback goes to the end of today’s list and stays open; their outreach stays held." : "The call goes to the end of today’s list. Nothing else changes.";
 }
 
-/** Question Q13's interim, said plainly: a callback whose lead has no good number left. */
-export function noGoodNumberLine(who: string): string {
-  return `Every number for ${who} is marked wrong, so nothing but skip for now can be logged on this callback. It stays on your list, flagged overdue once its time passes, and their other outreach in this campaign stays held until a new number arrives by import or they reply. Pausing them or skipping the step arrives with a later release.`;
+/**
+ * Question Q13's interim, said plainly (verifier on eac9f6c, F4): a callback whose lead has no good number left.
+ * Only skip for now can be logged, and it keeps the callback open. The one sentence for the call sheet, the queue
+ * and Up next (`short`), Needs attention and the record, so they cannot disagree.
+ */
+export function noGoodNumberText(who: string | null): { short: string; full: string } {
+  const whose = who === null ? "Every number" : `Every number for ${who}`;
+  return {
+    short: "no good number left, only skip for now can be logged",
+    full: `${whose} is marked wrong, so only skip for now can be logged on this callback, and it keeps the callback open. It stays on the call list, flagged overdue once its time has passed, and their other outreach in this campaign stays held until a new number arrives by import or they reply. Pausing them or skipping the step arrives with a later release.`,
+  };
 }
 
 /** One sentence per open call on the person and company-lead record (ticket 15b), from the server's read as of `today`. */
@@ -414,7 +454,7 @@ export function recordCallLine(call: RecordCallView, today: string): string {
     const at = call.callbackAt ? `${dateIn(call.zone, call.callbackAt)} at ${timeIn(call.zone, call.callbackAt)} their time` : "at the time they asked for";
     const overdue = call.reason === "overdue";
     const lines = [overdue ? `Callback ${at}, now overdue. It stays on your call list until you log what happened, and their automated outreach in this campaign stays held until then.` : `Callback ${at}. Their automated outreach in this campaign is held until you log how it went.`];
-    if (call.noGoodNumber) lines.push("Every number is marked wrong, so nothing can be logged on it until a new number arrives by import or they reply. Pausing them or skipping the step arrives with a later release.");
+    if (call.noGoodNumber) lines.push(noGoodNumberText(null).full);
     return lines.join(" ");
   }
   if (call.heldByCallback) return `Their call on the ${call.track.label.toLowerCase()} waits while their callback is open: only the callback is on the list.`;

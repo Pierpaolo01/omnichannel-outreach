@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import type { CallQueueItem } from "../../shared/api.ts";
+import type { CallQueueItem, CallTaskView } from "../../shared/api.ts";
 import { clockLine, refusedRecordLine } from "./wording.ts";
 
 describe("a kept refusal's reason (merge of ticket 15a)", () => {
@@ -38,5 +38,40 @@ describe("the sheet's calling-hours label, from the server's fact about the hour
   }
   test("a call off the list says nothing about its hours", () => {
     expect(clockLine({ ...view("due", { open: true, opensLaterToday: null }), listed: false }, "Europe/London")).toEqual({ text: "Their time", tone: "plain" });
+  });
+});
+
+describe("calls carried over from earlier days, in Needs attention (review bot on eac9f6c, item 4)", () => {
+  test("none shows no row; one and several are said in the singular and plural, with how many are on their last day", async () => {
+    const { carriedItem } = await import("./wording.ts");
+    expect(carriedItem({ carriedOver: 0, carriedOverLastDay: 0 })).toBeNull();
+    expect(carriedItem({ carriedOver: 1, carriedOverLastDay: 0 })).toMatchObject({ title: "One call carried over from an earlier day", body: "Rolled over or redialed, it is on your list with its original due date.", action: { label: "Open Calls", href: "/calls" } });
+    expect(carriedItem({ carriedOver: 1, carriedOverLastDay: 1 })?.body).toBe("Rolled over or redialed, it is on your list with its original due date. It is on its last day before it is skipped.");
+    expect(carriedItem({ carriedOver: 3, carriedOverLastDay: 1 })).toMatchObject({ title: "3 calls carried over from earlier days", body: "Rolled over or redialed, each is on your list with its own original due date. 1 of them is on its last day before it is skipped." });
+    expect(carriedItem({ carriedOver: 3, carriedOverLastDay: 2 })?.body).toBe("Rolled over or redialed, each is on your list with its own original due date. 2 of them are on their last day before they are skipped.");
+    expect(carriedItem({ carriedOver: 4, carriedOverLastDay: 4 })?.body).toBe("Rolled over or redialed, each is on your list with its own original due date. All 4 are on their last day before they are skipped.");
+  });
+});
+
+describe("a callback's time in the user's zone and the prospect's, across the March clock change (review bot and verifier on eac9f6c)", () => {
+  test("a New York user and a London prospect, Sunday 28 March 2027 at 18:30 their time: 13:30 yours, on the preview and the logged line", async () => {
+    const { callbackWhen, loggedLine } = await import("./wording.ts");
+    const { zonedInstant } = await import("./callbackTime.ts");
+    const at = zonedInstant("2027-03-28", "18:30", "Europe/London");
+    expect(new Date(at ?? 0).toISOString()).toBe("2027-03-28T17:30:00.000Z");
+    expect(callbackWhen("2027-03-28T17:30:00.000Z", "Europe/London", "America/New_York")).toBe("Sun 28 Mar at 18:30 their time, 13:30 your time");
+    const task = {
+      zone: "Europe/London",
+      open: true,
+      kind: "callback",
+      callbackAt: "2027-03-28T17:30:00.000Z",
+      campaign: { id: "c", name: "Clinics, London" },
+      company: { id: "co", name: "Harbour Lane Physio" },
+      storedCalls: [{ requestId: "r1", outcome: "callback_requested", redial: false, callbackAt: "2027-03-28T17:30:00.000Z", at: "2027-03-26T14:00:00.000Z", number: null, note: "" }],
+      personNotes: [],
+      companyNotes: [],
+    } as unknown as CallTaskView;
+    const logged = { requestId: "r1", who: "Ada Example", body: { requestId: "r1", outcome: "callback_requested" as const, numberId: "n", note: "", noteScope: "person" as const }, task };
+    expect(loggedLine(logged, "America/New_York")).toBe("Ada Example: callback requested for Sun 28 Mar at 18:30 their time, 13:30 your time. Their automated outreach in Clinics, London is held until you log how the callback went.");
   });
 });

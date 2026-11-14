@@ -558,7 +558,19 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
        * Skipped by the skip limit (ADR 0003 3.5, ticket 15b): not worked within `limitDays` of its original
        * due time `dueAt`. The entry's time is the rollover it was skipped at; the tracks after it start.
        */
-      | { readonly kind: "skipped"; readonly stepNumber: null; readonly reason: "unworked"; readonly dueAt: string; readonly limitDays: number }
+      | {
+          readonly kind: "skipped";
+          readonly stepNumber: null;
+          readonly reason: "unworked";
+          readonly dueAt: string;
+          readonly limitDays: number;
+          /**
+           * Each track that starts after this phone track, as its stored progress stands at the read (verifier on
+           * eac9f6c, F2): `started`; `waiting` out its delay, to start at `startsAt` if the lead keeps running; or
+           * `held` while the lead's outreach is held, so no day can be named.
+           */
+          readonly after: readonly { readonly track: TrackLabel; readonly state: "started" | "waiting" | "held"; readonly startsAt: string | null }[];
+        }
       | { readonly kind: "released"; readonly after: TrackLabel; readonly because: "skipped" | "failed" | "unworked" }
       /**
        * A callback whose time has passed with no outcome logged (question Q12), shown at the time asked for
@@ -721,7 +733,11 @@ export interface RecordCallView {
   readonly listed: boolean;
   /** Why it is on today's list; null when it is not. */
   readonly reason: CallReasonApi | null;
-  /** The user's date it is listed for, YYYY-MM-DD: a redial moves it on, a callback is listed from its own day. */
+  /**
+   * The first user date, from today, on which the engine's listing rule lists it (YYYY-MM-DD): a redial moves it
+   * on, a callback is listed from its own day, a day without calling hours is passed over. For a call waiting on
+   * the lead's callback, its own list date.
+   */
   readonly listedFor: string;
   readonly callbackAt: string | null;
   /** The prospect's zone. */
@@ -777,6 +793,8 @@ export interface TodayView {
   readonly overdueCallbacks: readonly CallQueueItem[];
   /** Calls on today's list carried from an earlier day: rolled over or redialed. */
   readonly carriedOver: number;
+  /** Of those, the ones skipped tonight if left unworked (`skippedTonight`): on their last day (ticket 15b). */
+  readonly carriedOverLastDay: number;
 }
 
 /** GET /api/calls: the focus queue. The focused task is the first ready now; the queue moves on only after an outcome. */
@@ -920,8 +938,14 @@ export interface CallTaskView {
   /** The skip limit on this call; null for a callback, which is never skipped. */
   readonly skipLimit: SkipLimitView | null;
   /**
-   * What a redial logged now does (ticket 15b): the user's date the call moves to, and the date at whose end
-   * it is skipped if it is still not worked (null while a hold freezes the clock). Null when no redial is offered.
+   * What a redial logged now does (ticket 15b): the engine's own outcome applied to a copy of the call, storing
+   * nothing, a callback's hold released first. The user's date the call is then listed for, and its skip limit
+   * then (null if the call would no longer be open). Null when no redial is offered or no number can be logged on.
    */
-  readonly redial: { readonly listedFor: string; readonly ifUnworked: string | null } | null;
+  readonly redial: { readonly listedFor: string; readonly skipLimit: SkipLimitView | null } | null;
+  /**
+   * The first user date, from today, on which the engine's listing rule lists this call (YYYY-MM-DD), as the
+   * record counts it; null when it lists it on none (the lead ended or is paused, the call waits on a callback).
+   */
+  readonly listedFrom: string | null;
 }

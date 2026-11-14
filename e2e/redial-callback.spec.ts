@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { respond } from "./mocks.ts";
-import { SCREENS, callbackWithNoGoodNumber, callOf, carriedAndOverdue, freshCalls, galleryRecord, openCalls, seedData } from "./screens.ts";
+import { SCREENS, callbackWithNoGoodNumber, callOf, carriedAndOverdue, carriedOnly, freshCalls, galleryRecord, openCalls, seedData } from "./screens.ts";
 
 /**
  * Redials, callbacks, rolled-over and overdue calls (ticket 15, part b), on the app over the fake email
@@ -85,7 +85,7 @@ test("a redial: the page says where the call goes and when its skip limit still 
   await at(page, f, "2026-11-11T11:00:00Z");
   await page.reload();
   await expect(page.getByText("Phone track skipped, not called")).toBeVisible();
-  await expect(page.getByText("Not called within 2 days of its due date, Mon 9 Nov, so the call was skipped. The tracks after it started.")).toBeVisible();
+  await expect(page.getByText("Not called within 2 days of its due date, Mon 9 Nov, so the call was skipped. Email track 2 started after it.")).toBeVisible();
   await expect(page.getByText("It starts after the phone track, which was skipped: its call wasn’t made within its skip limit.")).toBeVisible();
   await expect(page.getByText(/Their call/)).toHaveCount(0);
   await shot(page, "record-skipped-unworked");
@@ -213,12 +213,15 @@ test("Today and Calls show an overdue callback first, then calls carried from th
   await shot(page, "record-overdue-callback");
 });
 
-test("a callback whose lead has no good number left is shown for what it is: held, listed, overdue, and what the user can do today (Q13)", async ({ page }) => {
+test("a callback whose lead has no good number left is said the same way on the sheet, the queue, Today and the record, read at one instant: only skip for now can be logged, and it keeps the callback (Q13; verifier on eac9f6c, F4)", async ({ page }) => {
   const f = await callbackWithNoGoodNumber("q13");
+  const full = "Every number for Tom is marked wrong, so only skip for now can be logged on this callback, and it keeps the callback open. It stays on the call list, flagged overdue once its time has passed, and their other outreach in this campaign stays held until a new number arrives by import or they reply. Pausing them or skipping the step arrives with a later release.";
+  const short = "no good number left, only skip for now can be logged";
+  // One instant for all four reads: the app's clock does not move during this test.
   await openCalls(page, f);
   await expect(page.getByRole("heading", { name: "Tom" })).toBeVisible();
-  await expect(page.getByText(/Every number for Tom is marked wrong, so nothing but skip for now can be logged on this callback\./)).toBeVisible();
-  await expect(page.getByText(/until a new number arrives by import or they reply\. Pausing them or skipping the step arrives with a later release\./)).toBeVisible();
+  await expect(page.getByText(full)).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "Call queue" }).getByRole("listitem").first()).toContainText(short);
   await outcome(page, "No answer").click();
   await expect(logButton(page)).toBeDisabled();
   await outcome(page, "Skip for now").click();
@@ -226,9 +229,16 @@ test("a callback whose lead has no good number left is shown for what it is: hel
   await expect(logButton(page)).toBeEnabled();
   await shot(page, "calls-callback-no-good-number");
   await openCalls(page, f, "/");
-  await expect(page.getByRole("region", { name: "Needs attention" })).toContainText("Every number for Tom is marked wrong, so nothing can be logged on that callback until a new number arrives by import or they reply.");
+  await expect(page.getByRole("region", { name: "Needs attention" })).toContainText(full);
+  await expect(page.getByRole("region", { name: "Up next" }).getByRole("listitem").first()).toContainText(short);
   await page.goto(`${f.url}/leads/people/${f.person("Tom")}`);
-  await expect(page.getByText(/Every number is marked wrong, so nothing can be logged on it until a new number arrives by import or they reply\./)).toBeVisible();
+  await expect(page.getByText(full.replace("Every number for Tom", "Every number"), { exact: false })).toBeVisible();
+  await expect(page.getByText("nothing can be logged", { exact: false })).toHaveCount(0);
+  // Skip for now is accepted and keeps the callback open and held.
+  await openCalls(page, f);
+  await outcome(page, "Skip for now").click();
+  await logButton(page).click();
+  await expect(outcomeStatus(page)).toContainText("Tom skipped for now. The callback stays on today’s list, and their outreach stays held.");
 });
 
 test("a callback refused because its call expired meanwhile is kept with its time and note until dismissed", async ({ page }) => {
@@ -289,7 +299,7 @@ test("demonstration: a redial ages from its original due date, an unworked call 
     await at(page, f, "2026-11-11T11:00:00Z");
     await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
     await expect(page.getByText("Phone track skipped, not called")).toBeVisible();
-    await expect(page.getByText("Email track 2 started")).toBeVisible();
+    await expect(page.getByRole("listitem").filter({ hasText: /^Email track 2 started/ })).toBeVisible();
     await expect(page.getByText("Email 2 sent")).toBeVisible();
     await linger(page);
     await page.getByText("Phone track skipped, not called").scrollIntoViewIfNeeded();
@@ -323,6 +333,104 @@ test("the record says each open call's state in its campaign row: rolled over, a
   await shot(page, "record-call-states");
 });
 
+test.describe("a user in another zone than the prospect (review bot on eac9f6c, item 1)", () => {
+  test.use({ timezoneId: "America/New_York" });
+
+  test("the callback is said in their time and the user's, the same on the preview, the logged line, the queue, Today and the record", async ({ page }) => {
+    const f = await freshCalls("ready", "callback-new-york");
+    // The user works from New York; Amira is in London.
+    expect((await f.harness.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "America/New_York" })).status).toBe(200);
+    await page.clock.install({ time: f.harness.clock });
+    await page.goto(`${f.url}/calls`);
+    await expect(page.getByRole("heading", { name: "Amira Hassan" })).toBeVisible();
+    await outcome(page, "Callback requested").click();
+    await timeField(page).fill("15:30");
+    await expect(page.getByText("Callback on Mon 9 Nov at 15:30 their time, 10:30 your time. Inside their calling hours.")).toBeVisible();
+    await logButton(page).click();
+    await expect(outcomeStatus(page)).toHaveText("Amira Hassan: callback requested for Mon 9 Nov at 15:30 their time, 10:30 your time. Their automated outreach in Clinics, London is held until you log how the callback went.");
+    await expect(page.getByText("the same as yours")).toHaveCount(0);
+    const queue = page.getByRole("complementary", { name: "Call queue" });
+    await expect(queue.getByRole("listitem").filter({ hasText: "Amira Hassan" })).toContainText("Callback they asked for at 15:30 their time, 10:30 yours");
+    await page.goto(f.url);
+    await expect(page.getByText(/Amira Hassan \(callback they asked for at 15:30 their time, 10:30 yours\)/)).toBeVisible();
+    await shot(page, "today-new-york-later-today");
+
+    await at(page, f, "2026-11-09T15:45:00Z");
+    await page.reload();
+    await expect(page.getByRole("region", { name: "Needs attention" })).toContainText("Amira Hassan asked for Mon 9 Nov at 15:30 their time, 10:30 your time.");
+    await expect(page.getByRole("region", { name: "Up next" }).getByRole("listitem").first()).toContainText("Callback overdue since today at 15:30 their time, 10:30 yours");
+    await expect(page.getByText("the same as yours")).toHaveCount(0);
+    await shot(page, "today-new-york-overdue");
+    await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
+    // The record says the time asked for in their time, which is true whatever the user's zone.
+    await expect(page.getByText("Callback Mon 9 Nov at 15:30 their time, now overdue.", { exact: false })).toBeVisible();
+    await expect(page.getByText("the same as yours")).toHaveCount(0);
+  });
+});
+
+test("only calls carried over: Needs attention says how many and how many are on their last day, the same count as the Calls list, and Open Calls is reached by keyboard (review bot on eac9f6c, item 4)", async ({ page }) => {
+  const f = await carriedOnly("carried-only");
+  const list = (await f.harness.request<{ readyNow: { reason: string }[]; laterToday: { reason: string }[] }>("GET", "/api/calls")).body;
+  const carried = [...list.readyNow, ...list.laterToday].filter((x) => x.reason === "rolled_over" || x.reason === "redial").length;
+  expect(carried).toBe(4);
+  await openCalls(page, f, "/");
+  const attention = page.getByRole("region", { name: "Needs attention" });
+  await expect(attention.getByText(`${carried} calls carried over from earlier days`)).toBeVisible();
+  await expect(attention).toContainText("All 4 are on their last day before they are skipped.");
+  await expect(attention.getByText("Nothing needs you.")).toHaveCount(0);
+  await shot(page, "today-carried-only");
+  const link = attention.getByRole("link", { name: "Open Calls" });
+  await tabTo(page, link);
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(/\/calls$/);
+  await expect(page.getByRole("complementary", { name: "Call queue" }).getByRole("listitem").first()).toContainText("Rolled over, due Mon 9 Nov, last day before it’s skipped");
+});
+
+test("an unworked skip says what the track after it has done: waiting out its delay with the day it starts, then started, on a person's and a company lead's record (verifier on eac9f6c, F2)", async ({ page }) => {
+  const f = await freshCalls("delayed", "skip-delayed");
+  await page.clock.install({ time: f.harness.clock });
+  const records = [`/leads/people/${f.person("Amira Hassan")}`, `/leads/companies/${f.company("Riverside Sports Clinic")}`];
+  // Monday's calls are left unworked: skipped at the end of Tuesday, and the email after the call waits two days from then, to Friday.
+  await at(page, f, "2026-11-11T10:00:00Z");
+  for (const path of records) {
+    await page.goto(f.url + path);
+    const skip = page.getByRole("listitem").filter({ hasText: /^Phone track skipped, not called/ });
+    await expect(skip).toContainText("Not called within 2 days of its due date, Mon 9 Nov, so the call was skipped. Email track 2 starts after its delay, on Fri 13 Nov.");
+    await expect(skip).not.toContainText("started");
+    await expect(page.getByRole("listitem").filter({ hasText: /^Email track 2 started/ })).toHaveCount(0);
+  }
+  await shot(page, "record-skip-delay-waiting");
+  await at(page, f, "2026-11-13T10:00:00Z");
+  for (const path of records) {
+    await page.goto(f.url + path);
+    await expect(page.getByRole("listitem").filter({ hasText: /^Phone track skipped, not called/ })).toContainText("Email track 2 started after it.");
+    await expect(page.getByRole("listitem").filter({ hasText: /^Email track 2 started/ })).toContainText("It starts after the phone track, which was skipped: its call wasn’t made within its skip limit.");
+  }
+});
+
+test("after a reply, the record shows no call and no hold for the tasks kept for a restart: a callback, an ordinary call, and a company lead's call (review bot and verifier on eac9f6c)", async ({ page }) => {
+  const f = await freshCalls("ready", "replied-records");
+  const amira = await callOf(f, "Amira Hassan");
+  expect((await f.harness.request("POST", `/api/call-tasks/${amira.taskId}/outcome`, { requestId: "cb-before-reply", outcome: "callback_requested", callbackAt: "2026-11-09T15:00:00+00:00", numberId: amira.number("mobile") })).status).toBe(200);
+  const amiraRecord = `/leads/people/${f.person("Amira Hassan")}`;
+  const tomRecord = `/leads/people/${f.person("Tom")}`;
+  const records = [amiraRecord, tomRecord, `/leads/companies/${f.company("Riverside Sports Clinic")}`];
+  await page.clock.install({ time: f.harness.clock });
+  // Before the replies each record says its call.
+  await page.goto(f.url + amiraRecord);
+  await expect(page.getByText("Callback Mon 9 Nov at 15:00 their time. Their automated outreach in this campaign is held until you log how it went.")).toBeVisible();
+  await page.goto(f.url + tomRecord);
+  await expect(page.getByText("Their call is on today’s list.")).toBeVisible();
+  for (const address of ["amira@harbourlanephysio.example", "tom@harbourlanephysio.example", "info@riversidesports.example"]) expect(f.harness.fake.prospectReplies(address, true, null)).toBe(true);
+  await at(page, f, "2026-11-09T10:01:00Z");
+  for (const path of records) {
+    await page.goto(f.url + path);
+    await expect(page.getByText("Replied, automation stopped").first()).toBeVisible();
+    for (const said of ["held until you log", "Their call", "waits for a day", "Callback Mon"]) await expect(page.getByText(said, { exact: false })).toHaveCount(0);
+  }
+  await shot(page, "record-company-replied");
+});
+
 /** EVIDENCE_DIR only: the changed pages' states from the standing screen list (each loading, empty, error and success state), light and dark. */
 const EVIDENCE_SCREENS = [
   "today loading",
@@ -335,6 +443,7 @@ const EVIDENCE_SCREENS = [
   "calls, the list done",
   "calls, a callback on a day their calling hours never open",
   "calls, a callback logged and held",
+  "today with only calls carried over from earlier days",
   "calls, a callback time entered",
   "every outreach status, a bad number and a newer email",
 ];

@@ -890,7 +890,7 @@ describe("a redial and a callback's date and time are part of the press, like th
   test("a redial is fixed in the entry at the press, sent again unchanged after no answer, and said as the server stored it", async () => {
     const w = await world();
     const { d, view } = await ready(w);
-    expect(view.redial).toEqual({ listedFor: "2026-11-03", ifUnworked: "2026-11-03" });
+    expect(view.redial).toEqual({ listedFor: "2026-11-03", skipLimit: { dueDate: "2026-11-02", limitDays: 2, ifUnworked: "2026-11-03" } });
     d.setDraft({ outcome: "no_answer", redial: true, note: "Rang out." });
     d.log();
     await flush();

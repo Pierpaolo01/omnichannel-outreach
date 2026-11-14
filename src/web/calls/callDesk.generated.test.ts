@@ -673,7 +673,7 @@ async function run(seed: number, faults: ReadonlySet<DeskFault> = new Set()) {
     if (snap.confirming) problems.push(`9: ${t.label} is still confirming after the network settled`);
     // Invariant 11: the page's sentences agree with the server's read.
     if (snap.logged) {
-      const line = loggedLine(snap.logged);
+      const line = loggedLine(snap.logged, "Europe/London");
       const now = (await h.request<CallTaskView>("GET", `/api/call-tasks/${snap.logged.task.taskId}`)).body;
       const note = snap.logged.body.note.trim();
       if (line.includes("The note is saved") && ![...now.personNotes, ...now.companyNotes].some((n) => n.body === note)) problems.push(`11: ${t.label} says the note of ${snap.logged.requestId} is saved; the server does not hold it`);

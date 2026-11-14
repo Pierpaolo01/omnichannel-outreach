@@ -448,6 +448,13 @@ export async function callbackWithNoGoodNumber(name: string): Promise<FakeCallsA
   return f;
 }
 
+/** Tuesday 10:00: Monday's calls were left unworked, so all four are carried over and on their last day. */
+export async function carriedOnly(name: string): Promise<FakeCallsApp> {
+  const f = await freshCalls("ready", name);
+  await f.harness.advanceTo(Date.parse("2026-11-10T10:00:00Z"));
+  return f;
+}
+
 /** Opens Calls on a fresh app at its own clock, and waits for the sheet. */
 export async function openCalls(page: Page, f: FakeCallsApp, path = "/calls"): Promise<void> {
   await page.clock.setFixedTime(f.harness.clock);
@@ -648,7 +655,7 @@ export const SCREENS: readonly Screen[] = [
     name: "calls, a callback with no good number left",
     open: async (page) => {
       await openCalls(page, await callbackWithNoGoodNumber("screen-q13"));
-      await settle(page, "nothing but skip for now can be logged on this callback");
+      await settle(page, "only skip for now can be logged on this callback");
     },
   },
   {
@@ -656,6 +663,13 @@ export const SCREENS: readonly Screen[] = [
     open: async (page) => {
       await openCalls(page, await carriedAndOverdue("screen-today-carried"), "/");
       await settle(page, "Tom’s callback is overdue");
+    },
+  },
+  {
+    name: "today with only calls carried over from earlier days",
+    open: async (page) => {
+      await openCalls(page, await carriedOnly("screen-today-carried-only"), "/");
+      await settle(page, "4 calls carried over from earlier days");
     },
   },
   {

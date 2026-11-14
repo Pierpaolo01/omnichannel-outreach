@@ -3,7 +3,7 @@
  * task with everything the call screen shows. Built from the engine's stored facts and the CRM, so
  * the screens render them without recomputing anything.
  */
-import { bucketOf, CALL_OUTCOMES, callNumbers, callWindow, dayHasRoom, goodNumbers, isListed, listedForDay, queueRank, queueWall, recordedNumberOf, REDIAL_OUTCOMES, skipLimitOf, skippedTonight, unworkedSkipDay, userDayOf, type CallBucket } from "../../domain/sequence/calls.ts";
+import { bucketOf, CALL_OUTCOMES, callNumbers, callWindow, dayHasRoom, goodNumbers, isListed, listedForDay, queueRank, queueWall, recordedNumberOf, REDIAL_OUTCOMES, skipLimitOf, skippedTonight, unworkedSkipDay, type CallBucket } from "../../domain/sequence/calls.ts";
 import { displayPhone } from "../../domain/phone.ts";
 import { localDayNumber, nextWindowClose, nextWindowOpen, startOfLocalDay, windowOpen } from "../../domain/sequence/clock.ts";
 import { liveTracks } from "../../domain/sequence/definition.ts";
@@ -19,7 +19,7 @@ import { DEFAULT_RULES, type Rules } from "./rules.ts";
  * The decisions the call read models make, from the engine's rules: each lead's state as of the instant read
  * (the same catch-up a user action gets, council on 228cd3b), the queue order, the focus and the reasons.
  */
-export type CallViewRules = Pick<Rules, "readyNowOrder" | "focusOf" | "callReason" | "asOfAction" | "evaluate">;
+export type CallViewRules = Pick<Rules, "readyNowOrder" | "focusOf" | "callReason" | "asOfAction" | "evaluate" | "isListed" | "logCallOutcome">;
 
 /** A lead's state as of `now`: what fell due since the worker's last tick is applied (nothing is written). */
 async function asOfNow(store: OutreachStore, id: string, now: number, rules: CallViewRules): Promise<SubjectState | null> {
@@ -115,18 +115,40 @@ function skipLimitView(s: SubjectState, task: CallTask, now: number): SkipLimitV
   };
 }
 
+/** How many user days ahead the record looks for the first day a call is listed: past the callback Day select's four weeks. */
+const RECORD_LOOKAHEAD_DAYS = 60;
+
 /**
- * Each enrollment's open calls, as of `now`, for the person and company-lead record (ticket 15b): the
- * same facts the queue and the call read give, built by the same rules.
+ * The first user day, from today, on which the engine's listing rule (2.3; the rule the Calls list and the
+ * outcome route accept or refuse by) lists the task, as the lead's state stands now; null when it lists it on
+ * none: the lead has ended (a reply, a stop: its tasks are kept for a restart, 2.3), is paused, or the task
+ * is a call held by the lead's callback. The rule is applied to a copy whose user day is moved; nothing is written.
+ */
+function firstListedDay(s: SubjectState, task: CallTask, rules: CallViewRules): number | null {
+  const today = s.callDay.day;
+  for (let d = today; d < today + RECORD_LOOKAHEAD_DAYS; d++) if (rules.isListed({ ...s, callDay: { ...s.callDay, day: d } }, task)) return d;
+  return null;
+}
+
+/**
+ * Each enrollment's open calls, as of `now`, for the person and company-lead record (ticket 15b): only a call
+ * the user can act on today or on a later day, by the engine's listing rule (`firstListedDay`), and a call that
+ * waits on the lead's callback while that callback is itself shown. A lead that replied, was stopped or ended
+ * otherwise shows none, though its tasks are kept for a restart (review bot on eac9f6c).
  */
 export async function recordCalls(store: OutreachStore, enrollmentIds: readonly string[], now: number, rules: CallViewRules = DEFAULT_RULES): Promise<RecordCalls> {
   const out: RecordCallView[] = [];
   for (const id of enrollmentIds) {
     const s = await asOfNow(store, id, now, rules);
     if (!s) continue;
-    for (const task of s.callTasks) {
-      if (!task.open) continue;
-      const listed = isListed(s, task);
+    const shown = s.callTasks.flatMap((task) => {
+      const first = task.open ? firstListedDay(s, task, rules) : null;
+      return first === null ? [] : [{ task, first }];
+    });
+    const callbackShown = shown.some((x) => x.task.kind === "callback");
+    const held = callbackShown ? s.callTasks.filter((t) => t.open && t.kind === "call" && callbackHold(s)).map((task) => ({ task, first: null })) : [];
+    for (const { task, first } of [...shown, ...held]) {
+      const listed = first === s.callDay.day;
       out.push({
         enrollmentId: id,
         taskId: task.id,
@@ -134,17 +156,35 @@ export async function recordCalls(store: OutreachStore, enrollmentIds: readonly 
         kind: task.kind,
         listed,
         reason: listed ? rules.callReason(s, task, now) : null,
-        listedFor: dateOfDay(listedForDay(s, task)),
+        listedFor: dateOfDay(first ?? listedForDay(s, task)),
         callbackAt: task.callbackAt === null ? null : iso(task.callbackAt),
         zone: s.lead.zone,
         skipLimit: skipLimitView(s, task, now),
         noGoodNumber: goodNumbers(s).length === 0,
-        heldByCallback: task.kind === "call" && callbackHold(s),
+        heldByCallback: first === null,
       });
     }
   }
   const day = await store.engine.callDay(now);
   return { calls: out, today: dateIn(day.userZone, now) };
+}
+
+/**
+ * What a redial logged now would do (ticket 15b; review bot on eac9f6c): the engine's own outcome function,
+ * applied to a copy of the lead's state with no answer and a redial on the first good number, as the outcome
+ * route applies it (a callback's hold released first, 2.4), storing nothing. Null when it would be refused, or
+ * no number can be logged on (Q13).
+ */
+function redialPreview(s: SubjectState, task: CallTask, now: number, rules: CallViewRules): CallTaskView["redial"] {
+  const number = goodNumbers(s)[0];
+  if (!number) return null;
+  const out = rules.logCallOutcome(s, task.id, { requestId: `preview:${task.id}`, outcome: "no_answer", redial: true, numberId: number.id, note: "", noteScope: "person" }, now, { attempt: "preview", note: "preview" }, rules.isListed);
+  if (!out.ok) return null;
+  const after = out.state.callTasks.find((t) => t.id === task.id);
+  if (!after) return null;
+  const first = after.open ? firstListedDay(out.state, after, rules) : null;
+  if (first === null) return null;
+  return { listedFor: dateOfDay(first), skipLimit: skipLimitView(out.state, after, now) };
 }
 
 /**
@@ -238,6 +278,7 @@ export async function todayView(store: OutreachStore, now: number, rules?: CallV
     // Oldest first, by the time the prospect asked for.
     overdueCallbacks: readyNow.filter((x) => x.reason === "overdue").sort((a, b) => Date.parse(a.callbackAt ?? "") - Date.parse(b.callbackAt ?? "") || (a.taskId < b.taskId ? -1 : 1)),
     carriedOver: listed.filter((x) => x.reason === "rolled_over" || x.reason === "redial").length,
+    carriedOverLastDay: listed.filter((x) => (x.reason === "rolled_over" || x.reason === "redial") && x.skippedTonight).length,
   };
 }
 
@@ -334,11 +375,7 @@ export async function callTaskView(store: OutreachStore, taskId: string, now: nu
     storedCalls: s.callAttempts.filter((c) => c.taskId === taskId).map((c) => ({ requestId: c.requestId, ...callRecordView(s, c) })),
     asOf: iso(now),
     skipLimit: task.open ? skipLimitView(s, task, now) : null,
-    redial: listed && task.open
-      ? (() => {
-          const tomorrow = userDayOf(now, s.callDay.userZone) + 1;
-          return { listedFor: dateOfDay(tomorrow), ifUnworked: dateOrNull(unworkedSkipDay(s, task, now, tomorrow)) };
-        })()
-      : null,
+    redial: listed && task.open ? redialPreview(s, task, now, rules) : null,
+    listedFrom: task.open ? dateOrNull(firstListedDay(s, task, rules)) : null,
   };
 }
