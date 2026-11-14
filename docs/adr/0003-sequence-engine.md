@@ -1,6 +1,6 @@
 # 0003. The sequence engine
 
-- **Date:** 2026-11-13. Revised the same day after review rounds 1, 2 and 3 (two reviewers each; coordinator rulings 1–14, 1–10 and items 1–7), and amended in PR 37 after its review round 1 (coordinator rulings 1–11, "Changes from PR 37 review round 1"), by ticket 13a ("Changes from ticket 13a"), by ticket 14a ("Changes from ticket 14a"), by ticket 15a ("Changes from ticket 15a"), by ticket 14c ("Ticket 14c"), and by ticket 16a ("Changes from ticket 16a"), and by ticket 17a ("Ticket 17a").
+- **Date:** 2026-11-13. Revised the same day after review rounds 1, 2 and 3 (two reviewers each; coordinator rulings 1–14, 1–10 and items 1–7), and amended in PR 37 after its review round 1 (coordinator rulings 1–11, "Changes from PR 37 review round 1"), by ticket 13a ("Changes from ticket 13a"), by ticket 14a ("Changes from ticket 14a"), by ticket 15a ("Changes from ticket 15a"), by ticket 14c ("Ticket 14c"), and by ticket 16a ("Changes from ticket 16a"), and by ticket 17a ("Ticket 17a"), and by ticket 20a ("Ticket 20a").
 - **Status:** Proposed. The council reviews it before ticket [12](https://github.com/Pierpaolo01/omnichannel-outreach/issues/12) starts.
 - **Consumers:** tickets [12](https://github.com/Pierpaolo01/omnichannel-outreach/issues/12) to [23](https://github.com/Pierpaolo01/omnichannel-outreach/issues/23).
 - **Builds on:** [ADR 0001](0001-application-foundation-and-import-model.md) (domain code never reads the clock; the closed outreach-status type; the store interface) and [ADR 0002](0002-email-through-instantly.md) (the application owns every clock; Instantly only carries email). This ADR is the "application owns every clock" half. The Instantly adapter, its experiments and its questions P1–P4 stay in ADR 0002.
@@ -863,6 +863,8 @@ If the slot is busy, the retry waits for it. If any other condition fails, there
 
 ## 6. Restart and the interruption notice
 
+*Ticket 20a replaces this section's step 4 (the notice's detection, count and write) and defines what an interruption is; steps 1 to 3 are unchanged ("Ticket 20a" below).*
+
 On start, before the first evaluation:
 
 1. **Observe.** Apply provider events since the last checkpoint, with ADR 0002's overlap. The time the application was not running is not counted as a held reply's wait; outstanding events are observed and due lookups made before any held reply is evaluated, so a reply's thread can attach before it would fall back (PR 37 review round 3). A held reply survives a restart.
@@ -1165,6 +1167,7 @@ Each question below changes one rule, and each lists what is built until it is a
 - **Q15. Pausing or stopping a lead before its campaign launches** (ticket 17a). The spec's controls act on running outreach; before launch nothing of a lead runs, and a lead held then would not be in the Before launch projection's count of leads to start. *Recommendation:* allow neither before launch; a lead the user does not want contacted is left out of the import. *Built:* both refused before launch ("This campaign has not launched: nothing of this lead runs yet").
 - **Q16. "Resume" or "move to win-back" when nothing could run** (ticket 17a). The spec offers both "for a lead that replied or was stopped". A lead with no step left, or none that can reach it, would be ended again at once by the engine (no response, or no usable channel). *Recommendation:* refuse it with the reason, so the status says what is true. *Built:* refused, with the reason the engine's own transition gives on a copy.
 - **Q17. A message already handed to a provider when the user pauses or stops** (ticket 17a; a provider limitation, measured by the verifier on `ca8baee` against the documented-shape fakes, not a live provider). The email adapter hands over at most one email per inbox ahead of its send (`k = 1`). On a pause or a stop it deletes the handed-over lead; when the deletion takes effect nothing is sent; when it fails or its effect is uncertain, that one email can still be sent. A forced uncertain SMS cancellation behaves the same; no SMS provider is provisioned. *Interim built:* the control is accepted; the withdrawal is asked again each settling period until the provider's answer is final; a late send is recorded once and starts nothing while the lead is held; the enrollment and campaign reads say how many messages may still be sent (`mayStillSend`), for the screens part to show. Skip is different: it is refused while its step's work may still be sent. *For the human:* whether this is acceptable, or a pause should wait for the provider's final answer before it reports done.
+- **Q18 to Q20** (ticket 20a: when the interruption line clears, whether days the application was not running count toward a call's skip limit, and when a lead with no usable channel leaves Needs attention) are in "Ticket 20a", each with its interim.
 - **Q9. A campaign with no track in the main sequence.** The spec lists exactly three launch blockers, and none of them covers a campaign with nothing in it. *Recommendation:* treat it as "nothing to launch": the Launch button reads "Add a track to launch". It is not a fourth blocker, because no outreach can follow. *Built:* that (7.2).
 
 **Still open in ADR 0002** and unchanged here: P1 (the pre-existing Instantly campaigns on the same inboxes), P2 (continue thread if no transport passes X2), P3 (how the user resolves an unresolved send, used by 5.3–5.4), P4 (Instantly's unexplained skips, used by 5.4), and the consents C1–C4.
@@ -1990,6 +1993,116 @@ The branch is drawn in its own box below the main sequence, its tracks hanging f
 | - | - | - |
 | The save test's new coverage bar failed CI shard 6 of the full search (4 arranged branches against 6.25): in a shard, the coverage seeds are that shard's own, so a share of them is chance | **The rule, for every coverage bar in the file:** a share of the coverage seeds is required only where they are `pnpm check`'s fixed and recorded seeds, the same on every run; in a full-search shard each behaviour must be reached at least once (`atLeast`) | `SAVE_QUEUE_SEARCH=full SEQUENCE_SHARD=6/8` failed before the change and passes after it |
 | Side by side, the win-back box could draw wider than the width the canvas chose its layout by (its name, Add and empty text, about 494px, against a 320px budget), so the canvas scrolled sideways between 1040 and 1220px with the inspector open, a width the layout scan does not visit | The box takes exactly its budgeted width, or the main sequence's when wider (`contain: inline-size`); its contents wrap. **The rule:** the layout scan checks that a side-by-side canvas never draws wider than its budget (`data-needed`), which does not depend on the window, so it holds at every width once it holds at one | `win-back-editor.spec.ts` sweeps 1020 to 1440px in 20px steps (failed by up to 166px before); a screen with one phone track and an empty branch, which the budget check failed (494 against 320) without the change |
+
+## Ticket 20a: recovery after a sending interruption, and the attention reads (the engine and HTTP)
+
+Recorded on 14 November 2026 by the 20a implementer, before the code (delivery workflow, "Design first"). Part a is the engine, the worker, the store and the HTTP reads; the screens part renders what these reads serve and computes nothing. It replaces section 6's "interruption notice" (its detection, count and write) and keeps section 6's restart settlement, which this ticket reuses unchanged. Where they differ, this section wins.
+
+### The rule
+
+**What an interruption is.** An interval in which the application could not send. The worker records a **heartbeat** (`engine_heartbeat`, in the store's `meta`): the instant at which it last completed a tick in which every sending port answered its account read and its observation within `CALL_TIMEOUT`. An **interruption** is the interval `[X, Y)` from the last heartbeat `X` to the first tick `Y` after it in which every port answers again, when `Y − X > INTERRUPTION_GAP` (5 minutes, twenty of the worker's 15-second ticks). It covers every cause the worker can have for not sending, without telling them apart:
+
+- the process was not running: stopped, crashed, or the machine asleep (a suspended process does not tick);
+- ticks failed: a tick that throws completes nothing and writes no heartbeat;
+- a provider or the network was unreachable: the ticks ran, but a port's account read or observation did not answer.
+
+Not an interruption: a gap of 5 minutes or less (a slow tick, a short sleep); a send call answered `unknown` or refused, which the attempt table settles work by work (5.3) and Needs attention lists as unresolved work. A database with no heartbeat yet (a new one, or one upgraded from before this ticket) has had no worker that could report one, so its first tick records the heartbeat and reports no interruption: the length of a stop before this ticket cannot be known.
+
+**An interruption is not a pause.** The spec freezes clocks for a pause ("freezes every clock, including waits and the call skip limit") and says of an interruption only that "nothing is sent twice and nothing is skipped. Missed sends are spread across the sending window": the missed sends are late, not moved. So an interruption freezes nothing. Lead time runs through it; every deadline stored in lead time (a step's due time, a track's delayed start, the skip limit) stays where it was resolved; a callback keeps its time and is overdue after the interruption if its time passed during it; the skip limit's rollovers during the interruption are judged as 3.5 says ("a rollover the application was not running for expires the task where it expired"). A pause, a stop or a callback hold in force when the interruption began, or set during it (a provider outage leaves the application running, so the user can act), stays in force: an interruption changes no hold.
+
+**Recovery is the existing passes, and nothing else.** No lead's stored state is changed because an interruption happened. The first tick after it runs as every tick does (5.5): observation, the claim's age limit (an open claim older than `SETTLING` is withdrawn and claimed again), settlement through the attempt table (a call whose answer was lost is the crash row of 5.3: the same-key retry authorization, else `lookup`), withdrawals, evaluation, call placement, claims and handovers. So the guarantees are the ones that hold without an interruption, by construction:
+
+- **nothing twice**: a step has at most one live attempt and one `sent` attempt (unique indexes); work that may have reached the provider is never repeated with a new key, withdrawn by the app alone, or repeated on a transport that is not retryable (5.3); this holds for a stop between a handover's commit and its recorded answer (the crash row) and between a provider's acceptance and our observation of the send (the send is observed or looked up, and settles on the work that produced it);
+- **nothing skipped**: a pending step stays pending until it is claimed, skipped by a rule that applies without an interruption or by the user, or held with a reason (5.4);
+- **no burst**: every send call, a first handover or a same-key retry, takes the account's pacing slot in the transaction that authorizes it, the claim reserves capacity on the account's reset day across every campaign, and the in-flight bound counts unsettled work by key, freed at every final answer (ticket 17a). The steps that fell due during the interruption are claimed in 4.3's order, one per gap per account, inside each track's window, and what does not fit a reset day waits for the next;
+- **calls wait for the user**: the app never makes a call; a due call is placed by the day's capacity and calling hours (4.4); a call left unworked is judged at each rollover as 3.5 says; carried calls stay on the list as rolled over.
+
+The one seam is a rule, `afterInterruption(state, interruption, now)`, which the engine applies to every running lead when it records an interruption, through the version guard. Its value is the lead unchanged; it exists so that the generated runs can prove they would see a recovery that froze a clock, skipped a step or released a hold (the mutations below).
+
+**The interruption notice.** In the first tick after an interruption, once every port has answered and every lead has been evaluated, and before anything is claimed, the engine counts the sends the interruption rescheduled and writes, **in one store write**, the notice `{ from: X, to: Y, rescheduled: N }` and the heartbeat `Y`. A crash before that write leaves the heartbeat at `X`, so the next start finds the same interruption, now ending at its own instant; a crash after it finds the heartbeat at `Y` and no new interruption. One current line is kept: a later interruption replaces it; there is no history. A step **is rescheduled by the interruption** `[X, Y)` when, at the count:
+
+1. it is the pending step of a started, unfinished email or SMS track of an enrollment that has not ended, and has no result;
+2. nothing of it is with a provider: no attempt past `claimed`, and no unsettled work of it (`isUncertain`, 5.3);
+3. its track is not held (5.4);
+4. at some wall instant `t` in `[X, Y)` the lead ran (`t` is in no interval of its `freezes` record), lead time at `t` had reached the step's due time, and the track's window was open at `t` in the lead's zone.
+
+So N counts the sends that would have been claimable during the interruption and are now late: a step that fell due during it, or one already waiting for a pacing slot or capacity when it began. A step whose lead was held throughout, whose window stayed closed, that the provider already holds, or that was skipped or sent before `Y` is not counted. Test runs are not counted (ticket 21 owns them; none exist yet). "Count the steps due during the interruption" is the mutation that proves the count is not that.
+
+**The worker's state, as a read** (follow-up 42 item 45). While the application serves a read and no heartbeat has been written for more than `INTERRUPTION_GAP`, sending is interrupted now: due sends and due calls may be waiting to be claimed or placed. The read says since when, and why, from what the worker records: `ticks_failing` (the last tick to end threw: `engine_tick_failed` in `meta`, written by the tick's own failure handler), `providers_unreachable` (the last tick completed, but a port did not answer), or `worker_stalled` (no tick has ended since the heartbeat: one is still running, or the worker has not started).
+
+**One worker per database** (follow-up 42 item 15). The application refuses to start a second worker on a database another running process is using. Double sending would not follow from two workers (the handover and the same-key retry are conditional writes, the pacing slot is taken in the authorizing transaction, and the generated runs already run a second worker against the same store), but the heartbeat and the notice assume one writer, and two processes recovering at once would each read the other's in-progress calls as crashes. So the process takes a **lease** in one `BEGIN IMMEDIATE` transaction (`worker_lease` in `meta`: a random owner id, the process id, the instant renewed), renews it every 15 seconds on a timer of its own, independent of the tick, and releases it on SIGINT and SIGTERM. A second process is refused, and exits with a plain message before it listens, when the lease is held by another owner, was renewed within `LEASE_STALE` (60 seconds), and that process id is alive on this machine. A crashed process (its id no longer alive) or a stale lease is taken over. A worker that finds its lease taken by another owner stops ticking and exits.
+
+### Reads (for the screens part; computed by the engine's functions, nothing beside them)
+
+- `GET /api/today` gains `interruption`: the current notice, `{ from, to, rescheduled }`, or null; and `sendingInterrupted`: `{ since, cause }` while sending is interrupted now, else null.
+- `GET /api/calls` gains `sendingInterrupted`, the same value.
+- `GET /api/needs-attention` gains:
+  - `waitingForCapacity` (spec "Needs attention": "leads waiting for sending capacity"): each email or SMS step, as of the read (`asOfAction`), that is due, whose track is not held, that the claim's step guard (`claimRefusal`) would accept now, and that no account it may use can take because each one available is full for its reset day (`accountHasRoom`): its lead, campaign, track, channel, due instant, and when the first of those accounts resets. A step waiting for an unhealthy account is not here; `senderProblems` lists the account. A step waiting only for a pacing slot or an in-flight place is not waiting for capacity.
+  - `noUsableChannel` (follow-up 42 item 50): each enrollment ended `finished_no_usable_channel`, from any cause (a bounce, a bad number, a decline on the continue path, a channel never there), with its campaign, when it ended, and each channel of its branch with why it cannot reach the lead (`missing`, `bad`, or `declined` for calls), from the engine's own reach functions.
+  - `waitingOnTransport` (follow-up 42 item 12): each due step that cannot be claimed because its transport is unavailable (Instantly's continue-thread follow-ups until ADR 0002's X2), as `GET /api/email-provider` lists them.
+  - What was there stays: overdue callbacks, sender-account problems, account waits, stalled inboxes, held tracks, held capacity, anomalies. Carried calls stay on Today (`carriedOver`). There is no replies count or list.
+- **Every read is judged as of its instant** (2.4): each read that lists a lead's state builds it through `asOfAction`.
+
+### Invariants (numbered R1 to R11)
+
+1. **R1 Nothing twice.** On the providers' delivery logs, each step is delivered at most once, across every stop, crash, provider outage and recovery, including a crash between a handover's commit and its recorded answer, and between a provider's acceptance and the app's observation of the send.
+2. **R2 Nothing skipped.** No step gets a result except from a send, the user, or a rule that applies without an interruption; after the drain, every lead has ended (8.18).
+3. **R3 No burst.** On the providers' call logs, two send calls from one account are never closer than its gap, and no account's deliveries on a reset day exceed its capacity, across every recovery, with two campaigns sharing an inbox.
+4. **R4 Order.** At each first claim of a step on an account after a recovery, no step ranked higher by 4.3 was claimable and unclaimed (the order check of 9.2).
+5. **R5 Holds stand.** A lead or campaign paused before or during an interruption is paused after it; nothing of it is handed over until the user resumes it (P1).
+6. **R6 Clocks run.** Every pending step's due instant equals the one the record computes with no hold for the interruption (P2): an interruption moves no deadline. The skip limit and callbacks are as before (3.5, 2.3).
+7. **R7 The notice is the truth.** After each interruption longer than `INTERRUPTION_GAP`, the notice's `from`, `to` and `rescheduled` equal the record's `X`, `Y` and N; after a shorter gap the notice is unchanged.
+8. **R8 Recovery is idempotent.** A crash during recovery and a second recovery send nothing more (R1) and give the same notice (R7).
+9. **R9 Late answers apply when they arrive** (follow-up 42 item 39). A provider answer (an observation or a lookup) that arrives after the clock crossed a day boundary while it was awaited is applied at the instant it arrived: a send it reports is placed at the provider's send time clamped to that instant (3.3), never to the instant the request was made, so no next step is handed over before its due instant (P2).
+10. **R10 One worker.** A second process on a database whose lease is live is refused; a dead or stale lease is taken over.
+11. **R11 The reads are the engine's.** `waitingForCapacity`, `noUsableChannel`, `waitingOnTransport` and `sendingInterrupted` are decided by the engine's own functions as of the read, and the in-flight bound and a place freed at every final answer hold across interruptions (the control runs' checks B and F).
+
+### By construction
+
+The heartbeat and the notice are one store write; a step's attempts are bounded by unique indexes; the handover, the same-key retry and the pacing slot are conditional writes in one transaction; capacity is counted per provider work on its reset day; the deadlines are stored in lead time and never recomputed, and `afterInterruption` returns the lead unchanged; the lease is taken and checked in one `BEGIN IMMEDIATE` transaction. No migration is needed: the heartbeat, the notice, the tick-failure mark and the lease live in the existing `meta` table, and a database from the integration tip upgrades by having none of them (its first tick writes the heartbeat, its running leads keep running).
+
+### The boundary
+
+A heartbeat or notice that cannot be parsed reads as absent (no interruption is invented from it). The notice is never written for a gap of `INTERRUPTION_GAP` or less. A lease whose process id is this process's own is ours.
+
+### The generated test
+
+The control runs (`test/support/generated-controls.ts`) gain a run family, `interruptions: true`, whose events come from a stream of their own, so a run without it is the run it was. Its world starts in the week of the 25 October 2026 clock change in London, has one inbox shared by both campaigns with a daily capacity of 3 (so missed work spreads over days and across campaigns), and, at random instants:
+
+- **stops the application** for 2 minutes (under the gap), 20 minutes, 5 hours, a day or three days: either cleanly after a tick, or by a crash at a named point of the tick before it (after a claim, after a handover's commit, after the call, after a retry's commit, after a lookup, after an observed event), with work unsettled, during a pause, across the user's day rollover and across the clock change. While stopped nothing ticks and the providers carry on (late sends are delivered, prospects reply). The restart is a fresh engine on the same store, running restart settlement, and sometimes crashes again during it;
+- **cuts both providers off** for the same lengths while the application keeps ticking and the user keeps acting (every port call fails; what the providers hold, they still send);
+- **holds a provider's answer across midnight** (R9): an observation or a lookup whose answer arrives after the clock has moved past the user's day boundary while it was awaited.
+
+The record knows the truth of each interruption from the world it ran: `X` is the last instant the world was up with the providers reachable before it, `Y` the instant it came back. It computes N by the four conditions above from its own model (the record's pending steps as the app knows them at `Y`, its own hold intervals, the providers' logs), imports nothing from `src/domain/sequence/`, and compares it with `GET /api/today` after every recovery (R7). P1, P2, P3, P4, P6, the order check, B and F are asserted after every event as before, and the providers' delivery logs are checked per reset day against the inbox's capacity (R3). The harness marks the application alive at every tick it runs while the world is up (production's quiet 15-second ticks, which the harness skips), so only the generated stops and outages are interruptions.
+
+**Mutations, one per invariant, each killed by a known seed in `pnpm check`:**
+
+| Mutation | Invariant |
+| - | - |
+| a call whose answer a crash lost is taken as refused, so its step is claimed again with a new key | R1 (P6 on the delivery logs) |
+| the steps that fell due during an interruption are skipped (`afterInterruption`) | R2 (P2, and the drain) |
+| claims older than the interruption gap are handed over without the pacing slot | R3 (P3) |
+| the claim order ignores "follow-ups first" | R4 (the order check) |
+| an interruption releases the leads' pauses (`afterInterruption`) | R5 (P1) |
+| an interruption freezes the clock like a pause (`afterInterruption`) | R6 (P2) |
+| the count is the steps due during the interruption (`rescheduled`) | R7 |
+| a gap of any length is an interruption | R7 |
+| a late answer is applied at the instant its request was made (`answerInstant`) | R9 (P2) |
+
+**Not mutable as a rule, and guarded by example tests instead:** R8 (the notice and the heartbeat are one write: `interruption.test.ts` crashes at every point of the first tick after an interruption and checks the second recovery's notice), R10 (the lease is the store's transaction: two connections to one file, a live, a dead and a stale owner), and R11's reads (example tests through HTTP for each list and each cause, and the rule that a step is listed once).
+
+**Coverage lists.** The family's behaviours are named in a list of their own (`INTERRUPTION_FEATURES`); a name in neither it nor the retired list fails the check.
+
+### Questions for the human (each with the interim built)
+
+- **Q18. When does the interruption line stop showing?** The spec says Today shows one line and keeps no history; it does not say when the line goes. *Interim:* it stays until a newer interruption replaces it, including when N is 0, so the user never misses one. *Alternatives:* clear it at the end of the user's day, or once the rescheduled sends have gone.
+- **Q19. Do days the application was not running count toward a call's skip limit?** While operation is local-only, a stopped application also means the user could not see the call list. *Interim:* 3.5 as built: an interruption freezes no clock, so a call can be skipped at a rollover the application was not running for. *Alternative:* a day the application never ran is not a listed day, so no call expires at its end.
+- **Q20. When does a lead with no usable channel leave Needs attention?** Its ending is final (it cannot be restarted, Q6). *Interim:* it stays listed, oldest last. *Alternative:* list only those that ended since the user last looked, or in the last N days.
+
+### Unverified
+
+- **Sending with the laptop closed** (the ticket's first criterion): unverified. Operation is local-only and hosting is deferred (#28). What it depends on in this design: the worker runs in the server process and keeps one lease per database, so a hosted process would be that one worker, with the heartbeat, the notice and every rule unchanged; nothing here reads the laptop.
+- **The real providers.** No test contact is designated (#28) and Instantly writes stay off, so recovery against Instantly (ADR 0002's X5 and X6, including whether an idempotency key is honoured after an outage of days) is unverified; SMS has no provider.
 
 ## Consequences
 
