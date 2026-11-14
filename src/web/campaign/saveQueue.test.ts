@@ -242,6 +242,22 @@ describe("every way a save is sent reports into the queue (review: saveQueue.ts:
     expect(new Set(h.calls.map((c) => c.stamp)).size).toBe(1);
   });
 
+  test("when the retries of an older valid save run out after the draft was made one that cannot be saved, the status is that draft's, not a Try again (council on aebeb80, item 4)", async () => {
+    const h = harness();
+    h.edit("A");
+    const saved = h.queue.save();
+    for (let i = 0; i < 4; i++) {
+      await h.settle();
+      h.calls[i]!.reject(new NoAnswer());
+    }
+    await h.settle();
+    // The last try is in flight when the user makes the draft one that cannot be saved.
+    h.setDraft(def("B", { tracks: [{ ...def("B").tracks[0]!, window: [] }] }));
+    h.calls[4]!.reject(new NoAnswer());
+    await saved;
+    expect(h.statuses.at(-1)).toEqual({ kind: "invalid", message: "Choose at least one sending day." });
+  });
+
   test("an older save refused because a newer one was stored is not an error", async () => {
     const h = harness();
     h.edit("Older");
@@ -254,6 +270,133 @@ describe("every way a save is sent reports into the queue (review: saveQueue.ts:
     h.calls[0]!.reject(Object.assign(new Error("A later change from this page was already saved."), { code: "superseded" }));
     expect(await older).toEqual({ ok: true });
     expect(h.statuses.at(-1)).toEqual({ kind: "saved" });
+  });
+});
+
+describe("an answer to a request sent before the user loaded the saved version changes nothing (council on aebeb80, item 2; invariant 6)", () => {
+  test("a late 'replaced' after the load leaves the page idle and saving open", async () => {
+    const h = harness();
+    h.edit("A one");
+    const first = h.queue.save();
+    await h.settle();
+    // Leaving sends #1 again with keepalive; that one is accepted; the ordinary #1 is still out.
+    h.queue.sendNow();
+    await h.settle();
+    h.calls[1]!.resolve();
+    await h.settle();
+    // Page B saves over it; A's #2, sent on leaving again (the ordinary #1 still holds the queue), then
+    // conflicts, and A, shown again, loads B's saved version.
+    h.edit("A two");
+    h.queue.sendNow();
+    await h.settle();
+    h.calls[2]!.reject(Object.assign(new Error("Changed elsewhere."), { code: "edit_conflict" }));
+    await h.settle();
+    expect(h.queue.inConflict).toBe(true);
+    h.queue.loadedStored();
+    expect(h.statuses.at(-1)).toEqual({ kind: "idle" });
+    // The ordinary #1 is answered at last, late: replaced. It answers a draft the user set aside.
+    h.calls[0]!.reject(Object.assign(new Error("Saved, then changed elsewhere."), { code: "replaced" }));
+    await first;
+    expect(h.statuses.at(-1)).toEqual({ kind: "idle" });
+    expect(h.queue.inConflict).toBe(false);
+    h.edit("After loading");
+    void h.queue.save();
+    await h.settle();
+    expect(h.calls).toHaveLength(4);
+  });
+
+  test("a save asked for before the load, queued behind the old request, reports nothing once it runs (generated seed 845691)", async () => {
+    const h = harness();
+    h.edit("A one");
+    const first = h.queue.save();
+    await h.settle();
+    h.edit("A two");
+    const second = h.queue.save();
+    h.queue.markConflict("Changed elsewhere.");
+    h.queue.loadedStored();
+    const before = h.statuses.length;
+    h.calls[0]!.resolve();
+    await first;
+    await second;
+    await h.settle();
+    expect(h.statuses.slice(before)).toEqual([]);
+    expect(h.calls).toHaveLength(1);
+  });
+
+  test("after the load, a new save goes at once, not behind a request of the drafts set aside (generated seed 463057)", async () => {
+    const h = harness();
+    h.edit("A one");
+    void h.queue.save();
+    await h.settle();
+    h.queue.markConflict("Changed elsewhere.");
+    h.queue.loadedStored();
+    h.edit("After loading");
+    void h.queue.save();
+    await h.settle();
+    expect(h.calls).toHaveLength(2);
+    expect(h.statuses.at(-1)).toEqual({ kind: "saving" });
+    // The old request's late answer changes nothing.
+    h.calls[0]!.reject(Object.assign(new Error("Changed elsewhere."), { code: "edit_conflict" }));
+    await h.settle();
+    expect(h.statuses.at(-1)).toEqual({ kind: "saving" });
+    h.calls[1]!.resolve();
+    await h.settle();
+    expect(h.statuses.at(-1)).toEqual({ kind: "saved" });
+  });
+
+  test("so does a late conflict, superseded or accepted answer", async () => {
+    for (const late of ["edit_conflict", "superseded", "accepted"] as const) {
+      const h = harness();
+      h.edit("A one");
+      const first = h.queue.save();
+      await h.settle();
+      h.queue.markConflict("Changed elsewhere.");
+      h.queue.loadedStored();
+      const before = h.statuses.length;
+      if (late === "accepted") h.calls[0]!.resolve();
+      else h.calls[0]!.reject(Object.assign(new Error("Late."), { code: late }));
+      await first.catch(() => undefined);
+      await h.settle();
+      expect([late, h.statuses.slice(before), h.accepted.length, h.queue.inConflict]).toEqual([late, [], 0, false]);
+    }
+  });
+});
+
+describe("leaving the page when the newest draft cannot be saved (council on aebeb80, item 3)", () => {
+  test("the last valid draft still unconfirmed goes with the request that outlives the page, under its own number", async () => {
+    const h = harness();
+    h.edit("Valid A");
+    void h.queue.save();
+    await h.settle();
+    expect(h.calls).toHaveLength(1);
+    h.setDraft(def("B", { tracks: [{ ...def("B").tracks[0]!, window: [] }] }));
+    h.queue.sendNow();
+    expect(h.calls).toHaveLength(2);
+    expect(h.calls[1]).toMatchObject({ keepalive: true, stamp: 1 });
+    expect(h.calls[1]!.definition.tracks[0]!.steps[0]!.subject).toBe("Valid A");
+  });
+
+  test("a valid draft never sent (the debounce had not fired) goes too, under its own number", () => {
+    const h = harness();
+    h.edit("Valid A");
+    h.edit("Valid A, longer");
+    h.setDraft(def("B", { tracks: [{ ...def("B").tracks[0]!, window: [] }] }));
+    h.queue.sendNow();
+    expect(h.calls).toHaveLength(1);
+    expect(h.calls[0]).toMatchObject({ keepalive: true, stamp: 2 });
+    expect(h.calls[0]!.definition.tracks[0]!.steps[0]!.subject).toBe("Valid A, longer");
+  });
+
+  test("nothing goes when every valid draft is confirmed", async () => {
+    const h = harness();
+    h.edit("Valid A");
+    void h.queue.save();
+    await h.settle();
+    h.calls[0]!.resolve();
+    await h.settle();
+    h.setDraft(def("B", { tracks: [{ ...def("B").tracks[0]!, window: [] }] }));
+    h.queue.sendNow();
+    expect(h.calls).toHaveLength(1);
   });
 });
 

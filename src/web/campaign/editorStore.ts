@@ -96,6 +96,11 @@ export class EditorStore {
     return this.queue.inConflict;
   }
 
+  /** How many times the user has loaded the saved version (the queue's generation). */
+  get loads(): number {
+    return this.queue.loads;
+  }
+
   private set(change: Partial<EditorSnapshot>): void {
     const next = { ...this.state, ...change };
     this.state = { ...next, problems: change.draft ? draftProblems(next.draft) : next.problems, locked: next.view.launchedAt !== null || next.pending !== null };
@@ -132,7 +137,6 @@ export class EditorStore {
   /** An edit by the user. Ignored once launched, and while a launch or a load is in flight. */
   update(change: (draft: CampaignDefinition) => CampaignDefinition): void {
     if (this.state.locked) return;
-    this.queue.edited();
     // Shown at once, so a change is never labelled saved while it waits; a conflict stays shown,
     // now with an edit of its own that is not saved.
     const now = this.state.save;
@@ -142,6 +146,8 @@ export class EditorStore {
     const pending: SaveStatus = problems.length > 0 ? { kind: "invalid", message: problems.join(" ") } : { kind: "saving" };
     const save: SaveStatus = !this.queue.inConflict ? pending : now.kind === "conflict" ? { ...now, saved: false } : now;
     this.set({ draft, unsaved: true, save });
+    // Once the new draft is readable: the queue records each number's draft, and the newest valid one.
+    this.queue.edited();
     this.schedule();
   }
 

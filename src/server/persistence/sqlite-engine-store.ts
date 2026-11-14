@@ -157,6 +157,9 @@ export class SqliteEngineStore implements EngineStore {
       const check = decide(parseDefinition(row), leads, accounts);
       if (!check.canLaunch) return { ok: false, check, reason: "blocked" };
       this.run("UPDATE campaigns SET launched_at = ?, version = version + 1 WHERE id = ?", [now, campaignId]);
+      // A launched campaign's definition takes no more saves (until ticket 19), so its sessions' saves
+      // answer nothing any more: they go with the launch (ADR 0003 1.1.1, council on aebeb80, item 7).
+      this.run("DELETE FROM definition_saves WHERE campaign_id = ?", [campaignId]);
       const launchedRow = this.sql("SELECT * FROM campaigns WHERE id = ?").get(campaignId);
       for (const e of this.sql("SELECT id FROM enrollments WHERE campaign_id = ? ORDER BY enrolled_at, id").all(campaignId)) {
         const base = this.load(str(e, "id"), now);
