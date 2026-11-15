@@ -2375,7 +2375,7 @@ Recorded on 15 November 2026 by the ticket 22 implementer, before the code (deli
 | Each bounce | `bounce_events` | subject, track, step |
 | Each call logged | `call_attempts` | subject, outcome |
 | Each open callback | `call_tasks` with `open = 1` and `kind = 'callback'` | subject |
-| Each track's channel | the campaign's definition (removed tracks keep their channel, 1.1) | track id to channel |
+| Each track's channel | the campaign's definition (removed tracks keep their channel, 1.1), read with the campaign row | track id to channel |
 
 These are the facts Activity reads for the same entries (`activityOf`): "sent" is an attempt in state `sent` with its provider send time, "failed" a `failed` step result, "bounced" a bounce event, "replied" the stopping reply of a lead whose status is replied (`progressView`'s `reply`), "call" a call record. So a measure and the Activity entries of the campaign's leads count the same things.
 
@@ -2412,22 +2412,22 @@ These are the facts Activity reads for the same entries (`activityOf`): "sent" i
 
 ### What the read costs at 2,000 leads
 
-Six statements, whatever the number of leads: each reads the campaign's enrollments by `enrollments_by_campaign_status` and joins each enrollment's rows by the per-subject indexes (`attempts_by_subject`, `call_attempts_by_subject`, `bounce_events_by_subject`, the primary keys of `step_results` and `call_tasks`' `one_task_per_call_step`). The work grows with the campaign's own rows only. A test counts the statements per read (it fails if one is added per lead), and the as-built note below records the time measured at 2,000 leads. No index is expected to be needed; if one is, it is a migration taking the next number at merge.
+Seven statements, whatever the number of leads: the campaign row, then six that each read the campaign's enrollments by `enrollments_by_campaign_status` and join each enrollment's rows by the per-subject indexes (`attempts_by_subject`, `call_attempts_by_subject`, `bounce_events_by_subject`, the primary keys of `step_results` and `call_tasks`' `one_task_per_call_step`). The work grows with the campaign's own rows only. A test counts the statements per read (it fails if one is added per lead), and the as-built note below records the time measured at 2,000 leads. No index is expected to be needed; if one is, it is a migration taking the next number at merge.
 
 ### The generated test
 
 A new family, `test/support/generated-measures.ts` (seeds from 22000; `src/server/sequence-runs-measures*.test.ts`, so the `sequence-search` workflow runs all 100 seeds and a seed search per mutation, as for the other families). Through the real HTTP app, SQLite store and engine on the fake email and SMS providers, with fictitious data: two launched campaigns with different leads; the first has an email track of two steps and an SMS track of one or two, together, and a phone track; the second sends one email to its own leads. Some addresses bounce once sent, some are refused as invalid, and some mobiles are reported invalid after a text. At random instants the run advances the clock (minutes to a day, ticking the worker), makes a lead reply by email or text (now and then a second time, or on the other channel), logs a call outcome on a listed call (each of the eight, a redial now and then, a callback for a later time), logs an outcome on a due callback, pauses and resumes a lead or the campaign, stops a lead and resumes it from its next step.
 
-**The record** imports nothing from `src/domain/sequence/` or `src/server/measures.ts`. From its own log it keeps: the deliveries the fakes made to each campaign's leads and the instant each became observable, the refusals and bounces the fakes produced, the replies it made (lead, channel), the call outcomes it logged and the application accepted, the callbacks it requested and completed, and, from each lead's record page, its status (the record's own copy of the spec's group table maps it). At random instants, right after a tick, it reads `GET /api/campaigns/:id/measures` for both campaigns and checks M1 to M8, each problem labelled by its invariant.
+**The record** imports nothing from `src/domain/sequence/` or `src/server/measures.ts`. From its own log it keeps: the deliveries the fakes made to each campaign's leads and the instant each became observable, the refusals and bounces the fakes produced, the replies it made (lead, channel), the call outcomes it logged and the application accepted, the callbacks it requested and completed, and, from Leads filtered to each campaign, each lead's status (the record's own copy of the spec's group table maps it). At random instants, right after a tick, it reads `GET /api/campaigns/:id/measures` for both campaigns and checks M1 to M8, each problem labelled by its invariant.
 
 **Mutations, one per measure kind** (`MeasureRules`, injected into the app as `BulkRules` is), each killed by a known seed in `pnpm check`:
 
 | Mutation | Invariant |
 | - | - |
-| a status counted in the wrong group (in win-back as waiting on you) | M1 |
+| a status counted in the wrong group (callback scheduled as handed to you) | M1 |
 | a message handed to the provider counted as sent before it is | M2 |
 | bounces not counted, only refusals | M3 |
-| every stored reply counted, not each replying lead once | M4 |
+| a reply counted on every channel, not on the one that stopped the lead | M4 |
 | skip for now counted as a call made | M5 |
 | a gatekeeper counted as connected | M5 |
 | an ended lead's open callback counted as pending | M6 |
@@ -2437,6 +2437,14 @@ A new family, `test/support/generated-measures.ts` (seeds from 22000; `src/serve
 The test-run half of M8 is not generated until ticket 21 merges (no test run exists on this branch); then the family gains a test run of the first campaign from a stream of its own, and the mutation "the facts read by subject, not by enrollment".
 
 **Coverage list.** The family's behaviours are named in `MEASURE_FEATURES`; the fixed seeds must reach all of them.
+
+### As built (the ticket 22 implementer, after the code)
+
+- **Code.** `src/server/measures.ts` (one function per measure, `MeasureRules`, the exhaustive maps `callCounts` and the track channel), the store's `measureFacts` (`SqliteEngineStore`, one read transaction), `GET /api/campaigns/:id/measures` in `app.ts`, the wording in `src/web/campaign/measuresWording.ts` and the panel and strip in `src/web/campaign/MeasuresPanel.tsx`, read live with the campaign page (`useLiveRead`) and again after each read of the campaign. No migration and no index.
+- **The cost.** Seven statements per read (the campaign and one per kind of fact), the same with no activity and with sends, a bounce, a reply and a callback (`measures.test.ts`). Measured at 2,000 leads: see the pull request (informational, not a check).
+- **The generated runs as built.** `test/support/generated-measures.ts`, seeds from 22000: the first 60 seeds pass; `pnpm check` runs the fixed seeds 2, 18, 22, 25 and 39, which reach the 34 behaviours of `MEASURE_FEATURES`, and each mutation's killing seed: M1 18, M2 2, M3 2, M4 2, M5 2 (skip for now) and 0 (gatekeeper), M6 18, M7 2, M8 2. The M4 mutation first designed, "a lead resumed after its reply still counted", changed nothing: a restart clears the stored stopping reply, so the fact it would have miscounted does not exist; it is replaced by the channel mutation above.
+- **Found by these runs, outside this ticket's read-only scope, and not fixed here** (seed 22058 before the generator stepped around it): a lead resumed from its next step after a reply **by text** is stopped again by that same text at its next text's pre-send check. The engine records an observed text under the reply id `sms:<id>` (`applySmsEvent`) and passes the stored ids to the SMS port's pre-send check as the known replies, while the port reports the provider's bare id, so the old text is news and ends the lead as replied again. No wrong outreach follows (the lead sends less, not more), but the user's resume is undone. The generated measure runs do not resume a lead whose stopping reply was a text, until it is fixed.
+- **The test-run half of M8** waits for ticket 21 (pull request 60), as above.
 
 ### Questions for the human (each with the interim built)
 

@@ -8,6 +8,7 @@ import type { Campaign, EnrollmentView } from "../src/shared/api.ts";
 import { EngineHarness } from "../test/support/engine-harness.ts";
 import { business, csvOf, person } from "../test/support/export-builder.ts";
 import { fixture } from "./support.ts";
+import { measuresWorld, type MeasuresWorld } from "../test/support/measures-world.ts";
 
 /**
  * The app over the fake email provider (test/support/fake-email-port.ts), for the screens that
@@ -563,4 +564,46 @@ async function startCapacity(): Promise<FakeCapacityApp> {
   if (launched.status !== 200) throw new Error(`the capacity campaign did not launch: ${JSON.stringify(launched.body)}`);
   await harness.advanceTo(MONDAY_8 + H + 10 * 60_000);
   return { url: await serveHarness(harness), harness };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Ticket 22: the campaign measures, on the world of test/support/measures-world.ts (four fictitious people at Harbour
+// Lane Physio; an email track of two steps, a text and a call, all at launch, weekdays 09:00 to 17:00), launched on Monday
+// 2 November at 07:00 London. `early`: launched, nothing sent yet.
+// `running`: 09:15, Nia's email bounced, Sam's address refused, Ivo's mobile reported invalid after his text, Pat
+// replied by email, Nia's call reached a gatekeeper, and Ivo asked for a callback. `paused`: the same, then paused.
+
+export type MeasuresScenario = "early" | "running" | "paused";
+export interface FakeMeasuresApp {
+  readonly url: string;
+  readonly world: MeasuresWorld;
+}
+const measuresStarted = new Map<string, Promise<FakeMeasuresApp>>();
+
+export function fakeMeasuresApp(scenario: MeasuresScenario, name: string = scenario): Promise<FakeMeasuresApp> {
+  let app = measuresStarted.get(name);
+  if (!app) measuresStarted.set(name, (app = startMeasures(scenario)));
+  return app;
+}
+
+async function startMeasures(scenario: MeasuresScenario): Promise<FakeMeasuresApp> {
+  const world = await measuresWorld((h) => {
+    h.fake.bouncing.add("nia@harbour.example");
+    h.fake.invalid.add("sam@harbour.example");
+    h.sms.invalidAfterSend.add("+447700900104");
+  }, { start: Date.parse("2026-11-02T07:00:00Z"), weekdayHours: true });
+  const launched = await world.h.launch(world.campaignId);
+  if (launched.status !== 200) throw new Error(`the measures campaign did not launch: ${JSON.stringify(launched.body)}`);
+  if (scenario !== "early") {
+    await world.h.advanceTo(world.h.clock + 2 * H + 15 * 60_000);
+    world.h.fake.prospectReplies("pat@harbour.example");
+    await world.h.advanceTo(world.h.clock + 10 * 60_000);
+    if ((await world.log("Nia Cole", "gatekeeper")) !== 200) throw new Error("the gatekeeper call was refused");
+    if ((await world.log("Ivo Marsh", "callback_requested", { callbackAt: new Date(world.h.clock + 4 * H).toISOString() })) !== 200) throw new Error("the callback was refused");
+  }
+  if (scenario === "paused") {
+    const out = await world.h.request("POST", `/api/campaigns/${world.campaignId}/pause`, { requestId: "measures-paused" });
+    if (out.status !== 200) throw new Error(`the campaign did not pause: ${JSON.stringify(out.body)}`);
+  }
+  return { url: await serveHarness(world.h), world };
 }

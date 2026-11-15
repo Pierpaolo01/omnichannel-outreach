@@ -1,11 +1,12 @@
 import type { ReactNode } from "react";
 import { Link, useLocation, useSearch } from "wouter";
-import type { BeforeLaunchView, CampaignDetail, ImportRecord, LeadOutcome, LeadSearchResult } from "../../shared/api.ts";
+import type { BeforeLaunchView, CampaignDetail, CampaignMeasures, ImportRecord, LeadOutcome, LeadSearchResult } from "../../shared/api.ts";
 import { useApi } from "../api.ts";
 import { CampaignPauseControl, PausedBanner } from "../controls/ControlViews.tsx";
 import { useControls, type Controls } from "../controls/useControls.ts";
 import { useLiveRead } from "../controls/useLiveRead.ts";
 import { BeforeLaunchTab } from "../campaign/BeforeLaunchTab.tsx";
+import { GroupStrip, MeasuresPanel, useFollow } from "../campaign/MeasuresPanel.tsx";
 import { SequenceTab } from "../campaign/SequenceTab.tsx";
 import { sendsOnItsOwn } from "../campaign/model.ts";
 import { saveWording } from "../campaign/saveWording.ts";
@@ -54,11 +55,14 @@ export function CampaignPage({ id, tab }: { id: string; tab: CampaignTab }) {
     );
   }
   if (detail.read.state !== "ready" || !editor) return <CampaignSkeleton />;
-  return <Campaign detail={detail.read.data} editor={editor} tab={tab} controls={controls} />;
+  return <Campaign detail={detail.read.data} detailReads={detail.read.reads} editor={editor} tab={tab} controls={controls} />;
 }
 
-function Campaign({ detail, editor, tab, controls }: { detail: CampaignDetail; editor: SequenceEditor; tab: CampaignTab; controls: Controls }) {
+function Campaign({ detail, detailReads, editor, tab, controls }: { detail: CampaignDetail; detailReads: number; editor: SequenceEditor; tab: CampaignTab; controls: Controls }) {
   const now = useNow();
+  // Ticket 22: the campaign's figures, read live, and again whenever the campaign's own read is (a pause, a control).
+  const measures = useLiveRead<CampaignMeasures>(`/api/campaigns/${encodeURIComponent(detail.campaign.id)}/measures`);
+  useFollow(detailReads, measures.refresh);
   const { campaign, imports, leadCount } = detail;
   const { view } = editor;
   const blockers = view.launch.blockers.length;
@@ -116,7 +120,18 @@ function Campaign({ detail, editor, tab, controls }: { detail: CampaignDetail; e
       )}
       {/* While paused, nothing goes out on its own: the Paused banner says so, and this sentence would not be true (ticket 17b).
           How the running campaign is edited is said on its Sequence tab (ticket 19). */}
-      {editor.launched && !detail.pause.paused && <p className="mt-4 rounded-box border border-line bg-base-100 px-4 py-3 text-[14px] text-ink-2">{sendsOnItsOwn(editor.view.definition)}</p>}
+      {/* Variant A's strip on a running campaign: the leads in each status group beside that sentence (ticket 22). While
+          paused, the Paused banner carries the group counts. */}
+      {editor.launched && !detail.pause.paused && (
+        <div className="mt-4">
+          <GroupStrip read={measures.read} sentence={sendsOnItsOwn(editor.view.definition)} />
+        </div>
+      )}
+      {editor.launched && (
+        <div className="mt-3">
+          <MeasuresPanel read={measures.read} onRetry={() => void measures.refresh()} />
+        </div>
+      )}
 
       <nav aria-label="Campaign" className="mt-3.5 flex flex-wrap gap-1 border-b border-line">
         <TabLink href={campaignPath(campaign.id)} current={tab === "sequence"}>

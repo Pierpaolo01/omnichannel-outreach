@@ -57,9 +57,12 @@ export interface MeasuresWorld {
 let requests = 0;
 
 /** The campaign, imported and launched at Monday 09:00 with the providers' fakes set up by `prepare` before launch. */
-export async function measuresWorld(prepare: (h: EngineHarness) => void = () => undefined): Promise<MeasuresWorld> {
+/** Weekdays, 09:00 to 17:00: the browser scenarios launch at 07:00, so nothing goes out until the window opens. */
+export const WEEKDAYS_9_TO_17 = [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 }));
+
+export async function measuresWorld(prepare: (h: EngineHarness) => void = () => undefined, options: { readonly start?: number; readonly weekdayHours?: boolean } = {}): Promise<MeasuresWorld> {
   const h = new EngineHarness({
-    start: MONDAY_9,
+    start: options.start ?? MONDAY_9,
     accounts: [{ id: "inbox-a", capacity: 500, gapMs: MIN, k: 5, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
     sms: { numbers: [{ id: SMS_NUMBER, capacity: 500, gapMs: MIN, k: 5, healthy: true, resetZone: "Europe/London" }] },
   });
@@ -67,7 +70,7 @@ export async function measuresWorld(prepare: (h: EngineHarness) => void = () => 
   await h.tick();
   await h.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "Europe/London" });
   const { campaign } = await h.createCampaign("Clinics", { businesses: [HARBOUR], people: PEOPLE });
-  await h.defineSequence(campaign.id, DEFINITION);
+  await h.defineSequence(campaign.id, options.weekdayHours ? { ...DEFINITION, tracks: DEFINITION.tracks.map((t) => ({ ...t, window: WEEKDAYS_9_TO_17 })) } : DEFINITION);
   const rows = async () => (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows;
   const byName = new Map((await rows()).map((r) => [r.name, r.enrollments.find((e) => e.campaign.id === campaign.id)?.id ?? ""]));
   const lead = (name: string) => byName.get(name) ?? "";
