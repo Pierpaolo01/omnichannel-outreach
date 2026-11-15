@@ -1,5 +1,6 @@
 import { useId, useRef, useState, type SyntheticEvent } from "react";
 import type { TestRunRead, TestRunTab as TestRunTabView, TestStepRow } from "../../shared/api.ts";
+import { contactsUnsaved } from "../../domain/test-contacts.ts";
 import { ApiRequestError, postJson, putJson } from "../api.ts";
 import { ErrorState } from "../components.tsx";
 import { useLiveRead } from "../controls/useLiveRead.ts";
@@ -56,7 +57,8 @@ function Contacts({ campaignId, tab, editor, onChange }: { campaignId: string; t
   const [refusal, setRefusal] = useState<string | null>(null);
   const said = useRef<HTMLParagraphElement>(null);
 
-  const dirty = email.trim() !== (tab.contacts.email ?? "") || mobile.trim() !== (tab.contacts.mobile ?? "");
+  // Compared by the server's own reading of a contact (review bot on 55d6ac6): "+447700900456" is the stored "+44 7700 900456".
+  const dirty = contactsUnsaved({ email, mobile }, tab.contacts);
   const lead = tab.leads.find((l) => l.id === renderAs) ?? tab.leads[0] ?? null;
   const running = tab.run?.running === true;
   const noContact = tab.contacts.email === null && tab.contacts.mobile === null;
@@ -68,7 +70,10 @@ function Contacts({ campaignId, tab, editor, onChange }: { campaignId: string; t
     setFieldError(null);
     setSaveError(null);
     try {
-      await putJson(`/api/campaigns/${encodeURIComponent(campaignId)}/test-contacts`, { email, mobile });
+      const stored = (await putJson(`/api/campaigns/${encodeURIComponent(campaignId)}/test-contacts`, { email, mobile })) as TestRunTabView;
+      // The fields show what was stored, as the server wrote it.
+      setEmail(stored.contacts.email ?? "");
+      setMobile(stored.contacts.mobile ?? "");
       await onChange();
       setSaved(true);
     } catch (error) {

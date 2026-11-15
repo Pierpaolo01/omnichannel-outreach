@@ -40,3 +40,15 @@ export function parseTestContacts(input: TestContactsInput): ParsedTestContacts 
   }
   return { ok: true, contacts: { email, mobile } };
 }
+
+/**
+ * Whether what the user typed differs from the stored contacts (their values as the server shows them), compared by the
+ * keys `parseTestContacts` gives both: "+447700900456" and "+44 7700 900456" are one number, and an address's case is
+ * not a difference. What cannot be read is unsaved, so Save stays offered and says why.
+ */
+export function contactsUnsaved(typed: TestContactsInput, stored: { readonly email: string | null; readonly mobile: string | null }): boolean {
+  const mine = parseTestContacts(typed);
+  const theirs = parseTestContacts({ email: stored.email ?? "", mobile: stored.mobile ?? "" });
+  if (!mine.ok || !theirs.ok) return true;
+  return mine.contacts.email?.key !== theirs.contacts.email?.key || mine.contacts.mobile?.key !== theirs.contacts.mobile?.key;
+}

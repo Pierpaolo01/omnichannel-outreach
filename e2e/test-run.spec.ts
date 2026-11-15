@@ -144,3 +144,20 @@ test("the Test run tab at 390 px", async ({ page }) => {
   expect(scroll).toBeLessThanOrEqual(0);
   await shot(page, "10-test-running-390");
 });
+
+test("contacts saved as typed in another form show as stored, and Run test is offered (review bot on 55d6ac6)", async ({ page }) => {
+  const f = await fakeTestRunApp("normalized");
+  await at(page, f, `/campaigns/${f.campaign}/test-run`);
+  await page.getByLabel("Your email").fill("Alex.Own@Personal-Mail.example");
+  await page.getByLabel("Your mobile, for texts and the test call").fill("+447700900456");
+  await page.getByRole("button", { name: "Save contacts" }).click();
+  await expect(page.getByText("Saved.")).toBeVisible();
+  await expect(page.getByLabel("Your email")).toHaveValue(OWN_TEST_EMAIL);
+  await expect(page.getByLabel("Your mobile, for texts and the test call")).toHaveValue("+44 7700 900456");
+  await expect(page.getByRole("button", { name: "Save contacts" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Run test" })).toBeEnabled();
+  await expect(page.getByText("Save your contacts to run a test with them.")).toHaveCount(0);
+  // Typing the stored mobile in another form is not a change either.
+  await page.getByLabel("Your mobile, for texts and the test call").fill("+447700900456");
+  await expect(page.getByRole("button", { name: "Run test" })).toBeEnabled();
+});
