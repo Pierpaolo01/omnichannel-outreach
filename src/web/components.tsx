@@ -273,12 +273,13 @@ export function RecordSkeleton() {
  * A clock-driven screen whose reads keep failing (ADR 0003 4.4.1, "Freshness"): what it shows stays,
  * with this notice and Try again; refreshing carries on by itself meanwhile.
  */
-export function StaleNotice({ freshness, onRetry, retryRef, rescue }: { freshness: Freshness; onRetry: () => void; retryRef?: (el: HTMLButtonElement | null) => void; rescue?: number }) {
+/** `what`: what the screen shows, as the notice names it ("the list" on Today and Calls; "the campaign" on its page). */
+export function StaleNotice({ freshness, onRetry, retryRef, rescue, what = "the list" }: { freshness: Freshness; onRetry: () => void; retryRef?: (el: HTMLButtonElement | null) => void; rescue?: number; what?: string }) {
   const since = freshness.lastReadAt ? new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(freshness.lastReadAt)) : null;
   return (
     <div role="status" className="mt-4 flex flex-wrap items-center gap-3 rounded-box bg-pause-soft px-4 py-3 text-[14px]">
       <span className="min-w-0 flex-[1_1_320px] text-base-content">
-        This may be out of date: the last {freshness.failures} updates didn’t load{since ? `, so it shows the list as of ${since}` : ""}. It keeps trying.
+        This may be out of date: the last {freshness.failures} updates didn’t load{since ? `, so it shows ${what} as of ${since}` : ""}. It keeps trying.
       </span>
       <button type="button" ref={retryRef} data-rescue={rescue} className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={onRetry}>
         Try again

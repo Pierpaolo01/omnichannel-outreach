@@ -20,7 +20,7 @@
 import type { ActivityEntry, ControlView, EnrollmentView } from "../shared/api.ts";
 import { LEAD_CONTROLS } from "../domain/sequence/controls.ts";
 import { displayPhone } from "../domain/phone.ts";
-import { goodNumbers, skipLimitOf, userDayOf } from "../domain/sequence/calls.ts";
+import { callbackPending, goodNumbers, skipLimitOf, userDayOf } from "../domain/sequence/calls.ts";
 import { localDayNumber } from "../domain/sequence/clock.ts";
 import { goodEmail, goodMobile, wallAtLead } from "../domain/sequence/progress.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
@@ -198,8 +198,11 @@ function callEntries(
   for (const task of tasks) {
     let askedFor: string | null = null;
     const liveTask = live.callTasks.find((t) => t.id === task.id);
-    // The callback asked for that is open now, listed today or later by the listing rule: the one the record shows.
-    const openCallback = liveTask?.open && liveTask.kind === "callback" && liveTask.callbackAt !== null && firstListedDay(live, liveTask, rules) !== null ? new Date(liveTask.callbackAt).toISOString() : null;
+    // Two facts, each by the engine's own function (verifier F2 on 41028f2): the callback asked for that is pending now
+    // (`callbackPending`: an open callback of a lead whose outreach has not ended, a paused lead's included, as the
+    // measures count it), and whether it is listed today or later (`firstListedDay`, the listing rule; not while paused).
+    const pendingCallback = liveTask && liveTask.callbackAt !== null && callbackPending(liveTask, live.subject.ended) ? new Date(liveTask.callbackAt).toISOString() : null;
+    const listedCallback = pendingCallback !== null && liveTask && firstListedDay(live, liveTask, rules) !== null;
     for (const c of state.callAttempts.filter((a) => a.taskId === task.id)) {
       const record = callRecordView(state, c);
       entries.push({
@@ -216,7 +219,8 @@ function callEntries(
         onCallback: askedFor,
         zone: state.lead.zone,
         redialListedFrom: record.redial ? redialListedFrom(live, liveTask ?? task, c.atWall, rules) : null,
-        callbackOpen: record.callbackAt !== null && record.callbackAt === openCallback,
+        callbackPending: record.callbackAt !== null && record.callbackAt === pendingCallback,
+        callbackListed: record.callbackAt !== null && record.callbackAt === pendingCallback && listedCallback === true,
         declinedPath: record.declinedPath,
         // What the decline did to each remaining track, each as it stands at this read (ticket 16c).
         afterDecline: c.declinedPath === null ? [] : afterDeclineTracks(live, task.trackId, c.atWall, c.declinedPath, now),

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { OUTREACH_STATUSES } from "../src/domain/outreach-status.ts";
 import type { BeforeLaunchView, CampaignDefinition, CampaignListItem, CompanyRecord, ControlStepView, ControlView, EnrollmentRead, ImportRecord, LeadControlApi, LeadSearchResult, NeedsAttention, OutreachStatus, PersonRecord, RecordCalls, RecordColleagues, RecordControls, RecordLead, SequenceView, SummaryEntry, TodayView } from "../src/shared/api.ts";
 import { refusedPair, respond, serverError } from "./mocks.ts";
-import { FAKE_INBOX, FAKE_NUMBERS, OWN_TEST_EMAIL, OWN_TEST_MOBILE, TWO_CHANNELS, fakeCallsApp, fakeInterruptionApp, fakePeopleApp, fakeProviderApp, fakeTestRunApp, type CallsScenario, type FakeCallsApp, type FakePeopleApp, type FakeProviderApp, type FakeTestRunApp, type InterruptionScenario } from "./fake-provider.ts";
+import { FAKE_INBOX, FAKE_NUMBERS, OWN_TEST_EMAIL, OWN_TEST_MOBILE, TWO_CHANNELS, fakeCallsApp, fakeInterruptionApp, fakePeopleApp, fakeProviderApp, fakeTestRunApp, fakeMeasuresApp, type MeasuresScenario, type CallsScenario, type FakeCallsApp, type FakePeopleApp, type FakeProviderApp, type FakeTestRunApp, type InterruptionScenario } from "./fake-provider.ts";
 import { fixture } from "./support.ts";
 
 /** Opens a path on the app over the fake email provider. */
@@ -602,6 +602,28 @@ export function pausedCalls(name: string): Promise<FakeCallsApp> {
     pausedApps.set(name, app);
   }
   return app;
+}
+
+/** Opens the campaign page of ticket 22's measures app (`fakeMeasuresApp`). */
+async function measuresScreen(page: Page, scenario: MeasuresScenario): Promise<void> {
+  const f = await fakeMeasuresApp(scenario, `measures-screens-${scenario}`);
+  await page.clock.setFixedTime(f.world.h.clock);
+  await page.goto(`${f.url}/campaigns/${f.world.campaignId}`);
+}
+
+/** The campaign page of ticket 22's measures app after its refreshes failed twice: the figures stay, marked out of date. */
+async function staleMeasures(page: Page): Promise<void> {
+  const f = await fakeMeasuresApp("running", "measures-screens-stale");
+  await page.clock.setFixedTime(f.world.h.clock);
+  await page.goto(`${f.url}/campaigns/${f.world.campaignId}`);
+  await settle(page, "1 callback pending");
+  await page.route(`${f.url}/api/campaigns/${f.world.campaignId}`, (route) => serverError(route));
+  const notice = page.getByText("This may be out of date");
+  for (let i = 0; i < 60 && !(await notice.isVisible()); i++) {
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await page.waitForTimeout(250);
+  }
+  await notice.waitFor();
 }
 
 /** Opens Today on ticket 20's demonstration app (ticket 20b), after the interruption. */
@@ -2194,6 +2216,13 @@ export const SCREENS: readonly Screen[] = [
   { name: "controls: a person in a paused campaign", open: async (page) => { const f = await pausedCalls("person"); await page.clock.setFixedTime(f.harness.clock); await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`); await settle(page, "(campaign paused)"); } },
   { name: "controls: today with a paused campaign's calls off the list", open: async (page) => { const f = await pausedCalls("today"); await page.clock.setFixedTime(f.harness.clock); await page.goto(`${f.url}/`); await settle(page, "off your list while the campaign is paused"); } },
   { name: "controls: calls with a paused campaign's calls off the list", open: async (page) => { const f = await pausedCalls("calls"); await page.clock.setFixedTime(f.harness.clock); await page.goto(`${f.url}/calls`); await settle(page, "Nothing to call right now"); } },
+  // Ticket 22: the campaign's figures, early, running and paused, loading and failed.
+  { name: "measures: a campaign just launched", open: async (page) => { await measuresScreen(page, "early"); await settle(page, "None sent yet"); } },
+  { name: "measures: a running campaign", open: async (page) => { await measuresScreen(page, "running"); await settle(page, "1 callback pending"); } },
+  { name: "measures: how they are counted", open: async (page) => { await measuresScreen(page, "running"); await page.getByText("How these are counted").click(); await settle(page, "never takes their reply away"); } },
+  { name: "measures: with a test run", open: async (page) => { await measuresScreen(page, "with-test"); await settle(page, "from test runs"); } },
+  { name: "measures: a paused campaign", open: async (page) => { await measuresScreen(page, "paused"); await settle(page, "1 callback pending"); } },
+  { name: "measures: figures that may be out of date", open: async (page) => { await staleMeasures(page); } },
 ];
 
 /**

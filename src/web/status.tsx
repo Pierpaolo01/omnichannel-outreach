@@ -1,4 +1,4 @@
-import { OUTREACH_STATUSES, statusGroup } from "../domain/outreach-status.ts";
+import { OUTREACH_STATUSES, STATUS_GROUPS, statusGroup } from "../domain/outreach-status.ts";
 import type { OutreachStatus, StatusGroup } from "../shared/api.ts";
 
 /** Status names as the prototype and the spec word them. */
@@ -43,5 +43,36 @@ export function StatusBadge({ status }: { status: OutreachStatus }) {
     >
       {STATUS_LABEL[status]}
     </span>
+  );
+}
+
+/** A group's name beside its count, lower case as variant A's strip has it ("8 running"): the one wording of the strip and the Paused banner (ticket 22). */
+export function groupCountText(group: StatusGroup): string {
+  return STATUS_GROUP_LABEL[group].toLowerCase();
+}
+
+const GROUP_TONE = {
+  running: "text-ink-2",
+  waiting_on_you: "text-you",
+  handed_to_you: "text-hand",
+  paused: "text-pause",
+  ended: "text-end",
+} as const satisfies Record<StatusGroup, string>;
+
+/**
+ * The leads in each status group, as variant A draws them in its running strip and its paused banner (`.counts`): the count
+ * in ink, then the group's name in its tone after a 7px dot. The one rendering of the five groups wherever counts are shown
+ * (the campaign's strip and the Paused banner; council on 384630e, item 6).
+ */
+export function GroupCounts({ counts }: { counts: Readonly<Record<StatusGroup, number>> }) {
+  return (
+    <ul aria-label="Leads in each status group" className="flex flex-wrap gap-x-[18px] gap-y-1.5">
+      {STATUS_GROUPS.map((group) => (
+        <li key={group} className={`inline-flex items-center gap-1.5 before:size-[7px] before:rounded-full before:bg-current before:content-[''] ${GROUP_TONE[group]}`}>
+          <b className="font-semibold tabular-nums text-base-content">{counts[group]}</b>
+          {groupCountText(group)}
+        </li>
+      ))}
+    </ul>
   );
 }
