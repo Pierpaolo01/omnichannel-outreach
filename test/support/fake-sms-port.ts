@@ -93,7 +93,7 @@ export class FakeSmsPort implements SendPort {
     return Promise.resolve(
       [...this.numbers.values()]
         .filter((n) => n.listed !== false)
-        .map((n) => ({ id: n.id, channel: "sms" as const, label: `Simulated SMS (not a provider) ${n.id}`, capacity: n.capacity, gapMs: n.gapMs, k: n.k, healthy: n.healthy, problem: n.healthy ? null : "disconnected", resetZone: n.resetZone, quotaAvailable: true })),
+        .map((n) => ({ id: n.id, channel: "sms" as const, label: `Simulated SMS (not a provider) ${n.id}`, capacity: n.capacity, dailyLimit: n.capacity, gapMs: n.gapMs, k: n.k, healthy: n.healthy, problem: n.healthy ? null : "disconnected", resetZone: n.resetZone, quotaAvailable: true })),
     );
   }
 

@@ -33,6 +33,7 @@ export const inbox = (id: string, fields: Partial<AccountStatus> = {}): AccountS
   healthy: true,
   resetZone: "UTC",
   quotaAvailable: true,
+  dailyLimit: fields.capacity ?? 30,
   ...fields,
 });
 

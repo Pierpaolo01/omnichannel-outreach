@@ -337,6 +337,8 @@ export function projectLoad(input: ProjectionInput): Projection {
     const day = resetDay(id, t);
     return {
       ...a,
+      // Today's room today, the daily limit on any other reset day (council on PR 63).
+      capacity: day === today.get(id) ? a.capacity : a.dailyLimit,
       nextSlotAt: slot.get(id) ?? 0,
       used: (day === today.get(id) ? (baseToday.get(id) ?? 0) : 0) + (sentOn.get(`${id}/${day}`) ?? 0) + (reserved.get(id) ?? 0),
       inFlight: live.get(id) ?? 0,

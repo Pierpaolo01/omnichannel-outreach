@@ -7,6 +7,7 @@ import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { CampaignDefinition, StepDefinition } from "../../domain/sequence/definition.ts";
 import type { EnrollmentRead, LeadSearchResult } from "../../shared/api.ts";
+import { MIGRATIONS } from "./migrations.ts";
 
 /**
  * Migration 19: one stored form for a reply's id (ADR 0003 "Ticket 17a", the reply identity rule). Before it, a pre-send
@@ -81,7 +82,7 @@ describe("migration 19 on a database written before it", () => {
       expect(db.prepare("SELECT COUNT(*) AS n FROM reply_events").get()?.["n"]).toBe(0);
       db.prepare("UPDATE replies SET provider_ref = ?").run(c.bare);
       // The database has the integration branch's migration 18 (ticket 21's test runs): 19 applies after it.
-      expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()?.["v"]).toBe(19);
+      expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()?.["v"]).toBe(MIGRATIONS.length);
       db.exec("DELETE FROM schema_migrations WHERE version >= 19");
       expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()?.["v"]).toBe(18);
       expect(db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'test_runs'").get()?.["n"]).toBe(1);
@@ -101,7 +102,7 @@ describe("migration 19 on a database written before it", () => {
       expect((await after.request<EnrollmentRead>("GET", `/api/enrollments/${id}`)).body.status).not.toBe("replied");
       expect((await after.store.engine.subject(id, after.clock))?.replies.map((r) => r.providerRef)).toEqual([c.stored]);
       await after.store.close();
-      expect(new DatabaseSync(file).prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((r) => Number(r["version"])).slice(-2)).toEqual([18, 19]);
+      expect(new DatabaseSync(file).prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((r) => Number(r["version"]))).toEqual(MIGRATIONS.map((m) => m.version));
     });
   }
 

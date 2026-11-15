@@ -848,6 +848,40 @@ export const MIGRATIONS: readonly Migration[] = [
       DROP TABLE reply_forms;
     `,
   },
+  {
+    // Fix: an inbox used up outside the app no longer stops the engine's tick (verifier, 15 November 2026).
+    version: 20,
+    name: "a sender account's capacity may be 0 (no room on its reset day), and its daily limit is stored apart (ADR 0003 4.1 as amended)",
+    // An Instantly inbox whose daily limit other senders used up today, or that has no daily limit, reports capacity 0;
+    // `capacity > 0` refused it and the tick threw. 0 now means "no room now": the claim's capacity rule refuses it, and
+    // its due work waits for capacity in Needs attention. SQLite cannot change a CHECK, so the table is rebuilt; provider
+    // work and attempts reference it, hence `rebuildsTables`. Every stored row already satisfies the new CHECK.
+    rebuildsTables: true,
+    sql: `
+      CREATE TABLE sender_accounts_v20 (
+        id TEXT PRIMARY KEY,
+        channel TEXT NOT NULL CHECK (channel IN ('email', 'sms')),
+        label TEXT NOT NULL,
+        capacity INTEGER NOT NULL CHECK (capacity >= 0),
+        gap_ms INTEGER CHECK (gap_ms IS NULL OR gap_ms > 0),
+        k INTEGER NOT NULL CHECK (k > 0),
+        next_slot_at INTEGER NOT NULL DEFAULT 0,
+        healthy INTEGER NOT NULL DEFAULT 1,
+        wait_until INTEGER,
+        wait_reason TEXT,
+        backoff_ms INTEGER NOT NULL DEFAULT 0,
+        reset_zone TEXT NOT NULL DEFAULT 'UTC',
+        problem TEXT,
+        -- The room on any other reset day; today's is capacity (council on PR 63). Until the next sync, the capacity.
+        daily_limit INTEGER NOT NULL CHECK (daily_limit >= 0)
+      );
+      INSERT INTO sender_accounts_v20 (id, channel, label, capacity, gap_ms, k, next_slot_at, healthy, wait_until, wait_reason, backoff_ms, reset_zone, problem, daily_limit)
+        SELECT id, channel, label, capacity, gap_ms, k, next_slot_at, healthy, wait_until, wait_reason, backoff_ms, reset_zone, problem, capacity
+        FROM sender_accounts ORDER BY rowid;
+      DROP TABLE sender_accounts;
+      ALTER TABLE sender_accounts_v20 RENAME TO sender_accounts;
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string, migrations: readonly Migration[] = MIGRATIONS): void {

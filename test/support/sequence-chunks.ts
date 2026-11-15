@@ -25,9 +25,12 @@ export function inShard(index: number): boolean {
  * (`RunResult.stats.features`) except the slow-slot profile, which the mutation seed for "retry blocks
  * settlement" covers. Chosen greedily from that sweep, preferring fast runs; refresh it when the
  * generator changes. Offset 85 (seed 20261198) is the full search's case of a user's "not sent"
- * on work an inheritor carried, which left an accepted attempt unsettled (PR 37 review round 3).
+ * on work an inheritor carried, which left an accepted attempt unsettled (PR 37 review round 3). Offset 54
+ * (seed 20261167, shard 7 of the search on 0b02b73) and offset 93 (seed 20261206, shard 6) use an inbox
+ * up outside the app at the instant a tick had just claimed on it: work claimed before the report of no
+ * room is not new work after it, whatever the instant.
  */
-export const FIXED_SEEDS: readonly number[] = [5, 21, 43, 44, 50, 56, 72, 73, 83, 85, 87];
+export const FIXED_SEEDS: readonly number[] = [5, 21, 43, 44, 50, 54, 56, 72, 73, 83, 85, 87, 93];
 
 const CHUNK = 10;
 
