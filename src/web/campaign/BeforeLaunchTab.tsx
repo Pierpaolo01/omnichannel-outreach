@@ -93,6 +93,7 @@ function LaunchBar({ editor, facts }: { editor: SequenceEditor; facts: BeforeLau
       <>
         <b className="font-semibold">Ready to launch.</b>{" "}
         {starting !== null && days !== null ? `${starting} ${starting === 1 ? "lead starts" : "leads start"} within ${days} ${days === 1 ? "day" : "days"}.` : ""}
+        {facts.noTestSinceEdit ? " You haven’t run a test since your last edit; that’s optional." : ""}
       </>
     );
   return (
@@ -100,6 +101,11 @@ function LaunchBar({ editor, facts }: { editor: SequenceEditor; facts: BeforeLau
       <p ref={said} tabIndex={-1} className="min-w-0 flex-[1_1_360px] rounded-field outline-offset-4">
         {text}
       </p>
+      {!launchedAt && !launch.nothingToLaunch && facts?.noTestSinceEdit === true && launch.canLaunch && !editor.unsaved && (
+        <Link href={campaignPath(facts.campaignId, "test-run")} className="btn border-line-strong bg-base-100 font-medium no-underline">
+          Run test first
+        </Link>
+      )}
       {!launchedAt && !launch.nothingToLaunch && (
         <button
           type="button"
@@ -193,6 +199,8 @@ const and = (items: readonly string[]): string => (items.length <= 1 ? (items[0]
 
 function Warnings({ facts, editor }: { facts: BeforeLaunchView; editor: SequenceEditor }) {
   const items: { title: string; detail: string }[] = [];
+  // Ticket 21: a test is optional, so this is a warning and never a blocker.
+  if (facts.noTestSinceEdit) items.push({ title: "No test run since your last edit", detail: "Optional. You can launch without one, or run one first on the Test run tab." });
   const live = editor.view.definition.tracks.filter((t) => !t.removed && t.branch === "main");
   const noEmail = facts.coverage.leads - facts.coverage.email;
   const noMobile = facts.coverage.leads - facts.coverage.mobile;
@@ -214,7 +222,7 @@ function Warnings({ facts, editor }: { facts: BeforeLaunchView; editor: Sequence
     items.push({ title: "The call script is empty", detail: "Your call tasks will show no talking points. Write them in a phone track, in the sequence." });
   }
   for (const a of facts.load?.accounts ?? []) {
-    if (a.usedToday > 0) items.push({ title: `${a.label} has ${a.usedToday} of its ${a.capacity} sends a day used today`, detail: `Other campaigns sent or reserved them, so fewer first ${a.channel === "sms" ? "texts" : "emails"} can go today.` });
+    if (a.usedToday > 0) items.push({ title: `${a.label} has ${a.usedToday} of its ${a.capacity} sends a day used today`, detail: `Other campaigns or test runs sent or reserved them, so fewer first ${a.channel === "sms" ? "texts" : "emails"} can go today.` });
   }
   // A sender the win-back branch uses counts too: its emails and texts go from the same pools (ticket 16b).
   const sending = editor.view.definition.tracks.filter((t) => !t.removed);

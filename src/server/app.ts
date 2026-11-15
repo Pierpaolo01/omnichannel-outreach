@@ -7,7 +7,7 @@ import { LEAD_CONTROLS } from "../domain/sequence/controls.ts";
 import { maySend } from "../domain/sequence/attempt.ts";
 import { campaignControls, controlsView } from "./engine/controls-view.ts";
 import { checkScraperFile, parseScraperExport } from "../domain/scraper-export.ts";
-import type { ActivityView, ApiError, CallOutcomeAnswer, CallOutcomeRefusal, Campaign, CompanyRecord, FileCheckResult, PersonRecord, RecordCalls, SmsProviderStatus } from "../shared/api.ts";
+import type { ActivityView, ApiError, CallOutcomeAnswer, CallOutcomeRefusal, Campaign, CompanyRecord, FileCheckResult, PersonRecord, RecordCalls, SmsProviderStatus, TestContactsRefusal, TestRunTab } from "../shared/api.ts";
 import { CAMPAIGN_NAME_MAX, DEFINITION_MAX_BYTES, STEP_BODY_MAX, STEP_SUBJECT_MAX } from "../shared/limits.ts";
 import { checkApiRequest } from "./guard.ts";
 import { invalidBodyMessage, requestObject } from "./request-body.ts";
@@ -26,6 +26,8 @@ import { editImpactView } from "./engine/edit-impact.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
 import type { ControlRefusal, EnrollmentRead, CampaignDetail, CampaignMeasures, CampaignListItem, CampaignPauseRead, CampaignSequenceSummary, EditImpactView, RecordControls, RecordLead, SequenceView, ActivityNote, CallOutcomeApi, ColleagueView, NoteAnswer, RecordColleagues } from "../shared/api.ts";
 import { beforeLaunchView, copyPreview } from "./before-launch.ts";
+import { testRunTab } from "./test-runs.ts";
+import { parseTestContacts } from "../domain/test-contacts.ts";
 import { activityOf } from "./activity.ts";
 import { campaignMeasures, MEASURE_RULES, measuresOf, type MeasureRules } from "./measures.ts";
 import { registerEmailProviderRoutes, type EmailProviderSource } from "./instantly/routes.ts";
@@ -36,7 +38,7 @@ export interface AppDependencies {
   readonly now: () => string;
   readonly newId: () => string;
   /** The sequence engine. Without one, the app runs an engine with no connected email provider. */
-  readonly engine?: Pick<Engine, "launch" | "logCallOutcome" | "controlLead" | "setCampaignPause" | "saveDefinition"> & Partial<Pick<Engine, "transportAvailable">>;
+  readonly engine?: Pick<Engine, "launch" | "logCallOutcome" | "controlLead" | "setCampaignPause" | "saveDefinition" | "runTest"> & Partial<Pick<Engine, "transportAvailable">>;
   /** The email provider's own description, for GET /api/email-provider; absent when none is connected. */
   readonly emailProvider?: EmailProviderSource | null;
   /**
@@ -120,6 +122,14 @@ const leadControlBody = requestObject({
     .strictObject({ status: z.enum(OUTREACH_STATUSES), preview: z.string().max(500) }, { message: "Send the lead's status and the preview the confirmation showed." })
     .optional(),
 });
+// Ticket 21: the user's own test contacts, Run test and Stop test (ADR 0003 "Ticket 21").
+const testContactsBody = requestObject({ email: z.string().max(320), mobile: z.string().max(40) });
+const runTestBody = requestObject({
+  requestId: controlRequestId,
+  renderAs: z.string().trim().min(1, "Choose the lead the test's copy is written for.").max(200),
+  expect: z.strictObject({ definitionVersion: z.number().int().nonnegative() }, { message: "Send the version of the sequence you are looking at." }),
+});
+const stopTestBody = requestObject({ requestId: controlRequestId });
 // Redial and callback are ticket 15's, not interested and its declined path ticket 16's; which outcome each
 // goes with is the domain's rule (`logCallOutcome`), refused there with a plain reason.
 const outcomeBody = requestObject({
@@ -626,10 +636,14 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     return { leads, userZone: (await store.engine.callSettings()).userZone };
   };
 
+  // A test run is a subject but never a lead (ADR 0003 "Ticket 21"): the lead routes do not know it.
+  const isTestRun = async (id: string) => (await store.engine.testRun(id)) !== null;
+
   // Ticket 18: bulk add, pause, resume and stop on Leads, each per-lead effect through the engine's own control.
   bulkRoutes(app, { store, engine, now, newId, readOf, ...(bulkRules ? { rules: bulkRules } : {}) });
 
   app.get("/enrollments/:id", async (c) => {
+    if (await isTestRun(c.req.param("id"))) return notFound(c, "enrollment");
     const read = await enrollmentRead(c.req.param("id"));
     return read ? c.json(read) : notFound(c, "enrollment");
   });
@@ -639,7 +653,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     const body = leadControlBody.safeParse(await readJson(c));
     if (!body.success) return invalid(c, body.error);
     const id = c.req.param("id");
-    if (!(await store.engine.subject(id, Date.parse(now())))) return notFound(c, "enrollment");
+    if (!(await store.engine.subject(id, Date.parse(now()))) || (await isTestRun(id))) return notFound(c, "enrollment");
     const answer = await engine.controlLead(id, body.data.action, body.data.requestId, body.data.expect ?? null);
     if (!answer.ok) return controlRefused(c, answer.reason);
     // `effect` is the control's own effect, the read's preview at that instant; `enrollment` is the read after the worker ran (verifier B4).
@@ -672,7 +686,10 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     const body = outcomeBody.safeParse(await readJson(c));
     if (!body.success) return invalid(c, body.error);
     const id = c.req.param("id");
-    if ((await store.engine.callTaskSubject(id)) === null) return notFound(c, "call task");
+    const subjectId = await store.engine.callTaskSubject(id);
+    if (subjectId === null) return notFound(c, "call task");
+    // A test call keeps no note (question Q30): there is no person or company to keep it on.
+    if (body.data.note.trim() !== "" && (await isTestRun(subjectId))) return c.json<ApiError>({ error: { code: "invalid_request", message: "A test call keeps no note. Nothing was logged." } }, 400);
     const outcome = await engine.logCallOutcome(id, {
       requestId: body.data.requestId,
       outcome: body.data.outcome,
@@ -693,6 +710,49 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     const task = await callTaskView(store, id, at, rules);
     if (!task) return notFound(c, "call task");
     return c.json<CallOutcomeAnswer>({ task, nextFocusTaskId: (await callsView(store, at, { rules })).focusTaskId });
+  });
+
+  // -------------------------------------------------------------------------------------------
+  // Test runs (ticket 21; ADR 0003 "Ticket 21").
+
+  const testTab = async (id: string) => testRunTab(store, id, Date.parse(now()), rules);
+
+  app.get("/campaigns/:id/test-runs", async (c) => {
+    const tab = await testTab(c.req.param("id"));
+    return tab ? c.json<TestRunTab>(tab) : notFound(c, "campaign");
+  });
+
+  app.put("/campaigns/:id/test-contacts", async (c) => {
+    const body = testContactsBody.safeParse(await readJson(c));
+    if (!body.success) return invalid(c, body.error);
+    const parsed = parseTestContacts(body.data);
+    if (!parsed.ok) return c.json<TestContactsRefusal>({ error: { code: "invalid_test_contact", message: parsed.message, field: parsed.field } }, 400);
+    const saved = await store.engine.saveTestContacts(c.req.param("id"), parsed.contacts);
+    if (!saved.ok) return "missing" in saved ? notFound(c, "campaign") : c.json<TestContactsRefusal>({ error: { code: "test_contact_is_a_lead", message: saved.message, field: saved.field } }, 409);
+    const tab = await testTab(c.req.param("id"));
+    return tab ? c.json<TestRunTab>(tab) : notFound(c, "campaign");
+  });
+
+  app.post("/campaigns/:id/test-runs", async (c) => {
+    const body = runTestBody.safeParse(await readJson(c));
+    if (!body.success) return invalid(c, body.error);
+    const id = c.req.param("id");
+    if (!(await store.campaign(id))) return notFound(c, "campaign");
+    const answer = await engine.runTest(id, body.data.requestId, body.data.renderAs, body.data.expect.definitionVersion);
+    if (!answer.ok) return controlRefused(c, answer.reason);
+    const tab = await testTab(id);
+    return tab ? c.json<TestRunTab & { readonly replayed: boolean }>({ ...tab, replayed: answer.replayed }) : notFound(c, "campaign");
+  });
+
+  app.post("/test-runs/:id/stop", async (c) => {
+    const body = stopTestBody.safeParse(await readJson(c));
+    if (!body.success) return invalid(c, body.error);
+    const run = await store.engine.testRun(c.req.param("id"));
+    if (!run) return notFound(c, "test run");
+    const answer = await engine.controlLead(run.id, "stop", body.data.requestId, null);
+    if (!answer.ok) return controlRefused(c, answer.reason);
+    const tab = await testTab(run.campaignId);
+    return tab ? c.json<TestRunTab & { readonly replayed: boolean }>({ ...tab, replayed: answer.replayed }) : notFound(c, "campaign");
   });
 
   app.get("/needs-attention", async (c) => c.json(await needsAttentionView(store, Date.parse(now()), rules, (channel, threading) => engine.transportAvailable?.(channel, threading) ?? true)));

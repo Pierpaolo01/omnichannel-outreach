@@ -223,7 +223,8 @@ function QueueItem({ item, current, userZone, today }: { item: CallQueueItem; cu
     >
       <span className="truncate font-semibold">{item.person?.name ?? item.company.name}</span>
       <span className="text-right text-[13px] text-muted">{item.localTime}</span>
-      <span className="truncate text-[13px] text-muted">{item.company.name}</span>
+      {/* A test call (ticket 21) names its campaign where a lead's company would be. */}
+      {item.test ? <span className="text-[13px] text-muted [overflow-wrap:anywhere]">To your test mobile · {item.campaign.name}</span> : <span className="truncate text-[13px] text-muted">{item.company.name}</span>}
       <span />
       <span className={`col-span-2 mt-[3px] text-[12.5px] font-medium ${TONE[why.tone]}`}>
         {current && <span className="sr-only">On this call. </span>}
@@ -281,7 +282,7 @@ function NothingToCall({ view, listDone, placeFocus }: { view: CallsView; listDo
 
 function Sheet({ desk, snap, task, userZone, today, placeFocus }: { desk: CallDesk; snap: DeskSnapshot; task: CallTaskView; userZone: string; today: string; placeFocus: ReturnType<typeof useKeyboardFocus> }) {
   const who = whoOf(task);
-  const recordHref = task.person ? `/leads/people/${task.person.id}` : `/leads/companies/${task.company.id}`;
+  const recordHref = task.test ? `/campaigns/${encodeURIComponent(task.campaign.id)}/test-run` : task.person ? `/leads/people/${task.person.id}` : `/leads/companies/${task.company.id}`;
   const clock = clockLine(task, userZone);
   const numbersId = useId();
   return (
@@ -298,7 +299,9 @@ function Sheet({ desk, snap, task, userZone, today, placeFocus }: { desk: CallDe
               </Link>
             </h1>
             <p className="mt-1.5 text-[16px] text-band-muted">
-              {task.person ? (
+              {task.test ? (
+                "To your own test mobile, from a test of this campaign. Not a lead."
+              ) : task.person ? (
                 <>
                   {task.person.title ? `${task.person.title} at ` : ""}
                   <b className="font-medium text-band-ink">{task.company.name}</b>
@@ -383,7 +386,7 @@ function Sheet({ desk, snap, task, userZone, today, placeFocus }: { desk: CallDe
           <h2 className="mb-2.5 text-[13px] font-semibold text-muted">What they’ve had so far</h2>
           <Touches touches={task.touches} notes={task.personNotes} userZone={userZone} />
           <Link href={recordHref} className="mt-2 inline-block text-[13px] text-muted underline decoration-line-strong underline-offset-[3px] hover:text-base-content">
-            Open {who}’s full record
+            {task.test ? "Open the test run" : `Open ${who}’s full record`}
           </Link>
         </section>
       </div>
@@ -393,6 +396,7 @@ function Sheet({ desk, snap, task, userZone, today, placeFocus }: { desk: CallDe
 }
 
 function Colleagues({ task, userZone }: { task: CallTaskView; userZone: string }) {
+  if (task.test) return null;
   const people: { key: string; name: ReactNode; title: string; aside: ReactNode; note: CallColleagueView["lastCallNote"] }[] = [];
   if (task.person) people.push({ key: task.person.id, name: task.person.name, title: task.person.title, aside: <span className="text-[12px] text-muted">this call</span>, note: null });
   for (const c of task.colleagues) {
@@ -527,6 +531,10 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
           {NOT_QUEUED_LINE}
         </p>
       )}
+      {/* A test call keeps no note (ADR 0003 "Ticket 21", question Q30): there is no person or company to keep it on. */}
+      {task.test ? (
+        <p className="text-[13.5px] text-muted">A test call keeps no note. Log what happened to check the canvas paths.</p>
+      ) : (
       <div className="grid grid-cols-1 gap-1.5">
         <label htmlFor={noteId} className="text-[13px] font-semibold text-muted">
           Notes from this call
@@ -555,6 +563,7 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
           <p className="text-[13px] text-muted">Notes on a company lead are company notes, shown for everyone at {task.company.name}.</p>
         )}
       </div>
+      )}
       <div role="group" aria-label="Call outcome" className="flex flex-wrap gap-2">
         {OFFERED.map((o) => (
           <OutcomePill

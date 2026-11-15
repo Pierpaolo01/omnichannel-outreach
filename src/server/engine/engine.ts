@@ -347,7 +347,7 @@ export class Engine {
         catchUp: (s) => sealReckoning(this.rules.asOfAction(s, now), now),
         reconcile: (s, previous, previousZone) => this.rules.reconcileEdit(s, previous, previousZone, now),
         ...(options.impact !== undefined ? { impact: { expected: options.impact, digest: impactDigest } } : {}),
-      });
+      }, { now, stop: (s) => this.rules.stopTestOnEdit(s, now) });
       if (result.outcome === "saved" && result.stored.launchedAt !== null && options.tick !== false) await this.runTick();
       return result;
     });
@@ -475,7 +475,8 @@ export class Engine {
       room.set(a.id, stretches);
     }
     let rescheduled = 0;
-    for (const id of await this.store.runningSubjectIds()) {
+    // The worker runs every subject, leads and test runs alike.
+    for (const id of [...(await this.store.runningLeadIds()), ...(await this.store.runningTestRunIds())]) {
       const now = this.now();
       const s = await this.store.subject(id, now);
       if (!s) continue;
@@ -1135,6 +1136,30 @@ export class Engine {
         return { write: out.state, answer: "accepted", reason: null, effect: JSON.stringify(effectOf(s, action, out.state, now)) };
       });
       return this.answerOf(record);
+    });
+  }
+
+  /**
+   * Run test (ADR 0003 "Ticket 21"): in one transaction with its request id, the boundary is judged on what the
+   * transaction reads, and an accepted run is inserted and entered as launch enters a lead; a tick follows, as after
+   * any accepted control. Answers the run's id.
+   */
+  runTest(campaignId: string, requestId: string, renderAs: string, expectVersion: number): Promise<{ ok: true; replayed: boolean; runId: string } | { ok: false; reason: string }> {
+    return this.ticks.run(async () => {
+      const now = this.now();
+      const record = await this.store.startTestRun(
+        campaignId,
+        now,
+        { id: requestId, renderAs, expectVersion, runId: `test-${this.newId()}` },
+        this.rules.requestStanding,
+        (facts) => this.rules.runTestRefusal(facts),
+        (s) => this.rules.evaluate(this.rules.enterMain(s, now), now),
+      );
+      if (record.kind === "reused" || record.kind === "different") return { ok: false as const, reason: CONTROL_REQUEST_REUSED };
+      if (record.answer === "refused") return { ok: false as const, reason: record.reason ?? "Refused." };
+      if (record.kind === "answered") await this.runTick();
+      const effect = JSON.parse(record.effect ?? "{}") as { runId?: string };
+      return { ok: true as const, replayed: record.kind === "replayed", runId: effect.runId ?? "" };
     });
   }
 

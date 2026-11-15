@@ -96,6 +96,8 @@ export async function beforeLaunchView(store: OutreachStore, campaignId: string,
 
   return {
     campaignId,
+    // Ticket 21: a warning, never a blocker (7.2): the launch check does not read it.
+    noTestSinceEdit: await store.engine.noTestSinceEdit(campaignId),
     leads: leads.map((l) => l.lead),
     coverage: {
       leads: leads.length,
@@ -258,10 +260,16 @@ const accountsOf = (s: SubjectState): string[] => [
  */
 async function competingSubjects(store: OutreachStore, campaignId: string, definition: CampaignDefinition, now: number, calls: boolean): Promise<{ subjects: SubjectState[]; reach: Set<string> }> {
   const byCampaign = new Map<string, SubjectState[]>();
-  for (const id of await store.engine.runningSubjectIds()) {
+  for (const id of await store.engine.runningLeadIds()) {
     const s = await store.engine.subject(id, now);
     if (!s || s.campaign.id === campaignId) continue;
     byCampaign.set(s.campaign.id, [...(byCampaign.get(s.campaign.id) ?? []), s]);
+  }
+  // Running test runs compete for the accounts they share like any sender of sends, this campaign's own included
+  // (council on ffa202c, item 9): each is a group of its own, simulated by the engine's rules for a test run.
+  for (const id of await store.engine.runningTestRunIds()) {
+    const s = await store.engine.subject(id, now);
+    if (s) byCampaign.set(`test:${id}`, [s]);
   }
   const reach = new Set([...definition.emailPool, ...poolOf(definition, "sms")]);
   const included = new Set<string>();
