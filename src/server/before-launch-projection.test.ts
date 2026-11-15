@@ -1407,3 +1407,38 @@ describe("generated: calls placed within a tight daily call capacity, the user w
     });
   }
 });
+
+describe("a conversation another campaign takes while the projection runs (review bot on bebdc06; ADR 0003, question Q7 answered)", () => {
+  // Monday 2 November 2026, 08:00 UTC. The first campaign texts at 09:00, when its window opens, on the one number.
+  const MONDAY_8 = Date.parse("2026-11-02T08:00:00Z");
+  const NINE_TO_FIVE = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 9, end: 17 }));
+  const ALWAYS = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
+  const text = (id: string): StepDefinition => ({ id, waitDays: 0, subject: "", body: `Text ${id}.`, threading: "new_subject", removed: false });
+  const email = (id: string): StepDefinition => ({ id, waitDays: 0, subject: "Hello", body: `Email ${id}.`, threading: "new_subject", removed: false });
+  const rows = { businesses: [business({ business_id: "b1", business_name: "Harbour Lane Physio" })], people: [person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example", dial_phone: mobileOf(1), dial_phone_type: "mobile" })] };
+  const first: CampaignDefinition = { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: ["inbox-a"], smsPool: [SMS_NUMBER], tracks: [{ id: "m", channel: "sms", branch: "main", window: NINE_TO_FIVE, steps: [text("a1")], start: { kind: "entry" }, removed: false }] };
+  const second: CampaignDefinition = {
+    ...first,
+    tracks: [
+      { id: "m", channel: "sms", branch: "main", window: NINE_TO_FIVE, steps: [text("b1")], start: { kind: "entry" }, removed: false },
+      { id: "e", channel: "email", branch: "main", window: ALWAYS, steps: [email("e1")], start: { kind: "after", trackId: "m", delayDays: 0 }, removed: false },
+    ],
+  };
+
+  test("the second campaign's SMS track is skipped when the first takes the conversation at 09:00, and its email goes at 09:00, in the projection as in the engine", async () => {
+    const h = new EngineHarness({ start: MONDAY_8, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }], sms: smsNumbers });
+    await h.tick();
+    const a = (await h.createCampaign("Spring clinics", rows)).campaign.id;
+    await h.defineSequence(a, first);
+    expect((await h.launch(a)).status).toBe(200);
+    await h.advanceTo(MONDAY_8 + MIN);
+    const b = (await h.createCampaign("Autumn clinics", rows)).campaign.id;
+    await h.defineSequence(b, second);
+    const projected = await projectedSends(h.store, b, h.clock);
+    expect(projected?.sends.map((s) => `${new Date(s.at).toISOString()} ${s.accountId} ${s.stepId}`)).toEqual(["2026-11-02T09:00:00.000Z inbox-a e1"]);
+    expect((await h.launch(b)).status).toBe(200);
+    await h.advanceTo(MONDAY_8 + 4 * H);
+    const mine = new Set(await h.store.engine.subjectsOf(b));
+    expect([...h.fake.deliveryLog, ...h.sms.deliveryLog].filter((d) => mine.has(d.subjectId)).map((d) => `${new Date(d.at).toISOString()} ${d.sender} ${d.stepId}`)).toEqual(["2026-11-02T09:00:00.000Z inbox-a e1"]);
+  });
+});

@@ -292,6 +292,7 @@ const HOLD_REASON: Readonly<Record<string, string>> = {
   render_failed: "a message couldn’t be put together from its copy",
   provider_skipped: "the provider skipped the lead",
   no_thread: "a follow-up has no earlier email to continue",
+  sms_conversation_unsettled: "another campaign’s first text to the same mobile, on every number this campaign can use, isn’t known to have gone or not yet",
 };
 
 export interface AttentionItem {

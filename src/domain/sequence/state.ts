@@ -85,6 +85,8 @@ export interface TrackProgress {
   readonly finishedAt: number | null;
   readonly finishedWall: number | null;
   readonly finishReason: FinishReason | null;
+  /** For `skipped_conversation_taken`: the conversations that caused the skip, as they were then (question Q7 answered). */
+  readonly conversationOwners?: readonly ConversationCause[] | null;
 }
 
 export type StepOutcome = "sent" | "skipped" | "failed";
@@ -201,23 +203,45 @@ export interface SmsBinding {
   readonly sender: string;
   readonly recipient: string;
   readonly owner: string;
-  /** The owner's campaign, for a skipped track's reason (question Q7 answered). */
+  /** The owner's campaign, recorded with a skip's cause (question Q7 answered). */
   readonly ownerCampaignId: string | null;
-  /** That campaign's name as stored; null for a binding this change takes, which no read names. */
+  /** That campaign's name as stored now; null for a binding this change takes. */
   readonly ownerCampaignName: string | null;
   /** Whether the owner is a test run (ticket 21), whose binding is released when it ends. */
   readonly ownerIsTest: boolean;
   /** Whether the owner has ended. An ended owner keeps its binding all the same (ruling 8). */
   readonly ownerEnded: boolean;
-  /** The wall instant of the handover that took it. */
-  readonly createdWall: number;
+  /**
+   * Whether the owner's text on this pair is known sent (question Q7 answered, point 10): only then is the conversation
+   * taken for good. Until its work settles the other subject waits; work that ended not sent releases the binding.
+   */
+  readonly ownerSent: boolean;
 }
 
-/** One row of a mobile's SMS conversations, as a reply's attribution reads them (oldest first). */
+/**
+ * One conversation that made a track's skip (question Q7 answered): the number, the mobile, and its owner as they were at
+ * the skip, recorded with it so later pool edits, releases and renames never change the reason.
+ */
+export interface ConversationCause {
+  readonly sender: string;
+  readonly recipient: string;
+  readonly owner: string;
+  readonly ownerCampaignId: string | null;
+  readonly ownerCampaignName: string | null;
+  readonly ownerIsTest: boolean;
+}
+
+/**
+ * One record of a mobile's SMS conversations, as a reply's attribution reads them (oldest first): every binding, and
+ * after them every recorded skip for a taken conversation (`kind: "skipped"`), which owns nothing.
+ */
 export interface SmsBindingRecord {
+  readonly kind: "binding" | "skipped";
   readonly sender: string;
   readonly owner: string;
   readonly released: boolean;
+  /** Released because none of the owner's texts on the pair was sent (point 10): it never owned a conversation. */
+  readonly unsent: boolean;
 }
 
 export interface Reply {

@@ -11,6 +11,7 @@ import {
   candidatesFor,
   channelOf,
   claimRefusal,
+  conversationUnsettled,
   lacksThread,
   pairFree,
   progressOf,
@@ -57,6 +58,8 @@ export function heldReason(state: SubjectState, trackId: string, now: number): H
   if (lacksThread(state, trackId, progress.nextStepId)) return "no_thread";
   if (!renderStep(state, trackId, progress.nextStepId)) return "render_failed";
   // A conversation taken on every number the track may use is not a hold: evaluation skips the track (4.5, Q7 answered).
+  // One whose owner's first text is not known sent or not sent yet holds it, until that work settles (point 10).
+  if (conversationUnsettled(state, trackId, now)) return "sms_conversation_unsettled";
   return null;
 }
 
@@ -274,7 +277,7 @@ export function handOver(state: SubjectState, attempt: Attempt, account: Account
   return {
     ...state,
     subject: sms ? { ...state.subject, smsSender: state.subject.smsSender ?? account.id } : { ...state.subject, emailSender: state.subject.emailSender ?? account.id },
-    smsBindings: binds ? [...state.smsBindings, { sender: account.id, recipient: attempt.destination, owner: state.subject.id, ownerCampaignId: state.campaign.id, ownerCampaignName: null, ownerIsTest: state.subject.kind === "test_run", ownerEnded: false, createdWall: now }] : state.smsBindings,
+    smsBindings: binds ? [...state.smsBindings, { sender: account.id, recipient: attempt.destination, owner: state.subject.id, ownerCampaignId: state.campaign.id, ownerCampaignName: null, ownerIsTest: state.subject.kind === "test_run", ownerEnded: false, ownerSent: false }] : state.smsBindings,
     attempts: state.attempts.map((a) => (a.id === attempt.id ? handed : a)),
     work: state.work.map((w) => (w.key === attempt.idempotencyKey ? { ...w, calls: w.calls + 1, firstHandedWall: w.firstHandedWall ?? now, unresolvedSince: null } : w)),
     accounts: { ...state.accounts, [account.id]: { ...account, nextSlotAt: now + account.gapMs } },

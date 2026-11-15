@@ -236,6 +236,22 @@ describe("a mobile whose conversation is taken on every number skips the SMS tra
     expect((await h.progress(a("Pat Oneil"))).tracks[0]?.finishReason).toBe("completed");
   });
 
+  test("a lead whose evaluation the worker cached is skipped in the tick in which another lead takes the conversation, not at its next wake (review bot on bebdc06)", async () => {
+    // Both campaigns' texts fall due at 09:00, when the window opens, on the one number. Autumn clinics' lead is evaluated
+    // and cached from 08:01; at 09:00 Spring clinics' lead takes the conversation, and nothing of Autumn's lead changes.
+    const NINE_TO_FIVE = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 9, end: 17 }));
+    const { h, campaign, texts, emails } = await world({ numbers: [number(N1, { k: 1 })] });
+    h.clock = MONDAY_9 - H;
+    await campaign("Spring clinics", [track("t1", "sms", [text("m1")], { kind: "entry" }, NINE_TO_FIVE)], [N1]);
+    h.clock = MONDAY_9 - H + MIN;
+    const b = await campaign("Autumn clinics", [track("t1", "sms", [text("m1")], { kind: "entry" }, NINE_TO_FIVE), track("t2", "email", [email("s1")], after("t1", 1))], [N1]);
+    await h.advanceTo(MONDAY_9 + 2 * DAY);
+    expect(texts(PAT_MOBILE).map((d) => [d.sender, new Date(d.at).toISOString()])).toEqual([[N1, "2026-11-02T09:00:00.000Z"]]);
+    expect((await h.progress(b("Pat Oneil"))).tracks[0]).toMatchObject({ finishReason: "skipped_conversation_taken", finishedAt: "2026-11-02T09:00:00.000Z" });
+    // One calendar day after the skip, London: Tuesday 00:00.
+    expect(emails("pat@harbour.example").map((d) => new Date(d.at).toISOString())).toEqual(["2026-11-03T00:00:00.000Z"]);
+  });
+
   test("leads held under the interim are skipped at the first tick after the upgrade, their waiting tracks start after their delay from it, and nothing is sent twice", async () => {
     // The interim engine left a taken conversation unskipped; its one changed rule is `evaluate`.
     const interim: { -readonly [K in keyof Rules]?: Rules[K] } = { evaluate: TRACK_MUTATIONS["held instead of skipped"]!.rules.evaluate! };

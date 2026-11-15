@@ -68,6 +68,14 @@ export class FakeSmsPort implements SendPort {
   readonly invalidAfterSend = new Set<string>();
   /** Texts that go but are never reported: no sent event, and every lookup answers unknown (as the email fake's silent-send). */
   silentSends = false;
+  /** Question Q7 answered, point 10. Numbers whose next calls are refused for an account reason, with how many and why. */
+  readonly refuseFrom = new Map<string, { calls: number; reason: "rate_limited" | "payment_required"; retryAfterMs?: number }>();
+  /** Mobiles whose texts are accepted and then refused by the provider: a `rejected` event a minute later, nothing sent. */
+  readonly failAfterAccept = new Set<string>();
+  /** Mobiles whose next calls get no answer and are never sent: lookups find nothing (`not-sent`). */
+  readonly dropUnanswered = new Map<string, number>();
+  /** Mobiles whose texts are sent but whose answer is lost (`unknown`) and never reported: only a lookup finds them sent. */
+  readonly loseAnswer = new Set<string>();
   onHandover: ((entry: HandoverLogEntry) => Promise<void>) | null = null;
 
   private readonly now: () => number;
@@ -133,12 +141,28 @@ export class FakeSmsPort implements SendPort {
       this.refusals.push({ at: now, attemptId: request.attemptId, destination: request.destination, reason: "invalid_destination" });
       return { kind: "rejected", reason: "invalid_destination" };
     }
+    const refused = this.refuseFrom.get(request.sender);
+    if (refused && refused.calls > 0) {
+      refused.calls--;
+      this.refusals.push({ at: now, attemptId: request.attemptId, destination: request.destination, reason: refused.reason });
+      return { kind: "rejected", reason: refused.reason, ...(refused.retryAfterMs === undefined ? {} : { retryAfterMs: refused.retryAfterMs }) };
+    }
+    const dropped = this.dropUnanswered.get(request.destination) ?? 0;
+    if (dropped > 0) {
+      this.dropUnanswered.set(request.destination, dropped - 1);
+      return { kind: "unknown" };
+    }
     if (mode === "5xx" && this.random() < 0.5) return { kind: "unknown" };
     const providerRef = `sms-${++this.nextRef}`;
+    if (this.failAfterAccept.has(request.destination)) {
+      this.texts.push({ key: request.idempotencyKey, request, providerRef, sendAt: Number.POSITIVE_INFINITY, sentAt: null, cancelled: true, observeDelay: 0 });
+      this.emit(now + MINUTE, { id: `sms-rejected-${providerRef}`, kind: "rejected", key: request.idempotencyKey, providerRef, reason: "provider_skipped" });
+      return { kind: "accepted", providerRef };
+    }
     const delay = mode === "late-send" ? Math.round((1 + this.random() * 59) * MINUTE) : 0;
-    this.texts.push({ key: request.idempotencyKey, request, providerRef, sendAt: now + delay, sentAt: null, cancelled: false, observeDelay: this.silentSends ? Number.POSITIVE_INFINITY : mode === "late-send" ? Math.round(this.random() * 30 * MINUTE) : 0 });
+    this.texts.push({ key: request.idempotencyKey, request, providerRef, sendAt: now + delay, sentAt: null, cancelled: false, observeDelay: this.silentSends || this.loseAnswer.has(request.destination) ? Number.POSITIVE_INFINITY : mode === "late-send" ? Math.round(this.random() * 30 * MINUTE) : 0 });
     this.advance();
-    return mode === "lost-response" || mode === "5xx" ? { kind: "unknown" } : { kind: "accepted", providerRef };
+    return mode === "lost-response" || mode === "5xx" || this.loseAnswer.has(request.destination) ? { kind: "unknown" } : { kind: "accepted", providerRef };
   }
 
   private emit(visibleAt: number, event: ProviderEvent): void {

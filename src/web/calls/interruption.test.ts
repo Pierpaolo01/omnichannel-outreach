@@ -267,6 +267,12 @@ describe("the order of Needs attention (ticket 20b): the prototype's, with the n
     ]);
   });
 
+  test("a track waiting on another campaign's first text whose fate is not known yet says why (question Q7 answered, point 10)", () => {
+    const empty = { overdueCallbacks: [], stalledInboxes: [], heldTracks: [], accountWaits: [], senderProblems: [], heldCapacity: [], anomalies: [], waitingForCapacity: [], noUsableChannel: [], waitingOnProvider: [], waitingOnTransport: [], sendingInterrupted: null };
+    const items = attentionItems({ ...empty, heldTracks: [{ enrollmentId: "e1", trackId: "sms", reason: "sms_conversation_unsettled" }] }, { overdueCallbacks: [], userZone: ZONE, date: TODAY, carriedOver: 0, carriedOverLastDay: 0 });
+    expect(items.map((i) => i.body)).toEqual(["On hold because another campaign’s first text to the same mobile, on every number this campaign can use, isn’t known to have gone or not yet. Nothing is dropped."]);
+  });
+
   test("nothing in either read: no entry, so the page says nothing needs you", () => {
     const empty = { overdueCallbacks: [], stalledInboxes: [], heldTracks: [], accountWaits: [], senderProblems: [], heldCapacity: [], anomalies: [], waitingForCapacity: [], noUsableChannel: [], waitingOnProvider: [], waitingOnTransport: [], sendingInterrupted: null };
     expect(attentionItems(empty, { overdueCallbacks: [], userZone: ZONE, date: TODAY, carriedOver: 0, carriedOverLastDay: 0 })).toEqual([]);

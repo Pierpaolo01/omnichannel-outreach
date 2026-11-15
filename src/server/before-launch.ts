@@ -236,6 +236,7 @@ async function projectionOf(store: OutreachStore, campaignId: string, definition
     ...(calls ? { callDay: (broken.callDay ?? ((d: CallDay) => d))(await store.engine.callDay(now)) } : {}),
     ...(broken.rules ? { rules: broken.rules } : {}),
     ...(broken.maxSteps !== undefined ? { maxSteps: broken.maxSteps } : {}),
+    ...(broken.keepSettledAcrossConversations ? { keepSettledAcrossConversations: true } : {}),
   });
   // Past its bound the projection's figures are partial: none is shown, and the screen says why. Past
   // its horizon the days it covers stand, but no load figure does (the screen says so).
@@ -334,6 +335,8 @@ export interface ProjectionMutation {
   readonly callDay?: (stored: CallDay) => CallDay;
   /** A smaller bound on the projection's work, for the test that it stops. */
   readonly maxSteps?: number;
+  /** "A dirty watcher keeps its cached evaluation": a settled evaluation is kept when the SMS conversations change. */
+  readonly keepSettledAcrossConversations?: boolean;
 }
 
 async function loadProjection(store: OutreachStore, campaignId: string, definition: CampaignDefinition, leads: readonly CampaignLead[], now: number): Promise<LoadProjectionView> {

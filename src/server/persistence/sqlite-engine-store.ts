@@ -9,8 +9,9 @@ import { defaultGap } from "../../domain/sequence/dispatch.ts";
 import type { MergeData } from "../../domain/sequence/copy.ts";
 import { emptyDefinition, poolOf, type CampaignDefinition, type DeclinedPath } from "../../domain/sequence/definition.ts";
 import { callableOnDay, skipDeadlineOf, skipLimitOf } from "../../domain/sequence/calls.ts";
-import { deriveStatus } from "../../domain/sequence/progress.ts";
+import { bindingUnsent, deriveStatus } from "../../domain/sequence/progress.ts";
 import { maySend, occupyingKeys } from "../../domain/sequence/attempt.ts";
+import type { ConversationCause } from "../../domain/sequence/state.ts";
 import type {
   AccountState,
   Attempt,
@@ -720,13 +721,28 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   async smsBindingsOf(recipient: string): Promise<SmsBindingRecord[]> {
-    return this.sql("SELECT sender_number, owner_subject, released_at FROM sms_bindings WHERE recipient_key = ? ORDER BY COALESCE(released_at, created_at), seq")
+    const bindings = this.sql("SELECT sender_number, owner_subject, released_at, unsent FROM sms_bindings WHERE recipient_key = ? ORDER BY COALESCE(released_at, created_at), seq")
       .all(recipient)
-      .map((b) => ({ sender: str(b, "sender_number"), owner: str(b, "owner_subject"), released: b["released_at"] != null }));
+      .map((b): SmsBindingRecord => ({ kind: "binding", sender: str(b, "sender_number"), owner: str(b, "owner_subject"), released: b["released_at"] != null, unsent: Number(b["unsent"]) === 1 }));
+    // Every recorded skip for a taken conversation with this mobile, after the bindings: it owns nothing (question Q7 answered).
+    const skips = this.sql(
+      `SELECT t.subject_id, json_extract(c.value, '$.sender') AS sender FROM track_progress t, json_each(t.conversation_owners) c
+       WHERE t.conversation_owners IS NOT NULL AND json_extract(c.value, '$.recipient') = ? ORDER BY t.finished_wall, t.rowid`,
+    )
+      .all(recipient)
+      .map((r): SmsBindingRecord => ({ kind: "skipped", sender: str(r, "sender"), owner: str(r, "subject_id"), released: true, unsent: true }));
+    return [...bindings, ...skips];
   }
 
-  async latestSmsBinding(): Promise<number> {
-    return Number(this.sql("SELECT COALESCE(MAX(seq), 0) AS seq FROM sms_bindings").get()?.["seq"] ?? 0);
+  async conversationsVersion(): Promise<string> {
+    return str(
+      this.sql(
+        `SELECT (SELECT COALESCE(MAX(seq), 0) FROM sms_bindings) || '/' || (SELECT COUNT(*) FROM sms_bindings WHERE released_at IS NOT NULL) || '/' ||
+           (SELECT COUNT(*) FROM sms_bindings b WHERE b.released_at IS NULL AND EXISTS (SELECT 1 FROM provider_work w WHERE w.subject_id = b.owner_subject
+             AND w.account_id = b.sender_number AND w.destination = b.recipient_key AND (w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL))) AS v`,
+      ).get() ?? { v: "0/0/0" },
+      "v",
+    );
   }
 
   async accounts(now: number): Promise<AccountState[]> {
@@ -1280,8 +1296,10 @@ export class SqliteEngineStore implements EngineStore {
         .map((r) => ({ inbox: str(r, "inbox"), address: str(r, "address") })),
       // Every unreleased conversation of the lead's numbers and of the numbers its texts went to, whoever owns it (4.5).
       smsBindings: this.sql(
-        `SELECT b.sender_number, b.recipient_key, b.owner_subject, b.created_at, COALESCE(e.campaign_id, tr.campaign_id) AS owner_campaign, c.name AS owner_campaign_name,
-                tr.id IS NOT NULL AS owner_is_test, COALESCE(e.ended, tr.ended) AS owner_ended FROM sms_bindings b
+        `SELECT b.sender_number, b.recipient_key, b.owner_subject, COALESCE(e.campaign_id, tr.campaign_id) AS owner_campaign, c.name AS owner_campaign_name,
+                tr.id IS NOT NULL AS owner_is_test, COALESCE(e.ended, tr.ended) AS owner_ended,
+                EXISTS (SELECT 1 FROM provider_work w WHERE w.subject_id = b.owner_subject AND w.account_id = b.sender_number AND w.destination = b.recipient_key
+                  AND (w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL)) AS owner_sent FROM sms_bindings b
          LEFT JOIN enrollments e ON e.id = b.owner_subject
          LEFT JOIN test_runs tr ON tr.id = b.owner_subject
          LEFT JOIN campaigns c ON c.id = COALESCE(e.campaign_id, tr.campaign_id)
@@ -1292,7 +1310,7 @@ export class SqliteEngineStore implements EngineStore {
          ORDER BY b.seq`,
       )
         .all({ kind: owner?.kind ?? "", owner: owner?.id ?? "", own: JSON.stringify(owner ? [] : details.filter((d) => d.mobile).map((d) => d.key)), subject: subjectId })
-        .map((b) => ({ sender: str(b, "sender_number"), recipient: str(b, "recipient_key"), owner: str(b, "owner_subject"), ownerCampaignId: strOrNull(b, "owner_campaign"), ownerCampaignName: strOrNull(b, "owner_campaign_name"), ownerIsTest: Number(b["owner_is_test"]) === 1, ownerEnded: b["owner_ended"] != null, createdWall: num(b, "created_at") })),
+        .map((b) => ({ sender: str(b, "sender_number"), recipient: str(b, "recipient_key"), owner: str(b, "owner_subject"), ownerCampaignId: strOrNull(b, "owner_campaign"), ownerCampaignName: strOrNull(b, "owner_campaign_name"), ownerIsTest: Number(b["owner_is_test"]) === 1, ownerEnded: b["owner_ended"] != null, ownerSent: Number(b["owner_sent"]) === 1 })),
       lead: { zone, details, resolved, mergeData, phones },
       markBad: [],
       accounts,
@@ -1326,9 +1344,9 @@ export class SqliteEngineStore implements EngineStore {
       changed = true;
       this.run(
         `INSERT OR REPLACE INTO track_progress (subject_id, track_id, start_at, start_basis_at, start_basis_wall, start_zone, started_at,
-           destination_detail_id, next_step_id, basis_at, basis_wall, due_at, due_wall, due_zone, finished_at, finished_wall, finish_reason)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id, t.trackId, t.startAt, t.startBasisAt, t.startBasisWall, t.startZone, t.startedAt, t.destinationDetailId, t.nextStepId, t.basisAt, t.basisWall, t.dueAt, t.dueWall, t.dueZone, t.finishedAt, t.finishedWall, t.finishReason],
+           destination_detail_id, next_step_id, basis_at, basis_wall, due_at, due_wall, due_zone, finished_at, finished_wall, finish_reason, conversation_owners)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, t.trackId, t.startAt, t.startBasisAt, t.startBasisWall, t.startZone, t.startedAt, t.destinationDetailId, t.nextStepId, t.basisAt, t.basisWall, t.dueAt, t.dueWall, t.dueZone, t.finishedAt, t.finishedWall, t.finishReason, t.conversationOwners ? JSON.stringify(t.conversationOwners) : null],
       );
     }
     for (const r of next.results) {
@@ -1408,7 +1426,14 @@ export class SqliteEngineStore implements EngineStore {
       // The partial unique index refuses a second unreleased owner of the pair (4.5).
       this.run("INSERT INTO sms_bindings (sender_number, recipient_key, owner_subject, created_at) VALUES (?, ?, ?, ?)", [b.sender, b.recipient, id, now]);
     }
-    if (base.smsBindings.some((b) => !next.smsBindings.some((x) => x.sender === b.sender && x.recipient === b.recipient))) throw new Error("an SMS binding is never removed by a subject's change");
+    // A binding leaves a subject's change only as an unsent release (question Q7 answered, point 10): its own binding, none
+    // of whose texts on the pair went or may still go. Anything else is refused.
+    for (const b of base.smsBindings) {
+      if (next.smsBindings.some((x) => x.sender === b.sender && x.recipient === b.recipient)) continue;
+      if (b.owner !== id || !bindingUnsent(next, b)) throw new Error("an SMS binding is never removed by a subject's change, except its own binding with nothing sent");
+      changed = true;
+      this.run("UPDATE sms_bindings SET released_at = ?, unsent = 1 WHERE sender_number = ? AND recipient_key = ? AND owner_subject = ? AND released_at IS NULL", [now, b.sender, b.recipient, id]);
+    }
     for (const t of next.callTasks) {
       const before = base.callTasks.find((b) => b.id === t.id);
       if (same(before, t)) continue;
@@ -1587,6 +1612,7 @@ function toTrack(r: Row): TrackProgress {
     finishedAt: numOrNull(r, "finished_at"),
     finishedWall: numOrNull(r, "finished_wall"),
     finishReason: strOrNull(r, "finish_reason") as FinishReason | null,
+    ...(r["conversation_owners"] == null ? {} : { conversationOwners: JSON.parse(str(r, "conversation_owners")) as ConversationCause[] }),
   };
 }
 

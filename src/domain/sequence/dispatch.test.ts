@@ -213,7 +213,7 @@ describe("SMS dispatch and conversations (ADR 0003 4.5, ticket 13)", () => {
   // An SMS track only; its second step's threading is never read.
   const smsOnly = () => launched(multiTrackState([track("t2", "sms", [step("m1", { subject: "", body: "Hi {{first_name|there}}, {{company}} here." }), step("m2", { subject: "", waitDays: 1 })])]));
   const smsItem = item({ trackId: "t2", stepId: "m1" });
-  const other = (sender: string, ownerEnded = false) => ({ sender, recipient: MOBILE.key, owner: "lead-in-another-campaign", ownerCampaignId: "camp-2", ownerCampaignName: "Spring clinics", ownerIsTest: false, ownerEnded, createdWall: MONDAY_9 - 1 });
+  const other = (sender: string, ownerEnded = false) => ({ sender, recipient: MOBILE.key, owner: "lead-in-another-campaign", ownerCampaignId: "camp-2", ownerCampaignName: "Spring clinics", ownerIsTest: false, ownerEnded, ownerSent: true });
 
   test("a due SMS step is ready, and its claim uses a number from the SMS pool, never an inbox, to the mobile's E.164 key", () => {
     const s = smsOnly();
@@ -256,7 +256,7 @@ describe("SMS dispatch and conversations (ADR 0003 4.5, ticket 13)", () => {
     const h = handOver(ready, a, ready.accounts[N1]!, MONDAY_9);
     expect(h.attempts[0]).toMatchObject({ state: "handed", copy: { subject: "", body: "Hi Pat, Harbour Lane Physio here." }, threadRef: null });
     expect(h.subject).toMatchObject({ smsSender: N1, emailSender: null });
-    expect(h.smsBindings).toEqual([{ sender: N1, recipient: MOBILE.key, owner: "lead-1", ownerCampaignId: "camp-1", ownerCampaignName: null, ownerIsTest: false, ownerEnded: false, createdWall: MONDAY_9 }]);
+    expect(h.smsBindings).toEqual([{ sender: N1, recipient: MOBILE.key, owner: "lead-1", ownerCampaignId: "camp-1", ownerCampaignName: null, ownerIsTest: false, ownerEnded: false, ownerSent: false }]);
   });
 
   test("a conversation taken by another subject between the claim and the handover fails predicate 11; another fixed number fails 10", () => {
@@ -283,8 +283,8 @@ describe("SMS dispatch and conversations (ADR 0003 4.5, ticket 13)", () => {
 describe("an SMS reply's owner (ADR 0003 4.5)", () => {
   test("the reply goes to the owner of the conversation with the number it reached, never to the mobile's newest conversation", () => {
     const bindings = [
-      { sender: "+447700900001", owner: "a", released: false },
-      { sender: "+447700900002", owner: "b", released: false },
+      { kind: "binding" as const, sender: "+447700900001", owner: "a", released: false, unsent: false },
+      { kind: "binding" as const, sender: "+447700900002", owner: "b", released: false, unsent: false },
     ];
     expect(smsReplyOwner(bindings, "+447700900001")).toBe("a");
     expect(smsReplyOwner(bindings, "+447700900002")).toBe("b");
@@ -293,10 +293,20 @@ describe("an SMS reply's owner (ADR 0003 4.5)", () => {
 
   test("with no unreleased owner, the most recent released owner (an ended test run) is named", () => {
     const bindings = [
-      { sender: "n1", owner: "test-1", released: true },
-      { sender: "n1", owner: "test-2", released: true },
+      { kind: "binding" as const, sender: "n1", owner: "test-1", released: true, unsent: false },
+      { kind: "binding" as const, sender: "n1", owner: "test-2", released: true, unsent: false },
     ];
     expect(smsReplyOwner(bindings, "n1")).toBe("test-2");
-    expect(smsReplyOwner([...bindings, { sender: "n1", owner: "test-3", released: false }], "n1")).toBe("test-3");
+    expect(smsReplyOwner([...bindings, { kind: "binding" as const, sender: "n1", owner: "test-3", released: false, unsent: false }], "n1")).toBe("test-3");
+  });
+
+  test("a binding released as unsent never owned a conversation, and a recorded skip owns nothing: neither takes a reply (Q7 answered, point 10)", () => {
+    const records = [
+      { kind: "binding" as const, sender: "n1", owner: "test-1", released: true, unsent: false },
+      { kind: "binding" as const, sender: "n1", owner: "lead-a", released: true, unsent: true },
+      { kind: "skipped" as const, sender: "n1", owner: "lead-b", released: true, unsent: true },
+    ];
+    expect(smsReplyOwner(records, "n1")).toBe("test-1");
+    expect(smsReplyOwner(records.slice(1), "n1")).toBeNull();
   });
 });

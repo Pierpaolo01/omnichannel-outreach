@@ -9,7 +9,7 @@ import { launchCheck, type LaunchCheck } from "../../domain/sequence/blockers.ts
 import { REQUEST_ID_DIFFERENT, REQUEST_ID_REUSED, type OutcomeInput } from "../../domain/sequence/calls.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
-import { conversationRecheck, runs, sealReckoning } from "../../domain/sequence/progress.ts";
+import { runs, sealReckoning, settledEvaluation, stillSettled, type SettledEvaluation } from "../../domain/sequence/progress.ts";
 import { definitionProblems, type CampaignDefinition } from "../../domain/sequence/definition.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
 import { judgeCampaignControl, type LeadControl, type LeadExpectation } from "../../domain/sequence/controls.ts";
@@ -260,7 +260,24 @@ export class Engine {
    * Correct only while `runningSubjectVersions` names every input of `evaluate` and
    * `readyItems`: a ticket that adds an input (a call task, a pause) adds it to that key.
    */
-  private readonly settled = new Map<string, { key: string; until: number; bindings: number | null }>();
+  private readonly settled = new Map<string, { key: string } & SettledEvaluation>();
+
+  /**
+   * Every write the worker makes to a subject (question Q7 answered, point 10): a binding of its own whose texts all ended
+   * not sent is released in the same write that settles the last of them, so it never stands as a conversation.
+   */
+  private update(subjectId: string, now: number, decide: (state: SubjectState) => SubjectState | null): Promise<SubjectState | null> {
+    return this.store.update(subjectId, now, (s) => {
+      const next = decide(s);
+      return next === null ? null : this.rules.releaseUnsent(next);
+    });
+  }
+  private updateNow(subjectId: string, now: number, decide: (state: SubjectState) => SubjectState | null): SubjectState | null {
+    return this.store.updateNow(subjectId, now, (s) => {
+      const next = decide(s);
+      return next === null ? null : this.rules.releaseUnsent(next);
+    });
+  }
   private readonly nothingReady = new Map<string, { key: string; until: number }>();
   /** Subjects with no due call to place, by version key and call settings, until a wall instant. */
   private readonly noCallsReady = new Map<string, { key: string; until: number }>();
@@ -486,7 +503,7 @@ export class Engine {
       if (!s) continue;
       rescheduled += this.rules.rescheduled(s, gap, now, (accountId) => room.get(accountId) ?? []).length;
       const after = this.rules.afterInterruption(s, gap, now);
-      if (!same(after, s)) await this.store.update(id, now, (current) => (this.rules.versionsMatch(s, current) ? { ...after, accounts: current.accounts } : null));
+      if (!same(after, s)) await this.update(id, now, (current) => (this.rules.versionsMatch(s, current) ? { ...after, accounts: current.accounts } : null));
     }
     await this.store.setMetas({ [NOTICE_KEY]: JSON.stringify({ from: gap.from, to: gap.to, rescheduled }), [HEARTBEAT_KEY]: String(at) });
     this.heartbeatSeen = at;
@@ -705,7 +722,7 @@ export class Engine {
   ): Promise<boolean> {
     const now = this.now();
     const anomalies: string[] = [];
-    const written = await this.store.update(subjectId, now, (s) => {
+    const written = await this.update(subjectId, now, (s) => {
       const decided = decide(s, now);
       if (!decided) return null;
       let next = decided.out.state;
@@ -790,7 +807,7 @@ export class Engine {
     const now = this.now();
     let changed = false;
     for (const subjectId of subjects) {
-      const written = await this.store.update(subjectId, now, (s) => {
+      const written = await this.update(subjectId, now, (s) => {
         const next = this.rules.applyReply(s, { channel, atWall: Math.min(reply.at, now), providerRef: reply.id }, now);
         return same(next, s) ? null : next;
       });
@@ -882,7 +899,7 @@ export class Engine {
       atWall: Math.min(event.at, now),
       receivedWall: now,
     });
-    return (await this.store.update(w.subjectId, now, (s) => {
+    return (await this.update(w.subjectId, now, (s) => {
       const sentBy = handedBy(s);
       if (!sentBy) return null;
       const next = this.rules.applyBadDestination(s, sentBy, now);
@@ -1010,37 +1027,27 @@ export class Engine {
     let changed = false;
     // The user's zone decides the day an unworked call expires at, so it is part of the cache key.
     const settings = JSON.stringify(await this.store.callSettings());
-    // Another subject's first text takes a conversation without touching this subject's version (question Q7 answered).
-    const bindings = await this.store.latestSmsBinding();
+    // Another subject's conversations change without touching this subject's version (question Q7 answered).
+    const conversations = await this.store.conversationsVersion();
     for (const [id, subjectVersion] of await this.store.runningSubjectVersions()) {
       const version = `${subjectVersion}|${settings}`;
       const now = this.now();
       const known = this.settled.get(id);
-      if (known?.key === version && now < known.until && (known.bindings === null || known.bindings === bindings)) continue;
+      if (known?.key === version && stillSettled(known, now, conversations)) continue;
       const snapshot = await this.store.subject(id, now);
       if (!snapshot) continue;
       const next = this.rules.evaluate(snapshot, now);
       if (same(next, snapshot)) {
-        const lead = leadNow(snapshot.subject.clock, now);
-        const starts = snapshot.tracks.filter((p) => p.startedAt === null && p.startAt !== null).map((p) => now + ((p.startAt ?? 0) - lead));
-        // An open call task may expire at the next user day (ticket 15); a held lead's callback is looked at then too.
-        if (snapshot.callTasks.some((t) => t.open)) starts.push(await this.nextUserDay(now));
-        // An SMS track waiting to hand over is checked again at its due instant and when its window opens, and after
-        // any new conversation, for the skip of a taken one (question Q7 answered).
-        const recheck = conversationRecheck(snapshot, now);
-        if (recheck.at !== null) starts.push(recheck.at);
-        this.settled.set(id, { key: version, until: Math.min(Infinity, ...starts.filter((t) => t > now)), bindings: recheck.onNewBinding ? bindings : null });
+        // The one settling rule the projection uses too.
+        const day = snapshot.callTasks.some((t) => t.open) ? await this.nextUserDay(now) : Infinity;
+        this.settled.set(id, { key: version, ...settledEvaluation(snapshot, now, day, conversations) });
         continue;
       }
       await this.hooks.beforeApplyEvaluation?.(id);
-      // Shared facts other subjects write are taken as they are now: the accounts, and the SMS
-      // bindings, which another process's first handover to the same mobile may have added since the
-      // snapshot (review bot on 5ca8c5e). An evaluation never removes a binding; one it added is kept.
-      await this.store.update(id, now, (current) =>
-        this.rules.versionsMatch(snapshot, current)
-          ? { ...next, accounts: current.accounts, smsBindings: [...current.smsBindings, ...next.smsBindings.filter((b) => !snapshot.smsBindings.some((x) => x.sender === b.sender && x.recipient === b.recipient) && !current.smsBindings.some((x) => x.sender === b.sender && x.recipient === b.recipient))] }
-          : null,
-      );
+      // The evaluation is stored only if nothing it read has changed since its snapshot, the SMS conversations it read
+      // included (`versionsMatch`, checked in the write's own transaction): a binding taken, released or found sent since
+      // refuses it, and the next pass decides again on the state as it is (question Q7 answered). Accounts it never reads.
+      await this.update(id, now, (current) => (this.rules.versionsMatch(snapshot, current) ? { ...next, accounts: current.accounts } : null));
       // Written, or discarded as stale: either way another pass follows, so a discarded change is
       // re-evaluated on fresh state in this tick (2.5).
       changed = true;
@@ -1084,7 +1091,7 @@ export class Engine {
     let changed = false;
     for (const { item } of ready) {
       const taskId = this.newId();
-      const written = await this.store.update(item.subjectId, now, (s) => this.rules.placeCall(s, item, now, taskId));
+      const written = await this.update(item.subjectId, now, (s) => this.rules.placeCall(s, item, now, taskId));
       changed = written !== null || changed;
     }
     return changed;
@@ -1247,7 +1254,7 @@ export class Engine {
       const allowed = this.dispatchAllowed(this.rules.dispatchInstant(this.tickStarted, this.now()), () => Promise.resolve(relevantChannels(snapshot, item.trackId)));
       if (allowed === false || (allowed !== true && !(await allowed))) continue;
       const attemptId = this.newId();
-      const written = await this.store.update(item.subjectId, now, (s) => {
+      const written = await this.update(item.subjectId, now, (s) => {
         if (!this.rules.versionsMatch(snapshot, s)) return null;
         if (this.rules.claimRefusal(s, item, now) !== null) return null;
         const account = this.rules.chooseAccount(s, now, item.stepId);
@@ -1334,7 +1341,7 @@ export class Engine {
     const asked = await this.bounded(() => port.presendCheck({ sender: a.accountId, destination: a.destination, threadRefs, knownReplies: knownReplies.map((id) => this.rules.portReplyId(channel, id)) }), { kind: "unavailable" as const }, port.channel, (result) => ({ call: "presendCheck", result }));
     const result = this.rules.presendAnswer(asked, channel, knownReplies);
     if (result.kind === "unavailable") return false;
-    await this.store.update(a.subjectId, now, (s) => {
+    await this.update(a.subjectId, now, (s) => {
       let next: SubjectState = { ...s, attempts: s.attempts.map((x) => (x.id === a.id ? { ...x, presendCheckedWall: now, presendFoundReply: result.kind === "reply" } : x)) };
       if (result.kind === "reply") next = this.rules.applyReply(next, { channel, atWall: Math.min(result.at, now), providerRef: result.providerRef }, now);
       return next;
@@ -1418,7 +1425,7 @@ export class Engine {
       a,
       (now) => {
         const out: { authorized: Attempt | null; onlySlot: boolean; skip?: boolean } = { authorized: null, onlySlot: false };
-        this.store.updateNow(a.subjectId, now, (s) => {
+        this.updateNow(a.subjectId, now, (s) => {
           // Ownership, in the transaction that authorizes the send: a process that lost the lease records no handover.
           if (!this.leaseIsMine(now)) {
             out.skip = true;
@@ -1467,7 +1474,7 @@ export class Engine {
       a,
       (now) => {
         const out: { authorized: Attempt | null; onlySlot: boolean; skip?: boolean } = { authorized: null, onlySlot: false };
-        this.store.updateNow(a.subjectId, now, (s) => {
+        this.updateNow(a.subjectId, now, (s) => {
           // Ownership, in the transaction that authorizes the send: a process that lost the lease records no handover.
           if (!this.leaseIsMine(now)) {
             out.skip = true;

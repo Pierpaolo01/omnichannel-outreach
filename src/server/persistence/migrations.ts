@@ -882,6 +882,27 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE sender_accounts_v20 RENAME TO sender_accounts;
     `,
   },
+  {
+    version: 21,
+    name: "a skip for a taken SMS conversation records its cause; a binding whose texts all ended not sent is released as unsent (ADR 0003, question Q7 answered)",
+    // The skip's cause (the number, the mobile and the owner then) is stored with the track, so a later pool edit, a
+    // release or a rename never changes the reason a read gives. A conversation exists once a text is known sent: a
+    // binding none of whose owner's texts on the pair went is released, marked unsent, so it neither blocks another
+    // campaign nor takes a reply.
+    sql: `
+      ALTER TABLE track_progress ADD COLUMN conversation_owners TEXT;
+      ALTER TABLE sms_bindings ADD COLUMN unsent INTEGER NOT NULL DEFAULT 0 CHECK (unsent IN (0, 1));
+    `,
+    data: (db) => {
+      // A binding taken by a first text that then ended not sent, finally: released now, as the engine releases one.
+      db.prepare(
+        `UPDATE sms_bindings SET released_at = ?, unsent = 1
+         WHERE released_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM provider_work w WHERE w.subject_id = sms_bindings.owner_subject AND w.account_id = sms_bindings.sender_number
+             AND w.destination = sms_bindings.recipient_key AND (w.settled IS NULL OR w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL))`,
+      ).run(Date.now());
+    },
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string, migrations: readonly Migration[] = MIGRATIONS): void {

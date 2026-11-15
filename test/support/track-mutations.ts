@@ -72,7 +72,7 @@ function pretendTaken(s: SubjectState, which: (accountId: string, s: SubjectStat
   const fake = [...smsMobiles(s)].flatMap(([trackId, recipient]) =>
     (s.campaign.definition.smsPool ?? [])
       .filter((n) => which(n, s, trackId) && !s.smsBindings.some((b) => b.sender === n && b.recipient === recipient))
-      .map((n) => ({ sender: n, recipient, owner: PRETEND, ownerCampaignId: null, ownerCampaignName: null, ownerIsTest: false, ownerEnded: false, createdWall: 0 })),
+      .map((n) => ({ sender: n, recipient, owner: PRETEND, ownerCampaignId: null, ownerCampaignName: null, ownerIsTest: false, ownerEnded: false, ownerSent: true })),
   );
   return fake.length === 0 ? s : { ...s, smsBindings: [...s.smsBindings, ...fake] };
 }
@@ -106,7 +106,7 @@ const RULES: Record<string, Partial<Rules>> = {
       const out = R.claim(s, item, acc, input);
       const claimed = out.attempts.find((x) => x.id === input.attemptId);
       if (!claimed || acc.channel !== "sms" || out.smsBindings.some((b) => b.sender === acc.id && b.recipient === claimed.destination)) return out;
-      return { ...out, smsBindings: [...out.smsBindings, { sender: acc.id, recipient: claimed.destination, owner: s.subject.id, ownerCampaignId: s.campaign.id, ownerCampaignName: null, ownerIsTest: s.subject.kind === "test_run", ownerEnded: false, createdWall: input.now }] };
+      return { ...out, smsBindings: [...out.smsBindings, { sender: acc.id, recipient: claimed.destination, owner: s.subject.id, ownerCampaignId: s.campaign.id, ownerCampaignName: null, ownerIsTest: s.subject.kind === "test_run", ownerEnded: false, ownerSent: false }] };
     },
   },
   "ending check too late": {

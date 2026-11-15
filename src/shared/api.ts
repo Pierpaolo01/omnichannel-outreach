@@ -451,9 +451,10 @@ export interface ConversationOwnerView {
 }
 /**
  * Why a track waits for the user (ADR 0003 5.4). A mobile whose conversation is taken on every number is not a hold: its
- * SMS track is skipped (`skipped_conversation_taken`, question Q7 answered).
+ * SMS track is skipped (`skipped_conversation_taken`, question Q7 answered). `sms_conversation_unsettled`: every number
+ * is in another campaign's conversation whose first text is not known sent or not sent yet; it waits for that answer.
  */
-export type HoldReasonApi = "unresolved" | "render_failed" | "provider_skipped" | "no_thread";
+export type HoldReasonApi = "unresolved" | "render_failed" | "provider_skipped" | "no_thread" | "sms_conversation_unsettled";
 
 export interface SendView {
   readonly attemptId: string;

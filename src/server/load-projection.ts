@@ -24,7 +24,7 @@ import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, startOfLocalDay, w
 import { windowOf, type ReadyItem } from "../domain/sequence/dispatch.ts";
 import { callableOnDay, callRoom, callWindow, goodNumbers } from "../domain/sequence/calls.ts";
 import { liveSteps, liveTracks, poolOf, winBackEntry, type CampaignDefinition, type TrackChannel } from "../domain/sequence/definition.ts";
-import { channelReaches, conversationRecheck } from "../domain/sequence/progress.ts";
+import { channelReaches, settledEvaluation, stillSettled, type SettledEvaluation } from "../domain/sequence/progress.ts";
 import type { AccountState, Attempt, CallDay, SmsBinding, SubjectState } from "../domain/sequence/state.ts";
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
 
@@ -53,6 +53,8 @@ export interface ProjectionInput {
   readonly rules?: Rules;
   /** The most calls into the engine's rules the projection may make before it stops (`PROJECTION_MAX_STEPS`). */
   readonly maxSteps?: number;
+  /** For the oracle's broken projection only: a settled evaluation is kept when the conversations change. */
+  readonly keepSettledAcrossConversations?: boolean;
 }
 
 /**
@@ -244,17 +246,28 @@ export function projectLoad(input: ProjectionInput): Projection {
   const dirty = new Set<string>();
   // SMS conversations, shared by every subject, by mobile.
   const bindings = new Map<string, SmsBinding[]>();
+  /**
+   * The conversations' version, as the store's `conversationsVersion` (question Q7 answered): it changes when a binding
+   * is taken or released, and whenever a binding's owner writes, which is when its text can become known sent. Every
+   * evaluation settled on a waiting SMS track (`watching`) is looked at again then, through the shared `stillSettled`.
+   */
   let bindingsVersion = 0;
-  /** Subjects with an SMS track waiting to hand over: a new conversation may take their last free number (question Q7 answered). */
-  const watchingBindings = new Set<string>();
+  const watching = new Set<string>();
+  const conversationsChanged = () => {
+    bindingsVersion++;
+    for (const id of watching) dirty.add(id);
+  };
   const addBinding = (b: SmsBinding) => {
     const list = bindings.get(b.recipient) ?? [];
     if (list.some((x) => x.sender === b.sender)) return;
     bindings.set(b.recipient, [...list, b]);
-    bindingsVersion++;
-    // As `Engine.evaluateAll` looks again at a waiting subject after any new conversation.
-    for (const id of watchingBindings) dirty.add(id);
-    watchingBindings.clear();
+    conversationsChanged();
+  };
+  /** Whether a binding's owner's text on its pair is known sent: from the owner's simulated work, or as stored if it is not simulated. */
+  const ownerSent = (b: SmsBinding): boolean => {
+    const owner = states.get(b.owner);
+    if (!owner) return b.ownerSent;
+    return owner.work.some((w) => w.accountId === b.sender && w.destination === b.recipient && (w.settled === "sent" || w.settled === "user_sent" || w.sentWall !== null));
   };
 
   // ---- Prepare: this campaign's leads enter as launch enters them; everyone else as stored.
@@ -387,7 +400,7 @@ export function projectLoad(input: ProjectionInput): Projection {
     let smsBindings = bindingsCache.get(s);
     if (!smsBindings || smsBindings.version !== bindingsVersion) {
       const mobiles = new Set([...s.lead.details.filter((d) => d.channel === "phone").map((d) => d.key), ...s.attempts.map((a) => a.destination)]);
-      smsBindings = { version: bindingsVersion, list: [...mobiles].flatMap((m) => bindings.get(m) ?? []) };
+      smsBindings = { version: bindingsVersion, list: [...mobiles].flatMap((m) => (bindings.get(m) ?? []).map((b) => ({ ...b, ownerSent: ownerSent(b) }))) };
       bindingsCache.set(s, smsBindings);
     }
     const callDay = callDayAt(t);
@@ -397,8 +410,10 @@ export function projectLoad(input: ProjectionInput): Projection {
   for (const id of states.keys()) dirty.add(id);
   const wakes = new Wakes();
   /** Writes a subject's change, as the store does: the ledger, the slot it took, the conversation it bound. */
-  const write = (id: string, loaded: SubjectState, next: SubjectState) => {
-    if (next === loaded) return false;
+  const write = (id: string, loaded: SubjectState, changed: SubjectState) => {
+    if (changed === loaded) return false;
+    // As the worker writes: a binding of its own with nothing sent is released in the same write (point 10).
+    const next = rules.releaseUnsent(changed);
     written++;
     const before = stateOf(id);
     contribute(before, -1);
@@ -407,6 +422,12 @@ export function projectLoad(input: ProjectionInput): Projection {
     contribute(stored, 1);
     for (const [aid, acc] of Object.entries(next.accounts)) if (acc.nextSlotAt !== loaded.accounts[aid]?.nextSlotAt) slot.set(aid, acc.nextSlotAt);
     for (const b of next.smsBindings) addBinding(b);
+    for (const [recipient, list] of bindings) {
+      const kept = list.filter((b) => b.owner !== id || next.smsBindings.some((x) => x.sender === b.sender && x.recipient === b.recipient));
+      if (kept.length !== list.length) bindings.set(recipient, kept);
+    }
+    // A binding's owner wrote: its text may now be known sent, or its binding released.
+    if ([...bindings.values()].some((list) => list.some((b) => b.owner === id))) conversationsChanged();
     dirty.add(id);
     return true;
   };
@@ -478,7 +499,7 @@ export function projectLoad(input: ProjectionInput): Projection {
 
   const sends: ProjectedSend[] = [];
   let attemptSeq = 0;
-  const evalUntil = new Map<string, { state: SubjectState; until: number }>();
+  const evalUntil = new Map<string, { state: SubjectState } & SettledEvaluation>();
   const ready = new Map<string, { state: SubjectState; items: ReadyItem[]; until: number; windows: { w: readonly WindowRule[]; zone: string }[] }>();
   // Every ready item in claim order, kept sorted as entries come and go, so a pass with thousands
   // of leads waiting for capacity does not sort them all again.
@@ -660,22 +681,18 @@ export function projectLoad(input: ProjectionInput): Projection {
       for (const id of [...dirty]) {
         const s = stateOf(id);
         const known = evalUntil.get(id);
-        if (known?.state === s && t < known.until) continue;
+        const conversations = String(bindingsVersion);
+        // The one settling rule the worker uses (`settledEvaluation`, `stillSettled`); the oracle's broken projection keeps
+        // a settled evaluation across a change of conversations ("a dirty watcher keeps its cached evaluation").
+        if (known?.state === s && (input.keepSettledAcrossConversations ? t < known.until : stillSettled(known, t, conversations))) continue;
         const loaded = load(id, t);
         const next = rules.evaluate(loaded, t);
         if (next === loaded) {
-          const lead = leadNow(s.subject.clock, t);
-          const starts = s.tracks.filter((p) => p.startedAt === null && p.startAt !== null).map((p) => t + ((p.startAt ?? 0) - lead)).filter((x) => x > t);
-          // An open call task may be skipped at the user's next day (the skip limit, ticket 15), as `Engine.evaluateAll` looks then.
-          if (s.callTasks.some((x) => x.open)) starts.push(startOfLocalDay(localDayNumber(t, s.callDay.userZone) + 1, s.callDay.userZone));
-          // A waiting SMS track is looked at again at its due instant, when its window opens, and after any new
-          // conversation, as `Engine.evaluateAll` does for the skip of a taken one (question Q7 answered).
-          const recheck = conversationRecheck(loaded, t);
-          if (recheck.at !== null) starts.push(recheck.at);
-          if (recheck.onNewBinding) watchingBindings.add(id);
-          const until = Math.min(Infinity, ...starts);
-          evalUntil.set(id, { state: s, until });
-          wakes.push(until, id);
+          const settled = settledEvaluation(loaded, t, startOfLocalDay(localDayNumber(t, s.callDay.userZone) + 1, s.callDay.userZone), conversations);
+          if (settled.conversations === null) watching.delete(id);
+          else watching.add(id);
+          evalUntil.set(id, { state: s, ...settled });
+          wakes.push(settled.until, id);
           continue;
         }
         write(id, loaded, next);

@@ -9,7 +9,7 @@ import { leadNow, localDayNumber, nextWindowOpen, sendPoint, startOfLocalDay, sy
 import { render } from "./copy.ts";
 import { liveSteps, ownSubject, poolOf, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
 import type { StoredReplyId } from "./reply-identity.ts";
-import type { Attempt, EndReason, FinishReason, LeadDetail, ProviderWork, RenderedCopy, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
+import type { Attempt, ConversationCause, EndReason, FinishReason, LeadDetail, ProviderWork, RenderedCopy, SmsBinding, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Running, status and reach.
@@ -760,7 +760,8 @@ export function replyMatches(state: SubjectState, work: ProviderWork, reply: { r
  * conversation with the same mobile, however recent.
  */
 export function smsReplyOwner(bindings: readonly SmsBindingRecord[], sender: string): string | null {
-  const pair = bindings.filter((b) => b.sender === sender);
+  // A skip owns nothing, and an unsent binding never owned a conversation (question Q7 answered, point 10).
+  const pair = bindings.filter((b) => b.kind === "binding" && !b.unsent && b.sender === sender);
   return pair.find((b) => !b.released)?.owner ?? pair.filter((b) => b.released).at(-1)?.owner ?? null;
 }
 
@@ -908,19 +909,77 @@ export function claimRefusal(state: SubjectState, item: { readonly trackId: stri
   return null;
 }
 
+/** The numbers an SMS track may text from: the subject's fixed sender, else its pool as the definition holds it now. */
+function usableNumbers(state: SubjectState): readonly string[] {
+  const fixed = senderOf(state, "sms");
+  return fixed !== null ? [fixed] : poolOf(state.campaign.definition, "sms");
+}
+
+/** Another subject's binding of `sender` with the track's mobile, if any. */
+function otherBinding(state: SubjectState, sender: string, recipient: string): SmsBinding | undefined {
+  return state.smsBindings.find((b) => b.sender === sender && b.recipient === recipient && b.owner !== state.subject.id);
+}
+
+/**
+ * Whether the track's pending step would be claimed now but for its numbers (ADR 0003, question Q7 answered): the claim's
+ * step guard holds, the track may use at least one number (never vacuously), and none is a candidate: each is in another
+ * subject's conversation with the mobile. Null when not; otherwise the bindings that take them.
+ */
+function blockedNumbers(state: SubjectState, trackId: string, now: number): SmsBinding[] | null {
+  if (channelOf(state, trackId) !== "sms") return null;
+  const stepId = progressOf(state, trackId)?.nextStepId;
+  if (!stepId || claimRefusal(state, { trackId, stepId }, now) !== null) return null;
+  const numbers = usableNumbers(state);
+  const recipient = recipientOf(state, trackId);
+  if (numbers.length === 0 || recipient === null || candidatesFor(state, trackId).length > 0) return null;
+  return numbers.flatMap((n) => otherBinding(state, n, recipient) ?? []);
+}
+
 /**
  * Whether an SMS track's mobile is in another subject's conversation on every number it may use, at the moment its
- * pending step's claim would be made (ADR 0003, question Q7 answered): the claim's step guard holds, and no number is a
- * candidate. A free number's capacity, pacing, health or wait never makes it taken: those are waits.
+ * pending step's claim would be made, each owner's text known sent (question Q7 answered; point 10: a conversation
+ * exists once a text is known to have gone). A free number's capacity, pacing, health or wait never makes it taken.
  */
 export function conversationTaken(state: SubjectState, trackId: string, now: number): boolean {
-  if (channelOf(state, trackId) !== "sms") return false;
-  const stepId = progressOf(state, trackId)?.nextStepId;
-  if (!stepId || claimRefusal(state, { trackId, stepId }, now) !== null) return false;
-  // Every number taken, never vacuously: a track with no number to use has none taken (a launch blocker covers it).
-  const fixed = senderOf(state, "sms");
-  const numbers = fixed !== null ? [fixed] : poolOf(state.campaign.definition, "sms");
-  return numbers.length > 0 && candidatesFor(state, trackId).length === 0;
+  const blocked = blockedNumbers(state, trackId, now);
+  return blocked !== null && blocked.length > 0 && blocked.every((b) => b.ownerSent);
+}
+
+/**
+ * Whether the track waits on another subject's first text whose fate is not known yet (question Q7 answered, point 10):
+ * every number is in another subject's conversation, and some owner's text on it is not known sent. No final decision
+ * is taken on it; the track is held, with that reason, until the work settles: then it is skipped, or the binding,
+ * released as unsent, leaves the number free.
+ */
+export function conversationUnsettled(state: SubjectState, trackId: string, now: number): boolean {
+  const blocked = blockedNumbers(state, trackId, now);
+  return blocked !== null && blocked.some((b) => !b.ownerSent);
+}
+
+/**
+ * Whether the subject's own binding owns no conversation (question Q7 answered, point 10): none of its texts on the pair
+ * was sent, and none may still go (every piece of its work there settled not sent). It is then released, as unsent.
+ */
+export function bindingUnsent(state: SubjectState, binding: Pick<SmsBinding, "sender" | "recipient">): boolean {
+  return state.work
+    .filter((w) => w.accountId === binding.sender && w.destination === binding.recipient)
+    .every((w) => w.settled !== null && w.settled !== "sent" && w.settled !== "user_sent" && w.sentWall === null);
+}
+
+/**
+ * Whether two loads of a subject read the same SMS conversations (question Q7 answered): the same bindings of its mobiles,
+ * by number, mobile and owner, each with the same answer to whether its owner's text is known sent. A binding taken,
+ * released or found sent between an evaluation and its write makes them differ, and the write is refused.
+ */
+export function sameConversations(a: SubjectState, b: SubjectState): boolean {
+  const key = (s: SubjectState) => s.smsBindings.map((x) => `${x.sender}|${x.recipient}|${x.owner}|${x.ownerSent ? 1 : 0}`).sort().join("\n");
+  return key(a) === key(b);
+}
+
+/** Releases the subject's own bindings that own no conversation (`bindingUnsent`), in the write that settles their work. */
+export function releaseUnsentBindings(state: SubjectState): SubjectState {
+  const keep = state.smsBindings.filter((b) => b.owner !== state.subject.id || !bindingUnsent(state, b));
+  return keep.length === state.smsBindings.length ? state : { ...state, smsBindings: keep };
 }
 
 /** A campaign whose subject owns a mobile's SMS conversation, as a skipped track's reason names it. */
@@ -932,24 +991,18 @@ export interface ConversationOwner {
 }
 
 /**
- * Who owned the conversation a track was skipped for (ADR 0003, question Q7 answered), once each, in the order they took
- * it: the other subjects' bindings with the track's mobile taken at or before the skip, on the numbers the track may use
- * as read now (its fixed sender, else its pool); if a pool edit since leaves none of those, every such binding. Empty
- * for any other finish. Read from bindings, which are never deleted; a test run's is no longer listed once it ended.
+ * Who owned the conversation a track was skipped for (ADR 0003, question Q7 answered), once each, in the order the skip
+ * recorded them: from the cause stored with the skip, never from the bindings or the pool as they are now, so a pool
+ * edit, a test run ending or a campaign renamed since leaves the reason as it was. The name is the campaign's name at the
+ * skip, so it stays even if that campaign is renamed or no longer exists. Empty for any other finish.
  */
 export function conversationOwnersOf(state: SubjectState, trackId: string): ConversationOwner[] {
   const p = progressOf(state, trackId);
-  const recipient = recipientOf(state, trackId);
-  if (p?.finishReason !== "skipped_conversation_taken" || p.finishedWall === null || recipient === null) return [];
-  const skippedAt = p.finishedWall;
-  const fixed = senderOf(state, "sms");
-  const usable = new Set(fixed !== null ? [fixed] : poolOf(state.campaign.definition, "sms"));
-  const taken = state.smsBindings.filter((b) => b.recipient === recipient && b.owner !== state.subject.id && b.createdWall <= skippedAt);
-  const onUsable = taken.filter((b) => usable.has(b.sender));
+  if (p?.finishReason !== "skipped_conversation_taken") return [];
   const owners: ConversationOwner[] = [];
-  for (const b of onUsable.length > 0 ? onUsable : taken) {
-    if (b.ownerCampaignId === null || b.ownerCampaignName === null) continue;
-    if (!owners.some((o) => o.campaignId === b.ownerCampaignId && o.test === b.ownerIsTest)) owners.push({ campaignId: b.ownerCampaignId, name: b.ownerCampaignName, test: b.ownerIsTest });
+  for (const c of p.conversationOwners ?? []) {
+    if (c.ownerCampaignId === null || c.ownerCampaignName === null) continue;
+    if (!owners.some((o) => o.campaignId === c.ownerCampaignId && o.test === c.ownerIsTest)) owners.push({ campaignId: c.ownerCampaignId, name: c.ownerCampaignName, test: c.ownerIsTest });
   }
   return owners;
 }
@@ -979,13 +1032,48 @@ export function conversationRecheck(state: SubjectState, now: number): { readonl
 }
 
 /**
+ * How long an evaluation that changed nothing holds (ADR 0003, question Q7 answered, "One rule for the evaluation
+ * caches"). The worker's evaluation cache and the Before launch projection's both settle a subject with this function
+ * and look at it again with `stillSettled`, so the two cannot look at different instants or facts: until its next delayed
+ * track start, its user's next day while a call task is open (the skip limit), its waiting SMS track's due instant or
+ * window opening; and, while an SMS track waits to hand over, until the SMS conversations it could read change
+ * (`conversations`, a version of every binding and of whether its owner's text is known sent; null when none matters).
+ */
+export interface SettledEvaluation {
+  readonly until: number;
+  readonly conversations: string | null;
+}
+export function settledEvaluation(state: SubjectState, now: number, nextUserDay: number, conversations: string): SettledEvaluation {
+  const lead = leadNow(state.subject.clock, now);
+  const at = state.tracks.filter((p) => p.startedAt === null && p.startAt !== null).map((p) => now + ((p.startAt ?? 0) - lead));
+  if (state.callTasks.some((t) => t.open)) at.push(nextUserDay);
+  const recheck = conversationRecheck(state, now);
+  if (recheck.at !== null) at.push(recheck.at);
+  return { until: Math.min(Infinity, ...at.filter((t) => t > now)), conversations: recheck.onNewBinding ? conversations : null };
+}
+/** Whether a settled evaluation still holds at `now`, with the conversations as they are now. */
+export function stillSettled(entry: SettledEvaluation, now: number, conversations: string): boolean {
+  return now < entry.until && (entry.conversations === null || entry.conversations === conversations);
+}
+
+/**
  * Skips every SMS track whose conversation is taken (`conversationTaken`), at the evaluation's instant, with no step
  * result: like a missing channel, nothing of the track is sent. The skip is final (a finished track never restarts).
  */
 export function skipTakenConversations(state: SubjectState, now: number): SubjectState {
   let s = state;
   for (const track of liveTracksFor(s)) {
-    if (conversationTaken(s, track.id, now)) s = finishTrack(s, track.id, "skipped_conversation_taken", leadNow(s.subject.clock, now), wallOfLead(s.subject.clock, now));
+    if (!conversationTaken(s, track.id, now)) continue;
+    // The cause is recorded with the skip, as it is now: each number's owner and its campaign's name.
+    const cause: ConversationCause[] = (blockedNumbers(s, track.id, now) ?? []).map((b) => ({
+      sender: b.sender,
+      recipient: b.recipient,
+      owner: b.owner,
+      ownerCampaignId: b.ownerCampaignId,
+      ownerCampaignName: b.ownerCampaignName,
+      ownerIsTest: b.ownerIsTest,
+    }));
+    s = withTrack(finishTrack(s, track.id, "skipped_conversation_taken", leadNow(s.subject.clock, now), wallOfLead(s.subject.clock, now)), track.id, (t) => ({ ...t, conversationOwners: cause }));
   }
   return s;
 }
@@ -993,7 +1081,7 @@ export function skipTakenConversations(state: SubjectState, now: number): Subjec
 // ---------------------------------------------------------------------------------------------
 // Holds (5.4), derived.
 
-export type HoldReason = "unresolved" | "render_failed" | "provider_skipped" | "no_thread";
+export type HoldReason = "unresolved" | "render_failed" | "provider_skipped" | "no_thread" | "sms_conversation_unsettled";
 
 /** Why a started, unfinished track cannot proceed without guessing or the user, or null. */
 export function trackHold(state: SubjectState, trackId: string): HoldReason | null {
