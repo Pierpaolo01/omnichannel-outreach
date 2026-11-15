@@ -38,7 +38,7 @@ import type { RunTestFacts } from "../../domain/sequence/test-runs.ts";
 import { CONTACT_IS_A_LEAD } from "../../domain/sequence/test-runs.ts";
 import type { TestContact, TestContacts } from "../../domain/test-contacts.ts";
 import type { StoredTestContacts, TestRunRecord, TestStop } from "../engine/engine-store.ts";
-import type { BounceEvent, CallNoteRecord, CallSettings, CampaignEngineRow, DefinitionSave, EngineStore, LaunchOutcome, RunningSave, ReplyEvent, SaveResult, SenderAccountConfig, StoredDefinition, StoredNote, WorkerLease } from "../engine/engine-store.ts";
+import type { BounceEvent, CallNoteRecord, MeasureFacts, CallSettings, CampaignEngineRow, DefinitionSave, EngineStore, LaunchOutcome, RunningSave, ReplyEvent, SaveResult, SenderAccountConfig, StoredDefinition, StoredNote, WorkerLease } from "../engine/engine-store.ts";
 import { liveDetailRowOf } from "./sqlite-store.ts";
 import { holdsLeaseOn, releaseLeaseOn, takeLeaseOn } from "./lease-table.ts";
 
@@ -165,6 +165,10 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   async uncertainWorkOf(campaignId: string): Promise<number> {
+    return this.uncertainWorkNow(campaignId);
+  }
+
+  private uncertainWorkNow(campaignId: string): number {
     // The engine's own definition (`maySend`), applied to the rows, not restated in SQL (council on 56d599c).
     return this.sql("SELECT w.settled, w.calls, w.went_wall FROM provider_work w JOIN enrollments e ON e.id = w.subject_id WHERE e.campaign_id = ? AND w.settled IS NULL")
       .all(campaignId)
@@ -187,6 +191,81 @@ export class SqliteEngineStore implements EngineStore {
   async statusCounts(campaignId: string): Promise<Record<string, number>> {
     return Object.fromEntries(this.sql("SELECT status, COUNT(*) AS n FROM enrollments WHERE campaign_id = ? GROUP BY status").all(campaignId).map((r) => [str(r, "status"), num(r, "n")]));
   }
+
+  async measureFacts(campaignId: string, options: { readonly everyCampaign?: boolean } = {}): Promise<MeasureFacts | null> {
+    // One read transaction and no await inside it: every figure of one answer is of the same instant (ADR 0003 "Ticket 22").
+    this.db.exec("BEGIN");
+    try {
+      const campaign = this.sql("SELECT launched_at, paused_since, definition, default_timezone FROM campaigns WHERE id = ?").get(campaignId);
+      if (!campaign) return null;
+      // The lead groups read the campaign's enrollments: a test run is not a lead. Every other fact reads the campaign's
+      // subjects of both kinds, enrollments and test runs (ticket 21's view `engine_subjects`), each row marked by its kind:
+      // the principal's decision of 15 November 2026 (ADR 0003 "Ticket 22").
+      const scope = options.everyCampaign === true ? "" : "WHERE e.campaign_id = ?";
+      const and = scope ? `${scope} AND` : "WHERE";
+      const args: SQLInputValue[] = options.everyCampaign === true ? [] : [campaignId];
+      const rows = (sql: string) => this.sql(sql).all(...args);
+      const test = (r: Row) => str(r, "kind") === "test_run";
+      const facts: MeasureFacts = {
+        launched: campaign["launched_at"] != null,
+        launchedAt: numOrNull(campaign, "launched_at"),
+        pausedSince: numOrNull(campaign, "paused_since"),
+        mayStillSend: this.uncertainWorkNow(campaignId),
+        definition: campaign["definition"] == null ? emptyDefinition(strOrNull(campaign, "default_timezone") ?? "UTC") : parseDefinition(campaign),
+        enrollments: rows(`SELECT e.id, e.status, e.ended, e.stop_reply_channel, e.person_id FROM enrollments e ${scope}`).map((r) => ({
+          id: str(r, "id"),
+          status: str(r, "status"),
+          ended: strOrNull(r, "ended"),
+          stopReplyChannel: strOrNull(r, "stop_reply_channel"),
+          personId: strOrNull(r, "person_id"),
+        })),
+        // Every reply stored for the campaign's subjects, oldest first: a subject's first reply and its channel (council on 384630e).
+        replies: rows(`SELECT r.subject_id, e.kind, r.channel, r.at_wall FROM engine_subjects e JOIN replies r ON r.subject_id = e.id ${scope} ORDER BY r.at_wall, r.rowid`).map((r) => ({
+          subjectId: str(r, "subject_id"),
+          test: test(r),
+          channel: str(r, "channel"),
+          atWall: num(r, "at_wall"),
+        })),
+        attempts: rows(
+          `SELECT a.subject_id, e.kind, a.track_id, a.step_id, a.state, w.sent_wall, s.channel FROM engine_subjects e JOIN attempts a ON a.subject_id = e.id
+             JOIN sender_accounts s ON s.id = a.account_id LEFT JOIN provider_work w ON w.key = a.idempotency_key ${and} a.handed_wall IS NOT NULL`,
+        ).map((r) => ({ subjectId: str(r, "subject_id"), test: test(r), channel: str(r, "channel"), trackId: str(r, "track_id"), stepId: str(r, "step_id"), state: str(r, "state"), sentWall: numOrNull(r, "sent_wall") })),
+        // Each failure's channel is its attempt's sender account's: a fact of the send, not of the definition (review bot on b8a8361).
+        failures: rows(
+          `SELECT r.subject_id, e.kind, r.track_id, r.step_id, s.channel FROM engine_subjects e JOIN step_results r ON r.subject_id = e.id
+             JOIN attempts a ON a.id = r.attempt_id JOIN sender_accounts s ON s.id = a.account_id ${and} r.result = 'failed'`,
+        ).map((r) => ({
+          subjectId: str(r, "subject_id"),
+          test: test(r),
+          channel: str(r, "channel"),
+          trackId: str(r, "track_id"),
+          stepId: str(r, "step_id"),
+        })),
+        bounces: rows(
+          `SELECT b.subject_id, e.kind, b.track_id, b.step_id, s.channel FROM engine_subjects e JOIN bounce_events b ON b.subject_id = e.id
+             JOIN provider_work w ON w.key = b.work_key JOIN sender_accounts s ON s.id = w.account_id ${scope}`,
+        ).map((r) => ({
+          subjectId: str(r, "subject_id"),
+          test: test(r),
+          channel: str(r, "channel"),
+          trackId: str(r, "track_id"),
+          stepId: str(r, "step_id"),
+        })),
+        calls: rows(`SELECT c.subject_id, e.kind, c.outcome FROM engine_subjects e JOIN call_attempts c ON c.subject_id = e.id ${scope}`).map((r) => ({ subjectId: str(r, "subject_id"), test: test(r), outcome: str(r, "outcome") })),
+        openCallbacks: rows(`SELECT t.subject_id, e.kind, e.ended, t.open, t.kind AS task_kind FROM engine_subjects e JOIN call_tasks t ON t.subject_id = e.id ${and} t.open = 1 AND t.kind = 'callback'`).map((r) => ({
+          subjectId: str(r, "subject_id"),
+          test: test(r),
+          ended: strOrNull(r, "ended"),
+          open: num(r, "open") === 1,
+          kind: str(r, "task_kind") === "callback" ? ("callback" as const) : ("call" as const),
+        })),
+      };
+      return facts;
+    } finally {
+      this.db.exec("COMMIT");
+    }
+  }
+
 
   async saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save: DefinitionSave | null = null, running?: RunningSave, testStop?: TestStop): Promise<SaveResult> {
     return this.transaction((): SaveResult => {

@@ -22,10 +22,21 @@ export type LiveRead<T> =
 export function useLiveRead<T>(path: string, issue?: () => number): { read: LiveRead<T>; refresh: () => Promise<void> } {
   const [read, setRead] = useState<{ path: string; value: LiveRead<T> } | null>(null);
   const refresher = useMemo(() => {
-    const r: Refresher<{ data: T; issued: number }> = new Refresher<{ data: T; issued: number }>({
+    type Issued = { data: T; issued: number; asOf?: string; nextChangeAt?: string | null };
+    const r: Refresher<Issued> = new Refresher<Issued>({
       read: () => {
         const issued = issue?.() ?? 0;
-        return (getJson(path) as Promise<T>).then((data) => ({ data, issued }));
+        // The server's own instant and hint stay on the wrapper the reader sees (ticket 22: without them a page whose reads
+        // keep failing could not say when what it shows was read, and the reader lost the server's `nextChangeAt`).
+        return (getJson(path) as Promise<T>).then((data) => {
+          const timed = data as { asOf?: unknown; nextChangeAt?: unknown };
+          return {
+            data,
+            issued,
+            ...(typeof timed.asOf === "string" ? { asOf: timed.asOf } : {}),
+            ...(typeof timed.nextChangeAt === "string" || timed.nextChangeAt === null ? { nextChangeAt: timed.nextChangeAt } : {}),
+          };
+        });
       },
       onRead: ({ data, issued }): void => setRead((prev) => ({ path, value: { state: "ready", data, issued, freshness: r.freshness(), reads: (prev?.path === path && prev.value.state === "ready" ? prev.value.reads : 0) + 1 } })),
       onFailure: (error, freshness) =>

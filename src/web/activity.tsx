@@ -281,12 +281,15 @@ export function dependentLine(a: { readonly track: { readonly label: string } } 
 /**
  * What a logged call did to the lead's calls (ticket 15b): a redial, a callback asked for, or the callback it answered.
  * History, in the past tense; a present state (a callback still open and holding outreach) only when the server's read
- * says so (`callbackOpen`, verifier re-check H), and a day only from the server (`redialListedFrom`, council C).
+ * says so (`callbackPending` and `callbackListed`, verifier re-check H; ticket 22), and a day only from the server (`redialListedFrom`, council C).
  */
 function callMeaning(entry: Extract<ActivityEntry, { kind: "call"; channel: "call" }>): string | null {
   if (entry.outcome === "callback_requested" && entry.callbackAt !== null) {
     const asked = `${entry.onCallback === null ? "Callback asked for" : "Callback moved to"}, ${at(entry.callbackAt, entry.zone)} their time`;
-    return entry.callbackOpen ? `${asked}; their automated outreach in this campaign is held until you log how it went` : asked;
+    // Pending and listed are two facts of the server's read (ticket 22, verifier F2): a paused lead's callback is pending
+    // (the campaign's figures count it) but off the list.
+    if (!entry.callbackPending) return asked;
+    return entry.callbackListed ? `${asked}; their automated outreach in this campaign is held until you log how it went` : `${asked}; still pending, and off your call list while their outreach is paused`;
   }
   if (entry.onCallback !== null) {
     return entry.outcome === "skip_for_now" ? `Skipped for now on the callback for ${at(entry.onCallback, entry.zone)} their time` : `The callback they asked for, ${at(entry.onCallback, entry.zone)} their time; its hold on automated outreach ended`;

@@ -6,12 +6,14 @@ import { CampaignPauseControl, PausedBanner } from "../controls/ControlViews.tsx
 import { useControls, type Controls } from "../controls/useControls.ts";
 import { useLiveRead } from "../controls/useLiveRead.ts";
 import { BeforeLaunchTab } from "../campaign/BeforeLaunchTab.tsx";
+import { GroupStrip, MeasuresPanel } from "../campaign/MeasuresPanel.tsx";
+import type { Freshness } from "../calls/refresher.ts";
 import { SequenceTab } from "../campaign/SequenceTab.tsx";
 import { TestRunTab } from "../campaign/TestRunTab.tsx";
 import { sendsOnItsOwn } from "../campaign/model.ts";
 import { saveWording } from "../campaign/saveWording.ts";
 import { useSequence, type SequenceEditor } from "../campaign/useSequence.ts";
-import { ErrorState } from "../components.tsx";
+import { ErrorState, StaleNotice } from "../components.tsx";
 import { Icon } from "../icons.tsx";
 import { StatusBadge } from "../status.tsx";
 import { whenImported } from "../importText.tsx";
@@ -55,10 +57,10 @@ export function CampaignPage({ id, tab }: { id: string; tab: CampaignTab }) {
     );
   }
   if (detail.read.state !== "ready" || !editor) return <CampaignSkeleton />;
-  return <Campaign detail={detail.read.data} editor={editor} tab={tab} controls={controls} />;
+  return <Campaign detail={detail.read.data} freshness={detail.read.freshness} onRetry={() => void detail.refresh()} editor={editor} tab={tab} controls={controls} />;
 }
 
-function Campaign({ detail, editor, tab, controls }: { detail: CampaignDetail; editor: SequenceEditor; tab: CampaignTab; controls: Controls }) {
+function Campaign({ detail, freshness, onRetry, editor, tab, controls }: { detail: CampaignDetail; freshness: Freshness; onRetry: () => void; editor: SequenceEditor; tab: CampaignTab; controls: Controls }) {
   const now = useNow();
   const { campaign, imports, leadCount } = detail;
   const { view } = editor;
@@ -123,7 +125,20 @@ function Campaign({ detail, editor, tab, controls }: { detail: CampaignDetail; e
       )}
       {/* While paused, nothing goes out on its own: the Paused banner says so, and this sentence would not be true (ticket 17b).
           How the running campaign is edited is said on its Sequence tab (ticket 19). */}
-      {editor.launched && !detail.pause.paused && <p className="mt-4 rounded-box border border-line bg-base-100 px-4 py-3 text-[14px] text-ink-2">{sendsOnItsOwn(editor.view.definition)}</p>}
+      {/* Ticket 22: the Paused banner above, variant A's strip and the panel all come from this one read, whose pause, status
+          counts and measures are one store snapshot (verifier B1 on 41028f2). While paused, the banner carries the groups.
+          When its refreshes keep failing, the page says what it shows may be out of date (verifier F1). */}
+      {editor.launched && freshness.stale && <StaleNotice freshness={freshness} onRetry={onRetry} what="the campaign" />}
+      {editor.launched && !detail.pause.paused && (
+        <div className="mt-4">
+          <GroupStrip measures={detail.measures} sentence={sendsOnItsOwn(editor.view.definition)} />
+        </div>
+      )}
+      {editor.launched && (
+        <div className="mt-3">
+          <MeasuresPanel measures={detail.measures} />
+        </div>
+      )}
 
       <nav aria-label="Campaign" className="mt-3.5 flex flex-wrap gap-1 border-b border-line">
         <TabLink href={campaignPath(campaign.id)} current={tab === "sequence"}>

@@ -5,7 +5,7 @@
 import type { Channel, PhoneKind } from "../domain/contact-details.ts";
 import type { DetailNote, ImportSummary, LeadOutcome, NotEnrolledReason } from "../domain/import-plan.ts";
 import type { FileCheck } from "../domain/scraper-export.ts";
-import type { OutreachStatus } from "../domain/outreach-status.ts";
+import type { OutreachStatus, StatusGroup } from "../domain/outreach-status.ts";
 
 export type { DetailNote, EvidenceKind, ImportSummary, LeadOutcome, NotEnrolledReason, SummaryEntry } from "../domain/import-plan.ts";
 export type { ContactRoute } from "../domain/reach.ts";
@@ -56,6 +56,62 @@ export interface CampaignDetail extends CampaignPauseRead {
   readonly imports: readonly ImportRecord[];
   readonly leadCount: number;
   readonly sequence: CampaignSequenceSummary;
+  /**
+   * Ticket 22: the campaign's measures, from the same store snapshot as `pause`, `statusCounts` and `mayStillSend`, so a
+   * screen showing them together shows one instant (verifier B1 on 41028f2). `GET /api/campaigns/:id/measures` is the same.
+   */
+  readonly measures: CampaignMeasures;
+  /** The instant of this read. */
+  readonly asOf: string;
+}
+
+/**
+ * One rate: its numerator and denominator, as the read counted them, and the whole percent, or null with nothing to divide by.
+ * Both counts include the campaign's test runs; `fromTests` says how many of each are test runs (ticket 22, the principal's
+ * decision of 15 November 2026).
+ */
+export interface MeasureRate {
+  readonly numerator: number;
+  readonly denominator: number;
+  readonly percent: number | null;
+  readonly fromTests: { readonly numerator: number; readonly denominator: number };
+}
+
+/**
+ * Email or SMS: the messages the provider reported sent, those refused or bounced, and the leads (or test runs) that replied
+ * on it (ticket 22). Each counts test runs too; `fromTests` is how many of each came from them.
+ */
+export interface MessageMeasures {
+  readonly sent: number;
+  readonly failedOrBounced: number;
+  readonly replies: number;
+  readonly fromTests: { readonly sent: number; readonly failedOrBounced: number; readonly replies: number };
+}
+
+/** The calls the user logged (ticket 22), test calls included; `fromTests` is how many of each came from test runs. */
+export interface CallMeasures {
+  readonly made: number;
+  readonly connected: number;
+  readonly interested: number;
+  readonly declined: number;
+  readonly callbacksPending: number;
+  readonly fromTests: { readonly made: number; readonly connected: number; readonly interested: number; readonly declined: number; readonly callbacksPending: number };
+}
+
+/**
+ * GET /api/campaigns/:id/measures (ticket 22; ADR 0003 "Ticket 22"): every figure a tally of the campaign's stored
+ * activity, read in one snapshot. `channels` names the channels the campaign has tracks on, in the order shown.
+ */
+export interface CampaignMeasures {
+  readonly launched: boolean;
+  readonly leads: number;
+  readonly groups: Readonly<Record<StatusGroup, number>>;
+  readonly channels: readonly ("email" | "sms" | "call")[];
+  readonly email: MessageMeasures;
+  readonly sms: MessageMeasures;
+  readonly calls: CallMeasures;
+  readonly replyRate: MeasureRate;
+  readonly connectRate: MeasureRate;
 }
 
 /** A campaign control as the campaign read offers it (ticket 17a). */
@@ -815,10 +871,13 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
           /** With a redial: the user's date the engine listed the call from (its next day whose calling hours open). */
           readonly redialListedFrom: string | null;
           /**
-           * With a callback requested: that callback is open now, listed today or later by the listing rule, and holds the
-           * lead's outreach (the record shows it). False after its outcome, a new time, a reply, a stop or an ending.
+           * With a callback requested: that callback is pending now (the engine's `callbackPending`: no outcome other than
+           * skip for now logged on it, and the lead's outreach not ended), as the campaign measures count it, a paused
+           * lead's included. False after its outcome, a new time, a reply, a stop or an ending (ticket 22, verifier F2).
            */
-          readonly callbackOpen: boolean;
+          readonly callbackPending: boolean;
+          /** With a pending callback: it is on the call list today or on a later day (the listing rule); not while paused. */
+          readonly callbackListed: boolean;
           /** With not interested: the declined path taken, the track's or the user's override for the lead (ticket 16). */
           readonly declinedPath: DeclinedPathApi | null;
           /** With not interested: each track the decline left unfinished or finished, in its state at this read (ticket 16c). Empty otherwise. */
