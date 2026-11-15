@@ -1,7 +1,30 @@
 import type { LaunchCheck, SenderAccountView } from "../../domain/sequence/blockers.ts";
 import type { MergeData } from "../../domain/sequence/copy.ts";
 import type { CampaignDefinition } from "../../domain/sequence/definition.ts";
-import type { AccountState, Attempt, ProviderWork, SmsBindingRecord, SubjectState } from "../../domain/sequence/state.ts";
+import type { AccountState, Attempt, EndReason, ProviderWork, SmsBindingRecord, SubjectState } from "../../domain/sequence/state.ts";
+import type { RunTestFacts } from "../../domain/sequence/test-runs.ts";
+import type { TestContacts } from "../../domain/test-contacts.ts";
+
+/** One test run as stored (ADR 0003 "Ticket 21"): what it ran with and how it ended; its progress is a subject's. */
+export interface TestRunRecord {
+  readonly id: string;
+  readonly campaignId: string;
+  readonly renderAs: string;
+  readonly contacts: TestContacts;
+  readonly startedWall: number;
+  readonly definitionVersion: number;
+  readonly definitionEditedAt: string | null;
+  /** Set when an edit stopped it (question Q27). */
+  readonly stoppedBy: "edit" | null;
+  readonly ended: EndReason | null;
+  readonly endedWall: number | null;
+}
+
+/** A campaign's test contacts, and whether a lead's record now has either (the boundary). */
+export interface StoredTestContacts {
+  readonly contacts: TestContacts;
+  readonly leadHas: { readonly email: boolean; readonly mobile: boolean };
+}
 
 /** A sender account as the provider port reports it. */
 /** The process that runs the worker on a database (ticket 20a): a random id, its process id, and when it last renewed. */
@@ -175,6 +198,12 @@ export interface RunningSave {
   readonly impact?: { readonly expected: string; readonly digest: (definition: CampaignDefinition, definitionVersion: number, pausedSince: number | null) => string };
 }
 
+/** What an accepted save does to the campaign's running test (question Q27's interim): stops it, in the save's transaction. */
+export interface TestStop {
+  readonly now: number;
+  readonly stop: (state: SubjectState) => SubjectState;
+}
+
 /** Who wrote a save (ADR 0003 1.1.1): the editing session, its number in it, and the revision it last saw. */
 export interface DefinitionSave {
   readonly session: string;
@@ -195,7 +224,30 @@ export interface EngineStore {
    * transaction. Without `save` (API clients, tests) it is stored as before. A launched campaign's
    * save is applied by `running` (ticket 19); without it, a launched campaign's save is refused as `launched`.
    */
-  saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save?: DefinitionSave | null, running?: RunningSave): Promise<SaveResult>;
+  saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save?: DefinitionSave | null, running?: RunningSave, testStop?: TestStop): Promise<SaveResult>;
+
+  // Test runs (ADR 0003 "Ticket 21").
+  /** The campaign's test contacts and whether a lead's record has either now; null for no such campaign. */
+  testContacts(campaignId: string): Promise<StoredTestContacts | null>;
+  /** Stores the contacts in one transaction, refusing one a person's or company's live detail has. */
+  saveTestContacts(campaignId: string, contacts: TestContacts): Promise<{ readonly ok: true } | { readonly ok: false; readonly field: "email" | "mobile"; readonly message: string } | { readonly ok: false; readonly missing: true }>;
+  /**
+   * Run test in one transaction with its request id (17a's binding): the facts are read, `refusal` judges them, and an
+   * accepted run is inserted and entered with `enter`. The effect names the run.
+   */
+  startTestRun(
+    campaignId: string,
+    now: number,
+    request: { readonly id: string; readonly renderAs: string; readonly expectVersion: number; readonly runId: string },
+    standing: (stored: StoredRequest | null, request: { readonly target: string; readonly action: string; readonly body: string }) => RequestStanding,
+    refusal: (facts: RunTestFacts) => string | null,
+    enter: (state: SubjectState) => SubjectState,
+  ): Promise<ControlRecord>;
+  /** The campaign's test runs, newest first. */
+  testRunsOf(campaignId: string): Promise<TestRunRecord[]>;
+  testRun(runId: string): Promise<TestRunRecord | null>;
+  /** "No test since the last edit" (ADR 0003 "Ticket 21"): no run started on the campaign's current edit stamp. */
+  noTestSinceEdit(campaignId: string): Promise<boolean>;
   /**
    * Every enrollment of the campaign as stored now, in one snapshot, with the zone each would have under `draft` (its
    * default zone may differ): what the editor's read of a running edit starts from (ADR 0003 "Ticket 19"). Stores nothing.

@@ -154,6 +154,12 @@ const restartable = (state: SubjectState) => state.subject.ended === "replied" |
  */
 export function applyControl(state: SubjectState, action: LeadControl, now: number): ControlResult {
   const { subject, campaign } = state;
+  // A test run (ADR 0003 "Ticket 21") has one control, Stop test, before or after launch.
+  if (subject.kind === "test_run") {
+    if (action !== "stop") return refuse("A test run can only be stopped.");
+    if (subject.ended !== null) return refuse("This test has already ended.");
+    return accept(end(state, "stopped_manually", now));
+  }
   switch (action) {
     case "pause":
       if (campaign.launchedAt === null) return refuse(NOT_LAUNCHED);

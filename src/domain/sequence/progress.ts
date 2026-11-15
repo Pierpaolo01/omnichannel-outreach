@@ -27,10 +27,17 @@ export function callbackHold(state: SubjectState): boolean {
  * with ticket 17 on this same function.
  */
 export function runs(state: SubjectState): boolean {
+  const { subject } = state;
+  return campaignLets(state) && subject.ended === null && !subject.leadPaused && !callbackHold(state);
+}
+
+/**
+ * Whether the campaign lets the subject run: launched and not paused. A test run reads neither the launch nor the
+ * campaign pause (ADR 0003 3.6, "Ticket 21"): it runs "at any time". `runs` and the listing rule both read this.
+ */
+export function campaignLets(state: SubjectState): boolean {
   const { subject, campaign } = state;
-  // A test run reads neither the launch nor the campaign pause (ADR 0003 3.6, "Ticket 21"): it runs "at any time".
-  const campaignRuns = subject.kind === "test_run" || (campaign.launchedAt !== null && campaign.pausedSince === null);
-  return campaignRuns && subject.ended === null && !subject.leadPaused && !callbackHold(state);
+  return subject.kind === "test_run" || (campaign.launchedAt !== null && campaign.pausedSince === null);
 }
 
 /** The status (2.1): rules in order, first match wins. */
@@ -283,7 +290,7 @@ export function evaluate(state: SubjectState, now: number, options: { readonly e
   // Unworked calls past the skip limit are skipped at the rollover they expired at, before any start, so
   // the tracks after them start in this same evaluation (3.5; ticket 15). Judged for a held lead too, which
   // only records the rollovers judged (it did not run at them), so none is judged later under other inputs.
-  const judged = state.subject.ended === null && state.campaign.launchedAt !== null ? expireUnworked(state, now) : state;
+  const judged = state.subject.ended === null && (state.campaign.launchedAt !== null || state.subject.kind === "test_run") ? expireUnworked(state, now) : state;
   if (!runs(judged)) return judged;
   // `endingsFirst: false` exists only for the oracle's broken engine (ADR 0003 9.2, "ending check too late").
   let s = options.endingsFirst === false ? judged : checkEndings(judged, now);

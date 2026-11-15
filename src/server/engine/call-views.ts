@@ -74,9 +74,19 @@ interface Parties {
   readonly person: { id: string; name: string; title: string } | null;
   readonly company: { id: string; name: string };
   readonly campaign: { id: string; name: string };
+  /** A test call of a test run (ADR 0003 "Ticket 21"): to the user's own test mobile, never a lead. */
+  readonly test: boolean;
 }
 
+/** The name a test call carries where a lead's company would be: it has none. */
+export const TEST_CALL_NAME = "Your test mobile";
+
 async function partiesOf(store: OutreachStore, subjectId: string): Promise<Parties | null> {
+  const run = await store.engine.testRun(subjectId);
+  if (run) {
+    const campaign = await store.campaign(run.campaignId);
+    return { person: null, company: { id: "", name: TEST_CALL_NAME }, campaign: { id: run.campaignId, name: campaign?.name ?? "" }, test: true };
+  }
   const parties = await store.engine.subjectParties(subjectId);
   if (!parties) return null;
   const person = parties.personId === null ? null : await store.person(parties.personId);
@@ -86,6 +96,7 @@ async function partiesOf(store: OutreachStore, subjectId: string): Promise<Parti
     person: person ? { id: person.id, name: person.name, title: person.title } : null,
     company: { id: parties.companyId, name: company?.name ?? "" },
     campaign: { id: parties.campaignId, name: campaign?.name ?? "" },
+    test: false,
   };
 }
 
@@ -439,7 +450,7 @@ export async function callTaskView(store: OutreachStore, taskId: string, now: nu
   touches.sort((a, b) => a.t - b.t);
 
   // Everyone else at the company, enrolled or not, with each campaign's status and their last call note.
-  const company = await store.company(parties.company.id);
+  const company = parties.test ? null : await store.company(parties.company.id);
   const others = (company?.people ?? []).filter((p) => p.id !== parties.person?.id);
   const notes = await store.engine.lastCallNotes(others.flatMap((p) => p.enrollments.map((e) => e.id)));
   const colleagues: CallColleagueView[] = others.map((p) => {
@@ -471,7 +482,7 @@ export async function callTaskView(store: OutreachStore, taskId: string, now: nu
     script: s.campaign.definition.callScript ?? "",
     touches: touches.map((x) => x.touch),
     personNotes: parties.person ? (await store.engine.notesOf("person", parties.person.id)).map(noteView) : [],
-    companyNotes: (await store.engine.notesOf("company", parties.company.id)).map(noteView),
+    companyNotes: parties.test ? [] : (await store.engine.notesOf("company", parties.company.id)).map(noteView),
     colleagues,
     outcomes: listed ? CALL_OUTCOMES : [],
     storedRequestIds: s.callAttempts.filter((c) => c.taskId === taskId).map((c) => c.requestId),

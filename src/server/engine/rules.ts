@@ -24,6 +24,7 @@ import { applyControl, campaignPaused, campaignPrecondition, campaignResumed, co
 import type { RequestStanding, StoredRequest } from "./engine-store.ts";
 import { afterInterruption, interruptionOf, rescheduledSteps } from "../../domain/sequence/interruption.ts";
 import type { CallAnswer } from "../../domain/sequence/attempt.ts";
+import { runTestRefusal } from "../../domain/sequence/test-runs.ts";
 
 export interface Rules {
   readonly evaluate: typeof evaluate;
@@ -110,6 +111,10 @@ export interface Rules {
   readonly contactFrom: (answered: { readonly accounts: boolean; readonly observation: boolean }) => boolean;
   /** The answer a call whose answer was never recorded is taken to have (5.3's crash row): unknown. */
   readonly lostAnswer: CallAnswer;
+  /** Ticket 21: Run test's boundary, judged on the facts its transaction reads. */
+  readonly runTestRefusal: typeof runTestRefusal;
+  /** Ticket 21 (question Q27's interim): what an accepted edit does to the campaign's running test: stops it. */
+  readonly stopTestOnEdit: (state: SubjectState, now: number) => SubjectState;
 }
 
 export const DEFAULT_RULES: Rules = {
@@ -168,4 +173,9 @@ export const DEFAULT_RULES: Rules = {
   dispatchInstant: (_started, now) => now,
   contactFrom: (answered) => answered.accounts && answered.observation,
   lostAnswer: { kind: "unknown" },
+  runTestRefusal,
+  stopTestOnEdit: (state, now) => {
+    const stopped = applyControl(asOfAction(state, now, evaluate), "stop", now);
+    return stopped.ok ? stopped.state : state;
+  },
 };

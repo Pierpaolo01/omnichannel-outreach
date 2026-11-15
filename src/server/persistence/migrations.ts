@@ -650,6 +650,9 @@ export const MIGRATIONS: readonly Migration[] = [
     sql: `
       ALTER TABLE campaigns ADD COLUMN test_email TEXT;
       ALTER TABLE campaigns ADD COLUMN test_mobile TEXT;
+      -- The revision of the definition's last edit: a launch moves definition_version on without an edit (ticket 19).
+      ALTER TABLE campaigns ADD COLUMN edit_version INTEGER NOT NULL DEFAULT 0;
+      UPDATE campaigns SET edit_version = definition_version;
       CREATE TABLE test_runs (
         id TEXT PRIMARY KEY REFERENCES subjects(id),
         campaign_id TEXT NOT NULL REFERENCES campaigns(id),

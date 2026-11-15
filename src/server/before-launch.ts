@@ -96,6 +96,8 @@ export async function beforeLaunchView(store: OutreachStore, campaignId: string,
 
   return {
     campaignId,
+    // Ticket 21: a warning, never a blocker (7.2): the launch check does not read it.
+    noTestSinceEdit: await store.engine.noTestSinceEdit(campaignId),
     leads: leads.map((l) => l.lead),
     coverage: {
       leads: leads.length,

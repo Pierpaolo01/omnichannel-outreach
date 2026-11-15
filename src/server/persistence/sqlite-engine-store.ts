@@ -33,6 +33,10 @@ import type {
   WorkSettlement,
 } from "../../domain/sequence/state.ts";
 import { isOutreachStatus } from "../../domain/outreach-status.ts";
+import type { RunTestFacts } from "../../domain/sequence/test-runs.ts";
+import { CONTACT_IS_A_LEAD } from "../../domain/sequence/test-runs.ts";
+import type { TestContact, TestContacts } from "../../domain/test-contacts.ts";
+import type { StoredTestContacts, TestRunRecord, TestStop } from "../engine/engine-store.ts";
 import type { BounceEvent, CallNoteRecord, CallSettings, CampaignEngineRow, DefinitionSave, EngineStore, LaunchOutcome, RunningSave, ReplyEvent, SaveResult, SenderAccountConfig, StoredDefinition, StoredNote, WorkerLease } from "../engine/engine-store.ts";
 import { liveDetailRowOf } from "./sqlite-store.ts";
 import { holdsLeaseOn, releaseLeaseOn, takeLeaseOn } from "./lease-table.ts";
@@ -183,8 +187,27 @@ export class SqliteEngineStore implements EngineStore {
     return Object.fromEntries(this.sql("SELECT status, COUNT(*) AS n FROM enrollments WHERE campaign_id = ? GROUP BY status").all(campaignId).map((r) => [str(r, "status"), num(r, "n")]));
   }
 
-  async saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save: DefinitionSave | null = null, running?: RunningSave): Promise<SaveResult> {
+  async saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save: DefinitionSave | null = null, running?: RunningSave, testStop?: TestStop): Promise<SaveResult> {
     return this.transaction((): SaveResult => {
+      const result = this.saveDefinitionNow(campaignId, definition, editedAt, save, running);
+      // An accepted save stops the campaign's running test, in its transaction (ADR 0003 "Ticket 21", question Q27).
+      if (result.outcome === "saved" && testStop) this.stopRunningTest(campaignId, testStop);
+      return result;
+    });
+  }
+
+  private stopRunningTest(campaignId: string, testStop: TestStop): void {
+    const running = this.sql("SELECT id FROM test_runs WHERE campaign_id = ? AND ended IS NULL").get(campaignId);
+    if (!running) return;
+    const base = this.load(str(running, "id"), testStop.now);
+    if (!base) return;
+    const next = testStop.stop(base);
+    this.write(base, next, testStop.now);
+    if (next.subject.ended !== null) this.run("UPDATE test_runs SET stopped_by = 'edit' WHERE id = ?", [base.subject.id]);
+  }
+
+  private saveDefinitionNow(campaignId: string, definition: CampaignDefinition, editedAt: string, save: DefinitionSave | null, running?: RunningSave): SaveResult {
+    {
       const text = JSON.stringify(definition);
       const current = this.sql("SELECT * FROM campaigns WHERE id = ?").get(campaignId);
       if (current && current["launched_at"] != null && running) {
@@ -194,7 +217,7 @@ export class SqliteEngineStore implements EngineStore {
       // ADR 0003 1.1.1, in the statement that stores: accepted if it continues the stored session
       // with a higher number, or starts from the stored revision. A save with no session is stored.
       const changed = this.sql(
-        `UPDATE campaigns SET definition = ?, definition_version = definition_version + 1, definition_edited_at = ?, version = version + 1,
+        `UPDATE campaigns SET definition = ?, definition_version = definition_version + 1, edit_version = definition_version + 1, definition_edited_at = ?, version = version + 1,
            definition_session = ?, definition_seq = ?
          WHERE id = ? AND launched_at IS NULL
            AND (? IS NULL OR (definition_session = ? AND definition_seq < ?) OR definition_version = ?)`,
@@ -235,7 +258,108 @@ export class SqliteEngineStore implements EngineStore {
       // Another page changed the running sequence since this Apply's read (council on 93bed86, item 14): one reason.
       if (running?.impact && row["launched_at"] != null && save && strOrNull(row, "definition_session") !== save.session) return { outcome: "impact_changed", elsewhere: true, stored };
       return { outcome: "conflict", stored };
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Test runs (ADR 0003 "Ticket 21").
+
+  /** Whether a person's or company's live detail has this key: then it is a lead's, never a test contact. */
+  private leadHasKey(channel: "email" | "phone", key: string): boolean {
+    return this.sql("SELECT 1 FROM live_contact_details WHERE channel = ? AND key = ? LIMIT 1").get(channel, key) !== undefined;
+  }
+
+  private storedTestContacts(c: Row): StoredTestContacts {
+    const contact = (column: string): TestContact | null => {
+      const raw = strOrNull(c, column);
+      return raw === null ? null : (JSON.parse(raw) as TestContact);
+    };
+    const contacts: TestContacts = { email: contact("test_email"), mobile: contact("test_mobile") };
+    return {
+      contacts,
+      leadHas: { email: contacts.email !== null && this.leadHasKey("email", contacts.email.key), mobile: contacts.mobile !== null && this.leadHasKey("phone", contacts.mobile.key) },
+    };
+  }
+
+  async testContacts(campaignId: string): Promise<StoredTestContacts | null> {
+    const c = this.sql("SELECT test_email, test_mobile FROM campaigns WHERE id = ?").get(campaignId);
+    return c ? this.storedTestContacts(c) : null;
+  }
+
+  async saveTestContacts(campaignId: string, contacts: TestContacts): Promise<{ readonly ok: true } | { readonly ok: false; readonly field: "email" | "mobile"; readonly message: string } | { readonly ok: false; readonly missing: true }> {
+    return this.transaction(() => {
+      if (!this.sql("SELECT 1 FROM campaigns WHERE id = ?").get(campaignId)) return { ok: false as const, missing: true as const };
+      // The boundary, read in the saving transaction: a contact a lead's record has is refused.
+      if (contacts.email !== null && this.leadHasKey("email", contacts.email.key)) return { ok: false as const, field: "email" as const, message: CONTACT_IS_A_LEAD.email };
+      if (contacts.mobile !== null && this.leadHasKey("phone", contacts.mobile.key)) return { ok: false as const, field: "mobile" as const, message: CONTACT_IS_A_LEAD.mobile };
+      this.run("UPDATE campaigns SET test_email = ?, test_mobile = ? WHERE id = ?", [contacts.email ? JSON.stringify(contacts.email) : null, contacts.mobile ? JSON.stringify(contacts.mobile) : null, campaignId]);
+      return { ok: true as const };
     });
+  }
+
+  async startTestRun(
+    campaignId: string,
+    now: number,
+    request: { readonly id: string; readonly renderAs: string; readonly expectVersion: number; readonly runId: string },
+    standing: (stored: StoredRequest | null, request: { readonly target: string; readonly action: string; readonly body: string }) => RequestStanding,
+    refusal: (facts: RunTestFacts) => string | null,
+    enter: (state: SubjectState) => SubjectState,
+  ): Promise<ControlRecord> {
+    const action = "run_test";
+    const body = JSON.stringify({ action, renderAs: request.renderAs, expect: { definitionVersion: request.expectVersion } });
+    return this.transaction((): ControlRecord => {
+      const known = this.standingOf(request.id, { target: campaignId, action, body }, standing);
+      if (known) return known;
+      const c = this.sql("SELECT * FROM campaigns WHERE id = ?").get(campaignId);
+      if (!c) return { kind: "answered", answer: "refused", reason: "There is no such campaign.", effect: null };
+      const { contacts, leadHas } = this.storedTestContacts(c);
+      const definition = c["definition"] == null ? null : this.definitionOf(c);
+      const facts: RunTestFacts = {
+        running: this.sql("SELECT 1 FROM test_runs WHERE campaign_id = ? AND ended IS NULL").get(campaignId) !== undefined,
+        contacts,
+        leadHas,
+        leads: num(this.sql("SELECT COUNT(*) AS n FROM enrollments WHERE campaign_id = ?").get(campaignId) ?? {}, "n"),
+        renderAsOfCampaign: this.sql("SELECT 1 FROM enrollments WHERE id = ? AND campaign_id = ?").get(request.renderAs, campaignId) !== undefined,
+        nothingToLaunch: definition === null || !definition.tracks.some((t) => !t.removed && t.branch === "main"),
+        storedVersion: num(c, "definition_version"),
+        expectedVersion: request.expectVersion,
+      };
+      const reason = refusal(facts);
+      if (reason !== null) {
+        this.storeRequest(request.id, { target: campaignId, action, body, answer: "refused", reason, effect: null }, now);
+        return { kind: "answered", answer: "refused", reason, effect: null };
+      }
+      const id = request.runId;
+      this.run("INSERT INTO subjects (id, kind) VALUES (?, 'test_run')", [id]);
+      this.run(
+        `INSERT INTO test_runs (id, campaign_id, render_as, email_value, email_key, mobile_value, mobile_key, definition_version, definition_edited_at,
+           started_wall, request_id, status, frozen_since, frozen_total)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+        [id, campaignId, request.renderAs, contacts.email?.value ?? null, contacts.email?.key ?? null, contacts.mobile?.value ?? null, contacts.mobile?.key ?? null,
+          num(c, "definition_version"), strOrNull(c, "definition_edited_at"), now, request.id, now, now],
+      );
+      this.run("INSERT INTO freezes (subject_id, from_wall, to_wall) VALUES (?, ?, NULL)", [id, now]);
+      const base = this.load(id, now);
+      if (!base) throw new Error("a test run just inserted did not load");
+      this.write(base, enter(base), now);
+      const effect = JSON.stringify({ runId: id });
+      this.storeRequest(request.id, { target: campaignId, action, body, answer: "accepted", reason: null, effect }, now);
+      return { kind: "answered", answer: "accepted", reason: null, effect };
+    });
+  }
+
+  async testRunsOf(campaignId: string): Promise<TestRunRecord[]> {
+    return this.sql("SELECT * FROM test_runs WHERE campaign_id = ? ORDER BY started_wall DESC, rowid DESC").all(campaignId).map(toTestRun);
+  }
+
+  async testRun(runId: string): Promise<TestRunRecord | null> {
+    const row = this.sql("SELECT * FROM test_runs WHERE id = ?").get(runId);
+    return row ? toTestRun(row) : null;
+  }
+
+  async noTestSinceEdit(campaignId: string): Promise<boolean> {
+    // A run started on the last edit's revision or later (a launch moves the revision on without an edit).
+    return this.sql("SELECT 1 FROM test_runs t JOIN campaigns c ON c.id = t.campaign_id WHERE c.id = ? AND t.definition_version >= c.edit_version LIMIT 1").get(campaignId) === undefined;
   }
 
   /**
@@ -284,7 +408,7 @@ export class SqliteEngineStore implements EngineStore {
       this.write(base, running.catchUp(base), now);
     }
     this.run(
-      `UPDATE campaigns SET definition = ?, definition_version = definition_version + 1, definition_edited_at = ?, version = version + 1,
+      `UPDATE campaigns SET definition = ?, definition_version = definition_version + 1, edit_version = definition_version + 1, definition_edited_at = ?, version = version + 1,
          definition_session = ?, definition_seq = ? WHERE id = ?`,
       [text, editedAt, save?.session ?? null, save?.seq ?? null, campaignId],
     );
@@ -1493,4 +1617,20 @@ interface Reach {
 /** A test contact's detail id on its run (ADR 0003 "Ticket 21"): names no CRM record, and the triggers of migration 17 accept it only for a test run. */
 export function testDetailId(runId: string, channel: "email" | "mobile"): string {
   return `test:${runId}:${channel}`;
+}
+
+function toTestRun(r: Row): TestRunRecord {
+  const contact = (value: string, key: string): TestContact | null => (r[key] == null ? null : { value: strOrNull(r, value) ?? str(r, key), key: str(r, key) });
+  return {
+    id: str(r, "id"),
+    campaignId: str(r, "campaign_id"),
+    renderAs: str(r, "render_as"),
+    contacts: { email: contact("email_value", "email_key"), mobile: contact("mobile_value", "mobile_key") },
+    startedWall: num(r, "started_wall"),
+    definitionVersion: num(r, "definition_version"),
+    definitionEditedAt: strOrNull(r, "definition_edited_at"),
+    stoppedBy: strOrNull(r, "stopped_by") === "edit" ? "edit" : null,
+    ended: strOrNull(r, "ended") as EndReason | null,
+    endedWall: numOrNull(r, "ended_wall"),
+  };
 }

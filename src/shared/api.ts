@@ -589,6 +589,8 @@ export interface BeforeLaunchView {
   }[];
   /** Null once the campaign has launched: the projection is a before-launch estimate. */
   readonly load: LoadProjectionView | null;
+  /** Ticket 21: no test run started since the definition was last edited. A warning, never a blocker. */
+  readonly noTestSinceEdit: boolean;
 }
 
 export interface LoadProjectionView {
@@ -987,6 +989,8 @@ export interface CallQueueItem {
   readonly person: { readonly id: string; readonly name: string; readonly title: string } | null;
   readonly company: { readonly id: string; readonly name: string };
   readonly campaign: { readonly id: string; readonly name: string };
+  /** A test call (ticket 21): to the user's own test mobile, from a test run; it keeps no note. */
+  readonly test: boolean;
   /** The phone track the call comes from, named as the canvas names it ("Phone track", "Phone track 2"). */
   readonly track: { readonly id: string; readonly label: string };
   /** The prospect's zone and their local time now, as HH:MM. */
@@ -1244,6 +1248,8 @@ export interface CallTaskView {
   readonly person: { readonly id: string; readonly name: string; readonly title: string } | null;
   readonly company: { readonly id: string; readonly name: string };
   readonly campaign: { readonly id: string; readonly name: string };
+  /** A test call (ticket 21): to the user's own test mobile, from a test run; it keeps no note. */
+  readonly test: boolean;
   readonly track: { readonly id: string; readonly label: string };
   readonly zone: string;
   readonly localTime: string;
@@ -1313,4 +1319,88 @@ export interface CallTaskView {
    * record counts it; null when it lists it on none (the lead ended or is paused, the call waits on a callback).
    */
   readonly listedFrom: string | null;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Test runs (ticket 21; ADR 0003 "Ticket 21").
+
+/** The campaign's Test run tab: its test contacts, whether it has been tested since the last edit, and the latest run. */
+export interface TestRunTab {
+  readonly campaignId: string;
+  /** The revision on the page, which Run test names (`expect`). */
+  readonly definitionVersion: number;
+  readonly contacts: {
+    readonly email: string | null;
+    readonly mobile: string | null;
+    /** A lead's record now has it: it cannot be used (question Q29). */
+    readonly emailIsALead: boolean;
+    readonly mobileIsALead: boolean;
+  };
+  readonly noTestSinceEdit: boolean;
+  /** The leads a test may render its copy for, by name. */
+  readonly leads: readonly { readonly id: string; readonly name: string; readonly kind: "person" | "company" }[];
+  /** The latest run, read as of `at`; null before the first. */
+  readonly run: TestRunRead | null;
+  /** The read's instant. */
+  readonly at: string;
+  /** The zone the run's times are in: the campaign's (question Q2's interim). */
+  readonly zone: string;
+}
+
+/** How a test run ended, in its own words (ADR 0003 "Ticket 21"). */
+export type TestRunEnding = "your_reply" | "finished" | "no_contact_left" | "interested" | "declined" | "stopped" | "edited";
+
+export interface TestRunRead {
+  readonly id: string;
+  readonly running: boolean;
+  readonly ending: TestRunEnding | null;
+  readonly startedAt: string;
+  readonly endedAt: string | null;
+  /** The lead its copy renders for. */
+  readonly renderAs: { readonly id: string; readonly name: string };
+  readonly email: string | null;
+  readonly mobile: string | null;
+  /** Its messages still with a provider, which may still be sent after it ended. */
+  readonly mayStillSend: number;
+  readonly steps: readonly TestStepRow[];
+}
+
+/** What happened to one step of the canvas in a test run, from its stored facts only. */
+export type TestStepState =
+  /** The provider reported it sent, at `at`. */
+  | "sent"
+  | "failed"
+  | "skipped"
+  /** Handed to the provider; no answer yet. */
+  | "with_provider"
+  /** Its wait runs out at `at`; it goes then, or at its window's next opening. */
+  | "due"
+  /** A call on your Calls list now. */
+  | "on_your_list"
+  /** A call whose outcome you logged. */
+  | "logged"
+  /** Not reached: earlier steps first, or the run ended before it. */
+  | "not_reached";
+
+export interface TestStepRow {
+  readonly trackId: string;
+  readonly stepId: string;
+  readonly channel: "email" | "sms" | "call";
+  readonly branch: "main" | "win_back";
+  /** "Email 2", "Text 1", "Call", "Win-back email 1". */
+  readonly name: string;
+  /** The track's name, when the campaign has several on that channel or branch. */
+  readonly track: string;
+  readonly state: TestStepState;
+  readonly at: string | null;
+  /** For a call: its task, and the outcome logged. */
+  readonly taskId: string | null;
+  readonly outcome: string | null;
+  /** Why a step was skipped or failed, in the engine's word (`missing_channel`, `bad_destination`, …). */
+  readonly reason: string | null;
+}
+
+/** A test contact refused: malformed (400), or a lead's (409), by field. */
+export interface TestContactsRefusal {
+  readonly error: { readonly code: "invalid_test_contact" | "test_contact_is_a_lead"; readonly message: string; readonly field: "email" | "mobile" };
 }

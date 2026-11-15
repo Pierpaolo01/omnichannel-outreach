@@ -7,5 +7,6 @@ export const UNDO_SINCE_17 = `
   DROP TABLE IF EXISTS test_runs;
   ALTER TABLE campaigns DROP COLUMN test_email;
   ALTER TABLE campaigns DROP COLUMN test_mobile;
+  ALTER TABLE campaigns DROP COLUMN edit_version;
   DELETE FROM schema_migrations WHERE version >= 17;
 `;

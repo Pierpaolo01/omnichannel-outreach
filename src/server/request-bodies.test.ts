@@ -46,6 +46,8 @@ describe("request bodies refuse fields they do not know (verifier B4)", () => {
         if (name === "id" && r.path.startsWith("/api/campaigns/")) return unlaunchedId;
         if (name === "id" && r.path.startsWith("/api/call-tasks/")) return taskId;
         if (name === "id" && r.path.startsWith("/api/enrollments/")) return enrollmentId;
+        // Ticket 21: the body is read before the run is looked up, so any id is refused for the field first.
+        if (name === "id" && r.path.startsWith("/api/test-runs/")) return "test-none";
         throw new Error(`the route walk cannot fill :${name} in ${r.path}; add it here`);
       });
       const res = await h.request<{ error?: { code: string; message: string } }>(r.method, path, { zzUnexpected: true });
