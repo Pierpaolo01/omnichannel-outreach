@@ -444,3 +444,123 @@ async function startPeople(many: boolean): Promise<FakePeopleApp> {
   await harness.advanceTo(harness.clock + 5 * 60_000);
   return { url: await serveHarness(harness), harness, campaign: clinics, campaigns: { clinics, followUp, draft }, person: (n) => row(n).id, company: (n) => row(n).id };
 }
+
+// ---------------------------------------------------------------------------------------------
+// Ticket 20's demonstration (ticket 20b), as src/server/engine/interruption-demo.test.ts runs it: two campaigns sharing
+// one inbox of capacity 4 a day and two simulated SMS numbers, each with email, SMS and a phone track, three leads each,
+// one lead paused; then the application stops, and starts again. Nothing reaches a real provider; data is fictitious.
+
+export type InterruptionScenario = "same-day" | "across-days";
+
+export interface FakeInterruptionApp {
+  readonly url: string;
+  readonly harness: EngineHarness;
+  /** The instants the application stopped and started again. */
+  readonly stoppedAt: number;
+  readonly startedAt: number;
+}
+
+const interruptionStarted = new Map<string, Promise<FakeInterruptionApp>>();
+
+/** `same-day`: stopped Monday 12:00 to 15:00 London. `across-days`: stopped Monday 12:00 to Wednesday 12:00, then an hour running. */
+export function fakeInterruptionApp(scenario: InterruptionScenario, name: string = scenario): Promise<FakeInterruptionApp> {
+  let app = interruptionStarted.get(name);
+  if (!app) interruptionStarted.set(name, (app = startInterruption(scenario)));
+  return app;
+}
+
+async function startInterruption(scenario: InterruptionScenario): Promise<FakeInterruptionApp> {
+  const MIN = 60_000;
+  const ALWAYS = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
+  const WEEKDAYS = [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 }));
+  const harness = new EngineHarness({
+    start: MONDAY_8 + H,
+    accounts: [{ id: FAKE_INBOX, capacity: 4, gapMs: 5 * MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
+    sms: { numbers: FAKE_NUMBERS.map((id) => ({ id, capacity: 50, gapMs: 5 * MIN, k: 2, healthy: true, resetZone: "Europe/London" })) },
+  });
+  await harness.tick();
+  await harness.request("PUT", "/api/call-settings", { dailyCapacity: 10, userZone: "Europe/London" });
+  const harbour = business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101", city: "London" });
+  const people = [
+    person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbourlane.example", dial_phone: "+447700900101", dial_phone_type: "mobile" }),
+    person({ person_id: "p2", business_id: "b1", full_name: "Nia Cole", email: "nia@harbourlane.example", dial_phone: "+447700900102", dial_phone_type: "mobile" }),
+    person({ person_id: "p3", business_id: "b1", full_name: "Sam Reed", email: "sam@harbourlane.example" }),
+  ];
+  const email = (id: string, waitDays = 0): StepDefinition => ({ id, waitDays, subject: `A note for {{company}} ${id}`, body: `Hi {{first_name}}, a short note for {{company}} (${id}).`, threading: "new_subject", removed: false });
+  const text = (id: string, waitDays = 0): StepDefinition => ({ ...email(id, waitDays), subject: "" });
+  const def = (sms: string): CampaignDefinition => ({
+    timezone: "Europe/London",
+    callSkipLimitDays: 3,
+    emailPool: [FAKE_INBOX],
+    smsPool: [sms],
+    callScript: CALL_SCRIPT,
+    tracks: [
+      { id: "e1", channel: "email", branch: "main", window: ALWAYS, steps: [email("s1"), email("s2", 1)], start: { kind: "entry" }, removed: false },
+      { id: "x1", channel: "sms", branch: "main", window: ALWAYS, steps: [text("t1"), text("t2", 1)], start: { kind: "entry" }, removed: false },
+      { id: "p1", channel: "call", branch: "main", window: WEEKDAYS, steps: [{ ...email("c1"), subject: "", body: "" }], start: { kind: "entry" }, removed: false },
+    ],
+  });
+  const ids: string[] = [];
+  for (const [name, sms] of [["Clinics, London", FAKE_NUMBERS[0]], ["Physios, London", FAKE_NUMBERS[1]]] as const) {
+    const id = (await harness.request<{ campaign: Campaign }>("POST", "/api/campaigns", { name, defaultTimezone: "Europe/London", ...csvOf({ businesses: [harbour], people }) })).body.campaign.id;
+    await harness.defineSequence(id, def(sms));
+    const launched = await harness.launch(id);
+    if (launched.status !== 200) throw new Error(`the demonstration campaign did not launch: ${JSON.stringify(launched.body)}`);
+    ids.push(id);
+  }
+  await harness.advanceTo(MONDAY_8 + 4 * H);
+  // Nia is paused in the first campaign before the stop.
+  const rows = (await harness.request<{ rows: { name: string; enrollments: EnrollmentView[] }[] }>("GET", `/api/leads?campaign=${ids[0]}`)).body.rows;
+  const nia = rows.find((r) => r.name === "Nia Cole")?.enrollments.find((e) => e.campaign.id === ids[0])?.id ?? "";
+  const paused = await harness.request("POST", `/api/enrollments/${nia}/controls`, { requestId: "demo-pause", action: "pause" });
+  if (paused.status !== 200) throw new Error(`pausing failed: ${JSON.stringify(paused.body)}`);
+  const stoppedAt = harness.clock;
+  await harness.stopFor(scenario === "same-day" ? 3 * H : 48 * H);
+  const startedAt = harness.clock;
+  // Running again for an hour: the rescheduled sends go, spread by pacing, until the shared inbox is full for the day.
+  if (scenario === "across-days") await harness.advanceTo(startedAt + H);
+  return { url: await serveHarness(harness), harness, stoppedAt, startedAt };
+}
+
+// ---------------------------------------------------------------------------------------------
+// The verifier's focus case on PR 58 (ticket 20b): one inbox of capacity 1 a day, an email-only campaign with two leads,
+// so the second waits for capacity until the inbox resets at midnight UTC. No call tasks. Data is fictitious.
+
+export interface FakeCapacityApp {
+  readonly url: string;
+  readonly harness: EngineHarness;
+}
+
+const capacityStarted = new Map<string, Promise<FakeCapacityApp>>();
+
+/** Monday 9 November 2026 09:10 UTC: one lead's email went, the other's waits for the inbox's capacity. One app per name. */
+export function fakeCapacityApp(name: string): Promise<FakeCapacityApp> {
+  let app = capacityStarted.get(name);
+  if (!app) capacityStarted.set(name, (app = startCapacity()));
+  return app;
+}
+
+async function startCapacity(): Promise<FakeCapacityApp> {
+  const ALWAYS = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
+  const harness = new EngineHarness({ start: MONDAY_8 + H, accounts: [{ id: FAKE_INBOX, capacity: 1, gapMs: 60_000, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+  await harness.tick();
+  await harness.request("PUT", "/api/call-settings", { dailyCapacity: 10, userZone: "Europe/London" });
+  const harbour = business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101" });
+  const people = [
+    person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbourlane.example" }),
+    person({ person_id: "p2", business_id: "b1", full_name: "Sam Reed", email: "sam@harbourlane.example" }),
+  ];
+  const id = (await harness.request<{ campaign: Campaign }>("POST", "/api/campaigns", { name: "Clinics, London", defaultTimezone: "Europe/London", ...csvOf({ businesses: [harbour], people }) })).body.campaign.id;
+  await harness.defineSequence(id, {
+    timezone: "Europe/London",
+    callSkipLimitDays: 3,
+    emailPool: [FAKE_INBOX],
+    smsPool: [],
+    callScript: "",
+    tracks: [{ id: "e1", channel: "email", branch: "main", window: ALWAYS, steps: [{ id: "s1", waitDays: 0, subject: "A note for {{company}}", body: "Hi {{first_name}}, a short note for {{company}}.", threading: "new_subject", removed: false }], start: { kind: "entry" }, removed: false }],
+  });
+  const launched = await harness.launch(id);
+  if (launched.status !== 200) throw new Error(`the capacity campaign did not launch: ${JSON.stringify(launched.body)}`);
+  await harness.advanceTo(MONDAY_8 + H + 10 * 60_000);
+  return { url: await serveHarness(harness), harness };
+}

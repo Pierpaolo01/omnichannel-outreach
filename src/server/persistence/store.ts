@@ -5,6 +5,7 @@ import type { OutreachStatus } from "../../domain/outreach-status.ts";
 import type { EngineStore } from "../engine/engine-store.ts";
 import type { InstantlyStore } from "../instantly/store.ts";
 import type {
+  AttentionLead,
   Campaign,
   ImportFileNames,
   CampaignListItem, CampaignPauseRead,
@@ -53,6 +54,11 @@ export interface StoredContactDetail {
  * interface later. The SQLite adapter is the only implementation today.
  */
 export interface OutreachStore {
+  /**
+   * Whose lead each enrollment is, by names only, in one query (ticket 20b, council on 7622b8b): the person (null for a
+   * company lead), the company and the campaign. An unknown id is left out.
+   */
+  leadNames(enrollmentIds: readonly string[]): Promise<ReadonlyMap<string, AttentionLead>>;
   createCampaign(campaign: Campaign): Promise<void>;
   campaign(id: string): Promise<Campaign | null>;
   /** The campaigns with their lead counts and last import; the HTTP interface adds each one's sequence summary. */

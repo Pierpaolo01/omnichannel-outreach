@@ -15,6 +15,7 @@ import {
 import { isOutreachStatus } from "../../domain/outreach-status.ts";
 import { companyLeadReach, decisionMakerReach, hasUsableChannel } from "../../domain/reach.ts";
 import type {
+  AttentionLead,
   Campaign,
   CampaignListItem, CampaignPauseRead,
   ImportFileNames,
@@ -114,6 +115,30 @@ class SqliteStore implements OutreachStore {
     this.db = db;
     this.engine = new SqliteEngineStore(db);
     this.instantly = new SqliteInstantlyStore(db);
+  }
+
+  async leadNames(enrollmentIds: readonly string[]): Promise<ReadonlyMap<string, AttentionLead>> {
+    const out = new Map<string, AttentionLead>();
+    if (enrollmentIds.length === 0) return out;
+    const rows = this.db
+      .prepare(
+        `SELECT e.id, e.person_id, p.display_name AS person_name, e.company_id, co.name AS company_name, e.campaign_id, ca.name AS campaign_name
+         FROM enrollments e
+         LEFT JOIN people p ON p.id = e.person_id
+         JOIN companies co ON co.id = e.company_id
+         JOIN campaigns ca ON ca.id = e.campaign_id
+         WHERE e.id IN (SELECT value FROM json_each(?))`,
+      )
+      .all(JSON.stringify([...new Set(enrollmentIds)]));
+    for (const r of rows) {
+      const personId = strOrNull(r, "person_id");
+      out.set(str(r, "id"), {
+        person: personId === null ? null : { id: personId, name: strOrNull(r, "person_name") ?? "" },
+        company: { id: str(r, "company_id"), name: str(r, "company_name") },
+        campaign: { id: str(r, "campaign_id"), name: str(r, "campaign_name") },
+      });
+    }
+    return out;
   }
 
   async createCampaign(campaign: Campaign): Promise<void> {

@@ -1,9 +1,9 @@
 import type { APIRequestContext, Locator, Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { OUTREACH_STATUSES } from "../src/domain/outreach-status.ts";
-import type { BeforeLaunchView, CampaignDefinition, CampaignListItem, CompanyRecord, ControlStepView, ControlView, EnrollmentRead, ImportRecord, LeadControlApi, LeadSearchResult, OutreachStatus, PersonRecord, RecordCalls, RecordColleagues, RecordControls, RecordLead, SequenceView, SummaryEntry } from "../src/shared/api.ts";
+import type { BeforeLaunchView, CampaignDefinition, CampaignListItem, CompanyRecord, ControlStepView, ControlView, EnrollmentRead, ImportRecord, LeadControlApi, LeadSearchResult, NeedsAttention, OutreachStatus, PersonRecord, RecordCalls, RecordColleagues, RecordControls, RecordLead, SequenceView, SummaryEntry, TodayView } from "../src/shared/api.ts";
 import { refusedPair, respond, serverError } from "./mocks.ts";
-import { FAKE_INBOX, FAKE_NUMBERS, TWO_CHANNELS, fakeCallsApp, fakePeopleApp, fakeProviderApp, type CallsScenario, type FakeCallsApp, type FakePeopleApp, type FakeProviderApp } from "./fake-provider.ts";
+import { FAKE_INBOX, FAKE_NUMBERS, TWO_CHANNELS, fakeCallsApp, fakeInterruptionApp, fakePeopleApp, fakeProviderApp, type CallsScenario, type FakeCallsApp, type FakePeopleApp, type FakeProviderApp, type InterruptionScenario } from "./fake-provider.ts";
 import { fixture } from "./support.ts";
 
 /** Opens a path on the app over the fake email provider. */
@@ -65,6 +65,7 @@ const NEEDS_ATTENTION = {
   noUsableChannel: [],
   waitingOnTransport: [],
   waitingOnProvider: [],
+  sendingInterrupted: null,
   overdueCallbacks: [],
 } as const;
 
@@ -581,6 +582,50 @@ export function pausedCalls(name: string): Promise<FakeCallsApp> {
   return app;
 }
 
+/** Opens Today on ticket 20's demonstration app (ticket 20b), after the interruption. */
+async function interrupted(page: Page, scenario: InterruptionScenario): Promise<void> {
+  const f = await fakeInterruptionApp(scenario);
+  await page.clock.setFixedTime(f.harness.clock);
+  await page.goto(f.url + "/");
+}
+
+/** A name with no break opportunity, as long as a scraper row could give. */
+const LONG_NAME = `Wolfeschlegelsteinhausenbergerdorff${"x".repeat(40)}`;
+
+/**
+ * Today with every ticket 20 entry at once (ticket 20b), long names and lists: the reads of a calls app with sending not
+ * running, both providers not answering, twelve leads waiting for capacity over two campaigns, and forty leads with no
+ * way left. `one` gives one lead of each kind instead, so the entries link to records.
+ */
+async function everyEntry(page: Page, size: "many" | "one"): Promise<void> {
+  const f = await fakeCallsApp("ready");
+  await page.route("**/api/today", async (route) => {
+    const body = (await (await route.fetch()).json()) as TodayView;
+    const at = Date.parse(body.asOf);
+    await respond(route, {
+      ...body,
+      interruption: { from: new Date(at - 26 * 3_600_000).toISOString(), to: new Date(at - 3_600_000).toISOString(), rescheduled: size === "one" ? 1 : 1284 },
+    });
+  });
+  await page.route("**/api/needs-attention", async (route) => {
+    const body = (await (await route.fetch()).json()) as NeedsAttention;
+    const campaigns = [{ id: f.campaign, name: LONG_CAMPAIGN_NAME }, { id: "campaign-2", name: "Physiotherapy clinics, Greater London and the Home Counties" }];
+    const company = { id: "company-1", name: `${LONG_NAME} Physiotherapy` };
+    const lead = (i: number) => ({ person: i % 3 === 0 ? null : { id: `person-${i}`, name: `${LONG_NAME} ${i}` }, company, campaign: campaigns[i % 2] ?? campaigns[0]! });
+    const count = size === "one" ? 1 : 12;
+    const at = f.harness.clock;
+    await respond(route, {
+      ...body,
+      sendingInterrupted: { since: new Date(at - 20 * 60_000).toISOString(), cause: "providers_unreachable", lastFailedRead: { channel: "email", part: "observation", at: new Date(at - 60_000).toISOString() }, lastRoundFailedAt: null },
+      waitingOnProvider: [{ channel: "email", since: new Date(Date.parse(body.overdueCallbacks[0]?.dueAt ?? "2026-11-09T09:00:00Z")).toISOString(), sends: size === "one" ? 1 : 312 }, { channel: "sms", since: null, sends: 47 }],
+      waitingForCapacity: Array.from({ length: count }, (_, i) => ({ ...lead(i + 1), enrollmentId: `e-${i}`, campaignId: (campaigns[(i + 1) % 2] ?? campaigns[0]!).id, trackId: "t1", stepId: "s1", channel: i % 2 === 0 ? ("email" as const) : ("sms" as const), dueAt: "2026-11-09T08:00:00.000Z", accountIds: ["inbox-a"], resetsAt: "2026-11-10T00:00:00.000Z" })),
+      noUsableChannel: Array.from({ length: size === "one" ? 1 : 40 }, (_, i) => ({ ...lead(i + 1), enrollmentId: `n-${i}`, campaignId: (campaigns[(i + 1) % 2] ?? campaigns[0]!).id, endedAt: "2026-11-08T15:00:00.000Z", channels: [{ channel: "email" as const, why: "bad" as const }, { channel: "sms" as const, why: "missing" as const }, { channel: "call" as const, why: "declined" as const }] })),
+    });
+  });
+  await page.clock.setFixedTime(f.harness.clock);
+  await page.goto(f.url + "/");
+}
+
 export const SCREENS: readonly Screen[] = [
   { name: "today", open: async (page) => { await page.goto("/"); await settle(page, "Nothing to call right now."); } },
   { name: "calls", open: async (page) => { await page.goto("/calls"); await settle(page, "Calls appear here once a launched campaign reaches a call step."); } },
@@ -596,6 +641,11 @@ export const SCREENS: readonly Screen[] = [
       await settle(page, "Your SMS number +44 7700 900999 can’t send");
     },
   },
+  // Ticket 20b: the interruption line and the ticket 20 entries in Needs attention.
+  { name: "today after an interruption across days", open: async (page) => { await interrupted(page, "across-days"); await settle(page, "Sending was interrupted from Mon 9 Nov at 12:00"); } },
+  { name: "today after an interruption within the day", open: async (page) => { await interrupted(page, "same-day"); await settle(page, "Sending was interrupted from 12:00 to 15:00"); } },
+  { name: "today with every ticket 20 entry, long names and lists", open: async (page) => { await everyEntry(page, "many"); await settle(page, "No way was left to reach 40 leads"); } },
+  { name: "today with one lead of each ticket 20 kind", open: async (page) => { await everyEntry(page, "one"); await settle(page, /No way was left to reach Wolfe/); } },
   { name: "today loading", open: async (page) => { await hold(page, "**/api/today"); await hold(page, "**/api/needs-attention"); await page.goto("/"); await page.getByLabel("Loading up next").waitFor(); } },
   { name: "today error", open: async (page) => { await fail(page, "**/api/today"); await fail(page, "**/api/needs-attention"); await page.goto("/"); await settle(page, "Today’s calls didn’t load."); await settle(page, "Needs attention didn’t load."); } },
   { name: "calls, the focused call", open: async (page) => { await calls(page, "ready", "/calls"); await settle(page, "Calling hours Mon–Fri, 09:00–17:00"); } },

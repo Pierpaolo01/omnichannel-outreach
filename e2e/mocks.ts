@@ -10,6 +10,7 @@ import type {
   LeadSearchResult,
   CallTaskView,
   NeedsAttention,
+  TodayView,
   PersonRecord,
   RecordCalls,
   RecordColleagues,
@@ -35,6 +36,7 @@ export type MockBody =
   | FileCheckResult
   | BeforeLaunchView
   | NeedsAttention
+  | TodayView
   | CallTaskView;
 
 export function respond(route: Route, body: MockBody, status = 200): Promise<void> {
