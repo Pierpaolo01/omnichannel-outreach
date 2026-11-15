@@ -345,8 +345,21 @@ export class InstantlyEmailPort implements SendPort {
 
   /** The dispatch campaign for this send, created, re-asserted and active; null when Instantly could not be brought there. */
   private dispatchCampaign(context: SendContext, request: HandoverRequest, inbox: InstantlyAccount): Promise<DispatchCampaignRecord | null> {
-    const key = [context.kind, context.campaignId, request.trackId, request.stepId, request.sender].join("|");
-    const name = `${context.kind === "test_run" ? "oo·test·" : "oo·"}${[context.campaignId, request.trackId, request.stepId, request.sender].join("·")}`;
+    // A lead's dispatch campaign is shared by every lead of the campaign at that step and inbox. A test run's is its own
+    // (council on ffa202c, item 12): Instantly keeps one recipient per campaign, so a second test to the same test contact
+    // in a shared campaign would be refused as a duplicate. Stable across that run's retries, new for each run.
+    const scope = ((): string => {
+      switch (context.kind) {
+        case "enrollment":
+          return context.campaignId;
+        case "test_run":
+          return context.subjectId;
+        default:
+          throw new Error(`a subject kind the adapter does not know: ${String(context.kind satisfies never)}`);
+      }
+    })();
+    const key = [context.kind, scope, request.trackId, request.stepId, request.sender].join("|");
+    const name = `${context.kind === "test_run" ? "oo·test·" : "oo·"}${[scope, request.trackId, request.stepId, request.sender].join("·")}`;
     return this.single(`dispatch|${key}`, () => this.ensureDispatchCampaign(key, name, inbox));
   }
 

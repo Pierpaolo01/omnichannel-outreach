@@ -165,8 +165,10 @@ export class SqliteInstantlyStore implements InstantlyStore {
   }
 
   sendContext(subjectId: string): SendContext | null {
-    const r = this.db.prepare("SELECT campaign_id FROM enrollments WHERE id = ?").get(subjectId);
-    return r ? { kind: "enrollment", campaignId: str(r, "campaign_id") } : null;
+    // Every subject the engine sends for, a lead or a test run (council on ffa202c, item 7): the kind decides the dispatch campaign.
+    const r = this.db.prepare("SELECT kind, campaign_id FROM engine_subjects WHERE id = ?").get(subjectId);
+    if (!r) return null;
+    return { kind: str(r, "kind") === "test_run" ? "test_run" : "enrollment", campaignId: str(r, "campaign_id"), subjectId };
   }
 
   meta(key: string): string | null {

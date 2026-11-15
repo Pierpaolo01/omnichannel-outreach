@@ -54,7 +54,7 @@ async function run(seed: number): Promise<{ missing: string[]; unexpected: strin
       store: store.instantly,
       now,
       config: { resetZone: "UTC", pollIntervalMs: 0, pageSize: 2, pagesPerPoll: 2, freshnessMs: 365 * 24 * 60 * MINUTE },
-      subjectCampaign: () => Promise.resolve({ kind: "enrollment", campaignId: "camp-1" }),
+      subjectCampaign: (subjectId) => Promise.resolve({ kind: "enrollment", campaignId: "camp-1", subjectId }),
       crashPoint: (point) => {
         if (crashAt?.point !== point) return;
         if (crashAt.after-- > 0) return;

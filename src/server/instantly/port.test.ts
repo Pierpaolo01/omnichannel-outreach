@@ -28,7 +28,7 @@ async function setUp(options: { writes?: boolean; accounts?: InstantlyAccount[];
   const campaign = { id: "camp-1", name: "Autumn physio", defaultTimezone: "Europe/London", createdAt: new Date(T0).toISOString() };
   await store.createCampaign(campaign);
   const client = new InstantlyClient({ apiKey: "test-key-not-real", fetch: fake.fetch, writes: options.writes ?? true, now, timeoutMs: 10_000 });
-  const build = () => new InstantlyEmailPort({ client, store: store.instantly, now, config: { resetZone: "UTC", pollIntervalMs: 0, ...options.config }, subjectCampaign: () => Promise.resolve({ kind: "enrollment", campaignId: campaign.id }) });
+  const build = () => new InstantlyEmailPort({ client, store: store.instantly, now, config: { resetZone: "UTC", pollIntervalMs: 0, ...options.config }, subjectCampaign: (subjectId) => Promise.resolve({ kind: "enrollment", campaignId: campaign.id, subjectId }) });
   const port = build();
   return {
     fake,

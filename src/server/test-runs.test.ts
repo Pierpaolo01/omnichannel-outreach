@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
 import { describe, expect, test } from "vitest";
 import { EngineHarness } from "../../test/support/engine-harness.ts";
@@ -207,6 +208,18 @@ describe("a test run before launch (ADR 0003 'Ticket 21')", () => {
     // A run without a mobile: its own mobile id is refused, since it has no such contact.
     db.exec(`UPDATE test_runs SET mobile_key = NULL, mobile_value = NULL WHERE id = '${runId}'`);
     expect(set("attempts", "destination_detail_id", `test:${runId}:mobile`)).toThrow(/names neither/);
+  });
+
+  test("the Instantly store's every lookup by subject knows a test run (council on ffa202c, item 7)", async () => {
+    const w = await world();
+    await w.h.request("PUT", `/api/campaigns/${w.campaign}/test-contacts`, { email: OWN_EMAIL, mobile: "" });
+    const runId = (await w.run()).body.run?.id ?? "";
+    expect(w.h.store.instantly.sendContext(runId)).toEqual({ kind: "test_run", campaignId: w.campaign, subjectId: runId });
+    expect(w.h.store.instantly.sendContext(w.lead)).toEqual({ kind: "enrollment", campaignId: w.campaign, subjectId: w.lead });
+    expect(w.h.store.instantly.sendContext("no-such-subject")).toBeNull();
+    // The class: the adapter's store reads subjects only through engine_subjects, never the leads' table alone.
+    const source = readFileSync(new URL("./persistence/sqlite-instantly-store.ts", import.meta.url), "utf8");
+    expect(source.match(/\benrollments\b/g) ?? []).toEqual([]);
   });
 
   test("an edit stops the running test, and the warning holds until a test runs on the new version; launch is never blocked by it", async () => {

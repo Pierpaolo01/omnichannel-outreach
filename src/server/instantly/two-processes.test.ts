@@ -46,7 +46,7 @@ describe("two processes on one database", () => {
         store: store.instantly,
         now,
         config: { resetZone: "UTC", pollIntervalMs: 0 },
-        subjectCampaign: () => Promise.resolve({ kind: "enrollment", campaignId: "camp-1" }),
+        subjectCampaign: (subjectId) => Promise.resolve({ kind: "enrollment", campaignId: "camp-1", subjectId }),
       });
     const a = port(first);
     const b = port(second);
@@ -125,7 +125,7 @@ describe("two processes on one database", () => {
         store: store.instantly,
         now,
         config: { resetZone: "UTC", pollIntervalMs: 0 },
-        subjectCampaign: () => Promise.resolve({ kind: "enrollment", campaignId: "camp-1" }),
+        subjectCampaign: (subjectId) => Promise.resolve({ kind: "enrollment", campaignId: "camp-1", subjectId }),
       });
     const a = port(first, fake.fetch);
     const b = port(second, slowFetch);
