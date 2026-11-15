@@ -789,7 +789,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
         const shownAt = when.kind === "at" ? Date.parse(when.at) : when.kind === "now" ? now : null;
         const capacityWait = when.kind === "waits" && (when.why === "sending_capacity" || when.why === "sender_unavailable");
         if (!capacityWait && shownAt !== Math.max(want, now)) problem(`P2: ${s.id}/${pending.stepId} reads ${JSON.stringify(when)} at ${isoOf(now)}; the record says ${isoOf(Math.max(want, now))} (moved by every hold since its basis; holds ${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))})${process.env["CONTROLS_DEBUG"] ? ` [unheld ${isoOf(pending.unheld)}; prev ${JSON.stringify(t.steps.map((x) => resolution(s, t, x.id)).map((r) => (r ? [isoOf(r.at), isoOf(r.seen), r.kind] : null)))}; deliveries ${JSON.stringify(deliveries(t.channel === "sms" ? "sms" : "email").filter((d) => d.subjectId === s.id && t.steps.some((x) => x.id === d.stepId)).map((d) => [d.stepId, isoOf(d.at), isoOf(d.visibleAt)]))}; engine ${JSON.stringify(st.tracks.find((p) => p.trackId === t.id))}; results ${JSON.stringify(st.results.filter((r) => r.trackId === t.id).map((r) => [r.stepId, r.at, isoOf(r.atWall)]))}; freezes ${JSON.stringify(st.freezes.map((f) => [isoOf(f.fromWall), isoOf(f.toWall)]))}]` : ""}`);
-        if (pending.due > pending.unheld && !held) features.add("a-wait-moved-by-a-hold");
+        if (pending.due > pending.unheld) features.add("a-wait-moved-by-a-hold");
       }
       for (const ch of ["email", "sms"] as const) {
         for (const t of def(s).tracks.filter((x) => x.channel === ch)) {

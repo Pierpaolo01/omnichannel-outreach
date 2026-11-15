@@ -15,7 +15,7 @@ Each sentence in the "What the test checks" column is an assertion in the test i
 - **Unverified.** It could not be tested yet; the row says why.
 - **Not met.** The test shows the application does not do what the spec says.
 
-**Totals over the 78 rows below: 31 verified, 42 with fake providers only, 3 unverified, 2 not met.** The defects found are listed at the end.
+**Totals over the 78 rows below: 31 verified, 42 with fake providers only, 3 unverified, 2 not met.** The defects found are listed at the end. Defects 2 and 3 are fixed and were not counted rows, so the totals do not change; the two not met are "delivered" and question Q7.
 
 ## Reproduce it
 
@@ -29,7 +29,7 @@ pnpm exec playwright install chromium
 E2E_PORT=4399 pnpm exec playwright test e2e/acceptance.spec.ts e2e/acceptance-proofs.spec.ts e2e/acceptance-defects.spec.ts --no-deps
 ```
 
-The test runner builds the application and starts its own server on `E2E_PORT` (4320 if unset), so that port must be free. The story (`e2e/acceptance.spec.ts`) takes about a minute and a half. The supporting cases (`e2e/acceptance-proofs.spec.ts`) take under a minute. The two defect tests (`e2e/acceptance-defects.spec.ts`) are marked as expected to fail, so they report as passing while the defects remain. Run them with `SHOW_DEFECTS=1` to see the failures. Each test makes its own scratch folder and deletes it afterwards. Add `EVIDENCE_DIR=<folder>` for a screenshot per step and `RECORD_DEMO=1` for a recording.
+The test runner builds the application and starts its own server on `E2E_PORT` (4320 if unset), so that port must be free. The story (`e2e/acceptance.spec.ts`) takes about a minute and a half. The supporting cases (`e2e/acceptance-proofs.spec.ts`) take under a minute. The two defect tests (`e2e/acceptance-defects.spec.ts`) pass since the fix on `fix/untrue-reads`: their expected-failure marks are off. Each test makes its own scratch folder and deletes it afterwards. Add `EVIDENCE_DIR=<folder>` for a screenshot per step and `RECORD_DEMO=1` for a recording.
 
 In the table, "story" means the test "the acceptance story" in `e2e/acceptance.spec.ts`, with its step number. "Proof" means a named test in `e2e/acceptance-proofs.spec.ts`.
 
@@ -115,7 +115,7 @@ In the table, "story" means the test "the acceptance story" in `e2e/acceptance.s
 |---|---|---|---|
 | A Paused banner with the date it was paused | Verified | story, 8 | "Paused since Tue 10 Nov at 10:00", the instant the test paused it. |
 | The count of leads in each status group | Verified | story, 8 | The test works out each of the 12 leads' status at that moment from the story so far. The banner and the measures read both show 4 running, 2 waiting on you, 4 handed to you, 0 paused and 2 ended. |
-| Its calls leave the list | Verified | story, 8 | The Calls queue shows ready now 0 and later today 0, names neither of its two calls, and says they are off the list while paused. (The panel beside the queue can still reopen a call it had open: defect 3.) |
+| Its calls leave the list | Verified | story, 8 | The Calls queue shows ready now 0 and later today 0, names neither of its two calls, and says they are off the list while paused. A call the panel had open stays shown, locked, saying it is on hold while the campaign is paused; its read gives the pause as the reason and a posted outcome is refused with it (defect 3, fixed by `fix/untrue-reads`). |
 | Clocks freeze: nothing is sent while paused | Fake providers only | story, 8 | Over the two days paused, nothing reached the campaign's leads. |
 | Clocks freeze: waits | Fake providers only | story, 8 | Each lead's second email and Cara's second text go on the day two days after their first message, moved two days later by the pause, at or after 09:00 that day. |
 | Clocks freeze: the call skip limit | Verified | story, 8 | Kim's redial is still on the list after the pause. Not worked, it is skipped at the end of Thursday: its limit from Monday, moved by the two days paused. |
@@ -176,8 +176,8 @@ In the table, "story" means the test "the acceptance story" in `e2e/acceptance.s
 ## Defects found
 
 1. **No "delivered" state.** Not met, step 4. For email it's an Instantly limitation. For SMS nothing reports it. Reported; not built here, because it would add behaviour no ticket delivered and needs a real provider's delivery receipts.
-2. **A person's campaign row can name a past due time outside the sending window.** Run `e2e/acceptance-defects.spec.ts` with `SHOW_DEFECTS=1`. A campaign that sends Tuesday to Friday is launched on Monday at 10:00. At 11:00 the person's row says "Next: email 1 of 1, due Mon 9 Nov at 10:00": an hour in the past, on a day the window excludes. The read returns the wait's end as the step's due time, and the row shows it. The engine sends the email on Tuesday at 09:00, when the window opens. Reported; not fixed here.
-3. **On the Calls page, a paused campaign's call can reopen with a false reason.** The test is in the same file. A user has a callback open on the Calls page, the campaign is paused, and they come back. The queue is rightly empty, but the panel beside it reopens that call, with its outcome buttons. It says the call "was already logged from another window or device: callback requested at …". The call-task read explains any earlier outcome on the task as "logged", and the callback request is on the same task. Reported; not fixed here.
+2. **A person's campaign row can name a past due time outside the sending window.** Fixed on `fix/untrue-reads` (ADR 0003 "Reads that say when"). A campaign that sends Tuesday to Friday is launched on Monday at 10:00. At 11:00 the person's row said "Next: email 1 of 1, due Mon 9 Nov at 10:00", the wait's end. It now says "due Tue 10 Nov at 09:00", the instant the engine sends, from the engine's own function; the company-lead page says the same (`e2e/untrue-reads.spec.ts`). The test in `e2e/acceptance-defects.spec.ts` passes with its mark removed.
+3. **On the Calls page, a paused campaign's call could reopen with a false reason.** Fixed on `fix/untrue-reads` (ADR 0003 "why a call left the list"). The call-task read explained any earlier outcome on the task as "logged", so a callback a pause took off the list read as "already logged from another window or device". The read now gives the engine's reason (here the campaign pause), the page says it in the records' words ("The callback is on hold while this campaign is paused."), and an outcome posted for it is refused with that reason. The test in the same file passes with its mark removed.
 4. **Times on the Test run tab.** Follow-up, not blocking. A campaign made on the New campaign screen takes this computer's time zone as its default. The Test run tab shows its times in that zone without naming it, while Today and Calls use your own zone. When the two differ, the same moment reads as two different times. The run sets the campaign's zone in the editor, as you would.
 
 ## What is not proven, in one place

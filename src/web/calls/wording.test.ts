@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { CallQueueItem, CallTaskView } from "../../shared/api.ts";
-import { clockLine, noGoodNumberText, offListLine, pausedCallsLine, refusedRecordLine } from "./wording.ts";
+import { callHoldSentence, clockLine, noGoodNumberText, offListLine, pausedCallsLine, refusedRecordLine } from "./wording.ts";
 
 describe("a kept refusal's reason (merge of ticket 15a)", () => {
   const record = (offList: Parameters<typeof refusedRecordLine>[0]["refused"]["offList"], message: string) => ({ who: "Amira Hassan", body: { outcome: "no_answer" as const }, refused: { message, offList } });
@@ -16,21 +16,26 @@ describe("a kept refusal's reason (merge of ticket 15a)", () => {
   });
 });
 
-describe("why the call the page had open left the list, in one wording function (ADR 0003 \"why a call left the list\")", () => {
+describe("why the call the page had open left the list, in the records' words (ADR 0003 \"why a call left the list\")", () => {
   const Z = "Europe/London";
+  const ctx = (sinceOpened: boolean, kind: "call" | "callback" = "call") => ({ sinceOpened, kind, track: "Phone track" });
   test("logged since the desk opened it: from another window or device; logged before: it already has an outcome", () => {
     const off = { reason: "logged" as const, outcome: "no_answer" as const, at: "2026-11-09T10:00:00.000Z", status: "sequence_finished_no_response" as const };
-    expect(offListLine("Pat Oneil", off, null, Z, true)).toBe("Pat Oneil’s call was already logged from another window or device: no answer at 10:00.");
-    expect(offListLine("Pat Oneil", off, null, Z, false)).toBe("Pat Oneil’s call already has an outcome: no answer at 10:00.");
+    expect(offListLine("Pat Oneil", off, null, Z, ctx(true))).toBe("Pat Oneil’s call was already logged from another window or device: no answer at 10:00.");
+    expect(offListLine("Pat Oneil", off, null, Z, ctx(false))).toBe("Pat Oneil’s call already has an outcome: no answer at 10:00.");
   });
 
-  test("each hold, the callback hold, a later day and a day without calling hours, each in its own words", () => {
-    expect(offListLine("Pat Oneil", { reason: "campaign_paused", status: "callback_scheduled" }, null, Z)).toBe("Pat Oneil’s call is off the list while this campaign is paused. It comes back when you resume the campaign.");
-    expect(offListLine("Pat Oneil", { reason: "campaign_not_launched", status: "queued" }, null, Z)).toBe("Pat Oneil’s call is off the list until this campaign launches.");
-    expect(offListLine("Pat Oneil", { reason: "lead_paused", status: "paused" }, null, Z)).toBe("Pat Oneil’s call is off the list while their outreach in this campaign is paused. It comes back when you resume them.");
-    expect(offListLine("Pat Oneil", { reason: "callback_hold", status: "callback_scheduled" }, null, Z)).toBe("Pat Oneil’s call waits while their callback is open. It comes back once you log the callback.");
-    expect(offListLine("Pat Oneil", { reason: "listed_later", listedFrom: "2026-11-10", status: "waiting_on_call" }, null, Z)).toBe("Pat Oneil’s call is on your list from Tue 10 Nov.");
-    expect(offListLine("Pat Oneil", { reason: "no_hours_today", status: "waiting_on_call" }, null, Z)).toBe("Pat Oneil’s calling hours don’t open on your day today, so the call isn’t on today’s list.");
+  test("a hold says what the person and company records say of it (the same function), never that the call was logged", () => {
+    expect(offListLine("Pat Oneil", { reason: "campaign_paused", status: "callback_scheduled" }, null, Z, ctx(true, "callback"))).toBe(callHoldSentence("callback", "campaign_paused"));
+    expect(callHoldSentence("callback", "campaign_paused")).toBe("The callback is on hold while this campaign is paused.");
+    expect(offListLine("Pat Oneil", { reason: "lead_paused", status: "paused" }, null, Z, ctx(true))).toBe("The call is on hold while their outreach in this campaign is paused.");
+    expect(offListLine("Pat Oneil", { reason: "campaign_not_launched", status: "queued" }, null, Z, ctx(true))).toBe("The call is off the list until this campaign launches.");
+  });
+
+  test("a callback hold, a later day and a day without calling hours, as the record's call line says them", () => {
+    expect(offListLine("Pat Oneil", { reason: "callback_hold", status: "callback_scheduled" }, null, Z, ctx(true))).toBe("Their call on the phone track waits while their callback is open: only the callback is on the list.");
+    expect(offListLine("Pat Oneil", { reason: "listed_later", listedFrom: "2026-11-10", status: "waiting_on_call" }, null, Z, ctx(true))).toBe("Their call is on the list for Tue 10 Nov.");
+    expect(offListLine("Pat Oneil", { reason: "no_hours_today", status: "waiting_on_call" }, null, Z, ctx(true))).toBe("Their call waits for a day their calling hours open.");
   });
 });
 

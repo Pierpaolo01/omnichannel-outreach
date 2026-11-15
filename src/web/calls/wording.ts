@@ -229,16 +229,50 @@ function withNote(parts: string[], body: { readonly note: string }, task: CallTa
 }
 
 /**
+ * A call or callback a pause holds off the list, as the person and company records say it (`nextStepSentence`) and the
+ * Calls page says it of the call it had open (`offListLine`): one sentence per hold.
+ */
+export function callHoldSentence(kind: "call" | "callback", hold: "campaign_paused" | "lead_paused"): string {
+  const noun = kind === "callback" ? "callback" : "call";
+  switch (hold) {
+    case "campaign_paused":
+      return `The ${noun} is on hold while this campaign is paused.`;
+    case "lead_paused":
+      return `The ${noun} is on hold while their outreach in this campaign is paused.`;
+    default: {
+      const unhandled: never = hold;
+      throw new Error(`A hold with no sentence: ${String(unhandled)}`);
+    }
+  }
+}
+
+/** A call whose lead's callback holds it, as the record's call line says it. */
+export const callbackHoldsCallLine = (trackLabel: string): string => `Their call on the ${trackLabel.toLowerCase()} waits while their callback is open: only the callback is on the list.`;
+/** A call listed from a later day, as the record's call line says it (YYYY-MM-DD). */
+export const listedForLine = (date: string): string => `Their call is on the list for ${dayLabel(date)}.`;
+/** A call whose prospect's calling hours do not open on the user's day, as the record's call line says it. */
+export const HOURS_CLOSED_LINE = "Their call waits for a day their calling hours open.";
+
+/** What the page knows of the call beside its read: whether a logged outcome came since it opened the call, the call's kind and track. */
+export interface OffListContext {
+  readonly sinceOpened: boolean;
+  readonly kind: "call" | "callback";
+  readonly track: string;
+}
+
+/**
  * Why the call the page was on is off the list, from the server's `offList` (ADR 0003 "why a call left the list"), in one
  * exhaustive switch. `sinceOpened`: for `logged`, the outcome was stored since this tab opened the call, so it came from
  * another window or device; otherwise it already had it. The holds' sentences are provisional, for the principal.
  */
-export function offListLine(who: string, off: CallOffListView | null, message: string | null, zone: string, sinceOpened = true): string {
+export function offListLine(who: string, off: CallOffListView | null, message: string | null, zone: string, context: OffListContext | null = null): string {
   if (off === null) return message ?? `${who}’s call is no longer on the list.`;
+  // Without the page's context (a kept refusal): the kind the lead's status implies, and a logged outcome from elsewhere.
+  const kind = context?.kind ?? (off.status === "callback_scheduled" ? "callback" : "call");
   switch (off.reason) {
     case "logged":
       // This tab's own press, once stored, is shown as logged by it (reconcile); this one came from elsewhere.
-      return sinceOpened
+      return context?.sinceOpened ?? true
         ? `${who}’s call was already logged from another window or device: ${OUTCOME_LABEL[off.outcome].toLowerCase()} at ${timeIn(zone, off.at)}.`
         : `${who}’s call already has an outcome: ${OUTCOME_LABEL[off.outcome].toLowerCase()} at ${timeIn(zone, off.at)}.`;
     case "lead_ended":
@@ -249,17 +283,16 @@ export function offListLine(who: string, off: CallOffListView | null, message: s
     case "track_finished":
       return trackFinishedLine(who, off.finish);
     case "campaign_paused":
-      return `${who}’s call is off the list while this campaign is paused. It comes back when you resume the campaign.`;
-    case "campaign_not_launched":
-      return `${who}’s call is off the list until this campaign launches.`;
     case "lead_paused":
-      return `${who}’s call is off the list while their outreach in this campaign is paused. It comes back when you resume them.`;
+      return callHoldSentence(kind, off.reason);
+    case "campaign_not_launched":
+      return "The call is off the list until this campaign launches.";
     case "callback_hold":
-      return `${who}’s call waits while their callback is open. It comes back once you log the callback.`;
+      return context ? callbackHoldsCallLine(context.track) : "Their call waits while their callback is open: only the callback is on the list.";
     case "listed_later":
-      return `${who}’s call is on your list from ${dayLabel(off.listedFrom)}.`;
+      return listedForLine(off.listedFrom);
     case "no_hours_today":
-      return `${who}’s calling hours don’t open on your day today, so the call isn’t on today’s list.`;
+      return HOURS_CLOSED_LINE;
     default: {
       const unhandled: never = off;
       throw new Error(`A reason a call left the list with no words: ${String(unhandled)}`);
@@ -576,13 +609,13 @@ export function recordCallLine(call: RecordCallView, today: string): { lead: str
     return { lead, rest: call.noGoodNumber ? noGoodNumberText(null).afterOverdue : "" };
   }
   const plain = (lead: string) => ({ lead, rest: "" });
-  if (call.heldByCallback) return plain(`Their call on the ${call.track.label.toLowerCase()} waits while their callback is open: only the callback is on the list.`);
+  if (call.heldByCallback) return plain(callbackHoldsCallLine(call.track.label));
   if (call.listed) {
     const why = call.reason === "rolled_over" ? "Their call rolled over to today’s list." : call.reason === "redial" ? "Their call is back on today’s list: you asked for a redial." : "Their call is on today’s list.";
     return plain(`${why}${limit}`);
   }
-  if (call.listedFor > today) return plain(`Their call is on the list for ${dayLabel(call.listedFor)}.${limit}`);
-  return plain(`Their call waits for a day their calling hours open.${limit}`);
+  if (call.listedFor > today) return plain(`${listedForLine(call.listedFor)}${limit}`);
+  return plain(`${HOURS_CLOSED_LINE}${limit}`);
 }
 
 // ---------------------------------------------------------------------------------------------

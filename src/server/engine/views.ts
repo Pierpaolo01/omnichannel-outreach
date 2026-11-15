@@ -2,7 +2,6 @@
 import { isLive, markable } from "../../domain/sequence/attempt.ts";
 import { isListed, listedForDay, reasonOf } from "../../domain/sequence/calls.ts";
 import { callRecordView, dateOfDay } from "./call-views.ts";
-import { leadNow } from "../../domain/sequence/clock.ts";
 import { accountAvailable, candidatesFor, claimRefusal, heldReason, inheritedWork, readyItems, stalledAccounts, stepWhen } from "../../domain/sequence/dispatch.ts";
 import { stepWhenView } from "./step-when-view.ts";
 import { localDayNumber, startOfLocalDay } from "../../domain/sequence/clock.ts";

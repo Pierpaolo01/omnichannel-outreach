@@ -8,7 +8,7 @@
 import { STATUS_GROUPS, statusGroup, type StatusGroup } from "../../domain/outreach-status.ts";
 import type { CampaignPauseRead, ControlStepView, ControlView, LeadControlApi, OutreachStatus, RecordLead, StepWaitApi, StepWhenView } from "../../shared/api.ts";
 import { stepNoun } from "../../shared/track-label.ts";
-import { dateIn, HOLD_REASON } from "../calls/wording.ts";
+import { callHoldSentence, dateIn, HOLD_REASON } from "../calls/wording.ts";
 import { STATUS_GROUP_LABEL } from "../status.tsx";
 
 export type AllowedControl = Extract<ControlView, { readonly allowed: true }>;
@@ -173,10 +173,10 @@ export function nextStepSentence(lead: RecordLead, userZone: string): string {
     case "in_win_back":
       return next() || (campaignPaused ? frozen : status === "in_win_back" ? "In this campaign’s win-back branch." : "Their outreach is running.");
     case "waiting_on_call":
-      if (campaignPaused) return "The call is on hold while this campaign is paused.";
+      if (campaignPaused) return callHoldSentence("call", "campaign_paused");
       return step ? `Next: ${stepPhrase(step)}.` : "Waiting on a call on your list.";
     case "callback_scheduled":
-      return campaignPaused ? "The callback is on hold while this campaign is paused." : "Waiting on the callback they asked for.";
+      return campaignPaused ? callHoldSentence("callback", "campaign_paused") : "Waiting on the callback they asked for.";
     case "paused": {
       const resume = lead.controls.find((c): c is AllowedControl => c.action === "resume" && c.allowed);
       const held = resume?.next ?? null;

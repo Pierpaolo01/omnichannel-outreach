@@ -57,7 +57,7 @@ test("defect 2 (review item 11): a person's campaign row says when the next emai
   expect(sentence).not.toContain("Mon 9 Nov at 10:00");
 });
 
-test("defect 3: while its campaign is paused, the Calls page does not reopen a call it had open, nor say it was logged from another window", async ({ page }) => {
+test("defect 3: while its campaign is paused, the Calls page says why the call it had open is off the list, and never that it was logged from another window", async ({ page }) => {
   w = await acceptanceWorld({ start: MONDAY_10, smsConnected: true });
   const h = w.harness;
   const id = await launched(w, def([track("phone", "call", [step("c1", {})])]));
@@ -76,11 +76,12 @@ test("defect 3: while its campaign is paused, the Calls page does not reopen a c
   await expect(page.getByRole("complementary", { name: "Call queue" }).getByText("Ready now, 0")).toBeVisible();
   // What the spec asks: the paused campaign's call is off the list, and nothing says it was logged elsewhere.
   await expect(page.getByText(/already logged from another window or device/)).toHaveCount(0);
-  await expect(page.getByRole("heading", { name: "Pat Oneil", exact: true })).toHaveCount(0);
-  // The fix (ADR 0003 "why a call left the list"): the true reason, and no outcome controls.
-  const panel = page.getByRole("alert").filter({ hasText: "Open the next call" });
-  await expect(panel).toContainText("Pat Oneil’s call is off the list while this campaign is paused. It comes back when you resume the campaign.");
-  await expect(page.getByRole("group", { name: "Call outcome" })).toHaveCount(0);
+  // The fix (ADR 0003 "why a call left the list"): the server's read gives the pause as the reason, and the sheet, locked,
+  // says it in the records' words; no outcome can be pressed.
+  expect((await h.request<CallTaskView>("GET", `/api/call-tasks/${item?.taskId ?? ""}`)).body.offList).toEqual({ reason: "campaign_paused", status: "callback_scheduled" });
+  const alert = page.getByRole("alert").filter({ hasText: "Open the next call" });
+  await expect(alert).toContainText("The callback is on hold while this campaign is paused.");
+  for (const pill of await page.getByRole("group", { name: "Call outcome" }).getByRole("button").all()) await expect(pill).toBeDisabled();
   // An outcome posted now is refused with that reason, and nothing is stored.
   const refused = await h.request<{ offList?: { reason: string } }>("POST", `/api/call-tasks/${item?.taskId ?? ""}/outcome`, { requestId: "late-1", outcome: "no_answer", numberId: task.numbers[0]?.detailId ?? null, note: "" });
   expect(refused.status).toBe(409);
@@ -92,5 +93,5 @@ test("defect 3: while its campaign is paused, the Calls page does not reopen a c
   await at(page, w, "/calls");
   await expect(page.getByRole("heading", { name: "Pat Oneil", exact: true })).toBeVisible();
   await expect(page.getByLabel("Notes from this call")).toHaveValue("Ask about the Saturday clinic.");
-  await expect(page.getByRole("group", { name: "Call outcome" })).toBeVisible();
+  await expect(page.getByRole("group", { name: "Call outcome" }).getByRole("button", { name: "No answer" })).toBeEnabled();
 });

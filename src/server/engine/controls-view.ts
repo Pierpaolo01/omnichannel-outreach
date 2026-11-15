@@ -8,13 +8,11 @@ import { stepWhen } from "../../domain/sequence/dispatch.ts";
 import { stepWhenView } from "./step-when-view.ts";
 import { currentStep, judgeCampaignControl, previewDigest, LEAD_CONTROLS, skipTarget, type LeadControl } from "../../domain/sequence/controls.ts";
 import { isLive } from "../../domain/sequence/attempt.ts";
-import { deriveStatus, runs } from "../../domain/sequence/progress.ts";
+import { deriveStatus } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
 import type { CampaignControlView, ControlStepView, ControlView } from "../../shared/api.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 import { trackLabel } from "../../shared/track-label.ts";
-
-const iso = (t: number) => new Date(t).toISOString();
 
 function stepView(state: SubjectState, step: NonNullable<ReturnType<typeof currentStep>>, now: number, due: boolean): ControlStepView {
   const live = step.track.steps.filter((s) => !s.removed);
