@@ -74,7 +74,11 @@ test("pause during a wait and a pending call, the frozen skip limit, a smooth re
     // The call keeps its original due time; email 2 is due three days later than it was, by the time paused.
     expect(await callDue()).toBe(dueBefore);
     const email2After = (await read()).tracks.find((t) => t.trackId === "email")?.nextStep?.when;
-    expect(email2Before?.kind === "at" && email2After?.kind === "at" ? Date.parse(email2After.at) - Date.parse(email2Before.at) : null).toBe(3 * DAY);
+    // The read says when email 2 goes (ADR 0003 "Reads that say when"): before the pause, Wednesday's 09:00 opening after its
+    // wait ended at Wednesday 00:00; the pause moved that end by the three days paused, to Saturday 00:00, outside the
+    // weekday window, so it goes at Monday's 09:00 opening.
+    expect(email2Before).toEqual({ kind: "at", at: "2026-11-11T09:00:00.000Z" });
+    expect(email2After).toEqual({ kind: "at", at: "2026-11-16T09:00:00.000Z" });
     await at(page, f, "/calls");
     await expect(page.getByText(/Rolled over, due Mon 9 Nov/).first()).toBeVisible();
     await linger(page);
