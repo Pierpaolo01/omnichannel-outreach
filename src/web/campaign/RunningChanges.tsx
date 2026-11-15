@@ -58,6 +58,8 @@ const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one :
 
 /** Where a change is, named as the editor names it: the track, and the message by its place among the track's messages. */
 function changeName(change: EditImpactChange, draft: CampaignDefinition, stored: CampaignDefinition): string {
+  // A campaign-wide change (the call script, the zone, the senders) names the campaign, not a track.
+  if (change.trackId === null) return "This campaign";
   const inDraft = draft.tracks.find((t) => t.id === change.trackId);
   const inStored = stored.tracks.find((t) => t.id === change.trackId);
   // A removed track or message is named as it was before this change.
@@ -151,7 +153,10 @@ function whatItDoes(change: EditImpactChange, paused: boolean): string {
   if (change.reaches > 0) parts.push(`${plural(change.reaches, "lead", "leads")} ${reachWording(change.kind, paused)}`);
   if (change.skips > 0) parts.push(`${plural(change.skips, "lead", "leads")} not there yet will skip it`);
   if (change.inFlight > 0) parts.push(`${plural(change.inFlight, "lead has", "leads have")} it with the provider now, so it goes as it was`);
-  if (change.untouched > 0) parts.push(`${plural(change.untouched, "lead is", "leads are")} past it or finished${removal && change.kind === "track_removed" ? ", and keep what they started" : ""}`);
+  if (change.untouched > 0) {
+    if (change.trackId === null) parts.push(`${plural(change.untouched, "lead has", "leads have")} ended`);
+    else parts.push(`${plural(change.untouched, "lead is", "leads are")} past it or finished${removal && change.kind === "track_removed" ? ", and keep what they started" : ""}`);
+  }
   if (parts.length === 0) return "No lead is affected.";
   const sentence = parts.join("; ");
   return `${sentence.charAt(0).toUpperCase()}${sentence.slice(1)}.`;
