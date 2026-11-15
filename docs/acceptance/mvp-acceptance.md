@@ -1,6 +1,6 @@
 # MVP acceptance record
 
-Ticket [#23](https://github.com/Pierpaolo01/omnichannel-outreach/issues/23), against [the spec's acceptance story](https://github.com/Pierpaolo01/omnichannel-outreach/issues/10). Written on 15 November 2026 from the integration branch at `925f7a2` (tickets 11 to 22 merged).
+Ticket [#23](https://github.com/Pierpaolo01/omnichannel-outreach/issues/23), against [the spec's acceptance story](https://github.com/Pierpaolo01/omnichannel-outreach/issues/10). Written on 15 November 2026 and run on the integration branch at `440f08b` (tickets 11 to 22 merged, and the fix in pull request 63).
 
 ## How to read this
 
@@ -98,3 +98,7 @@ All nine steps run in order in one test, "the acceptance story", in `e2e/accepta
 - **SMS and calling as provider integrations.** None is provisioned. Calls are dialled by you on your own phone, and the application only lists them and records outcomes.
 - **Delivered.** Not shown for email (Instantly reports none) and not built for SMS (step 4b).
 - **Sending with the laptop closed.** Deferred while operation is local-only.
+
+## Found along the way, not blocking
+
+A campaign made on the New campaign screen takes this computer's time zone as its default. The Test run tab shows its times in the campaign's zone without naming it, while Today and Calls use your own zone. When the two differ, the same moment reads as two different times. The run sets the campaign's zone in the editor, as you would.
