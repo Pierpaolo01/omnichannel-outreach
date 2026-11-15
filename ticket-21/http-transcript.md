@@ -22,7 +22,7 @@
 ```json
 {
   "email": "alex.own@personal-mail.example",
-  "mobile": "+44 7700 900456"
+  "mobile": "+447700900456"
 }
 ```
 → 200
@@ -202,7 +202,7 @@
       "Email track · Email 2: sent 2026-11-09T10:01:00.000Z",
       "SMS track · Text 1: sent 2026-11-09T10:00:00.000Z",
       "SMS track · Text 2: sent 2026-11-09T10:01:00.000Z",
-      "Phone track · Call: logged 2026-11-09T10:03:00.000Z (not_interested)",
+      "Phone track · Call: logged 2026-11-09T10:03:00.000Z (not_interested) [not_interested]",
       "Win-back email track · Win-back email 1: sent 2026-11-09T10:03:00.000Z"
     ]
   }
@@ -468,7 +468,7 @@
       "Email track · Email 2: sent 2026-11-09T10:01:00.000Z",
       "SMS track · Text 1: sent 2026-11-09T10:00:00.000Z",
       "SMS track · Text 2: sent 2026-11-09T10:01:00.000Z",
-      "Phone track · Call: logged 2026-11-09T10:03:00.000Z (not_interested)",
+      "Phone track · Call: logged 2026-11-09T10:03:00.000Z (not_interested) [not_interested]",
       "Win-back email track · Win-back email 1: sent 2026-11-09T10:03:00.000Z"
     ]
   }
@@ -773,6 +773,8 @@
 }
 ```
 
+> Every delivery before the launch went to a test contact: true (7 deliveries).
+
 ## 2026-11-09T10:08:30.000Z  POST /api/campaigns/id-1/launch
 ```json
 {
@@ -785,4 +787,3 @@
   "launchedAt": "2026-11-09T10:08:30.000Z"
 }
 ```
-
