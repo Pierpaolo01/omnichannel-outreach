@@ -150,3 +150,38 @@ describe("the earliest instant, from everything the engine knows at the read (th
     expect(h.fake.deliveryLog).toHaveLength(1);
   });
 });
+
+describe("the order when a window opens (ADR 0003 4.3, rule 1.3; the coordinator on seed 17031)", () => {
+  test("a touched lead's follow-up goes first at 20:00, then two first messages due since 08:40, one per 30-minute gap", async () => {
+    // Thursday 12 November 2026, 20:00 London (GMT): one inbox, one in-flight place, a 30-minute gap; windows 20:00 to midnight.
+    const THURSDAY_20 = Date.parse("2026-11-12T20:00:00Z");
+    const FRIDAY = Date.parse("2026-11-13T00:00:00Z");
+    const evenings = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 20, end: 24 }));
+    const h = new EngineHarness({ start: THURSDAY_20, accounts: [{ id: "inbox-a", capacity: 50, gapMs: 30 * MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+    await h.tick();
+    expect((await h.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "Europe/London" })).status).toBe(200);
+    const ADA = person({ person_id: "p-ada", business_id: "b1", full_name: "Ada Brook", email: "ada@larkstreet.example" });
+    const BEN = person({ person_id: "p-ben", business_id: "b1", full_name: "Ben Hale", email: "ben@larkstreet.example" });
+    const CAL = person({ person_id: "p-cal", business_id: "b1", full_name: "Cal Reed", email: "cal@larkstreet.example" });
+    // Campaign 1: Ada's first email Thursday 20:00; her second a day later, due Friday 00:00, while the window is closed.
+    const one = (await h.createCampaign("Evening notes, Bristol", { businesses: [LARK], people: [ADA] })).campaign;
+    await h.defineSequence(one.id, definition([track("email", [email("a1"), email("a2", 1)], { window: evenings })]));
+    expect((await h.launch(one.id)).status).toBe(200);
+    await h.advanceTo(FRIDAY + MIN);
+    expect(h.fake.deliveryLog.map((d) => [d.stepId, d.at])).toEqual([["a1", THURSDAY_20]]);
+    // Campaign 2, launched Friday 08:40: Ben's and Cal's first messages due at once, the window closed until 20:00.
+    await h.advanceTo(FRIDAY + 8 * H + 40 * MIN);
+    const two = (await h.createCampaign("Evening openers, Bristol", { businesses: [LARK], people: [BEN, CAL] })).campaign;
+    await h.defineSequence(two.id, definition([track("email", [email("b1")], { window: evenings })]));
+    expect((await h.launch(two.id)).status).toBe(200);
+    await h.advanceTo(FRIDAY + 23 * H);
+    // Follow-ups before first messages (4.3): Ada's, touched by her sent first email, at the opening; then the two first
+    // messages, oldest due first and then by lead, one per gap.
+    const sent = h.fake.deliveryLog.filter((d) => d.at > FRIDAY).map((d) => [d.stepId, new Date(d.at).toISOString()]);
+    expect(sent).toEqual([
+      ["a2", "2026-11-13T20:00:00.000Z"],
+      ["b1", "2026-11-13T20:30:00.000Z"],
+      ["b1", "2026-11-13T21:00:00.000Z"],
+    ]);
+  });
+});

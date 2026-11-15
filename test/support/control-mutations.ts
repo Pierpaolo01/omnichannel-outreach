@@ -1,4 +1,7 @@
 import { currentStep, previewDigest } from "../../src/domain/sequence/controls.ts";
+import { leadNow } from "../../src/domain/sequence/clock.ts";
+import { inheritedWork } from "../../src/domain/sequence/dispatch.ts";
+import { channelOf, progressOf } from "../../src/domain/sequence/progress.ts";
 import { storedReplyId, type StoredReplyId } from "../../src/domain/sequence/reply-identity.ts";
 import type { SubjectState } from "../../src/domain/sequence/state.ts";
 import { DEFAULT_RULES, type Rules } from "../../src/server/engine/rules.ts";
@@ -138,6 +141,34 @@ const RULES: Record<string, Partial<Rules>> = {
   "a pre-send email answer stored under the provider's message id": {
     presendAnswer: (answer, channel, known) => (channel === "email" && answer.kind === "reply" ? { ...answer, providerRef: answer.providerRef.replace(/^reply:/, "") as StoredReplyId } : R.presendAnswer(answer, channel, known)),
   },
+  // ADR 0003 "Reads that say when" (review bot on 178de98): the read of a step whose work a new claim would inherit skips
+  // the sender's availability, so it says "now" while the inbox is down and the dispatcher chooses no account.
+  "an inherited reservation skips the availability check in the read": {
+    stepWhen: (s, trackId, now, env) => {
+      const when = R.stepWhen(s, trackId, now, env);
+      const stepId = progressOf(s, trackId)?.nextStepId ?? null;
+      return when?.kind === "waits" && when.why === "sender_unavailable" && stepId !== null && inheritedWork(s, stepId) !== undefined ? { kind: "at", at: now } : when;
+    },
+  },
+  // ADR 0003 1.3 (ruling 6) broken in the engine: a user's Skip touches the lead, so its follow-ups rank before first
+  // messages to leads nothing was ever sent to (invariant 18's order).
+  "a skipped step counts as touching the lead": {
+    applyControl: (s, action, now) => {
+      const out = R.applyControl(s, action, now);
+      return out.ok && action === "skip" ? { ok: true, state: { ...out.state, subject: { ...out.state.subject, touched: true } } } : out;
+    },
+  },
+  // Ticket 23's defect 2 restored in the read alone: an email or text whose wait has ended reads as due at the wait's end
+  // (now, once it has passed), not at its window's next opening.
+  "due is the wait's end, not the window's opening": {
+    stepWhen: (s, trackId, now, env) => {
+      const when = R.stepWhen(s, trackId, now, env);
+      const p = progressOf(s, trackId);
+      const channel = channelOf(s, trackId);
+      if (when?.kind !== "at" || !p || p.dueAt === null || (channel !== "email" && channel !== "sms")) return when;
+      return { kind: "at", at: now + Math.max(0, p.dueAt - leadNow(s.subject.clock, now)) };
+    },
+  },
 };
 
 /** The invariant each mutation must break, and the seed offset known to show it (refreshed by the CI search). */
@@ -179,6 +210,10 @@ const EXPECTED: Record<string, { invariant: string; seed: number; options?: Part
   "the precondition checked before the lead's state": { invariant: "P11", seed: 17 },
   "the precondition checks only the status": { invariant: "P13", seed: 0 },
   "a confirmation sends the click-time expectation": { invariant: "P13", seed: 0, options: { clickTimeExpectation: true } },
+  // ADR 0003 "Reads that say when": the windows family, in which the record models windows, zones and outages (W1 to W3).
+  "a skipped step counts as touching the lead": { invariant: "18", seed: 222, options: { windows: true } },
+  "an inherited reservation skips the availability check in the read": { invariant: "W3", seed: 20, options: { windows: true } },
+  "due is the wait's end, not the window's opening": { invariant: "W2", seed: 1, options: { windows: true } },
 };
 
 export const CONTROL_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number; readonly options?: Partial<ControlRunOptions> }> = Object.fromEntries(

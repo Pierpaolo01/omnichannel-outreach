@@ -87,6 +87,11 @@ export interface ControlRunOptions {
    * the same reply. It is one reply ("once"), and the next message goes (P6).
    */
   readonly replyBeforeObservation?: "sms" | "email";
+  /**
+   * The windows family (ADR 0003 "Reads that say when"): sending windows other than all day, prospects in other zones than
+   * the user's, an inbox that goes unhealthy for a while, and W3, the dispatcher's next round at each read's instant.
+   */
+  readonly windows?: boolean;
 }
 
 export interface ControlRunResult {
@@ -183,9 +188,9 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   // was: sending windows other than all day, prospects in other zones than the user's, and an inbox that goes unhealthy
   // or is rate-limited for a while. Not in the interruption family or the scripted runs, whose own checks assume all day.
   const rW = random(seed ^ 0x23f);
-  // In about six runs in ten, so the others keep the all-day shape some controls' behaviours (a claim left open at a pause,
-  // a stop refused with uncertain work) are reached in.
-  const drawsWindows = rW() < 0.6 && !interrupting && options.smsReplyRestart !== true && options.replyBeforeObservation === undefined && options.withdrawalAcrossARecovery !== true;
+  // The windows family (`windows: true`): every run draws them. The base family's runs are the runs they were, so every
+  // controls' behaviour its fixed seeds reach stays reached.
+  const drawsWindows = options.windows === true && !interrupting && options.smsReplyRestart !== true && options.replyBeforeObservation === undefined && options.withdrawalAcrossARecovery !== true;
   const WINDOW_DAYS = [[1, 2, 3, 4, 5], [2, 3, 4, 5, 6], [0, 1, 2, 3, 4, 5, 6], [1, 3, 5]];
   const WINDOW_HOURS = [[9, 17], [8, 12], [13, 18], [20, 24], [22, 2], [0, 24]];
   const drawWindow = (): Hours[] => {
@@ -198,6 +203,11 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   const zoneOfPerson = new Map<string, string>();
   /** The inbox's outages the run caused, [from, to): unhealthy at the provider, or rate-limited until `to`. */
   const outages: { from: number; to: number; kind: "unhealthy" }[] = [];
+  /**
+   * Work handed to the inbox's provider that the record has no final answer for (no delivery, no confirmed withdrawal): an
+   * outage then is the review bot's case on 178de98, a new claim inheriting that work's reservation while the inbox is down.
+   */
+  const unsettledAtTheProvider = () => email.handoverLog.some((c) => !email.deliveryLog.some((d) => d.key === c.key) && !email.withdrawLog.some((w) => w.key === c.key && w.answer === "withdrawn"));
   /** An outage of the inbox (unhealthy at the provider) is drawn at an event and ends at the first event after `until`. */
   const down: { outage: { until: number; index: number } | null } = { outage: null };
   const takeInboxDown = (now: number) => {
@@ -207,7 +217,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
       account.healthy = true;
       outages[current.index] = { ...outages[current.index]!, to: now };
       down.outage = null;
-    } else if (current === null && drawsWindows && account && rW() < 0.1) {
+    } else if (current === null && drawsWindows && account && rW() < (unsettledAtTheProvider() ? 0.5 : 0.2)) {
       account.healthy = false;
       outages.push({ from: now, to: Infinity, kind: "unhealthy" });
       down.outage = { until: now + [HOUR, 5 * HOUR, DAY][Math.floor(rW() * 3)]!, index: outages.length - 1 };
@@ -680,7 +690,10 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
           }
         }
       }
-      const touched = (s: Subject, T: number) => (["email", "sms"] as const).some((ch) => deliveries(ch).some((d) => d.subjectId === s.id && d.visibleAt <= T)) || [...callsDone].some(([k, at]) => k.startsWith(`${s.id}/`) && at <= T) || skips.some((x) => x.subjectId === s.id && x.at <= T && def(s).tracks.find((t) => t.id === x.trackId)?.channel === "call");
+      // ADR 0003 1.3 (ruling 6): a lead is touched only by a send observed sent, or a logged call outcome other than skip
+      // for now; a user's Skip of a step, a call's included, touches nothing (the clause that counted one came in with
+      // c189643 and was hidden by all-day windows until the windows family drew others).
+      const touched = (s: Subject, T: number) => (["email", "sms"] as const).some((ch) => deliveries(ch).some((d) => d.subjectId === s.id && d.visibleAt <= T)) || [...callsDone].some(([k, at]) => k.startsWith(`${s.id}/`) && at <= T);
       // Claimable by the record's own model (ADR 0003 "Reads that say when"): inside its window in the prospect's zone, and its
       // sender not taken down, a minute before and at T, as well as due and neither held nor ended.
       const eligible = (y: Item, T: number) =>
@@ -1563,9 +1576,8 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     } else if (kind < 0.9) await autoReply();
     if (r18() < 0.3) await staleSkip();
     await checkAll();
-    // From the windows' stream, at four reads in ten: the extra round runs at the read's own instant, so the runs between
-    // keep the shape (claims left open across an event) that the controls' behaviours need.
-    if (!interrupting && rW() < 0.4) await checkReadsAgainstDispatch();
+    // In the windows family, after every event: the extra round runs at the read's own instant.
+    if (drawsWindows) await checkReadsAgainstDispatch();
     if (interrupting && r20() < 0.4 && calm()) {
       await interrupt();
       await checkAll();
