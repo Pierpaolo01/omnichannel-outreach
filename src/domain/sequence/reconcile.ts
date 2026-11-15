@@ -34,10 +34,13 @@ export function reconcileEdit(state: SubjectState, previous: CampaignDefinition,
     if (!p || p.finishedAt !== null) continue;
     const was = before.get(track.id);
     if (p.startedAt !== null) {
+      // The zone a pending deadline is resolved in follows a zone the edit moved, in flight or not (council on 93bed86,
+      // item 8): an in-flight step keeps its handed-over work, and if that work comes back to pending, `alignPending`
+      // re-resolves its deadline from the basis in this zone, with the wait now in force.
+      if (zoneMoved && p.dueZone !== null) s = { ...s, tracks: s.tracks.map((t) => (t.trackId === track.id ? { ...t, dueZone: state.lead.zone } : t)) };
       if (inFlight(s, track.id)) continue;
       // A claim on a step whose content changed (its copy, threading or wait) is withdrawn (ruling 1).
       if (s.attempts.some((a) => a.trackId === track.id && a.state === "claimed" && !sameContentById(oldStep, track, a.stepId))) s = withdrawClaims(s, track.id);
-      if (zoneMoved && p.dueZone !== null) s = { ...s, tracks: s.tracks.map((t) => (t.trackId === track.id ? { ...t, dueZone: state.lead.zone } : t)) };
       continue;
     }
     if (p.startAt === null) continue;
@@ -163,7 +166,7 @@ function impactOf(state: SubjectState, change: EditChange): LeadImpact {
     case "step_removed": {
       const stepId = change.stepId ?? "";
       if (p?.startedAt != null && p.nextStepId === stepId && inFlight(state, track.id)) return "in_flight";
-      const ahead = p?.startedAt == null ? !state.results.some((r) => r.stepId === stepId) : remainingSteps(state, track).includes(stepId);
+      const ahead = p?.startedAt == null ? !state.results.some((r) => r.stepId === stepId) : stepsAhead(state, track).includes(stepId);
       if (!ahead) return "untouched";
       return change.kind === "step_removed" ? "skips" : "reaches";
     }
@@ -205,4 +208,17 @@ export function stillRunnable(def: CampaignDefinition, leads: readonly SubjectSt
       return { ...t, removed: false, steps: t.steps.map((s) => ({ ...s, removed: !steps.has(s.id) })) };
     }),
   };
+}
+
+/**
+ * The steps still ahead of a lead in a started track, as the engine will run them (council on 93bed86, item 9): 5.1's
+ * steps (`remainingSteps`), and while the pending step's work is with a provider, the steps after it, since once that
+ * work resolves it is the lead's last resolved step and a step inserted before it is behind the lead (question Q22's
+ * interim; the read counts as the run then does).
+ */
+export function stepsAhead(state: SubjectState, track: TrackDefinition): string[] {
+  const p = progressOf(state, track.id);
+  if (!p || p.nextStepId === null || !inFlight(state, track.id)) return remainingSteps(state, track);
+  const resolved = { ...state, results: [...state.results, { stepId: p.nextStepId, trackId: track.id, result: "sent" as const, reason: null, at: 0, atWall: 0, attemptId: null }] };
+  return remainingSteps(resolved, track);
 }

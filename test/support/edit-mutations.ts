@@ -29,7 +29,7 @@ export const EDIT_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; re
     options: { changeHandedCopy: true },
   },
   "an edit re-resolves a wait from the edit's instant, not its basis": {
-    seed: 1,
+    seed: 2,
     invariant: "E7",
     rules: reconciled((_, s, now) => {
       let out = s;
@@ -44,17 +44,17 @@ export const EDIT_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; re
     }),
   },
   "reconciliation skips held leads": {
-    seed: 81,
+    seed: 290,
     invariant: "E9",
     rules: { reconcileEdit: (s, previous, zone, now) => (runs(s) ? R.reconcileEdit(s, previous, zone, now) : s) },
   },
   "a reconnected track keeps the start it had resolved": {
-    seed: 5,
+    seed: 25,
     invariant: "E9",
     rules: reconciled((before, after) => ({ ...after, tracks: after.tracks.map((t) => (t.startedAt === null ? (progressOf(before, t.trackId) ?? t) : t)) })),
   },
   "an added step reopens a finished track": {
-    seed: 6,
+    seed: 14,
     invariant: "E3",
     rules: reconciled((_, s, now) => {
       let out = s;
@@ -109,8 +109,14 @@ export const EDIT_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; re
   },
   "a running edit's blockers checked over its live tracks only": {
     invariant: "E14",
-    seed: 32,
+    seed: 44,
     rules: { runningCheck: (definition, _leadsAfter, leads, accounts) => launchCheck(definition, leads, accounts) },
+  },
+  // Council on 93bed86, item 8: a zone edit not followed, so deadlines stay resolved in the old zone.
+  "a campaign zone edit keeps the old zone": {
+    invariant: "E7",
+    seed: 2,
+    rules: { reconcileEdit: (s, previous, _previousZone, now) => R.reconcileEdit(s, previous, s.lead.zone, now) },
   },
   "a control applied after an edit changed what it previews": {
     seed: 31,

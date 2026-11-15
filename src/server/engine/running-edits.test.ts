@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
-import type { LeadSearchResult } from "../../shared/api.ts";
+import type { EditImpactView, LeadSearchResult } from "../../shared/api.ts";
 
 /**
  * Editing a running campaign (ticket 19; ADR 0003 "Ticket 19") through the real HTTP app, SQLite store and engine,
@@ -181,5 +181,52 @@ describe("Apply sends exactly what the read was for (review bot on 7afa03d, the 
     // Read again on the state as it is: applied.
     const again = await w.h.request<{ digest: string }>("POST", `/api/campaigns/${w.id}/sequence/impact`, { definition: shown });
     expect((await w.save({ ...shown, impact: again.body.digest } as CampaignDefinition)).status).toBe(200);
+  });
+});
+
+describe("a zone edit while a step is with the provider (council on 93bed86, item 8)", () => {
+  test("Sol's case: withdrawn after the edit, Email 2 goes at the new zone's deadline, not five hours early", async () => {
+    const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }], modes: ["late-send"], random: () => 0.5 });
+    await h.tick();
+    // A lead on the campaign's default zone: neither the person nor the company has one.
+    const { campaign } = await h.createCampaign("Clinics", { businesses: [business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101", timezone: "" })], people: [person({ ...PAT, timezone: "" })] });
+    await h.defineSequence(campaign.id, THREE);
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    await h.advanceTo(Date.parse("2026-11-04T00:00:30Z"));
+    const pat = h.fake.handoverLog.filter((x) => x.stepId === "s2");
+    expect(pat).toHaveLength(1);
+    expect(h.fake.deliveryLog.some((d) => d.stepId === "s2")).toBe(false);
+    const moved = { ...def([track("e1", [email("s1"), email("s2", 5), email("s3", 3)])]), timezone: "America/New_York" };
+    expect((await h.request("PUT", `/api/campaigns/${campaign.id}/sequence`, moved)).status).toBe(200);
+    expect((await h.request("POST", `/api/campaigns/${campaign.id}/pause`, { requestId: "p1" })).status).toBe(200);
+    await h.advanceTo(Date.parse("2026-11-04T00:10:00Z"));
+    expect(h.fake.withdrawLog.map((w) => w.answer)).toContain("withdrawn");
+    expect((await h.request("POST", `/api/campaigns/${campaign.id}/resume`, { requestId: "p2" })).status).toBe(200);
+    const resumedAt = h.clock;
+    const paused = resumedAt - Date.parse("2026-11-04T00:00:30Z");
+    await h.advanceTo(Date.parse("2026-11-08T00:00:00Z"));
+    const again = h.fake.handoverLog.filter((x) => x.stepId === "s2").at(1);
+    // Five New York days after Email 1 (sent Monday morning New York time): Saturday 00:00 New York, 05:00 UTC, moved by the pause.
+    expect(again?.at).toBeGreaterThanOrEqual(Date.parse("2026-11-07T05:00:00Z") + paused);
+    expect(again?.at).toBeLessThan(Date.parse("2026-11-07T06:00:00Z") + paused);
+  });
+});
+
+describe("the read's counts are what the run then does (council on 93bed86, item 9)", () => {
+  test("a step inserted behind work already with the provider: the read says the lead is past it, and it is never sent", async () => {
+    const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }], modes: ["late-send"], random: () => 0.5 });
+    await h.tick();
+    const { campaign } = await h.createCampaign("Clinics", { businesses: [HARBOUR], people: [PAT] });
+    await h.defineSequence(campaign.id, THREE);
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    await h.advanceTo(Date.parse("2026-11-04T00:00:30Z"));
+    expect(h.fake.deliveryLog.map((d) => d.stepId)).toEqual(["s1"]);
+    expect(h.fake.handoverLog.map((x) => x.stepId)).toEqual(["s1", "s2"]);
+    const inserted = def([track("e1", [email("s1"), email("s1b", 1), email("s2", 2), email("s3", 3)])]);
+    const read = await h.request<EditImpactView>("POST", `/api/campaigns/${campaign.id}/sequence/impact`, { definition: inserted });
+    expect(read.body.changes.map((c) => [c.kind, c.stepId, c.reaches, c.untouched])).toEqual([["step_added", "s1b", 0, 1]]);
+    expect((await h.request("PUT", `/api/campaigns/${campaign.id}/sequence`, inserted)).status).toBe(200);
+    await h.advanceTo(Date.parse("2026-11-12T00:00:00Z"));
+    expect(h.fake.deliveryLog.map((d) => d.stepId)).toEqual(["s1", "s2", "s3"]);
   });
 });

@@ -205,3 +205,17 @@ describe("a running edit is checked over what leads still run (review bot on 7af
     expect(stillRunnable(next, [unstarted]).tracks.find((t) => t.id === "t1")?.removed).toBe(true);
   });
 });
+
+describe("a step with the provider at a zone edit takes the new zone when it returns to pending (council on 93bed86, item 8)", () => {
+  test("Email 2 with the provider, the zone moved to New York and the wait to five days; withdrawn: due five New York days after Email 1", () => {
+    const base = sent(launchedWith(tracksDefinition([emailTrack()])), "s1", MONDAY_9);
+    const flying = withAttempts(base, [...base.attempts, handed({ id: "h2", idempotencyKey: "h2", stepId: "s2", handedWall: Date.parse("2026-11-04T00:00:00Z") })], base.work);
+    const next = { ...tracksDefinition([emailTrack(steps3().map((s) => (s.id === "s2" ? { ...s, waitDays: 5 } : s)))]), timezone: "America/New_York" };
+    const moved = { ...withDefinition(flying, next), lead: { ...flying.lead, zone: "America/New_York" } };
+    const after = reconcileEdit(moved, flying.campaign.definition, "Europe/London", Date.parse("2026-11-04T00:30:00Z"));
+    const wanted = { ...after, work: after.work.map((w) => (w.key === "h2" ? { ...w, withdrawWanted: true } : w)) };
+    const back = applyToWork(wanted, "h2", { kind: "withdraw_answer", answer: "withdrawn", now: Date.parse("2026-11-04T01:00:00Z") }, Date.parse("2026-11-04T01:00:00Z"), opts).state;
+    // Email 1 went Monday 09:00 UTC, 04:00 in New York: five New York days on is Saturday 7 November 00:00 there, 05:00 UTC.
+    expect(progress(back)).toMatchObject({ nextStepId: "s2", dueZone: "America/New_York", dueWall: Date.parse("2026-11-07T05:00:00Z") });
+  });
+});

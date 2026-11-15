@@ -12,8 +12,9 @@ import { FULL_SEARCH, inShard } from "./sequence-chunks.ts";
 
 export const EDIT_SEED = 19_000;
 /** Offsets from EDIT_SEED, chosen greedily from a sweep of all 100 (15 November 2026) to reach every behaviour below, with each mutation's killing seed. */
-// 32 (review bot on 7afa03d): kills "a running edit's blockers checked over its live tracks only" (E14).
-export const EDIT_FIXED_SEEDS: readonly number[] = [0, 1, 4, 5, 6, 23, 31, 32, 81];
+// Re-chosen after the council on 93bed86 (zone and window edits, the read checked against the run): each mutation's
+// killing seed, which between them reach every behaviour below.
+export const EDIT_FIXED_SEEDS: readonly number[] = [0, 2, 6, 14, 23, 25, 31, 44, 290];
 const SEARCH_SEEDS = 100;
 const MAX_SEEDS = 30;
 const RUN_WRITES = 10_000;
@@ -22,6 +23,9 @@ const RUN_WRITES = 10_000;
 export const EDIT_FEATURES: readonly string[] = [
   "a-copy-edit-while-that-step-is-with-the-provider",
   "a-follow-up-timed",
+  "a-read-count-checked-step_added",
+  "a-read-count-checked-step_removed",
+  "a-read-count-checked-track_removed",
   "a-reply",
   "a-stale-skip-after-an-edit-refused",
   "a-step-added-ahead-of-a-lead",
@@ -42,6 +46,8 @@ export const EDIT_FEATURES: readonly string[] = [
   "edit-add-track-after-another-while-paused",
   "edit-add-track-at-launch",
   "edit-add-track-at-launch-while-paused",
+  "edit-campaign-zone",
+  "edit-campaign-zone-while-paused",
   "edit-copy",
   "edit-copy-while-paused",
   "edit-longer-wait",
@@ -54,6 +60,8 @@ export const EDIT_FEATURES: readonly string[] = [
   "edit-remove-track-while-paused",
   "edit-shorter-wait",
   "edit-shorter-wait-while-paused",
+  "edit-window",
+  "edit-window-while-paused",
   "late-sends",
   "refused-a-deleted-step",
   "refused-a-restored-step",

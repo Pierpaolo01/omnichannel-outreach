@@ -1,11 +1,11 @@
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../src/domain/sequence/definition.ts";
 import type { Rules } from "../../src/server/engine/rules.ts";
-import type { EnrollmentProgress, EnrollmentRead, LeadSearchResult } from "../../src/shared/api.ts";
+import type { EditImpactView, EnrollmentProgress, EnrollmentRead, LeadSearchResult } from "../../src/shared/api.ts";
 import { EngineHarness, quickWait } from "./engine-harness.ts";
 import { business, person } from "./export-builder.ts";
 import type { FakeAccount } from "./fake-email-port.ts";
 import { random } from "./generated-sequences.ts";
-import { dueAfter } from "./sequence-model.ts";
+import { dueAfter, local } from "./sequence-model.ts";
 
 /**
  * Generated edit runs (ticket 19; ADR 0003 "Ticket 19"): the user edits a running campaign at random instants through
@@ -32,6 +32,21 @@ const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 const ZONE = "Europe/London";
 const ALL_DAY = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
+/** The other zone a campaign's default is edited to, and back (council on 93bed86, item 8). */
+const OTHER_ZONE = "America/New_York";
+const WEEKDAYS_9_TO_17 = [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 }));
+type Window = readonly { readonly day: number; readonly start: number; readonly end: number }[];
+/** Whether `t` is inside `window` in `zone`, by the record's own calendar (sequence-model.ts). */
+const inWindow = (t: number, window: Window, zone: string) => {
+  const l = local(t, zone);
+  return window.some((w) => w.day === l.weekday && l.minute >= w.start * 60 && l.minute < w.end * 60);
+};
+/** The first instant at or after `t` inside `window` in `zone`: `t`, or the next whole hour that is. */
+const nextOpen = (t: number, window: Window, zone: string) => {
+  if (!Number.isFinite(t) || inWindow(t, window, zone)) return t;
+  for (let h = Math.ceil(t / 3_600_000) * 3_600_000, n = 0; n < 24 * 9; h += 3_600_000, n++) if (inWindow(h, window, zone)) return h;
+  return Infinity;
+};
 /** How long after its due instant a step may be handed over when nothing else delays it: ticks, the one-minute gap, a few leads. */
 const TOLERANCE = 2 * HOUR;
 
@@ -66,6 +81,8 @@ interface Edit {
   readonly logIndex: number;
   readonly at: number;
   readonly def: CampaignDefinition;
+  /** `lead|track` for every track each lead had started when the edit was saved (its read then). */
+  readonly started?: ReadonlySet<string>;
 }
 
 async function runUnguarded(seed: number, options: EditRunOptions): Promise<EditRunResult> {
@@ -106,9 +123,10 @@ async function runUnguarded(seed: number, options: EditRunOptions): Promise<Edit
   if (chance(0.5)) tracks.push(track("e2", stepsOf("e2", int(1, 2)), chance(0.6) ? { kind: "after", trackId: "e1", delayDays: int(0, 2) } : { kind: "entry" }));
   let current: CampaignDefinition = { timezone: ZONE, callSkipLimitDays: 2, emailPool: [inbox.id], smsPool: [], callScript: "", tracks };
 
-  const people = Array.from({ length: int(3, 5) }, (_, i) => person({ person_id: `p${i}`, business_id: "b1", full_name: `Lead ${i} Example`, email: i === 0 && chance(0.3) ? "" : `lead${i}@clinic${seed}.example` }));
+  // Every lead is on the campaign's default zone: neither person nor company has one, so a zone edit moves them all.
+  const people = Array.from({ length: int(3, 5) }, (_, i) => person({ person_id: `p${i}`, business_id: "b1", full_name: `Lead ${i} Example`, timezone: "", email: i === 0 && chance(0.3) ? "" : `lead${i}@clinic${seed}.example` }));
   await h.tick();
-  const { campaign } = await h.createCampaign("Edits", { businesses: [business({ business_id: "b1", business_name: "Clinic Example", phone_e164: "+442079460101" })], people });
+  const { campaign } = await h.createCampaign("Edits", { businesses: [business({ business_id: "b1", business_name: "Clinic Example", phone_e164: "+442079460101", timezone: "" })], people });
   await h.defineSequence(campaign.id, current);
   const launchedAt = h.clock;
   const launched = await h.launch(campaign.id);
@@ -152,6 +170,15 @@ async function runUnguarded(seed: number, options: EditRunOptions): Promise<Edit
       t = to;
     }
     return t + remaining;
+  };
+  /** The start rule and zone in force for a lead's track when it started: those of the last edit at which it had not. */
+  const startRuleOf = (lead: string, trackId: string, logIndex: number): { start: TrackDefinition["start"]; zone: string } => {
+    let def = edits[0]!.def;
+    for (const e of edits) {
+      if (e.logIndex > logIndex || e.started?.has(`${lead}|${trackId}`)) break;
+      def = e.def;
+    }
+    return { start: def.tracks.find((x) => x.id === trackId)?.start ?? { kind: "entry" }, zone: def.timezone };
   };
   /** `t`, or the end of the pause holding `t`. */
   const runningFrom = (t: number) => pauses.find((p) => p.from <= t && (p.to === null || t < p.to))?.to ?? (pauses.some((p) => p.from <= t && p.to === null) ? Infinity : t);
@@ -205,25 +232,32 @@ async function runUnguarded(seed: number, options: EditRunOptions): Promise<Edit
       const prior = email.deliveryLog.filter((d) => d.subjectId === x.subjectId && d.stepId !== x.stepId && d.at <= x.at && trackOfStep(def, d.stepId)?.id === t.id).sort((a, b) => a.at - b.at).at(-1);
       if (prior) {
         const basis = pointOf(prior.at);
-        const due = shifted(basis, dueAfter(basis, step.waitDays, ZONE) - basis);
-        if (x.at < due - 1) problem(`E7: ${x.stepId} went to ${x.subjectId} at ${iso(x.at)}, before its due instant ${iso(due)} (${step.waitDays} days after ${iso(prior.at)})`);
-        // Not before the app knew of the send, nor before the edit that put this wait in force.
-        const known = runningFrom(Math.max(due, prior.visibleAt, [...edits].reverse().find((e) => e.logIndex <= i)?.at ?? 0));
+        // In the campaign's zone in force at the handover (council on 93bed86, item 8), inside the track's window in it.
+        const zone = def.timezone;
+        const due = shifted(basis, dueAfter(basis, step.waitDays, zone) - basis);
+        if (x.at < due - 1) problem(`E7: ${x.stepId} went to ${x.subjectId} at ${iso(x.at)}, before its due instant ${iso(due)} (${step.waitDays} days after ${iso(prior.at)}, in ${zone})`);
+        if (!inWindow(x.at, t.window, zone)) problem(`E7: ${x.stepId} went to ${x.subjectId} at ${iso(x.at)}, outside its track's window in ${zone}`);
+        // Not before the app knew of the send, nor before the edit that put this wait in force, nor outside the window.
+        const known = nextOpen(runningFrom(Math.max(due, prior.visibleAt, [...edits].reverse().find((e) => e.logIndex <= i)?.at ?? 0)), t.window, zone);
         if (!late && x.at > known + TOLERANCE) problem(`E7: ${x.stepId} went to ${x.subjectId} at ${iso(x.at)}, long after its due instant ${iso(due)} (${step.waitDays} days after ${iso(prior.at)})${process.env["EDITS_DEBUG"] ? ` [edits ${JSON.stringify(edits.map((e) => [iso(e.at), e.logIndex, e.def.tracks.map((tt) => [tt.id, tt.removed, JSON.stringify(tt.start), tt.steps.map((ss) => `${ss.id}${ss.removed ? "x" : ""}:${ss.waitDays}`).join(" ")])]))} pauses ${JSON.stringify(pauses.map((p) => [iso(p.from), iso(p.to)]))} lead ${JSON.stringify(log.filter((y) => y.subjectId === x.subjectId).map((y) => [y.stepId, iso(y.at)]))}]` : ""}`);
         features.add("a-follow-up-timed");
-      } else if (!late && t.start.kind === "entry") {
+      } else if (!late && startRuleOf(x.subjectId, t.id, i).start.kind === "entry") {
         // E9: a track at launch starts at once for every lead running when it was drawn or connected so.
-        const from = runningFrom(Math.max(launchedAt, ruleChanged.get(t.id) ?? launchedAt));
+        const from = nextOpen(runningFrom(Math.max(launchedAt, ruleChanged.get(t.id) ?? launchedAt, [...edits].reverse().find((e) => e.logIndex <= i)?.at ?? 0)), t.window, def.timezone);
         if (x.at > from + TOLERANCE) problem(`E9: ${t.id}, which starts at launch since ${iso(ruleChanged.get(t.id))}, started for ${x.subjectId} only at ${iso(x.at)}`);
         features.add("a-track-start-timed");
-      } else if (!late && t.start.kind === "after") {
-        // E9: a track after another starts by the rule in force, from that track's finish.
-        const { trackId: after, delayDays } = t.start;
+      } else if (!late && startRuleOf(x.subjectId, t.id, i).start.kind === "after") {
+        // E9: a track after another starts by the rule in force when it started, from that track's finish: an edit after
+        // the lead started it does not move it, so the rule is the one of the last edit at which the lead had not.
+        const ruled = startRuleOf(x.subjectId, t.id, i);
+        const startRule = ruled.start;
+        if (startRule.kind !== "after") continue;
+        const { trackId: after, delayDays } = startRule;
         const finish = Date.parse((await read(x.subjectId)).tracks.find((p) => p.trackId === after)?.finishedAt ?? "");
         if (Number.isFinite(finish)) {
-          const due = shifted(pointOf(finish), dueAfter(pointOf(finish), delayDays, ZONE) - pointOf(finish));
-          if (x.at < due - 1) problem(`E9: ${t.id} started for ${x.subjectId} at ${iso(x.at)}, before ${iso(due)}, its start after ${after} finished at ${iso(finish)}`);
-          if (x.at > runningFrom(Math.max(due, ruleChanged.get(t.id) ?? 0)) + TOLERANCE) problem(`E9: ${t.id} started for ${x.subjectId} at ${iso(x.at)}, long after ${iso(due)}, its start after ${after} finished at ${iso(finish)}`);
+          const due = shifted(pointOf(finish), dueAfter(pointOf(finish), delayDays, ruled.zone) - pointOf(finish));
+          if (x.at < due - 1) problem(`E9: ${t.id} started for ${x.subjectId} at ${iso(x.at)}, before ${iso(due)}, its start after ${after} finished at ${iso(finish)}${process.env["EDITS_DEBUG"] ? ` [delay ${delayDays} zone ${def.timezone} edits ${JSON.stringify(edits.map((e) => [iso(e.at), e.logIndex, e.def.timezone, JSON.stringify(e.def.tracks.find((tt) => tt.id === t.id)?.start ?? null)]))} pauses ${JSON.stringify(pauses.map((q) => [iso(q.from), iso(q.to)]))} i ${i}]` : ""}`);
+          if (x.at > nextOpen(runningFrom(Math.max(due, ruleChanged.get(t.id) ?? 0, [...edits].reverse().find((e) => e.logIndex <= i)?.at ?? 0)), t.window, def.timezone) + TOLERANCE) problem(`E9: ${t.id} started for ${x.subjectId} at ${iso(x.at)}, long after ${iso(due)}, its start after ${after} finished at ${iso(finish)}`);
           features.add("a-track-start-timed");
         }
       }
@@ -265,6 +299,9 @@ async function runUnguarded(seed: number, options: EditRunOptions): Promise<Edit
     const stored = JSON.stringify((await h.request<{ definition: unknown }>("GET", `/api/campaigns/${campaign.id}/sequence`)).body.definition);
     // An accepted save runs a tick at once, under the new definition: it is in force for every handover from here.
     const logIndex = email.handoverLog.length;
+    // E15 (council on 93bed86, item 9): the read taken at this instant, for exactly this body, against what the record then
+    // classifies from the providers' logs and the reads.
+    const impact = mustRefuse === false ? (await h.request<EditImpactView>("POST", `/api/campaigns/${campaign.id}/sequence/impact`, { definition: next })).body : null;
     saving = true;
     const res = await h.request<{ error?: { code: string; message: string } }>("PUT", `/api/campaigns/${campaign.id}/sequence`, next).finally(() => {
       saving = false;
@@ -290,12 +327,29 @@ async function runUnguarded(seed: number, options: EditRunOptions): Promise<Edit
       problem(`setup: the edit ${label} was refused: ${JSON.stringify(res.body)}`);
       return;
     }
-    record(current, next, before, h.clock, logIndex);
+    const counted = record(current, next, before, h.clock, logIndex);
+    for (const c of impact?.changes ?? []) {
+      const key = `${c.kind}|${c.trackId ?? ""}|${c.stepId ?? ""}`;
+      const expected = counted.get(key);
+      if (expected === undefined) continue;
+      const said = c.kind === "step_added" ? c.reaches : c.skips;
+      if (said !== expected) problem(`E15: the read said ${said} for ${key} at ${iso(h.clock)}; the run classifies ${expected}`);
+      else features.add(`a-read-count-checked-${c.kind}`);
+    }
     features.add(`edit-${label}${pauses.some((p) => p.to === null) ? "-while-paused" : ""}`);
   }
 
-  function record(previous: CampaignDefinition, next: CampaignDefinition, before: ReadonlyMap<string, EnrollmentProgress>, at: number, logIndex = email.handoverLog.length): void {
-    edits.push({ logIndex, at, def: next });
+  /**
+   * Records what an accepted edit does, and returns the record's own count per change (E15): the leads an added step
+   * reaches, the running leads a removed step or track skips.
+   */
+  function record(previous: CampaignDefinition, next: CampaignDefinition, before: ReadonlyMap<string, EnrollmentProgress>, at: number, logIndex = email.handoverLog.length): Map<string, number> {
+    const counted = new Map<string, number>();
+    const running = (lead: string, trackId: string) => {
+      const r = before.get(lead);
+      return r !== undefined && r.endedAt === null && !r.tracks.find((p) => p.trackId === trackId)?.finishedAt;
+    };
+    edits.push({ logIndex, at, def: next, started: new Set(leads.flatMap((lead) => (before.get(lead)?.tracks ?? []).filter((p) => p.started).map((p) => `${lead}|${p.trackId}`))) });
     current = next;
     const old = new Map(previous.tracks.map((t) => [t.id, t]));
     for (const t of next.tracks) {
@@ -303,6 +357,7 @@ async function runUnguarded(seed: number, options: EditRunOptions): Promise<Edit
       if (!was || JSON.stringify(was.start) !== JSON.stringify(t.start)) ruleChanged.set(t.id, at);
       if (t.removed && was && !was.removed) {
         for (const lead of leads) if (!before.get(lead)?.tracks.find((p) => p.trackId === t.id)?.started) notStarted.push({ lead, trackId: t.id, logIndex });
+        counted.set(`track_removed|${t.id}|`, leads.filter((lead) => running(lead, t.id) && !before.get(lead)?.tracks.find((p) => p.trackId === t.id)?.started).length);
         features.add("a-track-removed");
       }
       if (!was) continue;
@@ -313,6 +368,9 @@ async function runUnguarded(seed: number, options: EditRunOptions): Promise<Edit
             if (handedBy(lead, s.id, logIndex)) features.add("a-step-removed-after-a-lead-reached-it");
             else skipped.push({ lead, stepId: s.id, at, logIndex });
           }
+          // Not yet at it: neither it nor a step after it handed over (a step behind the lead, Q22, is past, not skipped).
+          const later = was.steps.slice(was.steps.findIndex((y) => y.id === s.id) + 1);
+          counted.set(`step_removed|${t.id}|${s.id}`, leads.filter((lead) => running(lead, t.id) && !handedBy(lead, s.id, logIndex) && !later.some((y) => handedBy(lead, y.id, logIndex))).length);
         }
         if (!o) {
           const reaches = new Set<string>();
@@ -326,12 +384,15 @@ async function runUnguarded(seed: number, options: EditRunOptions): Promise<Edit
           }
           if (reaches.size > 0) features.add("a-step-added-ahead-of-a-lead");
           added.push({ stepId: s.id, trackId: t.id, at, logIndex, reaches });
+          counted.set(`step_added|${t.id}|${s.id}`, reaches.size);
         }
       });
     }
+    return counted;
   }
 
   // --- Edits the user makes. ---
+
   const live = (def: CampaignDefinition) => def.tracks.filter((t) => !t.removed);
   const liveSteps = (t: TrackDefinition) => t.steps.filter((s) => !s.removed);
   const withTrack = (def: CampaignDefinition, id: string, change: (t: TrackDefinition) => TrackDefinition): CampaignDefinition => ({ ...def, tracks: def.tracks.map((t) => (t.id === id ? change(t) : t)) });
@@ -472,6 +533,19 @@ async function runUnguarded(seed: number, options: EditRunOptions): Promise<Edit
     return withTrack(def, t.id, (x) => ({ ...x, removed: true, steps: x.steps.map((y) => (y.id === s.id ? { ...y, body: "" } : y)) }));
   }
 
+  const rz = random(seed ^ 0x9308);
+  function aTimingEdit(): { def: CampaignDefinition; label: string } | null {
+    const roll = rz();
+    if (roll < 0.15) return { def: { ...current, timezone: current.timezone === ZONE ? OTHER_ZONE : ZONE }, label: "campaign-zone" };
+    if (roll < 0.25) {
+      const tracks = live(current);
+      const t = tracks[Math.floor(rz() * tracks.length)];
+      if (!t) return null;
+      return { def: withTrack(current, t.id, (x) => ({ ...x, window: x.window.length === 7 ? WEEKDAYS_9_TO_17 : ALL_DAY })), label: "window" };
+    }
+    return null;
+  }
+
   /** E12: a Skip confirmed on a read taken before an edit that changed what it previews is refused, and changes nothing. */
   async function staleSkip(): Promise<void> {
     const id = pick(leads);
@@ -514,8 +588,13 @@ async function runUnguarded(seed: number, options: EditRunOptions): Promise<Edit
     const inFlight = email.handoverLog.some((x) => !email.deliveryLog.some((d) => d.key === x.key));
     const r = rand();
     const targeted = r < 0.55 ? await aTargetedEdit() : null;
+    // Council on 93bed86, item 8, from a stream of its own: the campaign's zone moved, or a track's window changed.
+    const timing = r < 0.55 && !targeted ? aTimingEdit() : null;
     if (targeted) {
       await save(targeted.def, targeted.label);
+    } else if (timing) {
+      anEdit();
+      await save(timing.def, timing.label);
     } else if (r < 0.55) {
       const edit = anEdit();
       if (edit) {
