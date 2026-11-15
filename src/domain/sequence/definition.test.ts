@@ -309,3 +309,32 @@ describe("a continue-thread email has no subject of its own (PR 41 council, item
     expect(ownSubject(step("s1", { threading: "new_subject", subject: "Hi" }))).toBe("Hi");
   });
 });
+
+describe("a running campaign's identities (ADR 0003 \"Ticket 19\", the boundary)", () => {
+  const base: CampaignDefinition = {
+    timezone: "Europe/London",
+    callSkipLimitDays: 2,
+    emailPool: [],
+    smsPool: [],
+    tracks: [
+      { id: "t1", channel: "email", branch: "main", window: [{ day: 1, start: 9, end: 17 }], start: { kind: "entry" }, removed: false, steps: [{ id: "s1", waitDays: 0, subject: "Hi", body: "B", threading: "new_subject", removed: false }, { id: "s2", waitDays: 1, subject: "", body: "B", threading: "continue_thread", removed: false }] },
+      { id: "t2", channel: "email", branch: "win_back", window: [{ day: 1, start: 9, end: 17 }], start: { kind: "entry" }, removed: false, steps: [{ id: "w1", waitDays: 0, subject: "Hi", body: "B", threading: "new_subject", removed: false }] },
+    ],
+  };
+  const kinds = (def: CampaignDefinition, launched: boolean) => definitionIssues(def, base, { launched }).map((i) => `${i.kind} ${i.trackId ?? ""} ${i.stepId ?? ""}`.trim());
+
+  test("a track moving between the branches is refused, before launch and after, the way a channel change is", () => {
+    const moved = { ...base, tracks: base.tracks.map((t) => (t.id === "t2" ? { ...t, branch: "main" as const } : t)) };
+    expect(kinds(moved, false)).toContain("branch_changed t2");
+    expect(kinds(moved, true)).toContain("branch_changed t2");
+  });
+
+  test("on a launched campaign a track or step is marked removed, never deleted, and never restored", () => {
+    const deleted = { ...base, tracks: [{ ...base.tracks[0]!, steps: base.tracks[0]!.steps.slice(0, 1) }] };
+    expect(kinds(deleted, false)).toEqual([]);
+    expect(kinds(deleted, true)).toEqual(["track_deleted t2", "step_deleted t1 s2"]);
+    const marked = { ...base, tracks: base.tracks.map((t) => (t.id === "t2" ? { ...t, removed: true } : { ...t, steps: t.steps.map((s) => (s.id === "s2" ? { ...s, removed: true } : s)) })) };
+    expect(kinds(marked, true)).toEqual([]);
+    expect(definitionIssues(base, marked, { launched: true }).map((i) => i.kind)).toEqual(["restored", "restored"]);
+  });
+});

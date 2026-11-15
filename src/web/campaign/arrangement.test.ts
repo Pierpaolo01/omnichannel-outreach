@@ -176,3 +176,16 @@ describe("the win-back branch and the declined path in the editor (ADR 0003, tic
     if (out.ok) expect(out.definition.tracks.map((t) => t.id)).toEqual(["e", "p", "w2"]);
   });
 });
+
+describe("on a running campaign (ticket 19)", () => {
+  test("removing a track marks it removed and keeps every other track as it was", () => {
+    const def: CampaignDefinition = {
+      timezone: "Europe/London",
+      callSkipLimitDays: 2,
+      emailPool: [],
+      tracks: ["t1", "t2"].map((id) => ({ id, channel: "email" as const, branch: "main" as const, window: [{ day: 1, start: 9, end: 17 }], steps: [], start: { kind: "entry" as const }, removed: false })),
+    };
+    const out = arrange(def, { kind: "remove", trackId: "t2", mark: true });
+    expect(out.ok && out.definition.tracks.map((t) => [t.id, t.removed])).toEqual([["t1", false], ["t2", true]]);
+  });
+});

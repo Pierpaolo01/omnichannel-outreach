@@ -267,6 +267,38 @@ describe("the engine through the Instantly adapter", () => {
   });
 });
 
+describe("editing a running campaign through the Instantly adapter (ticket 19; ADR 0003 \"Ticket 19\")", () => {
+  test("changed copy goes with the next lead handed over, from the same inbox; a direct edit in Instantly is overwritten, never read back", async () => {
+    const { h, fake } = setUp(true);
+    const { campaign } = await enrolled(h);
+    await h.tick();
+    await h.defineSequence(campaign.id, twoEmails());
+    h.clock = MONDAY_9;
+    await h.tick();
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    // The first opener is handed over at once; the second waits for the inbox's pacing gap.
+    expect(fake.writes().filter((w) => w.path === "/api/v2/leads/add")).toHaveLength(1);
+    const dispatch = fake.campaigns[0]!;
+    const template = JSON.stringify(dispatch.settings.sequences);
+    // Someone edits the dispatch campaign's template in Instantly, and the user changes the opener in the app.
+    fake.editDirectly(dispatch.id, { sequences: [{ steps: [{ type: "email", delay: 0, delay_unit: "minutes", variants: [{ subject: "Edited in Instantly", body: "Edited in Instantly" }] }] }] });
+    const def = twoEmails();
+    const edited: CampaignDefinition = { ...def, tracks: def.tracks.map((t) => ({ ...t, steps: t.steps.map((s) => (s.id === "s1" ? { ...s, body: "A changed note for {{company}}." } : s)) })) };
+    const saved = await h.request("PUT", `/api/campaigns/${campaign.id}/sequence`, edited);
+    expect(saved.status, JSON.stringify(saved.body)).toBe(200);
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    const bodies = fake.deliveries().map((d) => [d.inbox, d.subject, d.body]);
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toEqual(["ada@sender.example", expect.stringMatching(/^Hello /), "A note for Harbour Lane Physio."]);
+    expect(bodies[1]).toEqual(["ada@sender.example", expect.stringMatching(/^Hello /), "A changed note for Harbour Lane Physio."]);
+    // The template was put back before the second add; nothing of the direct edit came back into the app.
+    expect(JSON.stringify(dispatch.settings.sequences)).toBe(template);
+    expect(fake.writes().filter((w) => w.method === "PATCH" && w.path === `/api/v2/campaigns/${dispatch.id}`)).toHaveLength(1);
+    const stored = (await h.request<{ definition: CampaignDefinition }>("GET", `/api/campaigns/${campaign.id}/sequence`)).body.definition;
+    expect(JSON.stringify(stored)).not.toContain("Edited in Instantly");
+  });
+});
+
 describe("a sustained Instantly outage is an interruption (ticket 20a; PR 56 review bot)", () => {
   /** The real adapter with its default polling interval (one minute), the worker ticking every 15 seconds as in production. */
   function polling(writes = false) {

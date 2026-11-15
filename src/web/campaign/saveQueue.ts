@@ -229,10 +229,19 @@ export class SaveQueue {
   /** The body for a number: built when it is first sent (from the newest draft, or the one given), then reused unchanged. */
   private bodyFor(seq: number, from?: CampaignDefinition): CampaignDefinition {
     if (this.sentBody?.seq === seq) return this.sentBody.definition;
-    const { draft, accountIds, smsNumberIds } = this.deps.read();
-    const definition = { ...(from ?? draft), emailPool: [...accountIds], ...(smsNumberIds ? { smsPool: [...smsNumberIds] } : {}) };
+    const definition = this.bodyOf(from);
     this.sentBody = { seq, definition };
     return definition;
+  }
+
+  /**
+   * The one way a draft becomes what is sent (ticket 19; review bot on 7afa03d): the newest draft, or the one given, with
+   * the pools following the connected senders. A running edit's read of what it does is asked for exactly this body, and
+   * Apply sends it, so the two can never describe different definitions.
+   */
+  bodyOf(from?: CampaignDefinition): CampaignDefinition {
+    const { draft, accountIds, smsNumberIds } = this.deps.read();
+    return { ...(from ?? draft), emailPool: [...accountIds], ...(smsNumberIds ? { smsPool: [...smsNumberIds] } : {}) };
   }
 
   /** The user loaded the stored version: what was typed before is set aside, and saving starts again from it. */
@@ -247,7 +256,12 @@ export class SaveQueue {
     this.deps.onStatus({ kind: "idle" });
   }
 
-  save(options: { readonly keepalive?: boolean } = {}): Promise<SaveOutcome> {
+  /**
+   * `body`, when given (ticket 19's Apply), is exactly what is sent: under a number of its own, so neither a body cached
+   * for an earlier number nor one rebuilt at sending replaces what the user's read was for (council on 93bed86, item 11).
+   */
+  save(options: { readonly keepalive?: boolean; readonly body?: CampaignDefinition } = {}): Promise<SaveOutcome> {
+    if (options.body !== undefined) this.edited();
     // The generation it was asked in: a save asked before the user loaded the saved version, still
     // queued when the load arrives, saves and reports nothing once it runs (invariant 6).
     const generation = this.generation;
@@ -333,6 +347,13 @@ export class SaveQueue {
         this.deps.onStatus({ kind: "conflict", message, saved: this.confirmed() });
         return { kind: "conflict", message };
       }
+      // A running edit's read no longer holds because another page changed the sequence (council on 93bed86, item 14):
+      // the conflict state, as a lost save before launch is; any other `impact_changed` is a refusal, said in place.
+      if (code === "impact_changed" && (error as { elsewhere?: unknown }).elsewhere === true) {
+        this.conflictSeq = Math.max(this.conflictSeq ?? 0, save.seq);
+        this.deps.onStatus({ kind: "conflict", message, saved: false });
+        return { kind: "conflict", message };
+      }
       if (code === "edit_conflict") {
         // An older save than one already accepted: superseded, whatever it collided with.
         if (save.seq <= this.acceptedSeq) return { kind: "superseded" };
@@ -345,7 +366,7 @@ export class SaveQueue {
     }
   }
 
-  private async step(options: { readonly keepalive?: boolean }, generation: number): Promise<SaveOutcome> {
+  private async step(options: { readonly keepalive?: boolean; readonly body?: CampaignDefinition }, generation: number): Promise<SaveOutcome> {
     for (let tries = 0; ; tries++) {
       // The user loaded the saved version meanwhile: the page holds what the server stores, and this
       // save of a draft set aside reports nothing (invariant 6).
@@ -367,6 +388,7 @@ export class SaveQueue {
         return { ok: false, reason: "invalid", message };
       }
       this.deps.onStatus({ kind: "saving" });
+      if (options.body !== undefined && this.sentBody?.seq !== seq) this.sentBody = { seq, definition: options.body };
       const sent = await this.send(this.bodyFor(seq), options, { session: this.session, seq, base: version });
       if (sent.kind === "accepted") return this.confirmed() ? { ok: true } : { ok: false, reason: "changed" };
       if (sent.kind === "conflict") return { ok: false, reason: "conflict", message: sent.message };

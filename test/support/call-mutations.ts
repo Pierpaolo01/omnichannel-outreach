@@ -40,6 +40,14 @@ const keepBar = (before: SubjectState, after: SubjectState): SubjectState => ({ 
 const mapTasks = (s: SubjectState, change: (t: CallTask) => CallTask): SubjectState => ({ ...s, callTasks: s.callTasks.map(change) });
 
 const RULES: Record<string, Partial<Rules>> = {
+  // Ticket 19 (council on 93bed86, item 13): a running edit that lengthens a phone track's skip limit leaves every open
+  // call's deadline where it was.
+  "a lengthened skip limit keeps the old deadline": {
+    reconcileEdit: (s, previous, zone, now) => {
+      const out = R.reconcileEdit(s, previous, zone, now);
+      return { ...out, callTasks: out.callTasks.map((t) => ({ ...t, skipDeadline: s.callTasks.find((b) => b.id === t.id)?.skipDeadline ?? t.skipDeadline })) };
+    },
+  },
   // ADR 0003 9.3, ticket 14.
   "outcome on an unlisted task": {
     isListed: (_s, task) => task.open,
@@ -321,7 +329,7 @@ function unpaused(s: SubjectState): SubjectState {
 }
 
 /** The invariant each mutation must break, and the seed offset known to show it (refreshed by the CI search). */
-const EXPECTED: Record<string, { invariant: string; seed: number; pauses?: boolean }> = {
+const EXPECTED: Record<string, { invariant: string; seed: number; pauses?: boolean; skipLimitEdits?: boolean }> = {
   "outcome on an unlisted task": { invariant: "16", seed: 7 },
   "interested closes only its own task": { invariant: "16", seed: 54 },
   "daily call capacity ignored": { invariant: "17", seed: 0 },
@@ -367,9 +375,11 @@ const EXPECTED: Record<string, { invariant: string; seed: number; pauses?: boole
   "a paused campaign's calls stay on the list": { invariant: "16", seed: 2, pauses: true },
   "resuming the campaign releases the lead's own pause": { invariant: "1", seed: 2, pauses: true },
   "steps that fell due while held are never sent after the release": { invariant: "18", seed: 7, pauses: true },
+  // Ticket 19 (council on 93bed86, item 13), in the skip-limit runs (`skipLimitEdits: true`).
+  "a lengthened skip limit keeps the old deadline": { invariant: "7", seed: 6, skipLimitEdits: true },
 };
 
-export const CALL_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number; readonly pauses?: boolean }> = Object.fromEntries(
+export const CALL_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number; readonly pauses?: boolean; readonly skipLimitEdits?: boolean }> = Object.fromEntries(
   Object.entries(EXPECTED).map(([name, e]) => {
     const rules = RULES[name];
     if (!rules) throw new Error(`no mutation named ${name}`);

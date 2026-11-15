@@ -2,7 +2,8 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import type { CampaignDefinition, SequenceView } from "../../shared/api.ts";
 import { ApiRequestError, getJson, postJson, putJson, useApi } from "../api.ts";
 import { WEEK } from "./model.ts";
-import { EditorStore, type EditorSnapshot } from "./editorStore.ts";
+import { setLeaveGuard } from "../leaveGuard.ts";
+import { EditorStore, type ApplyOutcome, type EditorSnapshot } from "./editorStore.ts";
 import { NoAnswer, type SaveStatus } from "./saveQueue.ts";
 
 export { draftProblems } from "./saveQueue.ts";
@@ -23,8 +24,16 @@ export interface SequenceEditor {
   readonly launching: boolean;
   /** The stored version is loading after a conflict: authoring is locked until it arrives. */
   readonly loading: boolean;
-  /** Editing is locked (launched, or a launch or load pending): every authoring control reads this, and edits are refused. */
+  /** Editing is locked (a launch, a load or an apply pending): every authoring control reads this, and edits are refused. */
   readonly locked: boolean;
+  /** A running campaign's changes are being applied (ticket 19). */
+  readonly applying: boolean;
+  /** Applies a running campaign's changes, through the same ordered save path. */
+  readonly apply: (confirmed: { readonly body: string; readonly digest: string }) => Promise<ApplyOutcome>;
+  /** What Apply would send, by the one function every save uses: the body a running edit's read is asked for. */
+  readonly previewBody: () => CampaignDefinition;
+  /** Sets aside a running campaign's changes that were not applied. */
+  readonly discard: () => Promise<void>;
   readonly update: (change: (draft: CampaignDefinition) => CampaignDefinition) => void;
   readonly retrySave: () => void;
   /** After a conflict: replaces the draft with the stored version, setting aside what was typed. Resolves true once it has. */
@@ -46,8 +55,9 @@ async function putSequence(campaignId: string, body: unknown, options: { keepali
     return (await putJson(`/api/campaigns/${encodeURIComponent(campaignId)}/sequence`, body, { ...(options.keepalive ? { keepalive: true } : {}), signal: abort.signal })) as SequenceView;
   } catch (error) {
     if (!(error instanceof ApiRequestError)) throw new NoAnswer();
-    const code = (error.body as { error?: { code?: unknown } } | null)?.error?.code;
-    throw Object.assign(new Error(error.message), { code: typeof code === "string" ? code : null });
+    const body = (error.body as { error?: { code?: unknown; elsewhere?: unknown } } | null)?.error;
+    const code = body?.code;
+    throw Object.assign(new Error(error.message), { code: typeof code === "string" ? code : null, elsewhere: body?.elsewhere === true });
   } finally {
     clearTimeout(timeout);
   }
@@ -90,6 +100,25 @@ export function useSequence(campaignId: string) {
       if (event.persisted) void store.restored();
     };
     const online = () => store.online();
+    // A running campaign's changes go only when applied (ticket 19, Q24): leaving with some asks first.
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      const now = store.getSnapshot();
+      if (now.view.launchedAt !== null && now.unsaved) event.preventDefault();
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    // And inside the app (review bot and verifier on 7afa03d): the same campaign's tabs keep the editor; anything else asks.
+    const base = `/campaigns/${encodeURIComponent(campaignId)}`;
+    const tabs = ["", "/before-launch", "/test-run", "/leads", "/imports"].map((t) => `${base}${t}`);
+    const guard = () => {
+      const now = store.getSnapshot();
+      setLeaveGuard(
+        now.view.launchedAt !== null && now.unsaved
+          ? { allows: (path) => tabs.includes(path), text: "Leave without applying your changes? They are on this page only and have not reached any lead; leaving discards them." }
+          : null,
+      );
+    };
+    guard();
+    const unsubscribe = store.subscribe(guard);
     window.addEventListener("pagehide", leavePage);
     window.addEventListener("pageshow", back);
     window.addEventListener("online", online);
@@ -97,9 +126,12 @@ export function useSequence(campaignId: string) {
       window.removeEventListener("pagehide", leavePage);
       window.removeEventListener("pageshow", back);
       window.removeEventListener("online", online);
+      window.removeEventListener("beforeunload", beforeUnload);
+      unsubscribe();
+      setLeaveGuard(null);
       store.dispose();
     };
-  }, [store]);
+  }, [store, campaignId]);
 
   const editor: SequenceEditor | null =
     store && snapshot
@@ -113,6 +145,10 @@ export function useSequence(campaignId: string) {
           launching: snapshot.pending === "launch",
           loading: snapshot.pending === "load",
           locked: snapshot.locked,
+          applying: snapshot.pending === "apply",
+          apply: (confirmed) => store.apply(confirmed),
+          previewBody: () => store.previewBody(),
+          discard: () => store.discard(),
           update: (change) => store.update(change),
           retrySave: () => store.retrySave(),
           loadStored: async () => {
