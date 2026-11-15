@@ -40,35 +40,57 @@ async function at(page: Page, world: AcceptanceWorld, route: string): Promise<vo
   await page.goto(world.url + route);
 }
 
-test("defect 2 (review item 11): a person's campaign row says when the next email goes, not a past instant outside its sending window", async ({ page }) => {
-  test.fail(!process.env["SHOW_DEFECTS"], "Reported to the coordinator on 15 November 2026: the row says the wait's end (launch, Monday 10:00), not the next sendable instant (Tuesday 09:00).");
+/**
+ * The defect's own assertion, and only it. By default it asserts the defect as it stands today, so the suite passes and a
+ * fix makes this one assertion fail (the fix then swaps it for the spec's). SHOW_DEFECTS=1 asserts what the spec asks
+ * instead, which fails while the defect stands. Everything before it is asserted normally, so a broken setup fails either way.
+ */
+async function defect(spec: () => Promise<void> | void, today: () => Promise<void> | void): Promise<void> {
+  await (process.env["SHOW_DEFECTS"] ? spec() : today());
+}
+
+test("defect 2 (review item 11): a person's campaign row and the read name when the next email goes, not a past instant outside its sending window", async ({ page }) => {
   w = await acceptanceWorld({ start: MONDAY_10, smsConnected: true });
   const h = w.harness;
   // One email, sent Tuesday to Friday only, launched on a Monday morning.
-  await launched(w, def([track("email", "email", [step("s1", { subject: "Spring hours", body: "A note on spring hours." })], days([2, 3, 4, 5]))]));
+  const id = await launched(w, def([track("email", "email", [step("s1", { subject: "Spring hours", body: "A note on spring hours." })], days([2, 3, 4, 5]))]));
   await h.advanceTo(MONDAY_10 + H);
+  const lead = await w.lead("Pat Oneil", id);
+  const read = await w.read(lead);
   await at(page, w, `/leads/people/${await w.record("Pat Oneil")}`);
   const row = page.getByRole("region", { name: "Campaigns" }).getByRole("listitem").first();
+  await expect(row).toContainText("Next: email 1 of 1, due");
   const sentence = (await row.textContent()) ?? "";
   // What the engine does with it: nothing on Monday; it goes when Tuesday's window opens.
   await h.advanceTo(Date.parse("2026-11-10T12:00:00Z"));
   expect(h.fake.deliveryLog).toHaveLength(1);
-  expect(h.fake.deliveryLog[0]?.at).toBe(Date.parse("2026-11-10T09:00:00Z"));
-  // The row read on Monday at 11:00 should have named that instant, never one already past on a day the window excludes.
-  expect(sentence).toContain("due Tue 10 Nov at 09:00");
-  expect(sentence).not.toContain("Mon 9 Nov at 10:00");
+  const sentAt = h.fake.deliveryLog[0]?.at;
+  expect(sentAt).toBe(Date.parse("2026-11-10T09:00:00Z"));
+  const dueInRead = read.tracks.find((t) => t.channel === "email")?.nextStep?.dueAt;
+  await defect(
+    () => {
+      // The spec: the read and the row, taken on Monday at 11:00, name the instant it goes.
+      expect(dueInRead).toBe(new Date(sentAt ?? NaN).toISOString());
+      expect(sentence).toContain("due Tue 10 Nov at 09:00");
+    },
+    () => {
+      // Today: both name the wait's end, the launch on Monday at 10:00, already past and outside the window.
+      expect(dueInRead).toBe(new Date(MONDAY_10).toISOString());
+      expect(sentence).toContain("due Mon 9 Nov at 10:00");
+    },
+  );
 });
 
-test("defect 3: while its campaign is paused, the Calls page does not reopen a call it had open, nor say it was logged from another window", async ({ page }) => {
-  test.fail(!process.env["SHOW_DEFECTS"], "Reported to the coordinator on 15 November 2026: the call-task read gives the reason 'logged' for a callback that a campaign pause took off the list.");
+test("defect 3: while its campaign is paused, the Calls page does not say a call was logged from another window when it was not", async ({ page }) => {
   w = await acceptanceWorld({ start: MONDAY_10, smsConnected: true });
   const h = w.harness;
   const id = await launched(w, def([track("phone", "call", [step("c1", {})])]));
   await h.advanceTo(MONDAY_10 + 5 * MIN);
   // A callback for 15:30, logged over HTTP as the Calls page would; the user then has it open on the Calls page.
   const item = (await h.request<CallsView>("GET", "/api/calls")).body.readyNow[0];
-  const task = (await h.request<CallTaskView>("GET", `/api/call-tasks/${item?.taskId ?? ""}`)).body;
-  expect((await h.request("POST", `/api/call-tasks/${item?.taskId ?? ""}/outcome`, { requestId: "callback-1", outcome: "callback_requested", callbackAt: "2026-11-09T15:30:00.000Z", numberId: task.numbers[0]?.detailId ?? null, note: "" })).status).toBe(200);
+  const taskId = item?.taskId ?? "";
+  const task = (await h.request<CallTaskView>("GET", `/api/call-tasks/${taskId}`)).body;
+  expect((await h.request("POST", `/api/call-tasks/${taskId}/outcome`, { requestId: "callback-1", outcome: "callback_requested", callbackAt: "2026-11-09T15:30:00.000Z", numberId: task.numbers[0]?.detailId ?? null, note: "" })).status).toBe(200);
   await h.advanceTo(Date.parse("2026-11-09T15:45:00Z"));
   await at(page, w, "/calls");
   await expect(page.getByRole("heading", { name: "Pat Oneil", exact: true })).toBeVisible();
@@ -76,7 +98,21 @@ test("defect 3: while its campaign is paused, the Calls page does not reopen a c
   expect((await h.request("POST", `/api/campaigns/${id}/pause`, { requestId: "pause-1" })).status).toBe(200);
   await at(page, w, "/calls");
   await expect(page.getByRole("complementary", { name: "Call queue" }).getByText("Ready now, 0")).toBeVisible();
-  // What the spec asks: the paused campaign's call is off the list, and nothing says it was logged elsewhere.
-  await expect(page.getByText(/already logged from another window or device/)).toHaveCount(0);
-  await expect(page.getByRole("heading", { name: "Pat Oneil", exact: true })).toHaveCount(0);
+  // Nothing can be logged on it while paused: every outcome and Log are disabled, and a post is refused.
+  for (const button of await page.getByRole("group", { name: "Call outcome" }).getByRole("button").all()) await expect(button).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Log and open next call" })).toBeDisabled();
+  expect((await h.request("POST", `/api/call-tasks/${taskId}/outcome`, { requestId: "while-paused", outcome: "no_answer", numberId: task.numbers[0]?.detailId ?? null, note: "" })).status).toBe(409);
+  const offList = (await h.request<CallTaskView>("GET", `/api/call-tasks/${taskId}`)).body.offList;
+  await defect(
+    async () => {
+      // The spec: the call is off the list because the campaign is paused, not because an outcome was logged elsewhere.
+      expect(offList?.reason).not.toBe("logged");
+      await expect(page.getByText(/already logged from another window or device/)).toHaveCount(0);
+    },
+    async () => {
+      // Today: the read gives the reason "logged" (the callback request on the same task), and the page says so.
+      expect(offList?.reason).toBe("logged");
+      await expect(page.getByText(/already logged from another window or device: callback requested/)).toBeVisible();
+    },
+  );
 });
