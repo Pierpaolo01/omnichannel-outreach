@@ -103,6 +103,8 @@ export interface WorldOptions {
   readonly emailGapMs?: number;
   /** Each SMS number's pacing gap (default one a minute). */
   readonly smsGapMs?: number;
+  /** How many unsettled sends each sender may have at once (default 1). Above 1, only the pacing gap spaces sends. */
+  readonly inFlight?: number;
 }
 
 export async function acceptanceWorld(options: WorldOptions = {}): Promise<AcceptanceWorld> {
@@ -110,9 +112,9 @@ export async function acceptanceWorld(options: WorldOptions = {}): Promise<Accep
   const harness = new EngineHarness({
     start: options.start ?? MONDAY_0900,
     databasePath: path.join(dataDir, "outreach.sqlite"),
-    accounts: [{ id: INBOX, capacity: options.emailCapacity ?? 60, gapMs: options.emailGapMs ?? MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
+    accounts: [{ id: INBOX, capacity: options.emailCapacity ?? 60, gapMs: options.emailGapMs ?? MIN, k: options.inFlight ?? 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
     // The numbers start disconnected at the provider unless asked: Before launch then names the SMS track's missing sender.
-    sms: { numbers: NUMBERS.map((id) => ({ id, capacity: 60, gapMs: options.smsGapMs ?? MIN, k: 1, healthy: options.smsConnected ?? false, resetZone: "Europe/London" })) },
+    sms: { numbers: NUMBERS.map((id) => ({ id, capacity: 60, gapMs: options.smsGapMs ?? MIN, k: options.inFlight ?? 1, healthy: options.smsConnected ?? false, resetZone: "Europe/London" })) },
   });
   await harness.tick();
   const settings = await harness.request("PUT", "/api/call-settings", { dailyCapacity: 30, userZone: "Europe/London" });

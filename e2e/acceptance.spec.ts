@@ -616,6 +616,8 @@ test("the acceptance story: import, build, test run, launch, calls, replies, fai
     await expect(page.getByRole("heading", { name: `Paused since ${dayAt(PAUSE_AT)}` })).toBeVisible();
     const banner = page.getByRole("region", { name: /^Paused since/ }).getByRole("list", { name: "Leads in each status group" });
     for (const [group, n] of Object.entries(groupsOf(AT_PAUSE))) await expect(banner.getByRole("listitem").filter({ hasText: group.replace(/_/g, " ") })).toHaveText(`${n}${group.replace(/_/g, " ")}`);
+    // The campaign's counts strip and the measures read say the same groups (ticket 22's figures).
+    expect((await w.harness.request<CampaignMeasures>("GET", `/api/campaigns/${campaignId}/measures`)).body.groups).toEqual(groupsOf(AT_PAUSE));
     await shot(page, "08-paused-banner");
     await linger(page);
     // Off the Calls list itself while paused.

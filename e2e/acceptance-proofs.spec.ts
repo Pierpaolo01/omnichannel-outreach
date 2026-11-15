@@ -211,38 +211,39 @@ test("interruption recovery: the application's process exits after the provider 
 // ---------------------------------------------------------------------------------------------
 // Resume after a pause, with a backlog a burst would show (item 1).
 
-test("resume without a burst: what was due and waiting when the campaign paused goes one pacing gap apart per sender after resume, and every later wait moved by the pause", async () => {
+test("resume without a burst: everything that fell due while the campaign was paused goes one pacing gap apart per sender after resume, and every later wait moved by the pause", async () => {
   const GAP = 10 * MIN;
-  const world_ = await world({ emailCapacity: 48, emailGapMs: GAP, smsGapMs: GAP });
+  // Launched on Monday at 08:00, before the 09:00 window opens: nothing goes before the pause, whatever the pacing.
+  const LAUNCH = MONDAY_9 - H;
+  // Four sends may be unsettled at once per sender, so only the pacing gap keeps sends apart: a burst would show.
+  const world_ = await world({ start: LAUNCH, emailCapacity: 48, emailGapMs: GAP, smsGapMs: GAP, inFlight: 4 });
   const names = ["Pat Oneil", "Nia Cole", "Sam Reed", "Ivo Marsh"];
   const def = definition([track("email", "email", [step("s1", { subject: "A note", body: "First email for {{company}}." }), step("s2", { waitDays: 1, threading: "continue_thread", body: "Second email for {{company}}." })]), track("sms", "sms", [step("m1", { body: "First text for {{company}}." })])], { smsPool: [NUMBERS[0]] });
   const id = await campaign(world_, "Clinics, Bristol", clinic(names), def);
   const h = world_.harness;
-  // Monday 09:00: all four first emails and texts fall due at once; one sender each sends one every ten minutes.
-  const PAUSE_AT = MONDAY_9 + 15 * MIN;
+  const PAUSE_AT = LAUNCH + 30 * MIN;
   await h.advanceTo(PAUSE_AT);
-  const before = (log: { at: number }[]) => log.filter((d) => d.at < PAUSE_AT).length;
-  expect(before(h.fake.handoverLog)).toBe(2);
-  expect(before(h.sms.handoverLog)).toBe(2);
+  expect(h.fake.handoverLog).toHaveLength(0);
+  expect(h.sms.handoverLog).toHaveLength(0);
   expect((await h.request("POST", `/api/campaigns/${id}/pause`, { requestId: "pause-1" })).status).toBe(200);
-  const RESUME_AT = PAUSE_AT + 2 * DAY;
+  // Wednesday 10:00, the window open: every first email and text has long been due.
+  const RESUME_AT = Date.parse("2026-11-11T10:00:00Z");
   await h.advanceTo(RESUME_AT);
-  expect(h.fake.handoverLog.filter((x) => x.at >= PAUSE_AT)).toHaveLength(0);
+  expect(h.fake.handoverLog).toHaveLength(0);
   expect((await h.request("POST", `/api/campaigns/${id}/resume`, { requestId: "resume-1" })).status).toBe(200);
-  await h.advanceTo(RESUME_AT + H);
-
-  // The record: two emails and two texts were due and waiting at the pause. After resume they go at the resume instant
-  // and one gap later, per sender: more than one each, never together.
-  for (const log of [h.fake.handoverLog, h.sms.handoverLog]) {
-    const sends = log.filter((x) => x.at >= RESUME_AT).map((x) => x.at);
-    expect(sends).toHaveLength(2);
-    expect(sends).toEqual(paced([RESUME_AT, RESUME_AT], GAP));
+  // The worker's own pace after resume: a tick every 15 seconds for an hour, as production runs it. (The harness's
+  // advanceTo jumps from one wake to the next and never ticks twice at an instant, which would hide a burst.)
+  for (let t = RESUME_AT; t <= RESUME_AT + H; t += 15_000) {
+    h.clock = t;
+    await h.tick();
   }
-  // The second emails: due at the start of the local day after each first email, on clocks stopped for the two paused
-  // days, so all four fall due at the start of Thursday and go from 09:00, one gap apart.
+  // The record: four emails and four texts were due at the resume. Per sender they go at the resume and one gap after
+  // another: four each, never together.
+  for (const log of [h.fake.handoverLog, h.sms.handoverLog]) expect(log.map((x) => x.at)).toEqual(paced(names.map(() => RESUME_AT), GAP));
+  // The second emails: due at the start of the local day after each first email (Thursday), from 09:00, one gap apart.
   await h.advanceTo(Date.parse("2026-11-12T12:00:00Z"));
   const seconds = h.fake.deliveryLog.filter((d) => d.rendered.body.startsWith("Second email")).map((d) => d.at);
-  expect(seconds).toEqual(paced([0, 1, 2, 3].map(() => Date.parse("2026-11-12T09:00:00Z")), GAP));
+  expect(seconds).toEqual(paced(names.map(() => Date.parse("2026-11-12T09:00:00Z")), GAP));
 });
 
 // ---------------------------------------------------------------------------------------------
