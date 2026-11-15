@@ -65,27 +65,37 @@ export interface CampaignDetail extends CampaignPauseRead {
   readonly asOf: string;
 }
 
-/** One rate: its numerator and denominator, as the read counted them, and the whole percent, or null with nothing to divide by. */
+/**
+ * One rate: its numerator and denominator, as the read counted them, and the whole percent, or null with nothing to divide by.
+ * Both counts include the campaign's test runs; `fromTests` says how many of each are test runs (ticket 22, the principal's
+ * decision of 15 November 2026).
+ */
 export interface MeasureRate {
   readonly numerator: number;
   readonly denominator: number;
   readonly percent: number | null;
+  readonly fromTests: { readonly numerator: number; readonly denominator: number };
 }
 
-/** Email or SMS: the messages the provider reported sent, those refused or bounced, and the leads that replied on it (ticket 22). */
+/**
+ * Email or SMS: the messages the provider reported sent, those refused or bounced, and the leads (or test runs) that replied
+ * on it (ticket 22). Each counts test runs too; `fromTests` is how many of each came from them.
+ */
 export interface MessageMeasures {
   readonly sent: number;
   readonly failedOrBounced: number;
   readonly replies: number;
+  readonly fromTests: { readonly sent: number; readonly failedOrBounced: number; readonly replies: number };
 }
 
-/** The calls the user logged (ticket 22). */
+/** The calls the user logged (ticket 22), test calls included; `fromTests` is how many of each came from test runs. */
 export interface CallMeasures {
   readonly made: number;
   readonly connected: number;
   readonly interested: number;
   readonly declined: number;
   readonly callbacksPending: number;
+  readonly fromTests: { readonly made: number; readonly connected: number; readonly interested: number; readonly declined: number; readonly callbacksPending: number };
 }
 
 /**

@@ -643,8 +643,9 @@ async function startTestRuns(): Promise<FakeTestRunApp> {
 // 2 November at 07:00 London. `early`: launched, nothing sent yet.
 // `running`: 09:15, Nia's email bounced, Sam's address refused, Ivo's mobile reported invalid after his text, Pat
 // replied by email, Nia's call reached a gatekeeper, and Ivo asked for a callback. `paused`: the same, then paused.
+// `with-test`: the same as running, then a test run to the user's own contacts (ticket 21), five minutes on.
 
-export type MeasuresScenario = "early" | "running" | "paused";
+export type MeasuresScenario = "early" | "running" | "paused" | "with-test";
 export interface FakeMeasuresApp {
   readonly url: string;
   readonly world: MeasuresWorld;
@@ -671,6 +672,15 @@ async function startMeasures(scenario: MeasuresScenario): Promise<FakeMeasuresAp
     await world.h.advanceTo(world.h.clock + 10 * 60_000);
     if ((await world.log("Nia Cole", "gatekeeper")) !== 200) throw new Error("the gatekeeper call was refused");
     if ((await world.log("Ivo Marsh", "callback_requested", { callbackAt: new Date(world.h.clock + 4 * H).toISOString() })) !== 200) throw new Error("the callback was refused");
+  }
+  if (scenario === "with-test") {
+    // A test run to the user's own (fictitious) contacts, rendering as Pat: its sends count, said as from test runs.
+    const contacts = await world.h.request("PUT", `/api/campaigns/${world.campaignId}/test-contacts`, { email: OWN_TEST_EMAIL, mobile: OWN_TEST_MOBILE });
+    if (contacts.status !== 200) throw new Error(`the test contacts were refused: ${JSON.stringify(contacts.body)}`);
+    const tab = (await world.h.request<{ definitionVersion: number }>("GET", `/api/campaigns/${world.campaignId}/test-runs`)).body;
+    const run = await world.h.request("POST", `/api/campaigns/${world.campaignId}/test-runs`, { requestId: "measures-with-test", renderAs: world.lead("Pat Oneil"), expect: { definitionVersion: tab.definitionVersion } });
+    if (run.status !== 200) throw new Error(`the test run was refused: ${JSON.stringify(run.body)}`);
+    await world.h.advanceTo(world.h.clock + 5 * 60_000);
   }
   if (scenario === "paused") {
     const out = await world.h.request("POST", `/api/campaigns/${world.campaignId}/pause`, { requestId: "measures-paused" });

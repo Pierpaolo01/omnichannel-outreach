@@ -150,3 +150,29 @@ test("figures whose refreshes keep failing say they may be out of date, with whe
   await notice.getByRole("button", { name: "Try again" }).click();
   await expect(notice).toBeHidden();
 });
+
+test("How these are counted controls a list that is always there, hidden until opened (council on 384630e)", async ({ page }) => {
+  const f = await fakeMeasuresApp("running", "measures-disclosure");
+  await at(page, f, `/campaigns/${f.world.campaignId}`);
+  const button = panel(page).getByRole("button", { name: "How these are counted" });
+  const controlled = page.locator(`[id="${(await button.getAttribute("aria-controls")) ?? ""}"]`);
+  await expect(controlled).toHaveCount(1);
+  await expect(button).toHaveAttribute("aria-expanded", "false");
+  await expect(controlled).toBeHidden();
+  await button.click();
+  await expect(button).toHaveAttribute("aria-expanded", "true");
+  await expect(controlled).toBeVisible();
+  await button.press("Enter");
+  await expect(controlled).toBeHidden();
+});
+
+test("a test run's sends count, and each figure says how many came from test runs (the principal's decision, 15 November 2026)", async ({ page }) => {
+  const f = await fakeMeasuresApp("with-test", "measures-with-test");
+  await at(page, f, `/campaigns/${f.world.campaignId}`);
+  await expect(row(page, "Email")).toContainText("from test runs");
+  await expect(row(page, "SMS")).toContainText("(1 from test runs)");
+  // The lead groups are leads only: still the four.
+  const total = (await strip(page).getByRole("listitem").allTextContents()).map((t) => parseInt(t, 10)).reduce((a, b) => a + b, 0);
+  expect(total).toBe(4);
+  await expect(panel(page)).toContainText("(test runs: 0 of 1)");
+});

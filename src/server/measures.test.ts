@@ -1,7 +1,10 @@
 import { StatementSync } from "node:sqlite";
 import { describe, expect, test, vi } from "vitest";
 import { statusGroup, type OutreachStatus } from "../domain/outreach-status.ts";
-import type { ActivityView, CampaignDetail, LeadSearchResult } from "../shared/api.ts";
+import type { ActivityView, CallsView, CallTaskView, CampaignDetail, LeadSearchResult } from "../shared/api.ts";
+
+const OWN_EMAIL = "alex.own@personal-mail.example";
+const OWN_MOBILE = "+447700900456";
 import { campaignMeasures } from "./measures.ts";
 import { DAY, HOUR, MIN, MONDAY_9, launch, measuresWorld } from "../../test/support/measures-world.ts";
 
@@ -10,7 +13,8 @@ import { DAY, HOUR, MIN, MONDAY_9, launch, measuresWorld } from "../../test/supp
  * tally of what the providers and the user did, as Activity and each lead's record show it.
  */
 
-const NO_MESSAGES = { sent: 0, failedOrBounced: 0, replies: 0 };
+const NO_MESSAGES = { sent: 0, failedOrBounced: 0, replies: 0, fromTests: { sent: 0, failedOrBounced: 0, replies: 0 } };
+const NO_CALLS = { made: 0, connected: 0, interested: 0, declined: 0, callbacksPending: 0 };
 
 describe("GET /api/campaigns/:id/measures", () => {
   test("a campaign that does not exist is not found", async () => {
@@ -28,9 +32,9 @@ describe("GET /api/campaigns/:id/measures", () => {
       channels: ["email", "sms", "call"],
       email: NO_MESSAGES,
       sms: NO_MESSAGES,
-      calls: { made: 0, connected: 0, interested: 0, declined: 0, callbacksPending: 0 },
-      replyRate: { numerator: 0, denominator: 0, percent: null },
-      connectRate: { numerator: 0, denominator: 0, percent: null },
+      calls: { ...NO_CALLS, fromTests: NO_CALLS },
+      replyRate: { numerator: 0, denominator: 0, percent: null, fromTests: { numerator: 0, denominator: 0 } },
+      connectRate: { numerator: 0, denominator: 0, percent: null, fromTests: { numerator: 0, denominator: 0 } },
     });
   });
 
@@ -45,11 +49,11 @@ describe("GET /api/campaigns/:id/measures", () => {
     const m = await world.measures();
     expect(m.launched).toBe(true);
     // s1 to Pat, Nia and Ivo (Sam's was refused); t1 to all four, Ivo's reported invalid after it was sent.
-    expect(m.email).toEqual({ sent: 3, failedOrBounced: 2, replies: 0 });
-    expect(m.sms).toEqual({ sent: 4, failedOrBounced: 1, replies: 0 });
+    expect(m.email).toMatchObject({ sent: 3, failedOrBounced: 2, replies: 0 });
+    expect(m.sms).toMatchObject({ sent: 4, failedOrBounced: 1, replies: 0 });
     // The day after, s2 goes only to Pat and Ivo: Nia's address bounced and Sam's was invalid.
     await world.h.advanceTo(MONDAY_9 + DAY + 2 * HOUR);
-    expect((await world.measures()).email).toEqual({ sent: 5, failedOrBounced: 2, replies: 0 });
+    expect((await world.measures()).email).toMatchObject({ sent: 5, failedOrBounced: 2, replies: 0 });
   });
 
   test("replies count each lead that ever replied in the campaign once, by the channel of its first reply; the reply rate is over the leads reached", async () => {
@@ -63,7 +67,7 @@ describe("GET /api/campaigns/:id/measures", () => {
     expect(m.email.replies).toBe(1);
     expect(m.sms.replies).toBe(1);
     expect(m.groups.handed_to_you).toBe(2);
-    expect(m.replyRate).toEqual({ numerator: 2, denominator: 4, percent: 50 });
+    expect(m.replyRate).toMatchObject({ numerator: 2, denominator: 4, percent: 50 });
     // Pat replies again, by text: still one replying lead, still on email.
     world.h.sms.prospectTexts("+447700900101");
     world.h.fake.prospectReplies("pat@harbour.example");
@@ -86,8 +90,8 @@ describe("GET /api/campaigns/:id/measures", () => {
     expect(await world.log("Sam Reed", "interested")).toBe(200);
     expect(await world.log("Ivo Marsh", "callback_requested", { callbackAt: new Date(MONDAY_9 + 5 * HOUR).toISOString() })).toBe(200);
     let m = await world.measures();
-    expect(m.calls).toEqual({ made: 3, connected: 2, interested: 1, declined: 0, callbacksPending: 1 });
-    expect(m.connectRate).toEqual({ numerator: 2, denominator: 3, percent: 67 });
+    expect(m.calls).toMatchObject({ made: 3, connected: 2, interested: 1, declined: 0, callbacksPending: 1 });
+    expect(m.connectRate).toMatchObject({ numerator: 2, denominator: 3, percent: 67 });
     // Pat (skipped for now) and Nia (redialed) still have their calls open, Ivo waits on a callback, Sam is handed to you.
     expect(m.groups).toEqual({ running: 0, waiting_on_you: 3, handed_to_you: 1, paused: 0, ended: 0 });
     // Pat's call, then Nia's redial the next day, and Ivo's callback at its time.
@@ -97,7 +101,7 @@ describe("GET /api/campaigns/:id/measures", () => {
     await world.h.advanceTo(MONDAY_9 + DAY + 30 * MIN);
     expect(await world.log("Nia Cole", "voicemail")).toBe(200);
     m = await world.measures();
-    expect(m.calls).toEqual({ made: 6, connected: 3, interested: 1, declined: 1, callbacksPending: 0 });
+    expect(m.calls).toMatchObject({ made: 6, connected: 3, interested: 1, declined: 1, callbacksPending: 0 });
     expect(m.connectRate.percent).toBe(50);
   });
 
@@ -141,6 +145,41 @@ describe("GET /api/campaigns/:id/measures", () => {
     expect([mine.leads, mine.email.sent, mine.email.replies]).toEqual([4, 4, 0]);
     const theirs = await world.measures(campaign.id);
     expect([theirs.leads, theirs.email.sent, theirs.email.replies, theirs.channels]).toEqual([2, 2, 1, ["email"]]);
+  });
+});
+
+describe("test runs count, marked as test (the principal's decision, 15 November 2026)", () => {
+  test("a test run's sends, reply and call are counted with their share said; the lead groups stay leads only", async () => {
+    const world = await measuresWorld();
+    await launch(world);
+    await world.h.advanceTo(MONDAY_9 + HOUR);
+    const before = await world.measures();
+    expect((await world.h.request("PUT", `/api/campaigns/${world.campaignId}/test-contacts`, { email: OWN_EMAIL, mobile: OWN_MOBILE })).status).toBe(200);
+    const tab = (await world.h.request<{ definitionVersion: number }>("GET", `/api/campaigns/${world.campaignId}/test-runs`)).body;
+    const run = await world.h.request("POST", `/api/campaigns/${world.campaignId}/test-runs`, { requestId: "measures-test-run", renderAs: world.lead("Pat Oneil"), expect: { definitionVersion: tab.definitionVersion } });
+    expect(run.status).toBe(200);
+    await world.h.advanceTo(world.h.clock + 10 * MIN);
+    let m = await world.measures();
+    // Both emails (a test cuts each wait to a minute) and the text went to the user's own contacts: counted, and said as
+    // from test runs.
+    expect([m.email.sent - before.email.sent, m.email.fromTests.sent, m.sms.sent - before.sms.sent, m.sms.fromTests.sent]).toEqual([2, 2, 1, 1]);
+    expect(m.groups).toEqual(before.groups);
+    expect(m.leads).toBe(4);
+    expect(m.replyRate.fromTests).toEqual({ numerator: 0, denominator: 1 });
+    // A test call logged, then a reply from the test email (which ends the test run).
+    const leads = ["Pat Oneil", "Nia Cole", "Sam Reed", "Ivo Marsh"].map(world.lead);
+    const testCall = (await world.h.request<CallsView>("GET", "/api/calls")).body.readyNow.find((x) => !leads.includes(x.enrollmentId));
+    expect(testCall).toBeDefined();
+    if (testCall) {
+      const view = (await world.h.request<CallTaskView>("GET", `/api/call-tasks/${testCall.taskId}`)).body;
+      expect((await world.h.request("POST", `/api/call-tasks/${testCall.taskId}/outcome`, { requestId: "test-call", outcome: "no_answer", numberId: view.numbers.find((n) => !n.bad)?.detailId })).status).toBe(200);
+    }
+    world.h.fake.prospectReplies(OWN_EMAIL);
+    await world.h.advanceTo(world.h.clock + 5 * MIN);
+    m = await world.measures();
+    expect([m.email.replies, m.email.fromTests.replies, m.replyRate.fromTests.numerator]).toEqual([1, 1, 1]);
+    expect([m.calls.made - before.calls.made, m.calls.fromTests.made]).toEqual([1, 1]);
+    expect(m.groups).toEqual({ ...before.groups });
   });
 });
 

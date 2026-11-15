@@ -430,7 +430,11 @@ export interface EngineStore {
   lastCallNotes(subjectIds: readonly string[]): Promise<CallNoteRecord[]>;
 }
 
-/** What the campaign measures read (ticket 22): the facts Activity reads for the same entries, for the campaign's enrollments. */
+/**
+ * What the campaign measures read (ticket 22): the facts Activity reads for the same entries. `enrollments` are the campaign's
+ * leads (the lead groups); every other row is of the campaign's subjects of both kinds, enrollments and test runs, marked
+ * `test` for a test run's (the principal's decision of 15 November 2026).
+ */
 export interface MeasureFacts {
   readonly launched: boolean;
   /** The campaign row's launch and pause, in the same snapshot, so a screen's pause and figures are of one instant. */
@@ -439,18 +443,18 @@ export interface MeasureFacts {
   /** The campaign's handed-over work that may still be sent (`uncertainWorkOf`), in the same snapshot. */
   readonly mayStillSend: number;
   readonly definition: CampaignDefinition;
-  /** Each enrollment: its stored status, whether its outreach has ended, and the channel of the reply that stopped it. */
-  readonly enrollments: readonly { readonly id: string; readonly status: string; readonly ended: string | null; readonly stopReplyChannel: string | null }[];
-  /** Each reply stored for a lead, oldest first (by its provider time, then the order stored). */
-  readonly replies: readonly { readonly subjectId: string; readonly channel: string; readonly atWall: number }[];
+  /** Each enrollment: its stored status, whether its outreach has ended, its stopping reply's channel, and its person. */
+  readonly enrollments: readonly { readonly id: string; readonly status: string; readonly ended: string | null; readonly stopReplyChannel: string | null; readonly personId: string | null }[];
+  /** Each reply stored for a subject, oldest first (by its provider time, then the order stored). */
+  readonly replies: readonly { readonly subjectId: string; readonly test: boolean; readonly channel: string; readonly atWall: number }[];
   /** Each attempt handed to a provider, with its state and its work's provider send time. */
-  readonly attempts: readonly { readonly subjectId: string; readonly trackId: string; readonly stepId: string; readonly state: string; readonly sentWall: number | null }[];
+  readonly attempts: readonly { readonly subjectId: string; readonly test: boolean; readonly trackId: string; readonly stepId: string; readonly state: string; readonly sentWall: number | null }[];
   /** Each step result `failed`. */
-  readonly failures: readonly { readonly subjectId: string; readonly trackId: string; readonly stepId: string }[];
+  readonly failures: readonly { readonly subjectId: string; readonly test: boolean; readonly trackId: string; readonly stepId: string }[];
   /** Each bounce event. */
-  readonly bounces: readonly { readonly subjectId: string; readonly trackId: string; readonly stepId: string }[];
+  readonly bounces: readonly { readonly subjectId: string; readonly test: boolean; readonly trackId: string; readonly stepId: string }[];
   /** Each call outcome logged. */
-  readonly calls: readonly { readonly subjectId: string; readonly outcome: string }[];
-  /** Each open callback task. */
-  readonly openCallbacks: readonly { readonly subjectId: string; readonly open: boolean; readonly kind: "call" | "callback" }[];
+  readonly calls: readonly { readonly subjectId: string; readonly test: boolean; readonly outcome: string }[];
+  /** Each open callback task, with whether its subject's outreach has ended. */
+  readonly openCallbacks: readonly { readonly subjectId: string; readonly test: boolean; readonly ended: string | null; readonly open: boolean; readonly kind: "call" | "callback" }[];
 }

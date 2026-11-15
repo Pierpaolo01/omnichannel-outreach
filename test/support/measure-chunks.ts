@@ -12,10 +12,10 @@ import { FULL_SEARCH, inShard } from "./sequence-chunks.ts";
 
 export const MEASURE_SEED = 22_000;
 /**
- * Offsets from MEASURE_SEED, chosen from a sweep of the first 100 (15 November 2026, after the council on 384630e; every
- * one passed) to reach every behaviour below between them; the mutations' killing seeds run beside them.
+ * Offsets from MEASURE_SEED, chosen from a sweep of the first 100 (15 November 2026, after ticket 21's merge and the
+ * council on 384630e; every one passed) to reach every behaviour below between them; each mutation's killing seed is one of them.
  */
-export const MEASURE_FIXED_SEEDS: readonly number[] = [2, 4, 12, 18, 25, 49, 86];
+export const MEASURE_FIXED_SEEDS: readonly number[] = [0, 18, 38, 40, 49];
 const SEARCH_SEEDS = 100;
 const MAX_SEEDS = 40;
 
@@ -33,9 +33,17 @@ export const MEASURE_FEATURES: readonly string[] = [
   "a-reply-after-the-lead-ended",
   "a-reply-by-email",
   "a-reply-by-sms",
+  "a-reply-from-the-person-in-two-campaigns-in-campaign-0",
+  "a-reply-from-the-person-in-two-campaigns-in-campaign-1",
   "a-reply-in-the-other-campaign",
   "a-second-reply",
   "a-second-reply-on-the-other-channel",
+  "a-second-test-reply",
+  "a-second-test-run",
+  "a-test-call-logged",
+  "a-test-reply",
+  "a-test-run",
+  "a-track-removed-after-it-sent",
   "call-callback-requested",
   "call-gatekeeper",
   "call-interested",

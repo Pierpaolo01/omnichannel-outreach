@@ -68,13 +68,12 @@ export function MeasuresPanel({ measures: m }: { measures: CampaignMeasures }) {
           <Icon name="forward" className={`size-3.5 transition-transform ${notesOpen ? "rotate-90" : ""}`} />
           How these are counted
         </button>
-        {notesOpen && (
-          <ul id={notesId} className="mt-1.5 flex max-w-[72ch] list-disc flex-col gap-1 pl-5 text-ink-2">
-            {MEASURE_NOTES.map((note) => (
-              <li key={note}>{note}</li>
-            ))}
-          </ul>
-        )}
+        {/* Always rendered, hidden while closed, so the button's `aria-controls` always names an element (council on 384630e). */}
+        <ul id={notesId} hidden={!notesOpen} className="mt-1.5 flex max-w-[72ch] list-disc flex-col gap-1 pl-5 text-ink-2">
+          {MEASURE_NOTES.map((note) => (
+            <li key={note}>{note}</li>
+          ))}
+        </ul>
       </div>
     </section>
   );

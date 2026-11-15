@@ -197,47 +197,57 @@ export class SqliteEngineStore implements EngineStore {
     try {
       const campaign = this.sql("SELECT launched_at, paused_since, definition, default_timezone FROM campaigns WHERE id = ?").get(campaignId);
       if (!campaign) return null;
-      // Every row is read through the campaign's enrollments: a test run is a subject with no enrollment (ticket 21).
+      // The lead groups read the campaign's enrollments: a test run is not a lead. Every other fact reads the campaign's
+      // subjects of both kinds, enrollments and test runs (ticket 21's view `engine_subjects`), each row marked by its kind:
+      // the principal's decision of 15 November 2026 (ADR 0003 "Ticket 22").
       const scope = options.everyCampaign === true ? "" : "WHERE e.campaign_id = ?";
+      const and = scope ? `${scope} AND` : "WHERE";
       const args: SQLInputValue[] = options.everyCampaign === true ? [] : [campaignId];
       const rows = (sql: string) => this.sql(sql).all(...args);
+      const test = (r: Row) => str(r, "kind") === "test_run";
       const facts: MeasureFacts = {
         launched: campaign["launched_at"] != null,
         launchedAt: numOrNull(campaign, "launched_at"),
         pausedSince: numOrNull(campaign, "paused_since"),
         mayStillSend: this.uncertainWorkNow(campaignId),
         definition: campaign["definition"] == null ? emptyDefinition(strOrNull(campaign, "default_timezone") ?? "UTC") : parseDefinition(campaign),
-        enrollments: rows(`SELECT e.id, e.status, e.ended, e.stop_reply_channel FROM enrollments e ${scope}`).map((r) => ({
+        enrollments: rows(`SELECT e.id, e.status, e.ended, e.stop_reply_channel, e.person_id FROM enrollments e ${scope}`).map((r) => ({
           id: str(r, "id"),
           status: str(r, "status"),
           ended: strOrNull(r, "ended"),
           stopReplyChannel: strOrNull(r, "stop_reply_channel"),
+          personId: strOrNull(r, "person_id"),
         })),
-        // Every reply stored for the campaign's leads, oldest first: a lead's first reply and its channel (ticket 22, council on 384630e).
-        replies: rows(`SELECT r.subject_id, r.channel, r.at_wall FROM enrollments e JOIN replies r ON r.subject_id = e.id ${scope} ORDER BY r.at_wall, r.rowid`).map((r) => ({
+        // Every reply stored for the campaign's subjects, oldest first: a subject's first reply and its channel (council on 384630e).
+        replies: rows(`SELECT r.subject_id, e.kind, r.channel, r.at_wall FROM engine_subjects e JOIN replies r ON r.subject_id = e.id ${scope} ORDER BY r.at_wall, r.rowid`).map((r) => ({
           subjectId: str(r, "subject_id"),
+          test: test(r),
           channel: str(r, "channel"),
           atWall: num(r, "at_wall"),
         })),
         attempts: rows(
-          `SELECT a.subject_id, a.track_id, a.step_id, a.state, w.sent_wall FROM enrollments e JOIN attempts a ON a.subject_id = e.id
-             LEFT JOIN provider_work w ON w.key = a.idempotency_key ${scope ? `${scope} AND` : "WHERE"} a.handed_wall IS NOT NULL`,
-        ).map((r) => ({ subjectId: str(r, "subject_id"), trackId: str(r, "track_id"), stepId: str(r, "step_id"), state: str(r, "state"), sentWall: numOrNull(r, "sent_wall") })),
-        failures: rows(`SELECT r.subject_id, r.track_id, r.step_id FROM enrollments e JOIN step_results r ON r.subject_id = e.id ${scope ? `${scope} AND` : "WHERE"} r.result = 'failed'`).map((r) => ({
+          `SELECT a.subject_id, e.kind, a.track_id, a.step_id, a.state, w.sent_wall FROM engine_subjects e JOIN attempts a ON a.subject_id = e.id
+             LEFT JOIN provider_work w ON w.key = a.idempotency_key ${and} a.handed_wall IS NOT NULL`,
+        ).map((r) => ({ subjectId: str(r, "subject_id"), test: test(r), trackId: str(r, "track_id"), stepId: str(r, "step_id"), state: str(r, "state"), sentWall: numOrNull(r, "sent_wall") })),
+        failures: rows(`SELECT r.subject_id, e.kind, r.track_id, r.step_id FROM engine_subjects e JOIN step_results r ON r.subject_id = e.id ${and} r.result = 'failed'`).map((r) => ({
           subjectId: str(r, "subject_id"),
+          test: test(r),
           trackId: str(r, "track_id"),
           stepId: str(r, "step_id"),
         })),
-        bounces: rows(`SELECT b.subject_id, b.track_id, b.step_id FROM enrollments e JOIN bounce_events b ON b.subject_id = e.id ${scope}`).map((r) => ({
+        bounces: rows(`SELECT b.subject_id, e.kind, b.track_id, b.step_id FROM engine_subjects e JOIN bounce_events b ON b.subject_id = e.id ${scope}`).map((r) => ({
           subjectId: str(r, "subject_id"),
+          test: test(r),
           trackId: str(r, "track_id"),
           stepId: str(r, "step_id"),
         })),
-        calls: rows(`SELECT c.subject_id, c.outcome FROM enrollments e JOIN call_attempts c ON c.subject_id = e.id ${scope}`).map((r) => ({ subjectId: str(r, "subject_id"), outcome: str(r, "outcome") })),
-        openCallbacks: rows(`SELECT t.subject_id, t.open, t.kind FROM enrollments e JOIN call_tasks t ON t.subject_id = e.id ${scope ? `${scope} AND` : "WHERE"} t.open = 1 AND t.kind = 'callback'`).map((r) => ({
+        calls: rows(`SELECT c.subject_id, e.kind, c.outcome FROM engine_subjects e JOIN call_attempts c ON c.subject_id = e.id ${scope}`).map((r) => ({ subjectId: str(r, "subject_id"), test: test(r), outcome: str(r, "outcome") })),
+        openCallbacks: rows(`SELECT t.subject_id, e.kind, e.ended, t.open, t.kind AS task_kind FROM engine_subjects e JOIN call_tasks t ON t.subject_id = e.id ${and} t.open = 1 AND t.kind = 'callback'`).map((r) => ({
           subjectId: str(r, "subject_id"),
+          test: test(r),
+          ended: strOrNull(r, "ended"),
           open: num(r, "open") === 1,
-          kind: str(r, "kind") === "callback" ? ("callback" as const) : ("call" as const),
+          kind: str(r, "task_kind") === "callback" ? ("callback" as const) : ("call" as const),
         })),
       };
       return facts;
@@ -245,6 +255,7 @@ export class SqliteEngineStore implements EngineStore {
       this.db.exec("COMMIT");
     }
   }
+
 
   async saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save: DefinitionSave | null = null, running?: RunningSave, testStop?: TestStop): Promise<SaveResult> {
     return this.transaction((): SaveResult => {

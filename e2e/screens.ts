@@ -2220,6 +2220,7 @@ export const SCREENS: readonly Screen[] = [
   { name: "measures: a campaign just launched", open: async (page) => { await measuresScreen(page, "early"); await settle(page, "None sent yet"); } },
   { name: "measures: a running campaign", open: async (page) => { await measuresScreen(page, "running"); await settle(page, "1 callback pending"); } },
   { name: "measures: how they are counted", open: async (page) => { await measuresScreen(page, "running"); await page.getByText("How these are counted").click(); await settle(page, "never takes their reply away"); } },
+  { name: "measures: with a test run", open: async (page) => { await measuresScreen(page, "with-test"); await settle(page, "from test runs"); } },
   { name: "measures: a paused campaign", open: async (page) => { await measuresScreen(page, "paused"); await settle(page, "1 callback pending"); } },
   { name: "measures: figures that may be out of date", open: async (page) => { await staleMeasures(page); } },
 ];

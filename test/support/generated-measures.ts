@@ -1,6 +1,6 @@
 import type { CampaignDefinition, StepDefinition } from "../../src/domain/sequence/definition.ts";
 import type { MeasureRules } from "../../src/server/measures.ts";
-import type { CallsView, CallTaskView, CampaignMeasures, ControlAnswer, LeadSearchResult, OutreachStatus } from "../../src/shared/api.ts";
+import type { CallsView, CallTaskView, CampaignMeasures, ControlAnswer, LeadSearchResult, OutreachStatus, TestRunTab } from "../../src/shared/api.ts";
 import { EngineHarness } from "./engine-harness.ts";
 import { business, person } from "./export-builder.ts";
 import type { FakeMode } from "./fake-email-port.ts";
@@ -35,6 +35,9 @@ const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
 const ALWAYS = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
 const NUMBER = "+447700900001";
+/** The user's own test contacts (ticket 21): fictitious, a reserved example domain and a drama-range mobile. */
+const OWN_EMAIL = "alex.own@personal-mail.example";
+const OWN_MOBILE = "+447700900456";
 
 /** The spec's table of the five groups ("Outreach status"), the record's own copy. */
 const GROUP: Readonly<Record<OutreachStatus, keyof CampaignMeasures["groups"]>> = {
@@ -75,6 +78,8 @@ interface Lead {
   textReplied: boolean;
   /** A callback asked for with no outcome logged since. */
   callbackOpen: boolean;
+  /** The first campaign's first person, enrolled in the second campaign too (by the same scraper row). */
+  readonly shared?: true;
 }
 
 export async function runMeasures(seed: number, options: MeasureRunOptions = {}): Promise<{ problems: string[]; stats: { features: string[] } }> {
@@ -106,9 +111,12 @@ export async function runMeasures(seed: number, options: MeasureRunOptions = {})
   const leads: Lead[] = [
     ...firstNames.map((name, i): Lead => ({ name, campaign: 0, email: `p${i}@harbour.example`, mobile: i === 0 || chance(0.8) ? `+4477009001${String(10 + i)}` : null, enrollmentId: "", firstReply: null, textReplied: false, callbackOpen: false })),
     ...["Rae Lund", "Lea Park"].map((name, i): Lead => ({ name, campaign: 1, email: `q${i}@kestrel.example`, mobile: null, enrollmentId: "", firstReply: null, textReplied: false, callbackOpen: false })),
+    // Council on 384630e (item 3): the first campaign's first person is in the second campaign too, by the same scraper row.
+    { name: firstNames[0]!, campaign: 1, email: "p0@harbour.example", mobile: null, enrollmentId: "", firstReply: null, textReplied: false, callbackOpen: false, shared: true },
   ];
   // Addresses that bounce once sent, that are refused, and mobiles refused or reported invalid after a text.
   for (const l of leads) {
+    if (l.shared) continue;
     const r = rnd();
     if (r < 0.2) h.fake.bouncing.add(l.email);
     else if (r < 0.3) h.fake.invalid.add(l.email);
@@ -141,9 +149,15 @@ export async function runMeasures(seed: number, options: MeasureRunOptions = {})
   const campaignIds: string[] = [];
   for (const [i, def] of [definition, second].entries()) {
     const mine = leads.filter((l) => l.campaign === i);
-    const company = i === 0 ? business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101" }) : business({ business_id: "b2", business_name: "Kestrel Dental" });
-    const people = mine.map((l, j) => person({ person_id: `p${i}-${j}`, business_id: i === 0 ? "b1" : "b2", full_name: l.name, email: l.email, ...(l.mobile ? { dial_phone: l.mobile, dial_phone_type: "mobile" } : {}) }));
-    const { campaign } = await h.createCampaign(i === 0 ? "Clinics" : "Dentists", { businesses: [company], people });
+    const harbour = business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101" });
+    const companies = i === 0 ? [harbour] : [business({ business_id: "b2", business_name: "Kestrel Dental" }), harbour];
+    const first = leads.find((l) => l.campaign === 0)!;
+    const people = mine.map((l, j) =>
+      l.shared
+        ? person({ person_id: "p0-0", business_id: "b1", full_name: l.name, email: l.email, ...(first.mobile ? { dial_phone: first.mobile, dial_phone_type: "mobile" } : {}) })
+        : person({ person_id: `p${i}-${j}`, business_id: i === 0 ? "b1" : "b2", full_name: l.name, email: l.email, ...(l.mobile ? { dial_phone: l.mobile, dial_phone_type: "mobile" } : {}) }),
+    );
+    const { campaign } = await h.createCampaign(i === 0 ? "Clinics" : "Dentists", { businesses: companies, people });
     await h.defineSequence(campaign.id, def);
     if ((await h.launch(campaign.id)).status !== 200) throw new Error("launch refused");
     campaignIds.push(campaign.id);
@@ -153,7 +167,12 @@ export async function runMeasures(seed: number, options: MeasureRunOptions = {})
   const leadOf = (subjectId: string) => leads.find((l) => l.enrollmentId === subjectId);
 
   // The record's own log of calls the application accepted, and of the replies it made, per campaign.
-  const callsLogged: { lead: Lead; outcome: Outcome }[] = [];
+  const callsLogged: { campaign: 0 | 1; test: boolean; outcome: Outcome }[] = [];
+  // Ticket 21's test runs (the principal's decision of 15 November 2026: counted, marked as test), each with its own record:
+  // its id, and the channel of its first reply. The user's own contacts are fictitious.
+  const tests = new Map<string, { firstReply: "email" | "sms" | null }>();
+  const isTest = (subjectId: string) => tests.has(subjectId);
+  await h.request("PUT", `/api/campaigns/${campaignIds[0]}/test-contacts`, { email: OWN_EMAIL, mobile: OWN_MOBILE });
   let ids = 0;
 
   /** Each lead's status, as Leads shows it. */
@@ -174,29 +193,35 @@ export async function runMeasures(seed: number, options: MeasureRunOptions = {})
   /** Every measure, as the record computes it for campaign `c` from its own log. */
   const expected = (c: 0 | 1, status: Map<string, OutreachStatus>) => {
     const mine = leads.filter((l) => l.campaign === c);
-    const ofMine = (subjectId: string) => mine.some((l) => l.enrollmentId === subjectId);
+    // The campaign's subjects whose activity counts: its leads, and (the first campaign's) test runs.
+    const counted = (subjectId: string) => mine.some((l) => l.enrollmentId === subjectId) || (c === 0 && isTest(subjectId));
+    const share = <T,>(rows: readonly T[], subjectOf: (row: T) => string) => ({ all: rows.length, test: rows.filter((r) => isTest(subjectOf(r))).length });
     const groups = { running: 0, waiting_on_you: 0, handed_to_you: 0, paused: 0, ended: 0 };
     for (const l of mine) {
       const s = status.get(l.enrollmentId);
       if (s) groups[GROUP[s]] += 1;
     }
+    const testReplies = c === 0 ? [...tests].filter(([, t]) => t.firstReply !== null) : [];
     const messages = (channel: "email" | "sms") => {
-      const sent = deliveries(channel).filter((d) => ofMine(d.subjectId));
-      const handovers = (channel === "email" ? h.fake.handoverLog : h.sms.handoverLog).filter((x) => ofMine(x.subjectId));
+      const sent = deliveries(channel).filter((d) => counted(d.subjectId));
+      const handovers = (channel === "email" ? h.fake.handoverLog : h.sms.handoverLog).filter((x) => counted(x.subjectId));
       const refusedTo = channel === "email" ? h.fake.invalid : h.sms.invalid;
       const bouncing = channel === "email" ? h.fake.bouncing : h.sms.invalidAfterSend;
       const bounceDelay = channel === "email" ? 5 * MIN : 2 * MIN;
-      const failed = new Set<string>();
-      for (const x of handovers) if (refusedTo.has(x.destination)) failed.add(`${x.subjectId}/${x.stepId}`);
-      for (const d of sent) if (bouncing.has(d.destination) && d.at + bounceDelay <= h.clock) failed.add(`${d.subjectId}/${d.stepId}`);
-      return { sent: sent.length, failedOrBounced: failed.size, replies: mine.filter((l) => l.firstReply === channel).length };
+      const failed = new Map<string, string>();
+      for (const x of handovers) if (refusedTo.has(x.destination)) failed.set(`${x.subjectId}/${x.stepId}`, x.subjectId);
+      for (const d of sent) if (bouncing.has(d.destination) && d.at + bounceDelay <= h.clock) failed.set(`${d.subjectId}/${d.stepId}`, d.subjectId);
+      const replies = [...mine.filter((l) => l.firstReply === channel).map((l) => l.enrollmentId), ...testReplies.filter(([, t]) => t.firstReply === channel).map(([id]) => id)];
+      return { sent: share(sent, (d) => d.subjectId), failedOrBounced: share([...failed.values()], (id) => id), replies: share(replies, (id) => id) };
     };
-    const calls = callsLogged.filter((x) => x.lead.campaign === c);
-    const made = calls.filter((x) => MADE.includes(x.outcome)).length;
-    const connected = calls.filter((x) => CONNECTED.includes(x.outcome)).length;
-    const replied = mine.filter((l) => l.firstReply !== null);
-    const reached = new Set([...replied.map((l) => l.enrollmentId), ...[...deliveries("email"), ...deliveries("sms")].filter((d) => ofMine(d.subjectId)).map((d) => d.subjectId)]);
+    const calls = callsLogged.filter((x) => x.campaign === c);
+    const callShare = (rows: typeof calls) => ({ all: rows.length, test: rows.filter((x) => x.test).length });
+    const made = callShare(calls.filter((x) => MADE.includes(x.outcome)));
+    const connected = callShare(calls.filter((x) => CONNECTED.includes(x.outcome)));
+    const replied = [...mine.filter((l) => l.firstReply !== null).map((l) => l.enrollmentId), ...testReplies.map(([id]) => id)];
+    const reached = [...new Set([...replied, ...[...deliveries("email"), ...deliveries("sms")].filter((d) => counted(d.subjectId)).map((d) => d.subjectId)])];
     const pct = (n: number, d: number) => (d === 0 ? null : Math.round((100 * n) / d));
+    const rate = (n: { all: number; test: number }, d: { all: number; test: number }) => ({ numerator: n.all, denominator: d.all, percent: pct(n.all, d.all), fromTests: { numerator: n.test, denominator: d.test } });
     return {
       groups,
       email: messages("email"),
@@ -204,14 +229,16 @@ export async function runMeasures(seed: number, options: MeasureRunOptions = {})
       calls: {
         made,
         connected,
-        interested: calls.filter((x) => x.outcome === "interested").length,
-        declined: calls.filter((x) => x.outcome === "not_interested").length,
-        callbacksPending: mine.filter((l) => l.callbackOpen && !ENDED.includes(status.get(l.enrollmentId) ?? "queued")).length,
+        interested: callShare(calls.filter((x) => x.outcome === "interested")),
+        declined: callShare(calls.filter((x) => x.outcome === "not_interested")),
+        // Test calls are never asked for a callback in these runs, so a pending callback is a lead's.
+        callbacksPending: { all: mine.filter((l) => l.callbackOpen && !ENDED.includes(status.get(l.enrollmentId) ?? "queued")).length, test: 0 },
       },
-      replyRate: { numerator: replied.length, denominator: reached.size, percent: pct(replied.length, reached.size) },
-      connectRate: { numerator: connected, denominator: made, percent: pct(connected, made) },
+      replyRate: rate(share(replied, (id) => id), share(reached, (id) => id)),
+      connectRate: rate(connected, made),
     };
   };
+
 
   const check = async (when: string) => {
     await h.tick();
@@ -228,13 +255,18 @@ export async function runMeasures(seed: number, options: MeasureRunOptions = {})
         if (JSON.stringify(g) !== JSON.stringify(w)) fail(`${inv}${c === 1 ? "/M8" : ""} ${when}: campaign ${c}'s ${what} is ${JSON.stringify(g)}, the record says ${JSON.stringify(w)}`);
       };
       label("M1", "groups", got.groups, want.groups);
+      // Each figure, then how many of it came from test runs (M8: test runs counted, and only the campaign's).
+      const both = (inv: string, what: string, all: number, test: number, w: { all: number; test: number }) => {
+        label(inv, what, all, w.all);
+        label("M8", `${what} from test runs`, test, w.test);
+      };
       for (const ch of ["email", "sms"] as const) {
-        label("M2", `${ch} sent`, got[ch].sent, want[ch].sent);
-        label("M3", `${ch} failed or bounced`, got[ch].failedOrBounced, want[ch].failedOrBounced);
-        label("M4", `${ch} replies`, got[ch].replies, want[ch].replies);
+        both("M2", `${ch} sent`, got[ch].sent, got[ch].fromTests.sent, want[ch].sent);
+        both("M3", `${ch} failed or bounced`, got[ch].failedOrBounced, got[ch].fromTests.failedOrBounced, want[ch].failedOrBounced);
+        both("M4", `${ch} replies`, got[ch].replies, got[ch].fromTests.replies, want[ch].replies);
       }
-      label("M5", "calls", { made: got.calls.made, connected: got.calls.connected, interested: got.calls.interested, declined: got.calls.declined }, { made: want.calls.made, connected: want.calls.connected, interested: want.calls.interested, declined: want.calls.declined });
-      label("M6", "callbacks pending", got.calls.callbacksPending, want.calls.callbacksPending);
+      for (const part of ["made", "connected", "interested", "declined"] as const) both("M5", `calls ${part}`, got.calls[part], got.calls.fromTests[part], want.calls[part]);
+      both("M6", "callbacks pending", got.calls.callbacksPending, got.calls.fromTests.callbacksPending, want.calls.callbacksPending);
       label("M7", "reply rate", got.replyRate, want.replyRate);
       label("M7", "connect rate", got.connectRate, want.connectRate);
       if (c === 0 && (h.fake.handoverLog.length > deliveries("email").length || h.sms.handoverLog.length > deliveries("sms").length)) features.add("checked-with-a-message-at-the-provider");
@@ -255,6 +287,7 @@ export async function runMeasures(seed: number, options: MeasureRunOptions = {})
     if (!made) return;
     features.add(`a-reply-by-${channel}`);
     if (l.campaign === 1) features.add("a-reply-in-the-other-campaign");
+    if (leads.some((x) => x.shared && x.name === l.name)) features.add(`a-reply-from-the-person-in-two-campaigns-in-campaign-${l.campaign}`);
     // Any reply ends a lead as replied unless it already replied or was interested on a call (2.1).
     // Every reply is stored on the lead, whatever its status (2.1, `applyReply`); the figure counts the lead once, by its first.
     if (before === "replied") features.add(l.firstReply === channel ? "a-second-reply" : "a-second-reply-on-the-other-channel");
@@ -270,10 +303,19 @@ export async function runMeasures(seed: number, options: MeasureRunOptions = {})
     const items = (await h.request<CallsView>("GET", "/api/calls")).body.readyNow;
     if (items.length === 0) return;
     const item = pick(items);
-    const l = leadOf(item.enrollmentId);
-    if (!l) return;
     const view = (await h.request<CallTaskView>("GET", `/api/call-tasks/${item.taskId}`)).body;
     const numberId = view.numbers.find((n) => !n.bad)?.detailId;
+    if (item.test) {
+      // A test call (ticket 21), to the user's own mobile; never asked for a callback here, and it keeps no note.
+      const outcome = pick(CALL_OUTCOMES.filter((o) => o !== "callback_requested"));
+      const res = await h.request("POST", `/api/call-tasks/${item.taskId}/outcome`, { requestId: `call-${++ids}`, outcome, numberId, ...(outcome === "not_interested" ? { declinedPath: "continue" } : {}) });
+      if (res.status !== 200) return;
+      callsLogged.push({ campaign: 0, test: true, outcome });
+      features.add("a-test-call-logged");
+      return;
+    }
+    const l = leadOf(item.enrollmentId);
+    if (!l) return;
     const outcome = pick(CALL_OUTCOMES);
     const extra: Record<string, unknown> = {};
     if ((outcome === "no_answer" || outcome === "voicemail" || outcome === "gatekeeper") && chance(0.4)) extra["redial"] = true;
@@ -281,13 +323,47 @@ export async function runMeasures(seed: number, options: MeasureRunOptions = {})
     if (outcome === "not_interested") extra["declinedPath"] = winBack ? pick(["stop", "continue", "win_back"] as const) : pick(["stop", "continue"] as const);
     const res = await h.request("POST", `/api/call-tasks/${item.taskId}/outcome`, { requestId: `call-${++ids}`, outcome, numberId, note: "", ...extra });
     if (res.status !== 200) return;
-    callsLogged.push({ lead: l, outcome });
+    callsLogged.push({ campaign: l.campaign, test: false, outcome });
     features.add(`call-${outcome.replace(/_/g, "-")}`);
     if (extra["redial"]) features.add("call-redial");
     if (outcome !== "skip_for_now") {
       if (l.callbackOpen) features.add("a-callback-completed");
       l.callbackOpen = outcome === "callback_requested";
     }
+  };
+
+  /** Run test on the first campaign (ticket 21): refused while one runs; its sends go to the user's own contacts. */
+  const runTest = async () => {
+    const tab = (await h.request<TestRunTab>("GET", `/api/campaigns/${campaignIds[0]}/test-runs`)).body;
+    const renderAs = pick(leads.filter((l) => l.campaign === 0)).enrollmentId;
+    const res = await h.request<TestRunTab>("POST", `/api/campaigns/${campaignIds[0]}/test-runs`, { requestId: `test-${++ids}`, renderAs, expect: { definitionVersion: tab.definitionVersion } });
+    if (res.status !== 200 || !res.body.run) return;
+    tests.set(res.body.run.id, { firstReply: null });
+    features.add(tests.size > 1 ? "a-second-test-run" : "a-test-run");
+  };
+
+  /** A reply from the user's own test email, in the thread of a test's email the application has seen. */
+  const testReply = async () => {
+    const seen = deliveries("email").filter((d) => isTest(d.subjectId));
+    const d = seen.length > 0 ? pick(seen) : null;
+    if (!d || !h.fake.prospectReplies(OWN_EMAIL, true, null, { inThreadOf: d })) return;
+    const t = tests.get(d.subjectId)!;
+    if (t.firstReply === null) t.firstReply = "email";
+    else features.add("a-second-test-reply");
+    features.add("a-test-reply");
+    await h.advanceTo(h.clock + MIN);
+  };
+
+  /** The SMS track removed from the running campaign once it has sent (ticket 19's running edit); its texts still count. */
+  let removed = false;
+  const removeTrack = async () => {
+    if (removed || !deliveries("sms").some((d) => leads.some((l) => l.campaign === 0 && l.enrollmentId === d.subjectId))) return;
+    const current = (await h.request<{ definition: CampaignDefinition }>("GET", `/api/campaigns/${campaignIds[0]}/sequence`)).body.definition;
+    const next: CampaignDefinition = { ...current, tracks: current.tracks.map((t) => (t.id === "x1" ? { ...t, removed: true } : t)) };
+    const res = await h.request("PUT", `/api/campaigns/${campaignIds[0]}/sequence`, next);
+    if (res.status !== 200) return;
+    removed = true;
+    features.add("a-track-removed-after-it-sent");
   };
 
   const control = async () => {
@@ -333,7 +409,13 @@ export async function runMeasures(seed: number, options: MeasureRunOptions = {})
 
   const events = options.events ?? 40;
   await check("at launch");
+  // Council on 384630e, from a stream of its own: test runs, their replies, and the track removal.
+  const rTest = random(seed ^ 0x22c);
   for (let i = 0; i < events && problems.length === 0; i++) {
+    const t = rTest();
+    if (t < 0.08) await runTest();
+    else if (t < 0.14) await testReply();
+    else if (t < 0.17) await removeTrack();
     const r = rnd();
     if (r < 0.3) await h.advanceTo(h.clock + pick([2 * MIN, 10 * MIN, 45 * MIN, 3 * HOUR, 12 * HOUR, DAY]));
     else if (r < 0.5) await reply();
