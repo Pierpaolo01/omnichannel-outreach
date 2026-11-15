@@ -96,7 +96,10 @@ export async function providerEvidence(store: Pick<EngineStore, "meta">): Promis
   return parseEvidence(await store.meta(PROVIDERS_KEY));
 }
 
-export async function sendingInterrupted(store: Pick<EngineStore, "meta">, now: number): Promise<{ readonly since: number; readonly cause: InterruptionCause; readonly lastFailedRead: FailedRead | null } | null> {
+export async function sendingInterrupted(
+  store: Pick<EngineStore, "meta">,
+  now: number,
+): Promise<{ readonly since: number; readonly cause: InterruptionCause; readonly lastFailedRead: FailedRead | null; readonly lastRoundFailedAt: number | null } | null> {
   const heartbeat = parseInstant(await store.meta(HEARTBEAT_KEY));
   if (heartbeat === null || now - heartbeat <= INTERRUPTION_GAP) return null;
   const ended = parseInstant(await store.meta(TICK_ENDED_KEY)) ?? -Infinity;
@@ -111,5 +114,6 @@ export async function sendingInterrupted(store: Pick<EngineStore, "meta">, now: 
   const cause: InterruptionCause = failed > heartbeat && failed >= ended ? "ticks_failing" : failures.length > 0 ? "providers_unreachable" : "not_running";
   // The provider read that failed last since the heartbeat, if any: which channel and which part.
   const lastFailedRead = failures.sort((a, b) => b.at - a.at)[0] ?? null;
-  return { since: heartbeat, cause, lastFailedRead };
+  // The last round that threw since the heartbeat (ticket 20b, council on 7622b8b): rounds may have ended in between.
+  return { since: heartbeat, cause, lastFailedRead, lastRoundFailedAt: failed > heartbeat ? failed : null };
 }

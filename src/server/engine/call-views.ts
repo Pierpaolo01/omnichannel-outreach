@@ -5,11 +5,13 @@
  */
 import { bucketOf, CALL_OUTCOMES, callNumbers, callWindow, dayHasRoom, goodNumbers, isListed, listedForDay, queueRank, queueWall, recordedNumberOf, REDIAL_OUTCOMES, skipLimitOf, skippedTonight, unworkedSkipDay, type CallBucket } from "../../domain/sequence/calls.ts";
 import { interruptionNotice, sendingInterrupted } from "./worker-state.ts";
+import { needsAttention } from "./views.ts";
 import { displayPhone } from "../../domain/phone.ts";
 import { localDayNumber, nextWindowClose, nextWindowOpen, startOfLocalDay, windowOpen } from "../../domain/sequence/clock.ts";
 import { declinedPathOf, liveTracks, winBackAvailable, type DeclinedPath } from "../../domain/sequence/definition.ts";
 import { callbackHold, deriveStatus } from "../../domain/sequence/progress.ts";
 import type { CallAttempt, CallNumber, CallTask, RecordedNumber, SubjectState } from "../../domain/sequence/state.ts";
+import type { AttentionLead, NeedsAttention } from "../../shared/api.ts";
 import type { CallColleagueView, CallNumberView, CallOffListView, CallQueueItem, CallRecordView, CallTaskView, CallsView, DeclinePreviewView, InterruptionNoticeView, NoteView, PausedCampaignCalls, RecordCallView, RecordCalls, RecordedNumberView, SendingInterruptedView, SkipLimitView, TodayView, TouchView } from "../../shared/api.ts";
 import type { OutreachStore } from "../persistence/store.ts";
 import { DEFAULT_DAILY_CALL_CAPACITY } from "../persistence/sqlite-engine-store.ts";
@@ -331,13 +333,36 @@ export async function callsView(store: OutreachStore, now: number, options: { re
 /** Whether sending is interrupted now, and since when and why (ticket 20a; follow-up 42 item 45). */
 async function sendingInterruptedView(store: OutreachStore, now: number): Promise<SendingInterruptedView | null> {
   const state = await sendingInterrupted(store.engine, now);
-  return state ? { since: iso(state.since), cause: state.cause, lastFailedRead: state.lastFailedRead ? { channel: state.lastFailedRead.channel, part: state.lastFailedRead.part, at: iso(state.lastFailedRead.at) } : null } : null;
+  return state
+    ? {
+        since: iso(state.since),
+        cause: state.cause,
+        lastFailedRead: state.lastFailedRead ? { channel: state.lastFailedRead.channel, part: state.lastFailedRead.part, at: iso(state.lastFailedRead.at) } : null,
+        lastRoundFailedAt: state.lastRoundFailedAt === null ? null : iso(state.lastRoundFailedAt),
+      }
+    : null;
 }
 
 /** The current interruption notice (ticket 20a): one line, kept until the next interruption replaces it (question Q18). */
 async function noticeView(store: OutreachStore): Promise<InterruptionNoticeView | null> {
   const notice = await interruptionNotice(store.engine);
   return notice ? { from: iso(notice.from), to: iso(notice.to), rescheduled: notice.rescheduled } : null;
+}
+
+/**
+ * GET /api/needs-attention (ticket 20b): the engine's read, with whose lead each lead entry is, by the same parties the
+ * call list names. Names only: every state, count and instant is the engine's, from its one read.
+ */
+export async function needsAttentionView(store: OutreachStore, now: number, rules: Pick<Rules, "asOfAction" | "evaluate">, transportAvailable: Parameters<typeof needsAttention>[3]): Promise<NeedsAttention> {
+  const read = await needsAttention(store.engine, now, rules, transportAvailable);
+  // Names only, every lead in one query (council on 7622b8b): the read runs every 20 seconds on Today.
+  const names = await store.leadNames([...read.waitingForCapacity, ...read.noUsableChannel].map((x) => x.enrollmentId));
+  // Unreachable: every engine subject is an enrollment row. Named blank rather than dropped, so no entry is hidden.
+  const unnamed: AttentionLead = { person: null, company: { id: "", name: "" }, campaign: { id: "", name: "" } };
+  const lead = (enrollmentId: string): AttentionLead => names.get(enrollmentId) ?? unnamed;
+  const waitingForCapacity = read.waitingForCapacity.map((w) => ({ ...w, ...lead(w.enrollmentId) }));
+  const noUsableChannel = read.noUsableChannel.map((n) => ({ ...n, ...lead(n.enrollmentId) }));
+  return { ...read, waitingForCapacity, noUsableChannel, sendingInterrupted: await sendingInterruptedView(store, now) };
 }
 
 /** How many calls Up next shows on Today. */

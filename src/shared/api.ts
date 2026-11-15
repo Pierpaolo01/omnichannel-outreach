@@ -459,6 +459,16 @@ export interface EnrollmentProgress {
   readonly declined: { readonly at: string; readonly trackId: string; readonly path: DeclinedPathApi } | null;
 }
 
+/**
+ * Whose lead a Needs attention entry is about (ticket 20b): the person (null for a company lead), the company and the
+ * campaign, so Today names them and links to the record. Names only; the state is the entry's own.
+ */
+export interface AttentionLead {
+  readonly person: { readonly id: string; readonly name: string } | null;
+  readonly company: { readonly id: string; readonly name: string };
+  readonly campaign: { readonly id: string; readonly name: string };
+}
+
 /** GET /api/needs-attention (the 12b part: stalled inboxes, held tracks, account waits, provider anomalies). */
 export interface NeedsAttention {
   /**
@@ -503,7 +513,7 @@ export interface NeedsAttention {
    * Leads waiting for sending capacity (ticket 20a; spec "Needs attention"): each email or text that is due and could
    * be claimed now, but every account it may use is full for its reset day. It goes when the first of them resets.
    */
-  readonly waitingForCapacity: readonly {
+  readonly waitingForCapacity: readonly (AttentionLead & {
     readonly enrollmentId: string;
     readonly campaignId: string;
     readonly trackId: string;
@@ -512,22 +522,27 @@ export interface NeedsAttention {
     readonly dueAt: string;
     readonly accountIds: readonly string[];
     readonly resetsAt: string;
-  }[];
+  })[];
   /**
    * Leads left with no usable channel, from any cause (ticket 20a; follow-up 42 item 50), most recently ended first, with
    * why each channel of their branch cannot reach them. They stay listed: the ending is final (question Q20).
    */
-  readonly noUsableChannel: readonly {
+  readonly noUsableChannel: readonly (AttentionLead & {
     readonly enrollmentId: string;
     readonly campaignId: string;
     readonly endedAt: string;
     readonly channels: readonly { readonly channel: "email" | "sms" | "call"; readonly why: "missing" | "bad" | "declined" }[];
-  }[];
+  })[];
   /**
    * While sending is interrupted, the providers the dispatch gate waits on (ticket 20a, council B): each not answering,
    * since its last contact, and how many due sends wait on it, decided by the gate's own function (`waitingOn`).
    */
   readonly waitingOnProvider: readonly { readonly channel: "email" | "sms"; readonly since: string | null; readonly sends: number }[];
+  /**
+   * Sending interrupted now, as GET /api/today gives it, judged at this read's own instant (ticket 20b, council on
+   * 7622b8b), so every Needs attention entry comes from one read.
+   */
+  readonly sendingInterrupted: SendingInterruptedView | null;
   /** Due steps waiting for a transport the provider cannot use yet, such as continue-thread follow-ups (follow-up 42 item 12). */
   readonly waitingOnTransport: readonly { readonly enrollmentId: string; readonly trackId: string; readonly stepId: string; readonly channel: "email" | "sms"; readonly dueAt: string }[];
 }
@@ -1124,6 +1139,11 @@ export interface SendingInterruptedView {
   readonly cause: "ticks_failing" | "providers_unreachable" | "not_running";
   /** The provider read that failed last since then, and which part of the round: a partial answer is not contact. */
   readonly lastFailedRead: { readonly channel: "email" | "sms"; readonly part: "accounts" | "observation" | "call"; readonly at: string } | null;
+  /**
+   * The last instant a sending round threw since `since` (ticket 20b), else null. Rounds may have ended in between, so
+   * `ticks_failing` says the latest round failed, not that every round since `since` did.
+   */
+  readonly lastRoundFailedAt: string | null;
 }
 
 /** GET /api/calls: the focus queue. The focused task is the first ready now; the queue moves on only after an outcome. */

@@ -2181,6 +2181,7 @@ So N counts the sends that would have been claimable during the interruption and
   - `waitingOnTransport` (follow-up 42 item 12): each due step that cannot be claimed because its transport is unavailable (Instantly's continue-thread follow-ups until ADR 0002's X2), as `GET /api/email-provider` lists them.
   - What was there stays: overdue callbacks, sender-account problems, account waits, stalled inboxes, held tracks, held capacity, anomalies. Carried calls stay on Today (`carriedOver`). There is no replies count or list.
 - **Every read is judged as of its instant** (2.4): each read that lists a lead's state builds it through `asOfAction`.
+- **Added by ticket 20b (the screens), read-only.** `waitingForCapacity` and `noUsableChannel` entries carry `person`, `company` and `campaign` (ids and names), looked up for all of them in one query (`OutreachStore.leadNames`), so the read's cost for names does not grow with the leads (council on `7622b8b`; `attention.test.ts` counts the statements). `GET /api/needs-attention` carries `sendingInterrupted`, judged at its own instant, so every Needs attention entry comes from one read. `SendingInterruptedView.lastRoundFailedAt` is the last instant a round threw since `since`: rounds may end in between (a provider outage, then a failing round), so `ticks_failing` means the latest round failed, not every round.
 
 ### Invariants (numbered R1 to R11)
 
