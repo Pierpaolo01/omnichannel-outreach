@@ -346,7 +346,7 @@ function RunRead({ run, tab }: { run: TestRunRead; tab: TestRunTabView }) {
     <>
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <h2 id="test-run-heading" className="text-[19px]">
-          {run.running ? `Started at ${started}` : run.ending ? `${endingTitle(run.ending)}${run.endedAt ? ` at ${timeIn(tab.zone, run.endedAt, tab.at)}` : ""}` : `Started at ${started}`}
+          {run.running ? `Started at ${started}` : run.ending ? `${endingTitle(run.ending, run)}${run.endedAt ? ` at ${timeIn(tab.zone, run.endedAt, tab.at)}` : ""}` : `Started at ${started}`}
         </h2>
         <span className="flex items-center gap-2 text-[13.5px] text-muted">
           {run.running && <span className="size-[7px] rounded-full bg-you" aria-hidden="true" />}
@@ -354,7 +354,7 @@ function RunRead({ run, tab }: { run: TestRunRead; tab: TestRunTabView }) {
         </span>
       </div>
       <p className="-mt-1.5 text-[13.5px] text-muted [overflow-wrap:anywhere]">
-        {run.running ? "" : `Started at ${started}. `}Copy written for {run.renderAs.name}.{run.ending ? ` ${endingDetail(run.ending)}` : ""}
+        {run.running ? "" : `Started at ${started}. `}Copy written for {run.renderAs.name}.{run.ending ? ` ${endingDetail(run.ending, run)}` : ""}
         {!run.running && run.mayStillSend > 0 ? ` ${run.mayStillSend} ${run.mayStillSend === 1 ? "message was" : "messages were"} already with a provider and may still arrive.` : ""}
       </p>
       <ol className="flex flex-col" aria-label="The test’s steps, in order">

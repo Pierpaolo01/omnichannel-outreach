@@ -1532,7 +1532,11 @@ export interface TestStepRow {
   /** For a call: its task, and the outcome logged. */
   readonly taskId: string | null;
   readonly outcome: string | null;
-  /** Why a step was skipped or failed, in the engine's word (`missing_channel`, `bad_destination`, …). */
+  /**
+   * Why a step was skipped or failed: the engine's word on its result (`missing_channel`, …), or, for a step its track
+   * finished without reaching, why the track finished: `missing_channel`, `bad_destination`, `declined`, `skipped_by_you`,
+   * `unworked`, `win_back`, `interested` or `skipped`.
+   */
   readonly reason: string | null;
 }
 

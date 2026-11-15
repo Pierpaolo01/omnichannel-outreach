@@ -259,6 +259,18 @@ describe("a test run before launch (ADR 0003 'Ticket 21')", () => {
     await leadReads(w, runId);
   });
 
+  test("a test with only an email saved says its texts and call were skipped for want of a test mobile, not that every step ran (council on ffa202c, item 13)", async () => {
+    const w = await world();
+    await w.h.request("PUT", `/api/campaigns/${w.campaign}/test-contacts`, { email: OWN_EMAIL, mobile: "" });
+    await w.run();
+    await w.h.advanceTo(MONDAY_9 + 5 * MIN);
+    const run = (await w.tab()).run;
+    expect(run?.ending).toBe("finished");
+    const state = (id: string) => run?.steps.find((r) => r.stepId === id);
+    expect([state("e1")?.state, state("e2")?.state]).toEqual(["sent", "sent"]);
+    expect([state("m1")?.state, state("m1")?.reason, state("c1")?.state, state("c1")?.reason]).toEqual(["skipped", "missing_channel", "skipped", "missing_channel"]);
+  });
+
   test("an edit stops the running test, and the warning holds until a test runs on the new version; launch is never blocked by it", async () => {
     const w = await world();
     await w.h.request("PUT", `/api/campaigns/${w.campaign}/test-contacts`, { email: OWN_EMAIL, mobile: "" });

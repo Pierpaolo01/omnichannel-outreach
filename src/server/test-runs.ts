@@ -6,7 +6,7 @@
 import { isLive, maySend } from "../domain/sequence/attempt.ts";
 import { liveSteps, type TrackDefinition } from "../domain/sequence/definition.ts";
 import { progressOf } from "../domain/sequence/progress.ts";
-import type { EndReason, SubjectState } from "../domain/sequence/state.ts";
+import type { EndReason, FinishReason, SubjectState } from "../domain/sequence/state.ts";
 import type { TestRunEnding, TestRunRead, TestRunTab, TestStepRow } from "../shared/api.ts";
 import { stepNoun, trackLabel } from "../shared/track-label.ts";
 import type { TestRunRecord } from "./engine/engine-store.ts";
@@ -120,9 +120,36 @@ export function stepsOf(s: SubjectState, rules: CallViewRules): TestStepRow[] {
         rows.push({ ...base, state: "listed_later", at: day === null ? null : iso(startOfLocalDay(day, s.callDay.userZone)) });
       }
       else if (live) rows.push({ ...base, state: "with_provider", at: live.handedWall === null ? null : iso(live.handedWall) });
+      // A step of a track that finished without reaching it: skipped, with why its track finished (council on ffa202c, item 13).
+      else if (p?.finishReason) rows.push({ ...base, state: "skipped", at: p.finishedWall === null ? null : iso(p.finishedWall), reason: trackEndedBecause(p.finishReason) });
       else if (s.subject.ended === null && p && p.finishedAt === null && p.nextStepId === step.id && p.dueWall !== null) rows.push({ ...base, state: "due", at: iso(p.dueWall) });
       else rows.push({ ...base, state: "not_reached", at: null });
     });
   }
   return rows;
+}
+
+/** Why a track finished without reaching a step, in the read's own words (`TestStepRow.reason`). */
+function trackEndedBecause(reason: FinishReason): string {
+  switch (reason) {
+    case "skipped_missing_channel":
+      return "missing_channel";
+    case "failed_bad_destination":
+      return "bad_destination";
+    case "skipped_declined":
+      return "declined";
+    case "skipped_by_user":
+      return "skipped_by_you";
+    case "skipped_unworked":
+      return "unworked";
+    case "dropped_for_win_back":
+      return "win_back";
+    case "closed_on_interest":
+      return "interested";
+    case "completed":
+    case "skipped":
+      return "skipped";
+    default:
+      throw new Error(`a finish reason the read does not know: ${String(reason satisfies never)}`);
+  }
 }

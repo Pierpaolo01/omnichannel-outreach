@@ -13,13 +13,22 @@ export function timeIn(zone: string, iso: string, readAt: string): string {
   return `${new Intl.DateTimeFormat("en-GB", { timeZone: zone, weekday: "short" }).format(new Date(iso))} ${clock}`;
 }
 
-/** How a run ended, as the panel heads it. */
-export function endingTitle(ending: TestRunEnding): string {
+type RunFacts = Pick<TestRunRead, "steps">;
+
+/** The main sequence's steps, and the branch's once entered: the steps a finished run could have sent. */
+function reachable(run: RunFacts): TestStepRow[] {
+  const entered = run.steps.some((s) => s.branch === "win_back" && s.state !== "not_reached");
+  return run.steps.filter((s) => s.branch === "main" || entered);
+}
+const went = (s: TestStepRow) => s.state === "sent" || s.state === "logged";
+
+/** How a run ended, as the panel heads it; a finished run says "every step ran" only when its facts say so (council on ffa202c, item 13). */
+export function endingTitle(ending: TestRunEnding, run: RunFacts | null): string {
   switch (ending) {
     case "your_reply":
       return "Stopped by your reply";
     case "finished":
-      return "Finished: every step ran";
+      return run !== null && reachable(run).every(went) ? "Finished: every step ran" : "Finished";
     case "no_contact_left":
       return "Finished: no test contact left to reach";
     case "interested":
@@ -36,12 +45,12 @@ export function endingTitle(ending: TestRunEnding): string {
 }
 
 /** What the run's end means, under its title. */
-export function endingDetail(ending: TestRunEnding): string {
+export function endingDetail(ending: TestRunEnding, run: RunFacts): string {
   switch (ending) {
     case "your_reply":
       return "A reply from your test email or mobile stopped it, as a prospect’s reply stops their outreach.";
     case "finished":
-      return "Every step of the sequence went to your test contacts.";
+      return finishedDetail(run);
     case "no_contact_left":
       return "No channel of the sequence could reach your test contacts any more.";
     case "interested":
@@ -105,7 +114,7 @@ export function stepDetail(row: TestStepRow, run: Pick<TestRunRead, "email" | "m
     if (row.branch === "win_back") return "Runs if you log Not interested and the path is Win back";
     return row.channel === "call" ? "A test call goes on your Calls list when it is due" : "Waits for the steps before it";
   }
-  if (row.state === "skipped") return row.reason === "missing_channel" ? "No test contact on this channel" : "Skipped";
+  if (row.state === "skipped") return row.reason === "missing_channel" ? `Skipped: no test ${row.channel === "email" ? "email" : "mobile"} saved` : SKIPPED_BECAUSE[row.reason ?? ""] ?? "Skipped";
   if (row.channel === "call") return row.state === "on_your_list" ? "Log any outcome to continue. The canvas paths apply." : `To ${run.mobile ?? "your mobile"}`;
   if (row.state === "due") return "The wait is cut to about a minute";
   return `To ${(row.channel === "sms" ? run.mobile : run.email) ?? ""}`;
@@ -118,3 +127,33 @@ export function progressText(run: TestRunRead): string {
   const total = run.steps.filter((s) => s.branch === "main" || entered).length;
   return `${done} of ${total} ${total === 1 ? "step" : "steps"} done`;
 }
+
+/** A finished run, from its steps: how many went, and which were skipped for want of a test contact. */
+function finishedDetail(run: RunFacts): string {
+  const steps = reachable(run);
+  const sent = steps.filter(went).length;
+  if (sent === steps.length) return "Every step of the sequence went to your test contacts.";
+  const missing = (contact: "email" | "mobile") => steps.filter((s) => s.state === "skipped" && s.reason === "missing_channel" && (contact === "email" ? s.channel === "email" : s.channel !== "email"));
+  const parts: string[] = [`${sent} of ${steps.length} ${steps.length === 1 ? "step" : "steps"} went to your test contacts.`];
+  const noMobile = missing("mobile");
+  if (noMobile.length > 0) {
+    const texts = noMobile.some((s) => s.channel === "sms");
+    const calls = noMobile.filter((s) => s.channel === "call").length;
+    const what = [texts ? "the texts" : null, calls === 1 ? "the call" : calls > 1 ? "the calls" : null].filter((x): x is string => x !== null).join(" and ");
+    parts.push(`${what.charAt(0).toUpperCase()}${what.slice(1)} ${noMobile.length === 1 ? "was" : "were"} skipped: no test mobile was saved.`);
+  }
+  if (missing("email").length > 0) parts.push(`The ${missing("email").length === 1 ? "email was" : "emails were"} skipped: no test email was saved.`);
+  const other = steps.filter((s) => !went(s) && !(s.state === "skipped" && s.reason === "missing_channel")).length;
+  if (other > 0) parts.push(`${other} ${other === 1 ? "other step did" : "other steps did"} not go: each says why below.`);
+  return parts.join(" ");
+}
+
+/** Why a step was skipped, other than a missing test contact (`TestStepRow.reason`). */
+const SKIPPED_BECAUSE: Readonly<Record<string, string>> = {
+  bad_destination: "Skipped: the test contact was marked wrong",
+  declined: "Skipped: you logged Not interested",
+  skipped_by_you: "Skipped by you",
+  unworked: "Skipped: the call was not worked in time",
+  win_back: "Skipped: the test moved to the win-back branch",
+  interested: "Skipped: you logged Interested",
+};
