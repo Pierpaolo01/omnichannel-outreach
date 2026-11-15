@@ -26,7 +26,7 @@ export function TestRunTab({ campaignId, editor }: { campaignId: string; editor:
         <div className="skeleton h-[420px] w-full" />
       </div>
     );
-  const tab = read.data;
+  const tab = presses.latest ?? read.data;
   return (
     <div className="grid grid-cols-1 items-start gap-4 min-[1080px]:grid-cols-[380px_minmax(0,1fr)]">
       <Contacts campaignId={campaignId} tab={tab} editor={editor} onChange={refresh} presses={presses} />
@@ -38,6 +38,8 @@ export function TestRunTab({ campaignId, editor }: { campaignId: string; editor:
 const newRequestId = () => (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `r-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
 interface Presses {
+  /** A press's answer, until the read after it has landed. */
+  readonly latest: TestRunTabView | null;
   /** The press waiting for its answer: this page's, or one kept from before a reload or by another tab. */
   readonly press: TestRunPress | null;
   /** This page is sending it now. */
@@ -61,6 +63,7 @@ function usePresses(campaignId: string, refresh: () => Promise<void>): Presses {
   const [sending, setSending] = useState(false);
   const [refusal, setRefusal] = useState<string | null>(null);
   const [said, setSaid] = useState<{ text: string; n: number } | null>(null);
+  const [latest, setLatest] = useState<TestRunTabView | null>(null);
 
   const send = useCallback(
     async (p: TestRunPress) => {
@@ -68,10 +71,14 @@ function usePresses(campaignId: string, refresh: () => Promise<void>): Presses {
       setSending(true);
       setRefusal(null);
       try {
-        await postJson(p.path, p.body);
+        // The answer is the tab as of the press's effect: shown until the read asked for after it has landed, so the run
+        // before it never shows again in between (verifier re-check, item 15).
+        const answer = (await postJson(p.path, p.body)) as TestRunTabView;
         answered(store, campaignId, p.requestId);
+        setLatest(answer);
         setPress(null);
         await refresh();
+        setLatest(null);
         setSaid((prev) => ({ text: p.kind === "run" ? "The test started. Its steps are on the right." : "The test is stopped. Nothing more goes to your test contacts.", n: (prev?.n ?? 0) + 1 }));
       } catch (error) {
         // A refusal is the server's answer: the press is done. A failure with no answer keeps it for Try again.
@@ -111,6 +118,7 @@ function usePresses(campaignId: string, refresh: () => Promise<void>): Presses {
   }, [campaignId, refresh, store]);
 
   return {
+    latest,
     press,
     sending,
     refusal,
@@ -135,7 +143,7 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
   const [email, setEmail] = useState(tab.contacts.email ?? "");
   const [mobile, setMobile] = useState(tab.contacts.mobile ?? "");
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(0);
+  const [saved, setSaved] = useState<{ n: number; focus: boolean }>({ n: 0, focus: false });
   const [fieldError, setFieldError] = useState<{ field: "email" | "mobile"; message: string } | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [renderAs, setRenderAs] = useState<string | null>(null);
@@ -154,7 +162,7 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
 
   // Focus goes where the words say what happened (verifier F4 on 55d6ac6): Saved, the press's result, or its refusal.
   useEffect(() => {
-    if (saved > 0) savedRef.current?.focus();
+    if (saved.focus) savedRef.current?.focus();
   }, [saved]);
   useEffect(() => {
     if (said) saidRef.current?.focus();
@@ -163,26 +171,66 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
     if (refusal !== null) refusalRef.current?.focus();
   }, [refusal]);
 
-  const save = async (e: SyntheticEvent) => {
-    e.preventDefault();
-    const sent = { email, mobile };
+  // One save at a time (review bot on ffa202c; verifier R1): a save asked for while one waits is queued, the latest draft
+  // only, and sent after that one's answer, so an older answer can never land after a newer save. The fields take only
+  // the answer to the newest save, and only where they still hold what it sent.
+  const current = useRef({ email, mobile });
+  useEffect(() => {
+    current.current = { email, mobile };
+  }, [email, mobile]);
+  const inFlight = useRef(false);
+  const queued = useRef<{ email: string; mobile: string } | null>(null);
+  const [queuedNext, setQueuedNext] = useState(false);
+  const form = useRef<HTMLFormElement>(null);
+
+  const send = async (sent: { email: string; mobile: string }): Promise<void> => {
+    inFlight.current = true;
     setSaving(true);
     setFieldError(null);
     setSaveError(null);
+    let ok = false;
     try {
       const stored = (await putJson(`/api/campaigns/${encodeURIComponent(campaignId)}/test-contacts`, sent)) as TestRunTabView;
-      // The fields show what was stored, as the server wrote it, unless they were edited while it was saving.
-      setEmail((now) => (now === sent.email ? (stored.contacts.email ?? "") : now));
-      setMobile((now) => (now === sent.mobile ? (stored.contacts.mobile ?? "") : now));
-      await onChange();
-      setSaved((n) => n + 1);
+      ok = true;
+      if (queued.current === null) {
+        // The fields show what was stored, as the server wrote it, unless they were edited while it was saving.
+        setEmail((now) => (now === sent.email ? (stored.contacts.email ?? "") : now));
+        setMobile((now) => (now === sent.mobile ? (stored.contacts.mobile ?? "") : now));
+      }
     } catch (error) {
       const body = error instanceof ApiRequestError ? (error.body as { error?: { field?: "email" | "mobile"; message?: string } } | null) : null;
-      if (body?.error?.field) setFieldError({ field: body.error.field, message: body.error.message ?? "" });
-      else setSaveError(error instanceof Error ? error.message : "Saving failed.");
-    } finally {
-      setSaving(false);
+      if (queued.current === null) {
+        if (body?.error?.field) setFieldError({ field: body.error.field, message: body.error.message ?? "" });
+        else setSaveError(error instanceof Error ? error.message : "Saving failed.");
+      }
     }
+    const next = queued.current;
+    queued.current = null;
+    setQueuedNext(false);
+    if (next) return send(next);
+    inFlight.current = false;
+    setSaving(false);
+    await onChange();
+    if (ok) {
+      // Focus moves to "Saved." only when the user is not typing past the save (item 16): the fields still hold what it
+      // sent, and focus is not in one of them.
+      const typing = form.current?.contains(document.activeElement) === true && document.activeElement instanceof HTMLInputElement;
+      const edited = current.current.email !== sent.email || current.current.mobile !== sent.mobile;
+      setSaved((prev) => ({ n: prev.n + 1, focus: !typing && !edited }));
+    }
+  };
+
+  const save = (e: SyntheticEvent) => {
+    e.preventDefault();
+    const draft = { ...current.current };
+    if (inFlight.current) {
+      queued.current = draft;
+      setQueuedNext(true);
+      return;
+    }
+    // The submit button is disabled while saving: if it had focus, focus goes to the line that says what is happening.
+    if (document.activeElement instanceof HTMLButtonElement && form.current?.contains(document.activeElement)) savedRef.current?.focus();
+    void send(draft);
   };
 
   const hint = noContact ? "Add your email or mobile, and save them, to run a test." : dirty ? "Save your contacts to run a test with them." : editor.unsaved ? "Your latest change to the sequence isn’t saved yet; a test runs the saved version." : "";
@@ -193,17 +241,26 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
       <h2 id="test-contacts" className="text-[19px]">
         Test contacts
       </h2>
-      <form className="flex flex-col gap-3" onSubmit={(e) => void save(e)} noValidate>
+      <form
+        ref={form}
+        className="flex flex-col gap-3"
+        onSubmit={save}
+        // Enter in a field saves, and queues behind a save on its way: the disabled button would otherwise block it.
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && e.target instanceof HTMLInputElement) save(e);
+        }}
+        noValidate
+      >
         <ContactField id={emailId} label="Your email" icon="email" value={email} onChange={setEmail} type="email" placeholder="you@example.com" error={fieldError?.field === "email" ? fieldError.message : tab.contacts.emailIsALead ? "A lead has this email now, so tests can’t use it. Use another of your own." : null} />
         <ContactField id={mobileId} label="Your mobile, for texts and the test call" icon="sms" value={mobile} onChange={setMobile} type="tel" placeholder="+44 7700 900000" error={fieldError?.field === "mobile" ? fieldError.message : tab.contacts.mobileIsALead ? "A lead has this number now, so tests can’t use it. Use another of your own." : null} />
         <p className="text-[13.5px] text-muted">Only contacts that are your own. They are never leads: a lead’s email or number is refused.</p>
         <div className="flex flex-wrap items-center gap-3">
-          {/* Stays focusable while saving, so focus never falls to the page; Saved takes it once stored. */}
-          <button type="submit" className="btn btn-sm border-line-strong bg-base-100 font-medium" disabled={!dirty && !saving} aria-disabled={saving}>
+          {/* Disabled while a save waits: a second press is queued by Enter in a field, never sent beside it. */}
+          <button type="submit" className="btn btn-sm border-line-strong bg-base-100 font-medium" disabled={saving || !dirty}>
             {saving ? "Saving…" : "Save contacts"}
           </button>
           <span ref={savedRef} tabIndex={-1} className="rounded-field text-[13px] text-muted outline-offset-4" aria-live="polite">
-            {saved > 0 && !dirty && !saving ? "Saved." : ""}
+            {saving ? (queuedNext ? "Saving… Your latest change saves next." : "Saving…") : saved.n > 0 && !dirty ? "Saved." : ""}
           </span>
         </div>
         {saveError !== null && <p className="text-[13.5px] text-crit">{saveError}</p>}

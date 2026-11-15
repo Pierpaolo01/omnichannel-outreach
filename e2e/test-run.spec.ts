@@ -197,7 +197,9 @@ test("focus stays with what happened: Saved after Save contacts, the result afte
   const f = await fakeTestRunApp("focus");
   await at(page, f, `/campaigns/${f.campaign}/test-run`);
   await page.getByLabel("Your email").fill(OWN_TEST_EMAIL);
-  await page.getByLabel("Your email").press("Enter");
+  // Saved with the button, which is disabled while the save waits: focus goes to the line that says what happened.
+  await page.getByRole("button", { name: "Save contacts" }).focus();
+  await page.keyboard.press("Enter");
   await expect(page.getByText("Saved.")).toBeFocused();
   await page.getByRole("button", { name: "Run test" }).focus();
   await page.keyboard.press("Enter");
@@ -205,4 +207,64 @@ test("focus stays with what happened: Saved after Save contacts, the result afte
   await page.getByRole("button", { name: "Stop test" }).focus();
   await page.keyboard.press("Enter");
   await expect(page.getByText("The test is stopped. Nothing more goes to your test contacts.")).toBeFocused();
+});
+
+test("a second save while one waits goes after its answer, and the fields and the server keep the newest contact; focus stays where the user types (review bot on ffa202c; verifier R1 and item 16)", async ({ page }) => {
+  const f = await fakeTestRunApp("save-race");
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const puts: { body: string; at: number }[] = [];
+  let answered = 0;
+  await page.route("**/api/campaigns/*/test-contacts", async (route) => {
+    puts.push({ body: route.request().postData() ?? "", at: answered });
+    if (puts.length === 1) await gate;
+    await route.continue();
+    answered++;
+  });
+  await at(page, f, `/campaigns/${f.campaign}/test-run`);
+  const email = page.getByLabel("Your email");
+  await email.fill("alex.first@personal-mail.example");
+  await email.press("Enter");
+  await expect(page.getByRole("button", { name: "Saving…" })).toBeDisabled();
+  await email.fill("alex.second@personal-mail.example");
+  await email.press("Enter");
+  // One save in flight: the second waits for the first's answer.
+  await expect.poll(() => puts.length).toBe(1);
+  release();
+  await expect.poll(() => puts.length).toBe(2);
+  expect(puts[1]?.at).toBe(1);
+  expect(JSON.parse(puts[1]?.body ?? "{}")).toMatchObject({ email: "alex.second@personal-mail.example" });
+  await expect(page.getByText("Saved.")).toBeVisible();
+  await expect(email).toHaveValue("alex.second@personal-mail.example");
+  expect((await f.harness.request<{ contacts: { email: string } }>("GET", `/api/campaigns/${f.campaign}/test-runs`)).body.contacts.email).toBe("alex.second@personal-mail.example");
+  // The user kept typing in the field while it saved: focus stayed there.
+  await expect(email).toBeFocused();
+});
+
+test("after Run test's answer, the run it started shows while the next read is on its way, never the run before it (verifier re-check, item 15)", async ({ page }) => {
+  const f = await fakeTestRunApp("answer-until-read");
+  const c = `/api/campaigns/${f.campaign}`;
+  await f.harness.request("PUT", `${c}/test-contacts`, { email: OWN_TEST_EMAIL, mobile: "" });
+  const first = (await f.harness.request<{ definitionVersion: number; leads: { id: string }[] }>("GET", `${c}/test-runs`)).body;
+  const ran = (await f.harness.request<{ run: { id: string } }>("POST", `${c}/test-runs`, { requestId: "before", renderAs: first.leads[0]?.id ?? "", expect: { definitionVersion: first.definitionVersion } })).body;
+  await f.harness.request("POST", `/api/test-runs/${ran.run.id}/stop`, { requestId: "before-stop" });
+  await at(page, f, `/campaigns/${f.campaign}/test-run`);
+  await expect(page.getByRole("heading", { name: /^Stopped/ })).toBeVisible();
+  let posted = false;
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  await page.route("**/api/campaigns/*/test-runs", async (route) => {
+    if (route.request().method() === "POST") {
+      posted = true;
+      return route.continue();
+    }
+    if (posted) await gate;
+    return route.continue();
+  });
+  await page.getByRole("button", { name: "Run test again" }).click();
+  await expect(page.getByRole("button", { name: "Test running" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /^Started at/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /^Stopped/ })).toHaveCount(0);
+  release();
+  await expect(page.getByRole("heading", { name: /^Started at/ })).toBeVisible();
 });
