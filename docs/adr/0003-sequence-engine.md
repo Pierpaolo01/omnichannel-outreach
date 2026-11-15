@@ -2483,12 +2483,12 @@ Recorded on 15 November 2026 by the ticket 22 implementer, before the code (deli
 | - | - | - |
 | Each enrollment | `enrollments` | its `status`, whether it has ended (`ended`), and its stopping reply's channel (`stop_reply_channel`, read only by a mutation) |
 | Each reply | `replies`, oldest first | subject, channel |
-| Each message sent | `attempts` in state `sent`, with its work's `provider_work.sent_wall` | subject, track; one per step (the unique index `one_sent_attempt_per_step`) |
-| Each message that failed | `step_results` with result `failed` | subject, track, step |
-| Each bounce | `bounce_events` | subject, track, step |
+| Each message sent | `attempts` in state `sent`, with its work's `provider_work.sent_wall` | subject, and its channel: its sender account's (`sender_accounts.channel`), never the definition's track; one per step (the unique index `one_sent_attempt_per_step`) |
+| Each message that failed | `step_results` with result `failed`, and its attempt | subject, step, and the attempt's sender account's channel |
+| Each bounce | `bounce_events`, and its provider work | subject, step, and the work's sender account's channel |
 | Each call logged | `call_attempts` | subject, outcome |
 | Each open callback | `call_tasks` with `open = 1` and `kind = 'callback'` | subject, open, kind (judged by `callbackPending`) |
-| Each track's channel | the campaign's definition (removed tracks keep their channel, 1.1), read with the campaign row | track id to channel |
+| The channels shown | the campaign's definition (removed tracks keep their channel, 1.1), and every channel with recorded activity | which rows the panel shows; never which channel a message counts on |
 
 These are the facts Activity reads for the same entries (`activityOf`): "sent" is an attempt in state `sent` with its provider send time, "failed" a `failed` step result, "bounced" a bounce event, "replied" the stopping reply of a lead whose status is replied (`progressView`'s `reply`), "call" a call record. So a measure and the Activity entries of the campaign's leads count the same things.
 
@@ -2585,6 +2585,12 @@ A council reviewer asked whether test-run sends belong in a campaign's figures. 
 - **The generated runs, as built after the merge.** From a stream of their own: Run test on the first campaign (the user's own fictitious contacts saved first), a reply from the test email in a test's thread, and test calls (any outcome but a callback); the record keeps each test run's id and first reply, counts its deliveries and calls from the fakes' logs and its own log, and checks every figure and its test share. Also: the first campaign's SMS track removed from the running campaign once it has sent (its texts still count), and the first person enrolled in the second campaign too, by the same scraper row (a reply in one campaign counts there only). All 100 seeds (0 to 99) pass. The fixed seeds are 0, 18, 38, 40 and 49, reaching the 50 behaviours of `MEASURE_FEATURES`; each mutation's killing seed is one of them: M1 18, M2 0 (handed counted as sent; a removed track's messages no longer counted), M3 0, M4 0 (every channel; the current status; a person's reply counted in every campaign they are in), M5 0 (skip for now; gatekeeper), M6 18, M7 0, M8 0 (every campaign; test sends dropped).
 - **The disclosure** renders its list always and toggles `hidden`, so `aria-controls` always names an element (`e2e/measures.spec.ts`).
 - **Found while merging, fixed here** (`src/web/controls/useLiveRead.ts`): ticket 21 wraps each live read's answer as `{ data, issued }`, so the reader lost the server's `asOf` and `nextChangeAt` for every page using `useLiveRead`; a page whose reads keep failing could no longer say when what it shows was read. The wrapper now carries both. Regression: the stale-figures browser test, which failed on the merge.
+
+### After the review bot on `b8a8361`, and pull request 62's merge (`9fc5c2b`)
+
+- **A measure counts what was recorded, never what the definition still holds** (the review bot, blocking). A test may run on a draft, and a draft may delete a track outright; the first build took each message's channel from the definition's track, so a test's email on a track the draft then deleted vanished from Sent, its share and the reply rate's reached subjects. Each send, failure and bounce now takes its channel from the sender account that sent it (`sender_accounts.channel`, which an attempt and its work reference by foreign key, so it cannot go), and the panel names every channel with recorded activity as well as the definition's. The removed-track case for leads follows the same rule (a removed track's messages count because they were sent, not because the definition keeps the track). Regressions: `measures.test.ts` "a test's email sent before launch still counts after the draft deletes its track outright"; the generated runs, from a stream of their own, run a test on the first campaign's draft with an extra email track in half the runs and delete that track before launch; mutation "messages counted through the definition's tracks, so a deleted track's are lost" (M2), and "a removed track's messages no longer counted" (M2) now counts through live tracks.
+- **The guard is gone.** Pull request 62 fixed the old text that stopped a lead resumed after it; the generated runs resume leads after texted replies again (`resumed-after-a-texted-reply`).
+- **The generated runs, as built after both.** All 100 seeds (0 to 99) pass. The fixed seeds are now 13, 25, 49, 72, 73 and 80, reaching the 52 behaviours of `MEASURE_FEATURES` (with `a-test-sent-on-a-draft-track-later-deleted` and `resumed-after-a-texted-reply`). Every mutation is still killed on a fixed seed, and the killing seeds moved with the new streams: M1 and M6 from 18 to 49; every other mutation (M2 to M5, M7, M8, the three new ones included) from 0 to 13.
 
 ### Questions for the human (each with the interim built)
 

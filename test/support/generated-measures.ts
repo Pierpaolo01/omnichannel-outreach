@@ -74,7 +74,7 @@ interface Lead {
   enrollmentId: string;
   /** The channel of the lead's first reply in the campaign; never cleared (council on 384630e, item 2). */
   firstReply: "email" | "sms" | null;
-  /** The lead has texted a reply (the guard below). */
+  /** The lead has texted a reply: a resume after it is a behaviour the runs name. */
   textReplied: boolean;
   /** A callback asked for with no outcome logged since. */
   callbackOpen: boolean;
@@ -385,17 +385,15 @@ export async function runMeasures(seed: number, options: MeasureRunOptions = {})
     const withCallback = leads.filter((x) => x.campaign === 0 && x.callbackOpen);
     const l = withCallback.length > 0 && chance(0.5) ? pick(withCallback) : pick(leads.filter((x) => x.campaign === 0));
     const action = pick(["pause", "resume", "stop", "resume_from_next_step", "skip", ...(winBack ? (["move_to_win_back"] as const) : [])] as const);
-    // Not generated until pull request 62 merges: a resume after any texted reply. The engine stores an observed text as
-    // `sms:<id>` and its pre-send check compares the provider's bare id, so the resumed lead's next text finds that same old
-    // reply and stops it again (seed 22058; email first then a text reaches it too, the verifier on 41028f2).
-    if (action === "resume_from_next_step" && l.textReplied) return;
+    // Pull request 62 (reply identity) fixed the old text that stopped a lead resumed after it: resumes after texted replies are
+    // generated again.
     const before = (await statuses()).get(l.enrollmentId);
     const res = await h.request<ControlAnswer>("POST", `/api/enrollments/${l.enrollmentId}/controls`, { requestId: `control-${++ids}`, action });
     if (res.status !== 200) return;
     features.add(`lead-${action.replace(/_/g, "-")}`);
     if (l.callbackOpen && action === "pause") features.add("a-callback-while-paused");
     if (l.callbackOpen && action === "stop") features.add("a-callback-of-a-stopped-lead");
-    if (action === "resume_from_next_step" && before === "replied") features.add("resumed-after-a-reply");
+    if (action === "resume_from_next_step" && before === "replied") features.add(l.textReplied ? "resumed-after-a-texted-reply" : "resumed-after-a-reply");
     if (action === "move_to_win_back") {
       // Entering win-back finishes every main track, closing its call task (2.4): a callback asked for is no longer pending.
       if (before === "replied") features.add("moved-to-win-back-after-a-reply");

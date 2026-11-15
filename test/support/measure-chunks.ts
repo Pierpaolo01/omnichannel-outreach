@@ -12,10 +12,10 @@ import { FULL_SEARCH, inShard } from "./sequence-chunks.ts";
 
 export const MEASURE_SEED = 22_000;
 /**
- * Offsets from MEASURE_SEED, chosen from a sweep of the first 100 (15 November 2026, after ticket 21's merge and the
- * council on 384630e; every one passed) to reach every behaviour below between them; each mutation's killing seed is one of them.
+ * Offsets from MEASURE_SEED, chosen from a sweep of the first 100 (15 November 2026, after pull request 62's merge and the
+ * review bot on b8a8361; every one passed) to reach every behaviour below between them; each mutation's killing seed is one of them.
  */
-export const MEASURE_FIXED_SEEDS: readonly number[] = [0, 18, 38, 40, 49];
+export const MEASURE_FIXED_SEEDS: readonly number[] = [13, 25, 49, 72, 73, 80];
 const SEARCH_SEEDS = 100;
 const MAX_SEEDS = 40;
 
@@ -43,6 +43,7 @@ export const MEASURE_FEATURES: readonly string[] = [
   "a-test-call-logged",
   "a-test-reply",
   "a-test-run",
+  "a-test-sent-on-a-draft-track-later-deleted",
   "a-track-removed-after-it-sent",
   "call-callback-requested",
   "call-gatekeeper",
@@ -68,6 +69,7 @@ export const MEASURE_FEATURES: readonly string[] = [
   "moved-to-win-back-after-a-reply",
   "providers-send-late",
   "resumed-after-a-reply",
+  "resumed-after-a-texted-reply",
   "sms-bounced",
   "sms-refused",
   "sms-sent",
