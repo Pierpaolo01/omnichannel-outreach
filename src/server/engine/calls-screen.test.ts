@@ -173,3 +173,57 @@ describe("a hint of when the call list changes by the clock (ADR 0003 4.4.1, \"F
     for (const v of await views()) expect(v).toMatchObject({ nextChangeAt: "2026-11-03T00:00:00.000Z" });
   });
 });
+
+describe("why a call left the list is the engine's reason, never an earlier outcome (ADR 0003 \"why a call left the list\", ticket 23's defect 3)", () => {
+  test("a callback for later today, then the campaign paused: the reason is the pause; an outcome posted is refused with it; after the resume the call is back with its original due time", async () => {
+    const { h, c, task, taskOf, log, calls } = await world();
+    const patTask = await taskOf("Pat Oneil");
+    const direct = (await task(patTask)).numbers[0]?.detailId;
+    expect((await log(patTask, { outcome: "callback_requested", callbackAt: "2026-11-02T15:30:00.000Z", numberId: direct, note: "" })).status).toBe(200);
+    await h.advanceTo(Date.parse("2026-11-02T15:45:00Z"));
+    const before = await task(patTask);
+    expect(before.offList).toBeNull();
+    expect((await h.request("POST", `/api/campaigns/${c.id}/pause`, { requestId: "pause-1" })).status).toBe(200);
+    expect((await task(patTask)).offList).toEqual({ reason: "campaign_paused", status: "callback_scheduled" });
+    const refused = await log(patTask, { outcome: "interested", numberId: direct, note: "" });
+    expect(refused.status).toBe(409);
+    expect(refused.body.error?.message).toBe("This call is off the list while its campaign is paused.");
+    expect((refused.body as { offList?: unknown }).offList).toEqual({ reason: "campaign_paused", status: "callback_scheduled" });
+    expect((await task(patTask)).storedCalls.map((x) => x.outcome)).toEqual(["callback_requested"]);
+    // A day later, resumed: listed again, as old as it was.
+    await h.advanceTo(Date.parse("2026-11-03T10:00:00Z"));
+    expect((await h.request("POST", `/api/campaigns/${c.id}/resume`, { requestId: "resume-1" })).status).toBe(200);
+    const after = await task(patTask);
+    expect(after.offList).toBeNull();
+    expect(after.dueAt).toBe(before.dueAt);
+    expect((await calls()).readyNow.some((x) => x.taskId === patTask)).toBe(true);
+  });
+
+  test("the lead paused: its reason, and the outcome refused with it", async () => {
+    const { task, taskOf, log, lead, h } = await world();
+    const patTask = await taskOf("Pat Oneil");
+    expect((await h.request("POST", `/api/enrollments/${lead("Pat Oneil")}/controls`, { requestId: "p-1", action: "pause" })).status).toBe(200);
+    expect((await task(patTask)).offList).toEqual({ reason: "lead_paused", status: "paused" });
+    const refused = await log(patTask, { outcome: "no_answer", numberId: (await task(patTask)).numbers[0]?.detailId, note: "" });
+    expect(refused.status).toBe(409);
+    expect((refused.body as { offList?: unknown }).offList).toEqual({ reason: "lead_paused", status: "paused" });
+  });
+
+  test("the call skipped by the user: its track finished, not logged", async () => {
+    const { task, taskOf, lead, h } = await world();
+    const patTask = await taskOf("Pat Oneil");
+    // The email went first; the call is the step a skip skips now.
+    expect((await h.request("POST", `/api/enrollments/${lead("Pat Oneil")}/controls`, { requestId: "s-1", action: "skip" })).status).toBe(200);
+    expect((await task(patTask)).offList).toMatchObject({ reason: "track_finished", finish: "skipped_by_user" });
+  });
+
+  test("a redial moves it to tomorrow: logged; once the skip limit closes it, the track's finish, not the redial", async () => {
+    const { task, taskOf, log, h } = await world();
+    const patTask = await taskOf("Pat Oneil");
+    expect((await log(patTask, { outcome: "no_answer", redial: true, numberId: (await task(patTask)).numbers[0]?.detailId, note: "" })).status).toBe(200);
+    expect((await task(patTask)).offList).toMatchObject({ reason: "logged", outcome: "no_answer" });
+    // Saturday: unworked past its two-day limit, the call was skipped at a rollover.
+    await h.advanceTo(Date.parse("2026-11-07T10:00:00Z"));
+    expect((await task(patTask)).offList).toMatchObject({ reason: "track_finished", finish: "skipped_unworked" });
+  });
+});

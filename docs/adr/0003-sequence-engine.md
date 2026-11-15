@@ -2625,10 +2625,10 @@ Recorded by the implementer of the fix for ticket 23's defects 2 and 3, before t
 **Rule 2: why a call left the list is an exhaustive set, decided by the engine.** `offListReason(state, task)` (`calls.ts`) gives, for a task the listing rule (`isListed`) does not list, the first that holds of:
 
 1. `logged`: an outcome on this task is what took it off: the task closed with a closing outcome (anything but skip for now, a callback request or a redial) as its latest call record, or its latest outcome moved it to a later day (a redial, or a callback for a later day). An earlier outcome that left it listed (a callback for today, a redial already reached) is never the reason.
-2. `lead_ended`, with the lead's status (replied, stopped, interested, declined, finished, no usable channel).
-3. `campaign_paused`, then `campaign_not_launched` (only a test run's campaign can be unlaunched, and it is never held by it).
-4. `lead_paused`.
-5. `track_finished`, with its finish reason (skipped unworked, skipped by the user, declined on another call, dropped for win-back, interested on another call, no good number).
+2. `track_finished`, for a closed task, with its finish reason (skipped unworked, skipped by the user, declined on another call, dropped for win-back, interested on another call, no good number): the finish closed it, and an ending that followed (a skipped last step finishes the sequence) is not why it left.
+3. `lead_ended`, with the lead's status (replied, stopped, interested, declined, finished, no usable channel): an ended lead keeps its open task for a restart.
+4. `campaign_paused`, then `campaign_not_launched` (only a test run's campaign can be unlaunched, and it is never held by it).
+5. `lead_paused`.
 6. `callback_hold`: another call of the lead is a callback, which holds this one.
 7. `listed_later`: listed from a later user day (a redial or callback whose outcome is not the latest cause cannot reach here; a call whose list day is later).
 8. `no_hours_today`: the prospect's calling hours do not open on the user's day.

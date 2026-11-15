@@ -79,6 +79,9 @@ export function CallsPage() {
           <SheetSkeleton />
         ) : snap.task.state === "error" ? (
           <ErrorState title="This call didn’t load." message={snap.task.message} onRetry={() => void desk.refresh()} retryRef={(el) => placeFocus(el, "error")} rescue={2} />
+        ) : snap.away !== null ? (
+          // Off the list: the server's reason and Open the next call, with no sheet and no outcome controls (ADR 0003 "why a call left the list").
+          <OffTheList desk={desk} away={snap.away} userZone={queue.view.userZone} placeFocus={placeFocus} />
         ) : (
           <Sheet desk={desk} snap={snap} task={snap.task.view} userZone={queue.view.userZone} today={queue.view.date} placeFocus={placeFocus} />
         )}
@@ -280,6 +283,38 @@ function NothingToCall({ view, listDone, placeFocus }: { view: CallsView; listDo
   );
 }
 
+/**
+ * The call the page had open is off the list (ADR 0003 "why a call left the list"; provisional, ticket 23's defect 3):
+ * the server's reason in the one wording function, this tab's note when the server does not hold it, and Open the next
+ * call. No sheet and no outcome controls: nothing on it can be logged. Laid out as the empty state is.
+ */
+function OffTheList({ desk, away, userZone, placeFocus }: { desk: CallDesk; away: NonNullable<DeskSnapshot["away"]>; userZone: string; placeFocus: ReturnType<typeof useKeyboardFocus> }) {
+  return (
+    <section aria-labelledby="calls-off-list" className="overflow-clip rounded-box border border-line bg-base-100">
+      <div className="bg-band px-5 pb-7 pt-[26px] text-band-ink min-[901px]:px-[30px]">
+        <h1 id="calls-off-list" className="text-[34px] leading-[1.05] tracking-[-0.03em]">
+          Off the list
+        </h1>
+      </div>
+      <div className="px-5 py-6 min-[901px]:px-[30px]">
+        <div role="alert" className="flex max-w-[65ch] flex-col gap-2.5 rounded-field bg-crit-soft px-4 py-3 text-[14px]">
+          <p className="text-base-content [overflow-wrap:anywhere]">{offListLine(away.who, away.offList, null, userZone, away.sinceOpened)}</p>
+          {away.note.trim() !== "" && (
+            <p className="text-ink-2 [overflow-wrap:anywhere]">
+              Your note wasn’t saved: <q className="whitespace-pre-wrap">{away.note}</q>
+            </p>
+          )}
+          <div>
+            <button type="button" data-rescue="1" ref={(el) => placeFocus(el, "away")} className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={() => void desk.moveOn()}>
+              Open the next call
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function Sheet({ desk, snap, task, userZone, today, placeFocus }: { desk: CallDesk; snap: DeskSnapshot; task: CallTaskView; userZone: string; today: string; placeFocus: ReturnType<typeof useKeyboardFocus> }) {
   const who = whoOf(task);
   const recordHref = task.test ? `/campaigns/${encodeURIComponent(task.campaign.id)}/test-run` : task.person ? `/leads/people/${task.person.id}` : `/leads/companies/${task.company.id}`;
@@ -390,7 +425,7 @@ function Sheet({ desk, snap, task, userZone, today, placeFocus }: { desk: CallDe
           </Link>
         </section>
       </div>
-      <LogBar desk={desk} snap={snap} task={task} userZone={userZone} placeFocus={placeFocus} />
+      <LogBar desk={desk} snap={snap} task={task} userZone={userZone} />
     </section>
   );
 }
@@ -497,13 +532,12 @@ function touchRow(t: TouchView): { icon: "email" | "sms" | "reply" | "call"; ton
 }
 
 /** Keyboard focus on Log stays there while an outcome is pending: the button says so (aria-disabled) and is not removed. */
-function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; snap: DeskSnapshot; task: CallTaskView; userZone: string; placeFocus: ReturnType<typeof useKeyboardFocus> }) {
+function LogBar({ desk, snap, task, userZone }: { desk: CallDesk; snap: DeskSnapshot; task: CallTaskView; userZone: string }) {
   const noteId = useId();
   const hintId = useId();
   const { draft, locked } = snap;
   const who = whoOf(task);
   const dialled = task.numbers.find((n) => n.detailId === draft.numberId);
-  const away = snap.away;
   const pending = snap.pending !== null;
   const pathRefused = snap.declined !== null && !snap.declined.offered;
   const canLog = draft.outcome !== null && !snap.noteTooLong && (draft.outcome === "skip_for_now" || (dialled !== undefined && snap.numberProblem === null)) && (draft.outcome !== "callback_requested" || snap.callback?.at != null) && !pathRefused;
@@ -511,21 +545,6 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
   const noGood = noGoodNumberOn(task);
   return (
     <div className="flex flex-col gap-3.5 min-[901px]:sticky min-[901px]:bottom-0 border-t border-line bg-base-100 px-5 pb-[22px] pt-5 shadow-[0_-10px_24px_-18px_rgba(21,26,45,0.35)] min-[901px]:px-[30px]">
-      {away && (
-        <div role="alert" className="flex flex-col gap-2.5 rounded-field bg-crit-soft px-4 py-3 text-[14px]">
-          <p className="text-base-content">{offListLine(away.who, away.offList, null, userZone)}</p>
-          {away.note.trim() !== "" && (
-            <p className="text-ink-2 [overflow-wrap:anywhere]">
-              Your note wasn’t saved: <q className="whitespace-pre-wrap">{away.note}</q>
-            </p>
-          )}
-          <div>
-            <button type="button" data-rescue="1" ref={(el) => placeFocus(el, "away")} className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={() => void desk.moveOn()}>
-              Open the next call
-            </button>
-          </div>
-        </div>
-      )}
       {snap.notQueued && (
         <p role="alert" className="rounded-field bg-crit-soft px-4 py-2.5 text-[14px] text-base-content">
           {NOT_QUEUED_LINE}
@@ -543,7 +562,7 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
           id={noteId}
           className="textarea min-h-[76px] w-full resize-y border-line-strong text-[14px] leading-[1.45]"
           placeholder="What did they say?"
-          value={away ? away.note : draft.note}
+          value={draft.note}
           readOnly={locked}
           aria-describedby={snap.noteTooLong ? `${noteId}-long` : undefined}
           onChange={(e) => desk.setDraft({ note: e.target.value })}
@@ -569,16 +588,16 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
           <OutcomePill
             key={o}
             label={OUTCOME_LABEL[o]}
-            pressed={!away && draft.outcome === o}
+            pressed={draft.outcome === o}
             // With no good number left (the server's `noGoodNumber`, Q13), only skip for now can be logged: the others are disabled, described by that sentence.
             locked={locked || noGood}
             describedBy={noGood ? q13Id(task) : undefined}
             onPress={() => desk.setDraft({ outcome: o, ...(o === "callback_requested" && draft.callbackDay === null ? { callbackDay: days[0]?.value ?? null } : {}) })}
           />
         ))}
-        <OutcomePill label={OUTCOME_LABEL.skip_for_now} pressed={!away && draft.outcome === "skip_for_now"} locked={locked} onPress={() => desk.setDraft({ outcome: "skip_for_now" })} />
+        <OutcomePill label={OUTCOME_LABEL.skip_for_now} pressed={draft.outcome === "skip_for_now"} locked={locked} onPress={() => desk.setDraft({ outcome: "skip_for_now" })} />
       </div>
-      {!away && draft.outcome && (
+      {draft.outcome && (
         <div className="flex flex-col gap-2.5 rounded-field bg-raised px-4 py-3.5 text-[14px]">
           {draft.outcome === "wrong_number" ? (
             <p>{outcomeNumberLine("wrong_number", dialled && !snap.numberProblem ? dialled : null, pending)}</p>

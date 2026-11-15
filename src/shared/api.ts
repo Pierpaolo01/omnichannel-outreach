@@ -1336,16 +1336,24 @@ export interface CallColleagueView {
 }
 
 /**
- * Why a call task is not on today's list (ADR 0003 4.4.1), from the stored task and its call records:
- * `logged`, an outcome was logged on it (by any tab or client); `track_finished`, its phone track
- * finished otherwise (with the reason); `lead_ended`, the lead's outreach ended in this campaign;
- * `not_listed_today`, it waits for a day its calling hours open. `status` is the lead's status now.
+ * Why a call task is not on today's list (ADR 0003 4.4.1, and "why a call left the list"): the engine's own reason
+ * (`offListReason`), the first that holds. `logged`: an outcome on this task is what took it off (it closed the call, or
+ * moved it to a later day), never an earlier outcome that left it listed; `track_finished`: its phone track finished
+ * otherwise; `lead_ended`: the lead's outreach ended in this campaign; `campaign_paused`, `campaign_not_launched`,
+ * `lead_paused`: a hold; `callback_hold`: another of the lead's calls is a callback; `listed_later`: listed from a later
+ * user day (`listedFrom`, YYYY-MM-DD); `no_hours_today`: the prospect's calling hours do not open on the user's day.
+ * `status` is the lead's status now.
  */
 export type CallOffListView =
   | { readonly reason: "logged"; readonly outcome: CallOutcomeApi; readonly at: string; readonly status: OutreachStatus }
   | { readonly reason: "track_finished"; readonly finish: FinishReasonApi | null; readonly status: OutreachStatus }
   | { readonly reason: "lead_ended"; readonly status: OutreachStatus }
-  | { readonly reason: "not_listed_today"; readonly status: OutreachStatus };
+  | { readonly reason: "campaign_paused"; readonly status: OutreachStatus }
+  | { readonly reason: "campaign_not_launched"; readonly status: OutreachStatus }
+  | { readonly reason: "lead_paused"; readonly status: OutreachStatus }
+  | { readonly reason: "callback_hold"; readonly status: OutreachStatus }
+  | { readonly reason: "listed_later"; readonly listedFrom: string; readonly status: OutreachStatus }
+  | { readonly reason: "no_hours_today"; readonly status: OutreachStatus };
 
 /** GET /api/call-tasks/:id: everything the call screen shows for one task. */
 export interface CallTaskView {

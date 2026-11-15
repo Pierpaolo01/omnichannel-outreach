@@ -82,7 +82,8 @@ describe("every screen says a decline from the server's reads, so none can disag
       expect(logged).toContain(DECLINED_PATH_LINE[path]);
       expect(activity.startsWith(DECLINED_PATH_LINE[path].slice(0, -1))).toBe(true);
       const said = {
-        stop: { record: "Their outreach in this campaign stopped there.", offList: "Pat Oneil declined on a call, so their outreach in this campaign stopped and the call left the list." },
+        // The other call closed with its track (`skipped_declined`): that is why it left, ahead of the ending that followed (ADR 0003 "why a call left the list").
+        stop: { record: "Their outreach in this campaign stopped there.", offList: "Pat Oneil declined on another call, so no call is made to them again in this campaign and this call left the list." },
         continue: { record: "their other channels continue.", offList: "Pat Oneil declined on another call, so no call is made to them again in this campaign and this call left the list." },
         // The decline skips the lead's other started phone track as declined before entering win-back (ticket 16a's `decline`).
         win_back: { record: "moved to this campaign’s win-back branch, which is running.", offList: "Pat Oneil declined on another call, so no call is made to them again in this campaign and this call left the list." },

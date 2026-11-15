@@ -5,10 +5,9 @@ import { acceptanceWorld, H, INBOX, MIN, NUMBERS, type AcceptanceWorld } from ".
 import { business, csvOf, person } from "../test/support/export-builder.ts";
 
 /**
- * Ticket 23: product defects the acceptance run found and reported to the coordinator, not fixed here. Each test states
- * the behaviour the spec asks for and is marked `test.fail()`: it fails today, and the suite stays green while it does.
- * When the defect is fixed the test passes, Playwright reports the unexpected pass, and the mark comes off.
- * Every name, address and number is fictitious.
+ * Ticket 23: product defects the acceptance run found and reported to the coordinator. Each test states the behaviour the
+ * spec asks for. Defects 2 and 3 are fixed (ADR 0003 "Reads that say when, and why a call left the list"): their marks are
+ * off and they pass. Every name, address and number is fictitious.
  */
 
 test.use({ timezoneId: "Europe/London", actionTimeout: 15_000 });
@@ -41,7 +40,6 @@ async function at(page: Page, world: AcceptanceWorld, route: string): Promise<vo
 }
 
 test("defect 2 (review item 11): a person's campaign row says when the next email goes, not a past instant outside its sending window", async ({ page }) => {
-  test.fail(!process.env["SHOW_DEFECTS"], "Reported to the coordinator on 15 November 2026: the row says the wait's end (launch, Monday 10:00), not the next sendable instant (Tuesday 09:00).");
   w = await acceptanceWorld({ start: MONDAY_10, smsConnected: true });
   const h = w.harness;
   // One email, sent Tuesday to Friday only, launched on a Monday morning.
@@ -60,7 +58,6 @@ test("defect 2 (review item 11): a person's campaign row says when the next emai
 });
 
 test("defect 3: while its campaign is paused, the Calls page does not reopen a call it had open, nor say it was logged from another window", async ({ page }) => {
-  test.fail(!process.env["SHOW_DEFECTS"], "Reported to the coordinator on 15 November 2026: the call-task read gives the reason 'logged' for a callback that a campaign pause took off the list.");
   w = await acceptanceWorld({ start: MONDAY_10, smsConnected: true });
   const h = w.harness;
   const id = await launched(w, def([track("phone", "call", [step("c1", {})])]));
@@ -72,6 +69,7 @@ test("defect 3: while its campaign is paused, the Calls page does not reopen a c
   await h.advanceTo(Date.parse("2026-11-09T15:45:00Z"));
   await at(page, w, "/calls");
   await expect(page.getByRole("heading", { name: "Pat Oneil", exact: true })).toBeVisible();
+  await page.getByLabel("Notes from this call").fill("Ask about the Saturday clinic.");
   // The campaign is paused; the user comes back to the Calls page.
   expect((await h.request("POST", `/api/campaigns/${id}/pause`, { requestId: "pause-1" })).status).toBe(200);
   await at(page, w, "/calls");
@@ -79,4 +77,20 @@ test("defect 3: while its campaign is paused, the Calls page does not reopen a c
   // What the spec asks: the paused campaign's call is off the list, and nothing says it was logged elsewhere.
   await expect(page.getByText(/already logged from another window or device/)).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Pat Oneil", exact: true })).toHaveCount(0);
+  // The fix (ADR 0003 "why a call left the list"): the true reason, and no outcome controls.
+  const panel = page.getByRole("alert").filter({ hasText: "Open the next call" });
+  await expect(panel).toContainText("Pat Oneil’s call is off the list while this campaign is paused. It comes back when you resume the campaign.");
+  await expect(page.getByRole("group", { name: "Call outcome" })).toHaveCount(0);
+  // An outcome posted now is refused with that reason, and nothing is stored.
+  const refused = await h.request<{ offList?: { reason: string } }>("POST", `/api/call-tasks/${item?.taskId ?? ""}/outcome`, { requestId: "late-1", outcome: "no_answer", numberId: task.numbers[0]?.detailId ?? null, note: "" });
+  expect(refused.status).toBe(409);
+  expect(refused.body.offList?.reason).toBe("campaign_paused");
+  // Resumed the next morning: the call is back on the list, as old as it was, and opens again with the note the user typed.
+  await h.advanceTo(Date.parse("2026-11-10T10:00:00Z"));
+  expect((await h.request("POST", `/api/campaigns/${id}/resume`, { requestId: "resume-1" })).status).toBe(200);
+  expect((await h.request<CallTaskView>("GET", `/api/call-tasks/${item?.taskId ?? ""}`)).body.dueAt).toBe(task.dueAt);
+  await at(page, w, "/calls");
+  await expect(page.getByRole("heading", { name: "Pat Oneil", exact: true })).toBeVisible();
+  await expect(page.getByLabel("Notes from this call")).toHaveValue("Ask about the Saturday clinic.");
+  await expect(page.getByRole("group", { name: "Call outcome" })).toBeVisible();
 });

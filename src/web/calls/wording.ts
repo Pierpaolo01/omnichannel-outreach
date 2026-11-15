@@ -228,13 +228,19 @@ function withNote(parts: string[], body: { readonly note: string }, task: CallTa
   return parts.join(" ");
 }
 
-/** Why the call the page was on is off the list, from the server's `offList`. */
-export function offListLine(who: string, off: CallOffListView | null, message: string | null, zone: string): string {
+/**
+ * Why the call the page was on is off the list, from the server's `offList` (ADR 0003 "why a call left the list"), in one
+ * exhaustive switch. `sinceOpened`: for `logged`, the outcome was stored since this tab opened the call, so it came from
+ * another window or device; otherwise it already had it. The holds' sentences are provisional, for the principal.
+ */
+export function offListLine(who: string, off: CallOffListView | null, message: string | null, zone: string, sinceOpened = true): string {
   if (off === null) return message ?? `${who}’s call is no longer on the list.`;
   switch (off.reason) {
     case "logged":
       // This tab's own press, once stored, is shown as logged by it (reconcile); this one came from elsewhere.
-      return `${who}’s call was already logged from another window or device: ${OUTCOME_LABEL[off.outcome].toLowerCase()} at ${timeIn(zone, off.at)}.`;
+      return sinceOpened
+        ? `${who}’s call was already logged from another window or device: ${OUTCOME_LABEL[off.outcome].toLowerCase()} at ${timeIn(zone, off.at)}.`
+        : `${who}’s call already has an outcome: ${OUTCOME_LABEL[off.outcome].toLowerCase()} at ${timeIn(zone, off.at)}.`;
     case "lead_ended":
       if (off.status === "replied") return `${who} replied, so automation stopped and the call left the list.`;
       if (off.status === "interested_on_call") return `${who} was marked interested on another call, so automation stopped and the call left the list.`;
@@ -242,8 +248,22 @@ export function offListLine(who: string, off: CallOffListView | null, message: s
       return `${who}’s outreach in this campaign has ended (${STATUS_LABEL[off.status].toLowerCase()}), so the call left the list.`;
     case "track_finished":
       return trackFinishedLine(who, off.finish);
-    case "not_listed_today":
-      return `${who}’s call is not on today’s list.`;
+    case "campaign_paused":
+      return `${who}’s call is off the list while this campaign is paused. It comes back when you resume the campaign.`;
+    case "campaign_not_launched":
+      return `${who}’s call is off the list until this campaign launches.`;
+    case "lead_paused":
+      return `${who}’s call is off the list while their outreach in this campaign is paused. It comes back when you resume them.`;
+    case "callback_hold":
+      return `${who}’s call waits while their callback is open. It comes back once you log the callback.`;
+    case "listed_later":
+      return `${who}’s call is on your list from ${dayLabel(off.listedFrom)}.`;
+    case "no_hours_today":
+      return `${who}’s calling hours don’t open on your day today, so the call isn’t on today’s list.`;
+    default: {
+      const unhandled: never = off;
+      throw new Error(`A reason a call left the list with no words: ${String(unhandled)}`);
+    }
   }
 }
 
