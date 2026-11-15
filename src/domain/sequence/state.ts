@@ -7,6 +7,7 @@ import type { OutreachStatus } from "../outreach-status.ts";
 import type { Freeze, LeadClock } from "./clock.ts";
 import type { MergeData } from "./copy.ts";
 import type { Branch, CampaignDefinition, DeclinedPath, Threading } from "./definition.ts";
+import type { StoredReplyId } from "./reply-identity.ts";
 
 export type EndReason = Extract<
   OutreachStatus,
@@ -214,7 +215,8 @@ export interface SmsBindingRecord {
 export interface Reply {
   readonly channel: "email" | "sms";
   readonly atWall: number;
-  readonly providerRef: string;
+  /** The reply's stored id (the reply identity rule): one per provider reply. */
+  readonly providerRef: StoredReplyId;
 }
 
 /**

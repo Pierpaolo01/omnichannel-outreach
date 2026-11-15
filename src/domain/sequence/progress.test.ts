@@ -1,3 +1,4 @@
+import { storedReplyId } from "./reply-identity.ts";
 import { describe, expect, test } from "vitest";
 import { attempt, calledWork, DAY, definition, H, handed, MONDAY_9, MOBILE, multiTrackState, step, subjectState, track, withAttempts } from "../../../test/support/sequence-state.ts";
 import { leadNow } from "./clock.ts";
@@ -88,7 +89,7 @@ describe("sending (ADR 0003 2.4)", () => {
   test("a reply ends the lead as replied and quiesces its live attempts", () => {
     const s = launched();
     const live = withAttempts(s, [handed({ state: "accepted" })]);
-    const replied = applyReply(live, { channel: "email", atWall: MONDAY_9 + H, providerRef: "r-1" }, MONDAY_9 + H);
+    const replied = applyReply(live, { channel: "email", atWall: MONDAY_9 + H, providerRef: storedReplyId("email", "r-1") }, MONDAY_9 + H);
     expect(replied.subject.ended).toBe("replied");
     expect(replied.attempts[0]).toMatchObject({ state: "accepted", withdrawRequested: true });
     expect(replied.subject.clock.frozenSince).toBe(MONDAY_9 + H);
@@ -97,9 +98,9 @@ describe("sending (ADR 0003 2.4)", () => {
 
   test("a reply after another ending makes the lead replied; a second reply only records it", () => {
     const finished = { ...launched(), subject: { ...launched().subject, ended: "sequence_finished_no_response" as const } };
-    const replied = applyReply(finished, { channel: "email", atWall: MONDAY_9 + H, providerRef: "r-1" }, MONDAY_9 + H);
+    const replied = applyReply(finished, { channel: "email", atWall: MONDAY_9 + H, providerRef: storedReplyId("email", "r-1") }, MONDAY_9 + H);
     expect(replied.subject.ended).toBe("replied");
-    const again = applyReply(replied, { channel: "email", atWall: MONDAY_9 + 2 * H, providerRef: "r-2" }, MONDAY_9 + 2 * H);
+    const again = applyReply(replied, { channel: "email", atWall: MONDAY_9 + 2 * H, providerRef: storedReplyId("email", "r-2") }, MONDAY_9 + 2 * H);
     expect(again.subject).toEqual(replied.subject);
     expect(again.replies).toHaveLength(2);
   });
@@ -359,9 +360,9 @@ describe("tracks together and after, on email and SMS (ADR 0003 2.6, ticket 13)"
   test("an SMS reply stops every track of the lead, the email track's live attempt included", () => {
     const s = launched(multiTrackState([track("t1", "email", [opener("s1"), step("s2", { waitDays: 2 })]), track("t2", "sms", [text("m1")])]));
     const live = withAttempts(s, [handed({ state: "accepted" })]);
-    const replied = applyReply(live, { channel: "sms", atWall: MONDAY_9 + H, providerRef: "sms-r1" }, MONDAY_9 + H);
+    const replied = applyReply(live, { channel: "sms", atWall: MONDAY_9 + H, providerRef: storedReplyId("sms", "sms-r1") }, MONDAY_9 + H);
     expect(replied.subject.ended).toBe("replied");
-    expect(replied.replies).toEqual([{ channel: "sms", atWall: MONDAY_9 + H, providerRef: "sms-r1" }]);
+    expect(replied.replies).toEqual([{ channel: "sms", atWall: MONDAY_9 + H, providerRef: "sms:sms-r1" }]);
     expect(replied.attempts[0]).toMatchObject({ withdrawRequested: true });
     expect(deriveStatus(replied)).toBe("replied");
   });

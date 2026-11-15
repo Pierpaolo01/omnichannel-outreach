@@ -77,7 +77,7 @@ export interface PresendRequest {
   readonly sender: string;
   readonly destination: string;
   readonly threadRefs: readonly string[];
-  /** The replies the lead's record already holds on this channel, by the reply event's identity: not news. */
+  /** The replies the lead's record already holds on this channel, by the reply event's own id (`portReplyId`): not news. */
   readonly knownReplies: readonly string[];
 }
 
@@ -96,6 +96,9 @@ export interface SendPort {
    * ADR 0002's pre-send reply check: a reply in any of the lead's threads that is not one of `knownReplies` (the replies
    * the lead's record holds, by the identity the reply event carries) stops the send; `unavailable` when every thread
    * could not be read whole (ticket 17a; review bot on ca8baee, item 1).
+   * A `reply` answer's `providerRef` is the id of the reply event `observe` reports (or will report) for that same reply,
+   * never another form of it, so the pre-send check and the observation name one reply alike (the reply identity rule).
+   * A reply's id is unique within the provider account and never reused for another reply.
    */
   presendCheck(request: PresendRequest): Promise<{ readonly kind: "clear" } | { readonly kind: "reply"; readonly providerRef: string; readonly at: number } | { readonly kind: "unavailable" }>;
   handover(request: HandoverRequest): Promise<CallAnswer>;

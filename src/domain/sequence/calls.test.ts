@@ -1,3 +1,4 @@
+import { storedReplyId } from "./reply-identity.ts";
 import { describe, expect, test } from "vitest";
 import { attempt, DAY, H, handed, MONDAY_9, subjectState, tracksDefinition, withAttempts } from "../../../test/support/sequence-state.ts";
 import { bucketOf, callNumbers, compareReadyNow, isListed, logCallOutcome, placeCall, readyCalls, reasonOf } from "./calls.ts";
@@ -452,7 +453,7 @@ describe("not interested: the phone track's declined path (ticket 16; ADR 0003 2
 
   test("a reply during win-back is the ordinary reply handoff for this lead in this campaign", () => {
     const s = ok(logCallOutcome(world("win_back"), "task-1", declined(), AT, { attempt: "a1", note: "n1" }));
-    const replied = applyReply(s, { channel: "email", atWall: AT + H, providerRef: "ref-1" }, AT + H);
+    const replied = applyReply(s, { channel: "email", atWall: AT + H, providerRef: storedReplyId("email", "ref-1") }, AT + H);
     expect(deriveStatus(replied)).toBe("replied");
     expect(runs(replied)).toBe(false);
   });

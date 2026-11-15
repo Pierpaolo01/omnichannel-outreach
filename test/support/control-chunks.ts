@@ -21,6 +21,8 @@ export const CONTROL_SEED = 17_000;
 // 85 and 93 (ticket 17b, the search on 54f3a73): an ended lead's skip, sent with its read's precondition, refused with
 // the precondition's reason instead of the read's; one refusal order for the read and the action (judgeControl) since.
 export const CONTROL_FIXED_SEEDS: readonly number[] = [17, 19, 33, 35, 48, 64, 72, 85, 86, 91, 93, 99];
+/** The scripted reply runs' seed offset (`smsReplyRestart`, `replyBeforeObservation`): the reply identity rule. */
+export const SMS_REPLY_SEED = 0;
 const SEARCH_SEEDS = 100;
 const MAX_SEEDS = 30;
 const RUN_WRITES = 10_000;
@@ -66,6 +68,11 @@ export const CONTROL_FEATURES: readonly string[] = [
   "pause-with-work-at-the-provider",
   "restarted-after-a-reply",
   "restarted-after-a-stop",
+  // Reached by the scripted SMS reply run, not by the fixed seeds (the reply identity rule, ADR 0003 "Ticket 17a").
+  "restarted-after-a-text-reply",
+  // Reached by the scripted runs of a reply found by the pre-send check before its observation (council on PR 62).
+  "a-sms-reply-found-by-the-pre-send-check-before-its-observation",
+  "a-email-reply-found-by-the-pre-send-check-before-its-observation",
   "resume-accepted",
   "resume-inside-a-paused-campaign",
   "resume-refused",
@@ -135,6 +142,20 @@ export function controlChunks(): void {
         for (const failure of failures) console.error(failure);
         expect(failures).toEqual([]);
       }, 1_800_000);
+    }
+    test(`the scripted run: a lead resumed after a text it sent gets its next text (seed ${CONTROL_SEED + SMS_REPLY_SEED})`, async () => {
+      const { problems, stats } = await runControls(CONTROL_SEED + SMS_REPLY_SEED, { smsReplyRestart: true });
+      for (const f of stats.features) reached.add(f);
+      expect(problems).toEqual([]);
+      expect(stats.features).toContain("restarted-after-a-text-reply");
+    }, 600_000);
+    for (const channel of ["sms", "email"] as const) {
+      test(`the scripted run: a ${channel} reply the pre-send check finds before its observation is held once, and the resumed lead's next step goes (seed ${CONTROL_SEED + SMS_REPLY_SEED})`, async () => {
+        const { problems, stats } = await runControls(CONTROL_SEED + SMS_REPLY_SEED, { replyBeforeObservation: channel });
+        for (const f of stats.features) reached.add(f);
+        expect(problems).toEqual([]);
+        expect(stats.features).toContain(`a-${channel}-reply-found-by-the-pre-send-check-before-its-observation`);
+      }, 600_000);
     }
     if (!FULL_SEARCH) {
       test("the fixed seeds reach every behaviour they were chosen for", () => {

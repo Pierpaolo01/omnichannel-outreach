@@ -372,10 +372,16 @@ describe("review bot on ca8baee, item 1: a reply the lead's record holds never h
     });
   }
 
-  test("a reply recorded under the pre-send check's earlier identity (the bare email id) counts as known", async () => {
-    const { port, fake, refs, threads } = await twoThreads();
+  test("a reply is known by its observed event's id, the id the check answers with; the bare email id is not that id (migration 19 rewrote it)", async () => {
+    const { port, fake, refs, threads, advance } = await twoThreads();
     const old = fake.reply("pat@harbour.example", { threadId: threads[0] ?? "" });
-    expect(await check(port, refs, [old.id])).toEqual({ kind: "clear" });
+    advance(MINUTE);
+    const answer = await check(port, refs, []);
+    const observed = (await port.observe("c1")).events.filter((e) => e.kind === "reply").map((e) => e.id);
+    expect(answer).toEqual({ kind: "reply", providerRef: `reply:${old.id}`, at: expect.any(Number) });
+    expect(observed).toContain(`reply:${old.id}`);
+    expect(await check(port, refs, [`reply:${old.id}`])).toEqual({ kind: "clear" });
+    expect((await check(port, refs, [old.id])).kind).toBe("reply");
   });
 });
 

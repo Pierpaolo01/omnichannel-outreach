@@ -356,7 +356,8 @@ export class FakeEmailPort implements SendPort {
     const now = this.now();
     const last = options.inThreadOf ?? this.deliveryLog.filter((d) => d.destination === destination && d.at <= now).at(-1);
     if (!last) return false;
-    const id = `reply-${this.replyLog.length + 1}`;
+    // Named as the Instantly adapter names a reply event (`reply:<email id>`), and the pre-send check answers with it.
+    const id = `reply:em-${this.replyLog.length + 1}`;
     // Off the thread: from the lead's address to the inbox, as a new conversation with no thread.
     const threadRef = onThread ? last.providerRef : null;
     const at = providerAt ?? now;

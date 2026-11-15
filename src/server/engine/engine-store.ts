@@ -1,3 +1,4 @@
+import type { StoredReplyId } from "../../domain/sequence/reply-identity.ts";
 import type { LaunchCheck, SenderAccountView } from "../../domain/sequence/blockers.ts";
 import type { MergeData } from "../../domain/sequence/copy.ts";
 import type { CampaignDefinition } from "../../domain/sequence/definition.ts";
@@ -107,7 +108,8 @@ export interface ControlDecision<S> {
  * fallback matched nothing (kept by reference, without pausing), `resolved` once recorded on a lead.
  */
 export interface ReplyEvent {
-  readonly eventId: string;
+  /** The reply's stored id (the reply identity rule). */
+  readonly eventId: StoredReplyId;
   readonly providerRef: string | null;
   readonly inbox: string;
   /** Bare and lowercase. */
@@ -351,10 +353,10 @@ export interface EngineStore {
   /** Sends counted on the account's current reset day. */
   sentToday(accountId: string, now: number): Promise<number>;
 
-  replyEvent(eventId: string): Promise<ReplyEvent | null>;
+  replyEvent(eventId: StoredReplyId): Promise<ReplyEvent | null>;
   /** Records a reply event once; a second record of the same event id changes nothing. */
   recordReplyEvent(reply: ReplyEvent): Promise<void>;
-  updateReplyEvent(eventId: string, change: Partial<Pick<ReplyEvent, "state" | "waitedMs" | "lastCountedWall">>): Promise<void>;
+  updateReplyEvent(eventId: StoredReplyId, change: Partial<Pick<ReplyEvent, "state" | "waitedMs" | "lastCountedWall">>): Promise<void>;
   /** Reply events not yet resolved: pending and unmatched. */
   openReplyEvents(): Promise<ReplyEvent[]>;
   /** Reply events pending correlation. */
