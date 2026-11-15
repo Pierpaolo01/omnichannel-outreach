@@ -393,3 +393,43 @@ test("under a status filter, a selected row leaving the results after another ta
   await expect(stop).toBeFocused();
   await b.close();
 });
+
+test("storage that takes a press but not its answer: the outcome is shown, and after a reload recovered from the server's stored answer (review bot on d1cbef8)", async ({ page }) => {
+  const f = await fakePeopleApp("people-quota");
+  // A full browser storage, for entries that carry a whole answer.
+  await page.addInitScript(() => {
+    const descriptor = Object.getOwnPropertyDescriptor(Storage.prototype, "setItem");
+    const setItem = descriptor?.value as ((this: Storage, key: string, value: string) => void) | undefined;
+    Storage.prototype.setItem = function (this: Storage, key: string, value: string) {
+      if (key.startsWith("outreach.bulk.") && value.includes('"answer":')) throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+      setItem?.call(this, key, value);
+    };
+  });
+  let release: () => void = () => undefined;
+  const held = new Promise<void>((r) => (release = r));
+  await page.route("**/api/bulk", async (route) => {
+    await held;
+    await route.continue();
+  });
+  await at(page, f, `/leads?campaign=${f.campaigns.followUp}`);
+  await leadRow(page, "Amira Hassan").getByRole("checkbox").check();
+  await leadRow(page, "Tom").getByRole("checkbox").check();
+  await page.getByRole("toolbar").getByRole("button", { name: "Stop" }).click();
+  await expect(page.getByRole("group").filter({ hasText: "Stop 2 campaign enrollments" })).toBeVisible();
+  const tom = (await f.harness.request<LeadSearchResult>("GET", `/api/leads?campaign=${f.campaigns.followUp}&q=Tom`)).body.rows[0]?.enrollments.find((e) => e.campaign.id === f.campaigns.followUp)?.id ?? "";
+  expect((await f.harness.request("POST", `/api/enrollments/${tom}/controls`, { requestId: "elsewhere-tom-quota", action: "pause" })).status).toBe(200);
+  await page.getByRole("group").getByRole("button", { name: "Stop" }).click();
+  // The answer arrives on Amira's record; it does not fit in storage, so a marker is kept.
+  await leadRow(page, "Amira Hassan").getByRole("link", { name: "Amira Hassan" }).click();
+  release();
+  const row = page.getByRole("region", { name: "Campaigns" }).getByRole("listitem").filter({ hasText: "Physio follow-up" });
+  await expect(row.getByText("Stopped manually")).toBeVisible();
+  expect(await page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith("outreach.bulk.")).length)).toBe(1);
+  // A reload forgets what this page held; back on Leads the outcome is recovered from the server and shown, refusal included.
+  await page.reload();
+  await page.getByRole("link", { name: "Leads", exact: true }).first().click();
+  const result = page.getByRole("status").filter({ hasText: "Stopped 1 of 2 campaign enrollments." });
+  await expect(result).toBeVisible();
+  await expect(result).toContainText("Tom in Physio follow-up: This lead changed since you confirmed this");
+  expect(await statusIn(f, "Tom", f.campaigns.followUp)).toBe("paused");
+});

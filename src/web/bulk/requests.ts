@@ -45,6 +45,11 @@ export interface BulkPress {
    * is no longer on its way and is never sent again.
    */
   readonly answer?: BulkSendAnswer;
+  /**
+   * Answered, but the answer did not fit in storage (review bot on d1cbef8): the press is kept small, and its outcome is
+   * recovered by sending it again, since the server answers its bulk id with the answer it stored and applies nothing.
+   */
+  readonly answered?: true;
   readonly answeredAt?: number;
 }
 
@@ -99,6 +104,11 @@ export class BulkRequests {
   private stopped = false;
   private stopping: Promise<"stopped">;
   private signalStop: () => void = () => undefined;
+  /**
+   * Answers this manager holds that storage could not (review bot on d1cbef8), by bulk id: a press with one is answered,
+   * never sent again from here, and its outcome is shown from it. After a reload a stored marker is replayed instead.
+   */
+  private readonly known = new Map<string, { readonly answer: BulkSendAnswer; readonly at: number }>();
 
   constructor(ports: BulkRequestPorts) {
     this.ports = ports;
@@ -121,23 +131,41 @@ export class BulkRequests {
       .sort((a, b) => a.pressedAt - b.pressedAt || a.bulkId.localeCompare(b.bulkId));
   }
 
+  /** Answered: its answer is stored, or marked as given, or held here. Answered, a press is no longer on its way. */
+  private answered(p: BulkPress): boolean {
+    return p.answer !== undefined || p.answered === true || this.known.has(p.bulkId);
+  }
+
   /** The oldest stored press still on its way (not yet answered), whichever tab made it. */
   pending(): BulkPress | null {
-    return this.stored().find((p) => p.answer === undefined) ?? null;
+    return this.stored().find((p) => !this.answered(p)) ?? null;
+  }
+
+  /** Whether a press on its way names this enrollment among its items: a record's controls on that lead wait for it. */
+  pendingFor(enrollmentId: string): boolean {
+    return this.stored().some((p) => {
+      if (this.answered(p)) return false;
+      const items = p.body["items"];
+      return Array.isArray(items) && items.some((i: unknown) => typeof i === "object" && i !== null && "enrollmentId" in i && i.enrollmentId === enrollmentId);
+    });
   }
 
   /** The stored press had no answer at its last send from this page. */
   unconfirmed(): boolean {
-    return this.stored().some((p) => p.answer === undefined && this.unanswered.has(p.bulkId));
+    return this.stored().some((p) => !this.answered(p) && this.unanswered.has(p.bulkId));
   }
 
-  /** Every answered press not yet seen on Leads, newest answer first, whichever tab got the answer. */
+  /**
+   * Every answered press not yet seen on Leads, newest answer first, whichever tab got the answer. A marker whose answer
+   * this manager does not hold yet is listed once its replay has been answered.
+   */
   unseen(): BulkResult[] {
     return this.stored()
       .flatMap((p): { at: number; result: BulkResult }[] => {
-        if (p.answer === undefined) return [];
-        const result: BulkResult = p.answer.kind === "answered" ? { kind: "answered", press: p, body: p.answer.body } : { kind: "refused", press: p, message: p.answer.message };
-        return [{ at: p.answeredAt ?? p.pressedAt, result }];
+        const held = p.answer !== undefined ? { answer: p.answer, at: p.answeredAt ?? p.pressedAt } : this.known.get(p.bulkId);
+        if (!held) return [];
+        const result: BulkResult = held.answer.kind === "answered" ? { kind: "answered", press: p, body: held.answer.body } : { kind: "refused", press: p, message: held.answer.message };
+        return [{ at: held.at, result }];
       })
       .sort((a, b) => b.at - a.at)
       .map((x) => x.result);
@@ -151,8 +179,9 @@ export class BulkRequests {
   /** A Leads page showed this answered press to the tab that pressed it, or the user dismissed it: it leaves storage. */
   markSeen(bulkId: string): void {
     const p = parse(this.ports.local.get(keyOf(bulkId)));
-    if (p?.answer === undefined) return;
+    if (!p || !this.answered(p)) return;
     this.ports.local.remove(keyOf(bulkId));
+    this.known.delete(bulkId);
     this.ports.onChange();
   }
 
@@ -166,9 +195,12 @@ export class BulkRequests {
     return { ok: true, press };
   }
 
-  /** Every stored press is sent once on first sight, then on its own backoff. */
+  /**
+   * Every stored press on its way is sent once on first sight, then on its own backoff; so is every answered marker whose
+   * answer this manager does not hold, to recover it from the server's stored answer.
+   */
   watch(): void {
-    for (const p of this.stored()) if (p.answer === undefined && this.inFlight.get(p.bulkId) !== this.generation && !this.timers.has(p.bulkId)) void this.send(p.bulkId);
+    for (const p of this.stored()) if (p.answer === undefined && !this.known.has(p.bulkId) && this.inFlight.get(p.bulkId) !== this.generation && !this.timers.has(p.bulkId)) void this.send(p.bulkId);
   }
 
   storageChanged(): void {
@@ -206,8 +238,8 @@ export class BulkRequests {
     const generation = this.generation;
     if (this.halted() || this.inFlight.get(bulkId) === generation) return;
     const press = parse(this.ports.local.get(keyOf(bulkId)));
-    // Sent only while on its way: an answer another page got answered it.
-    if (!press || press.answer !== undefined) return;
+    // Sent only while on its way, or as a marker to recover its answer: an answer stored or held here settles it.
+    if (!press || press.answer !== undefined || this.known.has(bulkId)) return;
     this.inFlight.set(bulkId, generation);
     let answer: BulkSendAnswer | "stopped" | null = null;
     try {
@@ -233,29 +265,20 @@ export class BulkRequests {
     }
     this.unanswered.delete(bulkId);
     this.attempts.delete(bulkId);
-    // One write: the press becomes answered and not yet seen. Storage that will not take it loses only the line, never
-    // the outcome, which the server keeps under the bulk id: the press leaves storage and the answer is passed on.
+    // One write: the press becomes answered and not yet seen. When the answer does not fit, a compact marker is written
+    // over the small press instead, and the answer is held here; when not even that fits, the press stays as it is and
+    // the answer is held here. Never removed before it is seen: the server keeps the answer under the bulk id, so a
+    // reload or another tab recovers it by sending the press again (review bot on d1cbef8).
     const current = parse(this.ports.local.get(keyOf(bulkId)));
+    const at = this.ports.now();
     if (current && current.answer === undefined) {
-      if (!this.ports.local.set(keyOf(bulkId), JSON.stringify({ ...current, answer, answeredAt: this.ports.now() }))) this.ports.local.remove(keyOf(bulkId));
+      const stored = this.ports.local.set(keyOf(bulkId), JSON.stringify({ ...current, answer, answeredAt: at }));
+      if (!stored) {
+        this.known.set(bulkId, { answer, at });
+        if (current.answered !== true) this.ports.local.set(keyOf(bulkId), JSON.stringify({ ...current, answered: true, answeredAt: at }));
+      }
     }
     this.ports.onResult(answer.kind === "answered" ? { kind: "answered", press, body: answer.body } : { kind: "refused", press, message: answer.message });
     this.ports.onChange();
   }
-}
-
-/**
- * Whether a bulk press stored in this browser, by any tab, names this enrollment among its items (verifier B1 on
- * 4363270): the person page's controls on that lead wait for it, as they wait for a press on the lead itself.
- */
-export function bulkPendingFor(local: KeyValue, enrollmentId: string): boolean {
-  return local
-    .keys()
-    .filter(isBulkKey)
-    .some((k) => {
-      const press = parse(local.get(k));
-      if (!press || press.answer !== undefined) return false;
-      const items = press.body["items"];
-      return Array.isArray(items) && items.some((i: unknown) => typeof i === "object" && i !== null && "enrollmentId" in i && i.enrollmentId === enrollmentId);
-    });
 }

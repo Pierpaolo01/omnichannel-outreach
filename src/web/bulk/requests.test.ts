@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { KeyValue } from "../calls/callDesk.ts";
-import { BulkRequests, NoBulkAnswer, bulkPendingFor, type BulkPress, type BulkResult, type BulkSendAnswer } from "./requests.ts";
+import { BulkRequests, NoBulkAnswer, type BulkPress, type BulkResult, type BulkSendAnswer } from "./requests.ts";
 
 /**
  * Bulk presses on Leads (ticket 18), on the controls' request rule (17b): stored under the bulk id before the first send;
@@ -8,13 +8,15 @@ import { BulkRequests, NoBulkAnswer, bulkPendingFor, type BulkPress, type BulkRe
  * answer removes it. Driven with fake storage two "tabs" share, a fake server and a fake clock. Data is fictitious.
  */
 
-function sharedStorage(): KeyValue & { refuse: boolean } {
+function sharedStorage(): KeyValue & { refuse: boolean; maxValue: number } {
   const data = new Map<string, string>();
   const kv = {
     refuse: false,
+    /** A quota by value size: a write longer than this is refused, as a full browser storage refuses it. */
+    maxValue: Infinity,
     get: (k: string) => data.get(k) ?? null,
     set: (k: string, v: string) => {
-      if (kv.refuse) return false;
+      if (kv.refuse || v.length > kv.maxValue) return false;
       data.set(k, v);
       return true;
     },
@@ -186,10 +188,63 @@ describe("a lead named by a stored bulk press waits for it on its record (verifi
     let answer: (a: BulkSendAnswer) => void = () => undefined;
     w.answerWith(() => new Promise((r) => (answer = r)));
     a.requests.press("pause", BODY, LABELS, "Clinics");
-    expect(bulkPendingFor(w.local, "e1")).toBe(true);
-    expect(bulkPendingFor(w.local, "e2")).toBe(false);
+    expect(a.requests.pendingFor("e1")).toBe(true);
+    expect(w.tab("b").requests.pendingFor("e1")).toBe(true);
+    expect(a.requests.pendingFor("e2")).toBe(false);
     answer({ kind: "answered", body: {} });
     await w.settle();
-    expect(bulkPendingFor(w.local, "e1")).toBe(false);
+    expect(a.requests.pendingFor("e1")).toBe(false);
+  });
+});
+
+describe("an outcome too large to store is recovered from the server, never lost (review bot on d1cbef8)", () => {
+  const big = { counts: { applied: 1, refused: 1 }, results: Array.from({ length: 50 }, (_, i) => ({ enrollmentId: `e${i}`, outcome: "refused", reason: "They are already paused." })) };
+
+  test("storage takes the press but not the answered entry: a compact marker is kept, this tab shows the answer, and another tab or a reload replays the bulk id for the server's stored answer", async () => {
+    const w = world();
+    w.local.maxValue = 600;
+    const a = w.tab("a");
+    w.answerWith(() => Promise.resolve({ kind: "answered", body: big }));
+    expect(a.requests.press("pause", BODY, LABELS, "Clinics").ok).toBe(true);
+    await w.settle();
+    // No longer on its way, never sent again from here, and its outcome is there to show.
+    expect(a.requests.pending()).toBeNull();
+    expect(a.requests.unseen()).toMatchObject([{ kind: "answered", press: { bulkId: "bulk-1" }, body: big }]);
+    expect(w.local.keys()).toEqual(["outreach.bulk.bulk-1"]);
+    a.requests.watch();
+    await w.settle();
+    expect(w.sent).toHaveLength(1);
+    // A reload (a new manager on the same storage): the marker is replayed with its bulk id and body, and the server's
+    // stored answer is shown.
+    const reloaded = w.tab("a");
+    expect(reloaded.requests.pending()).toBeNull();
+    expect(reloaded.requests.unseen()).toEqual([]);
+    reloaded.requests.watch();
+    await w.settle();
+    expect(w.sent.map((x) => [x.tab, x.bulkId, JSON.stringify(x.body)])).toEqual([
+      ["a", "bulk-1", JSON.stringify(BODY)],
+      ["a", "bulk-1", JSON.stringify(BODY)],
+    ]);
+    expect(reloaded.requests.unseen()).toMatchObject([{ kind: "answered", press: { bulkId: "bulk-1" }, body: big }]);
+    reloaded.requests.markSeen("bulk-1");
+    expect(w.local.keys()).toEqual([]);
+  });
+
+  test("storage that refuses even the marker: the press stays stored, this tab shows the answer and does not send it again", async () => {
+    const w = world();
+    const a = w.tab("a");
+    w.answerWith(() => {
+      w.local.refuse = true;
+      return Promise.resolve({ kind: "answered", body: big });
+    });
+    a.requests.press("pause", BODY, LABELS, "Clinics");
+    await w.settle();
+    expect(a.requests.pending()).toBeNull();
+    expect(a.requests.pendingFor("e1")).toBe(false);
+    expect(a.requests.unseen()).toMatchObject([{ press: { bulkId: "bulk-1" }, body: big }]);
+    a.requests.watch();
+    await w.settle();
+    expect(w.sent).toHaveLength(1);
+    expect(w.local.keys()).toEqual(["outreach.bulk.bulk-1"]);
   });
 });

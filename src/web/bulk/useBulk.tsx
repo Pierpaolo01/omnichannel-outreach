@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useState, type ReactNode } from "react";
 import type { ApiError, BulkAction, BulkAddRow } from "../../shared/api.ts";
 import { browserStorage } from "../calls/storage.ts";
-import { BulkRequests, NoBulkAnswer, bulkPendingFor, isBulkKey, type BulkLabel, type BulkPress, type BulkPressOutcome, type BulkResult, type BulkSendAnswer } from "./requests.ts";
+import { BulkRequests, NoBulkAnswer, isBulkKey, type BulkLabel, type BulkPress, type BulkPressOutcome, type BulkResult, type BulkSendAnswer } from "./requests.ts";
 
 /** A 4xx whose code says the server refused the bulk is definite; anything else is no answer. */
 const DEFINITE = new Set(["bulk_refused", "not_found", "invalid_request"]);
@@ -114,10 +114,9 @@ export function useBulkPending(onAnswer: () => void): (enrollmentId: string) => 
     if (seq > since.seq || elsewhere > since.elsewhere) onAnswer();
   }, [seq, elsewhere, since, onAnswer]);
   const version = shell?.version ?? 0;
-  return useCallback((enrollmentId: string) => version >= 0 && bulkPendingFor(local, enrollmentId), [version]);
+  const requests = shell?.requests ?? null;
+  return useCallback((enrollmentId: string) => version >= 0 && (requests?.pendingFor(enrollmentId) ?? false), [version, requests]);
 }
-
-const local = browserStorage(() => window.localStorage);
 
 /** This tab's id, kept in `sessionStorage`, so a reload and moving between pages keep it; a new one when storage is blocked. */
 function tabId(): string {
