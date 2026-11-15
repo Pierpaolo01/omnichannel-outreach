@@ -82,6 +82,8 @@ const after = (action: ControlAction | "resume_from_next_step"): State => (actio
 interface Confirmation {
   readonly kind: "control";
   readonly preview: BulkControlPreview;
+  /** The selected rows, by key. */
+  readonly rows: readonly string[];
   /** The record's state of each item at the read, by enrollment id. */
   readonly seen: ReadonlyMap<string, State>;
 }
@@ -101,6 +103,8 @@ interface StoredPress {
 
 export async function runBulk(seed: number, options: BulkRunOptions = {}): Promise<{ problems: string[]; stats: { features: string[] } }> {
   const rnd = random(seed);
+  /** A stream of its own (verifier F2 on 4363270): a lead joins a confirmation's scope before its press. */
+  const joinRnd = random(seed ^ 0x18f2);
   const pick = <T>(xs: readonly T[]): T => xs[Math.floor(rnd() * xs.length)] as T;
   /** As `pick`, drawing the same number, for a list that may be empty. */
   const maybe = <T>(xs: readonly T[]): T | undefined => xs[Math.floor(rnd() * xs.length)];
@@ -208,7 +212,7 @@ export async function runBulk(seed: number, options: BulkRunOptions = {}): Promi
     if (res.body.counts.applies !== res.body.items.length - refused || res.body.counts.refused !== refused) fail(`B4 the preview's counts are not its items' tallies`);
     features.add(scope === null ? "scope-every-campaign" : "scope-one-campaign");
     if (refused > 0) features.add("preview-with-refusals");
-    tabs[tab] = { kind: "control", preview: res.body, seen };
+    tabs[tab] = { kind: "control", preview: res.body, seen, rows: selection.map((r) => r.key) };
   };
 
   /** What the server should answer for each item, at the instant the press first reaches it; applies the record. */
@@ -273,6 +277,10 @@ export async function runBulk(seed: number, options: BulkRunOptions = {}): Promi
       else if (JSON.stringify({ ...answer, replayed: false }) !== JSON.stringify({ ...(press.first as BulkAddAnswer), replayed: false })) fail(`B2 the add ${press.bulkId} sent again answered differently`);
       else features.add("add-replayed");
     } else {
+      // The answer is about exactly the items the confirmation sent: none added at the press (B1).
+      const sent = ((press.body as { items?: { enrollmentId: string }[] }).items ?? []).map((i) => i.enrollmentId).sort();
+      const answered = answer.results.map((r) => r.enrollmentId).sort();
+      if (JSON.stringify(sent) !== JSON.stringify(answered)) fail(`B1 the press ${press.bulkId} answered for ${answered.join(",")}, but its confirmation sent ${sent.join(",")}`);
       const tally = { applied: answer.results.filter((r) => r.outcome === "applied").length, refused: answer.results.filter((r) => r.outcome === "refused").length };
       if (JSON.stringify(tally) !== JSON.stringify(answer.counts)) fail(`B4 the answer's counts ${JSON.stringify(answer.counts)} are not its rows' ${JSON.stringify(tally)}`);
       for (const r of answer.results) {
@@ -323,6 +331,27 @@ export async function runBulk(seed: number, options: BulkRunOptions = {}): Promi
     tabs[tab] = null;
     const stored: StoredPress = { bulkId, body, confirmation: c, arrived: false, first: null };
     outbox.push(stored);
+    // Now and then a selected row joins the confirmation's scope before the press (verifier F2 on 4363270): enrolled by an
+    // add from elsewhere into the scope campaign (or, for every campaign, any campaign it is not in). The press must not
+    // touch it: the scope is the confirmation's, resolved at its read.
+    if (c.kind === "control" && joinRnd() < 0.5) {
+      const candidates = c.rows.flatMap((key) =>
+        campaigns
+          .filter((cp) => (c.preview.scope === null || cp.id === c.preview.scope.id) && cp.launched && !record.some((e) => e.rowKey === key && e.campaignId === cp.id) && !notEnrollable(key))
+          .map((cp) => ({ key, campaign: cp.id })),
+      );
+      const join = candidates[Math.floor(joinRnd() * candidates.length)];
+      if (join) {
+        const ref = rows.find((r) => r.key === join.key)?.ref;
+        const res = await h.request<BulkAddAnswer>("POST", "/api/bulk", { bulkId: `join-${seed}-${++ids}`, action: "add", campaignId: join.campaign, rows: [ref] });
+        const enrolled = res.status === 200 ? res.body.results[0] : undefined;
+        if (res.status === 200 && enrolled?.outcome === "enrolled" && enrolled.enrollmentId) {
+          record.push({ id: enrolled.enrollmentId, campaignId: join.campaign, rowKey: join.key, state: "running" });
+          await h.advanceTo(h.clock + 5 * MIN);
+          features.add("a-lead-joined-the-scope-before-the-press");
+        } else fail(`B6 the join of ${join.key} into ${join.campaign} answered ${res.status} ${JSON.stringify(res.body)}`);
+      }
+    }
     // Now and then a lead changes between the confirmation's read and the press.
     if (c.kind === "control" && chance(0.3)) {
       const item = maybe(c.preview.items.filter((i) => i.control.allowed));

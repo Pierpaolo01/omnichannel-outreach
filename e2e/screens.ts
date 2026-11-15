@@ -1130,9 +1130,20 @@ export const SCREENS: readonly Screen[] = [
     },
   },
   {
-    name: "a note not added",
+    name: "a note not confirmed yet",
     open: async (page) => {
       await fail(page, "**/api/people/*/notes");
+      const f = await people(page, "");
+      await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
+      await page.getByLabel("A note about Amira").fill("Prefers email over calls this month.");
+      await page.getByRole("button", { name: "Add note" }).click();
+      await settle(page, "Not confirmed yet.");
+    },
+  },
+  {
+    name: "a note refused",
+    open: async (page) => {
+      await page.route("**/api/people/*/notes", (route) => respond(route, { error: { code: "note_refused", message: "This request id was already used for another note: send a new one." } }, 409));
       const f = await people(page, "");
       await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
       await page.getByLabel("A note about Amira").fill("Prefers email over calls this month.");

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import type { ActivityEntry, DependentTrackState, TrackLabel } from "../shared/api.ts";
-import { describeEntry, nextNotePress } from "./activity.tsx";
+import { describeEntry, nextNotePress, noteSendFailure } from "./activity.tsx";
+import { ApiRequestError } from "./api.ts";
 
 const campaign = { id: "c1", name: "Autumn physio" };
 const at = "2026-11-02T09:05:00.000Z";
@@ -217,5 +218,14 @@ describe("a note's request id (review bot on 9daf7c0)", () => {
     expect(nextNotePress(sent, "Prefers afternoons.", "person", () => "r2")).toEqual({ requestId: "r2", body: "Prefers afternoons.", scope: "person" });
     expect(nextNotePress(sent, "Prefers mornings.", "company", () => "r2")).toEqual({ requestId: "r2", body: "Prefers mornings.", scope: "company" });
     expect(nextNotePress(null, "Prefers mornings.", "person", () => "r2")).toEqual({ requestId: "r2", body: "Prefers mornings.", scope: "person" });
+  });
+});
+
+describe("a failed note send (verifier F1 on 4363270)", () => {
+  test("only a definite 4xx answer is a refusal; a network error or a 5xx is no answer, and the note may be stored", () => {
+    expect(noteSendFailure(new ApiRequestError(409, "This request id was already used for another note: send a new one."))).toBe("refused");
+    expect(noteSendFailure(new ApiRequestError(400, "Type a note first."))).toBe("refused");
+    expect(noteSendFailure(new ApiRequestError(500, "Something went wrong on the server."))).toBe("no_answer");
+    expect(noteSendFailure(new TypeError("Failed to fetch"))).toBe("no_answer");
   });
 });

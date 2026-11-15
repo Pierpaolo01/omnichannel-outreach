@@ -96,6 +96,9 @@ export function LeadsPage() {
       .catch((e: unknown) => setConfirming((c) => (c?.request === request ? { request, state: "error", message: e instanceof Error ? e.message : "The server didn’t answer." } : c)));
   };
   const confirm = (preview: BulkControlPreview | BulkAddPreview) => {
+    // While another bulk is on its way the confirmation waits, open and focused; a confirmed bulk is never dropped
+    // without a word (verifier B1 on 4363270, the class 17b fixed for one lead).
+    if (bulk.pending() !== null) return;
     // The press is the preview's snapshot: its allowed items with the precondition each showed, or the rows to add.
     const out =
       preview.action === "add"
@@ -115,6 +118,8 @@ export function LeadsPage() {
             Object.fromEntries(preview.items.map((i) => [i.enrollmentId, { name: i.row.name, campaign: i.campaign.name }])),
             preview.scope?.name ?? null,
           );
+    // Refused here as busy (another tab stored a press at the same moment): the confirmation stays open and says why.
+    if (!out.ok && out.why === "busy") return;
     setConfirming(null);
     if (!out.ok && out.why === "unstored") setUnstored(true);
     // The prototype clears the selection once the action is taken; the answer, lead by lead, is said above the table.
@@ -227,7 +232,7 @@ export function LeadsPage() {
       {confirming?.state === "ready" && (() => {
         const preview = confirming.preview;
         const { text, canConfirm } = preview.action === "add" ? addConfirmText(preview) : controlConfirmText(preview);
-        return <BulkConfirm text={text} action={BULK_VERB[preview.action]} canConfirm={canConfirm} onConfirm={() => confirm(preview)} onCancel={closeConfirm} />;
+        return <BulkConfirm text={text} action={BULK_VERB[preview.action]} canConfirm={canConfirm} busy={bulk.pending() !== null} onConfirm={() => confirm(preview)} onCancel={closeConfirm} />;
       })()}
       <BulkStatus bulk={bulk} unstored={unstored} onDismissUnstored={() => setUnstored(false)} onDismissed={() => searchRef.current?.focus()} />
 

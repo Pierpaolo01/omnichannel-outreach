@@ -1,4 +1,4 @@
-import type { BulkRules } from "../../src/server/bulk.ts";
+import type { BulkRules, PressItem } from "../../src/server/bulk.ts";
 import type { BulkInvariant } from "./generated-bulk.ts";
 
 /**
@@ -13,5 +13,25 @@ export const BULK_MUTATIONS: Readonly<Record<string, { invariant: BulkInvariant;
   "the scope ignores the campaign filter": { invariant: "B1", seed: 0, rules: { inScope: () => true } },
   "a refused item reported as applied": { invariant: "B4", seed: 2, rules: { report: (r) => ({ ...r, outcome: "applied", reason: null }) } },
   "add enrolls a person with no usable channel": { invariant: "B6", seed: 0, rules: { usable: () => true } },
+  // The verifier's mutant on 4363270: the press re-reads each selected row's enrollments and adds those in scope now,
+  // so a lead that joined the scope after the confirmation is changed too.
+  "the scope is resolved again at the press": {
+    invariant: "B1",
+    seed: 2,
+    rules: {
+      pressItems: async (items, { store, scope, action, at, readOf }) => {
+        const rows = (await store.searchLeads({ text: "", campaignId: null, companyId: null, status: null, limit: 500 })).rows;
+        const selected = rows.filter((r) => r.enrollments.some((e) => items.some((i) => i.enrollmentId === e.id)));
+        const extra: PressItem[] = [];
+        for (const e of selected.flatMap((r) => r.enrollments)) {
+          if (items.some((i) => i.enrollmentId === e.id) || (scope !== null && e.campaign.id !== scope)) continue;
+          const state = await store.engine.subject(e.id, at);
+          const control = state ? readOf(state, at).controls.find((c) => c.action === action) : undefined;
+          if (state && control?.allowed) extra.push({ enrollmentId: e.id, expect: { status: readOf(state, at).status, preview: control.digest } });
+        }
+        return [...items, ...extra];
+      },
+    },
+  },
 };
 

@@ -207,3 +207,17 @@ export function shownBulkResult(current: BulkResult | null, incoming: BulkResult
   if (current !== null && own.has(current.press.bulkId)) return current;
   return incoming;
 }
+
+/**
+ * Whether a bulk press stored in this browser, by any tab, names this enrollment among its items (verifier B1 on
+ * 4363270): the person page's controls on that lead wait for it, as they wait for a press on the lead itself.
+ */
+export function bulkPendingFor(local: KeyValue, enrollmentId: string): boolean {
+  return local
+    .keys()
+    .filter(isBulkKey)
+    .some((k) => {
+      const items = parse(local.get(k))?.body["items"];
+      return Array.isArray(items) && items.some((i: unknown) => typeof i === "object" && i !== null && "enrollmentId" in i && i.enrollmentId === enrollmentId);
+    });
+}

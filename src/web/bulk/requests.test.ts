@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { KeyValue } from "../calls/callDesk.ts";
-import { BulkRequests, NoBulkAnswer, shownBulkResult, type BulkPress, type BulkResult, type BulkSendAnswer } from "./requests.ts";
+import { BulkRequests, NoBulkAnswer, bulkPendingFor, shownBulkResult, type BulkPress, type BulkResult, type BulkSendAnswer } from "./requests.ts";
 
 /**
  * Bulk presses on Leads (ticket 18), on the controls' request rule (17b): stored under the bulk id before the first send;
@@ -151,5 +151,20 @@ describe("which bulk answer a page shows (review bot on 9daf7c0)", () => {
     const own = new Set(["mine"]);
     expect(shownBulkResult(answer("other"), answer("mine"), own)).toEqual(answer("mine"));
     expect(shownBulkResult(answer("mine"), answer("other"), own)).toEqual(answer("mine"));
+  });
+});
+
+describe("a lead named by a stored bulk press waits for it on its record (verifier B1 on 4363270)", () => {
+  test("true for an enrollment among a stored press's items, from any tab, until its answer removes the press", async () => {
+    const w = world();
+    const a = w.tab("a");
+    let answer: (a: BulkSendAnswer) => void = () => undefined;
+    w.answerWith(() => new Promise((r) => (answer = r)));
+    a.requests.press("pause", BODY, LABELS, "Clinics");
+    expect(bulkPendingFor(w.local, "e1")).toBe(true);
+    expect(bulkPendingFor(w.local, "e2")).toBe(false);
+    answer({ kind: "answered", body: {} });
+    await w.settle();
+    expect(bulkPendingFor(w.local, "e1")).toBe(false);
   });
 });

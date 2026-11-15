@@ -187,3 +187,107 @@ test("a reload while a bulk is on its way sends the stored press again, and it i
   expect(held).toBeGreaterThanOrEqual(2);
   expect(await statusIn(f, "Daniel Price", f.campaigns.followUp)).not.toBe("paused");
 });
+
+test("a confirmation opened while another tab's bulk is on its way waits, says why, keeps focus, and sends nothing until that bulk is answered (verifier B1 on 4363270)", async ({ page, context }) => {
+  const f = await fakePeopleApp("people-two-tabs");
+  // Every send of a bulk is held until released (either tab may send a stored press).
+  let release: () => void = () => undefined;
+  const held = new Promise<void>((r) => (release = r));
+  const stopsSent: string[] = [];
+  await context.route("**/api/bulk", async (route, request) => {
+    const body = request.postData() ?? "";
+    if (body.includes('"action":"stop"')) stopsSent.push(body);
+    // Held before it reaches the server, until released.
+    await held;
+    await route.continue();
+  });
+  const b = await context.newPage();
+  for (const p of [page, b]) await at(p, f, `/leads?campaign=${f.campaigns.followUp}`);
+
+  // Tab B opens Stop's confirmation on Daniel.
+  await leadRow(b, "Daniel Price").getByRole("checkbox").check();
+  await b.getByRole("toolbar").getByRole("button", { name: "Stop" }).click();
+  const stop = b.getByRole("group").getByRole("button", { name: "Stop" });
+  await expect(stop).toBeFocused();
+
+  // Tab A confirms Pause on Daniel; its answer is held.
+  await leadRow(page, "Daniel Price").getByRole("checkbox").check();
+  await page.getByRole("toolbar").getByRole("button", { name: "Pause" }).click();
+  await page.getByRole("group").getByRole("button", { name: "Pause" }).click();
+
+  await expect(page.getByRole("status").filter({ hasText: "Pausing…" })).toBeVisible();
+  // Tab B's confirmation stays, says why it waits, and Enter on its action sends nothing and keeps focus.
+  await expect(b.getByRole("group")).toContainText("Another bulk change is on its way from this browser.");
+  await expect(stop).toHaveAttribute("aria-disabled", "true");
+  await stop.focus();
+  await b.keyboard.press("Enter");
+  await expect(b.getByRole("group")).toBeVisible();
+  await expect(stop).toBeFocused();
+  expect(stopsSent).toEqual([]);
+
+  // Once tab A's bulk is answered, tab B's Stop is sent from its own snapshot and judged by the server lead by lead.
+  release();
+  await expect(stop).not.toHaveAttribute("aria-disabled", "true");
+  await stop.click();
+  await expect(b.getByRole("status").filter({ hasText: "Daniel Price in Physio follow-up: This lead changed since you confirmed this" })).toBeVisible();
+  // One Stop was pressed: every send of it (either tab may send a stored press) carries its one bulk id.
+  expect(new Set(stopsSent.map((b) => (JSON.parse(b) as { bulkId: string }).bulkId)).size).toBe(1);
+  await b.close();
+});
+
+test("on the person page, a lead in a bulk on its way waits for it: its controls are off and the row says why (verifier B1 on 4363270)", async ({ page, context }) => {
+  const f = await fakePeopleApp("people-person-busy");
+  let release: () => void = () => undefined;
+  const held = new Promise<void>((r) => (release = r));
+  await context.route("**/api/bulk", async (route) => {
+    // Held before it reaches the server, until released.
+    await held;
+    await route.continue();
+  });
+  const person = await context.newPage();
+  await at(person, f, `/leads/people/${f.person("Daniel Price")}`);
+  const row = person.getByRole("region", { name: "Campaigns" }).getByRole("listitem").filter({ hasText: "Physio follow-up" });
+  await expect(row.getByRole("button", { name: "Pause: Daniel Price in Physio follow-up" })).toBeEnabled();
+
+  await at(page, f, `/leads?campaign=${f.campaigns.followUp}`);
+  await leadRow(page, "Daniel Price").getByRole("checkbox").check();
+  await page.getByRole("toolbar").getByRole("button", { name: "Pause" }).click();
+  await page.getByRole("group").getByRole("button", { name: "Pause" }).click();
+
+  await expect(row).toContainText("A bulk change from Leads that includes this campaign enrollment is on its way.");
+  await expect(row.getByRole("button", { name: "Pause: Daniel Price in Physio follow-up" })).toBeDisabled();
+  release();
+  await expect(row.getByText("A bulk change from Leads")).toHaveCount(0);
+  await person.close();
+});
+
+test("a note whose answer was lost is not confirmed, not refused; the next read shows it stored, once (verifier F1 on 4363270)", async ({ page }) => {
+  const f = await fakePeopleApp("people-note-lost");
+  let lost = 0;
+  let reread: () => void = () => undefined;
+  const rereadHeld = new Promise<void>((r) => (reread = r));
+  let holdActivity = false;
+  await page.route("**/api/people/*/notes", async (route) => {
+    if (lost++ === 0) {
+      await route.fetch();
+      holdActivity = true;
+      return route.abort("failed");
+    }
+    return route.continue();
+  });
+  // The read after the lost answer is held, so the page's interim sentence can be seen.
+  await page.route("**/api/people/*/activity", async (route) => {
+    if (holdActivity) await rereadHeld;
+    return route.continue();
+  });
+  await at(page, f, `/leads/people/${f.person("Daniel Price")}`);
+  const activity = page.getByRole("region", { name: "Activity" });
+  await activity.getByLabel("A note about Daniel").fill("Asked for a follow-up in spring.");
+  await activity.getByRole("button", { name: "Add note" }).click();
+  await expect(activity.getByText("Not confirmed yet.")).toBeVisible();
+  await expect(activity.getByText("The note wasn’t added.")).toHaveCount(0);
+  reread();
+  // The next read holds the note: the page says it was added, and shows it once.
+  await expect(activity.getByRole("status").filter({ hasText: "Note added." })).toBeVisible();
+  await expect(activity.getByText("Asked for a follow-up in spring.", { exact: true })).toHaveCount(1);
+});

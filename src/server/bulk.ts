@@ -57,11 +57,31 @@ export interface BulkRules {
   inScope(campaignId: string, scope: string | null): boolean;
   /** One per-lead answer as the bulk reports it (B4). */
   report(result: BulkControlResult): BulkControlResult;
+  /**
+   * The items a press applies (B1): the confirmation's, as sent, never the scope resolved again at the press. `context`
+   * gives what a mutation that re-resolves the scope would read; the app never calls it.
+   */
+  pressItems(items: readonly PressItem[], context: PressContext): Promise<readonly PressItem[]>;
   /** The enrollment rule's channel test, for add (B6); `undefined` keeps the import's own. */
   usable: ((reach: Reach) => boolean) | undefined;
 }
 
+/** One item of a press: an enrollment and the precondition its confirmation showed. */
+export interface PressItem {
+  readonly enrollmentId: string;
+  readonly expect: LeadExpectation;
+}
+/** What the press could read at its instant, for `BulkRules.pressItems`. */
+export interface PressContext {
+  readonly store: OutreachStore;
+  readonly scope: string | null;
+  readonly action: BulkControlAction;
+  readonly at: number;
+  readonly readOf: (state: SubjectState, at: number) => EnrollmentRead;
+}
+
 export const DEFAULT_BULK_RULES: BulkRules = {
+  pressItems: (items) => Promise.resolve(items),
   perLeadRequestId: (bulkId, enrollmentId) => `${bulkId}/${enrollmentId}`,
   precondition: (expect) => expect,
   inScope: (campaignId, scope) => scope === null || campaignId === scope,
@@ -233,7 +253,8 @@ export function bulkRoutes(app: Hono, deps: BulkDependencies): void {
     // The bulk id is bound to its body before any lead is touched; each item is then its own per-lead request (B2).
     if ((await store.bindBulkRequest(body.data.bulkId, pressed, bodyHash, at)) === "different") return refused(c, BULK_REQUEST_REUSED);
     const results: BulkControlResult[] = [];
-    for (const item of items) {
+    const applied = await rules.pressItems(items, { store, scope: body.data.campaignId, action: pressed, at, readOf: deps.readOf });
+    for (const item of applied) {
       if (!(await store.engine.subject(item.enrollmentId, Date.parse(deps.now())))) {
         results.push(rules.report({ enrollmentId: item.enrollmentId, outcome: "refused", reason: "There is no such lead.", replayed: false }));
         continue;

@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { ActivityEntry, ActivityNote, ActivityView, DependentTrackState, NoteAnswer } from "../shared/api.ts";
-import { postJson } from "./api.ts";
+import { ApiRequestError, postJson } from "./api.ts";
 import { useLiveRead } from "./controls/useLiveRead.ts";
 import { ErrorState, Section } from "./components.tsx";
 import { DECLINED_PATH_LINE, OUTCOME_TITLE, dateIn, declineTrackLine, dialledLine } from "./calls/wording.ts";
@@ -56,7 +56,7 @@ export function Activity({ path, reads, notes }: { path: string; reads: number; 
         ) : undefined
       }
     >
-      <NoteBox {...notes} onAdded={retry} />
+      <NoteBox {...notes} onAdded={retry} storedIds={result.state === "ready" ? result.data.notes.map((n) => n.id) : null} />
       {result.state === "error" ? (
         <ErrorState title="The activity didn’t load." message={result.message} onRetry={retry} />
       ) : entries === null ? (
@@ -360,6 +360,11 @@ export type NoteBoxProps = { readonly kind: "person"; readonly path: string; rea
 
 type NoteSend = { readonly requestId: string; readonly body: string; readonly scope: "person" | "company" };
 
+/** A failed note send: refused by the server (a definite 4xx answer), or no answer, when it may have been stored. */
+export function noteSendFailure(error: unknown): "refused" | "no_answer" {
+  return error instanceof ApiRequestError && error.status >= 400 && error.status < 500 ? "refused" : "no_answer";
+}
+
 /**
  * The press of Add note (review bot on 9daf7c0): the unchanged note of a send that had no answer keeps its request id, so
  * the server stores it once whether the first send arrived or not; a changed note or scope is a new note.
@@ -373,13 +378,13 @@ export function nextNotePress(unanswered: NoteSend | null, text: string, scope: 
  * The prototype's note box: a note about the person, or, ticked, a company note shown for everyone at the company. A
  * company lead's notes are company notes. The request id is fixed at the press, so Try again stores the note once.
  */
-function NoteBox(props: NoteBoxProps & { onAdded: () => void }) {
+function NoteBox(props: NoteBoxProps & { onAdded: () => void; /** The ids of the notes the record's last read holds. */ storedIds: readonly string[] | null }) {
   const fieldId = useId();
   const shareId = useId();
   const [text, setText] = useState("");
   const [share, setShare] = useState(props.kind === "company");
   const [sending, setSending] = useState<NoteSend | null>(null);
-  const [state, setState] = useState<{ kind: "idle" } | { kind: "saving" } | { kind: "saved"; scope: "person" | "company" } | { kind: "failed"; message: string }>({ kind: "idle" });
+  const [state, setState] = useState<{ kind: "idle" } | { kind: "saving" } | { kind: "saved"; scope: "person" | "company" } | { kind: "failed"; message: string } | { kind: "unconfirmed" }>({ kind: "idle" });
   const field = useRef<HTMLTextAreaElement | null>(null);
   const statusRef = useRef<HTMLElement | null>(null);
   const tooLong = text.length > NOTE_MAX;
@@ -395,10 +400,24 @@ function NoteBox(props: NoteBoxProps & { onAdded: () => void }) {
         setState({ kind: "saved", scope: note.scope });
         props.onAdded();
       })
-      .catch((e: unknown) => setState({ kind: "failed", message: e instanceof Error ? e.message : "The server didn’t answer." }));
+      .catch((e: unknown) => {
+        // Only the server's refusal says the note was not added; with no answer it may be stored (verifier F1 on 4363270).
+        if (noteSendFailure(e) === "refused") setState({ kind: "failed", message: e instanceof Error ? e.message : "" });
+        else {
+          setState({ kind: "unconfirmed" });
+          props.onAdded();
+        }
+      });
   };
+  // A send with no answer is settled by the next read that holds it: the note was added, once.
+  const { storedIds } = props;
+  if (state.kind === "unconfirmed" && sending && storedIds?.includes(`record-note:${sending.requestId}`)) {
+    setState({ kind: "saved", scope: sending.scope });
+    setSending(null);
+    if (text.trim() === sending.body) setText("");
+  }
   useEffect(() => {
-    if (state.kind === "saved" || state.kind === "failed") statusRef.current?.focus();
+    if (state.kind === "saved" || state.kind === "failed" || state.kind === "unconfirmed") statusRef.current?.focus();
   }, [state]);
   const setStatusRef = (el: HTMLElement | null) => {
     statusRef.current = el;
@@ -449,6 +468,16 @@ function NoteBox(props: NoteBoxProps & { onAdded: () => void }) {
         <p role="status" tabIndex={-1} ref={setStatusRef} className="rounded-field bg-you-soft px-3 py-2 text-[14px] text-base-content outline-offset-2">
           {state.scope === "company" ? `Company note added. It shows for everyone at ${props.company}.` : "Note added."}
         </p>
+      )}
+      {state.kind === "unconfirmed" && sending && (
+        <div role="status" tabIndex={-1} ref={setStatusRef} className="flex flex-wrap items-center gap-3 rounded-field bg-pause-soft px-3 py-2 text-[14px] outline-offset-2">
+          <span className="min-w-0 flex-[1_1_240px] text-base-content">
+            <b className="font-semibold">Not confirmed yet.</b> The server didn’t answer, so the note may already be saved. Trying again sends the same note, and it is added only once.
+          </span>
+          <button type="button" className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={() => send(sending)}>
+            Try again
+          </button>
+        </div>
       )}
       {state.kind === "failed" && sending && (
         <div role="alert" tabIndex={-1} ref={setStatusRef} className="flex flex-wrap items-center gap-3 rounded-field bg-crit-soft px-3 py-2 text-[14px] outline-offset-2">

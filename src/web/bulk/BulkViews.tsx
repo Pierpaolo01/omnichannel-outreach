@@ -3,6 +3,9 @@ import type { BulkAddAnswer, BulkControlAction, BulkControlAnswer, CampaignListI
 import type { Bulk } from "./useBulk.ts";
 import { addResultText, bulkPendingText, controlResultText } from "./wording.ts";
 
+/** Why a bulk confirmation waits: one bulk at a time from a browser (src/web/bulk/requests.ts). */
+export const BULK_BUSY = "Another bulk change is on its way from this browser. This one waits until it is answered, then sends what it shows.";
+
 const BAR_BUTTON = "btn btn-sm border-[color-mix(in_srgb,var(--color-band-ink)_35%,transparent)] bg-transparent font-medium text-band-ink hover:border-band-ink hover:bg-transparent disabled:border-[color-mix(in_srgb,var(--color-band-ink)_20%,transparent)] disabled:bg-transparent disabled:text-band-muted";
 
 /**
@@ -64,7 +67,25 @@ export function BulkBar({
  * do, the action and Cancel. A preview with nothing to do offers Close only. Not a modal: focus moves to the action (or
  * Close) when it opens, and Escape or Cancel returns it to the control that opened it.
  */
-export function BulkConfirm({ text, action, canConfirm, onConfirm, onCancel }: { text: string; action: string; canConfirm: boolean; onConfirm: () => void; onCancel: () => void }) {
+export function BulkConfirm({
+  text,
+  action,
+  canConfirm,
+  busy,
+  onConfirm,
+  onCancel,
+}: {
+  text: string;
+  action: string;
+  canConfirm: boolean;
+  /**
+   * Another bulk is on its way from this browser (verifier B1 on 4363270): the confirmation stays, keeps its snapshot and
+   * says why it waits; its action is aria-disabled, so focus stays on it, and pressing it sends nothing.
+   */
+  busy: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
   const textId = useId();
   const first = useRef<HTMLButtonElement | null>(null);
   useEffect(() => first.current?.focus(), [text]);
@@ -82,10 +103,19 @@ export function BulkConfirm({ text, action, canConfirm, onConfirm, onCancel }: {
     >
       <span id={textId} className="min-w-0 flex-[1_1_320px] text-base-content [overflow-wrap:anywhere]">
         {text}
+        {busy && canConfirm && <span className="mt-1 block text-ink-2">{BULK_BUSY}</span>}
       </span>
       <span className="flex flex-wrap gap-2">
         {canConfirm && (
-          <button type="button" ref={first} className="btn btn-primary btn-sm font-semibold" onClick={onConfirm}>
+          <button
+            type="button"
+            ref={first}
+            aria-disabled={busy}
+            className={`btn btn-primary btn-sm font-semibold ${busy ? "cursor-not-allowed opacity-50" : ""}`}
+            onClick={() => {
+              if (!busy) onConfirm();
+            }}
+          >
             {action}
           </button>
         )}

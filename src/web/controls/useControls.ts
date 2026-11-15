@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { ApiError, LeadControlApi } from "../../shared/api.ts";
 import { browserStorage } from "../calls/storage.ts";
+import { bulkPendingFor, isBulkKey } from "../bulk/requests.ts";
+
+const local = browserStorage(() => window.localStorage);
 import { ControlRequests, NoControlAnswer, controlKey, shownResult, isControlKey, type CampaignExpectation, type ControlResult, type ControlTarget, type LeadExpectation, type PressEntry, type PressOutcome, type SendAnswer } from "./requests.ts";
 
 /** A 4xx whose code says the server refused the request is definite; anything else is no answer (as the call desk reads it). */
@@ -30,6 +33,8 @@ export interface Controls {
   pending(target: ControlTarget): PressEntry | null;
   /** Its last send from this page had no answer. */
   unconfirmed(target: ControlTarget): boolean;
+  /** A bulk press from Leads, stored in this browser, names this lead (ticket 18): its controls wait for it. */
+  bulkPending(target: ControlTarget): boolean;
   /** The last definite answer this page got for a target, until dismissed or the next press. */
   result(target: ControlTarget): ControlResult | null;
   dismiss(target: ControlTarget): void;
@@ -88,6 +93,8 @@ export function useControls(targets: readonly ControlTarget[], refresh: () => Pr
     requests.watch(targetsRef.current);
     const onStorage = (e: StorageEvent) => {
       if (isControlKey(e.key)) requests.storageChanged(targetsRef.current);
+      // A bulk press stored or answered on Leads: the rows it names wait, or stop waiting (verifier B1 on 4363270).
+      if (isBulkKey(e.key)) render();
     };
     const onOnline = () => requests.retryNow();
     window.addEventListener("storage", onStorage);
@@ -126,6 +133,7 @@ export function useControls(targets: readonly ControlTarget[], refresh: () => Pr
       press,
       pending: (t: ControlTarget) => requests.pendingFor(t),
       unconfirmed: (t: ControlTarget) => requests.unconfirmed(t),
+      bulkPending: (t: ControlTarget) => t.kind === "lead" && bulkPendingFor(local, t.id),
       result: (t: ControlTarget) => results.get(controlKey(t)) ?? null,
       dismiss,
       retryNow: () => requests.retryNow(),

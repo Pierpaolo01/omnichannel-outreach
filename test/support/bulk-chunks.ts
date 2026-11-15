@@ -21,6 +21,8 @@ const MAX_SEEDS = 40;
 
 /** Every behaviour the fixed seeds must reach between them. */
 export const BULK_FEATURES: readonly string[] = [
+  // Verifier F2 on 4363270: a selected row joins a confirmation's scope before its press (seed 2 among the fixed seeds).
+  "a-lead-joined-the-scope-before-the-press",
   "add-already-enrolled",
   "add-confirmation",
   "add-enrolled",
