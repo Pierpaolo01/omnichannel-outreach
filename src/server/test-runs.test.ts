@@ -172,6 +172,21 @@ describe("a test run before launch (ADR 0003 'Ticket 21')", () => {
     expect((await w.tab()).run?.steps.find((r) => r.stepId === "c1")?.state).toBe("not_reached");
   });
 
+  test("a test call carried into the next day while its campaign is paused takes that day's capacity, as it is listed (review bot on 55d6ac6)", async () => {
+    const w = await world();
+    expect((await w.h.request("PUT", "/api/call-settings", { dailyCapacity: 1, userZone: "Europe/London" })).status).toBe(200);
+    await w.h.request("PUT", `/api/campaigns/${w.campaign}/test-contacts`, { email: OWN_EMAIL, mobile: OWN_MOBILE });
+    expect((await w.h.launch(w.campaign)).status).toBe(200);
+    await w.run();
+    await w.h.advanceTo(MONDAY_9 + 5 * MIN);
+    expect((await w.h.request<CallsView>("GET", "/api/calls")).body.readyNow.filter((c) => c.test)).toHaveLength(1);
+    expect((await w.h.request("POST", `/api/campaigns/${w.campaign}/pause`, { requestId: "p-1" })).status).toBe(200);
+    await w.h.advanceTo(Date.parse("2026-11-03T09:30:00Z"));
+    const tuesday = (await w.h.request<CallsView>("GET", "/api/calls")).body;
+    expect(tuesday.readyNow.filter((c) => c.test)).toHaveLength(1);
+    expect([tuesday.committed, tuesday.capacityReached]).toEqual([1, true]);
+  });
+
   test("an edit stops the running test, and the warning holds until a test runs on the new version; launch is never blocked by it", async () => {
     const w = await world();
     await w.h.request("PUT", `/api/campaigns/${w.campaign}/test-contacts`, { email: OWN_EMAIL, mobile: "" });

@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { enterMain, end, evaluate } from "../../src/domain/sequence/progress.ts";
-import type { SubjectState } from "../../src/domain/sequence/state.ts";
+import type { CallDay, SubjectState } from "../../src/domain/sequence/state.ts";
+import { startOfLocalDay } from "../../src/domain/sequence/clock.ts";
 import { DEFAULT_RULES } from "../../src/server/engine/rules.ts";
 import type { TestRunOptions } from "./generated-test-runs.ts";
 
@@ -98,6 +99,31 @@ export const TEST_RUN_MUTATIONS: Readonly<Record<string, TestRunMutation>> = {
     patch: (h) => {
       const db = (h.store.engine as unknown as { db: DatabaseSync }).db;
       db.exec("CREATE TRIGGER keep_test_bindings BEFORE UPDATE OF released_at ON sms_bindings WHEN NEW.owner_subject LIKE 'test-%' BEGIN SELECT RAISE(IGNORE); END;");
+    },
+  },
+  // Review bot on 55d6ac6: the committed-calls count leaves out a test's call carried into a day that starts while its
+  // campaign is paused, though the list shows it (a test run is not held by the campaign pause).
+  "a paused campaign's carried test calls take no capacity": {
+    invariant: "T10",
+    seed: 1,
+    patch: (h) => {
+      const store = h.store.engine as unknown as { callDayAt: (now: number) => CallDay; db: DatabaseSync };
+      const counted = store.callDayAt.bind(store);
+      store.callDayAt = (now) => {
+        const day = counted(now);
+        const start = startOfLocalDay(day.day, day.userZone);
+        if ([0, 6].includes(new Date(start + 12 * 3_600_000).getUTCDay())) return day;
+        const left = Number(
+          store.db
+            .prepare(
+              `SELECT COUNT(*) AS n FROM call_tasks t JOIN test_runs r ON r.id = t.subject_id
+               WHERE t.placed_wall < :start AND (t.closed_wall IS NULL OR t.closed_wall > :start) AND (r.ended_wall IS NULL OR r.ended_wall >= :start)
+                 AND EXISTS (SELECT 1 FROM hold_intervals hi WHERE hi.scope = 'campaign' AND hi.owner_id = r.campaign_id AND hi.from_wall <= :start AND (hi.to_wall IS NULL OR hi.to_wall > :start))`,
+            )
+            .get({ start })?.["n"] ?? 0,
+        );
+        return { ...day, committed: Math.max(0, day.committed - left) };
+      };
     },
   },
   "an edit leaves the test running": {

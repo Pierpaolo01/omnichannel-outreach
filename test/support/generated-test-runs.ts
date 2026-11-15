@@ -82,7 +82,15 @@ export async function runTestRuns(seed: number, options: TestRunOptions = {}): P
     { name: "Nia Cole", email: rand() < 0.8 ? "nia@harbour.example" : null, mobile: rand() < 0.7 ? "+447700900112" : null },
     ...(rand() < 0.6 ? [{ name: "Owen Hart", email: "owen@quayside.example", mobile: rand() < 0.5 ? "+447700900113" : null }] : []),
   ];
-  const emailSteps = 1 + Math.floor(rand() * 3);
+  // The call stream (T10, review bot on 55d6ac6), from a random source of its own: a small daily call capacity; in some runs
+  // the user leaves test calls on the list, so they are carried into later days; and in some of those, once a test call is
+  // on the list, the user launches, pauses, lets the night pass with the call open and resumes the next morning, when the
+  // leads' first calls fall due (their email track is one step) and compete for the room the carried test call leaves.
+  const rc = random(seed ^ 0x2110);
+  const callCapacity = 1 + Math.floor(rc() * 3);
+  const logsTestCalls = rc() < 0.6;
+  let carryWhilePaused = !logsTestCalls && rc() < 0.6;
+  const emailSteps = carryWhilePaused ? 1 : 1 + Math.floor(rand() * 3);
   const smsSteps = 1 + Math.floor(rand() * 2);
   const together = rand() < 0.5;
   const phone = rand() < 0.5;
@@ -109,7 +117,8 @@ export async function runTestRuns(seed: number, options: TestRunOptions = {}): P
   });
   h.maxWrites = options.maxWrites ?? null;
   await h.tick();
-  await h.request("PUT", "/api/call-settings", { dailyCapacity: 10, userZone: "Europe/London" });
+
+  await h.request("PUT", "/api/call-settings", { dailyCapacity: callCapacity, userZone: "Europe/London" });
   const { campaign } = await h.createCampaign("Clinics, London", {
     businesses: [business({ business_id: "b1", business_name: "Harbour Lane Physio" }), business({ business_id: "b2", business_name: "Quayside Physio" })],
     people: leads.map((l, i) =>
@@ -130,6 +139,8 @@ export async function runTestRuns(seed: number, options: TestRunOptions = {}): P
   let testedSinceEdit = false;
   let launched = false;
   let paused = false;
+  /** The record's own campaign pauses, as wall intervals (an open one ends at Infinity). */
+  const pauses: { from: number; to: number }[] = [];
   let requests = 0;
   const leadReplied = new Set<string>();
   options.patch?.(h, { leadEmails, renderAsOf: (id) => runs.get(id)?.renderAs ?? null });
@@ -234,6 +245,26 @@ export async function runTestRuns(seed: number, options: TestRunOptions = {}): P
     // T5, from the record's own account of edits and Run tests.
     const read = await tab();
     if (read.noTestSinceEdit !== !testedSinceEdit) problems.push(`T5: the read says noTestSinceEdit ${String(read.noTestSinceEdit)}; the record says ${String(!testedSinceEdit)} (${event})`);
+    // T10 (review bot on 55d6ac6): every call on the list takes the day's capacity, test or lead. On each user day, the calls
+    // placed that day never exceed the capacity less the calls carried into it that are listed on it: open at its start, of a
+    // subject that had not ended by then, on a weekday (the calling hours), and, for a lead, in a campaign not paused at its
+    // start; a test run's call is listed while its campaign is paused (ADR 0003 "Ticket 21").
+    const tasks = db.prepare(
+      `SELECT t.subject_id, t.placed_wall, t.closed_wall, COALESCE(e.ended_wall, r.ended_wall) AS ended_wall, r.id IS NOT NULL AS test
+         FROM call_tasks t LEFT JOIN enrollments e ON e.id = t.subject_id LEFT JOIN test_runs r ON r.id = t.subject_id`,
+    ).all().map((t) => ({ placed: Number(t["placed_wall"]), closed: t["closed_wall"] == null ? Infinity : Number(t["closed_wall"]), ended: t["ended_wall"] == null ? Infinity : Number(t["ended_wall"]), test: Number(t["test"]) === 1 }));
+    // Every user day from the first call placed to now, a day with only carried calls included.
+    const days = new Set<string>();
+    if (tasks.length > 0) for (let d = londonMidnight(londonDay(Math.min(...tasks.map((t) => t.placed)))); d <= h.clock; d += DAY) days.add(londonDay(d));
+    for (const day of days) {
+      const start = londonMidnight(day);
+      const weekday = new Date(start + 12 * H).getUTCDay();
+      const placed = tasks.filter((t) => londonDay(t.placed) === day).length;
+      const heldAtStart = pauses.some((x) => x.from <= start && start < x.to);
+      const carried = weekday === 0 || weekday === 6 ? 0 : tasks.filter((t) => t.placed < start && t.closed > start && t.ended >= start && (t.test || !heldAtStart)).length;
+      if (carried > 0 && t10Paused(heldAtStart, tasks, start)) features.add("a-test-call-carried-while-paused");
+      if (placed > Math.max(0, callCapacity - carried)) problems.push(`T10: ${placed} calls placed on ${day} with ${carried} listed calls carried into it and a capacity of ${callCapacity} (${event})`);
+    }
     // T9: an ended test holds no SMS conversation.
     for (const b of db.prepare("SELECT b.owner_subject FROM sms_bindings b JOIN test_runs t ON t.id = b.owner_subject WHERE b.released_at IS NULL AND t.ended IS NOT NULL").all()) {
       problems.push(`T9: ended test run ${String(b["owner_subject"])} still holds its SMS conversation (${event})`);
@@ -253,8 +284,31 @@ export async function runTestRuns(seed: number, options: TestRunOptions = {}): P
     const running = runningRun();
     let event = "";
     // A test call on the list is logged more often than chance would: the outcomes are what the call paths are about.
-    const ready = phone && running !== null ? (await h.request<CallsView>("GET", "/api/calls")).body.readyNow.find((c) => c.test) : undefined;
-    if (ready && rand() < 0.6) {
+    const ready = phone && running !== null && logsTestCalls ? (await h.request<CallsView>("GET", "/api/calls")).body.readyNow.find((c) => c.test) : undefined;
+    const listedTest = carryWhilePaused && phone && running !== null ? (await h.request<CallsView>("GET", "/api/calls")).body.readyNow.find((c) => c.test) : undefined;
+    if (listedTest) {
+      carryWhilePaused = false;
+      if (!launched) {
+        const res = await h.request("POST", `/api/campaigns/${campaign.id}/launch`, { definitionVersion: (await tab()).definitionVersion });
+        if (res.status === 200) launched = true;
+      }
+      // Paused just before midnight, so the leads' clocks lose only the night and their first calls fall due the next morning.
+      await h.advanceTo(londonMidnight(londonDay(h.clock + DAY)) - 10 * MIN);
+      if (launched && !paused && (await h.request("POST", `/api/campaigns/${campaign.id}/pause`, { requestId: `pause-${++requests}` })).status === 200) {
+        paused = true;
+        pauses.push({ from: h.clock, to: Infinity });
+      }
+      await h.advanceTo(londonMidnight(londonDay(h.clock + 20 * MIN)) + 9 * H + 30 * MIN);
+      await check("a test call carried overnight while paused");
+      // The campaign resumes that morning: the leads' calls due that day compete for the room the carried test call left.
+      if (paused && (await h.request("POST", `/api/campaigns/${campaign.id}/resume`, { requestId: `pause-${++requests}` })).status === 200) {
+        paused = false;
+        const open = pauses.at(-1);
+        if (open) open.to = h.clock;
+      }
+      await h.advanceTo(h.clock + 6 * H);
+      event = "the campaign resumed the morning after";
+    } else if (ready && rand() < 0.6) {
       const outcome = pick(["no_answer", "not_interested", "not_interested", "interested"] as const);
       const view = (await h.request<{ numbers: { detailId: string }[] }>("GET", `/api/call-tasks/${ready.taskId}`)).body;
       const declined = outcome === "not_interested" ? { declinedPath: rand() < 0.5 ? path : pick(["stop", "continue", "win_back"] as const) } : {};
@@ -342,6 +396,11 @@ export async function runTestRuns(seed: number, options: TestRunOptions = {}): P
       const res = await h.request("POST", `/api/campaigns/${campaign.id}/${paused ? "resume" : "pause"}`, { requestId: `pause-${++requests}` });
       if (res.status === 200) {
         paused = !paused;
+        if (paused) pauses.push({ from: h.clock, to: Infinity });
+        else {
+          const open = pauses.at(-1);
+          if (open) open.to = h.clock;
+        }
         if (paused) features.add("a-campaign-pause");
       }
       event = paused ? "pause" : "resume";
@@ -362,4 +421,19 @@ export async function runTestRuns(seed: number, options: TestRunOptions = {}): P
   if (deliveries().some((d) => leadIds.has(d.subjectId)) && deliveries().some((d) => isTest(d.subjectId))) features.add("tests-and-leads-share-senders");
   await h.store.close();
   return { problems: [...new Set(problems)], stats: { features: [...features].sort() } };
+}
+
+/** The London date of an instant, YYYY-MM-DD. */
+function londonDay(t: number): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit" }).format(t);
+}
+
+/** The instant London's day `day` starts: the test period has no clock change, so GMT midnight. */
+function londonMidnight(day: string): number {
+  return Date.parse(`${day}T00:00:00Z`);
+}
+
+/** Whether a test call was carried into a day that started inside a campaign pause. */
+function t10Paused(heldAtStart: boolean, tasks: readonly { placed: number; closed: number; ended: number; test: boolean }[], start: number): boolean {
+  return heldAtStart && tasks.some((t) => t.test && t.placed < start && t.closed > start && t.ended >= start);
 }

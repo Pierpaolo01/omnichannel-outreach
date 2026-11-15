@@ -11,8 +11,8 @@ import { TEST_RUN_MUTATIONS } from "./test-run-mutations.ts";
  */
 
 export const TEST_RUN_SEED = 21_000;
-/** Offsets from TEST_RUN_SEED, chosen from a sweep of all 100 (15 November 2026) to reach every behaviour below, and each mutation's killing seed. */
-export const TEST_RUN_FIXED_SEEDS: readonly number[] = [0, 2, 5, 7, 39, 40, 59, 75];
+/** Offsets from TEST_RUN_SEED, re-chosen from a sweep of all 100 after the call stream (review bot on 55d6ac6), to reach every behaviour below, and each mutation's killing seed. */
+export const TEST_RUN_FIXED_SEEDS: readonly number[] = [0, 1, 2, 7, 8, 10, 59];
 const SEARCH_SEEDS = 100;
 const MAX_SEEDS = 30;
 const RUN_WRITES = 10_000;
@@ -24,6 +24,7 @@ export const TEST_RUN_FEATURES: readonly string[] = [
   "a-lead-s-email-refused-as-a-test-contact",
   "a-test-after-another-ended",
   "a-test-before-launch",
+  "a-test-call-carried-while-paused",
   "a-test-call-interested",
   "a-test-call-no-answer",
   "a-test-call-not-interested-continue",

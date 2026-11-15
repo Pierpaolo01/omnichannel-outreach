@@ -864,7 +864,9 @@ export class SqliteEngineStore implements EngineStore {
            SELECT 1 FROM call_tasks h WHERE h.subject_id = t.subject_id AND h.id <> t.id AND h.placed_wall < :start AND (h.closed_wall IS NULL OR h.closed_wall > :start)
              AND (SELECT a.outcome FROM call_attempts a WHERE a.task_id = h.id AND a.at_wall < :start AND a.outcome <> 'skip_for_now' ORDER BY a.at_wall DESC, a.rowid DESC LIMIT 1) = 'callback_requested')
          AND NOT EXISTS (
-           SELECT 1 FROM hold_intervals hi WHERE ((hi.scope = 'campaign' AND hi.owner_id = c.id) OR (hi.scope IN ('lead', 'ended') AND hi.owner_id = e.id))
+           -- A campaign pause holds a lead, never a test run (\`campaignLets\`, which \`runs\` and the listing rule read; review
+           -- bot on 55d6ac6): a test call stays listed while its campaign is paused, so it takes the day's capacity.
+           SELECT 1 FROM hold_intervals hi WHERE ((hi.scope = 'campaign' AND hi.owner_id = c.id AND e.kind = 'enrollment') OR (hi.scope IN ('lead', 'ended') AND hi.owner_id = e.id))
              AND hi.from_wall <= :start AND (hi.to_wall IS NULL OR hi.to_wall > :start))
          AND (tr.id IS NOT NULL AND tr.mobile_key IS NOT NULL AND tr.mobile_bad = 0 OR EXISTS (
            SELECT 1 FROM live_contact_details d WHERE d.channel = 'phone' AND d.bad = 0
