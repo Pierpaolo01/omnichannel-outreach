@@ -4,7 +4,8 @@ import { Engine, TickQueue, type EngineDependencies, type EngineHooks } from "..
 import type { AttemptRef, HandoverRequest, SendPort } from "../../src/server/engine/ports.ts";
 import type { EmailProviderSource } from "../../src/server/instantly/routes.ts";
 import type { Rules } from "../../src/server/engine/rules.ts";
-import { openSqliteStore } from "../../src/server/persistence/sqlite-store.ts";
+import type { Migration } from "../../src/server/persistence/migrations.ts";
+import { openDatabase, openSqliteStore, openStoreOn } from "../../src/server/persistence/sqlite-store.ts";
 import type { OutreachStore } from "../../src/server/persistence/store.ts";
 import type { CampaignDefinition } from "../../src/domain/sequence/definition.ts";
 import type { Campaign, EnrollmentProgress, ImportRecord, PersonRecord, SequenceView } from "../../src/shared/api.ts";
@@ -40,6 +41,8 @@ export interface EngineHarnessOptions {
   readonly engine?: Partial<EngineDependencies>;
   /** A database file instead of an in-memory one, so a test can reopen it (migration tests). */
   readonly databasePath?: string;
+  /** The migrations to apply instead of every one: a prefix of the list stands for an older build's database (migration tests). */
+  readonly migrations?: readonly Migration[];
   /** The prefix of the engine's new ids: a harness reopening a database another wrote gives a fresh one, so its ids do not collide. */
   readonly idPrefix?: string;
   /** A fake SMS provider's numbers (ticket 13). Without them the engine has the unprovisioned SMS port. */
@@ -89,7 +92,7 @@ export class EngineHarness {
     this.hooks = options.hooks ?? {};
     this.engineIds = sequentialIds(options.idPrefix ?? "att");
     this.clock = options.start;
-    this.store = openSqliteStore(options.databasePath ?? ":memory:");
+    this.store = options.migrations ? openStoreOn(openDatabase(options.databasePath ?? ":memory:"), options.migrations) : openSqliteStore(options.databasePath ?? ":memory:");
     // Count the engine's subject writes: a deterministic measure of a run's work, the same on every machine.
     const store = this.store.engine;
     const update = store.update.bind(store);

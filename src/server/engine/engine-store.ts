@@ -24,7 +24,7 @@ export interface SenderAccountConfig {
   readonly id: string;
   readonly channel: "email" | "sms";
   readonly label: string;
-  /** Daily capacity on the account's reset day. */
+  /** Daily capacity on the account's reset day: a whole number, 0 when there is no room on it (`storableAccount`). */
   readonly capacity: number;
   /** The pacing gap; null for ADR 0003 4.1's default from the windows the account serves. */
   readonly gapMs: number | null;
@@ -34,6 +34,19 @@ export interface SenderAccountConfig {
   /** Why the provider says it cannot send, when not healthy, in the provider's own words (such as Instantly's "sending_off"). */
   readonly problem?: string | null;
   readonly resetZone: string;
+}
+
+/**
+ * A sender account as a port reported it, made storable (verifier, 15 November 2026). Capacity is a whole number of
+ * sends, 0 included: 0 is "no room on this reset day" (an Instantly inbox other senders used up, or with no daily limit),
+ * and the claim's capacity rule refuses it like any full account. A report the store cannot hold (a negative,
+ * fractional or non-finite capacity, an in-flight bound under 1, a gap that is not a positive whole number of
+ * milliseconds) holds that one account as `invalid_report` with no room, so it never fails the sync of the others.
+ */
+export function storableAccount<T extends SenderAccountConfig>(reported: T): T {
+  const whole = (n: number) => Number.isSafeInteger(n);
+  const valid = whole(reported.capacity) && reported.capacity >= 0 && whole(reported.k) && reported.k >= 1 && (reported.gapMs === null || (whole(reported.gapMs) && reported.gapMs > 0));
+  return valid ? reported : { ...reported, capacity: 0, k: 1, gapMs: null, healthy: false, problem: "invalid_report" };
 }
 
 export interface CampaignEngineRow {

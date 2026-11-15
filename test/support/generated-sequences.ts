@@ -26,6 +26,18 @@ import { dueAfter, firstOpen, higherPriority, inWindow, leadTimeOf, local, rende
  * sequence-model.ts: invariants 1-6, 8-13, 18-21, 24 and 26 of ADR 0003 section 8.
  */
 
+/** The record's next reset of `zone`'s day after `t`: the first instant whose local day is later, to the millisecond. */
+function nextResetAfter(t: number, zone: string): number {
+  const day = local(t, zone).day;
+  let [lo, hi] = [t, t + 27 * 3_600_000];
+  while (hi - lo > 1) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (local(mid, zone).day > day) hi = mid;
+    else lo = mid;
+  }
+  return hi;
+}
+
 export function random(seed: number): () => number {
   let a = seed >>> 0;
   return () => {
@@ -237,6 +249,15 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
   fake.overlapMs = pick([5, 15, 60]) * MINUTE;
   /** Each inbox's capacity over time, as the record knows it. */
   const capacityHistory = new Map(accounts.map((a) => [a.id, [[0, a.capacity]] as [number, number][]]));
+  /**
+   * Outside sends (verifier, 15 November 2026): other senders use an inbox up for the rest of its reset day, so the
+   * provider reports it with no room until the next reset. Drawn from a stream of their own, so a run without them
+   * keeps the course it had before they were added, and with it every recorded killing seed.
+   */
+  const outsideRand = random(seed ^ 0x0d75);
+  const outsideSends = !unlimited && outsideRand() < 0.3;
+  /** When each inbox had no room because of outside sends, as the record knows it. */
+  const outsideUse: { readonly id: string; readonly from: number; until: number }[] = [];
   /** Clock advances injected between a send's authorization and its call, by attempt and call instant. */
   const injectedDelay = new Map<string, number>();
   /** Keys the user marked sent, and when. */
@@ -589,6 +610,14 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       await userMarks();
       await advance(pick([HOUR, 6 * HOUR]));
     } else {
+      if (outsideSends && outsideRand() < 0.4) {
+        const a = accounts[Math.floor(outsideRand() * accounts.length)]!;
+        const until = nextResetAfter(h.clock, a.resetZone);
+        fake.usedUpUntil.set(a.id, until);
+        outsideUse.push({ id: a.id, from: h.clock, until });
+        features.add("outside-sends");
+        await h.tick();
+      }
       inject = unlimited ? 0 : 2;
       await advance(pick([MINUTE, HOUR, DAY]));
       inject = 0;
@@ -607,6 +636,8 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     fake.portHangs = false;
     transient = null;
     fake.rateLimitedUntil.clear();
+    fake.usedUpUntil.clear();
+    for (const o of outsideUse) o.until = Math.min(o.until, h.clock);
     for (const a of accounts) {
       a.healthy = true;
       a.quotaAvailable = true;
@@ -833,6 +864,27 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     }
     checkInFlight();
 
+    // 10, outside sends: no new work is claimed on an inbox on a reset day after the provider reported it had no room
+    // that day (its daily limit sent by others). Work already reserved may still be retried under its key.
+    const toldNoRoom = new Map<string, number>();
+    for (const n of fake.noRoomAnswers) {
+      const zone = accounts.find((a) => a.id === n.id)?.resetZone ?? "UTC";
+      const day = `${n.id}|${local(n.at, zone).day}`;
+      if (!toldNoRoom.has(day)) toldNoRoom.set(day, n.at);
+    }
+    if (toldNoRoom.size > 0) {
+      const firstClaims = new Map<string, Attempt>();
+      for (const a of allAttempts) {
+        const seen = firstClaims.get(a.idempotencyKey);
+        if (!seen || a.claimedWall < seen.claimedWall) firstClaims.set(a.idempotencyKey, a);
+      }
+      for (const [key, a] of firstClaims) {
+        const zone = accounts.find((x) => x.id === a.accountId)?.resetZone ?? "UTC";
+        const told = toldNoRoom.get(`${a.accountId}|${local(a.claimedWall, zone).day}`);
+        if (told !== undefined && told <= a.claimedWall) problem(`10: ${a.accountId} took new work ${key} for ${a.subjectId}/${a.stepId} at ${new Date(a.claimedWall).toISOString()} on a reset day it reported no room (from ${new Date(told).toISOString()})`);
+      }
+    }
+
     // 26. No attempt waits forever.
     for (const a of allAttempts) {
       if (a.state === "claimed" && now - a.claimedWall > SETTLING) problem(`26: ${a.id} has been claimed since ${new Date(a.claimedWall).toISOString()}`);
@@ -995,6 +1047,8 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     const acc = accounts.find((a) => a.id === accountId);
     if (!acc) return 0;
     if (acc.gapMs !== null) return acc.gapMs;
+    // An inbox other senders used up has no room: the default gap is then the floor, a minute (ADR 0003 4.1).
+    if (outsideUse.some((o) => o.id === accountId && o.from <= at && at < o.until)) return MINUTE;
     const capacity = (capacityHistory.get(accountId) ?? []).filter(([t]) => t <= at).at(-1)?.[1] ?? acc.capacity;
     const hours = campaigns
       .filter((c) => c.definition.emailPool.includes(accountId))
@@ -1237,7 +1291,9 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     for (const c of fake.handoverLog) bySender.set(c.sender, [...(bySender.get(c.sender) ?? []), c.at]);
     for (const [sender, times] of bySender) {
       for (let i = 1; i < times.length; i++) {
-        const gap = recordGap(sender, times[i]!);
+        // The gap is taken when a call is authorized (4.2), so it is the one in force at the earlier call; at an
+        // instant the inbox's capacity changed (outside sends), the smaller of the two.
+        const gap = Math.min(recordGap(sender, times[i - 1]!), recordGap(sender, times[i]!));
         if (times[i]! - times[i - 1]! < gap) problem(`11: ${sender} called ${times[i]! - times[i - 1]!} ms apart, under its gap of ${gap}`);
       }
     }

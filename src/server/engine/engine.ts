@@ -16,7 +16,7 @@ import { judgeCampaignControl, type LeadControl, type LeadExpectation } from "..
 import type { ControlView } from "../../shared/api.ts";
 import { effectOf } from "./controls-view.ts";
 import { impactDigest } from "./edit-impact.ts";
-import type { ControlRecord, DefinitionSave, EngineStore, ReplyEvent, SaveResult, StoredDefinition } from "./engine-store.ts";
+import { storableAccount, type ControlRecord, type DefinitionSave, type EngineStore, type ReplyEvent, type SaveResult, type StoredDefinition } from "./engine-store.ts";
 
 /** A control's answer. `effect`: the control's own effect, which the read previewed at that instant; null for a campaign's. */
 export type ControlAnswer = { readonly ok: true; readonly replayed: boolean; readonly effect: ControlView | null } | { readonly ok: false; readonly reason: string };
@@ -620,13 +620,15 @@ export class Engine {
   private async syncAccounts(): Promise<boolean> {
     let all = true;
     for (const channel of CHANNELS) {
-      const statuses = await this.bounded(() => this.ports[channel].accounts(), null);
+      let statuses = await this.bounded(() => this.ports[channel].accounts(), null);
       if (statuses === null) {
         all = false;
         await this.readFailed(channel, "accounts");
         continue;
       }
       this.readAnswered(channel, "accounts");
+      // One account's report the store cannot hold holds that account alone; it never fails the tick (`storableAccount`).
+      statuses = statuses.map(storableAccount);
       await this.store.upsertAccounts(statuses);
       // An account its provider no longer lists is disconnected: claims for it wait, and Needs attention lists it.
       await this.store.disconnectUnlisted(channel, statuses.map((a) => a.id));

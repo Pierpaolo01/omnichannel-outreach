@@ -522,7 +522,7 @@ A **test run** is its own record: `test_runs(id, campaign_id, render_as_enrollme
 
 Each email and SMS sender account has:
 
-- a daily capacity, a positive integer, counted on its reset day: Instantly's reset zone for email (ADR 0002 S5), the user's zone for SMS;
+- a daily capacity, a whole number of sends, counted on its reset day: Instantly's reset zone for email (ADR 0002 S5), the user's zone for SMS. 0 means no room on that reset day (amended 15 November 2026: "An account with no room" below);
 - a pacing gap: by default, the length of the shortest daily window among the tracks it serves, divided by its capacity, and at least 60 seconds. This way a full day's capacity fits inside the window. The preview shows the gap. A gap configured on the account replaces the default (built in 12b, PR 37 ruling 10);
 - `k`, a bound on attempts handed to the provider but not yet resolved, which is ADR 0002's in-flight bound, from 1 for email;
 - `next_slot_at`.
@@ -2352,6 +2352,18 @@ Both blocking findings are kinds of one rule, now stated at the head of this sec
 
 - **Sending with the laptop closed** (the ticket's first criterion): unverified. Operation is local-only and hosting is deferred (#28). What it depends on in this design: the worker runs in the server process and keeps one lease per database, so a hosted process would be that one worker, with the heartbeat, the notice and every rule unchanged; nothing here reads the laptop.
 - **The real providers.** No test contact is designated (#28) and Instantly writes stay off, so recovery against Instantly (ADR 0002's X5 and X6, including whether an idempotency key is honoured after an outage of days) is unverified; SMS has no provider.
+
+## An account with no room (fix, 15 November 2026)
+
+**The defect** (independent verifier, on the integration branch). An active Instantly inbox with daily limit 1, whose analytics count one send made today outside the app, is reported with capacity 0 (`limit − other senders`, ADR 0002 "as built"). The store's `CHECK (capacity > 0)` refused the account sync, so the tick threw, and so did saving a sequence and launching, which sync accounts too. An inbox with a daily limit of 0 or none (`no_daily_limit`, capacity 0) failed the same way. One inbox stopped the whole engine.
+
+**The rule.** A sender account's capacity is a whole number of sends on its reset day, 0 included. 0 is "no room now": the claim's capacity rule (4.2) refuses it as it refuses any full account, a due step that may use only such accounts is listed in Needs attention as waiting for capacity until the first of them resets (ticket 20a's read), and every other account and channel goes on. Nothing new is added to the claim: `used < capacity` is already false at 0. A capacity of 0 gives the default gap its floor, one minute (4.1), which only a same-key retry of work already reserved can take on such a day.
+
+**The boundary** (fixing the class, not the example). Every value a port reports about an account passes through one function, `storableAccount` (`src/server/engine/engine-store.ts`), which the engine applies to each report in its account sync before anything is stored. A report the store cannot hold (a negative, fractional or non-finite capacity, an in-flight bound under 1, a gap that is not a positive whole number of milliseconds) holds that one account, unhealthy with the problem `invalid_report` and no room, and Needs attention names it among sender problems. So no account's report can make the sync, or the tick, throw, and the account sends again once its report is valid. This covers the Instantly adapter and any SMS port alike.
+
+**By construction.** Migration 18 rebuilds `sender_accounts` with `CHECK (capacity >= 0)`; the other CHECKs stay, and `storableAccount` guarantees every stored row meets them. A migration that rebuilds a table others reference runs with foreign keys off around its transaction and is refused unless `foreign_key_check` finds nothing (`rebuildsReferencedTable`).
+
+**Tests.** `src/server/instantly/zero-capacity.test.ts` (the verifier's case through the real adapter and store against the fake Instantly service; a daily limit of 0 or none; capacity used up by the app's own sends), `src/server/engine/account-reports.test.ts` (each invalid value held on one inbox while the other sends; a report turning invalid then valid; an SMS number with capacity 0), and `src/server/persistence/migration-18.test.ts` (an upgrade from a database the integration tip creates, with provider work and attempts referencing the account). The generated runs (9.2) now draw outside sends from a stream of their own, in about three runs in ten: an inbox is used up until its next reset, the fake reports capacity 0, and invariant 10 asserts that no new work is claimed on an inbox on a reset day after it was reported with no room. The mutation "no room read as room for one" (capacity floored at 1, the naive way past the old CHECK) is killed by seed offset 3. Pacing (invariant 11) now takes the gap in force at the earlier of two calls, as 4.2 sets it, the smaller of the two where capacity changed between them.
 
 ## Consequences
 

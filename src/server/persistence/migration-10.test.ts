@@ -7,6 +7,7 @@ import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { CampaignDefinition } from "../../domain/sequence/definition.ts";
 import type { ActivityView, LeadSearchResult } from "../../shared/api.ts";
+import { MIGRATIONS } from "./migrations.ts";
 
 /**
  * Migration 10 (ticket 12c's bounce events) on a database with a bounce observed before it: the
@@ -101,7 +102,7 @@ describe("migration 10 on a database with a bounce observed before it (re-check 
     expect(entries[1]).toMatchObject({ kind: "address_bad", to: "sam@harbour.example" });
     // The upgrade itself ran 10 and 11 (and 12, ticket 14a's call tables, 13, pull request 49's sessions' saves, and 14, ticket 15a's redial, callback and skip-limit fields, 15, 16 and 17), and later bounces are recorded again.
     const versions = new DatabaseSync(file).prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((r) => Number(r["version"]));
-    expect(versions.filter((v) => v >= 9)).toEqual([9, 10, 11, 12, 13, 14, 15, 16, 17]);
+    expect(versions.filter((v) => v >= 9)).toEqual(MIGRATIONS.map((m) => m.version).filter((v) => v >= 9));
     await after.store.close();
   });
 });

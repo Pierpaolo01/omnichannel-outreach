@@ -42,6 +42,7 @@ const EXPECTED: Record<string, { invariant: string; seed: number | null; unlimit
   "clamp fallback": { invariant: "9", seed: 10 },
   "late send resolves successor": { invariant: "9", seed: 5 },
   "capacity off by one": { invariant: "10", seed: 3 },
+  "no room read as room for one": { invariant: "10", seed: 3 },
   window: { invariant: "13", seed: 5 },
   "touched at claim": { invariant: "1", seed: 1 },
   "uncertain work releases its reservation": { invariant: "10", seed: 85 },
@@ -204,6 +205,12 @@ const RULES: Record<string, Partial<Rules>> = {
       const next = nextStepOf(out.state, track);
       return { ...out, state: { ...out.state, tracks: out.state.tracks.map((t) => (t === progress ? { ...t, nextStepId: next } : t)) } };
     },
+  },
+
+  // Verifier, 15 November 2026: an inbox other senders used up reports capacity 0; an engine that stored or read it as 1
+  // (the naive way past the old `capacity > 0`) would send once more on that reset day.
+  "no room read as room for one": {
+    chooseAccount: (s, now) => R.chooseAccount({ ...s, accounts: Object.fromEntries(Object.entries(s.accounts).map(([k, a]) => [k, { ...a, capacity: Math.max(1, a.capacity) }])) }, now),
   },
 
   "capacity off by one": {

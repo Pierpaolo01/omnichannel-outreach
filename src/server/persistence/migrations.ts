@@ -19,6 +19,12 @@ export interface Migration {
   readonly sql: string;
   /** What SQL alone cannot compute, run after `sql` in the same transaction. */
   readonly data?: (db: DatabaseSync) => void;
+  /**
+   * A table rebuild that other tables reference: foreign keys are switched off around the migration's transaction (they
+   * cannot be switched inside one), and `foreign_key_check` must find nothing before it commits (SQLite's documented
+   * procedure for a schema change ALTER TABLE cannot make).
+   */
+  readonly rebuildsReferencedTable?: true;
 }
 
 const statusList = OUTREACH_STATUSES.map((s) => `'${s}'`).join(", ");
@@ -655,6 +661,38 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX IF NOT EXISTS enrollments_by_company ON enrollments(company_id, lead_kind);
     `,
   },
+  {
+    // Fix: an inbox used up outside the app no longer stops the engine's tick (verifier, 15 November 2026).
+    version: 18,
+    name: "a sender account's capacity may be 0: no room on its reset day (ADR 0003 4.1 as amended)",
+    // An Instantly inbox whose daily limit other senders used up today, or that has no daily limit, reports capacity 0;
+    // `capacity > 0` refused it and the tick threw. 0 now means "no room now": the claim's capacity rule refuses it, and
+    // its due work waits for capacity in Needs attention. SQLite cannot change a CHECK, so the table is rebuilt; provider
+    // work and attempts reference it, hence `rebuildsReferencedTable`. Every stored row already satisfies the new CHECK.
+    rebuildsReferencedTable: true,
+    sql: `
+      CREATE TABLE sender_accounts_v18 (
+        id TEXT PRIMARY KEY,
+        channel TEXT NOT NULL CHECK (channel IN ('email', 'sms')),
+        label TEXT NOT NULL,
+        capacity INTEGER NOT NULL CHECK (capacity >= 0),
+        gap_ms INTEGER CHECK (gap_ms IS NULL OR gap_ms > 0),
+        k INTEGER NOT NULL CHECK (k > 0),
+        next_slot_at INTEGER NOT NULL DEFAULT 0,
+        healthy INTEGER NOT NULL DEFAULT 1,
+        wait_until INTEGER,
+        wait_reason TEXT,
+        backoff_ms INTEGER NOT NULL DEFAULT 0,
+        reset_zone TEXT NOT NULL DEFAULT 'UTC',
+        problem TEXT
+      );
+      INSERT INTO sender_accounts_v18 (id, channel, label, capacity, gap_ms, k, next_slot_at, healthy, wait_until, wait_reason, backoff_ms, reset_zone, problem)
+        SELECT id, channel, label, capacity, gap_ms, k, next_slot_at, healthy, wait_until, wait_reason, backoff_ms, reset_zone, problem
+        FROM sender_accounts ORDER BY rowid;
+      DROP TABLE sender_accounts;
+      ALTER TABLE sender_accounts_v18 RENAME TO sender_accounts;
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string, migrations: readonly Migration[] = MIGRATIONS): void {
@@ -677,24 +715,37 @@ export function migrate(db: DatabaseSync, appliedAt: () => string, migrations: r
 
   for (const migration of migrations) {
     if (migration.version <= current) continue;
-    db.exec("BEGIN IMMEDIATE");
-    // Another process starting on the same new database may have applied it while this one waited for the lock (ticket 20a).
-    if (db.prepare("SELECT 1 FROM schema_migrations WHERE version = ?").get(migration.version) !== undefined) {
-      db.exec("COMMIT");
-      continue;
-    }
+    const foreignKeys = migration.rebuildsReferencedTable ? Number(db.prepare("PRAGMA foreign_keys").get()?.["foreign_keys"] ?? 0) : 0;
+    if (foreignKeys) db.exec("PRAGMA foreign_keys = OFF");
     try {
-      db.exec(migration.sql);
-      migration.data?.(db);
-      db.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(
-        migration.version,
-        migration.name,
-        appliedAt(),
-      );
-      db.exec("COMMIT");
-    } catch (error) {
-      db.exec("ROLLBACK");
-      throw error;
+      applyOne(db, migration, appliedAt);
+    } finally {
+      if (foreignKeys) db.exec("PRAGMA foreign_keys = ON");
     }
+  }
+}
+
+function applyOne(db: DatabaseSync, migration: Migration, appliedAt: () => string): void {
+  db.exec("BEGIN IMMEDIATE");
+  // Another process starting on the same new database may have applied it while this one waited for the lock (ticket 20a).
+  if (db.prepare("SELECT 1 FROM schema_migrations WHERE version = ?").get(migration.version) !== undefined) {
+    db.exec("COMMIT");
+    return;
+  }
+  try {
+    db.exec(migration.sql);
+    migration.data?.(db);
+    if (migration.rebuildsReferencedTable && db.prepare("PRAGMA foreign_key_check").all().length > 0) {
+      throw new Error(`Migration ${migration.version} would leave a reference to a row that no longer exists; it was not applied.`);
+    }
+    db.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(
+      migration.version,
+      migration.name,
+      appliedAt(),
+    );
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
   }
 }

@@ -281,6 +281,7 @@ const SENDER_PROBLEM: Readonly<Record<string, string>> = {
   disconnected: "It is disconnected.",
   not_listed: "Its provider no longer lists it.",
   unhealthy: "Its provider reports that it can’t send.",
+  invalid_report: "Its provider reported a sending limit the app can’t use, so it isn’t used until that’s corrected.",
 };
 
 const HOLD_REASON: Readonly<Record<string, string>> = {

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { CampaignDefinition } from "../../domain/sequence/definition.ts";
+import { MIGRATIONS } from "./migrations.ts";
 import type { CampaignDetail, EnrollmentRead, LeadSearchResult } from "../../shared/api.ts";
 
 /**
@@ -71,7 +72,7 @@ describe("migration 16 on a database written before it", () => {
     expect((await after.request("POST", `/api/campaigns/${campaign.id}/resume`, { requestId: "r" })).status).toBe(200);
     expect((await after.request("POST", `/api/enrollments/${id}/controls`, { requestId: "s", action: "stop" })).status).toBe(200);
     const versions = new DatabaseSync(file).prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((r) => Number(r["version"]));
-    expect(versions.at(-1)).toBe(17);
+    expect(versions.at(-1)).toBe(MIGRATIONS.length);
     await after.store.close();
   });
 

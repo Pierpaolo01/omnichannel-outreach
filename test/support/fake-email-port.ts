@@ -164,9 +164,20 @@ export class FakeEmailPort implements SendPort {
     return { retryable: step.threading === "new_subject" && !this.allNonRetryable, notSentIsFinal: false, ...(this.continueThreadUnavailable && step.threading === "continue_thread" ? { available: false } : {}) };
   }
 
+  /**
+   * Inboxes other senders used up, until an instant (the next reset of the inbox's day): each reports capacity 0 until
+   * then, as the Instantly adapter does when analytics count the daily limit sent outside the app.
+   */
+  readonly usedUpUntil = new Map<string, number>();
+  /** Every answer that reported an inbox with no room: the instant, and the inbox. */
+  readonly noRoomAnswers: { readonly at: number; readonly id: string }[] = [];
+
   accounts(): Promise<AccountStatus[]> {
+    const now = this.now();
+    const usedUp = (id: string) => now < (this.usedUpUntil.get(id) ?? -Infinity);
+    for (const id of this.accountsById.keys()) if (usedUp(id)) this.noRoomAnswers.push({ at: now, id });
     return Promise.resolve(
-      [...this.accountsById.values()].map((a) => ({ id: a.id, channel: "email" as const, label: `Fake inbox ${a.id}`, capacity: a.capacity, gapMs: a.gapMs, k: a.k, healthy: a.healthy, problem: a.healthy ? null : "unhealthy", resetZone: a.resetZone, quotaAvailable: a.quotaAvailable })),
+      [...this.accountsById.values()].map((a) => ({ id: a.id, channel: "email" as const, label: `Fake inbox ${a.id}`, capacity: usedUp(a.id) ? 0 : a.capacity, gapMs: a.gapMs, k: a.k, healthy: a.healthy, problem: a.healthy ? null : "unhealthy", resetZone: a.resetZone, quotaAvailable: a.quotaAvailable })),
     );
   }
 
