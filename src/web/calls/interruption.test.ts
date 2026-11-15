@@ -177,26 +177,33 @@ describe("leads left with no usable channel (question Q20's interim: they stay l
     ).toEqual({
       key: "no-usable-channel",
       tone: "end",
-      title: "No way is left to reach Sam Reed",
-      body: "In Clinics, Rotterdam: their email address is marked wrong, they have no mobile number, and they declined on a call. Their outreach there ended on Sat 14 Nov at 10:00.",
+      title: "No way was left to reach Sam Reed",
+      body: "In Clinics, Rotterdam, their outreach ended on Sat 14 Nov at 10:00, when no channel could reach them. Now their email address is marked wrong, they have no mobile number, and they declined on a call.",
       action: { label: "Open record", href: "/leads/people/p1", ariaLabel: "Open Sam Reed’s record" },
     });
   });
 
   test("each reason the read can give, said once", () => {
     const body = (channel: "email" | "sms" | "call", why: "missing" | "bad" | "declined") => noUsableChannelItem([ended("e1", SAM, "2026-11-15T08:00:00Z", [{ channel, why }])], TODAY, ZONE)?.body;
-    expect(body("email", "missing")).toBe("In Clinics, Rotterdam: they have no email address. Their outreach there ended at 09:00.");
-    expect(body("sms", "bad")).toBe("In Clinics, Rotterdam: their mobile number is marked wrong. Their outreach there ended at 09:00.");
-    expect(body("call", "missing")).toBe("In Clinics, Rotterdam: they have no number to call. Their outreach there ended at 09:00.");
-    expect(body("call", "bad")).toBe("In Clinics, Rotterdam: every number to call is marked wrong. Their outreach there ended at 09:00.");
+    expect(body("email", "missing")).toBe("In Clinics, Rotterdam, their outreach ended at 09:00, when no channel could reach them. Now they have no email address.");
+    expect(body("sms", "bad")).toBe("In Clinics, Rotterdam, their outreach ended at 09:00, when no channel could reach them. Now their mobile number is marked wrong.");
+    expect(body("call", "missing")).toBe("In Clinics, Rotterdam, their outreach ended at 09:00, when no channel could reach them. Now they have no number to call.");
+    expect(body("call", "bad")).toBe("In Clinics, Rotterdam, their outreach ended at 09:00, when no channel could reach them. Now every number to call is marked wrong.");
+  });
+
+  test("details restored by a later import (review bot on 487de7c): the ending is said as past and final, with no empty reason", () => {
+    expect(noUsableChannelItem([ended("e1", SAM, "2026-11-14T09:00:00Z", [])], TODAY, ZONE)).toMatchObject({
+      title: "No way was left to reach Sam Reed",
+      body: "In Clinics, Rotterdam, their outreach ended on Sat 14 Nov at 10:00, when no channel could reach them. None of their details is missing or marked wrong now, but the ending is final.",
+    });
   });
 
   test("several: one entry, the most recent named, and a link to them in Leads", () => {
     expect(noUsableChannelItem([ended("e2", NIA, "2026-11-15T08:00:00Z", [{ channel: "email", why: "missing" }]), ended("e1", null, "2026-11-12T08:00:00Z", [{ channel: "email", why: "bad" }])], TODAY, ZONE)).toEqual({
       key: "no-usable-channel",
       tone: "end",
-      title: "2 leads have no way left to reach them",
-      body: "Their outreach ended because no channel could reach them: details missing or marked wrong, or a decline on a call. The most recent is Nia Cole in Clinics, Rotterdam, at 09:00.",
+      title: "No way was left to reach 2 leads",
+      body: "Their outreach ended because no channel could reach them then: details missing or marked wrong, or a decline on a call. The most recent is Nia Cole in Clinics, Rotterdam, at 09:00.",
       action: { label: "Show them", href: "/leads?status=finished_no_usable_channel" },
     });
   });

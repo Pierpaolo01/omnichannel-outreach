@@ -102,11 +102,11 @@ test("sending not running, a provider not answering and leads with no way left: 
   // No page restarts sending: the entry has no link.
   await expect(stopped.getByRole("link")).toHaveCount(0);
   await expect(entry(page, "The SMS provider isn’t answering")).toContainText("It hasn’t answered yet. 2 texts wait on it");
-  const ended = entry(page, "No way is left to reach Rob Lane");
+  const ended = entry(page, "No way was left to reach Rob Lane");
   await expect(ended).toContainText("they have no email address");
   await expect(ended.getByRole("link", { name: "Open Rob Lane’s record" })).toHaveAttribute("href", "/leads/people/person-1");
   // The order: sending first among these, the lead with no way left last.
   const titles = await attention(page).getByRole("listitem").locator("b").allTextContents();
   expect(titles.indexOf("Sending is not running")).toBeLessThan(titles.indexOf("The SMS provider isn’t answering"));
-  expect(titles.at(-1)).toBe("No way is left to reach Rob Lane");
+  expect(titles.at(-1)).toBe("No way was left to reach Rob Lane");
 });

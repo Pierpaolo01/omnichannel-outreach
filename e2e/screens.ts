@@ -623,8 +623,8 @@ export const SCREENS: readonly Screen[] = [
   // Ticket 20b: the interruption line and the ticket 20 entries in Needs attention.
   { name: "today after an interruption across days", open: async (page) => { await interrupted(page, "across-days"); await settle(page, "Sending was interrupted from Mon 9 Nov at 12:00"); } },
   { name: "today after an interruption within the day", open: async (page) => { await interrupted(page, "same-day"); await settle(page, "Sending was interrupted from 12:00 to 15:00"); } },
-  { name: "today with every ticket 20 entry, long names and lists", open: async (page) => { await everyEntry(page, "many"); await settle(page, "40 leads have no way left to reach them"); } },
-  { name: "today with one lead of each ticket 20 kind", open: async (page) => { await everyEntry(page, "one"); await settle(page, /No way is left to reach Wolfe/); } },
+  { name: "today with every ticket 20 entry, long names and lists", open: async (page) => { await everyEntry(page, "many"); await settle(page, "No way was left to reach 40 leads"); } },
+  { name: "today with one lead of each ticket 20 kind", open: async (page) => { await everyEntry(page, "one"); await settle(page, /No way was left to reach Wolfe/); } },
   { name: "today loading", open: async (page) => { await hold(page, "**/api/today"); await hold(page, "**/api/needs-attention"); await page.goto("/"); await page.getByLabel("Loading up next").waitFor(); } },
   { name: "today error", open: async (page) => { await fail(page, "**/api/today"); await fail(page, "**/api/needs-attention"); await page.goto("/"); await settle(page, "Today’s calls didn’t load."); await settle(page, "Needs attention didn’t load."); } },
   { name: "calls, the focused call", open: async (page) => { await calls(page, "ready", "/calls"); await settle(page, "Calling hours Mon–Fri, 09:00–17:00"); } },

@@ -93,6 +93,18 @@ describe("leads left with no usable channel", () => {
   });
 });
 
+describe("a lead whose details a later import restores (review bot on 487de7c)", () => {
+  test("the ending stays listed, final, with no channel left that cannot reach them now", async () => {
+    const def = definition([track("e1", "email", [email("s1")])]);
+    const { h, campaignId, lead, attention } = await world(50, def, [PAT, ROB]);
+    await h.advanceTo(MONDAY_9 + H);
+    expect((await attention()).noUsableChannel.find((x) => x.enrollmentId === lead("Rob Lane"))?.channels).toEqual([{ channel: "email", why: "missing" }]);
+    await h.reimport(campaignId, { businesses: [HARBOUR], people: [PAT, { ...ROB, email: "rob@harbour.example" }] });
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    expect((await attention()).noUsableChannel.find((x) => x.enrollmentId === lead("Rob Lane"))).toMatchObject({ person: { name: "Rob Lane" }, channels: [] });
+  });
+});
+
 describe("steps waiting for a transport the provider cannot use yet (follow-up 42 item 12)", () => {
   test("a continue-thread follow-up, due, while that transport is unavailable", async () => {
     const def = definition([track("e1", "email", [email("s1"), email("s2", 1, "continue_thread")])]);

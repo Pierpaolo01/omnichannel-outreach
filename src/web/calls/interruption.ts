@@ -139,25 +139,28 @@ function unreachableLine(c: NeedsAttention["noUsableChannel"][number]["channels"
 
 /**
  * Leads left with no usable channel (`noUsableChannel`, most recently ended first): one entry. They stay listed while the
- * read lists them (question Q20's interim); one lead links to their record, several to them in Leads.
+ * read lists them (question Q20's interim); one lead links to their record, several to them in Leads. The ending is said
+ * as past and final: `channels` are the reasons that hold now, and a later import can restore details (review bot on
+ * 487de7c), leaving none.
  */
 export function noUsableChannelItem(ended: NeedsAttention["noUsableChannel"], today: string, userZone: string): AttentionItem | null {
   const first = ended[0];
   if (!first) return null;
   if (ended.length === 1) {
+    const now = first.channels.length === 0 ? "None of their details is missing or marked wrong now, but the ending is final." : `Now ${listOf(first.channels.map(unreachableLine))}.`;
     return {
       key: "no-usable-channel",
       tone: "end",
-      title: `No way is left to reach ${leadName(first)}`,
-      body: `In ${first.campaign.name}: ${listOf(first.channels.map(unreachableLine))}. Their outreach there ended ${whenPhrase(first.endedAt, userZone, today)}.`,
+      title: `No way was left to reach ${leadName(first)}`,
+      body: `In ${first.campaign.name}, their outreach ended ${whenPhrase(first.endedAt, userZone, today)}, when no channel could reach them. ${now}`,
       action: recordAction(first),
     };
   }
   return {
     key: "no-usable-channel",
     tone: "end",
-    title: `${ended.length} leads have no way left to reach them`,
-    body: `Their outreach ended because no channel could reach them: details missing or marked wrong, or a decline on a call. The most recent is ${leadName(first)} in ${first.campaign.name}, ${whenPhrase(first.endedAt, userZone, today)}.`,
+    title: `No way was left to reach ${ended.length} leads`,
+    body: `Their outreach ended because no channel could reach them then: details missing or marked wrong, or a decline on a call. The most recent is ${leadName(first)} in ${first.campaign.name}, ${whenPhrase(first.endedAt, userZone, today)}.`,
     action: { label: "Show them", href: "/leads?status=finished_no_usable_channel" },
   };
 }
