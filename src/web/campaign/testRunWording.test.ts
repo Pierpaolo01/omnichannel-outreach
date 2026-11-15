@@ -16,6 +16,7 @@ describe("the Test run tab says only what the run's facts say (ticket 21)", () =
     expect(stepStateText(row({ state: "due", at: "2026-11-02T10:43:10Z" }), "Europe/London", READ)).toBe("In about 1 min");
     expect(stepStateText(row({ state: "due", at: "2026-11-02T11:30:00Z" }), "Europe/London", READ)).toBe("Due 11:30");
     expect(stepStateText(row({ channel: "call", state: "on_your_list" }), "Europe/London", READ)).toBe("On your Calls list");
+    expect(stepStateText(row({ channel: "call", state: "listed_later", at: "2026-11-03T00:00:00Z" }), "Europe/London", READ)).toBe("On your list from Tue 3 Nov");
     expect(stepStateText(row({ channel: "call", state: "logged", outcome: "not_interested" }), "Europe/London", READ)).toBe("Logged 10:41: Not interested");
   });
 

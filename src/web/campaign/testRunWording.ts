@@ -76,6 +76,8 @@ export function stepStateText(row: TestStepRow, zone: string, readAt: string): s
     }
     case "on_your_list":
       return "On your Calls list";
+    case "listed_later":
+      return row.at === null ? "Not on your list" : `On your list from ${new Intl.DateTimeFormat("en-GB", { timeZone: zone, weekday: "short", day: "numeric", month: "short" }).format(new Date(row.at))}`;
     case "logged":
       return `Logged ${at}: ${outcomeWord(row.outcome)}`;
     case "not_reached":

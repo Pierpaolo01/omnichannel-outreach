@@ -161,6 +161,17 @@ describe("a test run before launch (ADR 0003 'Ticket 21')", () => {
     expect(rows.find((r) => r.stepId === "w1")?.state).toBe("sent");
   });
 
+  test("a stopped test's call is not reported on the list, as the Calls list does not list it (review bot on 55d6ac6)", async () => {
+    const w = await world();
+    await w.h.request("PUT", `/api/campaigns/${w.campaign}/test-contacts`, { email: OWN_EMAIL, mobile: OWN_MOBILE });
+    const runId = (await w.run()).body.run?.id ?? "";
+    await w.h.advanceTo(MONDAY_9 + 5 * MIN);
+    expect((await w.tab()).run?.steps.find((r) => r.stepId === "c1")?.state).toBe("on_your_list");
+    expect((await w.h.request("POST", `/api/test-runs/${runId}/stop`, { requestId: "stop-1" })).status).toBe(200);
+    expect((await w.h.request<CallsView>("GET", "/api/calls")).body.readyNow.filter((c) => c.test)).toEqual([]);
+    expect((await w.tab()).run?.steps.find((r) => r.stepId === "c1")?.state).toBe("not_reached");
+  });
+
   test("an edit stops the running test, and the warning holds until a test runs on the new version; launch is never blocked by it", async () => {
     const w = await world();
     await w.h.request("PUT", `/api/campaigns/${w.campaign}/test-contacts`, { email: OWN_EMAIL, mobile: "" });

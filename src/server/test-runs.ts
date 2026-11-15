@@ -10,8 +10,9 @@ import type { EndReason, SubjectState } from "../domain/sequence/state.ts";
 import type { TestRunEnding, TestRunRead, TestRunTab, TestStepRow } from "../shared/api.ts";
 import { stepNoun, trackLabel } from "../shared/track-label.ts";
 import type { TestRunRecord } from "./engine/engine-store.ts";
-import type { Rules } from "./engine/rules.ts";
 import type { OutreachStore } from "./persistence/store.ts";
+import { firstListedDay, type CallViewRules } from "./engine/call-views.ts";
+import { startOfLocalDay } from "../domain/sequence/clock.ts";
 
 const iso = (t: number) => new Date(t).toISOString();
 
@@ -44,7 +45,7 @@ async function leadsOf(store: OutreachStore, campaignId: string): Promise<TestRu
   });
 }
 
-export async function testRunTab(store: OutreachStore, campaignId: string, now: number, rules: Pick<Rules, "asOfAction" | "evaluate">): Promise<TestRunTab | null> {
+export async function testRunTab(store: OutreachStore, campaignId: string, now: number, rules: CallViewRules): Promise<TestRunTab | null> {
   const row = await store.engine.campaign(campaignId);
   const stored = await store.engine.testContacts(campaignId);
   if (!row || !stored) return null;
@@ -62,7 +63,7 @@ export async function testRunTab(store: OutreachStore, campaignId: string, now: 
   };
 }
 
-async function runRead(store: OutreachStore, run: TestRunRecord, leads: TestRunTab["leads"], now: number, rules: Pick<Rules, "asOfAction" | "evaluate">): Promise<TestRunRead | null> {
+async function runRead(store: OutreachStore, run: TestRunRecord, leads: TestRunTab["leads"], now: number, rules: CallViewRules): Promise<TestRunRead | null> {
   const stored = await store.engine.subject(run.id, now);
   if (!stored) return null;
   // As of the read's instant: what fell due since the worker's last tick is applied (nothing is written).
@@ -77,12 +78,12 @@ async function runRead(store: OutreachStore, run: TestRunRecord, leads: TestRunT
     email: run.contacts.email?.value ?? null,
     mobile: run.contacts.mobile?.value ?? null,
     mayStillSend: s.work.filter(maySend).length,
-    steps: stepsOf(s),
+    steps: stepsOf(s, rules),
   };
 }
 
 /** Every live step of the main sequence, then of the win-back branch, in canvas order, with what its facts say. */
-export function stepsOf(s: SubjectState): TestStepRow[] {
+export function stepsOf(s: SubjectState, rules: CallViewRules): TestStepRow[] {
   const def = s.campaign.definition;
   // A removed track a run started keeps its rows; one it never started is not shown.
   const shown = (t: TrackDefinition) => !t.removed || progressOf(s, t.id)?.startedAt != null;
@@ -111,7 +112,13 @@ export function stepsOf(s: SubjectState): TestStepRow[] {
       if (result) {
         const state = track.channel === "call" && result.result === "sent" ? "logged" : result.result;
         rows.push({ ...base, state, at: iso(result.atWall) });
-      } else if (task?.open) rows.push({ ...base, state: "on_your_list", at: iso(task.placedWall) });
+      } else if (task?.open && rules.isListed(s, task)) rows.push({ ...base, state: "on_your_list", at: iso(task.placedWall) });
+      else if (task?.open && s.subject.ended === null) {
+        // Open but not on today's list (a redial, a callback for a later day, a held test): when the listing rule lists it.
+        // An ended test keeps its open task (2.3) and is never listed: it falls through to "not reached".
+        const day = firstListedDay(s, task, rules);
+        rows.push({ ...base, state: "listed_later", at: day === null ? null : iso(startOfLocalDay(day, s.callDay.userZone)) });
+      }
       else if (live) rows.push({ ...base, state: "with_provider", at: live.handedWall === null ? null : iso(live.handedWall) });
       else if (s.subject.ended === null && p && p.finishedAt === null && p.nextStepId === step.id && p.dueWall !== null) rows.push({ ...base, state: "due", at: iso(p.dueWall) });
       else rows.push({ ...base, state: "not_reached", at: null });

@@ -1509,8 +1509,10 @@ export type TestStepState =
   | "with_provider"
   /** Its wait runs out at `at`; it goes then, or at its window's next opening. */
   | "due"
-  /** A call on your Calls list now. */
+  /** A call on your Calls list now, by the engine's listing rule. */
   | "on_your_list"
+  /** A call of a running test that is not on today's list: `at` is the start of the first day it is listed, or null. */
+  | "listed_later"
   /** A call whose outcome you logged. */
   | "logged"
   /** Not reached: earlier steps first, or the run ended before it. */
