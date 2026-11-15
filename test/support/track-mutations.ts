@@ -142,17 +142,15 @@ const RULES: Record<string, Partial<Rules>> = {
       return { ...out, smsBindings: [...s.smsBindings, ...out.smsBindings.filter((b) => !s.smsBindings.some((x) => x.sender === b.sender && x.recipient === b.recipient))] };
     },
   },
-  // The SMS reply rule reads bindings only, so a lead that skipped is never named by it: the nearest defect the rules
-  // can make is the skipping lead taking its conversation owner's ending as a reply of its own.
+  // Inside the reply rule itself: the newest record of the number's conversations with the mobile, a recorded skip
+  // included, takes the reply, so the lead that skipped is stopped by the owner's reply on the real reply path.
   "the skipping lead is stopped by the owner's reply": {
-    evaluate: (s, now, options) => {
-      const out = R.evaluate(s, now, options);
-      if (out.subject.ended !== null) return out;
-      const skipped = out.tracks.filter((p) => p.finishReason === "skipped_conversation_taken").map((p) => p.trackId);
-      const mobiles = smsMobiles(out);
-      const owner = out.smsBindings.find((b) => b.ownerEnded && b.owner !== out.subject.id && skipped.some((t) => mobiles.get(t) === b.recipient));
-      return owner ? R.applyReply(out, { channel: "sms", atWall: now, providerRef: R.storedReplyId("sms", `of-${owner.owner}`) }, now) : out;
-    },
+    smsReplyOwner: (records, sender) => records.filter((r) => r.sender === sender && (r.kind === "skipped" || !r.unsent)).at(-1)?.owner ?? null,
+  },
+  // Point 10: a first text refused or never sent keeps its conversation, as if a text had gone.
+  "a binding with nothing sent counts as taken": {
+    releaseUnsent: (s) => s,
+    evaluate: (s, now, options) => ({ ...R.evaluate({ ...s, smsBindings: s.smsBindings.map((b) => ({ ...b, ownerSent: true })) }, now, options), smsBindings: s.smsBindings }),
   },
 
   // One per further rule of ticket 13.
@@ -223,16 +221,19 @@ const RULES: Record<string, Partial<Rules>> = {
 const EXPECTED: Record<string, { invariant: string; seed: number }> = {
   "SMS reply to the newest campaign": { invariant: "14", seed: 0 },
   "binding transferred after an end": { invariant: "14", seed: 0 },
-  // Moved from 14 by question Q7's answer: a conversation bound at a claim now skips the other lead's track at once,
-  // against the record, so 28(b) breaks first (it was a silent hold under the interim, broken later by 14).
-  "binding fixed at claim": { invariant: "28", seed: 12 },
+  // Moved twice by question Q7's answer. At bebdc06 a conversation bound at a claim skipped the other lead's track (28).
+  // Since point 10 a binding without a text known sent never makes a skip: it holds the other lead only while it is
+  // unsettled and is released when the claim ends. What it still breaks is priority: the claim keeps another lead's
+  // higher-priority item off that number (12).
+  "binding fixed at claim": { invariant: "12", seed: 7 },
   "ending check too late": { invariant: "20", seed: 0 },
   "held instead of skipped": { invariant: "28", seed: 0 },
   "skipped although a free number had room": { invariant: "28", seed: 0 },
-  "skipped because today's capacity ran out": { invariant: "28", seed: 0 },
+  "skipped because today's capacity ran out": { invariant: "28", seed: 3 },
   "a later free number reopens the track": { invariant: "6", seed: 43 },
   "the binding moves to the second campaign": { invariant: "14", seed: 0 },
-  "the skipping lead is stopped by the owner's reply": { invariant: "14", seed: 3 },
+  "the skipping lead is stopped by the owner's reply": { invariant: "14", seed: 0 },
+  "a binding with nothing sent counts as taken": { invariant: "28", seed: 7 },
   "after counts from the earlier track's start": { invariant: "7", seed: 12 },
   "after delay ignored": { invariant: "7", seed: 3 },
   "together tracks not together": { invariant: "7", seed: 0 },

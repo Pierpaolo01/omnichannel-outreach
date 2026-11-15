@@ -1,6 +1,6 @@
 import type { CampaignDefinition, StepDefinition, TrackChannel, TrackDefinition } from "../../src/domain/sequence/definition.ts";
 import type { SubjectState } from "../../src/domain/sequence/state.ts";
-import type { Rules } from "../../src/server/engine/rules.ts";
+import { DEFAULT_RULES, type Rules } from "../../src/server/engine/rules.ts";
 import type { ActivityView, CompanyRecord, EnrollmentProgress, LeadSearchResult, NeedsAttention, OutreachStatus, PersonRecord } from "../../src/shared/api.ts";
 import { trackLabel } from "../../src/shared/track-label.ts";
 import { EngineHarness, quickWait } from "./engine-harness.ts";
@@ -51,6 +51,8 @@ import { dueAfter, firstOpen, higherPriority, inWindow, local, renderCopy, zoneO
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
+/** The engine's settling period, as ADR 0003 5.6 states it: an unhanded claim expires after it. */
+const SETTLING = 15 * MINUTE;
 const DAY = 24 * HOUR;
 const ZONES = ["Europe/London", "America/New_York", "Europe/Paris", "Asia/Kolkata", "Australia/Sydney", ""];
 const ALL_DAY = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
@@ -109,6 +111,8 @@ interface Campaign {
   launchedAt: number | null;
   /** A number added to its SMS pool while it runs, and when (question Q7 answered). */
   joined: { readonly number: string; readonly at: number } | null;
+  /** Its SMS pool as each edit the record made left it, in order (a number joining, a number removed). */
+  readonly poolEdits: { readonly at: number; readonly pool: readonly string[] }[];
 }
 
 type Pick = <T>(items: readonly T[]) => T;
@@ -171,6 +175,17 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
   const lateRand = random(seed ^ 0x0a7e);
   const lateNumber: FakeNumber | null = lateRand() < 0.5 ? { id: "+447700900090", capacity: 5, gapMs: MINUTE, k: 2, healthy: true, resetZone: "Europe/London" } : null;
   const lateAt = { campaign: lateRand(), event: lateRand() };
+  // After the reviews of bebdc06, from the same stream after its earlier draws: a number refusing its next text for an
+  // account reason (point 10); a pool edit removing a number; a person's mobile changing between two SMS tracks (a later
+  // export); and leads held under the interim engine until an upgrade part way through.
+  const refusalAt = lateRand() < 0.4 ? { event: lateRand(), number: lateRand(), retryMs: (lateRand() < 0.5 ? 5 : 20) * MINUTE } : null;
+  const removalAt = lateRand() < 0.3 ? { event: lateRand(), campaign: lateRand(), which: lateRand() } : null;
+  const mobileChangeAt = lateRand() < 0.35 ? { event: lateRand(), person: lateRand() } : null;
+  const interimUntil = lateRand() < 0.25 ? { event: lateRand() } : null;
+  /** When the interim engine was replaced by the engine as built, in a run that starts under it. */
+  let upgradeAt: number | null = null;
+  /** People whose mobile a later export changed, and when. */
+  const mobileChanges = new Map<string, { mobile: string; at: number }>();
   const emailModes: FakeMode[] = [...new Set([pick(["honest", "late-send", "duplicate-and-reorder"] as const), pick(["honest", "lost-response", "late-send"] as const)])];
   const smsModes: FakeSmsMode[] = [...new Set([pick(["honest", "late-send"] as const), pick(["honest", "lost-response", "late-send"] as const)])];
 
@@ -194,6 +209,10 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
     };
   });
 
+  // The run's rules: the mutation's, if any; under the interim engine until its upgrade, with the skip switched off.
+  const rulesNow: { -readonly [K in keyof Rules]?: Rules[K] } = { ...(options.rules ?? {}) };
+  const asBuilt = options.rules?.evaluate ?? DEFAULT_RULES.evaluate;
+  if (interimUntil) rulesNow.evaluate = (st, now, o) => asBuilt(st, now, { ...o, skipTakenConversations: false });
   const h = new EngineHarness({
     start,
     accounts: inboxes,
@@ -201,7 +220,7 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
     random: random(seed ^ 0x5eed),
     engine: { waitFor: quickWait },
     sms: { numbers: lateNumber ? [...numbers, lateNumber] : numbers, modes: smsModes },
-    ...(options.rules ? { rules: options.rules } : {}),
+    rules: rulesNow,
   });
   h.maxWrites = options.maxWrites ?? null;
   h.stopAt = options.deadline ?? null;
@@ -264,7 +283,7 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
           return { id, channel, branch: "win_back" as const, window: ALL_DAY, steps: [{ id: `${id}s1`, waitDays: 0, subject: channel === "email" ? "Still here, {{first_name|there}}" : "", body: "One more note for {{company}}.", threading: "new_subject" as const, removed: false }], start: { kind: "entry" as const }, removed: false };
         })
       : [];
-    campaigns.push({ id: "", definition, branch, companies: ci === 0 ? [0, 1, 2] : ci === 1 ? [0, 1] : [1, 2], launchedAt: null, joined: null });
+    campaigns.push({ id: "", definition, branch, companies: ci === 0 ? [0, 1, 2] : ci === 1 ? [0, 1] : [1, 2], launchedAt: null, joined: null, poolEdits: [] });
   }
   for (const c of campaigns) {
     if (c.definition.tracks.some((t) => t.start.kind === "after")) features.add("after");
@@ -274,7 +293,7 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
   }
   if (campaigns.length > 1) features.add("several-campaigns");
 
-  const rowsFor = (c: Campaign): ExportRows => ({
+  const rowsFor = (c: Campaign, mobiles: ReadonlyMap<string, string> = new Map()): ExportRows => ({
     businesses: c.companies.map((i) => {
       const co = companies[i]!;
       return business({ business_id: co.key, business_name: co.name, timezone: co.zone, phone_e164: co.line, general_emails: co.inbox ?? "" });
@@ -282,7 +301,7 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
     people: people
       .filter((p) => c.companies.includes(p.company))
       .map((p) =>
-        person({ person_id: p.key, business_id: companies[p.company]!.key, full_name: p.name, timezone: p.zone, email: p.email ?? "", ...(p.mobile ? { dial_phone: p.mobile, dial_phone_type: "mobile" } : {}) }),
+        person({ person_id: p.key, business_id: companies[p.company]!.key, full_name: p.name, timezone: p.zone, email: p.email ?? "", ...(mobiles.get(p.key) ?? p.mobile ? { dial_phone: mobiles.get(p.key) ?? p.mobile ?? "", dial_phone_type: "mobile" } : {}) }),
       ),
   });
 
@@ -350,9 +369,17 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
     features.add(providerAt === null ? "sms-reply" : "sms-reply-reported-late");
     return true;
   }
+  /** The record's decided skips, by subject and track: each fixed once its instant has come, in track order. */
+  const decidedSkips = new Map<string, number>();
+  /** Every claim the record saw made (the `afterClaim` hook): which subject, step and number, and when. */
+  const claims: { attemptId: string; subjectId: string; stepId: string; accountId: string; at: number }[] = [];
   h.hooks = {
     beforeHandover: async (attemptId) => injectAround((await h.store.engine.attempt(attemptId))?.subjectId ?? null),
-    afterClaim: (attemptId) => checkClaimPriority(attemptId),
+    afterClaim: async (attemptId) => {
+      const a = await h.store.engine.attempt(attemptId);
+      if (a) claims.push({ attemptId, subjectId: a.subjectId, stepId: a.stepId, accountId: a.accountId, at: h.clock });
+      await checkClaimPriority(attemptId);
+    },
   };
 
   for (const [ci, c] of campaigns.entries()) {
@@ -400,9 +427,13 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
   function emailBadAt(address: string): number {
     return (email.bouncing.has(address) ? (email.deliveryLog.find((d) => d.destination === address)?.at ?? Infinity) + 5 * MINUTE : Infinity);
   }
-  /** The conversation owner by the SMS provider's call log: the subject the number first texted that mobile for. */
+  /**
+   * The conversation's owner by the SMS provider's delivery log: the subject the number's first text that went to that
+   * mobile was for (question Q7 answered, point 10: a conversation exists once a text is known to have gone; a text refused
+   * or never sent owns nothing).
+   */
   function ownerOf(sender: string, mobile: string) {
-    return sms.handoverLog.find((c) => c.sender === sender && c.destination === mobile)?.subjectId ?? null;
+    return sms.deliveryLog.find((d) => d.sender === sender && d.destination === mobile)?.subjectId ?? null;
   }
   /**
    * The replies that reached a subject, in the order the app observed them (the providers' reply
@@ -412,7 +443,7 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
    */
   function repliesOf(id: string): { channel: "email" | "sms"; seenAt: number; at: number }[] {
     return [
-      ...sms.replyLog.filter((r) => ownerOf(r.to, r.from) === id && (sms.handoverLog.find((c) => c.sender === r.to && c.destination === r.from)?.at ?? Infinity) <= r.at).map((r) => ({ channel: "sms" as const, seenAt: r.at, at: Math.min(r.providerAt, r.at), order: sms.replyLog.indexOf(r) })),
+      ...sms.replyLog.filter((r) => ownerOf(r.to, r.from) === id && (sms.deliveryLog.find((d) => d.sender === r.to && d.destination === r.from)?.at ?? Infinity) <= r.at).map((r) => ({ channel: "sms" as const, seenAt: r.at, at: Math.min(r.providerAt, r.at), order: sms.replyLog.indexOf(r) })),
       ...email.replyLog.filter((r) => r.subjectId === id).map((r) => ({ channel: "email" as const, seenAt: r.at, at: Math.min(r.providerAt, r.at), order: email.replyLog.indexOf(r) })),
     ].sort((a, b) => a.seenAt - b.seenAt || a.order - b.order);
   }
@@ -502,13 +533,11 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
     const start = startOf(s, t);
     if (start === null || start > endLimitOf(s)) return null;
     const bad = badAtOf(s, t.channel);
-    if (bad <= start) return { at: start, seen: start };
-    // A taken conversation (question Q7 answered): finished at the skip 28(b) validated; not yet known while a claim delays it.
-    const earliest = skipEarliestOf(s, t);
-    if (earliest !== null && earliest < bad) {
-      const skipped = observedSkips.get(`${s.id}/${t.id}`);
-      return skipped === undefined ? null : { at: skipped, seen: skipped };
-    }
+    // Skipped at its start; the app can know it once it can know the start (its predecessor's finish seen).
+    if (bad <= start) return { at: start, seen: Math.max(start, startSeenAt(s, t) ?? start) };
+    // A taken conversation (question Q7 answered): finished at the record's own skip instant, once it has come.
+    const skipped = decidedSkips.get(`${s.id}/${t.id}`);
+    if (skipped !== undefined && skipped < bad) return { at: skipped, seen: skipped };
     const sends = t.steps.map((st) => deliveryOf(t.channel, s.id, st.id));
     const lastSend = sends.at(-1);
     if (lastSend && sends.every((d) => d !== undefined) && knownAt(t.channel, lastSend) < bad) {
@@ -526,60 +555,116 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
 
 
   // ------------------------------------------------------------------------------------------
-  // Question Q7 answered: the record's own view of taken conversations, from the SMS provider's handover log.
+  // Question Q7 answered: the record's own view of taken conversations, from the SMS provider's logs, the pool edits it
+  // made, the mobiles it changed, the claims it saw made and its own upgrade from the interim engine.
 
-  /** The SMS pool in force for a campaign at instant `t`: its definition's, plus a number that joined it by then. */
+  /** The SMS pool in force for a campaign at instant `t`: its definition's, as the edits the record made left it by then. */
   function poolAt(ci: number, t: number): string[] {
     const c = campaigns[ci]!;
-    const pool = c.definition.smsPool ?? [];
-    return c.joined && c.joined.at <= t ? [...pool, c.joined.number] : [...pool];
+    return [...(c.poolEdits.filter((e) => e.at <= t).at(-1)?.pool ?? c.definition.smsPool ?? [])];
   }
-  /** The numbers a subject may text from at `t`: the number its first text came from by then, else its campaign's pool. */
+  /** The mobile a person had at `t`: their own, or the one a later export gave them (the record's re-import). */
+  function mobileAt(s: Subject, t: number): string | null {
+    const changed = s.person ? mobileChanges.get(s.person.key) : undefined;
+    // A change at the very instant a track started came after it: that instant's tick started the track first.
+    return changed && changed.at < t ? changed.mobile : (s.person?.mobile ?? null);
+  }
+  /** The mobile an SMS track texts: the newest the person had when it started. */
+  function trackMobile(s: Subject, t: TrackDefinition): string | null {
+    const start = startOf(s, t);
+    return start === null ? null : mobileAt(s, start);
+  }
+  /** The numbers a subject may text from at `t`: the number its first handover was from by then (fixed), else its pool. */
   function usableAt(s: Subject, t: number): string[] {
     const first = sms.handoverLog.find((c) => c.subjectId === s.id && c.at <= t);
     return first ? [first.sender] : poolAt(s.campaign, t);
   }
-  /** When another subject first texted `mobile` from `sender`, so owns that conversation; null if nobody did, or `s` did first. */
+  /**
+   * When `mobile`'s conversation on `sender` became another subject's for good: when the app could know that subject's
+   * text, the first that went there, was sent (point 10). Null if nobody's text went there, or `s`'s went first.
+   */
   function takenFor(s: Subject, sender: string, mobile: string): number | null {
-    const first = sms.handoverLog.find((c) => c.sender === sender && c.destination === mobile);
-    return first && first.subjectId !== s.id ? first.at : null;
+    const first = sms.deliveryLog.find((d) => d.sender === sender && d.destination === mobile);
+    return first && first.subjectId !== s.id ? knownAt("sms", first) : null;
   }
-  /** Whether every number `s` may use at `t` had texted its mobile for someone else by `t` (4.5). */
-  function allTakenAt(s: Subject, t: number): boolean {
-    const mobile = mobileOf(s);
-    if (mobile === null) return false;
+  /** Whether every number `s` may use at `t` had a text known sent to `mobile` for someone else by `t` (4.5, point 10). */
+  function allTakenAt(s: Subject, t: number, mobile: string): boolean {
     const usable = usableAt(s, t);
     return usable.length > 0 && usable.every((n) => {
       const at = takenFor(s, n, mobile);
       return at !== null && at <= t;
     });
   }
+  /** The pacing gap of a number, as the generator gave it. */
+  const gapOf = (accountId: string) => [...numbers, ...(lateNumber ? [lateNumber] : [])].find((n) => n.id === accountId)?.gapMs ?? 0;
   /**
-   * The earliest instant the record allows an SMS track's skip for a taken conversation: the first instant from its
-   * start (its first step's due instant) at which every usable number is taken, inside its window. Null when the track
-   * texted, or the conversation is never taken on every usable number. A claim already waiting may delay the actual skip.
+   * When a claim the subject made on `accountId` at or before `t`, still waiting there, ends (the engine's claim: 4.2,
+   * 5.5): its handover is tried when the number's pacing slot next frees (the last handover on it, plus its gap), and
+   * fails there because the conversation is taken; or it expires one settling period after it was made. Null when no
+   * such claim waits at `t`.
    */
-  function skipEarliestOf(s: Subject, t: TrackDefinition): number | null {
+  function claimEnd(s: Subject, stepId: string, t: number): number | null {
+    const waiting = claims.filter((c) => c.subjectId === s.id && c.stepId === stepId && c.at <= t && !sms.handoverLog.some((x) => x.attemptId === c.attemptId) && c.at + SETTLING > t).at(-1);
+    if (!waiting) return null;
+    const onNumber = sms.handoverLog.filter((x) => x.sender === waiting.accountId).map((x) => x.at);
+    let at = t;
+    for (let guard = 0; guard < 1000; guard++) {
+      // The slot frees a gap after the number's last handover; a handover there for someone else takes it first.
+      const free = Math.max(at, Math.max(-Infinity, ...onNumber.filter((x) => x <= at)) + gapOf(waiting.accountId));
+      if (free > at && onNumber.includes(free)) {
+        at = free;
+        continue;
+      }
+      return Math.min(free, waiting.at + SETTLING);
+    }
+    return waiting.at + SETTLING;
+  }
+  /**
+   * The record's own instant for an SMS track's skip for a taken conversation, or null: the first instant from its start
+   * (its first step's due instant) at which every number it may use has another subject's text known sent to its mobile,
+   * inside its window, and no claim of its own still waits (a waiting claim's handover fails, or it expires, first); never
+   * while the interim engine runs, and never after the lead stopped. Its candidate instants are the start, every instant a
+   * text to that mobile became known sent, every pool edit and the upgrade.
+   */
+  function skipAtOf(s: Subject, t: TrackDefinition): number | null {
     if (t.channel !== "sms") return null;
-    const mobile = mobileOf(s);
+    const mobile = trackMobile(s, t);
     const start = startOf(s, t);
-    if (mobile === null || start === null) return null;
-    if (sms.handoverLog.some((c) => c.subjectId === s.id && t.steps.some((st) => st.id === c.stepId))) return null;
+    const stepId = t.steps[0]?.id;
+    if (mobile === null || start === null || stepId === undefined) return null;
+    if (sms.deliveryLog.some((d) => d.subjectId === s.id && t.steps.some((st) => st.id === d.stepId))) return null;
+    if (interimUntil && upgradeAt === null) return null;
     const zone = zoneFor(s);
-    const instants = [start, ...sms.handoverLog.filter((c) => c.destination === mobile && c.subjectId !== s.id && c.at > start).map((c) => c.at)].sort((a, b) => a - b);
-    for (const at of instants) {
-      if (!allTakenAt(s, at)) continue;
-      const open = firstOpen(t.window, zone, at);
-      if (Number.isFinite(open) && allTakenAt(s, open)) return open;
+    const instants = [start, upgradeAt ?? start, ...sms.deliveryLog.filter((d) => d.destination === mobile && d.subjectId !== s.id).map((d) => knownAt("sms", d)), ...campaigns[s.campaign]!.poolEdits.map((e) => e.at)]
+      .filter((x) => Number.isFinite(x) && x >= Math.max(start, upgradeAt ?? start))
+      .sort((a, b) => a - b);
+    for (const from of instants) {
+      if (!allTakenAt(s, from, mobile)) continue;
+      let at = firstOpen(t.window, zone, from);
+      for (let guard = 0; guard < 20 && Number.isFinite(at); guard++) {
+        const end = claimEnd(s, stepId, at);
+        if (end === null || end <= at) break;
+        at = firstOpen(t.window, zone, end);
+      }
+      if (!Number.isFinite(at) || !allTakenAt(s, at, mobile) || at >= endLimitOf(s) || mobileBadAt(mobile) <= at) continue;
+      return at;
     }
     return null;
   }
-  /** The skips the engine made that 28(b) validated, by subject and track: their instant, as the lead's progress gives it. */
-  const observedSkips = new Map<string, number>();
+  function decideSkips(now: number): void {
+    for (const rec of subjects.values()) {
+      for (const t of campaigns[rec.campaign]!.definition.tracks) {
+        const key = `${rec.id}/${t.id}`;
+        if (decidedSkips.has(key)) continue;
+        const at = skipAtOf(rec, t);
+        if (at !== null && at <= now) decidedSkips.set(key, at);
+      }
+    }
+  }
   /** When SMS stopped reaching the lead: every SMS track of its campaign skipped for a taken conversation (2.1). */
   function smsLostAt(s: Subject): number {
     const tracks = campaigns[s.campaign]!.definition.tracks.filter((t) => t.channel === "sms");
-    const skips = tracks.flatMap((t) => observedSkips.get(`${s.id}/${t.id}`) ?? []);
+    const skips = tracks.flatMap((t) => decidedSkips.get(`${s.id}/${t.id}`) ?? []);
     return tracks.length > 0 && skips.length === tracks.length ? Math.max(...skips) : Infinity;
   }
 
@@ -591,11 +676,61 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
   const lateCampaign = lateAt.campaign < 0.75 ? campaigns.length - 1 : Math.floor(((lateAt.campaign - 0.75) / 0.25) * campaigns.length);
   const lateEvent = Math.floor((lateAt.event < 0.7 ? 0.5 + lateAt.event / 1.4 : (lateAt.event - 0.7) / 0.6) * eventCount);
   for (let e = 0; e < eventCount; e++) {
+    const at = (x: number) => Math.floor(x * eventCount);
+    // The interim engine is simulated by switching the skip off in `rules.evaluate`; a running campaign's save and an
+    // import evaluate through the domain itself, so no edit or import is made while it runs: the upgrade comes first.
+    const edits = [refusalAt, removalAt, mobileChangeAt].some((x) => x && e === at(x.event)) || (lateNumber !== null && e === lateEvent);
+    if (interimUntil && upgradeAt === null && (e === at(interimUntil.event) || edits)) {
+      // The upgrade: the same database under the engine as built, at the first tick after it (question Q7 answered).
+      if (options.rules?.evaluate) rulesNow.evaluate = options.rules.evaluate;
+      else delete rulesNow.evaluate;
+      await h.restart();
+      upgradeAt = h.clock;
+      await h.tick();
+      features.add("leads-held-under-the-interim-upgraded");
+      // An edit due at this event comes a minute after the upgrade's tick, never at the same instant.
+      if (edits) await h.advanceTo(h.clock + MINUTE);
+    }
+    if (refusalAt && e === at(refusalAt.event)) {
+      // A number refuses its next text for an account reason (point 10): that binding is released as unsent.
+      const n = numbers[Math.floor(refusalAt.number * numbers.length)]!;
+      sms.refuseFrom.set(n.id, { calls: 1, reason: "rate_limited", retryAfterMs: refusalAt.retryMs });
+      features.add("a-number-refuses-a-text");
+    }
+    if (removalAt && e === at(removalAt.event)) {
+      // The user removes a number from a running campaign's SMS senders.
+      const ci = Math.floor(removalAt.campaign * campaigns.length);
+      const c = campaigns[ci]!;
+      const pool = poolAt(ci, h.clock);
+      if (pool.length >= 2) {
+        const next = pool.filter((_, i) => i !== Math.floor(removalAt.which * pool.length));
+        // Refused (409) when no number left in the pool can send now: a launch blocker of the running edit (ticket 19).
+        const saved = await h.request("PUT", `/api/campaigns/${c.id}/sequence`, { ...c.definition, smsPool: next, tracks: [...c.definition.tracks, ...c.branch] });
+        if (saved.status === 200) {
+          c.poolEdits.push({ at: h.clock, pool: next });
+          features.add("a-number-left-a-pool");
+        } else features.add("a-number-removal-refused");
+      }
+    }
+    if (mobileChangeAt && e === at(mobileChangeAt.event)) {
+      // A later export gives a person a new mobile (newer than the old one, which stays theirs); later SMS tracks text it.
+      const candidates = people.filter((p) => p.mobile && !sms.invalid.has(p.mobile) && !sms.invalidAfterSend.has(p.mobile) && campaigns.some((c) => c.id && c.companies.includes(p.company)));
+      const p = candidates[Math.floor(mobileChangeAt.person * candidates.length)];
+      const c = p ? campaigns.find((x) => x.id && x.companies.includes(p.company)) : undefined;
+      if (p && c) {
+        const mobile = `+4477009009${String(50 + people.indexOf(p))}`;
+        await h.reimport(c.id, rowsFor(c, new Map([[p.key, mobile]])));
+        mobileChanges.set(p.key, { mobile, at: h.clock });
+        features.add("a-mobile-changed");
+      }
+    }
     if (lateNumber && e === lateEvent) {
       // The user adds the fourth number to one running campaign's SMS senders (a pool edit stores nothing, ticket 19).
       const c = campaigns[lateCampaign]!;
-      await h.defineSequence(c.id, { ...c.definition, smsPool: [...(c.definition.smsPool ?? []), lateNumber.id], tracks: [...c.definition.tracks, ...c.branch] });
+      const pool = [...poolAt(lateCampaign, h.clock), lateNumber.id];
+      await h.defineSequence(c.id, { ...c.definition, smsPool: pool, tracks: [...c.definition.tracks, ...c.branch] });
       c.joined = { number: lateNumber.id, at: h.clock };
+      c.poolEdits.push({ at: h.clock, pool });
       features.add("a-number-joined-a-pool");
     }
     const r = rand();
@@ -661,7 +796,7 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
     if (st.subject.ended) features.add(`ended:${st.subject.ended}`);
   }
   // A number joined the pool of a campaign that had skipped a track for a taken conversation, after the skip (Q7 answered).
-  for (const [key, at] of observedSkips) {
+  for (const [key, at] of decidedSkips) {
     const joined = campaigns[subjects.get(key.split("/")[0]!)!.campaign]!.joined;
     if (joined && joined.at > at) features.add("a-number-joined-after-a-skip-in-its-campaign");
   }
@@ -683,33 +818,30 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
     // Needs attention answers at every check; a taken conversation is no longer one of its holds (28).
     if ((await h.request<NeedsAttention>("GET", "/api/needs-attention")).status !== 200) problem("18: Needs attention did not answer");
 
-    // 28(b). A skip for a taken conversation happens only when, at that instant, every number the track could use had
-    // texted the mobile for another subject, inside its window, at or after the record's earliest: never while a number
-    // free of the conversation was in the pool, whatever its capacity, health or pacing. Validated once, in track order,
-    // so a later track's start reads its predecessor's validated skip; 6 keeps it from changing after.
+    // 28. A skip for a taken conversation happens exactly at the record's own instant (`skipAtOf`): (a) never later, so
+    // no lead is left waiting on a taken conversation; (b) never earlier, never without every usable number taken by a
+    // text known sent, whatever a free number's capacity, health or pacing. The record decides its skips first, in track
+    // order, so a later track's start reads its predecessor's skip; 6 keeps a stored skip from changing after.
+    decideSkips(now);
     for (const [id, s] of states) {
       const rec = subjects.get(id)!;
       for (const t of campaigns[rec.campaign]!.definition.tracks) {
         const p = s.tracks.find((x) => x.trackId === t.id);
         const key = `${id}/${t.id}`;
-        if (p?.finishReason !== "skipped_conversation_taken" || p.finishedWall === null || observedSkips.has(key)) continue;
-        const at = p.finishedWall;
-        const earliest = skipEarliestOf(rec, t);
-        const mobile = mobileOf(rec);
-        const why =
-          earliest === null ? "the record never has every usable number taken"
-          : at < earliest ? `the record's earliest is ${new Date(earliest).toISOString()}`
-          : !allTakenAt(rec, at) ? `${usableAt(rec, at).filter((n) => mobile === null || takenFor(rec, n, mobile) === null || (takenFor(rec, n, mobile) ?? 0) > at).join(", ")} had not texted ${mobile ?? "its mobile"} for anyone else`
-          : !inWindow(t.window, zoneFor(rec), at) ? "its window was shut"
-          : mobile !== null && mobileBadAt(mobile) <= at ? "its mobile was already known bad"
-          : null;
-        if (why !== null) {
-          problem(`28: ${key} was skipped for a taken conversation at ${new Date(at).toISOString()}, but ${why}`);
-          continue;
+        const decided = decidedSkips.get(key);
+        const stored = p?.finishReason === "skipped_conversation_taken" ? p.finishedWall : null;
+        if (decided === undefined && stored === null) continue;
+        if (decided !== undefined && stored === null && s.subject.ended === null && (p?.finishedAt ?? null) === null) {
+          problem(`28: ${key} waits on a taken conversation at ${new Date(now).toISOString()}; the record skipped it at ${new Date(decided).toISOString()}`);
+        } else if (stored !== null && stored !== decided) {
+          problem(`28: ${key} was skipped for a taken conversation at ${new Date(stored).toISOString()}; the record ${decided === undefined ? "has no skip for it" : `skipped it at ${new Date(decided).toISOString()}`}`);
         }
-        observedSkips.set(key, at);
-        features.add("conversation-taken");
-        if (at > (earliest ?? at)) features.add("conversation-taken-skip-after-a-claim");
+        if (stored !== null) {
+          features.add("conversation-taken");
+          if (claims.some((c) => c.subjectId === id && c.stepId === t.steps[0]?.id && c.at <= stored && !sms.handoverLog.some((x) => x.attemptId === c.attemptId))) features.add("conversation-taken-skip-after-a-claim");
+          if (upgradeAt !== null && stored === upgradeAt) features.add("conversation-taken-held-under-the-interim");
+          if (s.subject.smsSender !== null) features.add("conversation-taken-on-a-fixed-sender");
+        }
       }
     }
 
@@ -790,19 +922,6 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
       if (new Set(own.map((c) => c.sender)).size > 1) problem(`14: ${id} was texted from ${[...new Set(own.map((c) => c.sender))].join(" and ")}`);
       if ((own[0]?.sender ?? null) !== s.subject.smsSender) problem(`1.3: ${id} has SMS sender ${s.subject.smsSender ?? "none"}; its first text came from ${own[0]?.sender ?? "none"}`);
 
-      // 28(a). No running lead waits on a taken conversation: an SMS track whose pending step is due, inside its
-      // window, with every number it may use texting the mobile for someone else, has been skipped, unless a claim
-      // of its own is still live (its handover fails, and the skip follows).
-      const leadNow = (s.subject.clock.frozenSince ?? now) - s.subject.clock.frozenTotal;
-      for (const t of def.tracks) {
-        const p = s.tracks.find((x) => x.trackId === t.id);
-        const mobile = mobileOf(rec);
-        if (t.channel !== "sms" || s.subject.ended !== null || mobile === null || !p || p.startedAt === null || p.finishedAt !== null || p.nextStepId === null || p.dueAt === null || p.dueAt > leadNow) continue;
-        const stepId = p.nextStepId;
-        if (s.attempts.some((a) => a.stepId === stepId && ["claimed", "handed", "accepted"].includes(a.state))) continue;
-        if (!inWindow(t.window, zone, now) || mobileBadAt(mobile) <= now || !allTakenAt(rec, now)) continue;
-        problem(`28: ${id}/${t.id} waits on ${stepId} at ${new Date(now).toISOString()}, though every number it may use (${usableAt(rec, now).join(", ")}) texts ${mobile} for someone else`);
-      }
       if (h.sms.deliveryLog.some((d) => d.subjectId === id && d.sender === campaigns[rec.campaign]!.joined?.number)) features.add("a-joined-number-texted");
 
       // 18 and 20 after the drain: the record's outcome for every track, and nothing left undone.
@@ -868,7 +987,7 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
           if (beforeStart !== null && (!reachesAt(rec, before.channel, beforeStart) || !completed(before))) out.push(`released|${t.channel}|${label}|-`);
         }
         // Skipped for a taken conversation: one entry for the track, nothing sent (question Q7 answered).
-        if (observedSkips.has(`${rec.id}/${t.id}`)) {
+        if (decidedSkips.has(`${rec.id}/${t.id}`)) {
           out.push(`skipped|${t.channel}|${label}|-`);
           return out;
         }
@@ -953,7 +1072,7 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
       // A detail known bad while the track is open fails it, in this campaign or any other.
       if (detail !== null) expected.push("failed_bad_destination");
       if (sentAll) expected.push("completed");
-      if (observedSkips.has(`${id}/${t.id}`)) expected.push("skipped_conversation_taken");
+      if (decidedSkips.has(`${id}/${t.id}`)) expected.push("skipped_conversation_taken");
       if (p.finishReason !== null && !expected.includes(p.finishReason)) problem(`20: ${id}/${t.id} finished ${p.finishReason}; the record expects ${expected.join(" or ")}`);
       if (p.finishReason === "completed" && !sentAll) problem(`20: ${id}/${t.id} completed though ${t.steps.filter((st) => !deliveryOf(t.channel, id, st.id)).map((st) => st.id).join(", ")} never reached the provider`);
       if (p.finishReason === "failed_bad_destination" && detail !== null && (t.channel === "email" ? emailBadAt(detail) : mobileBadAt(detail)) > now) problem(`20: ${id}/${t.id} failed though the record never saw ${detail} go bad`);
@@ -997,9 +1116,10 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
       // 2. No call from a disconnected sender.
       for (const c of calls) if (!c.healthy) problem(`2: ${c.subjectId}/${c.stepId} was called from ${c.sender} while it was disconnected`);
     }
-    // 14. One owner per conversation: every text from a number to a mobile is for one subject.
+    // 14. One owner per conversation: every text that went from a number to a mobile is for one subject. A first text
+    // refused or never sent owns nothing (point 10), so another subject may hand one over there after it.
     const pairs = new Map<string, Set<string>>();
-    for (const c of sms.handoverLog) pairs.set(`${c.sender}>${c.destination}`, (pairs.get(`${c.sender}>${c.destination}`) ?? new Set()).add(c.subjectId));
+    for (const c of sms.deliveryLog) pairs.set(`${c.sender}>${c.destination}`, (pairs.get(`${c.sender}>${c.destination}`) ?? new Set()).add(c.subjectId));
     for (const [pair, owners] of pairs) if (owners.size > 1) problem(`14: the conversation ${pair} was texted for ${owners.size} subjects`);
 
     // 8, 13, 19 and 2, per subject and track on the call logs.
@@ -1032,7 +1152,7 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
           const badAt = t.channel === "email" ? emailBadAt(c.destination) : mobileBadAt(c.destination);
           if (c.at > badAt) problem(`19: ${rec.id}/${step.id} was called for ${c.destination} after it was known bad at ${new Date(badAt).toISOString()}`);
           // The destination is the lead's own: a decision maker's mobile, never a main line.
-          const own = t.channel === "email" ? addressOf(rec) : mobileOf(rec);
+          const own = t.channel === "email" ? addressOf(rec) : trackMobile(rec, t);
           if (c.destination !== own) problem(`19: ${rec.id}/${step.id} was sent to ${c.destination}, not the lead's own ${t.channel === "email" ? "address" : "mobile"} (${own ?? "none"})`);
           previous = c;
         });
@@ -1075,8 +1195,10 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
     if (fixed !== null ? fixed !== accountId : !(t.channel === "sms" ? poolAt(rec.campaign, now) : def.emailPool).includes(accountId)) return false;
     if (badAtOf(rec, t.channel) <= now) return false;
     if (t.channel === "sms") {
-      const owner = ownerOf(accountId, mobileOf(rec) ?? "");
-      if (owner !== null && owner !== rec.id) return false;
+      // The conversation is held by whoever handed a text there first that was not refused (the binding, 4.5).
+      const mobile = trackMobile(rec, t) ?? "";
+      const holder = sms.handoverLog.find((c) => c.sender === accountId && c.destination === mobile && !sms.refusals.some((r) => r.attemptId === c.attemptId));
+      if (holder && holder.subjectId !== rec.id) return false;
     }
     return true;
   }
