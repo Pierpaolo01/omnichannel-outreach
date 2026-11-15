@@ -161,3 +161,48 @@ test("contacts saved as typed in another form show as stored, and Run test is of
   await page.getByLabel("Your mobile, for texts and the test call").fill("+447700900456");
   await expect(page.getByRole("button", { name: "Run test" })).toBeEnabled();
 });
+
+test("a reload while Run test waits shows it pending, never the test before it, and sends the same request until answered (verifier F3 on 55d6ac6)", async ({ page }) => {
+  const f = await fakeTestRunApp("reload-while-starting");
+  const c = `/api/campaigns/${f.campaign}`;
+  await f.harness.request("PUT", `${c}/test-contacts`, { email: OWN_TEST_EMAIL, mobile: "" });
+  const first = (await f.harness.request<{ definitionVersion: number; leads: { id: string }[] }>("GET", `${c}/test-runs`)).body;
+  const ran = (await f.harness.request<{ run: { id: string } }>("POST", `${c}/test-runs`, { requestId: "earlier", renderAs: first.leads[0]?.id ?? "", expect: { definitionVersion: first.definitionVersion } })).body;
+  await f.harness.request("POST", `/api/test-runs/${ran.run.id}/stop`, { requestId: "earlier-stop" });
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const bodies: string[] = [];
+  await page.route("**/api/campaigns/*/test-runs", async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    bodies.push(route.request().postData() ?? "");
+    await gate;
+    await route.continue().catch(() => undefined);
+  });
+  await at(page, f, `/campaigns/${f.campaign}/test-run`);
+  await expect(page.getByRole("heading", { name: /^Stopped/ })).toBeVisible();
+  await page.getByRole("button", { name: "Run test again" }).click();
+  await expect(page.getByRole("heading", { name: "Starting a test…" })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Starting a test…" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /^Stopped/ })).toHaveCount(0);
+  await expect.poll(() => bodies.length).toBe(2);
+  expect(bodies[1]).toBe(bodies[0]);
+  release();
+  await expect(page.getByRole("button", { name: "Test running" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /^Started at/ })).toBeVisible();
+  expect((await f.harness.request<{ run: { id: string; running: boolean } }>("GET", `${c}/test-runs`)).body.run.running).toBe(true);
+});
+
+test("focus stays with what happened: Saved after Save contacts, the result after Run and Stop (verifier F4 on 55d6ac6)", async ({ page }) => {
+  const f = await fakeTestRunApp("focus");
+  await at(page, f, `/campaigns/${f.campaign}/test-run`);
+  await page.getByLabel("Your email").fill(OWN_TEST_EMAIL);
+  await page.getByLabel("Your email").press("Enter");
+  await expect(page.getByText("Saved.")).toBeFocused();
+  await page.getByRole("button", { name: "Run test" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("The test started. Its steps are on the right.")).toBeFocused();
+  await page.getByRole("button", { name: "Stop test" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("The test is stopped. Nothing more goes to your test contacts.")).toBeFocused();
+});
