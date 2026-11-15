@@ -252,11 +252,20 @@ export class SqliteEngineStore implements EngineStore {
     const stored = storedDefinitionOf(row);
     const problems = running.problems(definition, previous);
     if (problems.length > 0) return { outcome: "invalid", problems, stored };
-    const { leads, accounts } = this.launchInputsNow(campaignId);
-    const check = running.check(definition, leads, accounts);
-    if (check.blockers.length > 0) return { outcome: "blocked", check, stored };
     const now = running.now;
     const ids = this.sql("SELECT id FROM enrollments WHERE campaign_id = ? ORDER BY enrolled_at, id").all(campaignId).map((e) => str(e, "id"));
+    // Every lead as the edit will leave it, computed before anything is written: the blockers are checked over what
+    // those leads can still run, removed tracks they started included (review bot on 7afa03d).
+    const leadsAfter = ids.flatMap((id) => {
+      const base = this.load(id, now);
+      const under = this.load(id, now, definition);
+      if (!base || !under) return [];
+      const caught = running.catchUp(base);
+      return [running.reconcile({ ...caught, campaign: { ...caught.campaign, definition }, lead: { ...caught.lead, zone: under.lead.zone } }, previous, base.lead.zone)];
+    });
+    const { leads, accounts } = this.launchInputsNow(campaignId);
+    const check = running.check(definition, leadsAfter, leads, accounts);
+    if (check.blockers.length > 0) return { outcome: "blocked", check, stored };
     const zones = new Map<string, string>();
     for (const id of ids) {
       const base = this.load(id, now);

@@ -148,3 +148,18 @@ describe("a page opened before launch cannot save as you type onto the running c
     expect(late.body.error?.code).toBe("edit_conflict");
   });
 });
+
+describe("a running edit is checked over what leads still run (review bot on 7afa03d)", () => {
+  test("clearing a pending email and removing its track is refused: leads that started the track would still send it", async () => {
+    const w = await world();
+    await w.h.advanceTo(MONDAY_9 + H);
+    const cleared = def([track("e1", [email("s1"), email("s2", 2, ""), email("s3", 3)], { removed: true }), track("e9", [email("x1")])]);
+    const read = await w.h.request<{ blockers: { kind: string }[] }>("POST", `/api/campaigns/${w.id}/sequence/impact`, { definition: cleared });
+    expect(read.body.blockers.map((b) => b.kind)).toContain("empty_copy");
+    const saved = await w.save(cleared);
+    expect(saved.status).toBe(409);
+    expect(saved.body.error?.code).toBe("blocked");
+    await w.h.advanceTo(MONDAY_9 + 5 * DAY);
+    expect(w.h.fake.handoverLog.filter((x) => x.rendered.body.trim() === "")).toEqual([]);
+  });
+});

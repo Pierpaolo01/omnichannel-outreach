@@ -2,7 +2,8 @@ import { describe, expect, test } from "vitest";
 import { DAY, H, handed, MONDAY_9, step, subjectState, track, tracksDefinition, withAttempts } from "../../../test/support/sequence-state.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "./definition.ts";
 import { applyToWork, enterMain, evaluate } from "./progress.ts";
-import { alignPending, changesBetween, editImpact, reconcileEdit } from "./reconcile.ts";
+import { launchCheck } from "./blockers.ts";
+import { alignPending, changesBetween, editImpact, reconcileEdit, stillRunnable } from "./reconcile.ts";
 import type { SubjectState } from "./state.ts";
 
 /**
@@ -187,5 +188,20 @@ describe("the pending step is 5.1's whatever wrote it (ADR 0003 \"Ticket 19\", s
     const rewound = { ...base, tracks: base.tracks.map((t) => ({ ...t, nextStepId: "s1" })) };
     expect(progress(evaluate(rewound, MONDAY_9 + H))?.nextStepId).toBe("s2");
     expect(progress(alignPending(rewound, MONDAY_9 + H))).toEqual(progress(base));
+  });
+});
+
+describe("a running edit is checked over what leads still run (review bot on 7afa03d)", () => {
+  test("a removed track that a lead started is checked for empty copy; one nobody runs is not", () => {
+    const before = sent(launchedWith(tracksDefinition([emailTrack()])), "s1", MONDAY_9);
+    const cleared = emailTrack(steps3().map((s) => (s.id === "s2" ? { ...s, body: "" } : s)), { removed: true });
+    const next = tracksDefinition([cleared, track("t9", "email", [step("x1", { threading: "new_subject" })])]);
+    const after = edit(before, next, MONDAY_9 + H);
+    const checked = stillRunnable(next, [after]);
+    expect(checked.tracks.find((t) => t.id === "t1")).toMatchObject({ removed: false });
+    expect(launchCheck(checked, [], []).blockers.map((b) => b.kind)).toContain("empty_copy");
+    // A lead that never started the removed track does not run it, so it is not checked.
+    const unstarted = { ...after, tracks: [] };
+    expect(stillRunnable(next, [unstarted]).tracks.find((t) => t.id === "t1")?.removed).toBe(true);
   });
 });

@@ -164,6 +164,8 @@ async function runUnguarded(seed: number, options: EditRunOptions): Promise<Edit
       const t = trackOfStep(def, x.stepId);
       const step = t?.steps.find((s) => s.id === x.stepId);
       // E10: nothing is handed over while the campaign is paused.
+      // E14: no empty message is ever handed over (the three blockers hold over what leads still run).
+      if (x.rendered.body.trim() === "") problem(`E14: an empty ${x.stepId} was handed to ${x.subjectId} at ${iso(x.at)}`);
       if (pausedAt(x.at)) problem(`E10: ${x.stepId} was handed to ${x.subjectId} at ${iso(x.at)}, while the campaign was paused`);
       const sameKey = log.slice(0, i).find((y) => y.key === x.key);
       // E2: a repeat call carries the first call's payload; no step is handed over after it was delivered.
@@ -244,7 +246,7 @@ async function runUnguarded(seed: number, options: EditRunOptions): Promise<Edit
   }
 
   /** Saves `next` and records what it does, or checks that a refusal changed nothing (E13). */
-  async function save(next: CampaignDefinition, label: string, mustRefuse = false): Promise<void> {
+  async function save(next: CampaignDefinition, label: string, mustRefuse: boolean | "either" = false): Promise<void> {
     const before = await snapshot();
     const stored = JSON.stringify((await h.request<{ definition: unknown }>("GET", `/api/campaigns/${campaign.id}/sequence`)).body.definition);
     // An accepted save runs a tick at once, under the new definition: it is in force for every handover from here.
@@ -253,6 +255,15 @@ async function runUnguarded(seed: number, options: EditRunOptions): Promise<Edit
     const res = await h.request<{ error?: { code: string; message: string } }>("PUT", `/api/campaigns/${campaign.id}/sequence`, next).finally(() => {
       saving = false;
     });
+    // An empty email in a removed track (review bot on 7afa03d): refused while a lead still runs it, else saved, and either
+    // way E14 holds (no empty message is ever handed over).
+    if (mustRefuse === "either") {
+      if (res.status === 200) {
+        record(current, next, before, h.clock, logIndex);
+        features.add("an-empty-email-in-a-removed-track-nobody-runs-saved");
+      } else features.add("refused-an-empty-email-in-a-removed-track-a-lead-runs");
+      return;
+    }
     if (mustRefuse) {
       if (res.status === 200) problem(`E13: the save refused ${label}, but it was answered 200`);
       const after = JSON.stringify((await h.request<{ definition: unknown }>("GET", `/api/campaigns/${campaign.id}/sequence`)).body.definition);
@@ -427,6 +438,18 @@ async function runUnguarded(seed: number, options: EditRunOptions): Promise<Edit
     return null;
   }
 
+  /** From a stream of its own (review bot on 7afa03d): a track's email emptied and the track removed in one edit. */
+  const rv = random(seed ^ 0x7afa);
+  function anEmptyEmailInARemovedTrack(): CampaignDefinition | null {
+    const def = current;
+    const removable = live(def).filter((t) => live(def).length > 1 && !live(def).some((x) => x.start.kind === "after" && x.start.trackId === t.id));
+    const t = removable[Math.floor(rv() * removable.length)];
+    const steps = t ? liveSteps(t) : [];
+    const s = steps[Math.floor(rv() * steps.length)];
+    if (!t || !s) return null;
+    return withTrack(def, t.id, (x) => ({ ...x, removed: true, steps: x.steps.map((y) => (y.id === s.id ? { ...y, body: "" } : y)) }));
+  }
+
   /** E12: a Skip confirmed on a read taken before an edit that changed what it previews is refused, and changes nothing. */
   async function staleSkip(): Promise<void> {
     const id = pick(leads);
@@ -479,7 +502,9 @@ async function runUnguarded(seed: number, options: EditRunOptions): Promise<Edit
       }
     } else if (r < 0.62) {
       const edit = aRefusedEdit();
-      if (edit) await save(edit.def, edit.label, true);
+      const hidden = rv() < 0.4 ? anEmptyEmailInARemovedTrack() : null;
+      if (hidden) await save(hidden, "empty-email-in-a-removed-track", "either");
+      else if (edit) await save(edit.def, edit.label, true);
     } else if (r < 0.77) {
       const open = pauses.find((p) => p.to === null);
       const res = await h.request("POST", `/api/campaigns/${campaign.id}/${open ? "resume" : "pause"}`, { requestId: `p-${seed}-${event}` });

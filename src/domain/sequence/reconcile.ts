@@ -176,3 +176,33 @@ function impactOf(state: SubjectState, change: EditChange): LeadImpact {
     }
   }
 }
+
+/**
+ * The definition a running edit is checked against (ADR 0003 "Ticket 19", the boundary; review bot on 7afa03d): its live
+ * tracks, which any lead may still start, and every removed track some lead still runs (started and not finished:
+ * `liveTracksFor`, the engine's own reading of 5.1), restored for the check with only the steps such a lead can still
+ * reach (`remainingSteps`, from which `nextStepOf` takes the next one). `leads` are the campaign's leads as the edit will
+ * leave them (`reconcileEdit` applied). The three launch blockers are then checked over this, so an empty or
+ * unrenderable message a lead would still be sent is refused, wherever it sits.
+ */
+export function stillRunnable(def: CampaignDefinition, leads: readonly SubjectState[]): CampaignDefinition {
+  const reachable = new Map<string, Set<string>>();
+  for (const lead of leads) {
+    for (const track of liveTracksFor(lead)) {
+      if (!track.removed) continue;
+      const p = progressOf(lead, track.id);
+      if (!p || p.startedAt === null || p.finishedAt !== null) continue;
+      const steps = reachable.get(track.id) ?? new Set<string>();
+      for (const id of remainingSteps(lead, track)) steps.add(id);
+      reachable.set(track.id, steps);
+    }
+  }
+  return {
+    ...def,
+    tracks: def.tracks.map((t) => {
+      const steps = reachable.get(t.id);
+      if (!t.removed || !steps) return t;
+      return { ...t, removed: false, steps: t.steps.map((s) => ({ ...s, removed: !steps.has(s.id) })) };
+    }),
+  };
+}

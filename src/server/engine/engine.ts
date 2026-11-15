@@ -342,7 +342,7 @@ export class Engine {
       const result = await this.store.saveDefinition(campaignId, definition, editedAt, save, {
         now,
         problems: (next, previous) => definitionProblems(next, previous, { launched: true }),
-        check: launchCheck,
+        check: (definition, leadsAfter, leads, accounts) => this.rules.runningCheck(definition, leadsAfter, leads, accounts),
         catchUp: (s) => sealReckoning(this.rules.asOfAction(s, now), now),
         reconcile: (s, previous, previousZone) => this.rules.reconcileEdit(s, previous, previousZone, now),
       });

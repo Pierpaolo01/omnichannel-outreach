@@ -12,7 +12,8 @@ import { FULL_SEARCH, inShard } from "./sequence-chunks.ts";
 
 export const EDIT_SEED = 19_000;
 /** Offsets from EDIT_SEED, chosen greedily from a sweep of all 100 (15 November 2026) to reach every behaviour below, with each mutation's killing seed. */
-export const EDIT_FIXED_SEEDS: readonly number[] = [0, 1, 4, 5, 6, 23, 31, 81];
+// 32 (review bot on 7afa03d): kills "a running edit's blockers checked over its live tracks only" (E14).
+export const EDIT_FIXED_SEEDS: readonly number[] = [0, 1, 4, 5, 6, 23, 31, 32, 81];
 const SEARCH_SEEDS = 100;
 const MAX_SEEDS = 30;
 const RUN_WRITES = 10_000;
@@ -31,6 +32,7 @@ export const EDIT_FEATURES: readonly string[] = [
   "a-track-start-timed",
   "an-edit-between-a-claim-and-its-handover",
   "an-edit-with-work-at-the-provider",
+  "an-empty-email-in-a-removed-track-nobody-runs-saved",
   "campaign-paused",
   "campaign-resumed",
   "edit-add-step",
@@ -54,6 +56,7 @@ export const EDIT_FEATURES: readonly string[] = [
   "late-sends",
   "refused-a-deleted-step",
   "refused-a-restored-step",
+  "refused-an-empty-email-in-a-removed-track-a-lead-runs",
   "refused-empty-copy",
 ];
 export const RETIRED_EDIT_FEATURES: Readonly<Record<string, string>> = {};

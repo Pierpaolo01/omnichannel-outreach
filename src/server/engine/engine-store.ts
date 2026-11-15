@@ -164,7 +164,8 @@ export type SaveResult =
  */
 export interface RunningSave {
   readonly problems: (definition: CampaignDefinition, previous: CampaignDefinition) => readonly string[];
-  readonly check: (definition: CampaignDefinition, leads: readonly MergeData[], accounts: readonly SenderAccountView[]) => LaunchCheck;
+  /** The three launch blockers over what the campaign's leads, as the edit will leave them (`leadsAfter`), can still run. */
+  readonly check: (definition: CampaignDefinition, leadsAfter: readonly SubjectState[], leads: readonly MergeData[], accounts: readonly SenderAccountView[]) => LaunchCheck;
   readonly catchUp: (state: SubjectState) => SubjectState;
   readonly reconcile: (state: SubjectState, previous: CampaignDefinition, previousZone: string) => SubjectState;
   readonly now: number;

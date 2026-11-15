@@ -7,6 +7,7 @@ import { launchCheck } from "../../domain/sequence/blockers.ts";
 import { definitionProblems, type CampaignDefinition } from "../../domain/sequence/definition.ts";
 import { sealReckoning } from "../../domain/sequence/progress.ts";
 import { changesBetween, editImpact } from "../../domain/sequence/reconcile.ts";
+import type { SubjectState } from "../../domain/sequence/state.ts";
 import type { EditImpactView } from "../../shared/api.ts";
 import type { EngineStore } from "./engine-store.ts";
 import type { Rules } from "./rules.ts";
@@ -17,14 +18,15 @@ export async function editImpactView(store: EngineStore, rules: Rules, campaignI
   const previous = row.definition;
   const problems = definitionProblems(draft, previous, { launched: row.launchedAt !== null });
   const { leads, accounts } = await store.launchInputs(campaignId);
-  const blockers = launchCheck(draft, leads, accounts).blockers;
   const changes = previous ? changesBetween(previous, draft) : [];
   const counts = changes.map((change) => ({ ...change, reaches: 0, skips: 0, inFlight: 0, untouched: 0 }));
   const subjects = previous && row.launchedAt !== null ? await store.campaignLeadsUnder(campaignId, now, draft) : [];
+  const leadsAfter: SubjectState[] = [];
   for (const { state, zoneUnderDraft } of subjects) {
     const caught = sealReckoning(rules.asOfAction(state, now), now);
     const under = { ...caught, campaign: { ...caught.campaign, definition: draft }, lead: { ...caught.lead, zone: zoneUnderDraft } };
     const after = rules.reconcileEdit(under, previous ?? draft, caught.lead.zone, now);
+    leadsAfter.push(after);
     editImpact(caught, after, changes).forEach((impact, i) => {
       const c = counts[i];
       if (!c) return;
@@ -34,5 +36,7 @@ export async function editImpactView(store: EngineStore, rules: Rules, campaignI
       else c.untouched++;
     });
   }
+  // The save's own check: over what the leads, as the edit leaves them, can still run (before launch, the launch check).
+  const blockers = (row.launchedAt !== null ? rules.runningCheck(draft, leadsAfter, leads, accounts) : launchCheck(draft, leads, accounts)).blockers;
   return { asOf: new Date(now).toISOString(), definitionVersion: row.definitionVersion, leads: subjects.length, changes: counts, problems, blockers };
 }

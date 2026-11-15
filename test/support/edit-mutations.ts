@@ -2,6 +2,7 @@ import { leadNow, span, wallOfLead } from "../../src/domain/sequence/clock.ts";
 import { inFlight, progressOf, remainingSteps, runs } from "../../src/domain/sequence/progress.ts";
 import type { SubjectState, TrackProgress } from "../../src/domain/sequence/state.ts";
 import { DEFAULT_RULES, type Rules } from "../../src/server/engine/rules.ts";
+import { launchCheck } from "../../src/domain/sequence/blockers.ts";
 
 /**
  * Deliberately broken running edits (ADR 0003 "Ticket 19"): each replaces `reconcileEdit` (or, for E12, the control's
@@ -98,6 +99,11 @@ export const EDIT_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; re
         return out;
       },
     },
+  },
+  "a running edit's blockers checked over its live tracks only": {
+    invariant: "E14",
+    seed: 32,
+    rules: { runningCheck: (definition, _leadsAfter, leads, accounts) => launchCheck(definition, leads, accounts) },
   },
   "a control applied after an edit changed what it previews": {
     seed: 31,
