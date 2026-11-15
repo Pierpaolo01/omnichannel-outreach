@@ -6,9 +6,9 @@
  * read says it at its instant.
  */
 import { STATUS_GROUPS, statusGroup, type StatusGroup } from "../../domain/outreach-status.ts";
-import type { CampaignPauseRead, ControlStepView, ControlView, LeadControlApi, OutreachStatus, RecordLead } from "../../shared/api.ts";
+import type { CampaignPauseRead, ControlStepView, ControlView, LeadControlApi, OutreachStatus, RecordLead, StepWaitApi, StepWhenView } from "../../shared/api.ts";
 import { stepNoun } from "../../shared/track-label.ts";
-import { dateIn } from "../calls/wording.ts";
+import { dateIn, HOLD_REASON } from "../calls/wording.ts";
 import { STATUS_GROUP_LABEL } from "../status.tsx";
 
 export type AllowedControl = Extract<ControlView, { readonly allowed: true }>;
@@ -71,7 +71,64 @@ export function stepPhrase(step: Pick<ControlStepView, "channel" | "track" | "nu
   }
 }
 
-const due = (iso: string | null, userZone: string): string => (iso ? `, due ${whenIn(userZone, iso)}` : "");
+/**
+ * Why a step has no time, as the read gives it (`StepWaitApi`), in one exhaustive switch. None promises a time: the engine
+ * cannot know when what holds the step ends (ADR 0003 "Reads that say when"). Provisional wording, for the principal.
+ */
+export function stepWaitWords(why: StepWaitApi): string {
+  switch (why) {
+    case "campaign_not_launched":
+      return "waiting for this campaign to launch";
+    case "campaign_paused":
+      return "on hold while this campaign is paused";
+    case "lead_paused":
+      return "on hold while they are paused";
+    case "callback":
+      return "on hold until you log the callback";
+    case "ended":
+      return "not going: their outreach in this campaign has ended";
+    case "with_provider":
+      return "already handed to the provider, which sends it";
+    case "unresolved":
+    case "render_failed":
+    case "provider_skipped":
+    case "no_thread":
+    case "sms_conversation_taken":
+      return `held: ${HOLD_REASON[why]}`;
+    case "no_window":
+      return "not going: its sending hours never open";
+    case "sender_unavailable":
+      return "waiting for a sender account that can send";
+    case "sending_capacity":
+      return "waiting for sending capacity: every account it may use is full today";
+    case "call_capacity":
+      return "waiting for room on your call list: today’s call capacity is used";
+    case "on_call_list":
+      return "on your call list";
+    default: {
+      const unhandled: never = why;
+      throw new Error(`A reason a step waits with no words: ${String(unhandled)}`);
+    }
+  }
+}
+
+/** When a step goes, from the read (`StepWhenView`): "due now", "due Tue 10 Nov at 09:00" in the user's zone, or why it waits. */
+export function stepWhenPhrase(when: StepWhenView, userZone: string): string {
+  switch (when.kind) {
+    case "now":
+      return "due now";
+    case "at":
+      return `due ${whenIn(userZone, when.at)}`;
+    case "waits":
+      return stepWaitWords(when.why);
+    default: {
+      const unhandled: never = when;
+      throw new Error(`A step time the page cannot say: ${String(unhandled)}`);
+    }
+  }
+}
+
+const due = (when: StepWhenView | null, userZone: string): string => (when ? `, ${stepWhenPhrase(when, userZone)}` : "");
 
 /** Work already handed to a provider that may still be sent (ticket 17a's provider limitation, question Q17): said only when the read counts any. */
 export function mayStillSendText(count: number): string | null {
@@ -88,9 +145,9 @@ function currentStepOf(lead: Pick<RecordLead, "controls">): ControlStepView | nu
   return null;
 }
 
-/** When the read says that step is due, if the lead keeps running: its track's pending step in the same read. */
-function dueOf(lead: Pick<RecordLead, "tracks">, step: ControlStepView): string | null {
-  return lead.tracks.find((t) => t.trackId === step.trackId && t.nextStep?.stepId === step.stepId)?.nextStep?.dueAt ?? step.dueAt;
+/** When the read says that step goes (the engine's `stepWhen`): its track's pending step in the same read. */
+function dueOf(lead: Pick<RecordLead, "tracks">, step: ControlStepView): StepWhenView | null {
+  return lead.tracks.find((t) => t.trackId === step.trackId && t.nextStep?.stepId === step.stepId)?.nextStep?.when ?? step.when;
 }
 
 /**
@@ -188,18 +245,18 @@ export function controlPreviewText(control: AllowedControl, campaign: RecordLead
     case "resume":
       if (campaign.paused) return join("Their own pause ends.", next ? `${capital(stepPhrase(next))} still waits while this campaign is paused.` : "Their outreach stays held while this campaign is paused.");
       if (control.statusAfter === "callback_scheduled") return "Their own pause ends. Their callback still holds their outreach until you log how it went.";
-      return next ? `Their outreach continues where it was: ${stepPhrase(next)}${due(next.dueAt, userZone)}.` : "Their outreach continues where it was.";
+      return next ? `Their outreach continues where it was: ${stepPhrase(next)}${due(next.when, userZone)}.` : "Their outreach continues where it was.";
     case "skip": {
       const skips = control.skips;
       const what = !skips ? "The current step is skipped and never sent." : skips.channel === "call" ? callSkipPreview(skips) : `${capital(stepPhrase(skips))} is skipped and never sent.`;
-      return join(what, next ? `Next: ${stepPhrase(next)}${due(next.dueAt, userZone)}.` : null);
+      return join(what, next ? `Next: ${stepPhrase(next)}${due(next.when, userZone)}.` : null);
     }
     case "stop":
       return join("Their outreach in this campaign stops: nothing more goes out and no call is listed. What was sent stays on record.", provider);
     case "resume_from_next_step":
-      return join(next ? `They resume at the next unsent step: ${stepPhrase(next)}${due(next.dueAt, userZone)}.` : "They resume at the next unsent step.", campaign.paused ? "It waits while this campaign is paused." : null, "Nothing already sent goes again.");
+      return join(next ? `They resume at the next unsent step: ${stepPhrase(next)}${due(next.when, userZone)}.` : "They resume at the next unsent step.", campaign.paused ? "It waits while this campaign is paused." : null, "Nothing already sent goes again.");
     case "move_to_win_back":
-      return join(next ? `They move to this campaign’s win-back branch, starting with ${stepPhrase(next)}${due(next.dueAt, userZone)}.` : "They move to this campaign’s win-back branch.", campaign.paused ? "It waits while this campaign is paused." : null, "Their remaining main-sequence steps are dropped.");
+      return join(next ? `They move to this campaign’s win-back branch, starting with ${stepPhrase(next)}${due(next.when, userZone)}.` : "They move to this campaign’s win-back branch.", campaign.paused ? "It waits while this campaign is paused." : null, "Their remaining main-sequence steps are dropped.");
     default: {
       const unhandled: never = control.action;
       throw new Error(`A control with no preview: ${String(unhandled)}`);

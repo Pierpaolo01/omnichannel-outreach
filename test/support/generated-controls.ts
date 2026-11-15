@@ -777,9 +777,18 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
           if (!endedAt(s, now)) problem(`P2: ${s.id}/${t.id}'s pending step is ${shown?.stepId ?? "none"} at ${isoOf(now)}; the record says ${pending.stepId}${process.env["CONTROLS_DEBUG"] ? ` [start ${isoOf(startOf(s, t))}; before ${JSON.stringify(def(s).tracks.map((x) => [x.id, finishOf(s, x)]))}; skips ${JSON.stringify(skips.filter((x) => x.subjectId === s.id))}; holds ${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))}; engine ${JSON.stringify(st.tracks.map((p) => [p.trackId, p.nextStepId, p.finishReason]))}; attempts ${JSON.stringify(st.attempts.map((a) => [a.stepId, a.state, isoOf(a.handedWall)]))}]` : ""}`);
           continue;
         }
-        const want = held || endedAt(s, now) ? pending.unheld : pending.due;
-        // A step already due shows when lead time reached its deadline on today's clock: compared only while still to come.
-        if (want > now && Date.parse(shown.dueAt) !== want) problem(`P2: ${s.id}/${pending.stepId} is due ${shown.dueAt} at ${isoOf(now)}; the record says ${isoOf(want)} (${held ? "held: the wall it was resolved to" : "moved by every hold since its basis"}; holds ${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))})${process.env["CONTROLS_DEBUG"] ? ` [unheld ${isoOf(pending.unheld)}; prev ${JSON.stringify(t.steps.map((x) => resolution(s, t, x.id)).map((r) => (r ? [isoOf(r.at), isoOf(r.seen), r.kind] : null)))}; deliveries ${JSON.stringify(deliveries(t.channel === "sms" ? "sms" : "email").filter((d) => d.subjectId === s.id && t.steps.some((x) => x.id === d.stepId)).map((d) => [d.stepId, isoOf(d.at), isoOf(d.visibleAt)]))}; engine ${JSON.stringify(st.tracks.find((p) => p.trackId === t.id))}; results ${JSON.stringify(st.results.filter((r) => r.trackId === t.id).map((r) => [r.stepId, r.at, isoOf(r.atWall)]))}; freezes ${JSON.stringify(st.freezes.map((f) => [isoOf(f.fromWall), isoOf(f.toWall)]))}]` : ""}`);
+        // W1 (ADR 0003 "Reads that say when"): a read never states an instant before its own, and a held or ended lead's
+        // step promises no time: the read gives the reason.
+        const when = shown.when;
+        if (when.kind === "at" && Date.parse(when.at) <= now) problem(`W1: ${s.id}/${pending.stepId} reads as due at ${when.at}, not after the read's instant ${isoOf(now)}`);
+        if ((held || endedAt(s, now)) && when.kind !== "waits") problem(`W1: ${s.id}/${pending.stepId} is held or ended at ${isoOf(now)} but the read says ${JSON.stringify(when)}, a time it cannot promise`);
+        if (held || endedAt(s, now)) continue;
+        const want = pending.due;
+        // The windows are open all day in these runs, so a running lead's step goes at its due instant, or now once that has
+        // passed; with no room on its sender today the read gives that reason and no time (ticket 20a's family).
+        const shownAt = when.kind === "at" ? Date.parse(when.at) : when.kind === "now" ? now : null;
+        const capacityWait = when.kind === "waits" && (when.why === "sending_capacity" || when.why === "sender_unavailable");
+        if (!capacityWait && shownAt !== Math.max(want, now)) problem(`P2: ${s.id}/${pending.stepId} reads ${JSON.stringify(when)} at ${isoOf(now)}; the record says ${isoOf(Math.max(want, now))} (moved by every hold since its basis; holds ${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))})${process.env["CONTROLS_DEBUG"] ? ` [unheld ${isoOf(pending.unheld)}; prev ${JSON.stringify(t.steps.map((x) => resolution(s, t, x.id)).map((r) => (r ? [isoOf(r.at), isoOf(r.seen), r.kind] : null)))}; deliveries ${JSON.stringify(deliveries(t.channel === "sms" ? "sms" : "email").filter((d) => d.subjectId === s.id && t.steps.some((x) => x.id === d.stepId)).map((d) => [d.stepId, isoOf(d.at), isoOf(d.visibleAt)]))}; engine ${JSON.stringify(st.tracks.find((p) => p.trackId === t.id))}; results ${JSON.stringify(st.results.filter((r) => r.trackId === t.id).map((r) => [r.stepId, r.at, isoOf(r.atWall)]))}; freezes ${JSON.stringify(st.freezes.map((f) => [isoOf(f.fromWall), isoOf(f.toWall)]))}]` : ""}`);
         if (pending.due > pending.unheld && !held) features.add("a-wait-moved-by-a-hold");
       }
       for (const ch of ["email", "sms"] as const) {

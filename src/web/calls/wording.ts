@@ -3,7 +3,7 @@
  * reads only what the server reported (the queue, the call task, an outcome's answer, Needs
  * attention); none decides anything about order, counts, hours, capacity or an outcome's effect.
  */
-import type { PausedCampaignCalls, CallNumberView, CallOffListView, CallOutcomeApi, DeclinedPathApi, DeclinePreviewView, DeclineTrackView, CallQueueItem, CallsView, CallTaskView, FinishReasonApi, NeedsAttention, OutreachStatus, RecordCallView, RecordCalls, RecordedNumberView, TodayView, WindowRule } from "../../shared/api.ts";
+import type { PausedCampaignCalls, CallNumberView, CallOffListView, CallOutcomeApi, DeclinedPathApi, DeclinePreviewView, DeclineTrackView, CallQueueItem, CallsView, CallTaskView, FinishReasonApi, HoldReasonApi, NeedsAttention, OutreachStatus, RecordCallView, RecordCalls, RecordedNumberView, TodayView, WindowRule } from "../../shared/api.ts";
 import { WIN_BACK_HAS_NO_TRACKS } from "../../domain/sequence/definition.ts";
 import { STATUS_LABEL } from "../status.tsx";
 import type { DeskSnapshot } from "./callDesk.ts";
@@ -284,7 +284,8 @@ const SENDER_PROBLEM: Readonly<Record<string, string>> = {
   invalid_report: "Its provider reported a sending setting the app can’t use, so it isn’t used until that’s corrected.",
 };
 
-const HOLD_REASON: Readonly<Record<string, string>> = {
+/** Why a held track waits (5.4), in words: Needs attention and the record's next step say it the same way. */
+export const HOLD_REASON: Readonly<Record<HoldReasonApi, string>> = {
   unresolved: "the provider hasn’t confirmed whether a message went",
   render_failed: "a message couldn’t be put together from its copy",
   provider_skipped: "the provider skipped the lead",
@@ -405,10 +406,10 @@ export function attentionItems(n: NeedsAttention, today: Pick<TodayView, "overdu
   for (const c of n.heldCapacity) {
     items.push({ key: `held-${c.accountId}`, tone: "pause", title: `${c.held} of ${c.accountId}’s ${c.capacity} sends today are held`, body: "The provider hasn’t confirmed whether those messages went, so their room is kept until it does." });
   }
-  const byReason = new Map<string, number>();
+  const byReason = new Map<HoldReasonApi, number>();
   for (const t of n.heldTracks) byReason.set(t.reason, (byReason.get(t.reason) ?? 0) + 1);
   for (const [reason, count] of byReason) {
-    items.push({ key: `tracks-${reason}`, tone: "pause", title: count === 1 ? "One lead’s track is on hold" : `${count} leads’ tracks are on hold`, body: `On hold because ${HOLD_REASON[reason] ?? reason}. Nothing is dropped.` });
+    items.push({ key: `tracks-${reason}`, tone: "pause", title: count === 1 ? "One lead’s track is on hold" : `${count} leads’ tracks are on hold`, body: `On hold because ${HOLD_REASON[reason]}. Nothing is dropped.` });
   }
   items.push(...capacityItems(n.waitingForCapacity, today.date, userZone));
   for (const [i, a] of n.anomalies.entries()) items.push({ key: `anomaly-${i}`, tone: "end", title: "The provider reported something unexpected", body: a.what });

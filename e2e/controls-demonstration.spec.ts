@@ -39,7 +39,7 @@ test("pause during a wait and a pending call, the frozen skip limit, a smooth re
   });
 
   const dueBefore = await callDue();
-  const email2Before = (await read()).tracks.find((t) => t.trackId === "email")?.nextStep?.dueAt;
+  const email2Before = (await read()).tracks.find((t) => t.trackId === "email")?.nextStep?.when;
 
   await test.step("pause the campaign from the list, during the wait and with the call pending", async () => {
     await at(page, f, "/campaigns");
@@ -73,8 +73,8 @@ test("pause during a wait and a pending call, the frozen skip limit, a smooth re
     await linger(page);
     // The call keeps its original due time; email 2 is due three days later than it was, by the time paused.
     expect(await callDue()).toBe(dueBefore);
-    const email2After = (await read()).tracks.find((t) => t.trackId === "email")?.nextStep?.dueAt;
-    expect(Date.parse(email2After ?? "") - Date.parse(email2Before ?? "")).toBe(3 * DAY);
+    const email2After = (await read()).tracks.find((t) => t.trackId === "email")?.nextStep?.when;
+    expect(email2Before?.kind === "at" && email2After?.kind === "at" ? Date.parse(email2After.at) - Date.parse(email2Before.at) : null).toBe(3 * DAY);
     await at(page, f, "/calls");
     await expect(page.getByText(/Rolled over, due Mon 9 Nov/).first()).toBeVisible();
     await linger(page);

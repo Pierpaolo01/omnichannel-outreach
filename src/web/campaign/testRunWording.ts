@@ -1,4 +1,7 @@
 import type { TestRunEnding, TestRunRead, TestStepRow } from "../../shared/api.ts";
+import { stepWaitWords } from "../controls/wording.ts";
+
+const capitalise = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1);
 
 /**
  * The Test run tab's words (ticket 21), from the read only: what each step's stored facts say, never more. Email has no
@@ -79,6 +82,8 @@ export function stepStateText(row: TestStepRow, zone: string, readAt: string): s
     case "with_provider":
       return row.channel === "sms" ? "With the SMS provider" : "With Instantly";
     case "due": {
+      // No time the engine can promise: the read's reason, in the one wording function (ADR 0003 "Reads that say when").
+      if (row.at === null && row.waits !== null) return capitalise(stepWaitWords(row.waits));
       const ms = row.at === null ? Infinity : Date.parse(row.at) - Date.parse(readAt);
       if (ms <= 0) return "Due now";
       return ms <= 2 * 60_000 ? "In about 1 min" : `Due ${at}`;

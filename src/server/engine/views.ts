@@ -3,7 +3,8 @@ import { isLive, markable } from "../../domain/sequence/attempt.ts";
 import { isListed, listedForDay, reasonOf } from "../../domain/sequence/calls.ts";
 import { callRecordView, dateOfDay } from "./call-views.ts";
 import { leadNow } from "../../domain/sequence/clock.ts";
-import { accountAvailable, candidatesFor, claimRefusal, heldReason, inheritedWork, readyItems, stalledAccounts } from "../../domain/sequence/dispatch.ts";
+import { accountAvailable, candidatesFor, claimRefusal, heldReason, inheritedWork, readyItems, stalledAccounts, stepWhen } from "../../domain/sequence/dispatch.ts";
+import { stepWhenView } from "./step-when-view.ts";
 import { localDayNumber, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { relevantChannels, waitingOn } from "../../domain/sequence/providers.ts";
 import { providerEvidence, sendingInterrupted } from "./worker-state.ts";
@@ -19,8 +20,6 @@ export function progressView(s: SubjectState, now: number): EnrollmentProgress {
   // The reply that stopped the lead, as stored when it stopped. A later text or email is kept on the
   // record, but never moves the channel or date the status shows.
   const reply = s.subject.ended === "replied" ? s.subject.stopReply : null;
-  const lead = leadNow(s.subject.clock, now);
-  const running = s.subject.clock.frozenSince === null;
   return {
     id: s.subject.id,
     campaignId: s.campaign.id,
@@ -63,10 +62,8 @@ export function progressView(s: SubjectState, now: number): EnrollmentProgress {
           finishReason: p?.finishReason ?? null,
           finishedAt: iso(p?.finishedWall ?? null),
           hold: heldReason(s, track.id, now),
-          nextStep:
-            p && p.finishedAt === null && p.nextStepId !== null && p.dueAt !== null
-              ? { stepId: p.nextStepId, number: numberOf(p.nextStepId), dueAt: new Date(running ? now + (p.dueAt - lead) : (p.dueWall ?? now)).toISOString() }
-              : null,
+          // When it goes, by the engine's own decision functions at this instant (ADR 0003 "Reads that say when").
+          nextStep: nextStepOf(s, track.id, numberOf, now),
           steps: track.steps.map((st, i) => {
             const result = s.results.find((r) => r.stepId === st.id);
             return {
@@ -98,6 +95,13 @@ export function progressView(s: SubjectState, now: number): EnrollmentProgress {
         };
       }),
   };
+}
+
+/** A track's pending step and when it goes (`stepWhen`), or null when it has none. */
+function nextStepOf(s: SubjectState, trackId: string, numberOf: (stepId: string) => number, now: number): EnrollmentProgress["tracks"][number]["nextStep"] {
+  const p = s.tracks.find((x) => x.trackId === trackId);
+  const when = stepWhen(s, trackId, now);
+  return p?.nextStepId && when ? { stepId: p.nextStepId, number: numberOf(p.nextStepId), when: stepWhenView(when, now) } : null;
 }
 
 /** A branch's tracks for the lead: not removed, or already started by it (5.1). */

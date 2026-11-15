@@ -120,6 +120,30 @@ export type CampaignControlView = { readonly action: "pause" | "resume"; readonl
 /** The controls on one lead in one campaign (ADR 0003 "Ticket 17a"). */
 export type LeadControlApi = "pause" | "resume" | "skip" | "stop" | "resume_from_next_step" | "move_to_win_back";
 
+/**
+ * Why a pending step has no time a read may promise (ADR 0003 "Reads that say when"): the engine cannot know when what
+ * holds it ends. The hold reasons are 5.4's (`HoldReasonApi`).
+ */
+export type StepWaitApi =
+  | "campaign_not_launched"
+  | "campaign_paused"
+  | "lead_paused"
+  | "callback"
+  | "ended"
+  | "with_provider"
+  | HoldReasonApi
+  | "no_window"
+  | "sender_unavailable"
+  | "sending_capacity"
+  | "call_capacity"
+  | "on_call_list";
+
+/**
+ * When a pending step goes, as the engine decides it at the read's instant (`stepWhen`): due now; at a later instant (its
+ * window's next opening, for an email or text whose wait has ended outside it); or waiting, with why, and no time.
+ */
+export type StepWhenView = { readonly kind: "now" } | { readonly kind: "at"; readonly at: string } | { readonly kind: "waits"; readonly why: StepWaitApi };
+
 /** A step a control names: the one it skips, or the next one the lead would send. */
 export interface ControlStepView {
   readonly trackId: string;
@@ -136,8 +160,8 @@ export interface ControlStepView {
   /** Its place among the track's steps, from 1, and how many there are. */
   readonly number: number;
   readonly of: number;
-  /** When it falls due once the lead runs; null while another hold remains after the action, or when not resolved yet. */
-  readonly dueAt: string | null;
+  /** When it goes once the action applies (`stepWhen` on the lead as the action leaves it); null for the step a skip skips. */
+  readonly when: StepWhenView | null;
 }
 
 /**
@@ -484,8 +508,8 @@ export interface TrackProgressView {
   readonly finishReason: FinishReasonApi | null;
   readonly finishedAt: string | null;
   readonly hold: HoldReasonApi | null;
-  /** The pending step and the wall instant it is due, if the lead keeps running. */
-  readonly nextStep: { readonly stepId: string; readonly number: number; readonly dueAt: string } | null;
+  /** The pending step and when it goes, as the engine decides it at the read (`stepWhen`). */
+  readonly nextStep: { readonly stepId: string; readonly number: number; readonly when: StepWhenView } | null;
   /** A phone track's call task once placed on the user's list (ticket 14): open until its outcome or its track's finish. */
   readonly callTask: {
     readonly taskId: string;
@@ -1566,7 +1590,7 @@ export type TestStepState =
   | "skipped"
   /** Handed to the provider; no answer yet. */
   | "with_provider"
-  /** Its wait runs out at `at`; it goes then, or at its window's next opening. */
+  /** Not sent yet: it goes at `at` (the read's instant when due now, else its window's next opening), or `at` is null and `waits` says why. */
   | "due"
   /** A call on your Calls list now, by the engine's listing rule. */
   | "on_your_list"
@@ -1588,6 +1612,8 @@ export interface TestStepRow {
   readonly track: string;
   readonly state: TestStepState;
   readonly at: string | null;
+  /** For a due step with no time the engine can promise: why it waits (`StepWaitApi`); null otherwise. */
+  readonly waits: StepWaitApi | null;
   /** For a call: its task, and the outcome logged. */
   readonly taskId: string | null;
   readonly outcome: string | null;

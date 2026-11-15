@@ -4,7 +4,8 @@
  * nothing, so a control the read allows is the one the action accepts at that instant, and a refusal carries the
  * same reason (P11).
  */
-import { leadNow } from "../../domain/sequence/clock.ts";
+import { stepWhen } from "../../domain/sequence/dispatch.ts";
+import { stepWhenView } from "./step-when-view.ts";
 import { currentStep, judgeCampaignControl, previewDigest, LEAD_CONTROLS, skipTarget, type LeadControl } from "../../domain/sequence/controls.ts";
 import { isLive } from "../../domain/sequence/attempt.ts";
 import { deriveStatus, runs } from "../../domain/sequence/progress.ts";
@@ -17,7 +18,6 @@ const iso = (t: number) => new Date(t).toISOString();
 
 function stepView(state: SubjectState, step: NonNullable<ReturnType<typeof currentStep>>, now: number, due: boolean): ControlStepView {
   const live = step.track.steps.filter((s) => !s.removed);
-  const lead = leadNow(state.subject.clock, now);
   return {
     trackId: step.track.id,
     // The track's name as everywhere else (ticket 17b): "Email track 2" when the campaign has several on its channel.
@@ -28,8 +28,14 @@ function stepView(state: SubjectState, step: NonNullable<ReturnType<typeof curre
     stepId: step.stepId,
     number: live.findIndex((s) => s.id === step.stepId) + 1,
     of: live.length,
-    dueAt: due && step.dueAt !== null && runs(state) ? iso(now + Math.max(0, step.dueAt - lead)) : null,
+    // When the step goes once the action applies: the engine's `stepWhen` on the lead as the action leaves it.
+    when: due ? whenOf(state, step.track.id, now) : null,
   };
+}
+
+function whenOf(state: SubjectState, trackId: string, now: number): ControlStepView["when"] {
+  const when = stepWhen(state, trackId, now);
+  return when ? stepWhenView(when, now) : null;
 }
 
 /** A call step's record: its calls logged so far (skip for now is no call), and whether its open task is a callback. */

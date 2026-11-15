@@ -3,6 +3,8 @@
  * since the last edit, and the latest run as of the read's instant, from its stored facts through the engine's own
  * functions. Nothing here writes, and nothing beside the engine decides what a test does.
  */
+import { stepWhen } from "../domain/sequence/dispatch.ts";
+import { stepWaitApi } from "./engine/step-when-view.ts";
 import { isLive, maySend } from "../domain/sequence/attempt.ts";
 import { liveSteps, type TrackDefinition } from "../domain/sequence/definition.ts";
 import { progressOf } from "../domain/sequence/progress.ts";
@@ -78,12 +80,12 @@ async function runRead(store: OutreachStore, run: TestRunRecord, leads: TestRunT
     email: run.contacts.email?.value ?? null,
     mobile: run.contacts.mobile?.value ?? null,
     mayStillSend: s.work.filter(maySend).length,
-    steps: stepsOf(s, rules),
+    steps: stepsOf(s, rules, now),
   };
 }
 
 /** Every live step of the main sequence, then of the win-back branch, in canvas order, with what its facts say. */
-export function stepsOf(s: SubjectState, rules: CallViewRules): TestStepRow[] {
+export function stepsOf(s: SubjectState, rules: CallViewRules, now: number): TestStepRow[] {
   const def = s.campaign.definition;
   // A removed track a run started keeps its rows; one it never started is not shown.
   const shown = (t: TrackDefinition) => !t.removed || progressOf(s, t.id)?.startedAt != null;
@@ -108,6 +110,7 @@ export function stepsOf(s: SubjectState, rules: CallViewRules): TestStepRow[] {
         taskId: task?.id ?? null,
         outcome: logged?.outcome ?? null,
         reason: result?.reason ?? null,
+        waits: null,
       };
       if (result) {
         const state = track.channel === "call" && result.result === "sent" ? "logged" : result.result;
@@ -122,7 +125,13 @@ export function stepsOf(s: SubjectState, rules: CallViewRules): TestStepRow[] {
       else if (live) rows.push({ ...base, state: "with_provider", at: live.handedWall === null ? null : iso(live.handedWall) });
       // A step of a track that finished without reaching it: skipped, with why its track finished (council on ffa202c, item 13).
       else if (p?.finishReason) rows.push({ ...base, state: "skipped", at: p.finishedWall === null ? null : iso(p.finishedWall), reason: trackEndedBecause(p.finishReason) });
-      else if (s.subject.ended === null && p && p.finishedAt === null && p.nextStepId === step.id && p.dueWall !== null) rows.push({ ...base, state: "due", at: iso(p.dueWall) });
+      else if (s.subject.ended === null && p && p.finishedAt === null && p.nextStepId === step.id && p.dueWall !== null) {
+        // When it goes, by the engine's own decision functions at the read (ADR 0003 "Reads that say when"): its window's
+        // next opening once the cut wait has ended, or why it waits, with no time.
+        const when = stepWhen(s, track.id, now);
+        if (when?.kind === "waits") rows.push({ ...base, state: "due", at: null, waits: stepWaitApi(when.why) });
+        else rows.push({ ...base, state: "due", at: iso(Math.max(when?.at ?? now, now)) });
+      }
       else rows.push({ ...base, state: "not_reached", at: null });
     });
   }

@@ -194,7 +194,7 @@ const BUSINESS_HEADER_ONLY_MISSING_PLACE =
  * them, so every status shows its sentence and its controls. Fictitious.
  */
 export function galleryLead(id: string, campaignId: string, status: OutreachStatus, fields: Partial<RecordLead> = {}): RecordLead {
-  const email = (number: number, dueAt: string | null = null): ControlStepView => ({ trackId: "e1", track: { label: "Email track", several: false, branch: "main" }, channel: "email", call: null, branch: "main", stepId: `s${number}`, number, of: 3, dueAt });
+  const email = (number: number, dueAt: string | null = null): ControlStepView => ({ trackId: "e1", track: { label: "Email track", several: false, branch: "main" }, channel: "email", call: null, branch: "main", stepId: `s${number}`, number, of: 3, when: dueAt === null ? null : { kind: "at", at: dueAt } });
   const ended = `Outreach to them has ended in this campaign (${status.replaceAll("_", " ")}).`;
   const ok = (action: LeadControlApi, more: Partial<Extract<ControlView, { allowed: true }>> = {}): ControlView => ({ action, allowed: true, statusAfter: status, skips: null, next: null, withProvider: 0, digest: `${action}|gallery`, ...more });
   const no = (action: LeadControlApi, reason: string): ControlView => ({ action, allowed: false, reason });
@@ -216,7 +216,7 @@ export function galleryLead(id: string, campaignId: string, status: OutreachStat
     sender: null,
     smsSender: null,
     zone: "Europe/London",
-    tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, hold: null, nextStep: { stepId: "s2", number: 2, dueAt: "2026-11-11T09:00:00.000Z" }, callTask: null, steps: [] }],
+    tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, hold: null, nextStep: { stepId: "s2", number: 2, when: { kind: "at", at: "2026-11-11T09:00:00.000Z" } }, callTask: null, steps: [] }],
     branch: status === "in_win_back" ? "win_back" : "main",
     winBackEnteredAt: null,
     declined: null,

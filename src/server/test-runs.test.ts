@@ -298,3 +298,25 @@ describe("a test run before launch (ADR 0003 'Ticket 21')", () => {
     ]);
   });
 });
+
+describe("the Test run tab says when a step goes as the engine decides it (ADR 0003 \"Reads that say when\")", () => {
+  test("a test run on Monday whose email window opens on Tuesday says Tuesday 09:00, not the cut wait's end", async () => {
+    const tuesdayOnly = [{ day: 2, start: 9, end: 17 }];
+    const w = await world({ ...DEFINITION, tracks: [track("e", "email", [step("e1")], { window: tuesdayOnly })] });
+    await w.h.request("PUT", `/api/campaigns/${w.campaign}/test-contacts`, { email: OWN_EMAIL, mobile: OWN_MOBILE });
+    expect((await w.run()).status).toBe(200);
+    await w.h.advanceTo(MONDAY_9 + 5 * MIN);
+    const row = (await w.tab()).run?.steps.find((s) => s.stepId === "e1");
+    expect(row).toMatchObject({ state: "due", at: "2026-11-03T09:00:00.000Z", waits: null });
+    await w.h.advanceTo(Date.parse("2026-11-03T09:30:00Z"));
+    expect(w.sent().find((d) => d.stepId === "e1")?.at).toBe(Date.parse("2026-11-03T09:00:00Z"));
+  });
+
+  test("with no room on the only inbox today, the row gives the reason and no time", async () => {
+    const w = await world({ ...DEFINITION, tracks: [track("e", "email", [step("e1")])] }, 0);
+    await w.h.request("PUT", `/api/campaigns/${w.campaign}/test-contacts`, { email: OWN_EMAIL, mobile: OWN_MOBILE });
+    expect((await w.run()).status).toBe(200);
+    await w.h.advanceTo(MONDAY_9 + 5 * MIN);
+    expect((await w.tab()).run?.steps.find((s) => s.stepId === "e1")).toMatchObject({ state: "due", at: null, waits: "sending_capacity" });
+  });
+});

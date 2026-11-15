@@ -72,7 +72,7 @@ describe("pausing a campaign", () => {
     const pat = c.lead("Pat Oneil");
     await h.advanceTo(MONDAY_9 + H);
     expect(sent(pat)).toEqual(["s1"]);
-    const dueBefore = (await read(pat)).tracks.find((t) => t.trackId === "e1")?.nextStep?.dueAt;
+    const dueBefore = (await read(pat)).tracks.find((t) => t.trackId === "e1")?.nextStep?.when;
     const q0 = (await h.request<CallsView>("GET", "/api/calls")).body;
     expect(q0.readyNow.length, JSON.stringify(q0).slice(0, 800)).toBe(2);
 
@@ -90,9 +90,9 @@ describe("pausing a campaign", () => {
     expect((await campaignControl(c.id, "pause")).body.error?.message).toMatch(/already paused/);
 
     expect((await campaignControl(c.id, "resume")).status).toBe(200);
-    const dueAfter = (await read(pat)).tracks.find((t) => t.trackId === "e1")?.nextStep?.dueAt;
-    expect(dueBefore).toBe("2026-11-04T00:00:00.000Z");
-    expect(dueAfter).toBe("2026-11-11T00:00:00.000Z");
+    const dueAfter = (await read(pat)).tracks.find((t) => t.trackId === "e1")?.nextStep?.when;
+    expect(dueBefore).toEqual({ kind: "at", at: "2026-11-04T00:00:00.000Z" });
+    expect(dueAfter).toEqual({ kind: "at", at: "2026-11-11T00:00:00.000Z" });
     expect((await h.request<CallsView>("GET", "/api/calls")).body.readyNow.length).toBe(2);
   });
 

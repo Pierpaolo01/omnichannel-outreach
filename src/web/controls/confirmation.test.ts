@@ -8,7 +8,7 @@ import { campaignConfirmationChanged, confirmationChanged, openCampaignConfirmat
  */
 
 const EMAIL = { label: "Email track", several: false, branch: "main" as const };
-const step = (number: number): ControlStepView => ({ trackId: "e1", track: EMAIL, channel: "email", call: null, branch: "main", stepId: `s${number}`, number, of: 3, dueAt: null });
+const step = (number: number): ControlStepView => ({ trackId: "e1", track: EMAIL, channel: "email", call: null, branch: "main", stepId: `s${number}`, number, of: 3, when: null });
 const skip = (n: number): ControlView => ({ action: "skip", allowed: true, statusAfter: "active", skips: step(n), next: step(n + 1), withProvider: 0, digest: `skip|active|e1/s${n}@main|e1/s${n + 1}@main` });
 const lead = (controls: ControlView[], status: RecordLead["status"] = "active"): RecordLead => ({
   id: "en-1", campaignId: "c-1", status, endedAt: null, reply: null, sender: null, smsSender: null, zone: "Europe/London", tracks: [], branch: "main", winBackEnteredAt: null, declined: null, controls, mayStillSend: 0,

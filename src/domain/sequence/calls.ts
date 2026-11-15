@@ -64,6 +64,29 @@ function opensToday(state: SubjectState, trackId: string, now: number): number |
   return opens !== null && opens < userDay(state).end ? opens : null;
 }
 
+/**
+ * The first instant at or after `now` at which the track's pending call step is placed on the user's list, the lead
+ * running (ADR 0003 "Reads that say when"): its wait has ended in lead time, and the prospect's calling hours open before
+ * the end of that instant's user day. On the current user day that is `opensToday`, the rule `readyCalls` places by, so
+ * `readyCalls` lists the step exactly when this is `now`. Null when there is no due time, or the hours never open.
+ */
+export function callPlacedFrom(state: SubjectState, trackId: string, now: number): number | null {
+  const p = progressOf(state, trackId);
+  if (!p || p.dueAt === null) return null;
+  const due = now + Math.max(0, p.dueAt - leadNow(state.subject.clock, now));
+  const today = userDay(state);
+  if (due < today.end && opensToday(state, trackId, due) !== null) return due;
+  const { userZone } = state.callDay;
+  // Each later user day, from the one the due instant falls on (or tomorrow), until the hours open on one of them.
+  let day = Math.max(localDayNumber(due, userZone), state.callDay.day + 1);
+  for (let i = 0; i < 9; i++, day++) {
+    const start = Math.max(due, startOfLocalDay(day, userZone));
+    const opens = nextWindowOpen(callWindow(state, trackId), state.lead.zone, start);
+    if (opens !== null && opens < startOfLocalDay(day + 1, userZone)) return start;
+  }
+  return null;
+}
+
 /** Whether the prospect's calling hours open at some point on the current user day (2.3). */
 function hoursOpenOnUserDay(state: SubjectState, trackId: string): boolean {
   const { start, end } = userDay(state);
@@ -248,7 +271,8 @@ export function readyCalls(state: SubjectState, now: number): ReadyItem[] {
     if (track?.channel !== "call" || p.startedAt === null || p.finishedAt !== null || p.nextStepId === null || p.dueAt === null || p.dueWall === null) return [];
     const stepId = p.nextStepId;
     if (p.dueAt > lead || state.callTasks.some((t) => t.stepId === stepId)) return [];
-    if (opensToday(state, p.trackId, now) === null) return [];
+    // Placed exactly at the instant the reads give (`callPlacedFrom`, ADR 0003 "Reads that say when").
+    if (callPlacedFrom(state, p.trackId, now) !== now) return [];
     return [{ subjectId: state.subject.id, trackId: p.trackId, stepId, touched: state.subject.touched, dueWall: p.dueWall }];
   });
 }

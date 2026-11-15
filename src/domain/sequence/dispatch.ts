@@ -5,10 +5,11 @@
  * the transaction that writes its result.
  */
 import { ENGINE_PARAMS, isLive, isUncertain } from "./attempt.ts";
-import { leadNow, windowOpen } from "./clock.ts";
+import { leadNow, localDayNumber, nextWindowOpen, startOfLocalDay, windowOpen } from "./clock.ts";
 import { render } from "./copy.ts";
 import { ownSubject, poolOf, type TrackChannel } from "./definition.ts";
-import { channelOf, progressOf, runs, trackHold, type HoldReason } from "./progress.ts";
+import { callbackHold, campaignLets, channelOf, progressOf, runs, trackHold, type HoldReason } from "./progress.ts";
+import { callPlacedFrom, callRoom, userDay } from "./calls.ts";
 import type { AccountState, Attempt, ProviderWork, RenderedCopy, SubjectState } from "./state.ts";
 
 export interface ReadyItem {
@@ -126,6 +127,86 @@ export function windowOf(state: SubjectState, trackId: string) {
   return state.campaign.definition.tracks.find((t) => t.id === trackId)?.window ?? [];
 }
 
+/**
+ * The first instant at or after `now` at which the claim's time conditions hold for the track's pending email or text,
+ * the lead running (ADR 0003 "Reads that say when"): its wait has ended in lead time, and its track's window is open in
+ * the prospect's zone. The claim's step guard refuses "the sending window is closed" exactly when it is not `now`. Null
+ * when there is no pending step with a due time, or the window never opens.
+ */
+export function sendableFrom(state: SubjectState, trackId: string, now: number): number | null {
+  const p = progressOf(state, trackId);
+  if (!p || p.dueAt === null) return null;
+  const dueWall = now + Math.max(0, p.dueAt - leadNow(state.subject.clock, now));
+  return nextWindowOpen(windowOf(state, trackId), state.lead.zone, dueWall);
+}
+
+/**
+ * Why a pending step has no time a read may promise: the engine cannot know when what holds it ends. A lead or campaign
+ * hold, an ending, work with a provider, a held track (5.4), no window, no sender account that can send, every sender
+ * account full before its reset, today's call list full, or a call already on the list (its task's read says where).
+ */
+export type StepWait =
+  | "campaign_not_launched"
+  | "campaign_paused"
+  | "lead_paused"
+  | "callback"
+  | "ended"
+  | "with_provider"
+  | HoldReason
+  | "no_window"
+  | "sender_unavailable"
+  | "sending_capacity"
+  | "call_capacity"
+  | "on_call_list";
+
+/** When the track's pending step goes, as every read says it: the engine's instant (at or after `now`), or why it waits. */
+export type StepWhen = { readonly kind: "at"; readonly at: number } | { readonly kind: "waits"; readonly why: StepWait };
+
+/**
+ * The one read of when a track's pending step goes (ADR 0003 "Reads that say when"), from the engine's own decision
+ * functions: `sendableFrom` for an email or text (the claim's step guard), `callPlacedFrom` for a call (`readyCalls`),
+ * then the claim's capacity rule for today. Null when the track has no pending step with a due time.
+ */
+export function stepWhen(state: SubjectState, trackId: string, now: number): StepWhen | null {
+  const p = progressOf(state, trackId);
+  if (!p || p.startedAt === null || p.finishedAt !== null || p.nextStepId === null || p.dueAt === null) return null;
+  const waits = (why: StepWait): StepWhen => ({ kind: "waits", why });
+  const { subject, campaign } = state;
+  if (subject.ended !== null) return waits("ended");
+  if (!campaignLets(state)) return waits(campaign.pausedSince !== null ? "campaign_paused" : "campaign_not_launched");
+  if (subject.leadPaused) return waits("lead_paused");
+  if (callbackHold(state)) return waits("callback");
+  if (!runs(state)) return waits("ended");
+  const stepId = p.nextStepId;
+  if (channelOf(state, trackId) === "call") {
+    if (state.callTasks.some((t) => t.stepId === stepId)) return waits("on_call_list");
+    const at = callPlacedFrom(state, trackId, now);
+    if (at === null) return waits("no_window");
+    // Placed today only while today's list has room (4.4); a later day's room is not known yet.
+    if (at < userDay(state).end && !callRoom(state)) return waits("call_capacity");
+    return { kind: "at", at };
+  }
+  // Claimed: it is going now, from this app. Handed over: the provider has it, and sends when it does.
+  const live = state.attempts.find((a) => a.stepId === stepId && isLive(a));
+  if (live) return live.state === "claimed" ? { kind: "at", at: now } : waits("with_provider");
+  const hold = heldReason(state, trackId, now);
+  if (hold) return waits(hold);
+  const at = sendableFrom(state, trackId, now);
+  if (at === null) return waits("no_window");
+  // A claim carrying uncertain work already holds its reservation (4.2).
+  if (inheritedWork(state, stepId)) return { kind: "at", at };
+  const channel = channelOf(state, trackId);
+  const usable = candidatesFor(state, trackId)
+    .map((id) => state.accounts[id])
+    .filter((a): a is AccountState => a !== undefined && a.channel === channel && accountAvailable(a, now));
+  if (usable.length === 0) return waits("sender_unavailable");
+  if (usable.every((a) => a.used >= a.capacity)) {
+    const resets = Math.min(...usable.map((a) => startOfLocalDay(localDayNumber(now, a.resetZone) + 1, a.resetZone)));
+    if (at < resets) return waits("sending_capacity");
+  }
+  return { kind: "at", at };
+}
+
 /** The claim's step guard (4.2 step 1). Null when it holds; otherwise why not. */
 export function claimRefusal(state: SubjectState, item: ReadyItem, now: number): string | null {
   if (!runs(state)) return "the lead is not running";
@@ -137,7 +218,8 @@ export function claimRefusal(state: SubjectState, item: ReadyItem, now: number):
   if (state.results.some((r) => r.stepId === item.stepId)) return "the step already has a result";
   if (state.attempts.some((a) => a.stepId === item.stepId && isLive(a))) return "the step already has a live attempt";
   if (p.dueAt === null || p.dueAt > leadNow(state.subject.clock, now)) return "the step is not due";
-  if (!windowOpen(windowOf(state, item.trackId), state.lead.zone, now)) return "the sending window is closed";
+  // The step's time conditions hold exactly at the instant the reads give (`sendableFrom`, ADR 0003 "Reads that say when").
+  if (sendableFrom(state, item.trackId, now) !== now) return "the sending window is closed";
   const dest = p.destinationDetailId ? state.lead.resolved[p.destinationDetailId] : undefined;
   if (!dest || dest.bad || !dest.owned) return "the destination is not a good address of the lead";
   if (!renderStep(state, item.trackId, item.stepId)) return "the copy does not render for this lead";
