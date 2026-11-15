@@ -17,8 +17,8 @@ import { definitionProblems, emptyDefinition, liveTracks, type CampaignDefinitio
 import { Engine } from "./engine/engine.ts";
 import type { StoredDefinition } from "./engine/engine-store.ts";
 import { UnconnectedEmailPort, UnprovisionedSmsPort } from "./engine/ports.ts";
-import { accountView, needsAttention, progressView } from "./engine/views.ts";
-import { callsView, callTaskView, recordCalls, todayView } from "./engine/call-views.ts";
+import { accountView, progressView } from "./engine/views.ts";
+import { callsView, callTaskView, needsAttentionView, recordCalls, todayView } from "./engine/call-views.ts";
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
 import { sealReckoning } from "../domain/sequence/progress.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
@@ -571,7 +571,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     return c.json<CallOutcomeAnswer>({ task, nextFocusTaskId: (await callsView(store, at, { rules })).focusTaskId });
   });
 
-  app.get("/needs-attention", async (c) => c.json(await needsAttention(store.engine, Date.parse(now()), rules, (channel, threading) => engine.transportAvailable?.(channel, threading) ?? true)));
+  app.get("/needs-attention", async (c) => c.json(await needsAttentionView(store, Date.parse(now()), rules, (channel, threading) => engine.transportAvailable?.(channel, threading) ?? true)));
 
   // No SMS provider is provisioned or chosen (#28): the running app reports none, honestly.
   app.get("/sms-provider", async (c) => {

@@ -3,7 +3,7 @@ import { Crash, EngineHarness, TransientError } from "../../../test/support/engi
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { Rules } from "./rules.ts";
 import type { CampaignDefinition, StepDefinition } from "../../domain/sequence/definition.ts";
-import type { CallsView, EnrollmentRead, LeadSearchResult, TodayView } from "../../shared/api.ts";
+import type { CallsView, EnrollmentRead, LeadSearchResult, NeedsAttention, TodayView } from "../../shared/api.ts";
 
 /**
  * Recovery after a sending interruption (ticket 20a; ADR 0003 "Ticket 20a") through the real HTTP app, SQLite store
@@ -361,11 +361,33 @@ describe("while sending is interrupted, the reads say so", () => {
     // From here only the engine's own ticks could write a heartbeat, and they fail.
     h.stopMarkingAlive();
     await h.advanceTo(lastGood + 20 * MIN);
-    expect((await today()).sendingInterrupted).toEqual({ since: iso(lastGood), cause: "ticks_failing", lastFailedRead: null });
+    const failingNow = await today();
+    expect(failingNow.sendingInterrupted).toMatchObject({ since: iso(lastGood), cause: "ticks_failing", lastFailedRead: null });
+    // Ticket 20b: when the last round failed, read from what the worker stored, and the same value on Needs attention.
+    const failedAt = Date.parse(failingNow.sendingInterrupted?.lastRoundFailedAt ?? "");
+    expect(failedAt).toBeGreaterThan(lastGood);
+    expect(failedAt).toBeLessThanOrEqual(h.clock);
+    expect((await h.request<NeedsAttention>("GET", "/api/needs-attention")).body.sendingInterrupted).toEqual(failingNow.sendingInterrupted);
     failing = false;
     await h.advanceTo(h.clock + MIN);
     expect((await today()).sendingInterrupted).toBeNull();
     expect((await today()).interruption?.from).toBe(iso(lastGood));
+  });
+
+  test("a round that completed while a provider was down, then a failing round (council on 7622b8b): the read gives when the last round failed, not that every round did", async () => {
+    const { h, campaign, today } = await world();
+    await campaign("Clinics");
+    await h.advanceTo(MONDAY_9 + H);
+    const cutAt = h.clock;
+    h.cutProvidersOff(TUESDAY_0 + 2 * H);
+    // Rounds run and end for ten minutes, but the provider does not answer: no heartbeat since the cut.
+    await h.advanceTo(cutAt + 10 * MIN);
+    expect((await today()).sendingInterrupted).toMatchObject({ since: iso(cutAt), cause: "providers_unreachable", lastRoundFailedAt: null });
+    failing = true;
+    await h.advanceTo(cutAt + 11 * MIN);
+    const read = (await today()).sendingInterrupted;
+    expect(read).toMatchObject({ since: iso(cutAt), cause: "ticks_failing" });
+    expect(Date.parse(read?.lastRoundFailedAt ?? "")).toBeGreaterThan(cutAt + 10 * MIN);
   });
 
   test("a database no worker has run on yet is not interrupted", async () => {
