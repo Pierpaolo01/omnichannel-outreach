@@ -140,14 +140,14 @@ function unreachableLine(c: NeedsAttention["noUsableChannel"][number]["channels"
 /**
  * Leads left with no usable channel (`noUsableChannel`, most recently ended first): one entry. They stay listed while the
  * read lists them (question Q20's interim); one lead links to their record, several to them in Leads. The ending is said
- * as past and final: `channels` are the reasons that hold now, and a later import can restore details (review bot on
- * 487de7c), leaving none.
+ * as past and final: `channels` are the reasons that hold now for the campaign's own channels (its branch's tracks), and a
+ * later import can restore details (review bot on 487de7c), leaving none; nothing is said about channels it does not use.
  */
 export function noUsableChannelItem(ended: NeedsAttention["noUsableChannel"], today: string, userZone: string): AttentionItem | null {
   const first = ended[0];
   if (!first) return null;
   if (ended.length === 1) {
-    const now = first.channels.length === 0 ? "None of their details is missing or marked wrong now, but the ending is final." : `Now ${listOf(first.channels.map(unreachableLine))}.`;
+    const now = first.channels.length === 0 ? "Each channel this campaign uses could reach them now, but the ending is final." : `Now ${listOf(first.channels.map(unreachableLine))}.`;
     return {
       key: "no-usable-channel",
       tone: "end",

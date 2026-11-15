@@ -194,7 +194,7 @@ describe("leads left with no usable channel (question Q20's interim: they stay l
   test("details restored by a later import (review bot on 487de7c): the ending is said as past and final, with no empty reason", () => {
     expect(noUsableChannelItem([ended("e1", SAM, "2026-11-14T09:00:00Z", [])], TODAY, ZONE)).toMatchObject({
       title: "No way was left to reach Sam Reed",
-      body: "In Clinics, Rotterdam, their outreach ended on Sat 14 Nov at 10:00, when no channel could reach them. None of their details is missing or marked wrong now, but the ending is final.",
+      body: "In Clinics, Rotterdam, their outreach ended on Sat 14 Nov at 10:00, when no channel could reach them. Each channel this campaign uses could reach them now, but the ending is final.",
     });
   });
 

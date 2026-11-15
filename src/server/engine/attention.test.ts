@@ -94,7 +94,8 @@ describe("leads left with no usable channel", () => {
 });
 
 describe("a lead whose details a later import restores (review bot on 487de7c)", () => {
-  test("the ending stays listed, final, with no channel left that cannot reach them now", async () => {
+  // The read speaks only of the campaign's own channels: this campaign is email-only, and Rob still has no mobile.
+  test("the ending stays listed, final, with none of the campaign's channels left that cannot reach them now", async () => {
     const def = definition([track("e1", "email", [email("s1")])]);
     const { h, campaignId, lead, attention } = await world(50, def, [PAT, ROB]);
     await h.advanceTo(MONDAY_9 + H);
