@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import type { ActivityView, CampaignMeasures, LeadSearchResult, NeedsAttention, SequenceView } from "../src/shared/api.ts";
+import type { ActivityView, CampaignMeasures, LeadSearchResult, PersonRecord, SequenceView } from "../src/shared/api.ts";
 import { acceptanceWorld, DAY, EXPECTED_IMPORT, exportFiles, H, MIN, NUMBERS, OWN_EMAIL, OWN_MOBILE, type AcceptanceWorld } from "./acceptance-world.ts";
 
 /**
@@ -35,6 +35,31 @@ async function at(page: Page, w: AcceptanceWorld, route: string): Promise<void> 
   await page.clock.setFixedTime(w.harness.clock);
   await page.goto(w.url + route);
 }
+
+/** An instant as London's HH:MM, as the screens say times: formatted here from the test's own record. */
+const hhmm = (t: number) => new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(t);
+/** The London calendar day of an instant, as a day number (days since 1 January 1970 in London). */
+const londonDay = (t: number) => {
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", year: "numeric", month: "numeric", day: "numeric" }).formatToParts(t).map((x) => [x.type, x.value]));
+  return Math.round(Date.UTC(Number(p["year"]), Number(p["month"]) - 1, Number(p["day"])) / 86_400_000);
+};
+/** The instant a London day starts (London is on GMT throughout this story, 9 to 20 November 2026). */
+const startOfLondonDay = (day: number) => day * 86_400_000;
+/** The first instant at or after `t` inside weekdays 09:00 to 17:00 in London, the story's sending windows. */
+const nextWeekdayWindow = (t: number) => {
+  for (let x = t, i = 0; i < 14 * 24 * 4; i++) {
+    const weekday = new Date(x).getUTCDay();
+    const hour = new Date(x).getUTCHours();
+    if (weekday >= 1 && weekday <= 5 && hour >= 9 && hour < 17) return x;
+    x = Math.floor(x / 3_600_000) * 3_600_000 + 3_600_000;
+  }
+  return NaN;
+};
+/** An instant as "Mon 9 Nov at 11:00" in London. */
+const dayAt = (t: number) => {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", weekday: "short", day: "numeric", month: "short" }).formatToParts(t).map((x) => [x.type, x.value]));
+  return `${parts["weekday"]} ${parts["day"]} ${parts["month"]} at ${hhmm(t)}`;
+};
 
 const saved = (page: Page) => expect(page.getByRole("status").filter({ hasText: "Saved" }).first()).toBeVisible();
 
@@ -176,15 +201,47 @@ test("the acceptance story: import, build, test run, launch, calls, replies, fai
     await shot(page, "02-ready-to-launch");
   });
 
-  /** What reached the user's own test contacts, from the fake providers' delivery logs: the test's record, not the app's. */
-  const toOwn = (destination: string) => [...w.harness.fake.deliveryLog, ...w.harness.sms.deliveryLog].filter((d) => d.destination === destination).map((d) => d.stepId);
-  const stepIds = async () => {
-    const def = (await w.harness.request<SequenceView>("GET", `/api/campaigns/${campaignId}/sequence`)).body.definition;
-    const ids = (channel: string, branch = "main") => def.tracks.filter((t) => t.channel === channel && t.branch === branch).flatMap((t) => t.steps.map((s) => s.id));
-    return { email: ids("email"), sms: ids("sms"), winBack: ids("email", "win_back") };
+  /**
+   * The test's own ledger of what a test run must send, rendered for Ada at Harbour Lane Physio: a phrase from each message
+   * the test typed in step 2, by the track it belongs to. The application's step ids are not used.
+   */
+  const COPY_FOR_ADA = {
+    email1: "Online booking at Harbour Lane Physio stops at 18:00",
+    email2: "happy to send a two-minute video of evening booking for Harbour Lane Physio",
+    text1: "Hi Ada, Alex from Northlight Bookings",
+    text2: "Ada, should I send the two-minute video for Harbour Lane Physio?",
+    afterCall: "Following up on my call: here is the two-minute video for Harbour Lane Physio",
+    winBack: "a booking link for evenings only",
+  } as const;
+  type Message = keyof typeof COPY_FOR_ADA;
+  const messageOf = (body: string): Message | "unknown" => (Object.keys(COPY_FOR_ADA) as Message[]).find((k) => body.includes(COPY_FOR_ADA[k])) ?? "unknown";
+  /** Every delivery to the user's own contacts, from the fake providers' logs, in order, with the test run it belongs to. */
+  const ownDeliveries = () =>
+    [...w.harness.fake.deliveryLog, ...w.harness.sms.deliveryLog]
+      .filter((d) => d.destination === OWN_EMAIL || d.destination === OWN_MOBILE)
+      .sort((x, y) => x.at - y.at)
+      .map((d) => ({ run: d.subjectId, at: d.at, to: d.destination, message: messageOf(d.rendered.body) }));
+  const toOwn = (destination: string) => ownDeliveries().filter((d) => d.to === destination);
+  const runs = () => [...new Set(ownDeliveries().map((d) => d.run))];
+  const ofRun = (run: string | undefined) => ownDeliveries().filter((d) => d.run === run);
+  const at_ = (run: string | undefined, m: Message) => ofRun(run).find((d) => d.message === m)?.at ?? NaN;
+  /** "About a minute": the spec's words for a test run's cut wait, taken as between 45 and 90 seconds. */
+  const aboutAMinute = (ms: number) => {
+    expect(ms).toBeGreaterThanOrEqual(45_000);
+    expect(ms).toBeLessThanOrEqual(90_000);
+  };
+  const logTestCall = async (outcome: "No answer" | "Not interested") => {
+    await at(page, w, "/calls");
+    await expect(page.getByText(/To your test mobile/).first()).toBeVisible();
+    await page.getByRole("group", { name: "Call outcome" }).getByRole("button", { name: outcome, exact: true }).click();
+    if (outcome === "Not interested") await expect(page.getByRole("group", { name: /What happens next for/ }).getByRole("radio", { name: /Move to the win-back messages/ })).toBeChecked();
+    await shot(page, outcome === "No answer" ? "03-test-call-no-answer" : "03-test-call-declined", false);
+    await page.getByRole("button", { name: /^Log/ }).first().click();
+    await expect(page.locator("p[role='status']").first()).toBeVisible();
+    return w.harness.clock;
   };
 
-  await test.step("3. Test run: every step to the user's own contacts, a test call whose declined path takes win back, and a reply that stops a repeat", async () => {
+  await test.step("3. Test run: every step to the user's own contacts with waits of about a minute; the test call's paths; a reply stops a repeat", async () => {
     const tab = `/campaigns/${campaignId}/test-run`;
     await at(page, w, tab);
     await page.getByLabel("Your email").fill(OWN_EMAIL);
@@ -192,77 +249,129 @@ test("the acceptance story: import, build, test run, launch, calls, replies, fai
     await page.getByRole("button", { name: "Save contacts" }).click();
     await expect(page.getByText("Saved.")).toBeVisible();
     await page.getByLabel("Copy written for").selectOption({ label: "Ada Reyes" });
+
+    // Run A: the call is logged No answer, so the main path runs to its end, the email after the call included.
     await page.getByRole("button", { name: "Run test" }).click();
     await expect(page.getByRole("button", { name: "Test running" })).toBeVisible();
-    await w.harness.advanceTo(w.harness.clock + 4 * MIN);
-    const ids = await stepIds();
-    // Every email and text step, in order, about a minute apart; nothing to a lead.
-    const email = ids.email.filter((id) => toOwn(OWN_EMAIL).includes(id));
-    expect(toOwn(OWN_EMAIL).slice(0, 2)).toEqual(ids.email.slice(0, 2));
-    expect(toOwn(OWN_MOBILE)).toEqual(ids.sms);
-    expect(email.length).toBeGreaterThanOrEqual(2);
-    expect([...w.harness.fake.deliveryLog, ...w.harness.sms.deliveryLog].every((d) => d.subjectId.startsWith("test-"))).toBe(true);
+    await w.harness.advanceTo(w.harness.clock + 3 * MIN);
+    const a = runs()[0];
+    // Every email and text step of the main path, each once, to the right contact, in its track's order.
+    expect(ofRun(a).map((d) => `${d.message} to ${d.to}`).sort()).toEqual([`email1 to ${OWN_EMAIL}`, `email2 to ${OWN_EMAIL}`, `text1 to ${OWN_MOBILE}`, `text2 to ${OWN_MOBILE}`]);
+    expect(at_(a, "email1")).toBeLessThan(at_(a, "email2"));
+    expect(at_(a, "text1")).toBeLessThan(at_(a, "text2"));
+    aboutAMinute(at_(a, "email2") - at_(a, "email1"));
+    aboutAMinute(at_(a, "text2") - at_(a, "text1"));
+    // Nothing went to a lead.
+    expect([...w.harness.fake.deliveryLog, ...w.harness.sms.deliveryLog].every((d) => d.destination === OWN_EMAIL || d.destination === OWN_MOBILE)).toBe(true);
     await at(page, w, tab);
     await expect(page.getByText("On your Calls list")).toBeVisible();
     await shot(page, "03-test-sends-and-call");
     await linger(page);
-
-    // The test call: Not interested, with the canvas's win-back path preselected.
-    await at(page, w, "/calls");
-    await expect(page.getByText(/To your test mobile/).first()).toBeVisible();
-    await page.getByRole("group", { name: "Call outcome" }).getByRole("button", { name: "Not interested", exact: true }).click();
-    await expect(page.getByRole("group", { name: /What happens next for/ }).getByRole("radio", { name: /Move to the win-back messages/ })).toBeChecked();
-    await shot(page, "03-test-call-declined", false);
-    await page.getByRole("button", { name: /^Log/ }).first().click();
+    const loggedA = await logTestCall("No answer");
     await w.harness.advanceTo(w.harness.clock + 3 * MIN);
-    expect(toOwn(OWN_EMAIL).filter((id) => ids.winBack.includes(id))).toEqual(ids.winBack);
+    expect(ofRun(a).map((d) => d.message).sort()).toEqual(["afterCall", "email1", "email2", "text1", "text2"]);
+    aboutAMinute(at_(a, "afterCall") - loggedA);
     await at(page, w, tab);
-    await expect(page.getByRole("heading", { name: /^Finished at \d\d:\d\d$/ })).toBeVisible();
-    await expect(page.getByText("Skipped: the test moved to the win-back branch")).toBeVisible();
+    await expect(page.getByRole("heading", { name: `Finished: every step ran at ${hhmm(at_(a, "afterCall"))}` })).toBeVisible();
+    await expect(page.getByRole("listitem").filter({ hasText: "Win-back email 1" })).toContainText("Not reached");
+    await shot(page, "03-test-finished-main-path");
+    await linger(page);
+
+    // Run B: Not interested takes the canvas's win-back path; the email after the call is skipped, and said so.
+    await page.getByRole("button", { name: "Run test again" }).click();
+    await expect(page.getByRole("button", { name: "Test running" })).toBeVisible();
+    await w.harness.advanceTo(w.harness.clock + 3 * MIN);
+    const b = runs()[1];
+    expect(ofRun(b).map((d) => d.message).sort()).toEqual(["email1", "email2", "text1", "text2"]);
+    const loggedB = await logTestCall("Not interested");
+    await w.harness.advanceTo(w.harness.clock + 3 * MIN);
+    expect(ofRun(b).map((d) => d.message).sort()).toEqual(["email1", "email2", "text1", "text2", "winBack"]);
+    expect(at_(b, "winBack") - loggedB).toBeLessThanOrEqual(MIN);
+    await at(page, w, tab);
+    await expect(page.getByRole("heading", { name: `Finished at ${hhmm(at_(b, "winBack"))}` })).toBeVisible();
+    await expect(page.getByRole("listitem").filter({ hasText: "Email track 2" })).toContainText("Skipped: the test moved to the win-back branch");
     await shot(page, "03-test-finished-win-back");
     await linger(page);
 
-    // Run again; a reply from the test email stops it.
-    const before = toOwn(OWN_EMAIL).length;
+    // Run C: a reply from the test email stops it after its first email and first text.
     await page.getByRole("button", { name: "Run test again" }).click();
     await expect(page.getByRole("button", { name: "Test running" })).toBeVisible();
     await w.harness.advanceTo(w.harness.clock + 30_000);
-    expect(toOwn(OWN_EMAIL).length).toBe(before + 1);
+    const c = runs()[2];
+    expect(ofRun(c).map((d) => d.message).sort()).toEqual(["email1", "text1"]);
     expect(w.harness.fake.prospectReplies(OWN_EMAIL)).toBe(true);
     await w.harness.advanceTo(w.harness.clock + 5 * MIN);
+    expect(ofRun(c).map((d) => d.message).sort()).toEqual(["email1", "text1"]);
+    expect(runs()).toHaveLength(3);
     await at(page, w, tab);
     await expect(page.getByRole("heading", { name: /Stopped by your reply/ })).toBeVisible();
-    expect(toOwn(OWN_EMAIL).length).toBe(before + 1);
     await shot(page, "03-test-stopped-by-reply");
     await linger(page);
   });
 
   /** The test's own ledger: every call outcome it logged and every reply it made, in this campaign. */
-  const logged: { name: string | null; outcome: string; test: boolean }[] = [{ name: null, outcome: "not_interested", test: true }];
-  const replied = { email: ["Ada Reyes"], sms: ["Ben Ortiz"], testEmail: 1 };
-  /** What the test expects each lead's status to end as, written down from the story, not read from the application. */
+  // ---------------------------------------------------------------------------------------------
+  // The test's own ledger. Everything the later steps expect is written here as the test acts, or read from the fake
+  // providers' logs; nothing is read from the application to decide what it should show.
+
+  /** Every call outcome the test logged in this campaign, test calls included. */
+  const logged: { name: string | null; outcome: string; test: boolean }[] = [
+    { name: null, outcome: "no_answer", test: true },
+    { name: null, outcome: "not_interested", test: true },
+  ];
+  /** Every reply the test made a prospect send: who, on which channel, at which instant, with which body. */
+  const replies: { name: string; channel: "email" | "sms"; at: number; body: string }[] = [];
+  const TEST_RUN_REPLIES = 1;
+  /** What the test expects each lead's status to end as, written down from the story. */
   const ENDS: Record<string, string> = {
     "Ada Reyes": "replied",
     "Ben Ortiz": "replied",
+    "Ivy Cole": "replied",
     "Gia Moss": "interested_on_call",
     "Hal Price": "declined_on_call",
     "Cara Lin": "sequence_finished_no_response",
     "Dev Shah": "sequence_finished_no_response",
     "Eve Hart": "sequence_finished_no_response",
     "Finn Wood": "sequence_finished_no_response",
-    "Ivy Cole": "sequence_finished_no_response",
     "Jon Lake": "sequence_finished_no_response",
     "Kim Rowe": "sequence_finished_no_response",
     "Juniper Pilates Studio": "sequence_finished_no_response",
   };
+  /** The status group of each status the story reaches (spec "Outreach status"). */
+  const GROUP: Record<string, string> = {
+    queued: "running",
+    active: "running",
+    in_win_back: "running",
+    waiting_on_call: "waiting_on_you",
+    callback_scheduled: "waiting_on_you",
+    replied: "handed_to_you",
+    interested_on_call: "handed_to_you",
+    paused: "paused",
+    declined_on_call: "ended",
+    stopped_manually: "ended",
+    sequence_finished_no_response: "ended",
+    finished_no_usable_channel: "ended",
+  };
+  const groupsOf = (statuses: Record<string, string>) => {
+    const out: Record<string, number> = { running: 0, waiting_on_you: 0, handed_to_you: 0, paused: 0, ended: 0 };
+    for (const status of Object.values(statuses)) out[GROUP[status] ?? "?"] = (out[GROUP[status] ?? "?"] ?? 0) + 1;
+    return out;
+  };
   const NAMES = Object.keys(ENDS);
   const ids = new Map<string, string>();
   const idOf = (name: string) => ids.get(name) ?? "";
+  const nameOf = (subjectId: string) => NAMES.find((n) => idOf(n) === subjectId) ?? null;
   /** Deliveries the fake providers made to this campaign's leads (their own logs), by lead name. */
   const deliveredTo = (name: string, channel: "email" | "sms" | "both" = "both") =>
     [...(channel === "sms" ? [] : w.harness.fake.deliveryLog), ...(channel === "email" ? [] : w.harness.sms.deliveryLog)].filter((d) => d.subjectId === idOf(name));
-  const campaignDeliveries = () => [...w.harness.fake.deliveryLog, ...w.harness.sms.deliveryLog].filter((d) => NAMES.some((n) => idOf(n) === d.subjectId));
+  const campaignDeliveries = () => [...w.harness.fake.deliveryLog, ...w.harness.sms.deliveryLog].filter((d) => nameOf(d.subjectId) !== null);
   const activity = async (name: string) => (await w.harness.request<ActivityView>("GET", `/api/people/${await w.record(name)}/activity`)).body.entries.filter((e) => e.campaign.id === campaignId);
+  const status = async (name: string) => (await w.read(idOf(name))).status;
+  const attention = (p: Page) => p.getByRole("region", { name: "Needs attention" });
+  const campaignRow = (p: Page, name: string) => p.getByRole("region", { name: "Campaigns" }).getByRole("listitem").filter({ hasText: name }).first();
+  /** The marker of each message the test typed, by the step it belongs to, for any lead: its copy without merge fields. */
+  const MARK = { email2: "A quick follow-up: happy to send a two-minute video", text2: "should I send the two-minute video", afterCall: "Following up on my call" };
+  const got = (name: string, mark: string) => deliveredTo(name).filter((d) => d.rendered.body.includes(mark));
 
   await test.step("4. Launch: emails and texts go out on schedule, and each shows sent or failed on the person timeline", async () => {
     // Cara's address hard-bounces; Dev's mobile is reported invalid after his text.
@@ -278,29 +387,29 @@ test("the acceptance story: import, build, test run, launch, calls, replies, fai
     await w.harness.advanceTo(w.harness.clock + 40 * MIN);
     await linger(page);
 
-    // Every lead's first email went, once; every lead with a mobile got its first text, once; the company lead got none.
+    // Every lead's first email went, once; every person with a mobile got their first text, once; the company lead none.
     for (const name of NAMES) {
-      expect(deliveredTo(name, "email").map((d) => d.stepId)).toHaveLength(1);
+      expect(deliveredTo(name, "email")).toHaveLength(1);
       expect(deliveredTo(name, "sms")).toHaveLength(name === "Juniper Pilates Studio" ? 0 : 1);
     }
-    // The pacing: one send a minute from the inbox, never two at once.
-    const emailTimes = w.harness.fake.deliveryLog.filter((d) => NAMES.some((n) => idOf(n) === d.subjectId)).map((d) => d.at).sort((a, b) => a - b);
+    // On schedule: one send a minute from the inbox, never two at once.
+    const emailTimes = w.harness.fake.deliveryLog.filter((d) => nameOf(d.subjectId) !== null).map((d) => d.at).sort((x, y) => x - y);
     for (let i = 1; i < emailTimes.length; i++) expect((emailTimes[i] ?? 0) - (emailTimes[i - 1] ?? 0)).toBeGreaterThanOrEqual(MIN);
 
+    // The timeline says each send at the time the provider sent it.
     await at(page, w, `/leads/people/${await w.record("Ada Reyes")}`);
     const timeline = page.getByRole("region", { name: "Activity" });
-    await expect(timeline.getByText("Email 1 sent")).toBeVisible();
-    await expect(timeline.getByText("Text 1 sent")).toBeVisible();
+    await expect(timeline.getByRole("listitem").filter({ hasText: "Email 1 sent" })).toContainText(hhmm(deliveredTo("Ada Reyes", "email")[0]?.at ?? NaN));
+    await expect(timeline.getByRole("listitem").filter({ hasText: "Text 1 sent" })).toContainText(hhmm(deliveredTo("Ada Reyes", "sms")[0]?.at ?? NaN));
     // No delivered state: Instantly reports none for email (ADR 0002), and no SMS provider reports one yet. Not met; see the record.
     await expect(timeline.getByText(/delivered/i)).toHaveCount(0);
     await shot(page, "04-timeline-sent");
-    expect((await activity("Ada Reyes")).map((e) => e.kind).sort()).toEqual(["sent", "sent"]);
 
+    // Failed: Cara's bounce, five minutes after the fake sent her email, and Dev's invalid number, two after his text.
     await at(page, w, `/leads/people/${await w.record("Cara Lin")}`);
-    await expect(page.getByRole("region", { name: "Activity" }).getByText("Email 1 bounced")).toBeVisible();
+    await expect(page.getByRole("region", { name: "Activity" }).getByRole("listitem").filter({ hasText: "Email 1 bounced" })).toContainText(hhmm((deliveredTo("Cara Lin", "email")[0]?.at ?? NaN) + 5 * MIN));
     await expect(page.getByText("Email, marked wrong")).toBeVisible();
     await shot(page, "04-timeline-bounced");
-    expect((await activity("Cara Lin")).map((e) => e.kind)).toContain("bounced");
     await at(page, w, `/leads/people/${await w.record("Dev Shah")}`);
     await expect(page.getByRole("region", { name: "Activity" }).getByText("Text 1: bad number")).toBeVisible();
     await expect(page.getByText("+44 7700 900306 was reported invalid and is marked wrong. Nothing more is texted to it.")).toBeVisible();
@@ -309,34 +418,39 @@ test("the acceptance story: import, build, test run, launch, calls, replies, fai
   });
 
   /** The outcome the test logs for each call, as the focus queue opens it. */
-  const PLAN: Record<string, { outcome: string; path?: RegExp; redial?: boolean; callback?: string; note?: string }> = {
-    "Ada Reyes": { outcome: "Left voicemail" },
-    "Ben Ortiz": { outcome: "No answer" },
-    "Cara Lin": { outcome: "Wrong number" },
-    "Dev Shah": { outcome: "Didn’t reach them", note: "Front desk says the owner decides; try mornings." },
-    "Eve Hart": { outcome: "No answer" },
-    "Finn Wood": { outcome: "Callback requested", callback: "15:30" },
-    "Gia Moss": { outcome: "Interested" },
-    "Hal Price": { outcome: "Not interested", path: /Stop all outreach in this campaign/ },
-    "Ivy Cole": { outcome: "Not interested", path: /Keep the email and SMS steps going/ },
-    "Jon Lake": { outcome: "Not interested", path: /Move to the win-back messages/ },
-    "Kim Rowe": { outcome: "No answer", redial: true },
+  const PLAN: Record<string, { outcome: string; api: string; path?: RegExp; redial?: boolean; callback?: string; note?: string }> = {
+    "Ada Reyes": { outcome: "Left voicemail", api: "voicemail" },
+    "Ben Ortiz": { outcome: "No answer", api: "no_answer" },
+    "Cara Lin": { outcome: "Didn’t reach them", api: "gatekeeper", note: "Front desk says the owner decides; try mornings." },
+    "Dev Shah": { outcome: "Wrong number", api: "wrong_number" },
+    "Eve Hart": { outcome: "No answer", api: "no_answer" },
+    "Finn Wood": { outcome: "Callback requested", api: "callback_requested", callback: "15:30" },
+    "Gia Moss": { outcome: "Interested", api: "interested" },
+    "Hal Price": { outcome: "Not interested", api: "not_interested", path: /Stop all outreach in this campaign/ },
+    "Ivy Cole": { outcome: "Not interested", api: "not_interested", path: /Keep the email and SMS steps going/ },
+    "Jon Lake": { outcome: "Not interested", api: "not_interested", path: /Move to the win-back messages/ },
+    "Kim Rowe": { outcome: "No answer", api: "no_answer", redial: true },
   };
-  const API_OUTCOME: Record<string, string> = { "Left voicemail": "voicemail", "No answer": "no_answer", "Wrong number": "wrong_number", "Didn’t reach them": "gatekeeper", "Callback requested": "callback_requested", Interested: "interested", "Not interested": "not_interested" };
+  /** When Finn's callback hold began and ended: the instants the test logged the request and the callback's outcome. */
+  const callbackHold = { from: NaN, to: NaN };
+  const callQueue = (p: Page) => p.getByRole("complementary", { name: "Call queue" });
 
-  await test.step("5. Calls: Today and the focus queue; redial, callback, interested and every declined path", async () => {
+  await test.step("5. Calls: Today and the focus queue; every outcome, redial, callback, interested and every declined path", async () => {
     await at(page, w, "/");
     const callers = Object.keys(PLAN);
     await expect(page.getByText(`${callers.length} calls are ready now.`)).toBeVisible();
     await shot(page, "05-today");
     await linger(page);
-    expect((await w.calls()).readyNow).toHaveLength(callers.length);
-    // The company lead has no number: its phone track was skipped, and nothing of it is on the list.
-    expect((await w.calls()).readyNow.some((c) => c.person === null)).toBe(false);
+    // The company lead has no number: nothing of it is on the list.
+    expect(new Set((await w.calls()).readyNow.map((c) => c.person?.name ?? c.company.name))).toEqual(new Set(callers));
     await page.getByRole("link", { name: "Start calling" }).click();
     const done = new Set<string>();
     for (let i = 0; i < callers.length; i++) {
+      // After a log, the desk has settled on the next call only once it has moved keyboard focus to that call's chosen
+      // number, its last step in opening it. Acting before then races that focus move, which scrolls the sheet to its top while a
+      // click lower down is under way (the flaky Log click, review item 15).
       await expect(page.getByRole("group", { name: "Call outcome" })).toBeVisible();
+      if (i > 0) await expect(page.getByRole("group", { name: "Number you dial" }).getByRole("radio", { checked: true })).toBeFocused();
       let current = "";
       for (const name of callers) if (!done.has(name) && (await page.getByRole("heading", { name, exact: true }).isVisible())) current = name;
       expect(current).not.toBe("");
@@ -346,29 +460,39 @@ test("the acceptance story: import, build, test run, launch, calls, replies, fai
       if (plan.redial) await page.getByRole("checkbox", { name: /Call again tomorrow/ }).check();
       if (plan.callback) await page.getByLabel("Their time", { exact: true }).fill(plan.callback);
       if (plan.note) await page.getByLabel("Notes from this call").fill(plan.note);
-      if (i < 4 || plan.path || plan.redial || plan.callback) await shot(page, `05-call-${current.split(" ")[0]?.toLowerCase() ?? ""}`, false);
+      await shot(page, `05-call-${current.split(" ")[0]?.toLowerCase() ?? ""}`, false);
       await page.getByRole("button", { name: "Log and open next call" }).click();
       await expect(page.locator("p[role='status']")).toContainText(current);
-      logged.push({ name: current, outcome: API_OUTCOME[plan.outcome] ?? "", test: false });
+      logged.push({ name: current, outcome: plan.api, test: false });
+      if (plan.callback) callbackHold.from = w.harness.clock;
       done.add(current);
       await linger(page);
     }
     await w.harness.advanceTo(w.harness.clock + 5 * MIN);
-    const status = async (name: string) => (await w.read(idOf(name))).status;
+    // Every outcome read back from the server as the test logged it.
+    for (const name of callers) {
+      const calls = (await activity(name)).flatMap((e) => (e.kind === "call" ? [e.outcome] : []));
+      expect(calls, name).toEqual([PLAN[name]?.api]);
+    }
     expect(await status("Gia Moss")).toBe("interested_on_call");
     expect(await status("Hal Price")).toBe("declined_on_call");
     expect(await status("Finn Wood")).toBe("callback_scheduled");
     expect((await w.read(idOf("Jon Lake"))).branch).toBe("win_back");
     expect((await w.read(idOf("Ivy Cole"))).declined?.path).toBe("continue");
+    // Wrong number: the number dialled, the clinic's main line (Dev's own mobile was already marked wrong), is marked bad.
+    const dev = await w.harness.request<PersonRecord>("GET", `/api/people/${await w.record("Dev Shah")}`);
+    const badDigits = dev.body.contactDetails.filter((d) => d.bad).map((d) => d.value.replace(/\D/g, ""));
+    expect(badDigits.some((v) => v.endsWith("1174960202"))).toBe(true);
+    expect(badDigits.some((v) => v.endsWith("7700900306"))).toBe(true);
     const kim = (await w.read(idOf("Kim Rowe"))).tracks.find((t) => t.channel === "call")?.callTask;
     expect(kim?.open).toBe(true);
     expect(kim?.listedFor).toBe("2026-11-10");
     await at(page, w, `/leads/people/${await w.record("Gia Moss")}`);
-    await expect(page.getByText("Interested on call").first()).toBeVisible();
+    await expect(campaignRow(page, CAMPAIGN).getByText("Interested on call")).toBeVisible();
     await shot(page, "05-interested");
   });
 
-  await test.step("6. Reply: an email reply and a text reply each stop only that lead in that campaign, with channel and date", async () => {
+  await test.step("6. Reply: an email reply, a text opt-out and a text auto-reply each stop only that lead in that campaign, with channel and date", async () => {
     // The second campaign: one email, sent on Tuesday to Friday only, so it reaches Ada after her reply here.
     await at(page, w, `/campaigns/${otherId}`);
     await page.getByRole("button", { name: "Email track" }).click();
@@ -382,30 +506,36 @@ test("the acceptance story: import, build, test run, launch, calls, replies, fai
     await expect(page.getByText(/^Launched /).first()).toBeVisible();
 
     await w.harness.advanceTo(Date.parse("2026-11-09T11:00:00Z"));
+    const at11 = w.harness.clock;
     expect(w.harness.fake.prospectReplies("ada@harbourlane.example")).toBe(true);
-    expect(w.harness.sms.prospectTexts("+447700900302", "Not now, thanks")).toBe(true);
+    replies.push({ name: "Ada Reyes", channel: "email", at: at11, body: "" });
+    expect(w.harness.sms.prospectTexts("+447700900302", "STOP please remove me")).toBe(true);
+    replies.push({ name: "Ben Ortiz", channel: "sms", at: at11, body: "STOP please remove me" });
+    expect(w.harness.sms.prospectTexts("+447700900305", "Auto-reply: I am away until Monday 16 November")).toBe(true);
+    replies.push({ name: "Ivy Cole", channel: "sms", at: at11, body: "Auto-reply: I am away until Monday 16 November" });
     await w.harness.advanceTo(w.harness.clock + 10 * MIN);
 
-    const ada = await w.read(idOf("Ada Reyes"));
-    expect(ada.status).toBe("replied");
-    expect(ada.reply?.channel).toBe("email");
-    const ben = await w.read(idOf("Ben Ortiz"));
-    expect(ben.status).toBe("replied");
-    expect(ben.reply?.channel).toBe("sms");
-    // Only that lead: Ada's colleague and Ada's lead in the other campaign keep running.
-    expect((await w.read(idOf("Eve Hart"))).status).toBe("active");
+    for (const r of replies) {
+      const read = await w.read(idOf(r.name));
+      expect(read.status, r.name).toBe("replied");
+      expect(read.reply?.channel, r.name).toBe(r.channel);
+      expect(Date.parse(read.reply?.at ?? ""), r.name).toBe(r.at);
+    }
+    // Only that lead: a colleague at the same company, and Ada's lead in the other campaign, keep running.
+    expect(await status("Cara Lin")).toBe("active");
     expect((await w.read(await w.lead("Ada Reyes", otherId))).status).not.toBe("replied");
 
-    await at(page, w, `/leads/people/${await w.record("Ada Reyes")}`);
-    const rows = page.getByRole("region", { name: "Campaigns" }).getByRole("listitem");
-    await expect(rows.filter({ hasText: CAMPAIGN }).getByText("Replied, automation stopped")).toBeVisible();
-    await expect(rows.filter({ hasText: OTHER }).getByText("Replied, automation stopped")).toHaveCount(0);
-    await expect(page.getByRole("region", { name: "Activity" }).getByText(/Replied by email/)).toBeVisible();
-    await shot(page, "06-replied-email");
-    await linger(page);
-    await at(page, w, `/leads/people/${await w.record("Ben Ortiz")}`);
-    await expect(page.getByRole("region", { name: "Activity" }).getByText(/Replied by text|Replied by SMS/)).toBeVisible();
-    await shot(page, "06-replied-sms");
+    for (const r of replies) {
+      await at(page, w, `/leads/people/${await w.record(r.name)}`);
+      const row = campaignRow(page, CAMPAIGN);
+      await expect(row.getByText("Replied, automation stopped")).toBeVisible();
+      await expect(row).toContainText(`Replied by ${r.channel === "email" ? "email" : "text"} on ${dayAt(r.at)}`);
+      // The reply's channel and date only, never its content.
+      if (r.body) await expect(page.getByText(r.body)).toHaveCount(0);
+      if (r.name === "Ada Reyes") await expect(campaignRow(page, OTHER).getByText("Replied, automation stopped")).toHaveCount(0);
+      await shot(page, `06-replied-${r.name.split(" ")[0]?.toLowerCase() ?? ""}`);
+      await linger(page);
+    }
     // In search too.
     await at(page, w, "/leads");
     await page.getByLabel("Search leads").fill("Ada");
@@ -413,86 +543,94 @@ test("the acceptance story: import, build, test run, launch, calls, replies, fai
     await shot(page, "06-search-replied");
   });
 
-  const status = async (name: string) => (await w.read(idOf(name))).status;
-  const attention = (p: Page) => p.getByRole("region", { name: "Needs attention" });
+  await test.step("7. Failures: a bounce and a bad number end their track early; a disconnected number shows in Needs attention; a missed callback is overdue", async () => {
+    // Cara's bounce ended her first email track after one email; Dev's invalid number ended his SMS track after one text.
+    // (That neither gets a second message is asserted at the end, when it would have been due.)
+    const cara = (await w.read(idOf("Cara Lin"))).tracks.find((t) => t.channel === "email" && t.branch === "main");
+    expect(cara?.finishReason).not.toBeNull();
+    const dev = (await w.read(idOf("Dev Shah"))).tracks.find((t) => t.channel === "sms");
+    expect(dev?.finishReason).not.toBeNull();
 
-  await test.step("7. Failures: a bounce and a bad number end their track early; a disconnected number shows in Needs attention; an overdue callback too", async () => {
-    // Cara: the bounce ended her first email track at its first email; her other tracks carry on.
-    const cara = await w.read(idOf("Cara Lin"));
-    const caraEmail = cara.tracks.find((t) => t.channel === "email" && t.branch === "main" && t.started);
-    expect(caraEmail?.finishReason).not.toBeNull();
-    expect(caraEmail?.nextStep).toBeNull();
-    expect(cara.status).not.toBe("sequence_finished_no_response");
-    // Dev: the invalid number ended his SMS track after text 1; text 2 is never due.
-    const dev = await w.read(idOf("Dev Shah"));
-    const devSms = dev.tracks.find((t) => t.channel === "sms");
-    expect(devSms?.finishReason).not.toBeNull();
-    expect(devSms?.nextStep).toBeNull();
-    expect((await w.read(idOf("Eve Hart"))).tracks.find((t) => t.channel === "sms")?.nextStep?.number).toBe(2);
-
-    // The second number is disconnected at the provider.
+    // The second number is disconnected at the provider; Needs attention names it; reconnected, the entry goes.
     const second = w.harness.sms.numbers.get(NUMBERS[1]);
     if (second) second.healthy = false;
     await w.harness.advanceTo(w.harness.clock + 2 * MIN);
-    const needs = (await w.harness.request<NeedsAttention>("GET", "/api/needs-attention")).body;
-    expect(needs.senderProblems.map((p) => p.accountId)).toEqual([NUMBERS[1]]);
     await at(page, w, "/");
-    await expect(attention(page)).toContainText("+44 7700 900901");
+    const entry = attention(page).getByRole("listitem").filter({ hasText: "+44 7700 900901" });
+    await expect(entry).toContainText("can’t send");
+    await expect(entry).toContainText("It is disconnected.");
     await shot(page, "07-disconnected-number");
     await linger(page);
     if (second) second.healthy = true;
     await w.harness.advanceTo(w.harness.clock + 2 * MIN);
-    expect((await w.harness.request<NeedsAttention>("GET", "/api/needs-attention")).body.senderProblems).toEqual([]);
+    await at(page, w, "/");
+    await expect(attention(page).getByRole("listitem").filter({ hasText: "+44 7700 900901" })).toHaveCount(0);
 
-    // Finn's callback at 15:30 is missed: overdue on Today until its outcome is logged.
+    // Finn's callback at 15:30 is missed: overdue on Today and on the Calls list, and it stays there.
     await w.harness.advanceTo(Date.parse("2026-11-09T15:45:00Z"));
     await at(page, w, "/");
     await expect(attention(page).getByText("Finn Wood’s callback is overdue")).toBeVisible();
     await shot(page, "07-overdue-callback");
-    await linger(page);
     await at(page, w, "/calls");
-    await expect(page.getByRole("heading", { name: "Finn Wood", exact: true })).toBeVisible();
-    await page.getByRole("group", { name: "Call outcome" }).getByRole("button", { name: "No answer", exact: true }).click();
-    await page.getByRole("button", { name: "Log and open next call" }).click();
-    await expect(page.locator("p[role='status']")).toContainText("Finn Wood");
-    logged.push({ name: "Finn Wood", outcome: "no_answer", test: false });
-    await w.harness.advanceTo(w.harness.clock + MIN);
-    expect(await status("Finn Wood")).not.toBe("callback_scheduled");
+    await expect(callQueue(page).getByRole("listitem").filter({ hasText: "Finn Wood" })).toContainText(/overdue/i);
+    await linger(page);
   });
 
-  await test.step("8. Pause and resume: clocks freeze, the Paused banner with its date and counts, and no burst on resume", async () => {
-    await w.harness.advanceTo(Date.parse("2026-11-10T10:00:00Z"));
-    // Tuesday: the other campaign's email reached Ada, who replied here on Monday; this campaign sent her nothing more.
+  /** What the test expects each lead's status to be just before the pause on Tuesday at 10:00, from the story so far. */
+  const AT_PAUSE: Record<string, string> = {
+    "Ada Reyes": "replied",
+    "Ben Ortiz": "replied",
+    "Ivy Cole": "replied",
+    "Gia Moss": "interested_on_call",
+    "Hal Price": "declined_on_call",
+    // Win back: its one email went on Monday, and nothing else was left.
+    "Jon Lake": "sequence_finished_no_response",
+    "Finn Wood": "callback_scheduled",
+    "Kim Rowe": "waiting_on_call",
+    "Cara Lin": "active",
+    "Dev Shah": "active",
+    "Eve Hart": "active",
+    "Juniper Pilates Studio": "active",
+  };
+  const PAUSE_AT = Date.parse("2026-11-10T10:00:00Z");
+  const RESUME_AT = Date.parse("2026-11-12T10:00:00Z");
+
+  await test.step("8. Pause and resume: rolled-over calls, the Paused banner with its date and counts, frozen clocks, calls off the list, and each lead continuing where it was", async () => {
+    await w.harness.advanceTo(PAUSE_AT);
+    // Tuesday: the other campaign's email reached Ada; this campaign sent her nothing after her reply.
     const otherAda = await w.lead("Ada Reyes", otherId);
     expect(w.harness.fake.deliveryLog.filter((d) => d.subjectId === otherAda)).toHaveLength(1);
-    expect(deliveredTo("Ada Reyes").filter((d) => d.at > Date.parse("2026-11-09T11:00:00Z"))).toHaveLength(0);
-    // Kim's redial is on today's list, its age counted from Monday.
+    // The calls on the list are exactly the redial and the overdue callback: no declined lead is called again.
+    const listed = await w.calls();
+    expect(new Set([...listed.readyNow, ...listed.laterToday].map((c) => c.person?.name))).toEqual(new Set(["Kim Rowe", "Finn Wood"]));
     await at(page, w, "/");
     await expect(page.getByRole("region", { name: "Up next" }).getByRole("listitem").filter({ hasText: "Kim Rowe" })).toContainText("Redial, due Mon 9 Nov");
-    await shot(page, "08-today-redial");
+    // Rolled over: Kim's redial from Monday is one call carried over, in Needs attention.
+    await expect(attention(page).getByText("One call carried over from an earlier day")).toBeVisible();
+    await shot(page, "08-today-rolled-over");
 
-    const eveBefore = (await w.read(idOf("Eve Hart"))).tracks.find((t) => t.channel === "email" && t.started)?.nextStep?.dueAt ?? "";
-    const kimBefore = (await w.read(idOf("Kim Rowe"))).tracks.find((t) => t.channel === "call")?.callTask;
-    expect(eveBefore).not.toBe("");
-
+    for (const [name, expected] of Object.entries(AT_PAUSE)) expect(await status(name), name).toBe(expected);
     await at(page, w, `/campaigns/${campaignId}`);
     await page.getByRole("button", { name: `Pause campaign: ${CAMPAIGN}` }).click();
     await page.getByRole("group").getByRole("button", { name: "Pause campaign" }).click();
-    const banner = page.getByRole("region", { name: /^Paused since/ });
-    await expect(page.getByRole("heading", { name: "Paused since Tue 10 Nov at 10:00" })).toBeVisible();
-    const groups = (await w.harness.request<CampaignMeasures>("GET", `/api/campaigns/${campaignId}/measures`)).body.groups;
-    // Handed to you: the two replies and the interested call, from the test's own ledger.
-    expect(groups.handed_to_you).toBe(replied.email.length + replied.sms.length + logged.filter((l) => !l.test && l.outcome === "interested").length);
-    for (const [group, n] of Object.entries(groups)) if (n > 0) await expect(banner.getByRole("list", { name: "Leads in each status group" })).toContainText(`${n}${group.replace(/_/g, " ")}`);
+    await expect(page.getByRole("heading", { name: `Paused since ${dayAt(PAUSE_AT)}` })).toBeVisible();
+    const banner = page.getByRole("region", { name: /^Paused since/ }).getByRole("list", { name: "Leads in each status group" });
+    for (const [group, n] of Object.entries(groupsOf(AT_PAUSE))) await expect(banner.getByRole("listitem").filter({ hasText: group.replace(/_/g, " ") })).toHaveText(`${n}${group.replace(/_/g, " ")}`);
     await shot(page, "08-paused-banner");
     await linger(page);
+    // Off the Calls list itself while paused.
     await at(page, w, "/calls");
     await expect(page.getByText(/calls? in Clinics, Bristol (are|is) off your list while the campaign is paused/).first()).toBeVisible();
+    // The queue itself lists neither call. (The panel beside it may still reopen the call it last had open: defect 3 in
+    // the record, e2e/acceptance-defects.spec.ts.)
+    await expect(callQueue(page).getByText("Ready now, 0")).toBeVisible();
+    await expect(callQueue(page).getByText("Later today, 0")).toBeVisible();
+    for (const name of ["Kim Rowe", "Finn Wood"]) await expect(callQueue(page).getByText(name, { exact: true })).toHaveCount(0);
     await shot(page, "08-calls-paused", false);
 
-    // Two days paused: nothing goes to this campaign's leads.
+    // Two days paused: nothing goes to this campaign's leads, and the redial is not skipped.
     const sentBefore = campaignDeliveries().length;
-    await w.harness.advanceTo(Date.parse("2026-11-12T10:00:00Z"));
+    await w.harness.advanceTo(RESUME_AT);
     expect(campaignDeliveries()).toHaveLength(sentBefore);
     expect((await w.read(idOf("Kim Rowe"))).tracks.find((t) => t.channel === "call")?.callTask?.open).toBe(true);
 
@@ -501,39 +639,71 @@ test("the acceptance story: import, build, test run, launch, calls, replies, fai
     await page.getByRole("group").getByRole("button", { name: "Resume campaign" }).click();
     await expect(page.getByText("Resumed. Each lead continued where it was.")).toBeVisible();
     await shot(page, "08-resumed");
-    // Every clock froze: Eve's wait ends two days later than it would have; Kim's call keeps its original due date.
-    const eveAfter = (await w.read(idOf("Eve Hart"))).tracks.find((t) => t.channel === "email" && t.started)?.nextStep?.dueAt ?? "";
-    expect(Date.parse(eveAfter) - Date.parse(eveBefore)).toBe(2 * DAY);
-    expect((await w.read(idOf("Kim Rowe"))).tracks.find((t) => t.channel === "call")?.callTask?.dueAt).toBe(kimBefore?.dueAt);
 
-    // No burst: what fell due during the pause goes out one pacing gap apart per sender.
-    const resumedAt = w.harness.clock;
-    await w.harness.advanceTo(resumedAt + 3 * H);
-    const after = campaignDeliveries().filter((d) => d.at >= resumedAt);
-    for (const sender of new Set(after.map((d) => d.sender))) {
-      const times = after.filter((d) => d.sender === sender).map((d) => d.at).sort((a, b) => a - b);
-      for (let i = 1; i < times.length; i++) expect((times[i] ?? 0) - (times[i - 1] ?? 0)).toBeGreaterThanOrEqual(MIN);
-    }
-
-    // Kim's redial is still on the list, not skipped by the pause; this time no answer, no redial.
+    // Kim's redial is back in the queue after two days paused: without the pause its two-day limit, counted from
+    // Monday, ended on Tuesday night. (The overdue callback comes first, so the queue opens Finn; Kim waits below.)
     await at(page, w, "/calls");
-    await expect(page.getByRole("heading", { name: "Kim Rowe", exact: true })).toBeVisible();
+    await expect(callQueue(page).getByRole("listitem").filter({ hasText: "Kim Rowe" })).toBeVisible();
+    await shot(page, "08-calls-after-resume", false);
+  });
+
+  await test.step("8 (continued). Clocks froze: each follow-up goes two days late, by the pause; the callback still holds Finn until its outcome", async () => {
+    // Friday noon. Each lead's second email was due two days after its first; paused for two days, it goes four days after.
+    await w.harness.advanceTo(Date.parse("2026-11-13T12:00:00Z"));
+    // A wait of two days runs to the start of the lead's local day two days after the first message (ADR 0003 3.3), and
+    // the message goes when that day's window opens at 09:00. Paused for two days, that day moves two days later.
+    const PAUSE = RESUME_AT - PAUSE_AT;
+    const PAUSE_DAYS = PAUSE / DAY;
+    const followUpDay = (first: number) => londonDay(first) + 2 + PAUSE_DAYS;
+    for (const name of ["Eve Hart", "Dev Shah", "Juniper Pilates Studio"]) {
+      const sent = got(name, MARK.email2).map((d) => d.at);
+      expect(sent, name).toHaveLength(1);
+      expect(londonDay(sent[0] ?? NaN), name).toBe(followUpDay(deliveredTo(name, "email")[0]?.at ?? NaN));
+      expect(hhmm(sent[0] ?? NaN) >= "09:00", name).toBe(true);
+    }
+    // Cara, Ada's colleague at Harbour Lane, still running after the replies there: her second text, on the same frozen clock.
+    const caraText = got("Cara Lin", MARK.text2).map((d) => d.at);
+    expect(caraText).toHaveLength(1);
+    expect(londonDay(caraText[0] ?? NaN)).toBe(followUpDay(deliveredTo("Cara Lin", "sms")[0]?.at ?? NaN));
+    // Kim's redial was not worked: its limit, Tuesday night moved by the two days paused, ended on Thursday night.
+    const kimCall = (await w.read(idOf("Kim Rowe"))).tracks.find((t) => t.channel === "call");
+    expect(kimCall?.finishReason).toBe("skipped_unworked");
+    expect(Date.parse(kimCall?.finishedAt ?? "")).toBe(Date.parse("2026-11-10T00:00:00Z") + DAY + PAUSE);
+    // Finn's follow-ups fell due too, and the callback held them: nothing has gone to him since Monday.
+    expect(deliveredTo("Finn Wood").filter((d) => d.at > Date.parse("2026-11-09T12:00:00Z"))).toHaveLength(0);
+    await at(page, w, "/calls");
+    await expect(page.getByRole("heading", { name: "Finn Wood", exact: true })).toBeVisible();
     await page.getByRole("group", { name: "Call outcome" }).getByRole("button", { name: "No answer", exact: true }).click();
     await page.getByRole("button", { name: "Log and open next call" }).click();
-    await expect(page.locator("p[role='status']")).toContainText("Kim Rowe");
-    logged.push({ name: "Kim Rowe", outcome: "no_answer", test: false });
+    await expect(page.locator("p[role='status']")).toContainText("Finn Wood");
+    logged.push({ name: "Finn Wood", outcome: "no_answer", test: false });
+    callbackHold.to = w.harness.clock;
+    // The hold froze Finn's clock as a pause does (ADR 0003 2.3): nothing goes now; checked when it falls due, in step 9.
+    await w.harness.advanceTo(callbackHold.to + H);
+    expect(got("Finn Wood", MARK.email2).length + got("Finn Wood", MARK.text2).length).toBe(0);
   });
 
   await test.step("9. End: unanswered leads end as sequence finished, no response; the campaign, channel and call measures", async () => {
     await w.harness.advanceTo(Date.parse("2026-11-20T12:00:00Z"));
     for (const name of NAMES) expect.soft(await status(name), name).toBe(ENDS[name]);
     await at(page, w, `/leads/people/${await w.record("Eve Hart")}`);
-    await expect(page.getByRole("region", { name: "Campaigns" }).getByRole("listitem").filter({ hasText: CAMPAIGN }).getByText("Sequence finished, no response")).toBeVisible();
+    await expect(campaignRow(page, CAMPAIGN).getByText("Sequence finished, no response")).toBeVisible();
     await shot(page, "09-finished-no-response");
     await linger(page);
     // Nothing went twice to any lead: each (lead, step) at most once, on the fake providers' own logs.
     const keys = campaignDeliveries().map((d) => `${d.subjectId}/${d.stepId}`);
     expect(new Set(keys).size).toBe(keys.length);
+    // Nothing after a reply, to anyone who replied.
+    for (const r of replies) expect(deliveredTo(r.name).filter((d) => d.at > r.at), r.name).toHaveLength(0);
+    // Finn's follow-ups: due at the start of the local day two days after his first email, on a clock frozen from the
+    // callback request to its outcome (the campaign's pause lies inside that hold), then at the next weekday window.
+    const finnDue = startOfLondonDay(londonDay(deliveredTo("Finn Wood", "email")[0]?.at ?? NaN) + 2) + (callbackHold.to - callbackHold.from);
+    for (const mark of [MARK.email2, MARK.text2]) {
+      const sent = got("Finn Wood", mark).map((d) => d.at);
+      expect(sent, mark).toHaveLength(1);
+      expect(londonDay(sent[0] ?? NaN), mark).toBe(londonDay(nextWeekdayWindow(finnDue)));
+      expect(sent[0] ?? NaN, mark).toBeGreaterThanOrEqual(nextWeekdayWindow(finnDue));
+    }
     // Bad details were never used again: Cara got one email, Dev one text.
     expect(deliveredTo("Cara Lin", "email")).toHaveLength(1);
     expect(deliveredTo("Dev Shah", "sms")).toHaveLength(1);
@@ -542,35 +712,50 @@ test("the acceptance story: import, build, test run, launch, calls, replies, fai
     const m = (await w.harness.request<CampaignMeasures>("GET", `/api/campaigns/${campaignId}/measures`)).body;
     const testEmail = toOwn(OWN_EMAIL).length;
     const testSms = toOwn(OWN_MOBILE).length;
-    const leadEmail = w.harness.fake.deliveryLog.filter((d) => NAMES.some((n) => idOf(n) === d.subjectId)).length;
-    const leadSms = w.harness.sms.deliveryLog.filter((d) => NAMES.some((n) => idOf(n) === d.subjectId)).length;
+    const leadEmail = w.harness.fake.deliveryLog.filter((d) => nameOf(d.subjectId) !== null).length;
+    const leadSms = w.harness.sms.deliveryLog.filter((d) => nameOf(d.subjectId) !== null).length;
+    const emailReplies = replies.filter((r) => r.channel === "email").length;
+    const smsReplies = replies.filter((r) => r.channel === "sms").length;
     expect(m.email.sent).toBe(leadEmail + testEmail);
     expect(m.email.fromTests.sent).toBe(testEmail);
     expect(m.sms.sent).toBe(leadSms + testSms);
+    expect(m.sms.fromTests.sent).toBe(testSms);
     expect(m.email.failedOrBounced).toBe(1);
     expect(m.sms.failedOrBounced).toBe(1);
-    expect(m.email.replies).toBe(replied.email.length + replied.testEmail);
-    expect(m.sms.replies).toBe(replied.sms.length);
+    expect(m.email.replies).toBe(emailReplies + TEST_RUN_REPLIES);
+    expect(m.sms.replies).toBe(smsReplies);
     const CONNECTED = new Set(["callback_requested", "interested", "not_interested"]);
-    expect(m.calls.made).toBe(logged.length);
-    expect(m.calls.connected).toBe(logged.filter((l) => CONNECTED.has(l.outcome)).length);
+    const made = logged.length;
+    const connected = logged.filter((l) => CONNECTED.has(l.outcome)).length;
+    expect(m.calls.made).toBe(made);
+    expect(m.calls.connected).toBe(connected);
     expect(m.calls.interested).toBe(logged.filter((l) => l.outcome === "interested").length);
     expect(m.calls.declined).toBe(logged.filter((l) => l.outcome === "not_interested").length);
     expect(m.calls.callbacksPending).toBe(0);
-    const GROUP: Record<string, string> = { replied: "handed_to_you", interested_on_call: "handed_to_you", declined_on_call: "ended", sequence_finished_no_response: "ended" };
-    const expectedGroups: Record<string, number> = {};
-    for (const end of Object.values(ENDS)) expectedGroups[GROUP[end] ?? ""] = (expectedGroups[GROUP[end] ?? ""] ?? 0) + 1;
+    const expectedGroups = groupsOf(ENDS);
     for (const [group, n] of Object.entries(m.groups)) expect(n, group).toBe(expectedGroups[group] ?? 0);
 
     await at(page, w, `/campaigns/${campaignId}`);
     const panel = page.getByRole("region", { name: "Outreach so far" });
     const row = (label: string) => panel.locator("dt", { hasText: new RegExp(`^${label}$`) }).locator("xpath=following-sibling::dd[1]");
     const tests = (n: number) => (n > 0 ? ` (${n} from test runs)` : "");
-    await expect(row("Email")).toHaveText(`${leadEmail + testEmail} sent${tests(testEmail)} · 1 failed or bounced · ${replied.email.length + replied.testEmail} replied${tests(replied.testEmail)}`);
-    await expect(row("SMS")).toContainText(`${leadSms + testSms} sent${tests(testSms)} · 1 failed or bounced`);
-    await expect(row("Calls")).toContainText(`${logged.length} made`);
-    await expect(page.getByRole("list", { name: "Leads in each status group" }).first()).toContainText(`${expectedGroups["handed_to_you"] ?? 0}handed to you`);
-    await expect(page.getByRole("list", { name: "Leads in each status group" }).first()).toContainText(`${expectedGroups["ended"] ?? 0}ended`);
+    const testCalls = logged.filter((l) => l.test);
+    await expect(row("Email")).toHaveText(`${leadEmail + testEmail} sent${tests(testEmail)} · 1 failed or bounced · ${emailReplies + TEST_RUN_REPLIES} replied${tests(TEST_RUN_REPLIES)}`);
+    await expect(row("SMS")).toHaveText(`${leadSms + testSms} sent${tests(testSms)} · 1 failed or bounced · ${smsReplies} leads replied`);
+    await expect(row("Calls")).toHaveText(
+      `${made} made${tests(testCalls.length)} · ${connected} connected${tests(testCalls.filter((l) => CONNECTED.has(l.outcome)).length)} · 1 interested · ${logged.filter((l) => l.outcome === "not_interested").length} declined${tests(testCalls.filter((l) => l.outcome === "not_interested").length)} · 0 callbacks pending`,
+    );
+    // The rates, with the counts behind them: leads (and test runs) emailed or texted, and how many replied; calls made, and how many connected.
+    const messagedLeads = new Set(campaignDeliveries().map((d) => d.subjectId)).size;
+    const testRuns = runs().length;
+    const replyNum = new Set(replies.map((r) => r.name)).size + TEST_RUN_REPLIES;
+    const replyDen = messagedLeads + testRuns;
+    await expect(panel).toContainText(`${Math.round((100 * replyNum) / replyDen)}% ${replyNum} of the ${replyDen} you emailed or texted replied (test runs: ${TEST_RUN_REPLIES} of ${testRuns})`);
+    const testConnected = testCalls.filter((l) => CONNECTED.has(l.outcome)).length;
+    await expect(panel).toContainText(`${Math.round((100 * connected) / made)}% ${connected} of ${made} calls reached the prospect for a conversation (test runs: ${testConnected} of ${testCalls.length})`);
+    // Opens and clicks are left out.
+    await expect(panel).not.toContainText(/\bopen(s|ed)\b|\bclick/i);
+    for (const [group, n] of Object.entries(expectedGroups)) await expect(page.getByRole("list", { name: "Leads in each status group" }).first().getByRole("listitem").filter({ hasText: group.replace(/_/g, " ") })).toHaveText(`${n}${group.replace(/_/g, " ")}`);
     await panel.scrollIntoViewIfNeeded();
     await shot(page, "09-measures");
     await linger(page);

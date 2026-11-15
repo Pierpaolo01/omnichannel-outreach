@@ -95,14 +95,24 @@ export function scratchFolder(): string {
   return dir;
 }
 
-export async function acceptanceWorld(options: { readonly start?: number; readonly smsConnected?: boolean } = {}): Promise<AcceptanceWorld> {
+export interface WorldOptions {
+  readonly start?: number;
+  readonly smsConnected?: boolean;
+  /** The inbox's daily capacity and pacing gap (default 60 a day, one a minute). */
+  readonly emailCapacity?: number;
+  readonly emailGapMs?: number;
+  /** Each SMS number's pacing gap (default one a minute). */
+  readonly smsGapMs?: number;
+}
+
+export async function acceptanceWorld(options: WorldOptions = {}): Promise<AcceptanceWorld> {
   const dataDir = scratchFolder();
   const harness = new EngineHarness({
     start: options.start ?? MONDAY_0900,
     databasePath: path.join(dataDir, "outreach.sqlite"),
-    accounts: [{ id: INBOX, capacity: 60, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
+    accounts: [{ id: INBOX, capacity: options.emailCapacity ?? 60, gapMs: options.emailGapMs ?? MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
     // The numbers start disconnected at the provider unless asked: Before launch then names the SMS track's missing sender.
-    sms: { numbers: NUMBERS.map((id) => ({ id, capacity: 60, gapMs: MIN, k: 1, healthy: options.smsConnected ?? false, resetZone: "Europe/London" })) },
+    sms: { numbers: NUMBERS.map((id) => ({ id, capacity: 60, gapMs: options.smsGapMs ?? MIN, k: 1, healthy: options.smsConnected ?? false, resetZone: "Europe/London" })) },
   });
   await harness.tick();
   const settings = await harness.request("PUT", "/api/call-settings", { dailyCapacity: 30, userZone: "Europe/London" });
