@@ -25,6 +25,8 @@ async function shot(page: Page, name: string): Promise<void> {
   if (!dir) return;
   for (const theme of ["light", "dark"] as const) {
     await page.emulateMedia({ colorScheme: theme });
+    // A theme switch starts colour transitions: the shot waits for them, so it shows the theme, not a blend of both.
+    await page.evaluate(() => Promise.all(document.getAnimations().map((a) => a.finished)));
     await page.screenshot({ path: `${dir}/${name}-${theme}.png`, fullPage: true });
   }
   await page.emulateMedia({ colorScheme: "light" });
