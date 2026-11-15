@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import type { CampaignPauseRead, ControlAnswer, LeadControlApi, OutreachStatus, RecordLead } from "../../shared/api.ts";
+import type { CampaignPauseRead, ControlAnswer, LeadControlApi, OutreachStatus, RecordLead, StatusGroup } from "../../shared/api.ts";
+import { GroupCounts } from "../status.tsx";
 import type { Controls } from "./useControls.ts";
 import type { ControlTarget } from "./requests.ts";
 import { campaignConfirmationChanged, confirmationChanged, openCampaignConfirmation, openLeadConfirmation, type CampaignConfirmation, type LeadConfirmation } from "./confirmation.ts";
@@ -319,14 +320,10 @@ export function PausedBanner({ read, compact = false }: { read: CampaignPauseRea
       <h2 id={id} className={`font-semibold text-pause ${compact ? "text-[13.5px]" : "text-[14px]"}`}>
         {title}
       </h2>
-      <dl className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-base-content" aria-label="Leads in each status">
-        {groups.map((g) => (
-          <div key={g.group} className="flex gap-1.5">
-            <dt className="text-ink-2">{g.label}</dt>
-            <dd className="font-semibold tabular-nums">{g.count}</dd>
-          </div>
-        ))}
-      </dl>
+      {/* The five groups in the one rendering of the strip (`GroupCounts`; council on 384630e, item 6). */}
+      <div className="mt-1">
+        <GroupCounts counts={Object.fromEntries(groups.map((g) => [g.group, g.count])) as Record<StatusGroup, number>} />
+      </div>
       {provider && <p className="mt-1 text-ink-2">{provider}</p>}
     </section>
   );

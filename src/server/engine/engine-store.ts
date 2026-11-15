@@ -383,6 +383,8 @@ export interface MeasureFacts {
   readonly definition: CampaignDefinition;
   /** Each enrollment: its stored status, whether its outreach has ended, and the channel of the reply that stopped it. */
   readonly enrollments: readonly { readonly id: string; readonly status: string; readonly ended: string | null; readonly stopReplyChannel: string | null }[];
+  /** Each reply stored for a lead, oldest first (by its provider time, then the order stored). */
+  readonly replies: readonly { readonly subjectId: string; readonly channel: string; readonly atWall: number }[];
   /** Each attempt handed to a provider, with its state and its work's provider send time. */
   readonly attempts: readonly { readonly subjectId: string; readonly trackId: string; readonly stepId: string; readonly state: string; readonly sentWall: number | null }[];
   /** Each step result `failed`. */

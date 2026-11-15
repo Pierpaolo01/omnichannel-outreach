@@ -68,9 +68,20 @@ const tallyCalls = (facts: MeasureFacts, part: keyof ReturnType<typeof callCount
     return outcome !== null && callCounts(outcome)[part];
   }).length;
 
-/** The leads that replied: their status is replied, by the channel of the reply that stopped them (as their status and Activity show it). */
-const repliedLeads = (facts: MeasureFacts, channel: MessageChannel | null) =>
-  facts.enrollments.filter((e) => statusOf(e.status) === "replied" && channelOfReply(e.stopReplyChannel) !== null && (channel === null || channelOfReply(e.stopReplyChannel) === channel));
+/**
+ * The leads that ever replied in the campaign, each once, by the channel of its first stored reply (council on 384630e,
+ * item 2): a figure that never goes down when a replied lead is resumed or moved to win-back. Every reply is stored on
+ * the lead whatever its status (`applyReply`), so a lead ended interested that later replied counts too.
+ */
+function firstReplies(facts: MeasureFacts): Map<string, MessageChannel> {
+  const first = new Map<string, MessageChannel>();
+  for (const r of facts.replies) {
+    const channel = channelOfReply(r.channel);
+    if (channel !== null && !first.has(r.subjectId)) first.set(r.subjectId, channel);
+  }
+  return first;
+}
+const repliedLeads = (facts: MeasureFacts, channel: MessageChannel | null) => [...firstReplies(facts)].filter(([, c]) => channel === null || c === channel).map(([id]) => ({ id }));
 
 /** The messages the provider reported sent: an attempt in state `sent`, with its provider send time (Activity's "sent"). */
 const sentAttempts = (facts: MeasureFacts) => facts.attempts.filter((a) => a.state === "sent" && a.sentWall !== null);

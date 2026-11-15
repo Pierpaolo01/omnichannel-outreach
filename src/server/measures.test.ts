@@ -52,7 +52,7 @@ describe("GET /api/campaigns/:id/measures", () => {
     expect((await world.measures()).email).toEqual({ sent: 5, failedOrBounced: 2, replies: 0 });
   });
 
-  test("replies count each replying lead once, by the channel of the reply that stopped them; the reply rate is over the leads reached", async () => {
+  test("replies count each lead that ever replied in the campaign once, by the channel of its first reply; the reply rate is over the leads reached", async () => {
     const world = await measuresWorld();
     await launch(world);
     await world.h.advanceTo(MONDAY_9 + 2 * HOUR);
@@ -70,10 +70,11 @@ describe("GET /api/campaigns/:id/measures", () => {
     await world.h.advanceTo(world.h.clock + 10 * MIN);
     m = await world.measures();
     expect([m.email.replies, m.sms.replies, m.replyRate.numerator]).toEqual([1, 1, 2]);
-    // Resumed after the reply, Pat is running again and no longer counted as replied.
+    // Resumed after the reply, Pat is running again, and still counted: a reply stored in the campaign is never uncounted
+    // (council on 384630e, item 2), by the channel of Pat's first reply.
     expect(await world.control("Pat Oneil", "resume_from_next_step")).toBe(200);
     m = await world.measures();
-    expect([m.email.replies, m.replyRate.numerator, m.groups.handed_to_you]).toEqual([0, 1, 1]);
+    expect([m.email.replies, m.sms.replies, m.replyRate.numerator, m.groups.handed_to_you]).toEqual([1, 1, 2, 1]);
   });
 
   test("calls: skip for now is not a call; connected is a conversation; a callback is pending until its outcome; the connect rate is per call", async () => {
@@ -202,7 +203,7 @@ describe("the read's cost is bounded (ADR 0003 \"Ticket 22\", what the read cost
     }
   }
 
-  test("eight statements, whatever the activity: the campaign, what may still be sent, then one per kind of fact", async () => {
+  test("nine statements, whatever the activity: the campaign, what may still be sent, then one per kind of fact", async () => {
     const world = await measuresWorld((h) => h.fake.bouncing.add("nia@harbour.example"));
     const read = () => campaignMeasures(world.h.store.engine, world.campaignId);
     const before = await statements(read);
@@ -212,6 +213,6 @@ describe("the read's cost is bounded (ADR 0003 \"Ticket 22\", what the read cost
     await world.h.advanceTo(world.h.clock + 10 * MIN);
     expect(await world.log("Sam Reed", "callback_requested", { callbackAt: new Date(MONDAY_9 + 6 * HOUR).toISOString() })).toBe(200);
     const after = await statements(read);
-    expect([before, after]).toEqual([8, 8]);
+    expect([before, after]).toEqual([9, 9]);
   });
 });

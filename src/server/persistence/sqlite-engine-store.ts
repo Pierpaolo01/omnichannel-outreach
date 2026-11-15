@@ -209,6 +209,12 @@ export class SqliteEngineStore implements EngineStore {
           ended: strOrNull(r, "ended"),
           stopReplyChannel: strOrNull(r, "stop_reply_channel"),
         })),
+        // Every reply stored for the campaign's leads, oldest first: a lead's first reply and its channel (ticket 22, council on 384630e).
+        replies: rows(`SELECT r.subject_id, r.channel, r.at_wall FROM enrollments e JOIN replies r ON r.subject_id = e.id ${scope} ORDER BY r.at_wall, r.rowid`).map((r) => ({
+          subjectId: str(r, "subject_id"),
+          channel: str(r, "channel"),
+          atWall: num(r, "at_wall"),
+        })),
         attempts: rows(
           `SELECT a.subject_id, a.track_id, a.step_id, a.state, w.sent_wall FROM enrollments e JOIN attempts a ON a.subject_id = e.id
              LEFT JOIN provider_work w ON w.key = a.idempotency_key ${scope ? `${scope} AND` : "WHERE"} a.handed_wall IS NOT NULL`,

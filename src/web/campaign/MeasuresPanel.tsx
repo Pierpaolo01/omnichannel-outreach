@@ -1,8 +1,8 @@
 import { useId, useState } from "react";
-import { STATUS_GROUPS, type StatusGroup } from "../../domain/outreach-status.ts";
 import type { CampaignMeasures } from "../../shared/api.ts";
 import { Icon } from "../icons.tsx";
-import { connectRateText, groupCountText, MEASURE_NOTES, measureRows, replyRateText } from "./measuresWording.ts";
+import { GroupCounts } from "../status.tsx";
+import { connectRateText, MEASURE_NOTES, measureRows, replyRateText } from "./measuresWording.ts";
 
 /**
  * The campaign measures (ticket 22). **Provisional** (ADR 0003 Q33): variant A draws only the five group counts in a strip
@@ -11,26 +11,11 @@ import { connectRateText, groupCountText, MEASURE_NOTES, measureRows, replyRateT
  * measures are one store snapshot), worded by `measuresWording.ts`; the page shows no figure from another read.
  */
 
-const GROUP_TONE = {
-  running: "text-ink-2",
-  waiting_on_you: "text-you",
-  handed_to_you: "text-hand",
-  paused: "text-pause",
-  ended: "text-end",
-} as const satisfies Record<StatusGroup, string>;
-
 /** Variant A's strip on a running campaign: the leads in each group, then the sentence on what goes out on its own. */
 export function GroupStrip({ measures, sentence }: { measures: CampaignMeasures; sentence: string }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 rounded-box border border-line bg-base-100 px-4 py-3 text-[14px]">
-      <ul aria-label="Leads in each status group" className="flex flex-wrap gap-x-[18px] gap-y-1.5">
-        {STATUS_GROUPS.map((group) => (
-          <li key={group} className={`inline-flex items-center gap-1.5 before:size-[7px] before:rounded-full before:bg-current before:content-[''] ${GROUP_TONE[group]}`}>
-            <b className="font-semibold tabular-nums text-base-content">{measures.groups[group]}</b>
-            {groupCountText(group)}
-          </li>
-        ))}
-      </ul>
+      <GroupCounts counts={measures.groups} />
       <span className="text-[13.5px] text-muted">{sentence}</span>
     </div>
   );

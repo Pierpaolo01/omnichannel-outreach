@@ -282,9 +282,11 @@ test("a campaign paused from the list and resumed from its page: the Paused bann
 
   const detail = (await f.harness.request<CampaignDetail>("GET", `/api/campaigns/${f.campaign}`)).body;
   const leads = (await f.harness.request<LeadSearchResult>("GET", `/api/leads?campaign=${f.campaign}&limit=500`)).body.rows;
-  const counts = await listRow.getByRole("definition").allTextContents();
-  expect(counts.map(Number).reduce((a, b) => a + b, 0)).toBe(leads.length);
-  expect(counts.map(Number).reduce((a, b) => a + b, 0)).toBe(detail.leadCount);
+  // The banner's five groups, in the strip's rendering ("3waiting on you"; ticket 22's `GroupCounts`).
+  const counts = (await listRow.getByRole("list", { name: "Leads in each status group" }).getByRole("listitem").allTextContents()).map((t) => parseInt(t, 10));
+  expect(counts).toHaveLength(5);
+  expect(counts.reduce((a, b) => a + b, 0)).toBe(leads.length);
+  expect(counts.reduce((a, b) => a + b, 0)).toBe(detail.leadCount);
 
   await test.step("Today and Calls say why its calls are not on the list", async () => {
     await page.goto(`${f.url}/`);

@@ -43,8 +43,8 @@ test("the figures change after sends, a refusal and a bounce, a reply, call outc
   await test.step("09:15: the provider sent and refused emails, one bounced, and a text was reported invalid", async () => {
     await world.h.advanceTo(world.h.clock + 2 * H + 15 * 60_000);
     await at(page, f, campaign);
-    await expect(row(page, "Email")).toHaveText("3 sent · 2 failed or bounced · 0 replied");
-    await expect(row(page, "SMS")).toHaveText("4 sent · 1 failed or bounced · 0 replied");
+    await expect(row(page, "Email")).toHaveText("3 sent · 2 failed or bounced · 0 leads replied");
+    await expect(row(page, "SMS")).toHaveText("4 sent · 1 failed or bounced · 0 leads replied");
     await linger(page);
     await at(page, f, `/leads/people/${await person("Nia Cole")}`);
     await expect(page.getByText(/bounced/i).first()).toBeVisible();
@@ -58,7 +58,7 @@ test("the figures change after sends, a refusal and a bounce, a reply, call outc
     await expect(page.getByText("Replied, automation stopped").first()).toBeVisible();
     await linger(page);
     await at(page, f, campaign);
-    await expect(row(page, "Email")).toHaveText("3 sent · 2 failed or bounced · 1 replied");
+    await expect(row(page, "Email")).toHaveText("3 sent · 2 failed or bounced · 1 lead replied");
     await expect(strip(page)).toContainText("1handed to you");
     await expect(panel(page)).toContainText("25% 1 of the 4 leads you emailed or texted replied");
     await linger(page);
@@ -95,7 +95,8 @@ test("the figures change after sends, a refusal and a bounce, a reply, call outc
     await page.getByRole("button", { name: "Pause campaign" }).first().click();
     await page.getByRole("group").getByRole("button", { name: "Pause campaign" }).click();
     await expect(page.getByRole("heading", { name: /^Paused since/ })).toBeVisible();
-    await expect(page.getByRole("definition").filter({ hasText: /^1$/ }).first()).toBeVisible();
+    // The banner says the groups as the strip did, from the same read (council on 384630e, item 6).
+    await expect(page.getByRole("region", { name: /^Paused since/ }).getByRole("list", { name: "Leads in each status group" })).toContainText("1paused");
     await expect(row(page, "Calls")).toHaveText("4 made · 3 connected · 1 interested · 1 declined · 0 callbacks pending");
     await linger(page);
   });
@@ -122,8 +123,8 @@ test("the Paused banner's counts and the figures come from one read, even with r
   const banner = page.getByRole("region", { name: /^Paused since/ });
   await expect(banner).toBeVisible();
   await expect(row(page, "Email")).toBeVisible();
-  const handed = Number(await banner.locator("dt", { hasText: /^Handed to you$/ }).locator("xpath=following-sibling::dd[1]").textContent());
-  const replied = async (label: string) => Number(/(\d+) replied/.exec((await row(page, label).textContent()) ?? "")?.[1] ?? "NaN");
+  const handed = parseInt((await banner.getByRole("listitem").filter({ hasText: "handed to you" }).textContent()) ?? "", 10);
+  const replied = async (label: string) => Number(/(\d+) leads? replied/.exec((await row(page, label).textContent()) ?? "")?.[1] ?? "NaN");
   // Nobody in this campaign was interested on a call, so every lead handed to you replied.
   expect(handed).toBe((await replied("Email")) + (await replied("SMS")));
 });

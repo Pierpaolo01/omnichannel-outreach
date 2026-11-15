@@ -12,18 +12,23 @@ import { FULL_SEARCH, inShard } from "./sequence-chunks.ts";
 
 export const MEASURE_SEED = 22_000;
 /**
- * Offsets from MEASURE_SEED, chosen from a sweep of the first 60 (15 November 2026; every one passed) to reach every
- * behaviour below between them; the mutations' killing seeds run beside them.
+ * Offsets from MEASURE_SEED, chosen from a sweep of the first 100 (15 November 2026, after the council on 384630e; every
+ * one passed) to reach every behaviour below between them; the mutations' killing seeds run beside them.
  */
-export const MEASURE_FIXED_SEEDS: readonly number[] = [2, 18, 22, 25, 39];
+export const MEASURE_FIXED_SEEDS: readonly number[] = [2, 4, 12, 18, 25, 49, 86];
 const SEARCH_SEEDS = 100;
 const MAX_SEEDS = 40;
 
 /** Every behaviour the fixed seeds must reach between them. */
 export const MEASURE_FEATURES: readonly string[] = [
+  "a-call-step-skipped",
   "a-callback-completed",
   "a-callback-of-a-stopped-lead",
+  "a-callback-skipped",
   "a-callback-while-paused",
+  "a-campaign-with-a-win-back-branch",
+  "a-message-step-skipped",
+  "a-new-reply-after-a-restart",
   "a-reply-after-interested",
   "a-reply-after-the-lead-ended",
   "a-reply-by-email",
@@ -46,10 +51,13 @@ export const MEASURE_FEATURES: readonly string[] = [
   "email-bounced",
   "email-refused",
   "email-sent",
+  "lead-move-to-win-back",
   "lead-pause",
   "lead-resume",
   "lead-resume-from-next-step",
+  "lead-skip",
   "lead-stop",
+  "moved-to-win-back-after-a-reply",
   "providers-send-late",
   "resumed-after-a-reply",
   "sms-bounced",

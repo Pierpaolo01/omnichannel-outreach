@@ -2362,14 +2362,15 @@ Recorded on 15 November 2026 by the ticket 22 implementer, before the code (deli
 **Every figure is a tally of facts the engine already stores for the campaign's enrollments, read in one snapshot, and worded by one function per measure.** Nothing is recomputed from the clock or the definition beyond each track's channel, and no figure is estimated, projected or compared with a target.
 
 1. **One read, one snapshot.** `GET /api/campaigns/:id/measures` calls one store method, `measureFacts(campaignId)`, which runs its statements in one SQLite read transaction (`BEGIN` … `COMMIT`, no await inside), so every figure in an answer is of the same instant.
-2. **Through the enrollments, by construction.** Each statement joins its table to `enrollments` on the subject id and filters by the enrollment's `campaign_id`. A test run (ticket 21, pull request 60) is a subject with no row in `enrollments`, so nothing of it is read: its sends, replies, call records and callbacks are in no measure, without a filter that could be forgotten. Another campaign's leads are excluded by the same join.
+2. **Leads and test runs, each by construction** (as decided by the principal on 15 November 2026, below; it replaced the first rule, under which test runs were never read). The five groups are of the campaign's enrollments only: a test run is not a lead. Every other figure counts the campaign's enrollments and its test runs, each read through its own table (`enrollments`, and ticket 21's `test_runs`, both filtered by the campaign), so a subject of another campaign is never read, and each figure says how many of it came from test runs, from the same function that counts it. *Built once pull request 60 (ticket 21) is on the integration branch; until then this branch has no test run, and every figure is of enrollments.*
 3. **One function per measure** (`src/server/measures.ts`), each over the facts the store returned, and each mapping exhaustive: a track's channel (`email`, `sms`, `call`), a call outcome (the eight of `CallOutcome`) and a status (through `statusGroup`, the one grouping function of ticket 18) each go through a `switch` with a `never` check, so a channel, outcome or status a later ticket adds fails typecheck until it is placed. The screen words each measure with one function (`src/web/campaign/measuresWording.ts`) and computes no figure.
 
 ### The facts read (`measureFacts`, one statement each)
 
 | Fact | Stored where | Read as |
 | - | - | - |
-| Each enrollment | `enrollments` | its `status`, whether it has ended (`ended`), and its stopping reply's channel (`stop_reply_channel`) |
+| Each enrollment | `enrollments` | its `status`, whether it has ended (`ended`), and its stopping reply's channel (`stop_reply_channel`, read only by a mutation) |
+| Each reply | `replies`, oldest first | subject, channel |
 | Each message sent | `attempts` in state `sent`, with its work's `provider_work.sent_wall` | subject, track; one per step (the unique index `one_sent_attempt_per_step`) |
 | Each message that failed | `step_results` with result `failed` | subject, track, step |
 | Each bounce | `bounce_events` | subject, track, step |
@@ -2384,7 +2385,7 @@ These are the facts Activity reads for the same entries (`activityOf`): "sent" i
 - **Leads by group.** For each of running, waiting on you, handed to you, paused and ended: the campaign's enrollments whose stored status `statusGroup` puts in it. Every lead is in exactly one group, so the five add up to the campaign's lead count, and each equals what Leads filtered to the campaign shows for those statuses. A campaign pause changes no status (2.1), so it moves no lead between groups; a lead pause moves the lead to paused.
 - **Sent**, for email and for SMS: the messages on that channel's tracks the provider reported sent. A message handed to the provider whose outcome is not known yet is not counted until the provider reports it sent (the campaign read's `mayStillSend` lists those already); a message the provider sent late, after it was asked to withdraw it, is counted, because it was sent.
 - **Failed or bounced**, for email and for SMS: the messages on that channel that the provider refused (a `failed` step result: an invalid address or number), plus the messages that bounced after they were sent (a bounce event), each message once. A bounced message was sent first, so it is in Sent as well. A track that ended because an address was marked bad elsewhere (another campaign's bounce, an invalid number on a call) sent nothing that failed here, so it is not counted; Activity says it as "address bad", not as a failure.
-- **Replies**, for email and for SMS: the leads whose status is "replied, automation stopped", by the channel of the reply that stopped them, as their status and Activity show it. A lead counts once however many times they replied: only the stopping reply is a fact of the status (2.4), and later replies never move its channel. A lead resumed after a reply (an auto-reply, say) is running again, and its record no longer shows the reply as its status, so it is not counted until it replies again. A lead whose call ended "interested" is counted under calls, not replies: interested is its own status.
+- **Replies**, for email and for SMS: the leads that have ever replied in the campaign, each once, by the channel of its first stored reply (`replies`, oldest first). A lead counts once however many times they replied, on whichever channel. The figure never goes down: a lead resumed after a reply, or moved to win-back, keeps its reply (council on `384630e`, item 2; the first build read the current status, which a resume or win-back lowered). Every reply is stored on the lead whatever its status (`applyReply`), so a lead whose call ended interested and who also replied is counted here too. Activity still shows the reply that stopped the lead as its status; the measure counts the stored replies, which Activity's status line does not list.
 - **Calls made**: the call outcomes logged, other than "skip for now". Each logged call counts, so a redial's second call is a second call made. A call step that never became a call (skipped for now, skipped by the user, skipped unworked by the skip limit, skipped for want of a number, or a call not yet worked) is not a call made.
 - **Calls connected**: the calls that reached the prospect for a conversation: logged interested, not interested, or callback requested. No answer, voicemail, gatekeeper or "didn't reach them", and wrong number are calls made, not connected.
 - **Interested** and **declined**: the calls logged interested, and not interested.
@@ -2400,11 +2401,11 @@ These are the facts Activity reads for the same entries (`activityOf`): "sent" i
 1. **M1 Groups.** Each group's count equals the number of the campaign's leads whose status, as Leads and each lead's record show it, the spec's table puts in that group.
 2. **M2 Sent.** Per channel, Sent equals the messages to the campaign's leads that the providers delivered and the application has observed as sent.
 3. **M3 Failed or bounced.** Per channel, it equals the messages the provider refused as invalid plus the delivered messages that bounced and whose bounce was observed, each message once.
-4. **M4 Replies.** Per channel, it equals the leads whose current status is replied, by the channel of their stopping reply, which the record knows from the replies it made.
+4. **M4 Replies.** Per channel, it equals the leads that ever replied, by the channel of their first reply, which the record knows from the replies it made; it never goes down.
 5. **M5 Calls.** Made, connected, interested and declined equal the tallies of the call outcomes the user logged and the application accepted.
 6. **M6 Callbacks pending.** It equals the leads with a callback requested and no outcome logged since, whose outreach has not ended.
 7. **M7 Rates.** Each rate's numerator and denominator equal the record's.
-8. **M8 Scope.** Nothing of another campaign is counted (and, once ticket 21 lands, nothing of a test run).
+8. **M8 Scope.** Nothing of another campaign is counted; a test run's sends, failures, replies and calls are counted and their share is said, and no test run is in a lead group (built with pull request 60, above).
 
 ### The boundary
 
@@ -2412,7 +2413,7 @@ These are the facts Activity reads for the same entries (`activityOf`): "sent" i
 
 ### What the read costs at 2,000 leads
 
-Seven statements, whatever the number of leads: the campaign row, then six that each read the campaign's enrollments by `enrollments_by_campaign_status` and join each enrollment's rows by the per-subject indexes (`attempts_by_subject`, `call_attempts_by_subject`, `bounce_events_by_subject`, the primary keys of `step_results` and `call_tasks`' `one_task_per_call_step`). The work grows with the campaign's own rows only. A test counts the statements per read (it fails if one is added per lead), and the as-built note below records the time measured at 2,000 leads. No index is expected to be needed; if one is, it is a migration taking the next number at merge.
+Nine statements since the verifier and the council on `41028f2` and `384630e` (seven when first built), whatever the number of leads: the campaign row, what may still be sent, then seven that each read the campaign's enrollments by `enrollments_by_campaign_status` and join each enrollment's rows by the per-subject indexes (`attempts_by_subject`, `call_attempts_by_subject`, `bounce_events_by_subject`, the primary keys of `step_results` and `call_tasks`' `one_task_per_call_step`). The work grows with the campaign's own rows only. A test counts the statements per read (it fails if one is added per lead), and the as-built note below records the time measured at 2,000 leads. No index is expected to be needed; if one is, it is a migration taking the next number at merge.
 
 ### The generated test
 
@@ -2453,6 +2454,18 @@ The test-run half of M8 is not generated until ticket 21 merges (no test run exi
 - **F2, pending and listed are two facts.** `callbackPending` (`src/domain/sequence/calls.ts`: an open callback of a lead whose outreach has not ended) is the one definition, used by the measures and by Activity; whether the callback is on the list is the listing rule's (`firstListedDay`). Activity's call entry carries both, `callbackPending` and `callbackListed`, in place of `callbackOpen`, and says a paused lead's callback is "still pending, and off your call list while their outreach is paused". Regressions: `measures.test.ts` (pause, resume and stop, Activity and the measures agreeing at each step), `activity.test.ts`.
 - **F4.** The note says a callback is pending "until an outcome other than Skip for now is logged on it".
 - **F3** (the texted reply that undoes a resume) is fixed in pull request 62; once it reaches the integration branch, this branch merges it and the generated runs drop their guard.
+
+### The principal's decision on test runs (15 November 2026)
+
+A council reviewer asked whether test-run sends belong in a campaign's figures. **The principal decided, on 15 November 2026: campaign measures include test-run sends, marked as test.** So sends, failures, replies and calls of the campaign's test runs count like any other, and the panel says how many of each figure came from test runs (most restrained form, provisional: "3 sent (1 from test runs)"); the five lead groups stay leads only, since a test run is not a lead. This replaces rule 2's first form and M8 (above). It is built once pull request 60 is on the integration branch: the facts gain each test run's rows read through `test_runs` by the campaign, each measure counts both kinds by one function that also returns the test share, the generated measure runs gain test runs with their own record of them, and a mutation that drops test sends, killed by a fixed seed.
+
+### After the council on `384630e` (each reproduced first as a failing test)
+
+- **Item 2, replies could go down:** above, Replies and M4. Regression: `measures.test.ts` (a lead resumed after its reply stays counted), and the mutation "replies counted from the current status, so they can go down" (M4, seed 4).
+- **Item 3:** until pull request 62 merges, the generated runs do not resume a lead that has texted any reply (email first, then a text, reaches the same defect).
+- **Item 4:** the generated runs start from a campaign with a win-back branch of two emails in half the runs (a stream of its own), take not interested with the win-back path, and use `move_to_win_back` and `skip`; half the time a control goes to a lead with a callback open. All 100 seeds (0 to 99) pass; the fixed seeds are 2, 4, 12, 18, 25, 49 and 86, reaching the 42 behaviours of `MEASURE_FEATURES`; killing seeds: M1 12, M2 2, M3 2, M4 2 (channel) and 4 (current status), M5 2 (skip for now) and 4 (gatekeeper), M6 12, M7 2, M8 2. A read is nine statements (the replies are its ninth).
+- **Item 5:** "3 sent · 2 failed or bounced · 1 lead replied": messages are counted as messages, replies as leads.
+- **Item 6:** the Paused banner and the strip say the groups one way, by one component and one wording function (`GroupCounts`, `groupCountText` in `src/web/status.tsx`): "**0** running", as variant A's strip and paused banner draw them.
 
 ### Questions for the human (each with the interim built)
 

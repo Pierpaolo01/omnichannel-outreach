@@ -1,6 +1,6 @@
 import type { CampaignDefinition, StepDefinition } from "../../src/domain/sequence/definition.ts";
 import type { MeasureRules } from "../../src/server/measures.ts";
-import type { CallsView, CallTaskView, CampaignMeasures, LeadSearchResult, OutreachStatus } from "../../src/shared/api.ts";
+import type { CallsView, CallTaskView, CampaignMeasures, ControlAnswer, LeadSearchResult, OutreachStatus } from "../../src/shared/api.ts";
 import { EngineHarness } from "./engine-harness.ts";
 import { business, person } from "./export-builder.ts";
 import type { FakeMode } from "./fake-email-port.ts";
@@ -69,8 +69,10 @@ interface Lead {
   readonly email: string;
   readonly mobile: string | null;
   enrollmentId: string;
-  /** The channel of the reply that stopped the lead, while its status says so; null once it is resumed. */
-  reply: "email" | "sms" | null;
+  /** The channel of the lead's first reply in the campaign; never cleared (council on 384630e, item 2). */
+  firstReply: "email" | "sms" | null;
+  /** The lead has texted a reply (the guard below). */
+  textReplied: boolean;
   /** A callback asked for with no outcome logged since. */
   callbackOpen: boolean;
 }
@@ -102,8 +104,8 @@ export async function runMeasures(seed: number, options: MeasureRunOptions = {})
   // Fictitious people. In the first campaign, each has an email and, mostly, a mobile; in the second, an email only.
   const firstNames = ["Pat Oneil", "Nia Cole", "Sam Reed", "Ivo Marsh", "Ada Holt", "Ben Vale"].slice(0, 3 + Math.floor(rnd() * 4));
   const leads: Lead[] = [
-    ...firstNames.map((name, i): Lead => ({ name, campaign: 0, email: `p${i}@harbour.example`, mobile: i === 0 || chance(0.8) ? `+4477009001${String(10 + i)}` : null, enrollmentId: "", reply: null, callbackOpen: false })),
-    ...["Rae Lund", "Lea Park"].map((name, i): Lead => ({ name, campaign: 1, email: `q${i}@kestrel.example`, mobile: null, enrollmentId: "", reply: null, callbackOpen: false })),
+    ...firstNames.map((name, i): Lead => ({ name, campaign: 0, email: `p${i}@harbour.example`, mobile: i === 0 || chance(0.8) ? `+4477009001${String(10 + i)}` : null, enrollmentId: "", firstReply: null, textReplied: false, callbackOpen: false })),
+    ...["Rae Lund", "Lea Park"].map((name, i): Lead => ({ name, campaign: 1, email: `q${i}@kestrel.example`, mobile: null, enrollmentId: "", firstReply: null, textReplied: false, callbackOpen: false })),
   ];
   // Addresses that bounce once sent, that are refused, and mobiles refused or reported invalid after a text.
   for (const l of leads) {
@@ -116,7 +118,7 @@ export async function runMeasures(seed: number, options: MeasureRunOptions = {})
       else if (m < 0.3) h.sms.invalidAfterSend.add(l.mobile);
     }
   }
-  const definition: CampaignDefinition = {
+  const definition: { -readonly [K in keyof CampaignDefinition]: CampaignDefinition[K] } & { tracks: CampaignDefinition["tracks"][number][] } = {
     timezone: "Europe/London",
     callSkipLimitDays: 3,
     emailPool: ["inbox-a"],
@@ -128,6 +130,13 @@ export async function runMeasures(seed: number, options: MeasureRunOptions = {})
       { id: "p1", channel: "call", branch: "main", window: ALWAYS, steps: [{ ...email("c1"), subject: "", body: "" }], start: chance(0.5) ? { kind: "entry" } : { kind: "after", trackId: "e1", delayDays: 0 }, removed: false },
     ],
   };
+  // Council on 384630e, item 4, from a stream of its own: a win-back branch of two emails in half the runs.
+  const r22 = random(seed ^ 0x22b);
+  const winBack = r22() < 0.5;
+  if (winBack) {
+    features.add("a-campaign-with-a-win-back-branch");
+    definition.tracks.push({ id: "w1", channel: "email", branch: "win_back", window: ALWAYS, steps: [email("w1"), email("w2", 1)], start: { kind: "entry" }, removed: false });
+  }
   const second: CampaignDefinition = { ...definition, smsPool: [], tracks: [definition.tracks[0]!] };
   const campaignIds: string[] = [];
   for (const [i, def] of [definition, second].entries()) {
@@ -180,12 +189,12 @@ export async function runMeasures(seed: number, options: MeasureRunOptions = {})
       const failed = new Set<string>();
       for (const x of handovers) if (refusedTo.has(x.destination)) failed.add(`${x.subjectId}/${x.stepId}`);
       for (const d of sent) if (bouncing.has(d.destination) && d.at + bounceDelay <= h.clock) failed.add(`${d.subjectId}/${d.stepId}`);
-      return { sent: sent.length, failedOrBounced: failed.size, replies: mine.filter((l) => l.reply === channel).length };
+      return { sent: sent.length, failedOrBounced: failed.size, replies: mine.filter((l) => l.firstReply === channel).length };
     };
     const calls = callsLogged.filter((x) => x.lead.campaign === c);
     const made = calls.filter((x) => MADE.includes(x.outcome)).length;
     const connected = calls.filter((x) => CONNECTED.includes(x.outcome)).length;
-    const replied = mine.filter((l) => l.reply !== null);
+    const replied = mine.filter((l) => l.firstReply !== null);
     const reached = new Set([...replied.map((l) => l.enrollmentId), ...[...deliveries("email"), ...deliveries("sms")].filter((d) => ofMine(d.subjectId)).map((d) => d.subjectId)]);
     const pct = (n: number, d: number) => (d === 0 ? null : Math.round((100 * n) / d));
     return {
@@ -247,12 +256,13 @@ export async function runMeasures(seed: number, options: MeasureRunOptions = {})
     features.add(`a-reply-by-${channel}`);
     if (l.campaign === 1) features.add("a-reply-in-the-other-campaign");
     // Any reply ends a lead as replied unless it already replied or was interested on a call (2.1).
-    if (before === "replied") features.add(l.reply === channel ? "a-second-reply" : "a-second-reply-on-the-other-channel");
+    // Every reply is stored on the lead, whatever its status (2.1, `applyReply`); the figure counts the lead once, by its first.
+    if (before === "replied") features.add(l.firstReply === channel ? "a-second-reply" : "a-second-reply-on-the-other-channel");
     else if (before === "interested_on_call") features.add("a-reply-after-interested");
-    else {
-      if (before && ENDED.includes(before)) features.add("a-reply-after-the-lead-ended");
-      l.reply = channel;
-    }
+    else if (before && ENDED.includes(before)) features.add("a-reply-after-the-lead-ended");
+    if (l.firstReply !== null && before !== "replied") features.add("a-new-reply-after-a-restart");
+    if (l.firstReply === null) l.firstReply = channel;
+    if (channel === "sms") l.textReplied = true;
     await h.advanceTo(h.clock + MIN);
   };
 
@@ -268,7 +278,7 @@ export async function runMeasures(seed: number, options: MeasureRunOptions = {})
     const extra: Record<string, unknown> = {};
     if ((outcome === "no_answer" || outcome === "voicemail" || outcome === "gatekeeper") && chance(0.4)) extra["redial"] = true;
     if (outcome === "callback_requested") extra["callbackAt"] = new Date(h.clock + (1 + Math.floor(rnd() * 30)) * HOUR).toISOString();
-    if (outcome === "not_interested") extra["declinedPath"] = pick(["stop", "continue"] as const);
+    if (outcome === "not_interested") extra["declinedPath"] = winBack ? pick(["stop", "continue", "win_back"] as const) : pick(["stop", "continue"] as const);
     const res = await h.request("POST", `/api/call-tasks/${item.taskId}/outcome`, { requestId: `call-${++ids}`, outcome, numberId, note: "", ...extra });
     if (res.status !== 200) return;
     callsLogged.push({ lead: l, outcome });
@@ -281,21 +291,33 @@ export async function runMeasures(seed: number, options: MeasureRunOptions = {})
   };
 
   const control = async () => {
-    const l = pick(leads.filter((x) => x.campaign === 0));
-    const action = pick(["pause", "resume", "stop", "resume_from_next_step"] as const);
-    // Not generated: a resume after a lead's texted reply. The engine stores an observed text as `sms:<id>` and its pre-send
-    // check compares the provider's bare id, so the resumed lead's next text finds that same old reply and stops it again
-    // (found by these runs on seed 22058; reported on pull request for ticket 22, outside its read-only scope).
-    if (action === "resume_from_next_step" && l.reply === "sms") return;
+    // Half the time, when one has a callback open, that lead: a pause, a stop, a skip or win-back during a callback.
+    const withCallback = leads.filter((x) => x.campaign === 0 && x.callbackOpen);
+    const l = withCallback.length > 0 && chance(0.5) ? pick(withCallback) : pick(leads.filter((x) => x.campaign === 0));
+    const action = pick(["pause", "resume", "stop", "resume_from_next_step", "skip", ...(winBack ? (["move_to_win_back"] as const) : [])] as const);
+    // Not generated until pull request 62 merges: a resume after any texted reply. The engine stores an observed text as
+    // `sms:<id>` and its pre-send check compares the provider's bare id, so the resumed lead's next text finds that same old
+    // reply and stops it again (seed 22058; email first then a text reaches it too, the verifier on 41028f2).
+    if (action === "resume_from_next_step" && l.textReplied) return;
     const before = (await statuses()).get(l.enrollmentId);
-    const res = await h.request("POST", `/api/enrollments/${l.enrollmentId}/controls`, { requestId: `control-${++ids}`, action });
+    const res = await h.request<ControlAnswer>("POST", `/api/enrollments/${l.enrollmentId}/controls`, { requestId: `control-${++ids}`, action });
     if (res.status !== 200) return;
     features.add(`lead-${action.replace(/_/g, "-")}`);
     if (l.callbackOpen && action === "pause") features.add("a-callback-while-paused");
     if (l.callbackOpen && action === "stop") features.add("a-callback-of-a-stopped-lead");
-    if (action === "resume_from_next_step") {
-      if (before === "replied") features.add("resumed-after-a-reply");
-      l.reply = null;
+    if (action === "resume_from_next_step" && before === "replied") features.add("resumed-after-a-reply");
+    if (action === "move_to_win_back") {
+      // Entering win-back finishes every main track, closing its call task (2.4): a callback asked for is no longer pending.
+      if (before === "replied") features.add("moved-to-win-back-after-a-reply");
+      l.callbackOpen = false;
+    }
+    if (action === "skip") {
+      // A skipped call step closes its task and releases a callback (2.4, "Skip step").
+      const skipped = res.body.effect.skips;
+      if (skipped?.call) {
+        features.add(skipped.call.callback ? "a-callback-skipped" : "a-call-step-skipped");
+        l.callbackOpen = false;
+      } else features.add("a-message-step-skipped");
     }
   };
 

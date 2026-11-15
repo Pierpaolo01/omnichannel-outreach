@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import type { CampaignMeasures } from "../../shared/api.ts";
-import { callsLine, connectRateText, groupCountText, measureRows, messagesLine, replyRateText, MEASURE_NOTES } from "./measuresWording.ts";
+import { groupCountText } from "../status.tsx";
+import { callsLine, connectRateText, measureRows, messagesLine, replyRateText, MEASURE_NOTES } from "./measuresWording.ts";
 
 const m = (fields: Partial<CampaignMeasures> = {}): CampaignMeasures => ({
   launched: true,
@@ -16,13 +17,14 @@ const m = (fields: Partial<CampaignMeasures> = {}): CampaignMeasures => ({
 });
 
 describe("the measures' wording (one function per measure)", () => {
-  test("a group's count, as the prototype's strip says it", () => {
+  test("a group's count, as the prototype's strip says it, the one wording of the strip and the Paused banner", () => {
     expect(groupCountText("waiting_on_you")).toBe("waiting on you");
     expect(groupCountText("running")).toBe("running");
   });
 
-  test("email and SMS: sent, failed or bounced, replied", () => {
-    expect(messagesLine(m().email)).toBe("40 sent · 2 failed or bounced · 3 replied");
+  test("email and SMS: messages sent, failed or bounced, and the leads who replied (council on 384630e, item 5)", () => {
+    expect(messagesLine(m().email)).toBe("40 sent · 2 failed or bounced · 3 leads replied");
+    expect(messagesLine({ sent: 2, failedOrBounced: 0, replies: 1 })).toBe("2 sent · 0 failed or bounced · 1 lead replied");
     expect(messagesLine({ sent: 0, failedOrBounced: 0, replies: 0 })).toBe("None sent yet");
   });
 
@@ -43,7 +45,7 @@ describe("the measures' wording (one function per measure)", () => {
 
   test("one row per channel the campaign has tracks on, in its order", () => {
     expect(measureRows(m()).map((r) => r.label)).toEqual(["Email", "SMS", "Calls"]);
-    expect(measureRows(m({ channels: ["email"] })).map((r) => [r.label, r.line])).toEqual([["Email", "40 sent · 2 failed or bounced · 3 replied"]]);
+    expect(measureRows(m({ channels: ["email"] })).map((r) => [r.label, r.line])).toEqual([["Email", "40 sent · 2 failed or bounced · 3 leads replied"]]);
   });
 
   test("how the figures are counted, in plain words, covering each edge the ADR names", () => {
