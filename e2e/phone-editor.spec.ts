@@ -245,18 +245,18 @@ test.describe("calls in Before launch", () => {
     }
   });
 
-  test("a running campaign's phone track is read-only, and says why", async ({ page }) => {
+  test("a running campaign's phone track is edited like any track, and nothing is applied until Apply (ticket 19)", async ({ page }) => {
     const f = await fakeProviderApp("phone-editor");
     const id = await f.freshTwoChannelCampaign("Running with a call");
     await f.harness.defineSequence(id, { ...TWO_CHANNELS, callScript: "Ask who books.", tracks: [...TWO_CHANNELS.tracks, phoneTrack("call", { kind: "entry" })] });
     expect((await f.harness.launch(id)).status).toBe(200);
     await page.goto(`${f.url}/campaigns/${id}?track=call`);
-    await expect(page.getByText("This campaign is running. Editing a running campaign arrives with a later release.")).toBeVisible();
-    // Read-only, not disabled: it can still be reached by keyboard, scrolled and copied.
-    await expect(page.getByLabel("Call script")).not.toBeEditable();
+    await expect(page.getByRole("heading", { name: "This campaign is running" })).toBeVisible();
     await expect(page.getByLabel("Call script")).toHaveValue("Ask who books.");
-    await expect(page.getByLabel("Days before an unworked call is skipped")).toBeDisabled();
-    await expect(page.getByRole("button", { name: "Monday" })).toBeDisabled();
-    await expect(page.getByRole("button", { name: "Remove this phone track" })).toHaveCount(0);
+    await page.getByLabel("Days before an unworked call is skipped").fill("3");
+    await expect(page.getByRole("heading", { name: "Changes not applied yet" })).toBeVisible();
+    await expect(page.getByTestId("running-changes").getByText("skip limit changed")).toBeVisible();
+    // Removing it marks it removed: leads that started it keep it.
+    await expect(page.getByRole("button", { name: "Remove this phone track" })).toBeEnabled();
   });
 });

@@ -1,6 +1,8 @@
 import { useState, type ReactNode, type SyntheticEvent } from "react";
-import { Link, Route, Switch, useLocation } from "wouter";
+import { Link, Route, Router, Switch, useLocation } from "wouter";
 import { BulkProvider } from "./bulk/useBulk.tsx";
+import { ConfirmStrip } from "./controls/ControlViews.tsx";
+import { leaveAnyway, stay, useGuardedLocation, useLeaveQuestion } from "./leaveGuard.ts";
 import { Icon, type IconName } from "./icons.tsx";
 import { CallsPage } from "./pages/CallsPage.tsx";
 import { CampaignPage } from "./pages/CampaignPage.tsx";
@@ -21,6 +23,26 @@ const AREAS: readonly { path: string; label: string; icon: IconName }[] = [
 ];
 
 export function App() {
+  // Navigation goes through the leave guard (ticket 19): a page holding unsent work asks before it is left.
+  return (
+    <Router hook={useGuardedLocation}>
+      <Shell />
+    </Router>
+  );
+}
+
+/** The question the leave guard asks, in the app's in-page confirmation, above the page it would leave. */
+function LeaveQuestion() {
+  const question = useLeaveQuestion();
+  if (!question) return null;
+  return (
+    <div className="mb-4">
+      <ConfirmStrip text={question.text} action="Leave and discard changes" onConfirm={leaveAnyway} onCancel={stay} />
+    </div>
+  );
+}
+
+function Shell() {
   return (
     // The app's one bulk request manager (ticket 18): a stored bulk is sent and answered wherever the user is.
     <BulkProvider>
@@ -34,6 +56,7 @@ export function App() {
       <Rail />
       <main id="main" className="min-w-0 px-4 pb-24 pt-5 min-[901px]:pl-10 min-[901px]:pr-4 min-[901px]:pt-8">
         <div className="max-w-[1180px]">
+          <LeaveQuestion />
           <Switch>
             <Route path="/" component={TodayPage} />
             <Route path="/calls" component={CallsPage} />

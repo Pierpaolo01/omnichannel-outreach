@@ -18,7 +18,8 @@ export type ArrangeOperation =
   | { readonly kind: "add"; readonly channel: "email" | "sms" | "call"; readonly branch?: Branch }
   /** A phone track's declined path (ticket 16b): what a declined call on it does. */
   | { readonly kind: "declined"; readonly trackId: string; readonly path: DeclinedPath }
-  | { readonly kind: "remove"; readonly trackId: string }
+  /** `mark`: on a running campaign the track is marked removed, never deleted, so its id keeps its meaning (ticket 19). */
+  | { readonly kind: "remove"; readonly trackId: string; readonly mark?: boolean }
   | { readonly kind: "start"; readonly trackId: string; readonly start: StartRule }
   | { readonly kind: "delay"; readonly trackId: string; readonly days: number };
 
@@ -89,7 +90,7 @@ export function naive(def: CampaignDefinition, op: ArrangeOperation): CampaignDe
     case "declined":
       return change(op.trackId, (t) => ({ ...t, declinedPath: op.path }));
     case "remove":
-      return { ...def, tracks: def.tracks.filter((t) => t.id !== op.trackId) };
+      return op.mark === true ? change(op.trackId, (t) => ({ ...t, removed: true })) : { ...def, tracks: def.tracks.filter((t) => t.id !== op.trackId) };
     case "start":
       return change(op.trackId, (t) => ({ ...t, start: op.start }));
     case "delay":

@@ -22,8 +22,9 @@ import { accountView, progressView } from "./engine/views.ts";
 import { callsView, callTaskView, needsAttentionView, recordCalls, todayView } from "./engine/call-views.ts";
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
 import { sealReckoning } from "../domain/sequence/progress.ts";
+import { editImpactView } from "./engine/edit-impact.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
-import type { ControlRefusal, EnrollmentRead, CampaignDetail, CampaignListItem, CampaignPauseRead, CampaignSequenceSummary, RecordControls, RecordLead, SequenceView, ActivityNote, CallOutcomeApi, ColleagueView, NoteAnswer, RecordColleagues } from "../shared/api.ts";
+import type { ControlRefusal, EnrollmentRead, CampaignDetail, CampaignListItem, CampaignPauseRead, CampaignSequenceSummary, EditImpactView, RecordControls, RecordLead, SequenceView, ActivityNote, CallOutcomeApi, ColleagueView, NoteAnswer, RecordColleagues } from "../shared/api.ts";
 import { beforeLaunchView, copyPreview } from "./before-launch.ts";
 import { activityOf } from "./activity.ts";
 import { registerEmailProviderRoutes, type EmailProviderSource } from "./instantly/routes.ts";
@@ -34,7 +35,7 @@ export interface AppDependencies {
   readonly now: () => string;
   readonly newId: () => string;
   /** The sequence engine. Without one, the app runs an engine with no connected email provider. */
-  readonly engine?: Pick<Engine, "launch" | "logCallOutcome" | "controlLead" | "setCampaignPause"> & Partial<Pick<Engine, "transportAvailable">>;
+  readonly engine?: Pick<Engine, "launch" | "logCallOutcome" | "controlLead" | "setCampaignPause" | "saveDefinition"> & Partial<Pick<Engine, "transportAvailable">>;
   /** The email provider's own description, for GET /api/email-provider; absent when none is connected. */
   readonly emailProvider?: EmailProviderSource | null;
   /**
@@ -78,7 +79,16 @@ const definitionBody = requestObject({
   tracks: z.array(trackBody).max(20),
   /** Who wrote the save (ADR 0003 1.1.1): its editing session, its number there, and the revision it last saw. */
   save: requestObject({ session: z.string().min(1).max(100), seq: z.number().int().nonnegative(), base: z.number().int().nonnegative() }).optional(),
+  /** On a running campaign, the digest of the read the user applied from (ticket 19; review bot on 7afa03d). */
+  impact: z.string().regex(/^[0-9a-f]{64}$/).optional(),
 });
+
+const impactBody = requestObject({ definition: definitionBody.omit({ save: true, impact: true }) });
+
+/** A definition as stored: a declined path only when the canvas set one; the phone track's fields travel in the same save (ADR 0003 1.1.1). */
+function definitionFromBody(fields: Omit<z.infer<typeof definitionBody>, "save" | "impact">): CampaignDefinition {
+  return { ...fields, tracks: fields.tracks.map(({ declinedPath, callSkipLimitDays, ...t }) => ({ ...t, ...(declinedPath ? { declinedPath } : {}), ...(callSkipLimitDays !== undefined ? { callSkipLimitDays } : {}) })) };
+}
 
 /** The user's zone: the machine's, which a campaign's default zone starts from (ADR 0003 1.1). */
 const machineZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -404,15 +414,26 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     if (!campaign) return notFound(c, "campaign");
     const body = definitionBody.safeParse(await readJson(c));
     if (!body.success) return invalid(c, body.error);
-    const { save, ...fields } = body.data;
-    // A declined path is stored only when the canvas set one; the phone track's fields travel in the same save (ADR 0003 1.1.1).
-    const definition: CampaignDefinition = { ...fields, tracks: fields.tracks.map(({ declinedPath, callSkipLimitDays, ...t }) => ({ ...t, ...(declinedPath ? { declinedPath } : {}), ...(callSkipLimitDays !== undefined ? { callSkipLimitDays } : {}) })) };
-    const previous = (await store.engine.campaign(campaign.id))?.definition ?? null;
-    const problems = definitionProblems(definition, previous);
+    const { save, impact, ...fields } = body.data;
+    const definition = definitionFromBody(fields);
+    const row = await store.engine.campaign(campaign.id);
+    const problems = definitionProblems(definition, row?.definition ?? null, { launched: row?.launchedAt != null });
     if (problems.length > 0) return c.json<ApiError>({ error: { code: "invalid_sequence", message: problems.join(" ") } }, 400);
-    const result = await store.engine.saveDefinition(campaign.id, definition, now(), save ?? null);
+    // Through the engine (ticket 19): a launched campaign's save reconciles its leads in the save's transaction.
+    const result = await engine.saveDefinition(campaign.id, definition, now(), save ?? null, impact !== undefined ? { impact } : {});
     const saved = result.outcome;
     if (saved === "missing") return notFound(c, "campaign");
+    if (saved === "impact_changed") {
+      // One reason whatever changed (council on 93bed86, item 14); `elsewhere` when the stored sequence itself changed.
+      const message = result.elsewhere
+        ? "This campaign's sequence was changed elsewhere since what this change does was shown, so nothing was applied. Load the saved version, or discard your changes, to carry on."
+        : "What this change does changed since it was shown, so nothing was applied. Check what it does now, then apply again.";
+      return c.json<ApiError>({ error: { code: "impact_changed", message, elsewhere: result.elsewhere } }, 409);
+    }
+    if (saved === "invalid") return c.json<ApiError>({ error: { code: "invalid_sequence", message: result.problems.join(" ") } }, 400);
+    if (saved === "blocked") {
+      return c.json<ApiError>({ error: { code: "blocked", message: `This change was not applied: ${result.check.blockers.map((b) => b.message).join(" ")}` } }, 409);
+    }
     if (saved === "superseded") {
       return c.json<ApiError>({ error: { code: "superseded", message: "A later change from this page was already saved." } }, 409);
     }
@@ -426,6 +447,16 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
       return c.json<ApiError>({ error: { code: "launched", message: "This campaign is running. Editing a running campaign arrives with a later release." } }, 409);
     }
     return c.json(await sequenceView(campaign.id, campaign.defaultTimezone, result.stored));
+  });
+
+  // Ticket 19: what applying a draft would do to a running campaign's leads, read through the engine's own functions.
+  app.post("/campaigns/:id/sequence/impact", withinDefinitionLimit, async (c) => {
+    const campaign = await store.campaign(c.req.param("id"));
+    if (!campaign) return notFound(c, "campaign");
+    const body = impactBody.safeParse(await readJson(c));
+    if (!body.success) return invalid(c, body.error);
+    const view = await editImpactView(store.engine, rules, campaign.id, definitionFromBody(body.data.definition), Date.parse(now()));
+    return view ? c.json<EditImpactView>(view) : notFound(c, "campaign");
   });
 
   app.post("/campaigns/:id/launch", async (c) => {

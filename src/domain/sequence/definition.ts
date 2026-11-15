@@ -140,7 +140,7 @@ export interface DefinitionIssue {
 export const issueKey = (issue: DefinitionIssue): string => `${issue.kind} ${issue.trackId ?? ""} ${issue.stepId ?? ""}`;
 
 /** The reasons a definition cannot be saved (ADR 0003 7.1), each with its identity. Empty when it can. */
-export function definitionIssues(def: CampaignDefinition, previous: CampaignDefinition | null = null): DefinitionIssue[] {
+export function definitionIssues(def: CampaignDefinition, previous: CampaignDefinition | null = null, options: { readonly launched?: boolean } = {}): DefinitionIssue[] {
   const problems: DefinitionIssue[] = [];
   const add = (kind: string, text: string, about: { readonly trackId?: string; readonly stepId?: string } = {}) => problems.push({ kind, text, ...about });
   if (!isTimeZone(def.timezone)) add("timezone", `The campaign's time zone "${def.timezone}" is not an IANA time zone such as Europe/London.`);
@@ -238,9 +238,32 @@ export function definitionIssues(def: CampaignDefinition, previous: CampaignDefi
     for (const track of def.tracks) {
       const old = before.get(track.id);
       if (old && old.channel !== track.channel) add("channel_changed", "A track cannot change channel: remove it and add a new one.", { trackId: track.id });
+      // Issue 42 item 49: the branch is part of a track's meaning, as its channel is (ADR 0003 "Ticket 19").
+      if (old && old.branch !== track.branch) add("branch_changed", "A track cannot move between the main sequence and the win-back branch: remove it and add a new one.", { trackId: track.id });
       for (const step of track.steps) {
         const was = stepTrack.get(step.id);
         if (was !== undefined && was !== track.id) add("step_moved", "A step cannot move to another track: remove it and add a new one.", { trackId: track.id, stepId: step.id });
+      }
+    }
+    // A running campaign's leads hold results and progress by these ids (ADR 0003 "Ticket 19"): a track or a step is
+    // marked removed, never deleted, and what is removed never comes back.
+    if (options.launched === true) {
+      const tracksNow = new Map(def.tracks.map((t) => [t.id, t]));
+      const stepsNow = new Map(def.tracks.flatMap((t) => t.steps.map((st) => [st.id, st] as const)));
+      for (const old of previous.tracks) {
+        if (!tracksNow.has(old.id)) add("track_deleted", "A track leads may have started cannot be deleted on a running campaign: it is marked removed instead.", { trackId: old.id });
+      }
+      for (const old of previous.tracks) {
+        if (!tracksNow.has(old.id)) continue;
+        for (const st of old.steps) if (!stepsNow.has(st.id)) add("step_deleted", "A step leads may have reached cannot be deleted on a running campaign: it is marked removed instead.", { trackId: old.id, stepId: st.id });
+      }
+      for (const old of previous.tracks) {
+        const now = tracksNow.get(old.id);
+        if (old.removed && now && !now.removed) add("restored", "A removed track cannot come back on a running campaign: add a new one.", { trackId: old.id });
+        for (const st of old.steps) {
+          const stNow = stepsNow.get(st.id);
+          if (st.removed && stNow && !stNow.removed) add("restored", "A removed step cannot come back on a running campaign: add a new one.", { trackId: old.id, stepId: st.id });
+        }
       }
     }
   }
@@ -251,6 +274,6 @@ export function definitionIssues(def: CampaignDefinition, previous: CampaignDefi
  * Plain messages for a definition that cannot be saved (ADR 0003 7.1). Empty when it can.
  * `previous` is the stored definition an edit replaces, if any. The sentences of `definitionIssues`.
  */
-export function definitionProblems(def: CampaignDefinition, previous: CampaignDefinition | null = null): string[] {
-  return definitionIssues(def, previous).map((issue) => issue.text);
+export function definitionProblems(def: CampaignDefinition, previous: CampaignDefinition | null = null, options: { readonly launched?: boolean } = {}): string[] {
+  return definitionIssues(def, previous, options).map((issue) => issue.text);
 }

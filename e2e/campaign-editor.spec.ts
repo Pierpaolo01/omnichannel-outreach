@@ -263,19 +263,21 @@ test.describe("review of pull request 41", () => {
     await expect(page.getByLabel("Email 1 copy")).toHaveValue(COPY.second.body);
   });
 
-  test("a running campaign's inspector has no enabled authoring control (PR 41 review: one lock)", async ({ page }) => {
+  test("a running campaign's inspector is editable, and nothing is applied until Apply (ticket 19)", async ({ page }) => {
     await page.goto(`${r.url}/campaigns/${r.running}?track=email&step=s1`);
-    await expect(page.getByText("This campaign is running.")).toBeVisible();
-    expect(await enabledAuthoring(page)).toEqual([]);
+    await expect(page.getByRole("heading", { name: "This campaign is running" })).toBeVisible();
+    expect(await enabledAuthoring(page)).toContain("Email 1 copy");
   });
 
-  test("a running campaign's emails still open, read-only (SequenceTab.tsx:207)", async ({ page }) => {
+  test("a running campaign's emails open and can be changed; the change waits for Apply (ticket 19)", async ({ page }) => {
     const id = await campaign(track([COPY.first, COPY.second]));
     expect((await r.harness.launch(id)).status).toBe(200);
     await page.goto(`${r.url}/campaigns/${id}?track=email`);
     await page.getByRole("button", { name: /^Email 2/ }).click();
     await expect(page.getByLabel("Email 2 copy")).toHaveValue(COPY.second.body);
-    await expect(page.getByLabel("Email 2 copy")).toBeDisabled();
+    await page.getByLabel("Email 2 copy").fill("A shorter second email for {{company}}.");
+    await expect(page.getByRole("heading", { name: "Changes not applied yet" })).toBeVisible();
+    expect((await stored(id)).definition.tracks[0]!.steps[1]!.body).toBe(COPY.second.body);
   });
 
   test("a campaign whose leads have all ended lists them with their outreach status, not \"No leads yet\" (verification F5)", async ({ page }) => {
@@ -631,7 +633,7 @@ test.describe("review of pull request 41", () => {
     // Every authoring control, not only the copy: sending days, hours, time zone, add and remove.
     expect(await enabledAuthoring(page)).toEqual([]);
     await held[0]!.continue();
-    await expect(page.getByText("This campaign is running.")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "This campaign is running" })).toBeVisible();
     expect((await stored(id)).launchedAt).not.toBeNull();
   });
 

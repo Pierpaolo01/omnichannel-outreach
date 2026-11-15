@@ -292,7 +292,13 @@ export interface CompanyRecord {
 }
 
 export interface ApiError {
-  readonly error: { readonly code: string; readonly message: string; readonly problems?: readonly { file: string; message: string }[] };
+  readonly error: {
+    readonly code: string;
+    readonly message: string;
+    readonly problems?: readonly { file: string; message: string }[];
+    /** On `impact_changed` (ticket 19): the stored sequence itself was changed elsewhere since the read. */
+    readonly elsewhere?: boolean;
+  };
 }
 
 /** A refused call outcome: the call's off-list facts as the server read them when it refused (ticket 14b). */
@@ -328,6 +334,37 @@ export interface SenderAccountViewApi {
   readonly usedToday: number;
   /** An account-level wait after a quota (402) or rate-limit (429) refusal. */
   readonly waiting: "quota" | "rate_limited" | null;
+}
+
+/**
+ * POST /api/campaigns/:id/sequence/impact (ticket 19; ADR 0003 "Ticket 19"): what applying a draft would do to the
+ * campaign's leads, read at `asOf` from the engine's own reconciliation of each lead, storing nothing.
+ */
+export interface EditImpactView {
+  readonly asOf: string;
+  /** The stored revision this read compared the draft with. */
+  readonly definitionVersion: number;
+  /** What this read was computed for (the body, the stored revision, the pause): Apply sends it as the save's `impact`. */
+  readonly digest: string;
+  /** The enrollments counted. */
+  readonly leads: number;
+  readonly changes: readonly EditImpactChange[];
+  /** What the save would refuse: the running boundary and the three launch blockers. */
+  readonly problems: readonly string[];
+  readonly blockers: readonly import("../domain/sequence/blockers.ts").LaunchBlocker[];
+}
+export interface EditImpactChange {
+  readonly kind: import("../domain/sequence/reconcile.ts").EditChangeKind;
+  readonly trackId: string | null;
+  readonly stepId: string | null;
+  /** Leads the change applies to: the work is still ahead of them. */
+  readonly reaches: number;
+  /** Leads that had not reached a removed step or track, and will pass over it. */
+  readonly skips: number;
+  /** Leads whose affected step is with a provider now: it goes as it was handed. */
+  readonly inFlight: number;
+  /** Leads past it, finished with that track, in the other branch, or ended. */
+  readonly untouched: number;
 }
 
 /** GET /api/campaigns/:id/sequence */

@@ -1629,8 +1629,8 @@ export const SCREENS: readonly Screen[] = [
       await settle(page, "start within");
     },
   },
-  { name: "fake provider: running campaign", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}`); await settle(page, "Editing a running campaign arrives with a later release."); } },
-  { name: "fake provider: running campaign's email track", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}?track=email`); await settle(page, "Editing a running campaign arrives with a later release."); } },
+  { name: "fake provider: running campaign", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}`); await settle(page, "This campaign is running"); } },
+  { name: "fake provider: running campaign's email track", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}?track=email`); await settle(page, "This campaign is running"); } },
   {
     name: "fake provider: before launch with a change that isn't saved",
     open: async (page) => {
@@ -1644,8 +1644,28 @@ export const SCREENS: readonly Screen[] = [
     },
   },
   {
-    name: "fake provider: a running campaign's later email, read-only",
-    open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}?track=email&step=s2`); await settle(page, "Editing a running campaign arrives with a later release."); },
+    name: "fake provider: a running campaign's later email, open for editing",
+    open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}?track=email&step=s2`); await settle(page, "This campaign is running"); },
+  },
+  {
+    // Ticket 19: a change on the page, with the server's read of what it would do to the running leads.
+    name: "fake provider: a running campaign's change, not applied, with what it does to the leads",
+    open: async (page) => {
+      const f = await fakeProviderApp();
+      await fake(page, `/campaigns/${f.running}?track=email&step=s2`);
+      await page.getByLabel("Email 2 copy").fill("Hi {{first_name|there}},\n\nOne more idea for {{company}}: a waiting list for the evening slots.\n\nAlex");
+      await settle(page, /will get the new copy|past it or finished/);
+    },
+  },
+  {
+    // Ticket 19: a change the save would refuse is said before Apply.
+    name: "fake provider: a running campaign's change that can't be applied",
+    open: async (page) => {
+      const f = await fakeProviderApp();
+      await fake(page, `/campaigns/${f.running}?track=email&step=s2`);
+      await page.getByLabel("Email 2 copy").fill("");
+      await settle(page, "This can’t be applied yet");
+    },
   },
   { name: "fake provider: a running campaign's leads, with their outreach status", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.running}/leads`); await settle(page, "Replied, automation stopped"); } },
   {
@@ -1933,11 +1953,11 @@ export const SCREENS: readonly Screen[] = [
     },
   },
   {
-    name: "fake provider: a running campaign's phone track, read-only",
+    name: "fake provider: a running campaign's phone track, open for editing",
     open: async (page) => {
       const f = await fakeProviderApp("phone-track");
       await page.goto(`${f.url}/campaigns/${await runningWithACall(f)}?track=call`);
-      await settle(page, "Editing a running campaign arrives with a later release.");
+      await settle(page, "This campaign is running");
     },
   },
   {
@@ -1976,7 +1996,7 @@ export const SCREENS: readonly Screen[] = [
     },
   },
   { name: "fake provider: every track on the canvas, running", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.twoChannels}`); await settle(page, "Email track 2"); } },
-  { name: "fake provider: a running campaign's SMS track, read-only", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.twoChannels}?track=sms`); await settle(page, "Editing a running campaign arrives with a later release."); } },
+  { name: "fake provider: a running campaign's SMS track, read-only", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.twoChannels}?track=sms`); await settle(page, "This campaign is running"); } },
   { name: "fake provider: an SMS track with its numbers, in the inspector", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.twoChannelsReady}?track=sms`); await settle(page, "texts a day across campaigns"); } },
   { name: "fake provider: before launch on both channels", open: async (page) => { const f = await fakeProviderApp(); await fake(page, `/campaigns/${f.twoChannelsReady}/before-launch`); await settle(page, "Simulated SMS"); await settle(page, "Text 1"); } },
   {

@@ -133,9 +133,10 @@ export const hourLabel = (h: number): string => `${String(h).padStart(2, "0")}:0
  * The track without one email. When the first email goes, the next becomes a first email: it has
  * no wait and starts its own thread, keeping its copy and any subject it had (PR 41 review).
  */
-export function removeStep(track: TrackDefinition, stepId: string): TrackDefinition {
+export function removeStep(track: TrackDefinition, stepId: string, mark = false): TrackDefinition {
   const wasFirst = liveSteps(track)[0]?.id === stepId;
-  const steps = track.steps.filter((s) => s.id !== stepId);
+  // On a running campaign a message is marked removed, never deleted, so leads' results keep naming it (ticket 19).
+  const steps = mark ? track.steps.map((s) => (s.id === stepId ? { ...s, removed: true } : s)) : track.steps.filter((s) => s.id !== stepId);
   const first = steps.find((s) => !s.removed);
   return {
     ...track,

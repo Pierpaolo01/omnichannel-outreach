@@ -71,7 +71,9 @@ describe("one email track through the engine and a fake provider", () => {
     expect(ready.launch).toEqual({ blockers: [], nothingToLaunch: false, canLaunch: true });
     h.clock = MONDAY_9;
     expect((await h.launch(campaign.id)).status).toBe(200);
-    expect((await h.request("PUT", `/api/campaigns/${campaign.id}/sequence`, threeEmails())).status).toBe(409);
+    // A running campaign takes edits (ticket 19), under the same three blockers; it launches once.
+    expect((await h.request("PUT", `/api/campaigns/${campaign.id}/sequence`, threeEmails())).status).toBe(200);
+    expect((await h.request("PUT", `/api/campaigns/${campaign.id}/sequence`, threeEmails(["inbox-z"]))).status).toBe(409);
     expect((await h.launch(campaign.id)).status).toBe(409);
   });
 

@@ -113,7 +113,7 @@ export class EngineHarness {
       store: this.store,
       now: () => new Date(this.clock).toISOString(),
       newId: sequentialIds(),
-      engine: { launch: (id, expected) => this.engine.launch(id, expected), logCallOutcome: (id, input) => this.engine.logCallOutcome(id, input), controlLead: (id, action, requestId, expected) => this.engine.controlLead(id, action, requestId, expected), setCampaignPause: (id, pause, requestId, expected) => this.engine.setCampaignPause(id, pause, requestId, expected), transportAvailable: (channel, threading) => this.engine.transportAvailable(channel, threading) },
+      engine: { launch: (id, expected) => this.engine.launch(id, expected), logCallOutcome: (id, input) => this.engine.logCallOutcome(id, input), controlLead: (id, action, requestId, expected) => this.engine.controlLead(id, action, requestId, expected), setCampaignPause: (id, pause, requestId, expected) => this.engine.setCampaignPause(id, pause, requestId, expected), transportAvailable: (channel, threading) => this.engine.transportAvailable(channel, threading), saveDefinition: (id, definition, editedAt, save, options) => this.engine.saveDefinition(id, definition, editedAt, save, options) },
       emailProvider: "status" in this.provider ? (this.provider as Provider & EmailProviderSource) : null,
       smsProvider: this.smsProvider ? "test-simulator" : "none",
       ...(options.rules ? { rules: options.rules } : {}),
@@ -418,6 +418,15 @@ export class EngineHarness {
     this.advanceProviders();
     // Another process: its ticks do not queue behind this one's.
     await new Engine({ ...this.options.engine, ticks: new TickQueue(), store: this.store.engine, port: this.provider, ...(this.smsProvider ? { smsPort: this.smsProvider } : {}), now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) }).tick();
+  }
+
+  /**
+   * A running edit saved by another process on the same store (ticket 19): it does not queue behind this process's
+   * tick, so a test can save from inside a hook, between a claim and its handover.
+   */
+  async otherProcessSave(campaignId: string, definition: CampaignDefinition): Promise<string> {
+    const other = new Engine({ ...this.options.engine, ticks: new TickQueue(), store: this.store.engine, port: this.provider, ...(this.smsProvider ? { smsPort: this.smsProvider } : {}), now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) });
+    return (await other.saveDefinition(campaignId, definition, new Date(this.clock).toISOString(), null, { tick: false })).outcome;
   }
 
   /** A fresh engine on the same store and provider, settling what the crash left open. */
