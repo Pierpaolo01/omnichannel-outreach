@@ -131,7 +131,7 @@ const EXPECTED: Record<string, { invariant: string; seed: number; options?: Part
   "skip skips two steps": { invariant: "P11", seed: 0 },
   "a skipped step is sent all the same": { invariant: "P4", seed: 18 },
   "stop leaves the clock running": { invariant: "P9", seed: 0 },
-  // "a restart rewinds to the track's first step" (P6) is retired since ticket 19: `alignPending`, which every evaluation and
+  // "a restart rewinds to the track's first step" (P6, seen as P2, under which it was recorded) is retired since ticket 19: `alignPending`, which every evaluation and
   // settlement runs, re-derives a pending step that names a step already resolved, so no rule swap of `applyControl` can
   // rewind a lead. `reconcile.test.ts` "a pending step pointed back at a sent step is brought forward again" guards it.
   "a restart keeps the ending's clock frozen": { invariant: "P9", seed: 0 },

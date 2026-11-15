@@ -230,3 +230,24 @@ describe("the read's counts are what the run then does (council on 93bed86, item
     expect(h.fake.deliveryLog.map((d) => d.stepId)).toEqual(["s1", "s2", "s3"]);
   });
 });
+
+describe("lengthening a phone track's skip limit on a running campaign (council on 93bed86, item 13)", () => {
+  test("every open call's deadline is re-resolved from its original due date with the new limit", async () => {
+    const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+    await h.tick();
+    expect((await h.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "Europe/London" })).status).toBe(200);
+    const { campaign } = await h.createCampaign("Clinics", { businesses: [HARBOUR], people: [person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example", direct_phone: "+442079460111" })] });
+    const phone: TrackDefinition = { id: "p1", channel: "call", branch: "main", window: [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 })), steps: [{ id: "c1", waitDays: 0, subject: "", body: "", threading: "new_subject", removed: false }], start: { kind: "entry" }, removed: false, callSkipLimitDays: 2 };
+    const calls = { ...def([phone]), callScript: "Ask who books." };
+    await h.defineSequence(campaign.id, calls);
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + H);
+    const id = h.store.engine as unknown as { subject(id: string, now: number): Promise<{ callTasks: { skipDeadline: number; dueWall: number }[] } | null> };
+    const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows;
+    const lead = rows[0]!.enrollments[0]!.id;
+    const before = (await id.subject(lead, h.clock))!.callTasks[0]!;
+    expect((await h.request("PUT", `/api/campaigns/${campaign.id}/sequence`, { ...calls, tracks: [{ ...phone, callSkipLimitDays: 4 }] })).status).toBe(200);
+    const after = (await id.subject(lead, h.clock))!.callTasks[0]!;
+    expect(after.skipDeadline - before.skipDeadline).toBe(2 * DAY);
+  });
+});

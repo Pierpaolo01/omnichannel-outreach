@@ -73,6 +73,13 @@ export interface CallRunOptions {
    * its own, so every run without it, and every seed recorded for a mutation, is the run it was).
    */
   readonly pauses?: boolean;
+  /**
+   * Ticket 19 (council on 93bed86, item 13): the generated user also lengthens a phone track's skip limit on a running
+   * campaign now and then, through the running-edit route (a run family of its own, as the pause runs are). The record
+   * re-resolves every open call's deadline from its original due date with the limit then in force, as ADR 0003 3.5's
+   * "Editing the limit" says. Limits are only lengthened: a shortened limit would judge again days the edit sealed.
+   */
+  readonly skipLimitEdits?: boolean;
 }
 
 export interface CallRunResult {
@@ -108,7 +115,7 @@ interface Subject {
 
 interface Campaign {
   id: string;
-  readonly definition: CampaignDefinition;
+  definition: CampaignDefinition;
   readonly companies: number[];
   launchedAt: number | null;
 }
@@ -365,6 +372,8 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
   const leadPauses: { subjectId: string; from: number; to: number }[] = [];
   /** Bumped whenever `logged` changes, so what the record remembers is keyed by what it was computed from. */
   let recordVersion = 0;
+  /** Each lengthened skip limit, by campaign index and track: when, and the limit before it. */
+  const limitEdits = new Map<string, { at: number; before: number }[]>();
   let actions = 0;
   const skips = new Map<string, number>();
   const checkedNotes = new Set<string>();
@@ -594,8 +603,21 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     // Resolved when the call was placed, in the user's zone then.
     const placedZone = uz(placed);
     // The limit in force for this track (ADR 0003 3.5, ticket 14c): its own, else the campaign's.
-    const limitDays = def(s).tracks.find((x) => x.id === t.id)?.callSkipLimitDays ?? def(s).callSkipLimitDays;
-    const deadline = afterHolds(s, due, startOfDay(local(due, placedZone).day + limitDays, placedZone));
+    // Ticket 19: the limit in force at each rollover. A lengthened limit re-resolves the deadline from the original due
+    // date; a rollover judged before the edit stays judged with the limit then (limits are only lengthened).
+    // ADR 3.5 "Editing the limit": re-resolved from the original due date with the new limit and the user's zone at the edit.
+    const edited = (e: number) => [...(limitEdits.get(`${s.campaign}/${t.id}`) ?? [])].filter((x) => x.at < e && x.at >= placed).at(-1);
+    const limitAt = (e: number): number => {
+      let limit = def(s).tracks.find((x) => x.id === t.id)?.callSkipLimitDays ?? def(s).callSkipLimitDays;
+      for (const edit of [...(limitEdits.get(`${s.campaign}/${t.id}`) ?? [])].reverse()) if (edit.at >= e) limit = edit.before;
+      return limit;
+    };
+    const zoneAt = (e: number) => {
+      const last = edited(e);
+      return last ? uz(last.at) : placedZone;
+    };
+    const deadlineAt = (e: number) => afterHolds(s, due, startOfDay(local(due, zoneAt(e)).day + limitAt(e), zoneAt(e)));
+    const deadline = Math.min(deadlineAt(-Infinity), deadlineAt(Infinity));
     if (deadline > h.clock) return null;
     const end = endLimitOf(s);
     const segments = userZones.map((z, i) => ({ from: z.at, to: userZones[i + 1]?.at ?? Infinity, zone: z.zone }));
@@ -609,7 +631,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
         if (e >= end) return null;
         // A rollover at the instant an outcome releases a hold is judged before the release (the tick before the
         // request, or the request's own catch-up, runs while held), so it counts as held (seed 20261195).
-        if (e < deadline || holdsOf(s).some((x) => x.from < e && e <= x.to)) continue;
+        if (e < deadlineAt(e) || holdsOf(s).some((x) => x.from < e && e <= x.to)) continue;
         const st = taskStateAt(s, t.id, e, true);
         const d = k - 1;
         if (st.kind === "callback" || d < st.listDay || !hoursOn(s, t.id, d, seg.zone, zoneFor(s, e, true))) continue;
@@ -1090,7 +1112,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
         const open = st.callTasks.some((t) => t.open);
         // A lead pause comes before the callback hold (2.1 rule 2); a campaign pause changes no status (ticket 17a).
         const want: OutreachStatus = leadPausedAt(s, now) ? "paused" : callbackHeldAt(s, now) ? "callback_scheduled" : winBackAt(s) <= now ? "in_win_back" : open ? "waiting_on_call" : touchedAt(s, now, false) ? "active" : "queued";
-        if (st.subject.ended !== null) problem(`20: ${id} ended ${st.subject.ended} at ${new Date(st.subject.endedWall ?? 0).toISOString()}; the record has it running`);
+        if (st.subject.ended !== null) problem(`20: ${id} ended ${st.subject.ended} at ${new Date(st.subject.endedWall ?? 0).toISOString()}; the record has it running${process.env["CALLS_DEBUG"] ? ` [${JSON.stringify(st.tracks.map((p) => [p.trackId, p.finishReason, isoOf(p.finishedWall)]))} tasks ${JSON.stringify(st.callTasks.map((t) => [t.trackId, t.open, isoOf(t.dueWall), isoOf(t.closedWall), t.skipDeadline]))} record ${JSON.stringify(def(s).tracks.map((t) => [t.id, t.callSkipLimitDays ?? null, isoOf(placedAt.get(`${s.id}/${t.id}`)), isoOf(t.channel === "call" ? expiryOf(s, t) : null), JSON.stringify(naturalFinish(s, t))]))}]` : ""}`);
         else if (progress.status !== want) problem(`1: ${id} is ${progress.status}; the record says ${want} (${open ? "an open call task" : touchedAt(s, now, false) ? "touched" : "never reached"})`);
       }
 
@@ -1742,6 +1764,32 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
   }
 
   const hasProblems = () => problems.length > 0;
+  const limitRand = random(seed ^ 0x13c1);
+  /** Ticket 19: a launched campaign's phone track's skip limit lengthened by a running edit (the record follows it). */
+  async function lengthenASkipLimit(): Promise<void> {
+    const launchedOnes = campaigns.filter((c) => c.launchedAt !== null && c.definition.tracks.some((t) => t.channel === "call" && !t.removed));
+    const c = launchedOnes[Math.floor(limitRand() * launchedOnes.length)];
+    if (!c) return;
+    const phones = c.definition.tracks.filter((t) => t.channel === "call" && !t.removed);
+    const t = phones[Math.floor(limitRand() * phones.length)]!;
+    const limit = (t.callSkipLimitDays ?? c.definition.callSkipLimitDays) + 1 + Math.floor(limitRand() * 2);
+    const next: CampaignDefinition = { ...c.definition, tracks: c.definition.tracks.map((x) => (x.id === t.id ? { ...x, callSkipLimitDays: limit } : x)) };
+    const res = await h.request<{ error?: { message: string } }>("PUT", `/api/campaigns/${c.id}/sequence`, next);
+    if (res.status !== 200) {
+      problem(`setup: lengthening ${t.id}'s skip limit was refused: ${res.body.error?.message ?? res.status}`);
+      return;
+    }
+    const key = `${campaigns.indexOf(c)}/${t.id}`;
+    limitEdits.set(key, [...(limitEdits.get(key) ?? []), { at: h.clock, before: t.callSkipLimitDays ?? c.definition.callSkipLimitDays }]);
+    c.definition = next;
+    if (process.env["CALLS_DEBUG"]) console.log("LIMIT", c.id, t.id, limit, new Date(h.clock).toISOString());
+    recordVersion++;
+    features.add("a-skip-limit-lengthened");
+    const open = [...knownTasks.values()].some((k) => k.trackId === t.id);
+    if (open) features.add("a-skip-limit-lengthened-with-a-call-on-the-list");
+    await checkAll(false);
+  }
+
   const eventCount = options.events ?? 24;
   for (let e = 0; e < eventCount && problems.length === 0 && !h.stopped; e++) {
     // Ticket 17a: in a run of the pause family, from its own stream, a pause or a resume before the event.
@@ -1755,6 +1803,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       // Asked through a call: the loop's condition narrows the length to 0 (as the drain's stop does).
       if (hasProblems()) break;
     }
+    if (options.skipLimitEdits === true && limitRand() < 0.12) await lengthenASkipLimit();
     const r = rand();
     // A minute passes before each action, so no action shares an instant with the ticks before it.
     if (r >= 0.3) await h.advanceTo(h.clock + MINUTE);

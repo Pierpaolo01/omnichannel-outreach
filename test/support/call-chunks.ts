@@ -31,6 +31,12 @@ export const CALL_FIXED_SEEDS: readonly number[] = [0, 4, 6, 8, 9, 16, 20, 21, 4
  * check 18 assumed an inbox free for the hour after a resume, while late sends held both its in-flight places).
  */
 export const CALL_PAUSE_SEEDS: readonly number[] = [0, 2, 7, 13, 14, 20, 26, 56];
+/**
+ * The skip-limit runs (ticket 19, council on 93bed86, item 13; `skipLimitEdits: true`): the generated user lengthens a
+ * phone track's skip limit on a running campaign. Chosen from a sweep of all 100 (15 November 2026): every one passed;
+ * these reach both behaviours, and 6 kills "a lengthened skip limit keeps the old deadline".
+ */
+export const CALL_LIMIT_SEEDS: readonly number[] = [2, 6, 8];
 
 /** Every behaviour the fixed seeds must reach between them. */
 export const CALL_FEATURES: readonly string[] = [
@@ -66,6 +72,9 @@ export const CALL_FEATURES: readonly string[] = [
   "a-person-zone-moved",
   "a-phone-track-released-by-the-decline-skipped",
   "a-redial-skipped-from-its-original-due-date",
+  // Ticket 19, the skip-limit runs.
+  "a-skip-limit-lengthened",
+  "a-skip-limit-lengthened-with-a-call-on-the-list",
   "a-send-beside-an-open-call",
   "a-send-in-win-back",
   "a-send-moved-by-a-callback",
@@ -189,14 +198,15 @@ export function callChunks(from: number, to: number): void {
   const all = Array.from({ length: Math.max(0, Math.min(to, SEARCH_SEEDS) - from) }, (_, i) => from + i).filter(inShard);
   const offsets = FULL_SEARCH ? all : CALL_FIXED_SEEDS.filter((o) => o >= from && o < to);
   const pauseOffsets = FULL_SEARCH ? all : CALL_PAUSE_SEEDS.filter((o) => o >= from && o < to);
+  const limitOffsets = FULL_SEARCH ? all : CALL_LIMIT_SEEDS.filter((o) => o >= from && o < to);
   describe(`generated call runs keep the engine's invariants (${FULL_SEARCH ? "full search" : "fixed seeds"}, ${SEED + from} to ${SEED + to - 1})`, () => {
-    if (offsets.length === 0 && pauseOffsets.length === 0) test.skip("no seed of this run in this range", () => undefined);
-    const chunks = [...chunksOf(offsets).map((c) => ({ c, pauses: false })), ...chunksOf(pauseOffsets).map((c) => ({ c, pauses: true }))];
-    for (const { c: chunk, pauses } of chunks) {
-      test(`${pauses ? "pause runs, " : ""}seeds ${chunk.map((o) => SEED + o).join(", ")}`, async () => {
+    if (offsets.length === 0 && pauseOffsets.length === 0 && limitOffsets.length === 0) test.skip("no seed of this run in this range", () => undefined);
+    const chunks = [...chunksOf(offsets).map((c) => ({ c, pauses: false, skipLimitEdits: false })), ...chunksOf(pauseOffsets).map((c) => ({ c, pauses: true, skipLimitEdits: false })), ...chunksOf(limitOffsets).map((c) => ({ c, pauses: false, skipLimitEdits: true }))];
+    for (const { c: chunk, pauses, skipLimitEdits } of chunks) {
+      test(`${pauses ? "pause runs, " : skipLimitEdits ? "skip-limit runs, " : ""}seeds ${chunk.map((o) => SEED + o).join(", ")}`, async () => {
         const failures: string[] = [];
         for (const offset of chunk) {
-          const { problems, stats } = await runCalls(SEED + offset, { pauses });
+          const { problems, stats } = await runCalls(SEED + offset, { pauses, skipLimitEdits });
           for (const f of stats.features) reached.add(f);
           if (problems.length > 0) failures.push(`seed ${SEED + offset}: ${problems.join("; ")}`);
           // A behaviour neither listed nor retired, in the fixed seeds or in any seed of the search: list it or retire it with a reason.
@@ -290,15 +300,15 @@ export function callOracle(): void {
     run(`the generated call runs fail invariant ${mutation.invariant} for an engine with "${name}"`, async () => {
       const breaks = (problems: readonly string[]) => problems.some((p) => callInvariantsOf(p).includes(mutation.invariant));
       if (!FULL_SEARCH) {
-        const { problems } = await runCalls(SEED + mutation.seed, { rules: mutation.rules, maxWrites: RUN_WRITES, pauses: mutation.pauses === true });
+        const { problems } = await runCalls(SEED + mutation.seed, { rules: mutation.rules, maxWrites: RUN_WRITES, pauses: mutation.pauses === true, skipLimitEdits: mutation.skipLimitEdits === true });
         expect(problems.filter((p) => callInvariantsOf(p).includes(mutation.invariant)), `seed ${SEED + mutation.seed} no longer breaks invariant ${mutation.invariant}; run the sequence-search workflow and update its seed. Problems: ${problems.join("; ")}`).not.toEqual([]);
         return;
       }
       let caught: string | null = null;
-      if (breaks((await runCalls(SEED + mutation.seed, { rules: mutation.rules, maxWrites: RUN_WRITES, pauses: mutation.pauses === true })).problems)) caught = `recorded seed offset ${mutation.seed}`;
+      if (breaks((await runCalls(SEED + mutation.seed, { rules: mutation.rules, maxWrites: RUN_WRITES, pauses: mutation.pauses === true, skipLimitEdits: mutation.skipLimitEdits === true })).problems)) caught = `recorded seed offset ${mutation.seed}`;
       else report(`recorded seed offset ${mutation.seed} no longer breaks invariant ${mutation.invariant} for call mutation "${name}"`);
       for (let i = 0; i < MAX_SEEDS && caught === null; i++) {
-        if (breaks((await runCalls(SEED + i, { rules: mutation.rules, maxWrites: RUN_WRITES, pauses: mutation.pauses === true })).problems)) caught = `seed offset ${i}`;
+        if (breaks((await runCalls(SEED + i, { rules: mutation.rules, maxWrites: RUN_WRITES, pauses: mutation.pauses === true, skipLimitEdits: mutation.skipLimitEdits === true })).problems)) caught = `seed offset ${i}`;
       }
       report(`killing seed: call mutation "${name}" (invariant ${mutation.invariant}): ${caught ?? `none in offsets 0-${MAX_SEEDS - 1}`}; recorded seed ${mutation.seed}`);
       expect(caught, `no seed broke invariant ${mutation.invariant} for "${name}"`).not.toBeNull();
