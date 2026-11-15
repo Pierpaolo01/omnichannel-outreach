@@ -271,7 +271,9 @@ async function callList(store: OutreachStore, now: number, rules: CallViewRules 
     if (!s) continue;
     if (s.campaign.pausedSince !== null) {
       const lifted = { ...s, campaign: { ...s.campaign, pausedSince: null } };
-      const calls = s.callTasks.filter((task) => task.open && rules.isListed(lifted, task)).length;
+      // Held by the pause: listed with it lifted and not listed now. A test run's call stays listed while its campaign is
+      // paused (ADR 0003 "Ticket 21"), so it is not counted here (verifier B2 on 55d6ac6).
+      const calls = s.callTasks.filter((task) => task.open && rules.isListed(lifted, task) && !rules.isListed(s, task)).length;
       if (calls > 0) held.set(s.campaign.id, { pausedSince: s.campaign.pausedSince, calls: (held.get(s.campaign.id)?.calls ?? 0) + calls });
     }
     for (const task of s.callTasks) {

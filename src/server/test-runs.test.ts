@@ -186,6 +186,8 @@ describe("a test run before launch (ADR 0003 'Ticket 21')", () => {
     const tuesday = (await w.h.request<CallsView>("GET", "/api/calls")).body;
     expect(tuesday.readyNow.filter((c) => c.test)).toHaveLength(1);
     expect([tuesday.committed, tuesday.capacityReached]).toEqual([1, true]);
+    // The listed test call is not said to be held off the list by the pause (verifier B2 on 55d6ac6).
+    expect(tuesday.pausedCampaigns.reduce((n, c) => n + c.calls, 0)).toBe(0);
   });
 
   test("a test run's rows may name only its own test contacts: another run's, an invented one or one it lacks is refused on all three tables (verifier F2 on 55d6ac6)", async () => {
