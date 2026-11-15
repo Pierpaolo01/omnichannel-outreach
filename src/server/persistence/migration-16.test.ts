@@ -1,3 +1,5 @@
+import { MIGRATIONS } from "./migrations.ts";
+import { UNDO_SINCE_17 } from "../../../test/support/undo-migrations.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
@@ -54,6 +56,7 @@ describe("migration 16 on a database written before it", () => {
       ALTER TABLE provider_work DROP COLUMN withdraw_wanted;
       ALTER TABLE provider_work DROP COLUMN withdraw_last_wall;
       ALTER TABLE provider_work DROP COLUMN went_wall;
+      ${UNDO_SINCE_17}
       DELETE FROM schema_migrations WHERE version >= 16;
     `);
     db.close();
@@ -71,7 +74,7 @@ describe("migration 16 on a database written before it", () => {
     expect((await after.request("POST", `/api/campaigns/${campaign.id}/resume`, { requestId: "r" })).status).toBe(200);
     expect((await after.request("POST", `/api/enrollments/${id}/controls`, { requestId: "s", action: "stop" })).status).toBe(200);
     const versions = new DatabaseSync(file).prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((r) => Number(r["version"]));
-    expect(versions.at(-1)).toBe(16);
+    expect(versions.at(-1)).toBe(MIGRATIONS.length);
     await after.store.close();
   });
 
@@ -122,6 +125,7 @@ describe("migration 16 on a database written before it", () => {
           ALTER TABLE provider_work DROP COLUMN withdraw_wanted;
           ALTER TABLE provider_work DROP COLUMN withdraw_last_wall;
           ALTER TABLE provider_work DROP COLUMN went_wall;
+          ${UNDO_SINCE_17}
           DELETE FROM schema_migrations WHERE version >= 16;
         `);
         db.close();

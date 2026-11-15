@@ -180,6 +180,24 @@ export function startOfLocalDay(day: number, zone: string): number {
   return hi;
 }
 
+/** A test run's every wait and track delay (ADR 0003 "Ticket 21"): about a minute, whatever the canvas says. */
+export const TEST_WAIT_MS = 60_000;
+
+/**
+ * The one wait rule (ADR 0003 3.3, "Ticket 21"): the span of a wait of `days` counted from wall instant `w`. For a lead,
+ * `span`'s calendar days in its zone; for a test run, no wait stays none and any other is TEST_WAIT_MS.
+ */
+export function waitSpan(kind: "enrollment" | "test_run", w: number, days: number, zone: string): number {
+  switch (kind) {
+    case "enrollment":
+      return span(w, days, zone);
+    case "test_run":
+      return days === 0 ? 0 : TEST_WAIT_MS;
+    default:
+      throw new Error(`a subject kind the wait rule does not know: ${String(kind satisfies never)}`);
+  }
+}
+
 /**
  * The span of a wait of `days` calendar days counted from wall instant `w` in `zone`: due at the
  * start of the local day `days` after the basis; 0 is due at once (ADR 0003 3.3).

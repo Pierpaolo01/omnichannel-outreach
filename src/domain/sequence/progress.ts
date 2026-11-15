@@ -5,7 +5,7 @@
  */
 import type { OutreachStatus } from "../outreach-status.ts";
 import { applyAttemptEvent, applyLookup, ENGINE_PARAMS, isLive, isUncertain, markable, maySend, withRef, type AttemptEffect, type AttemptEvent, type WorkEvent } from "./attempt.ts";
-import { leadNow, localDayNumber, nextWindowOpen, sendPoint, span, startOfLocalDay, syncClock, wallOfLead, type Freeze, type LeadClock } from "./clock.ts";
+import { leadNow, localDayNumber, nextWindowOpen, sendPoint, startOfLocalDay, syncClock, waitSpan, wallOfLead, type Freeze, type LeadClock } from "./clock.ts";
 import { liveSteps, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
 import type { Attempt, EndReason, FinishReason, LeadDetail, ProviderWork, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
 
@@ -28,7 +28,9 @@ export function callbackHold(state: SubjectState): boolean {
  */
 export function runs(state: SubjectState): boolean {
   const { subject, campaign } = state;
-  return campaign.launchedAt !== null && campaign.pausedSince === null && subject.ended === null && !subject.leadPaused && !callbackHold(state);
+  // A test run reads neither the launch nor the campaign pause (ADR 0003 3.6, "Ticket 21"): it runs "at any time".
+  const campaignRuns = subject.kind === "test_run" || (campaign.launchedAt !== null && campaign.pausedSince === null);
+  return campaignRuns && subject.ended === null && !subject.leadPaused && !callbackHold(state);
 }
 
 /** The status (2.1): rules in order, first match wins. */
@@ -239,7 +241,7 @@ export function advanceTrack(state: SubjectState, track: TrackDefinition, at: nu
   }
   const step = track.steps.find((s) => s.id === stepId);
   const zone = state.lead.zone;
-  const s = span(atWall, step?.waitDays ?? 0, zone);
+  const s = waitSpan(state.subject.kind, atWall, step?.waitDays ?? 0, zone);
   return withTrack(state, track.id, (t) => ({
     ...t,
     nextStepId: stepId,
@@ -426,7 +428,7 @@ function resolveStart(s: SubjectState, track: TrackDefinition, now: number): Pic
   }
   const before = progressOf(s, track.start.trackId);
   if (!before || before.finishedAt === null || before.finishedWall === null) return null;
-  return { startAt: before.finishedAt + span(before.finishedWall, track.start.delayDays, zone), startBasisAt: before.finishedAt, startBasisWall: before.finishedWall, startZone: zone };
+  return { startAt: before.finishedAt + waitSpan(s.subject.kind, before.finishedWall, track.start.delayDays, zone), startBasisAt: before.finishedAt, startBasisWall: before.finishedWall, startZone: zone };
 }
 
 function latestResult(state: SubjectState, trackId: string): StepResult | undefined {
@@ -779,7 +781,7 @@ export function alignPending(state: SubjectState, now: number): SubjectState {
       continue;
     }
     const zone = p.dueZone ?? s.lead.zone;
-    const wait = span(p.basisWall, track.steps.find((x) => x.id === want)?.waitDays ?? 0, zone);
+    const wait = waitSpan(s.subject.kind, p.basisWall, track.steps.find((x) => x.id === want)?.waitDays ?? 0, zone);
     if (want === p.nextStepId && p.dueAt === p.basisAt + wait && p.dueWall === p.basisWall + wait && p.dueZone === zone) continue;
     const basisAt = p.basisAt;
     const basisWall = p.basisWall;

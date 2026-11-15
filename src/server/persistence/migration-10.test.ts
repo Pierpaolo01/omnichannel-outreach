@@ -1,3 +1,4 @@
+import { UNDO_SINCE_17 } from "../../../test/support/undo-migrations.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
@@ -62,6 +63,7 @@ function beforeMigration10(file: string): void {
     ALTER TABLE provider_work DROP COLUMN withdraw_wanted;
       ALTER TABLE provider_work DROP COLUMN withdraw_last_wall;
       ALTER TABLE provider_work DROP COLUMN went_wall;
+    ${UNDO_SINCE_17}
     DELETE FROM schema_migrations WHERE version > 9;
   `);
   expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'bounce_events'").all()).toEqual([]);
@@ -101,7 +103,7 @@ describe("migration 10 on a database with a bounce observed before it (re-check 
     expect(entries[1]).toMatchObject({ kind: "address_bad", to: "sam@harbour.example" });
     // The upgrade itself ran 10 and 11 (and 12, ticket 14a's call tables, 13, pull request 49's sessions' saves, and 14, ticket 15a's redial, callback and skip-limit fields, 15 and 16), and later bounces are recorded again.
     const versions = new DatabaseSync(file).prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((r) => Number(r["version"]));
-    expect(versions.filter((v) => v >= 9)).toEqual([9, 10, 11, 12, 13, 14, 15, 16]);
+    expect(versions.filter((v) => v >= 9)).toEqual([9, 10, 11, 12, 13, 14, 15, 16, 17]);
     await after.store.close();
   });
 });

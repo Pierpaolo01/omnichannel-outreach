@@ -1,3 +1,4 @@
+import { UNDO_SINCE_17 } from "../../../test/support/undo-migrations.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
@@ -52,6 +53,7 @@ describe("migration 15 on a database with calls logged before it", () => {
       ALTER TABLE provider_work DROP COLUMN withdraw_wanted;
       ALTER TABLE provider_work DROP COLUMN withdraw_last_wall;
       ALTER TABLE provider_work DROP COLUMN went_wall;
+      ${UNDO_SINCE_17}
       DELETE FROM schema_migrations WHERE version >= 15;
     `);
     db.close();
