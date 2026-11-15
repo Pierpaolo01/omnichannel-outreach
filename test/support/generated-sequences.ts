@@ -258,6 +258,12 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
   const outsideSends = !unlimited && outsideRand() < 0.3;
   /** When each inbox had no room because of outside sends, as the record knows it. */
   const outsideUse: { readonly id: string; readonly from: number; until: number }[] = [];
+  /**
+   * Work each inbox already held when outside sends used it up, by inbox and reset day: claimed before the provider
+   * could report no room, even at the same instant (a tick at that instant ran first; seed 20261167, shard 7 of the
+   * search on 0b02b73). The order comes from this record's own events, never from comparing instants.
+   */
+  const claimedBeforeNoRoom = new Map<string, Set<string>>();
   /** Clock advances injected between a send's authorization and its call, by attempt and call instant. */
   const injectedDelay = new Map<string, number>();
   /** Keys the user marked sent, and when. */
@@ -613,6 +619,10 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       if (outsideSends && outsideRand() < 0.4) {
         const a = accounts[Math.floor(outsideRand() * accounts.length)]!;
         const until = nextResetAfter(h.clock, a.resetZone);
+        const held = new Set<string>();
+        for (const id of subjects.keys()) for (const x of (await h.store.engine.subject(id, h.clock))?.attempts ?? []) if (x.accountId === a.id) held.add(x.idempotencyKey);
+        const day = `${a.id}|${local(h.clock, a.resetZone).day}`;
+        claimedBeforeNoRoom.set(day, new Set([...(claimedBeforeNoRoom.get(day) ?? []), ...held]));
         fake.usedUpUntil.set(a.id, until);
         outsideUse.push({ id: a.id, from: h.clock, until });
         features.add("outside-sends");
@@ -865,7 +875,8 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     checkInFlight();
 
     // 10, outside sends: no new work is claimed on an inbox on a reset day after the provider reported it had no room
-    // that day (its daily limit sent by others). Work already reserved may still be retried under its key.
+    // that day (its daily limit sent by others). Work already reserved may still be retried under its key. Work the
+    // inbox held before the outside sends was claimed before any report of no room, whatever the instant.
     const toldNoRoom = new Map<string, number>();
     for (const n of fake.noRoomAnswers) {
       const zone = accounts.find((a) => a.id === n.id)?.resetZone ?? "UTC";
@@ -880,7 +891,9 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
       }
       for (const [key, a] of firstClaims) {
         const zone = accounts.find((x) => x.id === a.accountId)?.resetZone ?? "UTC";
-        const told = toldNoRoom.get(`${a.accountId}|${local(a.claimedWall, zone).day}`);
+        const day = `${a.accountId}|${local(a.claimedWall, zone).day}`;
+        const told = toldNoRoom.get(day);
+        if (claimedBeforeNoRoom.get(day)?.has(key)) continue;
         if (told !== undefined && told <= a.claimedWall) problem(`10: ${a.accountId} took new work ${key} for ${a.subjectId}/${a.stepId} at ${new Date(a.claimedWall).toISOString()} on a reset day it reported no room (from ${new Date(told).toISOString()})`);
       }
     }
