@@ -1,3 +1,4 @@
+import { storedReplyId } from "../../domain/sequence/reply-identity.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
@@ -114,7 +115,7 @@ describe("migration 9 on a database written before it", () => {
     // A lead that did not reply reads as before: no stopping reply, no SMS sender.
     expect((await after.progress(nia))).toMatchObject({ reply: null, smsSender: null });
     // A reply observed after the upgrade, with an earlier time than either, moves nothing.
-    await after.store.engine.update(pat, after.clock, (s) => applyReply(s, { channel: "email", atWall: MONDAY_9 + H / 2, providerRef: "late-after-upgrade" }, after.clock));
+    await after.store.engine.update(pat, after.clock, (s) => applyReply(s, { channel: "email", atWall: MONDAY_9 + H / 2, providerRef: storedReplyId("email", "late-after-upgrade") }, after.clock));
     expect((await after.progress(pat)).reply).toEqual(stopped);
     await after.store.close();
   });

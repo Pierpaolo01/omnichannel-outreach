@@ -22,9 +22,14 @@ import { reconcileEdit, stillRunnable } from "../../domain/sequence/reconcile.ts
 import { launchCheck } from "../../domain/sequence/blockers.ts";
 import { applyControl, campaignPaused, campaignPrecondition, campaignResumed, controlPrecondition, judgeControl } from "../../domain/sequence/controls.ts";
 import type { RequestStanding, StoredRequest } from "./engine-store.ts";
-import { portReplyId, storedReplyId } from "./reply-identity.ts";
+import { portReplyId, storedReplyId, type ReplyChannel, type StoredReplyId } from "../../domain/sequence/reply-identity.ts";
 import { afterInterruption, interruptionOf, rescheduledSteps } from "../../domain/sequence/interruption.ts";
 import type { CallAnswer } from "../../domain/sequence/attempt.ts";
+
+/** A port's pre-send answer: a reply named by its event's id (ports.ts). */
+export type PortPresendAnswer = { readonly kind: "clear" } | { readonly kind: "unavailable" } | { readonly kind: "reply"; readonly providerRef: string; readonly at: number };
+/** The pre-send answer the engine records: a reply by its stored id. */
+export type PresendAnswer = { readonly kind: "clear" } | { readonly kind: "unavailable" } | { readonly kind: "reply"; readonly providerRef: StoredReplyId; readonly at: number };
 
 export interface Rules {
   readonly evaluate: typeof evaluate;
@@ -81,8 +86,12 @@ export interface Rules {
   readonly withdrawalDue: typeof withdrawalDue;
   /** How a request id stands against its stored first answer (verifier B5): new, a replay of it, or reused. */
   readonly requestStanding: (stored: StoredRequest | null, request: { readonly target: string; readonly action: string; readonly body: string }) => RequestStanding;
-  /** What the engine makes of the pre-send check's answer (ADR 0002): as given; the mutation of ca8baee's defect clears a known reply. */
-  readonly presendAnswer: <T extends { readonly kind: string }>(answer: T, knownReplies: readonly string[]) => T | { readonly kind: "clear" };
+  /**
+   * What the engine makes of the pre-send check's answer (ADR 0002): a reply is recorded under `storedReplyId` of the id
+   * the port named it by (the reply event's own id), so the pre-send check and the observation store one id for one
+   * reply. The mutations: ca8baee's defect clears a known reply; the defect of PR 62 stores the port's bare id.
+   */
+  readonly presendAnswer: (answer: PortPresendAnswer, channel: ReplyChannel, knownReplies: readonly StoredReplyId[]) => PresendAnswer;
   /** A reply's identity, stored and as its port names it (ADR 0003 "Ticket 17a", the reply identity rule): one pair for every channel. */
   readonly storedReplyId: typeof storedReplyId;
   readonly portReplyId: typeof portReplyId;
@@ -156,7 +165,7 @@ export const DEFAULT_RULES: Rules = {
   previewAsOf: asOfAction,
   reconcileEdit,
   runningCheck: (definition, leadsAfter, leads, accounts) => launchCheck(stillRunnable(definition, leadsAfter), leads, accounts),
-  presendAnswer: (answer) => answer,
+  presendAnswer: (answer, channel) => (answer.kind === "reply" ? { ...answer, providerRef: storedReplyId(channel, answer.providerRef) } : answer),
   storedReplyId,
   portReplyId,
   // Everything an evaluation reads: the subject's and campaign's versions cover its progress and the

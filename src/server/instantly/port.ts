@@ -860,10 +860,10 @@ export class InstantlyEmailPort implements SendPort {
     // Every recorded thread is read whole, each page of it: a reply in it need not carry the lead's metadata. The send is
     // stopped by any reply the lead's record does not hold yet, in any thread; a reply it holds (one the user resumed the
     // lead after) is not news and never hides another (ticket 17a; review bot on ca8baee, item 1). A reply's identity is
-    // the one its observed event carries (`reply:<email id>`); the bare email id, which this check answered with before
-    // ticket 17a, counts as known too.
+    // the one its observed event carries (`reply:<email id>`), and this check answers with it too; the bare email ids this
+    // check answered with before ticket 17a were rewritten to it by migration 18.
     const known = new Set(request.knownReplies);
-    const isKnown = (e: InstantlyEmail) => known.has(`reply:${e.id}`) || known.has(e.id);
+    const isKnown = (e: InstantlyEmail) => known.has(`reply:${e.id}`);
     let found: InstantlyEmail | null = null;
     for (const thread of threads) {
       const read = await this.readPages<InstantlyEmail>((after) => this.client.get("/api/v2/emails", { search: `thread:${thread}`, eaccount: request.sender, mode: "emode_all", sort_order: "desc", limit: this.config.pageSize, starting_after: after }), undefined, WHOLE_READ_PAGES);

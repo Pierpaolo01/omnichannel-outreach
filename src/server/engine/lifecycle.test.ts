@@ -1,3 +1,4 @@
+import { storedReplyId } from "../../domain/sequence/reply-identity.ts";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, test } from "vitest";
 import { business, person } from "../../../test/support/export-builder.ts";
@@ -384,7 +385,7 @@ function replyInEveryGap(h: EngineHarness, port: ScriptedEmailPort): { gaps: () 
       }
       gaps++;
       // Another tick applies an observed reply here.
-      void store.update(w.subjectId, h.clock, (s) => applyReply(s, { channel: "email", atWall: h.clock, providerRef: `gap-reply-${gaps}` }, h.clock));
+      void store.update(w.subjectId, h.clock, (s) => applyReply(s, { channel: "email", atWall: h.clock, providerRef: storedReplyId("email", `gap-reply-${gaps}`) }, h.clock));
     }
   };
   const probe = (n: number) =>

@@ -17,6 +17,7 @@ import type { ControlView } from "../../shared/api.ts";
 import { effectOf } from "./controls-view.ts";
 import { impactDigest } from "./edit-impact.ts";
 import type { ControlRecord, DefinitionSave, EngineStore, ReplyEvent, SaveResult, StoredDefinition } from "./engine-store.ts";
+import type { StoredReplyId } from "../../domain/sequence/reply-identity.ts";
 
 /** A control's answer. `effect`: the control's own effect, which the read previewed at that instant; null for a campaign's. */
 export type ControlAnswer = { readonly ok: true; readonly replayed: boolean; readonly effect: ControlView | null } | { readonly ok: false; readonly reason: string };
@@ -779,7 +780,7 @@ export class Engine {
   }
 
   /** Records a reply on each subject it belongs to. */
-  private async recordReply(subjects: readonly string[], reply: { id: string; at: number }, channel: Channel = "email"): Promise<boolean> {
+  private async recordReply(subjects: readonly string[], reply: { id: StoredReplyId; at: number }, channel: Channel = "email"): Promise<boolean> {
     const now = this.now();
     let changed = false;
     for (const subjectId of subjects) {
@@ -1295,7 +1296,7 @@ export class Engine {
     // asked by its own ids, and its answer is recorded by the stored one: the reply identity rule (ADR 0003 "Ticket 17a").
     const knownReplies = (subject?.replies ?? []).filter((r) => r.channel === channel).map((r) => r.providerRef);
     const asked = await this.bounded(() => port.presendCheck({ sender: a.accountId, destination: a.destination, threadRefs, knownReplies: knownReplies.map((id) => this.rules.portReplyId(channel, id)) }), { kind: "unavailable" as const }, port.channel, (result) => ({ call: "presendCheck", result }));
-    const result = this.rules.presendAnswer(asked.kind === "reply" ? { ...asked, providerRef: this.rules.storedReplyId(channel, asked.providerRef) } : asked, knownReplies);
+    const result = this.rules.presendAnswer(asked, channel, knownReplies);
     if (result.kind === "unavailable") return false;
     await this.store.update(a.subjectId, now, (s) => {
       let next: SubjectState = { ...s, attempts: s.attempts.map((x) => (x.id === a.id ? { ...x, presendCheckedWall: now, presendFoundReply: result.kind === "reply" } : x)) };

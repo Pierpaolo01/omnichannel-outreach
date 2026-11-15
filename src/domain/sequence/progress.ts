@@ -7,6 +7,7 @@ import type { OutreachStatus } from "../outreach-status.ts";
 import { applyAttemptEvent, applyLookup, ENGINE_PARAMS, isLive, isUncertain, markable, maySend, withRef, type AttemptEffect, type AttemptEvent, type WorkEvent } from "./attempt.ts";
 import { leadNow, localDayNumber, nextWindowOpen, sendPoint, span, startOfLocalDay, syncClock, wallOfLead, type Freeze, type LeadClock } from "./clock.ts";
 import { liveSteps, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
+import type { StoredReplyId } from "./reply-identity.ts";
 import type { Attempt, EndReason, FinishReason, LeadDetail, ProviderWork, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
 
 // ---------------------------------------------------------------------------------------------
@@ -481,7 +482,7 @@ export function enterWinBack(state: SubjectState, now: number): SubjectState {
 }
 
 /** A reply ends outreach in this campaign (2.4), unless the lead already replied or was interested. */
-export function applyReply(state: SubjectState, reply: { channel: "email" | "sms"; atWall: number; providerRef: string }, now: number): SubjectState {
+export function applyReply(state: SubjectState, reply: { channel: "email" | "sms"; atWall: number; providerRef: StoredReplyId }, now: number): SubjectState {
   if (state.replies.some((r) => r.providerRef === reply.providerRef)) return state;
   const recorded = { ...state, replies: [...state.replies, reply] };
   if (state.subject.ended === "replied" || state.subject.ended === "interested_on_call") return recorded;
