@@ -7,6 +7,7 @@ import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { CampaignDefinition } from "../../domain/sequence/definition.ts";
 import type { CampaignDetail, EnrollmentRead, LeadSearchResult } from "../../shared/api.ts";
+import { MIGRATIONS } from "./migrations.ts";
 
 /**
  * Migration 16 (ticket 17a): the hold history and the controls' request ids. A database written before it
@@ -71,7 +72,7 @@ describe("migration 16 on a database written before it", () => {
     expect((await after.request("POST", `/api/campaigns/${campaign.id}/resume`, { requestId: "r" })).status).toBe(200);
     expect((await after.request("POST", `/api/enrollments/${id}/controls`, { requestId: "s", action: "stop" })).status).toBe(200);
     const versions = new DatabaseSync(file).prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((r) => Number(r["version"]));
-    expect(versions.at(-1)).toBe(17);
+    expect(versions.at(-1)).toBe(MIGRATIONS.length);
     await after.store.close();
   });
 

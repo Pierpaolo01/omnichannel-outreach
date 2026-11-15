@@ -655,6 +655,25 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX IF NOT EXISTS enrollments_by_company ON enrollments(company_id, lead_kind);
     `,
   },
+  {
+    // PR 62, the reply identity rule (ADR 0003 "Ticket 17a").
+    version: 18,
+    name: "one stored form for a text's reply id: sms:<id> (ADR 0003, the reply identity rule)",
+    // Before it, a pre-send check that found a text before its observation stored the provider's bare id, while the
+    // observation stores sms:<id>, so a late observation of the same text was a second reply that ended a resumed lead
+    // again (verifier B1 on PR 62). Every bare SMS id becomes sms:<id>; a lead holding both keeps one row, at the earlier
+    // instant. Email ids are stored as their port names them already. Reply events hold only observed ids (sms:<id>).
+    sql: `
+      UPDATE replies SET at_wall = (
+        SELECT MIN(b.at_wall) FROM replies b WHERE b.subject_id = replies.subject_id AND b.channel = 'sms' AND ('sms:' || b.provider_ref = replies.provider_ref OR b.provider_ref = replies.provider_ref)
+      )
+      WHERE channel = 'sms' AND substr(provider_ref, 1, 4) = 'sms:';
+      DELETE FROM replies
+      WHERE channel = 'sms' AND substr(provider_ref, 1, 4) <> 'sms:'
+        AND EXISTS (SELECT 1 FROM replies c WHERE c.subject_id = replies.subject_id AND c.provider_ref = 'sms:' || replies.provider_ref);
+      UPDATE replies SET provider_ref = 'sms:' || provider_ref WHERE channel = 'sms' AND substr(provider_ref, 1, 4) <> 'sms:';
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string, migrations: readonly Migration[] = MIGRATIONS): void {

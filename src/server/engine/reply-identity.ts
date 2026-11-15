@@ -17,8 +17,9 @@ export function storedReplyId(channel: ReplyChannel, portId: string): string {
 }
 
 /**
- * The id the port knows a stored reply by: the inverse of `storedReplyId`. An SMS id recorded bare (a pre-send check's
- * answer before this rule) is the port's id already.
+ * The id the port knows a stored reply by: the inverse of `storedReplyId`. Every stored SMS id carries the prefix
+ * (migration 18 rewrote the bare ids a pre-send answer stored before this rule), so a stored reply has one form and
+ * replies are compared as stored strings everywhere else.
  */
 export function portReplyId(channel: ReplyChannel, storedId: string): string {
   return channel === "sms" && storedId.startsWith(SMS_PREFIX) ? storedId.slice(SMS_PREFIX.length) : storedId;
