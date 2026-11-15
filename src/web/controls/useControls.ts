@@ -1,9 +1,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { ApiError, LeadControlApi } from "../../shared/api.ts";
 import { browserStorage } from "../calls/storage.ts";
-import { bulkPendingFor, isBulkKey } from "../bulk/requests.ts";
-
-const local = browserStorage(() => window.localStorage);
+import { useBulkPending } from "../bulk/useBulk.tsx";
 import { ControlRequests, NoControlAnswer, controlKey, shownResult, isControlKey, type CampaignExpectation, type ControlResult, type ControlTarget, type LeadExpectation, type PressEntry, type PressOutcome, type SendAnswer } from "./requests.ts";
 
 /** A 4xx whose code says the server refused the request is definite; anything else is no answer (as the call desk reads it). */
@@ -49,6 +47,10 @@ export interface Controls {
 export function useControls(targets: readonly ControlTarget[], refresh: () => Promise<void> | void): Controls {
   const [, render] = useReducer((n: number) => n + 1, 0);
   const [results, setResults] = useState<ReadonlyMap<string, ControlResult>>(new Map());
+  // A stored bulk press from Leads that names a lead here (verifier B1 on 4363270): its controls wait while it is on its
+  // way, and the record reads again when the shell's manager gets its answer, wherever the user went (review bot on 969799e).
+  const reread = useCallback(() => void refresh(), [refresh]);
+  const bulkPending = useBulkPending(reread);
   const targetsRef = useRef(targets);
   /** The request ids this tab pressed: its answer lines are its own. */
   const ownRef = useRef(new Set<string>());
@@ -93,8 +95,6 @@ export function useControls(targets: readonly ControlTarget[], refresh: () => Pr
     requests.watch(targetsRef.current);
     const onStorage = (e: StorageEvent) => {
       if (isControlKey(e.key)) requests.storageChanged(targetsRef.current);
-      // A bulk press stored or answered on Leads: the rows it names wait, or stop waiting (verifier B1 on 4363270).
-      if (isBulkKey(e.key)) render();
     };
     const onOnline = () => requests.retryNow();
     window.addEventListener("storage", onStorage);
@@ -133,12 +133,12 @@ export function useControls(targets: readonly ControlTarget[], refresh: () => Pr
       press,
       pending: (t: ControlTarget) => requests.pendingFor(t),
       unconfirmed: (t: ControlTarget) => requests.unconfirmed(t),
-      bulkPending: (t: ControlTarget) => t.kind === "lead" && bulkPendingFor(local, t.id),
+      bulkPending: (t: ControlTarget) => t.kind === "lead" && bulkPending(t.id),
       result: (t: ControlTarget) => results.get(controlKey(t)) ?? null,
       dismiss,
       retryNow: () => requests.retryNow(),
     }),
     // `pending` and `unconfirmed` read storage at each render; a change re-renders the page.
-    [press, dismiss, requests, results],
+    [press, dismiss, requests, results, bulkPending],
   );
 }

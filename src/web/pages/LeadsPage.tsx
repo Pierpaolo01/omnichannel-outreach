@@ -4,7 +4,7 @@ import type { BulkAddPreview, BulkControlAction, BulkControlPreview, CampaignLis
 import { PageTitle } from "../App.tsx";
 import { postJson, useApi } from "../api.ts";
 import { BulkBar, BulkChecking, BulkConfirm, BulkStatus } from "../bulk/BulkViews.tsx";
-import { useBulk } from "../bulk/useBulk.ts";
+import { useBulk } from "../bulk/useBulk.tsx";
 import { BULK_VERB, addConfirmText, controlConfirmText, scopeNote } from "../bulk/wording.ts";
 import { EnrollmentList, ErrorState, UNENROLLED_SHORT } from "../components.tsx";
 import { Icon } from "../icons.tsx";

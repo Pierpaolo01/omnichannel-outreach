@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef } from "react";
 import type { BulkAddAnswer, BulkControlAction, BulkControlAnswer, CampaignListItem } from "../../shared/api.ts";
-import type { Bulk } from "./useBulk.ts";
+import type { Bulk } from "./useBulk.tsx";
 import { addResultText, bulkPendingText, controlResultText } from "./wording.ts";
 
 /** Why a bulk confirmation waits: one bulk at a time from a browser (src/web/bulk/requests.ts). */

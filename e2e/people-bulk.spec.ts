@@ -291,3 +291,32 @@ test("a note whose answer was lost is not confirmed, not refused; the next read 
   await expect(activity.getByRole("status").filter({ hasText: "Note added." })).toBeVisible();
   await expect(activity.getByText("Asked for a follow-up in spring.", { exact: true })).toHaveCount(1);
 });
+
+for (const how of ["by a link", "and reloads it"] as const) {
+  test(`a bulk confirmed on Leads is sent and answered wherever the user goes: opening an affected person ${how} before the answer, its controls wait, then enable (review bot on 969799e)`, async ({ page }) => {
+    const f = await fakePeopleApp(`people-orphan-${how === "by a link" ? "link" : "reload"}`);
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route("**/api/bulk", async (route) => {
+      await held;
+      await route.continue();
+    });
+    await at(page, f, `/leads?campaign=${f.campaigns.followUp}`);
+    await leadRow(page, "Daniel Price").getByRole("checkbox").check();
+    await page.getByRole("toolbar").getByRole("button", { name: "Pause" }).click();
+    await page.getByRole("group").getByRole("button", { name: "Pause" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "Pausing…" })).toBeVisible();
+
+    await leadRow(page, "Daniel Price").getByRole("link", { name: "Daniel Price" }).click();
+    if (how === "and reloads it") await page.reload();
+    const row = page.getByRole("region", { name: "Campaigns" }).getByRole("listitem").filter({ hasText: "Physio follow-up" });
+    await expect(row).toContainText("A bulk change from Leads that includes this campaign enrollment is on its way.");
+
+    release();
+    // The answer arrives on the person page: the line goes, the row reads again, and its controls are offered.
+    await expect(row.getByText("A bulk change from Leads")).toHaveCount(0);
+    await expect(row.getByText("Paused", { exact: true })).toBeVisible();
+    await expect(row.getByRole("button", { name: "Resume: Daniel Price in Physio follow-up" })).toBeEnabled();
+    expect(await page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith("outreach.bulk.")).length)).toBe(0);
+  });
+}
