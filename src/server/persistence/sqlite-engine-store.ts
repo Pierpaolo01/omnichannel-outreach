@@ -250,6 +250,8 @@ export class SqliteEngineStore implements EngineStore {
     if (!accepts) return null;
     const previous = this.definitionOf(row);
     const stored = storedDefinitionOf(row);
+    // Apply sends exactly what its read was for: the same body, on the same revision and pause (review bot on 7afa03d).
+    if (running.impact && running.impact.digest(definition, num(row, "definition_version"), numOrNull(row, "paused_since")) !== running.impact.expected) return { outcome: "impact_changed", stored };
     const problems = running.problems(definition, previous);
     if (problems.length > 0) return { outcome: "invalid", problems, stored };
     const now = running.now;

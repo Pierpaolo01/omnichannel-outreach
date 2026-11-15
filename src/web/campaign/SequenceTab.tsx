@@ -128,8 +128,14 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
     setFocusNext(channel === "call" ? { to: "script", trackId: added.id } : { to: channel === "email" ? "subject" : "body", stepId: first.id });
   };
 
+  // The running-edit panel shows whenever the campaign is running, whatever the canvas shows: with every track removed
+  // too, so Apply and Discard stay in reach (review bot on 7afa03d). After Discard, focus goes to the canvas's first control.
+  const running = editor.launched ? <RunningChanges campaignId={campaignId} editor={editor} onDiscarded={() => setFocusNext({ to: "add" })} /> : null;
+
   if (tracks.length === 0 && branchTracks.length === 0) {
     return (
+      <div className="flex flex-col gap-4">
+      {running}
       <div className={`rounded-box border border-line bg-raised bg-[radial-gradient(var(--color-line-strong)_1px,transparent_1px)] bg-[length:18px_18px] px-6 py-14 h-[max(470px,calc(100dvh-306px))]`}>
         <div className="mx-auto flex max-w-[520px] flex-col items-start gap-2.5">
           <h2 className="text-[19px]">Add the first channel track</h2>
@@ -147,9 +153,8 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
               </span>
             </p>
           )}
-          {editor.launched ? (
-            <p className="text-[14px] text-muted">This campaign launched with no track.</p>
-          ) : (
+          {editor.launched && !editor.unsaved && editor.view.definition.tracks.every((t) => t.removed) && <p className="text-[14px] text-muted">This campaign launched with no track.</p>}
+          {
             <>
               <div className="mt-1.5 flex flex-wrap gap-2">
                 <button id={ADD_TRACK_ID} type="button" className="btn gap-1.5 border-line-strong bg-base-100 font-medium" disabled={editor.locked} onClick={() => add("email")}>
@@ -166,15 +171,16 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
                 </button>
               </div>
             </>
-          )}
+          }
         </div>
+      </div>
       </div>
     );
   }
 
   return (
     <div className="flex flex-col gap-4">
-    {editor.launched && <RunningChanges campaignId={campaignId} editor={editor} />}
+    {running}
     <div className={`grid grid-cols-1 items-start gap-4 ${selected ? "min-[1020px]:grid-cols-[minmax(0,1fr)_430px]" : ""}`}>
       <Canvas tracks={tracks} branchTracks={branchTracks} selectedId={selected?.id ?? null} editor={editor} onSelect={(id) => select(selected?.id === id ? null : id)} onAdd={add} />
       {selected?.channel === "call" && (

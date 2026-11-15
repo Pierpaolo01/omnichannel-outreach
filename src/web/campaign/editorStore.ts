@@ -46,7 +46,7 @@ export interface EditorSnapshot {
 
 export interface EditorDeps {
   /** One PUT: rejects with `NoAnswer`, or with an error carrying the server's `code`. */
-  put(body: CampaignDefinition & { save: SaveIdentity }, options: { readonly keepalive?: boolean; readonly signal?: AbortSignal }): Promise<SequenceView>;
+  put(body: CampaignDefinition & { save: SaveIdentity; impact?: string }, options: { readonly keepalive?: boolean; readonly signal?: AbortSignal }): Promise<SequenceView>;
   /** The launch POST for the revision on the page; rejects with an error carrying the server's `code`. */
   launch(definitionVersion: number): Promise<SequenceView>;
   /** The stored sequence, for "Load the saved version". */
@@ -64,7 +64,7 @@ export interface EditorDeps {
  * Faults the generated save test injects to prove it notices them (ticket 16b): a save whose body leaves
  * out each phone track's declined path, or the win-back branch's tracks. Never set by the page.
  */
-export type SaveFault = "declined_path_not_sent" | "win_back_tracks_not_sent" | "stale_win_back_copy" | "running_saved_as_typed";
+export type SaveFault = "declined_path_not_sent" | "win_back_tracks_not_sent" | "stale_win_back_copy" | "running_saved_as_typed" | "applied_body_not_previewed";
 
 function withFaults(definition: CampaignDefinition, faults: ReadonlySet<SaveFault> | undefined, previous: CampaignDefinition | null): CampaignDefinition {
   if (!faults || faults.size === 0) return definition;
@@ -88,6 +88,9 @@ export const smsNumberIds = (view: SequenceView): string[] => view.accounts.filt
 /** How long after an edit its save is sent. */
 export const SAVE_DELAY_MS = 600;
 
+/** What Apply did: applied, or why nothing was sent, in words for the page. */
+export type ApplyOutcome = { readonly ok: true } | { readonly ok: false; readonly message: string };
+
 export class EditorStore {
   private state: EditorSnapshot;
   private readonly listeners = new Set<() => void>();
@@ -96,6 +99,8 @@ export class EditorStore {
   private timer: unknown = null;
   /** The body of the last save sent, for the generated save test's `stale_win_back_copy` fault only. */
   private lastSent: CampaignDefinition | null = null;
+  /** While an Apply is in flight: the digest of the read it was confirmed on, sent with the save as `impact`. */
+  private applyImpact: string | null = null;
 
   constructor(initial: SequenceView, deps: EditorDeps) {
     this.deps = deps;
@@ -105,7 +110,7 @@ export class EditorStore {
       put: (definition, options, save) => {
         const sent = withFaults(definition, deps.faults, this.lastSent);
         this.lastSent = definition;
-        return deps.put({ ...sent, save }, options);
+        return deps.put({ ...sent, save, ...(this.applyImpact !== null ? { impact: this.applyImpact } : {}) }, options);
       },
       onStatus: (status) => this.set({ save: status, unsaved: status.kind !== "saved" && status.kind !== "idle" }),
       // Saves land in order, so each accepted view is the newest; the draft only if no edit came after.
@@ -198,18 +203,47 @@ export class EditorStore {
    * Applies the draft to a running campaign (ADR 0003 "Ticket 19"): through the same queue as every save, with
    * authoring locked until it answers. A draft that cannot be saved as it stands sends nothing.
    */
-  apply(): Promise<void> {
-    if (!this.launched() || this.state.problems.length > 0) return Promise.resolve();
+  apply(confirmed: { readonly body: string; readonly digest: string }): Promise<ApplyOutcome> {
+    // Apply never does nothing silently (verifier F5 on 7afa03d): every way it sends nothing says why.
+    if (!this.launched()) return Promise.resolve({ ok: false, message: "This campaign has not launched: its changes are saved as you type." });
+    if (this.state.pending !== null) return Promise.resolve({ ok: false, message: "Another change is still on its way." });
+    if (this.state.problems.length > 0) return Promise.resolve({ ok: false, message: this.state.problems.join(" ") });
+    if (this.queue.inConflict) return Promise.resolve({ ok: false, message: "This campaign was changed elsewhere. Load the saved version, or discard your changes, to carry on." });
+    // Apply sends exactly the body its read was for (review bot on 7afa03d): a read of another draft authorizes nothing.
+    if (JSON.stringify(this.previewBody()) !== confirmed.body && !this.deps.faults?.has("applied_body_not_previewed")) {
+      return Promise.resolve({ ok: false, message: "What this does is being checked again for your latest change. Apply once it shows." });
+    }
+    let outcome: ApplyOutcome = { ok: true };
     return this.locked("apply", async () => {
-      await this.queue.save();
-    });
+      this.applyImpact = confirmed.digest;
+      try {
+        const saved = await this.queue.save();
+        if (!saved.ok) outcome = { ok: false, message: saved.reason === "changed" ? "A newer change arrived while applying. Apply again." : saved.message };
+      } finally {
+        this.applyImpact = null;
+      }
+    }).then(() => outcome);
   }
 
-  /** Sets aside a running campaign's unapplied changes: the stored definition is the draft again. */
-  discard(): void {
-    if (!this.launched() || this.state.locked) return;
-    this.queue.edited();
-    this.set({ draft: this.state.view.definition, unsaved: false, save: { kind: "idle" } });
+  /**
+   * What applying the draft would send, built by the one function every save uses (`SaveQueue.bodyOf`): the editor asks
+   * the server what this body does, and Apply sends it with that read's digest.
+   */
+  previewBody(): CampaignDefinition {
+    return this.queue.bodyOf();
+  }
+
+  /**
+   * Sets aside a running campaign's unapplied changes. After another page's change won (a conflict), the stored version
+   * is loaded, which resolves it; otherwise the definition the page last had from the server is the draft again, and the
+   * queue starts from it (its status, `idle`, is the queue's own). Never hides a conflict (review bot on 7afa03d).
+   */
+  discard(): Promise<void> {
+    if (!this.launched() || this.state.locked) return Promise.resolve();
+    if (this.queue.inConflict) return this.loadStored();
+    this.set({ draft: this.state.view.definition, unsaved: false });
+    this.queue.loadedStored();
+    return Promise.resolve();
   }
 
   private schedule(): void {

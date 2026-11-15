@@ -14,24 +14,31 @@ import type { SequenceEditor } from "./useSequence.ts";
 const REFRESH_MS = 20_000;
 const DEBOUNCE_MS = 400;
 
-type ImpactRead = { readonly state: "idle" } | { readonly state: "loading" } | { readonly state: "ready"; readonly view: EditImpactView } | { readonly state: "error"; readonly message: string };
+type ImpactRead =
+  | { readonly state: "idle" }
+  | { readonly state: "loading" }
+  | { readonly state: "ready"; readonly view: EditImpactView }
+  | { readonly state: "error"; readonly message: string };
 
-/** The server's read of what applying `draft` would do, kept fresh while the page holds changes. */
-function useEditImpact(campaignId: string, draft: CampaignDefinition, enabled: boolean): { read: ImpactRead; retry: () => void } {
-  const [read, setRead] = useState<ImpactRead>({ state: "idle" });
+/**
+ * The server's read of what applying exactly `body` would do (review bot on 7afa03d): `body` is what Apply sends, built by
+ * the save queue's own function (`previewBody`). A read describes and authorizes only the body it was asked for: when the
+ * draft changes, the earlier read stops counting at once, and the read for the new body is waited for.
+ */
+function useEditImpact(campaignId: string, body: string, enabled: boolean): { read: ImpactRead; retry: () => void } {
+  const [answer, setAnswer] = useState<{ readonly for: string; readonly read: ImpactRead } | null>(null);
   const [tick, setTick] = useState(0);
   const asked = useRef(0);
   useEffect(() => {
     if (!enabled) return;
     const n = ++asked.current;
     const run = () => {
-      setRead((r) => (r.state === "ready" ? r : { state: "loading" }));
-      postJson(`/api/campaigns/${encodeURIComponent(campaignId)}/sequence/impact`, { definition: draft }).then(
+      postJson(`/api/campaigns/${encodeURIComponent(campaignId)}/sequence/impact`, { definition: JSON.parse(body) as unknown }).then(
         (view) => {
-          if (n === asked.current) setRead({ state: "ready", view: view as EditImpactView });
+          if (n === asked.current) setAnswer({ for: body, read: { state: "ready", view: view as EditImpactView } });
         },
         (error: unknown) => {
-          if (n === asked.current) setRead({ state: "error", message: error instanceof ApiRequestError ? error.message : "The server didn’t answer." });
+          if (n === asked.current) setAnswer({ for: body, read: { state: "error", message: error instanceof ApiRequestError ? error.message : "The server didn’t answer." } });
         },
       );
     };
@@ -41,8 +48,9 @@ function useEditImpact(campaignId: string, draft: CampaignDefinition, enabled: b
       clearTimeout(first);
       clearInterval(again);
     };
-  }, [campaignId, draft, enabled, tick]);
-  return { read: enabled ? read : { state: "idle" }, retry: () => setTick((t) => t + 1) };
+  }, [campaignId, body, enabled, tick]);
+  const read: ImpactRead = !enabled ? { state: "idle" } : answer && answer.for === body ? answer.read : { state: "loading" };
+  return { read, retry: () => setTick((t) => t + 1) };
 }
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
@@ -113,13 +121,16 @@ function whatItDoes(change: EditImpactChange): string {
 /** The read's instant in the campaign's own zone, named, never the browser's (as every screen states a time). */
 const timeOf = (iso: string, zone: string) => `${new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: zone })} (${zone.replace(/_/g, " ")})`;
 
-export function RunningChanges({ campaignId, editor }: { campaignId: string; editor: SequenceEditor }) {
+export function RunningChanges({ campaignId, editor, onDiscarded }: { campaignId: string; editor: SequenceEditor; onDiscarded: () => void }) {
   const enabled = editor.unsaved && !editor.applying && editor.problems.length === 0;
-  const { read, retry } = useEditImpact(campaignId, editor.draft, enabled);
+  // What Apply would send, by the save queue's one function; the read is asked for exactly this (review bot on 7afa03d).
+  const body = JSON.stringify(editor.previewBody());
+  const { read, retry } = useEditImpact(campaignId, body, enabled);
   const [error, setError] = useState<string | null>(null);
   const save = editor.save;
   const view = read.state === "ready" ? read.view : null;
   const refused = [...(view?.problems ?? []), ...(view?.blockers.map((b) => b.message) ?? [])];
+  // Apply only on a read of exactly this body: never on an earlier read while the new one is on its way.
   const canApply = editor.unsaved && !editor.locked && editor.problems.length === 0 && view !== null && refused.length === 0;
 
   return (
@@ -137,7 +148,16 @@ export function RunningChanges({ campaignId, editor }: { campaignId: string; edi
         </div>
         {editor.unsaved && (
           <div className="flex flex-wrap gap-2">
-            <button type="button" className="btn border-line-strong bg-base-100 font-medium" disabled={editor.locked} onClick={() => editor.discard()}>
+            <button
+              type="button"
+              className="btn border-line-strong bg-base-100 font-medium"
+              disabled={editor.locked}
+              onClick={() => {
+                setError(null);
+                // The button goes with the changes: focus moves to the canvas's first control (verifier on 7afa03d).
+                void editor.discard().then(onDiscarded);
+              }}
+            >
               Discard changes
             </button>
             <button
@@ -148,7 +168,16 @@ export function RunningChanges({ campaignId, editor }: { campaignId: string; edi
               onClick={() => {
                 if (editor.applying) return;
                 setError(null);
-                editor.apply().catch((e: unknown) => setError(e instanceof Error ? e.message : "Not applied."));
+                if (!view) return;
+                // Apply sends this body with the read's digest; the server refuses it if either no longer holds.
+                editor.apply({ body, digest: view.digest }).then(
+                  (outcome) => {
+                    if (outcome.ok) return;
+                    setError(outcome.message);
+                    retry();
+                  },
+                  (e: unknown) => setError(e instanceof Error ? e.message : "Not applied."),
+                );
               }}
             >
               {editor.applying ? "Applying…" : "Apply to running leads"}
@@ -194,7 +223,7 @@ export function RunningChanges({ campaignId, editor }: { campaignId: string; edi
       )}
       {(save.kind === "error" || error) && (
         <p role="alert" className="rounded-field bg-crit-soft px-3 py-2 text-[13.5px] text-crit">
-          Not applied. {save.kind === "error" ? save.message : error}
+          Not applied. {error ?? (save.kind === "error" ? save.message : "")}
         </p>
       )}
     </section>

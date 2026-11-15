@@ -320,6 +320,8 @@ export interface EditImpactView {
   readonly asOf: string;
   /** The stored revision this read compared the draft with. */
   readonly definitionVersion: number;
+  /** What this read was computed for (the body, the stored revision, the pause): Apply sends it as the save's `impact`. */
+  readonly digest: string;
   /** The enrollments counted. */
   readonly leads: number;
   readonly changes: readonly EditImpactChange[];

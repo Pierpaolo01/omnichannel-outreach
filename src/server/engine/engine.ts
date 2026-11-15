@@ -15,6 +15,7 @@ import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/
 import { judgeCampaignControl, type LeadControl, type LeadExpectation } from "../../domain/sequence/controls.ts";
 import type { ControlView } from "../../shared/api.ts";
 import { effectOf } from "./controls-view.ts";
+import { impactDigest } from "./edit-impact.ts";
 import type { ControlRecord, DefinitionSave, EngineStore, ReplyEvent, SaveResult, StoredDefinition } from "./engine-store.ts";
 
 /** A control's answer. `effect`: the control's own effect, which the read previewed at that instant; null for a campaign's. */
@@ -335,7 +336,7 @@ export class Engine {
    * definition and reconciled under the new one (ADR 0003 "Ticket 19"); it queues behind the running tick as a launch
    * does, and a tick follows an accepted one.
    */
-  saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save: DefinitionSave | null, options: { readonly tick?: boolean } = {}): Promise<SaveResult> {
+  saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save: DefinitionSave | null, options: { readonly tick?: boolean; readonly impact?: string } = {}): Promise<SaveResult> {
     return this.ticks.run(async () => {
       await this.syncAccounts();
       const now = this.now();
@@ -345,6 +346,7 @@ export class Engine {
         check: (definition, leadsAfter, leads, accounts) => this.rules.runningCheck(definition, leadsAfter, leads, accounts),
         catchUp: (s) => sealReckoning(this.rules.asOfAction(s, now), now),
         reconcile: (s, previous, previousZone) => this.rules.reconcileEdit(s, previous, previousZone, now),
+        ...(options.impact !== undefined ? { impact: { expected: options.impact, digest: impactDigest } } : {}),
       });
       if (result.outcome === "saved" && result.stored.launchedAt !== null && options.tick !== false) await this.runTick();
       return result;

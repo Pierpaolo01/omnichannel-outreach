@@ -163,3 +163,23 @@ describe("a running edit is checked over what leads still run (review bot on 7af
     expect(w.h.fake.handoverLog.filter((x) => x.rendered.body.trim() === "")).toEqual([]);
   });
 });
+
+describe("Apply sends exactly what the read was for (review bot on 7afa03d, the 17b class)", () => {
+  test("the read carries a digest of the body and the campaign's state; a save with another body or state is refused in place", async () => {
+    const w = await world();
+    await w.h.advanceTo(MONDAY_9 + H);
+    const shown = def([track("e1", [email("s1"), email("s2", 1), email("s3", 3)])]);
+    const read = await w.h.request<{ digest: string }>("POST", `/api/campaigns/${w.id}/sequence/impact`, { definition: shown });
+    expect(read.body.digest).toMatch(/^[0-9a-f]{64}$/);
+    // Another body than the one read: refused, nothing stored.
+    const other = await w.save({ ...def([track("e1", [email("s1"), email("s2", 0), email("s3", 3)])]), impact: read.body.digest } as CampaignDefinition);
+    expect([other.status, other.body.error?.code]).toEqual([409, "impact_changed"]);
+    // The campaign paused since the read: refused too.
+    expect((await w.h.request("POST", `/api/campaigns/${w.id}/pause`, { requestId: "p" })).status).toBe(200);
+    const paused = await w.save({ ...shown, impact: read.body.digest } as CampaignDefinition);
+    expect([paused.status, paused.body.error?.code]).toEqual([409, "impact_changed"]);
+    // Read again on the state as it is: applied.
+    const again = await w.h.request<{ digest: string }>("POST", `/api/campaigns/${w.id}/sequence/impact`, { definition: shown });
+    expect((await w.save({ ...shown, impact: again.body.digest } as CampaignDefinition)).status).toBe(200);
+  });
+});

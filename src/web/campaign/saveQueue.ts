@@ -229,10 +229,19 @@ export class SaveQueue {
   /** The body for a number: built when it is first sent (from the newest draft, or the one given), then reused unchanged. */
   private bodyFor(seq: number, from?: CampaignDefinition): CampaignDefinition {
     if (this.sentBody?.seq === seq) return this.sentBody.definition;
-    const { draft, accountIds, smsNumberIds } = this.deps.read();
-    const definition = { ...(from ?? draft), emailPool: [...accountIds], ...(smsNumberIds ? { smsPool: [...smsNumberIds] } : {}) };
+    const definition = this.bodyOf(from);
     this.sentBody = { seq, definition };
     return definition;
+  }
+
+  /**
+   * The one way a draft becomes what is sent (ticket 19; review bot on 7afa03d): the newest draft, or the one given, with
+   * the pools following the connected senders. A running edit's read of what it does is asked for exactly this body, and
+   * Apply sends it, so the two can never describe different definitions.
+   */
+  bodyOf(from?: CampaignDefinition): CampaignDefinition {
+    const { draft, accountIds, smsNumberIds } = this.deps.read();
+    return { ...(from ?? draft), emailPool: [...accountIds], ...(smsNumberIds ? { smsPool: [...smsNumberIds] } : {}) };
   }
 
   /** The user loaded the stored version: what was typed before is set aside, and saving starts again from it. */

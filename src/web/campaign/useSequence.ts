@@ -2,7 +2,7 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import type { CampaignDefinition, SequenceView } from "../../shared/api.ts";
 import { ApiRequestError, getJson, postJson, putJson, useApi } from "../api.ts";
 import { WEEK } from "./model.ts";
-import { EditorStore, type EditorSnapshot } from "./editorStore.ts";
+import { EditorStore, type ApplyOutcome, type EditorSnapshot } from "./editorStore.ts";
 import { NoAnswer, type SaveStatus } from "./saveQueue.ts";
 
 export { draftProblems } from "./saveQueue.ts";
@@ -28,9 +28,11 @@ export interface SequenceEditor {
   /** A running campaign's changes are being applied (ticket 19). */
   readonly applying: boolean;
   /** Applies a running campaign's changes, through the same ordered save path. */
-  readonly apply: () => Promise<void>;
+  readonly apply: (confirmed: { readonly body: string; readonly digest: string }) => Promise<ApplyOutcome>;
+  /** What Apply would send, by the one function every save uses: the body a running edit's read is asked for. */
+  readonly previewBody: () => CampaignDefinition;
   /** Sets aside a running campaign's changes that were not applied. */
-  readonly discard: () => void;
+  readonly discard: () => Promise<void>;
   readonly update: (change: (draft: CampaignDefinition) => CampaignDefinition) => void;
   readonly retrySave: () => void;
   /** After a conflict: replaces the draft with the stored version, setting aside what was typed. Resolves true once it has. */
@@ -127,7 +129,8 @@ export function useSequence(campaignId: string) {
           loading: snapshot.pending === "load",
           locked: snapshot.locked,
           applying: snapshot.pending === "apply",
-          apply: () => store.apply(),
+          apply: (confirmed) => store.apply(confirmed),
+          previewBody: () => store.previewBody(),
           discard: () => store.discard(),
           update: (change) => store.update(change),
           retrySave: () => store.retrySave(),

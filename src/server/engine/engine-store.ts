@@ -156,6 +156,8 @@ export type SaveResult =
   | { readonly outcome: "invalid"; readonly problems: readonly string[]; readonly stored: StoredDefinition }
   /** A running campaign's save refused by one of the three launch blockers (7.2): nothing stored. */
   | { readonly outcome: "blocked"; readonly check: LaunchCheck; readonly stored: StoredDefinition }
+  /** A running save sent with the digest of a read that no longer matches it (review bot on 7afa03d): nothing stored. */
+  | { readonly outcome: "impact_changed"; readonly stored: StoredDefinition }
   | { readonly outcome: "missing" };
 
 /**
@@ -169,6 +171,8 @@ export interface RunningSave {
   readonly catchUp: (state: SubjectState) => SubjectState;
   readonly reconcile: (state: SubjectState, previous: CampaignDefinition, previousZone: string) => SubjectState;
   readonly now: number;
+  /** The digest of the read the user applied from, if the client sent one, and how to compute it on the stored state. */
+  readonly impact?: { readonly expected: string; readonly digest: (definition: CampaignDefinition, definitionVersion: number, pausedSince: number | null) => string };
 }
 
 /** Who wrote a save (ADR 0003 1.1.1): the editing session, its number in it, and the revision it last saw. */

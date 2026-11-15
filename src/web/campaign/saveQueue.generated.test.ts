@@ -90,7 +90,7 @@ const REGRESSIONS = [7369, 7412, 7642, 7729, 7889, 845691, 463057];
  * seeds. The recorded seeds above replay the trajectories they were recorded with, so the generated user
  * makes no declined-path or branch edit on them.
  */
-const FAULT_SEEDS: Record<SaveFault, number> = { declined_path_not_sent: 7003, win_back_tracks_not_sent: 7004, stale_win_back_copy: 7016, running_saved_as_typed: 7025 };
+const FAULT_SEEDS: Record<SaveFault, number> = { declined_path_not_sent: 7003, win_back_tracks_not_sent: 7004, stale_win_back_copy: 7016, running_saved_as_typed: 7025, applied_body_not_previewed: 7022 };
 /** The commit the moving window is derived from: CI's, else the checkout's HEAD, else none. */
 function commitOf(): string {
   if (process.env["GITHUB_SHA"]) return process.env["GITHUB_SHA"];
@@ -191,6 +191,8 @@ interface Page {
   shape: Shape;
   /** Applies to a running campaign in progress (ticket 19): only while one is may a save of a launched campaign be sent. */
   applying: number;
+  /** The read the Apply in progress was confirmed on: the body it was for and its digest. */
+  confirmed: { body: string; digest: string } | null;
 }
 
 interface Request {
@@ -252,6 +254,8 @@ async function run(seed: number, faults?: ReadonlySet<SaveFault>) {
   // A second stream for what was added later (the late answer after a load), so the first stream's
   // choices, and the recorded seeds, stay as they were until it first acts.
   const r2 = rng(seed ^ 0x5eed_c0de);
+  // Ticket 19, a stream of its own: typing after a running edit's read, before Apply.
+  const r5 = rng(seed ^ 0x19a9_19a9);
   const h = new EngineHarness({ start: Date.parse("2026-11-02T10:00:00Z"), accounts: [inbox("inbox-a")], sms: { numbers: [] } });
   const { campaign } = await h.createCampaign("Generated", {
     businesses: [business({ business_id: "b1", business_name: "Harbour Lane Physio" })],
@@ -294,6 +298,7 @@ async function run(seed: number, faults?: ReadonlySet<SaveFault>) {
   let typed = 0;
   let copyBesideInFlight = false;
   let appliedRunning = false;
+  let typedAfterRead = false;
   let inboxes = 1;
   let numbers = 0;
   /**
@@ -449,13 +454,19 @@ async function run(seed: number, faults?: ReadonlySet<SaveFault>) {
   const pages: Page[] = [];
   const held = (page: Page, kind: Request["kind"], body: Request["body"], keepalive = false, draftAtLaunch?: CampaignDefinition) =>
     new Promise<SequenceView>((resolve, reject) => {
+      // Invariant I (ticket 19; review bot on 7afa03d): an Apply sends exactly the body its read was for, with that read's digest.
+      if (kind === "put" && page.confirmed) {
+        const { impact, ...rest } = body as Record<string, unknown>;
+        const definition = Object.fromEntries(Object.entries(rest).filter(([key]) => key !== "save"));
+        if (JSON.stringify(definition) !== page.confirmed.body || impact !== page.confirmed.digest) problems.push(`I: ${page.session} applied a body other than the one its read was for`);
+      }
       requests.push({ page, kind, body, keepalive, loads: page.store.loads, applying: page.applying > 0, answer: null, resolve, reject, ...(draftAtLaunch ? { draftAtLaunch } : {}) });
     });
 
   const openPage = async (): Promise<Page> => {
     const view = (await h.request<SequenceView>("GET", path)).body;
     const session = `s${pages.length}`;
-    const page = { session, frozen: false, gone: false, timer: null, newestTyped: null, newestSendable: null, shape: NO_SHAPE, applying: 0 } as Omit<Page, "store"> as Page;
+    const page = { session, frozen: false, gone: false, timer: null, newestTyped: null, newestSendable: null, shape: NO_SHAPE, applying: 0, confirmed: null } as Omit<Page, "store"> as Page;
     (page as { store: EditorStore }).store = new EditorStore(view, {
       session,
       put: (body, options) => held(page, "put", body as unknown as Request["body"], options.keepalive === true),
@@ -607,9 +618,29 @@ async function run(seed: number, faults?: ReadonlySet<SaveFault>) {
     } else if (roll < 0.77 && live && !launchedOnce() && page.store.getSnapshot().pending === null) {
       void page.store.launch().catch(() => undefined);
     } else if (roll < 0.79 && launchedOnce() && live && page.store.getSnapshot().pending === null) {
-      // Ticket 19: on a running campaign the generated user applies what they typed.
+      // Ticket 19: on a running campaign the generated user reads what applying would do, for the body the editor would
+      // send (`previewBody`), sometimes types after the read, and applies on that read (review bot on 7afa03d).
       page.applying++;
-      void page.store.apply().finally(() => page.applying--);
+      const body = page.store.previewBody();
+      const read = await h.request<{ digest?: string }>("POST", `/api/campaigns/${campaign.id}/sequence/impact`, { definition: body });
+      if (read.status !== 200 || read.body.digest === undefined) page.applying--;
+      else {
+        const confirmed = { body: JSON.stringify(body), digest: read.body.digest };
+        if (r5() < 0.3) {
+          const subject = `typed ${++typed}`;
+          // The record's shape starts from what the page shows when it has typed nothing since loading it.
+          if (page.newestTyped === null) page.shape = shapeOf(page.store.getSnapshot().draft);
+          page.store.update((d) => ({ ...d, callScript: subject }));
+          page.newestTyped = subject;
+          page.newestSendable = subject;
+          typedAfterRead = true;
+        }
+        page.confirmed = confirmed;
+        void page.store.apply(confirmed).finally(() => {
+          page.applying--;
+          page.confirmed = null;
+        });
+      }
     } else if (roll < 0.79 && !launchedOnce()) {
       // Another inbox or SMS number connects: the pages learn it with their next answer, and save the pool.
       if (r() < 0.5) h.fake.accountsById.set(`inbox-${++inboxes}`, inbox(`inbox-${inboxes}`));
@@ -677,16 +708,16 @@ async function run(seed: number, faults?: ReadonlySet<SaveFault>) {
   }
   const stored = (await h.request<SequenceView>("GET", path)).body.definition;
   const smsSaved = stored.tracks.some((t) => !t.removed && t.channel === "sms") && (stored.smsPool ?? []).length > 0;
-  return { problems, pending: requests.length, launchedOnce: launchedOnce(), smsSaved, phoneSaved: phoneCoverage.phoneSaved, phoneAny: phoneCoverage.phoneAny, lateAfterLoad, winBackSaved: phoneCoverage.winBackSaved, declinedSaved: phoneCoverage.declinedSaved, branchArranged: phoneCoverage.branchArranged, branchCopySaved: phoneCoverage.branchCopySaved, copyBesideInFlight, appliedRunning };
+  return { problems, pending: requests.length, launchedOnce: launchedOnce(), smsSaved, phoneSaved: phoneCoverage.phoneSaved, phoneAny: phoneCoverage.phoneAny, lateAfterLoad, winBackSaved: phoneCoverage.winBackSaved, declinedSaved: phoneCoverage.declinedSaved, branchArranged: phoneCoverage.branchArranged, branchCopySaved: phoneCoverage.branchCopySaved, copyBesideInFlight, appliedRunning, typedAfterRead };
 }
 
 describe("saving the definition, generated over the real editor state (ADR 0003 1.1.1)", () => {
   // What each coverage seed's run reached; the window's runs are checked for every invariant and counted for nothing.
-  const reached: { launched: boolean; smsSaved: boolean; phoneSaved: boolean; lateAfterLoad: number; winBackSaved: boolean; declinedSaved: boolean; branchArranged: boolean; branchCopySaved: boolean; copyBesideInFlight: boolean; appliedRunning: boolean }[] = [];
+  const reached: { launched: boolean; smsSaved: boolean; phoneSaved: boolean; lateAfterLoad: number; winBackSaved: boolean; declinedSaved: boolean; branchArranged: boolean; branchCopySaved: boolean; copyBesideInFlight: boolean; appliedRunning: boolean; typedAfterRead: boolean }[] = [];
   for (const seed of RUN_SEEDS) {
     test(`run ${seed}`, async () => {
       const out = await run(seed);
-      if (COVERAGE_SEEDS.has(seed)) reached.push({ launched: out.launchedOnce, smsSaved: out.smsSaved, phoneSaved: out.phoneSaved, lateAfterLoad: out.lateAfterLoad, winBackSaved: out.winBackSaved, declinedSaved: out.declinedSaved, branchArranged: out.branchArranged, branchCopySaved: out.branchCopySaved, copyBesideInFlight: out.copyBesideInFlight, appliedRunning: out.appliedRunning });
+      if (COVERAGE_SEEDS.has(seed)) reached.push({ launched: out.launchedOnce, smsSaved: out.smsSaved, phoneSaved: out.phoneSaved, lateAfterLoad: out.lateAfterLoad, winBackSaved: out.winBackSaved, declinedSaved: out.declinedSaved, branchArranged: out.branchArranged, branchCopySaved: out.branchCopySaved, copyBesideInFlight: out.copyBesideInFlight, appliedRunning: out.appliedRunning, typedAfterRead: out.typedAfterRead });
       expect(out.pending).toBe(0);
       expect(out.problems).toEqual([]);
     });
@@ -715,6 +746,9 @@ describe("saving the definition, generated over the real editor state (ADR 0003 
   });
   test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs apply edits to a running campaign (ticket 19)", () => {
     expect(count((r) => r.appliedRunning)).toBeGreaterThan(0);
+  });
+  test.skipIf(!ENOUGH_FOR_COVERAGE)("the runs type after a running edit's read and before its Apply (review bot on 7afa03d)", () => {
+    expect(count((r) => r.typedAfterRead)).toBeGreaterThan(0);
   });
   // Each fault in the editor's saving is killed by its recorded fixed seed (ticket 16b).
   for (const fault of Object.keys(FAULT_SEEDS) as SaveFault[]) {
