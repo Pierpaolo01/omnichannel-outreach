@@ -24,9 +24,10 @@ import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
 import { sealReckoning } from "../domain/sequence/progress.ts";
 import { editImpactView } from "./engine/edit-impact.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
-import type { ControlRefusal, EnrollmentRead, CampaignDetail, CampaignListItem, CampaignPauseRead, CampaignSequenceSummary, EditImpactView, RecordControls, RecordLead, SequenceView, ActivityNote, CallOutcomeApi, ColleagueView, NoteAnswer, RecordColleagues } from "../shared/api.ts";
+import type { ControlRefusal, EnrollmentRead, CampaignDetail, CampaignMeasures, CampaignListItem, CampaignPauseRead, CampaignSequenceSummary, EditImpactView, RecordControls, RecordLead, SequenceView, ActivityNote, CallOutcomeApi, ColleagueView, NoteAnswer, RecordColleagues } from "../shared/api.ts";
 import { beforeLaunchView, copyPreview } from "./before-launch.ts";
 import { activityOf } from "./activity.ts";
+import { campaignMeasures, type MeasureRules } from "./measures.ts";
 import { registerEmailProviderRoutes, type EmailProviderSource } from "./instantly/routes.ts";
 
 export interface AppDependencies {
@@ -47,6 +48,8 @@ export interface AppDependencies {
   readonly rules?: Partial<Rules>;
   /** The bulk rule's parts; the generated bulk runs' broken apps replace one (ADR 0003 "Ticket 18"). */
   readonly bulkRules?: Partial<BulkRules>;
+  /** The campaign measures' parts (ticket 22): the generated measure runs' mutations replace one. */
+  readonly measureRules?: Partial<MeasureRules>;
 }
 
 const windowRule = requestObject({ day: z.number().int().min(0).max(6), start: z.number().int().min(0).max(23), end: z.number().int().min(0).max(24) });
@@ -183,7 +186,7 @@ const launchBody = requestObject({ definitionVersion: z.number().int().optional(
 const checkBody = requestObject({ businessesCsv: z.string().optional(), peopleCsv: z.string().optional() });
 
 /** The HTTP interface. Every route is under /api; the web client is served separately. */
-export function createApp({ store, now, newId, engine: givenEngine, emailProvider, smsProvider = "none", rules: givenRules, bulkRules }: AppDependencies): Hono {
+export function createApp({ store, now, newId, engine: givenEngine, emailProvider, smsProvider = "none", rules: givenRules, bulkRules, measureRules }: AppDependencies): Hono {
   const rules: Rules = { ...DEFAULT_RULES, ...givenRules };
   const engine = givenEngine ?? new Engine({ store: store.engine, port: new UnconnectedEmailPort(), smsPort: new UnprovisionedSmsPort(), now: () => Date.parse(now()), newId });
   const app = new Hono().basePath("/api");
@@ -286,6 +289,13 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     if (!campaign) return notFound(c, "campaign");
     const leadCount = await store.leadCount(campaign.id);
     return c.json<CampaignDetail>({ campaign, imports: await store.listImports(campaign.id), leadCount, sequence: await sequenceSummary(campaign.id), ...(await pauseRead(campaign.id)) });
+  });
+
+  // Ticket 22: the campaign's outcome measures, every figure a tally of its stored activity, read in one snapshot.
+  app.get("/campaigns/:id/measures", async (c) => {
+    const measures = await campaignMeasures(store.engine, c.req.param("id"), measureRules);
+    if (!measures) return notFound(c, "campaign");
+    return c.json<CampaignMeasures>(measures);
   });
 
   // Ticket 17a: the campaign pause, its date, the count of leads in each status, and the controls allowed now.

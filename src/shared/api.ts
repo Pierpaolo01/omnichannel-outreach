@@ -5,7 +5,7 @@
 import type { Channel, PhoneKind } from "../domain/contact-details.ts";
 import type { DetailNote, ImportSummary, LeadOutcome, NotEnrolledReason } from "../domain/import-plan.ts";
 import type { FileCheck } from "../domain/scraper-export.ts";
-import type { OutreachStatus } from "../domain/outreach-status.ts";
+import type { OutreachStatus, StatusGroup } from "../domain/outreach-status.ts";
 
 export type { DetailNote, EvidenceKind, ImportSummary, LeadOutcome, NotEnrolledReason, SummaryEntry } from "../domain/import-plan.ts";
 export type { ContactRoute } from "../domain/reach.ts";
@@ -56,6 +56,45 @@ export interface CampaignDetail extends CampaignPauseRead {
   readonly imports: readonly ImportRecord[];
   readonly leadCount: number;
   readonly sequence: CampaignSequenceSummary;
+}
+
+/** One rate: its numerator and denominator, as the read counted them, and the whole percent, or null with nothing to divide by. */
+export interface MeasureRate {
+  readonly numerator: number;
+  readonly denominator: number;
+  readonly percent: number | null;
+}
+
+/** Email or SMS: the messages the provider reported sent, those refused or bounced, and the leads that replied on it (ticket 22). */
+export interface MessageMeasures {
+  readonly sent: number;
+  readonly failedOrBounced: number;
+  readonly replies: number;
+}
+
+/** The calls the user logged (ticket 22). */
+export interface CallMeasures {
+  readonly made: number;
+  readonly connected: number;
+  readonly interested: number;
+  readonly declined: number;
+  readonly callbacksPending: number;
+}
+
+/**
+ * GET /api/campaigns/:id/measures (ticket 22; ADR 0003 "Ticket 22"): every figure a tally of the campaign's stored
+ * activity, read in one snapshot. `channels` names the channels the campaign has tracks on, in the order shown.
+ */
+export interface CampaignMeasures {
+  readonly launched: boolean;
+  readonly leads: number;
+  readonly groups: Readonly<Record<StatusGroup, number>>;
+  readonly channels: readonly ("email" | "sms" | "call")[];
+  readonly email: MessageMeasures;
+  readonly sms: MessageMeasures;
+  readonly calls: CallMeasures;
+  readonly replyRate: MeasureRate;
+  readonly connectRate: MeasureRate;
 }
 
 /** A campaign control as the campaign read offers it (ticket 17a). */

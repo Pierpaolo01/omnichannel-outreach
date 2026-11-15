@@ -250,6 +250,12 @@ export interface EngineStore {
   /** The count of the campaign's leads in each outreach status (ticket 17a). */
   statusCounts(campaignId: string): Promise<Record<string, number>>;
   /**
+   * The stored activity the campaign measures tally (ticket 22; ADR 0003 "Ticket 22"), every row read through the campaign's
+   * enrollments, so a test run's rows (a subject with no enrollment) are never read, all in one read transaction: one
+   * snapshot. `everyCampaign` exists only for the measures' scope mutation (M8); the application never passes it.
+   */
+  measureFacts(campaignId: string, options?: { readonly everyCampaign?: boolean }): Promise<MeasureFacts | null>;
+  /**
    * The accepted control requests on these targets (enrollment and campaign ids), oldest first, as the engine recorded each in
    * the transaction that applied it (ticket 17a's `control_requests`): Activity says them (ticket 17b). Refusals and call outcomes are left out.
    */
@@ -364,4 +370,22 @@ export interface EngineStore {
   addNote(note: { readonly id: string; readonly owner: "person" | "company"; readonly ownerId: string; readonly body: string; readonly atWall: number }): Promise<"added" | "same" | "different">;
   /** The latest call made with a note on each of these subjects; a skip for now is not a call. */
   lastCallNotes(subjectIds: readonly string[]): Promise<CallNoteRecord[]>;
+}
+
+/** What the campaign measures read (ticket 22): the facts Activity reads for the same entries, for the campaign's enrollments. */
+export interface MeasureFacts {
+  readonly launched: boolean;
+  readonly definition: CampaignDefinition;
+  /** Each enrollment: its stored status, whether its outreach has ended, and the channel of the reply that stopped it. */
+  readonly enrollments: readonly { readonly id: string; readonly status: string; readonly ended: string | null; readonly stopReplyChannel: string | null }[];
+  /** Each attempt handed to a provider, with its state and its work's provider send time. */
+  readonly attempts: readonly { readonly subjectId: string; readonly trackId: string; readonly stepId: string; readonly state: string; readonly sentWall: number | null }[];
+  /** Each step result `failed`. */
+  readonly failures: readonly { readonly subjectId: string; readonly trackId: string; readonly stepId: string }[];
+  /** Each bounce event. */
+  readonly bounces: readonly { readonly subjectId: string; readonly trackId: string; readonly stepId: string }[];
+  /** Each call outcome logged. */
+  readonly calls: readonly { readonly subjectId: string; readonly outcome: string }[];
+  /** Each open callback task. */
+  readonly openCallbacks: readonly { readonly subjectId: string }[];
 }

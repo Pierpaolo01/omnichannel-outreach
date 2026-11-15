@@ -33,7 +33,7 @@ import type {
   WorkSettlement,
 } from "../../domain/sequence/state.ts";
 import { isOutreachStatus } from "../../domain/outreach-status.ts";
-import type { BounceEvent, CallNoteRecord, CallSettings, CampaignEngineRow, DefinitionSave, EngineStore, LaunchOutcome, RunningSave, ReplyEvent, SaveResult, SenderAccountConfig, StoredDefinition, StoredNote, WorkerLease } from "../engine/engine-store.ts";
+import type { BounceEvent, CallNoteRecord, MeasureFacts, CallSettings, CampaignEngineRow, DefinitionSave, EngineStore, LaunchOutcome, RunningSave, ReplyEvent, SaveResult, SenderAccountConfig, StoredDefinition, StoredNote, WorkerLease } from "../engine/engine-store.ts";
 import { liveDetailRowOf } from "./sqlite-store.ts";
 import { holdsLeaseOn, releaseLeaseOn, takeLeaseOn } from "./lease-table.ts";
 
@@ -181,6 +181,50 @@ export class SqliteEngineStore implements EngineStore {
 
   async statusCounts(campaignId: string): Promise<Record<string, number>> {
     return Object.fromEntries(this.sql("SELECT status, COUNT(*) AS n FROM enrollments WHERE campaign_id = ? GROUP BY status").all(campaignId).map((r) => [str(r, "status"), num(r, "n")]));
+  }
+
+  async measureFacts(campaignId: string, options: { readonly everyCampaign?: boolean } = {}): Promise<MeasureFacts | null> {
+    // One read transaction and no await inside it: every figure of one answer is of the same instant (ADR 0003 "Ticket 22").
+    this.db.exec("BEGIN");
+    try {
+      const campaign = this.sql("SELECT launched_at, definition, default_timezone FROM campaigns WHERE id = ?").get(campaignId);
+      if (!campaign) return null;
+      // Every row is read through the campaign's enrollments: a test run is a subject with no enrollment (ticket 21).
+      const scope = options.everyCampaign === true ? "" : "WHERE e.campaign_id = ?";
+      const args: SQLInputValue[] = options.everyCampaign === true ? [] : [campaignId];
+      const rows = (sql: string) => this.sql(sql).all(...args);
+      const facts: MeasureFacts = {
+        launched: campaign["launched_at"] != null,
+        definition: campaign["definition"] == null ? emptyDefinition(strOrNull(campaign, "default_timezone") ?? "UTC") : parseDefinition(campaign),
+        enrollments: rows(`SELECT e.id, e.status, e.ended, e.stop_reply_channel FROM enrollments e ${scope}`).map((r) => ({
+          id: str(r, "id"),
+          status: str(r, "status"),
+          ended: strOrNull(r, "ended"),
+          stopReplyChannel: strOrNull(r, "stop_reply_channel"),
+        })),
+        attempts: rows(
+          `SELECT a.subject_id, a.track_id, a.step_id, a.state, w.sent_wall FROM enrollments e JOIN attempts a ON a.subject_id = e.id
+             LEFT JOIN provider_work w ON w.key = a.idempotency_key ${scope ? `${scope} AND` : "WHERE"} a.handed_wall IS NOT NULL`,
+        ).map((r) => ({ subjectId: str(r, "subject_id"), trackId: str(r, "track_id"), stepId: str(r, "step_id"), state: str(r, "state"), sentWall: numOrNull(r, "sent_wall") })),
+        failures: rows(`SELECT r.subject_id, r.track_id, r.step_id FROM enrollments e JOIN step_results r ON r.subject_id = e.id ${scope ? `${scope} AND` : "WHERE"} r.result = 'failed'`).map((r) => ({
+          subjectId: str(r, "subject_id"),
+          trackId: str(r, "track_id"),
+          stepId: str(r, "step_id"),
+        })),
+        bounces: rows(`SELECT b.subject_id, b.track_id, b.step_id FROM enrollments e JOIN bounce_events b ON b.subject_id = e.id ${scope}`).map((r) => ({
+          subjectId: str(r, "subject_id"),
+          trackId: str(r, "track_id"),
+          stepId: str(r, "step_id"),
+        })),
+        calls: rows(`SELECT c.subject_id, c.outcome FROM enrollments e JOIN call_attempts c ON c.subject_id = e.id ${scope}`).map((r) => ({ subjectId: str(r, "subject_id"), outcome: str(r, "outcome") })),
+        openCallbacks: rows(`SELECT t.subject_id FROM enrollments e JOIN call_tasks t ON t.subject_id = e.id ${scope ? `${scope} AND` : "WHERE"} t.open = 1 AND t.kind = 'callback'`).map((r) => ({
+          subjectId: str(r, "subject_id"),
+        })),
+      };
+      return facts;
+    } finally {
+      this.db.exec("COMMIT");
+    }
   }
 
   async saveDefinition(campaignId: string, definition: CampaignDefinition, editedAt: string, save: DefinitionSave | null = null, running?: RunningSave): Promise<SaveResult> {
