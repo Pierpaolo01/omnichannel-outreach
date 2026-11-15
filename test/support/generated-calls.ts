@@ -1782,7 +1782,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     const key = `${campaigns.indexOf(c)}/${t.id}`;
     limitEdits.set(key, [...(limitEdits.get(key) ?? []), { at: h.clock, before: t.callSkipLimitDays ?? c.definition.callSkipLimitDays }]);
     c.definition = next;
-    if (process.env["CALLS_DEBUG"]) console.log("LIMIT", c.id, t.id, limit, new Date(h.clock).toISOString());
+    if (process.env["CALLS_DEBUG"]) console.info("LIMIT", c.id, t.id, limit, new Date(h.clock).toISOString());
     recordVersion++;
     features.add("a-skip-limit-lengthened");
     const open = [...knownTasks.values()].some((k) => k.trackId === t.id);
