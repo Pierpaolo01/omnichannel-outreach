@@ -3,7 +3,7 @@
  * reads only what the server reported (the queue, the call task, an outcome's answer, Needs
  * attention); none decides anything about order, counts, hours, capacity or an outcome's effect.
  */
-import type { PausedCampaignCalls, CallNumberView, CallOffListView, CallOutcomeApi, DeclinedPathApi, DeclinePreviewView, DeclineTrackView, CallQueueItem, CallsView, CallTaskView, FinishReasonApi, HoldReasonApi, NeedsAttention, OutreachStatus, RecordCallView, RecordCalls, RecordedNumberView, TodayView, WindowRule } from "../../shared/api.ts";
+import type { PausedCampaignCalls, CallbackListingView, CallNumberView, CallOffListView, CallOutcomeApi, DeclinedPathApi, DeclinePreviewView, DeclineTrackView, CallQueueItem, CallsView, CallTaskView, FinishReasonApi, HoldReasonApi, NeedsAttention, OutreachStatus, RecordCallView, RecordCalls, RecordedNumberView, TodayView, WindowRule } from "../../shared/api.ts";
 import { WIN_BACK_HAS_NO_TRACKS } from "../../domain/sequence/definition.ts";
 import { STATUS_LABEL } from "../status.tsx";
 import type { DeskSnapshot } from "./callDesk.ts";
@@ -137,7 +137,7 @@ export function capacityLine(view: Pick<CallsView, "dailyCapacity" | "defaultDai
   return `Your daily call capacity is ${n} ${n === 1 ? "call" : "calls"}${n === view.defaultDailyCapacity ? ", the default until you set one" : ""}.`;
 }
 
-export const CAPACITY_USED = "Today’s call capacity is used. Calls that fall due now wait for tomorrow; none is dropped.";
+export const CAPACITY_USED = "Today’s call capacity is used. Calls that fall due now wait for room on your list, on a day with calling hours; none is dropped.";
 
 const DAY = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 const hour = (h: number) => `${String(h % 24).padStart(2, "0")}:00`;
@@ -246,12 +246,23 @@ export function callHoldSentence(kind: "call" | "callback", hold: "campaign_paus
   }
 }
 
-/** A call whose lead's callback holds it, as the record's call line says it. */
-export const callbackHoldsCallLine = (trackLabel: string): string => `Their call on the ${trackLabel.toLowerCase()} waits while their callback is open: only the callback is on the list.`;
+/**
+ * A call whose lead's callback holds it, with that callback's real listing from the read (council on 178de98, item 8): the
+ * record's call line and the Calls page's off-list line both say it, so neither says the callback is on the list when it
+ * is not.
+ */
+export function callbackHoldsCallLine(trackLabel: string | null, callback: CallbackListingView): string {
+  const call = trackLabel === null ? "Their call" : `Their call on the ${trackLabel.toLowerCase()}`;
+  return callback.listed ? `${call} waits while their callback is open: only the callback is on the list.` : `${call} waits while their callback is open; the callback is ${listedForPhrase(callback.listedFor)}.`;
+}
+/** A call listed from a later day (YYYY-MM-DD), in a sentence's middle: the record's call line and a step's time both say it. */
+export const listedForPhrase = (date: string): string => `on the list for ${dayLabel(date)}`;
 /** A call listed from a later day, as the record's call line says it (YYYY-MM-DD). */
-export const listedForLine = (date: string): string => `Their call is on the list for ${dayLabel(date)}.`;
+export const listedForLine = (date: string): string => `Their call is ${listedForPhrase(date)}.`;
+/** A call whose prospect's calling hours do not open on the user's day, in a sentence's middle. */
+export const HOURS_CLOSED_PHRASE = "waits for a day their calling hours open";
 /** A call whose prospect's calling hours do not open on the user's day, as the record's call line says it. */
-export const HOURS_CLOSED_LINE = "Their call waits for a day their calling hours open.";
+export const HOURS_CLOSED_LINE = `Their call ${HOURS_CLOSED_PHRASE}.`;
 
 /** What the page knows of the call beside its read: whether a logged outcome came since it opened the call, the call's kind and track. */
 export interface OffListContext {
@@ -288,7 +299,7 @@ export function offListLine(who: string, off: CallOffListView | null, message: s
     case "campaign_not_launched":
       return "The call is off the list until this campaign launches.";
     case "callback_hold":
-      return context ? callbackHoldsCallLine(context.track) : "Their call waits while their callback is open: only the callback is on the list.";
+      return callbackHoldsCallLine(context?.track ?? null, off.callback);
     case "listed_later":
       return listedForLine(off.listedFrom);
     case "no_hours_today":
@@ -609,7 +620,7 @@ export function recordCallLine(call: RecordCallView, today: string): { lead: str
     return { lead, rest: call.noGoodNumber ? noGoodNumberText(null).afterOverdue : "" };
   }
   const plain = (lead: string) => ({ lead, rest: "" });
-  if (call.heldByCallback) return plain(callbackHoldsCallLine(call.track.label));
+  if (call.heldByCallback) return plain(callbackHoldsCallLine(call.track.label, call.heldByCallback));
   if (call.listed) {
     const why = call.reason === "rolled_over" ? "Their call rolled over to today’s list." : call.reason === "redial" ? "Their call is back on today’s list: you asked for a redial." : "Their call is on today’s list.";
     return plain(`${why}${limit}`);

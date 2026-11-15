@@ -18,7 +18,8 @@ import { definitionProblems, emptyDefinition, liveTracks, type CampaignDefinitio
 import { Engine } from "./engine/engine.ts";
 import type { StoredDefinition, StoredNote } from "./engine/engine-store.ts";
 import { UnconnectedEmailPort, UnprovisionedSmsPort } from "./engine/ports.ts";
-import { accountView, progressView } from "./engine/views.ts";
+import { accountView, progressView, stepEnvOf } from "./engine/views.ts";
+import type { StepEnv } from "../domain/sequence/dispatch.ts";
 import { callsView, callTaskView, needsAttentionView, recordCalls, todayView } from "./engine/call-views.ts";
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
 import { sealReckoning } from "../domain/sequence/progress.ts";
@@ -607,11 +608,15 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   });
 
   // Work handed over and not settled may still be sent (ticket 17a's provider limitation): the screens say so.
-  const readOf = (state: SubjectState, at: number): EnrollmentRead => ({ ...progressView(state, at), controls: controlsView(state, at, rules), mayStillSend: state.work.filter(maySend).length });
+  // When each step goes is read with what dispatch knows beyond the lead (ADR 0003 "Reads that say when"): the port's
+  // transport, and the dispatch gate while sending is interrupted.
+  const transport = (channel: "email" | "sms", threading: "new_subject" | "continue_thread") => engine.transportAvailable?.(channel, threading) ?? true;
+  const envAt = (at: number) => stepEnvOf(store.engine, at, transport);
+  const readOf = (state: SubjectState, at: number, env: StepEnv): EnrollmentRead => ({ ...progressView(state, at, env, rules.stepWhen), controls: controlsView(state, at, rules, env), mayStillSend: state.work.filter(maySend).length });
   const enrollmentRead = async (id: string): Promise<EnrollmentRead | null> => {
     const at = Date.parse(now());
     const state = await store.engine.subject(id, at);
-    return state ? readOf(state, at) : null;
+    return state ? readOf(state, at, await envAt(at)) : null;
   };
 
   // Ticket 17b: each enrollment's read on the record, with its campaign's launch and pause, so each campaign row shows
@@ -625,13 +630,14 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   };
   const recordControls = async (enrollmentIds: readonly string[], loaded: ReadonlyMap<string, SubjectState | null>, at: number): Promise<RecordControls> => {
     const leads: RecordLead[] = [];
+    const env = await envAt(at);
     for (const id of enrollmentIds) {
       const state = loaded.get(id) ?? null;
       if (!state) continue;
       // The campaign's launch and pause as the loaded lead holds them: the same snapshot as its calls and controls, so a
       // pause landing during this read never makes one row both on hold and on today's list (council on 57d874f, item 6).
       const { launchedAt, pausedSince } = state.campaign;
-      leads.push({ ...readOf(state, at), campaignState: { launched: launchedAt !== null, paused: pausedSince !== null, pausedSince: pausedSince === null ? null : new Date(pausedSince).toISOString() } });
+      leads.push({ ...readOf(state, at, env), campaignState: { launched: launchedAt !== null, paused: pausedSince !== null, pausedSince: pausedSince === null ? null : new Date(pausedSince).toISOString() } });
     }
     return { leads, userZone: (await store.engine.callSettings()).userZone };
   };
@@ -640,7 +646,8 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   const isTestRun = async (id: string) => (await store.engine.testRun(id)) !== null;
 
   // Ticket 18: bulk add, pause, resume and stop on Leads, each per-lead effect through the engine's own control.
-  bulkRoutes(app, { store, engine, now, newId, readOf, ...(bulkRules ? { rules: bulkRules } : {}) });
+  // Bulk previews say statuses and what each control does, never when a step goes: the read without dispatch context.
+  bulkRoutes(app, { store, engine, now, newId, readOf: (state, at) => readOf(state, at, {}), ...(bulkRules ? { rules: bulkRules } : {}) });
 
   app.get("/enrollments/:id", async (c) => {
     if (await isTestRun(c.req.param("id"))) return notFound(c, "enrollment");
@@ -715,7 +722,10 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   // -------------------------------------------------------------------------------------------
   // Test runs (ticket 21; ADR 0003 "Ticket 21").
 
-  const testTab = async (id: string) => testRunTab(store, id, Date.parse(now()), rules);
+  const testTab = async (id: string) => {
+    const at = Date.parse(now());
+    return testRunTab(store, id, at, rules, await envAt(at));
+  };
 
   app.get("/campaigns/:id/test-runs", async (c) => {
     const tab = await testTab(c.req.param("id"));

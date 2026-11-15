@@ -86,7 +86,8 @@ export function stepStateText(row: TestStepRow, zone: string, readAt: string): s
       if (row.at === null && row.waits !== null) return capitalise(stepWaitWords(row.waits));
       const ms = row.at === null ? Infinity : Date.parse(row.at) - Date.parse(readAt);
       if (ms <= 0) return "Due now";
-      return ms <= 2 * 60_000 ? "In about 1 min" : `Due ${at}`;
+      // The earliest it can go, never a promise (verifier on 178de98, item 9).
+      return ms <= 2 * 60_000 ? "Earliest in about 1 min" : `Earliest ${at}`;
     }
     case "on_your_list":
       return "On your Calls list";

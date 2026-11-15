@@ -246,6 +246,66 @@ export function nextWindowOpen(rules: readonly WindowRule[], zone: string, t: nu
   return best;
 }
 
+/** The zone's offset at `t` (local wall clock read as UTC, minus `t`), at the second `t` falls in. */
+function offsetAt(t: number, zone: string): number {
+  const second = t - (((t % 1000) + 1000) % 1000);
+  return localParts(second, zone).asUtc - second;
+}
+
+/** Every instant in [from, to) at which the zone's offset changes: the first second of each new offset. */
+function offsetChanges(zone: string, from: number, to: number): number[] {
+  const out: number[] = [];
+  const step = 6 * 3_600_000;
+  for (let x = from; x < to; x += step) {
+    const y = Math.min(x + step, to);
+    const before = offsetAt(x, zone);
+    if (before === offsetAt(y, zone)) continue;
+    let lo = x;
+    let hi = y;
+    while (hi - lo > 1000) {
+      const mid = lo + Math.floor((hi - lo) / 2000) * 1000;
+      if (offsetAt(mid, zone) === before) lo = mid;
+      else hi = mid;
+    }
+    out.push(hi - (((hi % 1000) + 1000) % 1000));
+  }
+  return out;
+}
+
+/** Every instant at which local time in `zone` reads `minute` minutes into local day `day`: none in a gap, two in a repeated hour. */
+function localOccurrences(day: number, minute: number, zone: string): number[] {
+  const wall = day * DAY + minute * 60_000;
+  const offsets = new Set([offsetAt(wall - 2 * DAY, zone), offsetAt(wall - DAY, zone), offsetAt(wall, zone), offsetAt(wall + DAY, zone), offsetAt(wall + 2 * DAY, zone)]);
+  return [...offsets].map((o) => wall - o).filter((t) => {
+    const p = localParts(t, zone);
+    return p.day === day && p.minute === minute;
+  });
+}
+
+/**
+ * The first instant at or after `t` at which `windowOpen` holds, exactly, or null when the window does not open within
+ * nine days (ADR 0003 "Reads that say when", council on 178de98, item 6). `windowOpen` can change from closed to open
+ * only where local time crosses a rule's start, or where the zone's offset changes (a missing hour can jump into a
+ * window, and a repeated hour can return to one): every such instant is a candidate, and the earliest at which the
+ * window is open is the answer. So a start that does not exist that night opens at the first instant after the gap, and
+ * a start that occurs twice opens at its first occurrence. The reads and the email and text claim guard use this; call
+ * listing still uses `nextWindowOpen`, whose instants around a clock change are reported, not changed here.
+ */
+export function windowOpensAt(rules: readonly WindowRule[], zone: string, t: number): number | null {
+  if (windowOpen(rules, zone, t)) return t;
+  const today = localDayNumber(t, zone);
+  const horizon = t + 9 * DAY;
+  const candidates = offsetChanges(zone, t, horizon);
+  for (let d = -1; d <= 8; d++) {
+    const day = today + d;
+    const weekday = (((day + 4) % 7) + 7) % 7;
+    for (const r of rules) if (r.day === weekday) candidates.push(...localOccurrences(day, r.start * 60, zone));
+  }
+  let best: number | null = null;
+  for (const c of candidates) if (c >= t && c < horizon && (best === null || c < best) && windowOpen(rules, zone, c)) best = c;
+  return best;
+}
+
 /** The first instant after `t` outside the window, while it is open at `t`; null when it is closed at `t` (ticket 14b: when a ready call stops being ready). */
 export function nextWindowClose(rules: readonly WindowRule[], zone: string, t: number): number | null {
   if (!windowOpen(rules, zone, t)) return null;

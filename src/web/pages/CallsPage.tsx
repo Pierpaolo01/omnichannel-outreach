@@ -609,7 +609,8 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
       )}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <span id={hintId} className="text-[13px] text-muted">
-          {pending
+          {/* No instruction the locked sheet would refuse (council on 178de98, item 5): nothing is said while it is locked. */}
+          {pending || locked
             ? ""
             : draft.outcome === null
               ? "Pick what happened to finish this call."

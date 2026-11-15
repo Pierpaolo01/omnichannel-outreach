@@ -45,7 +45,7 @@ test("a company lead launched on Monday with a Tuesday-to-Friday window: its row
   await page.clock.setFixedTime(h.clock);
   await page.goto(`${w.url}/leads/companies/${company}`);
   const row = page.getByRole("region", { name: "Campaigns" }).getByRole("listitem").first();
-  await expect(row).toContainText("due Tue 10 Nov at 09:00");
+  await expect(row).toContainText("earliest Tue 10 Nov at 09:00");
   await expect(row).not.toContainText("Mon 9 Nov at 10:00");
   // What the engine does: nothing on Monday; the email goes when Tuesday's window opens.
   await h.advanceTo(Date.parse("2026-11-10T12:00:00Z"));

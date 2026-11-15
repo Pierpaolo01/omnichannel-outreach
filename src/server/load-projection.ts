@@ -341,6 +341,7 @@ export function projectLoad(input: ProjectionInput): Projection {
       capacity: day === today.get(id) ? a.capacity : a.dailyLimit,
       nextSlotAt: slot.get(id) ?? 0,
       used: (day === today.get(id) ? (baseToday.get(id) ?? 0) : 0) + (sentOn.get(`${id}/${day}`) ?? 0) + (reserved.get(id) ?? 0),
+      reserved: reserved.get(id) ?? 0,
       inFlight: live.get(id) ?? 0,
     };
   };

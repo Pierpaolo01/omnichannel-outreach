@@ -102,6 +102,33 @@ export function callableOnDay(window: readonly WindowRule[], zone: string, start
   return opens !== null && opens < end;
 }
 
+/**
+ * How many of this lead's open calls will certainly take room on the user's list on a later user day `day` (ADR 0003
+ * "Reads that say when", verifier on 178de98, item 9): the engine knows a call is carried into `day` when no user day
+ * from today up to `day` can list it (the listing rule's own `callableOnDay`), so it cannot be worked before, and `day`
+ * can; a callback counts on its own day, before which it is not listed. A call that could be worked earlier may not be
+ * carried, and is not counted. The read gives "no room that day" only from these.
+ */
+export function carriedInto(state: SubjectState, day: number): number {
+  const { subject } = state;
+  if (subject.ended !== null || subject.leadPaused || !campaignLets(state) || goodNumbers(state).length === 0) return 0;
+  const { userZone } = state.callDay;
+  const callable = (task: CallTask, d: number) => callableOnDay(callWindow(state, task.trackId), state.lead.zone, startOfLocalDay(d, userZone), startOfLocalDay(d + 1, userZone));
+  let n = 0;
+  for (const task of state.callTasks) {
+    if (!task.open) continue;
+    if (task.kind === "callback") {
+      if (callbackDay(state, task) === day) n++;
+      continue;
+    }
+    if (callbackHold(state) || task.listDay > day || !callable(task, day)) continue;
+    let workableBefore = false;
+    for (let d = Math.max(task.listDay, state.callDay.day); d < day && !workableBefore; d++) workableBefore = callable(task, d);
+    if (!workableBefore) n++;
+  }
+  return n;
+}
+
 /** The user-local day a callback is for: it is listed from that day on (2.3). */
 export function callbackDay(state: SubjectState, task: CallTask): number {
   return task.callbackAt === null ? Number.POSITIVE_INFINITY : localDayNumber(task.callbackAt, state.callDay.userZone);
@@ -146,11 +173,23 @@ export type OffListReason =
   | { readonly kind: "lead_paused" }
   /** Its phone track finished otherwise: the skip limit, the user's skip, a decline on another call, win-back, no good number. */
   | { readonly kind: "track_finished"; readonly finish: FinishReason | null }
-  /** Another call of the lead is a callback, which holds this one. */
-  | { readonly kind: "callback_hold" }
+  /** Another call of the lead is a callback, which holds this one: whether that callback is listed today, and its list day. */
+  | { readonly kind: "callback_hold"; readonly callback: CallbackListing }
   /** Listed from a later user day (a redial or a callback whose outcome is no longer the latest cause). */
   | { readonly kind: "listed_later"; readonly day: number }
   | { readonly kind: "no_hours_today" };
+
+/** The lead's open callback as the listing rule sees it (`isListed`, `listedForDay`): on today's list, or the day it comes onto it. */
+export interface CallbackListing {
+  readonly listed: boolean;
+  readonly day: number;
+}
+
+/** The listing of the lead's open callback, the task that holds its other calls (2.3); null when it has none. */
+export function callbackListing(state: SubjectState): CallbackListing | null {
+  const callback = state.callTasks.find((t) => t.open && t.kind === "callback");
+  return callback ? { listed: isListed(state, callback), day: listedForDay(state, callback) } : null;
+}
 
 /** Whether this outcome is what took the task off the list: it closed it, or moved it past the current user day. */
 function tookOff(state: SubjectState, task: CallTask, outcome: CallAttempt): boolean {
@@ -169,7 +208,10 @@ export function offListReason(state: SubjectState, task: CallTask): OffListReaso
   if (subject.ended !== null) return { kind: "lead_ended" };
   if (!campaignLets(state)) return campaign.pausedSince !== null ? { kind: "campaign_paused" } : { kind: "campaign_not_launched" };
   if (subject.leadPaused) return { kind: "lead_paused" };
-  if (task.kind === "call" && callbackHold(state)) return { kind: "callback_hold" };
+  if (task.kind === "call" && callbackHold(state)) {
+    const callback = callbackListing(state);
+    if (callback) return { kind: "callback_hold", callback };
+  }
   const day = listedForDay(state, task);
   if (day > state.callDay.day) return { kind: "listed_later", day };
   return { kind: "no_hours_today" };

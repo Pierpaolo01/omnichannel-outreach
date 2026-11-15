@@ -3,7 +3,7 @@
  * since the last edit, and the latest run as of the read's instant, from its stored facts through the engine's own
  * functions. Nothing here writes, and nothing beside the engine decides what a test does.
  */
-import { stepWhen } from "../domain/sequence/dispatch.ts";
+import { stepWhen, type StepEnv } from "../domain/sequence/dispatch.ts";
 import { stepWaitApi } from "./engine/step-when-view.ts";
 import { isLive, maySend } from "../domain/sequence/attempt.ts";
 import { liveSteps, type TrackDefinition } from "../domain/sequence/definition.ts";
@@ -47,7 +47,7 @@ async function leadsOf(store: OutreachStore, campaignId: string): Promise<TestRu
   });
 }
 
-export async function testRunTab(store: OutreachStore, campaignId: string, now: number, rules: CallViewRules): Promise<TestRunTab | null> {
+export async function testRunTab(store: OutreachStore, campaignId: string, now: number, rules: CallViewRules, env: StepEnv = {}): Promise<TestRunTab | null> {
   const row = await store.engine.campaign(campaignId);
   const stored = await store.engine.testContacts(campaignId);
   if (!row || !stored) return null;
@@ -59,13 +59,13 @@ export async function testRunTab(store: OutreachStore, campaignId: string, now: 
     contacts: { email: stored.contacts.email?.value ?? null, mobile: stored.contacts.mobile?.value ?? null, emailIsALead: stored.leadHas.email, mobileIsALead: stored.leadHas.mobile },
     noTestSinceEdit: await store.engine.noTestSinceEdit(campaignId),
     leads,
-    run: latest ? await runRead(store, latest, leads, now, rules) : null,
+    run: latest ? await runRead(store, latest, leads, now, rules, env) : null,
     at: iso(now),
     zone: row.definition?.timezone ?? "UTC",
   };
 }
 
-async function runRead(store: OutreachStore, run: TestRunRecord, leads: TestRunTab["leads"], now: number, rules: CallViewRules): Promise<TestRunRead | null> {
+async function runRead(store: OutreachStore, run: TestRunRecord, leads: TestRunTab["leads"], now: number, rules: CallViewRules, env: StepEnv): Promise<TestRunRead | null> {
   const stored = await store.engine.subject(run.id, now);
   if (!stored) return null;
   // As of the read's instant: what fell due since the worker's last tick is applied (nothing is written).
@@ -80,12 +80,12 @@ async function runRead(store: OutreachStore, run: TestRunRecord, leads: TestRunT
     email: run.contacts.email?.value ?? null,
     mobile: run.contacts.mobile?.value ?? null,
     mayStillSend: s.work.filter(maySend).length,
-    steps: stepsOf(s, rules, now),
+    steps: stepsOf(s, rules, now, env),
   };
 }
 
 /** Every live step of the main sequence, then of the win-back branch, in canvas order, with what its facts say. */
-export function stepsOf(s: SubjectState, rules: CallViewRules, now: number): TestStepRow[] {
+export function stepsOf(s: SubjectState, rules: CallViewRules, now: number, env: StepEnv = {}): TestStepRow[] {
   const def = s.campaign.definition;
   // A removed track a run started keeps its rows; one it never started is not shown.
   const shown = (t: TrackDefinition) => !t.removed || progressOf(s, t.id)?.startedAt != null;
@@ -128,9 +128,30 @@ export function stepsOf(s: SubjectState, rules: CallViewRules, now: number): Tes
       else if (s.subject.ended === null && p && p.finishedAt === null && p.nextStepId === step.id && p.dueWall !== null) {
         // When it goes, by the engine's own decision functions at the read (ADR 0003 "Reads that say when"): its window's
         // next opening once the cut wait has ended, or why it waits, with no time.
-        const when = stepWhen(s, track.id, now);
-        if (when?.kind === "waits") rows.push({ ...base, state: "due", at: null, waits: stepWaitApi(when.why) });
-        else rows.push({ ...base, state: "due", at: iso(Math.max(when?.at ?? now, now)) });
+        const when = (rules.stepWhen ?? stepWhen)(s, track.id, now, env);
+        switch (when?.kind) {
+          case "waits":
+            rows.push({ ...base, state: "due", at: null, waits: stepWaitApi(when.why) });
+            break;
+          case "at":
+            rows.push({ ...base, state: "due", at: iso(Math.max(when.at, now)) });
+            break;
+          // A call goes on the list on a user day, with no time of day (council on 178de98, item 3): today's is due now,
+          // a later day's is listed from that day, as the tab says of an open call listed later.
+          case "call_day":
+            rows.push(when.day <= s.callDay.day ? { ...base, state: "due", at: iso(now) } : { ...base, state: "listed_later", at: iso(startOfLocalDay(when.day, s.callDay.userZone)) });
+            break;
+          case "listed_for":
+            rows.push({ ...base, state: "listed_later", at: iso(startOfLocalDay(when.day, s.callDay.userZone)) });
+            break;
+          case undefined:
+            rows.push({ ...base, state: "due", at: iso(now) });
+            break;
+          default: {
+            const unhandled: never = when;
+            throw new Error(`A step time the Test run tab cannot say: ${String(unhandled)}`);
+          }
+        }
       }
       else rows.push({ ...base, state: "not_reached", at: null });
     });

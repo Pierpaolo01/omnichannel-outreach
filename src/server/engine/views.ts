@@ -1,8 +1,8 @@
 /** Read models for the HTTP interface, built from the engine's stored facts. */
 import { isLive, markable } from "../../domain/sequence/attempt.ts";
-import { isListed, listedForDay, reasonOf } from "../../domain/sequence/calls.ts";
+import { carriedInto, isListed, listedForDay, reasonOf } from "../../domain/sequence/calls.ts";
 import { callRecordView, dateOfDay } from "./call-views.ts";
-import { accountAvailable, candidatesFor, claimRefusal, heldReason, inheritedWork, readyItems, stalledAccounts, stepWhen } from "../../domain/sequence/dispatch.ts";
+import { accountAvailable, candidatesFor, claimRefusal, heldReason, inheritedWork, readyItems, stalledAccounts, stepWhen, type StepEnv } from "../../domain/sequence/dispatch.ts";
 import { stepWhenView } from "./step-when-view.ts";
 import { localDayNumber, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { relevantChannels, waitingOn } from "../../domain/sequence/providers.ts";
@@ -15,7 +15,37 @@ import { DEFAULT_RULES, type Rules } from "./rules.ts";
 
 const iso = (t: number | null) => (t === null ? null : new Date(t).toISOString());
 
-export function progressView(s: SubjectState, now: number): EnrollmentProgress {
+/**
+ * What a read knows of dispatch beyond the subject (`StepEnv`): the port's transport for a step, as the claim pass asks the
+ * engine, and, while sending is interrupted, whether the dispatch gate holds the step's channels (`waitingOn`, its own).
+ */
+export async function stepEnvOf(store: Pick<EngineStore, "meta" | "callSettings" | "subjectsWithOpenCallTasks" | "subject">, now: number, transportAvailable?: StepEnv["transportAvailable"]): Promise<StepEnv> {
+  const interrupted = await sendingInterrupted(store, now);
+  const evidence = interrupted ? await providerEvidence(store) : null;
+  // A later day's room, from every lead's calls the engine knows are carried into it (`carriedInto`), against the capacity.
+  const { dailyCapacity } = await store.callSettings();
+  const withCalls: SubjectState[] = [];
+  for (const id of await store.subjectsWithOpenCallTasks()) {
+    const s = await store.subject(id, now);
+    if (s) withCalls.push(s);
+  }
+  const room = new Map<number, boolean>();
+  const callRoomOn = (day: number): boolean => {
+    let known = room.get(day);
+    if (known === undefined) {
+      known = withCalls.reduce((n, s) => n + carriedInto(s, day), 0) < dailyCapacity;
+      room.set(day, known);
+    }
+    return known;
+  };
+  return {
+    callRoomOn,
+    ...(transportAvailable ? { transportAvailable } : {}),
+    ...(evidence ? { waitingOnProvider: (s: SubjectState, trackId: string) => waitingOn(evidence, relevantChannels(s, trackId), now).length > 0 } : {}),
+  };
+}
+
+export function progressView(s: SubjectState, now: number, env: StepEnv = {}, when: typeof stepWhen = stepWhen): EnrollmentProgress {
   // The reply that stopped the lead, as stored when it stopped. A later text or email is kept on the
   // record, but never moves the channel or date the status shows.
   const reply = s.subject.ended === "replied" ? s.subject.stopReply : null;
@@ -62,7 +92,7 @@ export function progressView(s: SubjectState, now: number): EnrollmentProgress {
           finishedAt: iso(p?.finishedWall ?? null),
           hold: heldReason(s, track.id, now),
           // When it goes, by the engine's own decision functions at this instant (ADR 0003 "Reads that say when").
-          nextStep: nextStepOf(s, track.id, numberOf, now),
+          nextStep: nextStepOf(s, track.id, numberOf, now, env, when),
           steps: track.steps.map((st, i) => {
             const result = s.results.find((r) => r.stepId === st.id);
             return {
@@ -97,10 +127,10 @@ export function progressView(s: SubjectState, now: number): EnrollmentProgress {
 }
 
 /** A track's pending step and when it goes (`stepWhen`), or null when it has none. */
-function nextStepOf(s: SubjectState, trackId: string, numberOf: (stepId: string) => number, now: number): EnrollmentProgress["tracks"][number]["nextStep"] {
+function nextStepOf(s: SubjectState, trackId: string, numberOf: (stepId: string) => number, now: number, env: StepEnv, read: typeof stepWhen): EnrollmentProgress["tracks"][number]["nextStep"] {
   const p = s.tracks.find((x) => x.trackId === trackId);
-  const when = stepWhen(s, trackId, now);
-  return p?.nextStepId && when ? { stepId: p.nextStepId, number: numberOf(p.nextStepId), when: stepWhenView(when, now) } : null;
+  const when = read(s, trackId, now, env);
+  return p?.nextStepId && when ? { stepId: p.nextStepId, number: numberOf(p.nextStepId), when: stepWhenView(when, now, s.callDay.day) } : null;
 }
 
 /** A branch's tracks for the lead: not removed, or already started by it (5.1). */

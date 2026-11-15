@@ -14,6 +14,7 @@ import {
   handoverFailures,
   readyItems,
   retryFailures,
+  stepWhen,
 } from "../../domain/sequence/dispatch.ts";
 import { compareReadyNow, focusOf, isListed, logCallOutcome, placeCall, readyCalls, reasonOf } from "../../domain/sequence/calls.ts";
 import { applyBadDestination, applyReply, applyToAttempt, applyToWork, asOfAction, enterMain, evaluate, replyMatches, smsReplyOwner, withdrawalDue } from "../../domain/sequence/progress.ts";
@@ -45,6 +46,8 @@ export interface Rules {
   readonly applyBadDestination: typeof applyBadDestination;
   readonly sendPoint: typeof sendPoint;
   readonly readyItems: typeof readyItems;
+  /** When a pending step goes, as every read says it (ADR 0003 "Reads that say when"): a rule so a mutation can swap the read alone. */
+  readonly stepWhen: typeof stepWhen;
   /** Claims are made in this order (4.3). */
   readonly claimOrder: typeof comparePriority;
   /** Claimed attempts on one account are handed over in this order (5.5 step 2). */
@@ -141,6 +144,7 @@ export const DEFAULT_RULES: Rules = {
   applyBadDestination,
   sendPoint,
   readyItems,
+  stepWhen,
   claimOrder: comparePriority,
   handoverOrder: comparePriority,
   claimRefusal,

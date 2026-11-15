@@ -11,6 +11,8 @@ import {
   syncClock,
   wallOfLead,
   windowOpen,
+  windowOpensAt,
+  type WindowRule,
   type Freeze,
 } from "./clock.ts";
 
@@ -187,5 +189,31 @@ describe("running time: the one definition of time the application was running a
   ])("%s: credits at most the bound", async (_cause, gap, credited) => {
     const { runningCredit } = await import("./clock.ts");
     expect(runningCredit(1_000_000, 1_000_000 + gap, MIN)).toBe(credited);
+  });
+});
+
+describe("windowOpensAt: the first instant windowOpen holds, exactly, across clock changes (council on 178de98, item 6)", () => {
+  // An independent search: step windowOpen forward 30 minutes at a time from a 30-minute boundary. Exact here: every zone
+  // drawn has offsets of whole or half hours and changes on a whole hour, and every window edge is a whole local hour, so
+  // every instant windowOpen can change at lies on that grid.
+  const firstOpenByStepping = (rules: readonly WindowRule[], zone: string, t: number): number | null => {
+    for (let x = t; x < t + 9 * 86_400_000; x += 30 * 60_000) if (windowOpen(rules, zone, x)) return x;
+    return null;
+  };
+  const zones = ["Europe/London", "Europe/Berlin", "America/New_York", "Australia/Sydney", "Australia/Lord_Howe", "UTC"];
+  // Instants a few hours either side of each zone's 2026 changes, and some ordinary ones.
+  const anchors = ["2026-03-08T00:00:00Z", "2026-03-28T18:00:00Z", "2026-04-04T10:00:00Z", "2026-10-03T10:00:00Z", "2026-10-24T18:00:00Z", "2026-11-01T00:00:00Z", "2026-07-15T08:00:00Z"].map(Date.parse);
+  let seed = 23;
+  const rand = () => ((seed = (seed * 1103515245 + 12345) % 2_147_483_648) / 2_147_483_648);
+  test("on 300 drawn windows, zones and instants near each change, it equals the stepped answer", () => {
+    for (let i = 0; i < 300; i++) {
+      const zone = zones[Math.floor(rand() * zones.length)]!;
+      const start = Math.floor(rand() * 24);
+      const end = rand() < 0.2 ? Math.floor(rand() * start) : start + 1 + Math.floor(rand() * (24 - start));
+      const days = [0, 1, 2, 3, 4, 5, 6].filter(() => rand() < 0.4);
+      const rules = (days.length ? days : [0]).map((day) => ({ day, start, end }));
+      const t = anchors[Math.floor(rand() * anchors.length)]! + Math.floor(rand() * 48) * 30 * 60_000;
+      expect(windowOpensAt(rules, zone, t), `${zone} ${JSON.stringify(rules)} from ${new Date(t).toISOString()}`).toBe(firstOpenByStepping(rules, zone, t));
+    }
   });
 });

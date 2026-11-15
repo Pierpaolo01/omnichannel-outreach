@@ -33,7 +33,9 @@ describe("why the call the page had open left the list, in the records' words (A
   });
 
   test("a callback hold, a later day and a day without calling hours, as the record's call line says them", () => {
-    expect(offListLine("Pat Oneil", { reason: "callback_hold", status: "callback_scheduled" }, null, Z, ctx(true))).toBe("Their call on the phone track waits while their callback is open: only the callback is on the list.");
+    expect(offListLine("Pat Oneil", { reason: "callback_hold", callback: { listed: true, listedFor: "2026-11-09" }, status: "callback_scheduled" }, null, Z, ctx(true))).toBe("Their call on the phone track waits while their callback is open: only the callback is on the list.");
+    // Council on 178de98, item 8: tomorrow's callback is not on the list, and the sentence says so.
+    expect(offListLine("Pat Oneil", { reason: "callback_hold", callback: { listed: false, listedFor: "2026-11-10" }, status: "callback_scheduled" }, null, Z, ctx(true))).toBe("Their call on the phone track waits while their callback is open; the callback is on the list for Tue 10 Nov.");
     expect(offListLine("Pat Oneil", { reason: "listed_later", listedFrom: "2026-11-10", status: "waiting_on_call" }, null, Z, ctx(true))).toBe("Their call is on the list for Tue 10 Nov.");
     expect(offListLine("Pat Oneil", { reason: "no_hours_today", status: "waiting_on_call" }, null, Z, ctx(true))).toBe("Their call waits for a day their calling hours open.");
   });

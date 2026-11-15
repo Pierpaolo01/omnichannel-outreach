@@ -1008,6 +1008,7 @@ export class SqliteEngineStore implements EngineStore {
       backoffMs: num(a, "backoff_ms"),
       resetZone,
       used: num(counts, "sent_today") + num(counts, "reserved"),
+      reserved: num(counts, "reserved"),
       inFlight: this.occupancy(id),
     };
   }

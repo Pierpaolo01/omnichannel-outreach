@@ -387,6 +387,8 @@ export interface AccountState {
   readonly resetZone: string;
   /** Sends counted on today's reset day plus open reservations, across every subject. */
   readonly used: number;
+  /** Of `used`, the open reservations: unsettled work not yet sent, which a later reset day still counts (4.2). */
+  readonly reserved: number;
   /** Provider work holding in-flight places, across every subject: live attempts' work and unsettled work, once per key (`occupyingKeys`). */
   readonly inFlight: number;
 }

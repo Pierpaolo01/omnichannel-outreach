@@ -4,6 +4,7 @@
  */
 import type { StepWait, StepWhen } from "../../domain/sequence/dispatch.ts";
 import type { StepWaitApi, StepWhenView } from "../../shared/api.ts";
+import { dateOfDay } from "./call-views.ts";
 
 /** Every reason the engine has for a step with no time, in one exhaustive switch. */
 export function stepWaitApi(why: StepWait): StepWaitApi {
@@ -20,10 +21,16 @@ export function stepWaitApi(why: StepWait): StepWaitApi {
     case "no_thread":
     case "sms_conversation_taken":
     case "no_window":
+    case "no_transport":
+    case "waiting_on_provider":
+    case "reply_pending":
+    case "no_destination":
     case "sender_unavailable":
+    case "sender_busy":
     case "sending_capacity":
     case "call_capacity":
     case "on_call_list":
+    case "call_hours_closed":
       return why;
     default: {
       const unhandled: never = why;
@@ -32,8 +39,20 @@ export function stepWaitApi(why: StepWait): StepWaitApi {
   }
 }
 
-/** The read of `stepWhen(…, now)`: due now at the read's own instant, a later instant, or why it waits. */
-export function stepWhenView(when: StepWhen, now: number): StepWhenView {
-  if (when.kind === "waits") return { kind: "waits", why: stepWaitApi(when.why) };
-  return when.at <= now ? { kind: "now" } : { kind: "at", at: new Date(when.at).toISOString() };
+/** The read of `stepWhen(…, now)`: due now at the read's own instant, a later instant, a call's day, or why it waits. `today` is the user's day number. */
+export function stepWhenView(when: StepWhen, now: number, today: number): StepWhenView {
+  switch (when.kind) {
+    case "waits":
+      return { kind: "waits", why: stepWaitApi(when.why) };
+    case "at":
+      return when.at <= now ? { kind: "now" } : { kind: "at", at: new Date(when.at).toISOString() };
+    case "call_day":
+      return { kind: "call_day", day: dateOfDay(when.day), today: when.day <= today };
+    case "listed_for":
+      return { kind: "listed_for", day: dateOfDay(when.day) };
+    default: {
+      const unhandled: never = when;
+      throw new Error(`A step time the reads cannot say: ${String(unhandled)}`);
+    }
+  }
 }

@@ -133,16 +133,29 @@ export type StepWaitApi =
   | "with_provider"
   | HoldReasonApi
   | "no_window"
+  | "no_transport"
+  | "waiting_on_provider"
+  | "reply_pending"
+  | "no_destination"
   | "sender_unavailable"
+  | "sender_busy"
   | "sending_capacity"
   | "call_capacity"
-  | "on_call_list";
+  | "on_call_list"
+  | "call_hours_closed";
 
 /**
  * When a pending step goes, as the engine decides it at the read's instant (`stepWhen`): due now; at a later instant (its
  * window's next opening, for an email or text whose wait has ended outside it); or waiting, with why, and no time.
  */
-export type StepWhenView = { readonly kind: "now" } | { readonly kind: "at"; readonly at: string } | { readonly kind: "waits"; readonly why: StepWaitApi };
+export type StepWhenView =
+  | { readonly kind: "now" }
+  | { readonly kind: "at"; readonly at: string }
+  | { readonly kind: "waits"; readonly why: StepWaitApi }
+  /** A call not yet placed: the user's day (YYYY-MM-DD) it goes on the list, with no time of day; `today` when that is the read's day. */
+  | { readonly kind: "call_day"; readonly day: string; readonly today: boolean }
+  /** An open call listed from a later user day (YYYY-MM-DD), as the record's call line says it. */
+  | { readonly kind: "listed_for"; readonly day: string };
 
 /** A step a control names: the one it skips, or the next one the lead would send. */
 export interface ControlStepView {
@@ -1173,8 +1186,8 @@ export interface RecordCallView {
   /** Null for a callback, which is never skipped. */
   readonly skipLimit: SkipLimitView | null;
   readonly noGoodNumber: boolean;
-  /** A call held because the lead has an open callback on another phone track: only the callback is listed. */
-  readonly heldByCallback: boolean;
+  /** A call held because the lead has an open callback on another phone track, with that callback's own listing; null otherwise. */
+  readonly heldByCallback: CallbackListingView | null;
 }
 
 /** GET /api/people/:id and GET /api/companies/:id add each enrollment's open calls to the CRM record (ticket 15b). */
@@ -1351,9 +1364,15 @@ export type CallOffListView =
   | { readonly reason: "campaign_paused"; readonly status: OutreachStatus }
   | { readonly reason: "campaign_not_launched"; readonly status: OutreachStatus }
   | { readonly reason: "lead_paused"; readonly status: OutreachStatus }
-  | { readonly reason: "callback_hold"; readonly status: OutreachStatus }
+  | { readonly reason: "callback_hold"; readonly callback: CallbackListingView; readonly status: OutreachStatus }
   | { readonly reason: "listed_later"; readonly listedFrom: string; readonly status: OutreachStatus }
   | { readonly reason: "no_hours_today"; readonly status: OutreachStatus };
+
+/** The lead's open callback, which holds its other calls: on today's list, or the user's day (YYYY-MM-DD) it is listed from. */
+export interface CallbackListingView {
+  readonly listed: boolean;
+  readonly listedFor: string;
+}
 
 /** GET /api/call-tasks/:id: everything the call screen shows for one task. */
 export interface CallTaskView {

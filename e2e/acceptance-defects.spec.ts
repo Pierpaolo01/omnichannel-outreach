@@ -49,7 +49,7 @@ test("defect 2 (review item 11): a person's campaign row and the read name when 
   const read = await w.read(lead);
   await at(page, w, `/leads/people/${await w.record("Pat Oneil")}`);
   const row = page.getByRole("region", { name: "Campaigns" }).getByRole("listitem").first();
-  await expect(row).toContainText("Next: email 1 of 1, due");
+  await expect(row).toContainText("Next: email 1 of 1, earliest");
   const sentence = (await row.textContent()) ?? "";
   // What the engine does with it: nothing on Monday; it goes when Tuesday's window opens.
   await h.advanceTo(Date.parse("2026-11-10T12:00:00Z"));
@@ -59,7 +59,7 @@ test("defect 2 (review item 11): a person's campaign row and the read name when 
   // The read and the row, taken on Monday at 11:00, name the instant it goes (the read's `when`, ADR 0003 "Reads that say when").
   const whenInRead = read.tracks.find((t) => t.channel === "email")?.nextStep?.when;
   expect(whenInRead).toEqual({ kind: "at", at: new Date(sentAt ?? NaN).toISOString() });
-  expect(sentence).toContain("due Tue 10 Nov at 09:00");
+  expect(sentence).toContain("earliest Tue 10 Nov at 09:00");
   expect(sentence).not.toContain("Mon 9 Nov at 10:00");
 });
 
@@ -83,6 +83,8 @@ test("defect 3: while its campaign is paused, the Calls page does not say a call
   // Nothing can be logged on it while paused: every outcome and Log are disabled, and a post is refused.
   for (const button of await page.getByRole("group", { name: "Call outcome" }).getByRole("button").all()) await expect(button).toBeDisabled();
   await expect(page.getByRole("button", { name: "Log and open next call" })).toBeDisabled();
+  // Nor does the locked sheet tell the user to pick an outcome it then refuses (council on 178de98, item 5).
+  await expect(page.getByText("Pick what happened to finish this call.")).toHaveCount(0);
   expect((await h.request("POST", `/api/call-tasks/${taskId}/outcome`, { requestId: "while-paused", outcome: "no_answer", numberId: task.numbers[0]?.detailId ?? null, note: "" })).status).toBe(409);
   const offList = (await h.request<CallTaskView>("GET", `/api/call-tasks/${taskId}`)).body.offList;
   // The call is off the list because the campaign is paused, not because an outcome was logged elsewhere; the page says

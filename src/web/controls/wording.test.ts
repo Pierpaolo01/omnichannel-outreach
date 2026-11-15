@@ -61,14 +61,20 @@ const running = (status: OutreachStatus, fields: Partial<RecordLead> = {}) =>
 describe("when a step goes, in one wording function (ADR 0003 \"Reads that say when\")", () => {
   test("due now, at an instant in the user's zone, or why it waits with no time", () => {
     expect(stepWhenPhrase({ kind: "now" }, ZONE)).toBe("due now");
-    expect(stepWhenPhrase(at("2026-11-10T09:00:00.000Z"), ZONE)).toBe("due Tue 10 Nov at 09:00");
+    expect(stepWhenPhrase(at("2026-11-10T09:00:00.000Z"), ZONE)).toBe("earliest Tue 10 Nov at 09:00");
     expect(stepWhenPhrase({ kind: "waits", why: "sending_capacity" }, ZONE)).toBe("waiting for sending capacity: every account it may use is full today");
+    // A call: the day it goes on the list, never a time of day; once listed for a later day, the call line's own words.
+    expect(stepWhenPhrase({ kind: "call_day", day: "2026-11-10", today: false }, ZONE)).toBe("on your call list from Tue 10 Nov at the earliest");
+    expect(stepWhenPhrase({ kind: "call_day", day: "2026-11-09", today: true }, ZONE)).toBe("goes on your call list today");
+    expect(stepWhenPhrase({ kind: "listed_for", day: "2026-11-10" }, ZONE)).toBe("on the list for Tue 10 Nov");
+    expect(stepWhenPhrase({ kind: "waits", why: "call_hours_closed" }, ZONE)).toBe("waits for a day their calling hours open");
   });
 
   test("every reason the read can give has words, and none promises a time", () => {
     const reasons: Record<StepWaitApi, true> = {
       campaign_not_launched: true, campaign_paused: true, lead_paused: true, callback: true, ended: true, with_provider: true, unresolved: true, render_failed: true,
       provider_skipped: true, no_thread: true, sms_conversation_taken: true, no_window: true, sender_unavailable: true, sending_capacity: true, call_capacity: true, on_call_list: true,
+      no_transport: true, waiting_on_provider: true, reply_pending: true, no_destination: true, sender_busy: true, call_hours_closed: true,
     };
     for (const why of Object.keys(reasons) as StepWaitApi[]) {
       const words = stepWhenPhrase({ kind: "waits", why }, ZONE);
@@ -96,19 +102,19 @@ describe("the plain next-step sentence, for every status", () => {
   });
 
   test("queued and active after launch: the step the read names, and when it is due", () => {
-    expect(nextStepSentence(running("queued"), ZONE)).toBe("Nothing has gone out yet. Next: email 2 of 3, due Tue 3 Nov at 09:00.");
-    expect(nextStepSentence(running("active"), ZONE)).toBe("Next: email 2 of 3, due Tue 3 Nov at 09:00.");
+    expect(nextStepSentence(running("queued"), ZONE)).toBe("Nothing has gone out yet. Next: email 2 of 3, earliest Tue 3 Nov at 09:00.");
+    expect(nextStepSentence(running("active"), ZONE)).toBe("Next: email 2 of 3, earliest Tue 3 Nov at 09:00.");
   });
 
   test("a step of a campaign with several tracks on its channel names the track; a win-back step says so", () => {
     const two = { label: "Email track 2", several: true, branch: "main" as const };
     const r = running("active");
     const several = { ...r, controls: r.controls.map((c) => (c.action === "skip" && c.allowed ? { ...c, skips: step({ track: two }) } : c)) };
-    expect(nextStepSentence(several, ZONE)).toBe("Next: email 2 of 3 on email track 2, due Tue 3 Nov at 09:00.");
+    expect(nextStepSentence(several, ZONE)).toBe("Next: email 2 of 3 on email track 2, earliest Tue 3 Nov at 09:00.");
     const wb = { label: "Win-back email track", several: false, branch: "win_back" as const };
     const w = running("in_win_back");
     const winBack = { ...w, controls: w.controls.map((c) => (c.action === "skip" && c.allowed ? { ...c, skips: step({ track: wb, branch: "win_back", number: 1, of: 2 }) } : c)) };
-    expect(nextStepSentence(winBack, ZONE)).toBe("Next: win-back email 1 of 2, due Tue 3 Nov at 09:00.");
+    expect(nextStepSentence(winBack, ZONE)).toBe("Next: win-back email 1 of 2, earliest Tue 3 Nov at 09:00.");
   });
 
   test("a running lead with no step waiting says why, in the read's words", () => {
@@ -148,7 +154,7 @@ describe("the plain next-step sentence, for every status", () => {
   });
 
   test("the zone is the one passed in: the same read in New York says New York's day and time", () => {
-    expect(nextStepSentence(running("active"), "America/New_York")).toBe("Next: email 2 of 3, due Tue 3 Nov at 04:00.");
+    expect(nextStepSentence(running("active"), "America/New_York")).toBe("Next: email 2 of 3, earliest Tue 3 Nov at 04:00.");
   });
 });
 
@@ -183,14 +189,14 @@ describe("what a control will do (the read's preview) and what it did (the answe
     expect(controlEffectText(allowed("pause", { statusAfter: "paused", withProvider: 1 }))).toBe("Paused.");
   });
   test("resume: the next step and its due time, or the hold that remains", () => {
-    expect(controlPreviewText(allowed("resume", { next: step({ when: at("2026-11-03T09:00:00.000Z") }) }), paused, ZONE)).toBe("Their outreach continues where it was: email 2 of 3, due Tue 3 Nov at 09:00.");
+    expect(controlPreviewText(allowed("resume", { next: step({ when: at("2026-11-03T09:00:00.000Z") }) }), paused, ZONE)).toBe("Their outreach continues where it was: email 2 of 3, earliest Tue 3 Nov at 09:00.");
     expect(controlPreviewText(allowed("resume", { next: step() }), { launched: true, paused: true, pausedSince: "2026-11-02T10:00:00.000Z" }, ZONE)).toBe("Their own pause ends. Email 2 of 3 still waits while this campaign is paused.");
     expect(controlPreviewText(allowed("resume", { statusAfter: "callback_scheduled", next: null }), paused, ZONE)).toBe("Their own pause ends. Their callback still holds their outreach until you log how it went.");
     expect(controlEffectText(allowed("resume", { next: step({ when: at("2026-11-03T09:00:00.000Z") }) }))).toBe("Resumed.");
   });
   test("skip", () => {
     const skip = allowed("skip", { skips: step(), next: step({ stepId: "s3", number: 3, when: at("2026-11-06T09:00:00.000Z") }) });
-    expect(controlPreviewText(skip, paused, ZONE)).toBe("Email 2 of 3 is skipped and never sent. Next: email 3 of 3, due Fri 6 Nov at 09:00.");
+    expect(controlPreviewText(skip, paused, ZONE)).toBe("Email 2 of 3 is skipped and never sent. Next: email 3 of 3, earliest Fri 6 Nov at 09:00.");
     expect(controlEffectText(skip)).toBe("Email 2 of 3 skipped.");
     const call = allowed("skip", { skips: step({ channel: "call", track: { label: "Phone track", several: false, branch: "main" }, number: 1, of: 1 }), next: null });
     expect(controlPreviewText(call, paused, ZONE)).toBe("The call is skipped and never made.");
@@ -213,10 +219,10 @@ describe("what a control will do (the read's preview) and what it did (the answe
   });
   test("the restarts name the step that runs next, never step 1 unless the read says so", () => {
     const resume = allowed("resume_from_next_step", { next: step({ number: 3, when: at("2026-11-03T09:00:00.000Z") }) });
-    expect(controlPreviewText(resume, paused, ZONE)).toBe("They resume at the next unsent step: email 3 of 3, due Tue 3 Nov at 09:00. Nothing already sent goes again.");
+    expect(controlPreviewText(resume, paused, ZONE)).toBe("They resume at the next unsent step: email 3 of 3, earliest Tue 3 Nov at 09:00. Nothing already sent goes again.");
     expect(controlEffectText(resume)).toBe("Resumed from the next step.");
     const wb = allowed("move_to_win_back", { statusAfter: "in_win_back", next: step({ track: { label: "Win-back email track", several: false, branch: "win_back" }, branch: "win_back", number: 1, of: 2, when: at("2026-11-03T09:00:00.000Z") }) });
-    expect(controlPreviewText(wb, paused, ZONE)).toBe("They move to this campaign’s win-back branch, starting with win-back email 1 of 2, due Tue 3 Nov at 09:00. Their remaining main-sequence steps are dropped.");
+    expect(controlPreviewText(wb, paused, ZONE)).toBe("They move to this campaign’s win-back branch, starting with win-back email 1 of 2, earliest Tue 3 Nov at 09:00. Their remaining main-sequence steps are dropped.");
     expect(controlEffectText(wb)).toBe("Moved to the win-back branch.");
   });
 });

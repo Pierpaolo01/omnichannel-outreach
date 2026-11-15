@@ -8,7 +8,8 @@
 import { STATUS_GROUPS, statusGroup, type StatusGroup } from "../../domain/outreach-status.ts";
 import type { CampaignPauseRead, ControlStepView, ControlView, LeadControlApi, OutreachStatus, RecordLead, StepWaitApi, StepWhenView } from "../../shared/api.ts";
 import { stepNoun } from "../../shared/track-label.ts";
-import { callHoldSentence, dateIn, HOLD_REASON } from "../calls/wording.ts";
+import { callHoldSentence, dateIn, HOLD_REASON, HOURS_CLOSED_PHRASE, listedForPhrase } from "../calls/wording.ts";
+import { dayLabel } from "../calls/callbackTime.ts";
 import { STATUS_GROUP_LABEL } from "../status.tsx";
 
 export type AllowedControl = Extract<ControlView, { readonly allowed: true }>;
@@ -97,12 +98,24 @@ export function stepWaitWords(why: StepWaitApi): string {
       return `held: ${HOLD_REASON[why]}`;
     case "no_window":
       return "not going: its sending hours never open";
+    case "no_transport":
+      return "waiting: the email provider can’t send a follow-up in its thread yet";
+    case "waiting_on_provider":
+      return "waiting: sending is interrupted, and it goes once its provider answers again";
+    case "reply_pending":
+      return "waiting while a reply from them is matched to its thread";
+    case "no_destination":
+      return "not going: there is no good address to send it to";
+    case "sender_busy":
+      return "waiting for its sender to finish the sends it has under way";
+    case "call_hours_closed":
+      return HOURS_CLOSED_PHRASE;
     case "sender_unavailable":
       return "waiting for a sender account that can send";
     case "sending_capacity":
       return "waiting for sending capacity: every account it may use is full today";
     case "call_capacity":
-      return "waiting for room on your call list: today’s call capacity is used";
+      return "waiting for room on your call list, on a day with calling hours";
     case "on_call_list":
       return "on your call list";
     default: {
@@ -112,15 +125,25 @@ export function stepWaitWords(why: StepWaitApi): string {
   }
 }
 
-/** When a step goes, from the read (`StepWhenView`): "due now", "due Tue 10 Nov at 09:00" in the user's zone, or why it waits. */
+/**
+ * When a step goes, from the read (`StepWhenView`): "due now" only when dispatch hands it over on its next round; a later
+ * instant as the earliest it can go, never as a promise ("earliest Tue 10 Nov at 09:00", in the user's zone), since what the
+ * engine cannot know yet (another lead going first, tomorrow's room) can move it later (verifier on 178de98, item 9); or
+ * why it waits. Provisional wording, for the principal.
+ */
 export function stepWhenPhrase(when: StepWhenView, userZone: string): string {
   switch (when.kind) {
     case "now":
       return "due now";
     case "at":
-      return `due ${whenIn(userZone, when.at)}`;
+      return `earliest ${whenIn(userZone, when.at)}`;
     case "waits":
       return stepWaitWords(when.why);
+    // A call goes on the list on a day, never at a time of day (council on 178de98, item 3).
+    case "call_day":
+      return when.today ? "goes on your call list today" : `on your call list from ${dayLabel(when.day)} at the earliest`;
+    case "listed_for":
+      return listedForPhrase(when.day);
     default: {
       const unhandled: never = when;
       throw new Error(`A step time the page cannot say: ${String(unhandled)}`);

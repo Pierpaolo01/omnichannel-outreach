@@ -70,7 +70,7 @@ test("test contacts, Run test, the test call's win-back path, a reply stopping a
     await expect(page.getByRole("button", { name: "Test running" })).toBeVisible();
     await f.harness.advanceTo(f.harness.clock + 30_000);
     await at(page, f, tab);
-    await expect(page.getByText("In about 1 min").first()).toBeVisible();
+    await expect(page.getByText("Earliest in about 1 min").first()).toBeVisible();
     await shot(page, "04-test-running");
     await linger(page);
     await f.harness.advanceTo(f.harness.clock + 3 * MIN);
