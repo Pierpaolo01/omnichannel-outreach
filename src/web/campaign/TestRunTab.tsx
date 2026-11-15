@@ -16,8 +16,12 @@ import type { SequenceEditor } from "./useSequence.ts";
  * A Run or Stop press is kept with its request id until the server answers it, across a reload too (`testRunPress.ts`).
  */
 export function TestRunTab({ campaignId, editor }: { campaignId: string; editor: SequenceEditor }) {
-  const { read, refresh } = useLiveRead<TestRunTabView>(`/api/campaigns/${encodeURIComponent(campaignId)}/test-runs`);
-  const presses = usePresses(campaignId, refresh);
+  // One order for every read sent and every control answer received (review bot on f7cdc66): what is shown is the
+  // newest of them, so an older read, a control's own or the page's, never replaces a newer answer.
+  const order = useRef(0);
+  const issue = useCallback(() => ++order.current, []);
+  const { read, refresh } = useLiveRead<TestRunTabView>(`/api/campaigns/${encodeURIComponent(campaignId)}/test-runs`, issue);
+  const presses = usePresses(campaignId, refresh, issue);
   if (read.state === "error") return <ErrorState title="The test run didn’t load." message={read.message} onRetry={() => void refresh()} />;
   if (read.state === "loading")
     return (
@@ -26,7 +30,8 @@ export function TestRunTab({ campaignId, editor }: { campaignId: string; editor:
         <div className="skeleton h-[420px] w-full" />
       </div>
     );
-  const tab = presses.latest ?? read.data;
+  // A control's answer shows until a successful read sent after it lands; a failed read replaces nothing.
+  const tab = presses.latest !== null && presses.latest.issued > read.issued ? presses.latest.view : read.data;
   return (
     <div className="grid grid-cols-1 items-start gap-4 min-[1080px]:grid-cols-[380px_minmax(0,1fr)]">
       <Contacts campaignId={campaignId} tab={tab} editor={editor} onChange={refresh} presses={presses} />
@@ -41,8 +46,8 @@ const DISABLED = "disabled:border-line disabled:bg-transparent disabled:text-mut
 const newRequestId = () => (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `r-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
 interface Presses {
-  /** A press's answer, until the read after it has landed. */
-  readonly latest: TestRunTabView | null;
+  /** The newest control answer, numbered as it arrived in the page's one order with the reads. */
+  readonly latest: { readonly view: TestRunTabView; readonly issued: number } | null;
   /** The press waiting for its answer: this page's, or one kept from before a reload or by another tab. */
   readonly press: TestRunPress | null;
   /** This page is sending it now. */
@@ -60,13 +65,13 @@ interface Presses {
  * when the page opens (a reload while it waited, another visit) is sent again with the same id and body, so the page shows
  * it pending until the server has answered it, never the state from before it.
  */
-function usePresses(campaignId: string, refresh: () => Promise<void>): Presses {
+function usePresses(campaignId: string, refresh: () => Promise<void>, issue: () => number): Presses {
   const store = useMemo(() => browserStorage(() => window.localStorage), []);
   const [press, setPress] = useState<TestRunPress | null>(() => pendingPress(store, campaignId));
   const [sending, setSending] = useState(false);
   const [refusal, setRefusal] = useState<string | null>(null);
   const [said, setSaid] = useState<{ text: string; n: number } | null>(null);
-  const [latest, setLatest] = useState<TestRunTabView | null>(null);
+  const [latest, setLatest] = useState<Presses["latest"]>(null);
 
   const send = useCallback(
     async (p: TestRunPress) => {
@@ -74,20 +79,21 @@ function usePresses(campaignId: string, refresh: () => Promise<void>): Presses {
       setSending(true);
       setRefusal(null);
       try {
-        // The answer is the tab as of the press's effect: shown until the read asked for after it has landed, so the run
-        // before it never shows again in between (verifier re-check, item 15).
-        const answer = (await postJson(p.path, p.body)) as TestRunTabView;
+        // The answer is the tab as of the press's effect, numbered as it arrives: shown until a successful read sent after
+        // it lands (verifier re-check, item 15; review bot on f7cdc66). Nothing here clears it, and an older press's
+        // continuation cannot: each press sets only its own pending state and result, at its own answer.
+        const view = (await postJson(p.path, p.body)) as TestRunTabView;
+        const issued = issue();
         answered(store, campaignId, p.requestId);
-        setLatest(answer);
-        setPress(null);
-        await refresh();
-        setLatest(null);
+        setLatest((prev) => (prev === null || issued > prev.issued ? { view, issued } : prev));
+        setPress((now) => (now?.requestId === p.requestId ? null : now));
         setSaid((prev) => ({ text: p.kind === "run" ? "The test started. Its steps are on the right." : "The test is stopped. Nothing more goes to your test contacts.", n: (prev?.n ?? 0) + 1 }));
+        await refresh();
       } catch (error) {
         // A refusal is the server's answer: the press is done. A failure with no answer keeps it for Try again.
         if (error instanceof ApiRequestError && error.status >= 400 && error.status < 500) {
           answered(store, campaignId, p.requestId);
-          setPress(null);
+          setPress((now) => (now?.requestId === p.requestId ? null : now));
           setRefusal(error.message);
           await refresh();
         } else setRefusal(`${error instanceof Error ? error.message : "The request failed."} It may or may not have arrived: Try again sends the same request, which the server answers once.`);
@@ -95,7 +101,7 @@ function usePresses(campaignId: string, refresh: () => Promise<void>): Presses {
         setSending(false);
       }
     },
-    [campaignId, refresh, store],
+    [campaignId, issue, refresh, store],
   );
 
   // A press kept from before this page opened is sent again, with its own id and body (after the effect, so a development

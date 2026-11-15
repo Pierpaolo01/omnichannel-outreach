@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import type { CampaignDefinition } from "../src/domain/sequence/definition.ts";
+import { respond, serverError } from "./mocks.ts";
+import type { TestRunTab } from "../src/shared/api.ts";
 import { fakeTestRunApp, OWN_TEST_EMAIL, OWN_TEST_MOBILE, type FakeTestRunApp } from "./fake-provider.ts";
 
 /**
@@ -269,4 +271,62 @@ test("after Run test's answer, the run it started shows while the next read is o
   await expect(page.getByRole("heading", { name: /^Stopped/ })).toHaveCount(0);
   release();
   await expect(page.getByRole("heading", { name: /^Started at/ })).toBeVisible();
+});
+
+test("Run, then Stop before Run's read returns: the older read never brings back the running test (review bot on f7cdc66)", async ({ page }) => {
+  const f = await fakeTestRunApp("run-then-stop");
+  await f.harness.request("PUT", `/api/campaigns/${f.campaign}/test-contacts`, { email: OWN_TEST_EMAIL, mobile: "" });
+  await at(page, f, `/campaigns/${f.campaign}/test-run`);
+  await expect(page.getByRole("heading", { name: "No test yet" })).toBeVisible();
+  // From the Run press on, each read is answered by the server at once and delivered only when its gate opens: the first
+  // read carries the running test, sent before Stop.
+  const gates: (() => void)[] = [];
+  let armed = false;
+  let reads = 0;
+  await page.route("**/api/campaigns/*/test-runs", async (route) => {
+    if (route.request().method() === "POST") {
+      armed = true;
+      return route.continue();
+    }
+    if (!armed) return route.continue();
+    reads++;
+    const answer = (await (await route.fetch()).json()) as TestRunTab;
+    await new Promise<void>((resolve) => gates.push(resolve));
+    return respond(route, answer);
+  });
+  await page.getByRole("button", { name: "Run test" }).click();
+  await expect(page.getByRole("button", { name: "Stop test" })).toBeVisible();
+  await expect.poll(() => reads).toBe(1);
+  await page.getByRole("button", { name: "Stop test" }).click();
+  await expect(page.getByRole("heading", { name: /^Stopped/ })).toBeVisible();
+  // Run's read, sent before Stop's answer, lands: Stopped stays.
+  gates.shift()?.();
+  await expect.poll(() => reads).toBe(2);
+  await expect(page.getByRole("heading", { name: /^Stopped/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Test running" })).toHaveCount(0);
+  await expect(page.getByText("The test is stopped. Nothing more goes to your test contacts.")).toBeVisible();
+  // Stop's read lands: still Stopped, now from the read.
+  gates.shift()?.();
+  await expect(page.getByRole("heading", { name: /^Stopped/ })).toBeVisible();
+});
+
+test("a read that fails after Run test's answer leaves the started test shown (review bot on f7cdc66)", async ({ page }) => {
+  const f = await fakeTestRunApp("failed-read-after-run");
+  await f.harness.request("PUT", `/api/campaigns/${f.campaign}/test-contacts`, { email: OWN_TEST_EMAIL, mobile: "" });
+  await at(page, f, `/campaigns/${f.campaign}/test-run`);
+  await expect(page.getByRole("heading", { name: "No test yet" })).toBeVisible();
+  let armed = false;
+  await page.route("**/api/campaigns/*/test-runs", async (route) => {
+    if (route.request().method() === "POST") {
+      armed = true;
+      return route.continue();
+    }
+    return armed ? serverError(route) : route.continue();
+  });
+  await page.getByRole("button", { name: "Run test" }).click();
+  await expect(page.getByRole("button", { name: "Test running" })).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(page.getByRole("heading", { name: /^Started at/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "No test yet" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Stop test" })).toBeVisible();
 });
