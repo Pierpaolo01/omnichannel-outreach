@@ -444,3 +444,46 @@ async function startInterruption(scenario: InterruptionScenario): Promise<FakeIn
   if (scenario === "across-days") await harness.advanceTo(startedAt + H);
   return { url: await serveHarness(harness), harness, stoppedAt, startedAt };
 }
+
+// ---------------------------------------------------------------------------------------------
+// The verifier's focus case on PR 58 (ticket 20b): one inbox of capacity 1 a day, an email-only campaign with two leads,
+// so the second waits for capacity until the inbox resets at midnight UTC. No call tasks. Data is fictitious.
+
+export interface FakeCapacityApp {
+  readonly url: string;
+  readonly harness: EngineHarness;
+}
+
+const capacityStarted = new Map<string, Promise<FakeCapacityApp>>();
+
+/** Monday 9 November 2026 09:10 UTC: one lead's email went, the other's waits for the inbox's capacity. One app per name. */
+export function fakeCapacityApp(name: string): Promise<FakeCapacityApp> {
+  let app = capacityStarted.get(name);
+  if (!app) capacityStarted.set(name, (app = startCapacity()));
+  return app;
+}
+
+async function startCapacity(): Promise<FakeCapacityApp> {
+  const ALWAYS = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
+  const harness = new EngineHarness({ start: MONDAY_8 + H, accounts: [{ id: FAKE_INBOX, capacity: 1, gapMs: 60_000, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+  await harness.tick();
+  await harness.request("PUT", "/api/call-settings", { dailyCapacity: 10, userZone: "Europe/London" });
+  const harbour = business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101" });
+  const people = [
+    person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbourlane.example" }),
+    person({ person_id: "p2", business_id: "b1", full_name: "Sam Reed", email: "sam@harbourlane.example" }),
+  ];
+  const id = (await harness.request<{ campaign: Campaign }>("POST", "/api/campaigns", { name: "Clinics, London", defaultTimezone: "Europe/London", ...csvOf({ businesses: [harbour], people }) })).body.campaign.id;
+  await harness.defineSequence(id, {
+    timezone: "Europe/London",
+    callSkipLimitDays: 3,
+    emailPool: [FAKE_INBOX],
+    smsPool: [],
+    callScript: "",
+    tracks: [{ id: "e1", channel: "email", branch: "main", window: ALWAYS, steps: [{ id: "s1", waitDays: 0, subject: "A note for {{company}}", body: "Hi {{first_name}}, a short note for {{company}}.", threading: "new_subject", removed: false }], start: { kind: "entry" }, removed: false }],
+  });
+  const launched = await harness.launch(id);
+  if (launched.status !== 200) throw new Error(`the capacity campaign did not launch: ${JSON.stringify(launched.body)}`);
+  await harness.advanceTo(MONDAY_8 + H + 10 * 60_000);
+  return { url: await serveHarness(harness), harness };
+}

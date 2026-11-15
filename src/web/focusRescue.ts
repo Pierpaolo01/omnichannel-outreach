@@ -9,6 +9,11 @@ import { useEffect, useRef, type RefObject } from "react";
  *   4 another good number · 5 Back to Today, Start calling.
  * A transition with a destination of its own (the next call's number after an outcome, and so on)
  * places focus first; this only catches what would otherwise fall to the body.
+ *
+ * A list whose entries a read can remove (`data-rescue-list`, each entry `data-rescue-item` with a stable key, such as
+ * Needs attention on Today; verifier on PR 58) keeps focus in the list: the entry that took the focused one's place, or
+ * the next one after it as the list stood when focus entered it, else the previous one, else the list's heading
+ * (`data-rescue-heading`). With nothing left to focus, `data-rescue-fallback` (Today's greeting) takes it.
  */
 export function useFocusRescue(): RefObject<HTMLDivElement | null> {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -16,8 +21,16 @@ export function useFocusRescue(): RefObject<HTMLDivElement | null> {
     const container = ref.current;
     if (!container) return;
     let inside = false;
-    const onIn = () => {
+    /** The list entry focus was last in: its list, its key, and the list's keys at that moment, in order. */
+    let entry: { list: string; key: string; keys: string[] } | null = null;
+    const onIn = (e: FocusEvent) => {
       inside = true;
+      const item = e.target instanceof Element ? e.target.closest("[data-rescue-item]") : null;
+      const list = item?.closest("[data-rescue-list]");
+      entry =
+        item && list
+          ? { list: list.getAttribute("data-rescue-list") ?? "", key: item.getAttribute("data-rescue-item") ?? "", keys: [...list.querySelectorAll("[data-rescue-item]")].map((el) => el.getAttribute("data-rescue-item") ?? "") }
+          : null;
     };
     const onOut = (e: FocusEvent) => {
       // Focus moved on purpose to somewhere else on the page: not ours to rescue.
@@ -27,10 +40,32 @@ export function useFocusRescue(): RefObject<HTMLDivElement | null> {
       const active = document.activeElement;
       const lost = active === null || active === document.body || (active instanceof HTMLElement && container.contains(active) && (active.matches(":disabled") || !active.isConnected));
       if (!inside || !lost) return;
-      const usable = (el: Element): el is HTMLElement => el instanceof HTMLElement && !el.matches(":disabled") && el.getClientRects().length > 0;
-      const ranked = [...container.querySelectorAll("[data-rescue]")].filter(usable).sort((a, b) => Number(a.dataset["rescue"]) - Number(b.dataset["rescue"]));
-      const target = ranked[0] ?? [...container.querySelectorAll("a[href], button, input, select, textarea")].find(usable);
+      const usable = (el: Element | null | undefined): el is HTMLElement => el instanceof HTMLElement && !el.matches(":disabled") && el.getClientRects().length > 0;
+      const target = inList(usable) ?? ranked(usable) ?? [...container.querySelectorAll("[data-rescue-fallback]")].find(usable);
       target?.focus();
+    };
+    const ranked = (usable: (el: Element | null | undefined) => el is HTMLElement): HTMLElement | undefined => {
+      const byRank = [...container.querySelectorAll("[data-rescue]")].filter(usable).sort((a, b) => Number(a.dataset["rescue"]) - Number(b.dataset["rescue"]));
+      return byRank[0] ?? [...container.querySelectorAll("a[href], button, input, select, textarea")].find(usable);
+    };
+    /** Within the list focus was in: the same entry, the next, the previous, then its heading. */
+    const inList = (usable: (el: Element | null | undefined) => el is HTMLElement): HTMLElement | undefined => {
+      if (!entry) return undefined;
+      const was = entry;
+      const list = [...container.querySelectorAll("[data-rescue-list]")].find((el) => el.getAttribute("data-rescue-list") === was.list);
+      if (!list) return undefined;
+      const control = (key: string) => {
+        const item = [...list.querySelectorAll("[data-rescue-item]")].find((el) => el.getAttribute("data-rescue-item") === key);
+        return item?.querySelector("a[href], button, input, select, textarea");
+      };
+      const at = was.keys.indexOf(was.key);
+      const order = [was.key, ...was.keys.slice(at + 1), ...was.keys.slice(0, Math.max(at, 0)).reverse()];
+      for (const key of order) {
+        const c = control(key);
+        if (usable(c)) return c;
+      }
+      const heading = list.querySelector("[data-rescue-heading]");
+      return usable(heading) ? heading : undefined;
     };
     // A pointer press outside a control is the user putting focus down: not a loss to rescue.
     const onPointer = (e: PointerEvent) => {
