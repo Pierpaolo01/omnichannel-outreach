@@ -236,7 +236,7 @@ describe("ruling 5: settlement runs on its own clock", () => {
       new Promise((resolve) => setTimeout(() => resolve("blocked"), 3000)),
     ]);
     expect(await ran).toBe("ran");
-    const all = (await h.store.engine.subject((await h.store.engine.runningSubjectIds())[0]!, h.clock))!.attempts;
+    const all = (await h.store.engine.subject((await h.store.engine.runningLeadIds())[0]!, h.clock))!.attempts;
     expect(all[0]).toMatchObject({ state: "withdrawn", endedBy: "claim_expired" });
   });
 

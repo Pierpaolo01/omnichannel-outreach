@@ -46,7 +46,7 @@ describe("a provider's answer held across a boundary is applied after it arrived
         (port as unknown as Record<string, unknown>)[read] = original;
         expect(held).toBe(true);
 
-        const [id] = await h.store.engine.runningSubjectIds();
+        const [id] = await h.store.engine.runningLeadIds();
         const s = (await h.store.engine.subject(id ?? "", h.clock))!;
         expect(s.results.find((r) => r.stepId === "s1")).toMatchObject({ result: "sent", atWall: b.sentAt });
         // The follow-up's wait of one day counts from the send's day (London is on GMT in November).

@@ -4,7 +4,7 @@ import { describe, expect, test } from "vitest";
 import { EngineHarness } from "../../test/support/engine-harness.ts";
 import { business, person } from "../../test/support/export-builder.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../domain/sequence/definition.ts";
-import type { BeforeLaunchView, CallsView, LeadSearchResult, TestRunTab } from "../shared/api.ts";
+import type { BeforeLaunchView, CallsView, LeadSearchResult, NeedsAttention, TestRunTab } from "../shared/api.ts";
 
 /**
  * Test runs (ticket 21; ADR 0003 "Ticket 21") through the real HTTP app, SQLite store and engine, on the fake email
@@ -50,10 +50,10 @@ const DEFINITION: CampaignDefinition = {
 const PAT = person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", title: "Clinic owner", email: "pat@harbour.example", dial_phone: "+447700900111", dial_phone_type: "mobile" });
 const HARBOUR = business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101" });
 
-async function world(definition: CampaignDefinition = DEFINITION) {
+async function world(definition: CampaignDefinition = DEFINITION, emailCapacity = 50) {
   const h = new EngineHarness({
     start: MONDAY_9,
-    accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
+    accounts: [{ id: "inbox-a", capacity: emailCapacity, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
     sms: { numbers: [{ id: NUMBER, capacity: 50, gapMs: MIN, k: 2, healthy: true, resetZone: "Europe/London" }] },
   });
   await h.tick();
@@ -220,6 +220,43 @@ describe("a test run before launch (ADR 0003 'Ticket 21')", () => {
     // The class: the adapter's store reads subjects only through engine_subjects, never the leads' table alone.
     const source = readFileSync(new URL("./persistence/sqlite-instantly-store.ts", import.meta.url), "utf8");
     expect(source.match(/\benrollments\b/g) ?? []).toEqual([]);
+  });
+
+  test("no lead read names a test run: Needs attention, Today, Leads, the campaign, the person and their activity (council on ffa202c, item 8)", async () => {
+    const leadReads = async (w: Awaited<ReturnType<typeof world>>, runId: string) => {
+      const person = (await w.h.request<LeadSearchResult>("GET", `/api/leads?campaign=${w.campaign}`)).body.rows[0]?.id ?? "";
+      const reads = ["/api/needs-attention", "/api/leads", `/api/leads?campaign=${w.campaign}`, "/api/campaigns", `/api/campaigns/${w.campaign}`, `/api/people/${person}`, `/api/people/${person}/activity`, `/api/enrollments/${w.lead}`];
+      for (const path of reads) {
+        const res = await w.h.request<unknown>("GET", path);
+        expect([path, res.status]).toEqual([path, 200]);
+        expect([path, JSON.stringify(res.body).includes(runId)]).toEqual([path, false]);
+      }
+      // Today lists the test's call by design, marked as a test, never as a lead.
+      const today = JSON.stringify((await w.h.request<unknown>("GET", "/api/today")).body);
+      if (today.includes(runId)) expect(today).toMatch(/"test":true/);
+    };
+
+    // A test waiting for an inbox at capacity, beside a lead waiting for it too.
+    const full = await world(DEFINITION, 1);
+    await full.h.request("PUT", `/api/campaigns/${full.campaign}/test-contacts`, { email: OWN_EMAIL, mobile: OWN_MOBILE });
+    const waiting = (await full.run()).body.run?.id ?? "";
+    expect((await full.h.launch(full.campaign)).status).toBe(200);
+    await full.h.advanceTo(MONDAY_9 + 5 * MIN);
+    const attention = (await full.h.request<NeedsAttention>("GET", "/api/needs-attention")).body;
+    expect(attention.waitingForCapacity.map((x) => x.enrollmentId)).toEqual([full.lead]);
+    expect(attention.heldCapacity.flatMap((x) => x.work)).toEqual([]);
+    await leadReads(full, waiting);
+
+    // A test's callback that is overdue.
+    const w = await world();
+    await w.h.request("PUT", `/api/campaigns/${w.campaign}/test-contacts`, { email: OWN_EMAIL, mobile: OWN_MOBILE });
+    const runId = (await w.run()).body.run?.id ?? "";
+    await w.h.advanceTo(MONDAY_9 + 5 * MIN);
+    const call = (await w.h.request<CallsView>("GET", "/api/calls")).body.readyNow.find((c) => c.test);
+    expect((await w.h.request("POST", `/api/call-tasks/${call?.taskId}/outcome`, { requestId: "cb-1", outcome: "callback_requested", callbackAt: new Date(MONDAY_9 + 10 * MIN).toISOString(), numberId: `test:${runId}:mobile`, note: "" })).status).toBe(200);
+    await w.h.advanceTo(MONDAY_9 + 30 * MIN);
+    expect((await w.h.request<NeedsAttention>("GET", "/api/needs-attention")).body.overdueCallbacks).toEqual([]);
+    await leadReads(w, runId);
   });
 
   test("an edit stops the running test, and the warning holds until a test runs on the new version; launch is never blocked by it", async () => {

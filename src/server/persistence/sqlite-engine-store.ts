@@ -488,17 +488,18 @@ export class SqliteEngineStore implements EngineStore {
     });
   }
 
-  async runningSubjectIds(): Promise<string[]> {
+  async runningLeadIds(): Promise<string[]> {
     return this.sql(
         `SELECT e.id FROM enrollments e JOIN campaigns c ON c.id = e.campaign_id
-         WHERE c.launched_at IS NOT NULL AND e.ended IS NULL
-       UNION ALL
-       -- A test run runs whether or not its campaign is launched or paused (ADR 0003 "Ticket 21").
-       SELECT id FROM test_runs WHERE ended IS NULL
-       ORDER BY 1`,
+         WHERE c.launched_at IS NOT NULL AND e.ended IS NULL ORDER BY e.id`,
       )
       .all()
       .map((r) => str(r, "id"));
+  }
+
+  async runningTestRunIds(): Promise<string[]> {
+    // A test run runs whether or not its campaign is launched or paused (ADR 0003 "Ticket 21").
+    return this.sql("SELECT id FROM test_runs WHERE ended IS NULL ORDER BY id").all().map((r) => str(r, "id"));
   }
 
   async endedSubjectIds(reason: EndReason): Promise<string[]> {

@@ -475,7 +475,8 @@ export class Engine {
       room.set(a.id, stretches);
     }
     let rescheduled = 0;
-    for (const id of await this.store.runningSubjectIds()) {
+    // The worker runs every subject, leads and test runs alike.
+    for (const id of [...(await this.store.runningLeadIds()), ...(await this.store.runningTestRunIds())]) {
       const now = this.now();
       const s = await this.store.subject(id, now);
       if (!s) continue;

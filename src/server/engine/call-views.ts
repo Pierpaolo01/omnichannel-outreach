@@ -370,7 +370,8 @@ export async function needsAttentionView(store: OutreachStore, now: number, rule
   const read = await needsAttention(store.engine, now, rules, transportAvailable);
   // Names only, every lead in one query (council on 7622b8b): the read runs every 20 seconds on Today.
   const names = await store.leadNames([...read.waitingForCapacity, ...read.noUsableChannel].map((x) => x.enrollmentId));
-  // Unreachable: every engine subject is an enrollment row. Named blank rather than dropped, so no entry is hidden.
+  // Every entry is a lead's: the engine's read lists no test run (ADR 0003 "Ticket 21", rule 4). A lead whose name
+  // could not be read is named blank rather than dropped, so no entry is hidden.
   const unnamed: AttentionLead = { person: null, company: { id: "", name: "" }, campaign: { id: "", name: "" } };
   const lead = (enrollmentId: string): AttentionLead => names.get(enrollmentId) ?? unnamed;
   const waitingForCapacity = read.waitingForCapacity.map((w) => ({ ...w, ...lead(w.enrollmentId) }));
