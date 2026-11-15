@@ -1,4 +1,4 @@
-import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
+import type { DatabaseSync } from "node:sqlite";
 import type { CampaignDefinition, DeclinedPath, StepDefinition, TrackDefinition } from "../../src/domain/sequence/definition.ts";
 import type { Rules } from "../../src/server/engine/rules.ts";
 import type { CallsView, LeadSearchResult, TestRunTab } from "../../src/shared/api.ts";
