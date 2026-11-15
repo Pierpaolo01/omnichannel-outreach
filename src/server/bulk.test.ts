@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import { EngineHarness } from "../../test/support/engine-harness.ts";
 import { business, person } from "../../test/support/export-builder.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../domain/sequence/definition.ts";
+import { pressOf } from "../web/bulk/press.ts";
 import type { BulkAddAnswer, BulkAddPreview, BulkControlAnswer, BulkControlPreview, EnrollmentRead, LeadSearchResult } from "../shared/api.ts";
 
 /**
@@ -137,7 +138,8 @@ describe("a bulk control applies each per-lead control once, through the engine"
     const answer = (await w.press<BulkControlAnswer>(w.pressOf("bulk-2", p))).body;
     const pat = answer.results.find((r) => r.enrollmentId === patLead);
     expect(pat?.outcome).toBe("refused");
-    expect(pat?.reason).toMatch(/changed since you confirmed/);
+    // Leads' own wording: a row has no confirm of its own (council item 9 on 3555a3e).
+    expect(pat?.reason).toBe("This lead changed since you confirmed this, so nothing was changed. Select it again to see what a bulk change would do now.");
     expect(answer.counts).toEqual({ applied: 1, refused: 1 });
     expect((await w.read(patLead)).status).toBe("paused");
   });
@@ -229,6 +231,31 @@ describe("add to campaign uses the import's enrollment rule", () => {
     const leads = (await w.h.request<LeadSearchResult>("GET", `/api/leads?campaign=${second}`)).body.rows.find((r) => r.name === "Pat Oneil");
     expect(leads?.enrollments.filter((e) => e.campaign.id === second)).toHaveLength(1);
     expect(clinics).toBeTruthy();
+  });
+
+  test("a row the add preview said would not be added is never sent, even when it became reachable before the press (council item 8 on 3555a3e, Sol's reproduction)", async () => {
+    const w = await world();
+    await w.campaign("Clinics", [PAT, ODA]);
+    const running = await w.campaign("Running", [NIA]);
+    const other = await w.campaign("Elsewhere", [NIA]);
+    await w.h.advanceTo(MONDAY_9 + 10 * MIN);
+    const rows = [await w.ref("Pat Oneil"), await w.ref("Oda Finch")];
+    const preview = (await w.preview<BulkAddPreview>({ action: "add", rows, campaignId: running })).body;
+    expect(preview.rows.map((r) => [r.row.name, r.outcome])).toEqual([
+      ["Pat Oneil", "enroll"],
+      ["Oda Finch", "not_enrolled"],
+    ]);
+    // Another tab re-imports Oda with an email, into another campaign: Oda can be reached now.
+    await w.h.reimport(other, { businesses: [HARBOUR, QUAY, NOLINE], people: [{ ...ODA, email: "oda@fernhill.example" }] });
+    // The confirmation sends what it showed it would add: Pat, and not Oda.
+    const plan = pressOf(preview);
+    const answer = (await w.press<BulkAddAnswer>({ bulkId: "add-sol", ...plan.body })).body;
+    expect(answer.results.map((r) => [r.row.name, r.outcome])).toEqual([["Pat Oneil", "enrolled"]]);
+    expect(await w.lead("Oda Finch", running)).toBe("");
+    await w.h.advanceTo(MONDAY_9 + 2 * H);
+    // Anything sent to Oda is from the campaign that imported them, never from the one the confirmation left them out of.
+    const odaElsewhere = await w.lead("Oda Finch", other);
+    expect(w.h.fake.deliveryLog.filter((d) => d.destination === "oda@fernhill.example").every((d) => d.subjectId === odaElsewhere)).toBe(true);
   });
 
   test("a person enrolled between the confirmation and the press is reported as already enrolled", async () => {

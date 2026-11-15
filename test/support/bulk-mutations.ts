@@ -1,5 +1,6 @@
 import type { BulkRules, PressItem } from "../../src/server/bulk.ts";
 import type { BulkInvariant } from "./generated-bulk.ts";
+import { pressOf } from "../../src/web/bulk/press.ts";
 
 /**
  * Deliberately broken bulk rules (ADR 0003 "Ticket 18", the mutations): each replaces one part of the bulk rule; the
@@ -7,7 +8,18 @@ import type { BulkInvariant } from "./generated-bulk.ts";
  */
 let counter = 0;
 /** One broken bulk rule per invariant, each with the seed (offset from BULK_SEED) known to kill it. */
-export const BULK_MUTATIONS: Readonly<Record<string, { invariant: BulkInvariant; seed: number; rules: Partial<BulkRules> }>> = {
+export const BULK_MUTATIONS: Readonly<Record<string, { invariant: BulkInvariant; seed: number; rules: Partial<BulkRules>; pressOf?: typeof pressOf }>> = {
+  // Council item 8 on 3555a3e (Sol): an add's press sends every previewed row, so a row its confirmation showed as not
+  // added is enrolled once it became reachable.
+  "an add's press sends every previewed row": {
+    invariant: "B1",
+    seed: 5,
+    rules: {},
+    pressOf: (preview) => {
+      const plan = pressOf(preview);
+      return preview.action === "add" ? { ...plan, body: { ...plan.body, rows: preview.rows.map((r) => ({ kind: r.row.kind, id: r.row.id })) } } : plan;
+    },
+  },
   "a fresh per-lead request id on every send": { invariant: "B2", seed: 2, rules: { perLeadRequestId: (bulkId, enrollmentId) => `${bulkId}/${enrollmentId}/${++counter}` } },
   "the confirmation's precondition is not sent": { invariant: "B3", seed: 6, rules: { precondition: () => null } },
   "the scope ignores the campaign filter": { invariant: "B1", seed: 0, rules: { inScope: () => true } },

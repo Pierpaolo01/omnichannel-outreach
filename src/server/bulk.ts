@@ -11,7 +11,7 @@ import { z } from "zod";
 import { planEnrollment, type EnrollmentDecision, type LeadRef } from "../domain/import-plan.ts";
 import { OUTREACH_STATUSES } from "../domain/outreach-status.ts";
 import type { Reach } from "../domain/reach.ts";
-import type { LeadExpectation } from "../domain/sequence/controls.ts";
+import { CHANGED_SINCE_CONFIRMED, PREVIEW_CHANGED, type LeadExpectation } from "../domain/sequence/controls.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
 import type {
   ApiError,
@@ -42,6 +42,14 @@ export const BULK_MAX = 500;
  * preview over it is refused, so a confirmation is never shown that its press cannot send.
  */
 export const BULK_ITEMS_MAX = 5_000;
+/**
+ * The per-lead precondition refusals, as Leads says them (council item 9 on 3555a3e): a Leads row has no confirm of its
+ * own, so the user selects it again; the engine's own sentence stays as it is for the person page.
+ */
+export const BULK_CHANGED_SINCE_CONFIRMED = "This lead changed since you confirmed this, so nothing was changed. Select it again to see what a bulk change would do now.";
+export const BULK_PREVIEW_CHANGED = "What this would do changed since you confirmed it, so nothing was changed. Select it again to see what a bulk change would do now.";
+const bulkReason = (reason: string): string => (reason === CHANGED_SINCE_CONFIRMED ? BULK_CHANGED_SINCE_CONFIRMED : reason === PREVIEW_CHANGED ? BULK_PREVIEW_CHANGED : reason);
+
 export const BULK_REQUEST_REUSED = "This request id was already used for another action: send a new one.";
 
 /**
@@ -260,7 +268,7 @@ export function bulkRoutes(app: Hono, deps: BulkDependencies): void {
         continue;
       }
       const answer = await deps.engine.controlLead(item.enrollmentId, pressed, rules.perLeadRequestId(body.data.bulkId, item.enrollmentId), rules.precondition(item.expect));
-      results.push(rules.report(answer.ok ? { enrollmentId: item.enrollmentId, outcome: "applied", reason: null, replayed: answer.replayed } : { enrollmentId: item.enrollmentId, outcome: "refused", reason: answer.reason, replayed: false }));
+      results.push(rules.report(answer.ok ? { enrollmentId: item.enrollmentId, outcome: "applied", reason: null, replayed: answer.replayed } : { enrollmentId: item.enrollmentId, outcome: "refused", reason: bulkReason(answer.reason), replayed: false }));
     }
     return c.json<BulkControlAnswer>({
       bulkId: body.data.bulkId,

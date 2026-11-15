@@ -6,6 +6,7 @@ import { postJson, useApi } from "../api.ts";
 import { BulkBar, BulkChecking, BulkConfirm, BulkStatus } from "../bulk/BulkViews.tsx";
 import { useBulk } from "../bulk/useBulk.tsx";
 import { BULK_VERB, addConfirmText, controlConfirmText, scopeNote } from "../bulk/wording.ts";
+import { pressOf } from "../bulk/press.ts";
 import { EnrollmentList, ErrorState, UNENROLLED_SHORT } from "../components.tsx";
 import { Icon } from "../icons.tsx";
 import { STATUS_OPTIONS } from "../status.tsx";
@@ -74,14 +75,18 @@ export function LeadsPage() {
   const shownRows = (result.state === "ready" ? result.data.rows : result.state === "loading" ? (result.previous?.rows ?? []) : []);
   const selectedRows = shownRows.filter((r) => selected.has(rowKey(r)));
   const scopeCampaign = query.campaign ? (campaignOptions.state === "ready" ? (campaignOptions.data.campaigns.find((c) => c.id === query.campaign) ?? null) : null) : null;
-  // A confirmation is a snapshot of the selection and scope it opened on: changing either closes it, as in the prototype.
-  const selectionKey = selectedRows.map(rowKey).join("|") + `#${query.campaign}`;
+  // A confirmation is a snapshot of the selection and scope it opened on: the user's own change to either closes it, as
+  // in the prototype; a re-read never does (council item 7 on 3555a3e: under a status filter a row leaving the results
+  // closed it without a word).
+  const selectionKey = [...selected].sort().join("|") + `#${query.q}#${query.campaign}#${query.status}#${query.company}`;
   const [openedOn, setOpenedOn] = useState(selectionKey);
   if (openedOn !== selectionKey) {
     setOpenedOn(selectionKey);
     if (confirming !== null) setConfirming(null);
   }
-
+  // The selected rows' campaigns and statuses in the read the confirmation opened on, and in the latest read: when they
+  // differ, the confirmation says so, and still shows and sends what it opened on (the 17b rule).
+  const rowsNow = rowsSignature(shownRows, selected);
   const closeConfirm = () => {
     setConfirming(null);
     (opener.current?.isConnected ? opener.current : searchRef.current)?.focus();
@@ -89,35 +94,21 @@ export function LeadsPage() {
   const openPreview = (request: PreviewRequest, from: HTMLElement) => {
     opener.current = from;
     setUnstored(false);
-    bulk.dismiss();
-    setConfirming({ request, state: "loading" });
+    // A new confirmation clears the outcomes shown, which are seen.
+    for (const r of bulk.results) bulk.dismiss(r.press.bulkId);
+    setConfirming({ request, state: "loading", rowsAtOpen: rowsSignature(shownRows, selected) });
     postJson("/api/bulk/preview", { action: request.action, rows: selectedRows.map((r) => ({ kind: r.kind, id: r.id })), campaignId: request.campaignId })
-      .then((preview) => setConfirming((c) => (c?.request === request ? { request, state: "ready", preview: preview as BulkControlPreview | BulkAddPreview } : c)))
-      .catch((e: unknown) => setConfirming((c) => (c?.request === request ? { request, state: "error", message: e instanceof Error ? e.message : "The server didn’t answer." } : c)));
+      .then((preview) => setConfirming((c) => (c?.request === request ? { request, state: "ready", rowsAtOpen: c.rowsAtOpen, preview: preview as BulkControlPreview | BulkAddPreview } : c)))
+      .catch((e: unknown) => setConfirming((c) => (c?.request === request ? { request, state: "error", rowsAtOpen: c.rowsAtOpen, message: e instanceof Error ? e.message : "The server didn’t answer." } : c)));
   };
   const confirm = (preview: BulkControlPreview | BulkAddPreview) => {
     // While another bulk is on its way the confirmation waits, open and focused; a confirmed bulk is never dropped
     // without a word (verifier B1 on 4363270, the class 17b fixed for one lead).
     if (bulk.pending() !== null) return;
-    // The press is the preview's snapshot: its allowed items with the precondition each showed, or the rows to add.
-    const out =
-      preview.action === "add"
-        ? bulk.press(
-            "add",
-            { action: "add", campaignId: preview.campaign.id, rows: preview.rows.map((r) => ({ kind: r.row.kind, id: r.row.id })) },
-            Object.fromEntries(preview.rows.map((r) => [`${r.row.kind}:${r.row.id}`, { name: r.row.name, campaign: preview.campaign.name }])),
-            preview.campaign.name,
-          )
-        : bulk.press(
-            preview.action,
-            {
-              action: preview.action,
-              campaignId: preview.scope?.id ?? null,
-              items: preview.items.flatMap((i) => (i.control.allowed ? [{ enrollmentId: i.enrollmentId, expect: { status: i.status, preview: i.control.digest } }] : [])),
-            },
-            Object.fromEntries(preview.items.map((i) => [i.enrollmentId, { name: i.row.name, campaign: i.campaign.name }])),
-            preview.scope?.name ?? null,
-          );
+    // The press is the preview's snapshot (`pressOf`): its allowed items with the precondition each showed, or only the
+    // rows it showed as to be added.
+    const plan = pressOf(preview);
+    const out = bulk.press(plan.action, plan.body, plan.labels, plan.campaign, plan.notSent);
     // Refused here as busy (another tab stored a press at the same moment): the confirmation stays open and says why.
     if (!out.ok && out.why === "busy") return;
     setConfirming(null);
@@ -232,7 +223,15 @@ export function LeadsPage() {
       {confirming?.state === "ready" && (() => {
         const preview = confirming.preview;
         const { text, canConfirm } = preview.action === "add" ? addConfirmText(preview) : controlConfirmText(preview);
-        return <BulkConfirm text={text} action={BULK_VERB[preview.action]} canConfirm={canConfirm} busy={bulk.pending() !== null} onConfirm={() => confirm(preview)} onCancel={closeConfirm} />;
+        return <BulkConfirm
+            text={text}
+            action={BULK_VERB[preview.action]}
+            canConfirm={canConfirm}
+            busy={bulk.pending() !== null}
+            changed={confirming.rowsAtOpen !== rowsNow}
+            onConfirm={() => confirm(preview)}
+            onCancel={closeConfirm}
+          />;
       })()}
       <BulkStatus bulk={bulk} unstored={unstored} onDismissUnstored={() => setUnstored(false)} onDismissed={() => searchRef.current?.focus()} />
 
@@ -248,7 +247,8 @@ export function LeadsPage() {
             result={shown}
             query={query.q}
             loading={result.state === "loading"}
-            scopeName={scopeCampaign?.name ?? null}
+            scope={query.campaign ? { name: scopeCampaign?.name ?? null } : null}
+            companiesSelected={selectedRows.some((r) => r.kind === "company")}
             selected={selected}
             onSelect={(keys, on) =>
               setSelected((prev) => {
@@ -272,11 +272,39 @@ const rowKey = (row: Pick<LeadRow, "kind" | "id">) => `${row.kind}:${row.id}`;
 type PreviewRequest = { readonly action: BulkControlAction | "add"; readonly campaignId: string | null };
 /** The confirmation open: its preview being read, failing, or ready as a snapshot of that read. */
 type Confirming =
-  | { readonly request: PreviewRequest; readonly state: "loading" }
-  | { readonly request: PreviewRequest; readonly state: "error"; readonly message: string }
-  | { readonly request: PreviewRequest; readonly state: "ready"; readonly preview: BulkControlPreview | BulkAddPreview };
+  | { readonly request: PreviewRequest; readonly rowsAtOpen: string; readonly state: "loading" }
+  | { readonly request: PreviewRequest; readonly rowsAtOpen: string; readonly state: "error"; readonly message: string }
+  | { readonly request: PreviewRequest; readonly rowsAtOpen: string; readonly state: "ready"; readonly preview: BulkControlPreview | BulkAddPreview };
 
-function LeadTable({ result, query, loading, selected, onSelect, scopeName }: { result: LeadSearchResult; query: string; loading: boolean; selected: ReadonlySet<string>; onSelect: (keys: readonly string[], on: boolean) => void; scopeName: string | null }) {
+/** The selected rows as a read shows them: each row's campaigns and statuses, and the rows the read no longer holds. */
+function rowsSignature(rows: readonly LeadRow[], selected: ReadonlySet<string>): string {
+  return [...selected]
+    .sort()
+    .map((key) => {
+      const row = rows.find((r) => rowKey(r) === key);
+      return row ? `${key}=${row.enrollments.map((e) => `${e.campaign.id}:${e.status}`).join(",")}` : `${key}=gone`;
+    })
+    .join("|");
+}
+
+function LeadTable({
+  result,
+  query,
+  loading,
+  selected,
+  onSelect,
+  scope,
+  companiesSelected,
+}: {
+  result: LeadSearchResult;
+  query: string;
+  loading: boolean;
+  selected: ReadonlySet<string>;
+  onSelect: (keys: readonly string[], on: boolean) => void;
+  /** The scope the press uses: the campaign Leads is filtered to (its name once loaded), or every campaign. */
+  scope: { readonly name: string | null } | null;
+  companiesSelected: boolean;
+}) {
   const keys = result.rows.map(rowKey);
   const all = keys.length > 0 && keys.every((k) => selected.has(k));
   const some = keys.some((k) => selected.has(k));
@@ -331,7 +359,7 @@ function LeadTable({ result, query, loading, selected, onSelect, scopeName }: { 
           </table>
         </div>
       </div>
-      <p className="mt-3 text-[13px] text-muted [overflow-wrap:anywhere]">{scopeNote(scopeName)}</p>
+      <p className="mt-3 text-[13px] text-muted [overflow-wrap:anywhere]">{scopeNote(scope, companiesSelected)}</p>
       {result.total > result.rows.length && (
         <p className="mt-3 text-[13px] text-muted">
           Showing the first {result.rows.length} of {result.total}. Narrow the search to see the rest.

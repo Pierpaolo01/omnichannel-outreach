@@ -15,7 +15,7 @@ export const BULK_SEED = 18_000;
  * Offsets from BULK_SEED, chosen from a sweep of all 100 (14 November 2026; every one passed) to reach every behaviour
  * below between them, with the mutations' killing seeds.
  */
-export const BULK_FIXED_SEEDS: readonly number[] = [0, 2, 4, 5, 6, 8, 17];
+export const BULK_FIXED_SEEDS: readonly number[] = [0, 2, 4, 5, 6, 7, 8, 17];
 const SEARCH_SEEDS = 100;
 const MAX_SEEDS = 40;
 
@@ -23,6 +23,8 @@ const MAX_SEEDS = 40;
 export const BULK_FEATURES: readonly string[] = [
   // Verifier F2 on 4363270: a selected row joins a confirmation's scope before its press (seed 2 among the fixed seeds).
   "a-lead-joined-the-scope-before-the-press",
+  // Council item 8 on 3555a3e: the row an add's confirmation showed as not added became reachable before the press (seed 5).
+  "an-excluded-row-became-reachable-before-the-press",
   "add-already-enrolled",
   "add-confirmation",
   "add-enrolled",
@@ -75,12 +77,12 @@ export function bulkOracle(): void {
     run(`the generated bulk runs fail ${mutation.invariant} for an app with "${name}"`, async () => {
       const breaks = (problems: readonly string[]) => problems.some((p) => bulkInvariantsOf(p).includes(mutation.invariant));
       if (!FULL_SEARCH) {
-        const { problems } = await runBulk(BULK_SEED + mutation.seed, { bulkRules: mutation.rules });
+        const { problems } = await runBulk(BULK_SEED + mutation.seed, { bulkRules: mutation.rules, ...(mutation.pressOf ? { pressOf: mutation.pressOf } : {}) });
         expect(breaks(problems), `seed ${BULK_SEED + mutation.seed} no longer breaks ${mutation.invariant}; run the sequence-search workflow and update its seed. Problems: ${problems.join("; ")}`).toBe(true);
         return;
       }
-      let caught: number | null = breaks((await runBulk(BULK_SEED + mutation.seed, { bulkRules: mutation.rules })).problems) ? mutation.seed : null;
-      for (let o = 0; o < MAX_SEEDS && caught === null; o++) if (breaks((await runBulk(BULK_SEED + o, { bulkRules: mutation.rules })).problems)) caught = o;
+      let caught: number | null = breaks((await runBulk(BULK_SEED + mutation.seed, { bulkRules: mutation.rules, ...(mutation.pressOf ? { pressOf: mutation.pressOf } : {}) })).problems) ? mutation.seed : null;
+      for (let o = 0; o < MAX_SEEDS && caught === null; o++) if (breaks((await runBulk(BULK_SEED + o, { bulkRules: mutation.rules, ...(mutation.pressOf ? { pressOf: mutation.pressOf } : {}) })).problems)) caught = o;
       console.info(`killing seed: bulk mutation "${name}" (${mutation.invariant}): ${caught ?? "none"}; recorded ${mutation.seed}`);
       expect(caught).not.toBeNull();
     }, 1_800_000);

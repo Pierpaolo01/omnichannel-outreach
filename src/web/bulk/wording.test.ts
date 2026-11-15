@@ -49,8 +49,13 @@ describe("the bulk confirmation states its scope and what the server said it wou
   });
 
   test("the foot note names the scope", () => {
-    expect(scopeNote("Clinics")).toBe("Bulk actions change the selected people’s campaigns in Clinics only.");
-    expect(scopeNote(null)).toBe("Bulk actions change the selected people’s campaigns. Pick a campaign above to limit them to one campaign.");
+    expect(scopeNote({ name: "Clinics" }, false)).toBe("Bulk actions change the selected people’s campaigns in Clinics only.");
+    expect(scopeNote(null, false)).toBe("Bulk actions change the selected people’s campaigns. Pick a campaign above to limit them to one campaign.");
+  });
+
+  test("the foot note's scope is the press's, named once loaded, and names company leads when any are selected (council item 9 on 3555a3e)", () => {
+    expect(scopeNote({ name: null }, false)).toBe("Bulk actions change the selected people’s campaigns in the campaign Leads is filtered to only.");
+    expect(scopeNote({ name: "Clinics" }, true)).toBe("Bulk actions change the selected people’s and company leads’ campaigns in Clinics only.");
   });
 });
 

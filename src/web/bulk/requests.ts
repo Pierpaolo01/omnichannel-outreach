@@ -12,7 +12,7 @@
  * - **One bulk at a time on this device**: while a press is stored, no other is made, so two bulks never race each other
  *   from one browser. Two browsers are the server's to judge, lead by lead.
  */
-import type { BulkAction } from "../../shared/api.ts";
+import type { BulkAction, BulkAddRow } from "../../shared/api.ts";
 import type { KeyValue } from "../calls/callDesk.ts";
 
 /** What the confirmation showed of each item, so any tab can word the answer: whose enrollment, in which campaign. */
@@ -32,6 +32,20 @@ export interface BulkPress {
   /** The campaign the confirmation named (the scope, or the one added to); null for every campaign. */
   readonly campaign: string | null;
   readonly pressedAt: number;
+  /** The tab that pressed it (its id in `sessionStorage`, which survives a reload and moving between pages). */
+  readonly tab: string;
+  /**
+   * Add only (council item 8 on 3555a3e): the rows the confirmation showed as already enrolled or not added, which the
+   * press does not send; the outcome reports them from the preview.
+   */
+  readonly notSent?: readonly BulkAddRow[];
+  /**
+   * The server's definite answer, once one arrived (review bot on 3555a3e): the press stays stored, answered and not yet
+   * seen, until a Leads page shows it, so its outcome and refusals are never lost by being away from Leads. Answered, it
+   * is no longer on its way and is never sent again.
+   */
+  readonly answer?: BulkSendAnswer;
+  readonly answeredAt?: number;
 }
 
 export type BulkSendAnswer = { readonly kind: "answered"; readonly body: unknown } | { readonly kind: "refused"; readonly message: string };
@@ -49,6 +63,8 @@ export const BULK_RETRY_MS = [1_000, 2_000, 4_000, 8_000] as const;
 
 export interface BulkRequestPorts {
   readonly local: KeyValue;
+  /** This tab's id: its presses' outcomes are marked seen when this tab shows them. */
+  readonly tab: string;
   newId(): string;
   now(): number;
   setTimer(fire: () => void, ms: number): () => void;
@@ -105,20 +121,45 @@ export class BulkRequests {
       .sort((a, b) => a.pressedAt - b.pressedAt || a.bulkId.localeCompare(b.bulkId));
   }
 
-  /** The oldest stored press, whichever tab made it. */
+  /** The oldest stored press still on its way (not yet answered), whichever tab made it. */
   pending(): BulkPress | null {
-    return this.stored()[0] ?? null;
+    return this.stored().find((p) => p.answer === undefined) ?? null;
   }
 
   /** The stored press had no answer at its last send from this page. */
   unconfirmed(): boolean {
-    return this.stored().some((p) => this.unanswered.has(p.bulkId));
+    return this.stored().some((p) => p.answer === undefined && this.unanswered.has(p.bulkId));
+  }
+
+  /** Every answered press not yet seen on Leads, newest answer first, whichever tab got the answer. */
+  unseen(): BulkResult[] {
+    return this.stored()
+      .flatMap((p): { at: number; result: BulkResult }[] => {
+        if (p.answer === undefined) return [];
+        const result: BulkResult = p.answer.kind === "answered" ? { kind: "answered", press: p, body: p.answer.body } : { kind: "refused", press: p, message: p.answer.message };
+        return [{ at: p.answeredAt ?? p.pressedAt, result }];
+      })
+      .sort((a, b) => b.at - a.at)
+      .map((x) => x.result);
+  }
+
+  /** Whether this tab pressed it. */
+  own(press: BulkPress): boolean {
+    return press.tab === this.ports.tab;
+  }
+
+  /** A Leads page showed this answered press to the tab that pressed it, or the user dismissed it: it leaves storage. */
+  markSeen(bulkId: string): void {
+    const p = parse(this.ports.local.get(keyOf(bulkId)));
+    if (p?.answer === undefined) return;
+    this.ports.local.remove(keyOf(bulkId));
+    this.ports.onChange();
   }
 
   /** Stores a press under a new bulk id, then sends it. */
-  press(action: BulkAction, body: Readonly<Record<string, unknown>>, labels: BulkPress["labels"], campaign: string | null): BulkPressOutcome {
+  press(action: BulkAction, body: Readonly<Record<string, unknown>>, labels: BulkPress["labels"], campaign: string | null, notSent: readonly BulkAddRow[] = []): BulkPressOutcome {
     if (this.stopped || this.pending()) return { ok: false, why: "busy" };
-    const press: BulkPress = { v: 1, bulkId: this.ports.newId(), action, body, labels, campaign, pressedAt: this.ports.now() };
+    const press: BulkPress = { v: 1, bulkId: this.ports.newId(), action, body, labels, campaign, pressedAt: this.ports.now(), tab: this.ports.tab, ...(notSent.length > 0 ? { notSent } : {}) };
     if (!this.ports.local.set(keyOf(press.bulkId), JSON.stringify(press))) return { ok: false, why: "unstored" };
     this.ports.onChange();
     void this.send(press.bulkId);
@@ -127,7 +168,7 @@ export class BulkRequests {
 
   /** Every stored press is sent once on first sight, then on its own backoff. */
   watch(): void {
-    for (const p of this.stored()) if (this.inFlight.get(p.bulkId) !== this.generation && !this.timers.has(p.bulkId)) void this.send(p.bulkId);
+    for (const p of this.stored()) if (p.answer === undefined && this.inFlight.get(p.bulkId) !== this.generation && !this.timers.has(p.bulkId)) void this.send(p.bulkId);
   }
 
   storageChanged(): void {
@@ -165,7 +206,8 @@ export class BulkRequests {
     const generation = this.generation;
     if (this.halted() || this.inFlight.get(bulkId) === generation) return;
     const press = parse(this.ports.local.get(keyOf(bulkId)));
-    if (!press) return;
+    // Sent only while on its way: an answer another page got answered it.
+    if (!press || press.answer !== undefined) return;
     this.inFlight.set(bulkId, generation);
     let answer: BulkSendAnswer | "stopped" | null = null;
     try {
@@ -191,21 +233,15 @@ export class BulkRequests {
     }
     this.unanswered.delete(bulkId);
     this.attempts.delete(bulkId);
-    this.ports.local.remove(keyOf(bulkId));
+    // One write: the press becomes answered and not yet seen. Storage that will not take it loses only the line, never
+    // the outcome, which the server keeps under the bulk id: the press leaves storage and the answer is passed on.
+    const current = parse(this.ports.local.get(keyOf(bulkId)));
+    if (current && current.answer === undefined) {
+      if (!this.ports.local.set(keyOf(bulkId), JSON.stringify({ ...current, answer, answeredAt: this.ports.now() }))) this.ports.local.remove(keyOf(bulkId));
+    }
     this.ports.onResult(answer.kind === "answered" ? { kind: "answered", press, body: answer.body } : { kind: "refused", press, message: answer.message });
     this.ports.onChange();
   }
-}
-
-/**
- * Which answer the page shows after `incoming` arrives (review bot on 9daf7c0), on the controls' rule (17b): an answer to
- * this page's own press replaces what is shown; any other answer, such as a press this page sent again after a reload,
- * shows when nothing of this page's own is shown, and never replaces it.
- */
-export function shownBulkResult(current: BulkResult | null, incoming: BulkResult, own: ReadonlySet<string>): BulkResult {
-  if (own.has(incoming.press.bulkId)) return incoming;
-  if (current !== null && own.has(current.press.bulkId)) return current;
-  return incoming;
 }
 
 /**
@@ -217,7 +253,9 @@ export function bulkPendingFor(local: KeyValue, enrollmentId: string): boolean {
     .keys()
     .filter(isBulkKey)
     .some((k) => {
-      const items = parse(local.get(k))?.body["items"];
+      const press = parse(local.get(k));
+      if (!press || press.answer !== undefined) return false;
+      const items = press.body["items"];
       return Array.isArray(items) && items.some((i: unknown) => typeof i === "object" && i !== null && "enrollmentId" in i && i.enrollmentId === enrollmentId);
     });
 }

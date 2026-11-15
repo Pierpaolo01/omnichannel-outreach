@@ -96,7 +96,12 @@ export function addResultText(answer: BulkAddAnswer): { readonly summary: string
   return { summary: parts.filter(Boolean).join(" "), refused };
 }
 
-/** Under the bulk bar: what the actions change, as the prototype's foot note says it. */
-export function scopeNote(campaign: string | null): string {
-  return campaign ? `Bulk actions change the selected people’s campaigns in ${campaign} only.` : "Bulk actions change the selected people’s campaigns. Pick a campaign above to limit them to one campaign.";
+/**
+ * Under the table: what the bulk actions change, as the prototype's foot note says it. The scope is the one the press
+ * uses, the campaign Leads is filtered to, named once its name has loaded (council item 9 on 3555a3e).
+ */
+export function scopeNote(scope: { readonly name: string | null } | null, companies: boolean): string {
+  const whose = companies ? "the selected people’s and company leads’ campaigns" : "the selected people’s campaigns";
+  if (scope === null) return `Bulk actions change ${whose}. Pick a campaign above to limit them to one campaign.`;
+  return `Bulk actions change ${whose} in ${scope.name ?? "the campaign Leads is filtered to"} only.`;
 }

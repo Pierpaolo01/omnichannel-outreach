@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useState, type ReactNode } from "react";
-import type { ApiError, BulkAction } from "../../shared/api.ts";
+import type { ApiError, BulkAction, BulkAddRow } from "../../shared/api.ts";
 import { browserStorage } from "../calls/storage.ts";
-import { BulkRequests, NoBulkAnswer, bulkPendingFor, isBulkKey, shownBulkResult, type BulkLabel, type BulkPress, type BulkPressOutcome, type BulkResult, type BulkSendAnswer } from "./requests.ts";
+import { BulkRequests, NoBulkAnswer, bulkPendingFor, isBulkKey, type BulkLabel, type BulkPress, type BulkPressOutcome, type BulkResult, type BulkSendAnswer } from "./requests.ts";
 
 /** A 4xx whose code says the server refused the bulk is definite; anything else is no answer. */
 const DEFINITE = new Set(["bulk_refused", "not_found", "invalid_request"]);
@@ -21,13 +21,18 @@ async function sendBulk(press: BulkPress): Promise<BulkSendAnswer> {
 }
 
 export interface Bulk {
-  press(action: BulkAction, body: Readonly<Record<string, unknown>>, labels: Readonly<Record<string, BulkLabel>>, campaign: string | null): BulkPressOutcome;
+  press(action: BulkAction, body: Readonly<Record<string, unknown>>, labels: Readonly<Record<string, BulkLabel>>, campaign: string | null, notSent?: readonly BulkAddRow[]): BulkPressOutcome;
+  /** Whether this tab pressed it: only this tab's own presses take focus (council item 6 on 3555a3e). */
+  own(press: BulkPress): boolean;
   /** The bulk press stored on this device, whichever tab made it. */
   pending(): BulkPress | null;
   unconfirmed(): boolean;
-  /** The last definite answer this page got, until dismissed or the next press. */
-  result: BulkResult | null;
-  dismiss(): void;
+  /**
+   * Every bulk outcome this page has shown and not dismissed, newest first (review bot on 3555a3e): each answered bulk the
+   * outbox holds as not yet seen, wherever its answer arrived, is shown here once and then leaves storage.
+   */
+  results: readonly BulkResult[];
+  dismiss(bulkId: string): void;
   retryNow(): void;
 }
 
@@ -39,8 +44,6 @@ interface BulkShell {
   readonly answered: { readonly seq: number; readonly result: BulkResult } | null;
   /** Bumped when another tab stores or answers a bulk press. */
   readonly elsewhere: number;
-  /** The bulk ids pressed in this tab: their answer lines are this tab's own. */
-  readonly own: Set<string>;
 }
 
 const BulkContext = createContext<BulkShell | null>(null);
@@ -55,11 +58,11 @@ export function BulkProvider({ children }: { children: ReactNode }) {
   const [version, render] = useReducer((n: number) => n + 1, 0);
   const [answered, setAnswered] = useState<BulkShell["answered"]>(null);
   const [elsewhere, setElsewhere] = useState(0);
-  const [own] = useState(() => new Set<string>());
   const [requests] = useState(
     () =>
       new BulkRequests({
         local: browserStorage(() => window.localStorage),
+        tab: tabId(),
         newId: () => crypto.randomUUID(),
         now: () => Date.now(),
         setTimer: (fire, ms) => {
@@ -88,7 +91,7 @@ export function BulkProvider({ children }: { children: ReactNode }) {
       requests.stop();
     };
   }, [requests]);
-  const value = useMemo(() => ({ requests, version, answered, elsewhere, own }), [requests, version, answered, elsewhere, own]);
+  const value = useMemo(() => ({ requests, version, answered, elsewhere }), [requests, version, answered, elsewhere]);
   return <BulkContext.Provider value={value}>{children}</BulkContext.Provider>;
 }
 
@@ -116,22 +119,34 @@ export function useBulkPending(onAnswer: () => void): (enrollmentId: string) => 
 
 const local = browserStorage(() => window.localStorage);
 
-/** Leads' view of the shell's bulk manager: its presses, what is on its way, and this tab's answer line. */
+/** This tab's id, kept in `sessionStorage`, so a reload and moving between pages keep it; a new one when storage is blocked. */
+function tabId(): string {
+  const session = browserStorage(() => window.sessionStorage);
+  const known = session.get("outreach.tab");
+  if (known) return known;
+  const id = crypto.randomUUID();
+  session.set("outreach.tab", id);
+  return id;
+}
+
+/** Leads' view of the shell's bulk manager: its presses, what is on its way, and every bulk outcome not yet seen. */
 export function useBulk(refresh: () => void): Bulk {
   const shell = useShell();
-  const { requests, own } = shell;
-  const [result, setResult] = useState<BulkResult | null>(null);
-  // Answers and other tabs' changes that arrive while Leads is shown; one that arrived before it opened is not this page's line.
+  const { requests } = shell;
+  const version = shell.version;
+  // Every answered bulk the outbox holds as not yet seen joins what this page shows, newest first, whichever tab got its
+  // answer and wherever the user was then; once shown it is marked seen (review bot on 3555a3e).
+  const [shown, setShown] = useState<readonly BulkResult[]>([]);
+  const fresh = version >= 0 ? requests.unseen().filter((r) => !shown.some((s) => s.press.bulkId === r.press.bulkId)) : [];
+  if (fresh.length > 0) setShown((prev) => [...fresh.filter((r) => !prev.some((s) => s.press.bulkId === r.press.bulkId)), ...prev]);
+  // The tab that pressed a bulk marks its outcome seen once shown; another tab shows it and leaves it stored, so the
+  // tab that pressed it still sees it (the user may be there), until a Dismiss anywhere.
+  useEffect(() => {
+    for (const r of shown) if (requests.own(r.press)) requests.markSeen(r.press.bulkId);
+  }, [shown, requests]);
+  // The rows are read again for every answer and every change another tab makes while Leads is shown.
   const [since] = useState(() => ({ seq: shell.answered?.seq ?? 0, elsewhere: shell.elsewhere }));
-  const answered = shell.answered;
-  // Each answer that arrives while Leads is shown sets this tab's line once: an answer to a press recovered after a
-  // reload, or sent here for another tab, still has its answer shown (review bot on 9daf7c0).
-  const [lineSeq, setLineSeq] = useState(since.seq);
-  if (answered !== null && answered.seq > lineSeq) {
-    setLineSeq(answered.seq);
-    setResult((current) => shownBulkResult(current, answered.result, own));
-  }
-  const answeredSeq = answered?.seq ?? 0;
+  const answeredSeq = shell.answered?.seq ?? 0;
   useEffect(() => {
     if (answeredSeq > since.seq) refresh();
   }, [answeredSeq, since, refresh]);
@@ -140,18 +155,19 @@ export function useBulk(refresh: () => void): Bulk {
   }, [shell.elsewhere, since, refresh]);
 
   const press = useCallback(
-    (action: BulkAction, body: Readonly<Record<string, unknown>>, labels: Readonly<Record<string, BulkLabel>>, campaign: string | null) => {
-      setResult(null);
-      const out = requests.press(action, body, labels, campaign);
-      if (out.ok) own.add(out.press.bulkId);
-      return out;
-    },
-    [requests, own],
+    (action: BulkAction, body: Readonly<Record<string, unknown>>, labels: Readonly<Record<string, BulkLabel>>, campaign: string | null, notSent: readonly BulkAddRow[] = []) =>
+      requests.press(action, body, labels, campaign, notSent),
+    [requests],
   );
-  const dismiss = useCallback(() => setResult(null), []);
-  const version = shell.version;
+  const dismiss = useCallback(
+    (bulkId: string) => {
+      requests.markSeen(bulkId);
+      setShown((prev) => prev.filter((r) => r.press.bulkId !== bulkId));
+    },
+    [requests],
+  );
   return useMemo(
-    () => ({ press, pending: () => (version >= 0 ? requests.pending() : null), unconfirmed: () => requests.unconfirmed(), result, dismiss, retryNow: () => requests.retryNow() }),
-    [press, dismiss, requests, result, version],
+    () => ({ press, own: (p: BulkPress) => requests.own(p), pending: () => (version >= 0 ? requests.pending() : null), unconfirmed: () => requests.unconfirmed(), results: shown, dismiss, retryNow: () => requests.retryNow() }),
+    [press, dismiss, requests, shown, version],
   );
 }

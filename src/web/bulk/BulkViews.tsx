@@ -1,10 +1,19 @@
 import { useEffect, useId, useRef } from "react";
 import type { BulkAddAnswer, BulkControlAction, BulkControlAnswer, CampaignListItem } from "../../shared/api.ts";
+import type { BulkResult } from "./requests.ts";
+import { addOutcome } from "./press.ts";
 import type { Bulk } from "./useBulk.tsx";
 import { addResultText, bulkPendingText, controlResultText } from "./wording.ts";
 
-/** Why a bulk confirmation waits: one bulk at a time from a browser (src/web/bulk/requests.ts). */
-export const BULK_BUSY = "Another bulk change is on its way from this browser. This one waits until it is answered, then sends what it shows.";
+/**
+ * Why a bulk confirmation waits: one bulk at a time from a browser (src/web/bulk/requests.ts). True to what happens
+ * (council item 5 on 3555a3e): nothing is queued, since its snapshot may be stale by then; the user presses again.
+ */
+export function bulkBusyText(action: string): string {
+  return `Another change to these leads is on its way. Nothing has been sent from here; press ${action} again once it is answered.`;
+}
+/** Beside a waiting or open bulk confirmation whose selected rows a newer read changed. */
+export const BULK_ROWS_CHANGED = "These rows changed since you opened this.";
 
 const BAR_BUTTON = "btn btn-sm border-[color-mix(in_srgb,var(--color-band-ink)_35%,transparent)] bg-transparent font-medium text-band-ink hover:border-band-ink hover:bg-transparent disabled:border-[color-mix(in_srgb,var(--color-band-ink)_20%,transparent)] disabled:bg-transparent disabled:text-band-muted";
 
@@ -71,6 +80,7 @@ export function BulkConfirm({
   text,
   action,
   canConfirm,
+  changed,
   busy,
   onConfirm,
   onCancel,
@@ -78,6 +88,8 @@ export function BulkConfirm({
   text: string;
   action: string;
   canConfirm: boolean;
+  /** A newer read of the selected rows differs from the one it opened on: said, never changing what it shows or sends. */
+  changed: boolean;
   /**
    * Another bulk is on its way from this browser (verifier B1 on 4363270): the confirmation stays, keeps its snapshot and
    * says why it waits; its action is aria-disabled, so focus stays on it, and pressing it sends nothing.
@@ -103,7 +115,8 @@ export function BulkConfirm({
     >
       <span id={textId} className="min-w-0 flex-[1_1_320px] text-base-content [overflow-wrap:anywhere]">
         {text}
-        {busy && canConfirm && <span className="mt-1 block text-ink-2">{BULK_BUSY}</span>}
+        {changed && <span className="mt-1 block text-ink-2">{BULK_ROWS_CHANGED}</span>}
+        {busy && canConfirm && <span className="mt-1 block text-ink-2">{bulkBusyText(action)}</span>}
       </span>
       <span className="flex flex-wrap gap-2">
         {canConfirm && (
@@ -155,71 +168,95 @@ export function BulkChecking({ error, onRetry, onCancel }: { error: string | nul
 }
 
 /**
- * What this device knows of a bulk change: on its way, what the server did (lead by lead, in the past tense, from the
- * answer), a refusal of the whole bulk, or a press storage would not keep. Each takes focus when it appears.
+ * What this device knows of bulk changes: one on its way, a press storage would not keep, and every outcome not yet
+ * dismissed, newest first (review bot on 3555a3e: an outcome is shown until the user has seen it, wherever its answer
+ * arrived). What the server did is said lead by lead, in the past tense, from the answer. The newest line takes focus.
  */
 export function BulkStatus({ bulk, unstored, onDismissUnstored, onDismissed }: { bulk: Bulk; unstored: boolean; onDismissUnstored: () => void; /** Focus goes on after a Dismiss. */ onDismissed: () => void }) {
   const pending = bulk.pending();
-  const result = bulk.result;
   const ref = useRef<HTMLElement | null>(null);
-  const shown = pending ? `pending:${pending.bulkId}` : unstored ? "unstored" : result ? `${result.kind}:${result.press.bulkId}` : null;
+  const newest = bulk.results[0] ?? null;
+  // Only this tab's own press, and its outcome, take focus: another tab's is said here without moving the keyboard
+  // (council item 6 on 3555a3e).
+  const shown = pending ? (bulk.own(pending) ? `pending:${pending.bulkId}` : null) : unstored ? "unstored" : newest && bulk.own(newest.press) ? `${newest.kind}:${newest.press.bulkId}` : null;
   useEffect(() => {
     if (shown !== null) ref.current?.focus();
   }, [shown]);
   const setRef = (el: HTMLElement | null) => {
     ref.current = el;
   };
-  if (pending) {
-    const unconfirmed = bulk.unconfirmed();
-    return (
-      <p role="status" tabIndex={-1} ref={setRef} className="mt-3 flex flex-wrap items-center gap-3 rounded-xl bg-pause-soft px-4 py-3 text-[14px] text-base-content outline-offset-2">
-        <span className="min-w-0 flex-[1_1_280px]">
-          {bulkPendingText(pending.action, pending.campaign)}
-          {unconfirmed ? " Not confirmed yet. It is being sent again, and each change is applied only once." : ""}
-        </span>
-        {unconfirmed && (
-          <button type="button" className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={() => bulk.retryNow()}>
-            Try again now
+  return (
+    <>
+      {pending && <PendingLine bulk={bulk} pendingRef={setRef} />}
+      {!pending && unstored && (
+        <div role="alert" tabIndex={-1} ref={setRef} className="mt-3 flex flex-wrap items-center gap-3 rounded-xl bg-crit-soft px-4 py-3 text-[14px] outline-offset-2">
+          <span className="min-w-0 flex-[1_1_280px] text-base-content">
+            <b className="font-semibold text-crit">Not sent.</b> This device’s storage is full or blocked, so the change could not be kept while it is sent. Nothing was changed.
+          </span>
+          <button
+            type="button"
+            className="btn btn-sm border-line-strong bg-base-100 font-medium"
+            onClick={() => {
+              onDismissUnstored();
+              onDismissed();
+            }}
+          >
+            Dismiss
           </button>
-        )}
-      </p>
-    );
-  }
-  if (unstored) {
-    return (
-      <div role="alert" tabIndex={-1} ref={setRef} className="mt-3 flex flex-wrap items-center gap-3 rounded-xl bg-crit-soft px-4 py-3 text-[14px] outline-offset-2">
-        <span className="min-w-0 flex-[1_1_280px] text-base-content">
-          <b className="font-semibold text-crit">Not sent.</b> This device’s storage is full or blocked, so the change could not be kept while it is sent. Nothing was changed.
-        </span>
-        <button type="button" className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={() => {
-            onDismissUnstored();
+        </div>
+      )}
+      {bulk.results.map((result, i) => (
+        <ResultLine
+          key={result.press.bulkId}
+          result={result}
+          lineRef={i === 0 && !pending && !unstored ? setRef : undefined}
+          onDismiss={() => {
+            bulk.dismiss(result.press.bulkId);
             onDismissed();
-          }}>
-          Dismiss
+          }}
+        />
+      ))}
+    </>
+  );
+}
+
+function PendingLine({ bulk, pendingRef }: { bulk: Bulk; pendingRef: (el: HTMLElement | null) => void }) {
+  const pending = bulk.pending();
+  if (!pending) return null;
+  const unconfirmed = bulk.unconfirmed();
+  return (
+    <p role="status" tabIndex={-1} ref={pendingRef} className="mt-3 flex flex-wrap items-center gap-3 rounded-xl bg-pause-soft px-4 py-3 text-[14px] text-base-content outline-offset-2">
+      <span className="min-w-0 flex-[1_1_280px]">
+        {bulkPendingText(pending.action, pending.campaign)}
+        {unconfirmed ? " Not confirmed yet. It is being sent again, and each change is applied only once." : ""}
+      </span>
+      {unconfirmed && (
+        <button type="button" className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={() => bulk.retryNow()}>
+          Try again now
         </button>
-      </div>
-    );
-  }
-  if (!result) return null;
+      )}
+    </p>
+  );
+}
+
+/** One bulk's outcome: a refusal of the whole bulk, or what the server did lead by lead. */
+function ResultLine({ result, lineRef, onDismiss }: { result: BulkResult; lineRef: ((el: HTMLElement | null) => void) | undefined; onDismiss: () => void }) {
   if (result.kind === "refused") {
     return (
-      <div role="alert" tabIndex={-1} ref={setRef} className="mt-3 flex flex-wrap items-center gap-3 rounded-xl bg-crit-soft px-4 py-3 text-[14px] outline-offset-2">
+      <div role="alert" tabIndex={-1} ref={lineRef} className="mt-3 flex flex-wrap items-center gap-3 rounded-xl bg-crit-soft px-4 py-3 text-[14px] outline-offset-2">
         <span className="min-w-0 flex-[1_1_280px] text-base-content [overflow-wrap:anywhere]">
           <b className="font-semibold text-crit">Nothing was changed.</b> {result.message}
         </span>
-        <button type="button" className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={() => {
-          bulk.dismiss();
-          onDismissed();
-        }}>
+        <button type="button" className="btn btn-sm border-line-strong bg-base-100 font-medium" onClick={onDismiss}>
           Dismiss
         </button>
       </div>
     );
   }
   const answer = result.body as BulkControlAnswer | BulkAddAnswer;
-  const { summary, refused } = answer.action === "add" ? addResultText(answer) : controlResultText(answer, result.press.labels);
+  const { summary, refused } = answer.action === "add" ? addResultText(addOutcome(answer, result.press.notSent ?? [])) : controlResultText(answer, result.press.labels);
   return (
-    <div role="status" tabIndex={-1} ref={setRef} className="mt-3 flex flex-wrap items-start gap-3 rounded-xl bg-you-soft px-4 py-3 text-[14px] text-base-content outline-offset-2">
+    <div role="status" tabIndex={-1} ref={lineRef} className="mt-3 flex flex-wrap items-start gap-3 rounded-xl bg-you-soft px-4 py-3 text-[14px] text-base-content outline-offset-2">
       <div className="min-w-0 flex-[1_1_320px] [overflow-wrap:anywhere]">
         <p className="font-semibold">{summary}</p>
         {refused.length > 0 && (
@@ -233,10 +270,7 @@ export function BulkStatus({ bulk, unstored, onDismissUnstored, onDismissed }: {
           </>
         )}
       </div>
-      <button type="button" className="btn btn-ghost btn-sm font-medium text-ink-2 hover:text-base-content" onClick={() => {
-          bulk.dismiss();
-          onDismissed();
-        }}>
+      <button type="button" className="btn btn-ghost btn-sm font-medium text-ink-2 hover:text-base-content" onClick={onDismiss}>
         Dismiss
       </button>
     </div>

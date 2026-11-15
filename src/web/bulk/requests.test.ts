@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { KeyValue } from "../calls/callDesk.ts";
-import { BulkRequests, NoBulkAnswer, bulkPendingFor, shownBulkResult, type BulkPress, type BulkResult, type BulkSendAnswer } from "./requests.ts";
+import { BulkRequests, NoBulkAnswer, bulkPendingFor, type BulkPress, type BulkResult, type BulkSendAnswer } from "./requests.ts";
 
 /**
  * Bulk presses on Leads (ticket 18), on the controls' request rule (17b): stored under the bulk id before the first send;
@@ -36,6 +36,7 @@ function world() {
     const results: BulkResult[] = [];
     const requests = new BulkRequests({
       local,
+      tab: name,
       newId: () => `bulk-${++ids}`,
       now: () => 1_000 + ids,
       setTimer: (fire, ms) => {
@@ -78,7 +79,7 @@ describe("a bulk press is stored before its first send, and sent with the same i
       ["bulk-1", JSON.stringify(BODY)],
       ["bulk-1", JSON.stringify(BODY)],
     ]);
-    expect(a.requests.stored()).toEqual([]);
+    expect(a.requests.pending()).toBeNull();
     expect(a.results.map((r) => r.kind)).toEqual(["answered"]);
   });
 
@@ -96,7 +97,7 @@ describe("a bulk press is stored before its first send, and sent with the same i
       ["a", "bulk-1"],
       ["b", "bulk-1"],
     ]);
-    expect(w.local.keys()).toEqual([]);
+    expect(b.requests.pending()).toBeNull();
     expect(b.results).toHaveLength(1);
   });
 
@@ -123,7 +124,7 @@ describe("a bulk press is stored before its first send, and sent with the same i
     w.answerWith(() => Promise.resolve({ kind: "refused", message: "This request id was already used for another action: send a new one." }));
     a.requests.press("pause", BODY, LABELS, "Clinics");
     await w.settle();
-    expect(a.requests.stored()).toEqual([]);
+    expect(a.requests.pending()).toBeNull();
     expect(a.results).toMatchObject([{ kind: "refused", message: "This request id was already used for another action: send a new one." }]);
   });
 
@@ -138,19 +139,43 @@ describe("a bulk press is stored before its first send, and sent with the same i
     a.requests.watch();
     await w.settle();
     expect(a.results).toHaveLength(1);
-    expect(a.requests.stored()).toEqual([]);
+    expect(a.requests.pending()).toBeNull();
   });
 });
 
-describe("which bulk answer a page shows (review bot on 9daf7c0)", () => {
-  const answer = (bulkId: string): BulkResult => ({ kind: "answered", press: { v: 1, bulkId, action: "pause", body: {}, labels: {}, campaign: null, pressedAt: 1 }, body: {} });
-  test("an answer to a press this page did not make, a reload's recovered press, shows when nothing of its own is shown", () => {
-    expect(shownBulkResult(null, answer("recovered"), new Set())).toEqual(answer("recovered"));
+describe("an answered bulk stays until a Leads page has shown it (review bot on 3555a3e)", () => {
+  test("the answer is stored with the press: no longer on its way, never sent again, listed as unseen until marked seen", async () => {
+    const w = world();
+    const a = w.tab("a");
+    w.answerWith(() => Promise.resolve({ kind: "answered", body: { counts: { applied: 1, refused: 1 } } }));
+    a.requests.press("stop", BODY, LABELS, "Clinics");
+    await w.settle();
+    expect(a.requests.pending()).toBeNull();
+    expect(a.requests.unseen()).toMatchObject([{ kind: "answered", press: { bulkId: "bulk-1" }, body: { counts: { applied: 1, refused: 1 } } }]);
+    // Another tab, or a reload, finds the outcome too, and sends nothing for it.
+    const b = w.tab("b");
+    b.requests.watch();
+    await w.settle();
+    expect(w.sent).toHaveLength(1);
+    expect(b.requests.unseen().map((r) => r.press.bulkId)).toEqual(["bulk-1"]);
+    b.requests.markSeen("bulk-1");
+    expect(a.requests.unseen()).toEqual([]);
+    expect(w.local.keys()).toEqual([]);
   });
-  test("an answer to this page's own press replaces what is shown; another's never replaces this page's own", () => {
-    const own = new Set(["mine"]);
-    expect(shownBulkResult(answer("other"), answer("mine"), own)).toEqual(answer("mine"));
-    expect(shownBulkResult(answer("mine"), answer("other"), own)).toEqual(answer("mine"));
+
+  test("a refusal of the whole bulk is kept the same way, and several are listed newest answer first", async () => {
+    const w = world();
+    const a = w.tab("a");
+    w.answerWith(() => Promise.resolve({ kind: "refused", message: "This request id was already used for another action: send a new one." }));
+    a.requests.press("pause", BODY, LABELS, "Clinics");
+    await w.settle();
+    w.answerWith(() => Promise.resolve({ kind: "answered", body: {} }));
+    a.requests.press("resume", BODY, LABELS, "Clinics");
+    await w.settle();
+    expect(a.requests.unseen().map((r) => [r.press.bulkId, r.kind])).toEqual([
+      ["bulk-2", "answered"],
+      ["bulk-1", "refused"],
+    ]);
   });
 });
 

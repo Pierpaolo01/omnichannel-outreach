@@ -4,6 +4,7 @@ import type { CampaignDefinition, StepDefinition } from "../../src/domain/sequen
 import { EngineHarness } from "./engine-harness.ts";
 import { business, person } from "./export-builder.ts";
 import { random } from "./generated-sequences.ts";
+import { pressOf } from "../../src/web/bulk/press.ts";
 
 /**
  * The generated bulk runs (ticket 18; ADR 0003 "Ticket 18"). Through the real HTTP app, SQLite store and engine on the
@@ -22,6 +23,8 @@ export const bulkInvariantsOf = (problem: string): BulkInvariant[] => [...proble
 
 export interface BulkRunOptions {
   readonly bulkRules?: Partial<BulkRules>;
+  /** What a confirmation sends; the press builder Leads uses, replaced only by a mutation (council item 8 on 3555a3e). */
+  readonly pressOf?: typeof pressOf;
   readonly steps?: number;
 }
 
@@ -105,6 +108,8 @@ export async function runBulk(seed: number, options: BulkRunOptions = {}): Promi
   const rnd = random(seed);
   /** A stream of its own (verifier F2 on 4363270): a lead joins a confirmation's scope before its press. */
   const joinRnd = random(seed ^ 0x18f2);
+  /** A stream of its own (council item 8 on 3555a3e): the unreachable person becomes reachable before an add's press. */
+  const reachRnd = random(seed ^ 0x18a8);
   const pick = <T>(xs: readonly T[]): T => xs[Math.floor(rnd() * xs.length)] as T;
   /** As `pick`, drawing the same number, for a list that may be empty. */
   const maybe = <T>(xs: readonly T[]): T | undefined => xs[Math.floor(rnd() * xs.length)];
@@ -141,7 +146,9 @@ export async function runBulk(seed: number, options: BulkRunOptions = {}): Promi
   // The import's company-lead rule, for these companies: a company with people on record (all reachable here but Oda,
   // whose company has no shared inbox) is never added as a company lead.
   const companiesWithPeople = new Set((await search()).flatMap((r) => (r.kind === "person" ? [`company:${r.company.id}`] : [])));
-  const notEnrollable = (key: string) => key === odaKey || companiesWithPeople.has(key);
+  // Oda becomes reachable when re-imported with an email between an add's preview and its press (council item 8).
+  let odaReachable = false;
+  const notEnrollable = (key: string) => (key === odaKey && !odaReachable) || companiesWithPeople.has(key);
 
   let ids = 0;
   const tabs: [Confirmation | AddConfirmation | null, Confirmation | AddConfirmation | null] = [null, null];
@@ -189,6 +196,8 @@ export async function runBulk(seed: number, options: BulkRunOptions = {}): Promi
       }
       const tally = { enroll: res.body.rows.filter((r) => r.outcome === "enroll").length, alreadyEnrolled: res.body.rows.filter((r) => r.outcome === "already_enrolled").length, notEnrolled: res.body.rows.filter((r) => r.outcome === "not_enrolled").length };
       if (JSON.stringify(tally) !== JSON.stringify(res.body.counts)) fail(`B4 the add preview's counts ${JSON.stringify(res.body.counts)} are not its rows' ${JSON.stringify(tally)}`);
+      // A row the preview shows as not added is never sent (council item 8 on 3555a3e): the behaviour is reached here.
+      if (res.body.rows.some((r) => r.outcome === "not_enrolled")) features.add("add-no-usable-channel");
       tabs[tab] = { kind: "add", preview: res.body, rows: selection.map((r) => r.ref) };
       features.add("add-confirmation");
       return;
@@ -221,7 +230,8 @@ export async function runBulk(seed: number, options: BulkRunOptions = {}): Promi
     const c = press.confirmation;
     if (c.kind === "add") {
       const target = c.preview.campaign.id;
-      for (const ref of c.rows) {
+      // Only the rows the confirmation showed as to be added, whatever changed since (council item 8 on 3555a3e).
+      for (const ref of c.preview.rows.filter((r) => r.outcome === "enroll").map((r) => r.row)) {
         const key = `${ref.kind}:${ref.id}`;
         if (record.some((r) => r.rowKey === key && r.campaignId === target) || notEnrollable(key)) continue;
         // Enrolled now: its id comes from the answer.
@@ -243,16 +253,17 @@ export async function runBulk(seed: number, options: BulkRunOptions = {}): Promi
   };
 
   /** Fills in the ids of enrollments an add made, from its answer. */
-  const settleAdd = (answer: BulkAddAnswer) => {
+  const settleAdd = (answer: BulkAddAnswer, confirmation: AddConfirmation) => {
     for (const r of answer.results) {
       const key = `${r.row.kind}:${r.row.id}`;
       const pending = record.find((e) => e.id === `pending:${key}|${answer.campaign.id}`);
       if (r.outcome === "enrolled" && r.enrollmentId && pending) Object.assign(pending, { id: r.enrollmentId });
-      if (r.outcome === "enrolled" && !pending) fail(`B6 the add enrolled ${key}, which the record did not expect`);
+      const previewed = confirmation.preview.rows.find((x) => x.row.kind === r.row.kind && x.row.id === r.row.id)?.outcome;
+      // Enrolled though its confirmation said it would not be added: outside what the confirmation showed (B1).
+      if (r.outcome === "enrolled" && !pending) fail(`${previewed === "enroll" ? "B6" : "B1"} the add enrolled ${key}, which the record did not expect (its confirmation said ${previewed ?? "nothing"})`);
       if (r.outcome !== "enrolled" && pending) fail(`B6 the add did not enroll ${key} (${r.outcome}), which the record expected`);
       if (r.outcome === "enrolled") features.add("add-enrolled");
       if (r.outcome === "already_enrolled") features.add("add-already-enrolled");
-      if (r.outcome === "not_enrolled") features.add("add-no-usable-channel");
     }
   };
 
@@ -270,7 +281,7 @@ export async function runBulk(seed: number, options: BulkRunOptions = {}): Promi
     const answer = res.body;
     if (answer.action === "add") {
       if (firstArrival) {
-        settleAdd(answer);
+        if (press.confirmation.kind === "add") settleAdd(answer, press.confirmation);
         // Each new lead's first email goes out now, so nothing of it falls due between a later confirmation and its press.
         await h.advanceTo(h.clock + 5 * MIN);
       }
@@ -317,15 +328,13 @@ export async function runBulk(seed: number, options: BulkRunOptions = {}): Promi
     const c = tabs[tab];
     if (!c) return;
     const bulkId = `bulk-${seed}-${++ids}`;
-    const body =
-      c.kind === "add"
-        ? { bulkId, action: "add", campaignId: c.preview.campaign.id, rows: c.rows }
-        : { bulkId, action: c.preview.action, campaignId: c.preview.scope?.id ?? null, items: c.preview.items.flatMap((i) => (i.control.allowed ? [{ enrollmentId: i.enrollmentId, expect: { status: i.status, preview: i.control.digest } }] : [])) };
-    if (c.kind === "control" && c.preview.counts.applies === 0) {
+    // What Leads sends: the confirmation's snapshot, built by the page's own press builder.
+    const body = { bulkId, ...(options.pressOf ?? pressOf)(c.preview).body };
+    // A confirmation with nothing to do offers no action.
+    if ((c.kind === "control" && c.preview.counts.applies === 0) || (c.kind === "add" && c.preview.counts.enroll === 0)) {
       tabs[tab] = null;
       return;
     }
-    if (c.kind === "add" && c.rows.length === 0) return;
     // A confirmation pressed from both tabs on one read: the other tab keeps its copy and may press it too.
     if (tabs[tab === 0 ? 1 : 0] === c) features.add("two-tabs-one-read");
     tabs[tab] = null;
@@ -350,6 +359,22 @@ export async function runBulk(seed: number, options: BulkRunOptions = {}): Promi
           await h.advanceTo(h.clock + 5 * MIN);
           features.add("a-lead-joined-the-scope-before-the-press");
         } else fail(`B6 the join of ${join.key} into ${join.campaign} answered ${res.status} ${JSON.stringify(res.body)}`);
+      }
+    }
+    // Now and then the person the add's confirmation showed as not added becomes reachable before the press (council item
+    // 8 on 3555a3e, the reproduction): another tab re-imports them with an email into another campaign. The press still
+    // adds only what its confirmation showed.
+    if (c.kind === "add" && !odaReachable && c.preview.rows.some((r) => `${r.row.kind}:${r.row.id}` === odaKey && r.outcome === "not_enrolled") && reachRnd() < 0.6) {
+      const elsewhereCampaign = campaigns.filter((cp) => cp.id !== c.preview.campaign.id)[Math.floor(reachRnd() * (campaigns.length - 1))];
+      if (elsewhereCampaign) {
+        await h.reimport(elsewhereCampaign.id, { businesses: BUSINESSES, people: [{ ...ODA, email: "oda@fernhill.example" }] });
+        odaReachable = true;
+        // The import is another tab's event: the record takes the enrollments it made as they are.
+        for (const r of await search()) {
+          for (const e of r.enrollments) if (!record.some((x) => x.id === e.id)) record.push({ id: e.id, campaignId: e.campaign.id, rowKey: `${r.kind}:${r.id}`, state: stateOf(e.status) });
+        }
+        await h.advanceTo(h.clock + 5 * MIN);
+        features.add("an-excluded-row-became-reachable-before-the-press");
       }
     }
     // Now and then a lead changes between the confirmation's read and the press.
