@@ -80,6 +80,22 @@ describe("test contacts (ADR 0003 'Ticket 21', the boundary)", () => {
     expect(ok.body.contacts).toEqual({ email: OWN_EMAIL, mobile: "+44 7700 900456", emailIsALead: false, mobileIsALead: false });
   });
 
+  test("a lead's routes do not know a test run: its read, its controls and a bulk stop answer as for no lead (merge of ticket 18)", async () => {
+    const w = await world();
+    await w.h.request("PUT", `/api/campaigns/${w.campaign}/test-contacts`, { email: OWN_EMAIL, mobile: "" });
+    const runId = (await w.run()).body.run?.id ?? "";
+    expect((await w.h.request("GET", `/api/enrollments/${runId}`)).status).toBe(404);
+    expect((await w.h.request("POST", `/api/enrollments/${runId}/controls`, { requestId: "c-1", action: "stop" })).status).toBe(404);
+    const bulk = await w.h.request<{ results: { outcome: string; reason: string | null }[] }>("POST", "/api/bulk", {
+      bulkId: "bulk-1",
+      action: "stop",
+      campaignId: null,
+      items: [{ enrollmentId: runId, expect: { status: "active", preview: "" } }],
+    });
+    expect(bulk.body.results).toMatchObject([{ outcome: "refused", reason: "There is no such lead." }]);
+    expect((await w.tab()).run).toMatchObject({ id: runId, running: true });
+  });
+
   test("Run test is refused with no contact, and a lead's controls do not reach a test run", async () => {
     const w = await world();
     const refused = await w.run();
