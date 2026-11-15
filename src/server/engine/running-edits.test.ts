@@ -251,3 +251,18 @@ describe("lengthening a phone track's skip limit on a running campaign (council 
     expect(after.skipDeadline - before.skipDeadline).toBe(2 * DAY);
   });
 });
+
+describe("one reason when what was previewed no longer holds (council on 93bed86, item 14)", () => {
+  test("another tab applied first: the late Apply is refused impact_changed, said as changed elsewhere", async () => {
+    const w = await world();
+    await w.h.advanceTo(MONDAY_9 + H);
+    const base = (await w.h.request<{ definitionVersion: number }>("GET", `/api/campaigns/${w.id}/sequence`)).body.definitionVersion;
+    const mine = def([track("e1", [email("s1"), email("s2", 1), email("s3", 3)])]);
+    const read = await w.h.request<{ digest: string }>("POST", `/api/campaigns/${w.id}/sequence/impact`, { definition: mine });
+    const theirs = def([track("e1", [email("s1"), email("s2", 2, "Their copy."), email("s3", 3)])]);
+    const theirRead = await w.h.request<{ digest: string }>("POST", `/api/campaigns/${w.id}/sequence/impact`, { definition: theirs });
+    expect((await w.save({ ...theirs, save: { session: "tab-b", seq: 1, base }, impact: theirRead.body.digest } as CampaignDefinition)).status).toBe(200);
+    const late = await w.h.request<{ error?: { code: string; message: string; elsewhere?: boolean } }>("PUT", `/api/campaigns/${w.id}/sequence`, { ...mine, save: { session: "tab-a", seq: 1, base }, impact: read.body.digest });
+    expect([late.status, late.body.error?.code, late.body.error?.elsewhere]).toEqual([409, "impact_changed", true]);
+  });
+});

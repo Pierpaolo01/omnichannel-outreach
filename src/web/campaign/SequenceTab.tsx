@@ -70,7 +70,7 @@ const DECLINED_PATHS: readonly { readonly path: DeclinedPath; readonly label: st
 const DECLINED_ON_NODE: Record<DeclinedPath, string> = { stop: "stop", continue: "continue other channels", win_back: "win back" };
 
 /** The Sequence tab: the canvas with every track and how they connect, and the selected track's inspector beside it. */
-export function SequenceTab({ campaignId, editor }: { campaignId: string; editor: SequenceEditor }) {
+export function SequenceTab({ campaignId, editor, paused = false }: { campaignId: string; editor: SequenceEditor; paused?: boolean }) {
   const [, navigate] = useLocation();
   const params = new URLSearchParams(useSearch());
   const tracks = liveMain(editor.draft);
@@ -130,7 +130,7 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
 
   // The running-edit panel shows whenever the campaign is running, whatever the canvas shows: with every track removed
   // too, so Apply and Discard stay in reach (review bot on 7afa03d). After Discard, focus goes to the canvas's first control.
-  const running = editor.launched ? <RunningChanges campaignId={campaignId} editor={editor} onDiscarded={() => setFocusNext({ to: "add" })} /> : null;
+  const running = editor.launched ? <RunningChanges campaignId={campaignId} editor={editor} paused={paused} onDiscarded={() => setFocusNext({ to: "add" })} /> : null;
 
   if (tracks.length === 0 && branchTracks.length === 0) {
     return (
@@ -153,7 +153,8 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
               </span>
             </p>
           )}
-          {editor.launched && !editor.unsaved && editor.view.definition.tracks.every((t) => t.removed) && <p className="text-[14px] text-muted">This campaign launched with no track.</p>}
+          {/* The present state, from the draft and the stored version (council on 93bed86, item 15). */}
+          {editor.launched && <p className="text-[14px] text-muted">{noTracksSentence(editor)}</p>}
           {
             <>
               <div className="mt-1.5 flex flex-wrap gap-2">
@@ -233,6 +234,13 @@ export function SequenceTab({ campaignId, editor }: { campaignId: string; editor
 }
 
 const ADD_TRACK_ID = "add-track";
+
+/** A running campaign's empty canvas, said as it is: removed on this page only, or no track stored either. */
+function noTracksSentence(editor: SequenceEditor): string {
+  const stored = editor.view.definition.tracks.filter((t) => !t.removed).length;
+  if (stored === 0) return "No tracks. Add one: leads still running start it once you apply.";
+  return `No tracks. Add one, or Discard to keep the running ${stored === 1 ? "track" : "tracks"}.`;
+}
 /** The width one track node takes beside another: the node and the space around it. */
 const NODE_WIDTH = 230;
 const NODE_GAP = 24;
@@ -888,7 +896,9 @@ function InspectorFrame({ titleId, track, editor, onClose, children }: { titleId
 function EditorNotices({ editor, onLoadedStored }: { editor: SequenceEditor; onLoadedStored: () => void }) {
   return (
     <>
-      {editor.save.kind === "error" && <ErrorState title="Your last change wasn’t saved." message={editor.save.message} onRetry={editor.retrySave} />}
+      {/* On a running campaign a refused Apply is said by the running-edit panel, which points at Apply: never a Try
+          again here that would send nothing (council on 93bed86, item 10). */}
+      {editor.save.kind === "error" && !editor.launched && <ErrorState title="Your last change wasn’t saved." message={editor.save.message} onRetry={editor.retrySave} />}
       {editor.save.kind === "conflict" && <ConflictNotice editor={editor} onLoaded={onLoadedStored} />}
       {editor.problems.length > 0 && (
         <p role="alert" className="rounded-field bg-crit-soft px-3 py-2 text-[13.5px] text-crit">
@@ -1244,7 +1254,7 @@ function StepBlock({ channel, step, index, steps, open, facts, editor, onToggle,
               id={`body-${step.id}`}
               className={`textarea ${sms ? "min-h-[96px]" : "min-h-[150px]"} w-full [field-sizing:content] border-line-strong text-[14px] leading-[1.55] ${step.body.trim() ? "" : "border-crit bg-crit-soft/40"}`}
               value={step.body}
-              placeholder={`Write this ${noun.toLowerCase()}. Launch is blocked while it’s empty.`}
+              placeholder={editor.launched ? `Write this ${noun.toLowerCase()}. An empty ${noun.toLowerCase()} can’t be applied.` : `Write this ${noun.toLowerCase()}. Launch is blocked while it’s empty.`}
               onChange={(e) => onChange((s) => ({ ...s, body: e.target.value }))}
               aria-label={`${name} ${sms ? "message" : "copy"}`}
               aria-describedby={sms ? `${bodyId}-count` : undefined}

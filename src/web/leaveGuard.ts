@@ -4,9 +4,11 @@
  * page sets a guard, the router's navigation (links, `navigate`) and the browser's Back and Forward ask first, with the
  * app's in-page confirmation; a path the guard allows (the same campaign's other tabs, which keep the page's editor) goes.
  *
- * Back and Forward cannot be cancelled once the browser has moved, so the guard puts the address back at once, before
- * the router reads it (a capture listener on `popstate` runs before the router's own), and asks; leaving then goes to
- * the address the user asked for.
+ * Back and Forward cannot be cancelled once the browser has moved, and the history must stay as it was (review bot on
+ * 93bed86). So every entry this document makes carries its position, the guard's capture listener stops the router from
+ * seeing a move it blocks, and moves back by the same distance with `history.go`; nothing is pushed, so the entries ahead
+ * are kept. Leaving then moves by that distance again, and the router follows. Cancelling, or Escape, gives keyboard
+ * focus back to the element the navigation started from, or the page's main heading.
  */
 import { useSyncExternalStore } from "react";
 import { navigate as browserNavigate, useBrowserLocation } from "wouter/use-browser-location";
@@ -18,14 +20,25 @@ export interface LeaveGuard {
   readonly text: string;
 }
 
+type Pending = { readonly to: string; readonly kind: "link"; readonly options?: Parameters<typeof browserNavigate>[1] } | { readonly to: string; readonly kind: "history"; readonly delta: number };
+
+const KEY = "outreachEntry";
 let guard: LeaveGuard | null = null;
-let pending: string | null = null;
+let pending: Pending | null = null;
+/** Where focus was when the navigation the guard asks about started. */
+let origin: Element | null = null;
+/** This entry's position among the document's entries. */
+let position = 0;
+/** A move back the guard made itself, which the router must not see either. */
+let restoring = false;
 const listeners = new Set<() => void>();
-const here = () => `${location.pathname}${location.search}`;
-let last = typeof location === "undefined" ? "/" : here();
 
 const notify = () => {
   for (const l of listeners) l();
+};
+const entryOf = (state: unknown): number | null => {
+  const n = (state as Record<string, unknown> | null)?.[KEY];
+  return typeof n === "number" ? n : null;
 };
 
 /** Sets or clears the guard; clearing it also drops a question it was asking. */
@@ -37,69 +50,92 @@ export function setLeaveGuard(next: LeaveGuard | null): void {
   }
 }
 
-const pathOf = (to: string | URL) => {
-  const url = new URL(to, location.href);
-  return { path: url.pathname, full: `${url.pathname}${url.search}` };
-};
-
 /** The navigation the guard is asking about, or null. */
 export function useLeaveQuestion(): { readonly to: string; readonly text: string } | null {
-  const to = useSyncExternalStore(
+  const asked = useSyncExternalStore(
     (l) => {
       listeners.add(l);
       return () => listeners.delete(l);
     },
     () => pending,
   );
-  return to !== null && guard ? { to, text: guard.text } : null;
+  return asked !== null && guard ? { to: asked.to, text: guard.text } : null;
 }
+
+const ask = (next: Pending) => {
+  origin = typeof document === "undefined" ? null : document.activeElement;
+  pending = next;
+  notify();
+};
 
 /** The user chose to leave: the guard is set aside and the navigation goes. */
 export function leaveAnyway(): void {
-  const to = pending;
+  const asked = pending;
   pending = null;
   guard = null;
   notify();
-  if (to !== null) {
-    last = to;
-    browserNavigate(to);
-  }
+  if (asked === null) return;
+  if (asked.kind === "history") history.go(asked.delta);
+  else guardedNavigate(asked.to, asked.options);
 }
 
-/** The user chose to stay: nothing moves. */
+/** The user chose to stay: nothing moves, and focus goes back where the navigation started. */
 export function stay(): void {
   pending = null;
   notify();
+  const back = origin;
+  origin = null;
+  queueMicrotask(() => {
+    const target = back instanceof HTMLElement && back.isConnected ? back : document.querySelector<HTMLElement>("main h1");
+    if (target && !target.hasAttribute("tabindex") && target.tagName === "H1") target.setAttribute("tabindex", "-1");
+    target?.focus();
+  });
+}
+
+function guardedNavigate(to: string | URL, options?: Parameters<typeof browserNavigate>[1]): void {
+  const url = new URL(to, location.href);
+  if (guard && !guard.allows(url.pathname)) {
+    ask({ to: `${url.pathname}${url.search}`, kind: "link", ...(options ? { options } : {}) });
+    return;
+  }
+  // Each entry carries its position, so a blocked Back or Forward can be undone by the same distance.
+  const at = options?.replace === true ? position : position + 1;
+  position = at;
+  browserNavigate(to, { ...options, state: { ...((options?.state as Record<string, unknown> | undefined) ?? {}), [KEY]: at } });
 }
 
 /** The router's location hook: the browser's, with every navigation asked first while a guard holds. */
 export function useGuardedLocation(): ReturnType<typeof useBrowserLocation> {
   const [path] = useBrowserLocation();
-  const guarded: typeof browserNavigate = (to, options) => {
-    const target = pathOf(to);
-    if (guard && !guard.allows(target.path)) {
-      pending = target.full;
-      notify();
-      return;
-    }
-    last = target.full;
-    browserNavigate(to, options);
-  };
-  return [path, guarded];
+  return [path, guardedNavigate];
 }
 
 if (typeof window !== "undefined") {
+  // The entry the document opened on is position 0, keeping whatever state it had.
+  const opened = entryOf(history.state);
+  if (opened === null) history.replaceState({ ...((history.state as Record<string, unknown> | null) ?? {}), [KEY]: 0 }, "");
+  else position = opened;
   window.addEventListener(
     "popstate",
-    () => {
-      const now = here();
-      if (guard && !guard.allows(location.pathname)) {
-        history.pushState(history.state, "", last);
-        pending = now;
-        notify();
+    (event) => {
+      const at = entryOf(event.state) ?? entryOf(history.state);
+      if (restoring) {
+        // The guard's own move back to where the user was: the router never saw the move away, so it sees nothing now.
+        restoring = false;
+        event.stopImmediatePropagation();
+        if (at !== null) position = at;
         return;
       }
-      last = now;
+      if (guard && at !== null && !guard.allows(location.pathname)) {
+        // Before the router reads it: undo the move by the same distance, keeping every entry, and ask.
+        event.stopImmediatePropagation();
+        const delta = at - position;
+        restoring = true;
+        history.go(-delta);
+        ask({ to: `${location.pathname}${location.search}`, kind: "history", delta });
+        return;
+      }
+      if (at !== null) position = at;
     },
     { capture: true },
   );

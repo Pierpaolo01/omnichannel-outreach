@@ -144,7 +144,7 @@ function Campaign({ detail, editor, tab, controls }: { detail: CampaignDetail; e
       </nav>
 
       <div className="mt-4">
-        {tab === "sequence" && <SequenceTab campaignId={campaign.id} editor={editor} />}
+        {tab === "sequence" && <SequenceTab campaignId={campaign.id} editor={editor} paused={detail.pause.paused} />}
         {tab === "before-launch" && <BeforeLaunchTab campaignId={campaign.id} editor={editor} />}
         {tab === "test-run" && <TestRunTab />}
         {tab === "leads" && <LeadsTab campaignId={campaign.id} version={view.definitionVersion} launched={editor.launched} />}

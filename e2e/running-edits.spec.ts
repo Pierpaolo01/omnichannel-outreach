@@ -73,7 +73,7 @@ test.describe("editing a running campaign", () => {
     const panel = page.getByTestId("running-changes");
     await expect(panel.getByRole("heading", { name: "Changes not applied yet" })).toBeVisible();
     await expect(panel.getByText("Email track · Email 2")).toBeVisible();
-    await expect(panel.getByText(/leads? will get it/)).toBeVisible();
+    await expect(panel.getByText(/leads? will get the new copy/)).toBeVisible();
     expect((await stored(id)).tracks[0]!.steps[1]!.body).toBe(COPY.second.body);
     await shot(page, "running-campaign-copy-changed-not-applied");
     await linger(page);
@@ -136,8 +136,9 @@ test.describe("editing a running campaign", () => {
     await expect(panel.getByText("wait changed to 1 day")).toBeVisible();
     await shot(page, "paused-campaign-wait-changed-not-applied");
     await linger(page);
-    await panel.getByRole("button", { name: "Apply to running leads" }).click();
-    await expect(panel.getByRole("heading", { name: "This campaign is running" })).toBeVisible();
+    await expect(panel.getByText(/will wait the new time/)).toBeVisible();
+    await panel.getByRole("button", { name: "Apply to the paused campaign" }).click();
+    await expect(panel.getByRole("heading", { name: "This campaign is paused" })).toBeVisible();
     expect((await stored(id)).tracks[0]!.steps[1]!.waitDays).toBe(1);
   });
 
@@ -159,7 +160,7 @@ test.describe("editing a running campaign", () => {
     await page.goto(`${f.url}/campaigns/${id}?track=email&step=s2`);
     await page.getByLabel("Email 2 copy").fill("A first change for {{company}}.");
     const panel = page.getByTestId("running-changes");
-    await expect(panel.getByText(/leads? will get it/)).toBeVisible();
+    await expect(panel.getByText(/leads? will get the new copy/)).toBeVisible();
     // The read for the next change is held: the earlier read must not stand in for it.
     const held: (() => Promise<void>)[] = [];
     await page.route("**/api/campaigns/*/sequence/impact", (route) => void held.push(() => route.continue()));
@@ -200,7 +201,7 @@ test.describe("editing a running campaign", () => {
     expect((await stored(id)).emailPool).toEqual([FAKE_INBOX]);
   });
 
-  test("leaving inside the app asks first while changes are not applied: links and Back (review bot and verifier on 7afa03d)", async ({ page }) => {
+  test("leaving inside the app asks first while changes are not applied: links and Back, with history and focus kept (review bot on 7afa03d and 93bed86)", async ({ page }) => {
     const id = await running();
     // One document from here on: the campaigns list, then the campaign by its link.
     await page.goto(`${f.url}/campaigns`);
@@ -211,18 +212,58 @@ test.describe("editing a running campaign", () => {
     // Another tab of the same campaign keeps the editor: no question.
     await page.getByRole("link", { name: /^Before launch/ }).click();
     await page.getByRole("link", { name: "Sequence" }).click();
-    await page.getByRole("navigation", { name: "Areas" }).getByRole("link", { name: "Campaigns" }).click();
+    const campaigns = page.getByRole("navigation", { name: "Areas" }).getByRole("link", { name: "Campaigns" });
+    await campaigns.click();
     const question = page.getByRole("group").filter({ hasText: "Leave without applying your changes?" });
     await expect(question).toBeVisible();
     await question.getByRole("button", { name: "Cancel" }).click();
-    await expect(page).toHaveURL(new RegExp(`/campaigns/${id}`));
+    await expect(page).toHaveURL(new RegExp(`/campaigns/${id}$`));
+    // Focus goes back to the link the navigation started from (council on 93bed86, item 17).
+    await expect(campaigns).toBeFocused();
     await expect(page.getByTestId("running-changes").getByRole("heading", { name: "Changes not applied yet" })).toBeVisible();
-    // Back, past this campaign's own tabs (opening a track replaces the entry), to the campaigns list.
+    // Back to the Before launch tab: the same campaign, no question. Then Back past the campaign: asked; Escape stays.
+    await page.evaluate(() => history.back());
+    await expect(page).toHaveURL(new RegExp(`/campaigns/${id}/before-launch$`));
+    await page.evaluate(() => history.go(-2));
+    await expect(question).toBeVisible();
+    await expect(page).toHaveURL(new RegExp(`/campaigns/${id}/before-launch$`));
+    await page.keyboard.press("Escape");
+    await expect(question).toHaveCount(0);
+    expect(await page.evaluate(() => document.activeElement?.tagName)).not.toBe("BODY");
+    // The history was kept as it was: Forward still goes to the Sequence tab (review bot on 93bed86).
+    await page.evaluate(() => history.forward());
+    await expect(page).toHaveURL(new RegExp(`/campaigns/${id}$`));
+    await expect(page.getByTestId("running-changes").getByRole("heading", { name: "Changes not applied yet" })).toBeVisible();
+    // Back past the campaign again, and leave: it lands where Back was going, and nothing was applied.
     await page.evaluate(() => history.go(-3));
     await expect(question).toBeVisible();
-    await expect(page).toHaveURL(new RegExp(`/campaigns/${id}`));
     await question.getByRole("button", { name: "Leave and discard changes" }).click();
-    await expect(page).not.toHaveURL(new RegExp(`/campaigns/${id}`));
+    await expect(page).toHaveURL(new RegExp(`/campaigns$`));
     expect((await stored(id)).tracks[0]!.steps[1]!.body).toBe(COPY.second.body);
+  });
+
+  test("a refused Apply is said in the panel, pointing at Apply; no Try again that would send nothing (council on 93bed86, item 10)", async ({ page }) => {
+    const id = await running();
+    await page.goto(`${f.url}/campaigns/${id}?track=email&step=s2`);
+    await page.getByLabel("Email 2 copy").fill("A refused change for {{company}}.");
+    const panel = page.getByTestId("running-changes");
+    await expect(panel.getByText(/will get the new copy/)).toBeVisible();
+    await page.route("**/api/campaigns/*/sequence", (route) =>
+      route.request().method() === "PUT" ? route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: { code: "impact_changed", message: "What this change does changed since it was shown, so nothing was applied. Check what it does now, then apply again.", elsewhere: false } }) }) : route.continue(),
+    );
+    await panel.getByRole("button", { name: "Apply to running leads" }).click();
+    await expect(panel.getByText(/^Not applied\. What this change does changed/)).toBeVisible();
+    await expect(page.getByText("Your last change wasn’t saved.")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Try again" })).toHaveCount(0);
+    await page.unroute("**/api/campaigns/*/sequence");
+  });
+
+  test("with every track removed, the canvas says what is true and offers Add (council on 93bed86, item 15)", async ({ page }) => {
+    const id = await running();
+    await page.goto(`${f.url}/campaigns/${id}?track=email`);
+    await page.getByRole("button", { name: "Remove this email track" }).click();
+    await expect(page.getByText("No tracks. Add one, or Discard to keep the running track.")).toBeVisible();
+    await expect(page.getByText("This campaign launched with no track.")).toHaveCount(0);
+    await expect(page.locator("#add-track")).toBeEnabled();
   });
 });

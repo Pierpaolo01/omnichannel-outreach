@@ -83,7 +83,8 @@ export type EditChangeKind =
   | "declined_path"
   | "skip_limit"
   | "call_script"
-  | "timezone";
+  | "timezone"
+  | "sender_pool";
 export interface EditChange {
   readonly kind: EditChangeKind;
   readonly trackId: string | null;
@@ -131,6 +132,9 @@ export function changesBetween(previous: CampaignDefinition, next: CampaignDefin
   for (const was of previous.tracks) if (!was.removed && !next.tracks.some((t) => t.id === was.id)) add("track_removed", was.id);
   if ((previous.callScript ?? "") !== (next.callScript ?? "")) add("call_script");
   if (previous.timezone !== next.timezone) add("timezone");
+  // The pools follow the connected senders: a change rides along with Apply, so it is listed (council on 93bed86, item 12).
+  const same = (a: readonly string[] | undefined, b: readonly string[] | undefined) => [...(a ?? [])].sort().join("\n") === [...(b ?? [])].sort().join("\n");
+  if (!same(previous.emailPool, next.emailPool) || !same(previous.smsPool, next.smsPool)) add("sender_pool");
   return out;
 }
 
@@ -172,6 +176,7 @@ function impactOf(state: SubjectState, change: EditChange): LeadImpact {
     }
     case "call_script":
     case "timezone":
+    case "sender_pool":
       return "reaches";
     default: {
       const unreachable: never = change.kind;

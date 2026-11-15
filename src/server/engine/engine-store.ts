@@ -157,7 +157,7 @@ export type SaveResult =
   /** A running campaign's save refused by one of the three launch blockers (7.2): nothing stored. */
   | { readonly outcome: "blocked"; readonly check: LaunchCheck; readonly stored: StoredDefinition }
   /** A running save sent with the digest of a read that no longer matches it (review bot on 7afa03d): nothing stored. */
-  | { readonly outcome: "impact_changed"; readonly stored: StoredDefinition }
+  | { readonly outcome: "impact_changed"; readonly elsewhere: boolean; readonly stored: StoredDefinition }
   | { readonly outcome: "missing" };
 
 /**

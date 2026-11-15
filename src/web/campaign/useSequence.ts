@@ -55,8 +55,9 @@ async function putSequence(campaignId: string, body: unknown, options: { keepali
     return (await putJson(`/api/campaigns/${encodeURIComponent(campaignId)}/sequence`, body, { ...(options.keepalive ? { keepalive: true } : {}), signal: abort.signal })) as SequenceView;
   } catch (error) {
     if (!(error instanceof ApiRequestError)) throw new NoAnswer();
-    const code = (error.body as { error?: { code?: unknown } } | null)?.error?.code;
-    throw Object.assign(new Error(error.message), { code: typeof code === "string" ? code : null });
+    const body = (error.body as { error?: { code?: unknown; elsewhere?: unknown } } | null)?.error;
+    const code = body?.code;
+    throw Object.assign(new Error(error.message), { code: typeof code === "string" ? code : null, elsewhere: body?.elsewhere === true });
   } finally {
     clearTimeout(timeout);
   }

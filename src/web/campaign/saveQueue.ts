@@ -347,6 +347,13 @@ export class SaveQueue {
         this.deps.onStatus({ kind: "conflict", message, saved: this.confirmed() });
         return { kind: "conflict", message };
       }
+      // A running edit's read no longer holds because another page changed the sequence (council on 93bed86, item 14):
+      // the conflict state, as a lost save before launch is; any other `impact_changed` is a refusal, said in place.
+      if (code === "impact_changed" && (error as { elsewhere?: unknown }).elsewhere === true) {
+        this.conflictSeq = Math.max(this.conflictSeq ?? 0, save.seq);
+        this.deps.onStatus({ kind: "conflict", message, saved: false });
+        return { kind: "conflict", message };
+      }
       if (code === "edit_conflict") {
         // An older save than one already accepted: superseded, whatever it collided with.
         if (save.seq <= this.acceptedSeq) return { kind: "superseded" };

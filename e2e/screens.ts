@@ -1430,7 +1430,7 @@ export const SCREENS: readonly Screen[] = [
       const f = await fakeProviderApp();
       await fake(page, `/campaigns/${f.running}?track=email&step=s2`);
       await page.getByLabel("Email 2 copy").fill("Hi {{first_name|there}},\n\nOne more idea for {{company}}: a waiting list for the evening slots.\n\nAlex");
-      await settle(page, /will get it|past it or finished/);
+      await settle(page, /will get the new copy|past it or finished/);
     },
   },
   {

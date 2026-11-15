@@ -5,6 +5,7 @@
  * decides what a change does: every count is the server's, from the engine's own reconciliation of each lead.
  */
 import { useEffect, useRef, useState } from "react";
+import type { EditChangeKind } from "../../domain/sequence/reconcile.ts";
 import type { CampaignDefinition, EditImpactChange, EditImpactView, TrackDefinition } from "../../shared/api.ts";
 import { ApiRequestError, postJson } from "../api.ts";
 import { STEP_NOUN, liveSteps, trackTitle } from "./model.ts";
@@ -98,6 +99,8 @@ function whatChanged(change: EditImpactChange, draft: CampaignDefinition): strin
       return "call script changed";
     case "timezone":
       return "campaign time zone changed";
+    case "sender_pool":
+      return "senders changed to the ones connected now";
     default: {
       const unreachable: never = change.kind;
       return String(unreachable);
@@ -105,11 +108,47 @@ function whatChanged(change: EditImpactChange, draft: CampaignDefinition): strin
   }
 }
 
+/** What a change does to a lead it reaches, by its kind (council on 93bed86, item 12). */
+function reachWording(kind: EditChangeKind, paused: boolean): string {
+  const later = paused ? " once the campaign resumes" : "";
+  switch (kind) {
+    case "step_copy":
+      return `will get the new copy${later}`;
+    case "step_wait":
+      return `will wait the new time before it, counted from their last message`;
+    case "step_added":
+      return `will get it${later}`;
+    case "step_removed":
+    case "track_removed":
+      return "will skip it";
+    case "track_added":
+      return `will start it${later}`;
+    case "track_start":
+      return "will start it by the new rule";
+    case "track_window":
+      return "will be sent inside the new window";
+    case "declined_path":
+      return "will take the new path if they decline";
+    case "skip_limit":
+      return "will have their open call kept on the list the new number of days";
+    case "call_script":
+      return "will be called with the new script";
+    case "timezone":
+      return "will have what is still to come timed in the new zone";
+    case "sender_pool":
+      return "keep the sender they already use; a first message on a channel can go from the new ones";
+    default: {
+      const unreachable: never = kind;
+      return String(unreachable);
+    }
+  }
+}
+
 /** What the change does to the leads, from the server's counts; each count is said only when it is not zero. */
-function whatItDoes(change: EditImpactChange): string {
+function whatItDoes(change: EditImpactChange, paused: boolean): string {
   const parts: string[] = [];
   const removal = change.kind === "step_removed" || change.kind === "track_removed";
-  if (change.reaches > 0) parts.push(`${plural(change.reaches, "lead", "leads")} will get it`);
+  if (change.reaches > 0) parts.push(`${plural(change.reaches, "lead", "leads")} ${reachWording(change.kind, paused)}`);
   if (change.skips > 0) parts.push(`${plural(change.skips, "lead", "leads")} not there yet will skip it`);
   if (change.inFlight > 0) parts.push(`${plural(change.inFlight, "lead has", "leads have")} it with the provider now, so it goes as it was`);
   if (change.untouched > 0) parts.push(`${plural(change.untouched, "lead is", "leads are")} past it or finished${removal && change.kind === "track_removed" ? ", and keep what they started" : ""}`);
@@ -121,7 +160,7 @@ function whatItDoes(change: EditImpactChange): string {
 /** The read's instant in the campaign's own zone, named, never the browser's (as every screen states a time). */
 const timeOf = (iso: string, zone: string) => `${new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: zone })} (${zone.replace(/_/g, " ")})`;
 
-export function RunningChanges({ campaignId, editor, onDiscarded }: { campaignId: string; editor: SequenceEditor; onDiscarded: () => void }) {
+export function RunningChanges({ campaignId, editor, paused, onDiscarded }: { campaignId: string; editor: SequenceEditor; paused: boolean; onDiscarded: () => void }) {
   const enabled = editor.unsaved && !editor.applying && editor.problems.length === 0;
   // What Apply would send, by the save queue's one function; the read is asked for exactly this (review bot on 7afa03d).
   const body = JSON.stringify(editor.previewBody());
@@ -131,19 +170,20 @@ export function RunningChanges({ campaignId, editor, onDiscarded }: { campaignId
   const view = read.state === "ready" ? read.view : null;
   const refused = [...(view?.problems ?? []), ...(view?.blockers.map((b) => b.message) ?? [])];
   // Apply only on a read of exactly this body: never on an earlier read while the new one is on its way.
-  const canApply = editor.unsaved && !editor.locked && editor.problems.length === 0 && view !== null && refused.length === 0;
+  const conflict = save.kind === "conflict";
+  const canApply = editor.unsaved && !editor.locked && !conflict && editor.problems.length === 0 && view !== null && refused.length === 0;
 
   return (
     <section aria-labelledby="running-changes-title" data-testid="running-changes" className="flex flex-col gap-2.5 rounded-box border border-line bg-base-100 px-4 py-3.5">
       <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
         <div className="min-w-0 flex-[1_1_360px]">
           <h2 id="running-changes-title" className="text-[15.5px] font-semibold">
-            {editor.unsaved ? "Changes not applied yet" : "This campaign is running"}
+            {editor.unsaved ? "Changes not applied yet" : paused ? "This campaign is paused" : "This campaign is running"}
           </h2>
           <p className="text-[13.5px] text-ink-2">
             {editor.unsaved
-              ? "Nothing changes for leads until you apply. Messages already sent are never sent again, and finished tracks never restart."
-              : "Edit it here. Your changes stay on this page until you apply them; then they reach only messages not yet sent."}
+              ? `Nothing changes for leads until you apply${paused ? ", and its leads take what you apply when the campaign resumes" : ""}. Messages already sent are never sent again, and finished tracks never restart.`
+              : `Edit it here. Your changes stay on this page until you apply them; then they reach only messages not yet sent${paused ? ", once the campaign resumes" : ""}.`}
           </p>
         </div>
         {editor.unsaved && (
@@ -158,7 +198,7 @@ export function RunningChanges({ campaignId, editor, onDiscarded }: { campaignId
                 void editor.discard().then(onDiscarded);
               }}
             >
-              Discard changes
+              {conflict ? "Discard and load the saved version" : "Discard changes"}
             </button>
             <button
               type="button"
@@ -180,7 +220,7 @@ export function RunningChanges({ campaignId, editor, onDiscarded }: { campaignId
                 );
               }}
             >
-              {editor.applying ? "Applying…" : "Apply to running leads"}
+              {editor.applying ? "Applying…" : paused ? "Apply to the paused campaign" : "Apply to running leads"}
             </button>
           </div>
         )}
@@ -208,7 +248,7 @@ export function RunningChanges({ campaignId, editor, onDiscarded }: { campaignId
                       <span className="font-semibold">{changeName(change, editor.draft, editor.view.definition)}</span>
                       <span className="text-ink-2"> · {whatChanged(change, editor.draft)}</span>
                     </span>
-                    <span className="text-ink-2">{whatItDoes(change)}</span>
+                    <span className="text-ink-2">{whatItDoes(change, paused)}</span>
                   </li>
                 ))}
               </ul>
@@ -221,7 +261,12 @@ export function RunningChanges({ campaignId, editor, onDiscarded }: { campaignId
           )}
         </div>
       )}
-      {(save.kind === "error" || error) && (
+      {conflict && (
+        <p role="alert" className="rounded-field bg-crit-soft px-3 py-2 text-[13.5px] text-crit">
+          Not applied. {save.message}
+        </p>
+      )}
+      {!conflict && (save.kind === "error" || error) && (
         <p role="alert" className="rounded-field bg-crit-soft px-3 py-2 text-[13.5px] text-crit">
           Not applied. {error ?? (save.kind === "error" ? save.message : "")}
         </p>
