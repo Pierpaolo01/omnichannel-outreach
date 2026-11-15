@@ -232,6 +232,8 @@ export class SqliteEngineStore implements EngineStore {
           if (save.seq === seq && strOrNull(mine, "content_sha256") === hash) return { outcome: "replaced", stored };
         }
       }
+      // Another page changed the running sequence since this Apply's read (council on 93bed86, item 14): one reason.
+      if (running?.impact && row["launched_at"] != null && save && strOrNull(row, "definition_session") !== save.session) return { outcome: "impact_changed", elsewhere: true, stored };
       return { outcome: "conflict", stored };
     });
   }
@@ -244,17 +246,19 @@ export class SqliteEngineStore implements EngineStore {
    */
   private runningSave(campaignId: string, row: Record<string, SQLOutputValue>, definition: CampaignDefinition, text: string, editedAt: string, save: DefinitionSave | null, running: RunningSave): SaveResult | null {
     const stored = storedDefinitionOf(row);
-    // Apply sends exactly what its read was for: the same body, on the same revision and pause (review bot on 7afa03d).
-    // Checked first, so whatever changed (another page applied, the campaign paused or resumed, the body) the answer has
-    // one reason (council on 93bed86, item 14), and says when the stored sequence itself changed elsewhere.
-    if (running.impact && running.impact.digest(definition, num(row, "definition_version"), numOrNull(row, "paused_since")) !== running.impact.expected) {
-      return { outcome: "impact_changed", elsewhere: save !== null && num(row, "definition_version") !== save.base, stored };
-    }
+    // A request is bound to its first answer (ticket 17a's rule; review bot on 5b2f3c6): a save the rule would not accept
+    // as a new write (a retry of an accepted one, an older one, another page's) is answered by the save rule's receipts
+    // first, before anything about freshness; the caller then words another page's change as `impact_changed`.
     const accepts =
       save === null ||
       (strOrNull(row, "definition_session") === save.session && (numOrNull(row, "definition_seq") ?? 0) < save.seq) ||
       num(row, "definition_version") === save.base;
     if (!accepts) return null;
+    // A new write: Apply sends exactly what its read was for, the same body on the same revision and pause (review bot on
+    // 7afa03d); whatever changed, one reason (council on 93bed86, item 14).
+    if (running.impact && running.impact.digest(definition, num(row, "definition_version"), numOrNull(row, "paused_since")) !== running.impact.expected) {
+      return { outcome: "impact_changed", elsewhere: save !== null && num(row, "definition_version") !== save.base, stored };
+    }
     const previous = this.definitionOf(row);
     const problems = running.problems(definition, previous);
     if (problems.length > 0) return { outcome: "invalid", problems, stored };

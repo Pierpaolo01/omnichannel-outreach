@@ -266,3 +266,22 @@ describe("one reason when what was previewed no longer holds (council on 93bed86
     expect([late.status, late.body.error?.code, late.body.error?.elsewhere]).toEqual([409, "impact_changed", true]);
   });
 });
+
+describe("a request is bound to its first answer, before freshness (review bot on 5b2f3c6)", () => {
+  test("an accepted Apply whose answer was lost, retried with the same identity, body and digest: its success again, nothing applied twice", async () => {
+    const w = await world();
+    await w.h.advanceTo(MONDAY_9 + H);
+    const base = (await w.h.request<{ definitionVersion: number }>("GET", `/api/campaigns/${w.id}/sequence`)).body.definitionVersion;
+    const mine = def([track("e1", [email("s1"), email("s2", 2, "Applied once."), email("s3", 3)])]);
+    const read = await w.h.request<{ digest: string }>("POST", `/api/campaigns/${w.id}/sequence/impact`, { definition: mine });
+    const body = { ...mine, save: { session: "tab-a", seq: 3, base }, impact: read.body.digest };
+    const first = await w.h.request<{ definitionVersion: number }>("PUT", `/api/campaigns/${w.id}/sequence`, body);
+    expect(first.status).toBe(200);
+    const retry = await w.h.request<{ definitionVersion: number }>("PUT", `/api/campaigns/${w.id}/sequence`, body);
+    expect([retry.status, retry.body.definitionVersion]).toEqual([200, first.body.definitionVersion]);
+    // The same identity with another body is refused, as the save rule refuses it.
+    const other = await w.h.request<{ error?: { code: string } }>("PUT", `/api/campaigns/${w.id}/sequence`, { ...body, tracks: def([track("e1", [email("s1"), email("s2", 2, "Something else."), email("s3", 3)])]).tracks });
+    expect([other.status, other.body.error?.code]).toEqual([409, "edit_conflict"]);
+    expect((await w.h.request<{ definitionVersion: number }>("GET", `/api/campaigns/${w.id}/sequence`)).body.definitionVersion).toBe(first.body.definitionVersion);
+  });
+});
