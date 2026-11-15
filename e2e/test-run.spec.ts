@@ -1,0 +1,146 @@
+import { expect, test, type Page } from "@playwright/test";
+import type { CampaignDefinition } from "../src/domain/sequence/definition.ts";
+import { fakeTestRunApp, OWN_TEST_EMAIL, OWN_TEST_MOBILE, type FakeTestRunApp } from "./fake-provider.ts";
+
+/**
+ * Ticket 21's demonstration (recorded with RECORD_DEMO=1), on the fake providers with fictitious contacts: test contacts
+ * (a lead's refused), Run test, the test email and texts received on the fake test contact, a test call logged Not
+ * interested that takes the canvas's win-back path, a repeat after an edit stopped by a reply from the test email, and a
+ * launch with the "no test since the last edit" warning. EVIDENCE_DIR=<dir> saves screenshots there, in both themes.
+ */
+
+const MIN = 60_000;
+
+const linger = async (page: Page) => {
+  if (process.env["RECORD_DEMO"]) await page.waitForTimeout(2_000);
+};
+
+async function at(page: Page, f: FakeTestRunApp, path: string): Promise<void> {
+  await page.clock.setFixedTime(f.harness.clock);
+  await page.goto(f.url + path);
+}
+
+async function shot(page: Page, name: string): Promise<void> {
+  const dir = process.env["EVIDENCE_DIR"];
+  if (!dir) return;
+  for (const theme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme: theme });
+    await page.screenshot({ path: `${dir}/${name}-${theme}.png`, fullPage: true });
+  }
+  await page.emulateMedia({ colorScheme: "light" });
+}
+
+const sentTo = (f: FakeTestRunApp, destination: string) => [...f.harness.fake.deliveryLog, ...f.harness.sms.deliveryLog].filter((d) => d.destination === destination);
+
+test("test contacts, Run test, the test call's win-back path, a reply stopping a repeat after an edit, and a launch with the warning", async ({ page }) => {
+  test.setTimeout(240_000);
+  const f = await fakeTestRunApp("demonstration");
+  const tab = `/campaigns/${f.campaign}/test-run`;
+
+  await test.step("the Test run tab before any test: no contacts yet", async () => {
+    await at(page, f, tab);
+    await expect(page.getByRole("heading", { name: "No test yet" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Run test" })).toBeDisabled();
+    await shot(page, "01-test-contacts-empty");
+    await linger(page);
+  });
+
+  await test.step("a lead's email is refused as a test contact; the user's own are saved", async () => {
+    await page.getByLabel("Your email").fill("amira@harbourlanephysio.example");
+    await page.getByRole("button", { name: "Save contacts" }).click();
+    await expect(page.getByText("This email belongs to a lead. Test contacts must be your own.")).toBeVisible();
+    await shot(page, "02-test-contact-refused");
+    await linger(page);
+    await page.getByLabel("Your email").fill(OWN_TEST_EMAIL);
+    await page.getByLabel("Your mobile, for texts and the test call").fill("+44 7700 900456");
+    await page.getByRole("button", { name: "Save contacts" }).click();
+    await expect(page.getByText("Saved.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Run test" })).toBeEnabled();
+    await shot(page, "03-test-contacts-saved");
+    await linger(page);
+  });
+
+  await test.step("Run test: the emails and texts arrive on the test contacts, a minute apart, and nothing goes to a lead", async () => {
+    await page.getByLabel("Copy written for").selectOption({ label: "Amira Hassan" });
+    await page.getByRole("button", { name: "Run test" }).click();
+    await expect(page.getByRole("button", { name: "Test running" })).toBeVisible();
+    await f.harness.advanceTo(f.harness.clock + 30_000);
+    await at(page, f, tab);
+    await expect(page.getByText("In about 1 min").first()).toBeVisible();
+    await shot(page, "04-test-running");
+    await linger(page);
+    await f.harness.advanceTo(f.harness.clock + 3 * MIN);
+    expect(sentTo(f, OWN_TEST_EMAIL).map((d) => d.stepId)).toEqual(["s1", "s2"]);
+    expect(sentTo(f, OWN_TEST_MOBILE).map((d) => d.stepId)).toEqual(["m1", "m2"]);
+    expect(sentTo(f, OWN_TEST_EMAIL)[0]?.rendered.body).toContain("Hi Amira,");
+    expect([...f.harness.fake.deliveryLog, ...f.harness.sms.deliveryLog].every((d) => d.subjectId.startsWith("test-"))).toBe(true);
+    await at(page, f, tab);
+    await expect(page.getByText("On your Calls list")).toBeVisible();
+    await shot(page, "05-test-sends-and-call");
+    await linger(page);
+  });
+
+  await test.step("the test call is on the Calls list; Not interested takes the canvas's win-back path", async () => {
+    await at(page, f, "/calls");
+    await expect(page.getByText(/To your test mobile/).first()).toBeVisible();
+    await shot(page, "06-test-call-on-the-list");
+    await linger(page);
+    await page.getByRole("group", { name: "Call outcome" }).getByRole("button", { name: "Not interested", exact: true }).click();
+    await linger(page);
+    await page.getByRole("button", { name: /^Log/ }).first().click();
+    await f.harness.advanceTo(f.harness.clock + 3 * MIN);
+    expect(sentTo(f, OWN_TEST_EMAIL).map((d) => d.stepId)).toEqual(["s1", "s2", "w1"]);
+    await at(page, f, tab);
+    await expect(page.getByRole("heading", { name: /Finished: every step ran/ })).toBeVisible();
+    await expect(page.getByText(/Logged \d\d:\d\d: Not interested/)).toBeVisible();
+    await shot(page, "07-test-finished-win-back");
+    await linger(page);
+  });
+
+  await test.step("an edit: the warning returns; the repeat is stopped by a reply from the test email", async () => {
+    const stored = (await f.harness.request<{ definition: CampaignDefinition }>("GET", `/api/campaigns/${f.campaign}/sequence`)).body.definition;
+    await f.harness.request("PUT", `/api/campaigns/${f.campaign}/sequence`, { ...stored, tracks: stored.tracks.map((t) => (t.id === "email" ? { ...t, steps: t.steps.map((s, i) => (i === 0 ? { ...s, subject: "Evening bookings for {{company}}" } : s)) } : t)) });
+    await at(page, f, tab);
+    await expect(page.getByText("No test since the last edit. That’s optional: you can launch without one.")).toBeVisible();
+    await page.getByRole("button", { name: "Run test again" }).click();
+    await expect(page.getByRole("button", { name: "Test running" })).toBeVisible();
+    await f.harness.advanceTo(f.harness.clock + 30_000);
+    expect(f.harness.fake.prospectReplies(OWN_TEST_EMAIL)).toBe(true);
+    await f.harness.advanceTo(f.harness.clock + 2 * MIN);
+    await at(page, f, tab);
+    await expect(page.getByRole("heading", { name: /Stopped by your reply/ })).toBeVisible();
+    expect(sentTo(f, OWN_TEST_EMAIL).filter((d) => d.stepId === "s2")).toHaveLength(1);
+    await shot(page, "08-test-stopped-by-reply");
+    await linger(page);
+  });
+
+  await test.step("another edit, and a launch with the warning: it never blocks", async () => {
+    const stored = (await f.harness.request<{ definition: CampaignDefinition }>("GET", `/api/campaigns/${f.campaign}/sequence`)).body.definition;
+    await f.harness.request("PUT", `/api/campaigns/${f.campaign}/sequence`, { ...stored, tracks: stored.tracks.map((t) => (t.id === "sms" ? { ...t, steps: t.steps.map((s, i) => (i === 0 ? { ...s, body: `${s.body} Thanks!` } : s)) } : t)) });
+    await at(page, f, `/campaigns/${f.campaign}/before-launch`);
+    await expect(page.getByText("No test run since your last edit")).toBeVisible();
+    await expect(page.getByText("You haven’t run a test since your last edit; that’s optional.")).toBeVisible();
+    await expect(page.getByRole("link", { name: "Run test first" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Launch campaign" })).toBeEnabled();
+    await shot(page, "09-before-launch-warning");
+    await linger(page);
+    await page.getByRole("button", { name: "Launch campaign" }).click();
+    await expect(page.getByText(/^Launched /).first()).toBeVisible();
+    await shot(page, "11-launched-with-the-warning");
+    await linger(page);
+  });
+});
+
+test("the Test run tab at 390 px", async ({ page }) => {
+  const f = await fakeTestRunApp("narrow");
+  await f.harness.request("PUT", `/api/campaigns/${f.campaign}/test-contacts`, { email: OWN_TEST_EMAIL, mobile: OWN_TEST_MOBILE });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await at(page, f, `/campaigns/${f.campaign}/test-run`);
+  await page.getByRole("button", { name: "Run test" }).click();
+  await f.harness.advanceTo(f.harness.clock + 30_000);
+  await at(page, f, `/campaigns/${f.campaign}/test-run`);
+  await expect(page.getByRole("button", { name: "Test running" })).toBeVisible();
+  const scroll = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(scroll).toBeLessThanOrEqual(0);
+  await shot(page, "10-test-running-390");
+});

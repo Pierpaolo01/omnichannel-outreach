@@ -79,7 +79,7 @@ interface Parties {
 }
 
 /** The name a test call carries where a lead's company would be: it has none. */
-export const TEST_CALL_NAME = "Your test mobile";
+export const TEST_CALL_NAME = "Test call";
 
 async function partiesOf(store: OutreachStore, subjectId: string): Promise<Parties | null> {
   const run = await store.engine.testRun(subjectId);
