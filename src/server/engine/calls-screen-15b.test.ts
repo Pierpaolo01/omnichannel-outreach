@@ -435,7 +435,8 @@ describe("Activity says a day, a time or a present state only from the server's 
     for (const e of activity.entries) {
       if (e.kind === "call" && e.outcome === "callback_requested") {
         const open = rec.calls.some((c) => c.kind === "callback" && c.callbackAt === e.callbackAt);
-        expect(e.callbackOpen, `callback entry for ${e.callbackAt ?? ""}`).toBe(open);
+        // The record lists a callback it can act on (the listing rule): Activity's `callbackListed` (ticket 22).
+        expect(e.callbackListed, `callback entry for ${e.callbackAt ?? ""}`).toBe(open);
       }
       if (e.kind === "callback_overdue") expect(rec.calls.some((c) => c.kind === "callback" && c.reason === "overdue" && c.callbackAt === e.callbackAt)).toBe(true);
     }
@@ -456,7 +457,7 @@ describe("Activity says a day, a time or a present state only from the server's 
       if (late) await w.h.advanceTo(Date.parse("2026-11-02T15:30:00Z"));
       for (const { activity, rec } of await reads()) {
         await agrees(activity, rec);
-        expect(activity.entries.find((e) => e.kind === "call" && e.outcome === "callback_requested")).toMatchObject({ callbackOpen: true });
+        expect(activity.entries.find((e) => e.kind === "call" && e.outcome === "callback_requested")).toMatchObject({ callbackPending: true, callbackListed: true });
       }
       expect(w.h.fake.prospectReplies("pat@harbour.example", true, null)).toBe(true);
       expect(w.h.fake.prospectReplies("front@elmstreet.example", true, null)).toBe(true);
@@ -464,7 +465,7 @@ describe("Activity says a day, a time or a present state only from the server's 
       for (const { activity, rec } of await reads()) {
         expect(rec.calls).toEqual([]);
         await agrees(activity, rec);
-        expect(activity.entries.find((e) => e.kind === "call" && e.outcome === "callback_requested")).toMatchObject({ callbackOpen: false });
+        expect(activity.entries.find((e) => e.kind === "call" && e.outcome === "callback_requested")).toMatchObject({ callbackPending: false, callbackListed: false });
         expect(activity.entries.some((e) => e.kind === "callback_overdue")).toBe(false);
       }
     }
@@ -499,7 +500,7 @@ describe("a declined lead's retained call tasks are not open calls on the record
         expect((await h.request("POST", `/api/call-tasks/${id}/outcome`, { requestId: `after-${id}`, outcome: "skip_for_now" })).status).toBe(409);
       }
       const activity = (await h.request<ActivityView>("GET", `/api/people/${rows[0]?.id ?? ""}/activity`)).body.entries;
-      expect(activity.some((e) => e.kind === "callback_overdue" || (e.kind === "call" && e.callbackOpen))).toBe(false);
+      expect(activity.some((e) => e.kind === "callback_overdue" || (e.kind === "call" && e.callbackPending))).toBe(false);
       expect(activity.find((e) => e.kind === "call" && e.outcome === "not_interested")).toMatchObject({ declinedPath: path });
     });
   }

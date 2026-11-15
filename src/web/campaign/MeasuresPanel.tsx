@@ -1,15 +1,14 @@
-import { useEffect, useId, useState } from "react";
+import { useId, useState } from "react";
 import { STATUS_GROUPS, type StatusGroup } from "../../domain/outreach-status.ts";
 import type { CampaignMeasures } from "../../shared/api.ts";
-import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
-import type { LiveRead } from "../controls/useLiveRead.ts";
 import { connectRateText, groupCountText, MEASURE_NOTES, measureRows, replyRateText } from "./measuresWording.ts";
 
 /**
- * The campaign measures (ticket 22). **Provisional** (ADR 0003 Q32): variant A draws only the five group counts in a strip
+ * The campaign measures (ticket 22). **Provisional** (ADR 0003 Q33): variant A draws only the five group counts in a strip
  * under a running campaign's header; the per-channel figures and the rates are the most restrained form, one bordered
- * panel under it. Everything shown is the server's read, worded by `measuresWording.ts`.
+ * panel under it. Everything shown is the campaign's one read (`GET /api/campaigns/:id`, whose pause, status counts and
+ * measures are one store snapshot), worded by `measuresWording.ts`; the page shows no figure from another read.
  */
 
 const GROUP_TONE = {
@@ -21,41 +20,27 @@ const GROUP_TONE = {
 } as const satisfies Record<StatusGroup, string>;
 
 /** Variant A's strip on a running campaign: the leads in each group, then the sentence on what goes out on its own. */
-export function GroupStrip({ read, sentence }: { read: LiveRead<CampaignMeasures>; sentence: string }) {
+export function GroupStrip({ measures, sentence }: { measures: CampaignMeasures; sentence: string }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 rounded-box border border-line bg-base-100 px-4 py-3 text-[14px]">
-      {read.state === "ready" ? (
-        <ul aria-label="Leads in each status group" className="flex flex-wrap gap-x-[18px] gap-y-1.5">
-          {STATUS_GROUPS.map((group) => (
-            <li key={group} className={`inline-flex items-center gap-1.5 before:size-[7px] before:rounded-full before:bg-current before:content-[''] ${GROUP_TONE[group]}`}>
-              <b className="font-semibold tabular-nums text-base-content">{read.data.groups[group]}</b>
-              {groupCountText(group)}
-            </li>
-          ))}
-        </ul>
-      ) : read.state === "loading" ? (
-        <span role="status" aria-label="Loading the leads in each status group" className="skeleton h-4 w-80 max-w-full" />
-      ) : null}
+      <ul aria-label="Leads in each status group" className="flex flex-wrap gap-x-[18px] gap-y-1.5">
+        {STATUS_GROUPS.map((group) => (
+          <li key={group} className={`inline-flex items-center gap-1.5 before:size-[7px] before:rounded-full before:bg-current before:content-[''] ${GROUP_TONE[group]}`}>
+            <b className="font-semibold tabular-nums text-base-content">{measures.groups[group]}</b>
+            {groupCountText(group)}
+          </li>
+        ))}
+      </ul>
       <span className="text-[13.5px] text-muted">{sentence}</span>
     </div>
   );
 }
 
 /** "Outreach so far": per channel, then the two rates, then how each figure is counted. */
-export function MeasuresPanel({ read, onRetry }: { read: LiveRead<CampaignMeasures>; onRetry: () => void }) {
+export function MeasuresPanel({ measures: m }: { measures: CampaignMeasures }) {
   const id = useId();
   const notesId = useId();
   const [notesOpen, setNotesOpen] = useState(false);
-  if (read.state === "error") return <ErrorState title="The campaign’s figures didn’t load." message={read.message} onRetry={onRetry} />;
-  if (read.state === "loading")
-    return (
-      <div role="status" aria-busy="true" aria-label="Loading the campaign’s figures" className="rounded-box border border-line bg-base-100 px-4 py-3">
-        <div className="skeleton h-4 w-40" />
-        <div className="skeleton mt-3 h-4 w-full max-w-[520px]" />
-        <div className="skeleton mt-2 h-4 w-full max-w-[420px]" />
-      </div>
-    );
-  const m = read.data;
   const reply = replyRateText(m.replyRate);
   const connect = connectRateText(m.connectRate);
   const callsOnly = m.channels.length > 0 && m.channels.every((c) => c === "call");
@@ -108,11 +93,4 @@ export function MeasuresPanel({ read, onRetry }: { read: LiveRead<CampaignMeasur
       </div>
     </section>
   );
-}
-
-/** Reads the measures again whenever the campaign's own read does (a pause, a resume, a control elsewhere). */
-export function useFollow(reads: number, refresh: () => Promise<void>): void {
-  useEffect(() => {
-    if (reads > 1) void refresh();
-  }, [reads, refresh]);
 }

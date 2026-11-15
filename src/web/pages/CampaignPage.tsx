@@ -1,17 +1,18 @@
 import type { ReactNode } from "react";
 import { Link, useLocation, useSearch } from "wouter";
-import type { BeforeLaunchView, CampaignDetail, CampaignMeasures, ImportRecord, LeadOutcome, LeadSearchResult } from "../../shared/api.ts";
+import type { BeforeLaunchView, CampaignDetail, ImportRecord, LeadOutcome, LeadSearchResult } from "../../shared/api.ts";
 import { useApi } from "../api.ts";
 import { CampaignPauseControl, PausedBanner } from "../controls/ControlViews.tsx";
 import { useControls, type Controls } from "../controls/useControls.ts";
 import { useLiveRead } from "../controls/useLiveRead.ts";
 import { BeforeLaunchTab } from "../campaign/BeforeLaunchTab.tsx";
-import { GroupStrip, MeasuresPanel, useFollow } from "../campaign/MeasuresPanel.tsx";
+import { GroupStrip, MeasuresPanel } from "../campaign/MeasuresPanel.tsx";
+import type { Freshness } from "../calls/refresher.ts";
 import { SequenceTab } from "../campaign/SequenceTab.tsx";
 import { sendsOnItsOwn } from "../campaign/model.ts";
 import { saveWording } from "../campaign/saveWording.ts";
 import { useSequence, type SequenceEditor } from "../campaign/useSequence.ts";
-import { ErrorState } from "../components.tsx";
+import { ErrorState, StaleNotice } from "../components.tsx";
 import { Icon } from "../icons.tsx";
 import { StatusBadge } from "../status.tsx";
 import { whenImported } from "../importText.tsx";
@@ -55,14 +56,11 @@ export function CampaignPage({ id, tab }: { id: string; tab: CampaignTab }) {
     );
   }
   if (detail.read.state !== "ready" || !editor) return <CampaignSkeleton />;
-  return <Campaign detail={detail.read.data} detailReads={detail.read.reads} editor={editor} tab={tab} controls={controls} />;
+  return <Campaign detail={detail.read.data} freshness={detail.read.freshness} onRetry={() => void detail.refresh()} editor={editor} tab={tab} controls={controls} />;
 }
 
-function Campaign({ detail, detailReads, editor, tab, controls }: { detail: CampaignDetail; detailReads: number; editor: SequenceEditor; tab: CampaignTab; controls: Controls }) {
+function Campaign({ detail, freshness, onRetry, editor, tab, controls }: { detail: CampaignDetail; freshness: Freshness; onRetry: () => void; editor: SequenceEditor; tab: CampaignTab; controls: Controls }) {
   const now = useNow();
-  // Ticket 22: the campaign's figures, read live, and again whenever the campaign's own read is (a pause, a control).
-  const measures = useLiveRead<CampaignMeasures>(`/api/campaigns/${encodeURIComponent(detail.campaign.id)}/measures`);
-  useFollow(detailReads, measures.refresh);
   const { campaign, imports, leadCount } = detail;
   const { view } = editor;
   const blockers = view.launch.blockers.length;
@@ -120,16 +118,18 @@ function Campaign({ detail, detailReads, editor, tab, controls }: { detail: Camp
       )}
       {/* While paused, nothing goes out on its own: the Paused banner says so, and this sentence would not be true (ticket 17b).
           How the running campaign is edited is said on its Sequence tab (ticket 19). */}
-      {/* Variant A's strip on a running campaign: the leads in each status group beside that sentence (ticket 22). While
-          paused, the Paused banner carries the group counts. */}
+      {/* Ticket 22: the Paused banner above, variant A's strip and the panel all come from this one read, whose pause, status
+          counts and measures are one store snapshot (verifier B1 on 41028f2). While paused, the banner carries the groups.
+          When its refreshes keep failing, the page says what it shows may be out of date (verifier F1). */}
+      {editor.launched && freshness.stale && <StaleNotice freshness={freshness} onRetry={onRetry} what="the campaign" />}
       {editor.launched && !detail.pause.paused && (
         <div className="mt-4">
-          <GroupStrip read={measures.read} sentence={sendsOnItsOwn(editor.view.definition)} />
+          <GroupStrip measures={detail.measures} sentence={sendsOnItsOwn(editor.view.definition)} />
         </div>
       )}
       {editor.launched && (
         <div className="mt-3">
-          <MeasuresPanel read={measures.read} onRetry={() => void measures.refresh()} />
+          <MeasuresPanel measures={detail.measures} />
         </div>
       )}
 

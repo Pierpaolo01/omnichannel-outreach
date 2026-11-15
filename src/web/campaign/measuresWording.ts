@@ -62,5 +62,5 @@ export const MEASURE_NOTES: readonly string[] = [
   "Replied counts each lead whose outreach a reply stopped, once, on the channel of that reply. A lead who replies again, or on the other channel, still counts once. A lead you resumed after a reply no longer counts.",
   "The reply rate is the leads who replied out of the leads you emailed or texted. A call ended interested counts under calls, not replies.",
   "A call made is any outcome you logged except Skip for now. Connected means you spoke with them: interested, not interested or a callback asked for. A skipped call step is not a call.",
-  "A callback is pending until you log its outcome, also while the lead is paused; not once the lead has replied or been stopped.",
+  "A callback is pending until an outcome other than Skip for now is logged on it, also while the lead is paused (it is then off your call list); not once the lead has replied or been stopped.",
 ];

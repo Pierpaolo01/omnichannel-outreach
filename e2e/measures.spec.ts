@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
+import type { CampaignDetail } from "../src/shared/api.ts";
 import { fakeMeasuresApp, type FakeMeasuresApp } from "./fake-provider.ts";
+import { respond, serverError } from "./mocks.ts";
 
 /**
  * Ticket 22's demonstration (recorded with RECORD_DEMO=1), on the fake providers with fictitious data: the campaign's
@@ -97,4 +99,53 @@ test("the figures change after sends, a refusal and a bounce, a reply, call outc
     await expect(row(page, "Calls")).toHaveText("4 made · 3 connected · 1 interested · 1 declined · 0 callbacks pending");
     await linger(page);
   });
+});
+
+test("the Paused banner's counts and the figures come from one read, even with replies between a delayed answer and the next read (verifier B1)", async ({ page }) => {
+  const f = await fakeMeasuresApp("paused", "measures-one-read");
+  const { world } = f;
+  const detail = `${f.url}/api/campaigns/${world.campaignId}`;
+  let released = false;
+  // The campaign's read answers from the server now, and reaches the page only after two more leads have replied.
+  await page.route(detail, async (route) => {
+    const response = await route.fetch();
+    if (!released) {
+      released = true;
+      world.h.fake.prospectReplies("ivo@harbour.example");
+      world.h.sms.prospectTexts("+447700900102");
+      await world.h.advanceTo(world.h.clock + 5 * 60_000);
+    }
+    await respond(route, (await response.json()) as CampaignDetail);
+  });
+  await page.clock.setFixedTime(world.h.clock);
+  await page.goto(`${f.url}/campaigns/${world.campaignId}`);
+  const banner = page.getByRole("region", { name: /^Paused since/ });
+  await expect(banner).toBeVisible();
+  await expect(row(page, "Email")).toBeVisible();
+  const handed = Number(await banner.locator("dt", { hasText: /^Handed to you$/ }).locator("xpath=following-sibling::dd[1]").textContent());
+  const replied = async (label: string) => Number(/(\d+) replied/.exec((await row(page, label).textContent()) ?? "")?.[1] ?? "NaN");
+  // Nobody in this campaign was interested on a call, so every lead handed to you replied.
+  expect(handed).toBe((await replied("Email")) + (await replied("SMS")));
+});
+
+test("figures whose refreshes keep failing say they may be out of date, with when they were read, and Try again (verifier F1)", async ({ page }) => {
+  const f = await fakeMeasuresApp("running", "measures-stale");
+  const detail = `${f.url}/api/campaigns/${f.world.campaignId}`;
+  await at(page, f, `/campaigns/${f.world.campaignId}`);
+  await expect(row(page, "Calls")).toContainText("1 callback pending");
+  let failing = true;
+  await page.route(detail, (route) => (failing ? serverError(route) : route.continue()));
+  const notice = page.getByRole("status").filter({ hasText: "This may be out of date" });
+  await expect
+    .poll(async () => {
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      return notice.isVisible();
+    }, { timeout: 30_000 })
+    .toBe(true);
+  await expect(notice).toContainText(/so it shows the campaign as of \d\d:\d\d/);
+  // The figures stay, marked; Try again reads again and the notice goes once a read succeeds.
+  await expect(row(page, "Calls")).toContainText("1 callback pending");
+  failing = false;
+  await notice.getByRole("button", { name: "Try again" }).click();
+  await expect(notice).toBeHidden();
 });

@@ -1,5 +1,7 @@
 import { StatementSync } from "node:sqlite";
 import { describe, expect, test, vi } from "vitest";
+import { statusGroup, type OutreachStatus } from "../domain/outreach-status.ts";
+import type { ActivityView, CampaignDetail, LeadSearchResult } from "../shared/api.ts";
 import { campaignMeasures } from "./measures.ts";
 import { DAY, HOUR, MIN, MONDAY_9, launch, measuresWorld } from "../../test/support/measures-world.ts";
 
@@ -141,6 +143,53 @@ describe("GET /api/campaigns/:id/measures", () => {
   });
 });
 
+describe("the campaign read is one snapshot (verifier B1 on 41028f2)", () => {
+  test("its pause, status counts, what may still be sent and measures come from one store read of the facts, nothing beside it", async () => {
+    const world = await measuresWorld();
+    await launch(world);
+    await world.h.advanceTo(MONDAY_9 + 2 * HOUR);
+    world.h.fake.prospectReplies("pat@harbour.example");
+    await world.h.advanceTo(world.h.clock + 10 * MIN);
+    expect((await world.h.request("POST", `/api/campaigns/${world.campaignId}/pause`, { requestId: "pause-one-read" })).status).toBe(200);
+    const engine = world.h.store.engine;
+    const facts = vi.spyOn(engine, "measureFacts");
+    const counts = vi.spyOn(engine, "statusCounts");
+    const uncertain = vi.spyOn(engine, "uncertainWorkOf");
+    const detail = (await world.h.request<CampaignDetail>("GET", `/api/campaigns/${world.campaignId}`)).body;
+    expect([facts.mock.calls.length, counts.mock.calls.length, uncertain.mock.calls.length]).toEqual([1, 0, 0]);
+    expect(detail.measures).toEqual(await world.measures());
+    expect(detail.pause.paused).toBe(true);
+    // The banner's groups, from the read's status counts, are the measures' groups.
+    const grouped = { running: 0, waiting_on_you: 0, handed_to_you: 0, paused: 0, ended: 0 };
+    for (const [status, n] of Object.entries(detail.statusCounts)) grouped[statusGroup(status as OutreachStatus)] += n;
+    expect(grouped).toEqual(detail.measures.groups);
+    expect(detail.measures.groups.handed_to_you).toBe(1);
+  });
+});
+
+describe("a callback pending and a callback listed are two facts, the same in Activity and the measures (verifier F2 on 41028f2)", () => {
+  test("a paused lead's callback is pending but off today's list; a stopped lead's is neither", async () => {
+    const world = await measuresWorld();
+    await launch(world);
+    await world.h.advanceTo(MONDAY_9 + 30 * MIN);
+    expect(await world.log("Ivo Marsh", "callback_requested", { callbackAt: new Date(MONDAY_9 + 5 * HOUR).toISOString() })).toBe(200);
+    const ivo = (await world.h.request<LeadSearchResult>("GET", "/api/leads?limit=500")).body.rows.find((r) => r.name === "Ivo Marsh")?.id ?? "";
+    const callback = async () => {
+      const { entries } = (await world.h.request<ActivityView>("GET", `/api/people/${ivo}/activity`)).body;
+      const entry = entries.find((e) => e.kind === "call" && e.outcome === "callback_requested");
+      if (!entry || entry.kind !== "call") throw new Error("no callback entry");
+      return { pending: entry.callbackPending, listed: entry.callbackListed, measured: (await world.measures()).calls.callbacksPending };
+    };
+    expect(await callback()).toEqual({ pending: true, listed: true, measured: 1 });
+    expect(await world.control("Ivo Marsh", "pause")).toBe(200);
+    expect(await callback()).toEqual({ pending: true, listed: false, measured: 1 });
+    expect(await world.control("Ivo Marsh", "resume")).toBe(200);
+    expect(await callback()).toEqual({ pending: true, listed: true, measured: 1 });
+    expect(await world.control("Ivo Marsh", "stop")).toBe(200);
+    expect(await callback()).toEqual({ pending: false, listed: false, measured: 0 });
+  });
+});
+
 describe("the read's cost is bounded (ADR 0003 \"Ticket 22\", what the read costs)", () => {
   /** SQL statements run by `read`, counted on every statement's execution, as attention.test.ts counts them. */
   async function statements(read: () => Promise<unknown>): Promise<number> {
@@ -153,7 +202,7 @@ describe("the read's cost is bounded (ADR 0003 \"Ticket 22\", what the read cost
     }
   }
 
-  test("seven statements, whatever the activity: the campaign, then one per kind of fact", async () => {
+  test("eight statements, whatever the activity: the campaign, what may still be sent, then one per kind of fact", async () => {
     const world = await measuresWorld((h) => h.fake.bouncing.add("nia@harbour.example"));
     const read = () => campaignMeasures(world.h.store.engine, world.campaignId);
     const before = await statements(read);
@@ -163,6 +212,6 @@ describe("the read's cost is bounded (ADR 0003 \"Ticket 22\", what the read cost
     await world.h.advanceTo(world.h.clock + 10 * MIN);
     expect(await world.log("Sam Reed", "callback_requested", { callbackAt: new Date(MONDAY_9 + 6 * HOUR).toISOString() })).toBe(200);
     const after = await statements(read);
-    expect([before, after]).toEqual([7, 7]);
+    expect([before, after]).toEqual([8, 8]);
   });
 });

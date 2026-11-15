@@ -27,7 +27,7 @@ import type { SubjectState } from "../domain/sequence/state.ts";
 import type { ControlRefusal, EnrollmentRead, CampaignDetail, CampaignMeasures, CampaignListItem, CampaignPauseRead, CampaignSequenceSummary, EditImpactView, RecordControls, RecordLead, SequenceView, ActivityNote, CallOutcomeApi, ColleagueView, NoteAnswer, RecordColleagues } from "../shared/api.ts";
 import { beforeLaunchView, copyPreview } from "./before-launch.ts";
 import { activityOf } from "./activity.ts";
-import { campaignMeasures, type MeasureRules } from "./measures.ts";
+import { campaignMeasures, MEASURE_RULES, measuresOf, type MeasureRules } from "./measures.ts";
 import { registerEmailProviderRoutes, type EmailProviderSource } from "./instantly/routes.ts";
 
 export interface AppDependencies {
@@ -288,7 +288,10 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     const campaign = await store.campaign(c.req.param("id"));
     if (!campaign) return notFound(c, "campaign");
     const leadCount = await store.leadCount(campaign.id);
-    return c.json<CampaignDetail>({ campaign, imports: await store.listImports(campaign.id), leadCount, sequence: await sequenceSummary(campaign.id), ...(await pauseRead(campaign.id)) });
+    const asOf = now();
+    const snapshot = await campaignSnapshot(campaign.id);
+    if (!snapshot) return notFound(c, "campaign");
+    return c.json<CampaignDetail>({ campaign, imports: await store.listImports(campaign.id), leadCount, sequence: await sequenceSummary(campaign.id), ...snapshot, asOf });
   });
 
   // Ticket 22: the campaign's outcome measures, every figure a tally of its stored activity, read in one snapshot.
@@ -298,12 +301,26 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     return c.json<CampaignMeasures>(measures);
   });
 
-  // Ticket 17a: the campaign pause, its date, the count of leads in each status, and the controls allowed now.
+  // Ticket 17a: the campaign pause, its date, the count of leads in each status, and the controls allowed now. Ticket 22: all
+  // of it, and the campaign's measures, from the store's one snapshot (`measureFacts`), so a screen showing the Paused
+  // banner's counts beside the measures shows one instant (verifier B1 on 41028f2).
+  const campaignSnapshot = async (campaignId: string): Promise<(CampaignPauseRead & { readonly measures: CampaignMeasures }) | null> => {
+    const facts = await (measureRules?.facts ?? MEASURE_RULES.facts)(store.engine, campaignId);
+    if (!facts) return null;
+    const statusCounts = Object.fromEntries(OUTREACH_STATUSES.map((status) => [status, facts.enrollments.filter((e) => e.status === status).length])) as Record<OutreachStatus, number>;
+    return {
+      pause: { paused: facts.pausedSince !== null, pausedSince: facts.pausedSince !== null ? new Date(facts.pausedSince).toISOString() : null },
+      statusCounts,
+      controls: campaignControls({ launchedAt: facts.launchedAt, pausedSince: facts.pausedSince }),
+      mayStillSend: facts.mayStillSend,
+      userZone: (await store.engine.callSettings()).userZone,
+      measures: measuresOf(facts, measureRules),
+    };
+  };
   const pauseRead = async (campaignId: string): Promise<CampaignPauseRead> => {
-    const row = await store.engine.campaign(campaignId);
-    const stored = await store.engine.statusCounts(campaignId);
-    const statusCounts = Object.fromEntries(OUTREACH_STATUSES.map((status) => [status, stored[status] ?? 0])) as Record<OutreachStatus, number>;
-    return { pause: { paused: row?.pausedSince != null, pausedSince: row?.pausedSince != null ? new Date(row.pausedSince).toISOString() : null }, statusCounts, controls: campaignControls(row), mayStillSend: await store.engine.uncertainWorkOf(campaignId), userZone: (await store.engine.callSettings()).userZone };
+    const snapshot = await campaignSnapshot(campaignId);
+    if (!snapshot) throw new Error(`no campaign ${campaignId}`);
+    return { pause: snapshot.pause, statusCounts: snapshot.statusCounts, controls: snapshot.controls, mayStillSend: snapshot.mayStillSend, userZone: snapshot.userZone };
   };
   const controlRefused = (c: Context, message: string) => c.json<ControlRefusal>({ error: { code: "control_refused", message } }, 409);
 

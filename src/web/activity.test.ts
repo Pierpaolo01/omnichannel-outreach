@@ -65,16 +65,19 @@ describe("Activity is history; a present state or a day only from the server's r
     onCallback: null,
     zone: "Europe/London",
     redialListedFrom: null,
-    callbackOpen: false,
+    callbackPending: false,
+    callbackListed: false,
     declinedPath: null,
     afterDecline: [],
     ...fields,
   });
   const body = (entry: ActivityEntry, zone = "Europe/London") => describeEntry(entry, zone).body;
 
-  test("a callback asked for says the hold only while the server says it is open", () => {
-    expect(body(call({ callbackOpen: true }))).toBe("Callback asked for, Mon 2 Nov at 15:00 their time; their automated outreach in this campaign is held until you log how it went");
-    expect(body(call({ callbackOpen: false }))).toBe("Callback asked for, Mon 2 Nov at 15:00 their time");
+  test("a callback asked for says the hold only while the server says it is pending, and that it is off the list while paused", () => {
+    expect(body(call({ callbackPending: true, callbackListed: true }))).toBe("Callback asked for, Mon 2 Nov at 15:00 their time; their automated outreach in this campaign is held until you log how it went");
+    // Ticket 22 (verifier F2): a paused lead's callback is pending, as the campaign's figures count it, but not on the list.
+    expect(body(call({ callbackPending: true, callbackListed: false }))).toBe("Callback asked for, Mon 2 Nov at 15:00 their time; still pending, and off your call list while their outreach is paused");
+    expect(body(call({ callbackPending: false, callbackListed: false }))).toBe("Callback asked for, Mon 2 Nov at 15:00 their time");
   });
 
   test("a redial names the day the engine listed it from; a skip for now on a callback is history", () => {
@@ -100,12 +103,12 @@ describe("what the timeline says of a declined call (ticket 16)", () => {
   const number = { detailId: "d1", kind: "direct" as const, owner: "person" as const, value: "+44 20 7946 0111" };
 
   test("it says the path the decline took, as stored, then the number and the note", () => {
-    const declined = (declinedPath: "stop" | "continue" | "win_back") => ({ campaign, at, kind: "call" as const, channel: "call" as const, track: one("Phone track"), outcome: "not_interested" as const, number, note: "Happy with their supplier.", declinedPath, redial: false, callbackAt: null, onCallback: null, zone: "Europe/London", redialListedFrom: null, callbackOpen: false, afterDecline: [] });
+    const declined = (declinedPath: "stop" | "continue" | "win_back") => ({ campaign, at, kind: "call" as const, channel: "call" as const, track: one("Phone track"), outcome: "not_interested" as const, number, note: "Happy with their supplier.", declinedPath, redial: false, callbackAt: null, onCallback: null, zone: "Europe/London", redialListedFrom: null, callbackPending: false, callbackListed: false, afterDecline: [] });
     expect(say(declined("stop"))).toEqual(["Call: not interested", "Stopped in this campaign. +44 20 7946 0111, direct. Happy with their supplier.", null]);
     expect(say(declined("continue"))).toEqual(["Call: not interested", "No more calls in this campaign; the other channels were kept going. +44 20 7946 0111, direct. Happy with their supplier.", null]);
     expect(say(declined("win_back"))).toEqual(["Call: not interested", "Moved to this campaign’s win-back branch, with no more calls. +44 20 7946 0111, direct. Happy with their supplier.", null]);
     // Any other call has no path.
-    expect(say({ campaign, at, kind: "call", channel: "call", track: one("Phone track"), outcome: "no_answer", number, note: "", declinedPath: null, redial: false, callbackAt: null, onCallback: null, zone: "Europe/London", redialListedFrom: null, callbackOpen: false, afterDecline: [] })).toEqual(["Call: no answer", "+44 20 7946 0111, direct", null]);
+    expect(say({ campaign, at, kind: "call", channel: "call", track: one("Phone track"), outcome: "no_answer", number, note: "", declinedPath: null, redial: false, callbackAt: null, onCallback: null, zone: "Europe/London", redialListedFrom: null, callbackPending: false, callbackListed: false, afterDecline: [] })).toEqual(["Call: no answer", "+44 20 7946 0111, direct", null]);
   });
 });
 
@@ -157,7 +160,8 @@ describe("what a decline did to each remaining track, as the server's read holds
       onCallback: null,
       zone: "Europe/London",
       redialListedFrom: null,
-      callbackOpen: false,
+      callbackPending: false,
+      callbackListed: false,
       afterDecline: [
         { track: several("Email track 1"), state: "dropped_for_win_back", startsAt: null },
         { track: several("Phone track 2"), state: "dropped_for_win_back", startsAt: null },

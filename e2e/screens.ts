@@ -589,6 +589,21 @@ async function measuresScreen(page: Page, scenario: MeasuresScenario): Promise<v
   await page.goto(`${f.url}/campaigns/${f.world.campaignId}`);
 }
 
+/** The campaign page of ticket 22's measures app after its refreshes failed twice: the figures stay, marked out of date. */
+async function staleMeasures(page: Page): Promise<void> {
+  const f = await fakeMeasuresApp("running", "measures-screens-stale");
+  await page.clock.setFixedTime(f.world.h.clock);
+  await page.goto(`${f.url}/campaigns/${f.world.campaignId}`);
+  await settle(page, "1 callback pending");
+  await page.route(`${f.url}/api/campaigns/${f.world.campaignId}`, (route) => serverError(route));
+  const notice = page.getByText("This may be out of date");
+  for (let i = 0; i < 60 && !(await notice.isVisible()); i++) {
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await page.waitForTimeout(250);
+  }
+  await notice.waitFor();
+}
+
 /** Opens Today on ticket 20's demonstration app (ticket 20b), after the interruption. */
 async function interrupted(page: Page, scenario: InterruptionScenario): Promise<void> {
   const f = await fakeInterruptionApp(scenario);
@@ -2160,8 +2175,7 @@ export const SCREENS: readonly Screen[] = [
   { name: "measures: a running campaign", open: async (page) => { await measuresScreen(page, "running"); await settle(page, "1 callback pending"); } },
   { name: "measures: how they are counted", open: async (page) => { await measuresScreen(page, "running"); await page.getByText("How these are counted").click(); await settle(page, "Test runs are not counted."); } },
   { name: "measures: a paused campaign", open: async (page) => { await measuresScreen(page, "paused"); await settle(page, "1 callback pending"); } },
-  { name: "measures loading", open: async (page) => { await hold(page, "**/api/campaigns/*/measures"); await measuresScreen(page, "running"); await page.getByLabel("Loading the campaign’s figures").waitFor(); } },
-  { name: "measures error", open: async (page) => { await fail(page, "**/api/campaigns/*/measures"); await measuresScreen(page, "running"); await settle(page, "The campaign’s figures didn’t load."); } },
+  { name: "measures: figures that may be out of date", open: async (page) => { await staleMeasures(page); } },
 ];
 
 /**

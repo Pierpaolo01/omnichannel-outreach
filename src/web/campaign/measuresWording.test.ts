@@ -49,5 +49,9 @@ describe("the measures' wording (one function per measure)", () => {
   test("how the figures are counted, in plain words, covering each edge the ADR names", () => {
     const all = MEASURE_NOTES.join(" ");
     for (const phrase of ["once the provider reports it sent", "counts once", "other channel", "Skip for now", "callback"]) expect(all).toContain(phrase);
+    // Verifier F4 on 41028f2: Skip for now leaves a callback pending.
+    expect(MEASURE_NOTES.find((n) => n.startsWith("A callback is pending"))).toBe(
+      "A callback is pending until an outcome other than Skip for now is logged on it, also while the lead is paused (it is then off your call list); not once the lead has replied or been stopped.",
+    );
   });
 });

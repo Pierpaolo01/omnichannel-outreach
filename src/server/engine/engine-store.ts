@@ -375,6 +375,11 @@ export interface EngineStore {
 /** What the campaign measures read (ticket 22): the facts Activity reads for the same entries, for the campaign's enrollments. */
 export interface MeasureFacts {
   readonly launched: boolean;
+  /** The campaign row's launch and pause, in the same snapshot, so a screen's pause and figures are of one instant. */
+  readonly launchedAt: number | null;
+  readonly pausedSince: number | null;
+  /** The campaign's handed-over work that may still be sent (`uncertainWorkOf`), in the same snapshot. */
+  readonly mayStillSend: number;
   readonly definition: CampaignDefinition;
   /** Each enrollment: its stored status, whether its outreach has ended, and the channel of the reply that stopped it. */
   readonly enrollments: readonly { readonly id: string; readonly status: string; readonly ended: string | null; readonly stopReplyChannel: string | null }[];
@@ -387,5 +392,5 @@ export interface MeasureFacts {
   /** Each call outcome logged. */
   readonly calls: readonly { readonly subjectId: string; readonly outcome: string }[];
   /** Each open callback task. */
-  readonly openCallbacks: readonly { readonly subjectId: string }[];
+  readonly openCallbacks: readonly { readonly subjectId: string; readonly open: boolean; readonly kind: "call" | "callback" }[];
 }

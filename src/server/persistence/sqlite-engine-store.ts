@@ -160,6 +160,10 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   async uncertainWorkOf(campaignId: string): Promise<number> {
+    return this.uncertainWorkNow(campaignId);
+  }
+
+  private uncertainWorkNow(campaignId: string): number {
     // The engine's own definition (`maySend`), applied to the rows, not restated in SQL (council on 56d599c).
     return this.sql("SELECT w.settled, w.calls, w.went_wall FROM provider_work w JOIN enrollments e ON e.id = w.subject_id WHERE e.campaign_id = ? AND w.settled IS NULL")
       .all(campaignId)
@@ -187,7 +191,7 @@ export class SqliteEngineStore implements EngineStore {
     // One read transaction and no await inside it: every figure of one answer is of the same instant (ADR 0003 "Ticket 22").
     this.db.exec("BEGIN");
     try {
-      const campaign = this.sql("SELECT launched_at, definition, default_timezone FROM campaigns WHERE id = ?").get(campaignId);
+      const campaign = this.sql("SELECT launched_at, paused_since, definition, default_timezone FROM campaigns WHERE id = ?").get(campaignId);
       if (!campaign) return null;
       // Every row is read through the campaign's enrollments: a test run is a subject with no enrollment (ticket 21).
       const scope = options.everyCampaign === true ? "" : "WHERE e.campaign_id = ?";
@@ -195,6 +199,9 @@ export class SqliteEngineStore implements EngineStore {
       const rows = (sql: string) => this.sql(sql).all(...args);
       const facts: MeasureFacts = {
         launched: campaign["launched_at"] != null,
+        launchedAt: numOrNull(campaign, "launched_at"),
+        pausedSince: numOrNull(campaign, "paused_since"),
+        mayStillSend: this.uncertainWorkNow(campaignId),
         definition: campaign["definition"] == null ? emptyDefinition(strOrNull(campaign, "default_timezone") ?? "UTC") : parseDefinition(campaign),
         enrollments: rows(`SELECT e.id, e.status, e.ended, e.stop_reply_channel FROM enrollments e ${scope}`).map((r) => ({
           id: str(r, "id"),
@@ -217,8 +224,10 @@ export class SqliteEngineStore implements EngineStore {
           stepId: str(r, "step_id"),
         })),
         calls: rows(`SELECT c.subject_id, c.outcome FROM enrollments e JOIN call_attempts c ON c.subject_id = e.id ${scope}`).map((r) => ({ subjectId: str(r, "subject_id"), outcome: str(r, "outcome") })),
-        openCallbacks: rows(`SELECT t.subject_id FROM enrollments e JOIN call_tasks t ON t.subject_id = e.id ${scope ? `${scope} AND` : "WHERE"} t.open = 1 AND t.kind = 'callback'`).map((r) => ({
+        openCallbacks: rows(`SELECT t.subject_id, t.open, t.kind FROM enrollments e JOIN call_tasks t ON t.subject_id = e.id ${scope ? `${scope} AND` : "WHERE"} t.open = 1 AND t.kind = 'callback'`).map((r) => ({
           subjectId: str(r, "subject_id"),
+          open: num(r, "open") === 1,
+          kind: str(r, "kind") === "callback" ? ("callback" as const) : ("call" as const),
         })),
       };
       return facts;

@@ -85,6 +85,16 @@ export function callbackDay(state: SubjectState, task: CallTask): number {
 }
 
 /**
+ * Whether a callback is pending (ticket 22; verifier F2 on 41db0f2): the prospect asked for it, no outcome other than skip
+ * for now has been logged on it (its task is still an open callback), and the lead's outreach has not ended. A paused
+ * lead's or a paused campaign's callback is pending though it is not listed (`isListed`): the two are separate facts. A
+ * lead that replied or was stopped keeps its task only for a restart (2.3), so its callback is not pending.
+ */
+export function callbackPending(task: Pick<CallTask, "open" | "kind">, ended: string | null): boolean {
+  return task.open && task.kind === "callback" && ended === null;
+}
+
+/**
  * The listing rule (ADR 0003 2.3). An open task is listed while the subject has not ended, is not
  * lead-paused, and its campaign is launched and not paused; and, by kind:
  * - a call: the lead has no callback hold, the task is listed for today or an earlier day (a redial

@@ -56,6 +56,13 @@ export interface CampaignDetail extends CampaignPauseRead {
   readonly imports: readonly ImportRecord[];
   readonly leadCount: number;
   readonly sequence: CampaignSequenceSummary;
+  /**
+   * Ticket 22: the campaign's measures, from the same store snapshot as `pause`, `statusCounts` and `mayStillSend`, so a
+   * screen showing them together shows one instant (verifier B1 on 41028f2). `GET /api/campaigns/:id/measures` is the same.
+   */
+  readonly measures: CampaignMeasures;
+  /** The instant of this read. */
+  readonly asOf: string;
 }
 
 /** One rate: its numerator and denominator, as the read counted them, and the whole percent, or null with nothing to divide by. */
@@ -852,10 +859,13 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
           /** With a redial: the user's date the engine listed the call from (its next day whose calling hours open). */
           readonly redialListedFrom: string | null;
           /**
-           * With a callback requested: that callback is open now, listed today or later by the listing rule, and holds the
-           * lead's outreach (the record shows it). False after its outcome, a new time, a reply, a stop or an ending.
+           * With a callback requested: that callback is pending now (the engine's `callbackPending`: no outcome other than
+           * skip for now logged on it, and the lead's outreach not ended), as the campaign measures count it, a paused
+           * lead's included. False after its outcome, a new time, a reply, a stop or an ending (ticket 22, verifier F2).
            */
-          readonly callbackOpen: boolean;
+          readonly callbackPending: boolean;
+          /** With a pending callback: it is on the call list today or on a later day (the listing rule); not while paused. */
+          readonly callbackListed: boolean;
           /** With not interested: the declined path taken, the track's or the user's override for the lead (ticket 16). */
           readonly declinedPath: DeclinedPathApi | null;
           /** With not interested: each track the decline left unfinished or finished, in its state at this read (ticket 16c). Empty otherwise. */

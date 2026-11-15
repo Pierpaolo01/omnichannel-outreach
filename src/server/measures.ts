@@ -1,5 +1,6 @@
 import { isOutreachStatus, STATUS_GROUPS, statusGroup, type OutreachStatus, type StatusGroup } from "../domain/outreach-status.ts";
 import type { CampaignDefinition, TrackChannel } from "../domain/sequence/definition.ts";
+import { CALL_OUTCOMES, callbackPending } from "../domain/sequence/calls.ts";
 import type { CallOutcome } from "../domain/sequence/state.ts";
 import type { CampaignMeasures, MeasureRate } from "../shared/api.ts";
 import type { EngineStore, MeasureFacts } from "./engine/engine-store.ts";
@@ -57,7 +58,6 @@ export function callCounts(outcome: CallOutcome): { readonly made: boolean; read
   }
 }
 
-const CALL_OUTCOMES: readonly CallOutcome[] = ["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "not_interested", "callback_requested", "skip_for_now"];
 const outcomeOf = (value: string): CallOutcome | null => CALL_OUTCOMES.find((o) => o === value) ?? null;
 const statusOf = (value: string): OutreachStatus | null => (isOutreachStatus(value) ? value : null);
 const channelOfReply = (value: string | null): MessageChannel | null => (value === "email" || value === "sms" ? value : null);
@@ -123,10 +123,10 @@ export const MEASURE_RULES: MeasureRules = {
   callsInterested: (facts) => tallyCalls(facts, "interested"),
   callsDeclined: (facts) => tallyCalls(facts, "declined"),
 
-  /** Open callbacks of leads whose outreach has not ended: a stopped or replied lead keeps its task only for a restart (2.3). */
+  /** Callbacks pending, by the engine's own `callbackPending`: open callback tasks of leads whose outreach has not ended. */
   callbacksPending(facts) {
-    const notEnded = new Set(facts.enrollments.filter((e) => e.ended === null).map((e) => e.id));
-    return new Set(facts.openCallbacks.filter((c) => notEnded.has(c.subjectId)).map((c) => c.subjectId)).size;
+    const ended = new Map(facts.enrollments.map((e) => [e.id, e.ended]));
+    return new Set(facts.openCallbacks.filter((c) => ended.has(c.subjectId) && callbackPending(c, ended.get(c.subjectId) ?? null)).map((c) => c.subjectId)).size;
   },
 
   /** The leads that replied, out of the leads reached by email or SMS (a message sent, or a reply). */
@@ -149,11 +149,9 @@ function channelsOf(definition: CampaignDefinition): CampaignMeasures["channels"
   return order.filter((c) => definition.tracks.some((t) => t.channel === c));
 }
 
-/** The read: every measure from one snapshot of facts. Null for a campaign that does not exist. */
-export async function campaignMeasures(store: EngineStore, campaignId: string, overrides: Partial<MeasureRules> = {}): Promise<CampaignMeasures | null> {
+/** Every measure from one snapshot of facts. */
+export function measuresOf(facts: MeasureFacts, overrides: Partial<MeasureRules> = {}): CampaignMeasures {
   const rules: MeasureRules = { ...MEASURE_RULES, ...overrides };
-  const facts = await rules.facts(store, campaignId);
-  if (!facts) return null;
   const messages = (channel: MessageChannel) => ({ sent: rules.sent(facts, channel), failedOrBounced: rules.failedOrBounced(facts, channel), replies: rules.replies(facts, channel) });
   const made = rules.callsMade(facts);
   const connected = rules.callsConnected(facts);
@@ -168,4 +166,10 @@ export async function campaignMeasures(store: EngineStore, campaignId: string, o
     replyRate: rules.replyRate(facts),
     connectRate: rules.connectRate(connected, made),
   };
+}
+
+/** The read: the store's one snapshot of facts, then every measure from it. Null for a campaign that does not exist. */
+export async function campaignMeasures(store: EngineStore, campaignId: string, overrides: Partial<MeasureRules> = {}): Promise<CampaignMeasures | null> {
+  const facts = await (overrides.facts ?? MEASURE_RULES.facts)(store, campaignId);
+  return facts ? measuresOf(facts, overrides) : null;
 }
