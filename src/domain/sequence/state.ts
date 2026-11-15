@@ -7,6 +7,7 @@ import type { OutreachStatus } from "../outreach-status.ts";
 import type { Freeze, LeadClock } from "./clock.ts";
 import type { MergeData } from "./copy.ts";
 import type { Branch, CampaignDefinition, DeclinedPath, Threading } from "./definition.ts";
+import type { StoredReplyId } from "./reply-identity.ts";
 
 export type EndReason = Extract<
   OutreachStatus,
@@ -24,8 +25,12 @@ export type FinishReason =
   | "dropped_for_win_back"
   | "closed_on_interest";
 
+/** What a subject is (ADR 0003 1.2): a lead in a campaign, or a test run of the campaign's canvas against the user's own contacts (ticket 21). */
+export type SubjectKind = "enrollment" | "test_run";
+
 export interface SubjectRecord {
   readonly id: string;
+  readonly kind: SubjectKind;
   readonly campaignId: string;
   /** Bumped by the store on every write to this subject. */
   readonly version: number;
@@ -210,7 +215,8 @@ export interface SmsBindingRecord {
 export interface Reply {
   readonly channel: "email" | "sms";
   readonly atWall: number;
-  readonly providerRef: string;
+  /** The reply's stored id (the reply identity rule): one per provider reply. */
+  readonly providerRef: StoredReplyId;
 }
 
 /**

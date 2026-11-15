@@ -1,4 +1,5 @@
 import { currentStep, previewDigest } from "../../src/domain/sequence/controls.ts";
+import { storedReplyId, type StoredReplyId } from "../../src/domain/sequence/reply-identity.ts";
 import type { SubjectState } from "../../src/domain/sequence/state.ts";
 import { DEFAULT_RULES, type Rules } from "../../src/server/engine/rules.ts";
 import type { ControlRunOptions } from "./generated-controls.ts";
@@ -120,8 +121,22 @@ const RULES: Record<string, Partial<Rules>> = {
   },
   // Council on 57d874f, item 1: the client re-targets an open confirmation on the newest read (the run option below).
   "a confirmation sends the click-time expectation": {},
+  // The reply identity rule (ticket 22's runs, seed 22058): the pre-send check asks the SMS port by the stored `sms:<id>`,
+  // which the port never names a text by, so the text a lead was resumed after looks new and stops it again.
+  "the pre-send check compares a stored text's id with the provider's": {
+    portReplyId: (_channel, storedId) => storedId,
+  },
   "a reply the record holds clears the pre-send check": {
-    presendAnswer: (answer, known) => (answer.kind === "reply" && "providerRef" in answer && known.includes(String(answer.providerRef)) ? { kind: "clear" as const } : answer),
+    presendAnswer: (answer, channel, known) => (answer.kind === "reply" && known.includes(storedReplyId(channel, answer.providerRef)) ? { kind: "clear" as const } : R.presendAnswer(answer, channel, known)),
+  },
+  // Council on PR 62: a pre-send answer recorded under the port's bare id, not `storedReplyId` (the cast stands for the
+  // write site that skipped it, which the brand otherwise refuses). For a text, the provider's id without `sms:`.
+  "a pre-send text answer stored under the provider's id": {
+    presendAnswer: (answer, channel, known) => (channel === "sms" && answer.kind === "reply" ? { ...answer, providerRef: answer.providerRef as StoredReplyId } : R.presendAnswer(answer, channel, known)),
+  },
+  // For an email, the provider's message id without `reply:`, as the adapter answered before ticket 17a (cb31184).
+  "a pre-send email answer stored under the provider's message id": {
+    presendAnswer: (answer, channel, known) => (channel === "email" && answer.kind === "reply" ? { ...answer, providerRef: answer.providerRef.replace(/^reply:/, "") as StoredReplyId } : R.presendAnswer(answer, channel, known)),
   },
 };
 
@@ -154,6 +169,11 @@ const EXPECTED: Record<string, { invariant: string; seed: number; options?: Part
   // With the provider answering the first thread's reply, as the adapter did on ca8baee: the defect restored.
   "a reply the record holds clears the pre-send check": { invariant: "P1", seed: 24, options: { presendFirstReply: true } },
   "a control applied after its precondition changed": { invariant: "P13", seed: 0 },
+  // The scripted SMS reply run: the lead resumed after its text is ended again at its next text's check.
+  "the pre-send check compares a stored text's id with the provider's": { invariant: "P6", seed: 0, options: { smsReplyRestart: true } },
+  // The scripted runs of a reply the pre-send check finds before its observation: the late observation is a second reply.
+  "a pre-send text answer stored under the provider's id": { invariant: "once", seed: 0, options: { replyBeforeObservation: "sms" } },
+  "a pre-send email answer stored under the provider's message id": { invariant: "once", seed: 0, options: { replyBeforeObservation: "email" } },
   // Seed 17 since the precondition became the whole preview (verifier R1 on 57d874f): the stale-confirmation stream sends a
   // Skip to a lead that ended since its read, and the read's reason must be the action's (seed 85 found the order first).
   "the precondition checked before the lead's state": { invariant: "P11", seed: 17 },

@@ -1,3 +1,5 @@
+import { storedReplyId } from "../../domain/sequence/reply-identity.ts";
+import { UNDO_SINCE_18 } from "../../../test/support/undo-migrations.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
@@ -61,6 +63,7 @@ function beforeMigration9(file: string): void {
     ALTER TABLE provider_work DROP COLUMN withdraw_wanted;
       ALTER TABLE provider_work DROP COLUMN withdraw_last_wall;
       ALTER TABLE provider_work DROP COLUMN went_wall;
+    ${UNDO_SINCE_18}
     DELETE FROM schema_migrations WHERE version > 9;
     ALTER TABLE enrollments DROP COLUMN stop_reply_channel;
     ALTER TABLE enrollments DROP COLUMN stop_reply_at;
@@ -114,7 +117,7 @@ describe("migration 9 on a database written before it", () => {
     // A lead that did not reply reads as before: no stopping reply, no SMS sender.
     expect((await after.progress(nia))).toMatchObject({ reply: null, smsSender: null });
     // A reply observed after the upgrade, with an earlier time than either, moves nothing.
-    await after.store.engine.update(pat, after.clock, (s) => applyReply(s, { channel: "email", atWall: MONDAY_9 + H / 2, providerRef: "late-after-upgrade" }, after.clock));
+    await after.store.engine.update(pat, after.clock, (s) => applyReply(s, { channel: "email", atWall: MONDAY_9 + H / 2, providerRef: storedReplyId("email", "late-after-upgrade") }, after.clock));
     expect((await after.progress(pat)).reply).toEqual(stopped);
     await after.store.close();
   });

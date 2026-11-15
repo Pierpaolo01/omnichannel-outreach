@@ -545,7 +545,7 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
     await h.advanceTo(h.clock + 21 * DAY);
     for (let week = 0; week < 6; week++) {
       let waiting = false;
-      for (const id of await h.store.engine.runningSubjectIds()) {
+      for (const id of await h.store.engine.runningLeadIds()) {
         const p = (await h.request<EnrollmentProgress>("GET", `/api/enrollments/${id}`)).body;
         if (p.tracks.some((t) => t.finishReason === null && t.nextStep !== null && t.hold === null)) waiting = true;
       }

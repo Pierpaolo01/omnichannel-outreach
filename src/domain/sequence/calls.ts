@@ -8,7 +8,7 @@
 import { leadNow, localDayNumber, nextWindowOpen, span, startOfLocalDay, wallOfLead, windowOpen, type WindowRule } from "./clock.ts";
 import { WIN_BACK_HAS_NO_TRACKS, declinedPathOf, winBackAvailable, type CampaignDefinition, type DeclinedPath } from "./definition.ts";
 import type { ReadyItem } from "./dispatch.ts";
-import { advanceTrack, callbackHold, decline, end, evaluate, finishTrack, markDetailBad, progressOf, quiesce, runs, synced } from "./progress.ts";
+import { advanceTrack, callbackHold, campaignLets, decline, end, evaluate, finishTrack, markDetailBad, progressOf, quiesce, runs, synced } from "./progress.ts";
 import type { CallAttempt, CallDay, CallNumber, CallOutcome, CallTask, NoteDraft, RecordedNumber, SubjectState } from "./state.ts";
 
 export const CALL_OUTCOMES: readonly CallOutcome[] = ["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "not_interested", "callback_requested", "skip_for_now"];
@@ -94,8 +94,8 @@ export function callbackDay(state: SubjectState, task: CallTask): number {
  * Every outcome is accepted exactly when its task is listed at that moment.
  */
 export function isListed(state: SubjectState, task: CallTask): boolean {
-  const { subject, campaign } = state;
-  if (!task.open || campaign.launchedAt === null || campaign.pausedSince !== null || subject.ended !== null || subject.leadPaused) return false;
+  const { subject } = state;
+  if (!task.open || !campaignLets(state) || subject.ended !== null || subject.leadPaused) return false;
   if (task.kind === "callback") return callbackDay(state, task) <= state.callDay.day;
   return !callbackHold(state) && task.listDay <= state.callDay.day && hoursOpenOnUserDay(state, task.trackId);
 }

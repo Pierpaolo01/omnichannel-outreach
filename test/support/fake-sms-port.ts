@@ -179,9 +179,10 @@ export class FakeSmsPort implements SendPort {
    * The prospect at `from` texts `to` back: by default the number that last texted them. An SMS
    * reply carries only the two numbers, never a campaign. False if no number ever texted them and
    * none is given. `providerAt`: the text's time as the provider reports it, earlier than now for a
-   * text the app only observes now.
+   * text the app only observes now. `hiddenForMs`: how long its event stays out of observation, while a pre-send check
+   * (which reads the provider's messages) can already see it.
    */
-  prospectTexts(from: string, body = "Thanks, not now", to: string | null = null, providerAt: number | null = null): boolean {
+  prospectTexts(from: string, body = "Thanks, not now", to: string | null = null, providerAt: number | null = null, hiddenForMs = 0): boolean {
     const now = this.now();
     const number = to ?? this.deliveryLog.filter((d) => d.destination === from && d.at <= now).at(-1)?.sender ?? null;
     if (number === null) return false;
@@ -189,7 +190,7 @@ export class FakeSmsPort implements SendPort {
     // A text the provider reports late carries its own earlier time; its event becomes visible now.
     const at = providerAt ?? now;
     this.replyLog.push({ at: now, providerAt: at, id, from, to: number, body });
-    this.emit(now, { id, kind: "reply", providerRef: null, at, inbox: number, from });
+    this.emit(now + hiddenForMs, { id, kind: "reply", providerRef: null, at, inbox: number, from });
     return true;
   }
 

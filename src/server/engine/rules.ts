@@ -22,8 +22,15 @@ import { reconcileEdit, stillRunnable } from "../../domain/sequence/reconcile.ts
 import { launchCheck } from "../../domain/sequence/blockers.ts";
 import { applyControl, campaignPaused, campaignPrecondition, campaignResumed, controlPrecondition, judgeControl } from "../../domain/sequence/controls.ts";
 import type { RequestStanding, StoredRequest } from "./engine-store.ts";
+import { portReplyId, storedReplyId, type ReplyChannel, type StoredReplyId } from "../../domain/sequence/reply-identity.ts";
 import { afterInterruption, interruptionOf, rescheduledSteps } from "../../domain/sequence/interruption.ts";
 import type { CallAnswer } from "../../domain/sequence/attempt.ts";
+import { runTestRefusal } from "../../domain/sequence/test-runs.ts";
+
+/** A port's pre-send answer: a reply named by its event's id (ports.ts). */
+export type PortPresendAnswer = { readonly kind: "clear" } | { readonly kind: "unavailable" } | { readonly kind: "reply"; readonly providerRef: string; readonly at: number };
+/** The pre-send answer the engine records: a reply by its stored id. */
+export type PresendAnswer = { readonly kind: "clear" } | { readonly kind: "unavailable" } | { readonly kind: "reply"; readonly providerRef: StoredReplyId; readonly at: number };
 
 export interface Rules {
   readonly evaluate: typeof evaluate;
@@ -80,8 +87,15 @@ export interface Rules {
   readonly withdrawalDue: typeof withdrawalDue;
   /** How a request id stands against its stored first answer (verifier B5): new, a replay of it, or reused. */
   readonly requestStanding: (stored: StoredRequest | null, request: { readonly target: string; readonly action: string; readonly body: string }) => RequestStanding;
-  /** What the engine makes of the pre-send check's answer (ADR 0002): as given; the mutation of ca8baee's defect clears a known reply. */
-  readonly presendAnswer: <T extends { readonly kind: string }>(answer: T, knownReplies: readonly string[]) => T | { readonly kind: "clear" };
+  /**
+   * What the engine makes of the pre-send check's answer (ADR 0002): a reply is recorded under `storedReplyId` of the id
+   * the port named it by (the reply event's own id), so the pre-send check and the observation store one id for one
+   * reply. The mutations: ca8baee's defect clears a known reply; the defect of PR 62 stores the port's bare id.
+   */
+  readonly presendAnswer: (answer: PortPresendAnswer, channel: ReplyChannel, knownReplies: readonly StoredReplyId[]) => PresendAnswer;
+  /** A reply's identity, stored and as its port names it (ADR 0003 "Ticket 17a", the reply identity rule): one pair for every channel. */
+  readonly storedReplyId: typeof storedReplyId;
+  readonly portReplyId: typeof portReplyId;
   /** What the reads apply first when they preview a control: what fell due by the read's instant, as the action does. */
   readonly previewAsOf: typeof asOfAction;
   /** Brings one lead's progress in line with an edit of a running campaign (ticket 19, ADR 0003 "Ticket 19"). */
@@ -110,6 +124,10 @@ export interface Rules {
   readonly contactFrom: (answered: { readonly accounts: boolean; readonly observation: boolean }) => boolean;
   /** The answer a call whose answer was never recorded is taken to have (5.3's crash row): unknown. */
   readonly lostAnswer: CallAnswer;
+  /** Ticket 21: Run test's boundary, judged on the facts its transaction reads. */
+  readonly runTestRefusal: typeof runTestRefusal;
+  /** Ticket 21 (question Q27's interim): what an accepted edit does to the campaign's running test: stops it. */
+  readonly stopTestOnEdit: (state: SubjectState, now: number) => SubjectState;
 }
 
 export const DEFAULT_RULES: Rules = {
@@ -152,7 +170,9 @@ export const DEFAULT_RULES: Rules = {
   previewAsOf: asOfAction,
   reconcileEdit,
   runningCheck: (definition, leadsAfter, leads, accounts) => launchCheck(stillRunnable(definition, leadsAfter), leads, accounts),
-  presendAnswer: (answer) => answer,
+  presendAnswer: (answer, channel) => (answer.kind === "reply" ? { ...answer, providerRef: storedReplyId(channel, answer.providerRef) } : answer),
+  storedReplyId,
+  portReplyId,
   // Everything an evaluation reads: the subject's and campaign's versions cover its progress and the
   // definition; the lead's facts (contact details and their marks, zone, merge data) change without
   // bumping them (an import, a mark elsewhere), so they are compared as they were read.
@@ -168,4 +188,9 @@ export const DEFAULT_RULES: Rules = {
   dispatchInstant: (_started, now) => now,
   contactFrom: (answered) => answered.accounts && answered.observation,
   lostAnswer: { kind: "unknown" },
+  runTestRefusal,
+  stopTestOnEdit: (state, now) => {
+    const stopped = applyControl(asOfAction(state, now, evaluate), "stop", now);
+    return stopped.ok ? stopped.state : state;
+  },
 };

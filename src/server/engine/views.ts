@@ -151,7 +151,10 @@ export async function needsAttention(
     if (held.length === 0) continue;
     const work = [];
     for (const w of held) {
-      const carrying = (await store.subject(w.subjectId, now))?.attempts.filter((a) => a.idempotencyKey === w.key) ?? [];
+      const holder = await store.subject(w.subjectId, now);
+      // A test run's held work counts in the inbox's held sends (it holds them) but is no lead's work (rule 4).
+      if (holder?.subject.kind === "test_run") continue;
+      const carrying = holder?.attempts.filter((a) => a.idempotencyKey === w.key) ?? [];
       work.push({
         attemptId: (carrying.find(isLive) ?? carrying.at(-1))?.id ?? w.key,
         enrollmentId: w.subjectId,
@@ -172,7 +175,8 @@ export async function needsAttention(
   const interrupted = await sendingInterrupted(store, now);
   const evidence = interrupted ? await providerEvidence(store) : null;
   const providerWaits = new Map<"email" | "sms", number>();
-  for (const id of await store.runningSubjectIds()) {
+  // Leads only (ADR 0003 "Ticket 21", rule 4): a running test's waits show on its Test run tab, never as a lead's.
+  for (const id of await store.runningLeadIds()) {
     const stored = await store.subject(id, now);
     if (!stored) continue;
     for (const p of stored.tracks) {
@@ -226,7 +230,8 @@ export async function needsAttention(
     // As of the instant read: a call the worker has not yet skipped at a rollover is not shown (council on 228cd3b).
     const stored = await store.subject(id, now);
     const s = stored ? rules.asOfAction(stored, now, rules.evaluate) : null;
-    if (!s) continue;
+    // Leads only: a test's callback shows on the Calls list and its Test run tab, never as a lead's (rule 4).
+    if (!s || s.subject.kind === "test_run") continue;
     for (const t of s.callTasks) {
       if (isListed(s, t) && reasonOf(s, t, now) === "overdue") {
         overdueCallbacks.push({ taskId: t.id, enrollmentId: id, campaignId: s.campaign.id, callbackAt: new Date(t.callbackAt ?? now).toISOString(), dueAt: new Date(t.dueWall).toISOString() });

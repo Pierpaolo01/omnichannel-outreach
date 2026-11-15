@@ -20,11 +20,10 @@ export interface Migration {
   /** What SQL alone cannot compute, run after `sql` in the same transaction. */
   readonly data?: (db: DatabaseSync) => void;
   /**
-   * A table rebuild that other tables reference: foreign keys are switched off around the migration's transaction (they
-   * cannot be switched inside one), and `foreign_key_check` must find nothing before it commits (SQLite's documented
-   * procedure for a schema change ALTER TABLE cannot make).
+   * Rebuilds tables other tables reference (SQLite's documented twelve-step procedure): foreign keys are off for this
+   * migration only, and `foreign_key_check` must find nothing before it commits.
    */
-  readonly rebuildsReferencedTable?: true;
+  readonly rebuildsTables?: boolean;
 }
 
 const statusList = OUTREACH_STATUSES.map((s) => `'${s}'`).join(", ");
@@ -662,16 +661,204 @@ export const MIGRATIONS: readonly Migration[] = [
     `,
   },
   {
-    // Fix: an inbox used up outside the app no longer stops the engine's tick (verifier, 15 November 2026).
+    // Ticket 21.
     version: 18,
+    name: "test runs: a subject of their own, the campaign's test contacts, and detail references a test contact can satisfy (ADR 0003, ticket 21)",
+    rebuildsTables: true,
+    // A test run is a subject with the fields of an enrollment and no person or company. Its contacts' detail ids
+    // (`test:<run>:email`, `test:<run>:mobile`) name no CRM record, so the three columns that referenced
+    // contact_details are rebuilt without that key, which triggers replace: a lead's row may name only a CRM detail,
+    // and a test run's only its own test contact.
+    sql: `
+      ALTER TABLE campaigns ADD COLUMN test_email TEXT;
+      ALTER TABLE campaigns ADD COLUMN test_mobile TEXT;
+      -- The revision of the definition's last edit: a launch moves definition_version on without an edit (ticket 19).
+      ALTER TABLE campaigns ADD COLUMN edit_version INTEGER NOT NULL DEFAULT 0;
+      UPDATE campaigns SET edit_version = definition_version;
+      CREATE TABLE test_runs (
+        id TEXT PRIMARY KEY REFERENCES subjects(id),
+        campaign_id TEXT NOT NULL REFERENCES campaigns(id),
+        render_as TEXT NOT NULL REFERENCES enrollments(id),
+        email_value TEXT, email_key TEXT, mobile_value TEXT, mobile_key TEXT,
+        email_bad INTEGER NOT NULL DEFAULT 0 CHECK (email_bad IN (0, 1)),
+        mobile_bad INTEGER NOT NULL DEFAULT 0 CHECK (mobile_bad IN (0, 1)),
+        definition_version INTEGER NOT NULL,
+        definition_edited_at TEXT,
+        started_wall INTEGER NOT NULL,
+        stopped_by TEXT CHECK (stopped_by IN ('user', 'edit')),
+        request_id TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL CHECK (status IN (${statusList})),
+        version INTEGER NOT NULL DEFAULT 0,
+        ended TEXT, ended_at INTEGER, ended_wall INTEGER,
+        lead_paused INTEGER NOT NULL DEFAULT 0,
+        branch TEXT NOT NULL DEFAULT 'main' CHECK (branch IN ('main', 'win_back')),
+        branch_entered_at INTEGER,
+        touched INTEGER NOT NULL DEFAULT 0,
+        no_more_calls INTEGER NOT NULL DEFAULT 0,
+        frozen_since INTEGER, frozen_total INTEGER NOT NULL DEFAULT 0,
+        email_sender TEXT, sms_sender TEXT,
+        stop_reply_channel TEXT CHECK (stop_reply_channel IN ('email', 'sms')),
+        stop_reply_at INTEGER,
+        CHECK (email_key IS NOT NULL OR mobile_key IS NOT NULL)
+      );
+      CREATE UNIQUE INDEX one_running_test_per_campaign ON test_runs(campaign_id) WHERE ended IS NULL;
+      CREATE INDEX test_runs_by_campaign ON test_runs(campaign_id, started_wall);
+      -- Every subject the engine runs, with what the call list and the worker read of it: a test run has no person or company.
+      CREATE VIEW engine_subjects AS
+        SELECT id, 'enrollment' AS kind, campaign_id, person_id, company_id, ended, ended_wall FROM enrollments
+        UNION ALL
+        SELECT id, 'test_run' AS kind, campaign_id, NULL, NULL, ended, ended_wall FROM test_runs;
+
+      CREATE TABLE track_progress_v17 (
+        subject_id TEXT NOT NULL REFERENCES subjects(id),
+        track_id TEXT NOT NULL,
+        start_at INTEGER, start_basis_at INTEGER, start_basis_wall INTEGER, start_zone TEXT,
+        started_at INTEGER,
+        destination_detail_id TEXT,
+        next_step_id TEXT, basis_at INTEGER, basis_wall INTEGER, due_at INTEGER, due_wall INTEGER, due_zone TEXT,
+        finished_at INTEGER, finished_wall INTEGER, finish_reason TEXT,
+        PRIMARY KEY (subject_id, track_id)
+      );
+      INSERT INTO track_progress_v17 SELECT subject_id, track_id, start_at, start_basis_at, start_basis_wall, start_zone, started_at, destination_detail_id,
+        next_step_id, basis_at, basis_wall, due_at, due_wall, due_zone, finished_at, finished_wall, finish_reason FROM track_progress ORDER BY rowid;
+      DROP TABLE track_progress;
+      ALTER TABLE track_progress_v17 RENAME TO track_progress;
+
+      CREATE TABLE attempts_v17 (
+        id TEXT PRIMARY KEY,
+        subject_id TEXT NOT NULL REFERENCES subjects(id),
+        track_id TEXT NOT NULL,
+        step_id TEXT NOT NULL,
+        account_id TEXT NOT NULL REFERENCES sender_accounts(id),
+        destination_detail_id TEXT NOT NULL,
+        destination TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('claimed', 'handed', 'accepted', 'sent', 'rejected', 'withdrawn')),
+        copy TEXT,
+        threading TEXT NOT NULL CHECK (threading IN ('new_subject', 'continue_thread')),
+        thread_ref TEXT,
+        retryable INTEGER NOT NULL,
+        not_sent_final INTEGER NOT NULL,
+        idempotency_key TEXT NOT NULL REFERENCES provider_work(key),
+        calls INTEGER NOT NULL,
+        claimed_wall INTEGER NOT NULL,
+        handed_at INTEGER, handed_wall INTEGER, last_call_wall INTEGER,
+        presend_checked_wall INTEGER, presend_found_reply INTEGER NOT NULL DEFAULT 0,
+        ended_by TEXT,
+        withdraw_requested INTEGER NOT NULL DEFAULT 0,
+        withdraw_called INTEGER NOT NULL DEFAULT 0,
+        awaiting_answer INTEGER NOT NULL DEFAULT 0,
+        retry TEXT NOT NULL DEFAULT 'none',
+        reject_reason TEXT
+      );
+      INSERT INTO attempts_v17 SELECT id, subject_id, track_id, step_id, account_id, destination_detail_id, destination, state, copy, threading, thread_ref,
+        retryable, not_sent_final, idempotency_key, calls, claimed_wall, handed_at, handed_wall, last_call_wall, presend_checked_wall, presend_found_reply,
+        ended_by, withdraw_requested, withdraw_called, awaiting_answer, retry, reject_reason FROM attempts ORDER BY rowid;
+      DROP TABLE attempts;
+      ALTER TABLE attempts_v17 RENAME TO attempts;
+      CREATE UNIQUE INDEX one_live_attempt_per_step ON attempts(subject_id, step_id) WHERE state IN ('claimed', 'handed', 'accepted');
+      CREATE UNIQUE INDEX one_sent_attempt_per_step ON attempts(subject_id, step_id) WHERE state = 'sent';
+      CREATE INDEX attempts_by_subject ON attempts(subject_id);
+      CREATE INDEX attempts_by_account_state ON attempts(account_id, state);
+      CREATE INDEX attempts_by_key ON attempts(idempotency_key);
+
+      CREATE TABLE call_attempts_v17 (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES call_tasks(id),
+        subject_id TEXT NOT NULL REFERENCES subjects(id),
+        -- The client's key for the action that logged it: one action is logged once, whatever retries it.
+        request_id TEXT NOT NULL UNIQUE,
+        outcome TEXT NOT NULL,
+        number_detail_id TEXT,
+        note TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        at_wall INTEGER NOT NULL,
+        redial INTEGER NOT NULL DEFAULT 0 CHECK (redial IN (0, 1)),
+        callback_at INTEGER,
+        declined_path TEXT CHECK (declined_path IN ('stop', 'continue', 'win_back'))
+      );
+      INSERT INTO call_attempts_v17 SELECT id, task_id, subject_id, request_id, outcome, number_detail_id, note, at, at_wall, redial, callback_at, declined_path
+        FROM call_attempts ORDER BY rowid;
+      DROP TABLE call_attempts;
+      ALTER TABLE call_attempts_v17 RENAME TO call_attempts;
+      CREATE INDEX call_attempts_by_subject ON call_attempts(subject_id, at_wall);
+
+      -- A lead's row names only a live or merged CRM detail; a test run's names only its own email or mobile, which it has
+      -- (verifier F2 on 55d6ac6: another run's id, an invented kind or a contact the run lacks is refused).
+      CREATE TRIGGER track_progress_destination_detail_id_known_insert BEFORE INSERT ON track_progress
+      WHEN NOT (NEW.destination_detail_id IS NULL OR (CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
+          THEN (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
+          ELSE NEW.destination_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.destination_detail_id) END))
+      BEGIN SELECT RAISE(ABORT, 'track_progress.destination_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
+      CREATE TRIGGER track_progress_destination_detail_id_known_update BEFORE UPDATE OF destination_detail_id, subject_id ON track_progress
+      WHEN NOT (NEW.destination_detail_id IS NULL OR (CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
+          THEN (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
+          ELSE NEW.destination_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.destination_detail_id) END))
+      BEGIN SELECT RAISE(ABORT, 'track_progress.destination_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
+      CREATE TRIGGER attempts_destination_detail_id_known_insert BEFORE INSERT ON attempts
+      WHEN NOT (CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
+          THEN (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
+          ELSE NEW.destination_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.destination_detail_id) END)
+      BEGIN SELECT RAISE(ABORT, 'attempts.destination_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
+      CREATE TRIGGER attempts_destination_detail_id_known_update BEFORE UPDATE OF destination_detail_id, subject_id ON attempts
+      WHEN NOT (CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
+          THEN (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
+          ELSE NEW.destination_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.destination_detail_id) END)
+      BEGIN SELECT RAISE(ABORT, 'attempts.destination_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
+      CREATE TRIGGER call_attempts_number_detail_id_known_insert BEFORE INSERT ON call_attempts
+      WHEN NOT (NEW.number_detail_id IS NULL OR (CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
+          THEN (NEW.number_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
+            OR (NEW.number_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
+          ELSE NEW.number_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.number_detail_id) END))
+      BEGIN SELECT RAISE(ABORT, 'call_attempts.number_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
+      CREATE TRIGGER call_attempts_number_detail_id_known_update BEFORE UPDATE OF number_detail_id, subject_id ON call_attempts
+      WHEN NOT (NEW.number_detail_id IS NULL OR (CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
+          THEN (NEW.number_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
+            OR (NEW.number_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
+          ELSE NEW.number_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.number_detail_id) END))
+      BEGIN SELECT RAISE(ABORT, 'call_attempts.number_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
+    `,
+  },
+  {
+    // PR 62, the reply identity rule (ADR 0003 "Ticket 17a").
+    version: 19,
+    name: "one stored form for a reply's id: sms:<id> for a text, reply:<email id> for an email (ADR 0003, the reply identity rule)",
+    // A pre-send answer was stored under the provider's bare id while the observation stores the event's id: a text's
+    // bare id (until PR 62) beside sms:<id>, and an email's bare id (the Instantly adapter until ticket 17a, from
+    // cb31184) beside reply:<email id>. A late observation of the same reply was then a second reply that ended a resumed
+    // lead again (verifier B1 and the council on PR 62). Every bare id becomes the observed form; a lead holding both
+    // keeps one row, at the earlier instant. An email id with a colon is an event's id already (reply:, unsubscribed:)
+    // and is kept exactly. Reply events hold only observed ids. Bare is: a text without the sms: prefix, an email
+    // without any colon.
+    sql: `
+      CREATE TEMP TABLE reply_forms AS
+        SELECT rowid AS id, subject_id, provider_ref AS bare,
+          CASE channel WHEN 'sms' THEN 'sms:' || provider_ref ELSE 'reply:' || provider_ref END AS canonical, at_wall
+        FROM replies
+        WHERE (channel = 'sms' AND substr(provider_ref, 1, 4) <> 'sms:') OR (channel = 'email' AND instr(provider_ref, ':') = 0);
+      UPDATE replies SET at_wall = (SELECT MIN(f.at_wall) FROM reply_forms f WHERE f.subject_id = replies.subject_id AND f.canonical = replies.provider_ref)
+      WHERE EXISTS (SELECT 1 FROM reply_forms f WHERE f.subject_id = replies.subject_id AND f.canonical = replies.provider_ref AND f.at_wall < replies.at_wall);
+      DELETE FROM replies
+      WHERE rowid IN (SELECT f.id FROM reply_forms f WHERE EXISTS (SELECT 1 FROM replies c WHERE c.subject_id = f.subject_id AND c.provider_ref = f.canonical));
+      UPDATE replies SET provider_ref = (SELECT f.canonical FROM reply_forms f WHERE f.id = replies.rowid)
+      WHERE rowid IN (SELECT id FROM reply_forms);
+      DROP TABLE reply_forms;
+    `,
+  },
+  {
+    // Fix: an inbox used up outside the app no longer stops the engine's tick (verifier, 15 November 2026).
+    version: 20,
     name: "a sender account's capacity may be 0: no room on its reset day (ADR 0003 4.1 as amended)",
     // An Instantly inbox whose daily limit other senders used up today, or that has no daily limit, reports capacity 0;
     // `capacity > 0` refused it and the tick threw. 0 now means "no room now": the claim's capacity rule refuses it, and
     // its due work waits for capacity in Needs attention. SQLite cannot change a CHECK, so the table is rebuilt; provider
-    // work and attempts reference it, hence `rebuildsReferencedTable`. Every stored row already satisfies the new CHECK.
-    rebuildsReferencedTable: true,
+    // work and attempts reference it, hence `rebuildsTables`. Every stored row already satisfies the new CHECK.
+    rebuildsTables: true,
     sql: `
-      CREATE TABLE sender_accounts_v18 (
+      CREATE TABLE sender_accounts_v20 (
         id TEXT PRIMARY KEY,
         channel TEXT NOT NULL CHECK (channel IN ('email', 'sms')),
         label TEXT NOT NULL,
@@ -686,11 +873,11 @@ export const MIGRATIONS: readonly Migration[] = [
         reset_zone TEXT NOT NULL DEFAULT 'UTC',
         problem TEXT
       );
-      INSERT INTO sender_accounts_v18 (id, channel, label, capacity, gap_ms, k, next_slot_at, healthy, wait_until, wait_reason, backoff_ms, reset_zone, problem)
+      INSERT INTO sender_accounts_v20 (id, channel, label, capacity, gap_ms, k, next_slot_at, healthy, wait_until, wait_reason, backoff_ms, reset_zone, problem)
         SELECT id, channel, label, capacity, gap_ms, k, next_slot_at, healthy, wait_until, wait_reason, backoff_ms, reset_zone, problem
         FROM sender_accounts ORDER BY rowid;
       DROP TABLE sender_accounts;
-      ALTER TABLE sender_accounts_v18 RENAME TO sender_accounts;
+      ALTER TABLE sender_accounts_v20 RENAME TO sender_accounts;
     `,
   },
 ];
@@ -715,12 +902,13 @@ export function migrate(db: DatabaseSync, appliedAt: () => string, migrations: r
 
   for (const migration of migrations) {
     if (migration.version <= current) continue;
-    const foreignKeys = migration.rebuildsReferencedTable ? Number(db.prepare("PRAGMA foreign_keys").get()?.["foreign_keys"] ?? 0) : 0;
-    if (foreignKeys) db.exec("PRAGMA foreign_keys = OFF");
+    // A rebuild of tables other tables reference runs with foreign keys off (they cannot change inside a transaction).
+    const keysWereOn = migration.rebuildsTables === true && Number(db.prepare("PRAGMA foreign_keys").get()?.["foreign_keys"]) === 1;
+    if (keysWereOn) db.exec("PRAGMA foreign_keys = OFF");
     try {
       applyOne(db, migration, appliedAt);
     } finally {
-      if (foreignKeys) db.exec("PRAGMA foreign_keys = ON");
+      if (keysWereOn) db.exec("PRAGMA foreign_keys = ON");
     }
   }
 }
@@ -735,14 +923,11 @@ function applyOne(db: DatabaseSync, migration: Migration, appliedAt: () => strin
   try {
     db.exec(migration.sql);
     migration.data?.(db);
-    if (migration.rebuildsReferencedTable && db.prepare("PRAGMA foreign_key_check").all().length > 0) {
-      throw new Error(`Migration ${migration.version} would leave a reference to a row that no longer exists; it was not applied.`);
+    if (migration.rebuildsTables === true) {
+      const broken = db.prepare("PRAGMA foreign_key_check").all();
+      if (broken.length > 0) throw new Error(`migration ${migration.version} left ${broken.length} foreign key violations`);
     }
-    db.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(
-      migration.version,
-      migration.name,
-      appliedAt(),
-    );
+    db.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(migration.version, migration.name, appliedAt());
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");

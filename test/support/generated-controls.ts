@@ -74,6 +74,19 @@ export interface ControlRunOptions {
    * is confirmed, not of the read it opened on, as a confirmation that re-targets on a live read would.
    */
   readonly clickTimeExpectation?: boolean;
+  /**
+   * A fixed run (the reply identity rule, ADR 0003 "Ticket 17a"): a lead with a text track of two steps texts back after
+   * the first, the app observes it, and the user resumes the lead from its next step. The text it was resumed after is
+   * not news: its next text goes (P6), and the generic events run on from there.
+   */
+  readonly smsReplyRestart?: boolean;
+  /**
+   * A fixed run per channel (the reply identity rule, council on PR 62): a lead replies after its first message, the
+   * reply's event hidden from observation for a drawn time longer than the next step's wait, so the pre-send check of the
+   * next step finds it first and the lead ends replied; the user resumes the lead, then the delayed observation reports
+   * the same reply. It is one reply ("once"), and the next message goes (P6).
+   */
+  readonly replyBeforeObservation?: "sms" | "email";
 }
 
 export interface ControlRunResult {
@@ -173,7 +186,12 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   const definitions: CampaignDefinition[] = [];
   for (let ci = 0; ci < campaignCount; ci++) {
     const tracks: TrackDefinition[] = [{ id: `k${ci}e1`, channel: "email", branch: "main", window: ALL_DAY, steps: steps(`k${ci}e1`, pick([2, 3])), start: { kind: "entry" }, removed: false }];
-    if (chance(0.4)) tracks.push({ id: `k${ci}x1`, channel: "sms", branch: "main", window: ALL_DAY, steps: steps(`k${ci}x1`, pick([1, 2])).map((s) => ({ ...s, subject: "" })), start: { kind: "entry" }, removed: false });
+    // The scripted SMS reply run gives the first campaign a text track of two steps, so a resumed lead has a text left.
+    // The draws stay as they were for every other run, so no recorded seed moves.
+    const texts = chance(0.4);
+    const textSteps = texts ? pick([1, 2]) : 2;
+    const scriptedTexts = options.smsReplyRestart === true || options.replyBeforeObservation === "sms";
+    if (texts || (scriptedTexts && ci === 0)) tracks.push({ id: `k${ci}x1`, channel: "sms", branch: "main", window: ALL_DAY, steps: steps(`k${ci}x1`, scriptedTexts ? 2 : textSteps).map((s) => ({ ...s, subject: "" })), start: { kind: "entry" }, removed: false });
     if (chance(0.5)) tracks.push({ id: `k${ci}p1`, channel: "call", branch: "main", window: ALL_DAY, steps: [{ id: `k${ci}p1c`, waitDays: 0, subject: "", body: "", threading: "new_subject", removed: false }], start: { kind: "entry" }, removed: false, callSkipLimitDays: 30 });
     if (chance(0.5)) tracks.push({ id: `k${ci}e2`, channel: "email", branch: "main", window: ALL_DAY, steps: steps(`k${ci}e2`, pick([1, 2])), start: { kind: "after", trackId: `k${ci}e1`, delayDays: pick([0, 1]) }, removed: false });
     if (chance(0.5)) tracks.push({ id: `k${ci}w1`, channel: "email", branch: "win_back", window: ALL_DAY, steps: steps(`k${ci}w1`, pick([1, 2])), start: { kind: "entry" }, removed: false });
@@ -522,6 +540,18 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   async function checkAll(): Promise<void> {
     settleHidden();
     const now = h.clock;
+    // once (council on PR 62): one provider reply is held once per lead, whichever of the pre-send check and the
+    // observation found it first. A stored id names a provider's reply when it is that id, or either is the other with a
+    // prefix (`sms:`, `reply:`): the record does not restate the app's one stored form, only that there is one.
+    for (const s of subjects.values()) {
+      const held = (await h.store.engine.subject(s.id, now))?.replies ?? [];
+      const names = (stored: string, id: string) => stored === id || stored.endsWith(`:${id}`) || id.endsWith(`:${stored}`);
+      const theirs = [...email.replyLog.filter((r) => r.subjectId === s.id).map((r) => r.id), ...(s.person.mobile ? sms.replyLog.filter((r) => r.from === s.person.mobile).map((r) => r.id) : [])];
+      for (const id of theirs) {
+        const copies = held.filter((r) => names(r.providerRef, id));
+        if (copies.length > 1) problem(`once: ${s.id} holds the provider's reply ${id} ${copies.length} times (${copies.map((r) => r.providerRef).join(", ")})`);
+      }
+    }
     // P3: no burst. Two send calls from one sender are never closer than its gap (5 minutes), across every resume.
     for (const provider of [email, sms]) {
       const bySender = new Map<string, number[]>();
@@ -1268,6 +1298,80 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
 
   const eventCount = options.events ?? 22;
   await checkAll();
+  if (options.smsReplyRestart === true) {
+    // The scripted prelude: the first lead texted the first step of its text track texts back, is seen replied, and is
+    // resumed from its next step while its second text is still to come.
+    let texted: { s: Subject; mobile: string; sender: string } | undefined;
+    for (let i = 0; i < 240 && !texted; i++) {
+      await h.advanceTo(h.clock + MINUTE);
+      for (const d of sms.deliveryLog) {
+        const s = subjects.get(d.subjectId);
+        if (!s?.person.mobile || !d.stepId.endsWith("s1") || d.visibleAt > h.clock || endedAt(s, h.clock) || heldAt(s, h.clock)) continue;
+        texted = { s, mobile: s.person.mobile, sender: d.sender };
+        break;
+      }
+    }
+    if (texted && sms.prospectTexts(texted.mobile, "Not now, thanks", texted.sender)) {
+      const textedAt = h.clock;
+      await h.tick();
+      replied(texted.s, h.clock);
+      if (accepts(texted.s, "resume_from_next_step", h.clock)) {
+        await control(texted.s, "resume_from_next_step");
+        features.add("restarted-after-a-text-reply");
+      }
+      await h.advanceTo(h.clock + 3 * DAY);
+      // P6: a restart continues at the next unsent step. Nothing else happened to the lead in these three days, and its
+      // second text waits at most two, so it has gone: the text the lead was resumed after is not news.
+      const next = def(texted.s).tracks.find((t) => t.channel === "sms")?.steps[1];
+      if (next && !endedAt(texted.s, h.clock) && !heldAt(texted.s, h.clock) && !delivered("sms", texted.s, next.id)) problem(`P6: ${texted.s.id} was resumed after a text at ${isoOf(textedAt)} and its next text ${next.id} has not gone three days on${process.env["CONTROLS_DEBUG"] ? ` [app replies ${JSON.stringify((await h.store.engine.subject(texted.s.id, h.clock))?.replies)}; texts ${JSON.stringify(sms.replyLog)}]` : ""}`);
+      await checkAll();
+    }
+  }
+  if (options.replyBeforeObservation !== undefined) {
+    // The scripted prelude: the first lead sent the first step of a track of this channel replies, hidden from
+    // observation for longer than the next step's wait (at most two days), so the pre-send check finds it first.
+    const channel = options.replyBeforeObservation;
+    const port = channel === "sms" ? sms : email;
+    const rHidden = random(seed ^ 0x62a);
+    let first: { s: Subject; d: (typeof port.deliveryLog)[number] } | undefined;
+    for (let i = 0; i < 240 && !first; i++) {
+      await h.advanceTo(h.clock + MINUTE);
+      for (const d of port.deliveryLog) {
+        const s = subjects.get(d.subjectId);
+        const t = s ? def(s).tracks.find((x) => x.steps[0]?.id === d.stepId && x.channel === channel) : undefined;
+        if (!s || !t || t.steps.length < 2 || d.visibleAt > h.clock || endedAt(s, h.clock) || heldAt(s, h.clock)) continue;
+        if (channel === "sms" && !s.person.mobile) continue;
+        first = { s, d };
+        break;
+      }
+    }
+    const hiddenForMs = Math.round((2.5 + rHidden() * 2) * DAY);
+    const sent = first && (channel === "sms" ? sms.prospectTexts(first.s.person.mobile ?? "", "Not now, thanks", first.d.sender, null, hiddenForMs) : email.prospectReplies(first.d.destination, true, null, { inThreadOf: first.d, hiddenForMs }));
+    if (first && sent) {
+      const s = first.s;
+      const replyAt = h.clock;
+      // The app finds it at the next step's pre-send check: the lead ends replied, at the instant the engine recorded.
+      let endedWall: number | null = null;
+      for (let i = 0; i < 3 * 24 * 6 && endedWall === null; i++) {
+        await h.advanceTo(h.clock + 10 * MINUTE);
+        const st = await h.store.engine.subject(s.id, h.clock);
+        if (st?.subject.ended === "replied") endedWall = st.subject.endedWall;
+      }
+      if (endedWall !== null && endedWall < replyAt + hiddenForMs) {
+        replied(s, endedWall);
+        features.add(`a-${channel}-reply-found-by-the-pre-send-check-before-its-observation`);
+        if (accepts(s, "resume_from_next_step", h.clock)) {
+          await control(s, "resume_from_next_step");
+          // Past the delayed observation, and three days on for the next step.
+          await h.advanceTo(Math.max(h.clock, replyAt + hiddenForMs) + 3 * DAY);
+          const t = def(s).tracks.find((x) => x.channel === channel && x.steps[0]?.id === first.d.stepId);
+          const next = t?.steps[1];
+          if (next && !endedAt(s, h.clock) && !heldAt(s, h.clock) && !delivered(channel, s, next.id)) problem(`P6: ${s.id} was resumed after a reply the pre-send check found at ${isoOf(endedWall)} and its next ${channel} step ${next.id} has not gone three days after the reply's late observation`);
+        }
+        await checkAll();
+      }
+    }
+  }
   if (options.withdrawalAcrossARecovery === true) {
     // The scripted prelude: a lead whose email is at the provider is paused (its withdrawal answered unknown), the
     // application stops for six minutes, and runs on for an hour after its recovery.

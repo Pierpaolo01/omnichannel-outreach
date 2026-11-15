@@ -564,3 +564,74 @@ async function startCapacity(): Promise<FakeCapacityApp> {
   await harness.advanceTo(MONDAY_8 + H + 10 * 60_000);
   return { url: await serveHarness(harness), harness };
 }
+
+// ---------------------------------------------------------------------------------------------
+// Ticket 21: test runs. A campaign not launched, with two emails and two texts together, a phone track a day after the
+// emails whose declined path is win back, and a win-back email; the fixture leads; one inbox and two simulated SMS
+// numbers. The user's own test contacts are fictitious: a reserved example domain and a drama-range mobile.
+
+export const OWN_TEST_EMAIL = "alex.own@personal-mail.example";
+export const OWN_TEST_MOBILE = "+447700900456";
+
+export const testRunDefinition = (): CampaignDefinition => ({
+  timezone: "Europe/London",
+  callSkipLimitDays: 2,
+  emailPool: [FAKE_INBOX],
+  smsPool: [...FAKE_NUMBERS],
+  callScript: CALL_SCRIPT,
+  tracks: [
+    { id: "email", channel: "email", branch: "main", window: WEEKDAYS_9_TO_17, steps: [COPY.first, COPY.second], start: { kind: "entry" }, removed: false },
+    {
+      id: "sms",
+      channel: "sms",
+      branch: "main",
+      window: WEEKDAYS_9_TO_17,
+      steps: [
+        step("m1", { body: "Hi {{first_name|there}}, Alex from Northlight Bookings. I emailed about evening booking at {{company}}. OK if I call this week?", threading: "new_subject" }),
+        step("m2", { waitDays: 2, body: "{{first_name|Hi}}, should I send the two-minute video for {{company}}? A yes is enough." }),
+      ],
+      start: { kind: "entry" },
+      removed: false,
+    },
+    { id: "phone", channel: "call", branch: "main", window: WEEKDAYS_9_TO_17, steps: [step("c1", { threading: "new_subject" })], start: { kind: "after", trackId: "email", delayDays: 1 }, removed: false, declinedPath: "win_back" },
+    {
+      id: "win-back",
+      channel: "email",
+      branch: "win_back",
+      window: WEEKDAYS_9_TO_17,
+      steps: [step("w1", { subject: "One more idea for {{company}}", body: "Hi {{first_name|there}},\n\nUnderstood, and thanks for your time on the phone. One idea I’ll leave with you: a booking link for evenings only.\n\nAlex", threading: "new_subject" })],
+      start: { kind: "entry" },
+      removed: false,
+    },
+  ],
+});
+
+export interface FakeTestRunApp {
+  readonly url: string;
+  readonly harness: EngineHarness;
+  readonly campaign: string;
+}
+
+const testRunsStarted = new Map<string, Promise<FakeTestRunApp>>();
+
+/** One test-run app per name and test worker: Monday 10:00 London, the campaign not launched. */
+export function fakeTestRunApp(name: string): Promise<FakeTestRunApp> {
+  let app = testRunsStarted.get(name);
+  if (!app) testRunsStarted.set(name, (app = startTestRuns()));
+  return app;
+}
+
+async function startTestRuns(): Promise<FakeTestRunApp> {
+  const harness = new EngineHarness({
+    start: MONDAY_8 + 2 * H,
+    accounts: [{ id: FAKE_INBOX, capacity: 30, gapMs: 60_000, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
+    sms: { numbers: FAKE_NUMBERS.map((id) => ({ id, capacity: 40, gapMs: 60_000, k: 1, healthy: true, resetZone: "Europe/London" })) },
+  });
+  await harness.tick();
+  await harness.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "Europe/London" });
+  const csv = { businessesCsv: readFileSync(fixture("businesses-run1.csv"), "utf8"), peopleCsv: readFileSync(fixture("people-run1.csv"), "utf8") };
+  const campaign = (await harness.request<{ campaign: Campaign }>("POST", "/api/campaigns", { name: "Physiotherapy, Greater London", defaultTimezone: "Europe/London", ...csv })).body.campaign.id;
+  await harness.tick();
+  await harness.defineSequence(campaign, testRunDefinition());
+  return { url: await serveHarness(harness), harness, campaign };
+}

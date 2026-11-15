@@ -5,8 +5,9 @@
  */
 import type { OutreachStatus } from "../outreach-status.ts";
 import { applyAttemptEvent, applyLookup, ENGINE_PARAMS, isLive, isUncertain, markable, maySend, withRef, type AttemptEffect, type AttemptEvent, type WorkEvent } from "./attempt.ts";
-import { leadNow, localDayNumber, nextWindowOpen, sendPoint, span, startOfLocalDay, syncClock, wallOfLead, type Freeze, type LeadClock } from "./clock.ts";
+import { leadNow, localDayNumber, nextWindowOpen, sendPoint, startOfLocalDay, syncClock, waitSpan, wallOfLead, type Freeze, type LeadClock } from "./clock.ts";
 import { liveSteps, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
+import type { StoredReplyId } from "./reply-identity.ts";
 import type { Attempt, EndReason, FinishReason, LeadDetail, ProviderWork, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
 
 // ---------------------------------------------------------------------------------------------
@@ -27,8 +28,17 @@ export function callbackHold(state: SubjectState): boolean {
  * with ticket 17 on this same function.
  */
 export function runs(state: SubjectState): boolean {
+  const { subject } = state;
+  return campaignLets(state) && subject.ended === null && !subject.leadPaused && !callbackHold(state);
+}
+
+/**
+ * Whether the campaign lets the subject run: launched and not paused. A test run reads neither the launch nor the
+ * campaign pause (ADR 0003 3.6, "Ticket 21"): it runs "at any time". `runs` and the listing rule both read this.
+ */
+export function campaignLets(state: SubjectState): boolean {
   const { subject, campaign } = state;
-  return campaign.launchedAt !== null && campaign.pausedSince === null && subject.ended === null && !subject.leadPaused && !callbackHold(state);
+  return subject.kind === "test_run" || (campaign.launchedAt !== null && campaign.pausedSince === null);
 }
 
 /** The status (2.1): rules in order, first match wins. */
@@ -239,7 +249,7 @@ export function advanceTrack(state: SubjectState, track: TrackDefinition, at: nu
   }
   const step = track.steps.find((s) => s.id === stepId);
   const zone = state.lead.zone;
-  const s = span(atWall, step?.waitDays ?? 0, zone);
+  const s = waitSpan(state.subject.kind, atWall, step?.waitDays ?? 0, zone);
   return withTrack(state, track.id, (t) => ({
     ...t,
     nextStepId: stepId,
@@ -281,7 +291,7 @@ export function evaluate(state: SubjectState, now: number, options: { readonly e
   // Unworked calls past the skip limit are skipped at the rollover they expired at, before any start, so
   // the tracks after them start in this same evaluation (3.5; ticket 15). Judged for a held lead too, which
   // only records the rollovers judged (it did not run at them), so none is judged later under other inputs.
-  const judged = state.subject.ended === null && state.campaign.launchedAt !== null ? expireUnworked(state, now) : state;
+  const judged = state.subject.ended === null && (state.campaign.launchedAt !== null || state.subject.kind === "test_run") ? expireUnworked(state, now) : state;
   if (!runs(judged)) return judged;
   // `endingsFirst: false` exists only for the oracle's broken engine (ADR 0003 9.2, "ending check too late").
   let s = options.endingsFirst === false ? judged : checkEndings(judged, now);
@@ -426,7 +436,7 @@ function resolveStart(s: SubjectState, track: TrackDefinition, now: number): Pic
   }
   const before = progressOf(s, track.start.trackId);
   if (!before || before.finishedAt === null || before.finishedWall === null) return null;
-  return { startAt: before.finishedAt + span(before.finishedWall, track.start.delayDays, zone), startBasisAt: before.finishedAt, startBasisWall: before.finishedWall, startZone: zone };
+  return { startAt: before.finishedAt + waitSpan(s.subject.kind, before.finishedWall, track.start.delayDays, zone), startBasisAt: before.finishedAt, startBasisWall: before.finishedWall, startZone: zone };
 }
 
 function latestResult(state: SubjectState, trackId: string): StepResult | undefined {
@@ -481,7 +491,7 @@ export function enterWinBack(state: SubjectState, now: number): SubjectState {
 }
 
 /** A reply ends outreach in this campaign (2.4), unless the lead already replied or was interested. */
-export function applyReply(state: SubjectState, reply: { channel: "email" | "sms"; atWall: number; providerRef: string }, now: number): SubjectState {
+export function applyReply(state: SubjectState, reply: { channel: "email" | "sms"; atWall: number; providerRef: StoredReplyId }, now: number): SubjectState {
   if (state.replies.some((r) => r.providerRef === reply.providerRef)) return state;
   const recorded = { ...state, replies: [...state.replies, reply] };
   if (state.subject.ended === "replied" || state.subject.ended === "interested_on_call") return recorded;
@@ -779,7 +789,7 @@ export function alignPending(state: SubjectState, now: number): SubjectState {
       continue;
     }
     const zone = p.dueZone ?? s.lead.zone;
-    const wait = span(p.basisWall, track.steps.find((x) => x.id === want)?.waitDays ?? 0, zone);
+    const wait = waitSpan(s.subject.kind, p.basisWall, track.steps.find((x) => x.id === want)?.waitDays ?? 0, zone);
     if (want === p.nextStepId && p.dueAt === p.basisAt + wait && p.dueWall === p.basisWall + wait && p.dueZone === zone) continue;
     const basisAt = p.basisAt;
     const basisWall = p.basisWall;

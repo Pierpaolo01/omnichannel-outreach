@@ -1,3 +1,5 @@
+import { MIGRATIONS } from "./migrations.ts";
+import { UNDO_SINCE_18 } from "../../../test/support/undo-migrations.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
@@ -6,7 +8,6 @@ import { afterEach, describe, expect, test } from "vitest";
 import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { CampaignDefinition } from "../../domain/sequence/definition.ts";
-import { MIGRATIONS } from "./migrations.ts";
 import type { CampaignDetail, EnrollmentRead, LeadSearchResult } from "../../shared/api.ts";
 
 /**
@@ -55,6 +56,7 @@ describe("migration 16 on a database written before it", () => {
       ALTER TABLE provider_work DROP COLUMN withdraw_wanted;
       ALTER TABLE provider_work DROP COLUMN withdraw_last_wall;
       ALTER TABLE provider_work DROP COLUMN went_wall;
+      ${UNDO_SINCE_18}
       DELETE FROM schema_migrations WHERE version >= 16;
     `);
     db.close();
@@ -123,6 +125,7 @@ describe("migration 16 on a database written before it", () => {
           ALTER TABLE provider_work DROP COLUMN withdraw_wanted;
           ALTER TABLE provider_work DROP COLUMN withdraw_last_wall;
           ALTER TABLE provider_work DROP COLUMN went_wall;
+          ${UNDO_SINCE_18}
           DELETE FROM schema_migrations WHERE version >= 16;
         `);
         db.close();
