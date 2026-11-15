@@ -35,6 +35,9 @@ export function TestRunTab({ campaignId, editor }: { campaignId: string; editor:
   );
 }
 
+/** A disabled secondary button, as the app's others: no slab, muted text that meets AA in both themes. */
+const DISABLED = "disabled:border-line disabled:bg-transparent disabled:text-muted";
+
 const newRequestId = () => (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `r-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
 interface Presses {
@@ -256,7 +259,7 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
         <p className="text-[13.5px] text-muted">Only contacts that are your own. They are never leads: a lead’s email or number is refused.</p>
         <div className="flex flex-wrap items-center gap-3">
           {/* Disabled while a save waits: a second press is queued by Enter in a field, never sent beside it. */}
-          <button type="submit" className="btn btn-sm border-line-strong bg-base-100 font-medium" disabled={saving || !dirty}>
+          <button type="submit" className={`btn btn-sm border-line-strong bg-base-100 font-medium ${DISABLED}`} disabled={saving || !dirty}>
             {saving ? "Saving…" : "Save contacts"}
           </button>
           <span ref={savedRef} tabIndex={-1} className="rounded-field text-[13px] text-muted outline-offset-4" aria-live="polite">
@@ -289,7 +292,7 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
       <div className="flex flex-wrap items-center gap-2.5">
         {running && !(pending && press.kind === "run") ? (
           <>
-            <button type="button" className="btn border-line-strong bg-base-100 font-medium" disabled>
+            <button type="button" className={`btn border-line-strong bg-base-100 font-medium ${DISABLED}`} disabled>
               Test running
             </button>
             <button
@@ -307,7 +310,7 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
         ) : (
           <button
             type="button"
-            className="btn border-line-strong bg-base-100 font-medium"
+            className={`btn border-line-strong bg-base-100 font-medium ${DISABLED}`}
             disabled={!pending && (noContact || dirty || lead === null || editor.unsaved)}
             aria-disabled={pending}
             onClick={() => {
