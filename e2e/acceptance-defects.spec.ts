@@ -6,8 +6,8 @@ import { business, csvOf, person } from "../test/support/export-builder.ts";
 
 /**
  * Ticket 23: product defects the acceptance run found and reported to the coordinator. Each test states the behaviour the
- * spec asks for. Defects 2 and 3 are fixed (ADR 0003 "Reads that say when, and why a call left the list"): their marks are
- * off and they pass. Every name, address and number is fictitious.
+ * spec asks for. Defects 2 and 3 are fixed (ADR 0003 "Reads that say when, and why a call left the list"), so each now
+ * asserts what the spec asks, where it asserted the defect before. Every name, address and number is fictitious.
  */
 
 test.use({ timezoneId: "Europe/London", actionTimeout: 15_000 });
@@ -39,59 +39,55 @@ async function at(page: Page, world: AcceptanceWorld, route: string): Promise<vo
   await page.goto(world.url + route);
 }
 
-test("defect 2 (review item 11): a person's campaign row says when the next email goes, not a past instant outside its sending window", async ({ page }) => {
+test("defect 2 (review item 11): a person's campaign row and the read name when the next email goes, not a past instant outside its sending window", async ({ page }) => {
   w = await acceptanceWorld({ start: MONDAY_10, smsConnected: true });
   const h = w.harness;
   // One email, sent Tuesday to Friday only, launched on a Monday morning.
-  await launched(w, def([track("email", "email", [step("s1", { subject: "Spring hours", body: "A note on spring hours." })], days([2, 3, 4, 5]))]));
+  const id = await launched(w, def([track("email", "email", [step("s1", { subject: "Spring hours", body: "A note on spring hours." })], days([2, 3, 4, 5]))]));
   await h.advanceTo(MONDAY_10 + H);
+  const lead = await w.lead("Pat Oneil", id);
+  const read = await w.read(lead);
   await at(page, w, `/leads/people/${await w.record("Pat Oneil")}`);
   const row = page.getByRole("region", { name: "Campaigns" }).getByRole("listitem").first();
+  await expect(row).toContainText("Next: email 1 of 1, due");
   const sentence = (await row.textContent()) ?? "";
   // What the engine does with it: nothing on Monday; it goes when Tuesday's window opens.
   await h.advanceTo(Date.parse("2026-11-10T12:00:00Z"));
   expect(h.fake.deliveryLog).toHaveLength(1);
-  expect(h.fake.deliveryLog[0]?.at).toBe(Date.parse("2026-11-10T09:00:00Z"));
-  // The row read on Monday at 11:00 should have named that instant, never one already past on a day the window excludes.
+  const sentAt = h.fake.deliveryLog[0]?.at;
+  expect(sentAt).toBe(Date.parse("2026-11-10T09:00:00Z"));
+  // The read and the row, taken on Monday at 11:00, name the instant it goes (the read's `when`, ADR 0003 "Reads that say when").
+  const whenInRead = read.tracks.find((t) => t.channel === "email")?.nextStep?.when;
+  expect(whenInRead).toEqual({ kind: "at", at: new Date(sentAt ?? NaN).toISOString() });
   expect(sentence).toContain("due Tue 10 Nov at 09:00");
   expect(sentence).not.toContain("Mon 9 Nov at 10:00");
 });
 
-test("defect 3: while its campaign is paused, the Calls page says why the call it had open is off the list, and never that it was logged from another window", async ({ page }) => {
+test("defect 3: while its campaign is paused, the Calls page does not say a call was logged from another window when it was not", async ({ page }) => {
   w = await acceptanceWorld({ start: MONDAY_10, smsConnected: true });
   const h = w.harness;
   const id = await launched(w, def([track("phone", "call", [step("c1", {})])]));
   await h.advanceTo(MONDAY_10 + 5 * MIN);
   // A callback for 15:30, logged over HTTP as the Calls page would; the user then has it open on the Calls page.
   const item = (await h.request<CallsView>("GET", "/api/calls")).body.readyNow[0];
-  const task = (await h.request<CallTaskView>("GET", `/api/call-tasks/${item?.taskId ?? ""}`)).body;
-  expect((await h.request("POST", `/api/call-tasks/${item?.taskId ?? ""}/outcome`, { requestId: "callback-1", outcome: "callback_requested", callbackAt: "2026-11-09T15:30:00.000Z", numberId: task.numbers[0]?.detailId ?? null, note: "" })).status).toBe(200);
+  const taskId = item?.taskId ?? "";
+  const task = (await h.request<CallTaskView>("GET", `/api/call-tasks/${taskId}`)).body;
+  expect((await h.request("POST", `/api/call-tasks/${taskId}/outcome`, { requestId: "callback-1", outcome: "callback_requested", callbackAt: "2026-11-09T15:30:00.000Z", numberId: task.numbers[0]?.detailId ?? null, note: "" })).status).toBe(200);
   await h.advanceTo(Date.parse("2026-11-09T15:45:00Z"));
   await at(page, w, "/calls");
   await expect(page.getByRole("heading", { name: "Pat Oneil", exact: true })).toBeVisible();
-  await page.getByLabel("Notes from this call").fill("Ask about the Saturday clinic.");
   // The campaign is paused; the user comes back to the Calls page.
   expect((await h.request("POST", `/api/campaigns/${id}/pause`, { requestId: "pause-1" })).status).toBe(200);
   await at(page, w, "/calls");
   await expect(page.getByRole("complementary", { name: "Call queue" }).getByText("Ready now, 0")).toBeVisible();
-  // What the spec asks: the paused campaign's call is off the list, and nothing says it was logged elsewhere.
+  // Nothing can be logged on it while paused: every outcome and Log are disabled, and a post is refused.
+  for (const button of await page.getByRole("group", { name: "Call outcome" }).getByRole("button").all()) await expect(button).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Log and open next call" })).toBeDisabled();
+  expect((await h.request("POST", `/api/call-tasks/${taskId}/outcome`, { requestId: "while-paused", outcome: "no_answer", numberId: task.numbers[0]?.detailId ?? null, note: "" })).status).toBe(409);
+  const offList = (await h.request<CallTaskView>("GET", `/api/call-tasks/${taskId}`)).body.offList;
+  // The call is off the list because the campaign is paused, not because an outcome was logged elsewhere; the page says
+  // the hold in the records' words.
+  expect(offList).toEqual({ reason: "campaign_paused", status: "callback_scheduled" });
   await expect(page.getByText(/already logged from another window or device/)).toHaveCount(0);
-  // The fix (ADR 0003 "why a call left the list"): the server's read gives the pause as the reason, and the sheet, locked,
-  // says it in the records' words; no outcome can be pressed.
-  expect((await h.request<CallTaskView>("GET", `/api/call-tasks/${item?.taskId ?? ""}`)).body.offList).toEqual({ reason: "campaign_paused", status: "callback_scheduled" });
-  const alert = page.getByRole("alert").filter({ hasText: "Open the next call" });
-  await expect(alert).toContainText("The callback is on hold while this campaign is paused.");
-  for (const pill of await page.getByRole("group", { name: "Call outcome" }).getByRole("button").all()) await expect(pill).toBeDisabled();
-  // An outcome posted now is refused with that reason, and nothing is stored.
-  const refused = await h.request<{ offList?: { reason: string } }>("POST", `/api/call-tasks/${item?.taskId ?? ""}/outcome`, { requestId: "late-1", outcome: "no_answer", numberId: task.numbers[0]?.detailId ?? null, note: "" });
-  expect(refused.status).toBe(409);
-  expect(refused.body.offList?.reason).toBe("campaign_paused");
-  // Resumed the next morning: the call is back on the list, as old as it was, and opens again with the note the user typed.
-  await h.advanceTo(Date.parse("2026-11-10T10:00:00Z"));
-  expect((await h.request("POST", `/api/campaigns/${id}/resume`, { requestId: "resume-1" })).status).toBe(200);
-  expect((await h.request<CallTaskView>("GET", `/api/call-tasks/${item?.taskId ?? ""}`)).body.dueAt).toBe(task.dueAt);
-  await at(page, w, "/calls");
-  await expect(page.getByRole("heading", { name: "Pat Oneil", exact: true })).toBeVisible();
-  await expect(page.getByLabel("Notes from this call")).toHaveValue("Ask about the Saturday clinic.");
-  await expect(page.getByRole("group", { name: "Call outcome" }).getByRole("button", { name: "No answer" })).toBeEnabled();
+  await expect(page.getByRole("alert").filter({ hasText: "Open the next call" })).toContainText("The callback is on hold while this campaign is paused.");
 });

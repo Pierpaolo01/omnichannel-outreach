@@ -320,11 +320,15 @@ test("a missing track releases what waits on it, and an open call holds only wha
 test("reimport into a running campaign: nobody is enrolled twice or restarted; a new person starts from the first step; a newer email is marked newer", async ({ page }) => {
   const world_ = await world();
   const id = await campaign(world_, "Clinics, Bristol", null, STORY());
-  await world_.harness.advanceTo(world_.harness.clock + 3 * H);
-  const ada = await world_.lead("Ada Reyes", id);
-  const before = await world_.read(ada);
-  const sentBefore = deliveries(world_).length;
-  const enrolled = (await world_.harness.request<LeadSearchResult>("GET", `/api/leads?campaign=${id}&limit=500`)).body.rows.length;
+  const launchedAt = world_.harness.clock;
+  await world_.harness.advanceTo(launchedAt + 3 * H);
+  // The earlier leads, by the names in the first file: its 11 people and the studio, its one company lead.
+  const earlier = [...Object.values(PEOPLE).map((p) => p["full_name"] ?? ""), "Juniper Pilates Studio"];
+  const ids = new Map<string, string>();
+  for (const name of earlier) ids.set(name, await world_.lead(name, id));
+  // Their progress so far, from the providers' logs: each lead's messages, by step, before the second import.
+  const sentBefore = new Map(earlier.map((name) => [name, deliveries(world_).filter((d) => d.subjectId === ids.get(name)).map((d) => d.stepId).sort()]));
+  for (const [name, steps] of sentBefore) expect(steps, name).toEqual(name === "Juniper Pilates Studio" ? ["s1"] : ["m1", "s1"]);
 
   // A later scraper run: the same rows, Ada with a new address, and one new person at Kestrel Dental.
   const people = Object.values(PEOPLE).map((p) => (p["person_id"] === "pp-ada" ? { ...p, email: "ada.reyes@harbourmail.example" } : p));
@@ -339,18 +343,26 @@ test("reimport into a running campaign: nobody is enrolled twice or restarted; a
   await expect(page.getByRole("heading", { name: "Imported again into Clinics, Bristol" })).toBeVisible();
   await expect(page.getByText("No sequence was restarted.", { exact: false })).toBeVisible();
   await expect(page.getByRole("tab", { name: "New 1", exact: true })).toBeVisible();
-  // Every lead enrolled before is enrolled still, once: one more row, the newcomer.
-  expect((await world_.harness.request<LeadSearchResult>("GET", `/api/leads?campaign=${id}&limit=500`)).body.rows).toHaveLength(enrolled + 1);
-
-  // Ada's progress is as it was: same tracks, same next steps; nothing was sent again.
-  const after = await world_.read(ada);
-  expect(after.tracks.map((t) => [t.trackId, t.nextStep?.stepId ?? null, t.finishReason])).toEqual(before.tracks.map((t) => [t.trackId, t.nextStep?.stepId ?? null, t.finishReason]));
-  expect(deliveries(world_)).toHaveLength(sentBefore);
-  await world_.harness.advanceTo(world_.harness.clock + 30 * MIN);
+  // Every earlier lead is still enrolled once, as the same lead: one row each in this campaign, the same lead id.
+  for (const name of earlier) {
+    const rows = (await world_.harness.request<LeadSearchResult>("GET", `/api/leads?campaign=${id}&q=${encodeURIComponent(name)}&limit=50`)).body.rows.filter((r) => r.name === name);
+    expect(rows, name).toHaveLength(1);
+    expect(rows[0]?.enrollments.filter((e) => e.campaign.id === id).map((e) => e.id), name).toEqual([ids.get(name)]);
+  }
+  // Not restarted: no earlier lead gets its first email or text again; two days on, each gets its second email once, on
+  // the day two days after its first, as its sequence had it before the import.
+  await world_.harness.advanceTo(launchedAt + 2 * DAY + 3 * H);
+  for (const name of earlier) {
+    const got = deliveries(world_).filter((d) => d.subjectId === ids.get(name));
+    expect(got.filter((d) => d.stepId === "s1"), name).toHaveLength(1);
+    expect(got.filter((d) => d.stepId === "m1"), name).toHaveLength(name === "Juniper Pilates Studio" ? 0 : 1);
+    const second = got.filter((d) => d.stepId === "s2");
+    expect(second, name).toHaveLength(1);
+    expect(dayOf(second[0]?.at ?? NaN), name).toBe(dayOf(got.find((d) => d.stepId === "s1")?.at ?? NaN) + 2);
+  }
+  // The newcomer starts at the first step.
   const lia = await world_.lead("Lia Grant", id);
-  expect(deliveries(world_).filter((d) => d.subjectId === lia).map((d) => d.stepId)).toEqual(["s1"]);
-  const keys = deliveries(world_).map((d) => `${d.subjectId}/${d.stepId}`);
-  expect(new Set(keys).size).toBe(keys.length);
+  expect(deliveries(world_).filter((d) => d.subjectId === lia).map((d) => d.stepId)[0]).toBe("s1");
   await at(page, world_, `/leads/people/${await world_.record("Ada Reyes")}`);
   await expect(page.getByText("Email, newer")).toBeVisible();
   await expect(page.getByText("ada.reyes@harbourmail.example")).toBeVisible();
@@ -369,15 +381,18 @@ test("one person in two campaigns stays independent for email and calls: stopped
   const eveFirst = await world_.lead("Eve Hart", first);
   const eveSecond = await world_.lead("Eve Hart", second);
   const stoppedAt = world_.harness.clock;
+  // The same day, inside the skip limit: her call in the first campaign has left the list; in the second it is on it.
+  const listedNow = async () => {
+    const v = (await world_.harness.request<{ readyNow: { enrollmentId: string }[]; laterToday: { enrollmentId: string }[] }>("GET", "/api/calls")).body;
+    return [...v.readyNow, ...v.laterToday].map((c) => c.enrollmentId);
+  };
+  expect(await listedNow()).not.toContain(eveFirst);
+  expect(await listedNow()).toContain(eveSecond);
   await world_.harness.advanceTo(world_.harness.clock + 4 * DAY);
   expect((await world_.read(eveFirst)).status).toBe("stopped_manually");
   expect((await world_.read(eveSecond)).status).not.toBe("stopped_manually");
   expect(deliveries(world_).filter((d) => d.subjectId === eveFirst && d.at > stoppedAt)).toHaveLength(0);
   expect(sentTo(world_, eveSecond, "Second email")).toHaveLength(1);
-  // Her call in the second campaign is still on the list; in the first it is gone.
-  const calls = (await world_.harness.request<{ readyNow: { enrollmentId: string }[]; laterToday: { enrollmentId: string }[] }>("GET", "/api/calls")).body;
-  const listed = [...calls.readyNow, ...calls.laterToday].map((c) => c.enrollmentId);
-  expect(listed).not.toContain(eveFirst);
   expect((await world_.read(await world_.lead("Finn Wood", first))).status).not.toBe("stopped_manually");
 });
 
@@ -396,10 +411,22 @@ test("one person in two campaigns over SMS: with two free numbers, the second ca
   expect(fromB).toHaveLength(1);
   expect(fromB[0]?.sender).not.toBe(fromA[0]?.sender);
 
-  // One number only: a third campaign that may use only the number the first campaign's conversation holds.
-  const c = await campaign(world_, "Autumn follow-up, Bristol", rows, textOnly([fromA[0]?.sender ?? ""]));
-  await world_.harness.advanceTo(world_.harness.clock + DAY);
+  // One number only: a third campaign that may use only the number the first campaign's conversation holds, with an
+  // email track and a phone track as well.
+  const c = await campaign(world_, "Autumn follow-up, Bristol", rows, {
+    ...textOnly([fromA[0]?.sender ?? ""]),
+    emailPool: [INBOX],
+    tracks: [...textOnly([]).tracks, track("email", "email", [step("e1", { subject: "Autumn hours", body: "An email from the autumn campaign." })]), track("phone", "call", [step("c1", {})])],
+  });
   const pc = await world_.lead("Pat Oneil", c);
+  await world_.harness.advanceTo(world_.harness.clock + 10 * MIN);
+  // Its email and its call carry on: the email arrives, the call is on the list.
+  expect(world_.harness.fake.deliveryLog.filter((d) => d.subjectId === pc).map((d) => d.rendered.body)).toEqual(["An email from the autumn campaign."]);
+  const calls = (await world_.harness.request<{ readyNow: { enrollmentId: string }[]; laterToday: { enrollmentId: string }[] }>("GET", "/api/calls")).body;
+  expect([...calls.readyNow, ...calls.laterToday].map((x) => x.enrollmentId)).toContain(pc);
+  await world_.harness.advanceTo(world_.harness.clock + DAY);
+  // Its SMS track sends nothing: today's behaviour, held (the principal's decision of 15 November 2026 changes it to a
+  // skip with the reason shown, in its own pull request).
   expect(world_.harness.sms.deliveryLog.filter((d) => d.subjectId === pc)).toHaveLength(0);
   const needs = (await world_.harness.request<NeedsAttention>("GET", "/api/needs-attention")).body;
   expect(needs.heldTracks.filter((t) => t.enrollmentId === pc).map((t) => t.reason)).toEqual(["sms_conversation_taken"]);

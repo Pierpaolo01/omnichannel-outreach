@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import type { ActivityView, CampaignMeasures, LeadSearchResult, PersonRecord, SequenceView } from "../src/shared/api.ts";
-import { acceptanceWorld, DAY, EXPECTED_IMPORT, exportFiles, H, MIN, NUMBERS, OWN_EMAIL, OWN_MOBILE, type AcceptanceWorld } from "./acceptance-world.ts";
+import { acceptanceWorld, DAY, EXPECTED_IMPORT, exportFiles, H, INBOX, MIN, NUMBERS, OWN_EMAIL, OWN_MOBILE, type AcceptanceWorld } from "./acceptance-world.ts";
 
 /**
  * Ticket 23: the spec's acceptance story (issue 10, "Acceptance story (required)"), its nine steps in order, through the
@@ -77,6 +77,18 @@ test.afterAll(async () => {
 test("the acceptance story: import, build, test run, launch, calls, replies, failures, pause and resume, and the end", async ({ page }) => {
   test.setTimeout(600_000);
   const files = exportFiles();
+  /**
+   * The test's own ledger of what a test run must send, rendered for Ada at Harbour Lane Physio: a phrase from each message
+   * the test typed in step 2, by the track it belongs to. The application's step ids are not used.
+   */
+  const COPY_FOR_ADA = {
+    email1: "Online booking at Harbour Lane Physio stops at 18:00",
+    email2: "happy to send a two-minute video of evening booking for Harbour Lane Physio",
+    text1: "Hi Ada, Alex from Northlight Bookings",
+    text2: "Ada, should I send the two-minute video for Harbour Lane Physio?",
+    afterCall: "Following up on my call: here is the two-minute video for Harbour Lane Physio",
+    winBack: "a booking link for evenings only",
+  } as const;
 
   await test.step("1. Import: decision makers and a company lead appear, and the duplicate rows are merged", async () => {
     await at(page, w, "/campaigns");
@@ -167,6 +179,14 @@ test("the acceptance story: import, build, test run, launch, calls, replies, fai
       ["email", "main", "after"],
       ["email", "win_back", "entry"],
     ]);
+    // What the test set on the canvas: the email track after the phone track, one day after it; the phone track's
+    // declined path; each follow-up's wait of two days.
+    const live = sequence.definition.tracks.filter((t) => !t.removed);
+    const phone = live.find((t) => t.channel === "call");
+    const afterCall = live.find((t) => t.start.kind === "after");
+    expect(afterCall?.start).toEqual({ kind: "after", trackId: phone?.id, delayDays: 1 });
+    expect(phone?.declinedPath).toBe("win_back");
+    expect(live.filter((t) => t.channel !== "call" && t.branch === "main" && t.start.kind === "entry").map((t) => t.steps.filter((x) => !x.removed).map((x) => x.waitDays))).toEqual([[0, 2], [0, 2]]);
 
     await page.getByRole("link", { name: /Before launch/ }).click();
     await expect(page.getByText("3 things block launch.")).toBeVisible();
@@ -200,21 +220,40 @@ test("the acceptance story: import, build, test run, launch, calls, replies, fai
     await expect(page.getByText("No test run since your last edit")).toBeVisible();
     await expect(page.getByRole("button", { name: "Launch campaign" })).toBeEnabled();
     expect((await w.harness.request<SequenceView>("GET", `/api/campaigns/${campaignId}/sequence`)).body.launch.blockers).toEqual([]);
+    // The preview, for real imported leads: every message the test wrote, rendered for Ada; switched to the studio, a
+    // company lead with no first name, the fallback the test typed.
+    const preview = page.getByRole("region", { name: "Copy for a lead" });
+    await page.getByLabel("Preview as lead").selectOption({ label: "Ada Reyes" });
+    for (const phrase of Object.values(COPY_FOR_ADA)) await expect(preview.getByText(phrase, { exact: false }).first()).toBeVisible();
+    await page.getByLabel("Preview as lead").selectOption({ label: "Juniper Pilates Studio (company lead)" });
+    await expect(preview.getByText("Hi there,").first()).toBeVisible();
+    await expect(preview.getByText("Online booking at Juniper Pilates Studio stops at 18:00", { exact: false }).first()).toBeVisible();
+    // Channel coverage, from the test's export: every lead has an email; the 11 people have a mobile, the studio none;
+    // the 11 people have a number (mobile or main line), the studio none.
+    const coverage = page.getByRole("region", { name: "Channel coverage" });
+    const leadCount = EXPECTED_IMPORT.decisionMakers + EXPECTED_IMPORT.companyLeads;
+    for (const [n, what] of [[leadCount, "have an email"], [EXPECTED_IMPORT.decisionMakers, "have a mobile"], [EXPECTED_IMPORT.decisionMakers, "have a phone number"]] as const)
+      await expect(coverage.locator("div", { hasText: what }).filter({ has: page.locator("b") }).last()).toHaveText(`${n} of ${leadCount}${what}`);
+    // Missing merge fields: first name, lacked by the one company lead, with the fallbacks the test typed.
+    const firstName = page.getByRole("region", { name: "Missing merge fields" }).getByRole("row").filter({ hasText: "first name" });
+    await expect(firstName).toContainText(`${EXPECTED_IMPORT.companyLeads} company lead`);
+    await expect(firstName).toContainText("“there”");
+    await expect(firstName).toContainText("“Hi”");
+    // Daily load: one inbox carries every lead's first email on launch day; the two numbers carry the 11 people's first
+    // texts between them; 11 calls go on the list that day, against the 30 a day the test set. Nothing used today yet.
+    const load = page.getByRole("region", { name: "Daily load" });
+    const inbox = load.getByRole("row").filter({ hasText: INBOX });
+    await expect(inbox).toContainText(`${leadCount} a day`);
+    await expect(inbox).toContainText("0 of 60");
+    const texts = await Promise.all(NUMBERS.map(async (n) => Number(/(\d+) a day/.exec((await load.getByRole("row").filter({ hasText: n.replace("+44", "+44 ").replace(/(\d{4})(\d{6})$/, "$1 $2") }).textContent()) ?? "")?.[1] ?? NaN)));
+    expect(texts.reduce((x, y) => x + y, 0)).toBe(EXPECTED_IMPORT.decisionMakers);
+    const calls = load.getByRole("row").filter({ hasText: "Your calls" });
+    await expect(calls).toContainText(`${EXPECTED_IMPORT.decisionMakers} a day`);
+    await expect(calls).toContainText("0 of 30");
+    await expect(load).toContainText(`All ${leadCount} leads start within 1 day of launch.`);
     await shot(page, "02-ready-to-launch");
   });
 
-  /**
-   * The test's own ledger of what a test run must send, rendered for Ada at Harbour Lane Physio: a phrase from each message
-   * the test typed in step 2, by the track it belongs to. The application's step ids are not used.
-   */
-  const COPY_FOR_ADA = {
-    email1: "Online booking at Harbour Lane Physio stops at 18:00",
-    email2: "happy to send a two-minute video of evening booking for Harbour Lane Physio",
-    text1: "Hi Ada, Alex from Northlight Bookings",
-    text2: "Ada, should I send the two-minute video for Harbour Lane Physio?",
-    afterCall: "Following up on my call: here is the two-minute video for Harbour Lane Physio",
-    winBack: "a booking link for evenings only",
-  } as const;
   type Message = keyof typeof COPY_FOR_ADA;
   const messageOf = (body: string): Message | "unknown" => (Object.keys(COPY_FOR_ADA) as Message[]).find((k) => body.includes(COPY_FOR_ADA[k])) ?? "unknown";
   /** Every delivery to the user's own contacts, from the fake providers' logs, in order, with the test run it belongs to. */
@@ -223,6 +262,8 @@ test("the acceptance story: import, build, test run, launch, calls, replies, fai
       .filter((d) => d.destination === OWN_EMAIL || d.destination === OWN_MOBILE)
       .sort((x, y) => x.at - y.at)
       .map((d) => ({ run: d.subjectId, at: d.at, to: d.destination, message: messageOf(d.rendered.body) }));
+  /** Before launch every send is a test send: each delivery so far, on both providers' logs, went to the user's own contacts. */
+  const onlyOwnSoFar = () => expect([...w.harness.fake.deliveryLog, ...w.harness.sms.deliveryLog].filter((d) => d.destination !== OWN_EMAIL && d.destination !== OWN_MOBILE)).toEqual([]);
   const toOwn = (destination: string) => ownDeliveries().filter((d) => d.to === destination);
   const runs = () => [...new Set(ownDeliveries().map((d) => d.run))];
   const ofRun = (run: string | undefined) => ownDeliveries().filter((d) => d.run === run);
@@ -252,29 +293,34 @@ test("the acceptance story: import, build, test run, launch, calls, replies, fai
     await expect(page.getByText("Saved.")).toBeVisible();
     await page.getByLabel("Copy written for").selectOption({ label: "Ada Reyes" });
 
-    // Run A: the call is logged No answer, so the main path runs to its end, the email after the call included.
+    // Run A: the call is logged No answer half a minute in, before the second email and text fall due, so they and the
+    // email after the call go after the call; the main path runs to its end.
     await page.getByRole("button", { name: "Run test" }).click();
     await expect(page.getByRole("button", { name: "Test running" })).toBeVisible();
-    await w.harness.advanceTo(w.harness.clock + 3 * MIN);
+    await w.harness.advanceTo(w.harness.clock + 30_000);
     const a = runs()[0];
-    // Every email and text step of the main path, each once, to the right contact, in its track's order.
-    expect(ofRun(a).map((d) => `${d.message} to ${d.to}`).sort()).toEqual([`email1 to ${OWN_EMAIL}`, `email2 to ${OWN_EMAIL}`, `text1 to ${OWN_MOBILE}`, `text2 to ${OWN_MOBILE}`]);
-    expect(at_(a, "email1")).toBeLessThan(at_(a, "email2"));
-    expect(at_(a, "text1")).toBeLessThan(at_(a, "text2"));
-    aboutAMinute(at_(a, "email2") - at_(a, "email1"));
-    aboutAMinute(at_(a, "text2") - at_(a, "text1"));
-    // Nothing went to a lead.
-    expect([...w.harness.fake.deliveryLog, ...w.harness.sms.deliveryLog].every((d) => d.destination === OWN_EMAIL || d.destination === OWN_MOBILE)).toBe(true);
+    expect(ofRun(a).map((d) => `${d.message} to ${d.to}`).sort()).toEqual([`email1 to ${OWN_EMAIL}`, `text1 to ${OWN_MOBILE}`]);
+    onlyOwnSoFar();
     await at(page, w, tab);
     await expect(page.getByText("On your Calls list")).toBeVisible();
     await shot(page, "03-test-sends-and-call");
     await linger(page);
     const loggedA = await logTestCall("No answer");
     await w.harness.advanceTo(w.harness.clock + 3 * MIN);
-    expect(ofRun(a).map((d) => d.message).sort()).toEqual(["afterCall", "email1", "email2", "text1", "text2"]);
+    // Everything sent after the call went to the user's own contacts too.
+    onlyOwnSoFar();
+    // Every email and text step of the main path, each once, to the right contact, in its track's order, and the email
+    // after the call.
+    expect(ofRun(a).map((d) => `${d.message} to ${d.to}`).sort()).toEqual([`afterCall to ${OWN_EMAIL}`, `email1 to ${OWN_EMAIL}`, `email2 to ${OWN_EMAIL}`, `text1 to ${OWN_MOBILE}`, `text2 to ${OWN_MOBILE}`]);
+    expect(at_(a, "text2")).toBeGreaterThan(loggedA);
+    expect(at_(a, "email1")).toBeLessThan(at_(a, "email2"));
+    expect(at_(a, "text1")).toBeLessThan(at_(a, "text2"));
+    aboutAMinute(at_(a, "email2") - at_(a, "email1"));
+    aboutAMinute(at_(a, "text2") - at_(a, "text1"));
     aboutAMinute(at_(a, "afterCall") - loggedA);
+    onlyOwnSoFar();
     await at(page, w, tab);
-    await expect(page.getByRole("heading", { name: `Finished: every step ran at ${hhmm(at_(a, "afterCall"))}` })).toBeVisible();
+    await expect(page.getByRole("heading", { name: `Finished: every step ran at ${hhmm(Math.max(at_(a, "afterCall"), at_(a, "email2"), at_(a, "text2")))}` })).toBeVisible();
     await expect(page.getByRole("listitem").filter({ hasText: "Win-back email 1" })).toContainText("Not reached");
     await shot(page, "03-test-finished-main-path");
     await linger(page);
@@ -289,6 +335,7 @@ test("the acceptance story: import, build, test run, launch, calls, replies, fai
     await w.harness.advanceTo(w.harness.clock + 3 * MIN);
     expect(ofRun(b).map((d) => d.message).sort()).toEqual(["email1", "email2", "text1", "text2", "winBack"]);
     expect(at_(b, "winBack") - loggedB).toBeLessThanOrEqual(MIN);
+    onlyOwnSoFar();
     await at(page, w, tab);
     await expect(page.getByRole("heading", { name: `Finished at ${hhmm(at_(b, "winBack"))}` })).toBeVisible();
     await expect(page.getByRole("listitem").filter({ hasText: "Email track 2" })).toContainText("Skipped: the test moved to the win-back branch");
@@ -305,6 +352,7 @@ test("the acceptance story: import, build, test run, launch, calls, replies, fai
     await w.harness.advanceTo(w.harness.clock + 5 * MIN);
     expect(ofRun(c).map((d) => d.message).sort()).toEqual(["email1", "text1"]);
     expect(runs()).toHaveLength(3);
+    onlyOwnSoFar();
     await at(page, w, tab);
     await expect(page.getByRole("heading", { name: /Stopped by your reply/ })).toBeVisible();
     await shot(page, "03-test-stopped-by-reply");
@@ -421,14 +469,14 @@ test("the acceptance story: import, build, test run, launch, calls, replies, fai
 
   /** The outcome the test logs for each call, as the focus queue opens it. */
   const PLAN: Record<string, { outcome: string; api: string; path?: RegExp; redial?: boolean; callback?: string; note?: string }> = {
-    "Ada Reyes": { outcome: "Left voicemail", api: "voicemail" },
+    "Ada Reyes": { outcome: "Left voicemail", api: "voicemail", note: "Left a message about evening bookings." },
     "Ben Ortiz": { outcome: "No answer", api: "no_answer" },
     "Cara Lin": { outcome: "Didn’t reach them", api: "gatekeeper", note: "Front desk says the owner decides; try mornings." },
     "Dev Shah": { outcome: "Wrong number", api: "wrong_number" },
     "Eve Hart": { outcome: "No answer", api: "no_answer" },
     "Finn Wood": { outcome: "Callback requested", api: "callback_requested", callback: "15:30" },
-    "Gia Moss": { outcome: "Interested", api: "interested" },
-    "Hal Price": { outcome: "Not interested", api: "not_interested", path: /Stop all outreach in this campaign/ },
+    "Gia Moss": { outcome: "Interested", api: "interested", note: "Wants the walkthrough on Thursday." },
+    "Hal Price": { outcome: "Not interested", api: "not_interested", path: /Stop all outreach in this campaign/, note: "Happy with their current booking system." },
     "Ivy Cole": { outcome: "Not interested", api: "not_interested", path: /Keep the email and SMS steps going/ },
     "Jon Lake": { outcome: "Not interested", api: "not_interested", path: /Move to the win-back messages/ },
     "Kim Rowe": { outcome: "No answer", api: "no_answer", redial: true },
@@ -471,10 +519,10 @@ test("the acceptance story: import, build, test run, launch, calls, replies, fai
       await linger(page);
     }
     await w.harness.advanceTo(w.harness.clock + 5 * MIN);
-    // Every outcome read back from the server as the test logged it.
+    // Every outcome, and its note (empty where the test typed none), read back from the server as the test logged it.
     for (const name of callers) {
-      const calls = (await activity(name)).flatMap((e) => (e.kind === "call" ? [e.outcome] : []));
-      expect(calls, name).toEqual([PLAN[name]?.api]);
+      const calls = (await activity(name)).flatMap((e) => (e.kind === "call" ? [{ outcome: e.outcome, note: e.note }] : []));
+      expect(calls, name).toEqual([{ outcome: PLAN[name]?.api, note: PLAN[name]?.note ?? "" }]);
     }
     expect(await status("Gia Moss")).toBe("interested_on_call");
     expect(await status("Hal Price")).toBe("declined_on_call");
@@ -549,9 +597,11 @@ test("the acceptance story: import, build, test run, launch, calls, replies, fai
     // Cara's bounce ended her first email track after one email; Dev's invalid number ended his SMS track after one text.
     // (That neither gets a second message is asserted at the end, when it would have been due.)
     const cara = (await w.read(idOf("Cara Lin"))).tracks.find((t) => t.channel === "email" && t.branch === "main");
-    expect(cara?.finishReason).not.toBeNull();
+    expect(cara).toBeDefined();
+    expect(cara?.finishReason).toBe("failed_bad_destination");
     const dev = (await w.read(idOf("Dev Shah"))).tracks.find((t) => t.channel === "sms");
-    expect(dev?.finishReason).not.toBeNull();
+    expect(dev).toBeDefined();
+    expect(dev?.finishReason).toBe("failed_bad_destination");
 
     // The second number is disconnected at the provider; Needs attention names it; reconnected, the entry goes.
     const second = w.harness.sms.numbers.get(NUMBERS[1]);
@@ -669,6 +719,7 @@ test("the acceptance story: import, build, test run, launch, calls, replies, fai
     const caraText = got("Cara Lin", MARK.text2).map((d) => d.at);
     expect(caraText).toHaveLength(1);
     expect(londonDay(caraText[0] ?? NaN)).toBe(followUpDay(deliveredTo("Cara Lin", "sms")[0]?.at ?? NaN));
+    expect(hhmm(caraText[0] ?? NaN) >= "09:00").toBe(true);
     // Kim's redial was not worked: its limit, Tuesday night moved by the two days paused, ended on Thursday night.
     const kimCall = (await w.read(idOf("Kim Rowe"))).tracks.find((t) => t.channel === "call");
     expect(kimCall?.finishReason).toBe("skipped_unworked");
