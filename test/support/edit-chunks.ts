@@ -20,6 +20,7 @@ const RUN_WRITES = 10_000;
 
 /** Every behaviour the fixed seeds must reach between them. A name leaves it only into RETIRED_EDIT_FEATURES, with its reason. */
 export const EDIT_FEATURES: readonly string[] = [
+  "a-copy-edit-while-that-step-is-with-the-provider",
   "a-follow-up-timed",
   "a-reply",
   "a-stale-skip-after-an-edit-refused",
@@ -98,12 +99,12 @@ export function editOracle(): void {
     run(`the generated edit runs fail ${mutation.invariant} for an engine with "${name}"`, async () => {
       const breaks = (problems: readonly string[]) => problems.some((p) => editInvariantsOf(p).includes(mutation.invariant));
       if (!FULL_SEARCH) {
-        const { problems } = await runEdits(EDIT_SEED + mutation.seed, { rules: mutation.rules, maxWrites: RUN_WRITES });
+        const { problems } = await runEdits(EDIT_SEED + mutation.seed, { ...mutation.options, rules: mutation.rules, maxWrites: RUN_WRITES });
         expect(breaks(problems), `seed ${EDIT_SEED + mutation.seed} no longer breaks ${mutation.invariant}; run the sequence-search workflow and update its seed. Problems: ${problems.join("; ")}`).toBe(true);
         return;
       }
-      let caught: number | null = breaks((await runEdits(EDIT_SEED + mutation.seed, { rules: mutation.rules, maxWrites: RUN_WRITES })).problems) ? mutation.seed : null;
-      for (let o = 0; o < MAX_SEEDS && caught === null; o++) if (breaks((await runEdits(EDIT_SEED + o, { rules: mutation.rules, maxWrites: RUN_WRITES })).problems)) caught = o;
+      let caught: number | null = breaks((await runEdits(EDIT_SEED + mutation.seed, { ...mutation.options, rules: mutation.rules, maxWrites: RUN_WRITES })).problems) ? mutation.seed : null;
+      for (let o = 0; o < MAX_SEEDS && caught === null; o++) if (breaks((await runEdits(EDIT_SEED + o, { ...mutation.options, rules: mutation.rules, maxWrites: RUN_WRITES })).problems)) caught = o;
       console.info(`killing seed: edit mutation "${name}" (${mutation.invariant}): ${caught ?? "none"}; recorded ${mutation.seed}`);
       expect(caught).not.toBeNull();
     }, 1_800_000);

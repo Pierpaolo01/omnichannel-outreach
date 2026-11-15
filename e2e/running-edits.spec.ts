@@ -140,4 +140,89 @@ test.describe("editing a running campaign", () => {
     await expect(panel.getByRole("heading", { name: "This campaign is running" })).toBeVisible();
     expect((await stored(id)).tracks[0]!.steps[1]!.waitDays).toBe(1);
   });
+
+  test("removing the only track keeps Apply and Discard in reach; keyboard Discard puts focus on the canvas (review bot and verifier on 7afa03d)", async ({ page }) => {
+    const id = await running();
+    await page.goto(`${f.url}/campaigns/${id}?track=email`);
+    await page.getByRole("button", { name: "Remove this email track" }).click();
+    const panel = page.getByTestId("running-changes");
+    await expect(panel.getByRole("heading", { name: "Changes not applied yet" })).toBeVisible();
+    await expect(panel.getByText("Email track · removed")).toBeVisible();
+    await panel.getByRole("button", { name: "Discard changes" }).focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("button", { name: /^Email track/ })).toBeVisible();
+    await expect(page.locator("#add-track")).toBeFocused();
+  });
+
+  test("a newer edit's read is waited for: Apply never goes on the read of an earlier draft (review bot on 7afa03d)", async ({ page }) => {
+    const id = await running();
+    await page.goto(`${f.url}/campaigns/${id}?track=email&step=s2`);
+    await page.getByLabel("Email 2 copy").fill("A first change for {{company}}.");
+    const panel = page.getByTestId("running-changes");
+    await expect(panel.getByText(/leads? will get it/)).toBeVisible();
+    // The read for the next change is held: the earlier read must not stand in for it.
+    const held: (() => Promise<void>)[] = [];
+    await page.route("**/api/campaigns/*/sequence/impact", (route) => void held.push(() => route.continue()));
+    await page.getByLabel("Days to wait before Email 2").fill("0");
+    await expect(panel.getByText("Checking what this does to the leads…")).toBeVisible();
+    await expect(panel.getByRole("button", { name: "Apply to running leads" })).toBeDisabled();
+    await expect.poll(() => held.length).toBeGreaterThan(0);
+    for (const go of held.splice(0)) await go();
+    await page.unroute("**/api/campaigns/*/sequence/impact");
+    await expect(panel.getByText("wait changed to 0 days")).toBeVisible();
+    await panel.getByRole("button", { name: "Apply to running leads" }).click();
+    await expect(panel.getByRole("heading", { name: "This campaign is running" })).toBeVisible();
+    expect((await stored(id)).tracks[0]!.steps[1]!.waitDays).toBe(0);
+  });
+
+  test("an email track added to a running phone-only campaign uses the connected inbox, as Apply sends it (verifier F4 on 7afa03d)", async ({ page }) => {
+    const csv = { businessesCsv: readFileSync(fixture("businesses-run1.csv"), "utf8"), peopleCsv: readFileSync(fixture("people-run1.csv"), "utf8") };
+    const id = (await f.harness.request<{ campaign: Campaign }>("POST", "/api/campaigns", { name: `Phone only ${++n}`, defaultTimezone: "Europe/London", ...csv })).body.campaign.id;
+    await f.harness.defineSequence(id, {
+      timezone: "Europe/London",
+      callSkipLimitDays: 2,
+      emailPool: [],
+      smsPool: [],
+      callScript: "Ask who books.",
+      tracks: [{ id: "call", channel: "call", branch: "main", window: [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 })), steps: [{ id: "c1", waitDays: 0, subject: "", body: "", threading: "new_subject", removed: false }], start: { kind: "entry" }, removed: false }],
+    });
+    expect((await f.harness.launch(id)).status).toBe(200);
+    await page.goto(`${f.url}/campaigns/${id}`);
+    await page.getByRole("button", { name: "Add track" }).click();
+    await page.getByRole("menuitem", { name: "Email track" }).click();
+    await page.getByLabel("Email 1 subject").fill("Evening bookings at {{company}}");
+    await page.getByLabel("Email 1 copy").fill("Hi {{first_name|there}}, a note about evening booking.");
+    const panel = page.getByTestId("running-changes");
+    await expect(panel.getByText("Email track · added")).toBeVisible();
+    await expect(panel.getByText(/can’t be applied yet/)).toHaveCount(0);
+    await panel.getByRole("button", { name: "Apply to running leads" }).click();
+    await expect(panel.getByRole("heading", { name: "This campaign is running" })).toBeVisible();
+    expect((await stored(id)).emailPool).toEqual([FAKE_INBOX]);
+  });
+
+  test("leaving inside the app asks first while changes are not applied: links and Back (review bot and verifier on 7afa03d)", async ({ page }) => {
+    const id = await running();
+    // One document from here on: the campaigns list, then the campaign by its link.
+    await page.goto(`${f.url}/campaigns`);
+    await page.getByRole("link", { name: `Running edits ${n}`, exact: true }).click();
+    await page.getByRole("button", { name: /^Email track/ }).click();
+    await page.getByRole("button", { name: /^Email 2/ }).click();
+    await page.getByLabel("Email 2 copy").fill("Kept while I decide.");
+    // Another tab of the same campaign keeps the editor: no question.
+    await page.getByRole("link", { name: /^Before launch/ }).click();
+    await page.getByRole("link", { name: "Sequence" }).click();
+    await page.getByRole("navigation", { name: "Areas" }).getByRole("link", { name: "Campaigns" }).click();
+    const question = page.getByRole("group").filter({ hasText: "Leave without applying your changes?" });
+    await expect(question).toBeVisible();
+    await question.getByRole("button", { name: "Cancel" }).click();
+    await expect(page).toHaveURL(new RegExp(`/campaigns/${id}`));
+    await expect(page.getByTestId("running-changes").getByRole("heading", { name: "Changes not applied yet" })).toBeVisible();
+    // Back, past this campaign's own tabs (opening a track replaces the entry), to the campaigns list.
+    await page.evaluate(() => history.go(-3));
+    await expect(question).toBeVisible();
+    await expect(page).toHaveURL(new RegExp(`/campaigns/${id}`));
+    await question.getByRole("button", { name: "Leave and discard changes" }).click();
+    await expect(page).not.toHaveURL(new RegExp(`/campaigns/${id}`));
+    expect((await stored(id)).tracks[0]!.steps[1]!.body).toBe(COPY.second.body);
+  });
 });

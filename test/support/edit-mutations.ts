@@ -20,7 +20,14 @@ const reconciled = (f: (before: SubjectState, after: SubjectState, now: number) 
 const withTrack = (s: SubjectState, trackId: string, change: (t: TrackProgress) => TrackProgress): SubjectState => ({ ...s, tracks: s.tracks.map((t) => (t.trackId === trackId ? change(t) : t)) });
 const waitOf = (s: SubjectState, trackId: string, stepId: string) => s.campaign.definition.tracks.find((t) => t.id === trackId)?.steps.find((x) => x.id === stepId)?.waitDays ?? 0;
 
-export const EDIT_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number }> = {
+export const EDIT_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number; readonly options?: { readonly changeHandedCopy?: boolean } }> = {
+  // Verifier F7 on 7afa03d: what the provider delivers differs from what it was handed over (the record compares them).
+  "a handed-over email delivered with other copy": {
+    invariant: "E6",
+    seed: 0,
+    rules: {},
+    options: { changeHandedCopy: true },
+  },
   "an edit re-resolves a wait from the edit's instant, not its basis": {
     seed: 1,
     invariant: "E7",

@@ -39,6 +39,8 @@ export interface EditRunOptions {
   readonly rules?: Partial<Rules>;
   readonly events?: number;
   readonly maxWrites?: number;
+  /** For a mutation (verifier F7 on 7afa03d): the fake provider changes the body of work it holds, after the handover. */
+  readonly changeHandedCopy?: boolean;
 }
 export interface EditRunResult {
   readonly problems: string[];
@@ -84,6 +86,14 @@ async function runUnguarded(seed: number, options: EditRunOptions): Promise<Edit
   const h = new EngineHarness({ start, accounts: [inbox], modes: late ? ["honest", "late-send"] : ["honest"], random: random(seed ^ 0x19), engine: { waitFor: quickWait }, ...(options.rules ? { rules: options.rules } : {}) });
   h.maxWrites = options.maxWrites ?? null;
   const email = h.fake;
+  if (options.changeHandedCopy === true) {
+    const fake = email as unknown as { work: { request: { rendered: { subject: string; body: string } }; sentAt: number | null }[]; advance: () => void };
+    const advance = fake.advance.bind(email);
+    fake.advance = () => {
+      for (const w of fake.work) if (w.sentAt === null) w.request = { ...w.request, rendered: { ...w.request.rendered, body: "Changed after the handover." } };
+      advance();
+    };
+  }
 
   // --- The campaign. ---
   let version = 0;
@@ -219,9 +229,13 @@ async function runUnguarded(seed: number, options: EditRunOptions): Promise<Edit
       }
     }
     checkedHandovers = log.length;
-    // E1: delivered at most once.
+    // E1: delivered at most once. E6 (verifier F7 on 7afa03d; question Q25's interim): each delivery carries exactly the
+    // copy its work was first handed over with, whatever was edited meanwhile.
     const seen = new Set<string>();
     for (const d of email.deliveryLog) {
+      const handedWith = email.handoverLog.find((x) => x.key === d.key);
+      if (!handedWith) problem(`E6: ${d.stepId} was delivered to ${d.subjectId} with no handover of its work`);
+      else if (handedWith.rendered.subject !== d.rendered.subject || handedWith.rendered.body !== d.rendered.body) problem(`E6: ${d.stepId} was delivered to ${d.subjectId} as "${d.rendered.body}", not as it was handed over ("${handedWith.rendered.body}")`);
       const k = `${d.subjectId}|${d.stepId}`;
       if (seen.has(k)) problem(`E1: ${d.stepId} was delivered to ${d.subjectId} twice`);
       seen.add(k);
@@ -410,6 +424,7 @@ async function runUnguarded(seed: number, options: EditRunOptions): Promise<Edit
    * with the provider and a later step follows (E11), and a track reconnected while a lead waits out its delay (E9).
    */
   const rt = random(seed ^ 0x1919);
+  const rc = random(seed ^ 0xf7f7);
   async function aTargetedEdit(): Promise<{ def: CampaignDefinition; label: string } | null> {
     if (rt() > 0.45) return null;
     const def = current;
@@ -422,6 +437,13 @@ async function runUnguarded(seed: number, options: EditRunOptions): Promise<Edit
       if (index < 0 || index === steps.length - 1 || index === 0) continue;
       features.add("a-step-removed-while-with-the-provider");
       return { def: withTrack(def, t.id, (tt) => ({ ...tt, steps: tt.steps.map((st) => (st.id === x.stepId ? { ...st, removed: true } : st)) })), label: "remove-step" };
+    }
+    // Verifier F7 on 7afa03d: when no such step can be removed, the copy of a step whose work is with the provider is changed now and then.
+    const flyingCopy = flying.find((x) => def.tracks.some((tt) => !tt.removed && tt.steps.some((st) => st.id === x.stepId && !st.removed)));
+    if (flyingCopy && rc() < 0.5) {
+      const t = def.tracks.find((tt) => tt.steps.some((st) => st.id === flyingCopy.stepId))!;
+      features.add("a-copy-edit-while-that-step-is-with-the-provider");
+      return { def: withTrack(def, t.id, (tt) => ({ ...tt, steps: tt.steps.map((st) => (st.id === flyingCopy.stepId ? { ...st, ...copy(st.id) } : st)) })), label: "copy" };
     }
     for (const id of leads) {
       const r = await read(id);

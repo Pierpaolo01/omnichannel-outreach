@@ -2,6 +2,7 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import type { CampaignDefinition, SequenceView } from "../../shared/api.ts";
 import { ApiRequestError, getJson, postJson, putJson, useApi } from "../api.ts";
 import { WEEK } from "./model.ts";
+import { setLeaveGuard } from "../leaveGuard.ts";
 import { EditorStore, type ApplyOutcome, type EditorSnapshot } from "./editorStore.ts";
 import { NoAnswer, type SaveStatus } from "./saveQueue.ts";
 
@@ -104,6 +105,19 @@ export function useSequence(campaignId: string) {
       if (now.view.launchedAt !== null && now.unsaved) event.preventDefault();
     };
     window.addEventListener("beforeunload", beforeUnload);
+    // And inside the app (review bot and verifier on 7afa03d): the same campaign's tabs keep the editor; anything else asks.
+    const base = `/campaigns/${encodeURIComponent(campaignId)}`;
+    const tabs = ["", "/before-launch", "/test-run", "/leads", "/imports"].map((t) => `${base}${t}`);
+    const guard = () => {
+      const now = store.getSnapshot();
+      setLeaveGuard(
+        now.view.launchedAt !== null && now.unsaved
+          ? { allows: (path) => tabs.includes(path), text: "Leave without applying your changes? They are on this page only and have not reached any lead; leaving discards them." }
+          : null,
+      );
+    };
+    guard();
+    const unsubscribe = store.subscribe(guard);
     window.addEventListener("pagehide", leavePage);
     window.addEventListener("pageshow", back);
     window.addEventListener("online", online);
@@ -112,9 +126,11 @@ export function useSequence(campaignId: string) {
       window.removeEventListener("pageshow", back);
       window.removeEventListener("online", online);
       window.removeEventListener("beforeunload", beforeUnload);
+      unsubscribe();
+      setLeaveGuard(null);
       store.dispose();
     };
-  }, [store]);
+  }, [store, campaignId]);
 
   const editor: SequenceEditor | null =
     store && snapshot
