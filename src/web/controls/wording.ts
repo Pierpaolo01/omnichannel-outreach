@@ -9,6 +9,7 @@ import { STATUS_GROUPS, statusGroup, type StatusGroup } from "../../domain/outre
 import type { CampaignPauseRead, ControlStepView, ControlView, LeadControlApi, OutreachStatus, RecordLead } from "../../shared/api.ts";
 import { stepNoun } from "../../shared/track-label.ts";
 import { dateIn } from "../calls/wording.ts";
+import { STATUS_GROUP_LABEL } from "../status.tsx";
 
 export type AllowedControl = Extract<ControlView, { readonly allowed: true }>;
 
@@ -235,19 +236,11 @@ export function controlEffectText(effect: AllowedControl): string {
   }
 }
 
-const GROUP_LABEL = {
-  running: "Running",
-  waiting_on_you: "Waiting on you",
-  handed_to_you: "Handed to you",
-  paused: "Paused",
-  ended: "Ended",
-} as const satisfies Record<StatusGroup, string>;
-
 /** The count of leads in each status group, as the spec groups them, summed from the read's count in each status. */
 export function statusGroupCounts(counts: Readonly<Record<OutreachStatus, number>>): { group: StatusGroup; label: string; count: number }[] {
   return STATUS_GROUPS.map((group) => ({
     group,
-    label: GROUP_LABEL[group],
+    label: STATUS_GROUP_LABEL[group],
     count: (Object.entries(counts) as [OutreachStatus, number][]).filter(([status]) => statusGroup(status) === group).reduce((sum, [, n]) => sum + n, 0),
   }));
 }

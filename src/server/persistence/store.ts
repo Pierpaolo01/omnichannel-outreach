@@ -1,6 +1,6 @@
 import type { SubjectState } from "../../domain/sequence/state.ts";
 import type { Channel, PhoneKind } from "../../domain/contact-details.ts";
-import type { DetailOwner, Directory, ImportPlan } from "../../domain/import-plan.ts";
+import type { DetailOwner, Directory, ImportPlan, NewEnrollment } from "../../domain/import-plan.ts";
 import type { OutreachStatus } from "../../domain/outreach-status.ts";
 import type { EngineStore } from "../engine/engine-store.ts";
 import type { InstantlyStore } from "../instantly/store.ts";
@@ -13,7 +13,15 @@ import type {
   ImportRecord,
   LeadSearchResult,
   PersonRecord,
+  BulkRowRef,
+  BulkRowView,
+  EnrollmentView,
 } from "../../shared/api.ts";
+
+/** A selected Leads row with its name and every enrollment, as the bulk preview resolves scope from (ticket 18). */
+export interface LeadRowEnrollments extends BulkRowView {
+  readonly enrollments: readonly EnrollmentView[];
+}
 
 export interface LeadQuery {
   /** Name, company, email, or three or more digits of a phone number. Empty matches everyone. */
@@ -85,6 +93,24 @@ export interface OutreachStore {
   importRecord(campaignId: string, importId: string): Promise<ImportRecord | null>;
 
   searchLeads(query: LeadQuery): Promise<LeadSearchResult>;
+  /** The selected rows that exist, with their names and enrollments; a row that does not exist is left out (ticket 18). */
+  leadRows(refs: readonly BulkRowRef[]): Promise<LeadRowEnrollments[]>;
+  /** A plan over the campaign's directory, read and never written (add to campaign's preview); null for no such campaign. */
+  planInCampaign<T>(campaignId: string, plan: (directory: Directory) => T): Promise<T | null>;
+  /** Binds a bulk id to its action and body: new, the same as before, or different (refused whole). */
+  bindBulkRequest(bulkId: string, action: string, bodySha256: string, at: number): Promise<"new" | "same" | "different">;
+  /**
+   * Add to campaign (ticket 18): in one write transaction, the plan over the campaign's directory, its enrollments by the
+   * import's path, and the answer stored with the bulk id; a retry with the same body replays the stored answer.
+   */
+  addToCampaign<D>(input: {
+    campaignId: string;
+    bulkId: string;
+    bodySha256: string;
+    at: number;
+    plan: (directory: Directory) => { readonly decisions: D; readonly enrollments: readonly NewEnrollment[] };
+    answer: (decisions: D) => string;
+  }): Promise<{ kind: "answered"; answer: string; replayed: boolean } | { kind: "different" } | { kind: "missing" }>;
   person(id: string): Promise<PersonRecord | null>;
   company(id: string): Promise<CompanyRecord | null>;
 

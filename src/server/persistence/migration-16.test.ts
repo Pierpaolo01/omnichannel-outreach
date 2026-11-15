@@ -1,5 +1,5 @@
 import { MIGRATIONS } from "./migrations.ts";
-import { UNDO_SINCE_17 } from "../../../test/support/undo-migrations.ts";
+import { UNDO_SINCE_18 } from "../../../test/support/undo-migrations.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
@@ -56,7 +56,7 @@ describe("migration 16 on a database written before it", () => {
       ALTER TABLE provider_work DROP COLUMN withdraw_wanted;
       ALTER TABLE provider_work DROP COLUMN withdraw_last_wall;
       ALTER TABLE provider_work DROP COLUMN went_wall;
-      ${UNDO_SINCE_17}
+      ${UNDO_SINCE_18}
       DELETE FROM schema_migrations WHERE version >= 16;
     `);
     db.close();
@@ -125,7 +125,7 @@ describe("migration 16 on a database written before it", () => {
           ALTER TABLE provider_work DROP COLUMN withdraw_wanted;
           ALTER TABLE provider_work DROP COLUMN withdraw_last_wall;
           ALTER TABLE provider_work DROP COLUMN went_wall;
-          ${UNDO_SINCE_17}
+          ${UNDO_SINCE_18}
           DELETE FROM schema_migrations WHERE version >= 16;
         `);
         db.close();

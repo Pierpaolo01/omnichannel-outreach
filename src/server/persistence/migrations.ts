@@ -639,8 +639,30 @@ export const MIGRATIONS: readonly Migration[] = [
     `,
   },
   {
-    // Ticket 21.
+    // Ticket 18.
     version: 17,
+    name: "bulk actions' request ids, and enrollments by person and by company for lead search (ADR 0003, ticket 18)",
+    // A bulk id is bound to its action and body (a hash of it): the same id with another body is refused whole. Each
+    // per-lead control of a bulk keeps its own id (bulkId/enrollmentId) in control_requests. An add to campaign keeps its
+    // whole answer here, written in the transaction that enrolls, so a retry replays it and never enrolls twice.
+    // IF NOT EXISTS: the older migrations' tests rewind a database to before their version and migrate it again.
+    sql: `
+      CREATE TABLE IF NOT EXISTS bulk_requests (
+        bulk_id TEXT PRIMARY KEY,
+        action TEXT NOT NULL CHECK (action IN ('add', 'pause', 'resume', 'stop')),
+        body_sha256 TEXT NOT NULL,
+        answer TEXT,
+        at_wall INTEGER NOT NULL
+      );
+      -- Lead search reads each row's enrollments, and filters by campaign and status per person or company: without
+      -- these it scanned every enrollment for every row (measured at 2,000 leads; ADR 0003 "Ticket 18").
+      CREATE INDEX IF NOT EXISTS enrollments_by_person ON enrollments(person_id) WHERE lead_kind = 'person';
+      CREATE INDEX IF NOT EXISTS enrollments_by_company ON enrollments(company_id, lead_kind);
+    `,
+  },
+  {
+    // Ticket 21.
+    version: 18,
     name: "test runs: a subject of their own, the campaign's test contacts, and detail references a test contact can satisfy (ADR 0003, ticket 21)",
     rebuildsTables: true,
     // A test run is a subject with the fields of an enrollment and no person or company. Its contacts' detail ids

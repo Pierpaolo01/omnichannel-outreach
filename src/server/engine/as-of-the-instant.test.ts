@@ -113,6 +113,10 @@ describe("a route that changes an input the engine's timing reads first applies 
       "POST /api/campaigns/:id/test-runs": "inserts a test run and enters it at its own instant (ticket 21); it is no lead, and no lead's timing reads it",
       "POST /api/test-runs/:id/stop": "the stop control on a test run only, judged as of its own instant (asOfAction, ticket 21)",
       "POST /api/campaigns/:id/resume": "each lead judged as of the resume's instant (asOfAction), then released, in one transaction (ticket 17a)",
+      "POST /api/bulk/preview": "reads each lead as of its instant; writes nothing (ticket 18)",
+      "POST /api/bulk": "each item is POST /api/enrollments/:id/controls's own control, judged as of its instant; add enrolls new leads, which enter at their own instant, as an import's do, and changes no input of a lead already enrolled (ticket 18)",
+      "POST /api/people/:id/notes": "stores a note; the engine reads none (ticket 18)",
+      "POST /api/companies/:id/notes": "stores a note; the engine reads none (ticket 18)",
     };
     const probe = await world(def());
     const routes = [...new Set(probe.h.app.routes.filter((r) => ["POST", "PUT", "PATCH", "DELETE"].includes(r.method)).map((r) => `${r.method} ${r.path}`))];

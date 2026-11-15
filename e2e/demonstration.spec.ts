@@ -128,7 +128,7 @@ test("import twice, into a second campaign, then find people, company leads and 
   await test.step("a company whose decision makers can't be reached is contacted through its shared inbox", async () => {
     await nav(page, "Leads").click();
     await page.getByLabel("Search leads").fill("Juniper");
-    const company = page.getByRole("row", { name: /^Juniper Pilates Studio/ });
+    const company = page.getByRole("row", { name: /^Select Juniper Pilates Studio / });
     await expect(company).toContainText("Its decision makers can’t be reached directly");
     await expect(company).toContainText("Queued");
     await page.getByRole("row", { name: /Marco Bianchi/ }).getByRole("link", { name: "Marco Bianchi" }).click();

@@ -33,12 +33,15 @@ async function world() {
   expect((await h.launch(campaign.id)).status).toBe(200);
   const taskId = (await h.request<CallsView>("GET", "/api/calls")).body.focusTaskId ?? "";
   const enrollmentId = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows[0]?.enrollments[0]?.id ?? "";
-  return { h, campaignId: campaign.id, unlaunchedId: unlaunched.id, taskId, rows, enrollmentId };
+  const lead = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows[0];
+  const personId = lead?.kind === "person" ? lead.id : "";
+  const companyId = lead?.kind === "person" ? lead.company.id : "";
+  return { h, campaignId: campaign.id, unlaunchedId: unlaunched.id, taskId, rows, enrollmentId, personId, companyId };
 }
 
 describe("request bodies refuse fields they do not know (verifier B4)", () => {
   test("every route that takes a body answers 400 naming an unknown field, and changes nothing", async () => {
-    const { h, unlaunchedId, taskId, enrollmentId } = await world();
+    const { h, unlaunchedId, taskId, enrollmentId, personId, companyId } = await world();
     const routes = h.app.routes.filter((r) => ["POST", "PUT", "PATCH", "DELETE"].includes(r.method));
     expect(routes.length).toBeGreaterThan(5);
     for (const r of routes) {
@@ -48,6 +51,8 @@ describe("request bodies refuse fields they do not know (verifier B4)", () => {
         if (name === "id" && r.path.startsWith("/api/enrollments/")) return enrollmentId;
         // Ticket 21: the body is read before the run is looked up, so any id is refused for the field first.
         if (name === "id" && r.path.startsWith("/api/test-runs/")) return "test-none";
+        if (name === "id" && r.path.startsWith("/api/people/")) return personId;
+        if (name === "id" && r.path.startsWith("/api/companies/")) return companyId;
         throw new Error(`the route walk cannot fill :${name} in ${r.path}; add it here`);
       });
       const res = await h.request<{ error?: { code: string; message: string } }>(r.method, path, { zzUnexpected: true });

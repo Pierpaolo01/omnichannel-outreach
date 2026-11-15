@@ -1,6 +1,7 @@
 import { useId, type ReactNode } from "react";
 import { Link } from "wouter";
-import type { ColleagueView, ContactDetailView, EnrollmentView, RecordCalls, RecordControls, UnenrolledReason } from "../shared/api.ts";
+import type { ColleagueView, ContactDetailView, EnrollmentView, RecordCalls, RecordColleagues, RecordControls, UnenrolledReason } from "../shared/api.ts";
+import { when } from "./activity.tsx";
 import { declinedRecordLine, recordCallLine } from "./calls/wording.ts";
 import { Icon } from "./icons.tsx";
 import { StatusBadge } from "./status.tsx";
@@ -193,8 +194,9 @@ export function CampaignRows({
   );
 }
 
-/** Others at the company: status and role, linking to their own page. No quick actions. */
-export function PeopleRows({ people }: { people: readonly ColleagueView[] }) {
+/** Others at the company: status, role and last call note, linking to their own page. No quick actions. */
+export function PeopleRows({ people, lastCallNotes, userZone }: { people: readonly ColleagueView[]; lastCallNotes: RecordColleagues["colleagueNotes"]; userZone: string }) {
+  const now = useNow();
   return (
     <ul>
       {people.map((person) => (
@@ -217,6 +219,15 @@ export function PeopleRows({ people }: { people: readonly ColleagueView[] }) {
               />
             </div>
           </div>
+          {(() => {
+            // The note of the last call logged with them, as the call desk shows a colleague's (ticket 18).
+            const last = lastCallNotes.find((n) => n.personId === person.id)?.lastCallNote ?? null;
+            return last ? (
+              <p className="border-l-2 border-line-strong pl-2.5 text-[13.5px] text-ink-2 [overflow-wrap:anywhere]">
+                Last call, {when(last.at, now, userZone)}: {last.note}
+              </p>
+            ) : null;
+          })()}
         </li>
       ))}
     </ul>

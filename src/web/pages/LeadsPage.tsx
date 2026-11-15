@@ -1,8 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useSearch } from "wouter";
-import type { CampaignListItem, CompanyRecord, ContactDetailView, LeadRow, LeadSearchResult } from "../../shared/api.ts";
+import type { BulkAddPreview, BulkControlAction, BulkControlPreview, CampaignListItem, CompanyRecord, ContactDetailView, LeadRow, LeadSearchResult } from "../../shared/api.ts";
 import { PageTitle } from "../App.tsx";
-import { useApi } from "../api.ts";
+import { postJson, useApi } from "../api.ts";
+import { BulkBar, BulkChecking, BulkConfirm, BulkStatus } from "../bulk/BulkViews.tsx";
+import { useBulk } from "../bulk/useBulk.tsx";
+import { BULK_VERB, addConfirmText, controlConfirmText, scopeNote } from "../bulk/wording.ts";
+import { pressOf } from "../bulk/press.ts";
 import { EnrollmentList, ErrorState, UNENROLLED_SHORT } from "../components.tsx";
 import { Icon } from "../icons.tsx";
 import { STATUS_OPTIONS } from "../status.tsx";
@@ -60,6 +64,58 @@ export function LeadsPage() {
   const everyone = useApi<LeadSearchResult>("/api/leads?limit=1");
 
   const filtered = Boolean(query.q || query.campaign || query.status || query.company);
+
+  // Ticket 18: the selection, by row (`kind:id`), counted only among the rows shown, as in the prototype.
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const bulk = useBulk(retry);
+  const [confirming, setConfirming] = useState<Confirming | null>(null);
+  const [unstored, setUnstored] = useState(false);
+  const opener = useRef<HTMLElement | null>(null);
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  const shownRows = (result.state === "ready" ? result.data.rows : result.state === "loading" ? (result.previous?.rows ?? []) : []);
+  const selectedRows = shownRows.filter((r) => selected.has(rowKey(r)));
+  const scopeCampaign = query.campaign ? (campaignOptions.state === "ready" ? (campaignOptions.data.campaigns.find((c) => c.id === query.campaign) ?? null) : null) : null;
+  // A confirmation is a snapshot of the selection and scope it opened on: the user's own change to either closes it, as
+  // in the prototype; a re-read never does (council item 7 on 3555a3e: under a status filter a row leaving the results
+  // closed it without a word).
+  const selectionKey = [...selected].sort().join("|") + `#${query.q}#${query.campaign}#${query.status}#${query.company}`;
+  const [openedOn, setOpenedOn] = useState(selectionKey);
+  if (openedOn !== selectionKey) {
+    setOpenedOn(selectionKey);
+    if (confirming !== null) setConfirming(null);
+  }
+  // The selected rows' campaigns and statuses in the read the confirmation opened on, and in the latest read: when they
+  // differ, the confirmation says so, and still shows and sends what it opened on (the 17b rule).
+  const rowsNow = rowsSignature(shownRows, selected);
+  const closeConfirm = () => {
+    setConfirming(null);
+    (opener.current?.isConnected ? opener.current : searchRef.current)?.focus();
+  };
+  const openPreview = (request: PreviewRequest, from: HTMLElement) => {
+    opener.current = from;
+    setUnstored(false);
+    // A new confirmation clears the outcomes shown, which are seen.
+    for (const r of bulk.results) bulk.dismiss(r.press.bulkId);
+    setConfirming({ request, state: "loading", rowsAtOpen: rowsSignature(shownRows, selected) });
+    postJson("/api/bulk/preview", { action: request.action, rows: selectedRows.map((r) => ({ kind: r.kind, id: r.id })), campaignId: request.campaignId })
+      .then((preview) => setConfirming((c) => (c?.request === request ? { request, state: "ready", rowsAtOpen: c.rowsAtOpen, preview: preview as BulkControlPreview | BulkAddPreview } : c)))
+      .catch((e: unknown) => setConfirming((c) => (c?.request === request ? { request, state: "error", rowsAtOpen: c.rowsAtOpen, message: e instanceof Error ? e.message : "The server didn’t answer." } : c)));
+  };
+  const confirm = (preview: BulkControlPreview | BulkAddPreview) => {
+    // While another bulk is on its way the confirmation waits, open and focused; a confirmed bulk is never dropped
+    // without a word (verifier B1 on 4363270, the class 17b fixed for one lead).
+    if (bulk.pending() !== null) return;
+    // The press is the preview's snapshot (`pressOf`): its allowed items with the precondition each showed, or only the
+    // rows it showed as to be added.
+    const plan = pressOf(preview);
+    const out = bulk.press(plan.action, plan.body, plan.labels, plan.campaign, plan.notSent);
+    // Refused here as busy (another tab stored a press at the same moment): the confirmation stays open and says why.
+    if (!out.ok && out.why === "busy") return;
+    setConfirming(null);
+    if (!out.ok && out.why === "unstored") setUnstored(true);
+    // The prototype clears the selection once the action is taken; the answer, lead by lead, is said above the table.
+    if (out.ok) setSelected(new Set());
+  };
   const overall = everyone.result.state === "ready" ? everyone.result.data : null;
   const total = overall?.total ?? null;
   const shown = result.state === "ready" ? result.data : result.state === "loading" ? result.previous : null;
@@ -90,6 +146,7 @@ export function LeadsPage() {
           onChange={(event) => setText(event.target.value)}
           placeholder="Search by name, company, email or phone number"
           aria-label="Search leads"
+          ref={searchRef}
           className="text-[17px] text-base-content"
         />
       </label>
@@ -148,6 +205,36 @@ export function LeadsPage() {
 
       {query.company && <CompanyFacts id={query.company} />}
 
+      {selectedRows.length > 0 && (
+        <BulkBar
+          count={selectedRows.length}
+          campaigns={campaignList}
+          busy={bulk.pending() !== null}
+          onAction={(action, from) => openPreview({ action, campaignId: query.campaign || null }, from)}
+          onAdd={(campaignId, from) => openPreview({ action: "add", campaignId }, from)}
+          onClear={() => {
+            setSelected(new Set());
+            searchRef.current?.focus();
+          }}
+        />
+      )}
+      {confirming?.state === "loading" && <BulkChecking error={null} onRetry={() => undefined} onCancel={closeConfirm} />}
+      {confirming?.state === "error" && <BulkChecking error={confirming.message} onRetry={() => opener.current && openPreview(confirming.request, opener.current)} onCancel={closeConfirm} />}
+      {confirming?.state === "ready" && (() => {
+        const preview = confirming.preview;
+        const { text, canConfirm } = preview.action === "add" ? addConfirmText(preview) : controlConfirmText(preview);
+        return <BulkConfirm
+            text={text}
+            action={BULK_VERB[preview.action]}
+            canConfirm={canConfirm}
+            busy={bulk.pending() !== null}
+            changed={confirming.rowsAtOpen !== rowsNow}
+            onConfirm={() => confirm(preview)}
+            onCancel={closeConfirm}
+          />;
+      })()}
+      <BulkStatus bulk={bulk} unstored={unstored} onDismissUnstored={() => setUnstored(false)} onDismissed={() => searchRef.current?.focus()} />
+
       <div className="mt-4">
         {result.state === "error" ? (
           <ErrorState title="Leads didn’t load." message={result.message} onRetry={retry} />
@@ -156,14 +243,71 @@ export function LeadsPage() {
         ) : total === 0 ? (
           <Empty>No leads yet. People and companies appear here once a scraper export is imported into a campaign.</Empty>
         ) : (
-          <LeadTable result={shown} query={query.q} loading={result.state === "loading"} />
+          <LeadTable
+            result={shown}
+            query={query.q}
+            loading={result.state === "loading"}
+            scope={query.campaign ? { name: scopeCampaign?.name ?? null } : null}
+            companiesSelected={selectedRows.some((r) => r.kind === "company")}
+            selected={selected}
+            onSelect={(keys, on) =>
+              setSelected((prev) => {
+                const next = new Set(prev);
+                for (const k of keys) {
+                  if (on) next.add(k);
+                  else next.delete(k);
+                }
+                return next;
+              })
+            }
+          />
         )}
       </div>
     </div>
   );
 }
 
-function LeadTable({ result, query, loading }: { result: LeadSearchResult; query: string; loading: boolean }) {
+const rowKey = (row: Pick<LeadRow, "kind" | "id">) => `${row.kind}:${row.id}`;
+
+type PreviewRequest = { readonly action: BulkControlAction | "add"; readonly campaignId: string | null };
+/** The confirmation open: its preview being read, failing, or ready as a snapshot of that read. */
+type Confirming =
+  | { readonly request: PreviewRequest; readonly rowsAtOpen: string; readonly state: "loading" }
+  | { readonly request: PreviewRequest; readonly rowsAtOpen: string; readonly state: "error"; readonly message: string }
+  | { readonly request: PreviewRequest; readonly rowsAtOpen: string; readonly state: "ready"; readonly preview: BulkControlPreview | BulkAddPreview };
+
+/** The selected rows as a read shows them: each row's campaigns and statuses, and the rows the read no longer holds. */
+function rowsSignature(rows: readonly LeadRow[], selected: ReadonlySet<string>): string {
+  return [...selected]
+    .sort()
+    .map((key) => {
+      const row = rows.find((r) => rowKey(r) === key);
+      return row ? `${key}=${row.enrollments.map((e) => `${e.campaign.id}:${e.status}`).join(",")}` : `${key}=gone`;
+    })
+    .join("|");
+}
+
+function LeadTable({
+  result,
+  query,
+  loading,
+  selected,
+  onSelect,
+  scope,
+  companiesSelected,
+}: {
+  result: LeadSearchResult;
+  query: string;
+  loading: boolean;
+  selected: ReadonlySet<string>;
+  onSelect: (keys: readonly string[], on: boolean) => void;
+  /** The scope the press uses: the campaign Leads is filtered to (its name once loaded), or every campaign. */
+  scope: { readonly name: string | null } | null;
+  companiesSelected: boolean;
+}) {
+  const keys = result.rows.map(rowKey);
+  const all = keys.length > 0 && keys.every((k) => selected.has(k));
+  const some = keys.some((k) => selected.has(k));
   return (
     <>
       <div
@@ -174,33 +318,48 @@ function LeadTable({ result, query, loading }: { result: LeadSearchResult; query
           {/* The approved table: body-size cells, identity columns a quarter each, campaigns wider. */}
           <table className="table text-[15px]">
             <colgroup>
+              <col className="w-8 sm:w-11" />
               <col className="w-[27%]" />
               <col className="w-[27%]" />
               <col />
             </colgroup>
             <thead>
               <tr className="border-line text-[13px] font-medium text-muted">
-                <th className="px-3.5 py-3 font-medium">Person</th>
-                <th className="px-3.5 py-3 font-medium">Company</th>
-                <th className="px-3.5 py-3 font-medium">Campaigns</th>
+                <th className="py-3 pl-1.5 pr-0 font-medium sm:pl-3.5">
+                  <input
+                    type="checkbox"
+                    className="checkbox checkbox-sm border-line-strong checked:border-call checked:bg-call checked:text-base-100"
+                    aria-label="Select all shown"
+                    checked={all}
+                    ref={(el) => {
+                      if (el) el.indeterminate = some && !all;
+                    }}
+                    disabled={keys.length === 0}
+                    onChange={(e) => onSelect(keys, e.target.checked)}
+                  />
+                </th>
+                <th className="px-1.5 py-3 font-medium sm:px-3.5">Person</th>
+                <th className="px-1.5 py-3 font-medium sm:px-3.5">Company</th>
+                <th className="px-1.5 py-3 font-medium sm:px-3.5">Campaigns</th>
               </tr>
             </thead>
             <tbody>
               {result.rows.length === 0 ? (
                 <tr>
-                  <td colSpan={3} className="px-3.5 py-6 text-muted">
+                  <td colSpan={4} className="px-3.5 py-6 text-muted">
                     {query
                       ? `No one matches “${query}”. Try part of the name, the email domain, or the last digits of a phone number.`
                       : "No one matches these filters."}
                   </td>
                 </tr>
               ) : (
-                result.rows.map((row) => <LeadTableRow key={`${row.kind}:${row.id}`} row={row} />)
+                result.rows.map((row) => <LeadTableRow key={rowKey(row)} row={row} selected={selected.has(rowKey(row))} onSelect={(on) => onSelect([rowKey(row)], on)} />)
               )}
             </tbody>
           </table>
         </div>
       </div>
+      <p className="mt-3 text-[13px] text-muted [overflow-wrap:anywhere]">{scopeNote(scope, companiesSelected)}</p>
       {result.total > result.rows.length && (
         <p className="mt-3 text-[13px] text-muted">
           Showing the first {result.rows.length} of {result.total}. Narrow the search to see the rest.
@@ -210,17 +369,26 @@ function LeadTable({ result, query, loading }: { result: LeadSearchResult; query
   );
 }
 
-function LeadTableRow({ row }: { row: LeadRow }) {
+function LeadTableRow({ row, selected, onSelect }: { row: LeadRow; selected: boolean; onSelect: (on: boolean) => void }) {
   const [, navigate] = useLocation();
   const href = row.kind === "person" ? `/leads/people/${row.id}` : `/leads/companies/${row.id}`;
   return (
     <tr
-      className="cursor-pointer border-line align-top hover:[&>td]:bg-raised"
+      className={`cursor-pointer border-line align-top ${selected ? "[&>td]:bg-call-soft" : "hover:[&>td]:bg-raised"}`}
       onClick={(event) => {
-        if (!(event.target instanceof Element) || !event.target.closest("a")) navigate(href);
+        if (!(event.target instanceof Element) || !event.target.closest("a, input, label")) navigate(href);
       }}
     >
-      <td className="px-3.5 py-3.5">
+      <td className="py-3.5 pl-1.5 pr-0 sm:pl-3.5">
+        <input
+          type="checkbox"
+          className="checkbox checkbox-sm mt-0.5 border-line-strong checked:border-call checked:bg-call checked:text-base-100"
+          aria-label={`Select ${row.name}`}
+          checked={selected}
+          onChange={(e) => onSelect(e.target.checked)}
+        />
+      </td>
+      <td className="px-1.5 py-3.5 sm:px-3.5">
         <Link href={href} className="font-semibold no-underline hover:underline">
           {row.name}
         </Link>
@@ -236,7 +404,7 @@ function LeadTableRow({ row }: { row: LeadRow }) {
                   : `${row.peopleReachable} of its ${row.peopleOnRecord} decision makers can now be reached`}
         </div>
       </td>
-      <td className="px-3.5 py-3.5">
+      <td className="px-1.5 py-3.5 sm:px-3.5">
         {row.kind === "person" ? (
           <>
             {row.company.name}
@@ -253,7 +421,8 @@ function LeadTableRow({ row }: { row: LeadRow }) {
           )
         )}
       </td>
-      <td className="px-3.5 py-3.5">
+      {/* Below 640px a status badge may wrap, so the four columns fit at 390px whatever the fonts measure (CI on 9daf7c0). */}
+      <td className="px-1.5 py-3.5 max-sm:[&_li>span:first-child]:whitespace-normal sm:px-3.5">
         <EnrollmentList
           enrollments={row.enrollments}
           empty={[

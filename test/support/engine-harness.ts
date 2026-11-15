@@ -1,4 +1,5 @@
 import { createApp } from "../../src/server/app.ts";
+import type { BulkRules } from "../../src/server/bulk.ts";
 import { Engine, TickQueue, type EngineDependencies, type EngineHooks } from "../../src/server/engine/engine.ts";
 import type { AttemptRef, HandoverRequest, SendPort } from "../../src/server/engine/ports.ts";
 import type { EmailProviderSource } from "../../src/server/instantly/routes.ts";
@@ -30,6 +31,8 @@ export interface EngineHarnessOptions {
   readonly modes?: readonly FakeMode[];
   readonly random?: () => number;
   readonly rules?: Partial<Rules>;
+  /** The bulk rule's parts (ticket 18): the generated bulk runs' mutations replace one. */
+  readonly bulkRules?: Partial<BulkRules>;
   readonly hooks?: EngineHooks;
   /** A provider other than the generated test's fake, such as a scripted one, or one built on the harness's store and clock. */
   readonly port?: Provider | ((store: OutreachStore, now: () => number) => Provider);
@@ -114,6 +117,7 @@ export class EngineHarness {
       emailProvider: "status" in this.provider ? (this.provider as Provider & EmailProviderSource) : null,
       smsProvider: this.smsProvider ? "test-simulator" : "none",
       ...(options.rules ? { rules: options.rules } : {}),
+      ...(options.bulkRules ? { bulkRules: options.bulkRules } : {}),
     });
   }
 
