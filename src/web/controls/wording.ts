@@ -8,6 +8,7 @@
 import { STATUS_GROUPS, statusGroup, type StatusGroup } from "../../domain/outreach-status.ts";
 import type { CampaignPauseRead, ControlStepView, ControlView, LeadControlApi, OutreachStatus, RecordLead } from "../../shared/api.ts";
 import { stepNoun } from "../../shared/track-label.ts";
+import { holdReasonClause } from "../calls/wording.ts";
 import { dateIn } from "../calls/wording.ts";
 import { STATUS_GROUP_LABEL } from "../status.tsx";
 
@@ -102,9 +103,12 @@ export function nextStepSentence(lead: RecordLead, userZone: string): string {
   const step = currentStepOf(lead);
   const campaignPaused = lead.campaignState.paused;
   const frozen = "Waiting times are frozen while this campaign is paused.";
+  // A held step is never said to be due: the row says why, in the wording Needs attention uses (ADR 0003 5.4).
+  const held = step ? lead.tracks.find((t) => t.trackId === step.trackId && t.nextStep?.stepId === step.stepId && t.hold !== null) : undefined;
   const next = (): string => {
     if (!step) return refusalOf(lead, "skip") ?? "";
     if (campaignPaused) return join(`Next: ${stepPhrase(step)}.`, frozen);
+    if (held?.hold) return `Next: ${stepPhrase(step)}, on hold because ${holdReasonClause(held.hold, held.holdOwners)}.`;
     return `Next: ${stepPhrase(step)}${due(dueOf(lead, step), userZone)}.`;
   };
   const status: OutreachStatus = lead.status;

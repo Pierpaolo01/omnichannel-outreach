@@ -24,7 +24,7 @@ import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, startOfLocalDay, w
 import { windowOf, type ReadyItem } from "../domain/sequence/dispatch.ts";
 import { callableOnDay, callRoom, callWindow, goodNumbers } from "../domain/sequence/calls.ts";
 import { liveSteps, liveTracks, poolOf, winBackEntry, type CampaignDefinition, type TrackChannel } from "../domain/sequence/definition.ts";
-import { channelReaches, settledEvaluation, stillSettled, type SettledEvaluation } from "../domain/sequence/progress.ts";
+import { channelReaches, settledEvaluation, settledReadiness, stillSettled, type SettledEvaluation } from "../domain/sequence/progress.ts";
 import type { AccountState, Attempt, CallDay, SmsBinding, SubjectState } from "../domain/sequence/state.ts";
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
 
@@ -500,7 +500,7 @@ export function projectLoad(input: ProjectionInput): Projection {
   const sends: ProjectedSend[] = [];
   let attemptSeq = 0;
   const evalUntil = new Map<string, { state: SubjectState } & SettledEvaluation>();
-  const ready = new Map<string, { state: SubjectState; items: ReadyItem[]; until: number; windows: { w: readonly WindowRule[]; zone: string }[] }>();
+  const ready = new Map<string, { state: SubjectState; items: ReadyItem[]; until: number; conversations: string | null; windows: { w: readonly WindowRule[]; zone: string }[] }>();
   // Every ready item in claim order, kept sorted as entries come and go, so a pass with thousands
   // of leads waiting for capacity does not sort them all again.
   let sorted: ReadyItem[] = [];
@@ -689,8 +689,8 @@ export function projectLoad(input: ProjectionInput): Projection {
         const next = rules.evaluate(loaded, t);
         if (next === loaded) {
           const settled = settledEvaluation(loaded, t, startOfLocalDay(localDayNumber(t, s.callDay.userZone) + 1, s.callDay.userZone), conversations);
-          if (settled.conversations === null) watching.delete(id);
-          else watching.add(id);
+          // Watched once it waits on a conversation; an extra dirty mark later costs only a cache check.
+          if (settled.conversations !== null) watching.add(id);
           evalUntil.set(id, { state: s, ...settled });
           wakes.push(settled.until, id);
           continue;
@@ -705,17 +705,17 @@ export function projectLoad(input: ProjectionInput): Projection {
       for (const id of dirty) {
         const s = stateOf(id);
         const known = ready.get(id);
-        if (known?.state === s && t < known.until) continue;
-        const items = rules.readyItems(load(id, t), t);
-        const lead = leadNow(s.subject.clock, t);
-        // Its next due step, or its next track start (as `Engine.nextWakeAt`).
-        const dues = [
-          ...s.tracks.filter((p) => p.finishedAt === null && p.dueAt !== null).map((p) => t + ((p.dueAt ?? 0) - lead)),
-          ...s.tracks.filter((p) => p.startedAt === null && p.startAt !== null).map((p) => t + ((p.startAt ?? 0) - lead)),
-        ].filter((x) => x > t);
-        const until = Math.min(Infinity, ...dues);
+        // The worker's readiness rule (`settledReadiness`, `stillSettled`): kept until the next due instant, and, while an
+        // SMS track waits, until the conversations change.
+        const conversations = String(bindingsVersion);
+        if (known?.state === s && (input.keepSettledAcrossConversations ? t < known.until : stillSettled(known, t, conversations))) continue;
+        const loaded = load(id, t);
+        const items = rules.readyItems(loaded, t);
+        const settled = settledReadiness(loaded, t, conversations);
+        if (settled.conversations !== null) watching.add(id);
+        const until = settled.until;
         if (ready.has(id)) gone.add(id);
-        ready.set(id, { state: s, items, until, windows: items.map((i) => ({ w: windowOf(s, i.trackId), zone: s.lead.zone })) });
+        ready.set(id, { state: s, items, until, conversations: settled.conversations, windows: items.map((i) => ({ w: windowOf(s, i.trackId), zone: s.lead.zone })) });
         added.push(...items);
         wakes.push(until, id);
       }

@@ -496,6 +496,8 @@ export interface TrackProgressView {
   /** For `skipped_conversation_taken` (reason `sms_conversation_taken`): who owns the conversation. Empty otherwise. */
   readonly conversationOwners: readonly ConversationOwnerView[];
   readonly hold: HoldReasonApi | null;
+  /** For `sms_conversation_unsettled`: the campaigns whose first text the track waits on. Empty otherwise. */
+  readonly holdOwners: readonly ConversationOwnerView[];
   /** The pending step and the wall instant it is due, if the lead keeps running. */
   readonly nextStep: { readonly stepId: string; readonly number: number; readonly dueAt: string } | null;
   /** A phone track's call task once placed on the user's list (ticket 14): open until its outcome or its track's finish. */
@@ -563,7 +565,11 @@ export interface NeedsAttention {
    */
   readonly overdueCallbacks: readonly { readonly taskId: string; readonly enrollmentId: string; readonly campaignId: string; readonly callbackAt: string; readonly dueAt: string }[];
   readonly stalledInboxes: readonly { readonly accountId: string; readonly holding: readonly string[] }[];
-  readonly heldTracks: readonly { readonly enrollmentId: string; readonly trackId: string; readonly reason: HoldReasonApi }[];
+  /**
+   * Held tracks (5.4), each with whose lead it is (ticket 20b's names) and, for `sms_conversation_unsettled`, the
+   * campaigns whose first text it waits on (`owners`; empty for every other reason).
+   */
+  readonly heldTracks: readonly (AttentionLead & { readonly enrollmentId: string; readonly trackId: string; readonly reason: HoldReasonApi; readonly owners: readonly ConversationOwnerView[] })[];
   readonly accountWaits: readonly { readonly accountId: string; readonly reason: "quota" | "rate_limited"; readonly until: string | null }[];
   /**
    * Sender accounts on any channel that cannot send, each listed once (ticket 13; spec "Needs
@@ -1586,6 +1592,8 @@ export type TestStepState =
   | "with_provider"
   /** Its wait runs out at `at`; it goes then, or at its window's next opening. */
   | "due"
+  /** Held (ADR 0003 5.4): it waits on what `hold` names, not on its wait; never said to be due. */
+  | "held"
   /** A call on your Calls list now, by the engine's listing rule. */
   | "on_your_list"
   /** A call of a running test that is not on today's list: `at` is the start of the first day it is listed, or null. */
@@ -1617,6 +1625,9 @@ export interface TestStepRow {
   readonly reason: string | null;
   /** For `sms_conversation_taken`: whose conversation the test mobile is in (ADR 0003, question Q7 answered). */
   readonly owners?: readonly ConversationOwnerView[];
+  /** For `held`: why, as Needs attention names a held track's reason; for `sms_conversation_unsettled`, whose text. */
+  readonly hold?: HoldReasonApi;
+  readonly holdOwners?: readonly ConversationOwnerView[];
 }
 
 /** A test contact refused: malformed (400), or a lead's (409), by field. */

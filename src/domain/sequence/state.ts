@@ -216,6 +216,12 @@ export interface SmsBinding {
    * taken for good. Until its work settles the other subject waits; work that ended not sent releases the binding.
    */
   readonly ownerSent: boolean;
+  /**
+   * Whether a reply has come from the mobile to this number since the binding was taken: proof the owner's text went,
+   * whatever its work says (question Q7 answered, the coordinator's ruling on faac357). An answered binding is a
+   * conversation: the other subject is skipped, and it is never released as unsent.
+   */
+  readonly ownerAnswered: boolean;
 }
 
 /**
@@ -242,6 +248,8 @@ export interface SmsBindingRecord {
   readonly released: boolean;
   /** Released because none of the owner's texts on the pair was sent (point 10): it never owned a conversation. */
   readonly unsent: boolean;
+  /** The owner's text there is known sent, or a reply came on the pair since it was taken. The reply rule ignores it. */
+  readonly confirmed: boolean;
 }
 
 export interface Reply {

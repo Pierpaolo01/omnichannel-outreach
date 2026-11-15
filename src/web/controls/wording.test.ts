@@ -51,7 +51,7 @@ function lead(status: OutreachStatus, fields: Partial<RecordLead> = {}): RecordL
 /** A running lead whose current step is email 2, due Tuesday 3 November at 09:00 London. */
 const running = (status: OutreachStatus, fields: Partial<RecordLead> = {}) =>
   lead(status, {
-    tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], hold: null, nextStep: { stepId: "s2", number: 2, dueAt: "2026-11-03T09:00:00.000Z" }, callTask: null, steps: [] }],
+    tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], hold: null, holdOwners: [], nextStep: { stepId: "s2", number: 2, dueAt: "2026-11-03T09:00:00.000Z" }, callTask: null, steps: [] }],
     controls: [allowed("pause", { statusAfter: "paused", next: step() }), refused("resume", "They are not paused."), allowed("skip", { skips: step(), next: step({ stepId: "s3", number: 3, dueAt: "2026-11-06T09:00:00.000Z" }) }), allowed("stop", { statusAfter: "stopped_manually" })],
     ...fields,
   });
@@ -67,6 +67,9 @@ describe("the plain next-step sentence, for every status", () => {
 
   test("queued and active after launch: the step the read names, and when it is due", () => {
     expect(nextStepSentence(running("queued"), ZONE)).toBe("Nothing has gone out yet. Next: email 2 of 3, due Tue 3 Nov at 09:00.");
+    // A held step is never said to be due: the row says why, naming whose text it waits on (verifier on faac357, item 5).
+    const held = running("queued", { tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], hold: "sms_conversation_unsettled", holdOwners: [{ name: "Spring clinics", test: false }], nextStep: { stepId: "s2", number: 2, dueAt: "2026-11-03T09:00:00.000Z" }, callTask: null, steps: [] }] });
+    expect(nextStepSentence(held, ZONE)).toBe("Nothing has gone out yet. Next: email 2 of 3, on hold because the first text from campaign Spring clinics to the same mobile, on every number this campaign can use, isn’t known to have gone or not yet.");
     expect(nextStepSentence(running("active"), ZONE)).toBe("Next: email 2 of 3, due Tue 3 Nov at 09:00.");
   });
 

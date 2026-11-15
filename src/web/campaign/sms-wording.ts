@@ -24,9 +24,14 @@ const ownerName = (o: ConversationOwnerView): string => (o.test ? `the test run 
  * Activity, a decline's line about the track, the Test run tab and Needs attention. `whose` names the mobile; `tense`
  * is "past" where the skip is told, "now" where Needs attention says what stops a channel today.
  */
-export function conversationTaken(owners: readonly ConversationOwnerView[], whose: "their" | "your test" = "their", tense: "past" | "now" = "past"): string {
+/** "campaign A", "campaign A and the test run of campaign B"; "another campaign" when none is named. */
+export function ownersPhrase(owners: readonly ConversationOwnerView[]): string {
   const names = owners.map(ownerName);
   const last = names.at(-1);
-  const with_ = last === undefined ? "another campaign" : names.length === 1 ? last : `${names.slice(0, -1).join(", ")} and ${last}`;
+  return last === undefined ? "another campaign" : names.length === 1 ? last : `${names.slice(0, -1).join(", ")} and ${last}`;
+}
+
+export function conversationTaken(owners: readonly ConversationOwnerView[], whose: "their" | "your test" = "their", tense: "past" | "now" = "past"): string {
+  const with_ = ownersPhrase(owners);
   return `${whose} mobile ${tense === "past" ? "was already" : "is"} in a text conversation with ${with_} on every number this campaign can use`;
 }

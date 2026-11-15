@@ -721,16 +721,21 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   async smsBindingsOf(recipient: string): Promise<SmsBindingRecord[]> {
-    const bindings = this.sql("SELECT sender_number, owner_subject, released_at, unsent FROM sms_bindings WHERE recipient_key = ? ORDER BY COALESCE(released_at, created_at), seq")
+    const bindings = this.sql(
+      `SELECT b.sender_number, b.owner_subject, b.released_at, b.unsent,
+              EXISTS (SELECT 1 FROM provider_work w WHERE w.subject_id = b.owner_subject AND w.account_id = b.sender_number AND w.destination = b.recipient_key AND (w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL))
+                OR EXISTS (SELECT 1 FROM reply_events re WHERE re.event_id LIKE 'sms:%' AND re.state = 'resolved' AND re.inbox = b.sender_number AND re.address = b.recipient_key AND re.received_wall >= b.created_at) AS confirmed
+       FROM sms_bindings b WHERE b.recipient_key = ? ORDER BY COALESCE(b.released_at, b.created_at), b.seq`,
+    )
       .all(recipient)
-      .map((b): SmsBindingRecord => ({ kind: "binding", sender: str(b, "sender_number"), owner: str(b, "owner_subject"), released: b["released_at"] != null, unsent: Number(b["unsent"]) === 1 }));
+      .map((b): SmsBindingRecord => ({ kind: "binding", sender: str(b, "sender_number"), owner: str(b, "owner_subject"), released: b["released_at"] != null, unsent: Number(b["unsent"]) === 1, confirmed: Number(b["confirmed"]) === 1 }));
     // Every recorded skip for a taken conversation with this mobile, after the bindings: it owns nothing (question Q7 answered).
     const skips = this.sql(
       `SELECT t.subject_id, json_extract(c.value, '$.sender') AS sender FROM track_progress t, json_each(t.conversation_owners) c
        WHERE t.conversation_owners IS NOT NULL AND json_extract(c.value, '$.recipient') = ? ORDER BY t.finished_wall, t.rowid`,
     )
       .all(recipient)
-      .map((r): SmsBindingRecord => ({ kind: "skipped", sender: str(r, "sender"), owner: str(r, "subject_id"), released: true, unsent: true }));
+      .map((r): SmsBindingRecord => ({ kind: "skipped", sender: str(r, "sender"), owner: str(r, "subject_id"), released: true, unsent: true, confirmed: false }));
     return [...bindings, ...skips];
   }
 
@@ -739,7 +744,8 @@ export class SqliteEngineStore implements EngineStore {
       this.sql(
         `SELECT (SELECT COALESCE(MAX(seq), 0) FROM sms_bindings) || '/' || (SELECT COUNT(*) FROM sms_bindings WHERE released_at IS NOT NULL) || '/' ||
            (SELECT COUNT(*) FROM sms_bindings b WHERE b.released_at IS NULL AND EXISTS (SELECT 1 FROM provider_work w WHERE w.subject_id = b.owner_subject
-             AND w.account_id = b.sender_number AND w.destination = b.recipient_key AND (w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL))) AS v`,
+             AND w.account_id = b.sender_number AND w.destination = b.recipient_key AND (w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL))) || '/' ||
+           (SELECT COUNT(*) FROM sms_bindings b WHERE b.released_at IS NULL AND EXISTS (SELECT 1 FROM reply_events re WHERE re.event_id LIKE 'sms:%' AND re.state = 'resolved' AND re.inbox = b.sender_number AND re.address = b.recipient_key AND re.received_wall >= b.created_at)) AS v`,
       ).get() ?? { v: "0/0/0" },
       "v",
     );
@@ -1299,7 +1305,8 @@ export class SqliteEngineStore implements EngineStore {
         `SELECT b.sender_number, b.recipient_key, b.owner_subject, COALESCE(e.campaign_id, tr.campaign_id) AS owner_campaign, c.name AS owner_campaign_name,
                 tr.id IS NOT NULL AS owner_is_test, COALESCE(e.ended, tr.ended) AS owner_ended,
                 EXISTS (SELECT 1 FROM provider_work w WHERE w.subject_id = b.owner_subject AND w.account_id = b.sender_number AND w.destination = b.recipient_key
-                  AND (w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL)) AS owner_sent FROM sms_bindings b
+                  AND (w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL)) AS owner_sent,
+                EXISTS (SELECT 1 FROM reply_events re WHERE re.event_id LIKE 'sms:%' AND re.state = 'resolved' AND re.inbox = b.sender_number AND re.address = b.recipient_key AND re.received_wall >= b.created_at) AS owner_answered FROM sms_bindings b
          LEFT JOIN enrollments e ON e.id = b.owner_subject
          LEFT JOIN test_runs tr ON tr.id = b.owner_subject
          LEFT JOIN campaigns c ON c.id = COALESCE(e.campaign_id, tr.campaign_id)
@@ -1310,7 +1317,7 @@ export class SqliteEngineStore implements EngineStore {
          ORDER BY b.seq`,
       )
         .all({ kind: owner?.kind ?? "", owner: owner?.id ?? "", own: JSON.stringify(owner ? [] : details.filter((d) => d.mobile).map((d) => d.key)), subject: subjectId })
-        .map((b) => ({ sender: str(b, "sender_number"), recipient: str(b, "recipient_key"), owner: str(b, "owner_subject"), ownerCampaignId: strOrNull(b, "owner_campaign"), ownerCampaignName: strOrNull(b, "owner_campaign_name"), ownerIsTest: Number(b["owner_is_test"]) === 1, ownerEnded: b["owner_ended"] != null, ownerSent: Number(b["owner_sent"]) === 1 })),
+        .map((b) => ({ sender: str(b, "sender_number"), recipient: str(b, "recipient_key"), owner: str(b, "owner_subject"), ownerCampaignId: strOrNull(b, "owner_campaign"), ownerCampaignName: strOrNull(b, "owner_campaign_name"), ownerIsTest: Number(b["owner_is_test"]) === 1, ownerEnded: b["owner_ended"] != null, ownerSent: Number(b["owner_sent"]) === 1, ownerAnswered: Number(b["owner_answered"]) === 1 })),
       lead: { zone, details, resolved, mergeData, phones },
       markBad: [],
       accounts,

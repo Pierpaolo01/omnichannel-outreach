@@ -9,7 +9,7 @@ import { launchCheck, type LaunchCheck } from "../../domain/sequence/blockers.ts
 import { REQUEST_ID_DIFFERENT, REQUEST_ID_REUSED, type OutcomeInput } from "../../domain/sequence/calls.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
-import { runs, sealReckoning, settledEvaluation, stillSettled, type SettledEvaluation } from "../../domain/sequence/progress.ts";
+import { runs, sealReckoning, settledEvaluation, settledReadiness, stillSettled, type SettledEvaluation } from "../../domain/sequence/progress.ts";
 import { definitionProblems, type CampaignDefinition } from "../../domain/sequence/definition.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
 import { judgeCampaignControl, type LeadControl, type LeadExpectation } from "../../domain/sequence/controls.ts";
@@ -278,7 +278,7 @@ export class Engine {
       return next === null ? null : this.rules.releaseUnsent(next);
     });
   }
-  private readonly nothingReady = new Map<string, { key: string; until: number }>();
+  private readonly nothingReady = new Map<string, { key: string } & SettledEvaluation>();
   /** Subjects with no due call to place, by version key and call settings, until a wall instant. */
   private readonly noCallsReady = new Map<string, { key: string; until: number }>();
   /** Per subject and version: the wall instants its pending steps fall due, with their windows. */
@@ -1219,17 +1219,15 @@ export class Engine {
   private async claimAll(): Promise<boolean> {
     const now = this.now();
     const ready: { item: ReadyItem; snapshot: SubjectState }[] = [];
+    // A hold on an unsettled conversation changes with another subject's conversations, not this one's version.
+    const conversations = await this.store.conversationsVersion();
     for (const [id, version] of await this.store.runningSubjectVersions()) {
       const known = this.nothingReady.get(id);
-      if (known?.key === version && now < known.until) continue;
+      if (known?.key === version && this.rules.readinessHolds(known, now, conversations)) continue;
       const snapshot = await this.store.subject(id, now);
       if (!snapshot) continue;
       const items = this.rules.readyItems(snapshot, now);
-      if (items.length === 0) {
-        const lead = leadNow(snapshot.subject.clock, now);
-        const dues = snapshot.tracks.filter((p) => p.finishedAt === null && p.dueAt !== null).map((p) => now + ((p.dueAt ?? 0) - lead));
-        this.nothingReady.set(id, { key: version, until: Math.min(Infinity, ...dues.filter((t) => t > now)) });
-      }
+      if (items.length === 0) this.nothingReady.set(id, { key: version, ...settledReadiness(snapshot, now, conversations) });
       for (const item of items) ready.push({ item, snapshot });
     }
     ready.sort((a, b) => this.rules.claimOrder(a.item, b.item));

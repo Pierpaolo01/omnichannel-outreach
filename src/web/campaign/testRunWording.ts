@@ -1,5 +1,6 @@
 import type { TestRunEnding, TestRunRead, TestStepRow } from "../../shared/api.ts";
 import { conversationTaken } from "./sms-wording.ts";
+import { holdReasonClause } from "../calls/wording.ts";
 
 /**
  * The Test run tab's words (ticket 21), from the read only: what each step's stored facts say, never more. Email has no
@@ -79,6 +80,8 @@ export function stepStateText(row: TestStepRow, zone: string, readAt: string): s
       return "Skipped";
     case "with_provider":
       return row.channel === "sms" ? "With the SMS provider" : "With Instantly";
+    case "held":
+      return "On hold";
     case "due": {
       const ms = row.at === null ? Infinity : Date.parse(row.at) - Date.parse(readAt);
       if (ms <= 0) return "Due now";
@@ -118,6 +121,7 @@ export function stepDetail(row: TestStepRow, run: Pick<TestRunRead, "email" | "m
   if (row.state === "skipped" && row.reason === "sms_conversation_taken") return `Skipped: ${conversationTaken(row.owners ?? [], "your test")}`;
   if (row.state === "skipped") return row.reason === "missing_channel" ? `Skipped: no test ${row.channel === "email" ? "email" : "mobile"} saved` : SKIPPED_BECAUSE[row.reason ?? ""] ?? "Skipped";
   if (row.channel === "call") return row.state === "on_your_list" ? "Log any outcome to continue. The canvas paths apply." : `To ${run.mobile ?? "your mobile"}`;
+  if (row.state === "held") return `On hold because ${row.hold ? holdReasonClause(row.hold, row.holdOwners ?? []) : "something waits on you"}. Nothing is dropped.`;
   if (row.state === "due") return "The wait is cut to about a minute";
   return `To ${(row.channel === "sms" ? run.mobile : run.email) ?? ""}`;
 }

@@ -329,3 +329,23 @@ describe("a test mobile in another subject's SMS conversation (ADR 0003, questio
     expect(w.h.sms.deliveryLog.filter((d) => !first.has(d.subjectId))).toEqual([]);
   });
 });
+
+describe("a test step on hold reads as held with its reason, never as due (council on faac357, item 4)", () => {
+  test("a test waiting on another campaign's test text whose fate is unknown is on hold, with the reason, on the Test run tab", async () => {
+    const w = await world();
+    await w.h.request("PUT", `/api/campaigns/${w.campaign}/test-contacts`, { email: OWN_EMAIL, mobile: OWN_MOBILE });
+    // The first campaign's test text gets no answer: the conversation is provisionally its, unknown.
+    w.h.sms.dropUnanswered.set(OWN_MOBILE, 1);
+    expect((await w.run()).status).toBe(200);
+    await w.h.advanceTo(MONDAY_9 + MIN);
+    const smsOnly: CampaignDefinition = { ...DEFINITION, tracks: [track("m", "sms", [step("m1")])] };
+    const other = (await w.h.createCampaign("Clinics, Leeds", { businesses: [HARBOUR], people: [PAT] })).campaign.id;
+    await w.h.defineSequence(other, smsOnly);
+    await w.h.request("PUT", `/api/campaigns/${other}/test-contacts`, { email: OWN_EMAIL, mobile: OWN_MOBILE });
+    const tab = async () => (await w.h.request<TestRunTab>("GET", `/api/campaigns/${other}/test-runs`)).body;
+    const lead = (await w.h.request<LeadSearchResult>("GET", `/api/leads?campaign=${other}`)).body.rows[0]?.enrollments.find((e) => e.campaign.id === other)?.id ?? "";
+    expect((await w.h.request("POST", `/api/campaigns/${other}/test-runs`, { requestId: "other-1", renderAs: lead, expect: { definitionVersion: (await tab()).definitionVersion } })).status).toBe(200);
+    await w.h.advanceTo(MONDAY_9 + 3 * MIN);
+    expect((await tab()).run?.steps.find((s) => s.stepId === "m1")).toMatchObject({ state: "held", hold: "sms_conversation_unsettled", at: null });
+  });
+});

@@ -1,5 +1,5 @@
 import type { AttentionLead, InterruptionNoticeView, NeedsAttention, SendingInterruptedView } from "../../shared/api.ts";
-import { dateIn, isoDateIn, timeIn, type AttentionItem } from "./wording.ts";
+import { dateIn, holdReasonClause, isoDateIn, timeIn, type AttentionItem } from "./wording.ts";
 import { conversationTaken } from "../campaign/sms-wording.ts";
 
 /**
@@ -108,6 +108,30 @@ export function providerWaitItems(waits: NeedsAttention["waitingOnProvider"], to
       tone: "crit" as const,
       title: `${capital(words.provider)} isn’t answering`,
       body: `${since} ${words.send(w.sends)} ${one ? "waits" : "wait"} on it; ${one ? "it goes" : "they go"} once it answers, and nothing is dropped.`,
+    };
+  });
+}
+
+/**
+ * Held tracks (`heldTracks`, ADR 0003 5.4): one entry per campaign and reason, in the read's order. One lead is named and
+ * linked to its record, where its row says the same and offers its controls; several are counted and linked to the
+ * campaign's leads. The reason is the one wording (`holdReasonClause`), naming whose text a wait on one is for.
+ */
+export function heldTrackItems(held: NeedsAttention["heldTracks"]): AttentionItem[] {
+  const groups = new Map<string, NeedsAttention["heldTracks"][number][]>();
+  for (const h of held) groups.set(`${h.campaign.id}/${h.reason}`, [...(groups.get(`${h.campaign.id}/${h.reason}`) ?? []), h]);
+  return [...groups.values()].map((tracks) => {
+    const first = tracks[0] as NeedsAttention["heldTracks"][number];
+    const leads = new Set(tracks.map((h) => h.enrollmentId)).size;
+    const owners = tracks.flatMap((h) => h.owners).filter((o, i, all) => all.findIndex((x) => x.name === o.name && x.test === o.test) === i);
+    const body = `On hold because ${holdReasonClause(first.reason, owners)}. Nothing is dropped.`;
+    if (leads === 1) return { key: `tracks-${first.campaign.id}-${first.reason}`, tone: "pause" as const, title: `${leadName(first)} is on hold in ${first.campaign.name}`, body, action: recordAction(first) };
+    return {
+      key: `tracks-${first.campaign.id}-${first.reason}`,
+      tone: "pause" as const,
+      title: `${leads} leads in ${first.campaign.name} are on hold`,
+      body,
+      action: { label: "Open campaign", href: `/campaigns/${encodeURIComponent(first.campaign.id)}/leads`, ariaLabel: `Open ${first.campaign.name}` },
     };
   });
 }

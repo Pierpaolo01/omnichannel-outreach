@@ -942,7 +942,7 @@ function blockedNumbers(state: SubjectState, trackId: string, now: number): SmsB
  */
 export function conversationTaken(state: SubjectState, trackId: string, now: number): boolean {
   const blocked = blockedNumbers(state, trackId, now);
-  return blocked !== null && blocked.length > 0 && blocked.every((b) => b.ownerSent);
+  return blocked !== null && blocked.length > 0 && blocked.every(isConversation);
 }
 
 /**
@@ -953,14 +953,22 @@ export function conversationTaken(state: SubjectState, trackId: string, now: num
  */
 export function conversationUnsettled(state: SubjectState, trackId: string, now: number): boolean {
   const blocked = blockedNumbers(state, trackId, now);
-  return blocked !== null && blocked.some((b) => !b.ownerSent);
+  return blocked !== null && blocked.some((b) => !isConversation(b));
 }
+
+/**
+ * Whether a binding is a conversation (question Q7 answered, point 10 and the ruling on faac357): its owner's text there
+ * is known sent, or a reply has come on the pair since it was taken, which proves the text went.
+ */
+export const isConversation = (b: Pick<SmsBinding, "ownerSent" | "ownerAnswered">): boolean => b.ownerSent || b.ownerAnswered;
 
 /**
  * Whether the subject's own binding owns no conversation (question Q7 answered, point 10): none of its texts on the pair
  * was sent, and none may still go (every piece of its work there settled not sent). It is then released, as unsent.
  */
-export function bindingUnsent(state: SubjectState, binding: Pick<SmsBinding, "sender" | "recipient">): boolean {
+export function bindingUnsent(state: SubjectState, binding: Pick<SmsBinding, "sender" | "recipient" | "ownerAnswered">): boolean {
+  // Answered: a reply came on the pair, so a text went whatever the work says; it stays the owner's for good.
+  if (binding.ownerAnswered) return false;
   return state.work
     .filter((w) => w.accountId === binding.sender && w.destination === binding.recipient)
     .every((w) => w.settled !== null && w.settled !== "sent" && w.settled !== "user_sent" && w.sentWall === null);
@@ -972,7 +980,7 @@ export function bindingUnsent(state: SubjectState, binding: Pick<SmsBinding, "se
  * released or found sent between an evaluation and its write makes them differ, and the write is refused.
  */
 export function sameConversations(a: SubjectState, b: SubjectState): boolean {
-  const key = (s: SubjectState) => s.smsBindings.map((x) => `${x.sender}|${x.recipient}|${x.owner}|${x.ownerSent ? 1 : 0}`).sort().join("\n");
+  const key = (s: SubjectState) => s.smsBindings.map((x) => `${x.sender}|${x.recipient}|${x.owner}|${x.ownerSent ? 1 : 0}|${x.ownerAnswered ? 1 : 0}`).sort().join("\n");
   return key(a) === key(b);
 }
 
@@ -1003,6 +1011,19 @@ export function conversationOwnersOf(state: SubjectState, trackId: string): Conv
   for (const c of p.conversationOwners ?? []) {
     if (c.ownerCampaignId === null || c.ownerCampaignName === null) continue;
     if (!owners.some((o) => o.campaignId === c.ownerCampaignId && o.test === c.ownerIsTest)) owners.push({ campaignId: c.ownerCampaignId, name: c.ownerCampaignName, test: c.ownerIsTest });
+  }
+  return owners;
+}
+
+/**
+ * Whose first text the track waits on (`sms_conversation_unsettled`, point 10): the campaigns of the subjects holding its
+ * numbers whose text there is not known sent and not answered yet, once each. Empty when the track is not so held.
+ */
+export function unsettledOwnersOf(state: SubjectState, trackId: string, now: number): ConversationOwner[] {
+  const owners: ConversationOwner[] = [];
+  for (const b of (blockedNumbers(state, trackId, now) ?? []).filter((x) => !isConversation(x))) {
+    if (b.ownerCampaignId === null || b.ownerCampaignName === null) continue;
+    if (!owners.some((o) => o.campaignId === b.ownerCampaignId && o.test === b.ownerIsTest)) owners.push({ campaignId: b.ownerCampaignId, name: b.ownerCampaignName, test: b.ownerIsTest });
   }
   return owners;
 }
@@ -1051,6 +1072,21 @@ export function settledEvaluation(state: SubjectState, now: number, nextUserDay:
   if (recheck.at !== null) at.push(recheck.at);
   return { until: Math.min(Infinity, ...at.filter((t) => t > now)), conversations: recheck.onNewBinding ? conversations : null };
 }
+/**
+ * How long a readiness check that found nothing to claim holds (the worker's `nothingReady`, the projection's `ready`):
+ * until the subject's next due step or delayed track start, and, while an SMS track waits to hand over, until the
+ * conversations change: a hold on an unsettled conversation (`sms_conversation_unsettled`) makes `readyItems` return
+ * nothing, and a release or a text found sent changes that with no change to the subject itself.
+ */
+export function settledReadiness(state: SubjectState, now: number, conversations: string): SettledEvaluation {
+  const lead = leadNow(state.subject.clock, now);
+  const at = [
+    ...state.tracks.filter((p) => p.finishedAt === null && p.dueAt !== null).map((p) => now + ((p.dueAt ?? 0) - lead)),
+    ...state.tracks.filter((p) => p.startedAt === null && p.startAt !== null).map((p) => now + ((p.startAt ?? 0) - lead)),
+  ];
+  return { until: Math.min(Infinity, ...at.filter((t) => t > now)), conversations: conversationRecheck(state, now).onNewBinding ? conversations : null };
+}
+
 /** Whether a settled evaluation still holds at `now`, with the conversations as they are now. */
 export function stillSettled(entry: SettledEvaluation, now: number, conversations: string): boolean {
   return now < entry.until && (entry.conversations === null || entry.conversations === conversations);

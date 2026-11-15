@@ -5,7 +5,8 @@
  */
 import { isLive, maySend } from "../domain/sequence/attempt.ts";
 import { liveSteps, type TrackDefinition } from "../domain/sequence/definition.ts";
-import { progressOf } from "../domain/sequence/progress.ts";
+import { progressOf, unsettledOwnersOf } from "../domain/sequence/progress.ts";
+import { heldReason } from "../domain/sequence/dispatch.ts";
 import type { EndReason, FinishReason, SubjectState } from "../domain/sequence/state.ts";
 import type { TestRunEnding, TestRunRead, TestRunTab, TestStepRow } from "../shared/api.ts";
 import { stepNoun, trackLabel } from "../shared/track-label.ts";
@@ -79,17 +80,18 @@ async function runRead(store: OutreachStore, run: TestRunRecord, leads: TestRunT
     email: run.contacts.email?.value ?? null,
     mobile: run.contacts.mobile?.value ?? null,
     mayStillSend: s.work.filter(maySend).length,
-    steps: stepsOf(s, rules),
+    steps: stepsOf(s, rules, now),
   };
 }
 
 /** Every live step of the main sequence, then of the win-back branch, in canvas order, with what its facts say. */
-export function stepsOf(s: SubjectState, rules: CallViewRules): TestStepRow[] {
+export function stepsOf(s: SubjectState, rules: CallViewRules, now: number): TestStepRow[] {
   const def = s.campaign.definition;
   // A removed track a run started keeps its rows; one it never started is not shown.
   const shown = (t: TrackDefinition) => !t.removed || progressOf(s, t.id)?.startedAt != null;
   const tracks = [...def.tracks.filter((t) => t.branch === "main" && shown(t)), ...def.tracks.filter((t) => t.branch === "win_back" && shown(t))];
   const rows: TestStepRow[] = [];
+  const held = (trackId: string) => heldReason(s, trackId, now);
   for (const track of tracks) {
     const label = trackLabel(def, track);
     const steps = track.steps.filter((st) => !st.removed || s.results.some((r) => r.stepId === st.id));
@@ -127,7 +129,11 @@ export function stepsOf(s: SubjectState, rules: CallViewRules): TestStepRow[] {
         // A test mobile in another campaign's SMS conversation names its owner (question Q7 answered).
         rows.push(p.finishReason === "skipped_conversation_taken" ? { ...skipped, owners: conversationOwnersView(s, track.id) } : skipped);
       }
-      else if (s.subject.ended === null && p && p.finishedAt === null && p.nextStepId === step.id && p.dueWall !== null) rows.push({ ...base, state: "due", at: iso(p.dueWall) });
+      else if (s.subject.ended === null && p && p.finishedAt === null && p.nextStepId === step.id && held(track.id) !== null) {
+        // Held (5.4): never said to be due; the tab says why, as Needs attention does for a lead (council on faac357, item 4).
+        const hold = held(track.id);
+        rows.push(hold === null ? { ...base, state: "due", at: iso(p.dueWall ?? 0) } : { ...base, state: "held", at: null, hold, holdOwners: unsettledOwnersOf(s, track.id, now).map((o) => ({ name: o.name, test: o.test })) });
+      } else if (s.subject.ended === null && p && p.finishedAt === null && p.nextStepId === step.id && p.dueWall !== null) rows.push({ ...base, state: "due", at: iso(p.dueWall) });
       else rows.push({ ...base, state: "not_reached", at: null });
     });
   }

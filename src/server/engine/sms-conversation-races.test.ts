@@ -268,7 +268,7 @@ describe("a conversation exists once a text is known to have gone (council on be
     await w.h.advanceTo(MONDAY_8 + 2 * MIN);
     // Unknown: no final decision. B waits, listed with its reason.
     expect((await progress(w.h, b)).tracks[0]).toMatchObject({ finishReason: null, hold: "sms_conversation_unsettled" });
-    expect((await w.h.request<NeedsAttention>("GET", "/api/needs-attention")).body.heldTracks).toContainEqual({ enrollmentId: b, trackId: "m", reason: "sms_conversation_unsettled" });
+    expect((await w.h.request<NeedsAttention>("GET", "/api/needs-attention")).body.heldTracks).toContainEqual(expect.objectContaining({ enrollmentId: b, trackId: "m", reason: "sms_conversation_unsettled", owners: [{ name: "A", test: false }], campaign: expect.objectContaining({ name: "B" }) }));
     // The lookups find nothing, but an SMS "not sent" is not final (ADR 0002 P3): the work is unresolved and B still waits.
     await w.h.advanceTo(MONDAY_8 + 3 * H);
     expect(bindingRows(w)).toEqual([{ owner: a, released: 0, unsent: 0 }]);
@@ -278,6 +278,81 @@ describe("a conversation exists once a text is known to have gone (council on be
     expect(await w.h.engine.markAttempt(attempt.id, "not_sent")).toBe(true);
     expect(bindingRows(w)[0]).toEqual({ owner: a, released: 1, unsent: 1 });
     expect((await progress(w.h, b)).tracks[0]?.hold).toBeNull();
+  });
+
+  test("a lead held on an unsettled conversation texts once the binding is released as unsent, on the same engine, and its waiting email starts (council on faac357, item 1)", async () => {
+    const w = await twoCampaigns();
+    w.h.sms.dropUnanswered.set(PAT_MOBILE, 1);
+    await w.launch("A");
+    await w.h.advanceTo(MONDAY_8 + MIN);
+    await w.launch("B");
+    const [a, b] = [await w.lead("A"), await w.lead("B")];
+    await w.h.advanceTo(MONDAY_8 + 2 * MIN);
+    expect((await progress(w.h, b)).tracks[0]?.hold).toBe("sms_conversation_unsettled");
+    // An hour on, the lookups have found nothing, which for SMS is not final: A's text is unresolved, and B still waits.
+    await w.h.advanceTo(MONDAY_8 + H);
+    expect((await progress(w.h, b)).tracks[0]?.hold).toBe("sms_conversation_unsettled");
+    // A's campaign is paused, so its own retry cannot take the number back; the user marks A's text not sent.
+    // (Pausing asks the provider to withdraw A's text, which it never had: settled withdrawn, so the mark finds it settled.)
+    expect((await w.h.request("POST", `/api/campaigns/${w.ids["A"]}/pause`, { requestId: "pause-a" })).status).toBe(200);
+    const attempt = (await w.h.store.engine.subject(a, w.h.clock))!.attempts[0]!;
+    await w.h.engine.markAttempt(attempt.id, "not_sent");
+    expect(bindingRows(w)[0]).toEqual({ owner: a, released: 1, unsent: 1 });
+    await w.h.advanceTo(w.h.clock + 3 * H);
+    // The same long-running engine: B texts on the number, and the email waiting on its SMS track goes after it.
+    expect(w.h.sms.deliveryLog.filter((d) => d.subjectId === b).map((d) => [d.stepId, d.sender])).toEqual([["b1", N1]]);
+    expect((await progress(w.h, b)).tracks.map((t) => [t.trackId, t.finishReason])).toEqual([["m", "completed"], ["e", "completed"]]);
+    expect(w.h.fake.deliveryLog.filter((d) => d.subjectId === b).map((d) => d.stepId)).toEqual(["e1"]);
+  });
+
+  test("the release reaches a waiting lead by settlement too: A's text accepted then refused finally, B held meanwhile, then B texts and its email starts (verifier on faac357)", async () => {
+    const w = await twoCampaigns();
+    w.h.sms.failAfterAccept.add(PAT_MOBILE);
+    await w.launch("A");
+    w.h.clock = MONDAY_8 + 15_000;
+    await w.launch("B");
+    const b = await w.lead("B");
+    await w.h.advanceTo(MONDAY_8 + 30_000);
+    expect((await progress(w.h, b)).tracks[0]?.hold).toBe("sms_conversation_unsettled");
+    w.h.sms.failAfterAccept.delete(PAT_MOBILE);
+    // At 09:01 the provider refuses A's text: its binding is released as unsent; the same engine then serves B.
+    await w.h.advanceTo(MONDAY_8 + 2 * H);
+    expect(w.h.sms.deliveryLog.map((d) => [d.subjectId, d.sender])).toContainEqual([b, N1]);
+    expect((await progress(w.h, b)).tracks.map((t) => [t.trackId, t.finishReason])).toEqual([["m", "completed"], ["e", "completed"]]);
+  });
+
+  test("a first text that never settles: the waiting lead is listed with its reason, and each of the user's controls releases it (council on faac357, item 1)", async () => {
+    for (const control of ["skip", "stop", "mark the owner's text not sent"] as const) {
+      const w = await twoCampaigns();
+      w.h.sms.dropUnanswered.set(PAT_MOBILE, 1);
+      // The provider never answers a lookup for A's text: its work stays unresolved.
+      w.h.sms.silentSends = true;
+      await w.launch("A");
+      await w.h.advanceTo(MONDAY_8 + MIN);
+      await w.launch("B");
+      const [a, b] = [await w.lead("A"), await w.lead("B")];
+      await w.h.advanceTo(MONDAY_8 + 6 * H);
+      expect((await progress(w.h, b)).tracks[0]).toMatchObject({ finishReason: null, hold: "sms_conversation_unsettled" });
+      const attention = (await w.h.request<NeedsAttention>("GET", "/api/needs-attention")).body;
+      expect(attention.heldTracks).toContainEqual(expect.objectContaining({ enrollmentId: b, trackId: "m", reason: "sms_conversation_unsettled", owners: [{ name: "A", test: false }], campaign: expect.objectContaining({ name: "B" }) }));
+      if (control === "skip") {
+        expect((await w.h.request("POST", `/api/enrollments/${b}/controls`, { requestId: "skip-b", action: "skip" })).status).toBe(200);
+        await w.h.advanceTo(w.h.clock + H);
+        expect((await progress(w.h, b)).tracks.map((t) => [t.trackId, t.finishReason])).toEqual([["m", "skipped"], ["e", "completed"]]);
+      } else if (control === "stop") {
+        expect((await w.h.request("POST", `/api/enrollments/${b}/controls`, { requestId: "stop-b", action: "stop" })).status).toBe(200);
+        expect((await progress(w.h, b)).status).toBe("stopped_manually");
+      } else {
+        expect((await w.h.request("POST", `/api/campaigns/${w.ids["A"]}/pause`, { requestId: "pause-a" })).status).toBe(200);
+        const attempt = (await w.h.store.engine.subject(a, w.h.clock))!.attempts[0]!;
+        expect(await w.h.engine.markAttempt(attempt.id, "not_sent")).toBe(true);
+        // From here the provider reports texts again, so B's own text is not left unresolved.
+        w.h.sms.silentSends = false;
+        await w.h.advanceTo(w.h.clock + H);
+        expect(w.h.sms.deliveryLog.filter((d) => d.subjectId === b).map((d) => d.stepId)).toEqual(["b1"]);
+      }
+      expect((await w.h.request<NeedsAttention>("GET", "/api/needs-attention")).body.heldTracks.filter((x) => x.enrollmentId === b), control).toEqual([]);
+    }
   });
 
   test("an answer lost, then found sent: the other campaign waits while it is unknown, then is skipped", async () => {
@@ -297,3 +372,86 @@ describe("a conversation exists once a text is known to have gone (council on be
   });
 });
 
+
+describe("a reply while the conversation's ownership is unsettled (the coordinator's ruling on faac357; ADR 0003 Q7 point 10)", () => {
+  async function waiting() {
+    const w = await world([number(N1)]);
+    await w.create("A", [track("m", "sms", [text("a1")]), track("e", "email", [email("ea")], ALWAYS, { kind: "after", trackId: "m", delayDays: 2 })], [N1]);
+    await w.create("B", [track("m", "sms", [text("b1")]), track("e", "email", [email("e1")], ALWAYS, { kind: "after", trackId: "m", delayDays: 0 })], [N1]);
+    return w;
+  }
+  const workOf = async (w: Awaited<ReturnType<typeof world>>, id: string) => (await w.h.store.engine.subject(id, w.h.clock))!.work.map((x) => ({ settled: x.settled, sentWall: x.sentWall }));
+  const activityKinds = async (w: Awaited<ReturnType<typeof world>>, campaign: string) => {
+    const row = (await w.h.request<LeadSearchResult>("GET", "/api/leads?q=Pat%20Oneil")).body.rows.find((r) => r.name === "Pat Oneil")!;
+    return (await w.h.request<ActivityView>("GET", `/api/people/${row.id}/activity`)).body.entries.filter((e) => e.campaign.name === campaign).map((e) => `${e.kind}${"channel" in e ? `|${e.channel}` : ""}`);
+  };
+
+  test("the reply stops the holder at once and settles nothing; the waiting lead is then skipped, the owner named; a later not-sent leaves the holder replied and the conversation its own", async () => {
+    const w = await waiting();
+    w.h.sms.dropUnanswered.set(PAT_MOBILE, 1);
+    await w.launch("A");
+    await w.h.advanceTo(MONDAY_8 + MIN);
+    await w.launch("B");
+    const [a, b] = [await w.lead("A"), await w.lead("B")];
+    await w.h.advanceTo(MONDAY_8 + 2 * MIN);
+    expect((await progress(w.h, b)).tracks[0]?.hold).toBe("sms_conversation_unsettled");
+    // Pat answers the number, although no text from it is known to have gone.
+    w.h.sms.prospectTexts(PAT_MOBILE, "Who is this?", N1);
+    await w.h.advanceTo(MONDAY_8 + 3 * MIN);
+    expect((await progress(w.h, a)).status).toBe("replied");
+    // The reply settles nothing by itself: A's text is still neither sent nor not sent.
+    expect(await workOf(w, a)).toEqual([{ settled: null, sentWall: null }]);
+    // The answered conversation is A's for good: B is skipped, A named; B's email goes.
+    const skipped = (await progress(w.h, b)).tracks[0];
+    expect(skipped).toMatchObject({ finishReason: "skipped_conversation_taken", hold: null, conversationOwners: [{ name: "A", test: false }] });
+    expect((await progress(w.h, b)).status).not.toBe("replied");
+    await w.h.advanceTo(MONDAY_8 + H);
+    expect(w.h.fake.deliveryLog.filter((d) => d.subjectId === b).map((d) => d.stepId)).toEqual(["e1"]);
+    // A's text is found not sent (the user's mark, after the lookups). A stays replied, its conversation is kept (it was
+    // answered), Activity says a reply came and claims no text was sent, and the restart is offered.
+    const attempt = (await w.h.store.engine.subject(a, w.h.clock))!.attempts[0]!;
+    expect(await w.h.engine.markAttempt(attempt.id, "not_sent")).toBe(true);
+    expect((await progress(w.h, a)).status).toBe("replied");
+    expect(w.db.prepare("SELECT owner_subject AS owner, released_at, unsent FROM sms_bindings").all()).toEqual([{ owner: a, released_at: null, unsent: 0 }]);
+    expect(await activityKinds(w, "A")).toEqual(["replied|sms"]);
+    const controls = (await w.h.request<{ controls: { action: string; allowed: boolean }[] }>("GET", `/api/enrollments/${a}`)).body.controls;
+    expect(controls.find((c) => c.action === "resume_from_next_step")?.allowed).toBe(true);
+    // A later text on that conversation still reaches A.
+    w.h.sms.prospectTexts(PAT_MOBILE, "Hello again", N1);
+    await w.h.advanceTo(w.h.clock + MIN);
+    expect((await w.h.request<NeedsAttention>("GET", "/api/needs-attention")).body.anomalies).toEqual([]);
+  });
+
+  test("the reply while unknown, then the text found sent: the holder stays replied, the waiting lead skipped", async () => {
+    const w = await waiting();
+    w.h.sms.loseAnswer.add(PAT_MOBILE);
+    await w.launch("A");
+    await w.h.advanceTo(MONDAY_8 + MIN);
+    await w.launch("B");
+    const [a, b] = [await w.lead("A"), await w.lead("B")];
+    await w.h.advanceTo(MONDAY_8 + 2 * MIN);
+    expect((await progress(w.h, b)).tracks[0]?.hold).toBe("sms_conversation_unsettled");
+    w.h.sms.prospectTexts(PAT_MOBILE, "STOP", N1);
+    await w.h.advanceTo(MONDAY_8 + 3 * MIN);
+    expect((await progress(w.h, a)).status).toBe("replied");
+    expect((await progress(w.h, b)).tracks[0]?.finishReason).toBe("skipped_conversation_taken");
+    // The lookups then find A's text sent: nothing about either lead changes.
+    await w.h.advanceTo(MONDAY_8 + 3 * H);
+    expect((await workOf(w, a))[0]?.settled).toBe("sent");
+    expect((await progress(w.h, a)).status).toBe("replied");
+    expect(await activityKinds(w, "A")).toEqual(["replied|sms", "sent|sms"]);
+  });
+
+  test("a reply on a conversation released as unsent, with no binding left, is a text from a mobile no number has a conversation with: nobody is stopped", async () => {
+    const w = await waiting();
+    w.h.sms.failAfterAccept.add(PAT_MOBILE);
+    await w.launch("A");
+    await w.h.advanceTo(MONDAY_8 + 5 * MIN);
+    const a = await w.lead("A");
+    expect(w.db.prepare("SELECT released_at IS NOT NULL AS released, unsent FROM sms_bindings").all()).toEqual([{ released: 1, unsent: 1 }]);
+    w.h.sms.prospectTexts(PAT_MOBILE, "Hello?", N1);
+    await w.h.advanceTo(MONDAY_8 + 10 * MIN);
+    expect((await progress(w.h, a)).status).not.toBe("replied");
+    expect((await w.h.request<NeedsAttention>("GET", "/api/needs-attention")).body.anomalies.map((x) => x.what)).toContain("a text from a mobile no number of the app's has a conversation with");
+  });
+});

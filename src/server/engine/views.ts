@@ -7,7 +7,7 @@ import { accountAvailable, candidatesFor, claimRefusal, heldReason, inheritedWor
 import { localDayNumber, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { relevantChannels, waitingOn } from "../../domain/sequence/providers.ts";
 import { providerEvidence, sendingInterrupted } from "./worker-state.ts";
-import { channelOf, conversationOwnersOf, deriveStatus, liveTracksFor, unreachableWhy, wallAtLead } from "../../domain/sequence/progress.ts";
+import { channelOf, conversationOwnersOf, deriveStatus, liveTracksFor, unreachableWhy, unsettledOwnersOf, wallAtLead } from "../../domain/sequence/progress.ts";
 import type { AccountState, SubjectState } from "../../domain/sequence/state.ts";
 import type { AttentionLead, ConversationOwnerView, EnrollmentProgress, NeedsAttention, SenderAccountViewApi } from "../../shared/api.ts";
 import type { EngineStore } from "./engine-store.ts";
@@ -69,6 +69,7 @@ export function progressView(s: SubjectState, now: number): EnrollmentProgress {
           finishedAt: iso(p?.finishedWall ?? null),
           conversationOwners: conversationOwnersView(s, track.id),
           hold: heldReason(s, track.id, now),
+          holdOwners: unsettledOwnersOf(s, track.id, now).map((o) => ({ name: o.name, test: o.test })),
           nextStep:
             p && p.finishedAt === null && p.nextStepId !== null && p.dueAt !== null
               ? { stepId: p.nextStepId, number: numberOf(p.nextStepId), dueAt: new Date(running ? now + (p.dueAt - lead) : (p.dueWall ?? now)).toISOString() }
@@ -134,7 +135,8 @@ export function accountView(a: AccountState, label: string): SenderAccountViewAp
  * Needs attention as the engine decides it: every list of the HTTP read, with each lead entry by its ids only. The
  * route adds whose lead each is (`needsAttentionView` in call-views.ts, ticket 20b); nothing else is added there.
  */
-export type EngineNeedsAttention = Omit<NeedsAttention, "waitingForCapacity" | "noUsableChannel" | "sendingInterrupted"> & {
+export type EngineNeedsAttention = Omit<NeedsAttention, "waitingForCapacity" | "noUsableChannel" | "sendingInterrupted" | "heldTracks"> & {
+  readonly heldTracks: readonly Omit<NeedsAttention["heldTracks"][number], keyof AttentionLead>[];
   readonly waitingForCapacity: readonly Omit<NeedsAttention["waitingForCapacity"][number], keyof AttentionLead>[];
   readonly noUsableChannel: readonly Omit<NeedsAttention["noUsableChannel"][number], keyof AttentionLead>[];
 };
@@ -174,7 +176,7 @@ export async function needsAttention(
     }
     heldCapacity.push({ accountId: acc.id, held: held.length, capacity: acc.capacity, sentToday: await store.sentToday(acc.id, now), work });
   }
-  const heldTracks: NeedsAttention["heldTracks"][number][] = [];
+  const heldTracks: EngineNeedsAttention["heldTracks"][number][] = [];
   const waitingForCapacity: EngineNeedsAttention["waitingForCapacity"][number][] = [];
   const waitingOnTransport: NeedsAttention["waitingOnTransport"][number][] = [];
   // Ticket 20a (council B): while sending is interrupted, which providers the gate holds due sends on, by its own function.
@@ -187,7 +189,7 @@ export async function needsAttention(
     if (!stored) continue;
     for (const p of stored.tracks) {
       const reason = heldReason(stored, p.trackId, now);
-      if (reason) heldTracks.push({ enrollmentId: id, trackId: p.trackId, reason });
+      if (reason) heldTracks.push({ enrollmentId: id, trackId: p.trackId, reason, owners: unsettledOwnersOf(stored, p.trackId, now).map((o) => ({ name: o.name, test: o.test })) });
     }
     // Ticket 20a: as of the read, each due step the claim's step guard accepts now that waits for a transport the
     // provider cannot use yet, or for an account full for its reset day (not for a pacing slot or an in-flight place).

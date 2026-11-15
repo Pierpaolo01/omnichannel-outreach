@@ -16,7 +16,7 @@ import {
   retryFailures,
 } from "../../domain/sequence/dispatch.ts";
 import { compareReadyNow, focusOf, isListed, logCallOutcome, placeCall, readyCalls, reasonOf } from "../../domain/sequence/calls.ts";
-import { applyBadDestination, applyReply, applyToAttempt, applyToWork, asOfAction, enterMain, evaluate, releaseUnsentBindings, replyMatches, sameConversations, smsReplyOwner, withdrawalDue } from "../../domain/sequence/progress.ts";
+import { applyBadDestination, applyReply, applyToAttempt, applyToWork, asOfAction, enterMain, evaluate, releaseUnsentBindings, replyMatches, sameConversations, smsReplyOwner, stillSettled, withdrawalDue } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
 import { reconcileEdit, stillRunnable } from "../../domain/sequence/reconcile.ts";
 import { launchCheck } from "../../domain/sequence/blockers.ts";
@@ -109,6 +109,8 @@ export interface Rules {
   readonly versionsMatch: (computedFrom: SubjectState, current: SubjectState) => boolean;
   /** Releases the subject's own bindings with nothing sent, in every write (question Q7 answered, point 10). */
   readonly releaseUnsent: typeof releaseUnsentBindings;
+  /** Whether the claim stage's "nothing ready" for a subject still holds (`stillSettled`): the seam of its mutation. */
+  readonly readinessHolds: typeof stillSettled;
   /** Ticket 20a: the interruption ending at an instant, from the last heartbeat (more than INTERRUPTION_GAP before it). */
   readonly interruptionOf: typeof interruptionOf;
   /** Ticket 20a: what an interruption does to a lead: nothing (it is not a pause). */
@@ -188,6 +190,7 @@ export const DEFAULT_RULES: Rules = {
     JSON.stringify(a.lead) === JSON.stringify(b.lead) &&
     sameConversations(a, b),
   releaseUnsent: releaseUnsentBindings,
+  readinessHolds: stillSettled,
   interruptionOf,
   afterInterruption,
   rescheduled: rescheduledSteps,

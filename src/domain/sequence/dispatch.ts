@@ -277,7 +277,7 @@ export function handOver(state: SubjectState, attempt: Attempt, account: Account
   return {
     ...state,
     subject: sms ? { ...state.subject, smsSender: state.subject.smsSender ?? account.id } : { ...state.subject, emailSender: state.subject.emailSender ?? account.id },
-    smsBindings: binds ? [...state.smsBindings, { sender: account.id, recipient: attempt.destination, owner: state.subject.id, ownerCampaignId: state.campaign.id, ownerCampaignName: null, ownerIsTest: state.subject.kind === "test_run", ownerEnded: false, ownerSent: false }] : state.smsBindings,
+    smsBindings: binds ? [...state.smsBindings, { sender: account.id, recipient: attempt.destination, owner: state.subject.id, ownerCampaignId: state.campaign.id, ownerCampaignName: null, ownerIsTest: state.subject.kind === "test_run", ownerEnded: false, ownerSent: false, ownerAnswered: false }] : state.smsBindings,
     attempts: state.attempts.map((a) => (a.id === attempt.id ? handed : a)),
     work: state.work.map((w) => (w.key === attempt.idempotencyKey ? { ...w, calls: w.calls + 1, firstHandedWall: w.firstHandedWall ?? now, unresolvedSince: null } : w)),
     accounts: { ...state.accounts, [account.id]: { ...account, nextSlotAt: now + account.gapMs } },
