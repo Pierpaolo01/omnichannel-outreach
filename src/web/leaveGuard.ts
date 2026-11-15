@@ -115,10 +115,11 @@ if (typeof window !== "undefined") {
   const opened = entryOf(history.state);
   if (opened === null) history.replaceState({ ...((history.state as Record<string, unknown> | null) ?? {}), [KEY]: 0 }, "");
   else position = opened;
+  let last = `${location.pathname}${location.search}${location.hash}`;
   window.addEventListener(
     "popstate",
     (event) => {
-      const at = entryOf(event.state) ?? entryOf(history.state);
+      const at = entryOf(event.state);
       if (restoring) {
         // The guard's own move back to where the user was: the router never saw the move away, so it sees nothing now.
         restoring = false;
@@ -126,17 +127,46 @@ if (typeof window !== "undefined") {
         if (at !== null) position = at;
         return;
       }
-      if (guard && at !== null && !guard.allows(location.pathname)) {
-        // Before the router reads it: undo the move by the same distance, keeping every entry, and ask.
+      // Every traversal the router would follow is guarded, whatever its entry (review bot on 5b2f3c6): one a native
+      // fragment link made has no state of the router's.
+      if (guard && !guard.allows(location.pathname)) {
         event.stopImmediatePropagation();
-        const delta = at - position;
-        restoring = true;
-        history.go(-delta);
-        ask({ to: `${location.pathname}${location.search}`, kind: "history", delta });
+        const to = `${location.pathname}${location.search}`;
+        if (at !== null) {
+          // Undo the move by the same distance, keeping every entry, and ask.
+          const delta = at - position;
+          restoring = true;
+          history.go(-delta);
+          ask({ to, kind: "history", delta });
+        } else {
+          // An entry with no position (made outside this document's navigation): the address is put back, so the page
+          // and its unsent work stay, though the entries ahead cannot be kept; leaving then goes where the user asked.
+          position += 1;
+          history.pushState({ [KEY]: position }, "", last);
+          ask({ to, kind: "link" });
+        }
         return;
       }
       if (at !== null) position = at;
+      else {
+        // A new entry a native fragment link made (Skip to content): it takes the next position, so a later Back
+        // through it is measured like any other.
+        position += 1;
+        history.replaceState({ ...((history.state as Record<string, unknown> | null) ?? {}), [KEY]: position }, "");
+      }
+      last = `${location.pathname}${location.search}${location.hash}`;
     },
     { capture: true },
   );
+  // The router follows `hashchange` too: while a move is being undone or asked about, it must not see it either.
+  window.addEventListener(
+    "hashchange",
+    (event) => {
+      if (restoring || pending !== null) event.stopImmediatePropagation();
+      else last = `${location.pathname}${location.search}${location.hash}`;
+    },
+    { capture: true },
+  );
+  // Router navigation moves `last` too.
+  for (const kind of ["pushState", "replaceState"]) window.addEventListener(kind, () => (last = `${location.pathname}${location.search}${location.hash}`));
 }

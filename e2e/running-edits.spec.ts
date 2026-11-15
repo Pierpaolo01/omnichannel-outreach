@@ -267,4 +267,41 @@ test.describe("editing a running campaign", () => {
     await expect(page.getByText("This campaign launched with no track.")).toHaveCount(0);
     await expect(page.locator("#add-track")).toBeEnabled();
   });
+
+  test("Back through an entry a native link made is guarded too; a hash-only change on the page asks nothing (review bot on 5b2f3c6)", async ({ page }) => {
+    const id = await running();
+    await page.goto(`${f.url}/campaigns`);
+    // Skip to content, from the keyboard: a native fragment entry, /campaigns#main, with no router state.
+    await page.keyboard.press("Tab");
+    await expect(page.getByRole("link", { name: "Skip to content" })).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/\/campaigns#main$/);
+    await page.getByRole("link", { name: `Running edits ${n}`, exact: true }).click();
+    await page.getByRole("button", { name: /^Email track/ }).click();
+    await page.getByRole("button", { name: /^Email 2/ }).click();
+    await page.getByLabel("Email 2 copy").fill("Kept through a native entry.");
+    const panel = page.getByTestId("running-changes");
+    await expect(panel.getByRole("heading", { name: "Changes not applied yet" })).toBeVisible();
+    // A hash-only change on this page: no question, the draft stays.
+    await page.evaluate(() => {
+      location.hash = "main";
+    });
+    await expect(page).toHaveURL(new RegExp(`/campaigns/${id}.*#main$`));
+    const question = page.getByRole("group").filter({ hasText: "Leave without applying your changes?" });
+    await expect(question).toHaveCount(0);
+    await expect(panel.getByRole("heading", { name: "Changes not applied yet" })).toBeVisible();
+    // Back past it to the native entry: asked; Cancel keeps the draft.
+    await page.evaluate(() => history.go(-2));
+    await expect(question).toBeVisible();
+    await question.getByRole("button", { name: "Cancel" }).click();
+    await expect(page).toHaveURL(new RegExp(`/campaigns/${id}`));
+    await expect(panel.getByRole("heading", { name: "Changes not applied yet" })).toBeVisible();
+    await expect(page.getByLabel("Email 2 copy")).toHaveValue("Kept through a native entry.");
+    // Back again, and leave: the traversal completes, and nothing was applied.
+    await page.evaluate(() => history.go(-2));
+    await expect(question).toBeVisible();
+    await question.getByRole("button", { name: "Leave and discard changes" }).click();
+    await expect(page).toHaveURL(/\/campaigns(#main)?$/);
+    expect((await stored(id)).tracks[0]!.steps[1]!.body).toBe(COPY.second.body);
+  });
 });
