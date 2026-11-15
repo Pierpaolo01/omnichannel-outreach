@@ -5,6 +5,7 @@ import type { ActivityView, CallsView, CallTaskView, CampaignDetail, LeadSearchR
 
 const OWN_EMAIL = "alex.own@personal-mail.example";
 const OWN_MOBILE = "+447700900456";
+import type { CampaignDefinition } from "../domain/sequence/definition.ts";
 import { campaignMeasures } from "./measures.ts";
 import { DAY, HOUR, MIN, MONDAY_9, launch, measuresWorld } from "../../test/support/measures-world.ts";
 
@@ -180,6 +181,24 @@ describe("test runs count, marked as test (the principal's decision, 15 November
     expect([m.email.replies, m.email.fromTests.replies, m.replyRate.fromTests.numerator]).toEqual([1, 1, 1]);
     expect([m.calls.made - before.calls.made, m.calls.fromTests.made]).toEqual([1, 1]);
     expect(m.groups).toEqual({ ...before.groups });
+  });
+});
+
+describe("a measure counts what was recorded, never what the definition still holds (review bot on b8a8361)", () => {
+  test("a test's email sent before launch still counts after the draft deletes its track outright", async () => {
+    const world = await measuresWorld();
+    expect((await world.h.request("PUT", `/api/campaigns/${world.campaignId}/test-contacts`, { email: OWN_EMAIL, mobile: OWN_MOBILE })).status).toBe(200);
+    const tab = (await world.h.request<{ definitionVersion: number }>("GET", `/api/campaigns/${world.campaignId}/test-runs`)).body;
+    expect((await world.h.request("POST", `/api/campaigns/${world.campaignId}/test-runs`, { requestId: "draft-test", renderAs: world.lead("Pat Oneil"), expect: { definitionVersion: tab.definitionVersion } })).status).toBe(200);
+    await world.h.advanceTo(world.h.clock + 5 * MIN);
+    const before = await world.measures();
+    expect([before.email.sent, before.email.fromTests.sent]).toEqual([2, 2]);
+    // The draft deletes its email track outright (allowed before launch); the test's two emails were still sent.
+    const sequence = (await world.h.request<{ definition: CampaignDefinition }>("GET", `/api/campaigns/${world.campaignId}/sequence`)).body.definition;
+    await world.h.defineSequence(world.campaignId, { ...sequence, tracks: sequence.tracks.filter((t) => t.channel !== "email") });
+    const after = await world.measures();
+    expect([after.email.sent, after.email.fromTests.sent, after.replyRate.fromTests.denominator]).toEqual([2, 2, 1]);
+    expect(after.channels).toContain("email");
   });
 });
 

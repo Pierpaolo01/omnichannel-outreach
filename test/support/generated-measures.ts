@@ -147,6 +147,13 @@ export async function runMeasures(seed: number, options: MeasureRunOptions = {})
   }
   const second: CampaignDefinition = { ...definition, smsPool: [], tracks: [definition.tracks[0]!] };
   const campaignIds: string[] = [];
+  // Ticket 21's test runs (the principal's decision of 15 November 2026: counted, marked as test), each with its own record:
+  // its id, and the channel of its first reply. The user's own contacts are fictitious.
+  const tests = new Map<string, { firstReply: "email" | "sms" | null }>();
+  const isTest = (subjectId: string) => tests.has(subjectId);
+  // Review bot on b8a8361, from a stream of its own: in half the runs a test runs on the first campaign's draft with an extra
+  // email track, which the draft then deletes outright before launch; the test's messages on it still count.
+  const draftTest = random(seed ^ 0x22d)() < 0.5;
   for (const [i, def] of [definition, second].entries()) {
     const mine = leads.filter((l) => l.campaign === i);
     const harbour = business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101" });
@@ -158,6 +165,17 @@ export async function runMeasures(seed: number, options: MeasureRunOptions = {})
         : person({ person_id: `p${i}-${j}`, business_id: i === 0 ? "b1" : "b2", full_name: l.name, email: l.email, ...(l.mobile ? { dial_phone: l.mobile, dial_phone_type: "mobile" } : {}) }),
     );
     const { campaign } = await h.createCampaign(i === 0 ? "Clinics" : "Dentists", { businesses: companies, people });
+    if (i === 0 && draftTest) {
+      await h.defineSequence(campaign.id, { ...def, tracks: [...def.tracks, { id: "e9", channel: "email", branch: "main", window: ALWAYS, steps: [email("s9")], start: { kind: "entry" }, removed: false }] });
+      await h.request("PUT", `/api/campaigns/${campaign.id}/test-contacts`, { email: OWN_EMAIL, mobile: OWN_MOBILE });
+      const renderAs = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows[0]?.enrollments.find((e) => e.campaign.id === campaign.id)?.id ?? "";
+      const tab = (await h.request<TestRunTab>("GET", `/api/campaigns/${campaign.id}/test-runs`)).body;
+      const res = await h.request<TestRunTab>("POST", `/api/campaigns/${campaign.id}/test-runs`, { requestId: "draft-test", renderAs, expect: { definitionVersion: tab.definitionVersion } });
+      if (res.status === 200 && res.body.run) tests.set(res.body.run.id, { firstReply: null });
+      await h.advanceTo(h.clock + 5 * MIN);
+      if (h.fake.deliveryLog.some((d) => isTest(d.subjectId) && d.stepId === "s9")) features.add("a-test-sent-on-a-draft-track-later-deleted");
+    }
+    // The launched definition: in a draft-test run, without the extra track (deleted outright, as a draft may).
     await h.defineSequence(campaign.id, def);
     if ((await h.launch(campaign.id)).status !== 200) throw new Error("launch refused");
     campaignIds.push(campaign.id);
@@ -168,10 +186,6 @@ export async function runMeasures(seed: number, options: MeasureRunOptions = {})
 
   // The record's own log of calls the application accepted, and of the replies it made, per campaign.
   const callsLogged: { campaign: 0 | 1; test: boolean; outcome: Outcome }[] = [];
-  // Ticket 21's test runs (the principal's decision of 15 November 2026: counted, marked as test), each with its own record:
-  // its id, and the channel of its first reply. The user's own contacts are fictitious.
-  const tests = new Map<string, { firstReply: "email" | "sms" | null }>();
-  const isTest = (subjectId: string) => tests.has(subjectId);
   await h.request("PUT", `/api/campaigns/${campaignIds[0]}/test-contacts`, { email: OWN_EMAIL, mobile: OWN_MOBILE });
   let ids = 0;
 

@@ -21,13 +21,20 @@ export const MEASURE_MUTATIONS: Readonly<Record<string, { invariant: MeasureInva
   "a message handed to the provider counted as sent before it is": {
     invariant: "M2",
     seed: 0,
-    rules: { sent: (facts, channel) => tally(facts.attempts.filter((a) => facts.definition.tracks.find((t) => t.id === a.trackId)?.channel === channel), (a) => `${a.subjectId}/${a.stepId}/${a.state}`) },
+    rules: { sent: (facts, channel) => tally(facts.attempts.filter((a) => a.channel === channel), (a) => `${a.subjectId}/${a.stepId}/${a.state}`) },
   },
   // Council on 384630e (item 3): a track removed from a running campaign after it sent; its messages still count.
   "a removed track's messages no longer counted": {
     invariant: "M2",
     seed: 0,
-    rules: { sent: (facts, channel) => MEASURE_RULES.sent({ ...facts, definition: { ...facts.definition, tracks: facts.definition.tracks.filter((t) => !t.removed) } }, channel) },
+    rules: { sent: (facts, channel) => MEASURE_RULES.sent({ ...facts, attempts: facts.attempts.filter((a) => facts.definition.tracks.some((t) => t.id === a.trackId && !t.removed)) }, channel) },
+  },
+  // Review bot on b8a8361: messages counted through the definition's tracks, as built before, so a test's messages on a track a
+  // draft deleted outright are lost.
+  "messages counted through the definition's tracks, so a deleted track's are lost": {
+    invariant: "M2",
+    seed: 0,
+    rules: { sent: (facts, channel) => MEASURE_RULES.sent({ ...facts, attempts: facts.attempts.filter((a) => facts.definition.tracks.some((t) => t.id === a.trackId)) }, channel) },
   },
   "bounces not counted, only refusals": {
     invariant: "M3",

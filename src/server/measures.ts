@@ -1,5 +1,5 @@
 import { isOutreachStatus, STATUS_GROUPS, statusGroup, type OutreachStatus, type StatusGroup } from "../domain/outreach-status.ts";
-import type { CampaignDefinition, TrackChannel } from "../domain/sequence/definition.ts";
+import type { TrackChannel } from "../domain/sequence/definition.ts";
 import { CALL_OUTCOMES, callbackPending } from "../domain/sequence/calls.ts";
 import type { CallOutcome } from "../domain/sequence/state.ts";
 import type { CampaignMeasures, MeasureRate } from "../shared/api.ts";
@@ -14,26 +14,21 @@ import type { EngineStore, MeasureFacts } from "./engine/engine-store.ts";
 
 type MessageChannel = "email" | "sms";
 
-/** Where a track's work counts: its channel, from the definition, which keeps a removed track's channel (1.1). */
-function channelOfTrack(definition: CampaignDefinition, trackId: string): TrackChannel | null {
-  return definition.tracks.find((t) => t.id === trackId)?.channel ?? null;
-}
-
-/** Whether a track's channel carries messages of `channel` (exhaustive over the track channels). */
-function carries(channel: TrackChannel | null, wanted: MessageChannel): boolean {
-  switch (channel) {
+/**
+ * A message's channel: the stored channel of the sender account that sent it (`sender_accounts.channel`, which the schema
+ * checks is email or SMS), never the definition's tracks: a draft may delete a track outright after a test sent on it, and a
+ * measure counts what was recorded (review bot on b8a8361). Exhaustive over the stored values.
+ */
+function messageChannel(stored: string): MessageChannel | null {
+  switch (stored) {
     case "email":
     case "sms":
-      return channel === wanted;
-    case "call":
-    case null:
-      return false;
-    default: {
-      const never: never = channel;
-      return never;
-    }
+      return stored;
+    default:
+      return null;
   }
 }
+const on = (row: { readonly channel: string }, wanted: MessageChannel) => messageChannel(row.channel) === wanted;
 
 /** What one logged call outcome counts as (exhaustive over `CallOutcome`). Skip for now is not a call made. */
 export function callCounts(outcome: CallOutcome): { readonly made: boolean; readonly connected: boolean; readonly interested: boolean; readonly declined: boolean } {
@@ -144,12 +139,12 @@ export const MEASURE_RULES: MeasureRules = {
     return counts;
   },
 
-  sent: (facts, channel) => each(sentAttempts(facts).filter((a) => carries(channelOfTrack(facts.definition, a.trackId), channel))),
+  sent: (facts, channel) => each(sentAttempts(facts).filter((a) => on(a, channel))),
 
   /** Refused (a `failed` step result) or bounced after it was sent (a bounce event): each message once. */
   failedOrBounced: (facts, channel) =>
     tally(
-      [...facts.failures, ...facts.bounces].filter((m) => carries(channelOfTrack(facts.definition, m.trackId), channel)),
+      [...facts.failures, ...facts.bounces].filter((m) => on(m, channel)),
       (m) => `${m.subjectId}\u0000${m.stepId}`,
     ),
 
@@ -170,20 +165,22 @@ export const MEASURE_RULES: MeasureRules = {
   /** The subjects that replied, out of the subjects reached by email or SMS (a message sent, or a reply). */
   replyRate(facts) {
     const replied = repliedSubjects(facts, null);
-    const reached = [...replied, ...sentAttempts(facts).filter((a) => {
-      const channel = channelOfTrack(facts.definition, a.trackId);
-      return carries(channel, "email") || carries(channel, "sms");
-    })];
+    const reached = [...replied, ...sentAttempts(facts).filter((a) => messageChannel(a.channel) !== null)];
     return rate(each(replied), tally(reached, (r) => r.subjectId));
   },
 
   connectRate: (connected, made) => rate(connected, made),
 };
 
-/** The channels the campaign has tracks on, removed ones included (their activity stays), in the order the screen names them. */
-function channelsOf(definition: CampaignDefinition): CampaignMeasures["channels"] {
+/**
+ * The channels the screen names, in its order: those the campaign has tracks on (removed ones included), and any channel with
+ * recorded activity, so a figure whose track a draft deleted is still shown (review bot on b8a8361).
+ */
+function channelsOf(facts: MeasureFacts): CampaignMeasures["channels"] {
   const order: readonly TrackChannel[] = ["email", "sms", "call"];
-  return order.filter((c) => definition.tracks.some((t) => t.channel === c));
+  const recorded = new Set<TrackChannel>([...facts.attempts, ...facts.failures, ...facts.bounces, ...facts.replies].flatMap((r) => messageChannel(r.channel) ?? []));
+  if (facts.calls.length > 0) recorded.add("call");
+  return order.filter((c) => recorded.has(c) || facts.definition.tracks.some((t) => t.channel === c));
 }
 
 /** Every measure from one snapshot of facts: each figure, and how many of it came from test runs, from the same function. */
@@ -204,7 +201,7 @@ export function measuresOf(facts: MeasureFacts, overrides: Partial<MeasureRules>
     launched: facts.launched,
     leads: facts.enrollments.length,
     groups: rules.groups(facts),
-    channels: channelsOf(facts.definition),
+    channels: channelsOf(facts),
     email: messages("email"),
     sms: messages("sms"),
     calls: {

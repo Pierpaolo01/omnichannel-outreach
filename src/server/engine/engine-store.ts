@@ -447,12 +447,15 @@ export interface MeasureFacts {
   readonly enrollments: readonly { readonly id: string; readonly status: string; readonly ended: string | null; readonly stopReplyChannel: string | null; readonly personId: string | null }[];
   /** Each reply stored for a subject, oldest first (by its provider time, then the order stored). */
   readonly replies: readonly { readonly subjectId: string; readonly test: boolean; readonly channel: string; readonly atWall: number }[];
-  /** Each attempt handed to a provider, with its state and its work's provider send time. */
-  readonly attempts: readonly { readonly subjectId: string; readonly test: boolean; readonly trackId: string; readonly stepId: string; readonly state: string; readonly sentWall: number | null }[];
+  /**
+   * Each attempt handed to a provider, with its state, its work's provider send time, and its channel: its sender account's,
+   * a fact of the send that no edit of the definition changes (review bot on b8a8361). The same for failures and bounces.
+   */
+  readonly attempts: readonly { readonly subjectId: string; readonly test: boolean; readonly channel: string; readonly trackId: string; readonly stepId: string; readonly state: string; readonly sentWall: number | null }[];
   /** Each step result `failed`. */
-  readonly failures: readonly { readonly subjectId: string; readonly test: boolean; readonly trackId: string; readonly stepId: string }[];
+  readonly failures: readonly { readonly subjectId: string; readonly test: boolean; readonly channel: string; readonly trackId: string; readonly stepId: string }[];
   /** Each bounce event. */
-  readonly bounces: readonly { readonly subjectId: string; readonly test: boolean; readonly trackId: string; readonly stepId: string }[];
+  readonly bounces: readonly { readonly subjectId: string; readonly test: boolean; readonly channel: string; readonly trackId: string; readonly stepId: string }[];
   /** Each call outcome logged. */
   readonly calls: readonly { readonly subjectId: string; readonly test: boolean; readonly outcome: string }[];
   /** Each open callback task, with whether its subject's outreach has ended. */

@@ -226,18 +226,27 @@ export class SqliteEngineStore implements EngineStore {
           atWall: num(r, "at_wall"),
         })),
         attempts: rows(
-          `SELECT a.subject_id, e.kind, a.track_id, a.step_id, a.state, w.sent_wall FROM engine_subjects e JOIN attempts a ON a.subject_id = e.id
-             LEFT JOIN provider_work w ON w.key = a.idempotency_key ${and} a.handed_wall IS NOT NULL`,
-        ).map((r) => ({ subjectId: str(r, "subject_id"), test: test(r), trackId: str(r, "track_id"), stepId: str(r, "step_id"), state: str(r, "state"), sentWall: numOrNull(r, "sent_wall") })),
-        failures: rows(`SELECT r.subject_id, e.kind, r.track_id, r.step_id FROM engine_subjects e JOIN step_results r ON r.subject_id = e.id ${and} r.result = 'failed'`).map((r) => ({
+          `SELECT a.subject_id, e.kind, a.track_id, a.step_id, a.state, w.sent_wall, s.channel FROM engine_subjects e JOIN attempts a ON a.subject_id = e.id
+             JOIN sender_accounts s ON s.id = a.account_id LEFT JOIN provider_work w ON w.key = a.idempotency_key ${and} a.handed_wall IS NOT NULL`,
+        ).map((r) => ({ subjectId: str(r, "subject_id"), test: test(r), channel: str(r, "channel"), trackId: str(r, "track_id"), stepId: str(r, "step_id"), state: str(r, "state"), sentWall: numOrNull(r, "sent_wall") })),
+        // Each failure's channel is its attempt's sender account's: a fact of the send, not of the definition (review bot on b8a8361).
+        failures: rows(
+          `SELECT r.subject_id, e.kind, r.track_id, r.step_id, s.channel FROM engine_subjects e JOIN step_results r ON r.subject_id = e.id
+             JOIN attempts a ON a.id = r.attempt_id JOIN sender_accounts s ON s.id = a.account_id ${and} r.result = 'failed'`,
+        ).map((r) => ({
           subjectId: str(r, "subject_id"),
           test: test(r),
+          channel: str(r, "channel"),
           trackId: str(r, "track_id"),
           stepId: str(r, "step_id"),
         })),
-        bounces: rows(`SELECT b.subject_id, e.kind, b.track_id, b.step_id FROM engine_subjects e JOIN bounce_events b ON b.subject_id = e.id ${scope}`).map((r) => ({
+        bounces: rows(
+          `SELECT b.subject_id, e.kind, b.track_id, b.step_id, s.channel FROM engine_subjects e JOIN bounce_events b ON b.subject_id = e.id
+             JOIN provider_work w ON w.key = b.work_key JOIN sender_accounts s ON s.id = w.account_id ${scope}`,
+        ).map((r) => ({
           subjectId: str(r, "subject_id"),
           test: test(r),
+          channel: str(r, "channel"),
           trackId: str(r, "track_id"),
           stepId: str(r, "step_id"),
         })),
