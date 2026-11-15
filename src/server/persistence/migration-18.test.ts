@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
-import { UNDO_SINCE_18 } from "../../../test/support/undo-migrations.ts";
+import { UNDO_SINCE_18, UNDO_21 } from "../../../test/support/undo-migrations.ts";
 import type { CampaignDefinition } from "../../domain/sequence/definition.ts";
 import type { LeadSearchResult, TestRunTab } from "../../shared/api.ts";
 import { MIGRATIONS } from "./migrations.ts";
@@ -63,7 +63,7 @@ describe("migration 18 on a database written before it", () => {
     await before.store.close();
 
     const db = new DatabaseSync(file);
-    db.exec(undo);
+    db.exec(UNDO_21 + undo);
     expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()?.["v"]).toBe(undo === UNDO_SINCE_18 ? 17 : 16);
     db.close();
 

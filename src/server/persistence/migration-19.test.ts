@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from "node:fs";
+import { UNDO_21 } from "../../../test/support/undo-migrations.ts";
 import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
 import path from "node:path";
@@ -83,6 +84,7 @@ describe("migration 19 on a database written before it", () => {
       db.prepare("UPDATE replies SET provider_ref = ?").run(c.bare);
       // The database has the integration branch's migration 18 (ticket 21's test runs): 19 applies after it.
       expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()?.["v"]).toBe(MIGRATIONS.length);
+      db.exec(UNDO_21);
       db.exec("DELETE FROM schema_migrations WHERE version >= 19");
       expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()?.["v"]).toBe(18);
       expect(db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'test_runs'").get()?.["n"]).toBe(1);
@@ -132,7 +134,8 @@ describe("migration 19 on a database written before it", () => {
     insert.run("unsubscribed:lead-9", id, "email", MONDAY_9 + 10 * H);
     insert.run("em-3", id, "email", MONDAY_9 + 11 * H);
     insert.run("reply:em-3", id, "email", MONDAY_9 + 12 * H);
-    db.exec("DELETE FROM schema_migrations WHERE version >= 19");
+    db.exec(UNDO_21);
+      db.exec("DELETE FROM schema_migrations WHERE version >= 19");
     db.close();
 
     const after = harness(file, MONDAY_9 + DAY, "after");

@@ -1,4 +1,4 @@
-import { UNDO_SINCE_18 } from "../../../test/support/undo-migrations.ts";
+import { UNDO_SINCE_18, UNDO_21 } from "../../../test/support/undo-migrations.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
@@ -51,7 +51,7 @@ const harness = (databasePath: string) =>
 /** Takes a database back to just before migration 10: no bounce events table, no save-rule columns (11), no call tables (12, ticket 14a), no sessions' saves (13). */
 function beforeMigration10(file: string): void {
   const db = new DatabaseSync(file);
-  db.exec(`
+  db.exec(`${UNDO_21}
     DROP TABLE definition_saves;
     DROP TABLE notes;
     DROP TABLE call_attempts;

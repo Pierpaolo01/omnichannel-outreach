@@ -412,7 +412,9 @@ test("one person in two campaigns over SMS: with two free numbers, the second ca
   expect(fromB[0]?.sender).not.toBe(fromA[0]?.sender);
 
   // One number only: a third campaign that may use only the number the first campaign's conversation holds, with an
-  // email track and a phone track as well.
+  // email track and a phone track as well. It launches inside its window, after the first campaign's text was known
+  // sent, so its SMS track is skipped at that very instant.
+  const launchedAt = world_.harness.clock;
   const c = await campaign(world_, "Autumn follow-up, Bristol", rows, {
     ...textOnly([fromA[0]?.sender ?? ""]),
     emailPool: [INBOX],
@@ -422,7 +424,7 @@ test("one person in two campaigns over SMS: with two free numbers, the second ca
   await world_.harness.advanceTo(world_.harness.clock + 10 * MIN);
   // Its SMS track is skipped at once, with the reason: the first campaign keeps the conversation.
   const progress = (await world_.harness.request<EnrollmentProgress>("GET", `/api/enrollments/${pc}`)).body;
-  expect(progress.tracks.find((t) => t.trackId === "sms")).toMatchObject({ finishReason: "skipped_conversation_taken", hold: null, conversationOwners: [{ name: "Clinics, Bristol", test: false }] });
+  expect(progress.tracks.find((t) => t.trackId === "sms")).toMatchObject({ finishReason: "skipped_conversation_taken", finishedAt: new Date(launchedAt).toISOString(), hold: null, conversationOwners: [{ name: "Clinics, Bristol", test: false }] });
   // Its email and its call carry on: the email arrives, the call is on the list.
   expect(world_.harness.fake.deliveryLog.filter((d) => d.subjectId === pc).map((d) => d.rendered.body)).toEqual(["An email from the autumn campaign."]);
   const calls = (await world_.harness.request<{ readyNow: { enrollmentId: string }[]; laterToday: { enrollmentId: string }[] }>("GET", "/api/calls")).body;
