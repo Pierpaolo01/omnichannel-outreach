@@ -538,8 +538,17 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
     }
   }
 
-  async function compareWorld(w: World, seed: number) {
-    const h = new EngineHarness({ start: w.start, accounts: w.inboxes, sms: { numbers: w.numbers } });
+  async function compareWorld(w: World, seed: number, broken: ProjectionMutation = {}) {
+    // Question Q7 answered (review bot on bebdc06), from its own stream: in some worlds a competing campaign of the
+    // projected campaign's people, launched just before the projection, texts them on a number of its own, which the
+    // projected campaign's SMS tracks then use alone, when a window opens two hours after the projection's instant. One
+    // text at a time (an in-flight bound of 1, a seven-minute gap), so its texts take the conversations during the
+    // simulation, after the projected leads have settled, and they are skipped then.
+    const q7 = rng(seed + 7_007);
+    const projectedDef = w.campaigns.at(-1)!.definition;
+    const midRun = q7() < 0.4 && projectedDef.tracks.some((t) => t.channel === "sms" && t.branch === "main" && !t.removed) && w.campaigns.at(-1)!.leads.some((i) => w.people[i]!.mobile);
+    const ownNumber = { id: "+447700900990", capacity: 50, gapMs: 7 * MIN, k: 1, healthy: true, resetZone: "Europe/London" };
+    const h = new EngineHarness({ start: w.start, accounts: w.inboxes, sms: { numbers: midRun ? [...w.numbers, ownNumber] : w.numbers } });
     expect((await h.request("PUT", "/api/call-settings", { dailyCapacity: 50, userZone: "Europe/London" })).status).toBe(200);
     const r = rng(seed + 77);
     const d = rng(seed + 1616);
@@ -596,7 +605,20 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
       }
     }
     const target = ids.at(-1)!;
-    const projected = await projectedSends(h.store, target, h.clock);
+    if (midRun) {
+      const firstNumber = ownNumber.id;
+      const hour = Number(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", hour: "2-digit", hourCycle: "h23" }).format(h.clock));
+      const startHour = hour + 2 <= 21 ? hour + 2 : 7;
+      const opening = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: startHour, end: startHour + 2 }));
+      const texter = (await h.createCampaign("Competing texts", rows(w.campaigns.at(-1)!.leads))).campaign.id;
+      await h.defineSequence(texter, { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: projectedDef.emailPool, smsPool: [firstNumber], tracks: [{ id: "q7m", channel: "sms", branch: "main", window: opening, steps: [{ id: "q7m1", waitDays: 0, subject: "", body: "A text from another campaign.", threading: "new_subject", removed: false }], start: { kind: "entry" }, removed: false }] });
+      expect((await h.launch(texter)).status).toBe(200);
+      // An email straight after the first SMS track, so a skip the projection misses misses a send too.
+      const firstSms = projectedDef.tracks.find((t) => t.channel === "sms" && t.branch === "main" && !t.removed)!;
+      const after = { id: "q7e", channel: "email" as const, branch: "main" as const, window: [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 })), steps: [{ id: "q7e1", waitDays: 0, subject: "After the text", body: "An email after the text.", threading: "new_subject" as const, removed: false }], start: { kind: "after" as const, trackId: firstSms.id, delayDays: 0 }, removed: false };
+      await h.defineSequence(target, { ...projectedDef, smsPool: [firstNumber], tracks: [...projectedDef.tracks.map((t) => (t.channel === "sms" ? { ...t, window: opening } : t)), after] });
+    }
+    const projected = await projectedSends(h.store, target, h.clock, broken);
     const view = (await h.request<BeforeLaunchView>("GET", `/api/campaigns/${target}/before-launch`)).body;
     // The branch's sends are not counted, and the screen says so whenever the campaign has one (ticket 16) that a lead
     // can enter: a live branch track and a live phone track to decline on (council on aaf82b7).
@@ -639,7 +661,7 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
       for (const task of (await h.store.engine.subject(id, h.clock))!.callTasks) if (task.placedWall < until) callsActual.push(`${task.listDay} ${id} ${task.trackId}`);
     }
     const callsPredicted = (projected?.calls ?? []).filter((c) => c.at < until).map((c) => `${c.day} ${c.leadId} ${c.trackId}`);
-    return { actual, predicted, callsActual: callsActual.sort(), callsPredicted: callsPredicted.sort(), view, projected, noCall, taken, channels: new Set([...h.sms.deliveryLog.slice(already.sms)].filter((d) => mine.has(d.subjectId)).length > 0 ? ["sms"] : []) };
+    return { actual, predicted, callsActual: callsActual.sort(), callsPredicted: callsPredicted.sort(), view, projected, noCall, taken, midRun, channels: new Set([...h.sms.deliveryLog.slice(already.sms)].filter((d) => mine.has(d.subjectId)).length > 0 ? ["sms"] : []) };
   }
 
   const SEEDS = Number(process.env["PROJECTION_SEEDS"] ?? 40);
@@ -654,9 +676,10 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
   }
   /** The projection lists exactly the engine's placements and sends (ticket 14c: nothing is withheld in these worlds). */
   async function verify(w: World, seed: number) {
-    const { actual, predicted, callsActual, callsPredicted, view, projected, noCall, taken, channels } = await compareWorld(w, seed);
+    const { actual, predicted, callsActual, callsPredicted, view, projected, noCall, taken, midRun, channels } = await compareWorld(w, seed);
     texted.push(channels.has("sms"));
     if (taken) takenWorlds.push(seed);
+    if (taken && midRun) takenMidRunWorlds.push(seed);
     // Every track has a sender in these worlds, so nothing is withheld: a track after a phone track is
     // projected too, its call worked on its day with no answer, as the engine's user works it (ticket 14c).
     expect(view.load?.withheldBy ?? null).toBeNull();
@@ -693,6 +716,12 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
   const afterCallWorlds: number[] = [];
   const calledWorlds: number[] = [];
   const takenWorlds: number[] = [];
+  const takenMidRunWorlds: number[] = [];
+  /**
+   * The world that kills "a dirty watcher keeps its cached evaluation" (a search over 13000 to 13039 with the drawn event:
+   * only 13018 both skips mid-run and has a send after the skip the broken projection misses).
+   */
+  const KEEP_SETTLED_SEED = 13_018;
   test("the projected worlds place calls (ticket 14c)", () => {
     expect(calledWorlds.length).toBeGreaterThan(SEEDS / 8);
   });
@@ -718,6 +747,16 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
   });
   test("the worlds skip SMS tracks whose conversation another campaign holds, and the projection follows (question Q7 answered)", () => {
     expect(takenWorlds.length).toBeGreaterThan(0);
+  });
+  test("the worlds skip SMS tracks for a conversation another campaign takes while the projection runs (review bot on bebdc06)", () => {
+    expect(takenMidRunWorlds.length).toBeGreaterThan(0);
+  });
+  // The one settling rule (ADR 0003, question Q7 answered): a projection that keeps a settled evaluation when the
+  // conversations change misses a skip, and a send after it, that the engine makes, in this recorded world.
+  test("the generated worlds break a projection where a dirty watcher keeps its cached evaluation", async () => {
+    const out = await compareWorld(world(KEEP_SETTLED_SEED), KEEP_SETTLED_SEED, { keepSettledAcrossConversations: true });
+    expect(out.midRun).toBe(true);
+    expect(out.predicted).not.toEqual(out.actual);
   });
 });
 

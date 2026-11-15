@@ -3,6 +3,7 @@ import type { CampaignDefinition, DeclinedPath, StepDefinition, TrackDefinition 
 import type { Rules } from "../../src/server/engine/rules.ts";
 import type { CallsView, LeadSearchResult, TestRunTab } from "../../src/shared/api.ts";
 import { EngineHarness, quickWait } from "./engine-harness.ts";
+import { end } from "../../src/domain/sequence/progress.ts";
 import { business, person } from "./export-builder.ts";
 import type { DeliveryLogEntry, HandoverLogEntry } from "./fake-email-port.ts";
 import { random } from "./generated-sequences.ts";
@@ -132,6 +133,72 @@ export async function runTestRuns(seed: number, options: TestRunOptions = {}): P
   const leadEmails = leads.flatMap((l) => (l.email ? [l.email] : []));
   const leadKeys = new Set([...leadEmails, ...leads.flatMap((l) => (l.mobile ? [l.mobile] : []))]);
 
+  // Question Q7 answered (ADR 0003, provisional for test runs; the council and the verifier on bebdc06), from a stream of
+  // its own so the draws above and below are unchanged: in some runs a second campaign, never launched, runs tests on the
+  // same test mobile and the one number, kept running by a test call no one logs. While its text is known sent and it
+  // runs, it owns that conversation, and this campaign's test skips its SMS track (T11). Now and then, between one of this
+  // campaign's tests' evaluations and its write, another process stops the other test, which releases the conversation:
+  // the write must be refused, and the test texts.
+  const rq = random(seed ^ 0x0717);
+  const otherTests = rq() < 0.5;
+  const otherAt = { first: rq(), second: rq() };
+  let raceBudget = rq() < 0.7 ? 2 : 0;
+  const other = otherTests
+    ? (
+        await h.createCampaign("Clinics, Leeds", {
+          businesses: [business({ business_id: "b9", business_name: "Leeds Physio" })],
+          people: [person({ person_id: "p9", business_id: "b9", full_name: "Robin Vale", email: "robin@leeds-physio.example" })],
+        })
+      ).campaign.id
+    : null;
+  /** The other campaign's runs: when each started and, once it has, when it ended (as stored). */
+  const otherRuns = new Map<string, { startedAt: number; endedAt: number | null }>();
+  /** The instants at which the record released the other test's conversation between one of this campaign's tests' evaluations and its write. */
+  const releasedMidWrite = new Map<string, number[]>();
+  if (other) {
+    await h.defineSequence(other, {
+      timezone: "Europe/London",
+      callSkipLimitDays: 2,
+      emailPool: [INBOX],
+      smsPool: [NUMBER],
+      tracks: [
+        { id: "om", channel: "sms", branch: "main", window: ALWAYS, steps: [step("om1", 0, rq)], start: { kind: "entry" }, removed: false },
+        { id: "op", channel: "call", branch: "main", window: WEEKDAYS, steps: [callStep("oc1")], start: { kind: "entry" }, removed: false },
+      ],
+    });
+    await h.request("PUT", `/api/campaigns/${other}/test-contacts`, { email: OWN_EMAIL, mobile: OWN_MOBILE });
+    features.add("another-campaign-tests-on-the-same-mobile");
+  }
+  const otherRunning = () => [...otherRuns.keys()].find((id) => db.prepare("SELECT ended FROM test_runs WHERE id = ?").get(id)?.["ended"] == null) ?? null;
+  const runOtherTest = async () => {
+    if (!other || otherRunning() !== null) return;
+    const read = (await h.request<TestRunTab>("GET", `/api/campaigns/${other}/test-runs`)).body;
+    const lead = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${other}`)).body.rows[0]?.enrollments[0]?.id ?? "";
+    const res = await h.request<TestRunTab>("POST", `/api/campaigns/${other}/test-runs`, { requestId: `other-${++requests}`, renderAs: lead, expect: { definitionVersion: read.definitionVersion } });
+    if (res.status === 200 && res.body.run) {
+      otherRuns.set(res.body.run.id, { startedAt: h.clock, endedAt: null });
+      features.add("another-campaign-test-runs");
+    }
+  };
+  h.hooks = {
+    beforeApplyEvaluation: async (id) => {
+      const owner = otherRunning();
+      if (raceBudget <= 0 || owner === null || !runs.has(id) || !h.sms.deliveryLog.some((d) => d.subjectId === owner)) return;
+      // Only when this evaluation is the skip: the test's SMS track started, unfinished, its step due, no attempt live.
+      const st = await h.store.engine.subject(id, h.clock);
+      const m = st?.tracks.find((t) => t.trackId === "m");
+      const lead = st ? (st.subject.clock.frozenSince ?? h.clock) - st.subject.clock.frozenTotal : 0;
+      if (!st || !m || m.startedAt === null || m.finishedAt !== null || m.dueAt === null || m.dueAt > lead || st.attempts.some((a) => a.trackId === "m" && ["claimed", "handed", "accepted"].includes(a.state))) return;
+      raceBudget--;
+      // Another process stops the other test: one committed write on that test alone, which releases its conversation.
+      const stopped = { ok: (await h.store.engine.update(owner, h.clock, (o) => end(o, "stopped_manually", h.clock))) !== null };
+      if (stopped.ok) {
+        releasedMidWrite.set(id, [...(releasedMidWrite.get(id) ?? []), h.clock]);
+        features.add("a-conversation-released-during-a-write");
+      }
+    },
+  };
+
   // ---- The record.
   const db = (h.store.engine as unknown as { db: DatabaseSync }).db;
   const runs = new Map<string, { contacts: Set<string>; startedAt: number; endedAt: number | null; renderAs: string; replyAt: number | null; replyHandovers: number; editAt: number | null; editHandovers: number }>();
@@ -192,7 +259,9 @@ export async function runTestRuns(seed: number, options: TestRunOptions = {}): P
     for (const x of hs) {
       if (isTest(x.subjectId)) {
         const r = runs.get(x.subjectId);
-        if (!r?.contacts.has(x.destination)) problems.push(`T1: test run ${x.subjectId} handed ${x.stepId} to ${x.destination}, not its test contact (${event})`);
+        if (otherRuns.has(x.subjectId)) {
+          if (x.destination !== OWN_MOBILE && x.destination !== OWN_EMAIL) problems.push(`T1: the other campaign's test run ${x.subjectId} handed ${x.stepId} to ${x.destination}, not its test contact (${event})`);
+        } else if (!r?.contacts.has(x.destination)) problems.push(`T1: test run ${x.subjectId} handed ${x.stepId} to ${x.destination}, not its test contact (${event})`);
         if (leadKeys.has(x.destination)) problems.push(`T1: test run ${x.subjectId} handed ${x.stepId} to a lead's ${x.destination} (${event})`);
       }
     }
@@ -265,6 +334,23 @@ export async function runTestRuns(seed: number, options: TestRunOptions = {}): P
       if (carried > 0 && t10Paused(heldAtStart, tasks, start)) features.add("a-test-call-carried-while-paused");
       if (placed > Math.max(0, callCapacity - carried)) problems.push(`T10: ${placed} calls placed on ${day} with ${carried} listed calls carried into it and a capacity of ${callCapacity} (${event})`);
     }
+    // T11 (question Q7 answered, provisional for test runs): a test's SMS track is skipped for a taken conversation only
+    // while another test owns it, its text to the test mobile from the number known sent, and that test still running; and
+    // never at an instant at which the record released that conversation between the test's evaluation and its write.
+    for (const id of otherRuns.keys()) {
+      const row = db.prepare("SELECT ended_wall FROM test_runs WHERE id = ?").get(id);
+      const r = otherRuns.get(id)!;
+      if (row?.["ended_wall"] != null && r.endedAt === null) r.endedAt = Number(row["ended_wall"]);
+    }
+    for (const row of db.prepare("SELECT subject_id, finished_wall FROM track_progress WHERE finish_reason = 'skipped_conversation_taken'").all()) {
+      const id = String(row["subject_id"]);
+      const at = Number(row["finished_wall"]);
+      if (!runs.has(id)) continue;
+      const owner = [...otherRuns.entries()].find(([o, r]) => r.startedAt <= at && (r.endedAt === null || r.endedAt >= at) && ds.some((d) => d.subjectId === o && d.destination === OWN_MOBILE && d.sender === NUMBER && Math.min(d.visibleAt, Infinity) <= at));
+      if (!owner) problems.push(`T11: test run ${id} skipped its SMS track at ${new Date(at).toISOString()} with no other running test's text known sent to the test mobile (${event})`);
+      if ((releasedMidWrite.get(id) ?? []).includes(at)) problems.push(`T11: test run ${id} stored a skip at ${new Date(at).toISOString()} on a conversation released between its evaluation and its write (${event})`);
+      features.add("a-test-skips-its-text-for-another-test-s-conversation");
+    }
     // T9: an ended test holds no SMS conversation.
     for (const b of db.prepare("SELECT b.owner_subject FROM sms_bindings b JOIN test_runs t ON t.id = b.owner_subject WHERE b.released_at IS NULL AND t.ended IS NOT NULL").all()) {
       problems.push(`T9: ended test run ${String(b["owner_subject"])} still holds its SMS conversation (${event})`);
@@ -280,12 +366,13 @@ export async function runTestRuns(seed: number, options: TestRunOptions = {}): P
   // ---- The events.
   const events = 18 + Math.floor(rand() * 14);
   for (let e = 0; e < events && problems.length === 0 && !h.stopped; e++) {
+    if (other && (e === Math.floor(otherAt.first * events) || e === Math.floor(otherAt.second * events))) await runOtherTest();
     const roll = rand();
     const running = runningRun();
     let event = "";
     // A test call on the list is logged more often than chance would: the outcomes are what the call paths are about.
-    const ready = phone && running !== null && logsTestCalls ? (await h.request<CallsView>("GET", "/api/calls")).body.readyNow.find((c) => c.test) : undefined;
-    const listedTest = carryWhilePaused && phone && running !== null ? (await h.request<CallsView>("GET", "/api/calls")).body.readyNow.find((c) => c.test) : undefined;
+    const ready = phone && running !== null && logsTestCalls ? (await h.request<CallsView>("GET", "/api/calls")).body.readyNow.find((c) => c.test && c.campaign.id === campaign.id) : undefined;
+    const listedTest = carryWhilePaused && phone && running !== null ? (await h.request<CallsView>("GET", "/api/calls")).body.readyNow.find((c) => c.test && c.campaign.id === campaign.id) : undefined;
     if (listedTest) {
       carryWhilePaused = false;
       if (!launched) {

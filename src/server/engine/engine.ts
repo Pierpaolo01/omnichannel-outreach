@@ -1047,7 +1047,9 @@ export class Engine {
       // The evaluation is stored only if nothing it read has changed since its snapshot, the SMS conversations it read
       // included (`versionsMatch`, checked in the write's own transaction): a binding taken, released or found sent since
       // refuses it, and the next pass decides again on the state as it is (question Q7 answered). Accounts it never reads.
-      await this.update(id, now, (current) => (this.rules.versionsMatch(snapshot, current) ? { ...next, accounts: current.accounts } : null));
+      // Written over the current accounts and bindings: an evaluation adds or removes no binding, so with the guard
+      // above they are the snapshot's; without it, it could never remove one another process released or add one taken.
+      await this.update(id, now, (current) => (this.rules.versionsMatch(snapshot, current) ? { ...next, accounts: current.accounts, smsBindings: current.smsBindings } : null));
       // Written, or discarded as stale: either way another pass follows, so a discarded change is
       // re-evaluated on fresh state in this tick (2.5).
       changed = true;

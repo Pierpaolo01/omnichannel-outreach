@@ -12,7 +12,9 @@ import { TEST_RUN_MUTATIONS } from "./test-run-mutations.ts";
 
 export const TEST_RUN_SEED = 21_000;
 /** Offsets from TEST_RUN_SEED, re-chosen from a sweep of all 100 after the call stream (review bot on 55d6ac6), to reach every behaviour below, and each mutation's killing seed. */
-export const TEST_RUN_FIXED_SEEDS: readonly number[] = [0, 1, 2, 7, 8, 10, 59];
+// 25 (question Q7 answered, after the reviews of bebdc06): a test skips its text for another campaign's test's
+// conversation, and that conversation is released between a test's evaluation and its write.
+export const TEST_RUN_FIXED_SEEDS: readonly number[] = [0, 1, 2, 7, 8, 10, 25, 59];
 const SEARCH_SEEDS = 100;
 const MAX_SEEDS = 30;
 const RUN_WRITES = 10_000;
@@ -20,6 +22,10 @@ const RUN_WRITES = 10_000;
 /** Every behaviour the fixed seeds must reach between them. A name leaves it only into RETIRED_TEST_RUN_FEATURES, with its reason. */
 export const TEST_RUN_FEATURES: readonly string[] = [
   "a-campaign-pause",
+  "a-conversation-released-during-a-write",
+  "a-test-skips-its-text-for-another-test-s-conversation",
+  "another-campaign-test-runs",
+  "another-campaign-tests-on-the-same-mobile",
   "a-lead-reply",
   "a-lead-s-email-refused-as-a-test-contact",
   "a-test-after-another-ended",
