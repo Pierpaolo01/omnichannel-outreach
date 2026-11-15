@@ -16,7 +16,7 @@ import { judgeCampaignControl, type LeadControl, type LeadExpectation } from "..
 import type { ControlView } from "../../shared/api.ts";
 import { effectOf } from "./controls-view.ts";
 import { impactDigest } from "./edit-impact.ts";
-import type { ControlRecord, DefinitionSave, EngineStore, ReplyEvent, SaveResult, StoredDefinition } from "./engine-store.ts";
+import { storableAccount, type ControlRecord, type DefinitionSave, type EngineStore, type ReplyEvent, type SaveResult, type StoredDefinition } from "./engine-store.ts";
 import type { StoredReplyId } from "../../domain/sequence/reply-identity.ts";
 
 /** A control's answer. `effect`: the control's own effect, which the read previewed at that instant; null for a campaign's. */
@@ -466,11 +466,14 @@ export class Engine {
     const room = new Map<string, { from: number; to: number }[]>();
     for (const a of await this.store.accounts(this.now())) {
       const stretches: { from: number; to: number }[] = [];
+      // Today's room on today's reset day, the daily limit on the earlier days of the gap (council on PR 63).
+      const today = localDayNumber(this.now(), a.resetZone);
       for (let t = gap.from; t < gap.to; ) {
         const next = startOfLocalDay(localDayNumber(t, a.resetZone) + 1, a.resetZone);
         const from = Math.max(t, a.nextSlotAt);
         const to = Math.min(next, gap.to);
-        if (from < to && (await this.store.sentToday(a.id, t)) < a.capacity) stretches.push({ from, to });
+        const room = localDayNumber(t, a.resetZone) === today ? a.capacity : a.dailyLimit;
+        if (from < to && (await this.store.sentToday(a.id, t)) < room) stretches.push({ from, to });
         t = next;
       }
       room.set(a.id, stretches);
@@ -622,13 +625,15 @@ export class Engine {
   private async syncAccounts(): Promise<boolean> {
     let all = true;
     for (const channel of CHANNELS) {
-      const statuses = await this.bounded(() => this.ports[channel].accounts(), null);
+      let statuses = await this.bounded(() => this.ports[channel].accounts(), null);
       if (statuses === null) {
         all = false;
         await this.readFailed(channel, "accounts");
         continue;
       }
       this.readAnswered(channel, "accounts");
+      // One account's report the store cannot hold holds that account alone; it never fails the tick (`storableAccount`).
+      statuses = statuses.flatMap((s) => storableAccount(s, channel) ?? []);
       await this.store.upsertAccounts(statuses);
       // An account its provider no longer lists is disconnected: claims for it wait, and Needs attention lists it.
       await this.store.disconnectUnlisted(channel, statuses.map((a) => a.id));
