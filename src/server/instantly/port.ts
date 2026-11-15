@@ -113,7 +113,14 @@ const META = {
   /** When the last status scan of the campaign that reached its end began. */
   statusScanComplete: (campaignKey: string) => `status_scan_complete|${campaignKey}`,
   analytics: (day: string, inbox: string) => `analytics_sent_max|${day}|${inbox}`,
+  /** Analytics' count of the day's sends, as Instantly sent it, when it was not a whole number of sends (JSON). */
+  analyticsInvalid: (day: string, inbox: string) => `analytics_sent_invalid|${day}|${inbox}`,
 } as const;
+
+/** A count of sends as the store holds one: a whole, non-negative number (`storableAccount` checks the same). */
+function wholeSends(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
 
 /** The most pages a whole read (an inbox list, one thread) goes to; a longer one counts as incomplete. */
 const WHOLE_READ_PAGES = 1_000;
@@ -243,8 +250,16 @@ export class InstantlyEmailPort implements SendPort {
     this.analyticsReadWall = now;
     for (const entry of result.body) {
       if (entry.date !== day) continue;
+      // A count that is not a whole number of sends is kept as sent, for the inbox's report to carry to the check
+      // (`storableAccount`), never cast or clamped into the running maximum (re-check of 2c0f69c). A later whole count clears it.
+      const sent: unknown = entry.sent;
+      if (!wholeSends(sent)) {
+        this.store.setMeta(META.analyticsInvalid(day, entry.email_account), JSON.stringify(sent ?? null));
+        continue;
+      }
+      this.store.setMeta(META.analyticsInvalid(day, entry.email_account), "");
       // A running maximum through the day, so analytics lag never lowers it (ADR 0002).
-      this.store.raiseMeta(META.analytics(day, entry.email_account), entry.sent);
+      this.store.raiseMeta(META.analytics(day, entry.email_account), sent);
     }
   }
 
@@ -270,22 +285,28 @@ export class InstantlyEmailPort implements SendPort {
     const now = this.now();
     const day = resetDayOf(now, this.config.resetZone);
     const fresh = this.fresh(a.email, now);
-    const limit = a.daily_limit ?? 0;
+    // Instantly's numbers reach `storableAccount` as Instantly sent them (re-check of 2c0f69c: a negative limit clamped to 0
+    // read as "no daily limit"). Arithmetic runs only on whole, non-negative counts; anything else is passed on raw, and
+    // the check holds the inbox as an invalid report. A limit that is absent or 0 is "no daily limit".
+    const limit: unknown = a.daily_limit ?? 0;
+    const badSent = this.store.meta(META.analyticsInvalid(day, a.email)) ?? "";
+    const rawSent: unknown = badSent === "" ? null : JSON.parse(badSent);
     const other = Math.max(0, Number(this.store.meta(META.analytics(day, a.email)) ?? 0) - this.appSentToday(a.email, day));
-    const reason: InboxHoldReason | null = !this.client.writes ? "sending_off" : a.status !== 1 ? "not_active" : limit <= 0 ? "no_daily_limit" : !fresh ? "stale" : null;
-    const reported: AccountStatus = {
+    const room: unknown = !wholeSends(limit) ? limit : badSent !== "" ? rawSent : Math.max(0, limit - other);
+    const reason: InboxHoldReason | null = !this.client.writes ? "sending_off" : a.status !== 1 ? "not_active" : limit === 0 ? "no_daily_limit" : !fresh ? "stale" : null;
+    const reported = {
       id: a.email,
       channel: "email",
       label: a.email,
-      capacity: Math.max(0, limit - other),
-      dailyLimit: Math.max(0, limit),
+      capacity: room,
+      dailyLimit: limit,
       gapMs: null,
       k: this.config.k,
       healthy: reason === null,
       problem: reason,
       resetZone: this.config.resetZone,
       quotaAvailable,
-    };
+    } as unknown as AccountStatus;
     return storableAccount(reported, "email") ?? { ...reported, capacity: 0, dailyLimit: 0, healthy: false, problem: "invalid_report" };
   }
 
