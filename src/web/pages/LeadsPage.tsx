@@ -388,7 +388,8 @@ function LeadTableRow({ row, selected, onSelect }: { row: LeadRow; selected: boo
           )
         )}
       </td>
-      <td className="px-1.5 py-3.5 sm:px-3.5">
+      {/* Below 640px a status badge may wrap, so the four columns fit at 390px whatever the fonts measure (CI on 9daf7c0). */}
+      <td className="px-1.5 py-3.5 max-sm:[&_li>span:first-child]:whitespace-normal sm:px-3.5">
         <EnrollmentList
           enrollments={row.enrollments}
           empty={[
