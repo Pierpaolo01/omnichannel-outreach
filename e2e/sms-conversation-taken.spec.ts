@@ -28,7 +28,7 @@ async function shot(page: Page, name: string, target: Locator): Promise<void> {
 test("a lead whose SMS track was skipped for another campaign's conversation: the record says why and names the campaign, and the email after it went", async ({ page }) => {
   const f = await fakeTakenConversationApp();
   await page.clock.setFixedTime(f.harness.clock);
-  await page.goto(`${f.url}/people/${f.person("Pat Oneil")}`);
+  await page.goto(`${f.url}/leads/people/${f.person("Pat Oneil")}`);
   await expect(page.getByRole("heading", { name: "Pat Oneil" })).toBeVisible();
   const skipped = page.getByText(TAKEN);
   await expect(skipped).toBeVisible();
@@ -41,14 +41,14 @@ test("a lead whose SMS track was skipped for another campaign's conversation: th
 test("a lead whose only channel was that SMS track ends with no usable channel; the record and Today say why", async ({ page }) => {
   const f = await fakeTakenConversationApp();
   await page.clock.setFixedTime(f.harness.clock);
-  await page.goto(`${f.url}/people/${f.person("Nia Cole")}`);
+  await page.goto(`${f.url}/leads/people/${f.person("Nia Cole")}`);
   await expect(page.getByRole("heading", { name: "Nia Cole" })).toBeVisible();
-  await expect(page.getByText("Nothing is left to reach them on in this campaign.")).toBeVisible();
+  await expect(page.getByText("Nothing is left to reach them on in this campaign.").first()).toBeVisible();
   const skipped = page.getByText(TAKEN);
   await expect(skipped).toBeVisible();
-  await shot(page, "02-record-no-usable-channel", page.getByText("Nothing is left to reach them on in this campaign."));
+  await shot(page, "02-record-no-usable-channel", page.getByText("Nothing is left to reach them on in this campaign.").first());
   await page.goto(`${f.url}/`);
-  const attention = page.getByText("Now their mobile is in a text conversation with campaign Spring clinics on every number this campaign can use.");
+  const attention = page.getByText("Now their mobile is in a text conversation with campaign Spring clinics on every number this campaign can use and they have no email address.");
   await expect(attention).toBeVisible();
   await shot(page, "03-today-needs-attention", attention);
 });

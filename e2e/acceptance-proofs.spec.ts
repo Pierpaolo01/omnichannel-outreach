@@ -7,7 +7,7 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { expect, test, type Page } from "@playwright/test";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../src/domain/sequence/definition.ts";
-import type { Campaign, LeadSearchResult, NeedsAttention, TodayView } from "../src/shared/api.ts";
+import type { Campaign, EnrollmentProgress, LeadSearchResult, NeedsAttention, TodayView } from "../src/shared/api.ts";
 import { FakeEmailPort } from "../test/support/fake-email-port.ts";
 import { business, csvOf, person, type ExportRows } from "../test/support/export-builder.ts";
 import { acceptanceWorld, DAY, exportFiles, H, INBOX, MIN, NUMBERS, OWN_EMAIL, OWN_MOBILE, PEOPLE, type AcceptanceWorld, type WorldOptions } from "./acceptance-world.ts";
@@ -396,7 +396,7 @@ test("one person in two campaigns stays independent for email and calls: stopped
   expect((await world_.read(await world_.lead("Finn Wood", first))).status).not.toBe("stopped_manually");
 });
 
-test("one person in two campaigns over SMS: with two free numbers, the second campaign texts them from the other number; with one number, the second campaign's SMS track waits and Needs attention says why (ADR 0003 4.5, question Q7)", async ({ page }) => {
+test("one person in two campaigns over SMS: with two free numbers, the second campaign texts them from the other number; with one number, the second campaign skips its SMS track with the reason shown, its email and call carry on, and the lead finishes (ADR 0003 4.5, question Q7 answered)", async ({ page }) => {
   const world_ = await world();
   const rows = clinic(["Pat Oneil"]);
   const textOnly = (pool: string[]) => definition([track("sms", "sms", [step("m1", { body: "A text from {{company}}'s campaign." })])], { emailPool: [], smsPool: pool });
@@ -420,18 +420,29 @@ test("one person in two campaigns over SMS: with two free numbers, the second ca
   });
   const pc = await world_.lead("Pat Oneil", c);
   await world_.harness.advanceTo(world_.harness.clock + 10 * MIN);
+  // Its SMS track is skipped at once, with the reason: the first campaign keeps the conversation.
+  const progress = (await world_.harness.request<EnrollmentProgress>("GET", `/api/enrollments/${pc}`)).body;
+  expect(progress.tracks.find((t) => t.trackId === "sms")).toMatchObject({ finishReason: "skipped_conversation_taken", hold: null, conversationOwners: [{ name: "Clinics, Bristol", test: false }] });
   // Its email and its call carry on: the email arrives, the call is on the list.
   expect(world_.harness.fake.deliveryLog.filter((d) => d.subjectId === pc).map((d) => d.rendered.body)).toEqual(["An email from the autumn campaign."]);
   const calls = (await world_.harness.request<{ readyNow: { enrollmentId: string }[]; laterToday: { enrollmentId: string }[] }>("GET", "/api/calls")).body;
   expect([...calls.readyNow, ...calls.laterToday].map((x) => x.enrollmentId)).toContain(pc);
+  // The user works the call; with nothing else left, the lead finishes.
+  await at(page, world_, "/calls");
+  await page.getByRole("group", { name: "Call outcome" }).getByRole("button", { name: "No answer", exact: true }).click();
+  await page.getByRole("button", { name: /^Log/ }).first().click();
+  await expect(page.locator("p[role='status']").first()).toBeVisible();
   await world_.harness.advanceTo(world_.harness.clock + DAY);
-  // Its SMS track sends nothing: today's behaviour, held (the principal's decision of 15 November 2026 changes it to a
-  // skip with the reason shown, in its own pull request).
   expect(world_.harness.sms.deliveryLog.filter((d) => d.subjectId === pc)).toHaveLength(0);
+  expect((await world_.harness.request<EnrollmentProgress>("GET", `/api/enrollments/${pc}`)).body.status).toBe("sequence_finished_no_response");
+  // Nothing waits on the user for it.
   const needs = (await world_.harness.request<NeedsAttention>("GET", "/api/needs-attention")).body;
-  expect(needs.heldTracks.filter((t) => t.enrollmentId === pc).map((t) => t.reason)).toEqual(["sms_conversation_taken"]);
-  await at(page, world_, "/");
-  await expect(page.getByRole("region", { name: "Needs attention" })).toContainText("the mobile is in another campaign’s SMS conversation from every number this campaign may use");
+  expect(needs.heldTracks.filter((t) => t.enrollmentId === pc)).toEqual([]);
+  expect(needs.noUsableChannel.filter((t) => t.enrollmentId === pc)).toEqual([]);
+  // The person's record says why, naming the campaign that keeps the conversation.
+  const person = (await world_.harness.request<LeadSearchResult>("GET", "/api/leads?q=Pat%20Oneil")).body.rows.find((r) => r.name === "Pat Oneil")?.id ?? "";
+  await at(page, world_, `/leads/people/${person}`);
+  await expect(page.getByText("Their mobile was already in a text conversation with campaign Clinics, Bristol on every number this campaign can use, so a reply couldn’t show which campaign it answers.")).toBeVisible();
 });
 
 // ---------------------------------------------------------------------------------------------
