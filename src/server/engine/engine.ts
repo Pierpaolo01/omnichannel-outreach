@@ -17,6 +17,7 @@ import type { ControlView } from "../../shared/api.ts";
 import { effectOf } from "./controls-view.ts";
 import { impactDigest } from "./edit-impact.ts";
 import type { ControlRecord, DefinitionSave, EngineStore, ReplyEvent, SaveResult, StoredDefinition } from "./engine-store.ts";
+import type { StoredReplyId } from "../../domain/sequence/reply-identity.ts";
 
 /** A control's answer. `effect`: the control's own effect, which the read previewed at that instant; null for a campaign's. */
 export type ControlAnswer = { readonly ok: true; readonly replayed: boolean; readonly effect: ControlView | null } | { readonly ok: false; readonly reason: string };
@@ -762,7 +763,7 @@ export class Engine {
   private async applySmsEvent(event: ProviderEvent): Promise<boolean> {
     const now = this.now();
     if (event.kind === "reply") {
-      const eventId = `sms:${event.id}`;
+      const eventId = this.rules.storedReplyId("sms", event.id);
       if (await this.store.replyEvent(eventId)) return false;
       const owner = this.rules.smsReplyOwner(await this.store.smsBindingsOf(event.from), event.inbox);
       const reply: ReplyEvent = { eventId, providerRef: null, inbox: event.inbox, address: event.from, atWall: Math.min(event.at, now), receivedWall: now, state: owner ? "resolved" : "unmatched", waitedMs: 0, lastCountedWall: now };
@@ -780,7 +781,7 @@ export class Engine {
   }
 
   /** Records a reply on each subject it belongs to. */
-  private async recordReply(subjects: readonly string[], reply: { id: string; at: number }, channel: Channel = "email"): Promise<boolean> {
+  private async recordReply(subjects: readonly string[], reply: { id: StoredReplyId; at: number }, channel: Channel = "email"): Promise<boolean> {
     const now = this.now();
     let changed = false;
     for (const subjectId of subjects) {
@@ -827,10 +828,11 @@ export class Engine {
    * running time, then falls back. One that matches nothing stays unmatched by its reference.
    */
   private async applyReplyEvent(event: Extract<ProviderEvent, { kind: "reply" }>): Promise<boolean> {
-    if (await this.store.replyEvent(event.id)) return false;
+    const eventId = this.rules.storedReplyId("email", event.id);
+    if (await this.store.replyEvent(eventId)) return false;
     const now = this.now();
     const reply: ReplyEvent = {
-      eventId: event.id,
+      eventId,
       providerRef: event.providerRef,
       inbox: event.inbox,
       address: event.from.toLowerCase(),
@@ -1315,9 +1317,11 @@ export class Engine {
     const port = await this.portOf(a.accountId);
     const channel = port === this.ports.sms ? "sms" : "email";
     // The replies the lead's record holds are not news (a restart after an auto-reply): the port reports any other reply,
-    // in any of the lead's threads (ticket 17a; review bot on ca8baee, item 1; ADR 0002's correlation rules).
+    // in any of the lead's threads (ticket 17a; review bot on ca8baee, item 1; ADR 0002's correlation rules). The port is
+    // asked by its own ids, and its answer is recorded by the stored one: the reply identity rule (ADR 0003 "Ticket 17a").
     const knownReplies = (subject?.replies ?? []).filter((r) => r.channel === channel).map((r) => r.providerRef);
-    const result = this.rules.presendAnswer(await this.bounded(() => port.presendCheck({ sender: a.accountId, destination: a.destination, threadRefs, knownReplies }), { kind: "unavailable" as const }, port.channel, (result) => ({ call: "presendCheck", result })), knownReplies);
+    const asked = await this.bounded(() => port.presendCheck({ sender: a.accountId, destination: a.destination, threadRefs, knownReplies: knownReplies.map((id) => this.rules.portReplyId(channel, id)) }), { kind: "unavailable" as const }, port.channel, (result) => ({ call: "presendCheck", result }));
+    const result = this.rules.presendAnswer(asked, channel, knownReplies);
     if (result.kind === "unavailable") return false;
     await this.store.update(a.subjectId, now, (s) => {
       let next: SubjectState = { ...s, attempts: s.attempts.map((x) => (x.id === a.id ? { ...x, presendCheckedWall: now, presendFoundReply: result.kind === "reply" } : x)) };

@@ -822,6 +822,32 @@ export const MIGRATIONS: readonly Migration[] = [
       BEGIN SELECT RAISE(ABORT, 'call_attempts.number_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
     `,
   },
+  {
+    // PR 62, the reply identity rule (ADR 0003 "Ticket 17a").
+    version: 19,
+    name: "one stored form for a reply's id: sms:<id> for a text, reply:<email id> for an email (ADR 0003, the reply identity rule)",
+    // A pre-send answer was stored under the provider's bare id while the observation stores the event's id: a text's
+    // bare id (until PR 62) beside sms:<id>, and an email's bare id (the Instantly adapter until ticket 17a, from
+    // cb31184) beside reply:<email id>. A late observation of the same reply was then a second reply that ended a resumed
+    // lead again (verifier B1 and the council on PR 62). Every bare id becomes the observed form; a lead holding both
+    // keeps one row, at the earlier instant. An email id with a colon is an event's id already (reply:, unsubscribed:)
+    // and is kept exactly. Reply events hold only observed ids. Bare is: a text without the sms: prefix, an email
+    // without any colon.
+    sql: `
+      CREATE TEMP TABLE reply_forms AS
+        SELECT rowid AS id, subject_id, provider_ref AS bare,
+          CASE channel WHEN 'sms' THEN 'sms:' || provider_ref ELSE 'reply:' || provider_ref END AS canonical, at_wall
+        FROM replies
+        WHERE (channel = 'sms' AND substr(provider_ref, 1, 4) <> 'sms:') OR (channel = 'email' AND instr(provider_ref, ':') = 0);
+      UPDATE replies SET at_wall = (SELECT MIN(f.at_wall) FROM reply_forms f WHERE f.subject_id = replies.subject_id AND f.canonical = replies.provider_ref)
+      WHERE EXISTS (SELECT 1 FROM reply_forms f WHERE f.subject_id = replies.subject_id AND f.canonical = replies.provider_ref AND f.at_wall < replies.at_wall);
+      DELETE FROM replies
+      WHERE rowid IN (SELECT f.id FROM reply_forms f WHERE EXISTS (SELECT 1 FROM replies c WHERE c.subject_id = f.subject_id AND c.provider_ref = f.canonical));
+      UPDATE replies SET provider_ref = (SELECT f.canonical FROM reply_forms f WHERE f.id = replies.rowid)
+      WHERE rowid IN (SELECT id FROM reply_forms);
+      DROP TABLE reply_forms;
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string, migrations: readonly Migration[] = MIGRATIONS): void {

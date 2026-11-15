@@ -1,3 +1,4 @@
+import { storedReplyIdFromRow, type StoredReplyId } from "../../domain/sequence/reply-identity.ts";
 import { createHash } from "node:crypto";
 import type { AcceptedControl, ControlDecision, ControlRecord, RequestStanding, StoredRequest } from "../engine/engine-store.ts";
 import type { DatabaseSync, SQLInputValue, SQLOutputValue, StatementSync } from "node:sqlite";
@@ -589,7 +590,7 @@ export class SqliteEngineStore implements EngineStore {
     return num(this.sql("SELECT COUNT(*) AS n FROM provider_work WHERE account_id = ? AND sent_day = ?").get(accountId, resetDayOf(now, str(a, "reset_zone"))) ?? {}, "n");
   }
 
-  async replyEvent(eventId: string): Promise<ReplyEvent | null> {
+  async replyEvent(eventId: StoredReplyId): Promise<ReplyEvent | null> {
     const row = this.sql("SELECT * FROM reply_events WHERE event_id = ?").get(eventId);
     return row ? toReplyEvent(row) : null;
   }
@@ -602,7 +603,7 @@ export class SqliteEngineStore implements EngineStore {
     );
   }
 
-  async updateReplyEvent(eventId: string, change: Partial<Pick<ReplyEvent, "state" | "waitedMs" | "lastCountedWall">>): Promise<void> {
+  async updateReplyEvent(eventId: StoredReplyId, change: Partial<Pick<ReplyEvent, "state" | "waitedMs" | "lastCountedWall">>): Promise<void> {
     this.transaction(() => {
       if (change.state !== undefined) this.run("UPDATE reply_events SET state = ? WHERE event_id = ?", [change.state, eventId]);
       if (change.waitedMs !== undefined) this.run("UPDATE reply_events SET waited_ms = ? WHERE event_id = ?", [change.waitedMs, eventId]);
@@ -1181,7 +1182,7 @@ export class SqliteEngineStore implements EngineStore {
         .map((f) => ({ fromWall: num(f, "from_wall"), toWall: numOrNull(f, "to_wall") })),
       replies: this.sql("SELECT * FROM replies WHERE subject_id = ? ORDER BY at_wall, rowid")
         .all(subjectId)
-        .map((r) => ({ channel: str(r, "channel") === "sms" ? ("sms" as const) : ("email" as const), atWall: num(r, "at_wall"), providerRef: str(r, "provider_ref") })),
+        .map((r) => ({ channel: str(r, "channel") === "sms" ? ("sms" as const) : ("email" as const), atWall: num(r, "at_wall"), providerRef: storedReplyIdFromRow(str(r, "provider_ref")) })),
       pendingReplies: this.sql(
         `SELECT DISTINCT inbox, address FROM reply_events
          WHERE state = 'pending'
@@ -1560,7 +1561,7 @@ function toWork(r: Row): ProviderWork {
 
 function toReplyEvent(r: Row): ReplyEvent {
   return {
-    eventId: str(r, "event_id"),
+    eventId: storedReplyIdFromRow(str(r, "event_id")),
     providerRef: strOrNull(r, "provider_ref"),
     inbox: str(r, "inbox"),
     address: str(r, "address"),
