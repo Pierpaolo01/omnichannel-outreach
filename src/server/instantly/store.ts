@@ -38,6 +38,8 @@ export interface DispatchedLead {
 export interface SendContext {
   readonly kind: "enrollment" | "test_run";
   readonly campaignId: string;
+  /** The subject itself: a test run's dispatch campaign is its own (council on ffa202c, item 12). */
+  readonly subjectId: string;
 }
 
 export interface InstantlyStore {

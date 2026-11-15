@@ -22,7 +22,8 @@ export function registerEmailProviderRoutes(app: Hono, deps: { readonly engine: 
     const waitingFollowUps: { enrollmentId: string; trackId: string; stepId: string }[] = [];
     if (provider.transportFor({ threading: "continue_thread" }).available === false) {
       const now = deps.now();
-      for (const id of await deps.engine.runningSubjectIds()) {
+      // Leads only: a test's follow-up waits on its Test run tab (ADR 0003 "Ticket 21", rule 4).
+      for (const id of await deps.engine.runningLeadIds()) {
         const s = await deps.engine.subject(id, now);
         if (!s) continue;
         for (const p of s.tracks) {

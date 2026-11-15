@@ -6,7 +6,7 @@
  * lead's replies. `StoredReplyId` is branded: only `storedReplyId` makes one from a port's id, and a lead's replies,
  * `applyReply`, the pre-send check's known replies and the store's insert take nothing else, so a write site that
  * stores a port's bare id does not typecheck. The port is asked about a stored reply by `portReplyId`, the inverse.
- * Migration 18 rewrote the bare ids stored before this rule, so a stored reply has exactly one form.
+ * Migration 19 rewrote the bare ids stored before this rule, so a stored reply has exactly one form.
  */
 
 export type ReplyChannel = "email" | "sms";
@@ -29,7 +29,7 @@ export function portReplyId(channel: ReplyChannel, id: StoredReplyId): string {
 
 /**
  * A stored reply id read back from the database. Only the store calls this: every row was written from a
- * `StoredReplyId`, or rewritten to that form by migration 18.
+ * `StoredReplyId`, or rewritten to that form by migration 19.
  */
 export function storedReplyIdFromRow(raw: string): StoredReplyId {
   return raw as StoredReplyId;

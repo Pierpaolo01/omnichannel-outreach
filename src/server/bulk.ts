@@ -263,7 +263,8 @@ export function bulkRoutes(app: Hono, deps: BulkDependencies): void {
     const results: BulkControlResult[] = [];
     const applied = await rules.pressItems(items, { store, scope: body.data.campaignId, action: pressed, at, readOf: deps.readOf });
     for (const item of applied) {
-      if (!(await store.engine.subject(item.enrollmentId, Date.parse(deps.now())))) {
+      // A test run is a subject but never a lead (ADR 0003 "Ticket 21"): a bulk control does not reach it.
+      if (!(await store.engine.subject(item.enrollmentId, Date.parse(deps.now()))) || (await store.engine.testRun(item.enrollmentId)) !== null) {
         results.push(rules.report({ enrollmentId: item.enrollmentId, outcome: "refused", reason: "There is no such lead.", replayed: false }));
         continue;
       }

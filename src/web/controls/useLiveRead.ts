@@ -7,7 +7,7 @@ export type LiveRead<T> =
   | { readonly state: "loading" }
   | { readonly state: "error"; readonly message: string; readonly notFound: boolean }
   /** `reads`: how many reads have succeeded, so a part of the page read separately can follow this one. */
-  | { readonly state: "ready"; readonly data: T; readonly freshness: Freshness; readonly reads: number };
+  | { readonly state: "ready"; readonly data: T; readonly freshness: Freshness; readonly reads: number; readonly issued: number };
 
 /**
  * One server read a page shows and acts on, on the one reader Today and Calls use (`Refresher`; ADR 0003 4.4.1): reads
@@ -15,12 +15,19 @@ export type LiveRead<T> =
  * while visible, on focus, on coming back online, on another tab's control (a storage event), and whenever the page asks,
  * as after a control's answer. A failed read keeps what is shown; a first read that fails is an error.
  */
-export function useLiveRead<T>(path: string): { read: LiveRead<T>; refresh: () => Promise<void> } {
+/**
+ * `issue`, when given, numbers each read as it is sent (`issued` on the ready state), from a counter the page also numbers
+ * its own answers with, so the page can tell a read sent after an answer from one sent before it (ticket 21).
+ */
+export function useLiveRead<T>(path: string, issue?: () => number): { read: LiveRead<T>; refresh: () => Promise<void> } {
   const [read, setRead] = useState<{ path: string; value: LiveRead<T> } | null>(null);
   const refresher = useMemo(() => {
-    const r: Refresher<T> = new Refresher<T>({
-      read: () => getJson(path) as Promise<T>,
-      onRead: (data: T): void => setRead((prev) => ({ path, value: { state: "ready", data, freshness: r.freshness(), reads: (prev?.path === path && prev.value.state === "ready" ? prev.value.reads : 0) + 1 } })),
+    const r: Refresher<{ data: T; issued: number }> = new Refresher<{ data: T; issued: number }>({
+      read: () => {
+        const issued = issue?.() ?? 0;
+        return (getJson(path) as Promise<T>).then((data) => ({ data, issued }));
+      },
+      onRead: ({ data, issued }): void => setRead((prev) => ({ path, value: { state: "ready", data, issued, freshness: r.freshness(), reads: (prev?.path === path && prev.value.state === "ready" ? prev.value.reads : 0) + 1 } })),
       onFailure: (error, freshness) =>
         setRead((prev) =>
           prev?.path === path && prev.value.state === "ready"
@@ -34,6 +41,8 @@ export function useLiveRead<T>(path: string): { read: LiveRead<T>; refresh: () =
       interval: REFRESH_INTERVAL_MS,
     });
     return r;
+    // `issue` is read when a read is sent; a page passes a stable function.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path]);
 
   useEffect(() => {

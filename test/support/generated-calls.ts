@@ -1878,7 +1878,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
         if (!(await workFocus(true))) break;
       }
       // Done when no lead has work left, but for a callback no number can be logged on (checked below).
-      const running = await h.store.engine.runningSubjectIds();
+      const running = await h.store.engine.runningLeadIds();
       if (running.every((id) => stuck(subjects.get(id)!))) break;
       await h.advanceTo(h.clock + pick([2 * HOUR, 3 * HOUR, 5 * HOUR]));
     }

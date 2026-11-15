@@ -3,7 +3,7 @@ import { Crash, EngineHarness, quickWait, type Provider } from "../../../test/su
 import { business, person } from "../../../test/support/export-builder.ts";
 import { FakeInstantly } from "../../../test/support/fake-instantly.ts";
 import type { CampaignDefinition } from "../../domain/sequence/definition.ts";
-import type { EmailProviderStatus, EnrollmentView, NeedsAttention } from "../../shared/api.ts";
+import type { EmailProviderStatus, EnrollmentView, NeedsAttention, TestRunTab } from "../../shared/api.ts";
 import type { InstantlyAccount } from "./api.ts";
 import { InstantlyClient } from "./client.ts";
 import { InstantlyEmailPort } from "./port.ts";
@@ -409,5 +409,51 @@ describe("a sustained Instantly outage is an interruption (ticket 20a; PR 56 rev
     const { interruption, sendingInterrupted } = await today();
     expect(sendingInterrupted).toBeNull();
     expect(interruption).toMatchObject({ from: new Date(lastPoll).toISOString(), rescheduled: 0 });
+  });
+
+});
+
+describe("test runs through the Instantly adapter and its store (council on ffa202c, items 7 and 12)", () => {
+  // Council on ffa202c (items 7 and 12): test runs go through the real adapter and its SQLite store, against the fake
+  // Instantly HTTP service; nothing reaches the real service.
+  test("with writes on: a test email goes out through the adapter, and a second test, and a third after an edit, each reach the test contact once", async () => {
+    const { h, fake } = setUp(true);
+    const { campaign, lead } = await enrolled(h);
+    await h.tick();
+    await h.tick();
+    const oneEmail = (body: string): CampaignDefinition => ({ ...twoEmails(), tracks: twoEmails().tracks.map((t) => ({ ...t, steps: [{ ...t.steps[0]!, body }] })) });
+    await h.defineSequence(campaign.id, oneEmail("A note for {{company}}."));
+    h.clock = MONDAY_9;
+    await h.tick();
+    expect((await h.request("PUT", `/api/campaigns/${campaign.id}/test-contacts`, { email: "alex.own@personal-mail.example", mobile: "" })).status).toBe(200);
+    let n = 0;
+    const runTest = async () => {
+      const tab = (await h.request<TestRunTab>("GET", `/api/campaigns/${campaign.id}/test-runs`)).body;
+      const res = await h.request<TestRunTab>("POST", `/api/campaigns/${campaign.id}/test-runs`, { requestId: `run-${++n}`, renderAs: lead("Pat Oneil"), expect: { definitionVersion: tab.definitionVersion } });
+      expect(res.status).toBe(200);
+      return res.body.run?.id ?? "";
+    };
+    const toOwn = () => fake.deliveries().filter((d) => d.to === "alex.own@personal-mail.example").map((d) => d.body);
+    const ending = async () => (await h.request<TestRunTab>("GET", `/api/campaigns/${campaign.id}/test-runs`)).body.run?.ending;
+
+    const first = await runTest();
+    await h.advanceTo(MONDAY_9 + H);
+    expect(toOwn()).toEqual(["A note for Harbour Lane Physio."]);
+    expect(await ending()).toBe("finished");
+
+    const second = await runTest();
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    expect(toOwn()).toEqual(["A note for Harbour Lane Physio.", "A note for Harbour Lane Physio."]);
+    expect(await ending()).toBe("finished");
+
+    await h.defineSequence(campaign.id, oneEmail("An edited note for {{company}}."));
+    const third = await runTest();
+    await h.advanceTo(MONDAY_9 + 3 * H);
+    expect(toOwn()).toEqual(["A note for Harbour Lane Physio.", "A note for Harbour Lane Physio.", "An edited note for Harbour Lane Physio."]);
+    expect(await ending()).toBe("finished");
+    // One dispatch campaign per test run (and step and inbox), named for it, never a lead's.
+    expect(fake.campaigns.map((c) => c.name).sort()).toEqual([first, second, third].map((id) => `oo·test·${id}·t1·s1·ada@sender.example`).sort());
+    // Nothing went to a lead.
+    expect(fake.deliveries().every((d) => d.to === "alex.own@personal-mail.example")).toBe(true);
   });
 });

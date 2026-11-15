@@ -7,6 +7,7 @@ import { useControls, type Controls } from "../controls/useControls.ts";
 import { useLiveRead } from "../controls/useLiveRead.ts";
 import { BeforeLaunchTab } from "../campaign/BeforeLaunchTab.tsx";
 import { SequenceTab } from "../campaign/SequenceTab.tsx";
+import { TestRunTab } from "../campaign/TestRunTab.tsx";
 import { sendsOnItsOwn } from "../campaign/model.ts";
 import { saveWording } from "../campaign/saveWording.ts";
 import { useSequence, type SequenceEditor } from "../campaign/useSequence.ts";
@@ -80,6 +81,12 @@ function Campaign({ detail, editor, tab, controls }: { detail: CampaignDetail; e
             {lastImport ? ` · last import ${whenImported(lastImport.importedAt, now)}` : " · nothing imported yet"}
           </p>
         </div>
+        {/* Ticket 21 (variant A's header): a test may run at any time, before or after launch. */}
+        {tab !== "test-run" && tab !== "before-launch" && (
+          <Link href={campaignPath(campaign.id, "test-run")} className="btn border-line-strong bg-base-100 font-medium no-underline sm:mt-1.5 sm:ml-auto">
+            Run test
+          </Link>
+        )}
         {!editor.launched && tab !== "before-launch" && (
           <div className="flex flex-wrap items-center gap-2.5 sm:mt-1.5">
             {view.launch.nothingToLaunch ? (
@@ -146,7 +153,7 @@ function Campaign({ detail, editor, tab, controls }: { detail: CampaignDetail; e
       <div className="mt-4">
         {tab === "sequence" && <SequenceTab campaignId={campaign.id} editor={editor} paused={detail.pause.paused} />}
         {tab === "before-launch" && <BeforeLaunchTab campaignId={campaign.id} editor={editor} />}
-        {tab === "test-run" && <TestRunTab />}
+        {tab === "test-run" && <TestRunTab campaignId={campaign.id} editor={editor} />}
         {tab === "leads" && <LeadsTab campaignId={campaign.id} version={view.definitionVersion} launched={editor.launched} />}
         {tab === "imports" && <ImportsTab campaignId={campaign.id} imports={imports} />}
       </div>
@@ -221,18 +228,6 @@ function CampaignSkeleton() {
       <div className="skeleton mt-2 h-4 w-64 max-w-full" />
       <div className="skeleton mt-6 h-10 w-full" />
       <div className="skeleton mt-4 h-[360px] w-full" />
-    </div>
-  );
-}
-
-function TestRunTab() {
-  return (
-    <div className="max-w-[680px] rounded-box border border-dashed border-line-strong bg-base-100 px-6 py-6">
-      <h2 className="text-[19px]">Test runs arrive with a later release</h2>
-      <p className="mt-2 text-ink-2">
-        A test run will send every step to your own test email and mobile from the real sender inboxes, with each wait cut to about a minute.
-        It is optional: you can launch without one.
-      </p>
     </div>
   );
 }

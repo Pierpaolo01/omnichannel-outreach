@@ -11,7 +11,8 @@ name: sequence-search
 # bound. A shard of about four mutations and thirteen seeds finishes well inside the step's limit.
 # The same command runs the ticket 13 track generator (src/server/sequence-runs-tracks*.test.ts)
 # the ticket 14 call generator (src/server/sequence-runs-calls*.test.ts), the ticket 17a control
-# generator and the ticket 19 edit generator (src/server/sequence-runs-edits*.test.ts): their 100 seeds and a
+# generator, the ticket 19 edit generator (src/server/sequence-runs-edits*.test.ts) and the ticket 21 test-run
+# generator (src/server/sequence-runs-tests*.test.ts): their 100 seeds and a
 # seed search per mutation, sharded the same way; each of their runs takes a few seconds.
 # Each shard then runs its share of the save rule's generated test (ADR 0003 1.1.1,
 # src/web/campaign/saveQueue.generated.test.ts): 2,000 seeds in all, every eighth to a shard, each
