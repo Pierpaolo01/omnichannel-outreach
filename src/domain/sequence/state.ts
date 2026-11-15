@@ -24,8 +24,12 @@ export type FinishReason =
   | "dropped_for_win_back"
   | "closed_on_interest";
 
+/** What a subject is (ADR 0003 1.2): a lead in a campaign, or a test run of the campaign's canvas against the user's own contacts (ticket 21). */
+export type SubjectKind = "enrollment" | "test_run";
+
 export interface SubjectRecord {
   readonly id: string;
+  readonly kind: SubjectKind;
   readonly campaignId: string;
   /** Bumped by the store on every write to this subject. */
   readonly version: number;

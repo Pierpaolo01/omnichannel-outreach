@@ -17,6 +17,7 @@ import type {
   RecordControls,
   CampaignDetail,
   ControlRefusal,
+  TestRunTab,
 } from "../src/shared/api.ts";
 
 /**
@@ -37,6 +38,7 @@ export type MockBody =
   | BeforeLaunchView
   | NeedsAttention
   | TodayView
+  | TestRunTab
   | CallTaskView;
 
 export function respond(route: Route, body: MockBody, status = 200): Promise<void> {

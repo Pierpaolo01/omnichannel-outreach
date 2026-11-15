@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { OUTREACH_STATUSES } from "../src/domain/outreach-status.ts";
 import type { BeforeLaunchView, CampaignDefinition, CampaignListItem, CompanyRecord, ControlStepView, ControlView, EnrollmentRead, ImportRecord, LeadControlApi, LeadSearchResult, NeedsAttention, OutreachStatus, PersonRecord, RecordCalls, RecordColleagues, RecordControls, RecordLead, SequenceView, SummaryEntry, TodayView } from "../src/shared/api.ts";
 import { refusedPair, respond, serverError } from "./mocks.ts";
-import { FAKE_INBOX, FAKE_NUMBERS, TWO_CHANNELS, fakeCallsApp, fakeInterruptionApp, fakePeopleApp, fakeProviderApp, type CallsScenario, type FakeCallsApp, type FakePeopleApp, type FakeProviderApp, type InterruptionScenario } from "./fake-provider.ts";
+import { FAKE_INBOX, FAKE_NUMBERS, OWN_TEST_EMAIL, OWN_TEST_MOBILE, TWO_CHANNELS, fakeCallsApp, fakeInterruptionApp, fakePeopleApp, fakeProviderApp, fakeTestRunApp, type CallsScenario, type FakeCallsApp, type FakePeopleApp, type FakeProviderApp, type FakeTestRunApp, type InterruptionScenario } from "./fake-provider.ts";
 import { fixture } from "./support.ts";
 
 /** Opens a path on the app over the fake email provider. */
@@ -22,6 +22,28 @@ async function calls(page: Page, scenario: CallsScenario, path: string, name?: s
   // The browser's clock reads the app's, so the date and the clocks on screen agree with the calls.
   await page.clock.setFixedTime(f.harness.clock);
   await page.goto(f.url + path);
+  return f;
+}
+
+let testRunApps = 0;
+/**
+ * Ticket 21: a fresh test-run app on its Test run tab. `none`: no contacts saved; `running`: a test half a minute in;
+ * `replied`: a test stopped by a reply from the test email.
+ */
+async function testRuns(page: Page, name: string, state: "none" | "running" | "replied"): Promise<FakeTestRunApp> {
+  const f = await fakeTestRunApp(`${name}-${++testRunApps}`);
+  if (state !== "none") {
+    await f.harness.request("PUT", `/api/campaigns/${f.campaign}/test-contacts`, { email: OWN_TEST_EMAIL, mobile: OWN_TEST_MOBILE });
+    const tab = (await f.harness.request<{ definitionVersion: number; leads: { id: string }[] }>("GET", `/api/campaigns/${f.campaign}/test-runs`)).body;
+    await f.harness.request("POST", `/api/campaigns/${f.campaign}/test-runs`, { requestId: "screen-run", renderAs: tab.leads[0]?.id ?? "", expect: { definitionVersion: tab.definitionVersion } });
+    await f.harness.advanceTo(f.harness.clock + 30_000);
+    if (state === "replied") {
+      f.harness.fake.prospectReplies(OWN_TEST_EMAIL);
+      await f.harness.advanceTo(f.harness.clock + 60_000);
+    }
+  }
+  await page.clock.setFixedTime(f.harness.clock);
+  await page.goto(`${f.url}/campaigns/${f.campaign}/test-run`);
   return f;
 }
 
@@ -1527,7 +1549,31 @@ export const SCREENS: readonly Screen[] = [
   { name: "campaign with the longest accepted name", open: async (page, data) => { await page.goto(`/campaigns/${data.longCampaignId}`); await settle(page, "Add the first channel track"); } },
   { name: "before launch, nothing to launch", open: async (page, data) => { await page.goto(`/campaigns/${data.campaignId}/before-launch`); await settle(page, "Nothing to launch yet."); } },
   { name: "before launch with no leads", open: async (page, data) => { await page.goto(`/campaigns/${data.unimportedCampaignId}/before-launch`); await settle(page, "No leads yet."); } },
-  { name: "test run, not yet", open: async (page, data) => { await page.goto(`/campaigns/${data.campaignId}/test-run`); await settle(page, "Test runs arrive with a later release"); } },
+  // Ticket 21: the Test run tab, with no contacts, a refused contact, a test running, a test stopped by a reply, loading and an error; and a test call.
+  { name: "test run, no contacts", open: async (page, data) => { await page.goto(`/campaigns/${data.campaignId}/test-run`); await settle(page, "No test yet"); } },
+  {
+    name: "test run, a lead's email refused",
+    open: async (page) => {
+      await testRuns(page, "screen-refused", "none");
+      await page.getByLabel("Your email").fill("amira@harbourlanephysio.example");
+      await page.getByRole("button", { name: "Save contacts" }).click();
+      await settle(page, "This email belongs to a lead. Test contacts must be your own.");
+    },
+  },
+  { name: "test run, running", open: async (page) => { await testRuns(page, "screen-running", "running"); await settle(page, "In about 1 min"); } },
+  { name: "test run, stopped by a reply", open: async (page) => { await testRuns(page, "screen-replied", "replied"); await settle(page, "Stopped by your reply"); } },
+  { name: "test run loading", open: async (page, data) => { await hold(page, "**/api/campaigns/*/test-runs"); await page.goto(`/campaigns/${data.campaignId}/test-run`); await page.getByLabel("Loading the test run").waitFor(); } },
+  { name: "test run error", open: async (page, data) => { await fail(page, "**/api/campaigns/*/test-runs"); await page.goto(`/campaigns/${data.campaignId}/test-run`); await settle(page, "The test run didn’t load."); } },
+  {
+    name: "calls, a test call",
+    open: async (page) => {
+      const f = await testRuns(page, "screen-test-call", "running");
+      await f.harness.advanceTo(f.harness.clock + 3 * 60_000);
+      await page.clock.setFixedTime(f.harness.clock);
+      await page.goto(`${f.url}/calls`);
+      await settle(page, "A test call keeps no note. Log what happened to check the canvas paths.");
+    },
+  },
   { name: "campaign leads tab", open: async (page, data) => { await page.goto(`/campaigns/${data.campaignId}/leads`); await settle(page, "Uses a fallback for"); } },
   { name: "campaign leads tab, nothing imported", open: async (page, data) => { await page.goto(`/campaigns/${data.unimportedCampaignId}/leads`); await settle(page, "No leads yet."); } },
   { name: "campaign imports tab", open: async (page, data) => { await page.goto(`/campaigns/${data.campaignId}/imports`); await settle(page, "See result"); } },

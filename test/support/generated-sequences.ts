@@ -619,7 +619,7 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     for (let week = 0; week < 7; week++) {
       let waiting = false;
       const stalled = new Set((await h.request<NeedsAttention>("GET", "/api/needs-attention")).body.stalledInboxes.map((x) => x.accountId));
-      for (const id of await h.store.engine.runningSubjectIds()) {
+      for (const id of await h.store.engine.runningLeadIds()) {
         // Work still pending, not held and not waiting on a stalled inbox: a deadline or a window still to come.
         const progress = (await h.request<EnrollmentProgress>("GET", `/api/enrollments/${id}`)).body;
         if (progress.sender !== null && stalled.has(progress.sender)) continue;

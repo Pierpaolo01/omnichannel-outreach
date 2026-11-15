@@ -168,7 +168,7 @@ describe("the lease is checked where the send is decided, and right before the c
     expect(taken).toBe(true);
     expect(a.heldAt(h.clock)).toBe(false);
     expect(h.fake.handoverLog).toEqual([]);
-    const st = await h.store.engine.subject((await h.store.engine.runningSubjectIds())[0]!, h.clock);
+    const st = await h.store.engine.subject((await h.store.engine.runningLeadIds())[0]!, h.clock);
     expect(st?.attempts.filter((x) => x.state === "handed")).toEqual([]);
   });
 
@@ -187,7 +187,7 @@ describe("the lease is checked where the send is decided, and right before the c
     expect((await h.launch(campaign.id)).status).toBe(200);
     expect(frozen).toBe(true);
     expect(h.fake.handoverLog).toEqual([]);
-    const subjectId = (await h.store.engine.runningSubjectIds())[0]!;
+    const subjectId = (await h.store.engine.runningLeadIds())[0]!;
     const committed = (await h.store.engine.subject(subjectId, h.clock))?.attempts.find((x) => x.stepId === "s1");
     expect(committed).toMatchObject({ state: "handed", calls: 1 });
     // B works on: it finds A's committed handover as unsettled work under its key, and never makes a new one for the step.

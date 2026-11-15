@@ -79,6 +79,7 @@ export function subjectState(fields: Partial<SubjectState> = {}): SubjectState {
   return {
     subject: {
       id: "lead-1",
+      kind: "enrollment",
       campaignId: "camp-1",
       version: 0,
       status: "queued",

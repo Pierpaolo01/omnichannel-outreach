@@ -132,7 +132,7 @@ function Row({ item, userZone, today }: { item: CallQueueItem; userZone: string;
     <li className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-1 border-line py-3.5 [&+&]:border-t">
       <div className="min-w-0">
         <div className="font-semibold [overflow-wrap:anywhere]">{item.person?.name ?? item.company.name}</div>
-        <div className="text-[13px] text-muted [overflow-wrap:anywhere]">{item.company.name}</div>
+        <div className="text-[13px] text-muted [overflow-wrap:anywhere]">{item.test ? `To your test mobile · ${item.campaign.name}` : item.company.name}</div>
         <div className={`mt-0.5 text-[13px] font-medium ${TONE[why.tone]}`}>{why.text}</div>
       </div>
       <div className="text-right text-[13px] text-muted">
