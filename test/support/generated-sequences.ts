@@ -256,8 +256,11 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
    */
   const outsideRand = random(seed ^ 0x0d75);
   const outsideSends = !unlimited && outsideRand() < 0.3;
-  /** When each inbox had no room because of outside sends, as the record knows it. */
-  const outsideUse: { readonly id: string; readonly from: number; until: number }[] = [];
+  /**
+   * The pacing gap in force at each send call, by its place in the provider's call log, noted by the record when it first
+   * sees the call (the gap is taken when a call is authorized, ADR 0003 4.2; council on PR 63).
+   */
+  const gapAtCall: number[] = [];
   /**
    * Work each inbox already held when outside sends used it up, by inbox and reset day: claimed before the provider
    * could report no room, even at the same instant (a tick at that instant ran first; seed 20261167, shard 7 of the
@@ -624,7 +627,6 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
         const day = `${a.id}|${local(h.clock, a.resetZone).day}`;
         claimedBeforeNoRoom.set(day, new Set([...(claimedBeforeNoRoom.get(day) ?? []), ...held]));
         fake.usedUpUntil.set(a.id, until);
-        outsideUse.push({ id: a.id, from: h.clock, until });
         features.add("outside-sends");
         await h.tick();
       }
@@ -647,7 +649,6 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     transient = null;
     fake.rateLimitedUntil.clear();
     fake.usedUpUntil.clear();
-    for (const o of outsideUse) o.until = Math.min(o.until, h.clock);
     for (const a of accounts) {
       a.healthy = true;
       a.quotaAvailable = true;
@@ -1055,13 +1056,14 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     return Math.min(d.visibleAt, looked, markedSent.get(d.key) ?? Infinity);
   }
 
-  /** The record's pacing gap (ADR 0003 4.1): configured, else the shortest window served over capacity, at least a minute. */
+  /**
+   * The record's pacing gap (ADR 0003 4.1): configured, else the shortest window served over the daily limit, at least a
+   * minute. Outside sends change today's room, never the gap (council on PR 63).
+   */
   function recordGap(accountId: string, at: number): number {
     const acc = accounts.find((a) => a.id === accountId);
     if (!acc) return 0;
     if (acc.gapMs !== null) return acc.gapMs;
-    // An inbox other senders used up has no room: the default gap is then the floor, a minute (ADR 0003 4.1).
-    if (outsideUse.some((o) => o.id === accountId && o.from <= at && at < o.until)) return MINUTE;
     const capacity = (capacityHistory.get(accountId) ?? []).filter(([t]) => t <= at).at(-1)?.[1] ?? acc.capacity;
     const hours = campaigns
       .filter((c) => c.definition.emailPool.includes(accountId))
@@ -1300,14 +1302,16 @@ async function runSequenceUnguarded(seed: number, options: RunOptions): Promise<
     // 2 (predicate 9). No send call from an inbox the provider reported unhealthy at that moment.
     for (const c of fake.handoverLog) if (!c.healthy) problem(`2: ${c.subjectId}/${c.stepId} was called from ${c.sender} while it was unhealthy`);
     // 11. Pacing: two send calls from one account are never closer than its gap.
+    // The gap each call reserved is the one in force when it was made: noted once, as the record first sees the call.
+    for (let i = gapAtCall.length; i < fake.handoverLog.length; i++) gapAtCall.push(recordGap(fake.handoverLog[i]!.sender, fake.handoverLog[i]!.at));
     const bySender = new Map<string, number[]>();
-    for (const c of fake.handoverLog) bySender.set(c.sender, [...(bySender.get(c.sender) ?? []), c.at]);
-    for (const [sender, times] of bySender) {
-      for (let i = 1; i < times.length; i++) {
-        // The gap is taken when a call is authorized (4.2), so it is the one in force at the earlier call; at an
-        // instant the inbox's capacity changed (outside sends), the smaller of the two.
-        const gap = Math.min(recordGap(sender, times[i - 1]!), recordGap(sender, times[i]!));
-        if (times[i]! - times[i - 1]! < gap) problem(`11: ${sender} called ${times[i]! - times[i - 1]!} ms apart, under its gap of ${gap}`);
+    fake.handoverLog.forEach((c, i) => bySender.set(c.sender, [...(bySender.get(c.sender) ?? []), i]));
+    for (const [sender, calls] of bySender) {
+      for (let i = 1; i < calls.length; i++) {
+        // The next call may come only once the slot the earlier call reserved has passed (4.2).
+        const [earlier, later] = [fake.handoverLog[calls[i - 1]!]!, fake.handoverLog[calls[i]!]!];
+        const gap = gapAtCall[calls[i - 1]!]!;
+        if (later.at - earlier.at < gap) problem(`11: ${sender} called ${later.at - earlier.at} ms apart, under the gap of ${gap} its earlier call reserved`);
       }
     }
     // 8. Steps in order, on time, in the window, with the copy current at the handover.

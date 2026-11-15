@@ -2,6 +2,7 @@ import type { StoredReplyId } from "../../domain/sequence/reply-identity.ts";
 import type { LaunchCheck, SenderAccountView } from "../../domain/sequence/blockers.ts";
 import type { MergeData } from "../../domain/sequence/copy.ts";
 import type { CampaignDefinition } from "../../domain/sequence/definition.ts";
+import { isTimeZone } from "../../domain/sequence/clock.ts";
 import type { AccountState, Attempt, EndReason, ProviderWork, SmsBindingRecord, SubjectState } from "../../domain/sequence/state.ts";
 import type { RunTestFacts } from "../../domain/sequence/test-runs.ts";
 import type { TestContacts } from "../../domain/test-contacts.ts";
@@ -48,8 +49,13 @@ export interface SenderAccountConfig {
   readonly id: string;
   readonly channel: "email" | "sms";
   readonly label: string;
-  /** Daily capacity on the account's reset day: a whole number, 0 when there is no room on it (`storableAccount`). */
+  /** Today's room: the sends it may still make on its current reset day, a whole number, 0 when there is none (`storableAccount`). */
   readonly capacity: number;
+  /**
+   * Its daily limit: the room it has on any other reset day (council on PR 63). Today's room can be less, when other
+   * senders used some of it; the projection and the interruption count use this for every day but today.
+   */
+  readonly dailyLimit: number;
   /** The pacing gap; null for ADR 0003 4.1's default from the windows the account serves. */
   readonly gapMs: number | null;
   /** In-flight bound (ADR 0002's k). */
@@ -61,16 +67,44 @@ export interface SenderAccountConfig {
 }
 
 /**
- * A sender account as a port reported it, made storable (verifier, 15 November 2026). Capacity is a whole number of
- * sends, 0 included: 0 is "no room on this reset day" (an Instantly inbox other senders used up, or with no daily limit),
- * and the claim's capacity rule refuses it like any full account. A report the store cannot hold (a negative,
- * fractional or non-finite capacity, an in-flight bound under 1, a gap that is not a positive whole number of
- * milliseconds) holds that one account as `invalid_report` with no room, so it never fails the sync of the others.
+ * A sender account as a port reported it, made storable (verifier, 15 November 2026; council on PR 63). Capacity (today's
+ * room) and the daily limit are whole numbers of sends, 0 included: 0 is "no room" (an Instantly inbox other senders
+ * used up, or with no daily limit), and the claim's capacity rule refuses it like any full account. Every field the store
+ * needs is checked: a non-empty id and label, the port's own channel, a zone `Intl` knows, whole non-negative capacity
+ * and daily limit, an in-flight bound of at least 1, and a gap that is null or a positive whole number of milliseconds.
+ * A report that fails any of them holds that one account as `invalid_report`, with no room and storable defaults, so it
+ * never fails the sync of the others. A report with no usable id names no account: it is left out (null).
  */
-export function storableAccount<T extends SenderAccountConfig>(reported: T): T {
-  const whole = (n: number) => Number.isSafeInteger(n);
-  const valid = whole(reported.capacity) && reported.capacity >= 0 && whole(reported.k) && reported.k >= 1 && (reported.gapMs === null || (whole(reported.gapMs) && reported.gapMs > 0));
-  return valid ? reported : { ...reported, capacity: 0, k: 1, gapMs: null, healthy: false, problem: "invalid_report" };
+export function storableAccount<T extends SenderAccountConfig>(reported: T, channel: "email" | "sms"): T | null {
+  // A port's answer is read as data from outside: any field may be missing or of another type.
+  const value: unknown = reported;
+  if (typeof value !== "object" || value === null) return null;
+  const r = value as Record<string, unknown>;
+  const text = (v: unknown): v is string => typeof v === "string" && v.trim() !== "";
+  if (!text(r["id"])) return null;
+  const whole = (v: unknown, min: number) => typeof v === "number" && Number.isSafeInteger(v) && v >= min;
+  const zone = text(r["resetZone"]) && isTimeZone(r["resetZone"]);
+  const valid =
+    text(r["label"]) &&
+    r["channel"] === channel &&
+    zone &&
+    whole(r["capacity"], 0) &&
+    whole(r["dailyLimit"], 0) &&
+    whole(r["k"], 1) &&
+    (r["gapMs"] === null || whole(r["gapMs"], 1));
+  if (valid) return reported;
+  return {
+    ...reported,
+    label: text(r["label"]) ? reported.label : reported.id,
+    channel,
+    resetZone: zone ? reported.resetZone : "UTC",
+    capacity: 0,
+    dailyLimit: 0,
+    k: 1,
+    gapMs: null,
+    healthy: false,
+    problem: "invalid_report",
+  };
 }
 
 export interface CampaignEngineRow {

@@ -623,10 +623,10 @@ export class SqliteEngineStore implements EngineStore {
     this.transaction(() => {
       for (const a of accounts) {
         this.run(
-          `INSERT INTO sender_accounts (id, channel, label, capacity, gap_ms, k, healthy, problem, reset_zone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(id) DO UPDATE SET channel = excluded.channel, label = excluded.label, capacity = excluded.capacity,
+          `INSERT INTO sender_accounts (id, channel, label, capacity, gap_ms, k, healthy, problem, reset_zone, daily_limit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET channel = excluded.channel, label = excluded.label, capacity = excluded.capacity, daily_limit = excluded.daily_limit,
              gap_ms = excluded.gap_ms, k = excluded.k, healthy = excluded.healthy, problem = excluded.problem, reset_zone = excluded.reset_zone`,
-          [a.id, a.channel, a.label, a.capacity, a.gapMs, a.k, a.healthy ? 1 : 0, a.healthy ? null : (a.problem ?? "unhealthy"), a.resetZone],
+          [a.id, a.channel, a.label, a.capacity, a.gapMs, a.k, a.healthy ? 1 : 0, a.healthy ? null : (a.problem ?? "unhealthy"), a.resetZone, a.dailyLimit],
         );
       }
     });
@@ -911,12 +911,15 @@ export class SqliteEngineStore implements EngineStore {
            (SELECT COUNT(*) FROM provider_work WHERE account_id = :id AND settled IS NULL AND sent_wall IS NULL) AS reserved`,
       ).get({ id, today: resetDayOf(now, resetZone) }) ?? {};
     const capacity = num(a, "capacity");
+    const dailyLimit = num(a, "daily_limit");
     const channel = str(a, "channel") === "sms" ? ("sms" as const) : ("email" as const);
     return {
       id,
       channel,
       capacity,
-      gapMs: numOrNull(a, "gap_ms") ?? defaultGap(this.windowsServedBy(id, channel), capacity),
+      dailyLimit,
+      // From the daily limit, not today's room: a day other senders used up does not change the pacing (council on PR 63).
+      gapMs: numOrNull(a, "gap_ms") ?? defaultGap(this.windowsServedBy(id, channel), dailyLimit),
       k: num(a, "k"),
       nextSlotAt: num(a, "next_slot_at"),
       healthy: num(a, "healthy") === 1,

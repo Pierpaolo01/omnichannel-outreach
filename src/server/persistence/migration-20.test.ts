@@ -38,11 +38,10 @@ const definition: CampaignDefinition = {
   tracks: [{ id: "e1", channel: "email", branch: "main", window: ALWAYS, steps: [email("s1", 0), email("s2", 1)], start: { kind: "entry" }, removed: false }],
 };
 /**
- * The current build's database taken back to 17, the integration tip before ticket 21 (pull request 60): migration 20's
- * rebuild undone (the old CHECK), then 19 (data only, safe to run again) and 18 as ticket 21's own test undoes them.
- * The current code cannot write a database at 17 itself: it reads ticket 21's tables.
+ * The current build's database taken back to 19, the integration tip (`9fc5c2b`): migration 20's rebuild undone, with
+ * the old CHECK and no daily limit. The current code cannot write a database at 19 itself: it writes the daily limit.
  */
-const UNDO_SINCE_18_WITH_20 = `
+const UNDO_20 = `
   PRAGMA foreign_keys = OFF;
   CREATE TABLE sender_accounts_old (
     id TEXT PRIMARY KEY,
@@ -62,9 +61,15 @@ const UNDO_SINCE_18_WITH_20 = `
   INSERT INTO sender_accounts_old SELECT id, channel, label, capacity, gap_ms, k, next_slot_at, healthy, wait_until, wait_reason, backoff_ms, reset_zone, problem FROM sender_accounts;
   DROP TABLE sender_accounts;
   ALTER TABLE sender_accounts_old RENAME TO sender_accounts;
-  ${UNDO_SINCE_18}
+  PRAGMA foreign_keys = ON;
+  DELETE FROM schema_migrations WHERE version >= 20;
 `;
-const below = (version: number) => MIGRATIONS.filter((m) => m.version < version);
+/**
+ * Taken back to 17, the integration tip before ticket 21 (pull request 60): 20 undone, then 19 (data only, safe to run
+ * again) and 18 as ticket 21's own test undoes them. The current code cannot write a database at 17: it reads ticket
+ * 21's tables.
+ */
+const UNDO_SINCE_18_WITH_20 = `${UNDO_20} ${UNDO_SINCE_18}`;
 const schemaOf = (db: DatabaseSync, name: string) => String(db.prepare("SELECT sql FROM sqlite_schema WHERE name = ?").get(name)?.["sql"] ?? "");
 const names = (db: DatabaseSync, type: string) => db.prepare("SELECT name FROM sqlite_schema WHERE type = ? ORDER BY name").all(type).map((r) => String(r["name"]));
 const count = (db: DatabaseSync, table: string) => Number(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.["n"] ?? 0);
@@ -76,13 +81,13 @@ const rawOf = (h: EngineHarness) => (h.store.engine as unknown as { db: Database
  * used inbox-a up for the day: the account is stored with no room, the lead's next email waits for capacity, and it goes
  * the next day. Returns what each check needs.
  */
-async function upgrade(older: { readonly migrations: readonly Migration[] } | { readonly undo: string }, withTestRun: boolean) {
+async function upgrade(undo: string, withTestRun: boolean) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "migration-20-"));
   dirs.push(dir);
   const file = path.join(dir, "app.db");
   const inbox: FakeAccount = { id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" };
 
-  const before = new EngineHarness({ start: MONDAY_9, databasePath: file, ...("migrations" in older ? { migrations: older.migrations } : {}), accounts: [inbox] });
+  const before = new EngineHarness({ start: MONDAY_9, databasePath: file, accounts: [inbox] });
   await before.tick();
   const { campaign } = await before.createCampaign("Before 20", { businesses: [business({ business_id: "b1", business_name: "Harbour Lane Physio" })], people: [person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example" })] });
   await before.defineSequence(campaign.id, definition);
@@ -100,7 +105,7 @@ async function upgrade(older: { readonly migrations: readonly Migration[] } | { 
   await before.store.close();
 
   const old = new DatabaseSync(file);
-  if ("undo" in older) old.exec(older.undo);
+  old.exec(undo);
   expect(schemaOf(old, "sender_accounts")).toContain("CHECK (capacity > 0)");
   const kept = {
     accounts: old.prepare("SELECT * FROM sender_accounts").all(),
@@ -112,8 +117,8 @@ async function upgrade(older: { readonly migrations: readonly Migration[] } | { 
   old.close();
 
   // Tuesday, after the upgrade: other senders have used inbox-a up for the day.
-  inbox.capacity = 0;
   const after = new EngineHarness({ start: MONDAY_9 + DAY + 9 * H, databasePath: file, idPrefix: "after", accounts: [inbox] });
+  after.fake.usedUpUntil.set("inbox-a", MONDAY_9 + 2 * DAY - 9 * H);
   await after.tick();
   const waiting = (await after.request<NeedsAttention>("GET", "/api/needs-attention")).body.waitingForCapacity;
   expect(waiting.map((w) => [w.enrollmentId, w.stepId, w.accountIds])).toEqual([[lead, "s2", ["inbox-a"]]]);
@@ -138,7 +143,6 @@ async function upgrade(older: { readonly migrations: readonly Migration[] } | { 
   upgraded.close();
 
   // Wednesday the inbox has room again, and the lead's s2 goes.
-  inbox.capacity = 50;
   const later = new EngineHarness({ start: MONDAY_9 + 2 * DAY + 9 * H, databasePath: file, idPrefix: "later", accounts: [inbox] });
   await later.advanceTo(MONDAY_9 + 2 * DAY + 10 * H);
   expect(later.fake.deliveryLog.filter((d) => d.destination === "pat@harbour.example").map((d) => d.stepId)).toEqual(["s2"]);
@@ -156,13 +160,13 @@ function expectKept(r: Awaited<ReturnType<typeof upgrade>>): void {
   expect(r.foreignKeysAfter).toBe(1);
   expect(r.work).toBe(r.kept.work);
   expect(r.attempts).toEqual(r.kept.attempts);
-  // Every column of the account is kept; the sync after the upgrade changed only its capacity.
-  expect(r.accounts).toEqual(r.kept.accounts.map((a) => ({ ...a, capacity: 0 })));
+  // Every column of the account is kept; the sync after the upgrade set today's room to 0 and stored the daily limit.
+  expect(r.accounts).toEqual(r.kept.accounts.map((a) => ({ ...a, capacity: 0, daily_limit: 50 })));
 }
 
 describe("migration 20 on a database an older build created", () => {
   test("at 19 (the integration tip): the test run's attempts and ticket 21's triggers and view are kept, and inbox-a is stored with no room", async () => {
-    const r = await upgrade({ migrations: below(20) }, true);
+    const r = await upgrade(UNDO_20, true);
     expect(r.kept.attempts.filter((a) => a["subject_id"] !== r.kept.attempts[0]?.["subject_id"])).not.toEqual([]);
     expect(r.kept.triggers.length).toBeGreaterThan(0);
     expectKept(r);
@@ -171,19 +175,21 @@ describe("migration 20 on a database an older build created", () => {
   });
 
   test("at 17 (the tip before ticket 21): 18, 19 and 20 apply in a row, two of them rebuilding tables", async () => {
-    const r = await upgrade({ undo: UNDO_SINCE_18_WITH_20 }, false);
+    const r = await upgrade(UNDO_SINCE_18_WITH_20, false);
     expect(r.kept.views).not.toContain("engine_subjects");
     expect(r.kept.triggers).toEqual([]);
     expectKept(r);
     expect(r.triggers.length).toBeGreaterThan(0);
   });
 
-  test("a capacity below 0 is still refused by the store", () => {
+  test("a capacity or daily limit below 0 is refused by the store", () => {
     const db = openDatabase(":memory:");
     migrate(db, at);
-    const insert = (capacity: number) => db.prepare("INSERT INTO sender_accounts (id, channel, label, capacity, k) VALUES (?, 'email', 'x', ?, 1)").run(`a${capacity}`, capacity);
-    insert(0);
-    expect(() => insert(-1)).toThrow("CHECK constraint failed");
+    const insert = (capacity: number, dailyLimit: number) =>
+      db.prepare("INSERT INTO sender_accounts (id, channel, label, capacity, k, daily_limit) VALUES (?, 'email', 'x', ?, 1, ?)").run(`a${capacity}/${dailyLimit}`, capacity, dailyLimit);
+    insert(0, 0);
+    expect(() => insert(-1, 0)).toThrow("CHECK constraint failed");
+    expect(() => insert(0, -1)).toThrow("CHECK constraint failed");
   });
 });
 

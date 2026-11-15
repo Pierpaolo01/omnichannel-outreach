@@ -1,6 +1,7 @@
 import type { CallAnswer } from "../../domain/sequence/attempt.ts";
 import { resetDayOf, runningCredit } from "../../domain/sequence/clock.ts";
 import type { AccountStatus, AttemptRef, HandoverRequest, LookupResult, PresendRequest, ProviderEvent, SendPort, Transport } from "../engine/ports.ts";
+import { storableAccount } from "../engine/engine-store.ts";
 import type {
   AddLeadsRequest,
   AddLeadsResponse,
@@ -261,14 +262,36 @@ export class InstantlyEmailPort implements SendPort {
     this.store.setMeta(META.quotaHeld, String(this.now()));
   }
 
-  private inboxView(a: InstantlyAccount): InstantlyStatus["inboxes"][number] {
+  /**
+   * The inbox as the engine stores it: its own reasons first, then `storableAccount`, so the provider view and the
+   * engine's hold always agree (council on PR 63: a daily limit of 1.5 was shown healthy while the engine held it).
+   */
+  private report(a: InstantlyAccount, quotaAvailable: boolean): AccountStatus {
     const now = this.now();
     const day = resetDayOf(now, this.config.resetZone);
     const fresh = this.fresh(a.email, now);
     const limit = a.daily_limit ?? 0;
     const other = Math.max(0, Number(this.store.meta(META.analytics(day, a.email)) ?? 0) - this.appSentToday(a.email, day));
     const reason: InboxHoldReason | null = !this.client.writes ? "sending_off" : a.status !== 1 ? "not_active" : limit <= 0 ? "no_daily_limit" : !fresh ? "stale" : null;
-    return { id: a.email, status: a.status, dailyLimit: a.daily_limit, capacity: Math.max(0, limit - other), healthy: reason === null, reason };
+    const reported: AccountStatus = {
+      id: a.email,
+      channel: "email",
+      label: a.email,
+      capacity: Math.max(0, limit - other),
+      dailyLimit: Math.max(0, limit),
+      gapMs: null,
+      k: this.config.k,
+      healthy: reason === null,
+      problem: reason,
+      resetZone: this.config.resetZone,
+      quotaAvailable,
+    };
+    return storableAccount(reported, "email") ?? { ...reported, capacity: 0, dailyLimit: 0, healthy: false, problem: "invalid_report" };
+  }
+
+  private inboxView(a: InstantlyAccount): InstantlyStatus["inboxes"][number] {
+    const stored = this.report(a, true);
+    return { id: a.email, status: a.status, dailyLimit: a.daily_limit, capacity: stored.capacity, healthy: stored.healthy, reason: stored.healthy ? null : (stored.problem as InboxHoldReason) };
   }
 
   /**
@@ -295,10 +318,7 @@ export class InstantlyEmailPort implements SendPort {
   async accounts(): Promise<AccountStatus[]> {
     const inboxes = this.inboxes ?? (await this.readInboxes());
     const quotaAvailable = !this.quotaHeld();
-    return inboxes.map((a) => {
-      const view = this.inboxView(a);
-      return { id: a.email, channel: "email" as const, label: a.email, capacity: view.capacity, gapMs: null, k: this.config.k, healthy: view.healthy, problem: view.reason, resetZone: this.config.resetZone, quotaAvailable };
-    });
+    return inboxes.map((a) => this.report(a, quotaAvailable));
   }
 
   status(): InstantlyStatus {

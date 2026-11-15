@@ -369,7 +369,10 @@ export interface LeadFacts {
 export interface AccountState {
   readonly id: string;
   readonly channel: "email" | "sms";
+  /** Today's room on its current reset day (0: none). */
   readonly capacity: number;
+  /** Its room on any other reset day (council on PR 63): today's room can be less, never the daily limit. */
+  readonly dailyLimit: number;
   readonly gapMs: number;
   readonly k: number;
   readonly nextSlotAt: number;

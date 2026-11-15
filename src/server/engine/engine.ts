@@ -466,11 +466,14 @@ export class Engine {
     const room = new Map<string, { from: number; to: number }[]>();
     for (const a of await this.store.accounts(this.now())) {
       const stretches: { from: number; to: number }[] = [];
+      // Today's room on today's reset day, the daily limit on the earlier days of the gap (council on PR 63).
+      const today = localDayNumber(this.now(), a.resetZone);
       for (let t = gap.from; t < gap.to; ) {
         const next = startOfLocalDay(localDayNumber(t, a.resetZone) + 1, a.resetZone);
         const from = Math.max(t, a.nextSlotAt);
         const to = Math.min(next, gap.to);
-        if (from < to && (await this.store.sentToday(a.id, t)) < a.capacity) stretches.push({ from, to });
+        const room = localDayNumber(t, a.resetZone) === today ? a.capacity : a.dailyLimit;
+        if (from < to && (await this.store.sentToday(a.id, t)) < room) stretches.push({ from, to });
         t = next;
       }
       room.set(a.id, stretches);
@@ -630,7 +633,7 @@ export class Engine {
       }
       this.readAnswered(channel, "accounts");
       // One account's report the store cannot hold holds that account alone; it never fails the tick (`storableAccount`).
-      statuses = statuses.map(storableAccount);
+      statuses = statuses.flatMap((s) => storableAccount(s, channel) ?? []);
       await this.store.upsertAccounts(statuses);
       // An account its provider no longer lists is disconnected: claims for it wait, and Needs attention lists it.
       await this.store.disconnectUnlisted(channel, statuses.map((a) => a.id));

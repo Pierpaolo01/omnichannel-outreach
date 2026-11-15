@@ -68,6 +68,41 @@ describe("what a port reports about its accounts", () => {
     expect(read.senderProblems.map((p) => [p.accountId, p.problem])).toEqual([["inbox-a", "invalid_report"]]);
   });
 
+  /** One field of one inbox's report replaced, as a port could send it: the fake's own report is otherwise kept. */
+  const tamper = (h: EngineHarness, id: string, fields: Record<string, unknown>) => {
+    const original = h.fake.accounts.bind(h.fake);
+    h.fake.accounts = async () => (await original()).map((a) => (a.id === id ? { ...a, ...fields } : a));
+  };
+
+  test.each<[string, Record<string, unknown>]>([
+    ["a reset zone no clock knows", { resetZone: "Mars/Olympus_Mons" }],
+    ["no label", { label: null }],
+    ["an empty label", { label: "  " }],
+    ["the other channel", { channel: "sms" }],
+    ["a daily limit that is not a whole number", { dailyLimit: 2.5 }],
+  ])("one inbox reporting %s is held as an invalid report; the tick and a save complete, and the other inbox sends", async (_, fields) => {
+    const h = new EngineHarness({ start: MONDAY_9 - H, accounts: [inbox("inbox-a"), inbox("inbox-b")] });
+    tamper(h, "inbox-a", fields);
+    const definition: CampaignDefinition = { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: ["inbox-a", "inbox-b"], tracks: [track("email")] };
+    const lead = await launched(h, definition);
+    await h.advanceTo(MONDAY_9 + H);
+
+    expect(h.fake.deliveryLog.map((d) => [d.destination, d.sender])).toEqual([["pat@harbour.example", "inbox-b"]]);
+    expect((await h.progress(lead)).tracks[0]?.steps[0]?.result).toBe("sent");
+    const read = await attention(h);
+    expect(read.sendingInterrupted).toBeNull();
+    expect(read.senderProblems.map((p) => [p.accountId, p.channel, p.problem])).toEqual([["inbox-a", "email", "invalid_report"]]);
+  });
+
+  test("a report with no id names no account: it is left out, and the tick completes", async () => {
+    const h = new EngineHarness({ start: MONDAY_9 - H, accounts: [inbox("inbox-a"), inbox("inbox-b")] });
+    tamper(h, "inbox-a", { id: "" });
+    await launched(h, { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: ["inbox-b"], tracks: [track("email")] });
+    await h.advanceTo(MONDAY_9 + H);
+    expect(h.fake.deliveryLog.map((d) => d.sender)).toEqual(["inbox-b"]);
+    expect((await attention(h)).sendingInterrupted).toBeNull();
+  });
+
   test("an inbox whose report turns invalid is held from then on, and sends again once its report is valid", async () => {
     const a = inbox("inbox-a", { capacity: 50 });
     const h = new EngineHarness({ start: MONDAY_9 - H, accounts: [a] });

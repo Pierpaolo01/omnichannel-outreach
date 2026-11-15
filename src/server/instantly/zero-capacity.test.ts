@@ -137,6 +137,23 @@ describe("an inbox with no room today", () => {
     expect(fake.deliveries().map((d) => [d.to, d.inbox])).toEqual([["nia@northgate.example", BEA]]);
   });
 
+  test.each([1.5, 2.5])("a daily limit of %s: the provider view and Needs attention both show the inbox held as an invalid report, and the other inbox sends", async (limit) => {
+    const { h, fake } = setUp([
+      { email: ADA, status: 1, daily_limit: limit },
+      { email: BEA, status: 1, daily_limit: 30 },
+    ]);
+    await campaignOn(h, "Harbour", ADA, [["Pat Oneil", "pat@harbour.example"]]);
+    const onBea = await campaignOn(h, "Northgate", BEA, [["Nia Cole", "nia@northgate.example"]]);
+    h.clock = MONDAY_9;
+    await h.tick();
+    expect((await h.launch(onBea.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + 2 * H);
+
+    expect(await inboxView(h, ADA)).toMatchObject({ dailyLimit: limit, capacity: 0, healthy: false, reason: "invalid_report" });
+    expect((await attention(h)).senderProblems.map((p) => [p.accountId, p.problem])).toEqual([[ADA, "invalid_report"]]);
+    expect(fake.deliveries().map((d) => [d.to, d.inbox])).toEqual([["nia@northgate.example", BEA]]);
+  });
+
   test("used up by the app's own sends: the second lead waits for capacity until the next reset day", async () => {
     const { h, fake } = setUp([{ email: ADA, status: 1, daily_limit: 1 }]);
     const onAda = await campaignOn(h, "Harbour", ADA, [

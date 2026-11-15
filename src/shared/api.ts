@@ -928,7 +928,7 @@ export interface SmsProviderStatus {
 }
 
 /** Why a sender inbox of the email provider cannot send now. */
-export type InboxHoldReasonApi = "sending_off" | "not_active" | "no_daily_limit" | "stale";
+export type InboxHoldReasonApi = "sending_off" | "not_active" | "no_daily_limit" | "stale" | "invalid_report";
 
 /** GET /api/email-provider (ticket 12c): the email provider, its sender inboxes, and why any cannot send. */
 export interface EmailProviderStatus {

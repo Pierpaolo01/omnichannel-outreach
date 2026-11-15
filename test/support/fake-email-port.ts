@@ -177,7 +177,7 @@ export class FakeEmailPort implements SendPort {
     const usedUp = (id: string) => now < (this.usedUpUntil.get(id) ?? -Infinity);
     for (const id of this.accountsById.keys()) if (usedUp(id)) this.noRoomAnswers.push({ at: now, id });
     return Promise.resolve(
-      [...this.accountsById.values()].map((a) => ({ id: a.id, channel: "email" as const, label: `Fake inbox ${a.id}`, capacity: usedUp(a.id) ? 0 : a.capacity, gapMs: a.gapMs, k: a.k, healthy: a.healthy, problem: a.healthy ? null : "unhealthy", resetZone: a.resetZone, quotaAvailable: a.quotaAvailable })),
+      [...this.accountsById.values()].map((a) => ({ id: a.id, channel: "email" as const, label: `Fake inbox ${a.id}`, capacity: usedUp(a.id) ? 0 : a.capacity, dailyLimit: a.capacity, gapMs: a.gapMs, k: a.k, healthy: a.healthy, problem: a.healthy ? null : "unhealthy", resetZone: a.resetZone, quotaAvailable: a.quotaAvailable })),
     );
   }
 
