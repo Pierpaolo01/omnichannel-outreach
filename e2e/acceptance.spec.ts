@@ -196,6 +196,8 @@ test("the acceptance story: import, build, test run, launch, calls, replies, fai
     await w.harness.tick();
     await at(page, w, `/campaigns/${campaignId}/before-launch`);
     await expect(page.getByText("Ready to launch.")).toBeVisible();
+    // No test run yet: a warning, never a blocker. Launch stays enabled beside it.
+    await expect(page.getByText("No test run since your last edit")).toBeVisible();
     await expect(page.getByRole("button", { name: "Launch campaign" })).toBeEnabled();
     expect((await w.harness.request<SequenceView>("GET", `/api/campaigns/${campaignId}/sequence`)).body.launch.blockers).toEqual([]);
     await shot(page, "02-ready-to-launch");
