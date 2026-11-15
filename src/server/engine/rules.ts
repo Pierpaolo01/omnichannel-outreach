@@ -22,6 +22,7 @@ import { reconcileEdit, stillRunnable } from "../../domain/sequence/reconcile.ts
 import { launchCheck } from "../../domain/sequence/blockers.ts";
 import { applyControl, campaignPaused, campaignPrecondition, campaignResumed, controlPrecondition, judgeControl } from "../../domain/sequence/controls.ts";
 import type { RequestStanding, StoredRequest } from "./engine-store.ts";
+import { portReplyId, storedReplyId } from "./reply-identity.ts";
 import { afterInterruption, interruptionOf, rescheduledSteps } from "../../domain/sequence/interruption.ts";
 import type { CallAnswer } from "../../domain/sequence/attempt.ts";
 
@@ -82,6 +83,9 @@ export interface Rules {
   readonly requestStanding: (stored: StoredRequest | null, request: { readonly target: string; readonly action: string; readonly body: string }) => RequestStanding;
   /** What the engine makes of the pre-send check's answer (ADR 0002): as given; the mutation of ca8baee's defect clears a known reply. */
   readonly presendAnswer: <T extends { readonly kind: string }>(answer: T, knownReplies: readonly string[]) => T | { readonly kind: "clear" };
+  /** A reply's identity, stored and as its port names it (ADR 0003 "Ticket 17a", the reply identity rule): one pair for every channel. */
+  readonly storedReplyId: typeof storedReplyId;
+  readonly portReplyId: typeof portReplyId;
   /** What the reads apply first when they preview a control: what fell due by the read's instant, as the action does. */
   readonly previewAsOf: typeof asOfAction;
   /** Brings one lead's progress in line with an edit of a running campaign (ticket 19, ADR 0003 "Ticket 19"). */
@@ -153,6 +157,8 @@ export const DEFAULT_RULES: Rules = {
   reconcileEdit,
   runningCheck: (definition, leadsAfter, leads, accounts) => launchCheck(stillRunnable(definition, leadsAfter), leads, accounts),
   presendAnswer: (answer) => answer,
+  storedReplyId,
+  portReplyId,
   // Everything an evaluation reads: the subject's and campaign's versions cover its progress and the
   // definition; the lead's facts (contact details and their marks, zone, merge data) change without
   // bumping them (an import, a mark elsewhere), so they are compared as they were read.

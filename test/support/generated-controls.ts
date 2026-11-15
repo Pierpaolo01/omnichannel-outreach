@@ -74,6 +74,12 @@ export interface ControlRunOptions {
    * is confirmed, not of the read it opened on, as a confirmation that re-targets on a live read would.
    */
   readonly clickTimeExpectation?: boolean;
+  /**
+   * A fixed run (the reply identity rule, ADR 0003 "Ticket 17a"): a lead with a text track of two steps texts back after
+   * the first, the app observes it, and the user resumes the lead from its next step. The text it was resumed after is
+   * not news: its next text goes (P6), and the generic events run on from there.
+   */
+  readonly smsReplyRestart?: boolean;
 }
 
 export interface ControlRunResult {
@@ -173,7 +179,11 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   const definitions: CampaignDefinition[] = [];
   for (let ci = 0; ci < campaignCount; ci++) {
     const tracks: TrackDefinition[] = [{ id: `k${ci}e1`, channel: "email", branch: "main", window: ALL_DAY, steps: steps(`k${ci}e1`, pick([2, 3])), start: { kind: "entry" }, removed: false }];
-    if (chance(0.4)) tracks.push({ id: `k${ci}x1`, channel: "sms", branch: "main", window: ALL_DAY, steps: steps(`k${ci}x1`, pick([1, 2])).map((s) => ({ ...s, subject: "" })), start: { kind: "entry" }, removed: false });
+    // The scripted SMS reply run gives the first campaign a text track of two steps, so a resumed lead has a text left.
+    // The draws stay as they were for every other run, so no recorded seed moves.
+    const texts = chance(0.4);
+    const textSteps = texts ? pick([1, 2]) : 2;
+    if (texts || (options.smsReplyRestart === true && ci === 0)) tracks.push({ id: `k${ci}x1`, channel: "sms", branch: "main", window: ALL_DAY, steps: steps(`k${ci}x1`, options.smsReplyRestart === true ? 2 : textSteps).map((s) => ({ ...s, subject: "" })), start: { kind: "entry" }, removed: false });
     if (chance(0.5)) tracks.push({ id: `k${ci}p1`, channel: "call", branch: "main", window: ALL_DAY, steps: [{ id: `k${ci}p1c`, waitDays: 0, subject: "", body: "", threading: "new_subject", removed: false }], start: { kind: "entry" }, removed: false, callSkipLimitDays: 30 });
     if (chance(0.5)) tracks.push({ id: `k${ci}e2`, channel: "email", branch: "main", window: ALL_DAY, steps: steps(`k${ci}e2`, pick([1, 2])), start: { kind: "after", trackId: `k${ci}e1`, delayDays: pick([0, 1]) }, removed: false });
     if (chance(0.5)) tracks.push({ id: `k${ci}w1`, channel: "email", branch: "win_back", window: ALL_DAY, steps: steps(`k${ci}w1`, pick([1, 2])), start: { kind: "entry" }, removed: false });
@@ -1268,6 +1278,35 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
 
   const eventCount = options.events ?? 22;
   await checkAll();
+  if (options.smsReplyRestart === true) {
+    // The scripted prelude: the first lead texted the first step of its text track texts back, is seen replied, and is
+    // resumed from its next step while its second text is still to come.
+    let texted: { s: Subject; mobile: string; sender: string } | undefined;
+    for (let i = 0; i < 240 && !texted; i++) {
+      await h.advanceTo(h.clock + MINUTE);
+      for (const d of sms.deliveryLog) {
+        const s = subjects.get(d.subjectId);
+        if (!s?.person.mobile || !d.stepId.endsWith("s1") || d.visibleAt > h.clock || endedAt(s, h.clock) || heldAt(s, h.clock)) continue;
+        texted = { s, mobile: s.person.mobile, sender: d.sender };
+        break;
+      }
+    }
+    if (texted && sms.prospectTexts(texted.mobile, "Not now, thanks", texted.sender)) {
+      const textedAt = h.clock;
+      await h.tick();
+      replied(texted.s, h.clock);
+      if (accepts(texted.s, "resume_from_next_step", h.clock)) {
+        await control(texted.s, "resume_from_next_step");
+        features.add("restarted-after-a-text-reply");
+      }
+      await h.advanceTo(h.clock + 3 * DAY);
+      // P6: a restart continues at the next unsent step. Nothing else happened to the lead in these three days, and its
+      // second text waits at most two, so it has gone: the text the lead was resumed after is not news.
+      const next = def(texted.s).tracks.find((t) => t.channel === "sms")?.steps[1];
+      if (next && !endedAt(texted.s, h.clock) && !heldAt(texted.s, h.clock) && !delivered("sms", texted.s, next.id)) problem(`P6: ${texted.s.id} was resumed after a text at ${isoOf(textedAt)} and its next text ${next.id} has not gone three days on${process.env["CONTROLS_DEBUG"] ? ` [app replies ${JSON.stringify((await h.store.engine.subject(texted.s.id, h.clock))?.replies)}; texts ${JSON.stringify(sms.replyLog)}]` : ""}`);
+      await checkAll();
+    }
+  }
   if (options.withdrawalAcrossARecovery === true) {
     // The scripted prelude: a lead whose email is at the provider is paused (its withdrawal answered unknown), the
     // application stops for six minutes, and runs on for an hour after its recovery.

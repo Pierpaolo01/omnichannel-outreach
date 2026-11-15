@@ -120,6 +120,11 @@ const RULES: Record<string, Partial<Rules>> = {
   },
   // Council on 57d874f, item 1: the client re-targets an open confirmation on the newest read (the run option below).
   "a confirmation sends the click-time expectation": {},
+  // The reply identity rule (ticket 22's runs, seed 22058): the pre-send check asks the SMS port by the stored `sms:<id>`,
+  // which the port never names a text by, so the text a lead was resumed after looks new and stops it again.
+  "the pre-send check compares a stored text's id with the provider's": {
+    portReplyId: (_channel, storedId) => storedId,
+  },
   "a reply the record holds clears the pre-send check": {
     presendAnswer: (answer, known) => (answer.kind === "reply" && "providerRef" in answer && known.includes(String(answer.providerRef)) ? { kind: "clear" as const } : answer),
   },
@@ -154,6 +159,8 @@ const EXPECTED: Record<string, { invariant: string; seed: number; options?: Part
   // With the provider answering the first thread's reply, as the adapter did on ca8baee: the defect restored.
   "a reply the record holds clears the pre-send check": { invariant: "P1", seed: 24, options: { presendFirstReply: true } },
   "a control applied after its precondition changed": { invariant: "P13", seed: 0 },
+  // The scripted SMS reply run: the lead resumed after its text is ended again at its next text's check.
+  "the pre-send check compares a stored text's id with the provider's": { invariant: "P6", seed: 0, options: { smsReplyRestart: true } },
   // Seed 17 since the precondition became the whole preview (verifier R1 on 57d874f): the stale-confirmation stream sends a
   // Skip to a lead that ended since its read, and the read's reason must be the action's (seed 85 found the order first).
   "the precondition checked before the lead's state": { invariant: "P11", seed: 17 },
