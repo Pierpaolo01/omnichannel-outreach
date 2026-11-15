@@ -1,9 +1,9 @@
 import type { APIRequestContext, Locator, Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { OUTREACH_STATUSES } from "../src/domain/outreach-status.ts";
-import type { BeforeLaunchView, CampaignDefinition, CampaignListItem, CompanyRecord, ControlStepView, ControlView, EnrollmentRead, ImportRecord, LeadControlApi, LeadSearchResult, NeedsAttention, OutreachStatus, PersonRecord, RecordCalls, RecordControls, RecordLead, SequenceView, SummaryEntry, TodayView } from "../src/shared/api.ts";
+import type { BeforeLaunchView, CampaignDefinition, CampaignListItem, CompanyRecord, ControlStepView, ControlView, EnrollmentRead, ImportRecord, LeadControlApi, LeadSearchResult, NeedsAttention, OutreachStatus, PersonRecord, RecordCalls, RecordColleagues, RecordControls, RecordLead, SequenceView, SummaryEntry, TodayView } from "../src/shared/api.ts";
 import { refusedPair, respond, serverError } from "./mocks.ts";
-import { FAKE_INBOX, FAKE_NUMBERS, TWO_CHANNELS, fakeCallsApp, fakeInterruptionApp, fakeProviderApp, type CallsScenario, type FakeCallsApp, type FakeProviderApp, type InterruptionScenario } from "./fake-provider.ts";
+import { FAKE_INBOX, FAKE_NUMBERS, TWO_CHANNELS, fakeCallsApp, fakeInterruptionApp, fakePeopleApp, fakeProviderApp, type CallsScenario, type FakeCallsApp, type FakePeopleApp, type FakeProviderApp, type InterruptionScenario } from "./fake-provider.ts";
 import { fixture } from "./support.ts";
 
 /** Opens a path on the app over the fake email provider. */
@@ -205,7 +205,7 @@ export function galleryLead(id: string, campaignId: string, status: OutreachStat
   };
 }
 
-export function galleryRecord(id: string): PersonRecord & RecordCalls & RecordControls {
+export function galleryRecord(id: string): PersonRecord & RecordCalls & RecordControls & RecordColleagues {
   const statuses = OUTREACH_STATUSES;
   const e = (status: (typeof OUTREACH_STATUSES)[number]) => `e${statuses.indexOf(status)}`;
   const base = { track: { id: "p1", label: "Phone track" }, zone: "Europe/London", noGoodNumber: false, heldByCallback: false, callbackAt: null, skipLimit: null } as const;
@@ -254,6 +254,7 @@ export function galleryRecord(id: string): PersonRecord & RecordCalls & RecordCo
     colleagues: [
       { id: "p2", name: "Colleague Two", title: "Manager", enrollments: statuses.slice(5, 8).map((status, i) => ({ id: `ce${i}`, campaign: { id: `c${i}`, name: `Campaign ${i + 1}` }, status, enrolledAt: "2026-11-12T09:00:00.000Z" })), unenrolledReason: null },
     ],
+    colleagueNotes: [{ personId: "p2", lastCallNote: { note: "Asked us to call after the school run.", outcome: "callback_requested", at: "2026-11-12T09:30:00.000Z" } }],
   };
 }
 
@@ -324,6 +325,20 @@ export function runningWithACall(f: FakeProviderApp): Promise<string> {
     runningCalls.set(f, made);
   }
   return made;
+}
+
+let peopleFresh = 0;
+/** Opens a path on the ticket 18 app (fakePeopleApp); `fresh` gives an app of its own, for a screen that changes it. */
+async function people(page: Page, path: string, fresh = false): Promise<FakePeopleApp> {
+  const f = await fakePeopleApp(fresh ? `people-screens-${++peopleFresh}` : "people-screens");
+  await page.clock.setFixedTime(f.harness.clock);
+  if (path !== "") await page.goto(f.url + path);
+  return f;
+}
+
+/** Ticks the Leads rows of these names. */
+async function selectRows(page: Page, names: readonly string[]): Promise<void> {
+  for (const name of names) await page.getByRole("checkbox", { name: `Select ${name}`, exact: true }).check();
 }
 
 async function settle(page: Page, text: string | RegExp): Promise<void> {
@@ -439,7 +454,11 @@ export const JUNIPER_LATER = {
   declines: [],
   leads: [galleryLead("e1", "c1", "queued", { campaignState: { launched: false, paused: false, pausedSince: null }, controls: [] })],
   userZone: "Europe/London",
-} satisfies CompanyRecord & RecordCalls & RecordControls;
+  colleagueNotes: [
+    { personId: "p1", lastCallNote: null },
+    { personId: "p2", lastCallNote: null },
+  ],
+} satisfies CompanyRecord & RecordCalls & RecordControls & RecordColleagues;
 
 export const JUNIPER_LATER_ROW = {
   rows: [{ kind: "company", id: "co-juniper", name: "Juniper Pilates Studio", city: "London", peopleOnRecord: 2, peopleReachable: 1, enrollments: JUNIPER_LATER.enrollments, unenrolledReason: null }],
@@ -1037,6 +1056,161 @@ export const SCREENS: readonly Screen[] = [
   {
     name: "company lead through its shared inbox",
     open: async (page, data) => { await page.goto(`/leads/companies/${data.company("Juniper Pilates Studio")}`); await settle(page, "People on record"); },
+  },
+  // Ticket 18: selection, the bulk bar, each confirmation and what a bulk did; the person page with notes and colleagues.
+  { name: "leads, rows selected with the bulk bar", open: async (page) => { await people(page, "/leads"); await selectRows(page, ["Amira Hassan", "Tom"]); await settle(page, "2 selected"); } },
+  {
+    name: "leads, a bulk pause confirmed for one campaign",
+    open: async (page) => {
+      const f = await people(page, "");
+      await page.goto(`${f.url}/leads?campaign=${f.campaigns.clinics}`);
+      await selectRows(page, ["Amira Hassan", "Tom"]);
+      await page.getByRole("toolbar").getByRole("button", { name: "Pause" }).click();
+      await settle(page, "Pause 2 campaign enrollments");
+    },
+  },
+  {
+    name: "leads, a bulk stop in every campaign with a refusal",
+    open: async (page) => { await people(page, "/leads?q=amira"); await selectRows(page, ["Amira Hassan"]); await page.getByRole("toolbar").getByRole("button", { name: "Stop" }).click(); await settle(page, "in every campaign they are in?"); },
+  },
+  {
+    name: "leads, nothing to resume",
+    open: async (page) => { await people(page, "/leads?q=amira"); await selectRows(page, ["Amira Hassan"]); await page.getByRole("toolbar").getByRole("button", { name: "Resume" }).click(); await settle(page, "Nothing to resume."); },
+  },
+  {
+    name: "leads, add to campaign confirmed",
+    open: async (page) => {
+      await people(page, "/leads");
+      await selectRows(page, ["Ravi Patel", "Amira Hassan", "Sofia Marin"]);
+      await page.getByRole("toolbar").getByLabel("Add to campaign").selectOption({ label: "Physio follow-up" });
+      await settle(page, "Add 1 person to Physio follow-up?");
+    },
+  },
+  {
+    name: "leads, a bulk preview loading",
+    open: async (page) => { await hold(page, "**/api/bulk/preview"); await people(page, "/leads"); await selectRows(page, ["Tom"]); await page.getByRole("toolbar").getByRole("button", { name: "Pause" }).click(); await settle(page, "Checking what this would do…"); },
+  },
+  {
+    name: "leads, a bulk preview failed",
+    open: async (page) => { await fail(page, "**/api/bulk/preview"); await people(page, "/leads"); await selectRows(page, ["Tom"]); await page.getByRole("toolbar").getByRole("button", { name: "Pause" }).click(); await settle(page, "What this would do didn’t load."); },
+  },
+  {
+    name: "leads, a bulk change on its way",
+    open: async (page) => {
+      await hold(page, "**/api/bulk");
+      const f = await people(page, "", true);
+      await page.goto(`${f.url}/leads?campaign=${f.campaigns.followUp}`);
+      await selectRows(page, ["Daniel Price"]);
+      await page.getByRole("toolbar").getByRole("button", { name: "Pause" }).click();
+      await page.getByRole("group").getByRole("button", { name: "Pause" }).click();
+      await settle(page, "Pausing…");
+    },
+  },
+  {
+    name: "leads, a bulk change not confirmed yet",
+    open: async (page) => {
+      await fail(page, "**/api/bulk");
+      const f = await people(page, "", true);
+      await page.goto(`${f.url}/leads?campaign=${f.campaigns.followUp}`);
+      await selectRows(page, ["Daniel Price"]);
+      await page.getByRole("toolbar").getByRole("button", { name: "Pause" }).click();
+      await page.getByRole("group").getByRole("button", { name: "Pause" }).click();
+      await settle(page, "Not confirmed yet.");
+    },
+  },
+  {
+    name: "leads, a partial bulk result",
+    open: async (page) => {
+      const f = await people(page, "", true);
+      await page.goto(`${f.url}/leads?campaign=${f.campaigns.followUp}`);
+      await selectRows(page, ["Amira Hassan", "Tom"]);
+      await page.getByRole("toolbar").getByRole("button", { name: "Stop" }).click();
+      await settle(page, "Stop 2 campaign enrollments");
+      const tom = (await f.harness.request<LeadSearchResult>("GET", `/api/leads?campaign=${f.campaigns.followUp}&q=Tom`)).body.rows[0]?.enrollments.find((e) => e.campaign.id === f.campaigns.followUp)?.id ?? "";
+      await f.harness.request("POST", `/api/enrollments/${tom}/controls`, { requestId: `screens-tom-${Date.now()}`, action: "pause" });
+      await page.getByRole("group").getByRole("button", { name: "Stop" }).click();
+      await settle(page, "Stopped 1 of 2 campaign enrollments.");
+    },
+  },
+  {
+    name: "leads, a bulk change refused whole",
+    open: async (page) => {
+      await page.route("**/api/bulk", (route) => respond(route, { error: { code: "bulk_refused", message: "This request id was already used for another action: send a new one." } }, 409));
+      const f = await people(page, "", true);
+      await page.goto(`${f.url}/leads?campaign=${f.campaigns.followUp}`);
+      await selectRows(page, ["Daniel Price"]);
+      await page.getByRole("toolbar").getByRole("button", { name: "Pause" }).click();
+      await page.getByRole("group").getByRole("button", { name: "Pause" }).click();
+      await settle(page, "Nothing was changed.");
+    },
+  },
+  {
+    name: "leads, many results with every shown row selected",
+    open: async (page) => {
+      const f = await fakePeopleApp("people-many", { many: true });
+      await page.clock.setFixedTime(f.harness.clock);
+      await page.goto(`${f.url}/leads`);
+      await settle(page, "Showing the first 100");
+      await page.getByRole("checkbox", { name: "Select all shown" }).check();
+      await settle(page, "100 selected");
+    },
+  },
+  {
+    name: "a person in two campaigns, with a colleague's last call note and his company note",
+    open: async (page) => { const f = await people(page, ""); await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`); await settle(page, "Company note"); },
+  },
+  {
+    name: "a person's timeline filtered to one campaign",
+    open: async (page) => {
+      const f = await people(page, "");
+      await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
+      await page.getByLabel("Show activity from").selectOption({ label: "Physio follow-up" });
+      await settle(page, "in Physio follow-up");
+    },
+  },
+  {
+    name: "a note being added",
+    open: async (page) => {
+      await hold(page, "**/api/people/*/notes");
+      const f = await people(page, "");
+      await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
+      await page.getByLabel("A note about Amira").fill("Prefers email over calls this month.");
+      await page.getByRole("button", { name: "Add note" }).click();
+      await settle(page, "Adding…");
+    },
+  },
+  {
+    name: "a note not confirmed yet",
+    open: async (page) => {
+      await fail(page, "**/api/people/*/notes");
+      const f = await people(page, "");
+      await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
+      await page.getByLabel("A note about Amira").fill("Prefers email over calls this month.");
+      await page.getByRole("button", { name: "Add note" }).click();
+      await settle(page, "Not confirmed yet.");
+    },
+  },
+  {
+    name: "a note refused",
+    open: async (page) => {
+      await page.route("**/api/people/*/notes", (route) => respond(route, { error: { code: "note_refused", message: "This request id was already used for another note: send a new one." } }, 409));
+      const f = await people(page, "");
+      await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
+      await page.getByLabel("A note about Amira").fill("Prefers email over calls this month.");
+      await page.getByRole("button", { name: "Add note" }).click();
+      await settle(page, "The note wasn’t added.");
+    },
+  },
+  {
+    name: "a company note added",
+    open: async (page) => {
+      const f = await people(page, "", true);
+      await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
+      await page.getByLabel("A note about Amira").fill("Reception closes at 18:00 on Fridays.");
+      await page.getByText("Show for everyone at Harbour Lane Physio").click();
+      await page.getByRole("button", { name: "Add note" }).click();
+      await settle(page, "Company note added.");
+    },
   },
   // States added after the second verification (recheck R3).
   {

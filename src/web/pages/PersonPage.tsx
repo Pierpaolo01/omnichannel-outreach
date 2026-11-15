@@ -1,5 +1,5 @@
 import { Link } from "wouter";
-import type { PersonRecord, RecordCalls, RecordControls } from "../../shared/api.ts";
+import type { PersonRecord, RecordCalls, RecordColleagues, RecordControls } from "../../shared/api.ts";
 import type { Controls } from "../controls/useControls.ts";
 import { Activity } from "../activity.tsx";
 import { useControls } from "../controls/useControls.ts";
@@ -8,7 +8,7 @@ import { BackToLeads, CampaignRows, ContactRow, ErrorState, LocalTime, PeopleRow
 
 export function PersonPage({ id }: { id: string }) {
   // Read live (ticket 17b): after a control's answer, on another tab's control and while visible.
-  const { read, refresh } = useLiveRead<PersonRecord & RecordCalls & RecordControls>(`/api/people/${encodeURIComponent(id)}`);
+  const { read, refresh } = useLiveRead<PersonRecord & RecordCalls & RecordControls & RecordColleagues>(`/api/people/${encodeURIComponent(id)}`);
   const targets = read.state === "ready" ? read.data.leads.map((l) => ({ kind: "lead" as const, id: l.id })) : [];
   const controls = useControls(targets, refresh);
   return (
@@ -29,7 +29,7 @@ export function PersonPage({ id }: { id: string }) {
   );
 }
 
-function Person({ person, controls, reads }: { person: PersonRecord & RecordCalls & RecordControls; controls: Controls; reads: number }) {
+function Person({ person, controls, reads }: { person: PersonRecord & RecordCalls & RecordControls & RecordColleagues; controls: Controls; reads: number }) {
   const { company } = person;
   return (
     <article className="flex max-w-[780px] flex-col gap-10">
@@ -65,11 +65,15 @@ function Person({ person, controls, reads }: { person: PersonRecord & RecordCall
 
       {person.colleagues.length > 0 && (
         <Section title={`Others at ${company.name}`}>
-          <PeopleRows people={person.colleagues} />
+          <PeopleRows people={person.colleagues} lastCallNotes={person.colleagueNotes} userZone={person.userZone} />
         </Section>
       )}
 
-      <Activity path={`/api/people/${encodeURIComponent(person.id)}/activity`} reads={reads} />
+      <Activity
+        path={`/api/people/${encodeURIComponent(person.id)}/activity`}
+        reads={reads}
+        notes={{ kind: "person", path: `/api/people/${encodeURIComponent(person.id)}`, firstName: person.name.split(" ")[0] ?? person.name, company: company.name }}
+      />
     </article>
   );
 }

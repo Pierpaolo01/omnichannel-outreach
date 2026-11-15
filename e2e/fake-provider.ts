@@ -369,6 +369,83 @@ async function startCalls(scenario: CallsScenario): Promise<FakeCallsApp> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Ticket 18: lead search, bulk actions and the person page, with fictitious data. Amira Hassan is in two launched
+// campaigns and one not launched; a re-import marks her newer email; her direct line is marked wrong; her colleague
+// Tom's call left a note, saved as a company note. `many`: a further 120 fictitious people, for a long search.
+
+export interface FakePeopleApp extends FakeCallsApp {
+  readonly campaigns: { readonly clinics: string; readonly followUp: string; readonly draft: string };
+}
+
+const peopleStarted = new Map<string, Promise<FakePeopleApp>>();
+
+export function fakePeopleApp(name = "people", options: { many?: boolean } = {}): Promise<FakePeopleApp> {
+  let app = peopleStarted.get(name);
+  if (!app) peopleStarted.set(name, (app = startPeople(options.many ?? false)));
+  return app;
+}
+
+async function startPeople(many: boolean): Promise<FakePeopleApp> {
+  const harness = new EngineHarness({
+    start: MONDAY_8 - 2 * H,
+    accounts: [{ id: FAKE_INBOX, capacity: 200, gapMs: 60_000, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
+  });
+  await harness.tick();
+  await harness.request("PUT", "/api/call-settings", { dailyCapacity: 40, userZone: "Europe/London" });
+  const run1 = { businessesCsv: readFileSync(fixture("businesses-run1.csv"), "utf8"), peopleCsv: readFileSync(fixture("people-run1.csv"), "utf8") };
+  const run2 = { businessesCsv: readFileSync(fixture("businesses-run2.csv"), "utf8"), peopleCsv: readFileSync(fixture("people-run2.csv"), "utf8") };
+  const create = async (campaignName: string) => (await harness.request<{ campaign: Campaign }>("POST", "/api/campaigns", { name: campaignName, defaultTimezone: "Europe/London", ...run1 })).body.campaign.id;
+  const clinics = await create("Clinics, London");
+  const followUp = await create("Physio follow-up");
+  const draft = await create("Spring outreach");
+  // A later export, a few minutes on: its new details are marked newer.
+  harness.clock += 10 * 60_000;
+  await harness.request("POST", `/api/campaigns/${clinics}/imports`, run2);
+  await harness.defineSequence(clinics, callsDefinition());
+  await harness.defineSequence(followUp, callsDefinition(1));
+  await harness.defineSequence(draft, callsDefinition());
+  if (many) {
+    const businesses = Array.from({ length: 40 }, (_, i) => business({ business_id: `bz-wide-${i}`, business_name: `Wider Clinic ${String(i + 1).padStart(2, "0")}`, phone_e164: `+4420794610${String(i).padStart(2, "0")}` }));
+    const people = Array.from({ length: 120 }, (_, i) =>
+      person({ person_id: `pp-wide-${i}`, business_id: `bz-wide-${i % 40}`, full_name: `Sample Person ${String(i + 1).padStart(3, "0")}`, email: `person${i + 1}@widerclinic${i % 40}.example` }),
+    );
+    await harness.request("POST", "/api/campaigns", { name: "Wider list", defaultTimezone: "Europe/London", ...csvOf({ businesses, people }) });
+  }
+  harness.clock = MONDAY_8 - H;
+  for (const id of [clinics, followUp]) {
+    const launched = await harness.launch(id);
+    if (launched.status !== 200) throw new Error(`the people campaign did not launch: ${JSON.stringify(launched.body)}`);
+  }
+  await harness.advanceTo(MONDAY_8 + 2 * H);
+
+  const rows = (await harness.request<{ rows: { kind: string; id: string; name: string; enrollments: EnrollmentView[] }[] }>("GET", "/api/leads?limit=500")).body.rows;
+  const row = (rowName: string) => {
+    const found = rows.find((r) => r.name === rowName);
+    if (!found) throw new Error(`no lead named ${rowName}`);
+    return found;
+  };
+  // Amira's direct line is marked wrong (as a wrong-number call would).
+  const amira = (await harness.request<{ contactDetails: { id: string; phoneKind: string | null; owner: string }[] }>("GET", `/api/people/${row("Amira Hassan").id}`)).body;
+  const direct = amira.contactDetails.find((d) => d.owner === "person" && d.phoneKind !== null);
+  if (direct) await harness.store.markContactDetailBad(direct.id);
+  // Tom's call in Clinics, London: no answer, its note saved for everyone at Harbour Lane Physio.
+  const queue = (await harness.request<{ readyNow: { taskId: string; person: { name: string } | null; campaign: { id: string } }[] }>("GET", "/api/calls")).body.readyNow;
+  const tomCall = queue.find((q) => q.person?.name === "Tom" && q.campaign.id === clinics);
+  if (tomCall) {
+    const task = (await harness.request<{ numbers: { detailId: string; bad: boolean }[] }>("GET", `/api/call-tasks/${tomCall.taskId}`)).body;
+    await harness.request("POST", `/api/call-tasks/${tomCall.taskId}/outcome`, {
+      requestId: "people-tom-call",
+      outcome: "no_answer",
+      numberId: task.numbers.find((n) => !n.bad)?.detailId ?? null,
+      note: "Front desk says the director decides on software. Best before 10:00.",
+      noteScope: "company",
+    });
+  }
+  await harness.advanceTo(harness.clock + 5 * 60_000);
+  return { url: await serveHarness(harness), harness, campaign: clinics, campaigns: { clinics, followUp, draft }, person: (n) => row(n).id, company: (n) => row(n).id };
+}
+
+// ---------------------------------------------------------------------------------------------
 // Ticket 20's demonstration (ticket 20b), as src/server/engine/interruption-demo.test.ts runs it: two campaigns sharing
 // one inbox of capacity 4 a day and two simulated SMS numbers, each with email, SMS and a phone track, three leads each,
 // one lead paused; then the application stops, and starts again. Nothing reaches a real provider; data is fictitious.

@@ -633,6 +633,28 @@ export const MIGRATIONS: readonly Migration[] = [
         AND EXISTS (SELECT 1 FROM attempts a WHERE a.idempotency_key = provider_work.key AND a.withdraw_requested = 1);
     `,
   },
+  {
+    // Ticket 18.
+    version: 17,
+    name: "bulk actions' request ids, and enrollments by person and by company for lead search (ADR 0003, ticket 18)",
+    // A bulk id is bound to its action and body (a hash of it): the same id with another body is refused whole. Each
+    // per-lead control of a bulk keeps its own id (bulkId/enrollmentId) in control_requests. An add to campaign keeps its
+    // whole answer here, written in the transaction that enrolls, so a retry replays it and never enrolls twice.
+    // IF NOT EXISTS: the older migrations' tests rewind a database to before their version and migrate it again.
+    sql: `
+      CREATE TABLE IF NOT EXISTS bulk_requests (
+        bulk_id TEXT PRIMARY KEY,
+        action TEXT NOT NULL CHECK (action IN ('add', 'pause', 'resume', 'stop')),
+        body_sha256 TEXT NOT NULL,
+        answer TEXT,
+        at_wall INTEGER NOT NULL
+      );
+      -- Lead search reads each row's enrollments, and filters by campaign and status per person or company: without
+      -- these it scanned every enrollment for every row (measured at 2,000 leads; ADR 0003 "Ticket 18").
+      CREATE INDEX IF NOT EXISTS enrollments_by_person ON enrollments(person_id) WHERE lead_kind = 'person';
+      CREATE INDEX IF NOT EXISTS enrollments_by_company ON enrollments(company_id, lead_kind);
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string, migrations: readonly Migration[] = MIGRATIONS): void {

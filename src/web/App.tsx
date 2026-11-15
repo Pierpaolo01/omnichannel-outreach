@@ -1,5 +1,6 @@
 import { useState, type ReactNode, type SyntheticEvent } from "react";
 import { Link, Route, Router, Switch, useLocation } from "wouter";
+import { BulkProvider } from "./bulk/useBulk.tsx";
 import { ConfirmStrip } from "./controls/ControlViews.tsx";
 import { leaveAnyway, stay, useGuardedLocation, useLeaveQuestion } from "./leaveGuard.ts";
 import { Icon, type IconName } from "./icons.tsx";
@@ -43,6 +44,8 @@ function LeaveQuestion() {
 
 function Shell() {
   return (
+    // The app's one bulk request manager (ticket 18): a stored bulk is sent and answered wherever the user is.
+    <BulkProvider>
     <div className="grid min-h-screen grid-cols-1 grid-rows-[auto_1fr] min-[901px]:grid-cols-[220px_minmax(0,1fr)] min-[901px]:grid-rows-1">
       <a
         href="#main"
@@ -76,6 +79,7 @@ function Shell() {
         </div>
       </main>
     </div>
+    </BulkProvider>
   );
 }
 

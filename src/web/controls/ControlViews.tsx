@@ -61,7 +61,16 @@ export function ConfirmStrip({
         {busy && <span className="mt-1 block text-ink-2">{busy}</span>}
       </span>
       <span className="flex flex-wrap gap-2">
-        <button type="button" ref={confirmRef} className="btn btn-primary btn-sm font-semibold" disabled={busy !== null} onClick={onConfirm}>
+        <button
+          type="button"
+          ref={confirmRef}
+          // aria-disabled, not disabled: focus stays on the action while it waits (verifier B1 on 4363270).
+          aria-disabled={busy !== null}
+          className={`btn btn-primary btn-sm font-semibold ${busy !== null ? "cursor-not-allowed opacity-50" : ""}`}
+          onClick={() => {
+            if (busy === null) onConfirm();
+          }}
+        >
           {action}
         </button>
         <button type="button" className="btn btn-ghost btn-sm font-medium text-muted hover:text-base-content" onClick={onCancel}>
@@ -171,7 +180,8 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
   const focusNext = useRef<"status" | null>(null);
   const [refocus, setRefocus] = useState(false);
   const offered = offeredControls(lead);
-  const busy = controls.pending(target) !== null;
+  const bulkPending = controls.bulkPending(target);
+  const busy = controls.pending(target) !== null || bulkPending;
   const sentence = nextStepSentence(lead, userZone);
   // Before launch every control is refused for that one reason, which the sentence already says.
   const reasons = lead.campaignState.launched ? [...new Set(EXPECTED[lead.status].map((a) => refusalOf(lead, a)).filter((r): r is string => r !== null && r !== sentence))] : [];
@@ -215,6 +225,11 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
           {r}
         </p>
       ))}
+      {bulkPending && controls.pending(target) === null && (
+        <p role="status" className="rounded-field bg-pause-soft px-4 py-2.5 text-[14px] text-base-content">
+          A bulk change from Leads that includes this campaign enrollment is on its way. These controls wait until it is answered.
+        </p>
+      )}
       <ControlStatus
         controls={controls}
         target={target}

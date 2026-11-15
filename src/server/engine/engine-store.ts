@@ -357,6 +357,11 @@ export interface EngineStore {
   openCallbackInstants(): Promise<number[]>;
   /** Notes on a person or a company, newest first. */
   notesOf(owner: "person" | "company", ownerId: string): Promise<StoredNote[]>;
+  /**
+   * A note typed on a record (ticket 18), stored under its request id: the same id with the same owner and body is
+   * `same` and stores nothing; with another owner or body it is `different` and stores nothing.
+   */
+  addNote(note: { readonly id: string; readonly owner: "person" | "company"; readonly ownerId: string; readonly body: string; readonly atWall: number }): Promise<"added" | "same" | "different">;
   /** The latest call made with a note on each of these subjects; a skip for now is not a call. */
   lastCallNotes(subjectIds: readonly string[]): Promise<CallNoteRecord[]>;
 }

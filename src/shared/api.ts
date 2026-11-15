@@ -3,7 +3,7 @@
  * Types only: nothing here runs.
  */
 import type { Channel, PhoneKind } from "../domain/contact-details.ts";
-import type { ImportSummary, LeadOutcome, NotEnrolledReason } from "../domain/import-plan.ts";
+import type { DetailNote, ImportSummary, LeadOutcome, NotEnrolledReason } from "../domain/import-plan.ts";
 import type { FileCheck } from "../domain/scraper-export.ts";
 import type { OutreachStatus } from "../domain/outreach-status.ts";
 
@@ -241,6 +241,24 @@ export interface ColleagueView {
   readonly title: string;
   readonly enrollments: readonly EnrollmentView[];
   readonly unenrolledReason: UnenrolledReason;
+}
+
+/** The note of the last call logged with someone that had one (ticket 18), as the call desk's colleagues show it. */
+export interface LastCallNote {
+  readonly note: string;
+  readonly outcome: CallOutcomeApi;
+  readonly at: string;
+}
+
+/** GET /api/people/:id and GET /api/companies/:id (ticket 18): each colleague's (person on record's) last call note. */
+export interface RecordColleagues {
+  readonly colleagueNotes: readonly { readonly personId: string; readonly lastCallNote: LastCallNote | null }[];
+}
+
+/** POST /api/people/:id/notes and POST /api/companies/:id/notes. */
+export interface NoteAnswer {
+  readonly note: ActivityNote;
+  readonly replayed: boolean;
 }
 
 export interface PersonRecord {
@@ -876,8 +894,21 @@ export interface DeclinePreviewView {
   readonly withProvider: number;
 }
 
+/**
+ * A note on the record's timeline (ticket 18): the person's own notes and their company's notes, which show for everyone
+ * at the company. A note written with a call outcome shows on that call's entry instead, on the record of the lead the
+ * call was with; on a colleague's record its company note shows here.
+ */
+export interface ActivityNote {
+  readonly id: string;
+  readonly scope: "person" | "company";
+  readonly body: string;
+  readonly at: string;
+}
+
 export interface ActivityView {
   readonly entries: readonly ActivityEntry[];
+  readonly notes: readonly ActivityNote[];
   /** The user's zone, in which Activity's times and days are said (council on 32454ea, C). */
   readonly userZone: string;
 }
@@ -1314,3 +1345,106 @@ export interface CallTaskView {
    */
   readonly listedFrom: string | null;
 }
+
+// -------------------------------------------------------------------------------------------
+// Ticket 18: bulk actions on Leads (ADR 0003 "Ticket 18"). A bulk control is the set of per-lead controls its
+// confirmation showed; add to campaign uses the import's enrollment rule.
+
+export type BulkAction = "add" | "pause" | "resume" | "stop";
+export type BulkControlAction = Exclude<BulkAction, "add">;
+
+/** A selected Leads row: a person, or a company lead. */
+export interface BulkRowRef {
+  readonly kind: "person" | "company";
+  readonly id: string;
+}
+export interface BulkRowView extends BulkRowRef {
+  readonly name: string;
+}
+
+/** One enrollment in a bulk control's scope, with the action's entry in its own read (the same as GET /api/enrollments/:id). */
+export interface BulkPreviewItem {
+  readonly row: BulkRowView;
+  readonly enrollmentId: string;
+  readonly campaign: { readonly id: string; readonly name: string };
+  readonly status: OutreachStatus;
+  readonly control: ControlView;
+}
+
+/** POST /api/bulk/preview for pause, resume or stop: the scope resolved as of `asOf`, and what the press would do. */
+export interface BulkControlPreview {
+  readonly asOf: string;
+  readonly action: BulkControlAction;
+  /** The campaign Leads was filtered to; null for every campaign each selected row is in. */
+  readonly scope: { readonly id: string; readonly name: string } | null;
+  readonly rows: number;
+  readonly items: readonly BulkPreviewItem[];
+  /** Selected rows with no enrollment in scope. */
+  readonly outOfScope: readonly BulkRowView[];
+  /** Tallies of `items`: how many the action applies to, how many it refuses, grouped by the refusal's reason. */
+  readonly counts: { readonly applies: number; readonly refused: number; readonly reasons: readonly { readonly reason: string; readonly count: number }[] };
+}
+
+export type BulkAddOutcome = "enroll" | "already_enrolled" | "not_enrolled";
+/**
+ * Why the import's enrollment rule leaves a lead out (the page words each one, as the import results do): no usable
+ * channel; a personal email, mobile or shared inbox another lead in the campaign holds; or a company whose decision
+ * makers are on record and reachable (or that has no shared inbox), which is never a company lead.
+ */
+export type BulkNotEnrolled =
+  | { readonly reason: "no_usable_channel" }
+  | { readonly reason: "shares_contact"; readonly shared: { readonly detail: DetailNote; readonly lead: string; readonly companyName: string; readonly enrolled: boolean } }
+  | { readonly reason: "decision_makers_on_record" };
+export interface BulkAddRow {
+  readonly row: BulkRowView;
+  readonly outcome: BulkAddOutcome;
+  /** Set exactly when the outcome is not_enrolled. */
+  readonly notEnrolled: BulkNotEnrolled | null;
+}
+
+/** POST /api/bulk/preview for add: the import's enrollment rule on the directory as of `asOf`, writing nothing. */
+export interface BulkAddPreview {
+  readonly asOf: string;
+  readonly action: "add";
+  readonly campaign: { readonly id: string; readonly name: string };
+  readonly rows: readonly BulkAddRow[];
+  readonly counts: { readonly enroll: number; readonly alreadyEnrolled: number; readonly notEnrolled: number };
+}
+
+export type BulkPreview = BulkControlPreview | BulkAddPreview;
+
+/** One per-lead answer of a bulk control: the engine's answer to the per-lead request `bulkId/enrollmentId`. */
+export interface BulkControlResult {
+  readonly enrollmentId: string;
+  readonly outcome: "applied" | "refused";
+  readonly reason: string | null;
+  /** The answer is the per-lead request's first answer, given again. */
+  readonly replayed: boolean;
+}
+
+/** POST /api/bulk for pause, resume or stop. */
+export interface BulkControlAnswer {
+  readonly bulkId: string;
+  readonly action: BulkControlAction;
+  readonly results: readonly BulkControlResult[];
+  readonly counts: { readonly applied: number; readonly refused: number };
+}
+
+export interface BulkAddResult {
+  readonly row: BulkRowView;
+  readonly outcome: "enrolled" | "already_enrolled" | "not_enrolled";
+  readonly notEnrolled: BulkNotEnrolled | null;
+  readonly enrollmentId: string | null;
+}
+
+/** POST /api/bulk for add: stored with the bulk id in the transaction that enrolls, so a retry replays it. */
+export interface BulkAddAnswer {
+  readonly bulkId: string;
+  readonly action: "add";
+  readonly campaign: { readonly id: string; readonly name: string };
+  readonly results: readonly BulkAddResult[];
+  readonly counts: { readonly enrolled: number; readonly alreadyEnrolled: number; readonly notEnrolled: number };
+  readonly replayed: boolean;
+}
+
+export type BulkAnswer = BulkControlAnswer | BulkAddAnswer;

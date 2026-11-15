@@ -10,6 +10,7 @@ import {
   type ImportSummary,
   type KnownDetail,
   type LeadRef,
+  type NewEnrollment,
 } from "../../domain/import-plan.ts";
 import { isOutreachStatus } from "../../domain/outreach-status.ts";
 import { companyLeadReach, decisionMakerReach, hasUsableChannel } from "../../domain/reach.ts";
@@ -28,9 +29,11 @@ import type {
   LeadSearchResult,
   PersonRecord,
   UnenrolledReason,
+  BulkRowRef,
 } from "../../shared/api.ts";
 import type { EngineStore } from "../engine/engine-store.ts";
 import { migrate, MIGRATIONS, type Migration } from "./migrations.ts";
+import type { LeadRowEnrollments } from "./store.ts";
 import { SqliteEngineStore } from "./sqlite-engine-store.ts";
 import { SqliteInstantlyStore } from "./sqlite-instantly-store.ts";
 import type { InstantlyStore } from "../instantly/store.ts";
@@ -259,9 +262,8 @@ class SqliteStore implements OutreachStore {
       SELECT 'person' AS kind, p.id AS id, p.display_name AS sort_name FROM people p
       JOIN companies c ON c.id = p.company_id
       WHERE (:text = '' OR p.search_name LIKE :like ESCAPE '\\' OR c.search_name LIKE :like ESCAPE '\\'
-        OR ${detailMatch(
-          "((d.owner_kind = 'person' AND d.owner_id = p.id) OR (d.owner_kind = 'company' AND d.owner_id = c.id))",
-        )})
+        OR ${detailMatch("d.owner_kind = 'person' AND d.owner_id = p.id")}
+        OR ${detailMatch("d.owner_kind = 'company' AND d.owner_id = c.id")})
       AND (:company = '' OR p.company_id = :company)
       AND ${enrollmentFilter("e.lead_kind = 'person' AND e.person_id = p.id")}
       UNION ALL
@@ -312,6 +314,58 @@ class SqliteStore implements OutreachStore {
       };
     });
     return { rows, total, people: total - companies, companies, limit: query.limit };
+  }
+
+  async leadRows(refs: readonly BulkRowRef[]): Promise<LeadRowEnrollments[]> {
+    return refs.flatMap((ref): LeadRowEnrollments[] => {
+      if (ref.kind === "person") {
+        const row = this.personRow(ref.id);
+        return row ? [{ ...ref, name: str(row, "display_name"), enrollments: this.enrollments({ kind: "person", personId: ref.id }) }] : [];
+      }
+      const row = this.companyRow(ref.id);
+      return row ? [{ ...ref, name: str(row, "name"), enrollments: this.enrollments({ kind: "company", companyId: ref.id }) }] : [];
+    });
+  }
+
+  async planInCampaign<T>(campaignId: string, plan: (directory: Directory) => T): Promise<T | null> {
+    return this.campaignRow(campaignId) ? plan(this.directory(campaignId)) : null;
+  }
+
+  async bindBulkRequest(bulkId: string, action: string, bodySha256: string, at: number): Promise<"new" | "same" | "different"> {
+    return this.transaction(() => {
+      const row = this.db.prepare("SELECT action, body_sha256 FROM bulk_requests WHERE bulk_id = ?").get(bulkId);
+      if (row) return str(row, "action") === action && str(row, "body_sha256") === bodySha256 ? "same" : "different";
+      this.run("INSERT INTO bulk_requests (bulk_id, action, body_sha256, answer, at_wall) VALUES (?, ?, ?, NULL, ?)", [bulkId, action, bodySha256, at]);
+      return "new";
+    });
+  }
+
+  async addToCampaign<D>(input: {
+    campaignId: string;
+    bulkId: string;
+    bodySha256: string;
+    at: number;
+    plan: (directory: Directory) => { readonly decisions: D; readonly enrollments: readonly NewEnrollment[] };
+    answer: (decisions: D) => string;
+  }): Promise<{ kind: "answered"; answer: string; replayed: boolean } | { kind: "different" } | { kind: "missing" }> {
+    return this.transaction(() => {
+      // The bulk id's stored answer is read inside the write transaction: a concurrent retry waits, then replays it.
+      const known = this.db.prepare("SELECT action, body_sha256, answer FROM bulk_requests WHERE bulk_id = ?").get(input.bulkId);
+      if (known) {
+        const answer = strOrNull(known, "answer");
+        return str(known, "action") === "add" && str(known, "body_sha256") === input.bodySha256 && answer !== null ? { kind: "answered", answer, replayed: true } : { kind: "different" };
+      }
+      if (!this.campaignRow(input.campaignId)) return { kind: "missing" };
+      const plan = input.plan(this.directory(input.campaignId));
+      const sharedBefore = this.sharedDestinations();
+      this.insertEnrollments(input.campaignId, null, plan.enrollments);
+      // The import's safety net: one personal email, mobile or shared inbox is never two enrolled leads' in one campaign.
+      const broken = this.sharedDestinations().filter((d) => !sharedBefore.includes(d));
+      if (broken.length > 0) throw new Error(`the add would give ${broken.length} contact detail(s) to two enrolled leads in one campaign`);
+      const answer = input.answer(plan.decisions);
+      this.run("INSERT INTO bulk_requests (bulk_id, action, body_sha256, answer, at_wall) VALUES (?, 'add', ?, ?, ?)", [input.bulkId, input.bodySha256, answer, input.at]);
+      return { kind: "answered", answer, replayed: false };
+    });
   }
 
   async person(id: string): Promise<PersonRecord | null> {
@@ -650,9 +704,15 @@ class SqliteStore implements OutreachStore {
       [meta.importId, meta.campaignId, meta.importedAt, meta.fileNames.people, meta.fileNames.businesses, JSON.stringify(plan.summary)],
     );
 
+    this.insertEnrollments(meta.campaignId, meta.importId, plan.enrollments);
+  }
+
+  /** Enrolls leads in a campaign, as an import does: the one path for an import and an add to campaign (ticket 18). */
+  private insertEnrollments(campaignId: string, importId: string | null, enrollments: readonly NewEnrollment[]): void {
+    const meta = { campaignId, importId };
     const campaignRow = this.db.prepare("SELECT launched_at, paused_since FROM campaigns WHERE id = ?").get(meta.campaignId);
     const launched = campaignRow?.["launched_at"] != null && campaignRow["paused_since"] == null;
-    for (const e of plan.enrollments) {
+    for (const e of enrollments) {
       const enrolledMs = Date.parse(e.enrolledAt);
       const companyId = e.lead.kind === "company" ? e.lead.companyId : this.companyIdOfPerson(e.lead.personId);
       this.run(
