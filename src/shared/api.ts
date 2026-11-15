@@ -501,6 +501,11 @@ export interface NeedsAttention {
    * since its last contact, and how many due sends wait on it, decided by the gate's own function (`waitingOn`).
    */
   readonly waitingOnProvider: readonly { readonly channel: "email" | "sms"; readonly since: string | null; readonly sends: number }[];
+  /**
+   * Sending interrupted now, as GET /api/today gives it, judged at this read's own instant (ticket 20b, council on
+   * 7622b8b), so every Needs attention entry comes from one read.
+   */
+  readonly sendingInterrupted: SendingInterruptedView | null;
   /** Due steps waiting for a transport the provider cannot use yet, such as continue-thread follow-ups (follow-up 42 item 12). */
   readonly waitingOnTransport: readonly { readonly enrollmentId: string; readonly trackId: string; readonly stepId: string; readonly channel: "email" | "sms"; readonly dueAt: string }[];
 }
@@ -1097,6 +1102,11 @@ export interface SendingInterruptedView {
   readonly cause: "ticks_failing" | "providers_unreachable" | "not_running";
   /** The provider read that failed last since then, and which part of the round: a partial answer is not contact. */
   readonly lastFailedRead: { readonly channel: "email" | "sms"; readonly part: "accounts" | "observation" | "call"; readonly at: string } | null;
+  /**
+   * The last instant a sending round threw since `since` (ticket 20b), else null. Rounds may have ended in between, so
+   * `ticks_failing` says the latest round failed, not that every round since `since` did.
+   */
+  readonly lastRoundFailedAt: string | null;
 }
 
 /** GET /api/calls: the focus queue. The focused task is the first ready now; the queue moves on only after an outcome. */

@@ -1,4 +1,8 @@
-import { describe, expect, test } from "vitest";
+import { StatementSync } from "node:sqlite";
+import { describe, expect, test, vi } from "vitest";
+import { needsAttentionView } from "./call-views.ts";
+import { DEFAULT_RULES } from "./rules.ts";
+import { needsAttention } from "./views.ts";
 import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
@@ -103,6 +107,39 @@ describe("a lead whose details a later import restores (review bot on 487de7c)",
     await h.reimport(campaignId, { businesses: [HARBOUR], people: [PAT, { ...ROB, email: "rob@harbour.example" }] });
     await h.advanceTo(MONDAY_9 + 2 * H);
     expect((await attention()).noUsableChannel.find((x) => x.enrollmentId === lead("Rob Lane"))).toMatchObject({ person: { name: "Rob Lane" }, channels: [] });
+  });
+});
+
+describe("naming the leads costs a fixed number of statements (council on 7622b8b)", () => {
+  /** SQL statements run by `read`, counted on every statement's execution. */
+  async function statements(read: () => Promise<unknown>): Promise<number> {
+    const spies = (["get", "all", "run", "iterate"] as const).map((m) => vi.spyOn(StatementSync.prototype, m));
+    try {
+      await read();
+      return spies.reduce((n, s) => n + s.mock.calls.length, 0);
+    } finally {
+      for (const s of spies) s.mockRestore();
+    }
+  }
+
+  async function namingCost(leads: number): Promise<{ named: number; cost: number }> {
+    // Every lead has no email in an email-only campaign: each ends with no usable channel at launch, at one company.
+    const people = Array.from({ length: leads }, (_, i) => person({ person_id: `x${i}`, business_id: "b1", full_name: `Lead ${i} Example` }));
+    const { h, attention } = await world(50, definition([track("e1", "email", [email("s1")])]), people);
+    await h.advanceTo(MONDAY_9 + H);
+    const named = (await attention()).noUsableChannel.length;
+    const now = h.clock;
+    const engine = await statements(() => needsAttention(h.store.engine, now, DEFAULT_RULES));
+    const http = await statements(() => needsAttentionView(h.store, now, DEFAULT_RULES, () => true));
+    return { named, cost: http - engine };
+  }
+
+  test("the same with 2 leads and with 20", async () => {
+    const few = await namingCost(2);
+    const many = await namingCost(20);
+    expect([few.named, many.named]).toEqual([2, 20]);
+    expect(many.cost).toBe(few.cost);
+    expect(few.cost).toBeLessThanOrEqual(3);
   });
 });
 

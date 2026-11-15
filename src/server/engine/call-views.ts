@@ -333,7 +333,14 @@ export async function callsView(store: OutreachStore, now: number, options: { re
 /** Whether sending is interrupted now, and since when and why (ticket 20a; follow-up 42 item 45). */
 async function sendingInterruptedView(store: OutreachStore, now: number): Promise<SendingInterruptedView | null> {
   const state = await sendingInterrupted(store.engine, now);
-  return state ? { since: iso(state.since), cause: state.cause, lastFailedRead: state.lastFailedRead ? { channel: state.lastFailedRead.channel, part: state.lastFailedRead.part, at: iso(state.lastFailedRead.at) } : null } : null;
+  return state
+    ? {
+        since: iso(state.since),
+        cause: state.cause,
+        lastFailedRead: state.lastFailedRead ? { channel: state.lastFailedRead.channel, part: state.lastFailedRead.part, at: iso(state.lastFailedRead.at) } : null,
+        lastRoundFailedAt: state.lastRoundFailedAt === null ? null : iso(state.lastRoundFailedAt),
+      }
+    : null;
 }
 
 /** The current interruption notice (ticket 20a): one line, kept until the next interruption replaces it (question Q18). */
@@ -348,23 +355,14 @@ async function noticeView(store: OutreachStore): Promise<InterruptionNoticeView 
  */
 export async function needsAttentionView(store: OutreachStore, now: number, rules: Pick<Rules, "asOfAction" | "evaluate">, transportAvailable: Parameters<typeof needsAttention>[3]): Promise<NeedsAttention> {
   const read = await needsAttention(store.engine, now, rules, transportAvailable);
-  const named = new Map<string, AttentionLead>();
-  const lead = async (enrollmentId: string): Promise<AttentionLead> => {
-    const known = named.get(enrollmentId);
-    if (known) return known;
-    const p = await partiesOf(store, enrollmentId);
-    const out: AttentionLead = p
-      ? { person: p.person ? { id: p.person.id, name: p.person.name } : null, company: p.company, campaign: p.campaign }
-      : // Unreachable: every engine subject is an enrollment row. Named blank rather than dropped, so no entry is hidden.
-        { person: null, company: { id: "", name: "" }, campaign: { id: "", name: "" } };
-    named.set(enrollmentId, out);
-    return out;
-  };
-  const waitingForCapacity = [];
-  for (const w of read.waitingForCapacity) waitingForCapacity.push({ ...w, ...(await lead(w.enrollmentId)) });
-  const noUsableChannel = [];
-  for (const n of read.noUsableChannel) noUsableChannel.push({ ...n, ...(await lead(n.enrollmentId)) });
-  return { ...read, waitingForCapacity, noUsableChannel };
+  // Names only, every lead in one query (council on 7622b8b): the read runs every 20 seconds on Today.
+  const names = await store.leadNames([...read.waitingForCapacity, ...read.noUsableChannel].map((x) => x.enrollmentId));
+  // Unreachable: every engine subject is an enrollment row. Named blank rather than dropped, so no entry is hidden.
+  const unnamed: AttentionLead = { person: null, company: { id: "", name: "" }, campaign: { id: "", name: "" } };
+  const lead = (enrollmentId: string): AttentionLead => names.get(enrollmentId) ?? unnamed;
+  const waitingForCapacity = read.waitingForCapacity.map((w) => ({ ...w, ...lead(w.enrollmentId) }));
+  const noUsableChannel = read.noUsableChannel.map((n) => ({ ...n, ...lead(n.enrollmentId) }));
+  return { ...read, waitingForCapacity, noUsableChannel, sendingInterrupted: await sendingInterruptedView(store, now) };
 }
 
 /** How many calls Up next shows on Today. */

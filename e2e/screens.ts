@@ -65,6 +65,7 @@ const NEEDS_ATTENTION = {
   noUsableChannel: [],
   waitingOnTransport: [],
   waitingOnProvider: [],
+  sendingInterrupted: null,
   overdueCallbacks: [],
 } as const;
 
@@ -585,7 +586,6 @@ async function everyEntry(page: Page, size: "many" | "one"): Promise<void> {
     await respond(route, {
       ...body,
       interruption: { from: new Date(at - 26 * 3_600_000).toISOString(), to: new Date(at - 3_600_000).toISOString(), rescheduled: size === "one" ? 1 : 1284 },
-      sendingInterrupted: { since: new Date(at - 20 * 60_000).toISOString(), cause: "providers_unreachable", lastFailedRead: { channel: "email", part: "observation", at: new Date(at - 60_000).toISOString() } },
     });
   });
   await page.route("**/api/needs-attention", async (route) => {
@@ -594,8 +594,10 @@ async function everyEntry(page: Page, size: "many" | "one"): Promise<void> {
     const company = { id: "company-1", name: `${LONG_NAME} Physiotherapy` };
     const lead = (i: number) => ({ person: i % 3 === 0 ? null : { id: `person-${i}`, name: `${LONG_NAME} ${i}` }, company, campaign: campaigns[i % 2] ?? campaigns[0]! });
     const count = size === "one" ? 1 : 12;
+    const at = f.harness.clock;
     await respond(route, {
       ...body,
+      sendingInterrupted: { since: new Date(at - 20 * 60_000).toISOString(), cause: "providers_unreachable", lastFailedRead: { channel: "email", part: "observation", at: new Date(at - 60_000).toISOString() }, lastRoundFailedAt: null },
       waitingOnProvider: [{ channel: "email", since: new Date(Date.parse(body.overdueCallbacks[0]?.dueAt ?? "2026-11-09T09:00:00Z")).toISOString(), sends: size === "one" ? 1 : 312 }, { channel: "sms", since: null, sends: 47 }],
       waitingForCapacity: Array.from({ length: count }, (_, i) => ({ ...lead(i + 1), enrollmentId: `e-${i}`, campaignId: (campaigns[(i + 1) % 2] ?? campaigns[0]!).id, trackId: "t1", stepId: "s1", channel: i % 2 === 0 ? ("email" as const) : ("sms" as const), dueAt: "2026-11-09T08:00:00.000Z", accountIds: ["inbox-a"], resetsAt: "2026-11-10T00:00:00.000Z" })),
       noUsableChannel: Array.from({ length: size === "one" ? 1 : 40 }, (_, i) => ({ ...lead(i + 1), enrollmentId: `n-${i}`, campaignId: (campaigns[(i + 1) % 2] ?? campaigns[0]!).id, endedAt: "2026-11-08T15:00:00.000Z", channels: [{ channel: "email" as const, why: "bad" as const }, { channel: "sms" as const, why: "missing" as const }, { channel: "call" as const, why: "declined" as const }] })),

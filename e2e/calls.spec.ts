@@ -298,6 +298,7 @@ test.describe("whatever the server decides by the clock is refreshed when it can
         waitingForCapacity: [],
         noUsableChannel: [],
         waitingOnTransport: [],
+        sendingInterrupted: null,
         waitingOnProvider: [],
         overdueCallbacks: [],
       });

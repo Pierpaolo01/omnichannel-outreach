@@ -196,7 +196,7 @@ type Reads = { today: TodayView; attention: NeedsAttention };
 const REMOVE: Readonly<Record<string, (r: Reads, rest: string) => Reads>> = {
   "overdue-callbacks": (r) => ({ ...r, today: { ...r.today, overdueCallbacks: [] } }),
   "carried-over": (r) => ({ ...r, today: { ...r.today, carriedOver: 0, carriedOverLastDay: 0 } }),
-  "sending-interrupted": (r) => ({ ...r, today: { ...r.today, sendingInterrupted: null } }),
+  "sending-interrupted": (r) => ({ ...r, attention: { ...r.attention, sendingInterrupted: null } }),
   provider: (r, rest) => ({ ...r, attention: { ...r.attention, waitingOnProvider: r.attention.waitingOnProvider.filter((x) => x.channel !== rest) } }),
   sender: (r, rest) => ({ ...r, attention: { ...r.attention, senderProblems: r.attention.senderProblems.filter((x) => x.accountId !== rest) } }),
   wait: (r, rest) => ({ ...r, attention: { ...r.attention, accountWaits: r.attention.accountWaits.filter((x) => x.accountId !== rest) } }),
@@ -222,9 +222,10 @@ function everyKind(r: Reads): Reads {
   const at = r.today.asOf;
   const lead = (i: number) => ({ person: { id: `person-${i}`, name: `Lead ${i}` }, company: { id: "company-1", name: "Harbour Lane Physio" }, campaign: { id: `campaign-${i}`, name: `Campaign ${i}` } });
   return {
-    today: { ...r.today, sendingInterrupted: { since: at, cause: "providers_unreachable", lastFailedRead: null } },
+    today: r.today,
     attention: {
       ...r.attention,
+      sendingInterrupted: { since: at, cause: "providers_unreachable", lastFailedRead: null, lastRoundFailedAt: null },
       waitingOnProvider: [{ channel: "email", since: at, sends: 3 }, { channel: "sms", since: null, sends: 1 }],
       senderProblems: [{ accountId: "sms-1", channel: "sms", label: "+44 7700 900999", problem: "disconnected" }, { accountId: "inbox-2", channel: "email", label: "alex@northlight-mail.example", problem: "sending_off" }],
       accountWaits: [{ accountId: "inbox-3", reason: "quota", until: null }],

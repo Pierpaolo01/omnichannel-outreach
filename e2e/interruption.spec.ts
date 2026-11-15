@@ -31,7 +31,7 @@ test("ticket 20's demonstration: after two days stopped, Today says when sending
 
   await test.step("Wednesday 12:00 London: the one line, with the stop's date, since it began on Monday", async () => {
     await at(page, f, "/");
-    await expect(page.getByTestId("interruption-line")).toHaveText(`Sending was interrupted from Mon 9 Nov at 12:00 to 12:00; ${n} sends rescheduled.`);
+    await expect(page.getByTestId("interruption-line")).toHaveText(`Sending was interrupted from Mon 9 Nov at 12:00 to today at 12:00; ${n} sends rescheduled.`);
     await expect(page.getByText(/sending was interrupted/i)).toHaveCount(1);
     await linger(page);
   });
@@ -81,16 +81,13 @@ test("no interruption: no line", async ({ page }) => {
 
 test("sending not running, a provider not answering and leads with no way left: what each is and where to act", async ({ page }) => {
   const f = await fakeCallsApp("ready");
-  await page.route("**/api/today", async (route) => {
-    const body = (await (await route.fetch()).json()) as TodayView;
-    await respond(route, { ...body, sendingInterrupted: { since: body.asOf, cause: "not_running", lastFailedRead: null } });
-  });
   await page.route("**/api/needs-attention", async (route) => {
     const body = (await (await route.fetch()).json()) as NeedsAttention;
     const campaign = { id: f.campaign, name: "Clinics, London" };
     const company = { id: "co-1", name: "Harbour Lane Physio" };
     await respond(route, {
       ...body,
+      sendingInterrupted: { since: new Date(f.harness.clock).toISOString(), cause: "not_running", lastFailedRead: null, lastRoundFailedAt: null },
       waitingOnProvider: [{ channel: "sms", since: null, sends: 2 }],
       noUsableChannel: [{ enrollmentId: "e-1", campaignId: f.campaign, person: { id: "person-1", name: "Rob Lane" }, company, campaign, endedAt: body.overdueCallbacks[0]?.dueAt ?? "2026-11-09T09:00:00.000Z", channels: [{ channel: "email", why: "missing" }] }],
     });

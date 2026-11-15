@@ -355,6 +355,7 @@ export function carriedItem(today: Pick<TodayView, "carriedOver" | "carriedOverL
  */
 export const SAID_ON_TODAY: Record<keyof NeedsAttention, string> = {
   overdueCallbacks: "from Today's own read, which names whose they are (overdueItem)",
+  sendingInterrupted: "sendingInterruptedItem, from this read, so it and the provider entries share one instant",
   waitingOnProvider: "providerWaitItems",
   senderProblems: "one entry per account",
   accountWaits: "one entry per account",
@@ -372,14 +373,14 @@ export const SAID_ON_TODAY: Record<keyof NeedsAttention, string> = {
  * carried over), then sending and its providers (ticket 20b), sender accounts, held work, leads waiting for capacity,
  * anomalies, and leads with no way left to reach them last. Today's read (`today`) gives the user's zone and date.
  */
-export function attentionItems(n: NeedsAttention, today: Pick<TodayView, "overdueCallbacks" | "userZone" | "date" | "carriedOver" | "carriedOverLastDay" | "sendingInterrupted">): AttentionItem[] {
+export function attentionItems(n: NeedsAttention, today: Pick<TodayView, "overdueCallbacks" | "userZone" | "date" | "carriedOver" | "carriedOverLastDay">): AttentionItem[] {
   const userZone = today.userZone;
   const items: AttentionItem[] = [];
   const overdue = overdueItem(today);
   if (overdue) items.push(overdue);
   const carried = carriedItem(today);
   if (carried) items.push(carried);
-  if (today.sendingInterrupted) items.push(sendingInterruptedItem(today.sendingInterrupted, today.date, userZone));
+  if (n.sendingInterrupted) items.push(sendingInterruptedItem(n.sendingInterrupted, today.date, userZone));
   items.push(...providerWaitItems(n.waitingOnProvider, today.date, userZone));
   for (const p of n.senderProblems) {
     items.push({

@@ -128,7 +128,7 @@ export function accountView(a: AccountState, label: string): SenderAccountViewAp
  * Needs attention as the engine decides it: every list of the HTTP read, with each lead entry by its ids only. The
  * route adds whose lead each is (`needsAttentionView` in call-views.ts, ticket 20b); nothing else is added there.
  */
-export type EngineNeedsAttention = Omit<NeedsAttention, "waitingForCapacity" | "noUsableChannel"> & {
+export type EngineNeedsAttention = Omit<NeedsAttention, "waitingForCapacity" | "noUsableChannel" | "sendingInterrupted"> & {
   readonly waitingForCapacity: readonly Omit<NeedsAttention["waitingForCapacity"][number], keyof AttentionLead>[];
   readonly noUsableChannel: readonly Omit<NeedsAttention["noUsableChannel"][number], keyof AttentionLead>[];
 };
