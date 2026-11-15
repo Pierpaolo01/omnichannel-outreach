@@ -209,7 +209,7 @@ describe("the SMS pool follows the connected SMS numbers, in the same one pool s
 });
 
 
-describe("a running campaign: changes stay on the page until the user applies them (ADR 0003 \"Ticket 19\", Q20)", () => {
+describe("a running campaign: changes stay on the page until the user applies them (ADR 0003 \"Ticket 19\", Q24)", () => {
   test("typing saves nothing and leaving sends nothing; Apply sends the draft through the queue; Discard puts the stored one back", async () => {
     const h = harness(view("Stored", 4, true));
     expect(h.store.getSnapshot().locked).toBe(false);

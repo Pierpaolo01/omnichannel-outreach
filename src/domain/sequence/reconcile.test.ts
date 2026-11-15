@@ -67,7 +67,7 @@ describe("waits, copy and added steps apply to unsent messages only", () => {
     expect(progress(changed)).toMatchObject({ nextStepId: "s2", dueWall: Date.parse("2026-11-04T00:00:00Z") });
   });
 
-  test("a step added between the last sent one and the pending one becomes pending; one added behind the lead is not sent to it (Q18)", () => {
+  test("a step added between the last sent one and the pending one becomes pending; one added behind the lead is not sent to it (Q22)", () => {
     const twoSent = sent(afterFirst(), "s2", Date.parse("2026-11-04T09:00:00Z"));
     const added = tracksDefinition([emailTrack([step("s0", { threading: "new_subject" }), ...steps3().map((s) => (s.id === "s1" ? { ...s, threading: "continue_thread" as const, waitDays: 1 } : s)), step("s4", { waitDays: 1 })])]);
     const ahead = tracksDefinition([emailTrack([...steps3().slice(0, 2), step("s2b", { waitDays: 1 }), steps3()[2]!])]);
@@ -77,7 +77,7 @@ describe("waits, copy and added steps apply to unsent messages only", () => {
     expect(progress(reaches)).toMatchObject({ nextStepId: "s2b", dueWall: Date.parse("2026-11-05T00:00:00Z") });
   });
 
-  test("removing the last step a lead waits for finishes the track at the edit (Q19)", () => {
+  test("removing the last step a lead waits for finishes the track at the edit (Q23)", () => {
     const twoSent = sent(afterFirst(), "s2", Date.parse("2026-11-04T09:00:00Z"));
     const editAt = Date.parse("2026-11-05T12:00:00Z");
     const after = edit(twoSent, withStep("s3", { removed: true }), editAt);

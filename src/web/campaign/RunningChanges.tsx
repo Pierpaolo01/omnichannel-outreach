@@ -1,6 +1,6 @@
 /**
  * Editing a running campaign (ticket 19; ADR 0003 "Ticket 19", "What the editor shows"). Provisional, the most restrained
- * form (no prototype draws it; question Q20 is the principal's): changes stay on the page until Apply, and above the
+ * form (no prototype draws it; question Q24 is the principal's): changes stay on the page until Apply, and above the
  * canvas the server's read says what each change would do to the leads already running, as of that read. Nothing here
  * decides what a change does: every count is the server's, from the engine's own reconciliation of each lead.
  */

@@ -763,7 +763,7 @@ export function withdrawClaims(state: SubjectState, trackId: string): SubjectSta
  * "Ticket 19", step 4; invariant 22): its pending step is the step 5.1 names (`nextStepOf`), due at its stored basis
  * plus that step's wait, in the zone its deadline was resolved in. With nothing edited this changes nothing: both hold
  * by construction. When 5.1 names no step (an edit removed every step left), the track finishes at the lead's current
- * instant (question Q19). A change withdraws the track's claim.
+ * instant (question Q23). A change withdraws the track's claim.
  */
 export function alignPending(state: SubjectState, now: number): SubjectState {
   let s = state;

@@ -96,7 +96,7 @@ export function useSequence(campaignId: string) {
       if (event.persisted) void store.restored();
     };
     const online = () => store.online();
-    // A running campaign's changes go only when applied (ticket 19, Q20): leaving with some asks first.
+    // A running campaign's changes go only when applied (ticket 19, Q24): leaving with some asks first.
     const beforeUnload = (event: BeforeUnloadEvent) => {
       const now = store.getSnapshot();
       if (now.view.launchedAt !== null && now.unsaved) event.preventDefault();

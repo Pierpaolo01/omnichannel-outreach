@@ -38,7 +38,7 @@ export function saveWording(save: SaveStatus, launched: boolean, unsaved = false
 }
 
 /**
- * A running campaign's changes stay on the page until the user applies them (ADR 0003 "Ticket 19", Q20): "Not applied"
+ * A running campaign's changes stay on the page until the user applies them (ADR 0003 "Ticket 19", Q24): "Not applied"
  * while the page holds changes, "Applying…" while they go, "Applied" once the server took them.
  */
 function runningWording(save: SaveStatus, unsaved: boolean): SaveWording {

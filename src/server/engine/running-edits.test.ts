@@ -134,7 +134,7 @@ describe("the editor's read of what a draft would do (ADR 0003 \"Ticket 19\")", 
   });
 });
 
-describe("a page opened before launch cannot save as you type onto the running campaign (ADR 0003 \"Ticket 19\", Q20)", () => {
+describe("a page opened before launch cannot save as you type onto the running campaign (ADR 0003 \"Ticket 19\", Q24)", () => {
   test("launch moves the revision on and forgets the writing session, so that page's next save is a conflict", async () => {
     const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
     await h.tick();

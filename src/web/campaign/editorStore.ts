@@ -175,7 +175,7 @@ export class EditorStore {
 
   /**
    * An edit by the user. Ignored while a launch, a load or an apply is in flight. Before launch it is saved a moment
-   * later; on a running campaign it stays on the page until the user applies it (ADR 0003 "Ticket 19", Q20).
+   * later; on a running campaign it stays on the page until the user applies it (ADR 0003 "Ticket 19", Q24).
    */
   update(change: (draft: CampaignDefinition) => CampaignDefinition): void {
     if (this.state.locked) return;
@@ -236,14 +236,14 @@ export class EditorStore {
   leavePage(): void {
     if (this.timer !== null) this.deps.clearTimer(this.timer);
     this.timer = null;
-    // A running campaign's changes go only when the user applies them (Q20): leaving sends nothing.
+    // A running campaign's changes go only when the user applies them (Q24): leaving sends nothing.
     if (this.launched()) return;
     this.queue.sendNow();
   }
 
   /** Back from the back-forward cache (`pageshow` with `persisted`). */
   restored(): Promise<SaveOutcome> {
-    // A running campaign's changes go only when the user applies them (Q20).
+    // A running campaign's changes go only when the user applies them (Q24).
     if (this.launched()) return Promise.resolve({ ok: true });
     return this.queue.restored();
   }

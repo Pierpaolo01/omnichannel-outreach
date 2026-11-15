@@ -475,7 +475,7 @@ async function run(seed: number, faults?: ReadonlySet<SaveFault>) {
     if (req.kind === "put") {
       const running = launchedOnce();
       req.answer = await putRaw(req.body);
-      // Ticket 19 (Q20): once launched, a save is stored only when the user applied it; never one sent as they typed.
+      // Ticket 19 (Q24): once launched, a save is stored only when the user applied it; never one sent as they typed.
       if (running && req.answer.status === 200) {
         if (!req.applying) problems.push(`R: ${req.page.session}'s save was stored on the running campaign without Apply`);
         else appliedRunning = true;

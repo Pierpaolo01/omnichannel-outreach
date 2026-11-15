@@ -30,7 +30,7 @@ describe("one wording for every save state", () => {
   }
 });
 
-describe("a running campaign's changes are applied, not saved as typed (ticket 19, Q20)", () => {
+describe("a running campaign's changes are applied, not saved as typed (ticket 19, Q24)", () => {
   const cases: [SaveStatus, boolean, string | null][] = [
     [{ kind: "idle" }, false, null],
     [{ kind: "idle" }, true, "Not applied"],
