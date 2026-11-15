@@ -256,7 +256,12 @@ export class SaveQueue {
     this.deps.onStatus({ kind: "idle" });
   }
 
-  save(options: { readonly keepalive?: boolean } = {}): Promise<SaveOutcome> {
+  /**
+   * `body`, when given (ticket 19's Apply), is exactly what is sent: under a number of its own, so neither a body cached
+   * for an earlier number nor one rebuilt at sending replaces what the user's read was for (council on 93bed86, item 11).
+   */
+  save(options: { readonly keepalive?: boolean; readonly body?: CampaignDefinition } = {}): Promise<SaveOutcome> {
+    if (options.body !== undefined) this.edited();
     // The generation it was asked in: a save asked before the user loaded the saved version, still
     // queued when the load arrives, saves and reports nothing once it runs (invariant 6).
     const generation = this.generation;
@@ -354,7 +359,7 @@ export class SaveQueue {
     }
   }
 
-  private async step(options: { readonly keepalive?: boolean }, generation: number): Promise<SaveOutcome> {
+  private async step(options: { readonly keepalive?: boolean; readonly body?: CampaignDefinition }, generation: number): Promise<SaveOutcome> {
     for (let tries = 0; ; tries++) {
       // The user loaded the saved version meanwhile: the page holds what the server stores, and this
       // save of a draft set aside reports nothing (invariant 6).
@@ -376,6 +381,7 @@ export class SaveQueue {
         return { ok: false, reason: "invalid", message };
       }
       this.deps.onStatus({ kind: "saving" });
+      if (options.body !== undefined && this.sentBody?.seq !== seq) this.sentBody = { seq, definition: options.body };
       const sent = await this.send(this.bodyFor(seq), options, { session: this.session, seq, base: version });
       if (sent.kind === "accepted") return this.confirmed() ? { ok: true } : { ok: false, reason: "changed" };
       if (sent.kind === "conflict") return { ok: false, reason: "conflict", message: sent.message };

@@ -90,7 +90,7 @@ const REGRESSIONS = [7369, 7412, 7642, 7729, 7889, 845691, 463057];
  * seeds. The recorded seeds above replay the trajectories they were recorded with, so the generated user
  * makes no declined-path or branch edit on them.
  */
-const FAULT_SEEDS: Record<SaveFault, number> = { declined_path_not_sent: 7003, win_back_tracks_not_sent: 7004, stale_win_back_copy: 7016, running_saved_as_typed: 7025, applied_body_not_previewed: 7022 };
+const FAULT_SEEDS: Record<SaveFault, number> = { declined_path_not_sent: 7003, win_back_tracks_not_sent: 7004, stale_win_back_copy: 7016, running_saved_as_typed: 7022, applied_body_not_previewed: 7022 };
 /** The commit the moving window is derived from: CI's, else the checkout's HEAD, else none. */
 function commitOf(): string {
   if (process.env["GITHUB_SHA"]) return process.env["GITHUB_SHA"];

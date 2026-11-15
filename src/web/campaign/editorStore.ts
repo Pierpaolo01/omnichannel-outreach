@@ -217,7 +217,10 @@ export class EditorStore {
     return this.locked("apply", async () => {
       this.applyImpact = confirmed.digest;
       try {
-        const saved = await this.queue.save();
+        // Exactly the body the read was for, under a number of its own (council on 93bed86, item 11).
+        // The fault applies the draft on the page instead (the generated save test's invariant I must catch it).
+        const body = this.deps.faults?.has("applied_body_not_previewed") ? this.previewBody() : (JSON.parse(confirmed.body) as CampaignDefinition);
+        const saved = await this.queue.save({ body });
         if (!saved.ok) outcome = { ok: false, message: saved.reason === "changed" ? "A newer change arrived while applying. Apply again." : saved.message };
       } finally {
         this.applyImpact = null;

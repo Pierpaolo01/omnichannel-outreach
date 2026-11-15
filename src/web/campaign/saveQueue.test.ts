@@ -566,3 +566,20 @@ describe("a draft that cannot be saved says which track and message (ticket 13b)
     expect(draftProblems(d(track("e", "email", [0]), call))).toEqual(["Phone track: Call 1 is the first call, so it has no wait."]);
   });
 });
+
+describe("a save asked for with its exact body sends that body (ticket 19, council on 93bed86, item 11)", () => {
+  test("after a refused save, the connected senders change: the next save with the new body sends it, never the cached one", async () => {
+    const h = harness();
+    h.edit("Applied");
+    const first = h.queue.save({ body: h.queue.bodyOf() });
+    await h.settle();
+    h.calls[0]!.reject(Object.assign(new Error("What this change does changed."), { code: "impact_changed" }));
+    expect(await first).toMatchObject({ ok: false, reason: "failed" });
+    h.setInboxes(["inbox-a", "inbox-b"]);
+    const body = h.queue.bodyOf();
+    void h.queue.save({ body });
+    await h.settle();
+    expect(h.calls[1]!.definition.emailPool).toEqual(["inbox-a", "inbox-b"]);
+    expect(h.calls[1]!.definition).toEqual(body);
+  });
+});
