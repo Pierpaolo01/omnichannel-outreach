@@ -1,7 +1,8 @@
-import { useEffect, useId } from "react";
+import { useEffect, useId, useState } from "react";
 import { STATUS_GROUPS, type StatusGroup } from "../../domain/outreach-status.ts";
 import type { CampaignMeasures } from "../../shared/api.ts";
 import { ErrorState } from "../components.tsx";
+import { Icon } from "../icons.tsx";
 import type { LiveRead } from "../controls/useLiveRead.ts";
 import { connectRateText, groupCountText, MEASURE_NOTES, measureRows, replyRateText } from "./measuresWording.ts";
 
@@ -43,6 +44,8 @@ export function GroupStrip({ read, sentence }: { read: LiveRead<CampaignMeasures
 /** "Outreach so far": per channel, then the two rates, then how each figure is counted. */
 export function MeasuresPanel({ read, onRetry }: { read: LiveRead<CampaignMeasures>; onRetry: () => void }) {
   const id = useId();
+  const notesId = useId();
+  const [notesOpen, setNotesOpen] = useState(false);
   if (read.state === "error") return <ErrorState title="The campaign’s figures didn’t load." message={read.message} onRetry={onRetry} />;
   if (read.state === "loading")
     return (
@@ -88,14 +91,21 @@ export function MeasuresPanel({ read, onRetry }: { read: LiveRead<CampaignMeasur
           </div>
         )}
       </dl>
-      <details className="mt-2 text-[13.5px]">
-        <summary className="cursor-pointer text-muted hover:text-base-content">How these are counted</summary>
-        <ul className="mt-1.5 flex max-w-[72ch] list-disc flex-col gap-1 pl-5 text-ink-2">
-          {MEASURE_NOTES.map((note) => (
-            <li key={note}>{note}</li>
-          ))}
-        </ul>
-      </details>
+      {/* A button disclosure, not <details>: a details element is a "group" to assistive technology, the role every page
+          gives its in-page confirmation alone (ticket 17b), so a second group beside it would be ambiguous. */}
+      <div className="mt-2 text-[13.5px]">
+        <button type="button" aria-expanded={notesOpen} aria-controls={notesId} onClick={() => setNotesOpen((open) => !open)} className="inline-flex cursor-pointer items-center gap-1.5 text-muted hover:text-base-content">
+          <Icon name="forward" className={`size-3.5 transition-transform ${notesOpen ? "rotate-90" : ""}`} />
+          How these are counted
+        </button>
+        {notesOpen && (
+          <ul id={notesId} className="mt-1.5 flex max-w-[72ch] list-disc flex-col gap-1 pl-5 text-ink-2">
+            {MEASURE_NOTES.map((note) => (
+              <li key={note}>{note}</li>
+            ))}
+          </ul>
+        )}
+      </div>
     </section>
   );
 }
