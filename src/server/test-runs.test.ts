@@ -1,3 +1,4 @@
+import type { DatabaseSync } from "node:sqlite";
 import { describe, expect, test } from "vitest";
 import { EngineHarness } from "../../test/support/engine-harness.ts";
 import { business, person } from "../../test/support/export-builder.ts";
@@ -185,6 +186,25 @@ describe("a test run before launch (ADR 0003 'Ticket 21')", () => {
     const tuesday = (await w.h.request<CallsView>("GET", "/api/calls")).body;
     expect(tuesday.readyNow.filter((c) => c.test)).toHaveLength(1);
     expect([tuesday.committed, tuesday.capacityReached]).toEqual([1, true]);
+  });
+
+  test("a test run's rows may name only its own test contacts: another run's, an invented one or one it lacks is refused on all three tables (verifier F2 on 55d6ac6)", async () => {
+    const w = await world();
+    await w.h.request("PUT", `/api/campaigns/${w.campaign}/test-contacts`, { email: OWN_EMAIL, mobile: OWN_MOBILE });
+    const runId = (await w.run()).body.run?.id ?? "";
+    await w.h.advanceTo(MONDAY_9 + 5 * MIN);
+    const call = (await w.h.request<CallsView>("GET", "/api/calls")).body.readyNow.find((c) => c.test);
+    expect((await w.h.request("POST", `/api/call-tasks/${call?.taskId}/outcome`, { requestId: "o-1", outcome: "no_answer", numberId: `test:${runId}:mobile`, note: "" })).status).toBe(200);
+    const db = (w.h.store.engine as unknown as { db: DatabaseSync }).db;
+    const set = (table: string, column: string, value: string) => () => db.prepare(`UPDATE ${table} SET ${column} = ? WHERE subject_id = ?`).run(value, runId);
+    for (const [table, column] of [["track_progress", "destination_detail_id"], ["attempts", "destination_detail_id"], ["call_attempts", "number_detail_id"]] as const) {
+      expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE subject_id = ? AND ${column} IS NOT NULL`).get(runId)?.["n"], table).not.toBe(0);
+      for (const bad of ["test:test-other:email", `test:${runId}:invented`, `test:${runId}:fax`]) expect(set(table, column, bad), `${table} ${bad}`).toThrow(/names neither/);
+      expect(set(table, column, `test:${runId}:email`), table).not.toThrow();
+    }
+    // A run without a mobile: its own mobile id is refused, since it has no such contact.
+    db.exec(`UPDATE test_runs SET mobile_key = NULL, mobile_value = NULL WHERE id = '${runId}'`);
+    expect(set("attempts", "destination_detail_id", `test:${runId}:mobile`)).toThrow(/names neither/);
   });
 
   test("an edit stops the running test, and the warning holds until a test runs on the new version; launch is never blocked by it", async () => {

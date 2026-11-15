@@ -5,6 +5,12 @@
  */
 export const UNDO_SINCE_18 = `
   DROP VIEW IF EXISTS engine_subjects;
+  DROP TRIGGER IF EXISTS track_progress_destination_detail_id_known_insert;
+  DROP TRIGGER IF EXISTS track_progress_destination_detail_id_known_update;
+  DROP TRIGGER IF EXISTS attempts_destination_detail_id_known_insert;
+  DROP TRIGGER IF EXISTS attempts_destination_detail_id_known_update;
+  DROP TRIGGER IF EXISTS call_attempts_number_detail_id_known_insert;
+  DROP TRIGGER IF EXISTS call_attempts_number_detail_id_known_update;
   DROP TABLE IF EXISTS test_runs;
   ALTER TABLE campaigns DROP COLUMN test_email;
   ALTER TABLE campaigns DROP COLUMN test_mobile;

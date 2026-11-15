@@ -782,30 +782,44 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE call_attempts_v17 RENAME TO call_attempts;
       CREATE INDEX call_attempts_by_subject ON call_attempts(subject_id, at_wall);
 
+      -- A lead's row names only a live or merged CRM detail; a test run's names only its own email or mobile, which it has
+      -- (verifier F2 on 55d6ac6: another run's id, an invented kind or a contact the run lacks is refused).
       CREATE TRIGGER track_progress_destination_detail_id_known_insert BEFORE INSERT ON track_progress
-      WHEN NEW.destination_detail_id IS NOT NULL AND ((SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run') <> (NEW.destination_detail_id LIKE 'test:%')
-        OR (NEW.destination_detail_id NOT LIKE 'test:%' AND NOT EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.destination_detail_id))
-      BEGIN SELECT RAISE(ABORT, 'track_progress.destination_detail_id names neither a contact detail of a lead nor a test contact of a test run'); END;
-      CREATE TRIGGER track_progress_destination_detail_id_known_update BEFORE UPDATE OF destination_detail_id ON track_progress
-      WHEN NEW.destination_detail_id IS NOT NULL AND ((SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run') <> (NEW.destination_detail_id LIKE 'test:%')
-        OR (NEW.destination_detail_id NOT LIKE 'test:%' AND NOT EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.destination_detail_id))
-      BEGIN SELECT RAISE(ABORT, 'track_progress.destination_detail_id names neither a contact detail of a lead nor a test contact of a test run'); END;
+      WHEN NOT (NEW.destination_detail_id IS NULL OR (CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
+          THEN (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
+          ELSE NEW.destination_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.destination_detail_id) END))
+      BEGIN SELECT RAISE(ABORT, 'track_progress.destination_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
+      CREATE TRIGGER track_progress_destination_detail_id_known_update BEFORE UPDATE OF destination_detail_id, subject_id ON track_progress
+      WHEN NOT (NEW.destination_detail_id IS NULL OR (CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
+          THEN (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
+          ELSE NEW.destination_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.destination_detail_id) END))
+      BEGIN SELECT RAISE(ABORT, 'track_progress.destination_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
       CREATE TRIGGER attempts_destination_detail_id_known_insert BEFORE INSERT ON attempts
-      WHEN ((SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run') <> (NEW.destination_detail_id LIKE 'test:%')
-        OR (NEW.destination_detail_id NOT LIKE 'test:%' AND NOT EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.destination_detail_id))
-      BEGIN SELECT RAISE(ABORT, 'attempts.destination_detail_id names neither a contact detail of a lead nor a test contact of a test run'); END;
-      CREATE TRIGGER attempts_destination_detail_id_known_update BEFORE UPDATE OF destination_detail_id ON attempts
-      WHEN ((SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run') <> (NEW.destination_detail_id LIKE 'test:%')
-        OR (NEW.destination_detail_id NOT LIKE 'test:%' AND NOT EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.destination_detail_id))
-      BEGIN SELECT RAISE(ABORT, 'attempts.destination_detail_id names neither a contact detail of a lead nor a test contact of a test run'); END;
+      WHEN NOT (CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
+          THEN (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
+          ELSE NEW.destination_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.destination_detail_id) END)
+      BEGIN SELECT RAISE(ABORT, 'attempts.destination_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
+      CREATE TRIGGER attempts_destination_detail_id_known_update BEFORE UPDATE OF destination_detail_id, subject_id ON attempts
+      WHEN NOT (CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
+          THEN (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
+          ELSE NEW.destination_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.destination_detail_id) END)
+      BEGIN SELECT RAISE(ABORT, 'attempts.destination_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
       CREATE TRIGGER call_attempts_number_detail_id_known_insert BEFORE INSERT ON call_attempts
-      WHEN NEW.number_detail_id IS NOT NULL AND ((SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run') <> (NEW.number_detail_id LIKE 'test:%')
-        OR (NEW.number_detail_id NOT LIKE 'test:%' AND NOT EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.number_detail_id))
-      BEGIN SELECT RAISE(ABORT, 'call_attempts.number_detail_id names neither a contact detail of a lead nor a test contact of a test run'); END;
-      CREATE TRIGGER call_attempts_number_detail_id_known_update BEFORE UPDATE OF number_detail_id ON call_attempts
-      WHEN NEW.number_detail_id IS NOT NULL AND ((SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run') <> (NEW.number_detail_id LIKE 'test:%')
-        OR (NEW.number_detail_id NOT LIKE 'test:%' AND NOT EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.number_detail_id))
-      BEGIN SELECT RAISE(ABORT, 'call_attempts.number_detail_id names neither a contact detail of a lead nor a test contact of a test run'); END;
+      WHEN NOT (NEW.number_detail_id IS NULL OR (CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
+          THEN (NEW.number_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
+            OR (NEW.number_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
+          ELSE NEW.number_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.number_detail_id) END))
+      BEGIN SELECT RAISE(ABORT, 'call_attempts.number_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
+      CREATE TRIGGER call_attempts_number_detail_id_known_update BEFORE UPDATE OF number_detail_id, subject_id ON call_attempts
+      WHEN NOT (NEW.number_detail_id IS NULL OR (CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
+          THEN (NEW.number_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
+            OR (NEW.number_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
+          ELSE NEW.number_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.number_detail_id) END))
+      BEGIN SELECT RAISE(ABORT, 'call_attempts.number_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
     `,
   },
 ];
