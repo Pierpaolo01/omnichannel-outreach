@@ -274,7 +274,13 @@ export interface CompanyRecord {
 }
 
 export interface ApiError {
-  readonly error: { readonly code: string; readonly message: string; readonly problems?: readonly { file: string; message: string }[] };
+  readonly error: {
+    readonly code: string;
+    readonly message: string;
+    readonly problems?: readonly { file: string; message: string }[];
+    /** On `impact_changed` (ticket 19): the stored sequence itself was changed elsewhere since the read. */
+    readonly elsewhere?: boolean;
+  };
 }
 
 /** A refused call outcome: the call's off-list facts as the server read them when it refused (ticket 14b). */

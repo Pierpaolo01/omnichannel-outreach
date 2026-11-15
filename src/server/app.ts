@@ -421,7 +421,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
       const message = result.elsewhere
         ? "This campaign's sequence was changed elsewhere since what this change does was shown, so nothing was applied. Load the saved version, or discard your changes, to carry on."
         : "What this change does changed since it was shown, so nothing was applied. Check what it does now, then apply again.";
-      return c.json({ error: { code: "impact_changed", message, elsewhere: result.elsewhere } }, 409);
+      return c.json<ApiError>({ error: { code: "impact_changed", message, elsewhere: result.elsewhere } }, 409);
     }
     if (saved === "invalid") return c.json<ApiError>({ error: { code: "invalid_sequence", message: result.problems.join(" ") } }, 400);
     if (saved === "blocked") {

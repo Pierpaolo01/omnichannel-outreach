@@ -3,6 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 import type { CampaignDefinition, StepDefinition } from "../src/domain/sequence/definition.ts";
 import type { Campaign, SequenceView } from "../src/shared/api.ts";
 import { COPY, FAKE_INBOX, fakeProviderApp, type FakeProviderApp } from "./fake-provider.ts";
+import { respond } from "./mocks.ts";
 import { fixture } from "./support.ts";
 
 /**
@@ -249,7 +250,7 @@ test.describe("editing a running campaign", () => {
     const panel = page.getByTestId("running-changes");
     await expect(panel.getByText(/will get the new copy/)).toBeVisible();
     await page.route("**/api/campaigns/*/sequence", (route) =>
-      route.request().method() === "PUT" ? route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: { code: "impact_changed", message: "What this change does changed since it was shown, so nothing was applied. Check what it does now, then apply again.", elsewhere: false } }) }) : route.continue(),
+      route.request().method() === "PUT" ? respond(route, { error: { code: "impact_changed", message: "What this change does changed since it was shown, so nothing was applied. Check what it does now, then apply again.", elsewhere: false } }, 409) : route.continue(),
     );
     await panel.getByRole("button", { name: "Apply to running leads" }).click();
     await expect(panel.getByText(/^Not applied\. What this change does changed/)).toBeVisible();
