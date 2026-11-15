@@ -1,4 +1,5 @@
 import type { TestRunEnding, TestRunRead, TestStepRow } from "../../shared/api.ts";
+import { conversationTaken } from "./sms-wording.ts";
 
 /**
  * The Test run tab's words (ticket 21), from the read only: what each step's stored facts say, never more. Email has no
@@ -114,6 +115,7 @@ export function stepDetail(row: TestStepRow, run: Pick<TestRunRead, "email" | "m
     if (row.branch === "win_back") return "Runs if you log Not interested and the path is Win back";
     return row.channel === "call" ? "A test call goes on your Calls list when it is due" : "Waits for the steps before it";
   }
+  if (row.state === "skipped" && row.reason === "sms_conversation_taken") return `Skipped: ${conversationTaken(row.owners ?? [], "your test")}`;
   if (row.state === "skipped") return row.reason === "missing_channel" ? `Skipped: no test ${row.channel === "email" ? "email" : "mobile"} saved` : SKIPPED_BECAUSE[row.reason ?? ""] ?? "Skipped";
   if (row.channel === "call") return row.state === "on_your_list" ? "Log any outcome to continue. The canvas paths apply." : `To ${run.mobile ?? "your mobile"}`;
   if (row.state === "due") return "The wait is cut to about a minute";

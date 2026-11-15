@@ -414,6 +414,8 @@ export interface EngineStore {
   disconnectUnlisted(channel: "email" | "sms", listed: readonly string[]): Promise<void>;
   /** Every SMS conversation binding of a mobile (E.164), from any number, oldest first (ADR 0003 4.5). */
   smsBindingsOf(recipient: string): Promise<SmsBindingRecord[]>;
+  /** The newest SMS binding's sequence number, 0 for none: it grows with every conversation a first text takes (question Q7 answered). */
+  latestSmsBinding(): Promise<number>;
   accounts(now: number): Promise<AccountState[]>;
   accountLabels(): Promise<Record<string, string>>;
   /** Moves the account's next pacing slot to at least `callStart` plus its gap. */

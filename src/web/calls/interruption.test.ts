@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import type { NeedsAttention } from "../../shared/api.ts";
 import { attentionItems } from "./wording.ts";
 import { capacityItems, interruptionLine, noUsableChannelItem, providerWaitItems, sendingInterruptedItem } from "./interruption.ts";
 
@@ -170,7 +171,7 @@ describe("leads waiting for sending capacity", () => {
 });
 
 describe("leads left with no usable channel (question Q20's interim: they stay listed)", () => {
-  const ended = (enrollmentId: string, person: typeof SAM | null, endedAt: string, channels: { channel: "email" | "sms" | "call"; why: "missing" | "bad" | "declined" }[]) => ({
+  const ended = (enrollmentId: string, person: typeof SAM | null, endedAt: string, channels: NeedsAttention["noUsableChannel"][number]["channels"][number][]) => ({
     enrollmentId,
     campaignId: CLINICS.id,
     person,
@@ -183,7 +184,7 @@ describe("leads left with no usable channel (question Q20's interim: they stay l
   test("one lead: why each channel cannot reach them, when it ended, and their record", () => {
     expect(
       noUsableChannelItem(
-        [ended("e1", SAM, "2026-11-14T09:00:00Z", [{ channel: "email", why: "bad" }, { channel: "sms", why: "missing" }, { channel: "call", why: "declined" }])],
+        [ended("e1", SAM, "2026-11-14T09:00:00Z", [{ channel: "email", why: "bad", owners: [] }, { channel: "sms", why: "missing", owners: [] }, { channel: "call", why: "declined", owners: [] }])],
         TODAY,
         ZONE,
       ),
@@ -197,10 +198,14 @@ describe("leads left with no usable channel (question Q20's interim: they stay l
   });
 
   test("each reason the read can give, said once", () => {
-    const body = (channel: "email" | "sms" | "call", why: "missing" | "bad" | "declined") => noUsableChannelItem([ended("e1", SAM, "2026-11-15T08:00:00Z", [{ channel, why }])], TODAY, ZONE)?.body;
+    const body = (channel: "email" | "sms" | "call", why: "missing" | "bad" | "declined" | "conversation_taken") => noUsableChannelItem([ended("e1", SAM, "2026-11-15T08:00:00Z", [{ channel, why, owners: [] }])], TODAY, ZONE)?.body;
     expect(body("email", "missing")).toBe("In Clinics, Rotterdam, their outreach ended at 09:00, when no channel could reach them. Now they have no email address.");
     expect(body("sms", "bad")).toBe("In Clinics, Rotterdam, their outreach ended at 09:00, when no channel could reach them. Now their mobile number is marked wrong.");
     expect(body("call", "missing")).toBe("In Clinics, Rotterdam, their outreach ended at 09:00, when no channel could reach them. Now they have no number to call.");
+    // Question Q7 answered: a mobile in another campaign's text conversation names that campaign, in the one wording.
+    expect(noUsableChannelItem([ended("e1", SAM, "2026-11-15T08:00:00Z", [{ channel: "sms", why: "conversation_taken", owners: [{ name: "Spring clinics", test: false }] }])], TODAY, ZONE)?.body).toBe(
+      "In Clinics, Rotterdam, their outreach ended at 09:00, when no channel could reach them. Now their mobile is in a text conversation with campaign Spring clinics on every number this campaign can use.",
+    );
     expect(body("call", "bad")).toBe("In Clinics, Rotterdam, their outreach ended at 09:00, when no channel could reach them. Now every number to call is marked wrong.");
   });
 
@@ -212,7 +217,7 @@ describe("leads left with no usable channel (question Q20's interim: they stay l
   });
 
   test("several: one entry, the most recent named, and a link to them in Leads", () => {
-    expect(noUsableChannelItem([ended("e2", NIA, "2026-11-15T08:00:00Z", [{ channel: "email", why: "missing" }]), ended("e1", null, "2026-11-12T08:00:00Z", [{ channel: "email", why: "bad" }])], TODAY, ZONE)).toEqual({
+    expect(noUsableChannelItem([ended("e2", NIA, "2026-11-15T08:00:00Z", [{ channel: "email", why: "missing", owners: [] }]), ended("e1", null, "2026-11-12T08:00:00Z", [{ channel: "email", why: "bad", owners: [] }])], TODAY, ZONE)).toEqual({
       key: "no-usable-channel",
       tone: "end",
       title: "No way was left to reach 2 leads",
@@ -239,7 +244,7 @@ describe("the order of Needs attention (ticket 20b): the prototype's, with the n
         heldCapacity: [{ accountId: "inbox-d", held: 1, capacity: 30, sentToday: 4, work: [] }],
         anomalies: [{ what: "Something odd.", at: "2026-11-15T08:00:00Z" }],
         waitingForCapacity: [capacity("e1", SAM, CLINICS, "email", "2026-11-15T23:00:00Z")],
-        noUsableChannel: [{ enrollmentId: "e2", campaignId: CLINICS.id, person: NIA, company: HARBOUR, campaign: CLINICS, endedAt: "2026-11-15T08:00:00Z", channels: [{ channel: "email", why: "missing" }] }],
+        noUsableChannel: [{ enrollmentId: "e2", campaignId: CLINICS.id, person: NIA, company: HARBOUR, campaign: CLINICS, endedAt: "2026-11-15T08:00:00Z", channels: [{ channel: "email", why: "missing", owners: [] }] }],
         waitingOnProvider: [{ channel: "email", since: "2026-11-15T08:10:00Z", sends: 3 }],
         waitingOnTransport: [],
         // From the same read as the provider entries (council on 7622b8b).

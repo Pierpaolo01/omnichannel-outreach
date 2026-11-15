@@ -9,6 +9,7 @@ import { STATUS_LABEL } from "../status.tsx";
 import type { DeskSnapshot } from "./callDesk.ts";
 import { dayLabel, zonedInstants, type CallbackChoice } from "./callbackTime.ts";
 import { capacityItems, noUsableChannelItem, providerWaitItems, sendingInterruptedItem } from "./interruption.ts";
+import { conversationTaken } from "../campaign/sms-wording.ts";
 
 /** The outcome buttons, as the approved prototype labels them. */
 export const OUTCOME_LABEL = {
@@ -259,6 +260,8 @@ function trackFinishedLine(who: string, finish: FinishReasonApi | null): string 
       return `${who} moved to this campaign’s win-back branch, which makes no calls, so this call left the list.`;
     case "skipped_unworked":
       return `${who}’s call wasn’t made within its skip limit, so it was skipped and left the list.`;
+    // Never a phone track's finish: only an SMS track is skipped for a taken conversation.
+    case "skipped_conversation_taken":
     case "completed":
     case "skipped":
     case "skipped_by_user":
@@ -289,7 +292,6 @@ const HOLD_REASON: Readonly<Record<string, string>> = {
   render_failed: "a message couldn’t be put together from its copy",
   provider_skipped: "the provider skipped the lead",
   no_thread: "a follow-up has no earlier email to continue",
-  sms_conversation_taken: "the mobile is in another campaign’s SMS conversation from every number this campaign may use",
 };
 
 export interface AttentionItem {
@@ -678,6 +680,9 @@ export function declineTrackLine(a: DeclineTrackView, mode: "preview" | "record"
       return `${name} was skipped: its call wasn’t made within its skip limit.`;
     case "skipped_no_channel":
       return preview ? `${name} is skipped: there is nothing to reach them on for it.` : `${name} was skipped: there is nothing to reach them on for it.`;
+    case "skipped_conversation_taken":
+      // Already skipped when the preview is read, so the past tense in both modes (question Q7 answered).
+      return `${name} was skipped: ${conversationTaken(a.owners)}.`;
     case "skipped":
       return `${name} was skipped.`;
     case "stopped":

@@ -24,7 +24,7 @@ import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, startOfLocalDay, w
 import { windowOf, type ReadyItem } from "../domain/sequence/dispatch.ts";
 import { callableOnDay, callRoom, callWindow, goodNumbers } from "../domain/sequence/calls.ts";
 import { liveSteps, liveTracks, poolOf, winBackEntry, type CampaignDefinition, type TrackChannel } from "../domain/sequence/definition.ts";
-import { channelReaches } from "../domain/sequence/progress.ts";
+import { channelReaches, conversationRecheck } from "../domain/sequence/progress.ts";
 import type { AccountState, Attempt, CallDay, SmsBinding, SubjectState } from "../domain/sequence/state.ts";
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
 
@@ -241,14 +241,20 @@ export function projectLoad(input: ProjectionInput): Projection {
     }
   };
 
+  const dirty = new Set<string>();
   // SMS conversations, shared by every subject, by mobile.
   const bindings = new Map<string, SmsBinding[]>();
   let bindingsVersion = 0;
+  /** Subjects with an SMS track waiting to hand over: a new conversation may take their last free number (question Q7 answered). */
+  const watchingBindings = new Set<string>();
   const addBinding = (b: SmsBinding) => {
     const list = bindings.get(b.recipient) ?? [];
     if (list.some((x) => x.sender === b.sender)) return;
     bindings.set(b.recipient, [...list, b]);
     bindingsVersion++;
+    // As `Engine.evaluateAll` looks again at a waiting subject after any new conversation.
+    for (const id of watchingBindings) dirty.add(id);
+    watchingBindings.clear();
   };
 
   // ---- Prepare: this campaign's leads enter as launch enters them; everyone else as stored.
@@ -388,7 +394,7 @@ export function projectLoad(input: ProjectionInput): Projection {
     return { ...s, accounts: accounts.accounts, smsBindings: smsBindings.list, ...(callDay ? { callDay } : {}) };
   };
 
-  const dirty = new Set<string>(states.keys());
+  for (const id of states.keys()) dirty.add(id);
   const wakes = new Wakes();
   /** Writes a subject's change, as the store does: the ledger, the slot it took, the conversation it bound. */
   const write = (id: string, loaded: SubjectState, next: SubjectState) => {
@@ -662,6 +668,11 @@ export function projectLoad(input: ProjectionInput): Projection {
           const starts = s.tracks.filter((p) => p.startedAt === null && p.startAt !== null).map((p) => t + ((p.startAt ?? 0) - lead)).filter((x) => x > t);
           // An open call task may be skipped at the user's next day (the skip limit, ticket 15), as `Engine.evaluateAll` looks then.
           if (s.callTasks.some((x) => x.open)) starts.push(startOfLocalDay(localDayNumber(t, s.callDay.userZone) + 1, s.callDay.userZone));
+          // A waiting SMS track is looked at again at its due instant, when its window opens, and after any new
+          // conversation, as `Engine.evaluateAll` does for the skip of a taken one (question Q7 answered).
+          const recheck = conversationRecheck(loaded, t);
+          if (recheck.at !== null) starts.push(recheck.at);
+          if (recheck.onNewBinding) watchingBindings.add(id);
           const until = Math.min(Infinity, ...starts);
           evalUntil.set(id, { state: s, until });
           wakes.push(until, id);

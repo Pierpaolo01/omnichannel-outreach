@@ -725,6 +725,10 @@ export class SqliteEngineStore implements EngineStore {
       .map((b) => ({ sender: str(b, "sender_number"), owner: str(b, "owner_subject"), released: b["released_at"] != null }));
   }
 
+  async latestSmsBinding(): Promise<number> {
+    return Number(this.sql("SELECT COALESCE(MAX(seq), 0) AS seq FROM sms_bindings").get()?.["seq"] ?? 0);
+  }
+
   async accounts(now: number): Promise<AccountState[]> {
     return this.sql("SELECT id FROM sender_accounts ORDER BY id").all().map((r) => this.accountState(str(r, "id"), now)).filter((a): a is AccountState => a !== null);
   }
@@ -1276,9 +1280,11 @@ export class SqliteEngineStore implements EngineStore {
         .map((r) => ({ inbox: str(r, "inbox"), address: str(r, "address") })),
       // Every unreleased conversation of the lead's numbers and of the numbers its texts went to, whoever owns it (4.5).
       smsBindings: this.sql(
-        `SELECT b.sender_number, b.recipient_key, b.owner_subject, COALESCE(e.campaign_id, tr.campaign_id) AS owner_campaign, COALESCE(e.ended, tr.ended) AS owner_ended FROM sms_bindings b
+        `SELECT b.sender_number, b.recipient_key, b.owner_subject, b.created_at, COALESCE(e.campaign_id, tr.campaign_id) AS owner_campaign, c.name AS owner_campaign_name,
+                tr.id IS NOT NULL AS owner_is_test, COALESCE(e.ended, tr.ended) AS owner_ended FROM sms_bindings b
          LEFT JOIN enrollments e ON e.id = b.owner_subject
          LEFT JOIN test_runs tr ON tr.id = b.owner_subject
+         LEFT JOIN campaigns c ON c.id = COALESCE(e.campaign_id, tr.campaign_id)
          WHERE b.released_at IS NULL
            AND (b.recipient_key IN (SELECT key FROM live_contact_details WHERE owner_kind = :kind AND owner_id = :owner AND channel = 'phone')
              OR b.recipient_key IN (SELECT value FROM json_each(:own))
@@ -1286,7 +1292,7 @@ export class SqliteEngineStore implements EngineStore {
          ORDER BY b.seq`,
       )
         .all({ kind: owner?.kind ?? "", owner: owner?.id ?? "", own: JSON.stringify(owner ? [] : details.filter((d) => d.mobile).map((d) => d.key)), subject: subjectId })
-        .map((b) => ({ sender: str(b, "sender_number"), recipient: str(b, "recipient_key"), owner: str(b, "owner_subject"), ownerCampaignId: strOrNull(b, "owner_campaign"), ownerEnded: b["owner_ended"] != null })),
+        .map((b) => ({ sender: str(b, "sender_number"), recipient: str(b, "recipient_key"), owner: str(b, "owner_subject"), ownerCampaignId: strOrNull(b, "owner_campaign"), ownerCampaignName: strOrNull(b, "owner_campaign_name"), ownerIsTest: Number(b["owner_is_test"]) === 1, ownerEnded: b["owner_ended"] != null, createdWall: num(b, "created_at") })),
       lead: { zone, details, resolved, mergeData, phones },
       markBad: [],
       accounts,

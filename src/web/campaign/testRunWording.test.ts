@@ -25,6 +25,10 @@ describe("the Test run tab says only what the run's facts say (ticket 21)", () =
     expect(stepDetail(row({}), run)).toBe("To alex.own@personal-mail.example");
     expect(stepDetail(row({ channel: "sms" }), run)).toBe("To +44 7700 900456");
     expect(stepDetail(row({ branch: "win_back", state: "not_reached", at: null }), run)).toBe("Runs if you log Not interested and the path is Win back");
+    // Question Q7 answered (provisional for test runs): a test mobile in another campaign's conversation is skipped, and says whose.
+    expect(stepDetail(row({ channel: "sms", state: "skipped", reason: "sms_conversation_taken", owners: [{ name: "Spring clinics", test: false }] }), run)).toBe(
+      "Skipped: your test mobile was already in a text conversation with campaign Spring clinics on every number this campaign can use",
+    );
   });
 
   test("endings in their own words, and progress counts the branch only once entered", () => {

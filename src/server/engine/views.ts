@@ -7,13 +7,18 @@ import { accountAvailable, candidatesFor, claimRefusal, heldReason, inheritedWor
 import { localDayNumber, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { relevantChannels, waitingOn } from "../../domain/sequence/providers.ts";
 import { providerEvidence, sendingInterrupted } from "./worker-state.ts";
-import { channelOf, deriveStatus, liveTracksFor, unreachableWhy, wallAtLead } from "../../domain/sequence/progress.ts";
+import { channelOf, conversationOwnersOf, deriveStatus, liveTracksFor, unreachableWhy, wallAtLead } from "../../domain/sequence/progress.ts";
 import type { AccountState, SubjectState } from "../../domain/sequence/state.ts";
-import type { AttentionLead, EnrollmentProgress, NeedsAttention, SenderAccountViewApi } from "../../shared/api.ts";
+import type { AttentionLead, ConversationOwnerView, EnrollmentProgress, NeedsAttention, SenderAccountViewApi } from "../../shared/api.ts";
 import type { EngineStore } from "./engine-store.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 
 const iso = (t: number | null) => (t === null ? null : new Date(t).toISOString());
+
+/** Who owns the conversation a track was skipped for (question Q7 answered), as every read names them. Empty otherwise. */
+export function conversationOwnersView(s: SubjectState, trackId: string): ConversationOwnerView[] {
+  return conversationOwnersOf(s, trackId).map((o) => ({ name: o.name, test: o.test }));
+}
 
 export function progressView(s: SubjectState, now: number): EnrollmentProgress {
   // The reply that stopped the lead, as stored when it stopped. A later text or email is kept on the
@@ -62,6 +67,7 @@ export function progressView(s: SubjectState, now: number): EnrollmentProgress {
           started: p?.startedAt != null,
           finishReason: p?.finishReason ?? null,
           finishedAt: iso(p?.finishedWall ?? null),
+          conversationOwners: conversationOwnersView(s, track.id),
           hold: heldReason(s, track.id, now),
           nextStep:
             p && p.finishedAt === null && p.nextStepId !== null && p.dueAt !== null
@@ -219,7 +225,9 @@ export async function needsAttention(
     if (!s) continue;
     const channels = [...new Set(liveTracksFor(s).map((t) => t.channel))].flatMap((channel) => {
       const why = unreachableWhy(s, channel);
-      return why === null ? [] : [{ channel, why }];
+      // A taken conversation names its owners: every SMS track of the branch it skipped, once each.
+      const owners = why !== "conversation_taken" ? [] : liveTracksFor(s).filter((t) => t.channel === "sms").flatMap((t) => conversationOwnersView(s, t.id)).filter((o, i, all) => all.findIndex((x) => x.name === o.name && x.test === o.test) === i);
+      return why === null ? [] : [{ channel, why, owners }];
     });
     noUsableChannel.push({ enrollmentId: id, campaignId: s.campaign.id, endedAt: new Date(s.subject.endedWall ?? now).toISOString(), channels });
   }

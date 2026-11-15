@@ -12,6 +12,7 @@ import { stepNoun, trackLabel } from "../shared/track-label.ts";
 import type { TestRunRecord } from "./engine/engine-store.ts";
 import type { OutreachStore } from "./persistence/store.ts";
 import { firstListedDay, type CallViewRules } from "./engine/call-views.ts";
+import { conversationOwnersView } from "./engine/views.ts";
 import { startOfLocalDay } from "../domain/sequence/clock.ts";
 
 const iso = (t: number) => new Date(t).toISOString();
@@ -121,7 +122,11 @@ export function stepsOf(s: SubjectState, rules: CallViewRules): TestStepRow[] {
       }
       else if (live) rows.push({ ...base, state: "with_provider", at: live.handedWall === null ? null : iso(live.handedWall) });
       // A step of a track that finished without reaching it: skipped, with why its track finished (council on ffa202c, item 13).
-      else if (p?.finishReason) rows.push({ ...base, state: "skipped", at: p.finishedWall === null ? null : iso(p.finishedWall), reason: trackEndedBecause(p.finishReason) });
+      else if (p?.finishReason) {
+        const skipped = { ...base, state: "skipped" as const, at: p.finishedWall === null ? null : iso(p.finishedWall), reason: trackEndedBecause(p.finishReason) };
+        // A test mobile in another campaign's SMS conversation names its owner (question Q7 answered).
+        rows.push(p.finishReason === "skipped_conversation_taken" ? { ...skipped, owners: conversationOwnersView(s, track.id) } : skipped);
+      }
       else if (s.subject.ended === null && p && p.finishedAt === null && p.nextStepId === step.id && p.dueWall !== null) rows.push({ ...base, state: "due", at: iso(p.dueWall) });
       else rows.push({ ...base, state: "not_reached", at: null });
     });
@@ -134,6 +139,8 @@ function trackEndedBecause(reason: FinishReason): string {
   switch (reason) {
     case "skipped_missing_channel":
       return "missing_channel";
+    case "skipped_conversation_taken":
+      return "sms_conversation_taken";
     case "failed_bad_destination":
       return "bad_destination";
     case "skipped_declined":

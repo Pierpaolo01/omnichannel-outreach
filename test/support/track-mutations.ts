@@ -1,4 +1,4 @@
-import { finishTrack, progressOf } from "../../src/domain/sequence/progress.ts";
+import { candidatesFor, finishTrack, progressOf } from "../../src/domain/sequence/progress.ts";
 import { leadNow, wallOfLead } from "../../src/domain/sequence/clock.ts";
 import type { SubjectState, TrackProgress } from "../../src/domain/sequence/state.ts";
 import { DEFAULT_RULES, type Rules } from "../../src/server/engine/rules.ts";
@@ -55,6 +55,36 @@ function priority(compare: Rules["claimOrder"]): Partial<Rules> {
 
 const startRule = (s: SubjectState, trackId: string) => s.campaign.definition.tracks.find((t) => t.id === trackId)?.start;
 const smsAccount = (s: SubjectState, id: string) => s.accounts[id]?.channel === "sms";
+/** The mobile each of the subject's started SMS tracks texts (E.164), by track. */
+function smsMobiles(s: SubjectState): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const p of s.tracks) {
+    if (s.campaign.definition.tracks.find((t) => t.id === p.trackId)?.channel !== "sms" || p.destinationDetailId === null) continue;
+    const live = s.lead.resolved[p.destinationDetailId]?.liveId;
+    const key = s.lead.details.find((d) => d.id === live)?.key;
+    if (key) out.set(p.trackId, key);
+  }
+  return out;
+}
+const PRETEND = "mutation-pretended-owner";
+/** The state with every pool number `which` picks bound to someone else for the subject's mobiles; the bindings come off again after. */
+function pretendTaken(s: SubjectState, which: (accountId: string, s: SubjectState, trackId: string) => boolean): SubjectState {
+  const fake = [...smsMobiles(s)].flatMap(([trackId, recipient]) =>
+    (s.campaign.definition.smsPool ?? [])
+      .filter((n) => which(n, s, trackId) && !s.smsBindings.some((b) => b.sender === n && b.recipient === recipient))
+      .map((n) => ({ sender: n, recipient, owner: PRETEND, ownerCampaignId: null, ownerCampaignName: null, ownerIsTest: false, ownerEnded: false, createdWall: 0 })),
+  );
+  return fake.length === 0 ? s : { ...s, smsBindings: [...s.smsBindings, ...fake] };
+}
+const unpretend = (out: SubjectState): SubjectState => (out.smsBindings.some((b) => b.owner === PRETEND) ? { ...out, smsBindings: out.smsBindings.filter((b) => b.owner !== PRETEND) } : out);
+/** Another subject's binding on one of the subject's mobiles: the conversation is taken on that number. */
+const takenByOther = (s: SubjectState, n: string, trackId: string) => s.smsBindings.some((b) => b.sender === n && b.recipient === smsMobiles(s).get(trackId) && b.owner !== s.subject.id);
+/** The other subjects' bindings on the mobile of any of the subject's SMS tracks with no free number left. */
+function withoutTakenOwners(s: SubjectState): SubjectState {
+  const mobiles = new Set([...smsMobiles(s)].filter(([trackId]) => candidatesFor(s, trackId).length === 0).map(([, m]) => m));
+  return mobiles.size === 0 ? s : { ...s, smsBindings: s.smsBindings.filter((b) => !mobiles.has(b.recipient) || b.owner === s.subject.id) };
+}
+
 /** The bindings other subjects hold whose owner has ended, which a broken engine treats as free. */
 const withoutEndedOwners = (s: SubjectState): SubjectState => ({ ...s, smsBindings: s.smsBindings.filter((b) => !b.ownerEnded || b.owner === s.subject.id) });
 
@@ -76,11 +106,53 @@ const RULES: Record<string, Partial<Rules>> = {
       const out = R.claim(s, item, acc, input);
       const claimed = out.attempts.find((x) => x.id === input.attemptId);
       if (!claimed || acc.channel !== "sms" || out.smsBindings.some((b) => b.sender === acc.id && b.recipient === claimed.destination)) return out;
-      return { ...out, smsBindings: [...out.smsBindings, { sender: acc.id, recipient: claimed.destination, owner: s.subject.id, ownerCampaignId: s.campaign.id, ownerEnded: false }] };
+      return { ...out, smsBindings: [...out.smsBindings, { sender: acc.id, recipient: claimed.destination, owner: s.subject.id, ownerCampaignId: s.campaign.id, ownerCampaignName: null, ownerIsTest: s.subject.kind === "test_run", ownerEnded: false, createdWall: input.now }] };
     },
   },
   "ending check too late": {
     evaluate: (s, now) => R.evaluate(s, now, { endingsFirst: false }),
+  },
+
+  // Question Q7 answered (ADR 0003, 15 November 2026): one per rule of the skip.
+  "held instead of skipped": {
+    evaluate: (s, now, options) => R.evaluate(s, now, { ...options, skipTakenConversations: false }),
+  },
+  // "Any" instead of "every": one number taken by someone else is taken as all of them.
+  "skipped although a free number had room": {
+    evaluate: (s, now, options) => unpretend(R.evaluate(pretendTaken(s, (_n, x, trackId) => (x.campaign.definition.smsPool ?? []).some((m) => takenByOther(x, m, trackId))), now, options)),
+  },
+  // A free number with no room left today is taken as taken.
+  "skipped because today's capacity ran out": {
+    evaluate: (s, now, options) => unpretend(R.evaluate(pretendTaken(s, (n, x) => { const a = x.accounts[n]; return a !== undefined && a.used >= a.capacity; }), now, options)),
+  },
+  "a later free number reopens the track": {
+    evaluate: (s, now, options) => {
+      const out = R.evaluate(s, now, options);
+      const reopened = out.tracks.map((p) => (p.finishReason === "skipped_conversation_taken" && candidatesFor(out, p.trackId).length > 0 ? { ...p, finishedAt: null, finishedWall: null, finishReason: null } : p));
+      return reopened.some((p, i) => p !== out.tracks[i]) ? { ...out, tracks: reopened } : out;
+    },
+  },
+  // The second campaign texts the mobile from a number whose conversation another subject owns.
+  "the binding moves to the second campaign": {
+    evaluate: (s, now, options) => R.evaluate(s, now, { ...options, skipTakenConversations: false }),
+    chooseAccount: (s, now, stepId) => R.chooseAccount(withoutTakenOwners(s), now, stepId),
+    handoverFailures: (s, a, acc, now) => R.handoverFailures(withoutTakenOwners(s), a, acc, now),
+    handOver: (s, a, acc, now) => {
+      const out = R.handOver(withoutTakenOwners(s), a, acc, now);
+      return { ...out, smsBindings: [...s.smsBindings, ...out.smsBindings.filter((b) => !s.smsBindings.some((x) => x.sender === b.sender && x.recipient === b.recipient))] };
+    },
+  },
+  // The SMS reply rule reads bindings only, so a lead that skipped is never named by it: the nearest defect the rules
+  // can make is the skipping lead taking its conversation owner's ending as a reply of its own.
+  "the skipping lead is stopped by the owner's reply": {
+    evaluate: (s, now, options) => {
+      const out = R.evaluate(s, now, options);
+      if (out.subject.ended !== null) return out;
+      const skipped = out.tracks.filter((p) => p.finishReason === "skipped_conversation_taken").map((p) => p.trackId);
+      const mobiles = smsMobiles(out);
+      const owner = out.smsBindings.find((b) => b.ownerEnded && b.owner !== out.subject.id && skipped.some((t) => mobiles.get(t) === b.recipient));
+      return owner ? R.applyReply(out, { channel: "sms", atWall: now, providerRef: R.storedReplyId("sms", `of-${owner.owner}`) }, now) : out;
+    },
   },
 
   // One per further rule of ticket 13.
@@ -151,8 +223,16 @@ const RULES: Record<string, Partial<Rules>> = {
 const EXPECTED: Record<string, { invariant: string; seed: number }> = {
   "SMS reply to the newest campaign": { invariant: "14", seed: 0 },
   "binding transferred after an end": { invariant: "14", seed: 0 },
-  "binding fixed at claim": { invariant: "14", seed: 12 },
+  // Moved from 14 by question Q7's answer: a conversation bound at a claim now skips the other lead's track at once,
+  // against the record, so 28(b) breaks first (it was a silent hold under the interim, broken later by 14).
+  "binding fixed at claim": { invariant: "28", seed: 12 },
   "ending check too late": { invariant: "20", seed: 0 },
+  "held instead of skipped": { invariant: "28", seed: 0 },
+  "skipped although a free number had room": { invariant: "28", seed: 0 },
+  "skipped because today's capacity ran out": { invariant: "28", seed: 0 },
+  "a later free number reopens the track": { invariant: "6", seed: 43 },
+  "the binding moves to the second campaign": { invariant: "14", seed: 0 },
+  "the skipping lead is stopped by the owner's reply": { invariant: "14", seed: 3 },
   "after counts from the earlier track's start": { invariant: "7", seed: 12 },
   "after delay ignored": { invariant: "7", seed: 3 },
   "together tracks not together": { invariant: "7", seed: 0 },

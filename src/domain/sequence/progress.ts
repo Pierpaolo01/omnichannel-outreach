@@ -5,10 +5,11 @@
  */
 import type { OutreachStatus } from "../outreach-status.ts";
 import { applyAttemptEvent, applyLookup, ENGINE_PARAMS, isLive, isUncertain, markable, maySend, withRef, type AttemptEffect, type AttemptEvent, type WorkEvent } from "./attempt.ts";
-import { leadNow, localDayNumber, nextWindowOpen, sendPoint, startOfLocalDay, syncClock, waitSpan, wallOfLead, type Freeze, type LeadClock } from "./clock.ts";
-import { liveSteps, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
+import { leadNow, localDayNumber, nextWindowOpen, sendPoint, startOfLocalDay, syncClock, waitSpan, wallOfLead, windowOpen, type Freeze, type LeadClock } from "./clock.ts";
+import { render } from "./copy.ts";
+import { liveSteps, ownSubject, poolOf, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
 import type { StoredReplyId } from "./reply-identity.ts";
-import type { Attempt, EndReason, FinishReason, LeadDetail, ProviderWork, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
+import type { Attempt, EndReason, FinishReason, LeadDetail, ProviderWork, RenderedCopy, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Running, status and reach.
@@ -102,16 +103,34 @@ export function hasGoodNumber(state: SubjectState): boolean {
  * channel at the decline. `startTrack` still skips a phone track after a decline as `skipped_declined`.
  */
 export function channelReaches(state: SubjectState, channel: TrackChannel): boolean {
-  return channel === "call" ? hasGoodNumber(state) && !state.subject.noMoreCalls : destinationFor(state.lead.details, channel) !== null;
+  if (channel === "call") return hasGoodNumber(state) && !state.subject.noMoreCalls;
+  return destinationFor(state.lead.details, channel) !== null && !(channel === "sms" && smsConversationLost(state));
+}
+
+/**
+ * Whether SMS can no longer reach the lead in this campaign because its conversation is taken (ADR 0003, question Q7
+ * answered; spec "A lead with no usable channel left in the campaign is marked finished, with the reason shown"): every
+ * live SMS track of its branch has finished, one of them skipped for a taken conversation, and none of them texted it.
+ * While an SMS track of the branch is still to run, SMS still reaches the lead: a free number may join the pool first.
+ */
+export function smsConversationLost(state: SubjectState): boolean {
+  const sms = liveTracksFor(state).filter((t) => t.channel === "sms");
+  const progress = sms.map((t) => progressOf(state, t.id));
+  if (progress.some((p) => !p || p.finishedAt === null)) return false;
+  if (!progress.some((p) => p?.finishReason === "skipped_conversation_taken")) return false;
+  return !state.results.some((r) => r.result === "sent" && sms.some((t) => t.id === r.trackId));
 }
 
 /**
  * Why a channel cannot reach the lead (ticket 20a, Needs attention): null when it can; `declined` for calls after a
- * decline; `bad` when the lead has such a detail but every one is marked bad; `missing` when it has none.
+ * decline; `conversation_taken` for a good mobile whose SMS tracks were skipped for another campaign's conversation
+ * (question Q7 answered); `bad` when the lead has such a detail but every one is marked bad; `missing` when it has none.
  */
-export function unreachableWhy(state: SubjectState, channel: TrackChannel): "missing" | "bad" | "declined" | null {
+export function unreachableWhy(state: SubjectState, channel: TrackChannel): "missing" | "bad" | "declined" | "conversation_taken" | null {
   if (channelReaches(state, channel)) return null;
   if (channel === "call") return state.subject.noMoreCalls && hasGoodNumber(state) ? "declined" : state.lead.phones.length > 0 ? "bad" : "missing";
+  // A good mobile whose conversation was taken on every number its SMS tracks could use (question Q7 answered).
+  if (channel === "sms" && destinationFor(state.lead.details, channel) !== null) return "conversation_taken";
   return destinationFor(state.lead.details.map((d) => ({ ...d, bad: false })), channel) !== null ? "bad" : "missing";
 }
 
@@ -287,7 +306,7 @@ const emptyProgress = (trackId: string): TrackProgress => ({
  * What evaluation does for a running subject: endings first, track starts, next steps, then
  * endings again. Ready items are the dispatcher's (dispatch.ts). Reads no clock and no store.
  */
-export function evaluate(state: SubjectState, now: number, options: { readonly endingsFirst?: boolean } = {}): SubjectState {
+export function evaluate(state: SubjectState, now: number, options: { readonly endingsFirst?: boolean; readonly skipTakenConversations?: boolean } = {}): SubjectState {
   // Unworked calls past the skip limit are skipped at the rollover they expired at, before any start, so
   // the tracks after them start in this same evaluation (3.5; ticket 15). Judged for a held lead too, which
   // only records the rollovers judged (it did not run at them), so none is judged later under other inputs.
@@ -300,9 +319,13 @@ export function evaluate(state: SubjectState, now: number, options: { readonly e
 
   // Starts, until nothing more starts: a track skipped at its start finishes then, so a track
   // after it with no delay starts at the same lead time (spec "a skipped or failed track counts as finished").
-  for (let round = 0; round <= s.campaign.definition.tracks.length; round++) {
+  // An SMS track whose mobile's conversation is taken on every number it may use, at the moment its claim
+  // would be made, is skipped in the same fixpoint, so the tracks after it start as after any skip (Q7 answered).
+  // `skipTakenConversations: false` exists only for the oracle's broken engine ("held instead of skipped").
+  for (let round = 0; round <= 2 * s.campaign.definition.tracks.length; round++) {
     const before = s;
     for (const track of liveTracksFor(s)) s = startTrack(s, track, lead, now);
+    if (options.skipTakenConversations !== false) s = skipTakenConversations(s, now);
     if (before === s) break;
   }
 
@@ -799,9 +822,178 @@ export function alignPending(state: SubjectState, now: number): SubjectState {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The claim's step guard and the SMS conversation candidates (ADR 0003 4.2, 4.5). Evaluation reads them to skip a track
+// whose mobile's conversation is taken on every number it may use (question Q7 answered); dispatch re-exports them.
+
+export const stepDef = (state: SubjectState, trackId: string, stepId: string) =>
+  state.campaign.definition.tracks.find((t) => t.id === trackId)?.steps.find((s) => s.id === stepId);
+
+/** The copy for one step and lead, rendered from the current definition. A text has no subject. */
+export function renderStep(state: SubjectState, trackId: string, stepId: string): RenderedCopy | null {
+  const step = stepDef(state, trackId, stepId);
+  if (!step) return null;
+  // A text has no subject; an email renders only a subject it starts (a continuing one has none).
+  const subject = render(channelOf(state, trackId) === "sms" ? "" : ownSubject(step), state.lead.mergeData);
+  const body = render(step.body, state.lead.mergeData);
+  return subject.ok && body.ok ? { subject: subject.text, body: body.text } : null;
+}
+
+/** The thread a continue-thread step continues: the provider reference of the track's latest send. */
+export function threadOf(state: SubjectState, trackId: string): string | null {
+  const sent = state.work
+    .filter((w) => w.trackId === trackId && (w.settled === "sent" || w.settled === "user_sent") && state.attempts.some((a) => a.idempotencyKey === w.key && a.state === "sent"))
+    .sort((a, b) => (a.sentWall ?? 0) - (b.sentWall ?? 0));
+  return sent.at(-1)?.providerRef ?? null;
+}
+
+/** A continue-thread email with no thread to continue is held, not sent (ruling 1). A text has no thread. */
+export function lacksThread(state: SubjectState, trackId: string, stepId: string): boolean {
+  return channelOf(state, trackId) === "email" && stepDef(state, trackId, stepId)?.threading === "continue_thread" && threadOf(state, trackId) === null;
+}
+
+/** The subject's fixed sender on a channel (1.3). */
+export function senderOf(state: SubjectState, channel: TrackChannel): string | null {
+  return channel === "sms" ? state.subject.smsSender : channel === "email" ? state.subject.emailSender : null;
+}
+
+/**
+ * Whether `sender` may text `recipient` for this subject (4.5): the pair has no unreleased owner,
+ * or this subject owns it. An enrollment's binding is never transferred.
+ */
+export function pairFree(state: SubjectState, sender: string, recipient: string): boolean {
+  return state.smsBindings.every((b) => b.sender !== sender || b.recipient !== recipient || b.owner === state.subject.id);
+}
+
+/** The mobile an SMS track texts: its destination's key (E.164). */
+function recipientOf(state: SubjectState, trackId: string): string | null {
+  const id = progressOf(state, trackId)?.destinationDetailId;
+  const live = id ? state.lead.resolved[id]?.liveId : undefined;
+  return state.lead.details.find((d) => d.id === live)?.key ?? null;
+}
+
+/**
+ * The accounts a claim for a step on this track may choose from: the fixed sender, else the pool;
+ * for SMS, only numbers whose conversation with the mobile is free or this subject's (4.5).
+ */
+export function candidatesFor(state: SubjectState, trackId: string): string[] {
+  const channel = channelOf(state, trackId) ?? "email";
+  const fixed = senderOf(state, channel);
+  const ids = fixed !== null ? [fixed] : [...poolOf(state.campaign.definition, channel)];
+  if (channel !== "sms") return ids;
+  const recipient = recipientOf(state, trackId);
+  return recipient === null ? ids : ids.filter((id) => pairFree(state, id, recipient));
+}
+
+/** The track's sending window (4.1). */
+export function windowOf(state: SubjectState, trackId: string) {
+  return state.campaign.definition.tracks.find((t) => t.id === trackId)?.window ?? [];
+}
+
+/** The claim's step guard (4.2 step 1). Null when it holds; otherwise why not. */
+export function claimRefusal(state: SubjectState, item: { readonly trackId: string; readonly stepId: string }, now: number): string | null {
+  if (!runs(state)) return "the lead is not running";
+  const p = progressOf(state, item.trackId);
+  if (!p || p.startedAt === null || p.finishedAt !== null) return "the track is not running";
+  if (p.nextStepId !== item.stepId) return "the step is not the track's pending step";
+  const step = stepDef(state, item.trackId, item.stepId);
+  if (!step || step.removed) return "the step was removed";
+  if (state.results.some((r) => r.stepId === item.stepId)) return "the step already has a result";
+  if (state.attempts.some((a) => a.stepId === item.stepId && isLive(a))) return "the step already has a live attempt";
+  if (p.dueAt === null || p.dueAt > leadNow(state.subject.clock, now)) return "the step is not due";
+  if (!windowOpen(windowOf(state, item.trackId), state.lead.zone, now)) return "the sending window is closed";
+  const dest = p.destinationDetailId ? state.lead.resolved[p.destinationDetailId] : undefined;
+  if (!dest || dest.bad || !dest.owned) return "the destination is not a good address of the lead";
+  if (!renderStep(state, item.trackId, item.stepId)) return "the copy does not render for this lead";
+  if (lacksThread(state, item.trackId, item.stepId)) return "there is no thread to continue";
+  return null;
+}
+
+/**
+ * Whether an SMS track's mobile is in another subject's conversation on every number it may use, at the moment its
+ * pending step's claim would be made (ADR 0003, question Q7 answered): the claim's step guard holds, and no number is a
+ * candidate. A free number's capacity, pacing, health or wait never makes it taken: those are waits.
+ */
+export function conversationTaken(state: SubjectState, trackId: string, now: number): boolean {
+  if (channelOf(state, trackId) !== "sms") return false;
+  const stepId = progressOf(state, trackId)?.nextStepId;
+  if (!stepId || claimRefusal(state, { trackId, stepId }, now) !== null) return false;
+  // Every number taken, never vacuously: a track with no number to use has none taken (a launch blocker covers it).
+  const fixed = senderOf(state, "sms");
+  const numbers = fixed !== null ? [fixed] : poolOf(state.campaign.definition, "sms");
+  return numbers.length > 0 && candidatesFor(state, trackId).length === 0;
+}
+
+/** A campaign whose subject owns a mobile's SMS conversation, as a skipped track's reason names it. */
+export interface ConversationOwner {
+  readonly campaignId: string;
+  readonly name: string;
+  /** The owner is that campaign's test run. */
+  readonly test: boolean;
+}
+
+/**
+ * Who owned the conversation a track was skipped for (ADR 0003, question Q7 answered), once each, in the order they took
+ * it: the other subjects' bindings with the track's mobile taken at or before the skip, on the numbers the track may use
+ * as read now (its fixed sender, else its pool); if a pool edit since leaves none of those, every such binding. Empty
+ * for any other finish. Read from bindings, which are never deleted; a test run's is no longer listed once it ended.
+ */
+export function conversationOwnersOf(state: SubjectState, trackId: string): ConversationOwner[] {
+  const p = progressOf(state, trackId);
+  const recipient = recipientOf(state, trackId);
+  if (p?.finishReason !== "skipped_conversation_taken" || p.finishedWall === null || recipient === null) return [];
+  const skippedAt = p.finishedWall;
+  const fixed = senderOf(state, "sms");
+  const usable = new Set(fixed !== null ? [fixed] : poolOf(state.campaign.definition, "sms"));
+  const taken = state.smsBindings.filter((b) => b.recipient === recipient && b.owner !== state.subject.id && b.createdWall <= skippedAt);
+  const onUsable = taken.filter((b) => usable.has(b.sender));
+  const owners: ConversationOwner[] = [];
+  for (const b of onUsable.length > 0 ? onUsable : taken) {
+    if (b.ownerCampaignId === null || b.ownerCampaignName === null) continue;
+    if (!owners.some((o) => o.campaignId === b.ownerCampaignId && o.test === b.ownerIsTest)) owners.push({ campaignId: b.ownerCampaignId, name: b.ownerCampaignName, test: b.ownerIsTest });
+  }
+  return owners;
+}
+
+/**
+ * When an evaluation that changed nothing must look at the subject again for the skip of question Q7, though none of
+ * its own facts changes: each SMS track waiting to hand over its pending step (started, unfinished, due or not yet,
+ * no live attempt) falls due for the check at its due instant, then whenever its window opens; and another subject's
+ * new conversation with the mobile may take its last free number (`onNewBinding`). `at` is null when no instant applies.
+ */
+export function conversationRecheck(state: SubjectState, now: number): { readonly at: number | null; readonly onNewBinding: boolean } {
+  if (!runs(state)) return { at: null, onNewBinding: false };
+  const lead = leadNow(state.subject.clock, now);
+  let at: number | null = null;
+  let onNewBinding = false;
+  for (const track of liveTracksFor(state)) {
+    const p = progressOf(state, track.id);
+    if (track.channel !== "sms" || !p || p.startedAt === null || p.finishedAt !== null || p.nextStepId === null || p.dueAt === null) continue;
+    const stepId = p.nextStepId;
+    if (state.attempts.some((a) => a.stepId === stepId && isLive(a))) continue;
+    onNewBinding = true;
+    const due = now + (p.dueAt - lead);
+    const next = due > now ? due : nextWindowOpen(track.window, state.lead.zone, now);
+    if (next !== null && next > now && (at === null || next < at)) at = next;
+  }
+  return { at, onNewBinding };
+}
+
+/**
+ * Skips every SMS track whose conversation is taken (`conversationTaken`), at the evaluation's instant, with no step
+ * result: like a missing channel, nothing of the track is sent. The skip is final (a finished track never restarts).
+ */
+export function skipTakenConversations(state: SubjectState, now: number): SubjectState {
+  let s = state;
+  for (const track of liveTracksFor(s)) {
+    if (conversationTaken(s, track.id, now)) s = finishTrack(s, track.id, "skipped_conversation_taken", leadNow(s.subject.clock, now), wallOfLead(s.subject.clock, now));
+  }
+  return s;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Holds (5.4), derived.
 
-export type HoldReason = "unresolved" | "render_failed" | "provider_skipped" | "no_thread" | "sms_conversation_taken";
+export type HoldReason = "unresolved" | "render_failed" | "provider_skipped" | "no_thread";
 
 /** Why a started, unfinished track cannot proceed without guessing or the user, or null. */
 export function trackHold(state: SubjectState, trackId: string): HoldReason | null {

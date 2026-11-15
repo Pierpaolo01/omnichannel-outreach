@@ -624,8 +624,11 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
     const predicted = (projected?.sends ?? []).filter((s) => s.at < until).map(pickFields).sort();
     // Leads whose phone tracks all were skipped for want of a number: nothing of theirs waits on a call.
     const noCall = new Set<string>();
+    // A projected lead whose mobile's conversation was taken on every number skipped its SMS track (question Q7 answered).
+    let taken = false;
     for (const id of mine) {
       const st = (await h.store.engine.subject(id, h.clock))!;
+      if (st.tracks.some((p) => p.finishReason === "skipped_conversation_taken")) taken = true;
       const calls = st.campaign.definition.tracks.filter((t) => t.channel === "call" && !t.removed);
       if (calls.every((t) => st.tracks.find((p) => p.trackId === t.id)?.finishReason === "skipped_missing_channel")) noCall.add(id);
     }
@@ -636,7 +639,7 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
       for (const task of (await h.store.engine.subject(id, h.clock))!.callTasks) if (task.placedWall < until) callsActual.push(`${task.listDay} ${id} ${task.trackId}`);
     }
     const callsPredicted = (projected?.calls ?? []).filter((c) => c.at < until).map((c) => `${c.day} ${c.leadId} ${c.trackId}`);
-    return { actual, predicted, callsActual: callsActual.sort(), callsPredicted: callsPredicted.sort(), view, projected, noCall, channels: new Set([...h.sms.deliveryLog.slice(already.sms)].filter((d) => mine.has(d.subjectId)).length > 0 ? ["sms"] : []) };
+    return { actual, predicted, callsActual: callsActual.sort(), callsPredicted: callsPredicted.sort(), view, projected, noCall, taken, channels: new Set([...h.sms.deliveryLog.slice(already.sms)].filter((d) => mine.has(d.subjectId)).length > 0 ? ["sms"] : []) };
   }
 
   const SEEDS = Number(process.env["PROJECTION_SEEDS"] ?? 40);
@@ -651,8 +654,9 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
   }
   /** The projection lists exactly the engine's placements and sends (ticket 14c: nothing is withheld in these worlds). */
   async function verify(w: World, seed: number) {
-    const { actual, predicted, callsActual, callsPredicted, view, projected, noCall, channels } = await compareWorld(w, seed);
+    const { actual, predicted, callsActual, callsPredicted, view, projected, noCall, taken, channels } = await compareWorld(w, seed);
     texted.push(channels.has("sms"));
+    if (taken) takenWorlds.push(seed);
     // Every track has a sender in these worlds, so nothing is withheld: a track after a phone track is
     // projected too, its call worked on its day with no answer, as the engine's user works it (ticket 14c).
     expect(view.load?.withheldBy ?? null).toBeNull();
@@ -688,6 +692,7 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
   }
   const afterCallWorlds: number[] = [];
   const calledWorlds: number[] = [];
+  const takenWorlds: number[] = [];
   test("the projected worlds place calls (ticket 14c)", () => {
     expect(calledWorlds.length).toBeGreaterThan(SEEDS / 8);
   });
@@ -710,6 +715,9 @@ describe("every track on both channels, across campaigns (ticket 13b): the proje
   });
   test("the worlds really text: most projected campaigns send SMS", () => {
     expect(texted.filter(Boolean).length).toBeGreaterThan(SEEDS / 3);
+  });
+  test("the worlds skip SMS tracks whose conversation another campaign holds, and the projection follows (question Q7 answered)", () => {
+    expect(takenWorlds.length).toBeGreaterThan(0);
   });
 });
 

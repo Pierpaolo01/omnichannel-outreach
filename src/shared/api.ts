@@ -441,10 +441,19 @@ export interface SequenceView {
 
 export type FinishReasonApi = import("../domain/sequence/state.ts").FinishReason;
 /**
- * Why a track waits for the user (ADR 0003 5.4). `sms_conversation_taken`: every number the SMS
- * track may use is in another campaign's conversation with this mobile (4.5, question Q7).
+ * A campaign whose lead or test owns the SMS conversation a track was skipped for (ADR 0003, question Q7 answered): an
+ * SMS thread is one conversation between two numbers, so the campaign that texted first keeps it, and the reads name it.
  */
-export type HoldReasonApi = "unresolved" | "render_failed" | "provider_skipped" | "no_thread" | "sms_conversation_taken";
+export interface ConversationOwnerView {
+  readonly name: string;
+  /** The conversation belongs to that campaign's test run, not to one of its leads. */
+  readonly test: boolean;
+}
+/**
+ * Why a track waits for the user (ADR 0003 5.4). A mobile whose conversation is taken on every number is not a hold: its
+ * SMS track is skipped (`skipped_conversation_taken`, question Q7 answered).
+ */
+export type HoldReasonApi = "unresolved" | "render_failed" | "provider_skipped" | "no_thread";
 
 export interface SendView {
   readonly attemptId: string;
@@ -483,6 +492,8 @@ export interface TrackProgressView {
   readonly started: boolean;
   readonly finishReason: FinishReasonApi | null;
   readonly finishedAt: string | null;
+  /** For `skipped_conversation_taken` (reason `sms_conversation_taken`): who owns the conversation. Empty otherwise. */
+  readonly conversationOwners: readonly ConversationOwnerView[];
   readonly hold: HoldReasonApi | null;
   /** The pending step and the wall instant it is due, if the lead keeps running. */
   readonly nextStep: { readonly stepId: string; readonly number: number; readonly dueAt: string } | null;
@@ -605,7 +616,8 @@ export interface NeedsAttention {
     readonly enrollmentId: string;
     readonly campaignId: string;
     readonly endedAt: string;
-    readonly channels: readonly { readonly channel: "email" | "sms" | "call"; readonly why: "missing" | "bad" | "declined" }[];
+    /** `conversation_taken`: its SMS track was skipped because `owners` hold the conversation (question Q7 answered); `owners` is empty for every other reason. */
+    readonly channels: readonly { readonly channel: "email" | "sms" | "call"; readonly why: "missing" | "bad" | "declined" | "conversation_taken"; readonly owners: readonly ConversationOwnerView[] }[];
   })[];
   /**
    * While sending is interrupted, the providers the dispatch gate waits on (ticket 20a, council B): each not answering,
@@ -826,8 +838,11 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
           readonly copy: { readonly subject: string; readonly body: string } | null;
         }
       | { readonly kind: "failed"; readonly stepNumber: number; readonly to: string; readonly reason: string }
-      /** `no_email`, `no_mobile`, `company_lead` (a company lead is never texted, ADR 0003 Q10), `block_list`, or the step's reason. */
-      | { readonly kind: "skipped"; readonly stepNumber: number | null; readonly reason: string }
+      /**
+       * `no_email`, `no_mobile`, `company_lead` (a company lead is never texted, ADR 0003 Q10), `block_list`,
+       * `sms_conversation_taken` (with `owners`, question Q7 answered), or the step's reason.
+       */
+      | { readonly kind: "skipped"; readonly stepNumber: number | null; readonly reason: string; readonly owners?: readonly ConversationOwnerView[] }
       /** A hard bounce, or a number the carrier reported invalid after a text: the address or number is marked bad. */
       | { readonly kind: "bounced"; readonly stepNumber: number | null; readonly to: string }
       /** The track ended because its address or number is marked bad, with no bounce event of this campaign's. */
@@ -918,6 +933,8 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
  */
 export type DependentTrackState =
   | { readonly state: "waiting"; readonly startsAt: string }
+  /** Skipped because its mobile's SMS conversation belongs to `owners` (question Q7 answered). */
+  | { readonly state: "skipped_conversation_taken"; readonly startsAt: null; readonly owners: readonly ConversationOwnerView[] }
   | {
       readonly state:
         | "started"
@@ -1594,9 +1611,11 @@ export interface TestStepRow {
   /**
    * Why a step was skipped or failed: the engine's word on its result (`missing_channel`, …), or, for a step its track
    * finished without reaching, why the track finished: `missing_channel`, `bad_destination`, `declined`, `skipped_by_you`,
-   * `unworked`, `win_back`, `interested` or `skipped`.
+   * `unworked`, `win_back`, `interested`, `sms_conversation_taken` (with `owners`) or `skipped`.
    */
   readonly reason: string | null;
+  /** For `sms_conversation_taken`: whose conversation the test mobile is in (ADR 0003, question Q7 answered). */
+  readonly owners?: readonly ConversationOwnerView[];
 }
 
 /** A test contact refused: malformed (400), or a lead's (409), by field. */

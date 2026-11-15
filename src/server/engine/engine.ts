@@ -9,7 +9,7 @@ import { launchCheck, type LaunchCheck } from "../../domain/sequence/blockers.ts
 import { REQUEST_ID_DIFFERENT, REQUEST_ID_REUSED, type OutcomeInput } from "../../domain/sequence/calls.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
-import { runs, sealReckoning } from "../../domain/sequence/progress.ts";
+import { conversationRecheck, runs, sealReckoning } from "../../domain/sequence/progress.ts";
 import { definitionProblems, type CampaignDefinition } from "../../domain/sequence/definition.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
 import { judgeCampaignControl, type LeadControl, type LeadExpectation } from "../../domain/sequence/controls.ts";
@@ -260,7 +260,7 @@ export class Engine {
    * Correct only while `runningSubjectVersions` names every input of `evaluate` and
    * `readyItems`: a ticket that adds an input (a call task, a pause) adds it to that key.
    */
-  private readonly settled = new Map<string, { key: string; until: number }>();
+  private readonly settled = new Map<string, { key: string; until: number; bindings: number | null }>();
   private readonly nothingReady = new Map<string, { key: string; until: number }>();
   /** Subjects with no due call to place, by version key and call settings, until a wall instant. */
   private readonly noCallsReady = new Map<string, { key: string; until: number }>();
@@ -1010,11 +1010,13 @@ export class Engine {
     let changed = false;
     // The user's zone decides the day an unworked call expires at, so it is part of the cache key.
     const settings = JSON.stringify(await this.store.callSettings());
+    // Another subject's first text takes a conversation without touching this subject's version (question Q7 answered).
+    const bindings = await this.store.latestSmsBinding();
     for (const [id, subjectVersion] of await this.store.runningSubjectVersions()) {
       const version = `${subjectVersion}|${settings}`;
       const now = this.now();
       const known = this.settled.get(id);
-      if (known?.key === version && now < known.until) continue;
+      if (known?.key === version && now < known.until && (known.bindings === null || known.bindings === bindings)) continue;
       const snapshot = await this.store.subject(id, now);
       if (!snapshot) continue;
       const next = this.rules.evaluate(snapshot, now);
@@ -1023,7 +1025,11 @@ export class Engine {
         const starts = snapshot.tracks.filter((p) => p.startedAt === null && p.startAt !== null).map((p) => now + ((p.startAt ?? 0) - lead));
         // An open call task may expire at the next user day (ticket 15); a held lead's callback is looked at then too.
         if (snapshot.callTasks.some((t) => t.open)) starts.push(await this.nextUserDay(now));
-        this.settled.set(id, { key: version, until: Math.min(Infinity, ...starts.filter((t) => t > now)) });
+        // An SMS track waiting to hand over is checked again at its due instant and when its window opens, and after
+        // any new conversation, for the skip of a taken one (question Q7 answered).
+        const recheck = conversationRecheck(snapshot, now);
+        if (recheck.at !== null) starts.push(recheck.at);
+        this.settled.set(id, { key: version, until: Math.min(Infinity, ...starts.filter((t) => t > now)), bindings: recheck.onNewBinding ? bindings : null });
         continue;
       }
       await this.hooks.beforeApplyEvaluation?.(id);

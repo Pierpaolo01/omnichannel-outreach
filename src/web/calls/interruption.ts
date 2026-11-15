@@ -1,5 +1,6 @@
 import type { AttentionLead, InterruptionNoticeView, NeedsAttention, SendingInterruptedView } from "../../shared/api.ts";
 import { dateIn, isoDateIn, timeIn, type AttentionItem } from "./wording.ts";
+import { conversationTaken } from "../campaign/sms-wording.ts";
 
 /**
  * An instant as Today says it (ticket 20b): the time in the user's zone, with its date when that is not `today`, the
@@ -163,6 +164,8 @@ function unreachableLine(c: NeedsAttention["noUsableChannel"][number]["channels"
   switch (c.why) {
     case "declined":
       return "they have declined on a call";
+    case "conversation_taken":
+      return conversationTaken(c.owners, "their", "now");
     case "missing":
     case "bad":
       return detailLine(c.channel, c.why);
@@ -174,7 +177,7 @@ function unreachableLine(c: NeedsAttention["noUsableChannel"][number]["channels"
 }
 
 /** Each reason the read can give, as a cause of several leads' endings: a new reason fails typecheck here. */
-const CAUSE: Record<Why, string> = { missing: "a missing detail", bad: "a detail marked wrong", declined: "a decline on a call" };
+const CAUSE: Record<Why, string> = { missing: "a missing detail", bad: "a detail marked wrong", declined: "a decline on a call", conversation_taken: "a mobile in another campaign’s text conversation" };
 
 /**
  * Leads left with no usable channel (`noUsableChannel`, most recently ended first): one entry. They stay listed while the

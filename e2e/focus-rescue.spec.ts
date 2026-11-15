@@ -234,7 +234,7 @@ function everyKind(r: Reads): Reads {
       heldTracks: [{ enrollmentId: "e9", trackId: "t1", reason: "unresolved" }],
       waitingForCapacity: [1, 2].map((i) => ({ ...lead(i), enrollmentId: `e-${i}`, campaignId: `campaign-${i}`, trackId: "t1", stepId: "s1", channel: "email" as const, dueAt: at, accountIds: ["inbox-a"], resetsAt: at })),
       anomalies: [{ what: "Something odd.", at }],
-      noUsableChannel: [{ ...lead(3), enrollmentId: "n-1", campaignId: "campaign-3", endedAt: at, channels: [{ channel: "email", why: "missing" }] }],
+      noUsableChannel: [{ ...lead(3), enrollmentId: "n-1", campaignId: "campaign-3", endedAt: at, channels: [{ channel: "email", why: "missing", owners: [] }] }],
     },
   };
 }

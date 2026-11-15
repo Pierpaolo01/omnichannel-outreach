@@ -21,7 +21,8 @@ import { TRACK_MUTATIONS } from "./track-mutations.ts";
  */
 // 11, 12, 29 and 78 (seeds 20261124, 20261125, 20261142, 20261191): regressions for the Activity
 // check's record at the instant a lead ends or a number goes bad (the search on 7401eb2).
-export const TRACK_FIXED_SEEDS: readonly number[] = [2, 3, 4, 11, 12, 29, 61, 78];
+// 43 and 57 (question Q7 answered): a number joins a campaign's pool after a skip there, and a skip a claim delayed.
+export const TRACK_FIXED_SEEDS: readonly number[] = [2, 3, 4, 11, 12, 29, 43, 57, 61, 78];
 const SEARCH_SEEDS = 100;
 /** Seed offsets each mutation's search tries after its recorded seed. */
 const MAX_SEEDS = 30;
@@ -57,6 +58,11 @@ export function trackChunks(from: number, to: number): void {
       // that no lead here enters, including a lead with no usable channel at launch, whose skips Activity states.
       test("the fixed seeds reach a never-entered branch beside a running lead and beside a lead with no channel at launch", () => {
         expect(["a-lead-beside-a-branch-never-entered", "no-channel-at-launch-beside-a-branch"].filter((f) => !reached.has(f))).toEqual([]);
+      });
+      // Question Q7 answered: a track skipped for a taken conversation, one whose skip a waiting claim delayed, the track
+      // after one released by it, and a number joining that campaign's pool after the skip.
+      test("the fixed seeds skip SMS tracks for taken conversations, after a claim's wait too, release the tracks after them, and add a number after a skip", () => {
+        expect(["conversation-taken", "conversation-taken-skip-after-a-claim", "released-after:skipped_conversation_taken", "a-number-joined-after-a-skip-in-its-campaign"].filter((f) => !reached.has(f))).toEqual([]);
       });
     }
   });

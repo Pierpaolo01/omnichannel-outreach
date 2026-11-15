@@ -18,6 +18,8 @@ export type FinishReason =
   | "completed"
   | "skipped"
   | "skipped_missing_channel"
+  /** The mobile's SMS conversation on every number the track may use belongs to another subject (ADR 0003, question Q7 answered). */
+  | "skipped_conversation_taken"
   | "skipped_declined"
   | "skipped_by_user"
   | "skipped_unworked"
@@ -199,10 +201,16 @@ export interface SmsBinding {
   readonly sender: string;
   readonly recipient: string;
   readonly owner: string;
-  /** The owner's campaign, for the held track's reason; null for a binding this change takes. */
+  /** The owner's campaign, for a skipped track's reason (question Q7 answered). */
   readonly ownerCampaignId: string | null;
+  /** That campaign's name as stored; null for a binding this change takes, which no read names. */
+  readonly ownerCampaignName: string | null;
+  /** Whether the owner is a test run (ticket 21), whose binding is released when it ends. */
+  readonly ownerIsTest: boolean;
   /** Whether the owner has ended. An ended owner keeps its binding all the same (ruling 8). */
   readonly ownerEnded: boolean;
+  /** The wall instant of the handover that took it. */
+  readonly createdWall: number;
 }
 
 /** One row of a mobile's SMS conversations, as a reply's attribution reads them (oldest first). */

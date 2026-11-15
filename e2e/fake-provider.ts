@@ -688,3 +688,65 @@ async function startMeasures(scenario: MeasuresScenario): Promise<FakeMeasuresAp
   }
   return { url: await serveHarness(world.h), world };
 }
+
+// ---------------------------------------------------------------------------------------------
+// Question Q7 answered (ADR 0003, 15 November 2026): one SMS number, two campaigns. Spring clinics texts Pat and Nia
+// first and keeps those conversations; Autumn clinics then skips its SMS track for both. Pat goes on by email the next
+// day; Nia has no email, so her outreach in Autumn clinics ends with no usable channel. Data is fictitious.
+
+export interface FakeTakenConversationApp {
+  readonly url: string;
+  readonly harness: EngineHarness;
+  /** Record ids by person name. */
+  readonly person: (name: string) => string;
+}
+
+let takenStarted: Promise<FakeTakenConversationApp> | null = null;
+
+export function fakeTakenConversationApp(): Promise<FakeTakenConversationApp> {
+  takenStarted ??= startTakenConversation();
+  return takenStarted;
+}
+
+async function startTakenConversation(): Promise<FakeTakenConversationApp> {
+  const ALWAYS = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
+  const harness = new EngineHarness({
+    start: MONDAY_8 + H,
+    accounts: [{ id: FAKE_INBOX, capacity: 40, gapMs: 60_000, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
+    sms: { numbers: [{ id: FAKE_NUMBERS[0], capacity: 40, gapMs: 60_000, k: 2, healthy: true, resetZone: "Europe/London" }] },
+  });
+  await harness.tick();
+  const harbour = business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101", city: "London" });
+  const people = [
+    person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", title: "Clinic owner", email: "pat@harbourlane.example", dial_phone: "+447700900101", dial_phone_type: "mobile" }),
+    person({ person_id: "p2", business_id: "b1", full_name: "Nia Cole", title: "Practice manager", dial_phone: "+447700900102", dial_phone_type: "mobile" }),
+  ];
+  const text = (id: string, waitDays = 0): StepDefinition => ({ id, waitDays, subject: "", body: `Hi {{first_name|there}}, Alex from Northlight here (${id}).`, threading: "new_subject", removed: false });
+  const email = (id: string): StepDefinition => ({ id, waitDays: 0, subject: "Evening bookings at {{company}}", body: "Hi {{first_name|there}},\n\nWorth a 15-minute call next week?\n\nAlex", threading: "new_subject", removed: false });
+  const campaigns: [string, CampaignDefinition][] = [
+    ["Spring clinics", { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: [FAKE_INBOX], smsPool: [FAKE_NUMBERS[0]], tracks: [{ id: "sms", channel: "sms", branch: "main", window: ALWAYS, steps: [text("m1")], start: { kind: "entry" }, removed: false }] }],
+    [
+      "Autumn clinics",
+      {
+        timezone: "Europe/London",
+        callSkipLimitDays: 2,
+        emailPool: [FAKE_INBOX],
+        smsPool: [FAKE_NUMBERS[0]],
+        tracks: [
+          { id: "sms", channel: "sms", branch: "main", window: ALWAYS, steps: [text("m1"), text("m2", 2)], start: { kind: "entry" }, removed: false },
+          { id: "email", channel: "email", branch: "main", window: ALWAYS, steps: [email("s1")], start: { kind: "after", trackId: "sms", delayDays: 1 }, removed: false },
+        ],
+      },
+    ],
+  ];
+  for (const [name, definition] of campaigns) {
+    const id = (await harness.request<{ campaign: Campaign }>("POST", "/api/campaigns", { name, defaultTimezone: "Europe/London", ...csvOf({ businesses: [harbour], people }) })).body.campaign.id;
+    await harness.defineSequence(id, definition);
+    const launched = await harness.launch(id);
+    if (launched.status !== 200) throw new Error(`the campaign did not launch: ${JSON.stringify(launched.body)}`);
+    await harness.advanceTo(harness.clock + H);
+  }
+  await harness.advanceTo(harness.clock + 2 * 24 * H);
+  const rows = (await harness.request<{ rows: { id: string; name: string }[] }>("GET", "/api/leads")).body.rows;
+  return { url: await serveHarness(harness), harness, person: (n) => rows.find((r) => r.name === n)?.id ?? "" };
+}
