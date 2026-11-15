@@ -19,14 +19,18 @@ const iso = (t: number | null) => (t === null ? null : new Date(t).toISOString()
  * What a read knows of dispatch beyond the subject (`StepEnv`): the port's transport for a step, as the claim pass asks the
  * engine, and, while sending is interrupted, whether the dispatch gate holds the step's channels (`waitingOn`, its own).
  */
-export async function stepEnvOf(store: Pick<EngineStore, "meta" | "callSettings" | "subjectsWithOpenCallTasks" | "subject">, now: number, transportAvailable?: StepEnv["transportAvailable"]): Promise<StepEnv> {
+/**
+ * `known`: states the read has already loaded at `now`, reused so a record reads each of its enrollments once (council on
+ * 4fd9ca4, item 6).
+ */
+export async function stepEnvOf(store: Pick<EngineStore, "meta" | "callSettings" | "subjectsWithOpenCallTasks" | "subject">, now: number, transportAvailable?: StepEnv["transportAvailable"], known?: ReadonlyMap<string, SubjectState | null>): Promise<StepEnv> {
   const interrupted = await sendingInterrupted(store, now);
   const evidence = interrupted ? await providerEvidence(store) : null;
   // A later day's room, from every lead's calls the engine knows are carried into it (`carriedInto`), against the capacity.
   const { dailyCapacity } = await store.callSettings();
   const withCalls: SubjectState[] = [];
   for (const id of await store.subjectsWithOpenCallTasks()) {
-    const s = await store.subject(id, now);
+    const s = known?.has(id) ? (known.get(id) ?? null) : await store.subject(id, now);
     if (s) withCalls.push(s);
   }
   const room = new Map<number, boolean>();

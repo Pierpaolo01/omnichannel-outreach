@@ -285,7 +285,8 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   const senderOf = (s: Subject, t: TrackDefinition) => (t.channel === "sms" ? numbers[s.campaign]!.id : "inbox-a");
   /** The sender's next pacing slot by the record: its last send call plus the gap (P3's own rule). */
   const slotOf = (sender: string) => {
-    const calls = [...email.handoverLog, ...sms.handoverLog].filter((c) => c.sender === sender).map((c) => c.at);
+    // Every send call the sender made, a call an outage swallowed or never made included, as the engine takes a slot for each.
+    const calls = [...email.handoverLog, ...sms.handoverLog, ...h.swallowedHandovers, ...uncalledHandovers].filter((c) => c.sender === sender && c.at <= h.clock).map((c) => c.at);
     return calls.length > 0 ? Math.max(...calls) + gap : -Infinity;
   };
   /** The outage the record has the sender in at `t`, if any (only the inbox is ever taken down). */
@@ -944,7 +945,10 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     const res = await h.request<{ error?: { message: string }; replayed?: boolean; effect?: unknown }>("POST", `/api/enrollments/${s.id}/controls`, body);
     const accepted = res.status === 200;
     // The answer's effect is the read's preview at that instant, field for field (verifier B4).
-    if (accepted && offered?.allowed && JSON.stringify(res.body.effect) !== JSON.stringify(offered)) problem(`P11: ${action} on ${s.id} at ${isoOf(now)} answered the effect ${JSON.stringify(res.body.effect)}; the read previewed ${JSON.stringify(offered)}`);
+    // When a step goes is a present read (ADR 0003 "Reads that say when"), with what dispatch knows at the read; what a control
+    // did is history, and says no time. P11 compares the two without it.
+    const timeless = (x: unknown) => JSON.stringify(x, (key, value: unknown) => (key === "when" ? undefined : value));
+    if (accepted && offered?.allowed && timeless(res.body.effect) !== timeless(offered)) problem(`P11: ${action} on ${s.id} at ${isoOf(now)} answered the effect ${JSON.stringify(res.body.effect)}; the read previewed ${JSON.stringify(offered)}`);
     if (!accepted && res.body.error) refused.push({ path: `/api/enrollments/${s.id}/controls`, body, message: res.body.error.message });
     if (uncertain) features.add(accepted ? `${action}-with-uncertain-work` : `${action}-refused-with-uncertain-work`);
     if (accepted !== expected) problem(`P11: ${action} on ${s.id} at ${isoOf(now)} was ${accepted ? "accepted" : `refused (${res.body.error?.message ?? res.status})`}; the record says it must be ${expected ? "accepted" : "refused"}`);

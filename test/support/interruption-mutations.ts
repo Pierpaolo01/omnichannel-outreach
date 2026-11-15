@@ -100,7 +100,9 @@ const EXPECTED: Record<string, { invariant: string; seed: number; options?: Part
   "the pacing gap ignored while missed work catches up": { invariant: "P3", seed: 0, options: { gapMs: 1000 } },
   "the claim order ignores follow-ups first": { invariant: "18", seed: 5 },
   "an interruption releases the leads' pauses": { invariant: "P1", seed: 2 },
-  "an interruption freezes the clock like a pause": { invariant: "P2", seed: 1 },
+  // W2 since ADR 0003 "Reads that say when": the read's instant checked against the record's due instant catches the frozen
+  // clock first, and the run stops there (it was P2, the same due instant checked against the engine's own progress).
+  "an interruption freezes the clock like a pause": { invariant: "W2", seed: 1 },
   "the count is the steps due during the interruption": { invariant: "R7", seed: 0 },
   "a gap of any length is an interruption": { invariant: "R7", seed: 2 },
   "a late answer is applied at the instant its request was made": { invariant: "P12", seed: 16 },

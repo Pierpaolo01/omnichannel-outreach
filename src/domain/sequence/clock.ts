@@ -292,6 +292,8 @@ function localOccurrences(day: number, minute: number, zone: string): number[] {
  * listing still uses `nextWindowOpen`, whose instants around a clock change are reported, not changed here.
  */
 export function windowOpensAt(rules: readonly WindowRule[], zone: string, t: number): number | null {
+  // Beyond any date a zone can name (8.64e15 ms), nothing opens.
+  if (!Number.isFinite(t) || Math.abs(t) > 8.64e15 - 10 * DAY) return null;
   if (windowOpen(rules, zone, t)) return t;
   const today = localDayNumber(t, zone);
   const horizon = t + 9 * DAY;

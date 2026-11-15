@@ -611,7 +611,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   // When each step goes is read with what dispatch knows beyond the lead (ADR 0003 "Reads that say when"): the port's
   // transport, and the dispatch gate while sending is interrupted.
   const transport = (channel: "email" | "sms", threading: "new_subject" | "continue_thread") => engine.transportAvailable?.(channel, threading) ?? true;
-  const envAt = (at: number) => stepEnvOf(store.engine, at, transport);
+  const envAt = (at: number, known?: ReadonlyMap<string, SubjectState | null>) => stepEnvOf(store.engine, at, transport, known);
   const readOf = (state: SubjectState, at: number, env: StepEnv): EnrollmentRead => ({ ...progressView(state, at, env, rules.stepWhen), controls: controlsView(state, at, rules, env), mayStillSend: state.work.filter(maySend).length });
   const enrollmentRead = async (id: string): Promise<EnrollmentRead | null> => {
     const at = Date.parse(now());
@@ -630,7 +630,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   };
   const recordControls = async (enrollmentIds: readonly string[], loaded: ReadonlyMap<string, SubjectState | null>, at: number): Promise<RecordControls> => {
     const leads: RecordLead[] = [];
-    const env = await envAt(at);
+    const env = await envAt(at, loaded);
     for (const id of enrollmentIds) {
       const state = loaded.get(id) ?? null;
       if (!state) continue;

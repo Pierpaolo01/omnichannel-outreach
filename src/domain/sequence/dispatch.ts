@@ -283,7 +283,9 @@ function freshWhen(state: SubjectState, trackId: string, stepId: string, now: nu
     const candidates = candidatesFor(at, trackId).map((id) => at.accounts[id]).filter((a): a is AccountState => a !== undefined && a.channel === channel);
     const available = candidates.filter((a) => accountAvailable(a, t ?? now));
     if (available.length === 0) {
-      const until = candidates.filter((a) => a.healthy && a.waitUntil !== null && a.waitUntil > (t ?? now)).map((a) => a.waitUntil ?? 0);
+      // A known end only: a quota wait has none (the engine marks it with no real instant), so it is a reason, as Needs
+      // attention says it ("until" null for a quota).
+      const until = candidates.filter((a) => a.healthy && a.waitReason !== "quota" && a.waitUntil !== null && a.waitUntil > (t ?? now)).map((a) => a.waitUntil ?? 0);
       if (until.length === 0) return waits("sender_unavailable");
       t = sendableFrom(state, trackId, now, Math.min(...until));
       continue;

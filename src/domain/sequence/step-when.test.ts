@@ -308,3 +308,11 @@ describe("every hold on an email track reads as its reason, with no time (the ve
     expect(stepWhen(skipped, "t1", MONDAY_9 + MIN)).toEqual({ kind: "waits", why: "provider_skipped" });
   });
 });
+
+describe("a sender waiting with no known end (a quota): a reason, never a time", () => {
+  test("every sender the step may use is out of quota", () => {
+    const open = weekdays([0, 1, 2, 3, 4, 5, 6], 0, 24);
+    const s = launchedWith(open, MONDAY_9, { accounts: { "inbox-a": account("inbox-a", { waitUntil: Number.MAX_SAFE_INTEGER, waitReason: "quota" }), "inbox-b": account("inbox-b", { waitUntil: Number.MAX_SAFE_INTEGER, waitReason: "quota" }) } });
+    expect(stepWhen(s, "t1", MONDAY_9)).toEqual({ kind: "waits", why: "sender_unavailable" });
+  });
+});
