@@ -115,21 +115,23 @@ export function providerWaitItems(waits: NeedsAttention["waitingOnProvider"], to
 }
 
 /**
- * Held tracks (`heldTracks`, ADR 0003 5.4): one entry per campaign and reason, in the read's order. One lead is named and
+ * Held tracks (`heldTracks`, ADR 0003 5.4): one entry per campaign, reason and channel, in the read's order, so each notice
+ * words its own channel (review bot on e261ffa: a LinkedIn and an SMS hold share the reason `sms_conversation_unsettled`). One lead is named and
  * linked to its record, where its row says the same and offers its controls; several are counted and linked to the
  * campaign's leads. The reason is the one wording (`holdReasonClause`), naming whose text a wait on one is for.
  */
 export function heldTrackItems(held: NeedsAttention["heldTracks"]): AttentionItem[] {
   const groups = new Map<string, NeedsAttention["heldTracks"][number][]>();
-  for (const h of held) groups.set(`${h.campaign.id}/${h.reason}`, [...(groups.get(`${h.campaign.id}/${h.reason}`) ?? []), h]);
+  const keyOf = (h: NeedsAttention["heldTracks"][number]) => `${h.campaign.id}/${h.reason}/${h.channel}`;
+  for (const h of held) groups.set(keyOf(h), [...(groups.get(keyOf(h)) ?? []), h]);
   return [...groups.values()].map((tracks) => {
     const first = tracks[0] as NeedsAttention["heldTracks"][number];
     const leads = new Set(tracks.map((h) => h.enrollmentId)).size;
     const owners = tracks.flatMap((h) => h.owners).filter((o, i, all) => all.findIndex((x) => x.name === o.name && x.test === o.test) === i);
     const body = `On hold because ${holdReasonClause(first.reason, owners, first.channel)}. Nothing is dropped.`;
-    if (leads === 1) return { key: `tracks-${first.campaign.id}-${first.reason}`, tone: "pause" as const, title: `${leadName(first)} is on hold in ${first.campaign.name}`, body, action: recordAction(first) };
+    if (leads === 1) return { key: `tracks-${first.campaign.id}-${first.reason}-${first.channel}`, tone: "pause" as const, title: `${leadName(first)} is on hold in ${first.campaign.name}`, body, action: recordAction(first) };
     return {
-      key: `tracks-${first.campaign.id}-${first.reason}`,
+      key: `tracks-${first.campaign.id}-${first.reason}-${first.channel}`,
       tone: "pause" as const,
       title: `${leads} leads in ${first.campaign.name} are on hold`,
       body,

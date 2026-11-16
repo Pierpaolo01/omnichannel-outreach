@@ -5,6 +5,8 @@ playwright-report/
 *.sqlite
 *.sqlite-*
 *.db
+# Upgrade fixtures: databases written by an earlier build's own code from fictitious data only (migration tests).
+!test/fixtures/upgrade/*.db
 .env
 .env.*
 .impeccable/config.local.json

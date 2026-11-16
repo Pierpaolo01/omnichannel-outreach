@@ -304,3 +304,31 @@ export function callOutcome(r: PortCallResult): CallOutcome {
       return unreachable(r);
   }
 }
+
+/**
+ * An account's identity is its channel and its id together (the re-check of e261ffa, item 3): the same raw id on two
+ * channels is two accounts. Email accounts are addresses and SMS numbers E.164, which cannot take this prefix, so every
+ * LinkedIn session is known to the app as `linkedin:` and the session's own id, and nothing of another channel can share
+ * its id. The port itself knows only its own ids: `namespacedLinkedinPort` adds the prefix to the accounts it lists and
+ * strips it from every request the engine makes of it.
+ */
+export const LINKEDIN_ACCOUNT_PREFIX = "linkedin:";
+export const linkedinAccountId = (sessionId: string): string => `${LINKEDIN_ACCOUNT_PREFIX}${sessionId}`;
+const sessionIdOf = (accountId: string): string => (accountId.startsWith(LINKEDIN_ACCOUNT_PREFIX) ? accountId.slice(LINKEDIN_ACCOUNT_PREFIX.length) : accountId);
+
+export function namespacedLinkedinPort(port: SendPort): SendPort {
+  const withdrawInvite = port.withdrawInvite?.bind(port);
+  const contact = port.contact?.bind(port);
+  return {
+    channel: port.channel,
+    transportFor: (step) => port.transportFor(step),
+    accounts: async () => (await port.accounts()).map((a) => ({ ...a, id: linkedinAccountId(a.id) })),
+    ...(contact ? { contact } : {}),
+    presendCheck: (request) => port.presendCheck({ ...request, sender: sessionIdOf(request.sender) }),
+    handover: (request) => port.handover({ ...request, sender: sessionIdOf(request.sender) }),
+    ...(withdrawInvite ? { withdrawInvite: (invite: AttemptRef) => withdrawInvite({ ...invite, sender: sessionIdOf(invite.sender) }) } : {}),
+    withdraw: (attempt) => port.withdraw({ ...attempt, sender: sessionIdOf(attempt.sender) }),
+    observe: (checkpoint) => port.observe(checkpoint),
+    lookup: (attempt) => port.lookup({ ...attempt, sender: sessionIdOf(attempt.sender) }),
+  };
+}

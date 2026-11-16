@@ -115,11 +115,18 @@ export interface TrackProgress {
   /** How many times in a row the session answered the withdrawal "unknown" (ADR 0004 3.3): listed for the user after a bound. */
   readonly inviteWithdrawalUnknowns?: number;
   /**
-   * An invite to the profile already pending on LinkedIn that this application did not send (the pre-send check's `pending`;
-   * question Q42): when it was first seen, and last checked. The invite step is held and checked again each settling period.
+   * The connection checks before the invite (ADR 0004 6; review bot on e261ffa), one per session: a connection, an invite
+   * pending from elsewhere and "clear" are facts about one (session, profile) pair, never about the track. Each answer
+   * holds for a settling period; a `pending` answer keeps when it was first seen (question Q42).
    */
-  readonly invitePendingSeenWall?: number | null;
-  readonly invitePendingCheckedWall?: number | null;
+  readonly connectionChecks?: Readonly<Record<string, ConnectionCheck>>;
+}
+
+/** One session's connection check of a track's profile: its answer, when, and since when an invite was seen pending. */
+export interface ConnectionCheck {
+  readonly answer: "clear" | "pending";
+  readonly checkedWall: number;
+  readonly pendingSince: number | null;
 }
 
 export type StepOutcome = "sent" | "skipped" | "failed";

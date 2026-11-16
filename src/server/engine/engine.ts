@@ -28,7 +28,7 @@ export const CONTROL_REQUEST_REUSED = "This request id was already used for anot
 function outcomeBody(input: OutcomeInput): string {
   return JSON.stringify({ outcome: input.outcome, redial: input.redial, callbackAt: input.callbackAt, declinedPath: input.declinedPath, numberId: input.numberId, note: input.note, noteScope: input.noteScope });
 }
-import { callOutcome, UnconnectedLinkedInPort, UnprovisionedSmsPort, type AttemptRef, type CallOutcome, type PortCallResult, type HandoverRequest, type ProviderEvent, type SendPort } from "./ports.ts";
+import { callOutcome, namespacedLinkedinPort, UnconnectedLinkedInPort, UnprovisionedSmsPort, type AttemptRef, type CallOutcome, type PortCallResult, type HandoverRequest, type ProviderEvent, type SendPort } from "./ports.ts";
 import { rulesWith, type Rules } from "./rules.ts";
 import { HEARTBEAT_KEY, NOTICE_KEY, parseInstant, PROVIDERS_KEY, TICK_ENDED_KEY, TICK_FAILED_KEY } from "./worker-state.ts";
 import { relevantChannels, waitingOn, type ProviderEvidence } from "../../domain/sequence/providers.ts";
@@ -289,7 +289,7 @@ export class Engine {
 
   constructor(deps: EngineDependencies) {
     this.store = deps.store;
-    this.ports = { email: deps.port, sms: deps.smsPort ?? new UnprovisionedSmsPort(), linkedin: deps.linkedinPort ?? new UnconnectedLinkedInPort() };
+    this.ports = { email: deps.port, sms: deps.smsPort ?? new UnprovisionedSmsPort(), linkedin: namespacedLinkedinPort(deps.linkedinPort ?? new UnconnectedLinkedInPort()) };
     this.clockNow = deps.now;
     this.now = () => this.applyingAt ?? deps.now();
     this.newId = deps.newId;
@@ -587,7 +587,8 @@ export class Engine {
           const until = invitePendingUntil(s, p.trackId);
           if (until !== null) due.push({ wall: until, window: [], zone: s.lead.zone });
           // A connection check stands for a settling period; an invite still unclaimed then is checked again.
-          if (p.invitePendingCheckedWall != null && p.finishedAt === null) due.push({ wall: p.invitePendingCheckedWall + ENGINE_PARAMS.SETTLING, window: [], zone: s.lead.zone });
+          // Each session's own answer (review bot on e261ffa).
+          if (p.finishedAt === null) for (const c of Object.values(p.connectionChecks ?? {})) due.push({ wall: c.checkedWall + ENGINE_PARAMS.SETTLING, window: [], zone: s.lead.zone });
         }
         for (const p of s.tracks) if (awaitingAcceptance(s, p.trackId) && p.acceptBy != null) due.push({ wall: now + (p.acceptBy - leadNow(s.subject.clock, now)), window: [], zone: s.lead.zone });
         // An open call task can expire at the user's next day (the skip limit, ticket 15).
@@ -1341,18 +1342,22 @@ export class Engine {
       const s = await this.store.subject(id, now);
       if (!s) continue;
       for (const p of s.tracks) {
-        const session = this.rules.connectionCheckDue(s, p.trackId, now);
-        if (session === null) continue;
-        const destination = s.lead.details.find((d) => d.id === s.lead.resolved[p.destinationDetailId ?? ""]?.liveId)?.key ?? "";
-        if (!this.leaseIsMine(this.clockNow())) return changed;
-        const port = this.ports.linkedin;
-        const asked = await this.bounded(() => port.presendCheck({ sender: session, destination, threadRefs: [], knownReplies: [] }), { kind: "unavailable" as const }, "linkedin", (result) => ({ call: "presendCheck", result }));
-        if (asked.kind === "unavailable" || asked.kind === "reply") continue;
-        const answer = asked.kind === "connected" ? "connected" : asked.kind === "pending" && this.rules.outstandingInviteStops() ? "pending" : "clear";
-        changed = (await this.update(id, now, (st) => {
-          if (this.rules.connectionCheckDue(st, p.trackId, now) !== session) return null;
-          return this.rules.connectionChecked(st, p.trackId, session, destination, answer, now);
-        })) !== null || changed;
+        // Every session due a check, in the pool's order (review bot on e261ffa): the first that is already connected becomes
+        // the sender, and no later session is asked; the others' answers are kept per session.
+        for (const session of this.rules.connectionChecksDue(s, p.trackId, now)) {
+          const destination = s.lead.details.find((d) => d.id === s.lead.resolved[p.destinationDetailId ?? ""]?.liveId)?.key ?? "";
+          if (!this.leaseIsMine(this.clockNow())) return changed;
+          const port = this.ports.linkedin;
+          const asked = await this.bounded(() => port.presendCheck({ sender: session, destination, threadRefs: [], knownReplies: [] }), { kind: "unavailable" as const }, "linkedin", (result) => ({ call: "presendCheck", result }));
+          if (asked.kind === "unavailable" || asked.kind === "reply") continue;
+          const answer = asked.kind === "connected" ? "connected" : asked.kind === "pending" && this.rules.outstandingInviteStops() ? "pending" : "clear";
+          const written = await this.update(id, now, (st) => {
+            if (!this.rules.connectionChecksDue(st, p.trackId, now).includes(session)) return null;
+            return this.rules.connectionChecked(st, p.trackId, session, destination, answer, now);
+          });
+          changed = written !== null || changed;
+          if (answer === "connected" && written !== null) break;
+        }
       }
     }
     return changed;

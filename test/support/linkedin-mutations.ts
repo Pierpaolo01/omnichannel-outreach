@@ -43,7 +43,7 @@ function connectedAtTheSend(s: SubjectState): SubjectState {
 }
 
 /** A swap of one of progress.ts's rule flags for a replay, undone after it. */
-function flag<K extends "notConnectedMarksBad" | "pairsByChannel" | "waitEditRealigns">(name: K, value: (typeof progressRules)[K]): () => () => void {
+function flag<K extends "notConnectedMarksBad" | "pairsByChannel" | "waitEditRealigns" | "checksPerSession">(name: K, value: (typeof progressRules)[K]): () => () => void {
   return () => {
     const was = progressRules[name];
     progressRules[name] = value;
@@ -84,7 +84,7 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
   // L3: the mark is recorded, but the lead is not ended.
   "a reply mark that does not end the lead": {
     invariant: "L3",
-    seed: 9,
+    seed: 4,
     rules: {
       markReplied: (state, requestId, now) => {
         const refused = DEFAULT_RULES.markReplied(state, requestId, now);
@@ -146,7 +146,7 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
   // L8: the expiry finishes the track when it is evaluated, not at its deadline.
   "the expiry finishes at the instant evaluated": {
     invariant: "L8",
-    seed: 5,
+    seed: 10,
     rules: {
       inviteExpired: (state, trackId, now) => {
         const wanted = { ...state, tracks: state.tracks.map((t) => (t.trackId === trackId ? { ...t, inviteWithdrawal: "wanted" as const, inviteWithdrawalLastWall: null } : t)) };
@@ -158,7 +158,7 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
   // nor skipped.
   "an existing connection is ignored": {
     invariant: "L9",
-    seed: 11,
+    seed: 1,
     rules: {
       inviteAlreadyConnected: (state) => state,
       connectionChecked: (state, trackId, session, destination, answer, now) => DEFAULT_RULES.connectionChecked(state, trackId, session, destination, answer === "connected" ? "clear" : answer, now),
@@ -175,7 +175,7 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
   // L2, the gate in full (review bot on 194fc44): the gate covers only the first message, so a skip reaches a follow-up.
   "the connection gate covers only the first message": {
     invariant: "L2",
-    seed: 0,
+    seed: 24,
     rules: { outstandingInviteStops: () => false },
     patch: () => {
       const was = progressRules.connectionGate;
@@ -188,7 +188,7 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
   // L11: other subjects' pairs ignored on LinkedIn: a second campaign reaches a profile another campaign's session owns.
   "a LinkedIn pair owned by another subject is ignored": {
     invariant: "L11",
-    seed: 1,
+    seed: 10,
     rules: {
       chooseAccount: (state, now, stepId) => DEFAULT_RULES.chooseAccount(ownPairsOnly(state), now, stepId),
       handoverFailures: (state, attempt, account, now) => DEFAULT_RULES.handoverFailures(ownPairsOnly(state), attempt, account, now),
@@ -198,7 +198,10 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
         const out = DEFAULT_RULES.evaluate(own, now, options);
         return { ...out, smsBindings: [...out.smsBindings, ...state.smsBindings.filter((b) => !own.smsBindings.includes(b))] };
       },
-      connectionCheckDue: (state, trackId, now) => DEFAULT_RULES.connectionCheckDue(ownPairsOnly(state), trackId, now),
+      connectionChecksDue: (state, trackId, now) => DEFAULT_RULES.connectionChecksDue(ownPairsOnly(state), trackId, now),
+      // The session's "pending" for the owner's own outstanding invite would otherwise stop it: an engine that ignores the
+      // owner's pair is one that also ignores what that pair's invite tells it (the per-session check, review bot on e261ffa).
+      outstandingInviteStops: () => false,
     },
   },
   // L12: the mark accepted on a lead nothing reached on LinkedIn.
@@ -216,7 +219,7 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
   // L14 (Q37): a message refused because the connection is gone marks the profile bad.
   "a removed connection marks the profile bad": {
     invariant: "L14",
-    seed: 10,
+    seed: 16,
     rules: {},
     patch: flag("notConnectedMarksBad", true),
   },
@@ -225,7 +228,7 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
   // LinkedIn track starts after its text, see it as L16.
   "a binding lookup ignores the channel": {
     invariant: "L13",
-    seed: 1,
+    seed: 11,
     rules: {},
     patch: flag("pairsByChannel", false),
   },
@@ -238,14 +241,21 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
   // L8 (council on b21af02, item 8): an edit of the wait leaves every waiting deadline where it was.
   "an edited wait keeps the old deadline": {
     invariant: "L8",
-    seed: 2,
+    seed: 6,
     rules: {},
     patch: flag("waitEditRealigns", false),
+  },
+  // L17 (review bot on e261ffa): one connection check's answer kept for the track, asked of its first healthy session only.
+  "a check's result is stored for the track, not the session": {
+    invariant: "L17",
+    seed: 2,
+    rules: {},
+    patch: flag("checksPerSession", false),
   },
   // L13: a taken pair held instead of skipped: the second campaign's lead is left waiting on it for ever.
   "a taken LinkedIn pair is held, not skipped": {
     invariant: "L13",
-    seed: 10,
+    seed: 11,
     rules: { evaluate: (state, now, options) => DEFAULT_RULES.evaluate(state, now, { ...options, skipTakenConversations: false }) },
   },
 };

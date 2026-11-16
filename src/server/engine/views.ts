@@ -8,7 +8,7 @@ import { channelOfTrack, stepWhenView } from "./step-when-view.ts";
 import { localDayNumber, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { relevantChannels, waitingOn } from "../../domain/sequence/providers.ts";
 import { providerEvidence, sendingInterrupted } from "./worker-state.ts";
-import { inviteWithdrawalStuck, channelOf, conversationOwnersOf, deriveStatus, liveTracksFor, unreachableWhy, unsettledOwnersOf, wallAtLead } from "../../domain/sequence/progress.ts";
+import { invitePendingUntil, inviteWithdrawalStuck, channelOf, conversationOwnersOf, deriveStatus, liveTracksFor, unreachableWhy, unsettledOwnersOf, wallAtLead } from "../../domain/sequence/progress.ts";
 import type { AccountState, SubjectState } from "../../domain/sequence/state.ts";
 import type { LinkedinTrackView, AttentionLead, ConversationOwnerView, EnrollmentProgress, NeedsAttention, SenderAccountViewApi } from "../../shared/api.ts";
 import type { EngineStore } from "./engine-store.ts";
@@ -329,6 +329,8 @@ async function senderProblems(store: EngineStore, accounts: readonly AccountStat
   return accounts.filter((a) => !a.healthy).map((a) => ({ accountId: a.id, channel: a.channel, label: labels[a.id] ?? a.id, problem: a.problem ?? "unhealthy" }));
 }
 
+const earliest = (ts: readonly number[]): number | null => (ts.length === 0 ? null : Math.min(...ts));
+
 /** A LinkedIn track's stored facts as the read gives them (ADR 0004 section 9): nothing computed beside the engine's own. */
 export function linkedinTrackView(s: SubjectState, trackId: string): LinkedinTrackView {
   const p = s.tracks.find((x) => x.trackId === trackId);
@@ -344,6 +346,7 @@ export function linkedinTrackView(s: SubjectState, trackId: string): LinkedinTra
     withdrawal,
     withdrawalStuck: p ? inviteWithdrawalStuck(p) : false,
     inviteOpen: sent && p?.acceptedWall == null && (p?.connection ?? null) === null && withdrawal !== "withdrawn" && withdrawal !== "accepted_first",
-    pendingElsewhereSince: iso(p?.invitePendingSeenWall ?? null),
+    // While the track holds as pending elsewhere (every session it may use pending): the earliest any of them saw it.
+    pendingElsewhereSince: iso(invitePendingUntil(s, trackId) === null ? null : earliest(Object.values(p?.connectionChecks ?? {}).flatMap((c) => (c.pendingSince === null ? [] : [c.pendingSince])))),
   };
 }

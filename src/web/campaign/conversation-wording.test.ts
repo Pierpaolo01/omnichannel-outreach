@@ -58,6 +58,21 @@ describe("a conversation's sentences name its own channel", () => {
     });
   }
 
+  test("a LinkedIn hold and an SMS hold of one campaign, sharing their reason, are two notices, each in its own channel's words, in either order (review bot on e261ffa)", () => {
+    const linkedin = { ...LEAD, enrollmentId: "e1", trackId: "li", channel: "linkedin" as const, reason: "sms_conversation_unsettled" as const, owners: OWNER_A };
+    const sms = { ...LEAD, person: { id: "p2", name: "Sam Reed" }, enrollmentId: "e2", trackId: "t", channel: "sms" as const, reason: "sms_conversation_unsettled" as const, owners: OWNER_A };
+    for (const held of [[linkedin, sms], [sms, linkedin]]) {
+      const items = attentionItems({ ...NOTHING, heldTracks: held }, { overdueCallbacks: [], userZone: ZONE, date: "2026-11-02", carriedOver: 0, carriedOverLastDay: 0 });
+      expect(items).toHaveLength(2);
+      const byKey = Object.fromEntries(items.map((i) => [i.key, i.body]));
+      expect(Object.keys(byKey).sort()).toEqual(["tracks-c1-sms_conversation_unsettled-linkedin", "tracks-c1-sms_conversation_unsettled-sms"]);
+      expect(byKey["tracks-c1-sms_conversation_unsettled-linkedin"]).toContain("LinkedIn profile");
+      expect(byKey["tracks-c1-sms_conversation_unsettled-linkedin"]).not.toMatch(/mobile|\btext\b/);
+      expect(byKey["tracks-c1-sms_conversation_unsettled-sms"]).toContain("mobile");
+      expect(byKey["tracks-c1-sms_conversation_unsettled-sms"]).not.toContain("LinkedIn");
+    }
+  });
+
   test("every channel of conversations has its words (a channel added without them fails here and in typecheck)", () => {
     for (const channel of CONVERSATION_CHANNELS) {
       expect(conversationTaken(OWNERS, channel)).not.toContain("undefined");

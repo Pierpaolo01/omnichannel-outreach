@@ -22,7 +22,13 @@ export const UNDO_SINCE_18 = `
  * Migration 22 undone (ticket 24, ADR 0004): the columns and tables it added, dropped. The four tables it rebuilt need no
  * undoing: a later run of 22 rebuilds them from the columns it names. Run first by every undo that goes back past 22.
  */
-export const UNDO_22 = `
+export const UNDO_23 = `
+  DROP TRIGGER sms_bindings_channel_fixed;
+  DROP TRIGGER sender_accounts_channel_fixed;
+  ALTER TABLE sms_bindings DROP COLUMN channel;
+  DELETE FROM schema_migrations WHERE version >= 23;
+`;
+export const UNDO_22 = `${UNDO_23}
   ALTER TABLE track_progress DROP COLUMN connection;
   ALTER TABLE track_progress DROP COLUMN connected_at;
   ALTER TABLE track_progress DROP COLUMN connected_wall;
@@ -34,8 +40,7 @@ export const UNDO_22 = `
   ALTER TABLE track_progress DROP COLUMN invite_withdrawal;
   ALTER TABLE track_progress DROP COLUMN invite_withdrawal_last_wall;
   ALTER TABLE track_progress DROP COLUMN invite_withdrawal_unknowns;
-  ALTER TABLE track_progress DROP COLUMN invite_pending_seen_wall;
-  ALTER TABLE track_progress DROP COLUMN invite_pending_checked_wall;
+  ALTER TABLE track_progress DROP COLUMN connection_checks;
   ALTER TABLE provider_work DROP COLUMN kind;
   ALTER TABLE provider_work DROP COLUMN note;
   ALTER TABLE attempts DROP COLUMN action;

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { linkedinAccountId } from "./ports.ts";
 import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { FakeSession } from "../../../test/support/fake-linkedin-port.ts";
@@ -44,7 +45,7 @@ const emailTrack = (id: string, start: TrackDefinition["start"] = { kind: "entry
   start,
   removed: false,
 });
-const definition = (tracks: TrackDefinition[]): CampaignDefinition => ({ timezone: "Europe/London", callSkipLimitDays: 2, emailPool: ["inbox-a"], smsPool: [], linkedinPool: [S1], tracks });
+const definition = (tracks: TrackDefinition[]): CampaignDefinition => ({ timezone: "Europe/London", callSkipLimitDays: 2, emailPool: ["inbox-a"], smsPool: [], linkedinPool: [linkedinAccountId(S1)], tracks });
 const session = (id: string, fields: Partial<FakeSession> = {}): FakeSession => ({ id, gapMs: MIN, k: 1, healthy: true, resetZone: "Europe/London", ...fields });
 
 const PEOPLE = [
@@ -65,7 +66,7 @@ async function world(options: { allowances?: { invitesPerDay: number; messagesPe
   });
   await h.tick();
   const allowances = options.allowances === undefined ? { invitesPerDay: 20, messagesPerDay: 20, notesPerMonth: 20 } : options.allowances;
-  if (allowances) expect((await h.request("PUT", `/api/sender-accounts/${S1}/allowances`, allowances)).status).toBe(200);
+  if (allowances) expect((await h.request("PUT", `/api/sender-accounts/${linkedinAccountId(S1)}/allowances`, allowances)).status).toBe(200);
   const campaign = async (tracks: TrackDefinition[]) => {
     const { campaign: c } = await h.createCampaign("LinkedIn", { businesses: BUSINESSES, people: options.people ?? PEOPLE });
     await h.defineSequence(c.id, definition(tracks));
@@ -184,7 +185,7 @@ describe("allowances and the note (ADR 0004 sections 4 and 6)", () => {
     await campaign([linkedin("li", [invite(), step("m1", 0, "Thanks.")])]);
     await h.advanceTo(MONDAY_9 + 2 * H);
     expect(h.linkedin.handoverLog).toHaveLength(0);
-    expect((await h.request("PUT", `/api/sender-accounts/${S1}/allowances`, { invitesPerDay: 2, messagesPerDay: 5, notesPerMonth: 5 })).status).toBe(200);
+    expect((await h.request("PUT", `/api/sender-accounts/${linkedinAccountId(S1)}/allowances`, { invitesPerDay: 2, messagesPerDay: 5, notesPerMonth: 5 })).status).toBe(200);
     await h.advanceTo(MONDAY_9 + 4 * H);
     // Two invites a day: the third waits for the next day, never dropped.
     expect([PAT, NIA, SAM].map((p) => delivered(p).length).reduce((a, b) => a + b)).toBe(2);
@@ -206,7 +207,7 @@ describe("allowances and the note (ADR 0004 sections 4 and 6)", () => {
   test("an allowance is not for email or SMS accounts", async () => {
     const { h } = await world();
     expect((await h.request("PUT", "/api/sender-accounts/inbox-a/allowances", { invitesPerDay: 1, messagesPerDay: 1, notesPerMonth: 1 })).status).toBe(404);
-    expect((await h.request("PUT", `/api/sender-accounts/${S1}/allowances`, { invitesPerDay: -1, messagesPerDay: 1, notesPerMonth: 1 })).status).toBe(400);
+    expect((await h.request("PUT", `/api/sender-accounts/${linkedinAccountId(S1)}/allowances`, { invitesPerDay: -1, messagesPerDay: 1, notesPerMonth: 1 })).status).toBe(400);
   });
 });
 

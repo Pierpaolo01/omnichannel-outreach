@@ -1,6 +1,7 @@
 import { Crash, EngineHarness } from "./engine-harness.ts";
+import { linkedinAccountId } from "../../src/server/engine/ports.ts";
 import { business, csvOf, person } from "./export-builder.ts";
-import type { ProfileScript } from "./fake-linkedin-port.ts";
+import { connectedOn, pendingOn, type ProfileScript } from "./fake-linkedin-port.ts";
 import { random } from "./generated-sequences.ts";
 import { dueAfter, firstOpen, local, type Hours } from "./sequence-model.ts";
 import type { Rules } from "../../src/server/engine/rules.ts";
@@ -24,6 +25,8 @@ const SETTLING = 15 * MIN;
 const START = Date.parse("2026-11-02T08:00:00Z");
 const ZONES = ["Europe/London", "America/New_York", "Australia/Sydney"] as const;
 const SESSIONS = ["li-a", "li-b"] as const;
+/** A third session, from the second stream (review bot on e261ffa): pools of two and three sessions. */
+const THIRD_SESSION = "li-c";
 /** One simulated SMS number, for the SMS tracks drawn beside LinkedIn (review bot on b21af02). */
 const SMS_NUMBER = "+447700900001";
 
@@ -81,6 +84,10 @@ export function heldWithin(from: number, to: number, holds: readonly { readonly 
 /** An instant as a problem states it: a deadline the record finds never reached (held for good) is "never". */
 const iso = (at: number): string => (Number.isFinite(at) ? new Date(at).toISOString() : "never");
 
+/** A session as the app names it (`linkedin:` and its id), and back: the record keeps the provider's own ids. */
+const sessionOfAccount = (id: string): string => id.replace(/^linkedin:/, "");
+const toApp = (d: CampaignDefinition): CampaignDefinition => ({ ...d, linkedinPool: (d.linkedinPool ?? []).map(linkedinAccountId) });
+
 /** The invariant a problem names ("L4: ..."). */
 export const linkedinInvariantsOf = (problem: string): string[] => [problem.split(":")[0] ?? ""];
 
@@ -134,13 +141,22 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   };
 
   // --- The world.
-  const sessions = SESSIONS.slice(0, rnd() < 0.5 ? 1 : 2).map((id) => ({ id, gapMs: pickOf(rnd, [5 * MIN, 30 * MIN]), k: 1, healthy: true, resetZone: "Europe/London" }));
+  // In a share of runs the second session's own id is the SMS number's (the re-check of e261ffa, item 3): two accounts,
+  // whose pairs and handovers L16 keeps apart. Drawn from the second stream; its draws come after the first stream's here.
+  const sameIdAsNumber = rnd2() < 0.3;
+  const sessions = SESSIONS.slice(0, rnd() < 0.5 ? 1 : 2).map((raw) => (raw === "li-b" && sameIdAsNumber ? SMS_NUMBER : raw)).map((id): { id: string; gapMs: number; k: number; healthy: boolean; resetZone: string } => ({ id, gapMs: pickOf(rnd, [5 * MIN, 30 * MIN]), k: 1, healthy: true, resetZone: "Europe/London" }));
   const allowances = new Map<string, Allowance>(sessions.map((s) => [s.id, { invites: Math.floor(rnd() * 4) + 1, messages: Math.floor(rnd() * 4) + 1, notes: Math.floor(rnd() * 4) }]));
   // Allowances of zero (council on b21af02, item 6): no invites, or no messages, for a session, from the second stream.
   for (const [id, a] of allowances) {
     const roll = rnd2();
     if (roll < 0.2) allowances.set(id, { ...a, invites: 0 });
     else if (roll < 0.35) allowances.set(id, { ...a, messages: 0 });
+  }
+  if (sessions.some((x) => x.id === SMS_NUMBER)) features.add("a-session-id-that-is-a-number");
+  if (sessions.length === 2 && rnd2() < 0.5) {
+    sessions.push({ id: THIRD_SESSION, gapMs: 5 * MIN, k: 1, healthy: true, resetZone: "Europe/London" });
+    allowances.set(THIRD_SESSION, { invites: Math.floor(rnd2() * 3), messages: Math.floor(rnd2() * 3) + 1, notes: Math.floor(rnd2() * 3) });
+    features.add("a-third-session");
   }
   const h = new EngineHarness({
     start: START,
@@ -151,7 +167,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   });
   await h.tick();
   for (const [id, a] of allowances) {
-    const r = await h.request("PUT", `/api/sender-accounts/${id}/allowances`, { invitesPerDay: a.invites, messagesPerDay: a.messages, notesPerMonth: a.notes });
+    const r = await h.request("PUT", `/api/sender-accounts/${linkedinAccountId(id)}/allowances`, { invitesPerDay: a.invites, messagesPerDay: a.messages, notesPerMonth: a.notes });
     if (r.status !== 200) problem(`setup: allowances refused for ${id}`);
   }
 
@@ -172,7 +188,10 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       ? { id: `c${ci}-em`, channel: "email", branch: "main", window: [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 })), steps: [{ id: `c${ci}-e1`, waitDays: 0, subject: "Hello {{first_name|there}}", body: "An email.", threading: "new_subject", removed: false }], start: rnd() < 0.5 ? { kind: "entry" } : { kind: "after", trackId: li.id, delayDays: Math.floor(rnd() * 2) }, removed: false }
       : null;
     if (email) features.add(email.start.kind === "after" ? "email-after-linkedin" : "email-beside-linkedin");
-    const pool = sessions.length === 1 ? [sessions[0]!.id] : pickOf(rnd, [[sessions[0]!.id], [sessions[1]!.id], [sessions[0]!.id, sessions[1]!.id]]);
+    const base = sessions.length === 1 ? [sessions[0]!.id] : pickOf(rnd, [[sessions[0]!.id], [sessions[1]!.id], [sessions[0]!.id, sessions[1]!.id]]);
+    // Pools of two and three sessions often (review bot on e261ffa), from the second stream.
+    const second = sessions.length >= 2 && base.length === 1 && rnd2() < 0.5 ? [...base, sessions.find((x) => !base.includes(x.id) && x.id !== THIRD_SESSION)!.id] : base;
+    const pool = sessions.length === 3 && rnd2() < 0.7 ? [...second, THIRD_SESSION] : second;
     // An SMS track beside the LinkedIn one, at entry or after it, in a share of campaigns: one person's mobile and profile
     // are then pairs of two channels, which must never be mixed (review bot on b21af02).
     const smsRoll = rnd2();
@@ -208,10 +227,21 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
                       : { withdrawUnknown: 1 };
       // Q42's and Q37's states, from the second stream: an invite pending from elsewhere, and a connection removed after it.
       const extra = rnd2();
-      if (profile !== null && extra < 0.1) Object.assign(script ?? {}, { pendingElsewhere: true, connected: false });
+      if (profile !== null && extra < 0.1) {
+        // Pending from elsewhere on one session of the pool only, or on every session (review bot on e261ffa). Mostly on the
+        // pool's first session: the one session a check kept for the track would ask, the case it gets wrong.
+        if (pool.length > 1 && rnd2() < 0.6) Object.assign(script ?? {}, { connected: false, sessions: { [rnd2() < 0.67 ? pool[0]! : pool[Math.floor(rnd2() * pool.length)]!]: { pendingElsewhere: true } } });
+        else Object.assign(script ?? {}, { pendingElsewhere: true, connected: false });
+      }
       else if (profile !== null && extra < 0.18 && script && !script.connected && !script.unreachable) Object.assign(script, { acceptAfterMs: H, connectionRemoved: true });
       // A withdrawal the session keeps answering unknown, past the count that lists it for the user (item 7's event).
       else if (profile !== null && extra < 0.3 && script && !script.connected && !script.unreachable) Object.assign(script, { withdrawUnknown: 5, acceptAfterMs: null });
+      // Pending from elsewhere on the pool's first session only, the others clear (the review bot's reproduction on e261ffa).
+      else if (profile !== null && extra < 0.4 && pool.length > 1 && script && !script.connected && !script.unreachable) Object.assign(script, { sessions: { [pool[0]!]: { pendingElsewhere: true } } });
+      // Already connected on one session of the pool only, a later one than the first (review bot on e261ffa): the session a
+      // check of the first session alone would never find.
+      if (script?.connected && pool.length > 1 && rnd2() < 0.5) Object.assign(script, { connected: false, sessions: { [pool[1 + Math.floor(rnd2() * (pool.length - 1))]!]: { connected: true } } });
+      if (script?.sessions) features.add("an-answer-of-one-session");
       leads.push({ campaign: ci, name: `Lead${personNo} Fictional`, profile, email: `lead${personNo}@fictional.example`, zone, script, id: "" });
       if (profile && script) h.linkedin.profiles.set(profile, { ...script });
       (leads.at(-1) as Lead & { cell?: string }).cell = cell;
@@ -237,7 +267,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       people: own.map((l) => person({ person_id: rowOf.get(l)!.personId, business_id: rowOf.get(l)!.businessId, full_name: l.name, email: l.email, timezone: l.zone, linkedin_url: (l as Lead & { cell?: string }).cell ?? "", dial_phone: mobileOf(l), dial_phone_type: "mobile" })),
     });
     c.id = campaign.id;
-    await h.defineSequence(c.id, c.definition);
+    await h.defineSequence(c.id, toApp(c.definition));
     const launched = await h.launch(c.id);
     if (launched.status !== 200) problem(`setup: launch refused ${JSON.stringify(launched.body)}`);
     const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${c.id}`)).body.rows;
@@ -263,10 +293,14 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   const userWithdrawn = new Map<string, number>();
   const campaignHeld = new Map<string, { from: number; to: number | null }[]>();
   const waitEdits = new Map<number, { at: number; days: number }[]>();
-  const signedOut: { id: string; until: number }[] = [];
+  /** Each sign-out: from when, until when it was drawn to last, and when the run actually restored it. */
+  const signedOut: { id: string; from: number; until: number; restored: number | null }[] = [];
+  const healthyAt = (session: string, at: number) => !signedOut.some((o) => o.id === session && o.from <= at && at < (o.restored ?? Infinity));
   const skipped = new Map<string, number[]>();
   /** Every hold of a lead: its own pauses and its campaign's. */
-  const holdsOf = (l: Lead) => [...(held.get(l.id) ?? []), ...(campaignHeld.get(campaigns[l.campaign]!.id) ?? [])];
+  // A stop freezes the lead's clock as a pause does (ADR 0004 3.4): a stopped lead restarted from its next step was held
+  // from its stop to its restart (seed 24093).
+  const holdsOf = (l: Lead) => [...(held.get(l.id) ?? []), ...(campaignHeld.get(campaigns[l.campaign]!.id) ?? []), ...(stops.get(l.id) ?? [])];
   const outages: { from: number; to: number }[] = [];
   /**
    * The acceptance deadline by the record's own rule (ADR 0004 9; council on b21af02, item 8): the wait in force at the
@@ -333,7 +367,10 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     await extraEvent(rnd2());
     await check(false);
   }
-  for (const s of signedOut) h.linkedin.sessions.get(s.id)!.healthy = true;
+  for (const s of signedOut) {
+    h.linkedin.sessions.get(s.id)!.healthy = true;
+    s.restored ??= h.clock;
+  }
   await markUnresolved();
   for (const c of campaigns) {
     const open = (campaignHeld.get(c.id) ?? []).find((x) => x.to === null);
@@ -416,13 +453,17 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       }
       return;
     }
-    if (roll >= 0.24 && roll < 0.27 && sessions.length === 2) {
+    if (roll >= 0.24 && roll < 0.27 && sessions.length >= 2) {
       // A pool edit: a session added to or removed from a campaign's pool (a fixed sender keeps its lead's track).
       const c = campaigns[Math.floor(rnd2() * campaigns.length)]!;
       const stored = (await h.request<{ definition: CampaignDefinition }>("GET", `/api/campaigns/${c.id}/sequence`)).body.definition;
-      const pool = stored.linkedinPool ?? [];
-      const next = pool.length === 2 ? [pool[Math.floor(rnd2() * 2)]!] : sessions.map((x) => x.id);
-      if ((await h.request("PUT", `/api/campaigns/${c.id}/sequence`, { ...stored, linkedinPool: next })).status === 200) {
+      // The app names a session `linkedin:` and its id; the record keeps the provider's own ids.
+      const pool = (stored.linkedinPool ?? []).map(sessionOfAccount);
+      // Add a session the pool lacks, or remove one, half and half when both can be (pools of up to three).
+      const missing = sessions.map((x) => x.id).filter((id) => !pool.includes(id));
+      const add = missing.length > 0 && (pool.length < 2 || rnd2() < 0.5);
+      const next = add ? [...pool, missing[Math.floor(rnd2() * missing.length)]!] : pool.filter((_, i) => i !== Math.floor(rnd2() * pool.length));
+      if ((await h.request("PUT", `/api/campaigns/${c.id}/sequence`, { ...stored, linkedinPool: next.map(linkedinAccountId) })).status === 200) {
         c.definition = { ...c.definition, linkedinPool: next };
         pools.get(campaigns.indexOf(c))!.push({ at: h.clock, pool: next });
       }
@@ -476,7 +517,11 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       features.add(freed.includes(target) ? "a-person-enrolled-after-a-release" : "a-person-enrolled-later");
       return;
     }
-    for (const s of signedOut) if (s.until <= h.clock) h.linkedin.sessions.get(s.id)!.healthy = true;
+    for (const s of signedOut) {
+      if (s.until > h.clock || s.restored !== null) continue;
+      h.linkedin.sessions.get(s.id)!.healthy = true;
+      s.restored = h.clock;
+    }
     const lead = pickOf(rnd2, leads);
     const c = campaigns[lead.campaign]!;
     if (roll < 0.04 && !stopped.has(lead.id)) {
@@ -521,7 +566,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     } else if (roll < 0.13) {
       const s = pickOf(rnd2, sessions);
       h.linkedin.sessions.get(s.id)!.healthy = false;
-      signedOut.push({ id: s.id, until: h.clock + pickOf(rnd2, [H, 8 * H]) });
+      signedOut.push({ id: s.id, from: h.clock, until: h.clock + pickOf(rnd2, [H, 8 * H]), restored: null });
       features.add("a-session-signed-out");
     } else if (roll < 0.15) {
       let armed = true;
@@ -536,7 +581,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     } else if (roll < 0.2) {
       // A running edit of the LinkedIn track (ticket 19's rules): the wait for acceptance, or the messages.
       const stored = (await h.request<{ definition: CampaignDefinition }>("GET", `/api/campaigns/${c.id}/sequence`)).body.definition;
-      const kind = pickOf(rnd2, ["wait", "insert", "remove", "reorder"] as const);
+      const kind = pickOf(rnd2, ["wait", "wait", "insert", "remove", "reorder"] as const);
       const tracks = stored.tracks.map((t) => {
         if (t.id !== c.li.id) return t;
         const live = t.steps.filter((x) => !x.removed);
@@ -583,6 +628,12 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       const a = await h.store.engine.attempt(crashedAttempts[crashed.length]!);
       crashed.push({ subjectId: a?.subjectId ?? "", stepId: a?.stepId ?? "" });
     }
+    // A lead that replied may be restarted from its next unsent step (ADR 0003: "for a lead that replied or was stopped"):
+    // L3 asks nothing after a mark only until a restart after it.
+    const restartedSince = (subjectId: string, mark: number, at: number): boolean => {
+      const restart = restarted.get(subjectId);
+      return restart !== undefined && restart > mark && at >= restart;
+    };
     const allowanceOf = (session: string) => allowances.get(session) ?? { invites: 0, messages: 0, notes: 0 };
     const leadOfSubject = (id: string) => leads.find((l) => l.id === id);
     // The sessions a lead's LinkedIn step may go from, by the record: the session of its conversation once one is taken (its
@@ -604,6 +655,19 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       const connected = connectedSessionOf(lead);
       return connected ? [connected] : (campaigns[lead.campaign]!.definition.linkedinPool ?? []);
     };
+    /** Whether another subject holds this session's conversation with the lead's profile now, by the record's rule (Q41). */
+    const ownedByOther = (lead: Lead, session: string): boolean =>
+      lead.profile !== null &&
+      (li.handoverLog.some((x) => x.subjectId !== lead.id && x.sender === session && x.destination === lead.profile && releaseOf(x.subjectId, session, x.destination) === null) ||
+        leads.some((o) => o.id !== lead.id && o.profile === lead.profile && connectedSessionOf(o) === session));
+    /** Whether the lead's profile, now or before, is no other lead's: no other subject's pair can take a session out. */
+    const soleOwnerOf = (lead: Lead): boolean => {
+      const mine = [lead.profile, ...(lead.former ?? [])];
+      return !leads.some((o) => o.id !== lead.id && [o.profile, ...(o.former ?? [])].some((p) => p !== null && mine.includes(p)));
+    };
+    /** The sessions the lead's LinkedIn step may go from now: its own, less those whose pair another subject holds (seed 24069). */
+    const usableSessions = (lead: Lead): readonly string[] => sessionsOf(lead).filter((id) => !ownedByOther(lead, id) && healthyAt(id, now));
+
     // A handover whose outcome the session never told: neither refused nor delivered visibly.
     const unknownOutcome = (key: string) => !li.refusals.some((r) => r.key === key) && !li.deliveryLog.some((d) => d.key === key && d.visibleAt !== Infinity);
     /**
@@ -624,13 +688,29 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       return outs.every((o) => o !== null) ? Math.max(...(outs)) : null;
     };
 
+    /**
+     * Whether a subject's invite on a pair was being withdrawn at `at` by the record's own rule (seed 24046): delivered, its
+     * acceptance deadline passed before `at`, and neither the session nor the user had answered the withdrawal by then.
+     * Its conversation's fate is then unknown: another subject waits on it, never skips.
+     */
+    const beingWithdrawn = (subject: string, session: string, profile: string, at: number): boolean => {
+      const owner = leadOfSubject(subject);
+      const invite = li.deliveryLog.find((d) => d.subjectId === subject && d.sender === session && d.destination === profile && d.action === "invite");
+      if (!owner || !invite || li.deliveryLog.some((d) => d.subjectId === subject && d.destination === profile && d.action === "message")) return false;
+      const answered = li.withdrawalLog.some((w) => w.key === invite.key && w.answer !== "unknown" && w.at <= at) || li.handWithdrawalLog.some((w) => w.key === invite.key && w.at <= at);
+      // An invite accepted, and the acceptance reported, by then is a known conversation, not one being withdrawn (seeds 24035, 24071).
+      const accepted = li.acceptanceLog.some((a) => a.key === invite.key && a.at + (owner.script?.acceptReportDelayMs ?? 0) <= at);
+      return !answered && !accepted && deadlineWall(owner, invite.at, at) < at;
+    };
+
     /** Whether the record finds the hold the read states (L13 takes no hold on the engine's word). */
     const derivable = (lead: Lead, trackId: string, stepId: string, hold: string): boolean => {
       const c = campaigns[lead.campaign]!;
       if (trackId === c.li.id) {
-        if (hold === "invite_pending_elsewhere") return stepId === c.li.steps[0]!.id && lead.profile !== null && li.profiles.get(lead.profile)?.pendingElsewhere === true;
+        // Held as pending from elsewhere only when every session it may use has an invite pending there (review bot on e261ffa).
+        if (hold === "invite_pending_elsewhere") return stepId === c.li.steps[0]!.id && lead.profile !== null && usableSessions(lead).length > 0 && usableSessions(lead).every((id) => pendingOn(li.profiles.get(lead.profile!) ?? {}, id));
         if (hold === "unresolved") return crashed.some((x) => x.subjectId === lead.id && x.stepId === stepId) || li.handoverLog.some((x) => x.subjectId === lead.id && x.stepId === stepId && unknownOutcome(x.key));
-        if (hold === "sms_conversation_unsettled") return li.handoverLog.some((x) => x.subjectId !== lead.id && x.destination === lead.profile && sessionsOf(lead).includes(x.sender) && unknownOutcome(x.key));
+        if (hold === "sms_conversation_unsettled") return li.handoverLog.some((x) => x.subjectId !== lead.id && x.destination === lead.profile && sessionsOf(lead).includes(x.sender) && (unknownOutcome(x.key) || beingWithdrawn(x.subjectId, x.sender, x.destination, now)));
         return false;
       }
       const log = trackId === c.sms?.id ? (h.smsProvider?.handoverLog ?? []) : h.fake.handoverLog;
@@ -645,7 +725,8 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     for (const d of li.deliveryLog) {
       if (d.action === "invite") {
         const earlier = li.deliveryLog.filter((x) => x.action === "invite" && x.sender === d.sender && x.destination === d.destination && x.at < d.at);
-        const outstanding = earlier.filter((x) => !li.withdrawalLog.some((w) => w.key === x.key && w.answer === "withdrawn" && w.at <= d.at) || li.acceptanceLog.some((a) => a.key === x.key));
+        // Withdrawn by the session, or by the user's own hand on LinkedIn (then marked withdrawn; seed 24073).
+        const outstanding = earlier.filter((x) => !(li.withdrawalLog.some((w) => w.key === x.key && w.answer === "withdrawn" && w.at <= d.at) || li.handWithdrawalLog.some((w) => w.key === x.key && w.at <= d.at)) || li.acceptanceLog.some((a) => a.key === x.key));
         if (outstanding.length > 0) problem(`L1: ${d.sender} invited ${d.destination} again at ${iso(d.at)} (for ${d.subjectId}) with an earlier invite outstanding`);
         if (earlier.length > 0) features.add("a-second-invite-after-a-withdrawal");
       }
@@ -663,7 +744,8 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       if (!own || own.subject !== x.subjectId) {
         const invites = li.deliveryLog.filter((d) => d.subjectId === x.subjectId && d.sender === x.sender && d.destination === x.destination && d.action === "invite");
         const messaged = li.deliveryLog.some((d) => d.subjectId === x.subjectId && d.sender === x.sender && d.destination === x.destination && d.action === "message");
-        const withdrawn = invites.map((d) => li.withdrawalLog.find((w) => w.key === d.key && w.answer === "withdrawn")?.at ?? null);
+        // Withdrawn by the session, or by the user's hand and released by their mark (seed 24073), as the release rule has it.
+        const withdrawn = invites.map((d) => li.withdrawalLog.find((w) => w.key === d.key && w.answer === "withdrawn")?.at ?? (li.handWithdrawalLog.some((w) => w.key === d.key) ? (userWithdrawn.get(x.subjectId) ?? null) : null));
         const released = !messaged && invites.length > 0 && withdrawn.every((w) => w !== null) && !invites.some((d) => li.acceptanceLog.some((a) => a.key === d.key)) ? Math.max(...withdrawn.map(Number)) : null;
         if (!own || (own.releasedAt !== null && own.releasedAt <= x.at)) ownerOf.set(pair, { subject: x.subjectId, releasedAt: released });
       }
@@ -692,14 +774,14 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       if (connected) features.add("a-message-to-an-existing-connection");
       // L3: nothing after a marked reply.
       const mark = marked.get(d.subjectId);
-      if (mark !== undefined && d.at > mark) problem(`L3: ${d.subjectId} was sent ${d.stepId} at ${iso(d.at)}, after the reply marked at ${iso(mark)}`);
+      if (mark !== undefined && d.at > mark && !restartedSince(d.subjectId, mark, d.at)) problem(`L3: ${d.subjectId} was sent ${d.stepId} at ${iso(d.at)}, after the reply marked at ${iso(mark)}`);
     }
     for (const x of li.handoverLog) {
       const mark = marked.get(x.subjectId);
-      if (mark !== undefined && x.at > mark) problem(`L3: ${x.subjectId}'s ${x.stepId} was handed over after the reply marked at ${iso(mark)}`);
+      if (mark !== undefined && x.at > mark && !restartedSince(x.subjectId, mark, x.at)) problem(`L3: ${x.subjectId}'s ${x.stepId} was handed over after the reply marked at ${iso(mark)}`);
       const stop = (stops.get(x.subjectId) ?? []).find((y) => y.from < x.at && (y.to === null || x.at < y.to))?.from;
       // Q42's interim: an invite pending from elsewhere is never sent again (L1).
-      if (x.action === "invite" && h.linkedin.profiles.get(x.destination)?.pendingElsewhere === true) problem(`L1: ${x.subjectId} was handed an invite to ${x.destination}, which already has one pending from elsewhere`);
+      if (x.action === "invite" && pendingOn(h.linkedin.profiles.get(x.destination) ?? {}, x.sender)) problem(`L1: ${x.subjectId} was handed an invite to ${x.destination}, which already has one pending from elsewhere`);
       if (stop !== undefined && x.at > stop) problem(`L3: ${x.subjectId}'s ${x.stepId} was handed over after the lead was stopped at ${iso(stop)}`);
     }
     // L16: every handover goes on its own channel, from the sender the record expects: a LinkedIn action to the person's
@@ -728,7 +810,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     }
     for (const x of h.fake.handoverLog) {
       const mark = marked.get(x.subjectId);
-      if (mark !== undefined && x.at > mark) problem(`L3: ${x.subjectId}'s email ${x.stepId} was handed over after the reply marked at ${iso(mark)}`);
+      if (mark !== undefined && x.at > mark && !restartedSince(x.subjectId, mark, x.at)) problem(`L3: ${x.subjectId}'s email ${x.stepId} was handed over after the reply marked at ${iso(mark)}`);
     }
 
     // L5: allowances, per session and reset day (the user's zone, London), and the notes per calendar month.
@@ -779,14 +861,28 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
           const kind = p.trackId === c.li.id ? (p.nextStepId === c.li.steps[0]!.id ? "invites" : "messages") : null;
           // Only a step whose time has come by its connection: a message still waiting for acceptance says that first.
           const awaiting = (p.acceptBy ?? null) !== null && (p.connection ?? null) === null;
-          const noRoom = kind !== null && !awaiting && sessionsOf(lead).every((id) => (allowances.get(id)?.[kind] ?? 0) === 0);
+          // An invite goes only from a session with no invite pending from elsewhere (section 6; seeds 24062, 24094).
+          const fromWhich = kind === "invites" && lead.profile !== null ? usableSessions(lead).filter((id) => !pendingOn(li.profiles.get(lead.profile!) ?? {}, id)) : usableSessions(lead);
+          const noRoom = kind !== null && !awaiting && fromWhich.length > 0 && fromWhich.every((id) => (allowances.get(id)?.[kind] ?? 0) === 0);
           if (noRoom && (shown?.hold ?? null) === null) {
             if (shown?.nextStep?.when.why !== "sending_capacity") problem(`L13: ${lead.id}'s ${p.nextStepId} has no allowance on any session and its read does not say so (${JSON.stringify(shown?.nextStep?.when)})`);
             else features.add("a-step-waiting-on-a-zero-allowance");
             continue;
           }
           const hold = shown?.hold ?? null;
-          if (hold !== null && !derivable(lead, p.trackId, p.nextStepId, hold)) problem(`L13: ${lead.id}'s ${p.nextStepId} is held (${hold}) for no reason the record can find`);
+          // L17 (review bot on e261ffa): a track is never held on one session's answer while another session of its pool
+          // could act: held as pending only while every session it may use is pending, and never left at its invite while
+          // one of them is already connected. On a profile no other subject shares (another's pair takes a session out).
+          if (p.trackId === c.li.id && p.nextStepId === c.li.steps[0]!.id && lead.profile !== null && soleOwnerOf(lead)) {
+            const script = li.profiles.get(lead.profile) ?? {};
+            const usable = usableSessions(lead);
+            const notPending = usable.filter((id) => !pendingOn(script, id));
+            if (hold === "invite_pending_elsewhere" && notPending.length > 0) problem(`L17: ${lead.id}'s invite is held as pending from elsewhere, though ${notPending.join(" and ")} could act`);
+            const connected = usable.filter((id) => connectedOn(script, id));
+            if (connected.length > 0) problem(`L17: ${lead.id}'s track still waits at its invite, though ${connected.join(" and ")} is already connected`);
+            if (usable.length > 1) features.add("an-invite-decided-over-several-sessions");
+          }
+          if (hold !== null && !derivable(lead, p.trackId, p.nextStepId, hold) && !(hold === "invite_pending_elsewhere" && soleOwnerOf(lead))) problem(`L13: ${lead.id}'s ${p.nextStepId} is held (${hold}) for no reason the record can find`);
           if (p.dueAt === null && (p.acceptBy ?? null) === null && hold === null) problem(`L13: ${lead.id}'s ${p.nextStepId} is pending with nothing that can make it due`);
           if (p.dueWall !== null && p.dueWall < now - 3 * DAY && hold === null && !st.attempts.some((a) => a.stepId === p.nextStepId && a.state !== "withdrawn" && a.state !== "rejected" && a.state !== "sent")) problem(`L13: ${lead.id}'s ${p.nextStepId} has been due since ${iso(p.dueWall)} with nothing holding it`);
         }
@@ -798,8 +894,14 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       // L6: acceptance is never a reply: only the record's marks end a lead replied.
       if (st.subject.ended === "replied" && !marked.has(lead.id)) problem(`L6: ${lead.id} ended replied with no reply marked`);
       // L9: an existing connection gets no invite, and its first message goes by the drain unless held or ended.
-      if (lead.script?.connected) {
-        if (li.handoverLog.some((x) => x.subjectId === lead.id && x.action === "invite")) problem(`L9: ${lead.id} is already connected but was sent an invite`);
+      // Connected on a session of its pool (the profile's own answer, or one session's: review bot on e261ffa).
+      const connectedOnPool = lead.script ? [...poolsEver(lead.campaign)].filter((id) => connectedOn(lead.script!, id)) : [];
+      if (connectedOnPool.length > 0) {
+        // No invite while a session of its pool, healthy then, was already connected: the connection is preferred.
+        for (const x of li.handoverLog.filter((y) => y.subjectId === lead.id && y.action === "invite")) {
+          const ready = poolAt(lead.campaign, x.at).filter((id) => connectedOn(lead.script!, id) && healthyAt(id, x.at));
+          if (ready.length > 0 && soleOwnerOf(lead)) problem(`L9: ${lead.id} was sent an invite from ${x.sender} though ${ready.join(" and ")} was already connected`);
+        }
         features.add("already-connected");
         // A track skipped (by the user, or because another campaign owns the pair, Q41) or ended otherwise sends nothing: L9 asks
         // the first message of a track that is still running, or completed, to have gone.
@@ -859,12 +961,13 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
         if (t?.connection === "already_connected" && session && l.profile && t.connectedWall != null) claims.push({ subject: l.id, session, profile: l.profile, from: t.connectedWall, connected: true });
         if (t?.finishReason === "skipped_conversation_taken" && t.finishedWall != null) skippedTaken.push({ lead: l, at: t.finishedWall });
       }
-      // An already-connected owner keeps the pair for good; one that reached it holds it until its release.
+      // An already-connected owner keeps the pair for good; one that reached it holds it until its release, and grounds a
+      // skip only while its conversation is known: not while its invite is being withdrawn (seed 24046).
       const heldBy = (other: (typeof claims)[number], at: number) => {
         if (other.from > at) return false;
         if (other.connected) return true;
         const release = releaseOf(other.subject, other.session, other.profile);
-        return release === null || release > at;
+        return (release === null || release > at) && !beingWithdrawn(other.subject, other.session, other.profile, at);
       };
       for (const { lead, at } of skippedTaken) {
         const free = poolAt(lead.campaign, at).filter((session) => !claims.some((y) => y.subject !== lead.id && y.session === session && y.profile === lead.profile && heldBy(y, at)));

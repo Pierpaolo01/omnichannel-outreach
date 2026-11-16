@@ -736,8 +736,10 @@ export class SqliteEngineStore implements EngineStore {
       for (const a of accounts) {
         this.run(
           `INSERT INTO sender_accounts (id, channel, label, capacity, gap_ms, k, healthy, problem, reset_zone, daily_limit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(id) DO UPDATE SET channel = excluded.channel, label = excluded.label, capacity = excluded.capacity, daily_limit = excluded.daily_limit,
-             gap_ms = excluded.gap_ms, k = excluded.k, healthy = excluded.healthy, problem = excluded.problem, reset_zone = excluded.reset_zone`,
+           ON CONFLICT(id) DO UPDATE SET label = excluded.label, capacity = excluded.capacity, daily_limit = excluded.daily_limit,
+             gap_ms = excluded.gap_ms, k = excluded.k, healthy = excluded.healthy, problem = excluded.problem, reset_zone = excluded.reset_zone
+           -- Never another channel's account: an account's identity is its channel and its id (the re-check of e261ffa, item 3).
+           WHERE sender_accounts.channel = excluded.channel`,
           [a.id, a.channel, a.label, a.capacity, a.gapMs, a.k, a.healthy ? 1 : 0, a.healthy ? null : (a.problem ?? "unhealthy"), a.resetZone, a.dailyLimit],
         );
       }
@@ -757,7 +759,7 @@ export class SqliteEngineStore implements EngineStore {
       `SELECT b.sender_number, b.owner_subject, b.released_at, b.unsent,
               EXISTS (SELECT 1 FROM provider_work w WHERE w.subject_id = b.owner_subject AND w.account_id = b.sender_number AND w.destination = b.recipient_key AND (w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL))
                 OR EXISTS (SELECT 1 FROM reply_events re WHERE re.event_id LIKE 'sms:%' AND re.state = 'resolved' AND re.inbox = b.sender_number AND re.address = b.recipient_key AND re.received_wall >= b.created_at) AS confirmed
-       FROM sms_bindings b WHERE b.recipient_key = ? AND COALESCE((SELECT sa.channel FROM sender_accounts sa WHERE sa.id = b.sender_number), 'sms') = 'sms'
+       FROM sms_bindings b WHERE b.recipient_key = ? AND b.channel = 'sms'
        ORDER BY COALESCE(b.released_at, b.created_at), b.seq`,
     )
       .all(recipient)
@@ -797,6 +799,8 @@ export class SqliteEngineStore implements EngineStore {
            (SELECT COUNT(*) FROM sms_bindings b WHERE b.released_at IS NULL AND EXISTS (SELECT 1 FROM provider_work w WHERE w.subject_id = b.owner_subject
              AND w.account_id = b.sender_number AND w.destination = b.recipient_key AND (w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL))) || '/' ||
            (SELECT COUNT(*) FROM track_progress WHERE connection = 'already_connected') || '/' ||
+           -- An invite being withdrawn holds the others on its pair; its answer moves them (ADR 0004, Q41; seed 24046).
+           (SELECT COUNT(*) FROM track_progress WHERE invite_withdrawal = 'wanted') || '/' ||
            (SELECT COUNT(*) FROM sms_bindings b WHERE b.released_at IS NULL AND EXISTS (SELECT 1 FROM reply_events re WHERE re.event_id LIKE 'sms:%' AND re.state = 'resolved' AND re.inbox = b.sender_number AND re.address = b.recipient_key AND re.received_wall >= b.created_at)) AS v`,
       ).get() ?? { v: "0/0/0" },
       "v",
@@ -1482,8 +1486,14 @@ export class SqliteEngineStore implements EngineStore {
                  -- A LinkedIn pair taken by an already-connected skip is a conversation from the skip (ADR 0004, question Q41).
                  OR EXISTS (SELECT 1 FROM track_progress t WHERE t.subject_id = b.owner_subject AND t.connection = 'already_connected'
                   AND (t.destination_detail_id = 'linkedin:' || COALESCE(e.person_id, '') || ':' || b.recipient_key
-                    OR (t.destination_detail_id = 'test:' || b.owner_subject || ':linkedin' AND tr.linkedin_key = b.recipient_key)))) AS owner_sent,
-                EXISTS (SELECT 1 FROM reply_events re WHERE re.event_id LIKE 'sms:%' AND re.state = 'resolved' AND re.inbox = b.sender_number AND re.address = b.recipient_key AND re.received_wall >= b.created_at) AS owner_answered, (SELECT sa.channel FROM sender_accounts sa WHERE sa.id = b.sender_number) AS pair_channel FROM sms_bindings b
+                    OR (t.destination_detail_id = 'test:' || b.owner_subject || ':linkedin' AND tr.linkedin_key = b.recipient_key))))
+                -- An invite being withdrawn (its wait ended, the session not yet answered) is no known conversation: whether
+                -- the pair is released turns on the answer, so another subject waits, never skips (ADR 0004, Q41; seed 24046).
+                AND NOT EXISTS (SELECT 1 FROM track_progress t WHERE t.subject_id = b.owner_subject AND t.invite_withdrawal = 'wanted'
+                  AND t.connection IS NULL AND t.accepted_wall IS NULL
+                  AND (t.destination_detail_id = 'linkedin:' || COALESCE(e.person_id, '') || ':' || b.recipient_key
+                    OR (t.destination_detail_id = 'test:' || b.owner_subject || ':linkedin' AND tr.linkedin_key = b.recipient_key))) AS owner_sent,
+                EXISTS (SELECT 1 FROM reply_events re WHERE re.event_id LIKE 'sms:%' AND re.state = 'resolved' AND re.inbox = b.sender_number AND re.address = b.recipient_key AND re.received_wall >= b.created_at) AS owner_answered, b.channel AS pair_channel FROM sms_bindings b
          LEFT JOIN enrollments e ON e.id = b.owner_subject
          LEFT JOIN test_runs tr ON tr.id = b.owner_subject
          LEFT JOIN campaigns c ON c.id = COALESCE(e.campaign_id, tr.campaign_id)
@@ -1540,12 +1550,12 @@ export class SqliteEngineStore implements EngineStore {
         `INSERT OR REPLACE INTO track_progress (subject_id, track_id, start_at, start_basis_at, start_basis_wall, start_zone, started_at,
            destination_detail_id, next_step_id, basis_at, basis_wall, due_at, due_wall, due_zone, finished_at, finished_wall, finish_reason, conversation_owners,
            connection, connected_at, connected_wall, accepted_wall, accept_by, accept_by_wall, accept_by_zone, invite_withdrawal, invite_withdrawal_last_wall,
-           invite_withdrawal_unknowns, invite_pending_seen_wall, invite_pending_checked_wall, accept_by_days)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           invite_withdrawal_unknowns, connection_checks, accept_by_days)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id, t.trackId, t.startAt, t.startBasisAt, t.startBasisWall, t.startZone, t.startedAt, t.destinationDetailId, t.nextStepId, t.basisAt, t.basisWall, t.dueAt, t.dueWall, t.dueZone, t.finishedAt, t.finishedWall, t.finishReason, t.conversationOwners ? JSON.stringify(t.conversationOwners) : null,
           t.connection ?? null, t.connectedAt ?? null, t.connectedWall ?? null, t.acceptedWall ?? null, t.acceptBy ?? null, t.acceptByWall ?? null, t.acceptByZone ?? null, t.inviteWithdrawal ?? null, t.inviteWithdrawalLastWall ?? null,
-          t.inviteWithdrawalUnknowns ?? 0, t.invitePendingSeenWall ?? null, t.invitePendingCheckedWall ?? null, t.acceptByDays ?? null,
+          t.inviteWithdrawalUnknowns ?? 0, t.connectionChecks ? JSON.stringify(t.connectionChecks) : null, t.acceptByDays ?? null,
         ],
       );
       // Stored once and only forward (ADR 0004 10.4): a connection never changes once set, a withdrawal never moves back.
@@ -1632,7 +1642,8 @@ export class SqliteEngineStore implements EngineStore {
       if (b.owner !== id) throw new Error("a subject takes SMS bindings only for itself");
       changed = true;
       // The partial unique index refuses a second unreleased owner of the pair (4.5).
-      this.run("INSERT INTO sms_bindings (sender_number, recipient_key, owner_subject, created_at) VALUES (?, ?, ?, ?)", [b.sender, b.recipient, id, now]);
+      // The pair's channel is stored as it is taken, and never changes (the re-check of e261ffa, item 3).
+      this.run("INSERT INTO sms_bindings (sender_number, recipient_key, owner_subject, created_at, channel) VALUES (?, ?, ?, ?, ?)", [b.sender, b.recipient, id, now, b.channel]);
     }
     // A binding leaves a subject's change only as an unsent release (question Q7 answered, point 10): its own binding, none
     // of whose texts on the pair went or may still go. Anything else is refused.
@@ -1833,7 +1844,7 @@ function toTrack(r: Row): TrackProgress {
     ...(r["accepted_wall"] == null ? {} : { acceptedWall: num(r, "accepted_wall") }),
     ...(r["accept_by"] == null ? {} : { acceptBy: num(r, "accept_by"), acceptByWall: numOrNull(r, "accept_by_wall"), acceptByZone: strOrNull(r, "accept_by_zone"), acceptByDays: numOrNull(r, "accept_by_days") }),
     ...(r["invite_withdrawal"] == null ? {} : { inviteWithdrawal: str(r, "invite_withdrawal") as NonNullable<TrackProgress["inviteWithdrawal"]>, inviteWithdrawalLastWall: numOrNull(r, "invite_withdrawal_last_wall"), inviteWithdrawalUnknowns: num(r, "invite_withdrawal_unknowns") }),
-    ...(r["invite_pending_checked_wall"] == null ? {} : { invitePendingSeenWall: numOrNull(r, "invite_pending_seen_wall"), invitePendingCheckedWall: num(r, "invite_pending_checked_wall") }),
+    ...(r["connection_checks"] == null ? {} : { connectionChecks: JSON.parse(str(r, "connection_checks")) as NonNullable<TrackProgress["connectionChecks"]> }),
   };
 }
 

@@ -11,8 +11,12 @@ import { FULL_SEARCH, inShard } from "./sequence-chunks.ts";
  * killing seed. Counts, never times: every mutation replay stops after RUN_WRITES engine writes.
  */
 export const LINKEDIN_SEED = 24000;
-/** Offsets from LINKEDIN_SEED: a greedy cover of every behaviour below over offsets 0 to 29 (16 November 2026, after the re-check of b21af02). */
-export const LINKEDIN_FIXED_SEEDS: readonly number[] = [0, 2, 3, 5, 9, 16, 25, 29];
+/**
+ * Offsets from LINKEDIN_SEED: the four the search failed on at e261ffa (46, 69, 73, 93), the four the local run of offsets 30
+ * to 99 failed on before this round's push (35, 62, 71, 94; ADR 0004, "The review of e261ffa"), then a greedy cover of every
+ * behaviour below over offsets 0 to 29 (16 November 2026).
+ */
+export const LINKEDIN_FIXED_SEEDS: readonly number[] = [5, 8, 18, 29, 35, 46, 62, 69, 71, 73, 93, 94];
 /** Every behaviour the fixed seeds must reach (`stats.features`); a run that reports a name not listed here fails. */
 export const LINKEDIN_FEATURES: readonly string[] = [
   "a-campaign-paused",
@@ -40,6 +44,7 @@ export const LINKEDIN_FEATURES: readonly string[] = [
   "a-running-edit:wait",
   "a-second-invite-after-a-withdrawal",
   "a-session-added-to-a-pool",
+  "a-session-id-that-is-a-number",
   "a-session-removed-from-a-pool",
   "a-session-signed-out",
   "a-skip",
@@ -49,11 +54,14 @@ export const LINKEDIN_FEATURES: readonly string[] = [
   "a-step-waiting-on-a-zero-allowance",
   "a-stopped-lead-restarted",
   "a-stuck-withdrawal-marked-by-the-user",
+  "a-third-session",
   "a-withdrawal-answered-unknown",
   "a-withdrawal-found-it-accepted",
   "already-connected",
+  "an-answer-of-one-session",
   "an-edit-of-the-wait-while-waiting",
   "an-expiry-while-the-laptop-was-off",
+  "an-invite-decided-over-several-sessions",
   "an-invite-expired",
   "an-invite-pending-elsewhere",
   "an-invite-without-its-note",
@@ -84,7 +92,7 @@ const reached = new Set<string>();
 
 export function linkedinChunks(): void {
   const offsets = FULL_SEARCH ? Array.from({ length: SEARCH_SEEDS }, (_, i) => i).filter(inShard) : [...LINKEDIN_FIXED_SEEDS];
-  describe(`generated LinkedIn runs keep L1 to L16 (${FULL_SEARCH ? "full search" : "fixed seeds"})`, () => {
+  describe(`generated LinkedIn runs keep L1 to L17 (${FULL_SEARCH ? "full search" : "fixed seeds"})`, () => {
     if (offsets.length === 0) test.skip("no seed of this run in this shard", () => undefined);
     for (let i = 0; i < offsets.length; i += 10) {
       const chunk = offsets.slice(i, i + 10);

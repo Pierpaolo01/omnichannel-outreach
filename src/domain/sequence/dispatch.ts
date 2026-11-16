@@ -10,6 +10,8 @@ import { holdsConversations, linkedinStepKind, poolOf, socialActionOf, type Soci
 import {
   rules as gateRules,
   invitePendingUntil,
+  inviteClaimable,
+  inviteSessions,
   applyToAttempt,
   awaitingAcceptance,
   callbackHold,
@@ -87,8 +89,9 @@ export function readyItems(state: SubjectState, now: number): ReadyItem[] {
     if (state.results.some((r) => r.stepId === stepId)) return [];
     if (state.attempts.some((a) => a.stepId === stepId && isLive(a))) return [];
     if (heldReason(state, p.trackId, now)) return [];
-    // An invite is claimed only after a clear connection check within a settling period (council on b21af02, item 4).
-    if (channelOf(state, p.trackId) === "linkedin" && actionOfStep(state, p.trackId, stepId) === "invite" && ((p.invitePendingCheckedWall ?? null) === null || now >= (p.invitePendingCheckedWall ?? 0) + ENGINE_PARAMS.SETTLING || (p.invitePendingSeenWall ?? null) !== null)) return [];
+    // An invite is claimed only once every session it may use has answered its connection check within a settling period,
+    // and one of them is clear (council on b21af02, item 4; review bot on e261ffa).
+    if (channelOf(state, p.trackId) === "linkedin" && actionOfStep(state, p.trackId, stepId) === "invite" && !inviteClaimable(state, p.trackId, now)) return [];
     return [{ subjectId: state.subject.id, trackId: p.trackId, stepId, touched: state.subject.touched, dueWall: p.dueWall }];
   });
 }
@@ -219,7 +222,7 @@ export function stepWhen(state: SubjectState, trackId: string, now: number, env:
   // 2. Time alone: the wait's end and the window, nothing about senders but what the engine knows rules every one out.
   const opens = sendableFrom(state, trackId, now);
   if (opens === null) return waits("no_window");
-  if (opens > now) return leadWait(state, trackId, stepId) ?? noSenderKnown(state, trackId) ?? { kind: "at", at: opens };
+  if (opens > now) return leadWait(state, trackId, stepId) ?? noSenderKnown(state, trackId, now) ?? { kind: "at", at: opens };
   // 3. Its time has come. Every hold keeps its own reason (review bot on cc9bf55), then the per-step checks.
   if (!live) {
     const held = heldReason(state, trackId, now);
@@ -246,7 +249,7 @@ function unclaimedWhen(state: SubjectState, trackId: string, stepId: string, now
   const refusal = claimRefusal(state, { trackId, stepId }, now);
   if (refusal !== null) return { kind: "waits", why: refusalWait(refusal) };
   const destination = destinationOf(state, trackId);
-  const candidates = candidatesOf(state, trackId);
+  const candidates = candidatesOf(state, trackId, now);
   // Predicate 18 on every sender it may use: whichever the claim takes, the handover waits.
   if (candidates.length > 0 && candidates.every((a) => replyPending(state, a.id, destination))) return { kind: "waits", why: "reply_pending" };
   if (chooseAccount(state, now, stepId)) return { kind: "ready" };
@@ -255,13 +258,26 @@ function unclaimedWhen(state: SubjectState, trackId: string, stepId: string, now
 }
 
 /** The candidate accounts of the track's channel, as `chooseAccount` reads them. */
-function candidatesOf(state: SubjectState, trackId: string): AccountState[] {
+function candidatesOf(state: SubjectState, trackId: string, now: number): AccountState[] {
   const channel = channelOf(state, trackId);
   const action = actionOfPending(state, trackId);
-  return candidatesFor(state, trackId)
+  const p = progressOf(state, trackId);
+  const inherited = p?.nextStepId ? (inheritedWork(state, p.nextStepId)?.accountId ?? null) : null;
+  return sessionsFor(state, trackId, action, now, inherited)
     .map((id) => state.accounts[id])
     .filter((a): a is AccountState => a !== undefined && a.channel === channel)
     .map((a) => forAction(a, action));
+}
+
+/**
+ * The accounts a step may be claimed on: its track's candidates, and for an invite only the sessions whose connection check
+ * answered clear (review bot on e261ffa), with the account an inherited claim already holds.
+ */
+function sessionsFor(state: SubjectState, trackId: string, action: SocialAction | null, now: number, inherited: string | null): string[] {
+  const ids = candidatesFor(state, trackId);
+  if (action !== "invite") return ids;
+  const clear = inviteSessions(state, trackId, ids, now);
+  return inherited !== null && ids.includes(inherited) && !clear.includes(inherited) ? [...clear, inherited] : clear;
 }
 
 /** The social action of a track's pending step (ADR 0004 6), or null for email and SMS. */
@@ -308,11 +324,11 @@ function leadWait(state: SubjectState, trackId: string, stepId: string): { kind:
 }
 
 /** What the engine knows at the read rules out every sender for the step: none connected, or every daily limit zero. */
-function noSenderKnown(state: SubjectState, trackId: string): { kind: "waits"; why: StepWait } | null {
+function noSenderKnown(state: SubjectState, trackId: string, now: number): { kind: "waits"; why: StepWait } | null {
   const channel = channelOf(state, trackId) ?? "email";
   // A LinkedIn step: every session it may use allows none of its kind of action, the user's setting (ADR 0004 4, item 6).
   if (channel === "linkedin") {
-    const sessions = candidatesOf(state, trackId);
+    const sessions = candidatesOf(state, trackId, now);
     return sessions.length > 0 && sessions.every((a) => a.dailyLimit <= 0) ? { kind: "waits", why: "sending_capacity" } : null;
   }
   if (channel !== "email" && channel !== "sms") return null;
@@ -357,7 +373,7 @@ function refusalWait(refusal: string): StepWait {
  */
 export function senderWait(state: SubjectState, trackId: string, stepId: string, now: number): StepWait | null {
   const reserved = inheritedWork(state, stepId)?.accountId ?? null;
-  const candidates = candidatesOf(state, trackId);
+  const candidates = candidatesOf(state, trackId, now);
   if (candidates.length === 0) return "sender_unavailable";
   const causes: StepWait[] = [];
   for (const a of candidates) {
@@ -418,11 +434,11 @@ export function chooseAccount(state: SubjectState, now: number, stepId: string |
   const trackId = state.campaign.definition.tracks.find((t) => t.steps.some((st) => st.id === stepId))?.id ?? state.campaign.definition.tracks.find((t) => t.channel === "email")?.id ?? "";
   const channel = channelOf(state, trackId) ?? "email";
   const action = stepId === null ? null : actionOfStep(state, trackId, stepId);
-  const candidates = candidatesFor(state, trackId)
+  const inherited = stepId === null ? undefined : inheritedWork(state, stepId);
+  const candidates = sessionsFor(state, trackId, action, now, inherited?.accountId ?? null)
     .map((id) => state.accounts[id])
     .filter((a) => a?.channel === channel)
     .map((a) => (a ? forAction(a, action) : a));
-  const inherited = stepId === null ? undefined : inheritedWork(state, stepId);
   return pickAccount(candidates, now, inherited?.accountId ?? null);
 }
 

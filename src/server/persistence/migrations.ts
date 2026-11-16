@@ -1040,9 +1040,9 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE track_progress ADD COLUMN accept_by_days INTEGER;
       ALTER TABLE track_progress ADD COLUMN invite_withdrawal TEXT CHECK (invite_withdrawal IN ('wanted', 'withdrawn', 'accepted_first', 'kept_by_user'));
       ALTER TABLE track_progress ADD COLUMN invite_withdrawal_unknowns INTEGER NOT NULL DEFAULT 0;
-      -- An invite already pending on LinkedIn that this application did not send (ADR 0004 3.3, question Q42).
-      ALTER TABLE track_progress ADD COLUMN invite_pending_seen_wall INTEGER;
-      ALTER TABLE track_progress ADD COLUMN invite_pending_checked_wall INTEGER;
+      -- The connection checks before the invite, one answer per session (ADR 0004 6; question Q42; review bot on e261ffa):
+      -- a JSON object of session id to {answer: 'clear' | 'pending', checkedWall, pendingSince}.
+      ALTER TABLE track_progress ADD COLUMN connection_checks TEXT CHECK (connection_checks IS NULL OR json_valid(connection_checks));
       ALTER TABLE track_progress ADD COLUMN invite_withdrawal_last_wall INTEGER;
       -- A social step's action and an invite's note, fixed at the claim and at the handover (ADR 0004 4, 6).
       ALTER TABLE provider_work ADD COLUMN kind TEXT CHECK (kind IN ('invite', 'message'));
@@ -1109,6 +1109,20 @@ export const MIGRATIONS: readonly Migration[] = [
             OR (NEW.number_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
           ELSE NEW.number_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.number_detail_id) END))
       BEGIN SELECT RAISE(ABORT, 'call_attempts.number_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
+    `,
+  },
+  {
+    version: 23,
+    name: "a pair records its channel when it is taken and never changes it (the re-check of e261ffa, item 3)",
+    sql: `
+      -- Every pair before this is an SMS conversation, but for LinkedIn pairs a database of this branch already holds.
+      ALTER TABLE sms_bindings ADD COLUMN channel TEXT NOT NULL DEFAULT 'sms' CHECK (channel IN ('sms', 'linkedin'));
+      UPDATE sms_bindings SET channel = 'linkedin' WHERE sender_number IN (SELECT id FROM sender_accounts WHERE channel = 'linkedin');
+      CREATE TRIGGER sms_bindings_channel_fixed BEFORE UPDATE OF channel ON sms_bindings WHEN NEW.channel IS NOT OLD.channel
+      BEGIN SELECT RAISE(ABORT, 'a pair''s channel never changes'); END;
+      -- An account's channel never changes either: the same id on another channel is another account (ADR 0004 1.1).
+      CREATE TRIGGER sender_accounts_channel_fixed BEFORE UPDATE OF channel ON sender_accounts WHEN NEW.channel IS NOT OLD.channel
+      BEGIN SELECT RAISE(ABORT, 'an account''s channel never changes'); END;
     `,
   },
 ];

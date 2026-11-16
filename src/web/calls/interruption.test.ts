@@ -260,7 +260,7 @@ describe("the order of Needs attention (ticket 20b): the prototype's, with the n
       "wait-inbox-c",
       "stalled-inbox-b",
       "held-inbox-d",
-      "tracks-k1-unresolved",
+      "tracks-k1-unresolved-email",
       "capacity-c1",
       "anomaly-0",
       "no-usable-channel",

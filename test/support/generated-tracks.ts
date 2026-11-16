@@ -1,4 +1,5 @@
 import type { CampaignDefinition, StepDefinition, TrackChannel, TrackDefinition } from "../../src/domain/sequence/definition.ts";
+import { linkedinAccountId } from "../../src/server/engine/ports.ts";
 import type { SubjectState } from "../../src/domain/sequence/state.ts";
 import { heldReason } from "../../src/domain/sequence/dispatch.ts";
 import { DEFAULT_RULES, type Rules } from "../../src/server/engine/rules.ts";
@@ -85,7 +86,7 @@ async function linkedinBesideSms(start: number, options: TrackRunOptions): Promi
     ...(options.rules ? { rules: options.rules } : {}),
   });
   await h.tick();
-  const set = await h.request("PUT", `/api/sender-accounts/${LINKEDIN_SESSION}/allowances`, { invitesPerDay: 50, messagesPerDay: 50, notesPerMonth: 0 });
+  const set = await h.request("PUT", `/api/sender-accounts/${linkedinAccountId(LINKEDIN_SESSION)}/allowances`, { invitesPerDay: 50, messagesPerDay: 50, notesPerMonth: 0 });
   if (set.status !== 200) problems.push(`L16: the session's allowances were refused: ${set.status}`);
   for (const p of SOCIAL_PEOPLE) h.linkedin.profiles.set(profileOf(p), { connected: true });
   const all = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
@@ -98,7 +99,7 @@ async function linkedinBesideSms(start: number, options: TrackRunOptions): Promi
     callSkipLimitDays: 2,
     emailPool: [],
     smsPool: [SOCIAL_NUMBER],
-    linkedinPool: [LINKEDIN_SESSION],
+    linkedinPool: [linkedinAccountId(LINKEDIN_SESSION)],
     tracks: [
       { id: "st", channel: "sms", branch: "main", window: all, steps: [{ id: "st1", waitDays: 0, subject: "", body: "A text, {{first_name|there}}.", threading: "new_subject", removed: false }], start: { kind: "entry" }, removed: false },
       { id: "sl", channel: "linkedin", branch: "main", window: all, steps: [{ id: "sl1", waitDays: 0, subject: "", body: "", threading: "new_subject", removed: false }, { id: "sl2", waitDays: 0, subject: "", body: "A message, {{first_name|there}}.", threading: "new_subject", removed: false }], start: { kind: "after", trackId: "st", delayDays: 0 }, removed: false, acceptWaitDays: 1 },

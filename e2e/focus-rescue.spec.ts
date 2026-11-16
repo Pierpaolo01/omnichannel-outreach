@@ -202,8 +202,9 @@ const REMOVE: Readonly<Record<string, (r: Reads, rest: string) => Reads>> = {
   wait: (r, rest) => ({ ...r, attention: { ...r.attention, accountWaits: r.attention.accountWaits.filter((x) => x.accountId !== rest) } }),
   stalled: (r, rest) => ({ ...r, attention: { ...r.attention, stalledInboxes: r.attention.stalledInboxes.filter((x) => x.accountId !== rest) } }),
   held: (r, rest) => ({ ...r, attention: { ...r.attention, heldCapacity: r.attention.heldCapacity.filter((x) => x.accountId !== rest) } }),
-  // One entry per campaign and hold reason (the reviews of faac357, item 5): `tracks-<campaign>-<reason>`.
-  tracks: (r, rest) => ({ ...r, attention: { ...r.attention, heldTracks: r.attention.heldTracks.filter((x) => `${x.campaign.id}-${x.reason}` !== rest) } }),
+  // One entry per campaign, hold reason and channel (the reviews of faac357, item 5; review bot on e261ffa):
+  // `tracks-<campaign>-<reason>-<channel>`.
+  tracks: (r, rest) => ({ ...r, attention: { ...r.attention, heldTracks: r.attention.heldTracks.filter((x) => `${x.campaign.id}-${x.reason}-${x.channel}` !== rest) } }),
   capacity: (r, rest) => ({ ...r, attention: { ...r.attention, waitingForCapacity: r.attention.waitingForCapacity.filter((x) => x.campaign.id !== rest) } }),
   anomaly: (r) => ({ ...r, attention: { ...r.attention, anomalies: [] } }),
   "no-usable-channel": (r) => ({ ...r, attention: { ...r.attention, noUsableChannel: [] } }),
@@ -265,7 +266,7 @@ test("standing scan: removing any Needs attention entry by a refresh moves focus
   const keys = await first.locator("[data-rescue-item]").evaluateAll((els) => els.map((el) => ({ key: el.getAttribute("data-rescue-item") ?? "", linked: el.querySelector("a[href]") !== null })));
   await first.close();
   // Every kind the read can give is on the page.
-  expect(keys.map((k) => k.key.replace(/-(email|sms|sms-1|inbox-\d|unresolved|campaign-\d|k\d-[a-z_]+)$/, ""))).toEqual(
+  expect(keys.map((k) => k.key.replace(/-(email|sms|sms-1|inbox-\d|unresolved|campaign-\d|k\d-[a-z_]+-(?:email|sms|linkedin)|k\d-[a-z_]+)$/, ""))).toEqual(
     expect.arrayContaining(["overdue-callbacks", "carried-over", "sending-interrupted", "provider", "sender", "wait", "stalled", "held", "tracks", "capacity", "anomaly-0", "no-usable-channel"]),
   );
   for (const [j, k] of keys.entries()) {

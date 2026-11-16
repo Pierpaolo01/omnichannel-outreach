@@ -164,13 +164,18 @@ function expectKept(r: Awaited<ReturnType<typeof upgrade>>): void {
   expect(r.accounts).toEqual(r.kept.accounts.map((a) => ({ ...a, capacity: 0, daily_limit: 50 })));
 }
 
+/** The triggers migrations after 20 add (23: the re-check of e261ffa, item 3). */
+const LATER_TRIGGERS = ["sender_accounts_channel_fixed", "sms_bindings_channel_fixed"];
+
 describe("migration 20 on a database an older build created", () => {
   test("at 19 (the integration tip): the test run's attempts and ticket 21's triggers and view are kept, and inbox-a is stored with no room", async () => {
     const r = await upgrade(UNDO_20, true);
     expect(r.kept.attempts.filter((a) => a["subject_id"] !== r.kept.attempts[0]?.["subject_id"])).not.toEqual([]);
     expect(r.kept.triggers.length).toBeGreaterThan(0);
     expectKept(r);
-    expect(r.triggers).toEqual(r.kept.triggers);
+    // Every trigger kept; migration 23 adds its two (a pair's and an account's channel never change).
+    expect(r.triggers.filter((t) => !LATER_TRIGGERS.includes(t))).toEqual(r.kept.triggers);
+    expect(r.triggers.filter((t) => LATER_TRIGGERS.includes(t))).toEqual(LATER_TRIGGERS);
     expect(r.views).toEqual(r.kept.views);
   });
 

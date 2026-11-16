@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { linkedinAccountId } from "./ports.ts";
 import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { FakeSession } from "../../../test/support/fake-linkedin-port.ts";
@@ -29,7 +30,7 @@ const li = (id: string, prefix: string, messages = 2, acceptWaitDays = 3): Track
   removed: false,
   acceptWaitDays,
 });
-const def = (tracks: TrackDefinition[], pool: readonly string[]): CampaignDefinition => ({ timezone: "Europe/London", callSkipLimitDays: 2, emailPool: ["inbox-a"], smsPool: [], linkedinPool: [...pool], tracks });
+const def = (tracks: TrackDefinition[], pool: readonly string[]): CampaignDefinition => ({ timezone: "Europe/London", callSkipLimitDays: 2, emailPool: ["inbox-a"], smsPool: [], linkedinPool: pool.map(linkedinAccountId), tracks });
 const session = (id: string): FakeSession => ({ id, gapMs: MIN, k: 1, healthy: true, resetZone: "Europe/London" });
 const PEOPLE = [person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example", linkedin_url: PAT })];
 const BUSINESSES = [business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101" })];
@@ -37,7 +38,7 @@ const BUSINESSES = [business({ business_id: "b1", business_name: "Harbour Lane P
 async function world(sessions = ["s1"], allowances: Record<string, { invitesPerDay: number; messagesPerDay: number; notesPerMonth: number }> = {}) {
   const h = new EngineHarness({ start: MONDAY_9 - H, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }], linkedin: { sessions: sessions.map(session) } });
   await h.tick();
-  for (const s of sessions) await h.request("PUT", `/api/sender-accounts/${s}/allowances`, allowances[s] ?? { invitesPerDay: 20, messagesPerDay: 20, notesPerMonth: 20 });
+  for (const s of sessions) await h.request("PUT", `/api/sender-accounts/${linkedinAccountId(s)}/allowances`, allowances[s] ?? { invitesPerDay: 20, messagesPerDay: 20, notesPerMonth: 20 });
   h.clock = Math.max(h.clock, MONDAY_9);
   let n = 0;
   const campaign = async (name: string, tracks: TrackDefinition[], pool: readonly string[] = sessions, people = PEOPLE) => {
@@ -174,13 +175,13 @@ describe("item 10: the connection's session is the track's sender", () => {
     const a = await w.campaign("Spring", [li("a", "a")]);
     await w.h.advanceTo(MONDAY_9 + 2 * H);
     expect(w.h.linkedin.handoverLog).toHaveLength(0);
-    expect((await w.st(a.lead))?.smsBindings.find((b) => b.owner === a.lead)?.sender).toBe("s1");
+    expect((await w.st(a.lead))?.smsBindings.find((b) => b.owner === a.lead)?.sender).toBe(linkedinAccountId("s1"));
     // Signed out, then removed from the pool by an edit: a fixed sender is kept (ADR 0003 5.2), so it waits for s1.
     w.h.linkedin.sessions.get("s1")!.healthy = false;
     await w.h.advanceTo(MONDAY_9 + 4 * H);
     expect(w.h.linkedin.handoverLog).toHaveLength(0);
     w.h.linkedin.sessions.get("s1")!.healthy = true;
-    await w.h.request("PUT", "/api/sender-accounts/s1/allowances", { invitesPerDay: 5, messagesPerDay: 5, notesPerMonth: 5 });
+    await w.h.request("PUT", `/api/sender-accounts/${linkedinAccountId("s1")}/allowances`, { invitesPerDay: 5, messagesPerDay: 5, notesPerMonth: 5 });
     await w.h.advanceTo(MONDAY_9 + 6 * H);
     expect(w.h.linkedin.deliveryLog.map((x) => x.sender)).toEqual(["s1"]);
   });
@@ -304,7 +305,7 @@ describe("the second pass on b21af02", () => {
   async function both(order: "sms_first" | "linkedin_first") {
     const h = new EngineHarness({ start: MONDAY_9 - H, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }], sms: { numbers: [{ id: SMS, capacity: 50, gapMs: MIN, k: 2, healthy: true, resetZone: "Europe/London" }] }, linkedin: { sessions: [session("s1")] } });
     await h.tick();
-    await h.request("PUT", "/api/sender-accounts/s1/allowances", { invitesPerDay: 5, messagesPerDay: 5, notesPerMonth: 5 });
+    await h.request("PUT", `/api/sender-accounts/${linkedinAccountId("s1")}/allowances`, { invitesPerDay: 5, messagesPerDay: 5, notesPerMonth: 5 });
     h.clock = MONDAY_9;
     const people = [person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", dial_phone: MOBILE, dial_phone_type: "mobile", linkedin_url: PAT })];
     const { campaign: c } = await h.createCampaign("Both", { businesses: BUSINESSES, people });
@@ -359,7 +360,7 @@ describe("the second pass on b21af02", () => {
   test("item 3: one person in two campaigns, A owning the SMS conversation and B the LinkedIn one: each skips only its own channel's track, and a text reply is A's alone", async () => {
     const h = new EngineHarness({ start: MONDAY_9 - H, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }], sms: { numbers: [{ id: SMS, capacity: 50, gapMs: MIN, k: 2, healthy: true, resetZone: "Europe/London" }] }, linkedin: { sessions: [session("s1")] } });
     await h.tick();
-    await h.request("PUT", "/api/sender-accounts/s1/allowances", { invitesPerDay: 5, messagesPerDay: 5, notesPerMonth: 5 });
+    await h.request("PUT", `/api/sender-accounts/${linkedinAccountId("s1")}/allowances`, { invitesPerDay: 5, messagesPerDay: 5, notesPerMonth: 5 });
     h.clock = MONDAY_9;
     const people = [person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", dial_phone: MOBILE, dial_phone_type: "mobile", linkedin_url: PAT })];
     const launch = async (name: string, tracks: TrackDefinition[]) => {
@@ -397,6 +398,40 @@ describe("the second pass on b21af02", () => {
     expect((await h.store.engine.subject(b, h.clock))?.replies ?? []).toEqual([]);
   });
 
+  // The search's seed 24046 (sequence-search on e261ffa): a second campaign evaluated while the first's expired invite was
+  // being withdrawn was skipped for good, though the withdrawal then released the pair. It now waits for the answer.
+  test("seed 24046: a second campaign meeting a pair whose invite is being withdrawn waits, never skips; withdrawn, it invites", async () => {
+    const w = await world();
+    w.h.linkedin.profiles.set(PAT, { withdrawUnknown: 50 });
+    const a = await w.campaign("Spring", [li("a", "a", 1, 1)]);
+    await w.h.advanceTo(MONDAY_9 + 2 * DAY + 2 * H);
+    expect((await w.track(a.lead, "a"))?.inviteWithdrawal).toBe("wanted");
+    const b = await w.campaign("Autumn", [li("b", "b")]);
+    await w.h.advanceTo(w.h.clock + 2 * H);
+    expect((await w.track(b.lead, "b"))?.finishReason ?? null).toBeNull();
+    const held = (await w.read(b.lead)).tracks[0];
+    expect(held?.hold).toBe("sms_conversation_unsettled");
+    expect(JSON.stringify(held?.holdOwners)).toContain("Spring");
+    w.h.linkedin.withdrawByHand(PAT);
+    expect((await w.h.request("POST", `/api/enrollments/${a.lead}/invite-withdrawal`, { requestId: "iw-1", trackId: "a", answer: "withdrawn" })).status).toBe(200);
+    await w.h.advanceTo(w.h.clock + H);
+    expect(w.h.linkedin.deliveryLog.filter((d) => d.action === "invite").map((d) => d.subjectId)).toEqual([a.lead, b.lead]);
+  });
+
+  test("seed 24046, the other answer: the invite kept on LinkedIn keeps the pair, and the waiting campaign is skipped then", async () => {
+    const w = await world();
+    w.h.linkedin.profiles.set(PAT, { withdrawUnknown: 50 });
+    const a = await w.campaign("Spring", [li("a", "a", 1, 1)]);
+    await w.h.advanceTo(MONDAY_9 + 2 * DAY + 2 * H);
+    const b = await w.campaign("Autumn", [li("b", "b")]);
+    await w.h.advanceTo(w.h.clock + 2 * H);
+    expect((await w.track(b.lead, "b"))?.finishReason ?? null).toBeNull();
+    expect((await w.h.request("POST", `/api/enrollments/${a.lead}/invite-withdrawal`, { requestId: "iw-1", trackId: "a", answer: "kept" })).status).toBe(200);
+    await w.h.advanceTo(w.h.clock + H);
+    expect((await w.track(b.lead, "b"))?.finishReason).toBe("skipped_conversation_taken");
+    expect(w.h.linkedin.handoverLog.some((x) => x.subjectId === b.lead)).toBe(false);
+  });
+
   test("item 7: the user's 'withdrawn' mark on an ended lead releases the pair at once: another campaign then invites", async () => {
     const w = await world();
     w.h.linkedin.profiles.set(PAT, { withdrawUnknown: 50 });
@@ -408,5 +443,105 @@ describe("the second pass on b21af02", () => {
     const b = await w.campaign("Autumn", [li("b", "b")]);
     await w.h.advanceTo(w.h.clock + H);
     expect(w.h.linkedin.deliveryLog.filter((d) => d.action === "invite").map((d) => d.subjectId)).toEqual([a.lead, b.lead]);
+  });
+});
+
+describe("the review bot on e261ffa: a connection check's answer is one session's, never the track's", () => {
+  const none = { invitesPerDay: 0, messagesPerDay: 5, notesPerMonth: 0 };
+  const room = { invitesPerDay: 5, messagesPerDay: 5, notesPerMonth: 5 };
+
+  test("its reproduction: s1 pending from elsewhere and out of invites, s2 clear with room: the invite goes from s2, and the track never holds on s1", async () => {
+    const w = await world(["s1", "s2"], { s1: none, s2: room });
+    w.h.linkedin.profiles.set(PAT, { sessions: { s1: { pendingElsewhere: true } } });
+    const a = await w.campaign("Spring", [li("a", "a")]);
+    await w.h.advanceTo(MONDAY_9 + H);
+    expect(w.h.linkedin.deliveryLog.filter((d) => d.action === "invite").map((d) => [d.subjectId, d.sender])).toEqual([[a.lead, "s2"]]);
+    expect(new Set(w.h.linkedin.presendLog.map((p) => p.sender))).toEqual(new Set(["s1", "s2"]));
+  });
+
+  test("its second case: no invite room anywhere, s1 clear and only s2 already connected: s2 becomes the sender and the first message goes", async () => {
+    const w = await world(["s1", "s2"], { s1: none, s2: none });
+    w.h.linkedin.profiles.set(PAT, { sessions: { s2: { connected: true } } });
+    const a = await w.campaign("Spring", [li("a", "a")]);
+    await w.h.advanceTo(MONDAY_9 + H);
+    expect((await w.track(a.lead, "a"))?.connection).toBe("already_connected");
+    expect(w.h.linkedin.deliveryLog.map((d) => [d.action, d.sender])).toEqual([["message", "s2"]]);
+  });
+
+  test("a connected session is preferred to inviting from a clear one, and with two connected the first in the pool's order is the sender", async () => {
+    const one = await world(["s1", "s2"]);
+    one.h.linkedin.profiles.set(PAT, { sessions: { s2: { connected: true } } });
+    await one.campaign("Spring", [li("a", "a")]);
+    await one.h.advanceTo(MONDAY_9 + H);
+    expect(one.h.linkedin.deliveryLog.map((d) => [d.action, d.sender])).toEqual([["message", "s2"]]);
+    const two = await world(["s1", "s2"]);
+    two.h.linkedin.profiles.set(PAT, { connected: true });
+    await two.campaign("Spring", [li("a", "a")]);
+    await two.h.advanceTo(MONDAY_9 + H);
+    expect(two.h.linkedin.deliveryLog.map((d) => [d.action, d.sender])).toEqual([["message", "s1"]]);
+  });
+
+  // The search's seed 24062 (offsets 30 to 99, before the push of this round): outside the window the checks age unasked,
+  // and the read went back to every session's room, promising the window's next opening for an invite that can never go.
+  test("seed 24062: out of the window, a clear session with no invite room beside a pending one still reads a capacity wait, never a time", async () => {
+    const w = await world(["s1", "s2"], { s1: room, s2: none });
+    w.h.linkedin.profiles.set(PAT, { sessions: { s1: { pendingElsewhere: true } } });
+    const a = await w.campaign("Spring", [{ ...li("a", "a"), window: [{ day: 1, start: 9, end: 10 }] }]);
+    await w.h.advanceTo(MONDAY_9 + 30 * MIN);
+    expect((await w.read(a.lead)).tracks[0]?.nextStep?.when).toMatchObject({ kind: "waits", why: "sending_capacity" });
+    await w.h.advanceTo(MONDAY_9 + 3 * H);
+    const read = (await w.read(a.lead)).tracks[0];
+    expect(read?.hold).toBeNull();
+    expect(read?.nextStep?.when).toMatchObject({ kind: "waits", why: "sending_capacity" });
+    expect(w.h.linkedin.handoverLog).toEqual([]);
+  });
+
+  test("the pending hold only when every session is pending; a clear session out of invite room with another pending is a capacity wait", async () => {
+    const all = await world(["s1", "s2"]);
+    all.h.linkedin.profiles.set(PAT, { pendingElsewhere: true });
+    const a = await all.campaign("Spring", [li("a", "a")]);
+    await all.h.advanceTo(MONDAY_9 + H);
+    expect((await all.read(a.lead)).tracks[0]?.hold).toBe("invite_pending_elsewhere");
+    expect(all.h.linkedin.handoverLog).toEqual([]);
+    const mixed = await world(["s1", "s2"], { s1: room, s2: none });
+    mixed.h.linkedin.profiles.set(PAT, { sessions: { s1: { pendingElsewhere: true } } });
+    const b = await mixed.campaign("Spring", [li("a", "a")]);
+    await mixed.h.advanceTo(MONDAY_9 + H);
+    const read = (await mixed.read(b.lead)).tracks[0];
+    expect(read?.hold).toBeNull();
+    expect(read?.nextStep?.when).toMatchObject({ kind: "waits", why: "sending_capacity" });
+    expect(mixed.h.linkedin.handoverLog).toEqual([]);
+  });
+});
+
+describe("the re-check of e261ffa, item 3: a pair's channel is stored when it is taken, and an account is its channel and its id", () => {
+  test("a LinkedIn session whose own id is an SMS number's: two accounts; the SMS pair stays SMS, and the text reply is stored and ends the lead", async () => {
+    const NUMBER = "+447700900801";
+    const MOBILE = "+447700900811";
+    const h = new EngineHarness({ start: MONDAY_9 - H, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }], sms: { numbers: [{ id: NUMBER, capacity: 50, gapMs: MIN, k: 2, healthy: true, resetZone: "Europe/London" }] }, linkedin: { sessions: [] } });
+    await h.tick();
+    h.clock = MONDAY_9;
+    const people = [person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", dial_phone: MOBILE, dial_phone_type: "mobile" })];
+    const { campaign: c } = await h.createCampaign("Spring", { businesses: BUSINESSES, people });
+    const texts: TrackDefinition = { id: "t", channel: "sms", branch: "main", window: ALWAYS, steps: [step("t1", 0, "A text."), step("t2", 3, "A follow-up.")], start: { kind: "entry" }, removed: false };
+    await h.defineSequence(c.id, { ...def([texts], []), smsPool: [NUMBER] });
+    expect((await h.launch(c.id)).status).toBe(200);
+    const lead = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${c.id}`)).body.rows[0]?.enrollments[0]?.id ?? "";
+    await h.advanceTo(MONDAY_9 + H);
+    expect(h.sms.deliveryLog.map((d) => [d.sender, d.destination])).toEqual([[NUMBER, MOBILE]]);
+    // A simulated LinkedIn session appears whose own id is the number's, and the accounts are synced.
+    h.linkedin.sessions.set(NUMBER, session(NUMBER));
+    await h.tick();
+    const accounts = await h.store.engine.accounts(h.clock);
+    expect(accounts.filter((a) => a.id === NUMBER || a.id === linkedinAccountId(NUMBER)).map((a) => [a.id, a.channel]).sort()).toEqual([[NUMBER, "sms"], [linkedinAccountId(NUMBER), "linkedin"]]);
+    expect((await h.store.engine.subject(lead, h.clock))?.smsBindings.map((b) => [b.channel, b.sender, b.recipient])).toEqual([["sms", NUMBER, MOBILE]]);
+    // Pat texts back: the reply is stored on the SMS pair's owner, which ends; the follow-up never goes.
+    expect(h.sms.prospectTexts(MOBILE)).toBe(true);
+    await h.advanceTo(h.clock + H);
+    const st = await h.store.engine.subject(lead, h.clock);
+    expect(st?.subject.ended).toBe("replied");
+    expect(st?.replies.map((r) => r.channel)).toEqual(["sms"]);
+    await h.advanceTo(MONDAY_9 + 5 * DAY);
+    expect(h.sms.deliveryLog).toHaveLength(1);
   });
 });

@@ -9,7 +9,7 @@ import { leadNow, localDayNumber, nextWindowOpen, sendPoint, span, startOfLocalD
 import { render } from "./copy.ts";
 import { holdsConversations, type ConversationChannel, linkedinStepKind, liveSteps, ownSubject, poolOf, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
 import type { StoredReplyId } from "./reply-identity.ts";
-import type { Attempt, ConversationCause, EndReason, FinishReason, LeadDetail, ProviderWork, RenderedCopy, ReplyChannelName, SmsBinding, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
+import type { Attempt, ConnectionCheck, ConversationCause, EndReason, FinishReason, LeadDetail, ProviderWork, RenderedCopy, ReplyChannelName, SmsBinding, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Running, status and reach.
@@ -276,6 +276,11 @@ export const rules = {
   notConnectedMarksBad: false,
   /** An edit of the acceptance wait re-resolves every waiting deadline (ADR 0004 3.2); false only for a mutation. */
   waitEditRealigns: true,
+  /**
+   * A connection check's answer is kept per session (review bot on e261ffa); false only for the mutation that keeps one
+   * answer for the track and asks only its first healthy session, as `b21af02` to `e261ffa` did.
+   */
+  checksPerSession: true,
   connectionGate: (track: TrackDefinition, stepId: string, progress: TrackProgress): boolean => {
     const kind = linkedinStepKind(track, stepId);
     return kind !== null && kind !== "invite" && (progress.connection ?? null) === null;
@@ -1180,7 +1185,7 @@ export function settledReadiness(state: SubjectState, now: number, conversations
     // An invite held as pending elsewhere is checked again at the end of its settling period (question Q42's interim).
     ...state.tracks.flatMap((p) => invitePendingUntil(state, p.trackId) ?? []),
     // A clear connection check stands for a settling period; then the invite is checked again before it is claimed.
-    ...state.tracks.flatMap((p) => (p.invitePendingCheckedWall != null ? [p.invitePendingCheckedWall + ENGINE_PARAMS.SETTLING] : [])),
+    ...state.tracks.flatMap((p) => Object.values(p.connectionChecks ?? {}).map((c) => c.checkedWall + ENGINE_PARAMS.SETTLING)),
     ...state.tracks.filter((p) => p.finishedAt === null && p.dueAt !== null).map((p) => now + ((p.dueAt ?? 0) - lead)),
     ...state.tracks.filter((p) => p.startedAt === null && p.startAt !== null).map((p) => now + ((p.startAt ?? 0) - lead)),
   ];
@@ -1374,15 +1379,78 @@ export function invitePendingElsewhere(state: SubjectState, attemptId: string, n
   if (!a || a.state !== "claimed") return state;
   const step = applyAttemptEvent(a, workOf(state, a.idempotencyKey), { kind: "quiesce" });
   const s = withWork(withAttempt(state, { ...step.attempt, endedBy: "guard" }), step.work);
-  return attend(withTrack(s, a.trackId, (t) => ({ ...t, invitePendingSeenWall: t.invitePendingSeenWall ?? now, invitePendingCheckedWall: now })), now);
+  return attend(recordCheck(s, a.trackId, a.accountId, "pending", now), now);
 }
 
-/** Whether the track's invite is held as pending elsewhere at `now`, and until when (question Q42's interim). */
+/**
+ * Whether the track's invite is held as pending elsewhere, and until its next check (question Q42's interim, per session;
+ * review bot on e261ffa): only when no session can invite, that is every healthy session it may use has last answered
+ * `pending`. A session not yet checked, or one that answered `clear` (with invite room or not), is a session that may
+ * invite, so the track does not hold on another session's answer: it waits for that check, or for that session's room.
+ * Null when not held; otherwise the earliest instant one of those sessions is due a check again.
+ */
 export function invitePendingUntil(state: SubjectState, trackId: string): number | null {
   const p = progressOf(state, trackId);
   const track = state.campaign.definition.tracks.find((t) => t.id === trackId);
-  if (!p || !track || p.nextStepId === null || linkedinStepKind(track, p.nextStepId) !== "invite" || (p.invitePendingCheckedWall ?? null) === null || (p.invitePendingSeenWall ?? null) === null) return null;
-  return (p.invitePendingCheckedWall ?? 0) + ENGINE_PARAMS.SETTLING;
+  if (!p || !track || p.nextStepId === null || linkedinStepKind(track, p.nextStepId) !== "invite") return null;
+  const sessions = checkedSessions(state, trackId);
+  if (sessions.length === 0) return null;
+  const answers = sessions.map((id) => checkOf(p, id));
+  if (answers.some((c) => c?.answer !== "pending")) return null;
+  return Math.min(...answers.map((c) => (c?.checkedWall ?? 0) + ENGINE_PARAMS.SETTLING));
+}
+
+/** The healthy sessions a track's invite may go from: the ones its connection checks ask (its fixed sender, else its pool). */
+function checkedSessions(state: SubjectState, trackId: string): string[] {
+  return candidatesFor(state, trackId).filter((id) => state.accounts[id]?.healthy === true);
+}
+
+/** A session's latest check of the track's profile: its own, or under the mutation the one answer kept for the track. */
+export function checkOf(p: TrackProgress, session: string): ConnectionCheck | undefined {
+  return p.connectionChecks?.[rules.checksPerSession ? session : TRACK_CHECK];
+}
+
+/** The key the mutation keeps one answer under. */
+const TRACK_CHECK = "*";
+
+const fresh = (c: ConnectionCheck | undefined, now: number): c is ConnectionCheck => c !== undefined && now < c.checkedWall + ENGINE_PARAMS.SETTLING;
+
+/** The track's invite is decided only once every session it may use has an answer within a settling period. */
+function checksComplete(state: SubjectState, trackId: string, now: number): boolean {
+  const p = progressOf(state, trackId);
+  return !!p && checkedSessions(state, trackId).every((id) => fresh(checkOf(p, id), now));
+}
+
+/**
+ * The sessions an invite may be claimed on (review bot on e261ffa): with every session's answer fresh, those whose answer
+ * is `clear`; the account choice then picks among them by room, as for any step. Before the checks are complete nothing
+ * claims the invite (`readyItems`), and the reads judge every candidate.
+ */
+export function inviteSessions(state: SubjectState, trackId: string, ids: readonly string[], now: number): string[] {
+  const p = progressOf(state, trackId);
+  if (!p) return [...ids];
+  // Every session's latest answer, fresh or not (the search on e261ffa, seed 24062): outside the window the answers age
+  // unasked, and a read still judges the invite's room on the sessions that may send it. A claim waits for fresh answers
+  // (`inviteClaimable`), so only reads see an aged one. With a session never asked, every session is still a candidate.
+  const answered = checkedSessions(state, trackId).every((id) => checkOf(p, id) !== undefined);
+  if (!answered && !checksComplete(state, trackId, now)) return [...ids];
+  return ids.filter((id) => checkOf(p, id)?.answer === "clear");
+}
+
+/** Whether the track's pending invite may be claimed now: every session checked within a settling period, one of them clear. */
+export function inviteClaimable(state: SubjectState, trackId: string, now: number): boolean {
+  const p = progressOf(state, trackId);
+  return !!p && checksComplete(state, trackId, now) && checkedSessions(state, trackId).some((id) => checkOf(p, id)?.answer === "clear");
+}
+
+/** Records one session's answer (or, under the mutation, the track's one answer). */
+function recordCheck(state: SubjectState, trackId: string, session: string, answer: "clear" | "pending", now: number): SubjectState {
+  const key = rules.checksPerSession ? session : TRACK_CHECK;
+  return withTrack(state, trackId, (t) => {
+    const was = t.connectionChecks?.[key];
+    const check: ConnectionCheck = { answer, checkedWall: now, pendingSince: answer === "pending" ? (was?.answer === "pending" ? was.pendingSince : now) : null };
+    return { ...t, connectionChecks: { ...(t.connectionChecks ?? {}), [key]: check } };
+  });
 }
 
 /**
@@ -1447,27 +1515,31 @@ export function realignAcceptance(state: SubjectState, now: number): SubjectStat
  * whether the person is already connected, or an invite is already pending. It spends no allowance and needs none: it
  * runs whatever the invite allowance, so an existing connection moves the track on to its messages, which spend the
  * message allowance only when one goes. Due for a running subject's LinkedIn track whose pending step is the invite, due
- * and inside its window, with a good profile, not checked within a settling period. Returns the session to ask, or null.
+ * and inside its window, with a good profile. Returns the sessions to ask now: every healthy session the track may use (its
+ * fixed sender once it has one, else its pool), in the pool's order, whose own answer is older than a settling period.
  */
-export function connectionCheckDue(state: SubjectState, trackId: string, now: number): string | null {
+export function connectionChecksDue(state: SubjectState, trackId: string, now: number): string[] {
   const p = progressOf(state, trackId);
   const track = state.campaign.definition.tracks.find((t) => t.id === trackId);
-  if (!p || !track || track.channel !== "linkedin" || p.nextStepId === null || linkedinStepKind(track, p.nextStepId) !== "invite") return null;
-  if (claimRefusal(state, { trackId, stepId: p.nextStepId }, now) !== null) return null;
-  if ((p.invitePendingCheckedWall ?? null) !== null && now < (p.invitePendingCheckedWall ?? 0) + ENGINE_PARAMS.SETTLING) return null;
-  return candidatesFor(state, trackId).find((id) => state.accounts[id]?.healthy === true) ?? null;
+  if (!p || !track || track.channel !== "linkedin" || p.nextStepId === null || linkedinStepKind(track, p.nextStepId) !== "invite") return [];
+  if (claimRefusal(state, { trackId, stepId: p.nextStepId }, now) !== null) return [];
+  // Every healthy session it may use, in the pool's order, each whose own answer is older than a settling period (or none).
+  const sessions = checkedSessions(state, trackId);
+  if (!rules.checksPerSession) return fresh(p.connectionChecks?.[TRACK_CHECK], now) ? [] : sessions.slice(0, 1);
+  return sessions.filter((id) => !fresh(p.connectionChecks?.[id], now));
 }
 
 /**
- * The check's answer, applied in one write: `connected` skips the invite as already connected, takes the pair and fixes
- * the session, and the first message follows with its own wait; `pending` holds the invite (question Q42); `clear` leaves
- * the invite to be claimed under the invite allowance, for one settling period.
+ * One session's answer, applied in one write: `connected` skips the invite as already connected, takes the pair and fixes
+ * that session as the sender, and the first message follows with its own wait (a connected session is preferred to an
+ * invite from another: the invite waits until every session has answered); `pending` and `clear` are kept for that session
+ * for one settling period: an invite goes only from a clear session, and the track holds only when every session is
+ * pending (`invitePendingUntil`).
  */
 export function connectionChecked(state: SubjectState, trackId: string, session: string, destination: string, answer: "connected" | "pending" | "clear", now: number): SubjectState {
   const p = progressOf(state, trackId);
   if (!p || p.nextStepId === null) return state;
-  if (answer === "pending") return withTrack(state, trackId, (t) => ({ ...t, invitePendingSeenWall: t.invitePendingSeenWall ?? now, invitePendingCheckedWall: now }));
-  if (answer === "clear") return withTrack(state, trackId, (t) => ({ ...t, invitePendingSeenWall: null, invitePendingCheckedWall: now }));
+  if (answer !== "connected") return recordCheck(state, trackId, session, answer, now);
   const at = leadNow(state.subject.clock, now);
   const atWall = wallOfLead(state.subject.clock, now);
   let s: SubjectState = { ...state, results: [...state.results, { stepId: p.nextStepId, trackId, result: "skipped", reason: "already_connected", at, atWall, attemptId: null }] };

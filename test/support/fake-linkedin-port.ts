@@ -44,7 +44,17 @@ export interface ProfileScript {
   pendingElsewhere?: boolean;
   /** The connection is removed after acceptance: a message is refused `not_connected`. */
   readonly connectionRemoved?: boolean;
+  /**
+   * Answers that differ by session (review bot on e261ffa): a connection and an invite pending from elsewhere are facts of
+   * one (session, profile) pair. A session listed here answers by its entry; any other by the profile's own fields.
+   */
+  sessions?: Readonly<Record<string, { readonly connected?: boolean; readonly pendingElsewhere?: boolean }>>;
 }
+
+/** Whether the profile is scripted as connected to this session before any invite. */
+export const connectedOn = (script: ProfileScript, session: string): boolean => script.sessions?.[session]?.connected ?? script.connected === true;
+/** Whether an invite from this session to the profile is scripted as already pending, sent by hand outside the application. */
+export const pendingOn = (script: ProfileScript, session: string): boolean => script.sessions?.[session]?.pendingElsewhere ?? script.pendingElsewhere === true;
 
 export interface LinkedinDelivery {
   readonly at: number;
@@ -115,14 +125,14 @@ export class FakeLinkedInPort implements SendPort {
   connectedNow(sender: string, profile: string): boolean {
     const now = this.now();
     if (this.script(profile).connectionRemoved) return false;
-    return this.script(profile).connected === true || this.invites.some((i) => i.sender === sender && i.profile === profile && i.acceptedAt !== null && i.acceptedAt <= now);
+    return connectedOn(this.script(profile), sender) || this.invites.some((i) => i.sender === sender && i.profile === profile && i.acceptedAt !== null && i.acceptedAt <= now);
   }
 
   /** The pre-send check reads the connection (ADR 0004 2.3): never a reply. */
   presendCheck(request: PresendRequest): Promise<PresendResult> {
     const session = this.sessions.get(request.sender);
     const now = this.now();
-    const outstanding = this.script(request.destination).pendingElsewhere === true || this.invites.some((i) => i.sender === request.sender && i.profile === request.destination && i.withdrawnAt === null && (i.acceptedAt === null || i.acceptedAt > now));
+    const outstanding = pendingOn(this.script(request.destination), request.sender) || this.invites.some((i) => i.sender === request.sender && i.profile === request.destination && i.withdrawnAt === null && (i.acceptedAt === null || i.acceptedAt > now));
     const answer: PresendResult = !session?.healthy ? { kind: "unavailable" } : this.connectedNow(request.sender, request.destination) ? { kind: "connected" } : outstanding ? { kind: "pending" } : { kind: "clear" };
     this.presendLog.push({ at: this.now(), sender: request.sender, destination: request.destination, answer: answer.kind });
     return Promise.resolve(answer);
@@ -194,7 +204,10 @@ export class FakeLinkedInPort implements SendPort {
 
   /** The person accepts the invite the user sent by hand outside the application: they are connected from now. */
   acceptElsewhere(profile: string): void {
-    this.profiles.set(profile, { ...this.script(profile), pendingElsewhere: false, connected: true });
+    const script = this.script(profile);
+    // Each session the invite was pending from is connected now; the others are as they were.
+    const sessions = Object.fromEntries(Object.entries(script.sessions ?? {}).map(([id, x]) => [id, x.pendingElsewhere ? { connected: true, pendingElsewhere: false } : x]));
+    this.profiles.set(profile, { ...script, ...(script.pendingElsewhere ? { pendingElsewhere: false, connected: true } : {}), sessions });
   }
 
   /** The user accepts a test invite on their own profile now (ADR 0004 section 8): what a person does by hand. */

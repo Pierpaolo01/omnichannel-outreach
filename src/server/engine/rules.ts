@@ -19,7 +19,7 @@ import {
 import { compareReadyNow, focusOf, isListed, logCallOutcome, placeCall, readyCalls, reasonOf } from "../../domain/sequence/calls.ts";
 import { applyBadDestination, applyReply, applyToAttempt, applyToWork, asOfAction, enterMain, evaluate, releaseUnsentBindings, replyMatches, sameConversations, smsReplyOwner, stillSettled, withdrawalDue } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
-import { connectionCheckDue, connectionChecked, inviteAlreadyConnected, inviteExpired, inviteWithdrawalAnswer, inviteWithdrawalDue, recordAcceptance } from "../../domain/sequence/progress.ts";
+import { connectionChecksDue, connectionChecked, inviteAlreadyConnected, inviteExpired, inviteWithdrawalAnswer, inviteWithdrawalDue, recordAcceptance } from "../../domain/sequence/progress.ts";
 import { actionOfStep } from "../../domain/sequence/dispatch.ts";
 import { markPrecondition, markReplied } from "../../domain/sequence/controls.ts";
 import { reconcileEdit, stillRunnable } from "../../domain/sequence/reconcile.ts";
@@ -47,7 +47,7 @@ export interface Rules {
   /** The connection check's answer, applied (ADR 0004 section 6): the first place an existing connection is found. */
   readonly connectionChecked: typeof connectionChecked;
   /** Whether a track's invite is due a connection check now, and from which session (ADR 0004 section 6). */
-  readonly connectionCheckDue: typeof connectionCheckDue;
+  readonly connectionChecksDue: typeof connectionChecksDue;
   readonly inviteWithdrawalDue: typeof inviteWithdrawalDue;
   readonly inviteWithdrawalAnswer: typeof inviteWithdrawalAnswer;
   /** The social action a step asks for (ADR 0004 2.1, 6): what the pre-send check's "connected" means for it. */
@@ -191,7 +191,7 @@ export const DEFAULT_RULES: Rules = {
   inviteExpired,
   inviteAlreadyConnected,
   connectionChecked,
-  connectionCheckDue,
+  connectionChecksDue,
   inviteWithdrawalDue,
   inviteWithdrawalAnswer,
   actionOfStep,
