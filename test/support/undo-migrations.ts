@@ -25,6 +25,22 @@ export const UNDO_SINCE_18 = `
 export const UNDO_23 = `
   DROP TRIGGER sms_bindings_channel_fixed;
   DROP TRIGGER sender_accounts_channel_fixed;
+  DROP TRIGGER sms_bindings_channel_fixed_on_replace;
+  DROP TRIGGER sender_accounts_channel_fixed_on_replace;
+  DROP TRIGGER conversations_pair_insert;
+  DROP TRIGGER conversations_pair_update;
+  DROP TRIGGER conversations_pair_delete;
+  DROP TRIGGER conversations_work_insert;
+  DROP TRIGGER conversations_work_update;
+  DROP TRIGGER conversations_work_delete;
+  DROP TRIGGER conversations_progress_insert;
+  DROP TRIGGER conversations_progress_update;
+  DROP TRIGGER conversations_progress_delete;
+  DROP TRIGGER conversations_enrollment_ended;
+  DROP TRIGGER conversations_test_run_ended;
+  DROP TRIGGER conversations_reply_insert;
+  DROP TRIGGER conversations_reply_update;
+  DROP TABLE conversation_version;
   ALTER TABLE sms_bindings DROP COLUMN channel;
   DELETE FROM schema_migrations WHERE version >= 23;
 `;

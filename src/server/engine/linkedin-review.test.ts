@@ -545,3 +545,27 @@ describe("the re-check of e261ffa, item 3: a pair's channel is stored when it is
     expect(h.sms.deliveryLog).toHaveLength(1);
   });
 });
+
+describe("the re-check of dd3969c, item 1: the conversations' version moves with every fact ownership is read from", () => {
+  test("an acceptance during a withdrawal: the waiting campaign is skipped, stored, and its email goes, with no restart", async () => {
+    const w = await world();
+    w.h.linkedin.profiles.set(PAT, { withdrawUnknown: 500 });
+    // A invites at 09:00 on Monday 2 November with a one-day wait; after the expiry its withdrawal answers unknown.
+    const a = await w.campaign("Spring", [li("a", "a", 1, 1)]);
+    await w.h.advanceTo(MONDAY_9 + DAY + 2 * H);
+    expect((await w.track(a.lead, "a"))?.inviteWithdrawal).toBe("wanted");
+    // B on the same session and profile, its email straight after its LinkedIn track: it waits on A's withdrawal.
+    const email: TrackDefinition = { id: "e", channel: "email", branch: "main", window: ALWAYS, steps: [{ id: "e1", waitDays: 0, subject: "Hello", body: "An email.", threading: "new_subject", removed: false }], start: { kind: "after", trackId: "b", delayDays: 0 }, removed: false };
+    const b = await w.campaign("Autumn", [li("b", "b"), email]);
+    await w.h.advanceTo(w.h.clock + H);
+    expect((await w.track(b.lead, "b"))?.finishReason ?? null).toBeNull();
+    // Pat accepts A's invite at 12:00 on 3 November; then 96 worker ticks a quarter of an hour apart.
+    await w.h.advanceTo(MONDAY_9 + DAY + 3 * H);
+    expect(w.h.linkedin.acceptNow(PAT)).toBe(true);
+    for (let i = 0; i < 96; i++) await w.h.advanceTo(w.h.clock + 15 * MIN);
+    expect((await w.track(a.lead, "a"))?.acceptedWall).not.toBeNull();
+    // Stored, not only read: B's LinkedIn track skipped for A's conversation, and its email sent.
+    expect((await w.track(b.lead, "b"))?.finishReason).toBe("skipped_conversation_taken");
+    expect(w.h.fake.deliveryLog.filter((d) => d.subjectId === b.lead)).toHaveLength(1);
+  });
+});

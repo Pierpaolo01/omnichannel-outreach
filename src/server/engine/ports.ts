@@ -92,6 +92,8 @@ export interface PresendRequest {
   readonly threadRefs: readonly string[];
   /** The replies the lead's record already holds on this channel, by the reply event's own id (`portReplyId`): not news. */
   readonly knownReplies: readonly string[];
+  /** The subject asking, for the provider's own log only (the re-check of dd3969c, item 5): a port never acts on it. */
+  readonly subjectId?: string;
 }
 
 /** A pre-send check's answer. `connected`: for LinkedIn, the sender is already connected to the profile (ADR 0004 3.3). */

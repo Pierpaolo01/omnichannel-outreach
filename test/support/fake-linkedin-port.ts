@@ -88,7 +88,8 @@ export class FakeLinkedInPort implements SendPort {
   readonly withdrawalLog: { at: number; key: string; answer: InviteWithdrawal["kind"] }[] = [];
   /** Invites the user withdrew on LinkedIn by hand (`withdrawByHand`), outside the application. */
   readonly handWithdrawalLog: { at: number; key: string }[] = [];
-  readonly presendLog: { at: number; sender: string; destination: string; answer: PresendResult["kind"] }[] = [];
+  /** Every check, with the subject that asked (the record finds a connection from this log alone). */
+  readonly presendLog: { at: number; sender: string; destination: string; answer: PresendResult["kind"]; subjectId: string | null }[] = [];
   readonly lookupLog: { at: number; key: string; answer: LookupResult["kind"] }[] = [];
   readonly refusals: { at: number; key: string; destination: string; reason: string }[] = [];
   readonly sessions: Map<string, FakeSession>;
@@ -134,7 +135,7 @@ export class FakeLinkedInPort implements SendPort {
     const now = this.now();
     const outstanding = pendingOn(this.script(request.destination), request.sender) || this.invites.some((i) => i.sender === request.sender && i.profile === request.destination && i.withdrawnAt === null && (i.acceptedAt === null || i.acceptedAt > now));
     const answer: PresendResult = !session?.healthy ? { kind: "unavailable" } : this.connectedNow(request.sender, request.destination) ? { kind: "connected" } : outstanding ? { kind: "pending" } : { kind: "clear" };
-    this.presendLog.push({ at: this.now(), sender: request.sender, destination: request.destination, answer: answer.kind });
+    this.presendLog.push({ at: this.now(), sender: request.sender, destination: request.destination, answer: answer.kind, subjectId: request.subjectId ?? null });
     return Promise.resolve(answer);
   }
 

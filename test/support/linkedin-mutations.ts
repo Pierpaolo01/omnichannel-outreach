@@ -1,4 +1,5 @@
 import type { Rules } from "../../src/server/engine/rules.ts";
+import { SqliteEngineStore } from "../../src/server/persistence/sqlite-engine-store.ts";
 import { DEFAULT_RULES } from "../../src/server/engine/rules.ts";
 import { applyReply, awaitingAcceptance, connect, end, finishTrack, progressOf, rules as progressRules } from "../../src/domain/sequence/progress.ts";
 import { linkedinStepKind } from "../../src/domain/sequence/definition.ts";
@@ -251,6 +252,21 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
     seed: 2,
     rules: {},
     patch: flag("checksPerSession", false),
+  },
+  // 29 (the re-check of dd3969c, item 1): the conversations' version never moves, so every cache keyed on it outlives a
+  // change of conversations (the worker's evaluation and readiness caches): a fresh engine then acts where the worker idles.
+  "the conversations' version ignores every change": {
+    invariant: "29",
+    seed: 11,
+    rules: {},
+    patch: () => {
+      const proto = SqliteEngineStore.prototype as unknown as { conversationsVersion: () => Promise<string> };
+      const was = proto.conversationsVersion;
+      proto.conversationsVersion = () => Promise.resolve("0");
+      return () => {
+        proto.conversationsVersion = was;
+      };
+    },
   },
   // L13: a taken pair held instead of skipped: the second campaign's lead is left waiting on it for ever.
   "a taken LinkedIn pair is held, not skipped": {

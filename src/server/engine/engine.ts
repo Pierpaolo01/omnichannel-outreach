@@ -1348,7 +1348,7 @@ export class Engine {
           const destination = s.lead.details.find((d) => d.id === s.lead.resolved[p.destinationDetailId ?? ""]?.liveId)?.key ?? "";
           if (!this.leaseIsMine(this.clockNow())) return changed;
           const port = this.ports.linkedin;
-          const asked = await this.bounded(() => port.presendCheck({ sender: session, destination, threadRefs: [], knownReplies: [] }), { kind: "unavailable" as const }, "linkedin", (result) => ({ call: "presendCheck", result }));
+          const asked = await this.bounded(() => port.presendCheck({ sender: session, destination, threadRefs: [], knownReplies: [], subjectId: id }), { kind: "unavailable" as const }, "linkedin", (result) => ({ call: "presendCheck", result }));
           if (asked.kind === "unavailable" || asked.kind === "reply") continue;
           const answer = asked.kind === "connected" ? "connected" : asked.kind === "pending" && this.rules.outstandingInviteStops() ? "pending" : "clear";
           const written = await this.update(id, now, (st) => {
@@ -1485,7 +1485,7 @@ export class Engine {
     // in any of the lead's threads (ticket 17a; review bot on ca8baee, item 1; ADR 0002's correlation rules). The port is
     // asked by its own ids, and its answer is recorded by the stored one: the reply identity rule (ADR 0003 "Ticket 17a").
     const knownReplies = (subject?.replies ?? []).filter((r) => r.channel === channel).map((r) => r.providerRef);
-    const asked = await this.bounded(() => port.presendCheck({ sender: a.accountId, destination: a.destination, threadRefs, knownReplies: channel === "linkedin" ? [] : knownReplies.map((id) => this.rules.portReplyId(channel, id)) }), { kind: "unavailable" as const }, port.channel, (result) => ({ call: "presendCheck", result }));
+    const asked = await this.bounded(() => port.presendCheck({ sender: a.accountId, destination: a.destination, subjectId: a.subjectId, threadRefs, knownReplies: channel === "linkedin" ? [] : knownReplies.map((id) => this.rules.portReplyId(channel, id)) }), { kind: "unavailable" as const }, port.channel, (result) => ({ call: "presendCheck", result }));
     // A LinkedIn session's check reads the connection, never a reply (ADR 0004 2.3, 3.3). Connected at an invite's slot: the
     // invite is skipped in the handover's own write, with no call, when every predicate but the check and the slot holds.
     if (channel === "linkedin") {

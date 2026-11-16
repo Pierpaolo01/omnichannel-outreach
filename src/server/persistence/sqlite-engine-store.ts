@@ -57,6 +57,40 @@ export const DEFAULT_DAILY_CALL_CAPACITY = 50;
 const machineZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 /** The engine's tables in the same SQLite database as the CRM (ADR 0003 1.3). */
+/**
+ * The ownership query (ADR 0004, "The conversations' version"): every unreleased pair of a lead's destinations, with what
+ * its owner's ownership and knownness are read from. Every table it reads for those facts is in CONVERSATION_INPUT_TABLES,
+ * and each of them moves the conversations' version by trigger (migration 23); the others it reads only for a name or to
+ * find the lead's destinations. A test reads both lists.
+ */
+export const CONVERSATION_PAIRS_QUERY = `SELECT b.sender_number, b.recipient_key, b.owner_subject, COALESCE(e.campaign_id, tr.campaign_id) AS owner_campaign, c.name AS owner_campaign_name,
+                tr.id IS NOT NULL AS owner_is_test, COALESCE(e.ended, tr.ended) AS owner_ended,
+                (EXISTS (SELECT 1 FROM provider_work w WHERE w.subject_id = b.owner_subject AND w.account_id = b.sender_number AND w.destination = b.recipient_key
+                  AND (w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL))
+                 -- A LinkedIn pair taken by an already-connected skip is a conversation from the skip (ADR 0004, question Q41).
+                 OR EXISTS (SELECT 1 FROM track_progress t WHERE t.subject_id = b.owner_subject AND t.connection = 'already_connected'
+                  AND (t.destination_detail_id = 'linkedin:' || COALESCE(e.person_id, '') || ':' || b.recipient_key
+                    OR (t.destination_detail_id = 'test:' || b.owner_subject || ':linkedin' AND tr.linkedin_key = b.recipient_key))))
+                -- An invite being withdrawn (its wait ended, the session not yet answered) is no known conversation: whether
+                -- the pair is released turns on the answer, so another subject waits, never skips (ADR 0004, Q41; seed 24046).
+                AND NOT EXISTS (SELECT 1 FROM track_progress t WHERE t.subject_id = b.owner_subject AND t.invite_withdrawal = 'wanted'
+                  AND t.connection IS NULL AND t.accepted_wall IS NULL
+                  AND (t.destination_detail_id = 'linkedin:' || COALESCE(e.person_id, '') || ':' || b.recipient_key
+                    OR (t.destination_detail_id = 'test:' || b.owner_subject || ':linkedin' AND tr.linkedin_key = b.recipient_key))) AS owner_sent,
+                EXISTS (SELECT 1 FROM reply_events re WHERE re.event_id LIKE 'sms:%' AND re.state = 'resolved' AND re.inbox = b.sender_number AND re.address = b.recipient_key AND re.received_wall >= b.created_at) AS owner_answered, b.channel AS pair_channel FROM sms_bindings b
+         LEFT JOIN enrollments e ON e.id = b.owner_subject
+         LEFT JOIN test_runs tr ON tr.id = b.owner_subject
+         LEFT JOIN campaigns c ON c.id = COALESCE(e.campaign_id, tr.campaign_id)
+         WHERE b.released_at IS NULL
+           AND (b.recipient_key IN (SELECT key FROM live_contact_details WHERE owner_kind = :kind AND owner_id = :owner AND channel = 'phone')
+             OR b.recipient_key IN (SELECT value FROM json_each(:own))
+             OR b.recipient_key IN (SELECT value FROM json_each(:profiles))
+             OR b.recipient_key IN (SELECT destination FROM attempts WHERE subject_id = :subject))
+         ORDER BY b.seq`;
+export const CONVERSATION_INPUT_TABLES = ["sms_bindings", "provider_work", "track_progress", "enrollments", "test_runs", "reply_events"] as const;
+/** What the ownership query reads that is no fact of ownership: the owner's campaign's name, and the lead's destinations. */
+export const CONVERSATION_LOOKUP_TABLES = ["campaigns", "live_contact_details", "attempts", "json_each"] as const;
+
 export class SqliteEngineStore implements EngineStore {
   private readonly db: DatabaseSync;
 
@@ -792,19 +826,12 @@ export class SqliteEngineStore implements EngineStore {
     }
   }
 
+  /**
+   * The conversations' version (ADR 0004, "The conversations' version"): the counter the database moves itself, by trigger,
+   * on every write to a fact the ownership query below reads (`conversation_version`, migration 23). No list of events.
+   */
   async conversationsVersion(): Promise<string> {
-    return str(
-      this.sql(
-        `SELECT (SELECT COALESCE(MAX(seq), 0) FROM sms_bindings) || '/' || (SELECT COUNT(*) FROM sms_bindings WHERE released_at IS NOT NULL) || '/' ||
-           (SELECT COUNT(*) FROM sms_bindings b WHERE b.released_at IS NULL AND EXISTS (SELECT 1 FROM provider_work w WHERE w.subject_id = b.owner_subject
-             AND w.account_id = b.sender_number AND w.destination = b.recipient_key AND (w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL))) || '/' ||
-           (SELECT COUNT(*) FROM track_progress WHERE connection = 'already_connected') || '/' ||
-           -- An invite being withdrawn holds the others on its pair; its answer moves them (ADR 0004, Q41; seed 24046).
-           (SELECT COUNT(*) FROM track_progress WHERE invite_withdrawal = 'wanted') || '/' ||
-           (SELECT COUNT(*) FROM sms_bindings b WHERE b.released_at IS NULL AND EXISTS (SELECT 1 FROM reply_events re WHERE re.event_id LIKE 'sms:%' AND re.state = 'resolved' AND re.inbox = b.sender_number AND re.address = b.recipient_key AND re.received_wall >= b.created_at)) AS v`,
-      ).get() ?? { v: "0/0/0" },
-      "v",
-    );
+    return String(num(this.sql("SELECT seq FROM conversation_version WHERE id = 1").get() ?? { seq: 0 }, "seq"));
   }
 
   async accounts(now: number): Promise<AccountState[]> {
@@ -1479,30 +1506,7 @@ export class SqliteEngineStore implements EngineStore {
         .map((r) => ({ inbox: str(r, "inbox"), address: str(r, "address") })),
       // Every unreleased conversation of the lead's numbers and of the numbers its texts went to, whoever owns it (4.5).
       smsBindings: this.sql(
-        `SELECT b.sender_number, b.recipient_key, b.owner_subject, COALESCE(e.campaign_id, tr.campaign_id) AS owner_campaign, c.name AS owner_campaign_name,
-                tr.id IS NOT NULL AS owner_is_test, COALESCE(e.ended, tr.ended) AS owner_ended,
-                (EXISTS (SELECT 1 FROM provider_work w WHERE w.subject_id = b.owner_subject AND w.account_id = b.sender_number AND w.destination = b.recipient_key
-                  AND (w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL))
-                 -- A LinkedIn pair taken by an already-connected skip is a conversation from the skip (ADR 0004, question Q41).
-                 OR EXISTS (SELECT 1 FROM track_progress t WHERE t.subject_id = b.owner_subject AND t.connection = 'already_connected'
-                  AND (t.destination_detail_id = 'linkedin:' || COALESCE(e.person_id, '') || ':' || b.recipient_key
-                    OR (t.destination_detail_id = 'test:' || b.owner_subject || ':linkedin' AND tr.linkedin_key = b.recipient_key))))
-                -- An invite being withdrawn (its wait ended, the session not yet answered) is no known conversation: whether
-                -- the pair is released turns on the answer, so another subject waits, never skips (ADR 0004, Q41; seed 24046).
-                AND NOT EXISTS (SELECT 1 FROM track_progress t WHERE t.subject_id = b.owner_subject AND t.invite_withdrawal = 'wanted'
-                  AND t.connection IS NULL AND t.accepted_wall IS NULL
-                  AND (t.destination_detail_id = 'linkedin:' || COALESCE(e.person_id, '') || ':' || b.recipient_key
-                    OR (t.destination_detail_id = 'test:' || b.owner_subject || ':linkedin' AND tr.linkedin_key = b.recipient_key))) AS owner_sent,
-                EXISTS (SELECT 1 FROM reply_events re WHERE re.event_id LIKE 'sms:%' AND re.state = 'resolved' AND re.inbox = b.sender_number AND re.address = b.recipient_key AND re.received_wall >= b.created_at) AS owner_answered, b.channel AS pair_channel FROM sms_bindings b
-         LEFT JOIN enrollments e ON e.id = b.owner_subject
-         LEFT JOIN test_runs tr ON tr.id = b.owner_subject
-         LEFT JOIN campaigns c ON c.id = COALESCE(e.campaign_id, tr.campaign_id)
-         WHERE b.released_at IS NULL
-           AND (b.recipient_key IN (SELECT key FROM live_contact_details WHERE owner_kind = :kind AND owner_id = :owner AND channel = 'phone')
-             OR b.recipient_key IN (SELECT value FROM json_each(:own))
-             OR b.recipient_key IN (SELECT value FROM json_each(:profiles))
-             OR b.recipient_key IN (SELECT destination FROM attempts WHERE subject_id = :subject))
-         ORDER BY b.seq`,
+        CONVERSATION_PAIRS_QUERY,
       )
         // The lead's LinkedIn profile is a destination of conversations too (ADR 0004, question Q41): its session's pairs.
         .all({ kind: owner?.kind ?? "", owner: owner?.id ?? "", own: JSON.stringify(owner ? [] : details.filter((d) => d.mobile).map((d) => d.key)), profiles: JSON.stringify(details.filter((d) => d.channel === "linkedin").map((d) => d.key)), subject: subjectId })

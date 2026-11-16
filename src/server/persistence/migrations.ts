@@ -1123,6 +1123,42 @@ export const MIGRATIONS: readonly Migration[] = [
       -- An account's channel never changes either: the same id on another channel is another account (ADR 0004 1.1).
       CREATE TRIGGER sender_accounts_channel_fixed BEFORE UPDATE OF channel ON sender_accounts WHEN NEW.channel IS NOT OLD.channel
       BEGIN SELECT RAISE(ABORT, 'an account''s channel never changes'); END;
+      -- An INSERT OR REPLACE on the same key is a change too: refused before the old row is removed (the re-check of dd3969c, item 3).
+      CREATE TRIGGER sms_bindings_channel_fixed_on_replace BEFORE INSERT ON sms_bindings
+      WHEN EXISTS (SELECT 1 FROM sms_bindings WHERE seq = NEW.seq AND channel IS NOT NEW.channel)
+      BEGIN SELECT RAISE(ABORT, 'a pair''s channel never changes'); END;
+      CREATE TRIGGER sender_accounts_channel_fixed_on_replace BEFORE INSERT ON sender_accounts
+      WHEN EXISTS (SELECT 1 FROM sender_accounts WHERE id = NEW.id AND channel IS NOT NEW.channel)
+      BEGIN SELECT RAISE(ABORT, 'an account''s channel never changes'); END;
+
+      -- The conversations' version (ADR 0004, "The conversations' version"; the re-check of dd3969c, item 1): one counter the
+      -- database itself moves on every write to a fact a pair's ownership or knownness is read from, whatever wrote it. The
+      -- inputs, the same list the ownership query reads (smsBindings in sqlite-engine-store.ts): the pair rows; the owner's
+      -- provider work; the owner's track progress (a connection, an acceptance, a withdrawal); the owner's ending; and SMS
+      -- replies. A row of a subject that owns no pair moves nothing.
+      CREATE TABLE conversation_version (id INTEGER PRIMARY KEY CHECK (id = 1), seq INTEGER NOT NULL);
+      INSERT INTO conversation_version (id, seq) VALUES (1, 0);
+      CREATE TRIGGER conversations_pair_insert AFTER INSERT ON sms_bindings BEGIN UPDATE conversation_version SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_pair_update AFTER UPDATE ON sms_bindings BEGIN UPDATE conversation_version SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_pair_delete AFTER DELETE ON sms_bindings BEGIN UPDATE conversation_version SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_work_insert AFTER INSERT ON provider_work WHEN EXISTS (SELECT 1 FROM sms_bindings WHERE owner_subject = NEW.subject_id)
+      BEGIN UPDATE conversation_version SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_work_update AFTER UPDATE ON provider_work WHEN EXISTS (SELECT 1 FROM sms_bindings WHERE owner_subject IN (NEW.subject_id, OLD.subject_id))
+      BEGIN UPDATE conversation_version SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_work_delete AFTER DELETE ON provider_work WHEN EXISTS (SELECT 1 FROM sms_bindings WHERE owner_subject = OLD.subject_id)
+      BEGIN UPDATE conversation_version SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_progress_insert AFTER INSERT ON track_progress WHEN EXISTS (SELECT 1 FROM sms_bindings WHERE owner_subject = NEW.subject_id)
+      BEGIN UPDATE conversation_version SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_progress_update AFTER UPDATE ON track_progress WHEN EXISTS (SELECT 1 FROM sms_bindings WHERE owner_subject IN (NEW.subject_id, OLD.subject_id))
+      BEGIN UPDATE conversation_version SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_progress_delete AFTER DELETE ON track_progress WHEN EXISTS (SELECT 1 FROM sms_bindings WHERE owner_subject = OLD.subject_id)
+      BEGIN UPDATE conversation_version SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_enrollment_ended AFTER UPDATE OF ended ON enrollments WHEN NEW.ended IS NOT OLD.ended AND EXISTS (SELECT 1 FROM sms_bindings WHERE owner_subject = NEW.id)
+      BEGIN UPDATE conversation_version SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_test_run_ended AFTER UPDATE OF ended ON test_runs WHEN NEW.ended IS NOT OLD.ended AND EXISTS (SELECT 1 FROM sms_bindings WHERE owner_subject = NEW.id)
+      BEGIN UPDATE conversation_version SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_reply_insert AFTER INSERT ON reply_events BEGIN UPDATE conversation_version SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_reply_update AFTER UPDATE OF state ON reply_events WHEN NEW.state IS NOT OLD.state BEGIN UPDATE conversation_version SET seq = seq + 1; END;
     `,
   },
 ];

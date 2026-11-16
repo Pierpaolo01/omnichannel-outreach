@@ -329,6 +329,20 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     return clampedAt !== null ? afterHolds(clampedAt, 0, holdsOf(lead)) : afterHolds(sentAt, span, holdsOf(lead));
   };
 
+  // 29 (ADR 0003's invariant 29, as the track runs assert it; the re-check of dd3969c, item 1): the worker's caches follow the
+  // stored facts. Right after each of its ticks, a freshly started engine at the same instant, on the same store and
+  // providers, finds nothing to change and nothing to hand over. A cache keyed on less than what it read (a change of
+  // conversations) leaves the worker idle where a fresh one acts. Not while draining, after a problem, or past the bound.
+  let draining = false;
+  h.afterTick = async () => {
+    if (draining || bounded() || problems.length > 0) return;
+    const handovers = () => h.linkedin.handoverLog.length + (h.smsProvider?.handoverLog.length ?? 0) + h.fake.handoverLog.length;
+    const handed = handovers();
+    const changed = await h.freshEngineTick();
+    const more = handovers() - handed;
+    if (changed.length > 0 || more > 0) problem(`29: at ${iso(h.clock)} a fresh engine handed over ${more} and changed what the running worker had left: ${changed.join("; ").slice(0, 600)}`);
+  };
+
   // --- Events.
   const end = START + 12 * DAY;
   let requestNo = 0;
@@ -379,6 +393,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     if (!(await campaignPaused(c.id))) open.to = h.clock;
     else problem(`setup: the drain's resume of campaign ${c.id} did not take`);
   }
+  draining = true;
   // The drain: time passes with no new event, every hold released first.
   for (const l of leads) {
     const open = (held.get(l.id) ?? []).find((x) => x.to === null);
@@ -639,16 +654,16 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     // The sessions a lead's LinkedIn step may go from, by the record: the session of its conversation once one is taken (its
     // invite's handover, or the check that found it connected), else its campaign's pool now.
     const poolsEver = (ci: number) => new Set((pools.get(ci) ?? []).flatMap((x) => x.pool));
-    // The session of the check that found this subject connected: the one at its own connection's instant (two subjects on
-    // one profile, in two campaigns, are each checked from their own pool's sessions).
-    const connectedAt = new Map<string, number>();
-    for (const l of leads) {
-      const t = (await h.store.engine.subject(l.id, now))?.tracks.find((x) => x.trackId === campaigns[l.campaign]!.li.id);
-      if (t?.connection === "already_connected" && t.connectedWall != null) connectedAt.set(l.id, t.connectedWall);
-    }
-    // On any profile the person has had: a re-import can replace the profile after the connection was found.
-    const connectedSessionOf = (lead: Lead): string | undefined =>
-      li.presendLog.find((x) => [lead.profile, ...(lead.former ?? [])].includes(x.destination) && x.answer === "connected" && x.at === connectedAt.get(lead.id) && poolsEver(lead.campaign).has(x.sender))?.sender;
+    // The session of the first check that found this subject connected, from the provider's own log (the re-check of dd3969c,
+    // item 5): the check is the subject's own, on any profile the person has had.
+    // A connection the check found, not one its own accepted invite made: a "connected" answer before any invite of its own
+    // went (the check before a message answers "connected" too, once an invite is accepted).
+    const connectedCheckOf = (lead: Lead): { session: string; at: number } | undefined => {
+      const found = li.presendLog.find((x) => x.subjectId === lead.id && x.answer === "connected" && [lead.profile, ...(lead.former ?? [])].includes(x.destination) && poolsEver(lead.campaign).has(x.sender));
+      if (!found || li.deliveryLog.some((d) => d.subjectId === lead.id && d.action === "invite" && d.at <= found.at)) return undefined;
+      return { session: found.sender, at: found.at };
+    };
+    const connectedSessionOf = (lead: Lead): string | undefined => connectedCheckOf(lead)?.session;
     const sessionsOf = (lead: Lead): readonly string[] => {
       const invited = li.deliveryLog.find((d) => d.subjectId === lead.id && d.action === "invite")?.sender;
       if (invited) return [invited];
@@ -957,8 +972,8 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       for (const l of leads) {
         const st = await h.store.engine.subject(l.id, now);
         const t = st?.tracks.find((x) => x.trackId === campaigns[l.campaign]!.li.id);
-        const session = connectedSessionOf(l);
-        if (t?.connection === "already_connected" && session && l.profile && t.connectedWall != null) claims.push({ subject: l.id, session, profile: l.profile, from: t.connectedWall, connected: true });
+        const found = connectedCheckOf(l);
+        if (found && l.profile) claims.push({ subject: l.id, session: found.session, profile: l.profile, from: found.at, connected: true });
         if (t?.finishReason === "skipped_conversation_taken" && t.finishedWall != null) skippedTaken.push({ lead: l, at: t.finishedWall });
       }
       // An already-connected owner keeps the pair for good; one that reached it holds it until its release, and grounds a
