@@ -6,7 +6,7 @@
  */
 import { skipDeadlineOf, skipLimitOf } from "./calls.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "./definition.ts";
-import { alignPending, inFlight, liveTracksFor, progressOf, remainingSteps, withdrawClaims } from "./progress.ts";
+import { alignPending, inFlight, liveTracksFor, progressOf, remainingSteps, withdrawClaims, awaitingAcceptance } from "./progress.ts";
 import type { SubjectState } from "./state.ts";
 
 export { alignPending, inFlight } from "./progress.ts";
@@ -82,6 +82,8 @@ export type EditChangeKind =
   | "track_window"
   | "declined_path"
   | "skip_limit"
+  /** A LinkedIn track's wait for acceptance (ADR 0004 3.2): it reaches every lead still waiting, deadline re-resolved. */
+  | "accept_wait"
   | "call_script"
   | "timezone"
   | "sender_pool";
@@ -128,13 +130,14 @@ export function changesBetween(previous: CampaignDefinition, next: CampaignDefin
     if (JSON.stringify(was.window) !== JSON.stringify(track.window)) add("track_window", track.id);
     if (was.declinedPath !== track.declinedPath) add("declined_path", track.id);
     if (track.channel === "call" && skipLimitOf(previous, track.id) !== skipLimitOf(next, track.id)) add("skip_limit", track.id);
+    if (track.channel === "linkedin" && was.acceptWaitDays !== track.acceptWaitDays) add("accept_wait", track.id);
   }
   for (const was of previous.tracks) if (!was.removed && !next.tracks.some((t) => t.id === was.id)) add("track_removed", was.id);
   if ((previous.callScript ?? "") !== (next.callScript ?? "")) add("call_script");
   if (previous.timezone !== next.timezone) add("timezone");
   // The pools follow the connected senders: a change rides along with Apply, so it is listed (council on 93bed86, item 12).
   const same = (a: readonly string[] | undefined, b: readonly string[] | undefined) => [...(a ?? [])].sort().join("\n") === [...(b ?? [])].sort().join("\n");
-  if (!same(previous.emailPool, next.emailPool) || !same(previous.smsPool, next.smsPool)) add("sender_pool");
+  if (!same(previous.emailPool, next.emailPool) || !same(previous.smsPool, next.smsPool) || !same(previous.linkedinPool, next.linkedinPool)) add("sender_pool");
   return out;
 }
 
@@ -164,6 +167,9 @@ function impactOf(state: SubjectState, change: EditChange): LeadImpact {
     case "declined_path":
     case "skip_limit":
       return "reaches";
+    // A waiting lead's deadline is re-resolved; one whose invite has not gone yet takes the new wait when it goes.
+    case "accept_wait":
+      return awaitingAcceptance(state, track.id) || p?.connection == null ? "reaches" : "untouched";
     case "step_copy":
     case "step_wait":
     case "step_added":

@@ -34,6 +34,7 @@ export function stepWaitApi(why: StepWait): StepWaitApi {
     case "on_call_list":
     case "call_hours_closed":
     case "awaiting_acceptance":
+    case "invite_pending_elsewhere":
       return why;
     default: {
       const unhandled: never = why;

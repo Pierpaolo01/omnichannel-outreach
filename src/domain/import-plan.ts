@@ -111,6 +111,8 @@ export interface Directory {
   readonly people: readonly KnownPerson[];
   /** Enrollments in the campaign being imported into. Other campaigns never exclude anyone. */
   readonly enrollments: readonly KnownEnrollment[];
+  /** LinkedIn profile keys marked unreachable (ADR 0004 section 5): a profile among them is no channel. Absent: none. */
+  readonly badProfileKeys?: readonly string[];
   /**
    * Enrollments in every other campaign. They exclude nobody; they only stop a lead gaining a
    * personal email, mobile or shared inbox that another lead in the same campaign already has.
@@ -320,6 +322,7 @@ export function planImport(input: {
 }): ImportPlan {
   const { scraped, now, newId } = input;
   const crm = new WorkingDirectory(input.directory, now, newId);
+  const badProfiles: ReadonlySet<string> = new Set(input.directory.badProfileKeys ?? []);
   const businessRecords: (string | null)[] = scraped.businesses.map(() => null);
   const personRecords: (string | null)[] = scraped.people.map(() => null);
   const unapplied: SummaryEntry[] = [];
@@ -484,7 +487,7 @@ export function planImport(input: {
     const person = crm.person(personId);
     const company = crm.company(person.companyId);
     return {
-      reach: decisionMakerReach(personal(person.details), company.details),
+      reach: decisionMakerReach(personal(person.details), company.details, { url: person.fields.linkedinUrl, bad: badProfiles }),
       via: decisionMakerRoutes(personal(person.details), company.details),
     };
   };
@@ -585,7 +588,7 @@ export function planEnrollment(input: {
   const crm = new WorkingDirectory(input.directory, input.now, input.newId);
   const personReach = (personId: string): Reach => {
     const person = crm.person(personId);
-    return decisionMakerReach(personal(person.details), crm.company(person.companyId).details);
+    return decisionMakerReach(personal(person.details), crm.company(person.companyId).details, { url: person.fields.linkedinUrl, bad: new Set(input.directory.badProfileKeys ?? []) });
   };
   const seen = new Set<string>();
   const decisions: EnrollmentDecision[] = [];

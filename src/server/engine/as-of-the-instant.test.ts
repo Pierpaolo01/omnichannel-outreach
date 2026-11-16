@@ -117,6 +117,8 @@ describe("a route that changes an input the engine's timing reads first applies 
       "POST /api/bulk": "each item is POST /api/enrollments/:id/controls's own control, judged as of its instant; add enrolls new leads, which enter at their own instant, as an import's do, and changes no input of a lead already enrolled (ticket 18)",
       "POST /api/people/:id/notes": "stores a note; the engine reads none (ticket 18)",
       "POST /api/companies/:id/notes": "stores a note; the engine reads none (ticket 18)",
+      "POST /api/enrollments/:id/invite-withdrawal": "the user's answer about an invite's withdrawal; settles the ask, changes no deadline",
+      "POST /api/test-runs/:id/replies": "the user's LinkedIn reply mark on a test run only, judged as of its own instant (asOfAction)",
       "POST /api/enrollments/:id/replies": "the user's LinkedIn reply mark, judged as of its own instant (asOfAction, ADR 0004 section 7); it ends the lead, which freezes its clock",
       "PUT /api/sender-accounts/:id/allowances": "a LinkedIn session's allowances (ADR 0004 1.2), read at each claim as capacity is; no stored deadline reads them",
     };

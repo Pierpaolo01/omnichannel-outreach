@@ -160,7 +160,9 @@ export type StepWaitApi =
   | "on_call_list"
   | "call_hours_closed"
   /** A LinkedIn message waiting for its invite to be accepted (ADR 0004 section 9): `until` is the day the wait ends, a fact. */
-  | "awaiting_acceptance";
+  | "awaiting_acceptance"
+  /** An invite to the profile already pending on LinkedIn that this application did not send (question Q42). */
+  | "invite_pending_elsewhere";
 
 /**
  * When a pending step goes, as the engine decides it at the read's instant (`stepWhen`): ready (its time has come and nothing
@@ -515,7 +517,7 @@ export interface ConversationOwnerView {
  * SMS track is skipped (`skipped_conversation_taken`, question Q7 answered). `sms_conversation_unsettled`: every number
  * is in another campaign's conversation whose first text is not known sent or not sent yet; it waits for that answer.
  */
-export type HoldReasonApi = "unresolved" | "render_failed" | "provider_skipped" | "no_thread" | "sms_conversation_unsettled";
+export type HoldReasonApi = "unresolved" | "render_failed" | "provider_skipped" | "no_thread" | "sms_conversation_unsettled" | "invite_pending_elsewhere";
 
 export interface SendView {
   readonly attemptId: string;
@@ -546,6 +548,27 @@ export interface StepProgressView {
   readonly calls: readonly CallRecordView[];
 }
 
+/** What the engine stores of a LinkedIn track, for the record's sentences (ADR 0004 section 9). Part b words it. */
+export interface LinkedinTrackView {
+  /** The invite's note as it went: with it, without it because the note allowance was used, none written; null before it went. */
+  readonly note: "with" | "withheld" | "none" | null;
+  /** How the track connected, and when (the acceptance or the pre-send check); null while not connected. */
+  readonly connection: "accepted" | "already_connected" | null;
+  readonly connectedAt: string | null;
+  /** The platform's acceptance, recorded whenever observed. */
+  readonly acceptedAt: string | null;
+  /** An acceptance recorded after the track had finished: the person is now connected, and the user may write by hand. */
+  readonly acceptedAfterFinish: boolean;
+  /** The withdrawal after the acceptance wait: wanted, done, found accepted first, or kept by the user; null when none. */
+  readonly withdrawal: "wanted" | "withdrawn" | "accepted_first" | "kept_by_user" | null;
+  /** The session answered the withdrawal unknown too many times: listed in Needs attention for the user. */
+  readonly withdrawalStuck: boolean;
+  /** An invite this application sent is still open on LinkedIn (sent, not accepted, not withdrawn), whatever the lead's state. */
+  readonly inviteOpen: boolean;
+  /** An invite already pending on LinkedIn that this application did not send, first seen then (question Q42). */
+  readonly pendingElsewhereSince: string | null;
+}
+
 export interface TrackProgressView {
   readonly trackId: string;
   readonly channel: string;
@@ -556,6 +579,8 @@ export interface TrackProgressView {
   readonly finishedAt: string | null;
   /** For `skipped_conversation_taken` (reason `sms_conversation_taken`): who owns the conversation. Empty otherwise. */
   readonly conversationOwners: readonly ConversationOwnerView[];
+  /** A LinkedIn track's own facts (ADR 0004 section 9; council on 194fc44, items 4 and 6); null on any other track. */
+  readonly linkedin: LinkedinTrackView | null;
   readonly hold: HoldReasonApi | null;
   /** For `sms_conversation_unsettled`: the campaigns whose first text the track waits on. Empty otherwise. */
   readonly holdOwners: readonly ConversationOwnerView[];
@@ -630,6 +655,12 @@ export interface NeedsAttention {
    * Held tracks (5.4), each with whose lead it is (ticket 20b's names) and, for `sms_conversation_unsettled`, the
    * campaigns whose first text it waits on (`owners`; empty for every other reason).
    */
+  /**
+   * LinkedIn invite withdrawals the session has answered unknown too many times (ADR 0004 3.3; council on 194fc44, item 5):
+   * the user checks LinkedIn and marks it withdrawn or still there (`POST /api/enrollments/:id/invite-withdrawal`). Any other
+   * LinkedIn action left unknown is unresolved work, listed with the other unresolved work (ADR 0003 5.4).
+   */
+  readonly inviteWithdrawalsUnknown?: readonly { readonly enrollmentId: string; readonly trackId: string; readonly unknownAnswers: number }[];
   readonly heldTracks: readonly (AttentionLead & { readonly enrollmentId: string; readonly trackId: string; readonly reason: HoldReasonApi; readonly owners: readonly ConversationOwnerView[] })[];
   readonly accountWaits: readonly { readonly accountId: string; readonly reason: "quota" | "rate_limited"; readonly until: string | null }[];
   /**

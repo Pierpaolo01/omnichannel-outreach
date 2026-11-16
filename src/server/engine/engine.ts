@@ -9,9 +9,10 @@ import { launchCheck, type LaunchCheck } from "../../domain/sequence/blockers.ts
 import { REQUEST_ID_DIFFERENT, REQUEST_ID_REUSED, type OutcomeInput } from "../../domain/sequence/calls.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
-import { awaitingAcceptance, runs, sealReckoning, settledEvaluation, settledReadiness, stillSettled, type SettledEvaluation } from "../../domain/sequence/progress.ts";
+import { awaitingAcceptance, markInviteWithdrawal, invitePendingElsewhere, invitePendingUntil, runs, sealReckoning, settledEvaluation, settledReadiness, stillSettled, type SettledEvaluation } from "../../domain/sequence/progress.ts";
 import { definitionProblems, type CampaignDefinition } from "../../domain/sequence/definition.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
+import type { OutreachStatus } from "../../domain/outreach-status.ts";
 import { judgeCampaignControl, type LeadControl, type LeadExpectation } from "../../domain/sequence/controls.ts";
 import type { ControlView } from "../../shared/api.ts";
 import { effectOf } from "./controls-view.ts";
@@ -580,6 +581,10 @@ export class Engine {
         // A track waiting to start after another (ticket 13) starts at its resolved instant; it has no window of its own to wait for then.
         for (const p of s.tracks) if (p.startedAt === null && p.startAt !== null) due.push({ wall: now + (p.startAt - leadNow(s.subject.clock, now)), window: [], zone: s.lead.zone });
         // A LinkedIn invite's acceptance deadline (ADR 0004 3.3): its expiry finishes the track then, whatever the window.
+        for (const p of s.tracks) {
+          const until = invitePendingUntil(s, p.trackId);
+          if (until !== null) due.push({ wall: until, window: [], zone: s.lead.zone });
+        }
         for (const p of s.tracks) if (awaitingAcceptance(s, p.trackId) && p.acceptBy != null) due.push({ wall: now + (p.acceptBy - leadNow(s.subject.clock, now)), window: [], zone: s.lead.zone });
         // An open call task can expire at the user's next day (the skip limit, ticket 15).
         cached = { version, due, openCall: s.callTasks.some((t) => t.open && t.kind === "call") };
@@ -1227,14 +1232,37 @@ export class Engine {
    * bound to its first answer like every control, judged on the subject as of the action's instant. Accepted, it stops the
    * subject in this campaign only; the worker then runs, as after any accepted control.
    */
-  markReplied(subjectId: string, requestId: string): Promise<{ ok: true; replayed: boolean } | { ok: false; reason: string }> {
+  markReplied(subjectId: string, requestId: string, expected: { readonly status: OutreachStatus } | null = null): Promise<{ ok: true; replayed: boolean } | { ok: false; reason: string }> {
     return this.ticks.run(async () => {
       const now = this.now();
-      const record = await this.store.controlSubject(subjectId, now, { id: requestId, action: "mark_replied", body: JSON.stringify({ action: "mark_replied", channel: "linkedin" }) }, this.rules.requestStanding, (stored) => {
+      // The expectation is part of the body an id is bound to, as for every control (ticket 17b).
+      const body = JSON.stringify(expected === null ? { action: "mark_replied", channel: "linkedin" } : { action: "mark_replied", channel: "linkedin", expect: expected });
+      const record = await this.store.controlSubject(subjectId, now, { id: requestId, action: "mark_replied", body }, this.rules.requestStanding, (stored) => {
         const s = this.rules.asOfAction(stored, now, this.rules.evaluate);
-        const out = this.rules.markReplied(s, requestId, now);
+        const marked = this.rules.markReplied(s, requestId, now);
+        const unconfirmed = marked.ok ? this.rules.markPrecondition(this.rules.confirmedAgainst(stored, s), expected) : null;
+        const out = unconfirmed === null ? marked : ({ ok: false, reason: unconfirmed } as const);
         if (!out.ok) return { write: same(s, stored) ? null : s, answer: "refused", reason: out.reason, effect: null };
         return { write: out.state, answer: "accepted", reason: null, effect: JSON.stringify({ channel: "linkedin" }) };
+      });
+      if (record.kind === "reused" || record.kind === "different") return { ok: false as const, reason: CONTROL_REQUEST_REUSED };
+      if (record.answer === "refused") return { ok: false as const, reason: record.reason ?? "Refused." };
+      if (record.kind === "answered") await this.runTick();
+      return { ok: true as const, replayed: record.kind === "replayed" };
+    });
+  }
+
+  /**
+   * The user settles a withdrawal the session cannot answer (ADR 0004 3.3; council on 194fc44, item 5): withdrawn, or still
+   * there. One transaction with its request id, bound to its first answer like every control.
+   */
+  markInviteWithdrawal(subjectId: string, trackId: string, answer: "withdrawn" | "kept", requestId: string): Promise<{ ok: true; replayed: boolean } | { ok: false; reason: string }> {
+    return this.ticks.run(async () => {
+      const now = this.now();
+      const body = JSON.stringify({ action: "invite_withdrawal", trackId, answer });
+      const record = await this.store.controlSubject(subjectId, now, { id: requestId, action: "invite_withdrawal", body }, this.rules.requestStanding, (stored) => {
+        const next = markInviteWithdrawal(stored, trackId, answer, now);
+        return next === null ? { write: null, answer: "refused", reason: "No withdrawal of an invite is waiting for an answer on this track.", effect: null } : { write: next, answer: "accepted", reason: null, effect: JSON.stringify({ answer }) };
       });
       if (record.kind === "reused" || record.kind === "different") return { ok: false as const, reason: CONTROL_REQUEST_REUSED };
       if (record.answer === "refused") return { ok: false as const, reason: record.reason ?? "Refused." };
@@ -1425,21 +1453,24 @@ export class Engine {
     // invite is skipped in the handover's own write, with no call, when every predicate but the check and the slot holds.
     if (channel === "linkedin") {
       if (asked.kind === "unavailable") return false;
-      if (asked.kind === "connected" && subject && this.rules.actionOfStep(subject, a.trackId, a.stepId) === "invite") {
+      const invite = subject !== null && this.rules.actionOfStep(subject, a.trackId, a.stepId) === "invite";
+      if ((asked.kind === "connected" || asked.kind === "pending") && invite) {
         await this.update(a.subjectId, now, (s) => {
           const current = s.attempts.find((x) => x.id === a.id);
           const account = current ? s.accounts[current.accountId] : undefined;
           if (!current || current.state !== "claimed" || !account) return null;
           const failed = this.rules.handoverFailures(s, current, account, now).filter((f) => f !== 14 && f !== 16);
-          return failed.length === 0 ? this.rules.inviteAlreadyConnected(s, current.id, now) : this.rules.applyToAttempt(s, current.id, { kind: "guard_failed" }, now).state;
+          if (failed.length > 0) return this.rules.applyToAttempt(s, current.id, { kind: "guard_failed" }, now).state;
+          return asked.kind === "connected" ? this.rules.inviteAlreadyConnected(s, current.id, now) : invitePendingElsewhere(s, current.id, now);
         });
         return false;
       }
+      if (asked.kind === "pending") return false;
       await this.update(a.subjectId, now, (s) => ({ ...s, attempts: s.attempts.map((x) => (x.id === a.id ? { ...x, presendCheckedWall: now, presendFoundReply: false } : x)) }));
       this.hooks.crashPoint?.("after_presend", a.id);
       return true;
     }
-    if (asked.kind === "connected") return false;
+    if (asked.kind === "connected" || asked.kind === "pending") return false;
     const result = this.rules.presendAnswer(asked, channel, knownReplies);
     if (result.kind === "unavailable") return false;
     await this.update(a.subjectId, now, (s) => {

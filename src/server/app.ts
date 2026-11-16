@@ -39,7 +39,7 @@ export interface AppDependencies {
   readonly now: () => string;
   readonly newId: () => string;
   /** The sequence engine. Without one, the app runs an engine with no connected email provider. */
-  readonly engine?: Pick<Engine, "launch" | "logCallOutcome" | "controlLead" | "setCampaignPause" | "saveDefinition" | "runTest"> & Partial<Pick<Engine, "transportAvailable" | "markReplied">>;
+  readonly engine?: Pick<Engine, "launch" | "logCallOutcome" | "controlLead" | "setCampaignPause" | "saveDefinition" | "runTest"> & Partial<Pick<Engine, "transportAvailable" | "markReplied" | "markInviteWithdrawal">>;
   /** The email provider's own description, for GET /api/email-provider; absent when none is connected. */
   readonly emailProvider?: EmailProviderSource | null;
   /**
@@ -143,7 +143,12 @@ const leadControlBody = requestObject({
     .optional(),
 });
 // Ticket 21: the user's own test contacts, Run test and Stop test (ADR 0003 "Ticket 21").
-const markRepliedBody = requestObject({ requestId: controlRequestId, channel: z.literal("linkedin", { message: "Only a LinkedIn reply is marked by hand: email and SMS replies are detected." }) });
+const markRepliedBody = requestObject({
+  requestId: controlRequestId,
+  channel: z.literal("linkedin", { message: "Only a LinkedIn reply is marked by hand: email and SMS replies are detected." }),
+  expect: z.strictObject({ status: z.enum(OUTREACH_STATUSES) }, { message: "Send the status the confirmation showed." }).optional(),
+});
+const inviteWithdrawalBody = requestObject({ requestId: controlRequestId, trackId: z.string().min(1).max(100), answer: z.enum(["withdrawn", "kept"]) });
 const allowancesBody = requestObject({
   invitesPerDay: z.number().int().min(0).max(10_000),
   messagesPerDay: z.number().int().min(0).max(10_000),
@@ -723,7 +728,33 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     const id = c.req.param("id");
     if (!(await store.engine.subject(id, Date.parse(now()))) || (await isTestRun(id))) return notFound(c, "enrollment");
     if (!engine.markReplied) return controlRefused(c, "Marking a reply needs the engine.");
-    const answer = await engine.markReplied(id, body.data.requestId);
+    const answer = await engine.markReplied(id, body.data.requestId, body.data.expect ?? null);
+    if (!answer.ok) return controlRefused(c, answer.reason);
+    return c.json({ enrollment: await enrollmentRead(id), replayed: answer.replayed });
+  });
+
+  // A test run's LinkedIn reply, marked by the user on their own test profile (council on 194fc44, item 13): the same
+  // transition, request-id binding and confirmation as a lead's; it ends only that test run.
+  app.post("/test-runs/:id/replies", async (c) => {
+    const body = markRepliedBody.safeParse(await readJson(c));
+    if (!body.success) return invalid(c, body.error);
+    const run = await store.engine.testRun(c.req.param("id"));
+    if (!run) return notFound(c, "test run");
+    if (!engine.markReplied) return controlRefused(c, "Marking a reply needs the engine.");
+    const answer = await engine.markReplied(run.id, body.data.requestId, body.data.expect ?? null);
+    if (!answer.ok) return controlRefused(c, answer.reason);
+    const tab = await testTab(run.campaignId);
+    return tab ? c.json<TestRunTab & { readonly replayed: boolean }>({ ...tab, replayed: answer.replayed }) : notFound(c, "campaign");
+  });
+
+  // The user settles an invite withdrawal the session keeps answering unknown (ADR 0004 3.3).
+  app.post("/enrollments/:id/invite-withdrawal", async (c) => {
+    const body = inviteWithdrawalBody.safeParse(await readJson(c));
+    if (!body.success) return invalid(c, body.error);
+    const id = c.req.param("id");
+    if (!(await store.engine.subject(id, Date.parse(now()))) || (await isTestRun(id))) return notFound(c, "enrollment");
+    if (!engine.markInviteWithdrawal) return controlRefused(c, "Marking a withdrawal needs the engine.");
+    const answer = await engine.markInviteWithdrawal(id, body.data.trackId, body.data.answer, body.data.requestId);
     if (!answer.ok) return controlRefused(c, answer.reason);
     return c.json({ enrollment: await enrollmentRead(id), replayed: answer.replayed });
   });

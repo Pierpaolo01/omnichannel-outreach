@@ -1037,7 +1037,11 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE track_progress ADD COLUMN accept_by INTEGER;
       ALTER TABLE track_progress ADD COLUMN accept_by_wall INTEGER;
       ALTER TABLE track_progress ADD COLUMN accept_by_zone TEXT;
-      ALTER TABLE track_progress ADD COLUMN invite_withdrawal TEXT CHECK (invite_withdrawal IN ('wanted', 'withdrawn', 'accepted_first'));
+      ALTER TABLE track_progress ADD COLUMN invite_withdrawal TEXT CHECK (invite_withdrawal IN ('wanted', 'withdrawn', 'accepted_first', 'kept_by_user'));
+      ALTER TABLE track_progress ADD COLUMN invite_withdrawal_unknowns INTEGER NOT NULL DEFAULT 0;
+      -- An invite already pending on LinkedIn that this application did not send (ADR 0004 3.3, question Q42).
+      ALTER TABLE track_progress ADD COLUMN invite_pending_seen_wall INTEGER;
+      ALTER TABLE track_progress ADD COLUMN invite_pending_checked_wall INTEGER;
       ALTER TABLE track_progress ADD COLUMN invite_withdrawal_last_wall INTEGER;
       -- A social step's action and an invite's note, fixed at the claim and at the handover (ADR 0004 4, 6).
       ALTER TABLE provider_work ADD COLUMN kind TEXT CHECK (kind IN ('invite', 'message'));
@@ -1096,16 +1100,12 @@ export const MIGRATIONS: readonly Migration[] = [
       WHEN NOT (NEW.number_detail_id IS NULL OR (CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
           THEN (NEW.number_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
             OR (NEW.number_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
-            OR (NEW.number_detail_id = 'test:' || NEW.subject_id || ':linkedin' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND linkedin_key IS NOT NULL))
-          WHEN NEW.number_detail_id LIKE 'linkedin:%' THEN EXISTS (SELECT 1 FROM enrollments e WHERE e.id = NEW.subject_id AND e.person_id IS NOT NULL AND substr(NEW.number_detail_id, 1, length(e.person_id) + 10) = 'linkedin:' || e.person_id || ':')
           ELSE NEW.number_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.number_detail_id) END))
       BEGIN SELECT RAISE(ABORT, 'call_attempts.number_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
       CREATE TRIGGER call_attempts_number_detail_id_known_update BEFORE UPDATE OF number_detail_id, subject_id ON call_attempts
       WHEN NOT (NEW.number_detail_id IS NULL OR (CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
           THEN (NEW.number_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
             OR (NEW.number_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
-            OR (NEW.number_detail_id = 'test:' || NEW.subject_id || ':linkedin' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND linkedin_key IS NOT NULL))
-          WHEN NEW.number_detail_id LIKE 'linkedin:%' THEN EXISTS (SELECT 1 FROM enrollments e WHERE e.id = NEW.subject_id AND e.person_id IS NOT NULL AND substr(NEW.number_detail_id, 1, length(e.person_id) + 10) = 'linkedin:' || e.person_id || ':')
           ELSE NEW.number_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.number_detail_id) END))
       BEGIN SELECT RAISE(ABORT, 'call_attempts.number_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
     `,

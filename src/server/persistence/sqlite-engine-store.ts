@@ -781,6 +781,7 @@ export class SqliteEngineStore implements EngineStore {
         `SELECT (SELECT COALESCE(MAX(seq), 0) FROM sms_bindings) || '/' || (SELECT COUNT(*) FROM sms_bindings WHERE released_at IS NOT NULL) || '/' ||
            (SELECT COUNT(*) FROM sms_bindings b WHERE b.released_at IS NULL AND EXISTS (SELECT 1 FROM provider_work w WHERE w.subject_id = b.owner_subject
              AND w.account_id = b.sender_number AND w.destination = b.recipient_key AND (w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL))) || '/' ||
+           (SELECT COUNT(*) FROM track_progress WHERE connection = 'already_connected') || '/' ||
            (SELECT COUNT(*) FROM sms_bindings b WHERE b.released_at IS NULL AND EXISTS (SELECT 1 FROM reply_events re WHERE re.event_id LIKE 'sms:%' AND re.state = 'resolved' AND re.inbox = b.sender_number AND re.address = b.recipient_key AND re.received_wall >= b.created_at)) AS v`,
       ).get() ?? { v: "0/0/0" },
       "v",
@@ -1461,8 +1462,12 @@ export class SqliteEngineStore implements EngineStore {
       smsBindings: this.sql(
         `SELECT b.sender_number, b.recipient_key, b.owner_subject, COALESCE(e.campaign_id, tr.campaign_id) AS owner_campaign, c.name AS owner_campaign_name,
                 tr.id IS NOT NULL AS owner_is_test, COALESCE(e.ended, tr.ended) AS owner_ended,
-                EXISTS (SELECT 1 FROM provider_work w WHERE w.subject_id = b.owner_subject AND w.account_id = b.sender_number AND w.destination = b.recipient_key
-                  AND (w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL)) AS owner_sent,
+                (EXISTS (SELECT 1 FROM provider_work w WHERE w.subject_id = b.owner_subject AND w.account_id = b.sender_number AND w.destination = b.recipient_key
+                  AND (w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL))
+                 -- A LinkedIn pair taken by an already-connected skip is a conversation from the skip (ADR 0004, question Q41).
+                 OR EXISTS (SELECT 1 FROM track_progress t WHERE t.subject_id = b.owner_subject AND t.connection = 'already_connected'
+                  AND (t.destination_detail_id = 'linkedin:' || COALESCE(e.person_id, '') || ':' || b.recipient_key
+                    OR (t.destination_detail_id = 'test:' || b.owner_subject || ':linkedin' AND tr.linkedin_key = b.recipient_key)))) AS owner_sent,
                 EXISTS (SELECT 1 FROM reply_events re WHERE re.event_id LIKE 'sms:%' AND re.state = 'resolved' AND re.inbox = b.sender_number AND re.address = b.recipient_key AND re.received_wall >= b.created_at) AS owner_answered FROM sms_bindings b
          LEFT JOIN enrollments e ON e.id = b.owner_subject
          LEFT JOIN test_runs tr ON tr.id = b.owner_subject
@@ -1470,10 +1475,12 @@ export class SqliteEngineStore implements EngineStore {
          WHERE b.released_at IS NULL
            AND (b.recipient_key IN (SELECT key FROM live_contact_details WHERE owner_kind = :kind AND owner_id = :owner AND channel = 'phone')
              OR b.recipient_key IN (SELECT value FROM json_each(:own))
+             OR b.recipient_key IN (SELECT value FROM json_each(:profiles))
              OR b.recipient_key IN (SELECT destination FROM attempts WHERE subject_id = :subject))
          ORDER BY b.seq`,
       )
-        .all({ kind: owner?.kind ?? "", owner: owner?.id ?? "", own: JSON.stringify(owner ? [] : details.filter((d) => d.mobile).map((d) => d.key)), subject: subjectId })
+        // The lead's LinkedIn profile is a destination of conversations too (ADR 0004, question Q41): its session's pairs.
+        .all({ kind: owner?.kind ?? "", owner: owner?.id ?? "", own: JSON.stringify(owner ? [] : details.filter((d) => d.mobile).map((d) => d.key)), profiles: JSON.stringify(details.filter((d) => d.channel === "linkedin").map((d) => d.key)), subject: subjectId })
         .map((b) => ({ sender: str(b, "sender_number"), recipient: str(b, "recipient_key"), owner: str(b, "owner_subject"), ownerCampaignId: strOrNull(b, "owner_campaign"), ownerCampaignName: strOrNull(b, "owner_campaign_name"), ownerIsTest: Number(b["owner_is_test"]) === 1, ownerEnded: b["owner_ended"] != null, ownerSent: Number(b["owner_sent"]) === 1, ownerAnswered: Number(b["owner_answered"]) === 1 })),
       lead: { zone, details, resolved, mergeData, phones },
       markBad: [],
@@ -1509,17 +1516,19 @@ export class SqliteEngineStore implements EngineStore {
       this.run(
         `INSERT OR REPLACE INTO track_progress (subject_id, track_id, start_at, start_basis_at, start_basis_wall, start_zone, started_at,
            destination_detail_id, next_step_id, basis_at, basis_wall, due_at, due_wall, due_zone, finished_at, finished_wall, finish_reason, conversation_owners,
-           connection, connected_at, connected_wall, accepted_wall, accept_by, accept_by_wall, accept_by_zone, invite_withdrawal, invite_withdrawal_last_wall)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           connection, connected_at, connected_wall, accepted_wall, accept_by, accept_by_wall, accept_by_zone, invite_withdrawal, invite_withdrawal_last_wall,
+           invite_withdrawal_unknowns, invite_pending_seen_wall, invite_pending_checked_wall)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id, t.trackId, t.startAt, t.startBasisAt, t.startBasisWall, t.startZone, t.startedAt, t.destinationDetailId, t.nextStepId, t.basisAt, t.basisWall, t.dueAt, t.dueWall, t.dueZone, t.finishedAt, t.finishedWall, t.finishReason, t.conversationOwners ? JSON.stringify(t.conversationOwners) : null,
           t.connection ?? null, t.connectedAt ?? null, t.connectedWall ?? null, t.acceptedWall ?? null, t.acceptBy ?? null, t.acceptByWall ?? null, t.acceptByZone ?? null, t.inviteWithdrawal ?? null, t.inviteWithdrawalLastWall ?? null,
+          t.inviteWithdrawalUnknowns ?? 0, t.invitePendingSeenWall ?? null, t.invitePendingCheckedWall ?? null,
         ],
       );
       // Stored once and only forward (ADR 0004 10.4): a connection never changes once set, a withdrawal never moves back.
       const was = base.tracks.find((b) => b.trackId === t.trackId);
       if ((was?.connection ?? null) !== null && was?.connection !== t.connection) throw new Error(`a track's connection is set once (${t.trackId})`);
-      const order = { wanted: 1, withdrawn: 2, accepted_first: 2 } as const;
+      const order = { wanted: 1, withdrawn: 2, accepted_first: 2, kept_by_user: 2 } as const;
       if (was?.inviteWithdrawal && (!t.inviteWithdrawal || order[t.inviteWithdrawal] < order[was.inviteWithdrawal] || (order[was.inviteWithdrawal] === 2 && t.inviteWithdrawal !== was.inviteWithdrawal))) throw new Error(`an invite's withdrawal only moves forward (${t.trackId})`);
     }
     for (const r of next.results) {
@@ -1798,7 +1807,8 @@ function toTrack(r: Row): TrackProgress {
     ...(r["connection"] == null ? {} : { connection: str(r, "connection") === "accepted" ? ("accepted" as const) : ("already_connected" as const), connectedAt: numOrNull(r, "connected_at"), connectedWall: numOrNull(r, "connected_wall") }),
     ...(r["accepted_wall"] == null ? {} : { acceptedWall: num(r, "accepted_wall") }),
     ...(r["accept_by"] == null ? {} : { acceptBy: num(r, "accept_by"), acceptByWall: numOrNull(r, "accept_by_wall"), acceptByZone: strOrNull(r, "accept_by_zone") }),
-    ...(r["invite_withdrawal"] == null ? {} : { inviteWithdrawal: str(r, "invite_withdrawal") as NonNullable<TrackProgress["inviteWithdrawal"]>, inviteWithdrawalLastWall: numOrNull(r, "invite_withdrawal_last_wall") }),
+    ...(r["invite_withdrawal"] == null ? {} : { inviteWithdrawal: str(r, "invite_withdrawal") as NonNullable<TrackProgress["inviteWithdrawal"]>, inviteWithdrawalLastWall: numOrNull(r, "invite_withdrawal_last_wall"), inviteWithdrawalUnknowns: num(r, "invite_withdrawal_unknowns") }),
+    ...(r["invite_pending_checked_wall"] == null ? {} : { invitePendingSeenWall: numOrNull(r, "invite_pending_seen_wall"), invitePendingCheckedWall: num(r, "invite_pending_checked_wall") }),
   };
 }
 

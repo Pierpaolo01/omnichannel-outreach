@@ -1,4 +1,5 @@
 /** Read models for the HTTP interface, built from the engine's stored facts. */
+import { stepNumber } from "../../domain/sequence/definition.ts";
 import { isLive, markable } from "../../domain/sequence/attempt.ts";
 import { carriedInto, isListed, listedForDay, reasonOf } from "../../domain/sequence/calls.ts";
 import { callRecordView, dateOfDay } from "./call-views.ts";
@@ -7,9 +8,9 @@ import { stepWhenView } from "./step-when-view.ts";
 import { localDayNumber, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { relevantChannels, waitingOn } from "../../domain/sequence/providers.ts";
 import { providerEvidence, sendingInterrupted } from "./worker-state.ts";
-import { channelOf, conversationOwnersOf, deriveStatus, liveTracksFor, unreachableWhy, unsettledOwnersOf, wallAtLead } from "../../domain/sequence/progress.ts";
+import { inviteWithdrawalStuck, channelOf, conversationOwnersOf, deriveStatus, liveTracksFor, unreachableWhy, unsettledOwnersOf, wallAtLead } from "../../domain/sequence/progress.ts";
 import type { AccountState, SubjectState } from "../../domain/sequence/state.ts";
-import type { AttentionLead, ConversationOwnerView, EnrollmentProgress, NeedsAttention, SenderAccountViewApi } from "../../shared/api.ts";
+import type { LinkedinTrackView, AttentionLead, ConversationOwnerView, EnrollmentProgress, NeedsAttention, SenderAccountViewApi } from "../../shared/api.ts";
 import type { EngineStore } from "./engine-store.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 
@@ -88,7 +89,7 @@ export function progressView(s: SubjectState, now: number, env: StepEnv = {}, wh
       .filter((t, i, all) => all.indexOf(t) === i)
       .map((track) => {
         const p = s.tracks.find((x) => x.trackId === track.id);
-        const numberOf = (stepId: string) => track.steps.filter((st) => !st.removed).findIndex((st) => st.id === stepId) + 1;
+        const numberOf = (stepId: string) => stepNumber(track, stepId);
         const task = s.callTasks.find((t) => t.trackId === track.id);
         return {
           trackId: track.id,
@@ -110,6 +111,7 @@ export function progressView(s: SubjectState, now: number, env: StepEnv = {}, wh
           finishReason: p?.finishReason ?? null,
           finishedAt: iso(p?.finishedWall ?? null),
           conversationOwners: conversationOwnersView(s, track.id),
+          linkedin: track.channel === "linkedin" ? linkedinTrackView(s, track.id) : null,
           hold: heldReason(s, track.id, now),
           holdOwners: unsettledOwnersOf(s, track.id, now).map((o) => ({ name: o.name, test: o.test })),
           // When it goes, by the engine's own decision functions at this instant (ADR 0003 "Reads that say when").
@@ -296,7 +298,12 @@ export async function needsAttention(
     }
   }
   overdueCallbacks.sort((a, b) => Date.parse(a.callbackAt) - Date.parse(b.callbackAt) || (a.taskId < b.taskId ? -1 : 1));
+  // Leads only, whatever their state: a withdrawal is asked of the session for an ended lead too.
+  const inviteWithdrawalsUnknown = (await store.invitesToWithdraw())
+    .filter((w) => inviteWithdrawalStuck(w.progress) && !w.subjectId.startsWith("test-"))
+    .map((w) => ({ enrollmentId: w.subjectId, trackId: w.trackId, unknownAnswers: w.progress.inviteWithdrawalUnknowns ?? 0 }));
   return {
+    inviteWithdrawalsUnknown,
     overdueCallbacks,
     stalledInboxes: stalledAccounts(accounts, open, now),
     heldTracks,
@@ -319,4 +326,23 @@ export async function needsAttention(
 async function senderProblems(store: EngineStore, accounts: readonly AccountState[]): Promise<NeedsAttention["senderProblems"][number][]> {
   const labels = await store.accountLabels();
   return accounts.filter((a) => !a.healthy).map((a) => ({ accountId: a.id, channel: a.channel, label: labels[a.id] ?? a.id, problem: a.problem ?? "unhealthy" }));
+}
+
+/** A LinkedIn track's stored facts as the read gives them (ADR 0004 section 9): nothing computed beside the engine's own. */
+export function linkedinTrackView(s: SubjectState, trackId: string): LinkedinTrackView {
+  const p = s.tracks.find((x) => x.trackId === trackId);
+  const invite = s.work.find((w) => w.trackId === trackId && w.kind === "invite" && w.firstHandedWall !== null && w.settled !== "rejected");
+  const sent = invite !== undefined && (invite.settled === "sent" || invite.settled === "user_sent" || invite.sentWall !== null);
+  const withdrawal = p?.inviteWithdrawal ?? null;
+  return {
+    note: invite?.note ?? null,
+    connection: p?.connection ?? null,
+    connectedAt: iso(p?.connectedWall ?? null),
+    acceptedAt: iso(p?.acceptedWall ?? null),
+    acceptedAfterFinish: p?.acceptedWall != null && p.finishedWall != null && (p.connection ?? null) === null,
+    withdrawal,
+    withdrawalStuck: p ? inviteWithdrawalStuck(p) : false,
+    inviteOpen: sent && p?.acceptedWall == null && (p?.connection ?? null) === null && withdrawal !== "withdrawn" && withdrawal !== "accepted_first",
+    pendingElsewhereSince: iso(p?.invitePendingSeenWall ?? null),
+  };
 }

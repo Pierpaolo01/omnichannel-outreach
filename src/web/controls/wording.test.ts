@@ -53,7 +53,7 @@ function lead(status: OutreachStatus, fields: Partial<RecordLead> = {}): RecordL
 /** A running lead whose current step is email 2, due Tuesday 3 November at 09:00 London. */
 const running = (status: OutreachStatus, fields: Partial<RecordLead> = {}) =>
   lead(status, {
-    tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], hold: null, holdOwners: [], nextStep: { stepId: "s2", number: 2, when: at("2026-11-03T09:00:00.000Z") }, callTask: null, steps: [] }],
+    tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], linkedin: null, hold: null, holdOwners: [], nextStep: { stepId: "s2", number: 2, when: at("2026-11-03T09:00:00.000Z") }, callTask: null, steps: [] }],
     controls: [allowed("pause", { statusAfter: "paused", next: step() }), refused("resume", "They are not paused."), allowed("skip", { skips: step(), next: step({ stepId: "s3", number: 3, when: at("2026-11-06T09:00:00.000Z") }) }), allowed("stop", { statusAfter: "stopped_manually" })],
     ...fields,
   });
@@ -81,7 +81,7 @@ describe("when a step goes, in one wording function (ADR 0003 \"Reads that say w
     const reasons: Record<StepWaitApi, true> = {
       campaign_not_launched: true, campaign_paused: true, lead_paused: true, callback: true, ended: true, with_provider: true, unresolved: true, render_failed: true,
       provider_skipped: true, no_thread: true, sms_conversation_unsettled: true, no_window: true, sender_unavailable: true, sending_capacity: true, call_capacity: true, on_call_list: true,
-      no_transport: true, waiting_on_provider: true, reply_pending: true, no_destination: true, call_hours_closed: true, awaiting_acceptance: true,
+      no_transport: true, waiting_on_provider: true, reply_pending: true, no_destination: true, call_hours_closed: true, awaiting_acceptance: true, invite_pending_elsewhere: true,
       sender_slot: true, sender_rate_limited: true, sender_waiting: true,
     };
     for (const why of Object.keys(reasons) as StepWaitApi[]) {
@@ -114,7 +114,7 @@ describe("the plain next-step sentence, for every status", () => {
   test("queued and active after launch: the step the read names, and when it is due", () => {
     expect(nextStepSentence(running("queued"), ZONE)).toBe("Nothing has gone out yet. Next: email 2 of 3, earliest Tue 3 Nov at 09:00.");
     // A held step is never said to be due: the row says why, naming whose text it waits on (verifier on faac357, item 5).
-    const held = running("queued", { tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], hold: "sms_conversation_unsettled", holdOwners: [{ name: "Spring clinics", test: false }], nextStep: { stepId: "s2", number: 2, when: at("2026-11-03T09:00:00.000Z") }, callTask: null, steps: [] }] });
+    const held = running("queued", { tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], linkedin: null, hold: "sms_conversation_unsettled", holdOwners: [{ name: "Spring clinics", test: false }], nextStep: { stepId: "s2", number: 2, when: at("2026-11-03T09:00:00.000Z") }, callTask: null, steps: [] }] });
     expect(nextStepSentence(held, ZONE)).toBe("Nothing has gone out yet. Next: email 2 of 3, on hold because the first text from campaign Spring clinics to the same mobile, on every number this campaign can use, isn’t known to have gone or not yet.");
     expect(nextStepSentence(running("active"), ZONE)).toBe("Next: email 2 of 3, earliest Tue 3 Nov at 09:00.");
   });

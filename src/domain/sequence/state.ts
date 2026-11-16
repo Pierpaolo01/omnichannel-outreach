@@ -108,8 +108,16 @@ export interface TrackProgress {
   readonly acceptByWall?: number | null;
   readonly acceptByZone?: string | null;
   /** The invite's withdrawal after the deadline: wanted, done, or found accepted first (ADR 0004 3.3). */
-  readonly inviteWithdrawal?: "wanted" | "withdrawn" | "accepted_first" | null;
+  readonly inviteWithdrawal?: "wanted" | "withdrawn" | "accepted_first" | "kept_by_user" | null;
   readonly inviteWithdrawalLastWall?: number | null;
+  /** How many times in a row the session answered the withdrawal "unknown" (ADR 0004 3.3): listed for the user after a bound. */
+  readonly inviteWithdrawalUnknowns?: number;
+  /**
+   * An invite to the profile already pending on LinkedIn that this application did not send (the pre-send check's `pending`;
+   * question Q42): when it was first seen, and last checked. The invite step is held and checked again each settling period.
+   */
+  readonly invitePendingSeenWall?: number | null;
+  readonly invitePendingCheckedWall?: number | null;
 }
 
 export type StepOutcome = "sent" | "skipped" | "failed";

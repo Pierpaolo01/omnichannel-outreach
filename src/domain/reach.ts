@@ -1,10 +1,19 @@
 import type { Channel, PhoneKind } from "./contact-details.ts";
+import { linkedinProfileKey } from "./linkedin-profile.ts";
 
 /** Which channels a lead can be contacted on. Missing channels skip their tracks. */
 export interface Reach {
   readonly email: boolean;
   readonly sms: boolean;
   readonly call: boolean;
+  /** A member profile from the CSV, read by the one normaliser and not marked unreachable (ADR 0004 section 5). */
+  readonly linkedin: boolean;
+}
+
+/** Whether a CSV's LinkedIn cell is a usable profile: a member profile (a company page is not, Q35) whose key is not marked bad. */
+export function usableProfile(url: string, badProfileKeys: ReadonlySet<string> = new Set()): boolean {
+  const key = linkedinProfileKey(url);
+  return key !== null && !badProfileKeys.has(key);
 }
 
 export interface ContactPoint {
@@ -20,11 +29,12 @@ const usable = (points: readonly ContactPoint[], channel: Channel, kinds?: reado
  * A decision maker's email and SMS go only to their own address and mobile.
  * Calls may use any of their own numbers or the company main line.
  */
-export function decisionMakerReach(own: readonly ContactPoint[], company: readonly ContactPoint[]): Reach {
+export function decisionMakerReach(own: readonly ContactPoint[], company: readonly ContactPoint[], profile: { readonly url: string; readonly bad: ReadonlySet<string> } = { url: "", bad: new Set() }): Reach {
   return {
     email: usable(own, "email"),
     sms: usable(own, "phone", ["mobile"]),
     call: usable(own, "phone") || usable(company, "phone", ["main_line"]),
+    linkedin: usableProfile(profile.url, profile.bad),
   };
 }
 
@@ -37,11 +47,13 @@ export function companyLeadReach(company: readonly ContactPoint[]): Reach {
     email: usable(company, "email"),
     sms: false,
     call: usable(company, "phone", ["main_line"]),
+    // A company page cannot take a connection invite (question Q35).
+    linkedin: false,
   };
 }
 
 export function hasUsableChannel(reach: Reach): boolean {
-  return reach.email || reach.sms || reach.call;
+  return reach.email || reach.sms || reach.call || reach.linkedin;
 }
 
 /** The contact details a lead can be reached through, in the order the user reads them. */

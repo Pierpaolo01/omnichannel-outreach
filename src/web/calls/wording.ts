@@ -368,6 +368,7 @@ const HOLD_REASON: Readonly<Record<HoldReasonApi, string>> = {
   provider_skipped: "the provider skipped the lead",
   no_thread: "a follow-up has no earlier email to continue",
   sms_conversation_unsettled: "the first text from another campaign to the same mobile, on every number this campaign can use, isn’t known to have gone or not yet",
+  invite_pending_elsewhere: "an invite to them is already pending on LinkedIn that this application didn’t send",
 };
 
 export interface AttentionItem {
@@ -434,6 +435,7 @@ export function carriedItem(today: Pick<TodayView, "carriedOver" | "carriedOverL
  */
 export const SAID_ON_TODAY: Record<keyof NeedsAttention, string> = {
   overdueCallbacks: "from Today's own read, which names whose they are (overdueItem)",
+  inviteWithdrawalsUnknown: "not yet: part b of ticket 24 words it (ADR 0004 3.3); the read already lists each one",
   sendingInterrupted: "sendingInterruptedItem, from this read, so it and the provider entries share one instant",
   waitingOnProvider: "providerWaitItems",
   senderProblems: "one entry per account",

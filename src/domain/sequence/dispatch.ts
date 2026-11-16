@@ -6,8 +6,9 @@
  */
 import { ENGINE_PARAMS, isLive, isUncertain } from "./attempt.ts";
 import { leadNow, localDayNumber, windowOpen } from "./clock.ts";
-import { linkedinStepKind, poolOf, socialActionOf, type SocialAction } from "./definition.ts";
+import { holdsConversations, linkedinStepKind, poolOf, socialActionOf, type SocialAction } from "./definition.ts";
 import {
+  invitePendingUntil,
   applyToAttempt,
   awaitingAcceptance,
   callbackHold,
@@ -66,6 +67,9 @@ export function heldReason(state: SubjectState, trackId: string, now: number): H
   // A conversation taken on every number the track may use is not a hold: evaluation skips the track (4.5, Q7 answered).
   // One whose owner's first text is not known sent or not sent yet holds it, until that work settles (point 10).
   if (conversationUnsettled(state, trackId, now)) return "sms_conversation_unsettled";
+  // An invite already pending on LinkedIn that this application did not send: checked again after a settling period (Q42).
+  const pendingUntil = invitePendingUntil(state, trackId);
+  if (pendingUntil !== null && now < pendingUntil) return "invite_pending_elsewhere";
   return null;
 }
 
@@ -145,6 +149,7 @@ export function holdWait(hold: HoldReason): StepWait {
     case "provider_skipped":
     case "no_thread":
     case "sms_conversation_unsettled":
+    case "invite_pending_elsewhere":
       return hold;
     default: {
       const unhandled: never = hold;
@@ -184,19 +189,18 @@ export interface StepEnv {
  */
 export function stepWhen(state: SubjectState, trackId: string, now: number, env: StepEnv = {}): StepWhen | null {
   const p = progressOf(state, trackId);
-  // A LinkedIn message waiting for its invite to be accepted: a reason, with the day the wait ends as a fact (ADR 0004 9).
-  if (p && p.nextStepId !== null && awaitingAcceptance(state, trackId)) {
-    if (state.subject.ended !== null) return { kind: "waits", why: "ended" };
-    return p.acceptByWall != null ? { kind: "waits", why: "awaiting_acceptance", until: p.acceptByWall } : { kind: "waits", why: "awaiting_acceptance" };
-  }
-  if (!p || p.startedAt === null || p.finishedAt !== null || p.nextStepId === null || p.dueAt === null) return null;
+  const awaiting = p !== undefined && p.nextStepId !== null && awaitingAcceptance(state, trackId);
+  if (!p || p.startedAt === null || p.finishedAt !== null || p.nextStepId === null || (p.dueAt === null && !awaiting)) return null;
   const waits = (why: StepWait): StepWhen => ({ kind: "waits", why });
   const { subject, campaign } = state;
+  // Every hold first, with no time: a frozen clock has no end date (ADR 0003 "Reads that say when"; review bot on 194fc44).
   if (subject.ended !== null) return waits("ended");
   if (!campaignLets(state)) return waits(campaign.pausedSince !== null ? "campaign_paused" : "campaign_not_launched");
   if (subject.leadPaused) return waits("lead_paused");
   if (callbackHold(state)) return waits("callback");
   if (!runs(state)) return waits("ended");
+  // Waiting for acceptance (ADR 0004 9): the day the wait ends is the engine's own deadline on the lead's running clock now.
+  if (awaiting) return p.acceptBy != null ? { kind: "waits", why: "awaiting_acceptance", until: now + (p.acceptBy - leadNow(state.subject.clock, now)) } : waits("awaiting_acceptance");
   const stepId = p.nextStepId;
   const channel = channelOf(state, trackId);
   if (channel === "call") return callWhen(state, trackId, stepId, now, env);
@@ -554,10 +558,15 @@ export function handoverFailures(state: SubjectState, attempt: Attempt, account:
   const fixed = senderOf(state, channel);
   if (account.channel !== channel || (fixed !== null ? fixed !== account.id : !poolOf(state.campaign.definition, channel).includes(account.id))) failed.push(10);
   // 11. For SMS, the pair is unbound, or bound to this subject.
-  if (channel === "sms" && !pairFree(state, account.id, attempt.destination)) failed.push(11);
+  // 11. For a channel of conversations (SMS, LinkedIn), the pair is unbound, or bound to this subject.
+  if (holdsConversations(channel) && !pairFree(state, account.id, attempt.destination)) failed.push(11);
   if (!presendFresh(attempt, now)) failed.push(14);
   if (!renderStep(state, attempt.trackId, attempt.stepId)) failed.push(5);
   if (lacksThread(state, attempt.trackId, attempt.stepId)) failed.push(17);
+  // 19. A LinkedIn message only once the track is connected (ADR 0004 3.2), checked again in the write that authorizes it.
+  const track = state.campaign.definition.tracks.find((t) => t.id === attempt.trackId);
+  const progress = progressOf(state, attempt.trackId);
+  if (track && progress && linkedinStepKind(track, attempt.stepId) !== "invite" && linkedinStepKind(track, attempt.stepId) !== null && (progress.connection ?? null) === null) failed.push(19);
   if (now < account.nextSlotAt) failed.push(16);
   return [...new Set(failed)].sort((a, b) => a - b);
 }
@@ -588,7 +597,7 @@ export function handOver(state: SubjectState, attempt: Attempt, account: Account
   // The sender is fixed here, and for SMS the conversation taken, in the same write (1.3, 4.5).
   const channel = channelOf(state, attempt.trackId);
   const sms = channel === "sms";
-  const binds = sms && !state.smsBindings.some((b) => b.sender === account.id && b.recipient === attempt.destination);
+  const binds = holdsConversations(channel) && !state.smsBindings.some((b) => b.sender === account.id && b.recipient === attempt.destination);
   const subject =
     channel === "linkedin"
       ? { ...state.subject, linkedinSender: state.subject.linkedinSender ?? account.id }

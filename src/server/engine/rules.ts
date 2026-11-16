@@ -21,7 +21,7 @@ import { applyBadDestination, applyReply, applyToAttempt, applyToWork, asOfActio
 import type { SubjectState } from "../../domain/sequence/state.ts";
 import { inviteAlreadyConnected, inviteExpired, inviteWithdrawalAnswer, inviteWithdrawalDue, recordAcceptance } from "../../domain/sequence/progress.ts";
 import { actionOfStep } from "../../domain/sequence/dispatch.ts";
-import { markReplied } from "../../domain/sequence/controls.ts";
+import { markPrecondition, markReplied } from "../../domain/sequence/controls.ts";
 import { reconcileEdit, stillRunnable } from "../../domain/sequence/reconcile.ts";
 import { launchCheck } from "../../domain/sequence/blockers.ts";
 import { applyControl, campaignPaused, campaignPrecondition, campaignResumed, controlPrecondition, judgeControl } from "../../domain/sequence/controls.ts";
@@ -50,6 +50,8 @@ export interface Rules {
   readonly actionOfStep: typeof actionOfStep;
   /** The user's LinkedIn reply mark (ADR 0004 section 7). */
   readonly markReplied: typeof markReplied;
+  /** The mark's confirmation, checked after its own rule (council on 194fc44, item 7). */
+  readonly markPrecondition: typeof markPrecondition;
   readonly enterMain: typeof enterMain;
   readonly applyToAttempt: typeof applyToAttempt;
   readonly applyToWork: typeof applyToWork;
@@ -183,6 +185,7 @@ export const DEFAULT_RULES: Rules = {
   inviteWithdrawalAnswer,
   actionOfStep,
   markReplied,
+  markPrecondition,
   evaluate,
   enterMain,
   applyToAttempt,

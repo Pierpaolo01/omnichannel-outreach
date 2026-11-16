@@ -305,8 +305,20 @@ export function markRepliedRefusal(state: SubjectState): string | null {
   if (subject.kind === "enrollment" && campaign.launchedAt === null) return NOT_LAUNCHED;
   if (subject.ended === "replied") return "They are already marked replied in this campaign.";
   if (subject.ended === "interested_on_call") return "They were interested on a call: outreach to them has ended in this campaign.";
-  if (!state.work.some((w) => w.kind != null && w.firstHandedWall !== null)) return NOTHING_SENT_ON_LINKEDIN;
+  // Something must have reached the person on LinkedIn (council on 194fc44, item 7): work known sent, or handed over and not
+  // yet settled. A refused invite (an unreachable profile), a withdrawn claim or a final "not sent" reached nobody.
+  const reached = (w: (typeof state.work)[number]) => w.kind != null && w.firstHandedWall !== null && (w.settled === null || w.settled === "sent" || w.settled === "user_sent" || w.sentWall !== null);
+  if (!state.work.some(reached) && !state.tracks.some((p) => p.connection === "already_connected")) return NOTHING_SENT_ON_LINKEDIN;
   return null;
+}
+
+/**
+ * The mark's confirmation (ADR 0004 section 7; council on 194fc44, item 7), checked as the other controls' is, after the
+ * mark's own rule and in the transaction of its request id: the status the read showed, against the lead as that read
+ * showed it (`confirmed`). Null when it holds or none was sent.
+ */
+export function markPrecondition(confirmed: SubjectState, expected: { readonly status: OutreachStatus } | null): string | null {
+  return expected === null || deriveStatus(confirmed) === expected.status ? null : CHANGED_SINCE_CONFIRMED;
 }
 
 /**

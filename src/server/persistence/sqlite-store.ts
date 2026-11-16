@@ -541,6 +541,7 @@ class SqliteStore implements OutreachStore {
               ? { kind: "person", personId: str(row, "person_id") }
               : { kind: "company", companyId: str(row, "company_id") },
         })),
+      badProfileKeys: this.db.prepare("SELECT key FROM linkedin_profile_marks").all().map((r) => str(r, "key")),
       otherEnrollments: this.db
         .prepare("SELECT lead_kind, person_id, company_id, campaign_id FROM enrollments WHERE campaign_id <> ?")
         .all(campaignId)
@@ -847,7 +848,9 @@ class SqliteStore implements OutreachStore {
 
   private personUnenrolledReason(personId: string, companyId: string): UnenrolledReason {
     if (this.enrollments({ kind: "person", personId }).length > 0) return null;
-    const reach = decisionMakerReach(this.details("person", personId), this.details("company", companyId));
+    const url = strOrNull(this.db.prepare("SELECT linkedin_url FROM people WHERE id = ?").get(personId) ?? {}, "linkedin_url") ?? "";
+    const bad = new Set(this.db.prepare("SELECT key FROM linkedin_profile_marks").all().map((r) => str(r, "key")));
+    const reach = decisionMakerReach(this.details("person", personId), this.details("company", companyId), { url, bad });
     return hasUsableChannel(reach) ? null : "no_usable_channel";
   }
 

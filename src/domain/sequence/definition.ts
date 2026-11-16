@@ -8,6 +8,13 @@
 import { isTimeZone, type WindowRule } from "./clock.ts";
 
 export type TrackChannel = "email" | "sms" | "call" | "linkedin";
+/**
+ * The channels whose sends are a conversation between one sender account and one destination (ADR 0003 4.5 as generalised
+ * by ADR 0004, question Q41): an SMS number and a mobile, a LinkedIn session and a profile. A reply there cannot say which
+ * campaign it answers, so the pair belongs to the first subject known to have reached it. The one test of it.
+ */
+export const holdsConversations = (channel: TrackChannel | undefined): channel is "sms" | "linkedin" => channel === "sms" || channel === "linkedin";
+
 /** The channels a sender account serves (a phone track needs none): email, SMS and the social channels (ADR 0004). */
 export type SendChannel = Exclude<TrackChannel, "call">;
 export type Branch = "main" | "win_back";
@@ -315,4 +322,13 @@ export function definitionIssues(def: CampaignDefinition, previous: CampaignDefi
  */
 export function definitionProblems(def: CampaignDefinition, previous: CampaignDefinition | null = null, options: { readonly launched?: boolean } = {}): string[] {
   return definitionIssues(def, previous, options).map((issue) => issue.text);
+}
+
+/**
+ * A step's number in reads (verifier on 194fc44, item 14): its place, from 1, among the steps the track has now. A step an
+ * edit removed counts as the place it would hold: after the live steps before it in the track's order, never 0.
+ */
+export function stepNumber(track: Pick<TrackDefinition, "steps">, stepId: string): number {
+  const at = track.steps.findIndex((s) => s.id === stepId);
+  return track.steps.slice(0, Math.max(0, at)).filter((s) => !s.removed).length + 1;
 }

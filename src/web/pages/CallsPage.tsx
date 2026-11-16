@@ -1,4 +1,5 @@
 import { useId, useRef, type ReactNode } from "react";
+import { REPLY_WORDS } from "../controls/wording.ts";
 import { Link } from "wouter";
 import type { CallColleagueView, CallOutcomeApi, CallQueueItem, CallsView, CallTaskView, DeclinedPathApi, NoteView, TouchView } from "../../shared/api.ts";
 import { when } from "../activity.tsx";
@@ -492,7 +493,7 @@ function touchRow(t: TouchView): { icon: "email" | "sms" | "reply" | "call" | "l
     case "sms":
       return { icon: "sms", tone: PLAIN, title: "Text sent", body: null };
     case "reply":
-      return { icon: "reply", tone: "bg-hand-soft text-hand", title: t.channel === "email" ? "Replied by email" : t.channel === "linkedin" ? "Marked replied on LinkedIn" : "Replied by text", body: null };
+      return { icon: "reply", tone: "bg-hand-soft text-hand", title: REPLY_WORDS[t.channel].title, body: null };
     case "call":
       return { icon: "call", tone: "bg-call-soft text-call", title: OUTCOME_TITLE[t.outcome], body: [t.declinedPath ? DECLINED_PATH_LINE[t.declinedPath].slice(0, -1) : null, dialledLine(t.number), t.note].filter(Boolean).join(". ") || null };
   }

@@ -71,6 +71,10 @@ export type ProviderEvent =
   | { readonly id: string; readonly kind: "reply"; readonly providerRef: string | null; readonly at: number; readonly inbox: string; readonly from: string }
   | { readonly id: string; readonly kind: "rejected"; readonly key: string; readonly providerRef: string; readonly reason: RejectReason }
   /** A LinkedIn invite accepted, at the platform's time (ADR 0004 3.3): the invite's work by its key. Never a reply. */
+  /**
+   * `at` may be the instant the session observed the acceptance rather than when the person accepted (a logged-in page
+   * shows only a coarse time): an upper bound, which errs on the safe side at the deadline (council on 194fc44, item 8).
+   */
   | { readonly id: string; readonly kind: "accepted"; readonly key: string; readonly providerRef: string; readonly at: number };
 
 /** A send confirmed by lookup carries the provider's reference, so its thread is known (ruling 1). */
@@ -91,7 +95,12 @@ export interface PresendRequest {
 }
 
 /** A pre-send check's answer. `connected`: for LinkedIn, the sender is already connected to the profile (ADR 0004 3.3). */
-export type PresendResult = { readonly kind: "clear" } | { readonly kind: "reply"; readonly providerRef: string; readonly at: number } | { readonly kind: "unavailable" } | { readonly kind: "connected" };
+/**
+ * `pending`: for LinkedIn, an invite from the sender to the profile is already outstanding (council on 194fc44, item 1): one
+ * this application did not send, since a pair this application reached is owned and never claimed by another subject. It is
+ * never sent again.
+ */
+export type PresendResult = { readonly kind: "clear" } | { readonly kind: "reply"; readonly providerRef: string; readonly at: number } | { readonly kind: "unavailable" } | { readonly kind: "connected" } | { readonly kind: "pending" };
 
 /** A LinkedIn invite withdrawal's answer (ADR 0004 3.3): withdrawn, found accepted first (with the platform's time), or unknown. */
 export type InviteWithdrawal = { readonly kind: "withdrawn" } | { readonly kind: "already_accepted"; readonly at: number | null } | { readonly kind: "unknown" };
@@ -241,6 +250,7 @@ export function callOutcome(r: PortCallResult): CallOutcome {
         case "clear":
         case "reply":
         case "connected":
+        case "pending":
           return "answered";
         case "unavailable":
           return "failed";

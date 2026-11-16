@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
+import { REPLY_WORDS } from "./controls/wording.ts";
 import type { ActivityEntry, ActivityNote, ActivityView, DependentTrackState, NoteAnswer } from "../shared/api.ts";
 import { ApiRequestError, postJson } from "./api.ts";
 import { useLiveRead } from "./controls/useLiveRead.ts";
@@ -108,7 +109,7 @@ export function describeEntry(entry: ActivityEntry, userZone: string): { icon: I
     return {
       icon: "reply",
       tone: HAND,
-      title: entry.channel === "email" ? "Replied by email" : "Replied by text",
+      title: REPLY_WORDS[entry.channel].title,
       body: entry.channel === "email" ? "Automation stopped in this campaign. Read and answer the reply in Instantly." : "Automation stopped in this campaign. Answer the reply on your phone.",
       track: null,
     };

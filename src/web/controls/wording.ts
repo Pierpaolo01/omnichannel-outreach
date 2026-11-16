@@ -131,6 +131,8 @@ export function stepWaitWords(why: StepWaitApi, channel: "email" | "sms" | "call
       return "on your call list";
     case "awaiting_acceptance":
       return "waiting for them to accept the LinkedIn invite";
+    case "invite_pending_elsewhere":
+      return "on hold: an invite to them is already pending on LinkedIn that this application didn’t send";
     default: {
       const unhandled: never = why;
       throw new Error(`A reason a step waits with no words: ${String(unhandled)}`);
@@ -227,8 +229,8 @@ export function nextStepSentence(lead: RecordLead, userZone: string): string {
     }
     case "replied": {
       if (!lead.reply) return "They replied. Over to you.";
-      const how = lead.reply.channel === "email" ? "Replied by email" : "Replied by text";
-      return `${how} on ${whenIn(userZone, lead.reply.at)}. ${lead.reply.channel === "email" ? "Answer in Instantly." : "Answer on your phone."}`;
+      const words = REPLY_WORDS[lead.reply.channel];
+      return `${words.how} on ${whenIn(userZone, lead.reply.at)}. ${words.answer}`;
     }
     case "interested_on_call":
       return "Interested on the call. Over to you.";
@@ -366,3 +368,13 @@ export function campaignConfirmText(action: "pause" | "resume", name: string, re
 
 /** What a campaign's pause or resume did. */
 export const CAMPAIGN_DONE = { pause: "Paused. Its calls left your list and its waits froze.", resume: "Resumed. Each lead continued where it was." } as const;
+
+/**
+ * A reply's channel in words, one entry per channel (council on 194fc44, item 4): every sentence keyed on a reply's channel
+ * reads it here, so a channel added later fails typecheck until it has its words. A LinkedIn reply is the user's own mark.
+ */
+export const REPLY_WORDS: Readonly<Record<"email" | "sms" | "linkedin", { readonly how: string; readonly title: string; readonly answer: string }>> = {
+  email: { how: "Replied by email", title: "Replied by email", answer: "Answer in Instantly." },
+  sms: { how: "Replied by text", title: "Replied by text", answer: "Answer on your phone." },
+  linkedin: { how: "Marked replied on LinkedIn by you", title: "You marked them replied on LinkedIn", answer: "Carry on the conversation on LinkedIn." },
+};

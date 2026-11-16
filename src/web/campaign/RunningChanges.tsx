@@ -98,6 +98,8 @@ function whatChanged(change: EditImpactChange, draft: CampaignDefinition): strin
       return "declined path changed";
     case "skip_limit":
       return "skip limit changed";
+    case "accept_wait":
+      return "wait for the invite to be accepted changed";
     case "call_script":
       return "call script changed";
     case "timezone":
@@ -134,6 +136,8 @@ function reachWording(kind: EditChangeKind, paused: boolean): string {
       return "will take the new path if they decline";
     case "skip_limit":
       return "will have their open call kept on the list the new number of days";
+    case "accept_wait":
+      return "will wait the new number of days for their invite to be accepted, counted from when it was sent";
     case "call_script":
       return "will be called with the new script";
     case "timezone":
