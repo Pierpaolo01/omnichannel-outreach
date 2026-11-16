@@ -27,8 +27,9 @@ import { TRACK_MUTATIONS } from "./track-mutations.ts";
 // 76 and 84 (the search on faac357): a skip the app could only decide once it learnt late that the track had started, and
 // a waiting claim tried at the instant its slot freed, ahead of a lower-priority handover there. 50 and 85 (the reviews
 // of faac357): a first text refused hours after its acceptance while another campaign's lead waits on it, and one never
-// answered, which the user marks not sent.
-export const TRACK_FIXED_SEEDS: readonly number[] = [2, 3, 4, 5, 11, 12, 29, 43, 50, 57, 61, 76, 78, 84, 85];
+// answered, which the user marks not sent. 14 and 16: the mobile answers a first text the app does not yet know went,
+// while another campaign's lead on it waits.
+export const TRACK_FIXED_SEEDS: readonly number[] = [2, 3, 4, 5, 11, 12, 14, 16, 29, 43, 50, 57, 61, 76, 78, 84, 85];
 const SEARCH_SEEDS = 100;
 /** Seed offsets each mutation's search tries after its recorded seed. */
 const MAX_SEEDS = 30;
@@ -82,6 +83,7 @@ export function trackChunks(from: number, to: number): void {
             "a-first-text-refused-after-acceptance",
             "a-first-text-never-answered",
             "held-on-an-unsettled-conversation",
+            "a-reply-before-its-text-was-known-sent",
           ].filter((f) => !reached.has(f)),
         ).toEqual([]);
       });

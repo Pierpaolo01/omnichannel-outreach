@@ -741,7 +741,7 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
    * (its first step's due instant) at which every number it may use has another subject's text known sent to its mobile,
    * inside its window, and no claim of its own still waits (a waiting claim's handover fails, or it expires, first); never
    * while the interim engine runs, and never after the lead stopped. Its candidate instants are the start, every instant a
-   * text to that mobile became known sent, every pool edit and the upgrade.
+   * text to that mobile became known sent or the mobile answered, every pool edit and the upgrade.
    */
   function skipAtOf(s: Subject, t: TrackDefinition): number | null {
     if (t.channel !== "sms") return null;
@@ -754,7 +754,7 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
     const zone = zoneFor(s);
     // Never before the app can know the track started: its predecessor's finish seen (a send reported late).
     const seen = Math.max(start, startSeenAt(s, t) ?? start);
-    const instants = [seen, upgradeAt ?? seen, ...sms.deliveryLog.filter((d) => d.destination === mobile && d.subjectId !== s.id).map((d) => knownAt("sms", d)), ...campaigns[s.campaign]!.poolEdits.map((e) => e.at)]
+    const instants = [seen, upgradeAt ?? seen, ...sms.deliveryLog.filter((d) => d.destination === mobile && d.subjectId !== s.id).map((d) => knownAt("sms", d)), ...sms.replyLog.filter((r) => r.from === mobile).map((r) => r.at), ...campaigns[s.campaign]!.poolEdits.map((e) => e.at)]
       .filter((x) => Number.isFinite(x) && x >= Math.max(seen, upgradeAt ?? seen))
       .sort((a, b) => a - b);
     for (const from of instants) {

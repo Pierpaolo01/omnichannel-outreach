@@ -166,15 +166,13 @@ const RULES: Record<string, Partial<Rules>> = {
   "a reply while unsettled is dropped": {
     smsReplyOwner: (records, sender) => R.smsReplyOwner(records.filter((r) => r.kind !== "binding" || r.confirmed || r.released), sender),
   },
-  // The waiting subject treated as answered by the reply on the owner's pair. The reply rule names one owner and cannot
-  // reach another subject, so this lives where the waiting subject reads that pair: its evaluation. The reply's own write
-  // settles the owner's text as sent (a reply proves it went), so that evaluation cannot tell a reply that came while the
-  // text was unknown from a later one: it stops the waiting subject on any answered conversation of another subject's on
-  // its mobile. The generated runs' reply to a text not yet known sent is the unsettled case.
+  // The waiting subject treated as answered by the reply on the owner's unsettled pair. The reply rule names one owner and
+  // cannot reach another subject, so this lives where the waiting subject reads that pair: its evaluation, which sees the
+  // binding answered while its text is not known sent.
   "a reply while unsettled stops the waiting subject": {
     evaluate: (s, now, options) => {
       const out = R.evaluate(s, now, options);
-      const answered = out.subject.ended === null && out.smsBindings.some((b) => b.owner !== s.subject.id && b.ownerAnswered && [...smsMobiles(out).values()].includes(b.recipient));
+      const answered = out.subject.ended === null && out.smsBindings.some((b) => b.owner !== s.subject.id && b.ownerAnswered && !b.ownerSent && [...smsMobiles(out).values()].includes(b.recipient));
       return answered ? applyReply(out, { channel: "sms", atWall: now, providerRef: `sms:mutation-${s.subject.id}` as StoredReplyId }, now) : out;
     },
   },
@@ -262,7 +260,7 @@ const EXPECTED: Record<string, { invariant: string; seed: number }> = {
   "a binding with nothing sent counts as taken": { invariant: "28", seed: 7 },
   "a claim cache ignores a change of conversations": { invariant: "29", seed: 50 },
   "a reply while unsettled is dropped": { invariant: "14", seed: 16 },
-  "a reply while unsettled stops the waiting subject": { invariant: "14", seed: 16 },
+  "a reply while unsettled stops the waiting subject": { invariant: "14", seed: 14 },
   "after counts from the earlier track's start": { invariant: "7", seed: 12 },
   "after delay ignored": { invariant: "7", seed: 3 },
   "together tracks not together": { invariant: "7", seed: 0 },
