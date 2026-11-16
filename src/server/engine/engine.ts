@@ -1152,7 +1152,10 @@ export class Engine {
         const caughtUp = same(s, stored) ? null : s;
         // Judged in the transaction that checks the request id, in the one order the read uses (`judgeControl`): the lead's
         // state first, then whether it still applies as confirmed, whichever tab or process sent first (ticket 17b).
-        const out = this.rules.judgeControl(stored, s, action, now, expected, this.rules);
+        // The expectation is checked against the lead as the read that produced it showed it: evaluated as of the action's
+        // instant, in this transaction (review bot on 712884b). Only what the judge is given changes; what the action does
+        // with an accepted control does not.
+        const out = this.rules.judgeControl(this.rules.confirmedAgainst(stored, s), s, action, now, expected, this.rules);
         if (!out.ok) return { write: caughtUp, answer: "refused", reason: out.reason, effect: null };
         // The answer's effect is the read's preview at this instant: the same transition on the same state (verifier B4).
         return { write: out.state, answer: "accepted", reason: null, effect: JSON.stringify(effectOf(s, action, out.state, now)) };

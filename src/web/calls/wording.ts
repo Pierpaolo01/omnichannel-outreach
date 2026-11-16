@@ -3,7 +3,8 @@
  * reads only what the server reported (the queue, the call task, an outcome's answer, Needs
  * attention); none decides anything about order, counts, hours, capacity or an outcome's effect.
  */
-import type { PausedCampaignCalls, CallNumberView, CallOffListView, CallOutcomeApi, DeclinedPathApi, DeclinePreviewView, DeclineTrackView, CallQueueItem, CallsView, CallTaskView, FinishReasonApi, NeedsAttention, OutreachStatus, RecordCallView, RecordCalls, RecordedNumberView, TodayView, WindowRule, HoldReasonApi, ConversationOwnerView } from "../../shared/api.ts";
+import type { PausedCampaignCalls, CallbackListingView, CallNumberView, CallOffListView, CallOutcomeApi, DeclinedPathApi, DeclinePreviewView, DeclineTrackView, CallQueueItem, CallsView, CallTaskView, FinishReasonApi, NeedsAttention, OutreachStatus, RecordCallView, RecordCalls, RecordedNumberView, TodayView, WindowRule, HoldReasonApi, ConversationOwnerView } from "../../shared/api.ts";
+import { clockTime, localClock } from "../time.ts";
 import { WIN_BACK_HAS_NO_TRACKS } from "../../domain/sequence/definition.ts";
 import { STATUS_LABEL } from "../status.tsx";
 import type { DeskSnapshot } from "./callDesk.ts";
@@ -50,7 +51,7 @@ export const numberKind = (n: Pick<CallNumberView, "kind">): string => NUMBER_KI
 /** "+44 20 7946 0111, direct": the number a past call was logged on. */
 export const dialledLine = (n: RecordedNumberView | null): string | null => (n ? `${n.value}, ${NUMBER_KIND[n.kind]}` : null);
 
-export const timeIn = (zone: string, iso: string): string => new Intl.DateTimeFormat("en-GB", { timeZone: zone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(iso));
+export const timeIn = (zone: string, iso: string): string => clockTime(zone, iso);
 
 /** "Thu 5 Nov": the date of an instant in a zone. */
 export const dateIn = (zone: string, iso: string): string => new Intl.DateTimeFormat("en-GB", { timeZone: zone, weekday: "short", day: "numeric", month: "short" }).format(new Date(iso)).replace(",", "");
@@ -66,13 +67,14 @@ export const isoDateIn = (zone: string, iso: string): string => new Intl.DateTim
  */
 export function callbackTimes(iso: string, zone: string, userZone: string, today: string | null): { theirs: string; yours: string | null; dated: boolean } {
   const theirDate = isoDateIn(zone, iso);
-  const theirTime = timeIn(zone, iso);
+  // The bare clock: this sentence names a repeated hour's occurrence in its own words.
+  const theirTime = localClock(zone, iso);
   const dated = theirDate !== today;
   const occurrences = zonedInstants(theirDate, theirTime, zone);
   const clock = occurrences.length > 1 ? (Date.parse(iso) === occurrences[0] ? ", before the clocks go back" : ", after the clocks go back") : "";
   const theirs = `${dated ? `${dateIn(zone, iso)} at ` : ""}${theirTime} their time${clock}`;
   const yourDate = isoDateIn(userZone, iso);
-  const yourTime = timeIn(userZone, iso);
+  const yourTime = localClock(userZone, iso);
   if (yourDate === theirDate && yourTime === theirTime) return { theirs, yours: null, dated };
   return { theirs, yours: `${yourDate === theirDate ? "" : `${dateIn(userZone, iso)} at `}${yourTime} your time`, dated };
 }
@@ -122,7 +124,7 @@ export function reasonLine(item: CallQueueItem, userZone: string, today: string)
 /** The user's date as the server counts it ("2026-11-09" is Monday 9 November), with the time now. */
 export function dateHeading(date: string, now: Date, userZone: string): string {
   const day = new Intl.DateTimeFormat("en-GB", { timeZone: "UTC", weekday: "long", day: "numeric", month: "long" }).format(new Date(`${date}T12:00:00Z`)).replace(",", "");
-  return `${day}, ${new Intl.DateTimeFormat("en-GB", { timeZone: userZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(now)}`;
+  return `${day}, ${clockTime(userZone, now)}`;
 }
 
 /** Today's lede. */
@@ -138,7 +140,7 @@ export function capacityLine(view: Pick<CallsView, "dailyCapacity" | "defaultDai
   return `Your daily call capacity is ${n} ${n === 1 ? "call" : "calls"}${n === view.defaultDailyCapacity ? ", the default until you set one" : ""}.`;
 }
 
-export const CAPACITY_USED = "Today’s call capacity is used. Calls that fall due now wait for tomorrow; none is dropped.";
+export const CAPACITY_USED = "Today’s call capacity is used. Calls that fall due now wait for room on your list, on a day with calling hours; none is dropped.";
 
 const DAY = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 const hour = (h: number) => `${String(h % 24).padStart(2, "0")}:00`;
@@ -229,13 +231,64 @@ function withNote(parts: string[], body: { readonly note: string }, task: CallTa
   return parts.join(" ");
 }
 
-/** Why the call the page was on is off the list, from the server's `offList`. */
-export function offListLine(who: string, off: CallOffListView | null, message: string | null, zone: string): string {
+/**
+ * A call or callback a pause holds off the list, as the person and company records say it (`nextStepSentence`) and the
+ * Calls page says it of the call it had open (`offListLine`): one sentence per hold.
+ */
+export function callHoldSentence(kind: "call" | "callback", hold: "campaign_paused" | "lead_paused"): string {
+  const noun = kind === "callback" ? "callback" : "call";
+  switch (hold) {
+    case "campaign_paused":
+      return `The ${noun} is on hold while this campaign is paused.`;
+    case "lead_paused":
+      return `The ${noun} is on hold while their outreach in this campaign is paused.`;
+    default: {
+      const unhandled: never = hold;
+      throw new Error(`A hold with no sentence: ${String(unhandled)}`);
+    }
+  }
+}
+
+/**
+ * A call whose lead's callback holds it, with that callback's real listing from the read (council on 178de98, item 8): the
+ * record's call line and the Calls page's off-list line both say it, so neither says the callback is on the list when it
+ * is not.
+ */
+export function callbackHoldsCallLine(trackLabel: string | null, callback: CallbackListingView): string {
+  const call = trackLabel === null ? "Their call" : `Their call on the ${trackLabel.toLowerCase()}`;
+  return callback.listed ? `${call} waits while their callback is open: only the callback is on the list.` : `${call} waits while their callback is open; the callback is ${listedForPhrase(callback.listedFor)}.`;
+}
+/** A call listed from a later day (YYYY-MM-DD), in a sentence's middle: the record's call line and a step's time both say it. */
+export const listedForPhrase = (date: string): string => `on the list for ${dayLabel(date)}`;
+/** A call listed from a later day, as the record's call line says it (YYYY-MM-DD). */
+export const listedForLine = (date: string): string => `Their call is ${listedForPhrase(date)}.`;
+/** A call whose prospect's calling hours do not open on the user's day, in a sentence's middle. */
+export const HOURS_CLOSED_PHRASE = "waits for a day their calling hours open";
+/** A call whose prospect's calling hours do not open on the user's day, as the record's call line says it. */
+export const HOURS_CLOSED_LINE = `Their call ${HOURS_CLOSED_PHRASE}.`;
+
+/** What the page knows of the call beside its read: whether a logged outcome came since it opened the call, the call's kind and track. */
+export interface OffListContext {
+  readonly sinceOpened: boolean;
+  readonly kind: "call" | "callback";
+  readonly track: string;
+}
+
+/**
+ * Why the call the page was on is off the list, from the server's `offList` (ADR 0003 "why a call left the list"), in one
+ * exhaustive switch. `sinceOpened`: for `logged`, the outcome was stored since this tab opened the call, so it came from
+ * another window or device; otherwise it already had it. The holds' sentences are provisional, for the principal.
+ */
+export function offListLine(who: string, off: CallOffListView | null, message: string | null, zone: string, context: OffListContext | null = null): string {
   if (off === null) return message ?? `${who}’s call is no longer on the list.`;
+  // Without the page's context (a kept refusal): the kind the lead's status implies, and a logged outcome from elsewhere.
+  const kind = context?.kind ?? (off.status === "callback_scheduled" ? "callback" : "call");
   switch (off.reason) {
     case "logged":
       // This tab's own press, once stored, is shown as logged by it (reconcile); this one came from elsewhere.
-      return `${who}’s call was already logged from another window or device: ${OUTCOME_LABEL[off.outcome].toLowerCase()} at ${timeIn(zone, off.at)}.`;
+      return context?.sinceOpened ?? true
+        ? `${who}’s call was already logged from another window or device: ${OUTCOME_LABEL[off.outcome].toLowerCase()} at ${timeIn(zone, off.at)}.`
+        : `${who}’s call already has an outcome: ${OUTCOME_LABEL[off.outcome].toLowerCase()} at ${timeIn(zone, off.at)}.`;
     case "lead_ended":
       if (off.status === "replied") return `${who} replied, so automation stopped and the call left the list.`;
       if (off.status === "interested_on_call") return `${who} was marked interested on another call, so automation stopped and the call left the list.`;
@@ -243,8 +296,21 @@ export function offListLine(who: string, off: CallOffListView | null, message: s
       return `${who}’s outreach in this campaign has ended (${STATUS_LABEL[off.status].toLowerCase()}), so the call left the list.`;
     case "track_finished":
       return trackFinishedLine(who, off.finish);
-    case "not_listed_today":
-      return `${who}’s call is not on today’s list.`;
+    case "campaign_paused":
+    case "lead_paused":
+      return callHoldSentence(kind, off.reason);
+    case "campaign_not_launched":
+      return "The call is off the list until this campaign launches.";
+    case "callback_hold":
+      return callbackHoldsCallLine(context?.track ?? null, off.callback);
+    case "listed_later":
+      return listedForLine(off.listedFrom);
+    case "no_hours_today":
+      return HOURS_CLOSED_LINE;
+    default: {
+      const unhandled: never = off;
+      throw new Error(`A reason a call left the list with no words: ${String(unhandled)}`);
+    }
   }
 }
 
@@ -406,14 +472,16 @@ export function attentionItems(n: NeedsAttention, today: Pick<TodayView, "overdu
       key: `wait-${w.accountId}`,
       tone: "pause",
       title: `${w.accountId} is waiting`,
-      body: w.reason === "quota" ? "Instantly refused more sends for now. Sending resumes when it allows; nothing is dropped." : `Instantly asked to slow down. Sending resumes${w.until ? ` at ${timeIn(userZone, w.until)}` : ""}; nothing is dropped.`,
+      // What the provider said, and its own end where it gave one; never a time anything will send (the re-check of ff01571:
+      // at that time the campaign may be paused, or every other sender full).
+      body: w.reason === "quota" ? "Instantly refused more sends from this inbox for now; nothing is dropped." : `Instantly asked this inbox to slow down${w.until ? ` until ${timeIn(userZone, w.until)}` : ""}; nothing is dropped.`,
     });
   }
   for (const s of n.stalledInboxes) {
     items.push({ key: `stalled-${s.accountId}`, tone: "pause", title: `Sends from ${s.accountId} are stalled`, body: `${s.holding.length} ${s.holding.length === 1 ? "send waits" : "sends wait"} on it. Nothing is dropped.` });
   }
   for (const c of n.heldCapacity) {
-    items.push({ key: `held-${c.accountId}`, tone: "pause", title: `${c.held} of ${c.accountId}’s ${c.capacity} sends today are held`, body: "The provider hasn’t confirmed whether those messages went, so their room is kept until it does." });
+    items.push({ key: `held-${c.accountId}`, tone: "pause", title: `${c.held} of ${c.accountId}’s ${c.capacity} sends today are held`, body: "The provider hasn’t confirmed whether those messages went, so their room stays taken while it hasn’t." });
   }
   items.push(...heldTrackItems(n.heldTracks));
   items.push(...capacityItems(n.waitingForCapacity, today.date, userZone));
@@ -561,13 +629,13 @@ export function recordCallLine(call: RecordCallView, today: string): { lead: str
     return { lead, rest: call.noGoodNumber ? noGoodNumberText(null).afterOverdue : "" };
   }
   const plain = (lead: string) => ({ lead, rest: "" });
-  if (call.heldByCallback) return plain(`Their call on the ${call.track.label.toLowerCase()} waits while their callback is open: only the callback is on the list.`);
+  if (call.heldByCallback) return plain(callbackHoldsCallLine(call.track.label, call.heldByCallback));
   if (call.listed) {
     const why = call.reason === "rolled_over" ? "Their call rolled over to today’s list." : call.reason === "redial" ? "Their call is back on today’s list: you asked for a redial." : "Their call is on today’s list.";
     return plain(`${why}${limit}`);
   }
-  if (call.listedFor > today) return plain(`Their call is on the list for ${dayLabel(call.listedFor)}.${limit}`);
-  return plain(`Their call waits for a day their calling hours open.${limit}`);
+  if (call.listedFor > today) return plain(`${listedForLine(call.listedFor)}${limit}`);
+  return plain(`${HOURS_CLOSED_LINE}${limit}`);
 }
 
 // ---------------------------------------------------------------------------------------------

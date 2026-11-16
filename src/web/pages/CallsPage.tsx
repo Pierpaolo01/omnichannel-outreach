@@ -513,7 +513,7 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
     <div className="flex flex-col gap-3.5 min-[901px]:sticky min-[901px]:bottom-0 border-t border-line bg-base-100 px-5 pb-[22px] pt-5 shadow-[0_-10px_24px_-18px_rgba(21,26,45,0.35)] min-[901px]:px-[30px]">
       {away && (
         <div role="alert" className="flex flex-col gap-2.5 rounded-field bg-crit-soft px-4 py-3 text-[14px]">
-          <p className="text-base-content">{offListLine(away.who, away.offList, null, userZone)}</p>
+          <p className="text-base-content">{offListLine(away.who, away.offList, null, userZone, { sinceOpened: away.sinceOpened, kind: task.kind, track: task.track.label })}</p>
           {away.note.trim() !== "" && (
             <p className="text-ink-2 [overflow-wrap:anywhere]">
               Your note wasn’t saved: <q className="whitespace-pre-wrap">{away.note}</q>
@@ -609,7 +609,8 @@ function LogBar({ desk, snap, task, userZone, placeFocus }: { desk: CallDesk; sn
       )}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <span id={hintId} className="text-[13px] text-muted">
-          {pending
+          {/* No instruction the locked sheet would refuse (council on 178de98, item 5): nothing is said while it is locked. */}
+          {pending || locked
             ? ""
             : draft.outcome === null
               ? "Pick what happened to finish this call."

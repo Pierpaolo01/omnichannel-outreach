@@ -21,6 +21,11 @@ export const CONTROL_SEED = 17_000;
 // 85 and 93 (ticket 17b, the search on 54f3a73): an ended lead's skip, sent with its read's precondition, refused with
 // the precondition's reason instead of the read's; one refusal order for the read and the action (judgeControl) since.
 export const CONTROL_FIXED_SEEDS: readonly number[] = [17, 19, 33, 35, 48, 64, 72, 85, 86, 91, 93, 99];
+/**
+ * The windows family's fixed offsets (ADR 0003 "Reads that say when"): runs that draw sending windows, prospect zones and
+ * inbox outages, with W3 after every event. Chosen from a local sweep of offsets 0 to 99 on 15 November 2026.
+ */
+export const CONTROL_WINDOW_SEEDS: readonly number[] = [0, 9, 12, 27, 33, 36, 44, 46, 48, 49, 50, 53, 57, 62, 67, 69, 75, 79, 86];
 /** The scripted reply runs' seed offset (`smsReplyRestart`, `replyBeforeObservation`): the reply identity rule. */
 export const SMS_REPLY_SEED = 0;
 const SEARCH_SEEDS = 100;
@@ -33,6 +38,16 @@ export const CONTROL_FEATURES: readonly string[] = [
   "a-control-just-after-a-due-instant",
   "a-control-sent-again",
   "a-email-track",
+  // The windows family's exact W3 and W4 (ADR 0003 "Reads that say when", redesign after ff01571).
+  "w3-reads-between-rounds",
+  "w3-a-read-of-ready",
+  "w3-a-read-of-sender_slot",
+  "w3-a-read-of-sender_unavailable",
+  "w3-a-read-of-sender_rate_limited",
+  "w3-a-read-of-sending_capacity",
+  "w4-a-control-between-rounds",
+  "w4-a-preview-of-ready",
+  "c1-a-confirmation-between-rounds",
   "a-email-track-in-win-back",
   "a-hidden-reply",
   "a-hidden-reply-found-by-the-pre-send-check",
@@ -113,6 +128,9 @@ export const CONTROL_FEATURES: readonly string[] = [
 ];
 
 export const RETIRED_CONTROL_FEATURES: Readonly<Record<string, string>> = {
+  "w3-a-ready-claim-at-its-slot": "A ready read of a step whose claim is at its slot: the windows family's checks cover it where it occurs; none of the fixed seeds reaches it, so it is not required of them.",
+  "w3-a-read-of-sender_busy": "A reason the read can give that the windows family's pools rarely reach (two places per inbox); not required of the fixed seeds.",
+  "w3-a-read-of-sender_waiting": "A reason the read can give for a pool whose candidates wait for different causes; reached in the search, not required of the fixed seeds.",
   "move_to_win_back-with-a-claim-open": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
   "move_to_win_back-with-uncertain-work": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
   "move_to_win_back-with-work-at-the-provider": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",
@@ -156,6 +174,22 @@ export function controlChunks(): void {
         expect(problems).toEqual([]);
         expect(stats.features).toContain(`a-${channel}-reply-found-by-the-pre-send-check-before-its-observation`);
       }, 600_000);
+    }
+    const windowOffsets = FULL_SEARCH ? offsets : CONTROL_WINDOW_SEEDS;
+    for (let i = 0; i < windowOffsets.length; i += 10) {
+      const chunk = windowOffsets.slice(i, i + 10);
+      test(`the windows family: seeds ${chunk.map((o) => CONTROL_SEED + o).join(", ")} (drawn windows, zones and outages; W1 to W3)`, async () => {
+        const failures: string[] = [];
+        for (const offset of chunk) {
+          const { problems, stats } = await runControls(CONTROL_SEED + offset, { windows: true });
+          for (const f of stats.features) reached.add(f);
+          if (problems.length > 0) failures.push(`seed ${CONTROL_SEED + offset} (windows): ${problems.join("; ")}`);
+          const unknown = stats.features.filter((f) => !known(f));
+          if (unknown.length > 0) failures.push(`seed ${CONTROL_SEED + offset} (windows) reaches behaviours in neither list: ${unknown.join(", ")}`);
+        }
+        for (const failure of failures) console.error(failure);
+        expect(failures).toEqual([]);
+      }, 1_800_000);
     }
     if (!FULL_SEARCH) {
       test("the fixed seeds reach every behaviour they were chosen for", () => {

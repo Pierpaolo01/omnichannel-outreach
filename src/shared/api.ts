@@ -120,6 +120,51 @@ export type CampaignControlView = { readonly action: "pause" | "resume"; readonl
 /** The controls on one lead in one campaign (ADR 0003 "Ticket 17a"). */
 export type LeadControlApi = "pause" | "resume" | "skip" | "stop" | "resume_from_next_step" | "move_to_win_back";
 
+/**
+ * Why a pending step has no time a read may promise (ADR 0003 "Reads that say when"): the engine cannot know when what
+ * holds it ends. The hold reasons are 5.4's (`HoldReasonApi`).
+ */
+export type StepWaitApi =
+  | "campaign_not_launched"
+  | "campaign_paused"
+  | "lead_paused"
+  | "callback"
+  | "ended"
+  | "with_provider"
+  | HoldReasonApi
+  | "no_window"
+  | "no_transport"
+  | "waiting_on_provider"
+  | "reply_pending"
+  | "no_destination"
+  | "sender_slot"
+  | "sender_unavailable"
+  | "sender_rate_limited"
+  | "sending_capacity"
+  | "sender_waiting"
+  | "call_capacity"
+  | "on_call_list"
+  | "call_hours_closed";
+
+/**
+ * When a pending step goes, as the engine decides it at the read's instant (`stepWhen`): ready (its time has come and nothing
+ * of its own holds it; no instant is promised); the earliest instant, when it waits on time alone (its wait's end, then its
+ * window's opening); or why it waits, with no time.
+ */
+export type StepWhenView =
+  /** Its time has come and nothing of its own holds it: in line for its sender, with no instant promised. */
+  | { readonly kind: "ready" }
+  | { readonly kind: "at"; readonly at: string }
+  /** `channel` names the step's channel where the reason depends on it (no transport). */
+  | { readonly kind: "waits"; readonly why: StepWaitApi; readonly channel?: "email" | "sms" }
+  /**
+   * A call not yet placed: the user's day (YYYY-MM-DD) it goes on the list, with no time of day; `today` when that is the
+   * read's day; `now` when it is ready for the list (due, calling hours open today, room on today's list), with no instant promised.
+   */
+  | { readonly kind: "call_day"; readonly day: string; readonly today: boolean; readonly now: boolean }
+  /** An open call listed from a later user day (YYYY-MM-DD), as the record's call line says it. */
+  | { readonly kind: "listed_for"; readonly day: string };
+
 /** A step a control names: the one it skips, or the next one the lead would send. */
 export interface ControlStepView {
   readonly trackId: string;
@@ -136,8 +181,8 @@ export interface ControlStepView {
   /** Its place among the track's steps, from 1, and how many there are. */
   readonly number: number;
   readonly of: number;
-  /** When it falls due once the lead runs; null while another hold remains after the action, or when not resolved yet. */
-  readonly dueAt: string | null;
+  /** When it goes once the action applies (`stepWhen` on the lead as the action leaves it); null for the step a skip skips. */
+  readonly when: StepWhenView | null;
 }
 
 /**
@@ -498,8 +543,8 @@ export interface TrackProgressView {
   readonly hold: HoldReasonApi | null;
   /** For `sms_conversation_unsettled`: the campaigns whose first text the track waits on. Empty otherwise. */
   readonly holdOwners: readonly ConversationOwnerView[];
-  /** The pending step and the wall instant it is due, if the lead keeps running. */
-  readonly nextStep: { readonly stepId: string; readonly number: number; readonly dueAt: string } | null;
+  /** The pending step and when it goes, as the engine decides it at the read (`stepWhen`). */
+  readonly nextStep: { readonly stepId: string; readonly number: number; readonly when: StepWhenView } | null;
   /** A phone track's call task once placed on the user's list (ticket 14): open until its outcome or its track's finish. */
   readonly callTask: {
     readonly taskId: string;
@@ -1173,8 +1218,8 @@ export interface RecordCallView {
   /** Null for a callback, which is never skipped. */
   readonly skipLimit: SkipLimitView | null;
   readonly noGoodNumber: boolean;
-  /** A call held because the lead has an open callback on another phone track: only the callback is listed. */
-  readonly heldByCallback: boolean;
+  /** A call held because the lead has an open callback on another phone track, with that callback's own listing; null otherwise. */
+  readonly heldByCallback: CallbackListingView | null;
 }
 
 /** GET /api/people/:id and GET /api/companies/:id add each enrollment's open calls to the CRM record (ticket 15b). */
@@ -1336,16 +1381,30 @@ export interface CallColleagueView {
 }
 
 /**
- * Why a call task is not on today's list (ADR 0003 4.4.1), from the stored task and its call records:
- * `logged`, an outcome was logged on it (by any tab or client); `track_finished`, its phone track
- * finished otherwise (with the reason); `lead_ended`, the lead's outreach ended in this campaign;
- * `not_listed_today`, it waits for a day its calling hours open. `status` is the lead's status now.
+ * Why a call task is not on today's list (ADR 0003 4.4.1, and "why a call left the list"): the engine's own reason
+ * (`offListReason`), the first that holds. `logged`: an outcome on this task is what took it off (it closed the call, or
+ * moved it to a later day), never an earlier outcome that left it listed; `track_finished`: its phone track finished
+ * otherwise; `lead_ended`: the lead's outreach ended in this campaign; `campaign_paused`, `campaign_not_launched`,
+ * `lead_paused`: a hold; `callback_hold`: another of the lead's calls is a callback; `listed_later`: listed from a later
+ * user day (`listedFrom`, YYYY-MM-DD); `no_hours_today`: the prospect's calling hours do not open on the user's day.
+ * `status` is the lead's status now.
  */
 export type CallOffListView =
   | { readonly reason: "logged"; readonly outcome: CallOutcomeApi; readonly at: string; readonly status: OutreachStatus }
   | { readonly reason: "track_finished"; readonly finish: FinishReasonApi | null; readonly status: OutreachStatus }
   | { readonly reason: "lead_ended"; readonly status: OutreachStatus }
-  | { readonly reason: "not_listed_today"; readonly status: OutreachStatus };
+  | { readonly reason: "campaign_paused"; readonly status: OutreachStatus }
+  | { readonly reason: "campaign_not_launched"; readonly status: OutreachStatus }
+  | { readonly reason: "lead_paused"; readonly status: OutreachStatus }
+  | { readonly reason: "callback_hold"; readonly callback: CallbackListingView; readonly status: OutreachStatus }
+  | { readonly reason: "listed_later"; readonly listedFrom: string; readonly status: OutreachStatus }
+  | { readonly reason: "no_hours_today"; readonly status: OutreachStatus };
+
+/** The lead's open callback, which holds its other calls: on today's list, or the user's day (YYYY-MM-DD) it is listed from. */
+export interface CallbackListingView {
+  readonly listed: boolean;
+  readonly listedFor: string;
+}
 
 /** GET /api/call-tasks/:id: everything the call screen shows for one task. */
 export interface CallTaskView {
@@ -1590,7 +1649,7 @@ export type TestStepState =
   | "skipped"
   /** Handed to the provider; no answer yet. */
   | "with_provider"
-  /** Its wait runs out at `at`; it goes then, or at its window's next opening. */
+  /** Not sent yet: ready when `at` is the read's instant, else the earliest `at` (its window's next opening), or `at` is null and `waits` says why. */
   | "due"
   /** Held (ADR 0003 5.4): it waits on what `hold` names, not on its wait; never said to be due. */
   | "held"
@@ -1614,6 +1673,8 @@ export interface TestStepRow {
   readonly track: string;
   readonly state: TestStepState;
   readonly at: string | null;
+  /** For a due step with no time the engine can promise: why it waits (`StepWaitApi`); null otherwise. */
+  readonly waits: StepWaitApi | null;
   /** For a call: its task, and the outcome logged. */
   readonly taskId: string | null;
   readonly outcome: string | null;

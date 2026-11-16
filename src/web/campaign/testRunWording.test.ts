@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import type { TestStepRow } from "../../shared/api.ts";
 import { endingDetail, endingTitle, progressText, stepDetail, stepStateText, timeIn } from "./testRunWording.ts";
 
-const row = (fields: Partial<TestStepRow>): TestStepRow => ({ trackId: "e", stepId: "e1", channel: "email", branch: "main", name: "Email 1", track: "Email track", state: "sent", at: "2026-11-02T10:41:00Z", taskId: null, outcome: null, reason: null, ...fields });
+const row = (fields: Partial<TestStepRow>): TestStepRow => ({ trackId: "e", stepId: "e1", channel: "email", branch: "main", name: "Email 1", track: "Email track", state: "sent", at: "2026-11-02T10:41:00Z", taskId: null, outcome: null, reason: null, waits: null, ...fields });
 const READ = "2026-11-02T10:42:20Z";
 
 describe("the Test run tab says only what the run's facts say (ticket 21)", () => {
@@ -13,11 +13,19 @@ describe("the Test run tab says only what the run's facts say (ticket 21)", () =
 
   test("a sent email says Sent, never delivered; a due step a minute off says so; a call on the list says where it is", () => {
     expect(stepStateText(row({}), "Europe/London", READ)).toBe("Sent 10:41");
-    expect(stepStateText(row({ state: "due", at: "2026-11-02T10:43:10Z" }), "Europe/London", READ)).toBe("In about 1 min");
-    expect(stepStateText(row({ state: "due", at: "2026-11-02T11:30:00Z" }), "Europe/London", READ)).toBe("Due 11:30");
+    expect(stepStateText(row({ state: "due", at: "2026-11-02T10:43:10Z" }), "Europe/London", READ)).toBe("Earliest in about 1 min");
+    expect(stepStateText(row({ state: "due", at: "2026-11-02T11:30:00Z" }), "Europe/London", READ)).toBe("Earliest 11:30");
+    // ADR 0003 "Reads that say when": the window's opening on another day, and a reason with no time.
+    expect(stepStateText(row({ state: "due", at: "2026-11-03T09:00:00Z" }), "Europe/London", READ)).toBe("Earliest Tue 09:00");
+    expect(stepStateText(row({ state: "due", at: null, waits: "sending_capacity" }), "Europe/London", READ)).toBe("Waiting for sending capacity: every account it may use is full today");
     expect(stepStateText(row({ channel: "call", state: "on_your_list" }), "Europe/London", READ)).toBe("On your Calls list");
     expect(stepStateText(row({ channel: "call", state: "listed_later", at: "2026-11-03T00:00:00Z" }), "Europe/London", READ)).toBe("On your list from Tue 3 Nov");
     expect(stepStateText(row({ channel: "call", state: "logged", outcome: "not_interested" }), "Europe/London", READ)).toBe("Logged 10:41: Not interested");
+  });
+
+  test("a text held for its transport names the SMS provider, an email the email provider (the re-check of ff01571)", () => {
+    expect(stepStateText(row({ channel: "sms", stepId: "m2", name: "Text 2", state: "due", at: null, waits: "no_transport" }), "Europe/London", READ)).toBe("Waiting: the SMS provider can’t send this text yet");
+    expect(stepStateText(row({ state: "due", at: null, waits: "no_transport" }), "Europe/London", READ)).toBe("Waiting: the email provider can’t send a follow-up in its thread yet");
   });
 
   test("a step names where it went, and a win-back step not reached says when it would run", () => {
@@ -50,5 +58,13 @@ describe("the Test run tab says only what the run's facts say (ticket 21)", () =
     const whole = run([row({}), row({ stepId: "e2" })]);
     expect(endingTitle("finished", whole)).toBe("Finished: every step ran");
     expect(endingDetail("finished", whole)).toBe("Every step of the sequence went to your test contacts.");
+  });
+});
+
+describe("a Test run row inside a repeated hour says which one (verifier on cc9bf55, item 11)", () => {
+  const read = "2026-10-24T22:00:00Z";
+  test("both 01:30s of 25 October 2026 in London", () => {
+    expect(stepStateText(row({ state: "due", at: "2026-10-25T00:30:00Z" }), "Europe/London", read)).toBe("Earliest Sun 01:30 BST");
+    expect(stepStateText(row({ state: "due", at: "2026-10-25T01:30:00Z" }), "Europe/London", read)).toBe("Earliest Sun 01:30 GMT");
   });
 });

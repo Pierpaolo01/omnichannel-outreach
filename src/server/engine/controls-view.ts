@@ -4,20 +4,18 @@
  * nothing, so a control the read allows is the one the action accepts at that instant, and a refusal carries the
  * same reason (P11).
  */
-import { leadNow } from "../../domain/sequence/clock.ts";
+import { releasedBy, stepWhen, type StepEnv } from "../../domain/sequence/dispatch.ts";
+import { stepWhenView } from "./step-when-view.ts";
 import { currentStep, judgeCampaignControl, previewDigest, LEAD_CONTROLS, skipTarget, type LeadControl } from "../../domain/sequence/controls.ts";
 import { isLive } from "../../domain/sequence/attempt.ts";
-import { deriveStatus, runs } from "../../domain/sequence/progress.ts";
+import { deriveStatus } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
 import type { CampaignControlView, ControlStepView, ControlView } from "../../shared/api.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 import { trackLabel } from "../../shared/track-label.ts";
 
-const iso = (t: number) => new Date(t).toISOString();
-
-function stepView(state: SubjectState, step: NonNullable<ReturnType<typeof currentStep>>, now: number, due: boolean): ControlStepView {
+function stepView(state: SubjectState, step: NonNullable<ReturnType<typeof currentStep>>, now: number, due: boolean, env: StepEnv = {}, read: typeof stepWhen = stepWhen): ControlStepView {
   const live = step.track.steps.filter((s) => !s.removed);
-  const lead = leadNow(state.subject.clock, now);
   return {
     trackId: step.track.id,
     // The track's name as everywhere else (ticket 17b): "Email track 2" when the campaign has several on its channel.
@@ -28,8 +26,14 @@ function stepView(state: SubjectState, step: NonNullable<ReturnType<typeof curre
     stepId: step.stepId,
     number: live.findIndex((s) => s.id === step.stepId) + 1,
     of: live.length,
-    dueAt: due && step.dueAt !== null && runs(state) ? iso(now + Math.max(0, step.dueAt - lead)) : null,
+    // When the step goes once the action applies: the engine's `stepWhen` on the lead as the action leaves it.
+    when: due ? whenOf(state, step.track.id, now, env, read) : null,
   };
+}
+
+function whenOf(state: SubjectState, trackId: string, now: number, env: StepEnv, read: typeof stepWhen): ControlStepView["when"] {
+  const when = read(state, trackId, now, env);
+  return when ? stepWhenView(when, now, state.callDay.day) : null;
 }
 
 /** A call step's record: its calls logged so far (skip for now is no call), and whether its open task is a callback. */
@@ -44,12 +48,12 @@ function newlyWithdrawn(before: SubjectState, after: SubjectState): number {
   return after.attempts.filter((a) => isLive(a) && a.state !== "claimed" && a.withdrawRequested && !before.attempts.find((b) => b.id === a.id)?.withdrawRequested).length;
 }
 
-export function controlView(stored: SubjectState, action: LeadControl, now: number, rules: Rules): ControlView {
+export function controlView(stored: SubjectState, action: LeadControl, now: number, rules: Rules, env: StepEnv = {}): ControlView {
   const before = rules.previewAsOf(stored, now, rules.evaluate);
   // The action's own refusal order (`judgeControl`), with no expectation: a request confirmed on this read is judged the same.
   const out = rules.judgeControl(stored, before, action, now, null, rules);
   if (!out.ok) return { action, allowed: false, reason: out.reason };
-  return effectOf(before, action, out.state, now);
+  return effectOf(before, action, out.state, now, env, rules.previewStepWhen);
 }
 
 /**
@@ -57,7 +61,7 @@ export function controlView(stored: SubjectState, action: LeadControl, now: numb
  * read previews it on a copy, and the action answers with it (verifier B4). What the worker does after the control (a
  * send due at once) is not part of it: the action's answer carries that as the read after the worker ran.
  */
-export function effectOf(before: SubjectState, action: LeadControl, after: SubjectState, now: number): ControlView {
+export function effectOf(before: SubjectState, action: LeadControl, after: SubjectState, now: number, env: StepEnv = {}, read: typeof stepWhen = stepWhen): ControlView {
   // The step a skip skips: the first pending step not with a provider (council D2), as the transition chooses it.
   const skipped = action === "skip" ? skipTarget(before) : null;
   const next = currentStep(after);
@@ -66,7 +70,9 @@ export function effectOf(before: SubjectState, action: LeadControl, after: Subje
     allowed: true,
     statusAfter: deriveStatus(after),
     skips: skipped ? stepView(before, skipped, now, false) : null,
-    next: next ? stepView(after, next, now, true) : null,
+    // A preview reads the state the control would produce (council on cc9bf55, item 8): its withdrawals' reservations freed,
+    // and the call room counted with this lead as it would be (the environment takes the state it is asked about).
+    next: next ? stepView(releasedBy(before, after), next, now, true, env, read) : null,
     withProvider: newlyWithdrawn(before, after),
     // What the preview names, which a confirmation sends back as its precondition (verifier R1 on 57d874f).
     digest: previewDigest(before, action, after),
@@ -74,8 +80,8 @@ export function effectOf(before: SubjectState, action: LeadControl, after: Subje
 }
 
 /** Every control of the lead, in a fixed order. */
-export function controlsView(stored: SubjectState, now: number, rules: Rules): ControlView[] {
-  return LEAD_CONTROLS.map((action) => controlView(stored, action, now, rules));
+export function controlsView(stored: SubjectState, now: number, rules: Rules, env: StepEnv = {}): ControlView[] {
+  return LEAD_CONTROLS.map((action) => controlView(stored, action, now, rules, env));
 }
 
 /** The campaign's pause and resume, judged on its row exactly as `Engine.setCampaignPause` judges them. */

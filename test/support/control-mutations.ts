@@ -1,4 +1,7 @@
 import { currentStep, previewDigest } from "../../src/domain/sequence/controls.ts";
+import { leadNow } from "../../src/domain/sequence/clock.ts";
+import { candidatesFor } from "../../src/domain/sequence/dispatch.ts";
+import { channelOf, progressOf } from "../../src/domain/sequence/progress.ts";
 import { storedReplyId, type StoredReplyId } from "../../src/domain/sequence/reply-identity.ts";
 import type { SubjectState } from "../../src/domain/sequence/state.ts";
 import { DEFAULT_RULES, type Rules } from "../../src/server/engine/rules.ts";
@@ -138,6 +141,83 @@ const RULES: Record<string, Partial<Rules>> = {
   "a pre-send email answer stored under the provider's message id": {
     presendAnswer: (answer, channel, known) => (channel === "email" && answer.kind === "reply" ? { ...answer, providerRef: answer.providerRef.replace(/^reply:/, "") as StoredReplyId } : R.presendAnswer(answer, channel, known)),
   },
+  // ADR 0003 1.3 (ruling 6) broken in the engine: a user's Skip touches the lead, so its follow-ups rank before first
+  // messages to leads nothing was ever sent to (invariant 18's order).
+  "a skipped step counts as touching the lead": {
+    applyControl: (s, action, now) => {
+      const out = R.applyControl(s, action, now);
+      return out.ok && action === "skip" ? { ok: true, state: { ...out.state, subject: { ...out.state.subject, touched: true } } } : out;
+    },
+  },
+  // ADR 0003 "Reads that say when", the redesign after ff01571: a pool whose candidates wait for different causes reads the
+  // full inbox's reason, which is not true of every candidate it speaks for.
+  "a mixed pool reads the full sender's reason": {
+    stepWhen: (s, trackId, now, env) => {
+      const when = R.stepWhen(s, trackId, now, env);
+      if (when?.kind !== "waits" || when.why !== "sender_waiting") return when;
+      const pool = candidatesFor(s, trackId).map((id) => s.accounts[id]).filter((a) => a !== undefined);
+      return pool.some((a) => a.used >= a.capacity) ? { kind: "waits", why: "sending_capacity" } : when;
+    },
+  },
+
+  // Rule 3 broken (the coordinator on 712884b): a claim whose own slot is not reached reads "ready", though the engine
+  // cannot hand it over at that instant.
+  "a claimed step whose slot is not reached reads ready": {
+    stepWhen: (s, trackId, now, env) => {
+      const when = R.stepWhen(s, trackId, now, env);
+      return when?.kind === "waits" && when.why === "sender_slot" ? { kind: "ready" } : when;
+    },
+  },
+  // ADR 0003 "Reads that say when", rule 3 (the coordinator on ab6fe8e): a held step's reason replaced by "ready".
+  "a held step reads ready": {
+    stepWhen: (s, trackId, now, env) => {
+      const when = R.stepWhen(s, trackId, now, env);
+      const held = ["campaign_paused", "lead_paused", "callback", "unresolved", "render_failed", "provider_skipped", "no_thread", "sms_conversation_unsettled"];
+      return when?.kind === "waits" && held.includes(when.why) ? { kind: "ready" } : when;
+    },
+  },
+  // Rule 2 broken: a step waiting for its window reads ready.
+  "a step outside its window reads ready": {
+    stepWhen: (s, trackId, now, env) => {
+      const when = R.stepWhen(s, trackId, now, env);
+      return when?.kind === "at" ? { kind: "ready" } : when;
+    },
+  },
+  // Rule 3 broken: every sender full by its sends, and the read says ready.
+  "a step whose every sender is full reads ready": {
+    stepWhen: (s, trackId, now, env) => {
+      const when = R.stepWhen(s, trackId, now, env);
+      return when?.kind === "waits" && when.why === "sending_capacity" ? { kind: "ready" } : when;
+    },
+  },
+  // Rule 3 broken: a ready step is given an instant (a minute on), which no read may promise.
+  "a ready step is given a time": {
+    stepWhen: (s, trackId, now, env) => {
+      const when = R.stepWhen(s, trackId, now, env);
+      return when?.kind === "ready" ? { kind: "at", at: now + 60_000 } : when;
+    },
+  },
+  // Council on cc9bf55, item 7: the controls' preview of the next step gives the wait's end, while the read gives the truth.
+  "a preview's time is the wait's end": {
+    previewStepWhen: (s, trackId, now, env) => {
+      const when = R.stepWhen(s, trackId, now, env);
+      const p = progressOf(s, trackId);
+      const channel = channelOf(s, trackId);
+      if (when?.kind !== "at" || !p || p.dueAt === null || (channel !== "email" && channel !== "sms")) return when;
+      return { kind: "at", at: now + Math.max(0, p.dueAt - leadNow(s.subject.clock, now)) };
+    },
+  },
+  // Ticket 23's defect 2 restored in the read alone: an email or text waiting on time reads its wait's end (now, once it has
+  // passed), not the first instant its window is open after it.
+  "an earliest instant ignores the window": {
+    stepWhen: (s, trackId, now, env) => {
+      const when = R.stepWhen(s, trackId, now, env);
+      const p = progressOf(s, trackId);
+      const channel = channelOf(s, trackId);
+      if (when?.kind !== "at" || !p || p.dueAt === null || (channel !== "email" && channel !== "sms")) return when;
+      return { kind: "at", at: now + Math.max(0, p.dueAt - leadNow(s.subject.clock, now)) };
+    },
+  },
 };
 
 /** The invariant each mutation must break, and the seed offset known to show it (refreshed by the CI search). */
@@ -179,6 +259,16 @@ const EXPECTED: Record<string, { invariant: string; seed: number; options?: Part
   "the precondition checked before the lead's state": { invariant: "P11", seed: 17 },
   "the precondition checks only the status": { invariant: "P13", seed: 0 },
   "a confirmation sends the click-time expectation": { invariant: "P13", seed: 0, options: { clickTimeExpectation: true } },
+  // ADR 0003 "Reads that say when": the windows family, in which the record models windows, zones and outages (W1 to W3).
+  "a skipped step counts as touching the lead": { invariant: "18", seed: 9 },
+  "a mixed pool reads the full sender's reason": { invariant: "W2", seed: 110, options: { windows: true } },
+  "a claimed step whose slot is not reached reads ready": { invariant: "W3", seed: 1, options: { windows: true } },
+  "a held step reads ready": { invariant: "W1", seed: 1, options: { windows: true } },
+  "a step outside its window reads ready": { invariant: "W2", seed: 0, options: { windows: true } },
+  "a step whose every sender is full reads ready": { invariant: "W2", seed: 21, options: { windows: true } },
+  "a ready step is given a time": { invariant: "W2", seed: 1, options: { windows: true } },
+  "an earliest instant ignores the window": { invariant: "W2", seed: 0, options: { windows: true } },
+  "a preview's time is the wait's end": { invariant: "W4", seed: 0, options: { windows: true } },
 };
 
 export const CONTROL_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number; readonly options?: Partial<ControlRunOptions> }> = Object.fromEntries(

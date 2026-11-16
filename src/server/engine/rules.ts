@@ -14,6 +14,7 @@ import {
   handoverFailures,
   readyItems,
   retryFailures,
+  stepWhen,
 } from "../../domain/sequence/dispatch.ts";
 import { compareReadyNow, focusOf, isListed, logCallOutcome, placeCall, readyCalls, reasonOf } from "../../domain/sequence/calls.ts";
 import { applyBadDestination, applyReply, applyToAttempt, applyToWork, asOfAction, enterMain, evaluate, releaseUnsentBindings, replyMatches, sameConversations, smsReplyOwner, stillSettled, withdrawalDue } from "../../domain/sequence/progress.ts";
@@ -45,6 +46,16 @@ export interface Rules {
   readonly applyBadDestination: typeof applyBadDestination;
   readonly sendPoint: typeof sendPoint;
   readonly readyItems: typeof readyItems;
+  /** When a pending step goes, as every read says it (ADR 0003 "Reads that say when"): a rule so a mutation can swap the read alone. */
+  readonly stepWhen: typeof stepWhen;
+  /** The same read for a control's preview of its next step: its own rule, so a mutation can break the preview alone. */
+  readonly previewStepWhen: typeof stepWhen;
+  /**
+   * The lead a confirmation's expectation is checked against, given the stored lead and the lead as of the action's instant:
+   * the evaluated one, as the read that produced the expectation showed it (the review bot on 712884b). A rule so a
+   * mutation can judge the stored one.
+   */
+  readonly confirmedAgainst: (stored: SubjectState, evaluated: SubjectState) => SubjectState;
   /** Claims are made in this order (4.3). */
   readonly claimOrder: typeof comparePriority;
   /** Claimed attempts on one account are handed over in this order (5.5 step 2). */
@@ -148,6 +159,9 @@ export const DEFAULT_RULES: Rules = {
   applyBadDestination,
   sendPoint,
   readyItems,
+  stepWhen,
+  previewStepWhen: stepWhen,
+  confirmedAgainst: (_stored, evaluated) => evaluated,
   claimOrder: comparePriority,
   handoverOrder: comparePriority,
   claimRefusal,

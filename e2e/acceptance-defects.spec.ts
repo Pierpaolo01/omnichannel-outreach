@@ -5,10 +5,9 @@ import { acceptanceWorld, H, INBOX, MIN, NUMBERS, type AcceptanceWorld } from ".
 import { business, csvOf, person } from "../test/support/export-builder.ts";
 
 /**
- * Ticket 23: product defects the acceptance run found and reported to the coordinator, not fixed here. Each test states
- * the behaviour the spec asks for and is marked `test.fail()`: it fails today, and the suite stays green while it does.
- * When the defect is fixed the test passes, Playwright reports the unexpected pass, and the mark comes off.
- * Every name, address and number is fictitious.
+ * Ticket 23: product defects the acceptance run found and reported to the coordinator. Each test states the behaviour the
+ * spec asks for. Defects 2 and 3 are fixed (ADR 0003 "Reads that say when, and why a call left the list"), so each now
+ * asserts what the spec asks, where it asserted the defect before. Every name, address and number is fictitious.
  */
 
 test.use({ timezoneId: "Europe/London", actionTimeout: 15_000 });
@@ -40,15 +39,6 @@ async function at(page: Page, world: AcceptanceWorld, route: string): Promise<vo
   await page.goto(world.url + route);
 }
 
-/**
- * The defect's own assertion, and only it. By default it asserts the defect as it stands today, so the suite passes and a
- * fix makes this one assertion fail (the fix then swaps it for the spec's). SHOW_DEFECTS=1 asserts what the spec asks
- * instead, which fails while the defect stands. Everything before it is asserted normally, so a broken setup fails either way.
- */
-async function defect(spec: () => Promise<void> | void, today: () => Promise<void> | void): Promise<void> {
-  await (process.env["SHOW_DEFECTS"] ? spec() : today());
-}
-
 test("defect 2 (review item 11): a person's campaign row and the read name when the next email goes, not a past instant outside its sending window", async ({ page }) => {
   w = await acceptanceWorld({ start: MONDAY_10, smsConnected: true });
   const h = w.harness;
@@ -59,26 +49,18 @@ test("defect 2 (review item 11): a person's campaign row and the read name when 
   const read = await w.read(lead);
   await at(page, w, `/leads/people/${await w.record("Pat Oneil")}`);
   const row = page.getByRole("region", { name: "Campaigns" }).getByRole("listitem").first();
-  await expect(row).toContainText("Next: email 1 of 1, due");
+  await expect(row).toContainText("Next: email 1 of 1, earliest");
   const sentence = (await row.textContent()) ?? "";
   // What the engine does with it: nothing on Monday; it goes when Tuesday's window opens.
   await h.advanceTo(Date.parse("2026-11-10T12:00:00Z"));
   expect(h.fake.deliveryLog).toHaveLength(1);
   const sentAt = h.fake.deliveryLog[0]?.at;
   expect(sentAt).toBe(Date.parse("2026-11-10T09:00:00Z"));
-  const dueInRead = read.tracks.find((t) => t.channel === "email")?.nextStep?.dueAt;
-  await defect(
-    () => {
-      // The spec: the read and the row, taken on Monday at 11:00, name the instant it goes.
-      expect(dueInRead).toBe(new Date(sentAt ?? NaN).toISOString());
-      expect(sentence).toContain("due Tue 10 Nov at 09:00");
-    },
-    () => {
-      // Today: both name the wait's end, the launch on Monday at 10:00, already past and outside the window.
-      expect(dueInRead).toBe(new Date(MONDAY_10).toISOString());
-      expect(sentence).toContain("due Mon 9 Nov at 10:00");
-    },
-  );
+  // The read and the row, taken on Monday at 11:00, name the instant it goes (the read's `when`, ADR 0003 "Reads that say when").
+  const whenInRead = read.tracks.find((t) => t.channel === "email")?.nextStep?.when;
+  expect(whenInRead).toEqual({ kind: "at", at: new Date(sentAt ?? NaN).toISOString() });
+  expect(sentence).toContain("earliest Tue 10 Nov at 09:00");
+  expect(sentence).not.toContain("Mon 9 Nov at 10:00");
 });
 
 test("defect 3: while its campaign is paused, the Calls page does not say a call was logged from another window when it was not", async ({ page }) => {
@@ -101,18 +83,13 @@ test("defect 3: while its campaign is paused, the Calls page does not say a call
   // Nothing can be logged on it while paused: every outcome and Log are disabled, and a post is refused.
   for (const button of await page.getByRole("group", { name: "Call outcome" }).getByRole("button").all()) await expect(button).toBeDisabled();
   await expect(page.getByRole("button", { name: "Log and open next call" })).toBeDisabled();
+  // Nor does the locked sheet tell the user to pick an outcome it then refuses (council on 178de98, item 5).
+  await expect(page.getByText("Pick what happened to finish this call.")).toHaveCount(0);
   expect((await h.request("POST", `/api/call-tasks/${taskId}/outcome`, { requestId: "while-paused", outcome: "no_answer", numberId: task.numbers[0]?.detailId ?? null, note: "" })).status).toBe(409);
   const offList = (await h.request<CallTaskView>("GET", `/api/call-tasks/${taskId}`)).body.offList;
-  await defect(
-    async () => {
-      // The spec: the call is off the list because the campaign is paused, not because an outcome was logged elsewhere.
-      expect(offList?.reason).not.toBe("logged");
-      await expect(page.getByText(/already logged from another window or device/)).toHaveCount(0);
-    },
-    async () => {
-      // Today: the read gives the reason "logged" (the callback request on the same task), and the page says so.
-      expect(offList?.reason).toBe("logged");
-      await expect(page.getByText(/already logged from another window or device: callback requested/)).toBeVisible();
-    },
-  );
+  // The call is off the list because the campaign is paused, not because an outcome was logged elsewhere; the page says
+  // the hold in the records' words.
+  expect(offList).toEqual({ reason: "campaign_paused", status: "callback_scheduled" });
+  await expect(page.getByText(/already logged from another window or device/)).toHaveCount(0);
+  await expect(page.getByRole("alert").filter({ hasText: "Open the next call" })).toContainText("The callback is on hold while this campaign is paused.");
 });

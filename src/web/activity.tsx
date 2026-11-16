@@ -7,7 +7,7 @@ import { DECLINED_PATH_LINE, OUTCOME_TITLE, dateIn, declineTrackLine, dialledLin
 import { dayLabel } from "./calls/callbackTime.ts";
 import { Icon, type IconName } from "./icons.tsx";
 import { stepNoun } from "../shared/track-label.ts";
-import { useNow } from "./time.ts";
+import { useNow, clockTime } from "./time.ts";
 import { conversationTaken } from "./campaign/sms-wording.ts";
 
 /**
@@ -230,7 +230,7 @@ function controlEntry(entry: Extract<ActivityEntry, { kind: "control" }>): { ico
   }
 }
 
-const timeIn = (zone: string, iso: string) => new Intl.DateTimeFormat("en-GB", { timeZone: zone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(iso));
+const timeIn = (zone: string, iso: string) => clockTime(zone, iso);
 /** "Thu 5 Nov at 14:30" in the prospect's zone. */
 const at = (iso: string, zone: string) => `${dateIn(zone, iso)} at ${timeIn(zone, iso)}`;
 
@@ -506,7 +506,7 @@ function NoteBox(props: NoteBoxProps & { onAdded: () => void; /** The ids of the
 export function when(iso: string, now: Date, zone: string): string {
   const date = (d: Date) => new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
   const at = new Date(iso);
-  const time = new Intl.DateTimeFormat("en-GB", { timeZone: zone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(at);
+  const time = clockTime(zone, at);
   if (date(at) === date(now)) return `Today, ${time}`;
   return `${dateIn(zone, iso)}, ${time}`;
 }

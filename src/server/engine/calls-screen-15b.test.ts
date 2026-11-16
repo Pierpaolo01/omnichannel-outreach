@@ -135,7 +135,7 @@ describe("callbacks on the screens (ADR 0003 2.3, Q12, Q13)", () => {
     expect(held).toMatchObject({ kind: "callback", callbackAt: "2026-11-02T15:00:00.000Z", status: "callback_scheduled", skipLimit: null });
     expect(held.storedCalls.at(-1)).toMatchObject({ requestId: "cb-1", outcome: "callback_requested", callbackAt: "2026-11-02T15:00:00.000Z", redial: false });
     expect((await record("Pat Oneil")).calls).toEqual([
-      expect.objectContaining({ taskId: id, kind: "callback", listed: true, reason: "callback", callbackAt: "2026-11-02T15:00:00.000Z", zone: "Europe/London", noGoodNumber: false, skipLimit: null, heldByCallback: false }),
+      expect.objectContaining({ taskId: id, kind: "callback", listed: true, reason: "callback", callbackAt: "2026-11-02T15:00:00.000Z", zone: "Europe/London", noGoodNumber: false, skipLimit: null, heldByCallback: null }),
     ]);
     await h.advanceTo(Date.parse("2026-11-02T15:05:00Z"));
     expect((await record("Pat Oneil")).calls[0]).toMatchObject({ reason: "overdue" });
@@ -181,7 +181,8 @@ describe("callbacks on the screens (ADR 0003 2.3, Q12, Q13)", () => {
     expect((await h.request("POST", `/api/call-tasks/${first?.taskId}/outcome`, { requestId: "cb", outcome: "callback_requested", callbackAt: "2026-11-03T10:00:00+00:00", numberId: number })).status).toBe(200);
     const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${c.id}`)).body.rows;
     const rec = (await h.request<PersonRecord & RecordCalls>("GET", `/api/people/${rows[0]?.id}`)).body;
-    expect(rec.calls.find((x) => x.taskId === second?.taskId)).toMatchObject({ kind: "call", listed: false, reason: null, heldByCallback: true });
+    // Council on 178de98, item 8: the held call says where its callback really is: tomorrow's, not on today's list.
+    expect(rec.calls.find((x) => x.taskId === second?.taskId)).toMatchObject({ kind: "call", listed: false, reason: null, heldByCallback: { listed: false, listedFor: "2026-11-03" } });
     // A callback for tomorrow is not on today's list.
     expect(rec.calls.find((x) => x.taskId === first?.taskId)).toMatchObject({ kind: "callback", listed: false, reason: null, listedFor: "2026-11-03" });
   });

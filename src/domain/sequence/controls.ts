@@ -235,10 +235,10 @@ export function previewDigest(before: SubjectState, action: LeadControl, after: 
 }
 
 /**
- * Why a control no longer applies as confirmed, or null when it does (or carries no expectation). The status is the stored
- * lead's, as every read says it (`stored`); the preview is the digest of what the action would do now, from the lead as
- * of the action's instant (`before`) and the transition's result (`after`, null when the action is refused: then its own
- * refusal comes first, `judgeControl`).
+ * Why a control no longer applies as confirmed, or null when it does (or carries no expectation). The status is the lead's
+ * as the read says it (`stored`: the action passes the lead evaluated as of its instant, as the read evaluates it); the
+ * preview is the digest of what the action would do now, from the lead as of the action's instant (`before`) and the
+ * transition's result (`after`, null when the action is refused: then its own refusal comes first, `judgeControl`).
  */
 export function controlPrecondition(stored: SubjectState, before: SubjectState, action: LeadControl, after: SubjectState | null, expected: LeadExpectation | null): string | null {
   if (expected === null) return null;

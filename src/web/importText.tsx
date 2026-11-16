@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { clockTime } from "./time.ts";
 import type { ContactRoute, DetailNote, EvidenceKind, ImportSummary, LeadOutcome, SummaryEntry } from "../shared/api.ts";
 
 /** Words for the import summary: outcomes, the routes a lead can be reached on, and what changed. */
@@ -187,7 +188,7 @@ export function resultLede(summary: ImportSummary, firstImport: boolean): string
 /** "today at 16:40" or "9 November at 16:40", in the user's time. */
 export function whenImported(iso: string, now: Date): string {
   const at = new Date(iso);
-  const time = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(at);
+  const time = clockTime(undefined, at);
   const sameDay = at.toDateString() === now.toDateString();
   const day = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "long" }).format(at);
   return sameDay ? `today at ${time}` : `${day} at ${time}`;

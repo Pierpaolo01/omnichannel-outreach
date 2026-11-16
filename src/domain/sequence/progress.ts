@@ -5,7 +5,7 @@
  */
 import type { OutreachStatus } from "../outreach-status.ts";
 import { applyAttemptEvent, applyLookup, ENGINE_PARAMS, isLive, isUncertain, markable, maySend, withRef, type AttemptEffect, type AttemptEvent, type WorkEvent } from "./attempt.ts";
-import { leadNow, localDayNumber, nextWindowOpen, sendPoint, startOfLocalDay, syncClock, waitSpan, wallOfLead, windowOpen, type Freeze, type LeadClock } from "./clock.ts";
+import { leadNow, localDayNumber, nextWindowOpen, sendPoint, startOfLocalDay, syncClock, waitSpan, wallOfLead, windowOpensAt, type Freeze, type LeadClock } from "./clock.ts";
 import { render } from "./copy.ts";
 import { liveSteps, ownSubject, poolOf, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
 import type { StoredReplyId } from "./reply-identity.ts";
@@ -890,6 +890,19 @@ export function windowOf(state: SubjectState, trackId: string) {
   return state.campaign.definition.tracks.find((t) => t.id === trackId)?.window ?? [];
 }
 
+/**
+ * The first instant at or after `now` at which the claim's time conditions hold for the track's pending email or text,
+ * the lead running (ADR 0003 "Reads that say when"): its wait has ended in lead time, and its track's window is open in
+ * the prospect's zone. The claim's step guard refuses "the sending window is closed" exactly when it is not `now`. Null
+ * when there is no pending step with a due time, or the window never opens.
+ */
+export function sendableFrom(state: SubjectState, trackId: string, now: number, from: number = now): number | null {
+  const p = progressOf(state, trackId);
+  if (!p || p.dueAt === null) return null;
+  const dueWall = now + Math.max(0, p.dueAt - leadNow(state.subject.clock, now));
+  return windowOpensAt(windowOf(state, trackId), state.lead.zone, Math.max(dueWall, from));
+}
+
 /** The claim's step guard (4.2 step 1). Null when it holds; otherwise why not. */
 export function claimRefusal(state: SubjectState, item: { readonly trackId: string; readonly stepId: string }, now: number): string | null {
   if (!runs(state)) return "the lead is not running";
@@ -901,7 +914,8 @@ export function claimRefusal(state: SubjectState, item: { readonly trackId: stri
   if (state.results.some((r) => r.stepId === item.stepId)) return "the step already has a result";
   if (state.attempts.some((a) => a.stepId === item.stepId && isLive(a))) return "the step already has a live attempt";
   if (p.dueAt === null || p.dueAt > leadNow(state.subject.clock, now)) return "the step is not due";
-  if (!windowOpen(windowOf(state, item.trackId), state.lead.zone, now)) return "the sending window is closed";
+  // The step's time conditions hold exactly at the instant the reads give (`sendableFrom`, ADR 0003 "Reads that say when").
+  if (sendableFrom(state, item.trackId, now) !== now) return "the sending window is closed";
   const dest = p.destinationDetailId ? state.lead.resolved[p.destinationDetailId] : undefined;
   if (!dest || dest.bad || !dest.owned) return "the destination is not a good address of the lead";
   if (!renderStep(state, item.trackId, item.stepId)) return "the copy does not render for this lead";

@@ -164,6 +164,11 @@ export interface Draft {
   readonly pressId: string | null;
   /** The count of call reads started when this press's entry was found gone: a read started after it settles it. */
   readonly goneAtRead: number | null;
+  /**
+   * The server's instant (`asOf`) of the first read this tab opened the call on, kept with the draft: an outcome stored
+   * at or after it was logged since the desk opened the call (ADR 0003 "why a call left the list").
+   */
+  readonly openedAt: string | null;
 }
 
 export type Load<T> = { readonly state: "loading" } | { readonly state: "error"; readonly message: string } | { readonly state: "ready"; readonly view: T };
@@ -185,8 +190,11 @@ export interface CallState {
   readonly pending: (OutboxEntry & { readonly own: boolean; readonly unconfirmed: boolean }) | null;
   /** This tab's press, found stored. */
   readonly logged: LoggedRecord | null;
-  /** Why the call is off the list, and this tab's typed note when the server does not hold it. */
-  readonly away: { readonly taskId: string; readonly who: string; readonly offList: CallOffListView; readonly note: string } | null;
+  /**
+   * Why the call is off the list, this tab's typed note when the server does not hold it, and, for `logged`, whether that
+   * outcome was stored since this tab opened the call (only then is it said to be from another window or device).
+   */
+  readonly away: { readonly taskId: string; readonly who: string; readonly offList: CallOffListView; readonly note: string; readonly sinceOpened: boolean } | null;
   /** The press's entry is gone and no read has been started since: start one. */
   readonly pressGone: boolean;
   /** A read started after the entry went does not hold the press: it was never stored. */
@@ -233,7 +241,9 @@ export function reconcile(input: {
     const typed = draft.note.trim();
     const held = typed !== "" && ([...view.personNotes, ...view.companyNotes].some((n) => n.body === typed) || view.touches.some((t) => t.kind === "call" && t.note === typed));
     const kept = typed !== "" && entries.some((e) => e.refused && e.taskId === view.taskId && e.body.note.trim() === typed);
-    return { ...base, kind: "off_list", locked: true, pressSettled, away: { taskId: view.taskId, who, offList: view.offList, note: typed === "" || held || kept ? "" : draft.note } };
+    const off = view.offList;
+    const sinceOpened = off.reason === "logged" && (draft.openedAt === null || Date.parse(off.at) >= Date.parse(draft.openedAt));
+    return { ...base, kind: "off_list", locked: true, pressSettled, away: { taskId: view.taskId, who, offList: off, note: typed === "" || held || kept ? "" : draft.note, sinceOpened } };
   }
   // 5. A draft, ready to work.
   return { ...base, pressSettled };
@@ -288,7 +298,7 @@ const FOCUS = "outreach.calls.focus";
 /** Backoff after no answer, in milliseconds; the last repeats. */
 export const RETRY_MS = [1_000, 2_000, 4_000, 8_000] as const;
 
-const EMPTY_DRAFT: Draft = { outcome: null, numberId: null, note: "", noteScope: "person", redial: false, callbackDay: null, callbackTime: "", callbackAt: null, declinedPath: null, pressId: null, goneAtRead: null };
+const EMPTY_DRAFT: Draft = { outcome: null, numberId: null, note: "", noteScope: "person", redial: false, callbackDay: null, callbackTime: "", callbackAt: null, declinedPath: null, pressId: null, goneAtRead: null, openedAt: null };
 
 const PATHS: readonly DeclinedPathApi[] = ["stop", "continue", "win_back"];
 
@@ -323,6 +333,7 @@ function readDraft(raw: string | null): Draft | null {
       declinedPath: PATHS.find((x) => x === d.declinedPath) ?? null,
       pressId: typeof d.pressId === "string" ? d.pressId : null,
       goneAtRead: null,
+      openedAt: typeof d.openedAt === "string" ? d.openedAt : null,
     };
   } catch {
     return null;
@@ -598,7 +609,10 @@ export class CallDesk {
       // The draft is made once in this tab: from its copy, or with the first good number, as the server lists them (direct first).
       const copy = readDraft(this.ports.session.get(DRAFT + view.taskId));
       draft = copy ?? { ...EMPTY_DRAFT, numberId: view.numbers.find((n) => !n.bad)?.detailId ?? null, noteScope: view.person === null ? "company" : "person" };
-      draftNotKept = copy === null ? !this.ports.session.set(DRAFT + view.taskId, JSON.stringify(draft)) : false;
+      // The instant this tab opened the call: kept across reloads with the draft, set once.
+      const opened = draft.openedAt === null;
+      if (opened) draft = { ...draft, openedAt: view.asOf };
+      draftNotKept = copy === null || opened ? !this.ports.session.set(DRAFT + view.taskId, JSON.stringify(draft)) : false;
       if (this.fault("first_read_skips_reconcile")) {
         this.state = { ...this.state, task: { state: "ready", view }, draft, away: null, locked: false };
         for (const l of this.listeners) l();

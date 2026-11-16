@@ -18,7 +18,8 @@ import { definitionProblems, emptyDefinition, liveTracks, type CampaignDefinitio
 import { Engine } from "./engine/engine.ts";
 import type { StoredDefinition, StoredNote } from "./engine/engine-store.ts";
 import { UnconnectedEmailPort, UnprovisionedSmsPort } from "./engine/ports.ts";
-import { accountView, progressView } from "./engine/views.ts";
+import { accountView, progressView, stepEnvOf } from "./engine/views.ts";
+import type { StepEnv } from "../domain/sequence/dispatch.ts";
 import { callsView, callTaskView, needsAttentionView, recordCalls, todayView } from "./engine/call-views.ts";
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
 import { sealReckoning } from "../domain/sequence/progress.ts";
@@ -607,11 +608,32 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   });
 
   // Work handed over and not settled may still be sent (ticket 17a's provider limitation): the screens say so.
-  const readOf = (state: SubjectState, at: number): EnrollmentRead => ({ ...progressView(state, at), controls: controlsView(state, at, rules), mayStillSend: state.work.filter(maySend).length });
+  // When each step goes is read with what dispatch knows beyond the lead (ADR 0003 "Reads that say when"): the port's
+  // transport, and the dispatch gate while sending is interrupted.
+  const transport = (channel: "email" | "sms", threading: "new_subject" | "continue_thread") => engine.transportAvailable?.(channel, threading) ?? true;
+  /**
+   * A read with what dispatch knows, computed once with a probe in place of the later days' call room, and again with the
+   * room only when some step asked for it (council and verifier on cc9bf55, items 6 and 12): the other leads' open calls are
+   * loaded only when a call not yet on the list would go on it on a later day.
+   */
+  const withEnv = async <T>(at: number, reading: readonly SubjectState[], known: ReadonlyMap<string, SubjectState | null> | undefined, compute: (env: StepEnv) => T | Promise<T>): Promise<T> => {
+    const light = await stepEnvOf(store.engine, at, reading, transport, known, false);
+    const probe = { asked: false };
+    const first = await compute({ ...light, callRoomOn: () => ((probe.asked = true), true) });
+    return probe.asked ? compute(await stepEnvOf(store.engine, at, reading, transport, known)) : first;
+  };
+  // The read is this subject as the engine evaluates it at the read's instant (`previewAsOf`, the rule the controls' preview
+  // already reads through: the engine's own `asOfAction`): a track
+  // whose start or a step whose due falls between two rounds is read as started or due, never as having no pending step
+  // (the P2 seeds of the search on ab6fe8e). Pure: nothing is written; the next round evaluates the same.
+  const readOf = (stored: SubjectState, at: number, env: StepEnv): EnrollmentRead => {
+    const state = rules.previewAsOf(stored, at, rules.evaluate);
+    return { ...progressView(state, at, env, rules.stepWhen), controls: controlsView(state, at, rules, env), mayStillSend: state.work.filter(maySend).length };
+  };
   const enrollmentRead = async (id: string): Promise<EnrollmentRead | null> => {
     const at = Date.parse(now());
     const state = await store.engine.subject(id, at);
-    return state ? readOf(state, at) : null;
+    return state ? withEnv(at, [state], new Map([[id, state]]), (env) => readOf(state, at, env)) : null;
   };
 
   // Ticket 17b: each enrollment's read on the record, with its campaign's launch and pause, so each campaign row shows
@@ -624,15 +646,19 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     return { ...(await recordCalls(store, enrollmentIds, at, rules, loaded)), ...(await recordControls(enrollmentIds, loaded, at)) };
   };
   const recordControls = async (enrollmentIds: readonly string[], loaded: ReadonlyMap<string, SubjectState | null>, at: number): Promise<RecordControls> => {
-    const leads: RecordLead[] = [];
-    for (const id of enrollmentIds) {
-      const state = loaded.get(id) ?? null;
-      if (!state) continue;
-      // The campaign's launch and pause as the loaded lead holds them: the same snapshot as its calls and controls, so a
-      // pause landing during this read never makes one row both on hold and on today's list (council on 57d874f, item 6).
-      const { launchedAt, pausedSince } = state.campaign;
-      leads.push({ ...readOf(state, at), campaignState: { launched: launchedAt !== null, paused: pausedSince !== null, pausedSince: pausedSince === null ? null : new Date(pausedSince).toISOString() } });
-    }
+    const states = [...loaded.values()].filter((x): x is SubjectState => x !== null);
+    const leads = await withEnv(at, states, loaded, (env) => {
+      const out: RecordLead[] = [];
+      for (const id of enrollmentIds) {
+        const state = loaded.get(id) ?? null;
+        if (!state) continue;
+        // The campaign's launch and pause as the loaded lead holds them: the same snapshot as its calls and controls, so a
+        // pause landing during this read never makes one row both on hold and on today's list (council on 57d874f, item 6).
+        const { launchedAt, pausedSince } = state.campaign;
+        out.push({ ...readOf(state, at, env), campaignState: { launched: launchedAt !== null, paused: pausedSince !== null, pausedSince: pausedSince === null ? null : new Date(pausedSince).toISOString() } });
+      }
+      return out;
+    });
     return { leads, userZone: (await store.engine.callSettings()).userZone };
   };
 
@@ -640,7 +666,12 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   const isTestRun = async (id: string) => (await store.engine.testRun(id)) !== null;
 
   // Ticket 18: bulk add, pause, resume and stop on Leads, each per-lead effect through the engine's own control.
-  bulkRoutes(app, { store, engine, now, newId, readOf, ...(bulkRules ? { rules: bulkRules } : {}) });
+  // Bulk previews are per-lead previews (council on cc9bf55, item 8): the same read, with what dispatch knows. A request's
+  // rows share one environment, since the call room takes each row's own state (`callRoomOn(day, self)`).
+  const readAll = async (states: readonly SubjectState[], at: number): Promise<EnrollmentRead[]> => {
+    return withEnv(at, states, new Map(states.map((s) => [s.subject.id, s])), (env) => states.map((s) => readOf(s, at, env)));
+  };
+  bulkRoutes(app, { store, engine, now, newId, readOf: (state, at) => withEnv(at, [state], new Map([[state.subject.id, state]]), (env) => readOf(state, at, env)), readAll, ...(bulkRules ? { rules: bulkRules } : {}) });
 
   app.get("/enrollments/:id", async (c) => {
     if (await isTestRun(c.req.param("id"))) return notFound(c, "enrollment");
@@ -715,7 +746,12 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   // -------------------------------------------------------------------------------------------
   // Test runs (ticket 21; ADR 0003 "Ticket 21").
 
-  const testTab = async (id: string) => testRunTab(store, id, Date.parse(now()), rules);
+  const testTab = async (id: string) => {
+    const at = Date.parse(now());
+    const latest = (await store.engine.testRunsOf(id))[0] ?? null;
+    const run = latest ? await store.engine.subject(latest.id, at) : null;
+    return withEnv(at, run ? [run] : [], run && latest ? new Map([[latest.id, run]]) : undefined, (env) => testRunTab(store, id, at, rules, env));
+  };
 
   app.get("/campaigns/:id/test-runs", async (c) => {
     const tab = await testTab(c.req.param("id"));

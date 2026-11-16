@@ -1,4 +1,8 @@
 import type { TestRunEnding, TestRunRead, TestStepRow } from "../../shared/api.ts";
+import { clockTime } from "../time.ts";
+import { stepWaitWords } from "../controls/wording.ts";
+
+const capitalise = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1);
 import { conversationTaken } from "./sms-wording.ts";
 import { holdReasonClause } from "../calls/wording.ts";
 
@@ -10,7 +14,7 @@ import { holdReasonClause } from "../calls/wording.ts";
 /** HH:MM in `zone`, with the weekday when it is not the read's own day. */
 export function timeIn(zone: string, iso: string, readAt: string): string {
   const day = (t: string) => new Intl.DateTimeFormat("en-GB", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(t));
-  const clock = new Intl.DateTimeFormat("en-GB", { timeZone: zone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(iso));
+  const clock = clockTime(zone, iso);
   if (day(iso) === day(readAt)) return clock;
   return `${new Intl.DateTimeFormat("en-GB", { timeZone: zone, weekday: "short" }).format(new Date(iso))} ${clock}`;
 }
@@ -83,9 +87,13 @@ export function stepStateText(row: TestStepRow, zone: string, readAt: string): s
     case "held":
       return "On hold";
     case "due": {
+      // No time the engine can promise: the read's reason, in the one wording function (ADR 0003 "Reads that say when").
+      if (row.at === null && row.waits !== null) return capitalise(stepWaitWords(row.waits, row.channel));
       const ms = row.at === null ? Infinity : Date.parse(row.at) - Date.parse(readAt);
-      if (ms <= 0) return "Due now";
-      return ms <= 2 * 60_000 ? "In about 1 min" : `Due ${at}`;
+      // Its time has come and nothing of its own holds it: ready, in line for its sender, never "now" (ADR 0003).
+      if (ms <= 0) return "Ready to send, in line for its sender";
+      // The earliest it can go, never a promise (verifier on 178de98, item 9).
+      return ms <= 2 * 60_000 ? "Earliest in about 1 min" : `Earliest ${at}`;
     }
     case "on_your_list":
       return "On your Calls list";

@@ -758,7 +758,7 @@ describe("every read of the call goes through the one reconciliation, and every 
         if (!offNext) return view;
         // One read says the call is off the list (its hours closed, say); the next lists it again.
         offNext = false;
-        return { ...view, listed: false, offList: { reason: "not_listed_today", status: view.status } };
+        return { ...view, listed: false, offList: { reason: "no_hours_today", status: view.status } };
       },
     });
     await a.start();
@@ -768,7 +768,7 @@ describe("every read of the call goes through the one reconciliation, and every 
     offNext = true;
     await a.refresh();
     await flush();
-    expect(a.getSnapshot().away?.offList.reason).toBe("not_listed_today");
+    expect(a.getSnapshot().away?.offList.reason).toBe("no_hours_today");
     await a.refresh();
     await flush();
     expect(a.getSnapshot().away).toBeNull();

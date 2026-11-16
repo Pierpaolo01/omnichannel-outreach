@@ -515,3 +515,4 @@ export interface MeasureFacts {
   /** Each open callback task, with whether its subject's outreach has ended. */
   readonly openCallbacks: readonly { readonly subjectId: string; readonly test: boolean; readonly ended: string | null; readonly open: boolean; readonly kind: "call" | "callback" }[];
 }
+

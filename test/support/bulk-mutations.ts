@@ -38,8 +38,8 @@ export const BULK_MUTATIONS: Readonly<Record<string, { invariant: BulkInvariant;
         for (const e of selected.flatMap((r) => r.enrollments)) {
           if (items.some((i) => i.enrollmentId === e.id) || (scope !== null && e.campaign.id !== scope)) continue;
           const state = await store.engine.subject(e.id, at);
-          const control = state ? readOf(state, at).controls.find((c) => c.action === action) : undefined;
-          if (state && control?.allowed) extra.push({ enrollmentId: e.id, expect: { status: readOf(state, at).status, preview: control.digest } });
+          const control = state ? (await readOf(state, at)).controls.find((c) => c.action === action) : undefined;
+          if (state && control?.allowed) extra.push({ enrollmentId: e.id, expect: { status: (await readOf(state, at)).status, preview: control.digest } });
         }
         return [...items, ...extra];
       },

@@ -9,7 +9,7 @@ import { leadNow, localDayNumber, nextWindowOpen, span, startOfLocalDay, wallOfL
 import { WIN_BACK_HAS_NO_TRACKS, declinedPathOf, winBackAvailable, type CampaignDefinition, type DeclinedPath } from "./definition.ts";
 import type { ReadyItem } from "./dispatch.ts";
 import { advanceTrack, callbackHold, campaignLets, decline, end, evaluate, finishTrack, markDetailBad, progressOf, quiesce, runs, synced } from "./progress.ts";
-import type { CallAttempt, CallDay, CallNumber, CallOutcome, CallTask, NoteDraft, RecordedNumber, SubjectState } from "./state.ts";
+import type { CallAttempt, CallDay, CallNumber, CallOutcome, CallTask, FinishReason, NoteDraft, RecordedNumber, SubjectState } from "./state.ts";
 
 export const CALL_OUTCOMES: readonly CallOutcome[] = ["no_answer", "voicemail", "gatekeeper", "wrong_number", "interested", "not_interested", "callback_requested", "skip_for_now"];
 
@@ -64,6 +64,29 @@ function opensToday(state: SubjectState, trackId: string, now: number): number |
   return opens !== null && opens < userDay(state).end ? opens : null;
 }
 
+/**
+ * The first instant at or after `now` at which the track's pending call step is placed on the user's list, the lead
+ * running (ADR 0003 "Reads that say when"): its wait has ended in lead time, and the prospect's calling hours open before
+ * the end of that instant's user day. On the current user day that is `opensToday`, the rule `readyCalls` places by, so
+ * `readyCalls` lists the step exactly when this is `now`. Null when there is no due time, or the hours never open.
+ */
+export function callPlacedFrom(state: SubjectState, trackId: string, now: number): number | null {
+  const p = progressOf(state, trackId);
+  if (!p || p.dueAt === null) return null;
+  const due = now + Math.max(0, p.dueAt - leadNow(state.subject.clock, now));
+  const today = userDay(state);
+  if (due < today.end && opensToday(state, trackId, due) !== null) return due;
+  const { userZone } = state.callDay;
+  // Each later user day, from the one the due instant falls on (or tomorrow), until the hours open on one of them.
+  let day = Math.max(localDayNumber(due, userZone), state.callDay.day + 1);
+  for (let i = 0; i < 9; i++, day++) {
+    const start = Math.max(due, startOfLocalDay(day, userZone));
+    const opens = nextWindowOpen(callWindow(state, trackId), state.lead.zone, start);
+    if (opens !== null && opens < startOfLocalDay(day + 1, userZone)) return start;
+  }
+  return null;
+}
+
 /** Whether the prospect's calling hours open at some point on the current user day (2.3). */
 function hoursOpenOnUserDay(state: SubjectState, trackId: string): boolean {
   const { start, end } = userDay(state);
@@ -77,6 +100,33 @@ function hoursOpenOnUserDay(state: SubjectState, trackId: string): boolean {
 export function callableOnDay(window: readonly WindowRule[], zone: string, start: number, end: number): boolean {
   const opens = nextWindowOpen(window, zone, start);
   return opens !== null && opens < end;
+}
+
+/**
+ * How many of this lead's open calls will certainly take room on the user's list on a later user day `day` (ADR 0003
+ * "Reads that say when", verifier on 178de98, item 9): the engine knows a call is carried into `day` when no user day
+ * from today up to `day` can list it (the listing rule's own `callableOnDay`), so it cannot be worked before, and `day`
+ * can; a callback counts on its own day, before which it is not listed. A call that could be worked earlier may not be
+ * carried, and is not counted. The read gives "no room that day" only from these.
+ */
+export function carriedInto(state: SubjectState, day: number): number {
+  const { subject } = state;
+  if (subject.ended !== null || subject.leadPaused || !campaignLets(state) || goodNumbers(state).length === 0) return 0;
+  const { userZone } = state.callDay;
+  const callable = (task: CallTask, d: number) => callableOnDay(callWindow(state, task.trackId), state.lead.zone, startOfLocalDay(d, userZone), startOfLocalDay(d + 1, userZone));
+  let n = 0;
+  for (const task of state.callTasks) {
+    if (!task.open) continue;
+    if (task.kind === "callback") {
+      if (callbackDay(state, task) === day) n++;
+      continue;
+    }
+    if (callbackHold(state) || task.listDay > day || !callable(task, day)) continue;
+    let workableBefore = false;
+    for (let d = Math.max(task.listDay, state.callDay.day); d < day && !workableBefore; d++) workableBefore = callable(task, d);
+    if (!workableBefore) n++;
+  }
+  return n;
 }
 
 /** The user-local day a callback is for: it is listed from that day on (2.3). */
@@ -108,6 +158,95 @@ export function isListed(state: SubjectState, task: CallTask): boolean {
   if (!task.open || !campaignLets(state) || subject.ended !== null || subject.leadPaused) return false;
   if (task.kind === "callback") return callbackDay(state, task) <= state.callDay.day;
   return !callbackHold(state) && task.listDay <= state.callDay.day && hoursOpenOnUserDay(state, task.trackId);
+}
+
+/**
+ * Why an open or closed call task is not on the user's list now (ADR 0003 "Reads that say when, and why a call left the
+ * list"): the engine's own reason, the first that holds of an exhaustive set. Null exactly when `isListed` holds.
+ */
+export type OffListReason =
+  /** An outcome on this task is what took it off: it closed the call, or moved it to a later day (a redial, a callback). */
+  | { readonly kind: "logged"; readonly attempt: CallAttempt }
+  | { readonly kind: "lead_ended" }
+  | { readonly kind: "campaign_paused" }
+  | { readonly kind: "campaign_not_launched" }
+  | { readonly kind: "lead_paused" }
+  /** Its phone track finished otherwise: the skip limit, the user's skip, a decline on another call, win-back, no good number. */
+  | { readonly kind: "track_finished"; readonly finish: FinishReason | null }
+  /** Another call of the lead is a callback, which holds this one: whether that callback is listed today, and its list day. */
+  | { readonly kind: "callback_hold"; readonly callback: CallbackListing }
+  /** Listed from a later user day (a redial or a callback whose outcome is no longer the latest cause). */
+  | { readonly kind: "listed_later"; readonly day: number }
+  | { readonly kind: "no_hours_today" };
+
+/** The lead's open callback as the listing rule sees it (`isListed`, `listedForDay`): on today's list, or the day it comes onto it. */
+export interface CallbackListing {
+  readonly listed: boolean;
+  readonly day: number;
+}
+
+/** The listing of the lead's open callback, the task that holds its other calls (2.3); null when it has none. */
+export function callbackListing(state: SubjectState): CallbackListing | null {
+  const callback = state.callTasks.find((t) => t.open && t.kind === "callback");
+  return callback ? { listed: isListed(state, callback), day: listedForDay(state, callback) } : null;
+}
+
+/** Whether this outcome is what took the task off the list: it closed it, or moved it past the current user day. */
+function tookOff(state: SubjectState, task: CallTask, outcome: CallAttempt): boolean {
+  const moves = outcome.redial || outcome.outcome === "callback_requested";
+  if (!task.open) return !moves;
+  return moves && listedForDay(state, task) > state.callDay.day;
+}
+
+export function offListReason(state: SubjectState, task: CallTask): OffListReason | null {
+  if (isListed(state, task)) return null;
+  const { subject, campaign } = state;
+  const last = state.callAttempts.filter((a) => a.taskId === task.id && a.outcome !== "skip_for_now").at(-1);
+  if (last && tookOff(state, task, last)) return { kind: "logged", attempt: last };
+  // A closed task was closed by its track's finish; an ending that followed it is not why it left.
+  if (!task.open) return { kind: "track_finished", finish: progressOf(state, task.trackId)?.finishReason ?? null };
+  if (subject.ended !== null) return { kind: "lead_ended" };
+  if (!campaignLets(state)) return campaign.pausedSince !== null ? { kind: "campaign_paused" } : { kind: "campaign_not_launched" };
+  if (subject.leadPaused) return { kind: "lead_paused" };
+  if (task.kind === "call" && callbackHold(state)) {
+    const callback = callbackListing(state);
+    if (callback) return { kind: "callback_hold", callback };
+  }
+  const day = listedForDay(state, task);
+  if (day > state.callDay.day) return { kind: "listed_later", day };
+  return { kind: "no_hours_today" };
+}
+
+/** The refusal of an outcome posted for a task that is off the list, from the engine's reason (never logged). */
+export function offListRefusal(state: SubjectState, task: CallTask, reason: OffListReason): string {
+  switch (reason.kind) {
+    case "logged":
+    case "track_finished": {
+      if (task.open) return "This call is not on today's list.";
+      // Said plainly when the skip limit closed it: an action is judged as of its own instant, so a call that
+      // expired at a rollover before the action arrived is refused even if the screen still showed it.
+      const finish = progressOf(state, task.trackId);
+      if (finish?.finishReason === "skipped_unworked" && task.closedWall !== null) return `This call was skipped at ${new Date(task.closedWall).toISOString()}: it was not worked within its skip limit, so it is no longer on the list.`;
+      return "This call is no longer on the list: its outcome was logged or its track has finished.";
+    }
+    case "lead_ended":
+      return "This lead's outreach has ended in this campaign, so its call is not on today's list.";
+    case "campaign_paused":
+      return "This call is off the list while its campaign is paused.";
+    case "campaign_not_launched":
+      return "This call is off the list until its campaign launches.";
+    case "lead_paused":
+      return "This call is off the list while the lead is paused.";
+    case "callback_hold":
+      return "This call is off the list while the lead's callback is open.";
+    case "listed_later":
+    case "no_hours_today":
+      return "This call is not on today's list.";
+    default: {
+      const unhandled: never = reason;
+      throw new Error(`A reason a call is off the list with no refusal: ${String(unhandled)}`);
+    }
+  }
 }
 
 export type CallBucket = "ready_now" | "later_today";
@@ -248,7 +387,8 @@ export function readyCalls(state: SubjectState, now: number): ReadyItem[] {
     if (track?.channel !== "call" || p.startedAt === null || p.finishedAt !== null || p.nextStepId === null || p.dueAt === null || p.dueWall === null) return [];
     const stepId = p.nextStepId;
     if (p.dueAt > lead || state.callTasks.some((t) => t.stepId === stepId)) return [];
-    if (opensToday(state, p.trackId, now) === null) return [];
+    // Placed exactly at the instant the reads give (`callPlacedFrom`, ADR 0003 "Reads that say when").
+    if (callPlacedFrom(state, p.trackId, now) !== now) return [];
     return [{ subjectId: state.subject.id, trackId: p.trackId, stepId, touched: state.subject.touched, dueWall: p.dueWall }];
   });
 }
@@ -377,15 +517,10 @@ export function logCallOutcome(
   }
   const task = state.callTasks.find((t) => t.id === taskId);
   if (!task) return { ok: false, reason: "There is no such call task." };
-  if (!task.open) {
-    // Said plainly when the skip limit closed it: an action is judged as of its own instant, so a call that
-    // expired at a rollover before the action arrived is refused even if the screen still showed it.
-    const finish = progressOf(state, task.trackId);
-    if (finish?.finishReason === "skipped_unworked" && task.closedWall !== null) return { ok: false, reason: `This call was skipped at ${new Date(task.closedWall).toISOString()}: it was not worked within its skip limit, so it is no longer on the list.` };
-    return { ok: false, reason: "This call is no longer on the list: its outcome was logged or its track has finished." };
-  }
-  if (!listed(state, task)) {
-    return { ok: false, reason: state.subject.ended !== null ? "This lead's outreach has ended in this campaign, so its call is not on today's list." : "This call is not on today's list." };
+  // Off the list: refused with the engine's reason (ADR 0003 "why a call left the list"), and nothing is stored.
+  if (!task.open || !listed(state, task)) {
+    const reason = offListReason(state, task) ?? (task.open ? ({ kind: "no_hours_today" } as const) : ({ kind: "track_finished", finish: null } as const));
+    return { ok: false, reason: offListRefusal(state, task, reason) };
   }
   const redial = input.redial === true;
   if (redial && !REDIAL_OUTCOMES.includes(input.outcome)) return { ok: false, reason: "A redial follows no answer, voicemail left, or gatekeeper or not reached." };

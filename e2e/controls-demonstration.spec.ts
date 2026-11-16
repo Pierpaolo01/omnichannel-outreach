@@ -39,7 +39,7 @@ test("pause during a wait and a pending call, the frozen skip limit, a smooth re
   });
 
   const dueBefore = await callDue();
-  const email2Before = (await read()).tracks.find((t) => t.trackId === "email")?.nextStep?.dueAt;
+  const email2Before = (await read()).tracks.find((t) => t.trackId === "email")?.nextStep?.when;
 
   await test.step("pause the campaign from the list, during the wait and with the call pending", async () => {
     await at(page, f, "/campaigns");
@@ -73,8 +73,12 @@ test("pause during a wait and a pending call, the frozen skip limit, a smooth re
     await linger(page);
     // The call keeps its original due time; email 2 is due three days later than it was, by the time paused.
     expect(await callDue()).toBe(dueBefore);
-    const email2After = (await read()).tracks.find((t) => t.trackId === "email")?.nextStep?.dueAt;
-    expect(Date.parse(email2After ?? "") - Date.parse(email2Before ?? "")).toBe(3 * DAY);
+    const email2After = (await read()).tracks.find((t) => t.trackId === "email")?.nextStep?.when;
+    // The read says when email 2 goes (ADR 0003 "Reads that say when"): before the pause, Wednesday's 09:00 opening after its
+    // wait ended at Wednesday 00:00; the pause moved that end by the three days paused, to Saturday 00:00, outside the
+    // weekday window, so it goes at Monday's 09:00 opening.
+    expect(email2Before).toEqual({ kind: "at", at: "2026-11-11T09:00:00.000Z" });
+    expect(email2After).toEqual({ kind: "at", at: "2026-11-16T09:00:00.000Z" });
     await at(page, f, "/calls");
     await expect(page.getByText(/Rolled over, due Mon 9 Nov/).first()).toBeVisible();
     await linger(page);

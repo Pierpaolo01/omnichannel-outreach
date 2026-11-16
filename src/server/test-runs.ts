@@ -3,6 +3,8 @@
  * since the last edit, and the latest run as of the read's instant, from its stored facts through the engine's own
  * functions. Nothing here writes, and nothing beside the engine decides what a test does.
  */
+import { stepWhen, type StepEnv } from "../domain/sequence/dispatch.ts";
+import { stepWaitApi } from "./engine/step-when-view.ts";
 import { isLive, maySend } from "../domain/sequence/attempt.ts";
 import { liveSteps, type TrackDefinition } from "../domain/sequence/definition.ts";
 import { progressOf, unsettledOwnersOf } from "../domain/sequence/progress.ts";
@@ -47,7 +49,7 @@ async function leadsOf(store: OutreachStore, campaignId: string): Promise<TestRu
   });
 }
 
-export async function testRunTab(store: OutreachStore, campaignId: string, now: number, rules: CallViewRules): Promise<TestRunTab | null> {
+export async function testRunTab(store: OutreachStore, campaignId: string, now: number, rules: CallViewRules, env: StepEnv = {}): Promise<TestRunTab | null> {
   const row = await store.engine.campaign(campaignId);
   const stored = await store.engine.testContacts(campaignId);
   if (!row || !stored) return null;
@@ -59,13 +61,13 @@ export async function testRunTab(store: OutreachStore, campaignId: string, now: 
     contacts: { email: stored.contacts.email?.value ?? null, mobile: stored.contacts.mobile?.value ?? null, emailIsALead: stored.leadHas.email, mobileIsALead: stored.leadHas.mobile },
     noTestSinceEdit: await store.engine.noTestSinceEdit(campaignId),
     leads,
-    run: latest ? await runRead(store, latest, leads, now, rules) : null,
+    run: latest ? await runRead(store, latest, leads, now, rules, env) : null,
     at: iso(now),
     zone: row.definition?.timezone ?? "UTC",
   };
 }
 
-async function runRead(store: OutreachStore, run: TestRunRecord, leads: TestRunTab["leads"], now: number, rules: CallViewRules): Promise<TestRunRead | null> {
+async function runRead(store: OutreachStore, run: TestRunRecord, leads: TestRunTab["leads"], now: number, rules: CallViewRules, env: StepEnv): Promise<TestRunRead | null> {
   const stored = await store.engine.subject(run.id, now);
   if (!stored) return null;
   // As of the read's instant: what fell due since the worker's last tick is applied (nothing is written).
@@ -80,18 +82,27 @@ async function runRead(store: OutreachStore, run: TestRunRecord, leads: TestRunT
     email: run.contacts.email?.value ?? null,
     mobile: run.contacts.mobile?.value ?? null,
     mayStillSend: s.work.filter(maySend).length,
-    steps: stepsOf(s, rules, now),
+    steps: stepsOf(s, rules, now, env),
   };
 }
 
 /** Every live step of the main sequence, then of the win-back branch, in canvas order, with what its facts say. */
-export function stepsOf(s: SubjectState, rules: CallViewRules, now: number): TestStepRow[] {
+export function stepsOf(s: SubjectState, rules: CallViewRules, now: number, env: StepEnv = {}): TestStepRow[] {
   const def = s.campaign.definition;
   // A removed track a run started keeps its rows; one it never started is not shown.
   const shown = (t: TrackDefinition) => !t.removed || progressOf(s, t.id)?.startedAt != null;
   const tracks = [...def.tracks.filter((t) => t.branch === "main" && shown(t)), ...def.tracks.filter((t) => t.branch === "win_back" && shown(t))];
   const rows: TestStepRow[] = [];
+  // Held (5.4) first, every hold (unresolved and sms_conversation_unsettled included), ahead of the provider's progress, for
+  // email and SMS: never said to be due (council on faac357, item 4; the verifier on cc9bf55, item 10).
   const held = (trackId: string) => heldReason(s, trackId, now);
+  // Any other reason the read gives (but "with the provider") also comes before the provider's progress.
+  const waitsHere = (track: TrackDefinition, stepId: string): TestStepRow["waits"] => {
+    const p = progressOf(s, track.id);
+    if (track.channel === "call" || s.subject.ended !== null || !p || p.finishedAt !== null || p.nextStepId !== stepId) return null;
+    const when = (rules.stepWhen ?? stepWhen)(s, track.id, now, env);
+    return when?.kind === "waits" && when.why !== "with_provider" ? stepWaitApi(when.why) : null;
+  };
   for (const track of tracks) {
     const label = trackLabel(def, track);
     const steps = track.steps.filter((st) => !st.removed || s.results.some((r) => r.stepId === st.id));
@@ -111,6 +122,7 @@ export function stepsOf(s: SubjectState, rules: CallViewRules, now: number): Tes
         taskId: task?.id ?? null,
         outcome: logged?.outcome ?? null,
         reason: result?.reason ?? null,
+        waits: null,
       };
       if (result) {
         const state = track.channel === "call" && result.result === "sent" ? "logged" : result.result;
@@ -122,18 +134,47 @@ export function stepsOf(s: SubjectState, rules: CallViewRules, now: number): Tes
         const day = firstListedDay(s, task, rules);
         rows.push({ ...base, state: "listed_later", at: day === null ? null : iso(startOfLocalDay(day, s.callDay.userZone)) });
       }
+      else if (s.subject.ended === null && p && p.finishedAt === null && p.nextStepId === step.id && held(track.id) !== null) {
+        const hold = held(track.id);
+        rows.push(hold === null ? { ...base, state: "due", at: iso(p.dueWall ?? 0) } : { ...base, state: "held", at: null, hold, holdOwners: unsettledOwnersOf(s, track.id, now).map((o) => ({ name: o.name, test: o.test })) });
+      } else if (waitsHere(track, step.id)) rows.push({ ...base, state: "due", at: null, waits: waitsHere(track, step.id) });
       else if (live) rows.push({ ...base, state: "with_provider", at: live.handedWall === null ? null : iso(live.handedWall) });
       // A step of a track that finished without reaching it: skipped, with why its track finished (council on ffa202c, item 13).
       else if (p?.finishReason) {
         const skipped = { ...base, state: "skipped" as const, at: p.finishedWall === null ? null : iso(p.finishedWall), reason: trackEndedBecause(p.finishReason) };
         // A test mobile in another campaign's SMS conversation names its owner (question Q7 answered).
         rows.push(p.finishReason === "skipped_conversation_taken" ? { ...skipped, owners: conversationOwnersView(s, track.id) } : skipped);
+      } else if (s.subject.ended === null && p && p.finishedAt === null && p.nextStepId === step.id && p.dueWall !== null) {
+        // When it goes, by the engine's own decision functions at the read (ADR 0003 "Reads that say when"): ready, its
+        // window's next opening once the cut wait has ended, or why it waits, with no time.
+        const when = (rules.stepWhen ?? stepWhen)(s, track.id, now, env);
+        switch (when?.kind) {
+          case "waits":
+            rows.push({ ...base, state: "due", at: null, waits: stepWaitApi(when.why) });
+            break;
+          case "ready":
+            rows.push({ ...base, state: "due", at: iso(now) });
+            break;
+          case "at":
+            rows.push({ ...base, state: "due", at: iso(Math.max(when.at, now)) });
+            break;
+          // A call goes on the list on a user day, with no time of day (council on 178de98, item 3): today's is due now,
+          // a later day's is listed from that day, as the tab says of an open call listed later.
+          case "call_day":
+            rows.push(when.day <= s.callDay.day ? { ...base, state: "due", at: iso(now) } : { ...base, state: "listed_later", at: iso(startOfLocalDay(when.day, s.callDay.userZone)) });
+            break;
+          case "listed_for":
+            rows.push({ ...base, state: "listed_later", at: iso(startOfLocalDay(when.day, s.callDay.userZone)) });
+            break;
+          case undefined:
+            rows.push({ ...base, state: "due", at: iso(now) });
+            break;
+          default: {
+            const unhandled: never = when;
+            throw new Error(`A step time the Test run tab cannot say: ${String(unhandled)}`);
+          }
+        }
       }
-      else if (s.subject.ended === null && p && p.finishedAt === null && p.nextStepId === step.id && held(track.id) !== null) {
-        // Held (5.4): never said to be due; the tab says why, as Needs attention does for a lead (council on faac357, item 4).
-        const hold = held(track.id);
-        rows.push(hold === null ? { ...base, state: "due", at: iso(p.dueWall ?? 0) } : { ...base, state: "held", at: null, hold, holdOwners: unsettledOwnersOf(s, track.id, now).map((o) => ({ name: o.name, test: o.test })) });
-      } else if (s.subject.ended === null && p && p.finishedAt === null && p.nextStepId === step.id && p.dueWall !== null) rows.push({ ...base, state: "due", at: iso(p.dueWall) });
       else rows.push({ ...base, state: "not_reached", at: null });
     });
   }

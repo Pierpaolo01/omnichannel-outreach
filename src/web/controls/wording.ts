@@ -6,10 +6,11 @@
  * read says it at its instant.
  */
 import { STATUS_GROUPS, statusGroup, type StatusGroup } from "../../domain/outreach-status.ts";
-import type { CampaignPauseRead, ControlStepView, ControlView, LeadControlApi, OutreachStatus, RecordLead } from "../../shared/api.ts";
+import { clockTime } from "../time.ts";
+import type { CampaignPauseRead, ControlStepView, ControlView, LeadControlApi, OutreachStatus, RecordLead, StepWaitApi, StepWhenView } from "../../shared/api.ts";
 import { stepNoun } from "../../shared/track-label.ts";
-import { holdReasonClause } from "../calls/wording.ts";
-import { dateIn } from "../calls/wording.ts";
+import { callHoldSentence, dateIn, holdReasonClause, HOURS_CLOSED_PHRASE, listedForPhrase } from "../calls/wording.ts";
+import { dayLabel } from "../calls/callbackTime.ts";
 import { STATUS_GROUP_LABEL } from "../status.tsx";
 
 export type AllowedControl = Extract<ControlView, { readonly allowed: true }>;
@@ -48,7 +49,7 @@ export function refusalOf(lead: Pick<RecordLead, "controls">, action: LeadContro
   return control && !control.allowed ? control.reason : null;
 }
 
-const timeIn = (zone: string, iso: string): string => new Intl.DateTimeFormat("en-GB", { timeZone: zone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(iso));
+const timeIn = (zone: string, iso: string): string => clockTime(zone, iso);
 
 /** "Tue 3 Nov at 09:00", in the user's zone. */
 export const whenIn = (userZone: string, iso: string): string => `${dateIn(userZone, iso)} at ${timeIn(userZone, iso)}`;
@@ -72,7 +73,97 @@ export function stepPhrase(step: Pick<ControlStepView, "channel" | "track" | "nu
   }
 }
 
-const due = (iso: string | null, userZone: string): string => (iso ? `, due ${whenIn(userZone, iso)}` : "");
+/**
+ * Why a step has no time, as the read gives it (`StepWaitApi`), in one exhaustive switch. None promises a time: the engine
+ * cannot know when what holds the step ends (ADR 0003 "Reads that say when"). Provisional wording, for the principal.
+ */
+// `channel` is required, never defaulted: a caller that forgot it would word a text's reason as an email's (the re-check of
+// ff01571: the Test run tab named the email provider for an SMS transport hold).
+export function stepWaitWords(why: StepWaitApi, channel: "email" | "sms" | "call" | undefined): string {
+  switch (why) {
+    case "campaign_not_launched":
+      return "waiting for this campaign to launch";
+    case "campaign_paused":
+      return "on hold while this campaign is paused";
+    case "lead_paused":
+      return "on hold while they are paused";
+    case "callback":
+      return "on hold while their callback is open";
+    case "ended":
+      return "not going: their outreach in this campaign has ended";
+    case "with_provider":
+      return "already handed to the provider, which sends it";
+    case "unresolved":
+    case "render_failed":
+    case "provider_skipped":
+    case "no_thread":
+    case "sms_conversation_unsettled":
+      return `held: ${holdReasonClause(why)}`;
+    case "no_window":
+      return "not going: its sending hours never open";
+    case "no_transport":
+      // Per channel (council on cc9bf55, item 5): only email has such a step today, but the words must hold for a text.
+      return channel === "sms" ? "waiting: the SMS provider can’t send this text yet" : "waiting: the email provider can’t send a follow-up in its thread yet";
+    case "waiting_on_provider":
+      // A reason promises nothing (council on cc9bf55, item 9): the read after the cause clears says when.
+      return "waiting: sending is interrupted";
+    case "reply_pending":
+      return "waiting while a reply from them is matched to its thread";
+    case "no_destination":
+      return "not going: there is no good address to send it to";
+    case "sender_slot":
+      // Its claim's sender's pacing slot is not reached; a slot only moves later. No time is promised.
+      return "waiting for its sender’s next sending slot";
+    case "sender_rate_limited":
+      return "waiting: the provider is limiting how fast its senders can send";
+    case "sender_waiting":
+      return "waiting for a sender that can take it";
+    case "call_hours_closed":
+      return HOURS_CLOSED_PHRASE;
+    case "sender_unavailable":
+      return "waiting for a sender account that can send";
+    case "sending_capacity":
+      return "waiting for sending capacity: every account it may use is full today";
+    case "call_capacity":
+      return "waiting for room on your call list, on a day with calling hours";
+    case "on_call_list":
+      return "on your call list";
+    default: {
+      const unhandled: never = why;
+      throw new Error(`A reason a step waits with no words: ${String(unhandled)}`);
+    }
+  }
+}
+
+/**
+ * When a step goes, from the read (`StepWhenView`): ready, when its time has come and nothing of its own holds it, in line
+ * for its sender and never "now" (other leads may go first); a later instant, given only while the step waits on time alone,
+ * as the earliest it can go, never as a promise ("earliest Tue 10 Nov at 09:00", in the user's zone); or why it waits, with
+ * no time. Provisional wording, for the principal.
+ */
+export function stepWhenPhrase(when: StepWhenView, userZone: string): string {
+  switch (when.kind) {
+    case "ready":
+      return "ready to send, in line for its sender";
+    case "at":
+      return `earliest ${whenIn(userZone, when.at)}`;
+    case "waits":
+      return stepWaitWords(when.why, when.channel);
+    // A call goes on the list on a day, never at a time of day (council on 178de98, item 3).
+    case "call_day":
+      // Due, with calling hours open and room on today's list: ready for the list, which the next round fills in order.
+      if (when.now) return "ready to go on your call list";
+      return when.today ? "on your call list later today at the earliest" : `on your call list from ${dayLabel(when.day)} at the earliest`;
+    case "listed_for":
+      return listedForPhrase(when.day);
+    default: {
+      const unhandled: never = when;
+      throw new Error(`A step time the page cannot say: ${String(unhandled)}`);
+    }
+  }
+}
+
+const due = (when: StepWhenView | null, userZone: string): string => (when ? `, ${stepWhenPhrase(when, userZone)}` : "");
 
 /** Work already handed to a provider that may still be sent (ticket 17a's provider limitation, question Q17): said only when the read counts any. */
 export function mayStillSendText(count: number): string | null {
@@ -89,9 +180,9 @@ function currentStepOf(lead: Pick<RecordLead, "controls">): ControlStepView | nu
   return null;
 }
 
-/** When the read says that step is due, if the lead keeps running: its track's pending step in the same read. */
-function dueOf(lead: Pick<RecordLead, "tracks">, step: ControlStepView): string | null {
-  return lead.tracks.find((t) => t.trackId === step.trackId && t.nextStep?.stepId === step.stepId)?.nextStep?.dueAt ?? step.dueAt;
+/** When the read says that step goes (the engine's `stepWhen`): its track's pending step in the same read. */
+function dueOf(lead: Pick<RecordLead, "tracks">, step: ControlStepView): StepWhenView | null {
+  return lead.tracks.find((t) => t.trackId === step.trackId && t.nextStep?.stepId === step.stepId)?.nextStep?.when ?? step.when;
 }
 
 /**
@@ -120,10 +211,10 @@ export function nextStepSentence(lead: RecordLead, userZone: string): string {
     case "in_win_back":
       return next() || (campaignPaused ? frozen : status === "in_win_back" ? "In this campaign’s win-back branch." : "Their outreach is running.");
     case "waiting_on_call":
-      if (campaignPaused) return "The call is on hold while this campaign is paused.";
+      if (campaignPaused) return callHoldSentence("call", "campaign_paused");
       return step ? `Next: ${stepPhrase(step)}.` : "Waiting on a call on your list.";
     case "callback_scheduled":
-      return campaignPaused ? "The callback is on hold while this campaign is paused." : "Waiting on the callback they asked for.";
+      return campaignPaused ? callHoldSentence("callback", "campaign_paused") : "Waiting on the callback they asked for.";
     case "paused": {
       const resume = lead.controls.find((c): c is AllowedControl => c.action === "resume" && c.allowed);
       const held = resume?.next ?? null;
@@ -192,18 +283,18 @@ export function controlPreviewText(control: AllowedControl, campaign: RecordLead
     case "resume":
       if (campaign.paused) return join("Their own pause ends.", next ? `${capital(stepPhrase(next))} still waits while this campaign is paused.` : "Their outreach stays held while this campaign is paused.");
       if (control.statusAfter === "callback_scheduled") return "Their own pause ends. Their callback still holds their outreach until you log how it went.";
-      return next ? `Their outreach continues where it was: ${stepPhrase(next)}${due(next.dueAt, userZone)}.` : "Their outreach continues where it was.";
+      return next ? `Their outreach continues where it was: ${stepPhrase(next)}${due(next.when, userZone)}.` : "Their outreach continues where it was.";
     case "skip": {
       const skips = control.skips;
       const what = !skips ? "The current step is skipped and never sent." : skips.channel === "call" ? callSkipPreview(skips) : `${capital(stepPhrase(skips))} is skipped and never sent.`;
-      return join(what, next ? `Next: ${stepPhrase(next)}${due(next.dueAt, userZone)}.` : null);
+      return join(what, next ? `Next: ${stepPhrase(next)}${due(next.when, userZone)}.` : null);
     }
     case "stop":
       return join("Their outreach in this campaign stops: nothing more goes out and no call is listed. What was sent stays on record.", provider);
     case "resume_from_next_step":
-      return join(next ? `They resume at the next unsent step: ${stepPhrase(next)}${due(next.dueAt, userZone)}.` : "They resume at the next unsent step.", campaign.paused ? "It waits while this campaign is paused." : null, "Nothing already sent goes again.");
+      return join(next ? `They resume at the next unsent step: ${stepPhrase(next)}${due(next.when, userZone)}.` : "They resume at the next unsent step.", campaign.paused ? "It waits while this campaign is paused." : null, "Nothing already sent goes again.");
     case "move_to_win_back":
-      return join(next ? `They move to this campaign’s win-back branch, starting with ${stepPhrase(next)}${due(next.dueAt, userZone)}.` : "They move to this campaign’s win-back branch.", campaign.paused ? "It waits while this campaign is paused." : null, "Their remaining main-sequence steps are dropped.");
+      return join(next ? `They move to this campaign’s win-back branch, starting with ${stepPhrase(next)}${due(next.when, userZone)}.` : "They move to this campaign’s win-back branch.", campaign.paused ? "It waits while this campaign is paused." : null, "Their remaining main-sequence steps are dropped.");
     default: {
       const unhandled: never = control.action;
       throw new Error(`A control with no preview: ${String(unhandled)}`);

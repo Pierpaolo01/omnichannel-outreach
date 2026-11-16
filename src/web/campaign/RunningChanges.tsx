@@ -5,6 +5,7 @@
  * decides what a change does: every count is the server's, from the engine's own reconciliation of each lead.
  */
 import { useEffect, useRef, useState } from "react";
+import { clockTime } from "../time.ts";
 import type { EditChangeKind } from "../../domain/sequence/reconcile.ts";
 import type { CampaignDefinition, EditImpactChange, EditImpactView, TrackDefinition } from "../../shared/api.ts";
 import { ApiRequestError, postJson } from "../api.ts";
@@ -163,7 +164,7 @@ function whatItDoes(change: EditImpactChange, paused: boolean): string {
 }
 
 /** The read's instant in the campaign's own zone, named, never the browser's (as every screen states a time). */
-const timeOf = (iso: string, zone: string) => `${new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: zone })} (${zone.replace(/_/g, " ")})`;
+const timeOf = (iso: string, zone: string) => `${clockTime(zone, iso)} (${zone.replace(/_/g, " ")})`;
 
 export function RunningChanges({ campaignId, editor, paused, onDiscarded }: { campaignId: string; editor: SequenceEditor; paused: boolean; onDiscarded: () => void }) {
   const enabled = editor.unsaved && !editor.applying && editor.problems.length === 0;

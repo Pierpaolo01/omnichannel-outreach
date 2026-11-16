@@ -194,7 +194,7 @@ const BUSINESS_HEADER_ONLY_MISSING_PLACE =
  * them, so every status shows its sentence and its controls. Fictitious.
  */
 export function galleryLead(id: string, campaignId: string, status: OutreachStatus, fields: Partial<RecordLead> = {}): RecordLead {
-  const email = (number: number, dueAt: string | null = null): ControlStepView => ({ trackId: "e1", track: { label: "Email track", several: false, branch: "main" }, channel: "email", call: null, branch: "main", stepId: `s${number}`, number, of: 3, dueAt });
+  const email = (number: number, dueAt: string | null = null): ControlStepView => ({ trackId: "e1", track: { label: "Email track", several: false, branch: "main" }, channel: "email", call: null, branch: "main", stepId: `s${number}`, number, of: 3, when: dueAt === null ? null : { kind: "at", at: dueAt } });
   const ended = `Outreach to them has ended in this campaign (${status.replaceAll("_", " ")}).`;
   const ok = (action: LeadControlApi, more: Partial<Extract<ControlView, { allowed: true }>> = {}): ControlView => ({ action, allowed: true, statusAfter: status, skips: null, next: null, withProvider: 0, digest: `${action}|gallery`, ...more });
   const no = (action: LeadControlApi, reason: string): ControlView => ({ action, allowed: false, reason });
@@ -216,7 +216,7 @@ export function galleryLead(id: string, campaignId: string, status: OutreachStat
     sender: null,
     smsSender: null,
     zone: "Europe/London",
-    tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], hold: null, holdOwners: [], nextStep: { stepId: "s2", number: 2, dueAt: "2026-11-11T09:00:00.000Z" }, callTask: null, steps: [] }],
+    tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], hold: null, holdOwners: [], nextStep: { stepId: "s2", number: 2, when: { kind: "at", at: "2026-11-11T09:00:00.000Z" } }, callTask: null, steps: [] }],
     branch: status === "in_win_back" ? "win_back" : "main",
     winBackEnteredAt: null,
     declined: null,
@@ -230,7 +230,7 @@ export function galleryLead(id: string, campaignId: string, status: OutreachStat
 export function galleryRecord(id: string): PersonRecord & RecordCalls & RecordControls & RecordColleagues {
   const statuses = OUTREACH_STATUSES;
   const e = (status: (typeof OUTREACH_STATUSES)[number]) => `e${statuses.indexOf(status)}`;
-  const base = { track: { id: "p1", label: "Phone track" }, zone: "Europe/London", noGoodNumber: false, heldByCallback: false, callbackAt: null, skipLimit: null } as const;
+  const base = { track: { id: "p1", label: "Phone track" }, zone: "Europe/London", noGoodNumber: false, heldByCallback: null, callbackAt: null, skipLimit: null } as const;
   const limit = { dueDate: "2026-11-09", limitDays: 2, ifUnworked: "2026-11-10" } as const;
   // Ticket 15b: every state of an open call on the record (the enrollment beside each is a fixture; the record pairs them by id).
   const calls: RecordCalls["calls"] = [
@@ -239,7 +239,7 @@ export function galleryRecord(id: string): PersonRecord & RecordCalls & RecordCo
     { ...base, enrollmentId: "e-overdue", taskId: "t-overdue", kind: "callback", listed: true, reason: "overdue", listedFor: "2026-11-09", callbackAt: "2026-11-09T11:30:00.000Z", noGoodNumber: true },
     { ...base, enrollmentId: "e-redial", taskId: "t-redial", kind: "call", listed: false, reason: null, listedFor: "2026-11-11", skipLimit: { ...limit, ifUnworked: "2026-11-11" } },
     { ...base, enrollmentId: "e-held", taskId: "t-held-callback", kind: "callback", listed: false, reason: null, listedFor: "2026-11-12", callbackAt: "2026-11-12T10:00:00.000Z" },
-    { ...base, enrollmentId: "e-held", taskId: "t-held", track: { id: "p2", label: "Phone track 2" }, kind: "call", listed: false, reason: null, listedFor: "2026-11-10", heldByCallback: true, skipLimit: { ...limit, ifUnworked: null } },
+    { ...base, enrollmentId: "e-held", taskId: "t-held", track: { id: "p2", label: "Phone track 2" }, kind: "call", listed: false, reason: null, listedFor: "2026-11-10", heldByCallback: { listed: true, listedFor: "2026-11-09" }, skipLimit: { ...limit, ifUnworked: null } },
   ];
   // Enrollments whose status goes with those calls, after the one-per-status gallery.
   const more = [
@@ -1582,7 +1582,7 @@ export const SCREENS: readonly Screen[] = [
       await settle(page, "This email belongs to a lead. Test contacts must be your own.");
     },
   },
-  { name: "test run, running", open: async (page) => { await testRuns(page, "screen-running", "running"); await settle(page, "In about 1 min"); } },
+  { name: "test run, running", open: async (page) => { await testRuns(page, "screen-running", "running"); await settle(page, "Earliest in about 1 min"); } },
   { name: "test run, stopped by a reply", open: async (page) => { await testRuns(page, "screen-replied", "replied"); await settle(page, "Stopped by your reply"); } },
   { name: "test run loading", open: async (page, data) => { await hold(page, "**/api/campaigns/*/test-runs"); await page.goto(`/campaigns/${data.campaignId}/test-run`); await page.getByLabel("Loading the test run").waitFor(); } },
   { name: "test run error", open: async (page, data) => { await fail(page, "**/api/campaigns/*/test-runs"); await page.goto(`/campaigns/${data.campaignId}/test-run`); await settle(page, "The test run didn’t load."); } },

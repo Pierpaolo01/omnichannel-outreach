@@ -39,7 +39,8 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
   for (const enrollment of enrollments) {
     const state = await store.engine.subject(enrollment.id, now);
     if (!state) continue;
-    const progress = progressView(state, now);
+    // Activity is history: it never says when a step goes, so no step is read for it (council on cc9bf55, item 6).
+    const progress = progressView(state, now, {}, () => null);
     const campaign = enrollment.campaign;
     const def = state.campaign.definition;
     const companyLead = kind === "company";

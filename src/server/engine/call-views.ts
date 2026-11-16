@@ -3,7 +3,7 @@
  * task with everything the call screen shows. Built from the engine's stored facts and the CRM, so
  * the screens render them without recomputing anything.
  */
-import { bucketOf, CALL_OUTCOMES, callNumbers, callWindow, dayHasRoom, goodNumbers, isListed, listedForDay, queueRank, queueWall, recordedNumberOf, REDIAL_OUTCOMES, skipLimitOf, skippedTonight, unworkedSkipDay, type CallBucket } from "../../domain/sequence/calls.ts";
+import { bucketOf, CALL_OUTCOMES, callbackListing, callNumbers, callWindow, dayHasRoom, goodNumbers, isListed, listedForDay, offListReason, queueRank, queueWall, recordedNumberOf, REDIAL_OUTCOMES, skipLimitOf, skippedTonight, unworkedSkipDay, type CallBucket } from "../../domain/sequence/calls.ts";
 import { interruptionNotice, sendingInterrupted } from "./worker-state.ts";
 import { needsAttention } from "./views.ts";
 import { displayPhone } from "../../domain/phone.ts";
@@ -12,7 +12,7 @@ import { declinedPathOf, liveTracks, winBackAvailable, type DeclinedPath } from 
 import { callbackHold, deriveStatus } from "../../domain/sequence/progress.ts";
 import type { CallAttempt, CallNumber, CallTask, RecordedNumber, SubjectState } from "../../domain/sequence/state.ts";
 import type { AttentionLead, NeedsAttention } from "../../shared/api.ts";
-import type { CallColleagueView, CallNumberView, CallOffListView, CallQueueItem, CallRecordView, CallTaskView, CallsView, DeclinePreviewView, InterruptionNoticeView, NoteView, PausedCampaignCalls, RecordCallView, RecordCalls, RecordedNumberView, SendingInterruptedView, SkipLimitView, TodayView, TouchView } from "../../shared/api.ts";
+import type { CallbackListingView, CallColleagueView, CallNumberView, CallOffListView, CallQueueItem, CallRecordView, CallTaskView, CallsView, DeclinePreviewView, InterruptionNoticeView, NoteView, PausedCampaignCalls, RecordCallView, RecordCalls, RecordedNumberView, SendingInterruptedView, SkipLimitView, TodayView, TouchView } from "../../shared/api.ts";
 import type { OutreachStore } from "../persistence/store.ts";
 import { DEFAULT_DAILY_CALL_CAPACITY } from "../persistence/sqlite-engine-store.ts";
 import type { StoredNote } from "./engine-store.ts";
@@ -23,7 +23,7 @@ import { afterDeclineTracks } from "./track-states.ts";
  * The decisions the call read models make, from the engine's rules: each lead's state as of the instant read
  * (the same catch-up a user action gets, council on 228cd3b), the queue order, the focus and the reasons.
  */
-export type CallViewRules = Pick<Rules, "readyNowOrder" | "focusOf" | "callReason" | "asOfAction" | "evaluate" | "isListed" | "logCallOutcome">;
+export type CallViewRules = Pick<Rules, "readyNowOrder" | "focusOf" | "callReason" | "asOfAction" | "evaluate" | "isListed" | "logCallOutcome"> & Partial<Pick<Rules, "stepWhen">>;
 
 /** A lead's state as of `now`: what fell due since the worker's last tick is applied (nothing is written). */
 async function asOfNow(store: OutreachStore, id: string, now: number, rules: CallViewRules): Promise<SubjectState | null> {
@@ -191,7 +191,7 @@ export async function recordCalls(
         zone: s.lead.zone,
         skipLimit: skipLimitView(s, task, now),
         noGoodNumber: goodNumbers(s).length === 0,
-        heldByCallback: first === null,
+        heldByCallback: first === null ? callbackListingView(s) : null,
       });
     }
   }
@@ -405,18 +405,40 @@ export async function todayView(store: OutreachStore, now: number, rules?: CallV
   };
 }
 
+/** The lead's open callback's listing, as the read says it (`callbackListing`); null when it has none. */
+function callbackListingView(s: SubjectState): CallbackListingView | null {
+  const c = callbackListing(s);
+  return c ? { listed: c.listed, listedFor: dateOfDay(c.day) } : null;
+}
+
 /**
- * Why a task is not on today's list (ADR 0003 4.4.1), read from the stored task and its call records:
- * an outcome logged on it comes first, then the lead's ending, then its track's finish.
+ * Why a task is not on today's list (ADR 0003 4.4.1, "why a call left the list"): the engine's `offListReason`, mapped
+ * once, in an exhaustive switch.
  */
-function offListOf(s: SubjectState, task: CallTask, listed: boolean): CallOffListView | null {
-  if (listed) return null;
+function offListOf(s: SubjectState, task: CallTask): CallOffListView | null {
+  const reason = offListReason(s, task);
+  if (reason === null) return null;
   const status = deriveStatus(s);
-  const logged = s.callAttempts.filter((a) => a.taskId === task.id && a.outcome !== "skip_for_now").at(-1);
-  if (logged) return { reason: "logged", outcome: logged.outcome, at: iso(logged.atWall), status };
-  if (s.subject.ended !== null) return { reason: "lead_ended", status };
-  if (!task.open) return { reason: "track_finished", finish: s.tracks.find((p) => p.trackId === task.trackId)?.finishReason ?? null, status };
-  return { reason: "not_listed_today", status };
+  switch (reason.kind) {
+    case "logged":
+      return { reason: "logged", outcome: reason.attempt.outcome, at: iso(reason.attempt.atWall), status };
+    case "track_finished":
+      return { reason: "track_finished", finish: reason.finish, status };
+    case "lead_ended":
+    case "campaign_paused":
+    case "campaign_not_launched":
+    case "lead_paused":
+    case "no_hours_today":
+      return { reason: reason.kind, status };
+    case "callback_hold":
+      return { reason: "callback_hold", callback: { listed: reason.callback.listed, listedFor: dateOfDay(reason.callback.day) }, status };
+    case "listed_later":
+      return { reason: "listed_later", listedFrom: dateOfDay(reason.day), status };
+    default: {
+      const unhandled: never = reason;
+      throw new Error(`A reason a call is off the list the read cannot say: ${String(unhandled)}`);
+    }
+  }
 }
 
 /** Whether the hours are open at `now`, by the engine's window rule, and, if not, when they open later on the user's day. */
@@ -474,7 +496,7 @@ export async function callTaskView(store: OutreachStore, taskId: string, now: nu
     enrollmentId: s.subject.id,
     open: task.open,
     listed,
-    offList: offListOf(s, task, listed),
+    offList: offListOf(s, task),
     status: deriveStatus(s),
     ...parties,
     track: { id: task.trackId, label: trackLabel(s, task.trackId) },
