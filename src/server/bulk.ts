@@ -85,7 +85,7 @@ export interface PressContext {
   readonly scope: string | null;
   readonly action: BulkControlAction;
   readonly at: number;
-  readonly readOf: (state: SubjectState, at: number) => EnrollmentRead;
+  readonly readOf: (state: SubjectState, at: number) => Promise<EnrollmentRead>;
 }
 
 export const DEFAULT_BULK_RULES: BulkRules = {
@@ -127,7 +127,9 @@ export interface BulkDependencies {
   readonly now: () => string;
   readonly newId: () => string;
   /** The enrollment's read, as GET /api/enrollments/:id gives it. */
-  readonly readOf: (state: SubjectState, at: number) => EnrollmentRead;
+  readonly readOf: (state: SubjectState, at: number) => Promise<EnrollmentRead>;
+  /** Many enrollments' reads at one instant, with one environment for all (council on cc9bf55, items 6 and 8). */
+  readonly readAll: (states: readonly SubjectState[], at: number) => Promise<EnrollmentRead[]>;
   readonly rules?: Partial<BulkRules>;
 }
 
@@ -189,18 +191,22 @@ export function bulkRoutes(app: Hono, deps: BulkDependencies): void {
     // Every enrollment in scope, loaded once, at one instant: its read's entry for the action is the item (B1).
     const items: BulkPreviewItem[] = [];
     const outOfScope: BulkRowView[] = [];
+    const loaded: { view: BulkRowView; e: (typeof selected)[number]["enrollments"][number]; state: SubjectState }[] = [];
     for (const row of selected) {
       const view = { kind: row.kind, id: row.id, name: row.name };
       const inScope = row.enrollments.filter((e) => rules.inScope(e.campaign.id, scope));
       if (inScope.length === 0) outOfScope.push(view);
       for (const e of inScope) {
         const state = await store.engine.subject(e.id, at);
-        if (!state) continue;
-        const read = deps.readOf(state, at);
-        const control = read.controls.find((x) => x.action === action);
-        if (!control) continue;
-        items.push({ row: view, enrollmentId: e.id, campaign: e.campaign, status: read.status, control });
+        if (state) loaded.push({ view, e, state });
       }
+    }
+    const reads = await deps.readAll(loaded.map((x) => x.state), at);
+    for (const [i, { view, e }] of loaded.entries()) {
+      const read = reads[i];
+      const control = read?.controls.find((x) => x.action === action);
+      if (!read || !control) continue;
+      items.push({ row: view, enrollmentId: e.id, campaign: e.campaign, status: read.status, control });
     }
     if (items.length > BULK_ITEMS_MAX) {
       return c.json<ApiError>({ error: { code: "invalid_request", message: `These rows are in more than ${BULK_ITEMS_MAX.toLocaleString("en-GB")} campaign enrollments. Filter by a campaign, or select fewer.` } }, 400);

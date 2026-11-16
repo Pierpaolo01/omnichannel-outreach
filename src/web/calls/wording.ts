@@ -4,6 +4,7 @@
  * attention); none decides anything about order, counts, hours, capacity or an outcome's effect.
  */
 import type { PausedCampaignCalls, CallbackListingView, CallNumberView, CallOffListView, CallOutcomeApi, DeclinedPathApi, DeclinePreviewView, DeclineTrackView, CallQueueItem, CallsView, CallTaskView, FinishReasonApi, HoldReasonApi, NeedsAttention, OutreachStatus, RecordCallView, RecordCalls, RecordedNumberView, TodayView, WindowRule } from "../../shared/api.ts";
+import { clockTime, localClock } from "../time.ts";
 import { WIN_BACK_HAS_NO_TRACKS } from "../../domain/sequence/definition.ts";
 import { STATUS_LABEL } from "../status.tsx";
 import type { DeskSnapshot } from "./callDesk.ts";
@@ -49,7 +50,7 @@ export const numberKind = (n: Pick<CallNumberView, "kind">): string => NUMBER_KI
 /** "+44 20 7946 0111, direct": the number a past call was logged on. */
 export const dialledLine = (n: RecordedNumberView | null): string | null => (n ? `${n.value}, ${NUMBER_KIND[n.kind]}` : null);
 
-export const timeIn = (zone: string, iso: string): string => new Intl.DateTimeFormat("en-GB", { timeZone: zone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(iso));
+export const timeIn = (zone: string, iso: string): string => clockTime(zone, iso);
 
 /** "Thu 5 Nov": the date of an instant in a zone. */
 export const dateIn = (zone: string, iso: string): string => new Intl.DateTimeFormat("en-GB", { timeZone: zone, weekday: "short", day: "numeric", month: "short" }).format(new Date(iso)).replace(",", "");
@@ -65,13 +66,14 @@ export const isoDateIn = (zone: string, iso: string): string => new Intl.DateTim
  */
 export function callbackTimes(iso: string, zone: string, userZone: string, today: string | null): { theirs: string; yours: string | null; dated: boolean } {
   const theirDate = isoDateIn(zone, iso);
-  const theirTime = timeIn(zone, iso);
+  // The bare clock: this sentence names a repeated hour's occurrence in its own words.
+  const theirTime = localClock(zone, iso);
   const dated = theirDate !== today;
   const occurrences = zonedInstants(theirDate, theirTime, zone);
   const clock = occurrences.length > 1 ? (Date.parse(iso) === occurrences[0] ? ", before the clocks go back" : ", after the clocks go back") : "";
   const theirs = `${dated ? `${dateIn(zone, iso)} at ` : ""}${theirTime} their time${clock}`;
   const yourDate = isoDateIn(userZone, iso);
-  const yourTime = timeIn(userZone, iso);
+  const yourTime = localClock(userZone, iso);
   if (yourDate === theirDate && yourTime === theirTime) return { theirs, yours: null, dated };
   return { theirs, yours: `${yourDate === theirDate ? "" : `${dateIn(userZone, iso)} at `}${yourTime} your time`, dated };
 }
@@ -121,7 +123,7 @@ export function reasonLine(item: CallQueueItem, userZone: string, today: string)
 /** The user's date as the server counts it ("2026-11-09" is Monday 9 November), with the time now. */
 export function dateHeading(date: string, now: Date, userZone: string): string {
   const day = new Intl.DateTimeFormat("en-GB", { timeZone: "UTC", weekday: "long", day: "numeric", month: "long" }).format(new Date(`${date}T12:00:00Z`)).replace(",", "");
-  return `${day}, ${new Intl.DateTimeFormat("en-GB", { timeZone: userZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(now)}`;
+  return `${day}, ${clockTime(userZone, now)}`;
 }
 
 /** Today's lede. */

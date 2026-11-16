@@ -176,7 +176,27 @@ export type StepWhen =
   | { readonly kind: "at"; readonly at: number }
   | { readonly kind: "call_day"; readonly at: number; readonly day: number }
   | { readonly kind: "listed_for"; readonly day: number }
-  | { readonly kind: "waits"; readonly why: StepWait };
+  /** `channel` names the step's channel where the reason depends on it (no transport). */
+  | { readonly kind: "waits"; readonly why: StepWait; readonly channel?: "email" | "sms" };
+
+/**
+ * A held track's reason as the read gives it (5.4), one case per hold `heldReason` can return, so a hold a later change
+ * adds fails typecheck here until it has its own reason, never falling through to a generic one.
+ */
+export function holdWait(hold: HoldReason): StepWait {
+  switch (hold) {
+    case "unresolved":
+    case "render_failed":
+    case "provider_skipped":
+    case "no_thread":
+    case "sms_conversation_taken":
+      return hold;
+    default: {
+      const unhandled: never = hold;
+      throw new Error(`A hold the read has no reason for: ${String(unhandled)}`);
+    }
+  }
+}
 
 /**
  * What a read knows of dispatch beyond the subject (ADR 0003 "Reads that say when"): whether the step's port has a
@@ -186,8 +206,12 @@ export type StepWhen =
 export interface StepEnv {
   readonly transportAvailable?: (channel: "email" | "sms", threading: "new_subject" | "continue_thread") => boolean;
   readonly waitingOnProvider?: (state: SubjectState, trackId: string) => boolean;
-  /** Whether the user's list has room for one more call on a later user day, from the calls the engine knows are carried into it (`carriedInto`). */
-  readonly callRoomOn?: (day: number) => boolean;
+  /**
+   * Whether the user's list has room for one more call on a later user day, from the calls the engine knows are carried into
+   * it (`carriedInto`), with `self` (the subject being read: for a control's preview, its state after the control) in place
+   * of its stored state (council on cc9bf55, item 8).
+   */
+  readonly callRoomOn?: (day: number, self: SubjectState) => boolean;
 }
 
 /**
@@ -233,36 +257,60 @@ export function stepWhen(state: SubjectState, trackId: string, now: number, env:
   if (channel !== "email" && channel !== "sms") return null;
   // A held track first (5.4): work the provider has not confirmed holds the track with a live attempt too.
   const hold = trackHold(state, trackId);
-  if (hold) return waits(hold);
+  if (hold) return waits(holdWait(hold));
   const live = state.attempts.find((a) => a.stepId === stepId && isLive(a));
   if (live && live.state !== "claimed") return waits("with_provider");
   const threading = stepDef(state, trackId, stepId)?.threading ?? "new_subject";
-  if (env.transportAvailable && !env.transportAvailable(channel, threading)) return waits("no_transport");
+  if (env.transportAvailable && !env.transportAvailable(channel, threading)) return { kind: "waits", why: "no_transport", channel };
   if (env.waitingOnProvider?.(state, trackId) === true) return waits("waiting_on_provider");
   if (live) {
-    // Claimed: the handover's own predicates (the pre-send check, 14, is the engine's to make at the call).
+    // Claimed: the handover's own predicates (the pre-send check, 14, is the engine's to make at the call), and what the
+    // engine does on them (`tryHandover`): none failing, it hands over; only the slot (16) or a reply awaiting its thread
+    // (18), with 18 among them, it waits; only the slot, it waits for it; anything else withdraws the claim.
     const account = state.accounts[live.accountId];
     const failed = account ? handoverFailures(state, live, account, now).filter((f) => f !== 14) : [9];
     if (failed.length === 0) return { kind: "at", at: now };
-    if (failed.includes(18)) return waits("reply_pending");
-    if (failed.every((f) => f === 16) && account) return { kind: "at", at: account.nextSlotAt };
+    if (failed.every((f) => f === 16 || f === 18) && failed.includes(18)) return waits("reply_pending");
+    if (failed.every((f) => f === 16) && account) {
+      // The slot is an instant only if the claim lives to it and the handover passes there too (review bot on cc9bf55): a
+      // claim expires one settling period after it was made (`claim_expired`, as the engine's pass does), and the step is
+      // claimed again from then; at a slot the handover refuses, the claim is withdrawn, and the step is claimed again.
+      const slot = account.nextSlotAt;
+      const expires = live.claimedWall + ENGINE_PARAMS.SETTLING;
+      if (slot >= expires) return freshWhen(releasedBy(state, applyToAttempt(state, live.id, { kind: "claim_expired", now: expires }, expires).state), trackId, stepId, now, expires);
+      const atSlot = handoverFailures(state, live, account, slot).filter((f) => f !== 14);
+      if (atSlot.length === 0) return { kind: "at", at: slot };
+    }
     // Any other failure withdraws it (`guard_failed`), freeing a reservation that was never called; the step is then the
     // dispatcher's to claim again, which the rest of this read asks.
-    const after = applyToAttempt(state, live.id, { kind: "guard_failed" }, now).state;
-    const freed = after.work.find((w) => w.key === live.idempotencyKey)?.settled != null;
-    const acc = after.accounts[live.accountId];
-    const released = freed && acc ? { ...after, accounts: { ...after.accounts, [acc.id]: { ...acc, used: Math.max(0, acc.used - 1), reserved: Math.max(0, acc.reserved - 1), inFlight: Math.max(0, acc.inFlight - 1) } } } : after;
-    return freshWhen(released, trackId, stepId, now);
+    return freshWhen(releasedBy(state, applyToAttempt(state, live.id, { kind: "guard_failed" }, now).state), trackId, stepId, now);
   }
+  // Every hold keeps its own reason (review bot on cc9bf55): never a generic one the candidates' state would give.
   const held = heldReason(state, trackId, now);
-  if (held && held !== "sms_conversation_taken") return waits(held);
+  if (held) return waits(holdWait(held));
   return freshWhen(state, trackId, stepId, now);
 }
 
+/**
+ * `after` with the reservations its withdrawals free (4.2): a claimed attempt withdrawn before any call settles its work,
+ * and the store then releases that account's place and reservation. A read of a state a transition produces (a claim the
+ * handover withdraws, a control's preview) sees each account as the store would report it then (council on cc9bf55, item 8).
+ */
+export function releasedBy(before: SubjectState, after: SubjectState): SubjectState {
+  let accounts = after.accounts;
+  for (const w of after.work) {
+    const was = before.work.find((x) => x.key === w.key);
+    if (!was || was.settled !== null || w.settled === null || w.calls > 0) continue;
+    const a = accounts[w.accountId];
+    if (a) accounts = { ...accounts, [a.id]: { ...a, used: Math.max(0, a.used - 1), reserved: Math.max(0, a.reserved - 1), inFlight: Math.max(0, a.inFlight - 1) } };
+  }
+  return accounts === after.accounts ? after : { ...after, accounts };
+}
+
 /** An email or text with no live attempt: the first instant the claim's guard, the dispatcher's account choice and the handover's slot all accept it. */
-function freshWhen(state: SubjectState, trackId: string, stepId: string, now: number): StepWhen {
+function freshWhen(state: SubjectState, trackId: string, stepId: string, now: number, from: number = now): StepWhen {
   const waits = (why: StepWait): StepWhen => ({ kind: "waits", why });
-  let t = sendableFrom(state, trackId, now);
+  let t = sendableFrom(state, trackId, now, from);
   const item: ReadyItem = { subjectId: state.subject.id, trackId, stepId, touched: state.subject.touched, dueWall: now };
   for (let i = 0; i < LOOK_AHEAD && t !== null; i++) {
     const at = accountsAt(state, now, t);
@@ -272,24 +320,29 @@ function freshWhen(state: SubjectState, trackId: string, stepId: string, now: nu
     if (refusal === "there is no thread to continue") return waits("no_thread");
     if (refusal !== null) return waits("no_window");
     const account = chooseAccount(at, t, stepId);
+    // Candidates held until a known instant (not a quota) that would have room then: the dispatcher may take one of them
+    // before the chosen account's slot comes (the sweep on cc9bf55's fixes, offsets 10 and 44).
+    const channel = channelOf(at, trackId);
+    const candidates = candidatesFor(at, trackId).map((id) => at.accounts[id]).filter((a): a is AccountState => a !== undefined && a.channel === channel);
+    const reserved = inheritedWork(at, stepId)?.accountId ?? null;
+    const from = t;
+    const roomAt = (a: AccountState, u: number) => accountHasRoom(accountsAt(state, now, u).accounts[a.id] ?? a, reserved === a.id);
+    const heldUntil = candidates.filter((a) => a.healthy && a.waitReason !== "quota" && a.waitUntil !== null && a.waitUntil > from && roomAt(a, a.waitUntil)).map((a) => Math.max(a.waitUntil ?? 0, a.nextSlotAt));
     if (account) {
       if (replyPending(at, account.id, destinationOf(at, trackId))) return waits("reply_pending");
       if (account.nextSlotAt <= t) return { kind: "at", at: t };
-      t = sendableFrom(state, trackId, now, account.nextSlotAt);
+      t = sendableFrom(state, trackId, now, Math.min(account.nextSlotAt, ...heldUntil));
       continue;
     }
-    // Why the dispatcher chose none, from the same candidates `chooseAccount` reads.
-    const channel = channelOf(at, trackId);
-    const candidates = candidatesFor(at, trackId).map((id) => at.accounts[id]).filter((a): a is AccountState => a !== undefined && a.channel === channel);
-    const available = candidates.filter((a) => accountAvailable(a, t ?? now));
-    if (available.length === 0) {
-      // A known end only: a quota wait has none (the engine marks it with no real instant), so it is a reason, as Needs
-      // attention says it ("until" null for a quota).
-      const until = candidates.filter((a) => a.healthy && a.waitReason !== "quota" && a.waitUntil !== null && a.waitUntil > (t ?? now)).map((a) => a.waitUntil ?? 0);
-      if (until.length === 0) return waits("sender_unavailable");
-      t = sendableFrom(state, trackId, now, Math.min(...until));
+    // Why the dispatcher chose none, from the same candidates `chooseAccount` reads. A healthy candidate held until a known
+    // instant (not a quota wait, which has none) that would have room then is asked again from there, whatever the others
+    // are (council on cc9bf55, item 3: one full and another briefly held is the held one's instant, not "full").
+    if (heldUntil.length > 0) {
+      t = sendableFrom(state, trackId, now, Math.min(...heldUntil));
       continue;
     }
+    const available = candidates.filter((a) => accountAvailable(a, from));
+    if (available.length === 0) return waits("sender_unavailable");
     if (available.some((a) => a.used < a.capacity)) return waits("sender_busy");
     return waits("sending_capacity");
   }
@@ -318,7 +371,7 @@ function callWhen(state: SubjectState, trackId: string, stepId: string, now: num
   if (at < userDay(state).end && !callRoom(state)) return { kind: "waits", why: "call_capacity" };
   const day = localDayNumber(at, state.callDay.userZone);
   // A later day already filled by calls the engine knows are carried into it: no room it can name a day for.
-  if (day > state.callDay.day && env.callRoomOn?.(day) === false) return { kind: "waits", why: "call_capacity" };
+  if (day > state.callDay.day && env.callRoomOn?.(day, state) === false) return { kind: "waits", why: "call_capacity" };
   return { kind: "call_day", at, day };
 }
 

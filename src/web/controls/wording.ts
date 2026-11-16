@@ -6,6 +6,7 @@
  * read says it at its instant.
  */
 import { STATUS_GROUPS, statusGroup, type StatusGroup } from "../../domain/outreach-status.ts";
+import { clockTime } from "../time.ts";
 import type { CampaignPauseRead, ControlStepView, ControlView, LeadControlApi, OutreachStatus, RecordLead, StepWaitApi, StepWhenView } from "../../shared/api.ts";
 import { stepNoun } from "../../shared/track-label.ts";
 import { callHoldSentence, dateIn, HOLD_REASON, HOURS_CLOSED_PHRASE, listedForPhrase } from "../calls/wording.ts";
@@ -48,7 +49,7 @@ export function refusalOf(lead: Pick<RecordLead, "controls">, action: LeadContro
   return control && !control.allowed ? control.reason : null;
 }
 
-const timeIn = (zone: string, iso: string): string => new Intl.DateTimeFormat("en-GB", { timeZone: zone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(iso));
+const timeIn = (zone: string, iso: string): string => clockTime(zone, iso);
 
 /** "Tue 3 Nov at 09:00", in the user's zone. */
 export const whenIn = (userZone: string, iso: string): string => `${dateIn(userZone, iso)} at ${timeIn(userZone, iso)}`;
@@ -76,7 +77,7 @@ export function stepPhrase(step: Pick<ControlStepView, "channel" | "track" | "nu
  * Why a step has no time, as the read gives it (`StepWaitApi`), in one exhaustive switch. None promises a time: the engine
  * cannot know when what holds the step ends (ADR 0003 "Reads that say when"). Provisional wording, for the principal.
  */
-export function stepWaitWords(why: StepWaitApi): string {
+export function stepWaitWords(why: StepWaitApi, channel?: "email" | "sms"): string {
   switch (why) {
     case "campaign_not_launched":
       return "waiting for this campaign to launch";
@@ -85,7 +86,7 @@ export function stepWaitWords(why: StepWaitApi): string {
     case "lead_paused":
       return "on hold while they are paused";
     case "callback":
-      return "on hold until you log the callback";
+      return "on hold while their callback is open";
     case "ended":
       return "not going: their outreach in this campaign has ended";
     case "with_provider":
@@ -99,9 +100,11 @@ export function stepWaitWords(why: StepWaitApi): string {
     case "no_window":
       return "not going: its sending hours never open";
     case "no_transport":
-      return "waiting: the email provider can’t send a follow-up in its thread yet";
+      // Per channel (council on cc9bf55, item 5): only email has such a step today, but the words must hold for a text.
+      return channel === "sms" ? "waiting: the SMS provider can’t send this text yet" : "waiting: the email provider can’t send a follow-up in its thread yet";
     case "waiting_on_provider":
-      return "waiting: sending is interrupted, and it goes once its provider answers again";
+      // A reason promises nothing (council on cc9bf55, item 9): the read after the cause clears says when.
+      return "waiting: sending is interrupted";
     case "reply_pending":
       return "waiting while a reply from them is matched to its thread";
     case "no_destination":
@@ -138,10 +141,12 @@ export function stepWhenPhrase(when: StepWhenView, userZone: string): string {
     case "at":
       return `earliest ${whenIn(userZone, when.at)}`;
     case "waits":
-      return stepWaitWords(when.why);
+      return stepWaitWords(when.why, when.channel);
     // A call goes on the list on a day, never at a time of day (council on 178de98, item 3).
     case "call_day":
-      return when.today ? "goes on your call list today" : `on your call list from ${dayLabel(when.day)} at the earliest`;
+      // Placed on dispatch's next round only when `now`; a call later today waits for room judged then (council on cc9bf55, item 4).
+      if (when.now) return "going on your call list now";
+      return when.today ? "on your call list later today at the earliest" : `on your call list from ${dayLabel(when.day)} at the earliest`;
     case "listed_for":
       return listedForPhrase(when.day);
     default: {

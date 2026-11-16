@@ -141,8 +141,18 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   if (lateSends) features.add("late-sends");
   const keepsSending = lateSends && chance(0.4);
   if (keepsSending) features.add("withdrawals-answered-unknown-and-sent");
-  const gap = options.gapMs ?? 5 * MINUTE;
-  const inboxes: FakeAccount[] = [{ id: "inbox-a", capacity: CAPACITY, gapMs: gap, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }];
+  // ADR 0003 "Reads that say when": the windows family (`windows: true`), from a stream of its own so every other draw stays as
+  // it was. Not in the interruption family or the scripted runs, whose own checks assume all-day windows and one inbox.
+  const rW = random(seed ^ 0x23f);
+  const drawsWindows = options.windows === true && !interrupting && options.smsReplyRestart !== true && options.replyBeforeObservation === undefined && options.withdrawalAcrossARecovery !== true;
+  // Pacing gaps long enough to cross a window's close, a pool of one to three inboxes, and one inbox that can run out of room.
+  const gap = options.gapMs ?? (drawsWindows ? [5 * MINUTE, 30 * MINUTE, 2 * HOUR][Math.floor(rW() * 3)]! : 5 * MINUTE);
+  const inboxIds = drawsWindows ? ["inbox-a", "inbox-b", "inbox-c"].slice(0, 1 + Math.floor(rW() * 3)) : ["inbox-a"];
+  // With two or more inboxes, one is always small enough to run out on a busy day: a pool with one inbox full and another
+  // briefly held is the case "a mixed pool gives the full sender's reason" breaks (council on cc9bf55, item 3).
+  const smallInbox = drawsWindows && (inboxIds.length > 1 || rW() < 0.4) ? inboxIds[Math.floor(rW() * inboxIds.length)]! : null;
+  const capacityOf = (sender: string) => (sender.startsWith("+") ? 50 : sender === smallInbox ? 2 : CAPACITY);
+  const inboxes: FakeAccount[] = inboxIds.map((id) => ({ id, capacity: capacityOf(id), gapMs: gap, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }));
   // One SMS number per campaign, so no conversation is another campaign's (question Q7's hold is the track runs').
   const numbers: FakeNumber[] = [0, 1].map((i) => ({ id: `+44770090001${i}`, capacity: 50, gapMs: gap, k: 2, healthy: true, resetZone: ZONE }));
   // Review bot and verifier on ca8baee, from a stream of their own: providers whose lookups lag behind acceptance (work
@@ -184,13 +194,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   }
   const email = h.fake;
   const sms = h.sms;
-  // ADR 0003 "Reads that say when" (council on 178de98, item 1), from a stream of its own so every other draw stays as it
-  // was: sending windows other than all day, prospects in other zones than the user's, and an inbox that goes unhealthy
-  // or is rate-limited for a while. Not in the interruption family or the scripted runs, whose own checks assume all day.
-  const rW = random(seed ^ 0x23f);
-  // The windows family (`windows: true`): every run draws them. The base family's runs are the runs they were, so every
-  // controls' behaviour its fixed seeds reach stays reached.
-  const drawsWindows = options.windows === true && !interrupting && options.smsReplyRestart !== true && options.replyBeforeObservation === undefined && options.withdrawalAcrossARecovery !== true;
+  // The windows family's sending windows, prospect zones and inbox outages (unhealthy, or rate-limited), drawn from `rW`.
   const WINDOW_DAYS = [[1, 2, 3, 4, 5], [2, 3, 4, 5, 6], [0, 1, 2, 3, 4, 5, 6], [1, 3, 5]];
   const WINDOW_HOURS = [[9, 17], [8, 12], [13, 18], [20, 24], [22, 2], [0, 24]];
   const drawWindow = (): Hours[] => {
@@ -202,7 +206,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   const ZONES = ["Europe/London", "America/New_York", "Australia/Sydney"];
   const zoneOfPerson = new Map<string, string>();
   /** The inbox's outages the run caused, [from, to): unhealthy at the provider, or rate-limited until `to`. */
-  const outages: { from: number; to: number; kind: "unhealthy" }[] = [];
+  const outages: { inbox: string; from: number; to: number; kind: "unhealthy" | "rate_limited" }[] = [];
   /**
    * Work handed to the inbox's provider that the record has no final answer for (no delivery, no confirmed withdrawal): an
    * outage then is the review bot's case on 178de98, a new claim inheriting that work's reservation while the inbox is down.
@@ -211,16 +215,29 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   /** An outage of the inbox (unhealthy at the provider) is drawn at an event and ends at the first event after `until`. */
   const down: { outage: { until: number; index: number } | null } = { outage: null };
   const takeInboxDown = (now: number) => {
-    const account = email.accountsById.get("inbox-a");
     const current = down.outage;
-    if (current !== null && now >= current.until && account) {
-      account.healthy = true;
+    const failing = current ? email.accountsById.get(outages[current.index]!.inbox) : undefined;
+    if (current !== null && now >= current.until && failing) {
+      failing.healthy = true;
       outages[current.index] = { ...outages[current.index]!, to: now };
       down.outage = null;
-    } else if (current === null && drawsWindows && account && rW() < (unsettledAtTheProvider() ? 0.5 : 0.2)) {
-      account.healthy = false;
-      outages.push({ from: now, to: Infinity, kind: "unhealthy" });
-      down.outage = { until: now + [HOUR, 5 * HOUR, DAY][Math.floor(rW() * 3)]!, index: outages.length - 1 };
+    } else if (current === null && drawsWindows && rW() < (unsettledAtTheProvider() ? 0.5 : 0.2)) {
+      // A rate limit falls on an inbox other than the small one, when there is one (the mixed pool's case).
+      const limitable = inboxIds.filter((x) => x !== smallInbox);
+      const rateLimit = rW() >= 0.3 && limitable.length > 0;
+      const choices = rateLimit ? limitable : inboxIds;
+      const inbox = choices[Math.floor(rW() * choices.length)]!;
+      const until = now + [HOUR, 5 * HOUR, DAY][Math.floor(rW() * 3)]!;
+      if (!rateLimit) {
+        // Unhealthy at the provider: the engine reads it at its next account sync.
+        email.accountsById.get(inbox)!.healthy = false;
+        outages.push({ inbox, from: now, to: Infinity, kind: "unhealthy" });
+        down.outage = { until, index: outages.length - 1 };
+      } else {
+        // Rate-limited until `until`: the engine learns it when a send is refused, and waits until then.
+        email.rateLimitedUntil.set(inbox, until);
+        outages.push({ inbox, from: now, to: until, kind: "rate_limited" });
+      }
     }
   };
 
@@ -240,7 +257,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     if (chance(0.5)) tracks.push({ id: `k${ci}e2`, channel: "email", branch: "main", window: ALL_DAY, steps: steps(`k${ci}e2`, pick([1, 2])), start: { kind: "after", trackId: `k${ci}e1`, delayDays: pick([0, 1]) }, removed: false });
     if (chance(0.5)) tracks.push({ id: `k${ci}w1`, channel: "email", branch: "win_back", window: ALL_DAY, steps: steps(`k${ci}w1`, pick([1, 2])), start: { kind: "entry" }, removed: false });
     // Drawn after the generator's own draws, from the windows' stream: a call track keeps its all-day hours.
-    definitions.push({ timezone: ZONE, callSkipLimitDays: 30, emailPool: ["inbox-a"], smsPool: [numbers[ci]!.id], callScript: "Ask who handles bookings.", tracks: tracks.map((t) => (t.channel === "call" ? t : { ...t, window: drawWindow() })) });
+    definitions.push({ timezone: ZONE, callSkipLimitDays: 30, emailPool: inboxIds, smsPool: [numbers[ci]!.id], callScript: "Ask who handles bookings.", tracks: tracks.map((t) => (t.channel === "call" ? t : { ...t, window: drawWindow() })) });
   }
   for (const d of definitions) {
     for (const t of d.tracks) features.add(`a-${t.channel}-track${t.branch === "win_back" ? "-in-win-back" : ""}`);
@@ -281,16 +298,41 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   const def = (s: Subject) => definitions[s.campaign]!;
   /** The prospect's zone: waits count in its calendar days, and windows are its local hours (ADR 0003 3.3, 3.4). */
   const zoneOfSubject = (s: Subject) => zoneOfPerson.get(s.person.key) ?? ZONE;
-  /** The account a lead's email or text track sends from: the one inbox, or its campaign's own number. */
-  const senderOf = (s: Subject, t: TrackDefinition) => (t.channel === "sms" ? numbers[s.campaign]!.id : "inbox-a");
+  /** A lead's email sender, fixed at its first email handed over (1.3); null before, when any inbox of the pool may be chosen. */
+  const emailSenderOf = (s: Subject): string | null => email.handoverLog.find((c) => c.subjectId === s.id)?.sender ?? null;
+  /** The accounts a lead's email or text track may send from: its fixed inbox or the pool, or its campaign's own number. */
+  const sendersOf = (s: Subject, t: TrackDefinition): string[] => {
+    if (t.channel === "sms") return [numbers[s.campaign]!.id];
+    const fixed = emailSenderOf(s);
+    return fixed ? [fixed] : inboxIds;
+  };
   /** The sender's next pacing slot by the record: its last send call plus the gap (P3's own rule). */
   const slotOf = (sender: string) => {
     // Every send call the sender made, a call an outage swallowed or never made included, as the engine takes a slot for each.
     const calls = [...email.handoverLog, ...sms.handoverLog, ...h.swallowedHandovers, ...uncalledHandovers].filter((c) => c.sender === sender && c.at <= h.clock).map((c) => c.at);
     return calls.length > 0 ? Math.max(...calls) + gap : -Infinity;
   };
-  /** The outage the record has the sender in at `t`, if any (only the inbox is ever taken down). */
-  const outageUntil = (sender: string, t: number) => (sender === "inbox-a" ? (outages.find((o) => o.from <= t && t < o.to) ?? null) : null);
+  /**
+   * The record's own count of an inbox's room on its UTC reset day at `t`: sends delivered that day plus work handed over and
+   * not yet given a final answer, within one of its capacity (the slack invariant F allows too).
+   */
+  const nearlyFullAt = (sender: string, t: number, claims = 0) => {
+    const day = isoOf(t).slice(0, 10);
+    const sent = email.deliveryLog.filter((d) => d.sender === sender && d.at <= t && isoOf(d.at).slice(0, 10) === day).length;
+    // A delivery settles its work's reservation only once the app can know it: its event seen, or a lookup answering "sent".
+    const knownSent = (key: string) => email.deliveryLog.some((d) => d.key === key && Math.min(d.visibleAt, email.lookupLog.find((l) => l.key === key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity) <= t);
+    const open = new Set(email.handoverLog.filter((c) => c.sender === sender && c.at <= t && !knownSent(c.key) && !(email.refusals.some((x) => x.attemptId === c.attemptId) && email.handoverLog.filter((y) => y.key === c.key).length <= 1) && !email.withdrawLog.some((w) => w.key === c.key && w.answer === "withdrawn")).map((c) => c.key)).size;
+    // Claims not yet handed over hold reservations too (4.2): the caller reads them from the store, as it reads a claim's expiry.
+    return sent + open + claims >= capacityOf(sender) - 1;
+  };
+  /**
+   * The outage the record has the sender in at `t`, as the engine can know it: unhealthy from its start; rate-limited only
+   * once a send to it was refused as rate-limited (the engine then waits until the limit's end).
+   */
+  // Down as the engine knows it: unhealthy, which its next account sync reads exactly. A rate limit's end is the engine's own
+  // reading of the provider's retry-after (its answer instant plus that, or its own backoff), which the record takes from the
+  // store where an instant must be explained, and never treats as down: at that instant the engine tries, and is refused.
+  const outageUntil = (sender: string, t: number) => outages.find((o) => o.inbox === sender && o.kind === "unhealthy" && o.from <= t && t < o.to) ?? null;
 
   // ----------------------------------------------------------------------------------------------
   // The record.
@@ -487,7 +529,9 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     const known = (d: { key: string; at: number; visibleAt: number }) => upFrom(Math.min(d.visibleAt, port.lookupLog.find((l) => l.key === d.key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity)) <= h.clock;
     // A send call an outage swallowed is with the provider as far as the app can tell (ticket 20a), until a final answer.
     const swallowed = [...h.swallowedHandovers, ...uncalledHandovers].filter((c) => c.channel === ch && c.at <= h.clock);
-    return [...handovers(ch), ...swallowed].some((c) => c.subjectId === s.id && c.stepId === stepId && !deliveries(ch).some((d) => d.key === c.key && known(d)) && !port.withdrawLog.some((w) => w.key === c.key && w.answer === "withdrawn"));
+    // A refusal settles the work only when it answers the key's only call: the provider never took it. After earlier calls of
+    // that key whose outcome is unknown the work stays uncertain, so it may still be sent (ADR 0002, the attempt's rule).
+    return [...handovers(ch), ...swallowed].some((c) => c.subjectId === s.id && c.stepId === stepId && !deliveries(ch).some((d) => d.key === c.key && known(d)) && !port.withdrawLog.some((w) => w.key === c.key && w.answer === "withdrawn") && !port.refusals.some((x) => "attemptId" in c && x.attemptId === c.attemptId && port.handoverLog.filter((y) => y.key === c.key).length <= 1));
   }
   /**
    * Ticket 20a, R7: the sends the interruption [x, y) rescheduled, by the record, at y (the clock), as the app knows them
@@ -551,7 +595,9 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
       return p ? [{ track: t, stepId: p.stepId, lead: p.lead }] : [];
     });
     // In lead time, as the engine orders them: on the wall, two deadlines behind an open hold are both never.
-    all.sort((a, b) => a.lead - b.lead || (a.track.id < b.track.id ? -1 : 1));
+    // Within a second is a tie: the record's own lead-time arithmetic rounds a late send's millisecond differently on two
+    // tracks due at the same wall instant (the windows family, offset 38), where the engine's order falls to the track id.
+    all.sort((a, b) => (Math.abs(a.lead - b.lead) >= 1000 ? a.lead - b.lead : 0) || (a.track.id < b.track.id ? -1 : 1));
     return all[0] ?? null;
   }
   /** The step a skip skips: the first pending step, in the same order, that is not with a provider (council D2 on 56d599c). */
@@ -560,7 +606,9 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
       const p = pendingOf(s, t, now);
       return p ? [{ track: t, stepId: p.stepId, lead: p.lead }] : [];
     });
-    all.sort((a, b) => a.lead - b.lead || (a.track.id < b.track.id ? -1 : 1));
+    // Within a second is a tie: the record's own lead-time arithmetic rounds a late send's millisecond differently on two
+    // tracks due at the same wall instant (the windows family, offset 38), where the engine's order falls to the track id.
+    all.sort((a, b) => (Math.abs(a.lead - b.lead) >= 1000 ? a.lead - b.lead : 0) || (a.track.id < b.track.id ? -1 : 1));
     return all.find((c) => !inFlight(c.track, s, c.stepId)) ?? null;
   }
   /** A track left that can run for the lead: unfinished, and its channel reaches the lead (council D1 on 56d599c). */
@@ -661,10 +709,14 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     const settledAt = (key: string) => {
       const d = email.deliveryLog.find((x) => x.key === key);
       const sent = d ? Math.min(d.visibleAt, email.lookupLog.find((l) => l.key === key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity, email.withdrawLog.find((w) => w.key === key && w.answer === "too-late")?.at ?? Infinity) : Infinity;
-      return Math.min(sent, email.withdrawLog.find((w) => w.key === key && w.answer === "withdrawn")?.at ?? Infinity);
+      // A refusal settles the work only when it answers the key's only call (the attempt's rule): after earlier calls the
+      // work stays uncertain.
+      const calls = email.handoverLog.filter((c) => c.key === key);
+      const refused = calls.length <= 1 ? (email.refusals.find((x) => calls.some((c) => c.attemptId === x.attemptId))?.at ?? Infinity) : Infinity;
+      return Math.min(sent, refused, email.withdrawLog.find((w) => w.key === key && w.answer === "withdrawn")?.at ?? Infinity);
     };
     for (const c of firstCalls) {
-      const held = firstCalls.filter((x) => x.key !== c.key && x.at < c.at && settledAt(x.key) > c.at);
+      const held = firstCalls.filter((x) => x.sender === c.sender && x.key !== c.key && x.at < c.at && settledAt(x.key) > c.at);
       if (held.length >= 2) problem(`B: ${c.subjectId}/${c.stepId} was handed over at ${isoOf(c.at)} while the inbox already had ${held.length} pieces of work with the provider unsettled (${held.map((x) => x.key).join(", ")})`);
     }
     // 18's order (council C on 56d599c): at each first claim of a step that needs an in-flight place, no other step for the
@@ -672,7 +724,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     // was due and claimable a minute before and still unclaimed: no lead released from a hold, and no overdue lead, is
     // passed over while others are served.
     {
-      type Item = { s: Subject; t: TrackDefinition; stepId: string; sender: string; due: number; stored: number; known: number; claim: number; inherited: boolean };
+      type Item = { s: Subject; t: TrackDefinition; stepId: string; sender: string | null; due: number; stored: number; known: number; claim: number; inherited: boolean };
       const items: Item[] = [];
       for (const s of subjects.values()) {
         const st = await h.store.engine.subject(s.id, now);
@@ -687,7 +739,8 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
             const due = prev ? afterHolds(s, prev.at, stored) : start;
             const known = prev ? prev.seen : (t.start.kind === "after" ? (finishOf(s, def(s).tracks.find((x) => x.id === (t.start.kind === "after" ? t.start.trackId : ""))!)?.seen ?? Infinity) : start);
             const first = st?.attempts.filter((a) => a.stepId === step.id).sort((a, b) => a.claimedWall - b.claimedWall)[0];
-            items.push({ s, t, stepId: step.id, sender: t.channel === "sms" ? numbers[s.campaign]!.id : "inbox-a", due, stored, known, claim: first?.claimedWall ?? Infinity, inherited: first !== undefined && first.idempotencyKey !== first.id });
+            // The lead's fixed inbox, else the one its first claim took; null when it has neither (any inbox of the pool).
+            items.push({ s, t, stepId: step.id, sender: t.channel === "sms" ? numbers[s.campaign]!.id : (emailSenderOf(s) ?? first?.accountId ?? null), due, stored, known, claim: first?.claimedWall ?? Infinity, inherited: first !== undefined && first.idempotencyKey !== first.id });
           }
         }
       }
@@ -695,13 +748,17 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
       // for now; a user's Skip of a step, a call's included, touches nothing (the clause that counted one came in with
       // c189643 and was hidden by all-day windows until the windows family drew others).
       const touched = (s: Subject, T: number) => (["email", "sms"] as const).some((ch) => deliveries(ch).some((d) => d.subjectId === s.id && d.visibleAt <= T)) || [...callsDone].some(([k, at]) => k.startsWith(`${s.id}/`) && at <= T);
+      /** Some inbox the item may use is up at T: its own, or, with none fixed yet, any of the pool. */
+      const upAt = (y: Item, T: number) => (y.sender === null ? inboxIds : [y.sender]).some((x) => outageUntil(x, T) === null);
       // Claimable by the record's own model (ADR 0003 "Reads that say when"): inside its window in the prospect's zone, and its
       // sender not taken down, a minute before and at T, as well as due and neither held nor ended.
       const eligible = (y: Item, T: number) =>
         !downAt(T) && !downAt(T - MINUTE) &&
-        inWindow(y.t.window, zoneOfSubject(y.s), T) && inWindow(y.t.window, zoneOfSubject(y.s), T - MINUTE) && outageUntil(y.sender, T) === null && outageUntil(y.sender, T - MINUTE) === null &&
+        inWindow(y.t.window, zoneOfSubject(y.s), T) && inWindow(y.t.window, zoneOfSubject(y.s), T - MINUTE) && upAt(y, T) && upAt(y, T - MINUTE) &&
         y.due <= T - MINUTE && y.known <= T - MINUTE && !holdsOf(y.s).some((x) => x.from <= T && x.to > T - MINUTE) && !endedAt(y.s, T) && branchOf(y.s, T) === y.t.branch &&
         !skips.some((x) => x.subjectId === y.s.id && x.stepId === y.stepId && x.at <= T) && !((finishOf(y.s, y.t)?.at ?? Infinity) <= T) && !hidden.some((r) => r.subjectId === y.s.id && r.at <= T);
+      /** Whether `y` could have gone on `sender`: its own, or, with none fixed yet, any inbox of the pool. */
+      const sameSender = (y: Item, sender: string | null) => sender !== null && (y.sender === sender || (y.sender === null && inboxIds.includes(sender)));
       const ranksAbove = (y: Item, x: Item, T: number) => {
         const ty = touched(y.s, T);
         const tx = touched(x.s, T);
@@ -712,7 +769,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
       for (const x of items) {
         if (!Number.isFinite(x.claim) || x.inherited) continue;
         for (const y of items) {
-          if (y === x || y.sender !== x.sender || y.claim <= x.claim || !eligible(y, x.claim) || !ranksAbove(y, x, x.claim)) continue;
+          if (y === x || !sameSender(y, x.sender) || y.claim <= x.claim || !eligible(y, x.claim) || !ranksAbove(y, x, x.claim)) continue;
           problem(`18: ${x.s.id}/${x.stepId} was claimed on ${x.sender} at ${isoOf(x.claim)} while ${y.s.id}/${y.stepId}, due ${isoOf(y.due)} and ranked higher, waited (claimed ${isoOf(y.claim)})${process.env["CONTROLS_DEBUG"] ? ` [y window ${JSON.stringify(y.t.window)} zone ${zoneOfSubject(y.s)}; x window ${JSON.stringify(x.t.window)} zone ${zoneOfSubject(x.s)}; outages ${JSON.stringify(outages.map((o) => [isoOf(o.from), isoOf(o.to)]))}; y holds ${JSON.stringify(holdsOf(y.s).map((o) => [isoOf(o.from), isoOf(o.to)]))}; y attempts ${JSON.stringify(email.handoverLog.filter((c) => c.subjectId === y.s.id).map((c) => [c.stepId, isoOf(c.at), c.mode]))}]` : ""}`);
         }
       }
@@ -723,11 +780,11 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
       // that was claimable throughout.
       const SLACK = 20 * MINUTE;
       /** inbox-a's day, by the providers' logs: sends delivered that UTC day by T, and work handed over and not final by T. */
-      const nearlyFull = (T: number) => {
+      const nearlyFull = (sender: string, T: number) => {
         const day = isoOf(T).slice(0, 10);
-        const sentThatDay = email.deliveryLog.filter((d) => d.at <= T && isoOf(d.at).slice(0, 10) === day).length;
-        const open = firstCalls.filter((c) => c.at <= T && settledAt(c.key) > T).length;
-        return sentThatDay + open >= CAPACITY - 1;
+        const sentThatDay = email.deliveryLog.filter((d) => d.sender === sender && d.at <= T && isoOf(d.at).slice(0, 10) === day).length;
+        const open = firstCalls.filter((c) => c.sender === sender && c.at <= T && settledAt(c.key) > T).length;
+        return sentThatDay + open >= capacityOf(sender) - 1;
       };
       for (const ch of ["email", "sms"] as const) {
         const port = ch === "email" ? email : sms;
@@ -748,10 +805,16 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
           if (held >= 2) continue;
           if (firsts.some((c) => c.sender === sender && c.at > f && c.at <= f + SLACK)) continue;
           for (const y of items) {
-            if (y.sender !== sender || y.claim <= f + SLACK || y.inherited) continue;
+            if (!sameSender(y, sender) || y.claim <= f + SLACK || y.inherited) continue;
             if (![f + MINUTE, f + SLACK / 2, f + SLACK].every((T) => eligible(y, T))) continue;
+            // The freed sender itself must be up (with a pool, the item may be eligible on another inbox), and not under a rate
+            // limit the engine waits out (its end as the engine reads it can fall a couple of minutes from the fake's).
+            if ([f + MINUTE, f + SLACK / 2, f + SLACK].some((T) => outageUntil(sender, T) !== null)) continue;
+            if (outages.some((o) => o.kind === "rate_limited" && o.inbox === sender && o.from < f + SLACK && o.to + 2 * MINUTE > f)) continue;
+            // The sender's pacing slot must have come too: with the windows family's long gaps a freed place can wait for it.
+            if ([f + MINUTE, f + SLACK / 2, f + SLACK].some((T) => [...email.handoverLog, ...sms.handoverLog].filter((c) => c.sender === sender && c.at <= T).reduce((m, c) => Math.max(m, c.at + gap), -Infinity) > T)) continue;
             // With a small daily capacity (ticket 20a's family), a sender at or near its day's capacity may rightly wait.
-            if (sender === "inbox-a" && [f + MINUTE, f + SLACK / 2, f + SLACK].some((T) => nearlyFull(T))) continue;
+            if (!sender.startsWith("+") && [f + MINUTE, f + SLACK / 2, f + SLACK].some((T) => nearlyFull(sender, T))) continue;
             problem(`F: ${sender} had a free in-flight place from ${isoOf(f)} (a final answer for ${freed.key}) and handed nothing over for ${SLACK / MINUTE} minutes while ${y.s.id}/${y.stepId}, due ${isoOf(y.due)}, waited (claimed ${isoOf(y.claim)})`);
           }
         }
@@ -789,6 +852,9 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     if (engineDay.committed !== committed) problem(`P12: ${engineDay.committed} calls are committed on ${isoOf(dayStart)}'s day; the record counts ${committed}`);
     const q = (await h.request<CallsView>("GET", "/api/calls")).body;
     const listed = new Set([...q.readyNow, ...q.laterToday].map((x) => x.enrollmentId));
+    // Each sender's claims not yet handed over, across every lead: reservations the record's provider logs cannot see.
+    const claimsOn = new Map<string, number>();
+    for (const x of subjects.values()) for (const a of (await h.store.engine.subject(x.id, now))?.attempts ?? []) if (a.state === "claimed") claimsOn.set(a.accountId, (claimsOn.get(a.accountId) ?? 0) + 1);
     for (const s of subjects.values()) {
       const st = await h.store.engine.subject(s.id, now);
       const read = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${s.id}`)).body;
@@ -851,20 +917,33 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
         // prospect's zone and is never before the window's first opening at or after the due instant; it is later than that
         // opening only by what the record can name, the sender's pacing slot or its outage; and never while the record
         // has the sender down.
+        // A reason must be one the record can name too: "every account full" while the record has an inbox up and clearly not
+        // full is a read that hid an instant (council on cc9bf55, item 3).
+        if (drawsWindows && when.kind === "waits" && when.why === "sending_capacity" && t.channel === "email") {
+          const roomy = sendersOf(s, t).filter((x) => outageUntil(x, now) === null && !nearlyFullAt(x, now, claimsOn.get(x) ?? 0));
+          if (roomy.length > 0) problem(`W2: ${s.id}/${pending.stepId} reads "sending_capacity" at ${isoOf(now)}, but the record has room on ${roomy.join(", ")}${process.env["CONTROLS_DEBUG"] ? ` [engine accounts ${JSON.stringify(Object.values(st.accounts).map((a) => [a.id, a.healthy, a.used, a.reserved, a.capacity, a.dailyLimit, a.inFlight, a.k, isoOf(a.waitUntil)]))}; sender ${st.subject.emailSender}; deliveries ${JSON.stringify(email.deliveryLog.filter((d) => isoOf(d.at).slice(0, 10) === isoOf(now).slice(0, 10)).map((d) => [d.sender, isoOf(d.at)]))}]` : ""}`);
+        }
         const shownAt = when.kind === "at" ? Date.parse(when.at) : when.kind === "now" ? now : null;
         if (shownAt !== null && !inFlight(t, s, pending.stepId)) {
           const zone = zoneOfSubject(s);
           const window: readonly Hours[] = t.window;
           const opening = Number.isFinite(pending.due) ? firstOpen(window, zone, Math.max(pending.due, now)) : Infinity;
-          const sender = senderOf(s, t);
-          const down = outageUntil(sender, shownAt);
+          const senders = sendersOf(s, t);
+          const downs = senders.map((x) => outageUntil(x, shownAt));
+          const down = downs.every((x) => x !== null) ? downs[0]! : null;
+          const sender = senders.join("/");
           if (!inWindow(window, zone, shownAt)) problem(`W2: ${s.id}/${pending.stepId} reads ${JSON.stringify(when)} at ${isoOf(now)}, outside its window in ${zone} (the record's next opening is ${isoOf(opening)})`);
           else if (shownAt < opening) problem(`W2: ${s.id}/${pending.stepId} reads ${JSON.stringify(when)} at ${isoOf(now)}, before the record's first opening ${isoOf(opening)} after its due instant ${isoOf(pending.due)}`);
-          else if (down !== null) problem(`W2: ${s.id}/${pending.stepId} reads ${JSON.stringify(when)} at ${isoOf(now)} while the record has its sender ${sender} ${down.kind} until ${isoOf(down.to)}`);
+          else if (down !== null) problem(`W2: ${s.id}/${pending.stepId} reads ${JSON.stringify(when)} at ${isoOf(now)} while the record has its sender ${sender} ${down.kind} until ${isoOf(down.to)}${process.env["CONTROLS_DEBUG"] ? ` [engine accounts ${JSON.stringify(Object.values(st.accounts).map((a) => [a.id, a.healthy, isoOf(a.waitUntil), a.waitReason, isoOf(a.nextSlotAt)]))}; attempts ${JSON.stringify(st.attempts.filter((a) => a.stepId === pending.stepId).map((a) => [a.state, a.accountId, isoOf(a.claimedWall), a.rejectReason]))}; refusals ${JSON.stringify(email.refusals.map((x) => [isoOf(x.at), x.reason]))}]` : ""}`);
           else {
-            const slot = slotOf(sender);
+            const slot = Math.min(...senders.map(slotOf));
             const after = (t: number) => (Number.isFinite(t) ? firstOpen(window, zone, t) : Infinity);
-            const explained = [opening, after(Math.max(opening, slot)), ...outages.filter((o) => o.to > opening && Number.isFinite(o.to)).map((o) => after(Math.max(opening, o.to, slot)))];
+            const waits = senders.map((x) => st.accounts[x]?.waitUntil ?? null).filter((w): w is number => w !== null && Number.isFinite(w) && w < 8e15 && w > opening);
+            const ends = [...outages.filter((o) => senders.includes(o.inbox) && o.kind === "unhealthy" && o.to > opening && Number.isFinite(o.to)).map((o) => o.to), ...waits];
+            // A claim made for the step expires one settling period (15 minutes, ADR 0003 5.3) after it was made, and the step
+            // is claimed again from then: the stored claim's instant, read from the store, is the record's to name.
+            const expiries = st.attempts.filter((a) => a.stepId === pending.stepId && a.state === "claimed").map((a) => a.claimedWall + 15 * MINUTE);
+            const explained = [opening, ...senders.map((x) => after(Math.max(opening, slotOf(x)))), ...ends.flatMap((end) => senders.map((x) => after(Math.max(opening, end, slotOf(x))))), ...expiries.flatMap((e) => [after(Math.max(opening, e)), ...senders.map((x) => after(Math.max(opening, e, slotOf(x))))])];
             if (!explained.includes(shownAt)) problem(`W2: ${s.id}/${pending.stepId} reads ${JSON.stringify(when)} at ${isoOf(now)}; the record has it go at its opening ${isoOf(opening)}, or its sender's slot ${isoOf(slot)}, and names nothing later`);
           }
         }
@@ -935,7 +1014,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     const offered = read.controls.find((c) => c.action === action);
     if (!offered || offered.allowed !== expected) problem(`P11: ${s.id}'s read ${offered?.allowed ? "offers" : "refuses"} ${action} at ${isoOf(now)}; the record says it must be ${expected ? "accepted" : "refused"}${offered && !offered.allowed ? ` ("${offered.reason}")` : ""}${process.env["CONTROLS_DEBUG"] ? ` [holds ${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))}; pauses ${JSON.stringify([...leadPauses.filter((p) => p.subjectId === s.id), ...campaignPauses.filter((p) => p.campaign === s.campaign)].map((p) => [isoOf(p.from), isoOf(p.to)]))}; endings ${JSON.stringify(endings.filter((e) => e.subjectId === s.id).map((e) => [e.kind, isoOf(e.at), isoOf(e.restartedAt)]))}; downs ${JSON.stringify(downs.map((x) => [isoOf(x.from), isoOf(x.to)]))}; freezes ${JSON.stringify((await h.store.engine.subject(s.id, now))?.freezes.map((f) => [isoOf(f.fromWall), isoOf(f.toWall)]))}; current ${currentStep(s, now)?.stepId ?? "none"}; starts ${JSON.stringify(def(s).tracks.map((x) => [x.id, JSON.stringify(x.start), isoOf(startOf(s, x)), finishOf(s, x)]))}; lookups ${JSON.stringify(email.lookupLog.filter((l) => l.key === "att-122").map((l) => [isoOf(l.at), l.answer]))}; engineTracks ${JSON.stringify((await h.store.engine.subject(s.id, now))?.tracks.map((p) => [p.trackId, p.startAt, p.startedAt, p.finishReason, isoOf(p.finishedWall)]))}; clock ${JSON.stringify((await h.store.engine.subject(s.id, now))?.subject.clock)}; work ${JSON.stringify((await h.store.engine.subject(s.id, now))?.work.map((w) => [w.stepId, w.key, w.calls, w.settled, w.lookupAnswer]))}; attempts ${JSON.stringify((await h.store.engine.subject(s.id, now))?.attempts.map((a) => [a.stepId, a.idempotencyKey, a.state, a.endedBy]))}; handovers ${JSON.stringify(email.handoverLog.filter((c) => c.subjectId === s.id).map((c) => [c.stepId, c.key, isoOf(c.at), c.mode]))}; deliveries ${JSON.stringify(email.deliveryLog.filter((c) => c.subjectId === s.id).map((c) => [c.stepId, c.key, isoOf(c.at)]))}; withdrawals ${JSON.stringify(email.withdrawLog)}]` : ""}`);
     const current = action === "skip" ? (skipTargetOf(s, now) ?? currentStep(s, now)) : currentStep(s, now);
-    if (action === "skip" && offered?.allowed && current && (offered.skips?.trackId !== current.track.id || offered.skips.stepId !== current.stepId)) problem(`P11: ${s.id}'s read would skip ${offered.skips?.stepId ?? "nothing"}; the record's current step is ${current.stepId}${process.env["CONTROLS_DEBUG"] ? ` [pending ${JSON.stringify(tracksIn(s, branchOf(s, now)).map((t) => [t.id, pendingOf(s, t, now)]).map(([id, p]) => [id, p && typeof p === "object" ? [p.stepId, isoOf(p.due), isoOf(p.unheld)] : null]))}; holds ${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))}; engine ${JSON.stringify((read.tracks).map((t) => [t.trackId, t.nextStep]))}]` : ""}`);
+    if (action === "skip" && offered?.allowed && current && (offered.skips?.trackId !== current.track.id || offered.skips.stepId !== current.stepId)) problem(`P11: ${s.id}'s read would skip ${offered.skips?.stepId ?? "nothing"}; the record's current step is ${current.stepId}${process.env["CONTROLS_DEBUG"] ? ` [pending ${JSON.stringify(tracksIn(s, branchOf(s, now)).map((t) => [t.id, pendingOf(s, t, now)]).map(([id, p]) => [id, p && typeof p === "object" ? [p.stepId, isoOf(p.due), isoOf(p.unheld), p.lead] : null]))}; holds ${JSON.stringify(holdsOf(s).map((x) => [isoOf(x.from), isoOf(x.to)]))}; engine ${JSON.stringify((read.tracks).map((t) => [t.trackId, t.nextStep]))}]` : ""}`);
     if (action === "skip" && current && inFlight(current.track, s, current.stepId)) features.add("skip-refused-with-work-at-the-provider");
     const live = (await h.store.engine.subject(s.id, now))?.attempts.filter((a) => a.state === "claimed" || a.state === "handed" || a.state === "accepted") ?? [];
     const before = await others(s, null);
@@ -949,6 +1028,12 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     // did is history, and says no time. P11 compares the two without it.
     const timeless = (x: unknown) => JSON.stringify(x, (key, value: unknown) => (key === "when" ? undefined : value));
     if (accepted && offered?.allowed && timeless(res.body.effect) !== timeless(offered)) problem(`P11: ${action} on ${s.id} at ${isoOf(now)} answered the effect ${JSON.stringify(res.body.effect)}; the read previewed ${JSON.stringify(offered)}`);
+    // W4 (council on cc9bf55, items 7 and 8): the preview's time, read before the control, is the read's time for that step
+    // after it, at the same instant: a preview reads the state the control would produce.
+    // The answer's effect is the control's own transition at that instant, before the worker's round the route runs after it;
+    // outside the interruption family (whose dispatch gate the effect does not ask) the two times are the same read.
+    const effectNext = (res.body.effect as { next?: { stepId?: string; when?: unknown } } | undefined)?.next;
+    if (accepted && offered?.allowed && offered.next && !interrupting && effectNext?.stepId === offered.next.stepId && JSON.stringify(effectNext.when) !== JSON.stringify(offered.next.when)) problem(`W4: ${action} on ${s.id} at ${isoOf(now)} previewed ${offered.next.stepId} ${JSON.stringify(offered.next.when)}; the control's own transition gives ${JSON.stringify(effectNext.when)}`);
     if (!accepted && res.body.error) refused.push({ path: `/api/enrollments/${s.id}/controls`, body, message: res.body.error.message });
     if (uncertain) features.add(accepted ? `${action}-with-uncertain-work` : `${action}-refused-with-uncertain-work`);
     if (accepted !== expected) problem(`P11: ${action} on ${s.id} at ${isoOf(now)} was ${accepted ? "accepted" : `refused (${res.body.error?.message ?? res.status})`}; the record says it must be ${expected ? "accepted" : "refused"}`);
@@ -1492,7 +1577,9 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
    * over before it; and when the record's model has room at it (the lead neither held nor ended nor acted on, no reply,
    * the sender up and handing nothing else over), it is handed over at it.
    */
-  const promised = new Map<string, { s: Subject; stepId: string; ch: "email" | "sms"; sender: string; at: number; readAt: number }>();
+  const promised = new Map<string, { s: Subject; stepId: string; ch: "email" | "sms"; senders: string[]; at: number; readAt: number }>();
+  const seenAccounts = new Map<string, unknown>();
+  const repliedBy = (s: Subject, T: number) => [...email.replyLog.filter((x) => x.subjectId === s.id), ...(s.person.mobile ? sms.replyLog.filter((x) => x.from === s.person.mobile) : [])].some((x) => x.at <= T);
   async function checkReadsAgainstDispatch(): Promise<void> {
     const now = h.clock;
     const reads: { s: Subject; t: TrackDefinition; stepId: string; when: NonNullable<EnrollmentRead["tracks"][number]["nextStep"]>["when"] }[] = [];
@@ -1504,24 +1591,27 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
         if (next) reads.push({ s, t, stepId: next.stepId, when: next.when });
       }
     }
+    for (const s of subjects.values()) {
+      const st = await h.store.engine.subject(s.id, now);
+      if (st) seenAccounts.set(s.id, Object.values(st.accounts).map((a) => [a.id, a.healthy, isoOf(a.nextSlotAt), isoOf(a.waitUntil), a.waitReason, a.used, a.capacity, a.inFlight, a.k]));
+    }
     const mark = { email: email.handoverLog.length, sms: sms.handoverLog.length };
     await h.tick();
     for (const r of reads) {
       const ch = r.t.channel === "sms" ? "sms" : "email";
-      const sender = senderOf(r.s, r.t);
+      const senders = sendersOf(r.s, r.t);
       const round = (ch === "sms" ? sms : email).handoverLog.slice(mark[ch]);
       const mine = round.filter((c) => c.subjectId === r.s.id && c.stepId === r.stepId);
-      const replied = [...email.replyLog.filter((x) => x.subjectId === r.s.id), ...(r.s.person.mobile ? sms.replyLog.filter((x) => x.from === r.s.person.mobile) : [])].length > 0;
       switch (r.when.kind) {
         case "now":
-          if (mine.length === 0 && !round.some((c) => c.sender === sender) && !replied) problem(`W3: ${r.s.id}/${r.stepId} read "due now" at ${isoOf(now)}, but the next round handed nothing over and the record names no reason`);
+          if (mine.length === 0 && !round.some((c) => senders.includes(c.sender)) && !repliedBy(r.s, now)) problem(`W3: ${r.s.id}/${r.stepId} read "due now" at ${isoOf(now)}, but the next round handed nothing over and the record names no reason`);
           break;
         case "waits":
           if (mine.length > 0 && r.when.why !== "with_provider" && r.when.why !== "unresolved") problem(`W3: ${r.s.id}/${r.stepId} read "${r.when.why}" at ${isoOf(now)}, but the next round handed it over`);
           break;
         case "at":
           if (mine.length > 0) problem(`W3: ${r.s.id}/${r.stepId} read "earliest ${r.when.at}" at ${isoOf(now)}, but the next round handed it over before then`);
-          else promised.set(`${r.s.id}/${r.stepId}`, { s: r.s, stepId: r.stepId, ch, sender, at: Date.parse(r.when.at), readAt: now });
+          else promised.set(`${r.s.id}/${r.stepId}`, { s: r.s, stepId: r.stepId, ch, senders, at: Date.parse(r.when.at), readAt: now });
           break;
         case "call_day":
         case "listed_for":
@@ -1530,6 +1620,19 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
           const unhandled: never = r.when;
           throw new Error(`a read the record does not know: ${String(unhandled)}`);
         }
+      }
+    }
+    // The review bot on cc9bf55: advance to the earliest instant a read gave, nothing else changing, and dispatch must hand
+    // the step over at it (in half the rounds, so the runs keep their other shapes too).
+    const soonest = [...promised.values()].filter((p) => p.readAt === now && p.at <= now + 3 * DAY).sort((a, b) => a.at - b.at)[0];
+    if (soonest && rW() < 0.5) {
+      await h.advanceTo(soonest.at);
+      for (const p of [...promised.values()].filter((x) => x.readAt === now && x.at === soonest.at)) {
+        const all = (p.ch === "sms" ? sms : email).handoverLog;
+        const got = all.find((c) => c.subjectId === p.s.id && c.stepId === p.stepId && c.at > p.readAt);
+        const other = all.some((c) => p.senders.includes(c.sender) && c.at > p.readAt && c.at <= p.at && !(c.subjectId === p.s.id && c.stepId === p.stepId));
+        if (got?.at !== p.at && !other && !repliedBy(p.s, p.at)) problem(`W3: ${p.s.id}/${p.stepId} read "earliest ${isoOf(p.at)}" at ${isoOf(p.readAt)}; advancing to it with nothing else changing, it was handed over ${got ? `at ${isoOf(got.at)} on ${got.sender}` : "not at all"}${process.env["CONTROLS_DEBUG"] ? ` [accounts at the read ${JSON.stringify(seenAccounts.get(p.s.id))}; refusals ${JSON.stringify(email.refusals.map((x) => [isoOf(x.at), x.reason]))}; outages ${JSON.stringify(outages.map((o) => [o.inbox, o.kind, isoOf(o.from), isoOf(o.to)]))}]` : ""}`);
+        promised.delete(`${p.s.id}/${p.stepId}`);
       }
     }
     // Each promised instant once it has passed by a round: never handed over before it; handed over at it where the record has room.
@@ -1545,10 +1648,9 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
       }
       const span = (x: { from: number; to: number }) => x.from < p.at + MINUTE && x.to > p.readAt;
       const actedOn = holdsOf(p.s).some(span) || skips.some((x) => x.subjectId === p.s.id && x.at >= p.readAt) || leadPauses.some((x) => x.subjectId === p.s.id && x.from >= p.readAt) || (winBack.get(p.s.id) ?? -Infinity) >= p.readAt || endedAt(p.s, p.at);
-      const replied = [...email.replyLog.filter((x) => x.subjectId === p.s.id), ...(p.s.person.mobile ? sms.replyLog.filter((x) => x.from === p.s.person.mobile) : [])].some((x) => x.at <= p.at + MINUTE);
-      const busy = all.some((c) => c.sender === p.sender && c.at >= p.readAt && c.at <= p.at + MINUTE && !(c.subjectId === p.s.id && c.stepId === p.stepId));
-      const down = outages.some((o) => o.from < p.at + MINUTE && o.to > p.readAt) && p.sender === "inbox-a";
-      if (actedOn || replied || busy || down) continue;
+      const busy = all.some((c) => p.senders.includes(c.sender) && c.at >= p.readAt && c.at <= p.at + MINUTE && !(c.subjectId === p.s.id && c.stepId === p.stepId));
+      const down = outages.some((o) => p.senders.includes(o.inbox) && span(o));
+      if (actedOn || repliedBy(p.s, p.at + MINUTE) || busy || down) continue;
       if (!first || first.at > p.at + MINUTE) problem(`W3: ${p.s.id}/${p.stepId} read "earliest ${isoOf(p.at)}" at ${isoOf(p.readAt)}; the record had room then, but it was handed over ${first ? `at ${isoOf(first.at)}` : "not at all"}`);
     }
   }
@@ -1591,10 +1693,10 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   // The drain: every pause resumed, then each day every listed call logged no answer, until every lead has ended.
   if (problems.length === 0 && !h.stopped) {
     // The inbox back up for good, so every lead can finish.
-    const inbox = email.accountsById.get("inbox-a");
     const current = down.outage;
-    if (inbox && current !== null) {
-      inbox.healthy = true;
+    if (current !== null) {
+      const failing = email.accountsById.get(outages[current.index]!.inbox);
+      if (failing) failing.healthy = true;
       outages[current.index] = { ...outages[current.index]!, to: h.clock };
       down.outage = null;
     }

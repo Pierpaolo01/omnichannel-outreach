@@ -1,4 +1,5 @@
 import type { TestRunEnding, TestRunRead, TestStepRow } from "../../shared/api.ts";
+import { clockTime } from "../time.ts";
 import { stepWaitWords } from "../controls/wording.ts";
 
 const capitalise = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1);
@@ -11,7 +12,7 @@ const capitalise = (text: string): string => text.charAt(0).toUpperCase() + text
 /** HH:MM in `zone`, with the weekday when it is not the read's own day. */
 export function timeIn(zone: string, iso: string, readAt: string): string {
   const day = (t: string) => new Intl.DateTimeFormat("en-GB", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(t));
-  const clock = new Intl.DateTimeFormat("en-GB", { timeZone: zone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(iso));
+  const clock = clockTime(zone, iso);
   if (day(iso) === day(readAt)) return clock;
   return `${new Intl.DateTimeFormat("en-GB", { timeZone: zone, weekday: "short" }).format(new Date(iso))} ${clock}`;
 }

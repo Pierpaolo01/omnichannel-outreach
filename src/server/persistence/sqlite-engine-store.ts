@@ -917,7 +917,22 @@ export class SqliteEngineStore implements EngineStore {
    * today, and committed tasks, placed before today and open at its start for leads that had not
    * ended by then. Committed tasks are always listed, so they count first against the capacity.
    */
+  /**
+   * The call day's counts are the same for every subject a read loads at one instant (council on cc9bf55, item 6): kept for
+   * the instant and the connection's write count (`total_changes()`), so any write in between counts afresh.
+   */
+  private callDayMemo: { key: string; value: CallDay } | null = null;
+
   private callDayAt(now: number): CallDay {
+    const changes = num(this.sql("SELECT total_changes() AS n").get() ?? {}, "n");
+    const key = `${now}|${changes}`;
+    if (this.callDayMemo?.key === key) return this.callDayMemo.value;
+    const value = this.callDayCounted(now);
+    this.callDayMemo = { key, value };
+    return value;
+  }
+
+  private callDayCounted(now: number): CallDay {
     const { dailyCapacity, userZone } = this.callSettingsNow();
     const day = localDayNumber(now, userZone);
     const start = startOfLocalDay(day, userZone);

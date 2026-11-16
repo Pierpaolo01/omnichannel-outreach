@@ -64,8 +64,11 @@ describe("when a step goes, in one wording function (ADR 0003 \"Reads that say w
     expect(stepWhenPhrase(at("2026-11-10T09:00:00.000Z"), ZONE)).toBe("earliest Tue 10 Nov at 09:00");
     expect(stepWhenPhrase({ kind: "waits", why: "sending_capacity" }, ZONE)).toBe("waiting for sending capacity: every account it may use is full today");
     // A call: the day it goes on the list, never a time of day; once listed for a later day, the call line's own words.
-    expect(stepWhenPhrase({ kind: "call_day", day: "2026-11-10", today: false }, ZONE)).toBe("on your call list from Tue 10 Nov at the earliest");
-    expect(stepWhenPhrase({ kind: "call_day", day: "2026-11-09", today: true }, ZONE)).toBe("goes on your call list today");
+    expect(stepWhenPhrase({ kind: "call_day", day: "2026-11-10", today: false, now: false }, ZONE)).toBe("on your call list from Tue 10 Nov at the earliest");
+    expect(stepWhenPhrase({ kind: "call_day", day: "2026-11-09", today: true, now: false }, ZONE)).toBe("on your call list later today at the earliest");
+    expect(stepWhenPhrase({ kind: "call_day", day: "2026-11-09", today: true, now: true }, ZONE)).toBe("going on your call list now");
+    expect(stepWhenPhrase({ kind: "waits", why: "no_transport", channel: "sms" }, ZONE)).toBe("waiting: the SMS provider can’t send this text yet");
+    expect(stepWhenPhrase({ kind: "waits", why: "no_transport", channel: "email" }, ZONE)).toBe("waiting: the email provider can’t send a follow-up in its thread yet");
     expect(stepWhenPhrase({ kind: "listed_for", day: "2026-11-10" }, ZONE)).toBe("on the list for Tue 10 Nov");
     expect(stepWhenPhrase({ kind: "waits", why: "call_hours_closed" }, ZONE)).toBe("waits for a day their calling hours open");
   });
@@ -80,6 +83,8 @@ describe("when a step goes, in one wording function (ADR 0003 \"Reads that say w
       const words = stepWhenPhrase({ kind: "waits", why }, ZONE);
       expect(words, why).not.toBe("");
       expect(words, why).not.toMatch(/\d{2}:\d{2}|due/);
+      // No reason says what happens next (council on cc9bf55, item 9).
+      expect(words, why).not.toMatch(/goes once|starts when|as soon as|until|comes back|will /);
     }
   });
 
@@ -262,5 +267,14 @@ describe("the campaign's pause", () => {
     expect(mayStillSendText(0)).toBeNull();
     expect(mayStillSendText(1)).toBe("One message already handed to a provider may still be sent.");
     expect(mayStillSendText(4)).toBe("4 messages already handed to a provider may still be sent.");
+  });
+});
+
+describe("a time inside a repeated hour says which one (verifier on cc9bf55, item 11)", () => {
+  // London, 25 October 2026: 01:00 to 01:59 occurs twice (BST, then GMT).
+  test("on a record row: the first 01:00 is BST, the second GMT; an ordinary time says no zone", () => {
+    expect(stepWhenPhrase(at("2026-10-25T00:00:00.000Z"), ZONE)).toBe("earliest Sun 25 Oct at 01:00 BST");
+    expect(stepWhenPhrase(at("2026-10-25T01:00:00.000Z"), ZONE)).toBe("earliest Sun 25 Oct at 01:00 GMT");
+    expect(stepWhenPhrase(at("2026-10-25T03:00:00.000Z"), ZONE)).toBe("earliest Sun 25 Oct at 03:00");
   });
 });

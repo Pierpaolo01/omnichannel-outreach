@@ -43,11 +43,11 @@ export function stepWaitApi(why: StepWait): StepWaitApi {
 export function stepWhenView(when: StepWhen, now: number, today: number): StepWhenView {
   switch (when.kind) {
     case "waits":
-      return { kind: "waits", why: stepWaitApi(when.why) };
+      return when.channel ? { kind: "waits", why: stepWaitApi(when.why), channel: when.channel } : { kind: "waits", why: stepWaitApi(when.why) };
     case "at":
       return when.at <= now ? { kind: "now" } : { kind: "at", at: new Date(when.at).toISOString() };
     case "call_day":
-      return { kind: "call_day", day: dateOfDay(when.day), today: when.day <= today };
+      return { kind: "call_day", day: dateOfDay(when.day), today: when.day <= today, now: when.at <= now };
     case "listed_for":
       return { kind: "listed_for", day: dateOfDay(when.day) };
     default: {

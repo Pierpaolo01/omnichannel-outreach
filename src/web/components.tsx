@@ -8,7 +8,7 @@ import { StatusBadge } from "./status.tsx";
 import { CampaignPausedMarker, LeadControls, LeadSentence } from "./controls/ControlViews.tsx";
 import { CALL_LINE_IS_THE_SENTENCE } from "./controls/wording.ts";
 import type { Controls } from "./controls/useControls.ts";
-import { clockIn, useNow } from "./time.ts";
+import { clockIn, useNow, clockTime } from "./time.ts";
 import type { Freshness } from "./calls/refresher.ts";
 
 export function ErrorState({ title, message, onRetry, retryRef, rescue }: { title: string; message: string; onRetry?: () => void; retryRef?: (el: HTMLButtonElement | null) => void; rescue?: number }) {
@@ -275,7 +275,7 @@ export function RecordSkeleton() {
  */
 /** `what`: what the screen shows, as the notice names it ("the list" on Today and Calls; "the campaign" on its page). */
 export function StaleNotice({ freshness, onRetry, retryRef, rescue, what = "the list" }: { freshness: Freshness; onRetry: () => void; retryRef?: (el: HTMLButtonElement | null) => void; rescue?: number; what?: string }) {
-  const since = freshness.lastReadAt ? new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(freshness.lastReadAt)) : null;
+  const since = freshness.lastReadAt ? clockTime(undefined, freshness.lastReadAt) : null;
   return (
     <div role="status" className="mt-4 flex flex-wrap items-center gap-3 rounded-box bg-pause-soft px-4 py-3 text-[14px]">
       <span className="min-w-0 flex-[1_1_320px] text-base-content">

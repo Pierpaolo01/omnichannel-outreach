@@ -151,9 +151,13 @@ export type StepWaitApi =
 export type StepWhenView =
   | { readonly kind: "now" }
   | { readonly kind: "at"; readonly at: string }
-  | { readonly kind: "waits"; readonly why: StepWaitApi }
-  /** A call not yet placed: the user's day (YYYY-MM-DD) it goes on the list, with no time of day; `today` when that is the read's day. */
-  | { readonly kind: "call_day"; readonly day: string; readonly today: boolean }
+  /** `channel` names the step's channel where the reason depends on it (no transport). */
+  | { readonly kind: "waits"; readonly why: StepWaitApi; readonly channel?: "email" | "sms" }
+  /**
+   * A call not yet placed: the user's day (YYYY-MM-DD) it goes on the list, with no time of day; `today` when that is the
+   * read's day; `now` when dispatch places it on its next round (due, calling hours open today, room on today's list).
+   */
+  | { readonly kind: "call_day"; readonly day: string; readonly today: boolean; readonly now: boolean }
   /** An open call listed from a later user day (YYYY-MM-DD), as the record's call line says it. */
   | { readonly kind: "listed_for"; readonly day: string };
 

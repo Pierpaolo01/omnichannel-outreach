@@ -4,7 +4,7 @@
  * nothing, so a control the read allows is the one the action accepts at that instant, and a refusal carries the
  * same reason (P11).
  */
-import { stepWhen, type StepEnv } from "../../domain/sequence/dispatch.ts";
+import { releasedBy, stepWhen, type StepEnv } from "../../domain/sequence/dispatch.ts";
 import { stepWhenView } from "./step-when-view.ts";
 import { currentStep, judgeCampaignControl, previewDigest, LEAD_CONTROLS, skipTarget, type LeadControl } from "../../domain/sequence/controls.ts";
 import { isLive } from "../../domain/sequence/attempt.ts";
@@ -53,7 +53,7 @@ export function controlView(stored: SubjectState, action: LeadControl, now: numb
   // The action's own refusal order (`judgeControl`), with no expectation: a request confirmed on this read is judged the same.
   const out = rules.judgeControl(stored, before, action, now, null, rules);
   if (!out.ok) return { action, allowed: false, reason: out.reason };
-  return effectOf(before, action, out.state, now, env, rules.stepWhen);
+  return effectOf(before, action, out.state, now, env, rules.previewStepWhen);
 }
 
 /**
@@ -70,7 +70,9 @@ export function effectOf(before: SubjectState, action: LeadControl, after: Subje
     allowed: true,
     statusAfter: deriveStatus(after),
     skips: skipped ? stepView(before, skipped, now, false) : null,
-    next: next ? stepView(after, next, now, true, env, read) : null,
+    // A preview reads the state the control would produce (council on cc9bf55, item 8): its withdrawals' reservations freed,
+    // and the call room counted with this lead as it would be (the environment takes the state it is asked about).
+    next: next ? stepView(releasedBy(before, after), next, now, true, env, read) : null,
     withProvider: newlyWithdrawn(before, after),
     // What the preview names, which a confirmation sends back as its precondition (verifier R1 on 57d874f).
     digest: previewDigest(before, action, after),

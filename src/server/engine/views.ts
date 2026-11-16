@@ -20,33 +20,43 @@ const iso = (t: number | null) => (t === null ? null : new Date(t).toISOString()
  * engine, and, while sending is interrupted, whether the dispatch gate holds the step's channels (`waitingOn`, its own).
  */
 /**
- * `known`: states the read has already loaded at `now`, reused so a record reads each of its enrollments once (council on
- * 4fd9ca4, item 6).
+ * `reading`: the subjects whose steps this read (and its controls' previews) asks about. The other leads' open calls are
+ * loaded only when one of them has a phone track, the only step a later day's call room can change (council on cc9bf55,
+ * item 6). `known`: states the read has already loaded at `now`, reused so a record reads each of its enrollments once
+ * (council on 4fd9ca4, item 6).
  */
-export async function stepEnvOf(store: Pick<EngineStore, "meta" | "callSettings" | "subjectsWithOpenCallTasks" | "subject">, now: number, transportAvailable?: StepEnv["transportAvailable"], known?: ReadonlyMap<string, SubjectState | null>): Promise<StepEnv> {
+export async function stepEnvOf(
+  store: Pick<EngineStore, "meta" | "callSettings" | "subjectsWithOpenCallTasks" | "subject">,
+  now: number,
+  reading: readonly SubjectState[],
+  transportAvailable?: StepEnv["transportAvailable"],
+  known?: ReadonlyMap<string, SubjectState | null>,
+  room = true,
+): Promise<StepEnv> {
   const interrupted = await sendingInterrupted(store, now);
   const evidence = interrupted ? await providerEvidence(store) : null;
-  // A later day's room, from every lead's calls the engine knows are carried into it (`carriedInto`), against the capacity.
+  const gate = evidence ? { waitingOnProvider: (s: SubjectState, trackId: string) => waitingOn(evidence, relevantChannels(s, trackId), now).length > 0 } : {};
+  const transport = transportAvailable ? { transportAvailable } : {};
+  if (!room || !reading.some((s) => s.campaign.definition.tracks.some((t) => t.channel === "call"))) return { ...transport, ...gate };
+  // A later day's room, from every lead's calls the engine knows are carried into it (`carriedInto`), against the capacity,
+  // with the subject asked about in place of its stored state (a preview's state after its control, item 8).
   const { dailyCapacity } = await store.callSettings();
   const withCalls: SubjectState[] = [];
   for (const id of await store.subjectsWithOpenCallTasks()) {
     const s = known?.has(id) ? (known.get(id) ?? null) : await store.subject(id, now);
     if (s) withCalls.push(s);
   }
-  const room = new Map<number, boolean>();
-  const callRoomOn = (day: number): boolean => {
-    let known = room.get(day);
-    if (known === undefined) {
-      known = withCalls.reduce((n, s) => n + carriedInto(s, day), 0) < dailyCapacity;
-      room.set(day, known);
+  const others = new Map<string, number>();
+  const callRoomOn = (day: number, self: SubjectState): boolean => {
+    const key = `${day}|${self.subject.id}`;
+    let n = others.get(key);
+    if (n === undefined) {
+      n = withCalls.reduce((sum, s) => sum + (s.subject.id === self.subject.id ? 0 : carriedInto(s, day)), 0);
+      others.set(key, n);
     }
-    return known;
+    return n + carriedInto(self, day) < dailyCapacity;
   };
-  return {
-    callRoomOn,
-    ...(transportAvailable ? { transportAvailable } : {}),
-    ...(evidence ? { waitingOnProvider: (s: SubjectState, trackId: string) => waitingOn(evidence, relevantChannels(s, trackId), now).length > 0 } : {}),
-  };
+  return { callRoomOn, ...transport, ...gate };
 }
 
 export function progressView(s: SubjectState, now: number, env: StepEnv = {}, when: typeof stepWhen = stepWhen): EnrollmentProgress {

@@ -91,6 +91,14 @@ export function stepsOf(s: SubjectState, rules: CallViewRules, now: number, env:
   const shown = (t: TrackDefinition) => !t.removed || progressOf(s, t.id)?.startedAt != null;
   const tracks = [...def.tracks.filter((t) => t.branch === "main" && shown(t)), ...def.tracks.filter((t) => t.branch === "win_back" && shown(t))];
   const rows: TestStepRow[] = [];
+  // A pending email or text the read holds (a track hold, or any other reason but "with the provider") says that reason,
+  // ahead of the provider's progress: the tab never shows ordinary progress for a held step (verifier on cc9bf55, item 10).
+  const heldHere = (track: TrackDefinition, stepId: string): TestStepRow["waits"] => {
+    const p = progressOf(s, track.id);
+    if (track.channel === "call" || s.subject.ended !== null || !p || p.finishedAt !== null || p.nextStepId !== stepId) return null;
+    const when = (rules.stepWhen ?? stepWhen)(s, track.id, now, env);
+    return when?.kind === "waits" && when.why !== "with_provider" ? stepWaitApi(when.why) : null;
+  };
   for (const track of tracks) {
     const label = trackLabel(def, track);
     const steps = track.steps.filter((st) => !st.removed || s.results.some((r) => r.stepId === st.id));
@@ -122,6 +130,7 @@ export function stepsOf(s: SubjectState, rules: CallViewRules, now: number, env:
         const day = firstListedDay(s, task, rules);
         rows.push({ ...base, state: "listed_later", at: day === null ? null : iso(startOfLocalDay(day, s.callDay.userZone)) });
       }
+      else if (heldHere(track, step.id)) rows.push({ ...base, state: "due", at: null, waits: heldHere(track, step.id) });
       else if (live) rows.push({ ...base, state: "with_provider", at: live.handedWall === null ? null : iso(live.handedWall) });
       // A step of a track that finished without reaching it: skipped, with why its track finished (council on ffa202c, item 13).
       else if (p?.finishReason) rows.push({ ...base, state: "skipped", at: p.finishedWall === null ? null : iso(p.finishedWall), reason: trackEndedBecause(p.finishReason) });

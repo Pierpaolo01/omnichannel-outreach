@@ -48,6 +48,8 @@ export interface Rules {
   readonly readyItems: typeof readyItems;
   /** When a pending step goes, as every read says it (ADR 0003 "Reads that say when"): a rule so a mutation can swap the read alone. */
   readonly stepWhen: typeof stepWhen;
+  /** The same read for a control's preview of its next step: its own rule, so a mutation can break the preview alone. */
+  readonly previewStepWhen: typeof stepWhen;
   /** Claims are made in this order (4.3). */
   readonly claimOrder: typeof comparePriority;
   /** Claimed attempts on one account are handed over in this order (5.5 step 2). */
@@ -145,6 +147,7 @@ export const DEFAULT_RULES: Rules = {
   sendPoint,
   readyItems,
   stepWhen,
+  previewStepWhen: stepWhen,
   claimOrder: comparePriority,
   handoverOrder: comparePriority,
   claimRefusal,

@@ -1,9 +1,9 @@
 import { describe, expect, test } from "vitest";
-import { account, calledWork, H, handed, MONDAY_9, step, subjectState, withAttempts } from "../../../test/support/sequence-state.ts";
-import { chooseAccount, claim, claimRefusal, stepWhen } from "./dispatch.ts";
+import { account, calledWork, H, handed, MOBILE, MONDAY_9, multiTrackState, step, subjectState, track, withAttempts } from "../../../test/support/sequence-state.ts";
+import { chooseAccount, claim, claimRefusal, heldReason, holdWait, stepWhen } from "./dispatch.ts";
 import { logCallOutcome, placeCall, readyCalls } from "./calls.ts";
 import { localDayNumber } from "./clock.ts";
-import { enterMain, evaluate } from "./progress.ts";
+import { applyToAttempt, enterMain, evaluate } from "./progress.ts";
 import type { WindowRule } from "./clock.ts";
 import type { AccountState, SubjectState } from "./state.ts";
 
@@ -231,7 +231,7 @@ describe("every other condition dispatch checks (council on 178de98, item 2)", (
   const open = weekdays([0, 1, 2, 3, 4, 5, 6], 0, 24);
   test("no transport for the step (a continue-thread email Instantly cannot send): a reason", () => {
     const s = launchedWith(open, MONDAY_9);
-    expect(stepWhen(s, "t1", MONDAY_9, { transportAvailable: () => false })).toEqual({ kind: "waits", why: "no_transport" });
+    expect(stepWhen(s, "t1", MONDAY_9, { transportAvailable: () => false })).toEqual({ kind: "waits", why: "no_transport", channel: "email" });
   });
   test("sending interrupted, waiting on its provider: a reason", () => {
     const s = launchedWith(open, MONDAY_9);
@@ -314,5 +314,80 @@ describe("a sender waiting with no known end (a quota): a reason, never a time",
     const open = weekdays([0, 1, 2, 3, 4, 5, 6], 0, 24);
     const s = launchedWith(open, MONDAY_9, { accounts: { "inbox-a": account("inbox-a", { waitUntil: Number.MAX_SAFE_INTEGER, waitReason: "quota" }), "inbox-b": account("inbox-b", { waitUntil: Number.MAX_SAFE_INTEGER, waitReason: "quota" }) } });
     expect(stepWhen(s, "t1", MONDAY_9)).toEqual({ kind: "waits", why: "sender_unavailable" });
+  });
+});
+
+describe("every instant the read gives passes dispatch's checks at it (review bot and council on cc9bf55)", () => {
+  const open = weekdays([0, 1, 2, 3, 4, 5, 6], 0, 24);
+  const TWO_H = 2 * H;
+  test("a mixed pool: one inbox full today, the other with room but held for two hours: that instant, not 'full'", () => {
+    const s = launchedWith(open, MONDAY_9, { accounts: { "inbox-a": account("inbox-a", { capacity: 1, used: 1 }), "inbox-b": account("inbox-b", { waitUntil: MONDAY_9 + TWO_H, waitReason: "rate_limited" }) } });
+    expect(stepWhen(s, "t1", MONDAY_9)).toEqual({ kind: "at", at: MONDAY_9 + TWO_H });
+    expect(chooseAccount(s, MONDAY_9 + TWO_H, "s1")?.id).toBe("inbox-b");
+    expect(claimRefusal(s, item, MONDAY_9 + TWO_H)).toBeNull();
+  });
+  test("a mixed pool: one inbox at its in-flight bound, the other held for two hours: that instant, not 'busy'", () => {
+    const s = launchedWith(open, MONDAY_9, { accounts: { "inbox-a": account("inbox-a", { inFlight: 1, k: 1 }), "inbox-b": account("inbox-b", { waitUntil: MONDAY_9 + TWO_H, waitReason: "rate_limited" }) } });
+    expect(stepWhen(s, "t1", MONDAY_9)).toEqual({ kind: "at", at: MONDAY_9 + TWO_H });
+  });
+  test("a held sender with no room even when its wait ends: the reason, no time", () => {
+    const s = launchedWith(open, MONDAY_9, { accounts: { "inbox-a": account("inbox-a", { capacity: 1, used: 1, waitUntil: MONDAY_9 + TWO_H, waitReason: "rate_limited" }), "inbox-b": account("inbox-b", { capacity: 1, used: 1 }) } });
+    expect(stepWhen(s, "t1", MONDAY_9)).toEqual({ kind: "waits", why: "sending_capacity" });
+  });
+  test("a claimed step whose slot falls after the window's close: the next opening, as the engine withdraws and claims again", () => {
+    // Weekdays 09:00 to 17:00; claimed at Monday 16:59, its slot at 17:01, after the close.
+    const s = launchedWith(weekdays([1, 2, 3, 4, 5]), MONDAY_9, { accounts: { "inbox-a": account("inbox-a") } });
+    const at1659 = MONDAY_9 + 8 * H - MIN;
+    const c = claim(s, item, account("inbox-a"), { attemptId: "a-1", retryable: true, notSentIsFinal: false, now: at1659 });
+    const slotted = { ...c, accounts: { "inbox-a": { ...c.accounts["inbox-a"]!, nextSlotAt: at1659 + 2 * MIN } } };
+    expect(stepWhen(slotted, "t1", at1659)).toEqual({ kind: "at", at: Date.parse("2026-11-03T09:00:00Z") });
+  });
+  test("a claim failing a reply awaiting its thread together with another predicate is withdrawn, and the step goes from another inbox", () => {
+    const s = launchedWith(open, MONDAY_9);
+    const c = claim(s, item, account("inbox-a"), { attemptId: "a-1", retryable: true, notSentIsFinal: false, now: MONDAY_9 });
+    const down = { ...c, accounts: { ...c.accounts, "inbox-a": { ...c.accounts["inbox-a"]!, healthy: false } }, pendingReplies: [{ inbox: "inbox-a", address: "pat@harbour.example" }] } as SubjectState;
+    expect(stepWhen(down, "t1", MONDAY_9 + MIN)).toEqual({ kind: "at", at: MONDAY_9 + MIN });
+    expect(chooseAccount(applyToAttempt(down, "a-1", { kind: "guard_failed" }, MONDAY_9 + MIN).state, MONDAY_9 + MIN, "s1")?.id).toBe("inbox-b");
+  });
+  test("a claim failing only on a reply awaiting its thread waits, as the engine keeps it", () => {
+    const s = launchedWith(open, MONDAY_9);
+    const c = claim(s, item, account("inbox-a"), { attemptId: "a-1", retryable: true, notSentIsFinal: false, now: MONDAY_9 });
+    const waiting = { ...c, pendingReplies: [{ inbox: "inbox-a", address: "pat@harbour.example" }] } as SubjectState;
+    expect(stepWhen(waiting, "t1", MONDAY_9 + MIN)).toEqual({ kind: "waits", why: "reply_pending" });
+  });
+});
+
+describe("every hold heldReason can give is the read's reason, never a generic one (review bot on cc9bf55)", () => {
+  test("a mobile in another campaign's conversation on every number: sms_conversation_taken, not 'no sender'", () => {
+    const N1 = "+447700900001";
+    const N2 = "+447700900002";
+    const base = multiTrackState([track("t2", "sms", [step("m1", { subject: "", body: "Hi {{first_name|there}}." })])]);
+    const s = evaluate(enterMain({ ...base, campaign: { ...base.campaign, launchedAt: MONDAY_9 } }, MONDAY_9), MONDAY_9);
+    const other = (sender: string) => ({ sender, recipient: MOBILE.key, owner: "lead-in-another-campaign", ownerCampaignId: "camp-2", ownerEnded: false });
+    const taken = { ...s, smsBindings: [other(N1), other(N2)] };
+    expect(heldReason(taken, "t2", MONDAY_9)).toBe("sms_conversation_taken");
+    expect(stepWhen(taken, "t2", MONDAY_9)).toEqual({ kind: "waits", why: "sms_conversation_taken" });
+  });
+  test("holdWait is the identity on every hold (an unknown hold fails typecheck in its switch)", () => {
+    for (const h of ["unresolved", "render_failed", "provider_skipped", "no_thread", "sms_conversation_taken"] as const) expect(holdWait(h)).toBe(h);
+  });
+});
+
+describe("a pool whose chosen inbox's slot is later than another inbox's held instant (sweep of the windows family, offsets 10 and 44)", () => {
+  test("inbox-a's slot two hours away, inbox-b rate-limited for fifteen minutes with room: the fifteen minutes", () => {
+    const open = weekdays([0, 1, 2, 3, 4, 5, 6], 0, 24);
+    const s = launchedWith(open, MONDAY_9, { accounts: { "inbox-a": account("inbox-a", { nextSlotAt: MONDAY_9 + 2 * H }), "inbox-b": account("inbox-b", { waitUntil: MONDAY_9 + 15 * MIN, waitReason: "rate_limited" }) } });
+    expect(stepWhen(s, "t1", MONDAY_9)).toEqual({ kind: "at", at: MONDAY_9 + 15 * MIN });
+    expect(chooseAccount(s, MONDAY_9 + 15 * MIN, "s1")?.id).toBe("inbox-b");
+  });
+});
+
+describe("a claim waiting longer than a settling period for its slot expires, and the step is claimed again (windows family, offsets 10 and 44)", () => {
+  test("claimed on inbox-a whose slot is two hours away, inbox-b free: the claim's expiry, fifteen minutes after it, not the slot", () => {
+    const open = weekdays([0, 1, 2, 3, 4, 5, 6], 0, 24);
+    const s = launchedWith(open, MONDAY_9);
+    const c = claim(s, item, account("inbox-a"), { attemptId: "a-1", retryable: true, notSentIsFinal: false, now: MONDAY_9 });
+    const slotted = { ...c, accounts: { ...c.accounts, "inbox-a": { ...c.accounts["inbox-a"]!, nextSlotAt: MONDAY_9 + 2 * H } } };
+    expect(stepWhen(slotted, "t1", MONDAY_9 + MIN)).toEqual({ kind: "at", at: MONDAY_9 + 15 * MIN });
   });
 });

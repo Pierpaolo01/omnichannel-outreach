@@ -48,3 +48,11 @@ describe("the Test run tab says only what the run's facts say (ticket 21)", () =
     expect(endingDetail("finished", whole)).toBe("Every step of the sequence went to your test contacts.");
   });
 });
+
+describe("a Test run row inside a repeated hour says which one (verifier on cc9bf55, item 11)", () => {
+  const read = "2026-10-24T22:00:00Z";
+  test("both 01:30s of 25 October 2026 in London", () => {
+    expect(stepStateText(row({ state: "due", at: "2026-10-25T00:30:00Z" }), "Europe/London", read)).toBe("Earliest Sun 01:30 BST");
+    expect(stepStateText(row({ state: "due", at: "2026-10-25T01:30:00Z" }), "Europe/London", read)).toBe("Earliest Sun 01:30 GMT");
+  });
+});

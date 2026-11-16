@@ -78,7 +78,7 @@ describe("the read reaches dispatch's answer for the port's transport (council o
     await h.advanceTo(MONDAY_10 + H);
     expect(h.fake.deliveryLog.map((d) => d.stepId)).toEqual(["s1"]);
     await h.advanceTo(MONDAY_10 + 3 * 24 * H);
-    expect(await when()).toEqual({ kind: "waits", why: "no_transport" });
+    expect(await when()).toEqual({ kind: "waits", why: "no_transport", channel: "email" });
     expect(h.fake.deliveryLog.map((d) => d.stepId)).toEqual(["s1"]);
   });
 });
@@ -183,5 +183,77 @@ describe("the order when a window opens (ADR 0003 4.3, rule 1.3; the coordinator
       ["b1", "2026-11-13T20:30:00.000Z"],
       ["b1", "2026-11-13T21:00:00.000Z"],
     ]);
+  });
+});
+
+describe("a reason promises nothing (council on cc9bf55, item 9)", () => {
+  test("Tuesday-to-Friday hours, provider access cut Monday 11:00 and back at noon: the step still waits for Tuesday 09:00, and the read says so", async () => {
+    const { h, when } = await world(definition([track("email", [email("s1")])]));
+    h.cutProvidersOff(MONDAY_10 + 2 * H);
+    await h.advanceTo(MONDAY_10 + H + 30 * MIN);
+    expect(await when()).toEqual({ kind: "waits", why: "waiting_on_provider" });
+    await h.advanceTo(MONDAY_10 + 3 * H);
+    expect(await when()).toEqual({ kind: "at", at: new Date(TUESDAY_9).toISOString() });
+    expect(h.fake.deliveryLog).toEqual([]);
+    await h.advanceTo(TUESDAY_9 + H);
+    expect(h.fake.deliveryLog.map((d) => d.at)).toEqual([TUESDAY_9]);
+  });
+});
+
+describe("a claimed step's pacing slot after the window closes (review bot on cc9bf55, item 1)", () => {
+  test("two leads launched Monday 16:58, weekday 09:00 to 17:00, a three-minute gap: at 16:59 the second reads Tuesday 09:00 and goes then", async () => {
+    const MONDAY_1658 = Date.parse("2026-11-02T16:58:00Z");
+    const h = new EngineHarness({ start: MONDAY_1658, accounts: [{ id: "inbox-a", capacity: 50, gapMs: 3 * MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+    await h.tick();
+    expect((await h.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "Europe/London" })).status).toBe(200);
+    const NIA = person({ person_id: "p2", business_id: "b1", full_name: "Nia Cole", email: "nia@larkstreet.example" });
+    const { campaign } = await h.createCampaign("Spring follow-up, Bristol", { businesses: [LARK], people: [PAT, NIA] });
+    const weekdays = [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 }));
+    await h.defineSequence(campaign.id, definition([track("email", [email("s1")], { window: weekdays })]));
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_1658 + MIN);
+    expect(h.fake.deliveryLog).toHaveLength(1);
+    const first = h.fake.deliveryLog[0]!;
+    const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows;
+    const second = rows.flatMap((r) => r.enrollments).find((e) => e.id !== first.subjectId)?.id ?? "";
+    // The path the review bot and the council read on: the claim open at the read, its slot (17:01) beyond the close. On
+    // cc9bf55 this read gave 17:01.
+    expect((await h.store.engine.subject(second, h.clock))?.attempts.some((a) => a.state === "claimed")).toBe(true);
+    const read = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${second}`)).body;
+    expect(read.tracks[0]?.nextStep?.when).toEqual({ kind: "at", at: "2026-11-03T09:00:00.000Z" });
+    await h.advanceTo(Date.parse("2026-11-03T10:00:00Z"));
+    expect(h.fake.deliveryLog.find((d) => d.subjectId === second)?.at).toBe(Date.parse("2026-11-03T09:00:00Z"));
+  });
+});
+
+describe("a control's preview reads the state the control would produce (council on cc9bf55, item 8)", () => {
+  test("capacity 1, two consecutive phone tracks, Friday's call unworked: on Saturday Skip's preview names Monday, as the read after it does, and the call is placed Monday", async () => {
+    const FRIDAY_10 = Date.parse("2026-11-13T10:00:00Z");
+    const weekdays = [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 }));
+    const h = new EngineHarness({ start: FRIDAY_10, accounts: [{ id: "inbox-a", capacity: 50, gapMs: 10 * MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+    await h.tick();
+    expect((await h.request("PUT", "/api/call-settings", { dailyCapacity: 1, userZone: "Europe/London" })).status).toBe(200);
+    const caller = { ...PAT, direct_phone: "+441174960310" };
+    const { campaign } = await h.createCampaign("Spring calls, Bristol", { businesses: [LARK], people: [caller] });
+    const call = (id: string) => ({ ...email(id), subject: "", body: "" });
+    await h.defineSequence(campaign.id, definition([
+      { id: "phone1", channel: "call", branch: "main", window: weekdays, start: { kind: "entry" }, removed: false, steps: [call("c1")] },
+      { id: "phone2", channel: "call", branch: "main", window: weekdays, start: { kind: "after", trackId: "phone1", delayDays: 0 }, removed: false, steps: [call("c2")] },
+    ]));
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    await h.advanceTo(FRIDAY_10 + MIN);
+    const id = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows[0]?.enrollments[0]?.id ?? "";
+    const read = async () => (await h.request<EnrollmentRead>("GET", `/api/enrollments/${id}`)).body;
+    expect((await read()).tracks.find((t) => t.trackId === "phone1")?.callTask?.open).toBe(true);
+    // Saturday: Friday's call is carried into Monday and takes its one place; skipping it frees that place.
+    await h.advanceTo(Date.parse("2026-11-14T12:00:00Z"));
+    const skip = controlOf(await read(), "skip");
+    expect(skip.allowed && skip.next?.trackId).toBe("phone2");
+    const previewed = skip.allowed ? skip.next?.when : undefined;
+    expect(previewed).toEqual({ kind: "call_day", day: "2026-11-16", today: false, now: false });
+    expect((await h.request("POST", `/api/enrollments/${id}/controls`, { requestId: "skip-1", action: "skip" })).status).toBe(200);
+    expect((await read()).tracks.find((t) => t.trackId === "phone2")?.nextStep?.when).toEqual(previewed);
+    await h.advanceTo(Date.parse("2026-11-16T12:00:00Z"));
+    expect((await read()).tracks.find((t) => t.trackId === "phone2")?.callTask?.placedAt.slice(0, 10)).toBe("2026-11-16");
   });
 });
