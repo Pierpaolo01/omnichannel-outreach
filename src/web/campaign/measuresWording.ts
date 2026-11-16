@@ -1,4 +1,4 @@
-import type { CallMeasures, CampaignMeasures, MeasureRate, MessageMeasures } from "../../shared/api.ts";
+import type { CallMeasures, CampaignMeasures, LinkedinMeasures, MeasureRate, MessageMeasures } from "../../shared/api.ts";
 
 /**
  * The campaign measures in words (ticket 22; ADR 0003 "Ticket 22"): one function per measure, each saying a figure the
@@ -16,6 +16,13 @@ export function messagesLine(m: MessageMeasures): string {
   // Replies are leads (council on 384630e, item 5); with a test run among them, they are said as replies.
   const replied = m.fromTests.replies > 0 ? `${m.replies} replied${fromTests(m.fromTests.replies)}` : `${plural(m.replies, "lead", "leads")} replied`;
   return `${m.sent} sent${fromTests(m.fromTests.sent)} · ${m.failedOrBounced} failed or bounced${fromTests(m.fromTests.failedOrBounced)} · ${replied}`;
+}
+
+/** LinkedIn (ADR 0004 section 8): invites sent and accepted, messages sent, failures, and replies the user marked. */
+export function linkedinLine(m: LinkedinMeasures): string {
+  if (m.invitesSent === 0 && m.messagesSent === 0 && m.failed === 0 && m.replies === 0) return "None sent yet";
+  const t = m.fromTests;
+  return `${m.invitesSent} ${m.invitesSent === 1 ? "invite" : "invites"} sent${fromTests(t.invitesSent)} · ${m.invitesAccepted} accepted${fromTests(t.invitesAccepted)} · ${m.messagesSent} ${m.messagesSent === 1 ? "message" : "messages"} sent${fromTests(t.messagesSent)} · ${m.failed} failed${fromTests(t.failed)} · ${plural(m.replies, "lead", "leads")} marked replied${fromTests(t.replies)}`;
 }
 
 /** The calls logged, test calls included: made, connected, interested, declined, and callbacks pending. */
@@ -50,6 +57,8 @@ export function measureRows(m: CampaignMeasures): { channel: CampaignMeasures["c
         return { channel, label: "SMS", line: messagesLine(m.sms) };
       case "call":
         return { channel, label: "Calls", line: callsLine(m.calls) };
+      case "linkedin":
+        return { channel, label: "LinkedIn", line: linkedinLine(m.linkedin) };
       default: {
         const never: never = channel;
         return never;

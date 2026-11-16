@@ -65,6 +65,7 @@ export function stepPhrase(step: Pick<ControlStepView, "channel" | "track" | "nu
       return `the call${on}`;
     case "email":
     case "sms":
+    case "linkedin":
       return `${lower(stepNoun(step.track, step.channel))} ${step.number} of ${step.of}${on}`;
     default: {
       const unhandled: never = step.channel;
@@ -79,7 +80,7 @@ export function stepPhrase(step: Pick<ControlStepView, "channel" | "track" | "nu
  */
 // `channel` is required, never defaulted: a caller that forgot it would word a text's reason as an email's (the re-check of
 // ff01571: the Test run tab named the email provider for an SMS transport hold).
-export function stepWaitWords(why: StepWaitApi, channel: "email" | "sms" | "call" | undefined): string {
+export function stepWaitWords(why: StepWaitApi, channel: "email" | "sms" | "call" | "linkedin" | undefined): string {
   switch (why) {
     case "campaign_not_launched":
       return "waiting for this campaign to launch";
@@ -128,6 +129,8 @@ export function stepWaitWords(why: StepWaitApi, channel: "email" | "sms" | "call
       return "waiting for room on your call list, on a day with calling hours";
     case "on_call_list":
       return "on your call list";
+    case "awaiting_acceptance":
+      return "waiting for them to accept the LinkedIn invite";
     default: {
       const unhandled: never = why;
       throw new Error(`A reason a step waits with no words: ${String(unhandled)}`);
@@ -148,6 +151,8 @@ export function stepWhenPhrase(when: StepWhenView, userZone: string): string {
     case "at":
       return `earliest ${whenIn(userZone, when.at)}`;
     case "waits":
+      // The day an acceptance wait ends is a fact of the read, said as when the wait ends, never as when a send goes (ADR 0004 9).
+      if (when.why === "awaiting_acceptance" && when.until !== undefined) return `${stepWaitWords(when.why, when.channel)}; the wait ends ${dateIn(userZone, when.until)}`;
       return stepWaitWords(when.why, when.channel);
     // A call goes on the list on a day, never at a time of day (council on 178de98, item 3).
     case "call_day":

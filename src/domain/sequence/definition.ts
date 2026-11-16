@@ -7,7 +7,9 @@
  */
 import { isTimeZone, type WindowRule } from "./clock.ts";
 
-export type TrackChannel = "email" | "sms" | "call";
+export type TrackChannel = "email" | "sms" | "call" | "linkedin";
+/** The channels a sender account serves (a phone track needs none): email, SMS and the social channels (ADR 0004). */
+export type SendChannel = Exclude<TrackChannel, "call">;
 export type Branch = "main" | "win_back";
 export type Threading = "new_subject" | "continue_thread";
 
@@ -44,6 +46,11 @@ export interface TrackDefinition {
    * phone track saved before ticket 14c has none of its own and reads the campaign's (`skipLimitOf` in calls.ts, the one reading of the limit).
    */
   readonly callSkipLimitDays?: number;
+  /**
+   * A LinkedIn track's acceptance wait (ADR 0004 3.1): whole days, at least 1, after the invite is sent for it to be
+   * accepted. Required on a LinkedIn track and on no other.
+   */
+  readonly acceptWaitDays?: number;
 }
 
 export interface CampaignDefinition {
@@ -57,6 +64,8 @@ export interface CampaignDefinition {
   readonly smsPool?: readonly string[];
   /** The campaign's call script or talking points, shown on every call task (ADR 0003 1.1). Absent before ticket 14: none. */
   readonly callScript?: string;
+  /** LinkedIn sender sessions LinkedIn tracks may use (ADR 0004 1.1). Absent before ticket 24: none. */
+  readonly linkedinPool?: readonly string[];
   readonly tracks: readonly TrackDefinition[];
 }
 
@@ -105,8 +114,24 @@ export function emptyDefinition(timezone: string): CampaignDefinition {
 
 /** The sender accounts a track on `channel` may use. */
 export function poolOf(def: CampaignDefinition, channel: TrackChannel): readonly string[] {
-  return channel === "email" ? def.emailPool : channel === "sms" ? (def.smsPool ?? []) : [];
+  return channel === "email" ? def.emailPool : channel === "sms" ? (def.smsPool ?? []) : channel === "linkedin" ? (def.linkedinPool ?? []) : [];
 }
+
+/**
+ * A LinkedIn step's kind, by its position among the track's live steps (ADR 0004 3.1): the first is the connection invite
+ * (its body is the note), the second the first message, sent once connected, and the rest follow-up messages. Null for a
+ * step of another channel or one not live. Every reader asks this one function.
+ */
+export type LinkedinStepKind = "invite" | "first_message" | "follow_up";
+export function linkedinStepKind(track: Pick<TrackDefinition, "channel" | "steps">, stepId: string): LinkedinStepKind | null {
+  if (track.channel !== "linkedin") return null;
+  const index = track.steps.filter((s) => !s.removed).findIndex((s) => s.id === stepId);
+  return index < 0 ? null : index === 0 ? "invite" : index === 1 ? "first_message" : "follow_up";
+}
+
+/** The kind of action a step's handover asks of a social port, and the allowance it counts on (ADR 0004 2.1, 6). */
+export type SocialAction = "invite" | "message";
+export const socialActionOf = (kind: LinkedinStepKind | null): SocialAction | null => (kind === null ? null : kind === "invite" ? "invite" : "message");
 
 export const liveTracks = (def: CampaignDefinition, branch: Branch = "main"): TrackDefinition[] =>
   def.tracks.filter((t) => !t.removed && t.branch === branch);
@@ -146,7 +171,8 @@ export function definitionIssues(def: CampaignDefinition, previous: CampaignDefi
   if (!isTimeZone(def.timezone)) add("timezone", `The campaign's time zone "${def.timezone}" is not an IANA time zone such as Europe/London.`);
   if (!isWholeDays(def.callSkipLimitDays) || def.callSkipLimitDays === 0) add("campaign_skip_limit", "The call skip limit is a whole number of days, at least 1.");
   const smsPool = def.smsPool ?? [];
-  if (new Set(def.emailPool).size !== def.emailPool.length || new Set(smsPool).size !== smsPool.length) add("sender_twice", "A sender account is listed twice.");
+  const linkedinPool = def.linkedinPool ?? [];
+  if (new Set(def.emailPool).size !== def.emailPool.length || new Set(smsPool).size !== smsPool.length || new Set(linkedinPool).size !== linkedinPool.length) add("sender_twice", "A sender account is listed twice.");
 
   const trackIds = new Set<string>();
   const stepIds = new Set<string>();
@@ -163,7 +189,7 @@ export function definitionIssues(def: CampaignDefinition, previous: CampaignDefi
   // Tracks are named within their branch: "the email track", "Win-back email track 2".
   const label = (track: TrackDefinition) => {
     const same = live.filter((t) => t.channel === track.channel && t.branch === track.branch);
-    const channel = track.channel === "sms" ? "SMS" : track.channel === "call" ? "phone" : track.channel;
+    const channel = track.channel === "sms" ? "SMS" : track.channel === "call" ? "phone" : track.channel === "linkedin" ? "LinkedIn" : track.channel;
     const named = track.branch === "win_back" ? `win-back ${channel}` : channel;
     return same.length === 1 ? `the ${named} track` : `${named[0]?.toUpperCase() ?? ""}${named.slice(1)} track ${same.indexOf(track) + 1}`;
   };
@@ -208,6 +234,13 @@ export function definitionIssues(def: CampaignDefinition, previous: CampaignDefi
       if (track.channel !== "call") add("skip_limit_not_phone", "Only a phone track has a call skip limit.", { trackId: track.id });
       else if (!isWholeDays(track.callSkipLimitDays) || track.callSkipLimitDays === 0) add("track_skip_limit", `${name}'s call skip limit is a whole number of days, at least 1.`, { trackId: track.id });
     }
+    // A LinkedIn track (ADR 0004 3.1): an invite, then at least a first message, with an acceptance wait of whole days.
+    if (track.channel === "linkedin") {
+      const wait = track.acceptWaitDays;
+      if (wait === undefined || !isWholeDays(wait) || wait === 0) add("accept_wait", `${name}'s wait for the invite to be accepted is a whole number of days, at least 1.`, { trackId: track.id });
+      if (liveSteps(track).length < 2) add("linkedin_steps", `${name} needs a connection invite and at least one message after it.`, { trackId: track.id });
+      if (liveSteps(track).some((st) => st.subject.trim() !== "")) add("linkedin_subject", `${name}'s invite and messages have no subject.`, { trackId: track.id });
+    } else if (track.acceptWaitDays !== undefined) add("accept_wait_not_linkedin", "Only a LinkedIn track waits for an invite to be accepted.", { trackId: track.id });
     const steps = liveSteps(track);
     // A phone track is one call with no follow-ups (spec "Phone tracks"); the call has no copy.
     if (track.channel === "call" && steps.length !== 1) add("call_steps", `${name} is one call with no follow-ups: give it exactly one step.`, { trackId: track.id });
@@ -243,6 +276,12 @@ export function definitionIssues(def: CampaignDefinition, previous: CampaignDefi
       for (const step of track.steps) {
         const was = stepTrack.get(step.id);
         if (was !== undefined && was !== track.id) add("step_moved", "A step cannot move to another track: remove it and add a new one.", { trackId: track.id, stepId: step.id });
+      }
+      // A LinkedIn step's kind is its position (ADR 0004 3.1): on a running campaign the invite stays the invite.
+      if (old && track.channel === "linkedin" && options.launched === true) {
+        const oldInvite = old.steps.find((st) => linkedinStepKind(old, st.id) === "invite");
+        const newInvite = track.steps.find((st) => linkedinStepKind(track, st.id) === "invite");
+        if (oldInvite && newInvite && oldInvite.id !== newInvite.id) add("linkedin_invite_moved", "A running LinkedIn track's connection invite stays its first step: add a new track to change it.", { trackId: track.id });
       }
     }
     // A running campaign's leads hold results and progress by these ids (ADR 0003 "Ticket 19"): a track or a step is

@@ -518,6 +518,7 @@ describe("what Activity says of a track after an unworked skip is the engine's o
       skipped_by_user: "skipped",
       skipped_missing_channel: "skipped_no_channel",
       skipped_conversation_taken: "skipped_conversation_taken",
+      invite_not_accepted: "finished",
       skipped_declined: "skipped_declined",
       skipped_unworked: "skipped_unworked",
       dropped_for_win_back: "dropped_for_win_back",

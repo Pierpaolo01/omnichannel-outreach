@@ -3,7 +3,7 @@ import type { LaunchCheck, SenderAccountView } from "../../domain/sequence/block
 import type { MergeData } from "../../domain/sequence/copy.ts";
 import type { CampaignDefinition } from "../../domain/sequence/definition.ts";
 import { isTimeZone } from "../../domain/sequence/clock.ts";
-import type { AccountState, Attempt, EndReason, ProviderWork, SmsBindingRecord, SubjectState } from "../../domain/sequence/state.ts";
+import type { AccountState, Attempt, EndReason, ProviderWork, SmsBindingRecord, SubjectState, TrackProgress } from "../../domain/sequence/state.ts";
 import type { RunTestFacts } from "../../domain/sequence/test-runs.ts";
 import type { TestContacts } from "../../domain/test-contacts.ts";
 
@@ -45,9 +45,16 @@ export interface AcceptedControl {
   readonly atWall: number;
 }
 
+/** A social sender account's allowances (ADR 0004 1.2): the user's numbers, no default. */
+export interface SocialAllowances {
+  readonly invitesPerDay: number;
+  readonly messagesPerDay: number;
+  readonly notesPerMonth: number;
+}
+
 export interface SenderAccountConfig {
   readonly id: string;
-  readonly channel: "email" | "sms";
+  readonly channel: "email" | "sms" | "linkedin";
   readonly label: string;
   /** Today's room: the sends it may still make on its current reset day, a whole number, 0 when there is none (`storableAccount`). */
   readonly capacity: number;
@@ -75,7 +82,7 @@ export interface SenderAccountConfig {
  * A report that fails any of them holds that one account as `invalid_report`, with no room and storable defaults, so it
  * never fails the sync of the others. A report with no usable id names no account: it is left out (null).
  */
-export function storableAccount<T extends SenderAccountConfig>(reported: T, channel: "email" | "sms"): T | null {
+export function storableAccount<T extends SenderAccountConfig>(reported: T, channel: "email" | "sms" | "linkedin"): T | null {
   // A port's answer is read as data from outside: any field may be missing or of another type.
   const value: unknown = reported;
   if (typeof value !== "object" || value === null) return null;
@@ -383,6 +390,12 @@ export interface EngineStore {
   attempt(attemptId: string): Promise<Attempt | null>;
   /** Unsettled provider work a quiesce wants withdrawn (ticket 17a; council A). */
   workToWithdraw(): Promise<ProviderWork[]>;
+  /** LinkedIn tracks whose invite an acceptance expiry wants withdrawn, with the invite's sent work (ADR 0004 3.3). */
+  invitesToWithdraw(): Promise<{ readonly subjectId: string; readonly trackId: string; readonly workKey: string; readonly progress: TrackProgress }[]>;
+  /** A social account's allowances, the user's settings (ADR 0004 1.2); null when none are set. */
+  allowances(accountId: string): Promise<SocialAllowances | null>;
+  /** Sets them: refused for an account that is not a social sender. */
+  setAllowances(accountId: string, allowances: SocialAllowances, now: number): Promise<"set" | "not_social">;
   /** Unsettled provider work with a lookup scheduled. */
   openWork(): Promise<ProviderWork[]>;
   /**
@@ -411,7 +424,7 @@ export interface EngineStore {
 
   upsertAccounts(accounts: readonly SenderAccountConfig[]): Promise<void>;
   /** Marks unhealthy every account of `channel` its port no longer reports: it is disconnected. */
-  disconnectUnlisted(channel: "email" | "sms", listed: readonly string[]): Promise<void>;
+  disconnectUnlisted(channel: "email" | "sms" | "linkedin", listed: readonly string[]): Promise<void>;
   /** Every SMS conversation binding of a mobile (E.164), from any number, oldest first (ADR 0003 4.5). */
   smsBindingsOf(recipient: string): Promise<SmsBindingRecord[]>;
   /**
@@ -505,7 +518,9 @@ export interface MeasureFacts {
    * Each attempt handed to a provider, with its state, its work's provider send time, and its channel: its sender account's,
    * a fact of the send that no edit of the definition changes (review bot on b8a8361). The same for failures and bounces.
    */
-  readonly attempts: readonly { readonly subjectId: string; readonly test: boolean; readonly channel: string; readonly trackId: string; readonly stepId: string; readonly state: string; readonly sentWall: number | null }[];
+  readonly attempts: readonly { readonly subjectId: string; readonly test: boolean; readonly channel: string; readonly trackId: string; readonly stepId: string; readonly state: string; readonly sentWall: number | null; readonly action?: string | null }[];
+  /** Each LinkedIn track an acceptance was recorded on, whenever it was observed (ADR 0004 section 8). */
+  readonly acceptances?: readonly { readonly subjectId: string; readonly test: boolean; readonly trackId: string }[];
   /** Each step result `failed`. */
   readonly failures: readonly { readonly subjectId: string; readonly test: boolean; readonly channel: string; readonly trackId: string; readonly stepId: string }[];
   /** Each bounce event. */

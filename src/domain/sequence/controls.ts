@@ -92,7 +92,7 @@ export function withProvider(state: SubjectState, stepId: string): boolean {
   return state.work.some((w) => w.stepId === stepId && isUncertain(w));
 }
 
-const PROVIDER_NAME = { email: "email provider", sms: "SMS provider", call: "call list" } as const;
+const PROVIDER_NAME = { email: "email provider", sms: "SMS provider", call: "call list", linkedin: "LinkedIn session" } as const;
 
 /** Skip the current step (ADR 0003 "Ticket 17a", "Skip step"): exactly one step, never sent. */
 function skip(state: SubjectState, now: number): ControlResult {

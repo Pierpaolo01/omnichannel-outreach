@@ -192,7 +192,7 @@ export async function needsAttention(
   store: EngineStore,
   now: number,
   rules: Pick<Rules, "asOfAction" | "evaluate"> = DEFAULT_RULES,
-  transportAvailable: (channel: "email" | "sms", threading: "new_subject" | "continue_thread") => boolean = () => true,
+  transportAvailable: (channel: "email" | "sms" | "linkedin", threading: "new_subject" | "continue_thread") => boolean = () => true,
 ): Promise<EngineNeedsAttention> {
   const accounts = await store.accounts(now);
   const open = await store.openAttempts();
@@ -229,7 +229,7 @@ export async function needsAttention(
   // Ticket 20a (council B): while sending is interrupted, which providers the gate holds due sends on, by its own function.
   const interrupted = await sendingInterrupted(store, now);
   const evidence = interrupted ? await providerEvidence(store) : null;
-  const providerWaits = new Map<"email" | "sms", number>();
+  const providerWaits = new Map<"email" | "sms" | "linkedin", number>();
   // Leads only (ADR 0003 "Ticket 21", rule 4): a running test's waits show on its Test run tab, never as a lead's.
   for (const id of await store.runningLeadIds()) {
     const stored = await store.subject(id, now);

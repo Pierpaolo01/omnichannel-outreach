@@ -5,9 +5,10 @@ import { providerFresh, relevantChannels, waitingOn, type ProviderEvidence } fro
 /** Which providers a lead's send waits on (ADR 0003 "Ticket 20a", after the council on 13dad92). Data is fictitious. */
 
 const T = Date.parse("2026-11-02T09:00:00Z");
-const evidence = (email: number | null, sms: number | null): Record<"email" | "sms", ProviderEvidence> => ({
+const evidence = (email: number | null, sms: number | null, linkedin: number | null = T): Record<"email" | "sms" | "linkedin", ProviderEvidence> => ({
   email: { contactAt: email, freshForMs: 60_000, failedAt: null, failedPart: null },
   sms: { contactAt: sms, freshForMs: 60_000, failedAt: null, failedPart: null },
+  linkedin: { contactAt: linkedin, freshForMs: 60_000, failedAt: null, failedPart: null },
 });
 
 describe("a provider is fresh while its last contact stands", () => {

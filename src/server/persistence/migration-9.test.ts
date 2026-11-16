@@ -1,5 +1,5 @@
 import { storedReplyId } from "../../domain/sequence/reply-identity.ts";
-import { UNDO_SINCE_18 } from "../../../test/support/undo-migrations.ts";
+import { UNDO_22, UNDO_SINCE_18 } from "../../../test/support/undo-migrations.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
@@ -51,6 +51,7 @@ const harness = (databasePath: string) =>
 function beforeMigration9(file: string): void {
   const db = new DatabaseSync(file);
   db.exec(`
+    ${UNDO_22}
     DROP TABLE definition_saves;
     DROP TABLE notes;
     DROP TABLE call_attempts;

@@ -610,7 +610,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   // Work handed over and not settled may still be sent (ticket 17a's provider limitation): the screens say so.
   // When each step goes is read with what dispatch knows beyond the lead (ADR 0003 "Reads that say when"): the port's
   // transport, and the dispatch gate while sending is interrupted.
-  const transport = (channel: "email" | "sms", threading: "new_subject" | "continue_thread") => engine.transportAvailable?.(channel, threading) ?? true;
+  const transport = (channel: "email" | "sms" | "linkedin", threading: "new_subject" | "continue_thread") => engine.transportAvailable?.(channel, threading) ?? true;
   /**
    * A read with what dispatch knows, computed once with a probe in place of the later days' call room, and again with the
    * room only when some step asked for it (council and verifier on cc9bf55, items 6 and 12): the other leads' open calls are

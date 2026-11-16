@@ -898,6 +898,218 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE sms_bindings ADD COLUMN unsent INTEGER NOT NULL DEFAULT 0 CHECK (unsent IN (0, 1));
     `,
   },
+  {
+    version: 22,
+    name: "LinkedIn tracks (ticket 24, ADR 0004): the channel, a track's connection and acceptance deadline, allowances, profiles and test profiles",
+    // SQLite cannot change a CHECK, so the four tables whose CHECK names the channels are rebuilt with 'linkedin' added:
+    // sender accounts, replies (a LinkedIn reply is the user's mark), and the stopping reply's channel on enrollments and
+    // test runs. The detail triggers of migration 18 are replaced, so a lead's row may also name its person's LinkedIn
+    // profile (`linkedin:<person id>:<key>`, ADR 0004 section 5) and a test run's its own test profile; the view that reads
+    // both subject tables is dropped and made again around the rebuild. Every stored row satisfies the new CHECKs.
+    rebuildsTables: true,
+    sql: `
+      DROP TRIGGER track_progress_destination_detail_id_known_insert;
+      DROP TRIGGER track_progress_destination_detail_id_known_update;
+      DROP TRIGGER attempts_destination_detail_id_known_insert;
+      DROP TRIGGER attempts_destination_detail_id_known_update;
+      DROP TRIGGER call_attempts_number_detail_id_known_insert;
+      DROP TRIGGER call_attempts_number_detail_id_known_update;
+      DROP VIEW engine_subjects;
+
+      CREATE TABLE sender_accounts_v22 (
+        id TEXT PRIMARY KEY,
+        channel TEXT NOT NULL CHECK (channel IN ('email', 'sms', 'linkedin')),
+        label TEXT NOT NULL,
+        capacity INTEGER NOT NULL CHECK (capacity >= 0),
+        gap_ms INTEGER CHECK (gap_ms IS NULL OR gap_ms > 0),
+        k INTEGER NOT NULL CHECK (k > 0),
+        next_slot_at INTEGER NOT NULL DEFAULT 0,
+        healthy INTEGER NOT NULL DEFAULT 1,
+        wait_until INTEGER,
+        wait_reason TEXT,
+        backoff_ms INTEGER NOT NULL DEFAULT 0,
+        reset_zone TEXT NOT NULL DEFAULT 'UTC',
+        problem TEXT,
+        daily_limit INTEGER NOT NULL CHECK (daily_limit >= 0)
+      );
+      INSERT INTO sender_accounts_v22 (id, channel, label, capacity, gap_ms, k, next_slot_at, healthy, wait_until, wait_reason, backoff_ms, reset_zone, problem, daily_limit)
+        SELECT id, channel, label, capacity, gap_ms, k, next_slot_at, healthy, wait_until, wait_reason, backoff_ms, reset_zone, problem, daily_limit FROM sender_accounts ORDER BY rowid;
+      DROP TABLE sender_accounts;
+      ALTER TABLE sender_accounts_v22 RENAME TO sender_accounts;
+
+      CREATE TABLE replies_v22 (
+        provider_ref TEXT NOT NULL,
+        subject_id TEXT NOT NULL REFERENCES subjects(id),
+        channel TEXT NOT NULL CHECK (channel IN ('email', 'sms', 'linkedin')),
+        at_wall INTEGER NOT NULL,
+        PRIMARY KEY (subject_id, provider_ref)
+      );
+      INSERT INTO replies_v22 (provider_ref, subject_id, channel, at_wall) SELECT provider_ref, subject_id, channel, at_wall FROM replies ORDER BY rowid;
+      DROP TABLE replies;
+      ALTER TABLE replies_v22 RENAME TO replies;
+      CREATE INDEX replies_by_subject ON replies(subject_id);
+
+      CREATE TABLE enrollments_v22 (
+        id TEXT PRIMARY KEY,
+        campaign_id TEXT NOT NULL REFERENCES campaigns(id),
+        lead_kind TEXT NOT NULL CHECK (lead_kind IN ('person', 'company')),
+        person_id TEXT REFERENCES people(id),
+        company_id TEXT NOT NULL REFERENCES companies(id),
+        status TEXT NOT NULL CHECK (status IN ('queued', 'active', 'in_win_back', 'waiting_on_call', 'callback_scheduled', 'replied', 'interested_on_call', 'paused', 'declined_on_call', 'stopped_manually', 'sequence_finished_no_response', 'finished_no_usable_channel')),
+        enrolled_at TEXT NOT NULL,
+        import_id TEXT REFERENCES imports(id),
+        version INTEGER NOT NULL DEFAULT 0,
+        ended TEXT, ended_at INTEGER, ended_wall INTEGER,
+        lead_paused INTEGER NOT NULL DEFAULT 0,
+        branch TEXT NOT NULL DEFAULT 'main' CHECK (branch IN ('main', 'win_back')),
+        branch_entered_at INTEGER,
+        touched INTEGER NOT NULL DEFAULT 0,
+        no_more_calls INTEGER NOT NULL DEFAULT 0,
+        frozen_since INTEGER, frozen_total INTEGER NOT NULL DEFAULT 0,
+        email_sender TEXT, sms_sender TEXT,
+        stop_reply_channel TEXT CHECK (stop_reply_channel IN ('email', 'sms', 'linkedin')),
+        stop_reply_at INTEGER,
+        linkedin_sender TEXT,
+        CHECK ((lead_kind = 'person') = (person_id IS NOT NULL))
+      );
+      INSERT INTO enrollments_v22 (id, campaign_id, lead_kind, person_id, company_id, status, enrolled_at, import_id, version, ended, ended_at, ended_wall, lead_paused, branch,
+          branch_entered_at, touched, no_more_calls, frozen_since, frozen_total, email_sender, sms_sender, stop_reply_channel, stop_reply_at)
+        SELECT id, campaign_id, lead_kind, person_id, company_id, status, enrolled_at, import_id, version, ended, ended_at, ended_wall, lead_paused, branch,
+          branch_entered_at, touched, no_more_calls, frozen_since, frozen_total, email_sender, sms_sender, stop_reply_channel, stop_reply_at FROM enrollments ORDER BY rowid;
+      DROP TABLE enrollments;
+      ALTER TABLE enrollments_v22 RENAME TO enrollments;
+      CREATE UNIQUE INDEX one_person_lead_per_campaign ON enrollments(campaign_id, person_id) WHERE lead_kind = 'person';
+      CREATE UNIQUE INDEX one_company_lead_per_campaign ON enrollments(campaign_id, company_id) WHERE lead_kind = 'company';
+      CREATE INDEX enrollments_by_campaign_status ON enrollments(campaign_id, status);
+      CREATE INDEX enrollments_by_person ON enrollments(person_id) WHERE lead_kind = 'person';
+      CREATE INDEX enrollments_by_company ON enrollments(company_id, lead_kind);
+
+      CREATE TABLE test_runs_v22 (
+        id TEXT PRIMARY KEY REFERENCES subjects(id),
+        campaign_id TEXT NOT NULL REFERENCES campaigns(id),
+        render_as TEXT NOT NULL REFERENCES enrollments(id),
+        email_value TEXT, email_key TEXT, mobile_value TEXT, mobile_key TEXT,
+        email_bad INTEGER NOT NULL DEFAULT 0 CHECK (email_bad IN (0, 1)),
+        mobile_bad INTEGER NOT NULL DEFAULT 0 CHECK (mobile_bad IN (0, 1)),
+        definition_version INTEGER NOT NULL,
+        definition_edited_at TEXT,
+        started_wall INTEGER NOT NULL,
+        stopped_by TEXT CHECK (stopped_by IN ('user', 'edit')),
+        request_id TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL CHECK (status IN ('queued', 'active', 'in_win_back', 'waiting_on_call', 'callback_scheduled', 'replied', 'interested_on_call', 'paused', 'declined_on_call', 'stopped_manually', 'sequence_finished_no_response', 'finished_no_usable_channel')),
+        version INTEGER NOT NULL DEFAULT 0,
+        ended TEXT, ended_at INTEGER, ended_wall INTEGER,
+        lead_paused INTEGER NOT NULL DEFAULT 0,
+        branch TEXT NOT NULL DEFAULT 'main' CHECK (branch IN ('main', 'win_back')),
+        branch_entered_at INTEGER,
+        touched INTEGER NOT NULL DEFAULT 0,
+        no_more_calls INTEGER NOT NULL DEFAULT 0,
+        frozen_since INTEGER, frozen_total INTEGER NOT NULL DEFAULT 0,
+        email_sender TEXT, sms_sender TEXT,
+        stop_reply_channel TEXT CHECK (stop_reply_channel IN ('email', 'sms', 'linkedin')),
+        stop_reply_at INTEGER,
+        linkedin_sender TEXT,
+        linkedin_value TEXT, linkedin_key TEXT,
+        linkedin_bad INTEGER NOT NULL DEFAULT 0 CHECK (linkedin_bad IN (0, 1)),
+        CHECK (email_key IS NOT NULL OR mobile_key IS NOT NULL OR linkedin_key IS NOT NULL)
+      );
+      INSERT INTO test_runs_v22 (id, campaign_id, render_as, email_value, email_key, mobile_value, mobile_key, email_bad, mobile_bad, definition_version, definition_edited_at,
+          started_wall, stopped_by, request_id, status, version, ended, ended_at, ended_wall, lead_paused, branch, branch_entered_at, touched, no_more_calls, frozen_since,
+          frozen_total, email_sender, sms_sender, stop_reply_channel, stop_reply_at)
+        SELECT id, campaign_id, render_as, email_value, email_key, mobile_value, mobile_key, email_bad, mobile_bad, definition_version, definition_edited_at,
+          started_wall, stopped_by, request_id, status, version, ended, ended_at, ended_wall, lead_paused, branch, branch_entered_at, touched, no_more_calls, frozen_since,
+          frozen_total, email_sender, sms_sender, stop_reply_channel, stop_reply_at FROM test_runs ORDER BY rowid;
+      DROP TABLE test_runs;
+      ALTER TABLE test_runs_v22 RENAME TO test_runs;
+      CREATE UNIQUE INDEX one_running_test_per_campaign ON test_runs(campaign_id) WHERE ended IS NULL;
+      CREATE INDEX test_runs_by_campaign ON test_runs(campaign_id, started_wall);
+
+      CREATE VIEW engine_subjects AS
+        SELECT id, 'enrollment' AS kind, campaign_id, person_id, company_id, ended, ended_wall FROM enrollments
+        UNION ALL
+        SELECT id, 'test_run' AS kind, campaign_id, NULL, NULL, ended, ended_wall FROM test_runs;
+
+      -- A LinkedIn track's connection, acceptance deadline and invite withdrawal (ADR 0004 3.2).
+      ALTER TABLE track_progress ADD COLUMN connection TEXT CHECK (connection IN ('accepted', 'already_connected'));
+      ALTER TABLE track_progress ADD COLUMN connected_at INTEGER;
+      ALTER TABLE track_progress ADD COLUMN connected_wall INTEGER;
+      ALTER TABLE track_progress ADD COLUMN accepted_wall INTEGER;
+      ALTER TABLE track_progress ADD COLUMN accept_by INTEGER;
+      ALTER TABLE track_progress ADD COLUMN accept_by_wall INTEGER;
+      ALTER TABLE track_progress ADD COLUMN accept_by_zone TEXT;
+      ALTER TABLE track_progress ADD COLUMN invite_withdrawal TEXT CHECK (invite_withdrawal IN ('wanted', 'withdrawn', 'accepted_first'));
+      ALTER TABLE track_progress ADD COLUMN invite_withdrawal_last_wall INTEGER;
+      -- A social step's action and an invite's note, fixed at the claim and at the handover (ADR 0004 4, 6).
+      ALTER TABLE provider_work ADD COLUMN kind TEXT CHECK (kind IN ('invite', 'message'));
+      ALTER TABLE provider_work ADD COLUMN note TEXT CHECK (note IN ('with', 'withheld', 'none'));
+      ALTER TABLE attempts ADD COLUMN action TEXT CHECK (action IN ('invite', 'message'));
+      -- The user's test LinkedIn profile (ADR 0004 section 8).
+      ALTER TABLE campaigns ADD COLUMN test_linkedin TEXT;
+
+      -- The user's allowances for each social sender account (ADR 0004 1.2): no default; kept across the port's syncs.
+      CREATE TABLE social_allowances (
+        account_id TEXT PRIMARY KEY,
+        invites_per_day INTEGER NOT NULL CHECK (invites_per_day >= 0),
+        messages_per_day INTEGER NOT NULL CHECK (messages_per_day >= 0),
+        notes_per_month INTEGER NOT NULL CHECK (notes_per_month >= 0),
+        updated_wall INTEGER NOT NULL
+      );
+      -- A LinkedIn profile the session found unreachable, by its key (ADR 0004 section 5; ADR 0001: never cleared).
+      CREATE TABLE linkedin_profile_marks (
+        key TEXT PRIMARY KEY,
+        marked_wall INTEGER NOT NULL
+      );
+
+      CREATE TRIGGER track_progress_destination_detail_id_known_insert BEFORE INSERT ON track_progress
+      WHEN NOT (NEW.destination_detail_id IS NULL OR (CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
+          THEN (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':linkedin' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND linkedin_key IS NOT NULL))
+          WHEN NEW.destination_detail_id LIKE 'linkedin:%' THEN EXISTS (SELECT 1 FROM enrollments e WHERE e.id = NEW.subject_id AND e.person_id IS NOT NULL AND substr(NEW.destination_detail_id, 1, length(e.person_id) + 10) = 'linkedin:' || e.person_id || ':')
+          ELSE NEW.destination_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.destination_detail_id) END))
+      BEGIN SELECT RAISE(ABORT, 'track_progress.destination_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
+      CREATE TRIGGER track_progress_destination_detail_id_known_update BEFORE UPDATE OF destination_detail_id, subject_id ON track_progress
+      WHEN NOT (NEW.destination_detail_id IS NULL OR (CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
+          THEN (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':linkedin' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND linkedin_key IS NOT NULL))
+          WHEN NEW.destination_detail_id LIKE 'linkedin:%' THEN EXISTS (SELECT 1 FROM enrollments e WHERE e.id = NEW.subject_id AND e.person_id IS NOT NULL AND substr(NEW.destination_detail_id, 1, length(e.person_id) + 10) = 'linkedin:' || e.person_id || ':')
+          ELSE NEW.destination_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.destination_detail_id) END))
+      BEGIN SELECT RAISE(ABORT, 'track_progress.destination_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
+      CREATE TRIGGER attempts_destination_detail_id_known_insert BEFORE INSERT ON attempts
+      WHEN NOT ((CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
+          THEN (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':linkedin' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND linkedin_key IS NOT NULL))
+          WHEN NEW.destination_detail_id LIKE 'linkedin:%' THEN EXISTS (SELECT 1 FROM enrollments e WHERE e.id = NEW.subject_id AND e.person_id IS NOT NULL AND substr(NEW.destination_detail_id, 1, length(e.person_id) + 10) = 'linkedin:' || e.person_id || ':')
+          ELSE NEW.destination_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.destination_detail_id) END))
+      BEGIN SELECT RAISE(ABORT, 'attempts.destination_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
+      CREATE TRIGGER attempts_destination_detail_id_known_update BEFORE UPDATE OF destination_detail_id, subject_id ON attempts
+      WHEN NOT ((CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
+          THEN (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':linkedin' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND linkedin_key IS NOT NULL))
+          WHEN NEW.destination_detail_id LIKE 'linkedin:%' THEN EXISTS (SELECT 1 FROM enrollments e WHERE e.id = NEW.subject_id AND e.person_id IS NOT NULL AND substr(NEW.destination_detail_id, 1, length(e.person_id) + 10) = 'linkedin:' || e.person_id || ':')
+          ELSE NEW.destination_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.destination_detail_id) END))
+      BEGIN SELECT RAISE(ABORT, 'attempts.destination_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
+      CREATE TRIGGER call_attempts_number_detail_id_known_insert BEFORE INSERT ON call_attempts
+      WHEN NOT (NEW.number_detail_id IS NULL OR (CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
+          THEN (NEW.number_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
+            OR (NEW.number_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
+            OR (NEW.number_detail_id = 'test:' || NEW.subject_id || ':linkedin' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND linkedin_key IS NOT NULL))
+          WHEN NEW.number_detail_id LIKE 'linkedin:%' THEN EXISTS (SELECT 1 FROM enrollments e WHERE e.id = NEW.subject_id AND e.person_id IS NOT NULL AND substr(NEW.number_detail_id, 1, length(e.person_id) + 10) = 'linkedin:' || e.person_id || ':')
+          ELSE NEW.number_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.number_detail_id) END))
+      BEGIN SELECT RAISE(ABORT, 'call_attempts.number_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
+      CREATE TRIGGER call_attempts_number_detail_id_known_update BEFORE UPDATE OF number_detail_id, subject_id ON call_attempts
+      WHEN NOT (NEW.number_detail_id IS NULL OR (CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
+          THEN (NEW.number_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
+            OR (NEW.number_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
+            OR (NEW.number_detail_id = 'test:' || NEW.subject_id || ':linkedin' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND linkedin_key IS NOT NULL))
+          WHEN NEW.number_detail_id LIKE 'linkedin:%' THEN EXISTS (SELECT 1 FROM enrollments e WHERE e.id = NEW.subject_id AND e.person_id IS NOT NULL AND substr(NEW.number_detail_id, 1, length(e.person_id) + 10) = 'linkedin:' || e.person_id || ':')
+          ELSE NEW.number_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.number_detail_id) END))
+      BEGIN SELECT RAISE(ABORT, 'call_attempts.number_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string, migrations: readonly Migration[] = MIGRATIONS): void {

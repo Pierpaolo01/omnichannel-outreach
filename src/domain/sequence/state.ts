@@ -9,6 +9,9 @@ import type { MergeData } from "./copy.ts";
 import type { Branch, CampaignDefinition, DeclinedPath, Threading } from "./definition.ts";
 import type { StoredReplyId } from "./reply-identity.ts";
 
+/** The channels a reply can be on: detected for email and SMS, marked by the user for LinkedIn (ADR 0004 section 7). */
+export type ReplyChannelName = "email" | "sms" | "linkedin";
+
 export type EndReason = Extract<
   OutreachStatus,
   "replied" | "interested_on_call" | "declined_on_call" | "stopped_manually" | "sequence_finished_no_response" | "finished_no_usable_channel"
@@ -25,7 +28,9 @@ export type FinishReason =
   | "skipped_unworked"
   | "failed_bad_destination"
   | "dropped_for_win_back"
-  | "closed_on_interest";
+  | "closed_on_interest"
+  /** A LinkedIn invite not accepted within the track's acceptance wait, with the fallback off: withdrawn (ADR 0004 3.3). */
+  | "invite_not_accepted";
 
 /** What a subject is (ADR 0003 1.2): a lead in a campaign, or a test run of the campaign's canvas against the user's own contacts (ticket 21). */
 export type SubjectKind = "enrollment" | "test_run";
@@ -50,12 +55,14 @@ export interface SubjectRecord {
   readonly emailSender: string | null;
   /** The subject's SMS sender number, fixed at its first SMS handover (ADR 0003 1.3), never reassigned. */
   readonly smsSender: string | null;
+  /** The subject's LinkedIn sender session, fixed at its first LinkedIn handover (ADR 0004 6), never reassigned. Absent: none. */
+  readonly linkedinSender?: string | null;
   /**
    * The reply that stopped the lead: its channel and its time as the provider reported it. Stored in
    * the transaction that ends the lead as replied, and never recomputed from later replies, whatever
    * order they are observed in (ticket 13a, verifier B1).
    */
-  readonly stopReply: { readonly channel: "email" | "sms"; readonly atWall: number } | null;
+  readonly stopReply: { readonly channel: ReplyChannelName; readonly atWall: number } | null;
 }
 
 export interface CampaignState {
@@ -87,6 +94,22 @@ export interface TrackProgress {
   readonly finishReason: FinishReason | null;
   /** For `skipped_conversation_taken`: the conversations that caused the skip, as they were then (question Q7 answered). */
   readonly conversationOwners?: readonly ConversationCause[] | null;
+  /**
+   * A LinkedIn track's connection (ADR 0004 3.2), set once: the invite accepted, or the sender already connected. Its point
+   * on the lead's clock is `connectedAt` and `connectedWall`. Absent or null on other tracks and until connected.
+   */
+  readonly connection?: "accepted" | "already_connected" | null;
+  readonly connectedAt?: number | null;
+  readonly connectedWall?: number | null;
+  /** The platform's acceptance time, recorded whenever it is observed, also on a finished track (a fact; the measure counts it). */
+  readonly acceptedWall?: number | null;
+  /** The acceptance deadline in lead time, resolved once from the invite's send point plus the acceptance wait (ADR 0004 3.2). */
+  readonly acceptBy?: number | null;
+  readonly acceptByWall?: number | null;
+  readonly acceptByZone?: string | null;
+  /** The invite's withdrawal after the deadline: wanted, done, or found accepted first (ADR 0004 3.3). */
+  readonly inviteWithdrawal?: "wanted" | "withdrawn" | "accepted_first" | null;
+  readonly inviteWithdrawalLastWall?: number | null;
 }
 
 export type StepOutcome = "sent" | "skipped" | "failed";
@@ -103,7 +126,7 @@ export interface StepResult {
 
 export type AttemptState = "claimed" | "handed" | "accepted" | "sent" | "rejected" | "withdrawn";
 export type EndedBy = "guard" | "claim_expired" | "quiesce" | "provider" | "lookup_not_sent" | "user" | "call" | "observed" | "lookup";
-export type RejectReason = "blocklisted" | "invalid_destination" | "payment_required" | "rate_limited" | "provider_skipped";
+export type RejectReason = "blocklisted" | "invalid_destination" | "payment_required" | "rate_limited" | "provider_skipped" | "not_connected";
 export type LookupAnswer = "sent" | "queued" | "not-sent" | "unknown";
 
 export interface RenderedCopy {
@@ -150,6 +173,8 @@ export interface Attempt {
   /** A same-key retry the worker should try to authorize (5.6); `after_not_sent` withdraws if refused. */
   readonly retry: "none" | "wanted" | "wanted_after_not_sent" | "refused";
   readonly rejectReason: RejectReason | null;
+  /** A social step's action, fixed at the claim with the transport (ADR 0004 2.1): the request is built from the attempt alone. */
+  readonly action?: "invite" | "message";
 }
 
 /** How provider work settled (ADR 0003 4.2): the user's mark settles it too. */
@@ -193,6 +218,13 @@ export interface ProviderWork {
    * so it holds no in-flight place; it settles as sent when its send time is observed or looked up.
    */
   readonly wentWall: number | null;
+  /** A social step's action (ADR 0004 2.1), written at the claim: the allowance it counts on. Absent or null on email and SMS. */
+  readonly kind?: "invite" | "message" | null;
+  /**
+   * An invite's note, decided in the handover transaction and never again (ADR 0004 section 4): `with` it went with its note,
+   * `withheld` its note was not empty but the sender's note allowance was used, `none` its note was empty. Null until handed.
+   */
+  readonly note?: "with" | "withheld" | "none" | null;
 }
 
 /**
@@ -253,7 +285,7 @@ export interface SmsBindingRecord {
 }
 
 export interface Reply {
-  readonly channel: "email" | "sms";
+  readonly channel: ReplyChannelName;
   readonly atWall: number;
   /** The reply's stored id (the reply identity rule): one per provider reply. */
   readonly providerRef: StoredReplyId;
@@ -376,7 +408,8 @@ export interface CallDay {
 /** A live contact detail of the lead, as engine decisions read it. */
 export interface LeadDetail {
   readonly id: string;
-  readonly channel: "email" | "phone";
+  /** `linkedin`: the decision maker's profile from the import (ADR 0004 section 5), keyed by `linkedinProfileKey`. */
+  readonly channel: "email" | "phone" | "linkedin";
   /** The lead may send to it: its own email, or a company lead's shared inbox. */
   readonly ownEmail: boolean;
   /**
@@ -406,9 +439,22 @@ export interface LeadFacts {
   readonly phones: readonly CallNumber[];
 }
 
+/** One allowance of a social account (ADR 0004 1.2, 6): the user's number for the reset day, and what is used of it. */
+export interface Allowance {
+  readonly capacity: number;
+  readonly used: number;
+}
+
 export interface AccountState {
   readonly id: string;
-  readonly channel: "email" | "sms";
+  readonly channel: "email" | "sms" | "linkedin";
+  /**
+   * A social account's allowances per kind of action, today (ADR 0004 6): sent on the reset day plus reservations, from
+   * `provider_work.kind`. Absent on email and SMS, whose `capacity` is the one bucket.
+   */
+  readonly kinds?: { readonly invite: Allowance; readonly message: Allowance };
+  /** A LinkedIn account's note allowance this calendar month, in its reset zone (ADR 0004 section 4). */
+  readonly notes?: Allowance;
   /** Today's room on its current reset day (0: none). */
   readonly capacity: number;
   /** Its room on any other reset day (council on PR 63): today's room can be less, never the daily limit. */

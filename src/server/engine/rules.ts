@@ -19,6 +19,8 @@ import {
 import { compareReadyNow, focusOf, isListed, logCallOutcome, placeCall, readyCalls, reasonOf } from "../../domain/sequence/calls.ts";
 import { applyBadDestination, applyReply, applyToAttempt, applyToWork, asOfAction, enterMain, evaluate, releaseUnsentBindings, replyMatches, sameConversations, smsReplyOwner, stillSettled, withdrawalDue } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
+import { inviteAlreadyConnected, inviteExpired, inviteWithdrawalAnswer, inviteWithdrawalDue, recordAcceptance } from "../../domain/sequence/progress.ts";
+import { actionOfStep } from "../../domain/sequence/dispatch.ts";
 import { reconcileEdit, stillRunnable } from "../../domain/sequence/reconcile.ts";
 import { launchCheck } from "../../domain/sequence/blockers.ts";
 import { applyControl, campaignPaused, campaignPrecondition, campaignResumed, controlPrecondition, judgeControl } from "../../domain/sequence/controls.ts";
@@ -35,6 +37,16 @@ export type PresendAnswer = { readonly kind: "clear" } | { readonly kind: "unava
 
 export interface Rules {
   readonly evaluate: typeof evaluate;
+  /** LinkedIn (ADR 0004 section 3): an acceptance the session reports, recorded and, before the deadline, connecting the track. */
+  readonly recordAcceptance: typeof recordAcceptance;
+  /** The acceptance expiry with the fallback off (3.3; ticket 27 attaches here). `evaluate` reads it through its option. */
+  readonly inviteExpired: typeof inviteExpired;
+  /** The pre-send check found the sender already connected: the invite skipped, the track connected (3.3). */
+  readonly inviteAlreadyConnected: typeof inviteAlreadyConnected;
+  readonly inviteWithdrawalDue: typeof inviteWithdrawalDue;
+  readonly inviteWithdrawalAnswer: typeof inviteWithdrawalAnswer;
+  /** The social action a step asks for (ADR 0004 2.1, 6): what the pre-send check's "connected" means for it. */
+  readonly actionOfStep: typeof actionOfStep;
   readonly enterMain: typeof enterMain;
   readonly applyToAttempt: typeof applyToAttempt;
   readonly applyToWork: typeof applyToWork;
@@ -149,6 +161,12 @@ export interface Rules {
 }
 
 export const DEFAULT_RULES: Rules = {
+  recordAcceptance,
+  inviteExpired,
+  inviteAlreadyConnected,
+  inviteWithdrawalDue,
+  inviteWithdrawalAnswer,
+  actionOfStep,
   evaluate,
   enterMain,
   applyToAttempt,

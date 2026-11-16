@@ -27,7 +27,7 @@ export const CONTROL_REQUEST_REUSED = "This request id was already used for anot
 function outcomeBody(input: OutcomeInput): string {
   return JSON.stringify({ outcome: input.outcome, redial: input.redial, callbackAt: input.callbackAt, declinedPath: input.declinedPath, numberId: input.numberId, note: input.note, noteScope: input.noteScope });
 }
-import { callOutcome, UnprovisionedSmsPort, type AttemptRef, type CallOutcome, type PortCallResult, type HandoverRequest, type ProviderEvent, type SendPort } from "./ports.ts";
+import { callOutcome, UnconnectedLinkedInPort, UnprovisionedSmsPort, type AttemptRef, type CallOutcome, type PortCallResult, type HandoverRequest, type ProviderEvent, type SendPort } from "./ports.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 import { HEARTBEAT_KEY, NOTICE_KEY, parseInstant, PROVIDERS_KEY, TICK_ENDED_KEY, TICK_FAILED_KEY } from "./worker-state.ts";
 import { relevantChannels, waitingOn, type ProviderEvidence } from "../../domain/sequence/providers.ts";
@@ -109,6 +109,8 @@ export interface EngineDependencies {
   readonly port: SendPort;
   /** The SMS port (ticket 13); the unprovisioned one when absent, since no SMS provider exists (#28). */
   readonly smsPort?: SendPort;
+  /** The LinkedIn port (ticket 24, ADR 0004); the unconnected one when absent, since no LinkedIn session is connected (#28). */
+  readonly linkedinPort?: SendPort;
   /** Milliseconds since the epoch. */
   readonly now: () => number;
   readonly newId: () => string;
@@ -134,9 +136,9 @@ export interface EngineDependencies {
   readonly ticks?: TickQueue;
 }
 
-type Channel = "email" | "sms";
-const OBSERVE_CHECKPOINT: Record<Channel, string> = { email: "email_observe_checkpoint", sms: "sms_observe_checkpoint" };
-const CHANNELS: readonly Channel[] = ["email", "sms"];
+type Channel = "email" | "sms" | "linkedin";
+const OBSERVE_CHECKPOINT: Record<Channel, string> = { email: "email_observe_checkpoint", sms: "sms_observe_checkpoint", linkedin: "linkedin_observe_checkpoint" };
+const CHANNELS: readonly Channel[] = ["email", "sms", "linkedin"];
 const MAX_PASSES = 50;
 const QUOTA_WAIT = Number.MAX_SAFE_INTEGER;
 /** Ticket 20a: how long a port's last answer stands for "it answers", for a port that does not report its own freshness: four ticks. */
@@ -153,14 +155,14 @@ export class Engine {
   /** While a provider's answer is applied: the instant the rules say it is applied at (`answerInstant`); null otherwise. */
   private applyingAt: number | null = null;
   /** Ticket 20a: each provider's last actual answer, for a port that does not report its own (`SendPort.contact`). */
-  private readonly answeredAt: Record<Channel, number | null> = { email: null, sms: null };
+  private readonly answeredAt: Record<Channel, number | null> = { email: null, sms: null, linkedin: null };
   /** Ticket 20a: which reads of each provider answered in the current round (a tick, or the dispatch gate's own asking). */
-  private round: Record<Channel, { accounts: boolean; observation: boolean }> = { email: { accounts: false, observation: false }, sms: { accounts: false, observation: false } };
+  private round: Record<Channel, { accounts: boolean; observation: boolean }> = { email: { accounts: false, observation: false }, sms: { accounts: false, observation: false }, linkedin: { accounts: false, observation: false } };
 
   /** Ticket 20a (council D): the last call each provider answered while its contact stood, extending it. */
-  private readonly extendedAt: Record<Channel, number | null> = { email: null, sms: null };
+  private readonly extendedAt: Record<Channel, number | null> = { email: null, sms: null, linkedin: null };
   /** Ticket 20a (council G): each provider's last failed read, as evidence. */
-  private readonly failedRead: Record<Channel, { at: number; part: "accounts" | "observation" | "call" } | null> = { email: null, sms: null };
+  private readonly failedRead: Record<Channel, { at: number; part: "accounts" | "observation" | "call" } | null> = { email: null, sms: null, linkedin: null };
   /** Whether the dispatch gate has asked every provider again in this round. */
   private askedThisRound = false;
 
@@ -175,7 +177,7 @@ export class Engine {
   }
 
   /** The contact each self-reporting port last reported, to see it jump (below). */
-  private readonly reportedSeen: Record<Channel, number | null> = { email: null, sms: null };
+  private readonly reportedSeen: Record<Channel, number | null> = { email: null, sms: null, linkedin: null };
 
   /**
    * A port that reports its own contact (the adapter, which answers from a cache between polls) may answer every call
@@ -215,7 +217,7 @@ export class Engine {
       const failed = this.failedRead[c];
       return { contactAt: at, freshForMs, failedAt: failed?.at ?? null, failedPart: failed?.part ?? null };
     };
-    return { email: of("email"), sms: of("sms") };
+    return { email: of("email"), sms: of("sms"), linkedin: of("linkedin") };
   }
 
   private async saveEvidence(): Promise<void> {
@@ -223,7 +225,7 @@ export class Engine {
   }
 
   private newRound(): void {
-    this.round = { email: { accounts: false, observation: false }, sms: { accounts: false, observation: false } };
+    this.round = { email: { accounts: false, observation: false }, sms: { accounts: false, observation: false }, linkedin: { accounts: false, observation: false } };
   }
 
   /** A read answered: the round is contact only once every read the engine relies on has answered in it (`contactFrom`). */
@@ -286,7 +288,7 @@ export class Engine {
 
   constructor(deps: EngineDependencies) {
     this.store = deps.store;
-    this.ports = { email: deps.port, sms: deps.smsPort ?? new UnprovisionedSmsPort() };
+    this.ports = { email: deps.port, sms: deps.smsPort ?? new UnprovisionedSmsPort(), linkedin: deps.linkedinPort ?? new UnconnectedLinkedInPort() };
     this.clockNow = deps.now;
     this.now = () => this.applyingAt ?? deps.now();
     this.newId = deps.newId;
@@ -533,6 +535,7 @@ export class Engine {
       // A held reply falls back only after this pass's lookups have had their chance to attach its reference.
       changed = (await this.correlate(false, true)) || changed;
       changed = (await this.withdraw()) || changed;
+      changed = (await this.withdrawInvites()) || changed;
       changed = (await this.evaluateAll()) || changed;
       changed = (await this.placeCallsAll()) || changed;
       changed = (await this.claimAll()) || changed;
@@ -767,7 +770,7 @@ export class Engine {
       const { events, checkpoint: next } = observed;
       await this.answered(asked, async () => {
         for (const event of events) {
-          changed = (await (channel === "sms" ? this.applySmsEvent(event) : this.applyEvent(event))) || changed;
+          changed = (await (channel === "sms" ? this.applySmsEvent(event) : channel === "linkedin" ? this.applyLinkedinEvent(event) : this.applyEvent(event))) || changed;
           this.hooks.crashPoint?.("after_observe_event", null);
         }
       });
@@ -800,6 +803,59 @@ export class Engine {
       return false;
     }
     return this.applyEvent(event, w);
+  }
+
+  /**
+   * A LinkedIn session's event (ADR 0004 2.3). An acceptance is recorded on the invite's track, never as a reply; a session
+   * never reports a reply (there is no reply detection), so one is an anomaly. Sends, refusals and failures are matched by
+   * their work, as every channel's are.
+   */
+  private async applyLinkedinEvent(event: ProviderEvent): Promise<boolean> {
+    const now = this.now();
+    if (event.kind === "reply") {
+      await this.store.recordAnomaly(null, "a LinkedIn session reported a reply, which the app does not detect", now);
+      return false;
+    }
+    const w = (await this.store.work(event.key)) ?? (await this.store.workByProviderRef(event.providerRef));
+    if (!w) {
+      await this.store.recordAnomaly(null, `a LinkedIn ${event.kind} event the app cannot match`, now);
+      return false;
+    }
+    if (event.kind !== "accepted") return this.applyEvent(event, w);
+    return (await this.update(w.subjectId, now, (s) => {
+      // An acceptance proves the invite went: work not yet recorded sent is recorded sent at the acceptance first (3.3).
+      const work = s.work.find((x) => x.key === w.key);
+      let next = s;
+      if (work && work.settled !== "sent" && work.settled !== "user_sent") next = this.rules.applyToWork(next, w.key, { kind: "sent_observed", providerTime: event.at, providerRef: event.providerRef }, now, { resetDay: this.resetDay(next), point: this.rules.sendPoint }).state;
+      next = this.rules.recordAcceptance(next, w.trackId, event.at, work?.firstHandedWall ?? event.at, now, this.rules.sendPoint);
+      next = this.rules.evaluate(next, now);
+      return same(next, s) ? null : next;
+    })) !== null;
+  }
+
+  /**
+   * The invite withdrawals an acceptance expiry asked for (ADR 0004 3.3): each asked of its session until it answers
+   * withdrawn or accepted first, again one settling period after an unknown answer, whether or not the lead runs.
+   */
+  private async withdrawInvites(): Promise<boolean> {
+    let changed = false;
+    const now = this.now();
+    for (const ask of await this.store.invitesToWithdraw()) {
+      if (!this.rules.inviteWithdrawalDue(ask.progress, now)) continue;
+      const w = await this.store.work(ask.workKey);
+      if (!w) continue;
+      const port = await this.portOf(w.accountId);
+      if (!port.withdrawInvite) continue;
+      if (!this.leaseIsMine(this.clockNow())) return changed;
+      const answer = await this.bounded(() => port.withdrawInvite?.(this.ref(w)) ?? Promise.resolve({ kind: "unknown" as const }), { kind: "unknown" as const }, port.channel, (result) => ({ call: "withdrawInvite", result }));
+      const at = this.now();
+      changed =
+        (await this.update(ask.subjectId, at, (s) => {
+          const next = this.rules.inviteWithdrawalAnswer(s, ask.trackId, answer.kind, at, answer.kind === "already_accepted" ? answer.at : null);
+          return same(next, s) ? null : next;
+        })) !== null || changed;
+    }
+    return changed;
   }
 
   /** Records a reply on each subject it belongs to. */
@@ -1251,7 +1307,7 @@ export class Engine {
       if (this.rules.claimRefusal(snapshot, item, now) !== null) continue;
       const track = snapshot.campaign.definition.tracks.find((t) => t.id === item.trackId);
       const step = track?.steps.find((s) => s.id === item.stepId);
-      const transport = this.ports[track?.channel === "sms" ? "sms" : "email"].transportFor({ threading: step?.threading ?? "new_subject" });
+      const transport = this.ports[track?.channel === "sms" ? "sms" : track?.channel === "linkedin" ? "linkedin" : "email"].transportFor({ threading: step?.threading ?? "new_subject" });
       // A step the port cannot send yet is not claimed: it waits, and nothing is sent for it.
       if (transport.available === false) continue;
       const allowed = this.dispatchAllowed(this.rules.dispatchInstant(this.tickStarted, this.now()), () => Promise.resolve(relevantChannels(snapshot, item.trackId)));
@@ -1336,12 +1392,31 @@ export class Engine {
     const subject = await this.store.subject(a.subjectId, now);
     const threadRefs = (subject?.work ?? []).flatMap((w) => (w.providerRef === null ? [] : [w.providerRef]));
     const port = await this.portOf(a.accountId);
-    const channel = port === this.ports.sms ? "sms" : "email";
+    const channel = port === this.ports.sms ? "sms" : port === this.ports.linkedin ? "linkedin" : "email";
     // The replies the lead's record holds are not news (a restart after an auto-reply): the port reports any other reply,
     // in any of the lead's threads (ticket 17a; review bot on ca8baee, item 1; ADR 0002's correlation rules). The port is
     // asked by its own ids, and its answer is recorded by the stored one: the reply identity rule (ADR 0003 "Ticket 17a").
     const knownReplies = (subject?.replies ?? []).filter((r) => r.channel === channel).map((r) => r.providerRef);
-    const asked = await this.bounded(() => port.presendCheck({ sender: a.accountId, destination: a.destination, threadRefs, knownReplies: knownReplies.map((id) => this.rules.portReplyId(channel, id)) }), { kind: "unavailable" as const }, port.channel, (result) => ({ call: "presendCheck", result }));
+    const asked = await this.bounded(() => port.presendCheck({ sender: a.accountId, destination: a.destination, threadRefs, knownReplies: channel === "linkedin" ? [] : knownReplies.map((id) => this.rules.portReplyId(channel, id)) }), { kind: "unavailable" as const }, port.channel, (result) => ({ call: "presendCheck", result }));
+    // A LinkedIn session's check reads the connection, never a reply (ADR 0004 2.3, 3.3). Connected at an invite's slot: the
+    // invite is skipped in the handover's own write, with no call, when every predicate but the check and the slot holds.
+    if (channel === "linkedin") {
+      if (asked.kind === "unavailable") return false;
+      if (asked.kind === "connected" && subject && this.rules.actionOfStep(subject, a.trackId, a.stepId) === "invite") {
+        await this.update(a.subjectId, now, (s) => {
+          const current = s.attempts.find((x) => x.id === a.id);
+          const account = current ? s.accounts[current.accountId] : undefined;
+          if (!current || current.state !== "claimed" || !account) return null;
+          const failed = this.rules.handoverFailures(s, current, account, now).filter((f) => f !== 14 && f !== 16);
+          return failed.length === 0 ? this.rules.inviteAlreadyConnected(s, current.id, now) : this.rules.applyToAttempt(s, current.id, { kind: "guard_failed" }, now).state;
+        });
+        return false;
+      }
+      await this.update(a.subjectId, now, (s) => ({ ...s, attempts: s.attempts.map((x) => (x.id === a.id ? { ...x, presendCheckedWall: now, presendFoundReply: false } : x)) }));
+      this.hooks.crashPoint?.("after_presend", a.id);
+      return true;
+    }
+    if (asked.kind === "connected") return false;
     const result = this.rules.presendAnswer(asked, channel, knownReplies);
     if (result.kind === "unavailable") return false;
     await this.update(a.subjectId, now, (s) => {
@@ -1375,6 +1450,7 @@ export class Engine {
       subjectId: a.subjectId,
       trackId: a.trackId,
       stepId: a.stepId,
+      ...(a.action ? { action: a.action } : {}),
     };
   }
 

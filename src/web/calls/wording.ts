@@ -326,13 +326,15 @@ function trackFinishedLine(who: string, finish: FinishReasonApi | null): string 
       return `${who} moved to this campaign’s win-back branch, which makes no calls, so this call left the list.`;
     case "skipped_unworked":
       return `${who}’s call wasn’t made within its skip limit, so it was skipped and left the list.`;
-    // Never a phone track's finish: only an SMS track is skipped for a taken conversation.
+    // Never a phone track's finish: only an SMS track is skipped for a taken conversation, and only a LinkedIn track waits
+    // for an invite to be accepted (ADR 0004).
     case "skipped_conversation_taken":
     case "completed":
     case "skipped":
     case "skipped_by_user":
     case "failed_bad_destination":
     case "closed_on_interest":
+    case "invite_not_accepted":
       return `${who}’s phone track has finished, so the call left the list.`;
     default: {
       const unhandled: never = finish;

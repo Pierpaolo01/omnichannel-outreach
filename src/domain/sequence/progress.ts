@@ -5,11 +5,11 @@
  */
 import type { OutreachStatus } from "../outreach-status.ts";
 import { applyAttemptEvent, applyLookup, ENGINE_PARAMS, isLive, isUncertain, markable, maySend, withRef, type AttemptEffect, type AttemptEvent, type WorkEvent } from "./attempt.ts";
-import { leadNow, localDayNumber, nextWindowOpen, sendPoint, startOfLocalDay, syncClock, waitSpan, wallOfLead, windowOpensAt, type Freeze, type LeadClock } from "./clock.ts";
+import { leadNow, localDayNumber, nextWindowOpen, sendPoint, span, startOfLocalDay, syncClock, waitSpan, wallOfLead, windowOpensAt, type Freeze, type LeadClock } from "./clock.ts";
 import { render } from "./copy.ts";
-import { liveSteps, ownSubject, poolOf, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
+import { linkedinStepKind, liveSteps, ownSubject, poolOf, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
 import type { StoredReplyId } from "./reply-identity.ts";
-import type { Attempt, ConversationCause, EndReason, FinishReason, LeadDetail, ProviderWork, RenderedCopy, SmsBinding, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
+import type { Attempt, ConversationCause, EndReason, FinishReason, LeadDetail, ProviderWork, RenderedCopy, ReplyChannelName, SmsBinding, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Running, status and reach.
@@ -87,9 +87,14 @@ export function goodMobile(details: readonly LeadDetail[]): LeadDetail | null {
   return [...details].filter((d) => d.channel === "phone" && d.mobile && !d.bad).sort((a, b) => b.order - a.order)[0] ?? null;
 }
 
+/** The lead's LinkedIn profile from the import, when it is a member profile not marked bad (ADR 0004 section 5). */
+export function goodProfile(details: readonly LeadDetail[]): LeadDetail | null {
+  return [...details].filter((d) => d.channel === "linkedin" && !d.bad).sort((a, b) => b.order - a.order)[0] ?? null;
+}
+
 /** The detail a track on `channel` starts with: the newest good one the lead may be sent to on it. */
 export function destinationFor(details: readonly LeadDetail[], channel: TrackChannel): LeadDetail | null {
-  return channel === "email" ? goodEmail(details) : channel === "sms" ? goodMobile(details) : null;
+  return channel === "email" ? goodEmail(details) : channel === "sms" ? goodMobile(details) : channel === "linkedin" ? goodProfile(details) : null;
 }
 
 /** Whether the user has a good number to dial for the lead: its own, or the company main line (ADR 0001 "Usable channels"). */
@@ -268,6 +273,10 @@ export function advanceTrack(state: SubjectState, track: TrackDefinition, at: nu
   }
   const step = track.steps.find((s) => s.id === stepId);
   const zone = state.lead.zone;
+  // A LinkedIn message waits for a connection (ADR 0004 3.2): until then it is pending with no due time, so nothing claims it.
+  if (linkedinStepKind(track, stepId) === "first_message" && (progress.connection ?? null) === null) {
+    return withTrack(state, track.id, (t) => ({ ...t, nextStepId: stepId, basisAt: null, basisWall: null, dueAt: null, dueWall: null, dueZone: null }));
+  }
   const s = waitSpan(state.subject.kind, atWall, step?.waitDays ?? 0, zone);
   return withTrack(state, track.id, (t) => ({
     ...t,
@@ -306,7 +315,11 @@ const emptyProgress = (trackId: string): TrackProgress => ({
  * What evaluation does for a running subject: endings first, track starts, next steps, then
  * endings again. Ready items are the dispatcher's (dispatch.ts). Reads no clock and no store.
  */
-export function evaluate(state: SubjectState, now: number, options: { readonly endingsFirst?: boolean; readonly skipTakenConversations?: boolean } = {}): SubjectState {
+export function evaluate(
+  state: SubjectState,
+  now: number,
+  options: { readonly endingsFirst?: boolean; readonly skipTakenConversations?: boolean; readonly inviteExpired?: typeof inviteExpired } = {},
+): SubjectState {
   // Unworked calls past the skip limit are skipped at the rollover they expired at, before any start, so
   // the tracks after them start in this same evaluation (3.5; ticket 15). Judged for a held lead too, which
   // only records the rollovers judged (it did not run at them), so none is judged later under other inputs.
@@ -343,6 +356,12 @@ export function evaluate(state: SubjectState, now: number, options: { readonly e
     const progress = progressOf(s, track.id);
     if (track.channel !== "call" || !progress || progress.startedAt === null || progress.finishedAt !== null || hasGoodNumber(s)) continue;
     s = finishTrack(s, track.id, "skipped_missing_channel", lead, wallOfLead(s.subject.clock, now));
+  }
+
+  // A LinkedIn invite whose acceptance wait has ended with no connection (ADR 0004 3.3): before the next steps, so the
+  // tracks after it start in this same evaluation from the deadline. `inviteExpired` is a rule, where ticket 27 attaches.
+  for (const track of liveTracksFor(s)) {
+    if (awaitingAcceptance(s, track.id) && (progressOf(s, track.id)?.acceptBy ?? Infinity) <= lead) s = (options.inviteExpired ?? inviteExpired)(s, track.id, now);
   }
 
   // Next steps for started tracks with no pending step and no live attempt.
@@ -514,7 +533,7 @@ export function enterWinBack(state: SubjectState, now: number): SubjectState {
 }
 
 /** A reply ends outreach in this campaign (2.4), unless the lead already replied or was interested. */
-export function applyReply(state: SubjectState, reply: { channel: "email" | "sms"; atWall: number; providerRef: StoredReplyId }, now: number): SubjectState {
+export function applyReply(state: SubjectState, reply: { channel: ReplyChannelName; atWall: number; providerRef: StoredReplyId }, now: number): SubjectState {
   if (state.replies.some((r) => r.providerRef === reply.providerRef)) return state;
   const recorded = { ...state, replies: [...state.replies, reply] };
   if (state.subject.ended === "replied" || state.subject.ended === "interested_on_call") return recorded;
@@ -714,8 +733,12 @@ function recordSent(
   const progress = progressOf(s, attempt.trackId);
   const track = s.campaign.definition.tracks.find((t) => t.id === attempt.trackId);
   if (!progress || !track || progress.finishedAt !== null) return s;
+  // A sent LinkedIn invite starts its acceptance wait, resolved once from the send point (ADR 0004 3.2).
+  if (linkedinStepKind(track, attempt.stepId) === "invite") s = withTrack(s, track.id, (t) => ({ ...t, ...acceptDeadline(s, track, point.at, point.atWall) }));
   return advanceTrack(s, track, point.at, point.atWall);
 }
+
+const failedReasonOf = (channel: TrackChannel | undefined): string => (channel === "sms" ? "invalid number" : channel === "linkedin" ? "profile unreachable" : "invalid address");
 
 function recordRejected(state: SubjectState, attempt: Attempt, reason: Attempt["rejectReason"], now: number): SubjectState {
   const progress = progressOf(state, attempt.trackId);
@@ -723,7 +746,7 @@ function recordRejected(state: SubjectState, attempt: Attempt, reason: Attempt["
   const atWall = wallOfLead(state.subject.clock, now);
   if (reason === "invalid_destination") {
     const failed = progress && progress.finishedAt === null && !state.results.some((r) => r.stepId === attempt.stepId)
-      ? { ...state, results: [...state.results, { stepId: attempt.stepId, trackId: attempt.trackId, result: "failed" as const, reason: channelOf(state, attempt.trackId) === "sms" ? "invalid number" : "invalid address", at, atWall, attemptId: attempt.id }] }
+      ? { ...state, results: [...state.results, { stepId: attempt.stepId, trackId: attempt.trackId, result: "failed" as const, reason: failedReasonOf(channelOf(state, attempt.trackId)), at, atWall, attemptId: attempt.id }] }
       : state;
     return applyBadDestination(failed, attempt, now);
   }
@@ -733,6 +756,15 @@ function recordRejected(state: SubjectState, attempt: Attempt, reason: Attempt["
       ? state
       : { ...state, results: [...state.results, { stepId: attempt.stepId, trackId: attempt.trackId, result: "skipped" as const, reason: "address on the provider's block list", at, atWall, attemptId: attempt.id }] };
     return checkEndings(finishTrack(skipped, attempt.trackId, "skipped_missing_channel", at, atWall), now);
+  }
+  // A LinkedIn message refused because the connection is gone (ADR 0004 2.2, question Q37): the track fails, the profile
+  // stays good (it is still theirs), and the lead's other tracks continue.
+  if (reason === "not_connected") {
+    if (!progress || progress.finishedAt !== null) return state;
+    const failed = state.results.some((r) => r.stepId === attempt.stepId)
+      ? state
+      : { ...state, results: [...state.results, { stepId: attempt.stepId, trackId: attempt.trackId, result: "failed" as const, reason: "not connected", at, atWall, attemptId: attempt.id }] };
+    return checkEndings(finishTrack(failed, attempt.trackId, "failed_bad_destination", at, atWall), now);
   }
   // 402 and 429 wait at the account; an unexplained provider skip holds the track (5.4).
   return state;
@@ -834,7 +866,8 @@ export function renderStep(state: SubjectState, trackId: string, stepId: string)
   const step = stepDef(state, trackId, stepId);
   if (!step) return null;
   // A text has no subject; an email renders only a subject it starts (a continuing one has none).
-  const subject = render(channelOf(state, trackId) === "sms" ? "" : ownSubject(step), state.lead.mergeData);
+  const channel = channelOf(state, trackId);
+  const subject = render(channel === "sms" || channel === "linkedin" ? "" : ownSubject(step), state.lead.mergeData);
   const body = render(step.body, state.lead.mergeData);
   return subject.ok && body.ok ? { subject: subject.text, body: body.text } : null;
 }
@@ -854,7 +887,7 @@ export function lacksThread(state: SubjectState, trackId: string, stepId: string
 
 /** The subject's fixed sender on a channel (1.3). */
 export function senderOf(state: SubjectState, channel: TrackChannel): string | null {
-  return channel === "sms" ? state.subject.smsSender : channel === "email" ? state.subject.emailSender : null;
+  return channel === "sms" ? state.subject.smsSender : channel === "email" ? state.subject.emailSender : channel === "linkedin" ? (state.subject.linkedinSender ?? null) : null;
 }
 
 /**
@@ -1152,4 +1185,101 @@ export const channelOf = (state: SubjectState, trackId: string): TrackChannel | 
 export function stepsOf(state: SubjectState, trackId: string) {
   const track = state.campaign.definition.tracks.find((t) => t.id === trackId);
   return track ? liveSteps(track) : [];
+}
+
+// ---------------------------------------------------------------------------------------------
+// The LinkedIn track (ADR 0004 section 3): the connection, the acceptance deadline and its expiry.
+
+/** A LinkedIn track whose invite was sent and which is not connected yet, unfinished: its first message has no due time. */
+export function awaitingAcceptance(state: SubjectState, trackId: string): boolean {
+  const p = progressOf(state, trackId);
+  const track = state.campaign.definition.tracks.find((t) => t.id === trackId);
+  if (!p || !track || track.channel !== "linkedin" || p.startedAt === null || p.finishedAt !== null) return false;
+  return (p.connection ?? null) === null && (p.acceptBy ?? null) !== null;
+}
+
+/**
+ * The acceptance deadline (ADR 0004 3.2): the invite's send point plus the track's acceptance wait in calendar days in the
+ * prospect's zone, in lead time. Not cut short for a test run (question Q40): a person accepts the test invite by hand.
+ */
+export function acceptDeadline(state: SubjectState, track: TrackDefinition, at: number, atWall: number): Pick<TrackProgress, "acceptBy" | "acceptByWall" | "acceptByZone"> {
+  const zone = state.lead.zone;
+  const s = span(atWall, track.acceptWaitDays ?? 1, zone);
+  return { acceptBy: at + s, acceptByWall: atWall + s, acceptByZone: zone };
+}
+
+/** The invite's own sent result on the track, if any: the basis of its acceptance deadline. */
+export function inviteResult(state: SubjectState, track: TrackDefinition): StepResult | undefined {
+  return state.results.find((r) => r.trackId === track.id && linkedinStepKind(track, r.stepId) === "invite");
+}
+
+/**
+ * The connection (ADR 0004 3.3): stored once on the track, at its point on the lead's clock, and the first message (the step
+ * 5.1 names now) resolved from it with its own wait, whether or not the lead runs, as a send's successor is (ADR 0003 2.4).
+ */
+export function connect(state: SubjectState, trackId: string, how: "accepted" | "already_connected", at: number, atWall: number): SubjectState {
+  const p = progressOf(state, trackId);
+  const track = state.campaign.definition.tracks.find((t) => t.id === trackId);
+  if (!p || !track || p.finishedAt !== null || (p.connection ?? null) !== null) return state;
+  const connected = withTrack(state, trackId, (t) => ({ ...t, connection: how, connectedAt: at, connectedWall: atWall, nextStepId: null, dueAt: null, dueWall: null, dueZone: null, basisAt: null, basisWall: null }));
+  return advanceTrack(connected, track, at, atWall);
+}
+
+/**
+ * An acceptance the platform reports, at its own time `providerTime` (ADR 0004 3.3). Always recorded as a fact on the track
+ * (`acceptedWall`). It connects the track only while the track awaits acceptance and the acceptance came before the
+ * deadline, read on the lead's clock: an acceptance after the deadline, or on a finished track, starts nothing.
+ */
+export function recordAcceptance(state: SubjectState, trackId: string, providerTime: number, handedWall: number, now: number, point: typeof sendPoint = sendPoint): SubjectState {
+  const p = progressOf(state, trackId);
+  if (!p) return state;
+  const s = (p.acceptedWall ?? null) === null ? withTrack(state, trackId, (t) => ({ ...t, acceptedWall: Math.min(Math.max(providerTime, handedWall), now) })) : state;
+  if (!awaitingAcceptance(s, trackId)) return s;
+  const at = point(s.subject.clock, s.freezes, providerTime, handedWall, now);
+  if (at.at >= (p.acceptBy ?? Infinity)) return s;
+  return connect(s, trackId, "accepted", at.at, at.atWall);
+}
+
+/**
+ * The acceptance expiry with the fallback off (ADR 0004 3.3; ticket 27 attaches here): the invite is to be withdrawn, and the
+ * track finishes `invite_not_accepted` at the deadline, in lead time and the wall instant it stood at, so what waits on it
+ * starts after its delay from then. The lead's other tracks carry on; the endings are checked after it by evaluation.
+ */
+export function inviteExpired(state: SubjectState, trackId: string, now: number): SubjectState {
+  const p = progressOf(state, trackId);
+  if (!p || (p.acceptBy ?? null) === null) return state;
+  const at = p.acceptBy ?? 0;
+  const atWall = wallAtLead(state.subject.clock, state.freezes, at, now);
+  const wanted = withTrack(state, trackId, (t) => ({ ...t, inviteWithdrawal: "wanted", inviteWithdrawalLastWall: null }));
+  return finishTrack(wanted, trackId, "invite_not_accepted", at, atWall);
+}
+
+/**
+ * The sender is already connected to the profile, found by the pre-send check at the invite's slot (ADR 0004 3.3): in the
+ * handover's own write, no provider call. The claim is withdrawn (its reservation released), the invite gets the result
+ * skipped, `already_connected`, and the track is connected at that instant, so the first message follows with its wait.
+ */
+export function inviteAlreadyConnected(state: SubjectState, attemptId: string, now: number): SubjectState {
+  const a = state.attempts.find((x) => x.id === attemptId);
+  if (!a || a.state !== "claimed") return state;
+  const step = applyAttemptEvent(a, workOf(state, a.idempotencyKey), { kind: "quiesce" });
+  let s = withWork(withAttempt(state, { ...step.attempt, endedBy: "guard" }), step.work);
+  const at = leadNow(s.subject.clock, now);
+  const atWall = wallOfLead(s.subject.clock, now);
+  if (!s.results.some((r) => r.stepId === a.stepId)) s = { ...s, results: [...s.results, { stepId: a.stepId, trackId: a.trackId, result: "skipped", reason: "already_connected", at, atWall, attemptId: a.id }] };
+  return attend(connect(s, a.trackId, "already_connected", at, atWall), now);
+}
+
+/** An invite withdrawal's answer (ADR 0004 3.3): withdrawn, found accepted first (recorded as a fact), or asked again later. */
+export function inviteWithdrawalAnswer(state: SubjectState, trackId: string, answer: "withdrawn" | "already_accepted" | "unknown", now: number, acceptedAt: number | null = null): SubjectState {
+  const p = progressOf(state, trackId);
+  if (!p || p.inviteWithdrawal !== "wanted") return state;
+  if (answer === "unknown") return withTrack(state, trackId, (t) => ({ ...t, inviteWithdrawalLastWall: now }));
+  if (answer === "withdrawn") return withTrack(state, trackId, (t) => ({ ...t, inviteWithdrawal: "withdrawn", inviteWithdrawalLastWall: now }));
+  return withTrack(state, trackId, (t) => ({ ...t, inviteWithdrawal: "accepted_first", inviteWithdrawalLastWall: now, acceptedWall: t.acceptedWall ?? acceptedAt ?? now }));
+}
+
+/** Whether a track's invite withdrawal is to be asked of the session at `now`: wanted, and not answered unknown within a settling period. */
+export function inviteWithdrawalDue(p: TrackProgress, now: number): boolean {
+  return p.inviteWithdrawal === "wanted" && ((p.inviteWithdrawalLastWall ?? null) === null || now >= (p.inviteWithdrawalLastWall ?? 0) + ENGINE_PARAMS.SETTLING);
 }

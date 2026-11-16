@@ -19,10 +19,33 @@ export const UNDO_SINCE_18 = `
 `;
 
 /**
+ * Migration 22 undone (ticket 24, ADR 0004): the columns and tables it added, dropped. The four tables it rebuilt need no
+ * undoing: a later run of 22 rebuilds them from the columns it names. Run first by every undo that goes back past 22.
+ */
+export const UNDO_22 = `
+  ALTER TABLE track_progress DROP COLUMN connection;
+  ALTER TABLE track_progress DROP COLUMN connected_at;
+  ALTER TABLE track_progress DROP COLUMN connected_wall;
+  ALTER TABLE track_progress DROP COLUMN accepted_wall;
+  ALTER TABLE track_progress DROP COLUMN accept_by;
+  ALTER TABLE track_progress DROP COLUMN accept_by_wall;
+  ALTER TABLE track_progress DROP COLUMN accept_by_zone;
+  ALTER TABLE track_progress DROP COLUMN invite_withdrawal;
+  ALTER TABLE track_progress DROP COLUMN invite_withdrawal_last_wall;
+  ALTER TABLE provider_work DROP COLUMN kind;
+  ALTER TABLE provider_work DROP COLUMN note;
+  ALTER TABLE attempts DROP COLUMN action;
+  ALTER TABLE campaigns DROP COLUMN test_linkedin;
+  DROP TABLE social_allowances;
+  DROP TABLE linkedin_profile_marks;
+  DELETE FROM schema_migrations WHERE version >= 22;
+`;
+
+/**
  * Migration 21 undone (question Q7 answered): a skip's cause and the unsent mark, dropped. Run first by a test that takes
  * a database back to before an earlier migration, so that migration and every one after it, 21 included, apply again.
  */
-export const UNDO_21 = `
+export const UNDO_21 = `${UNDO_22}
   ALTER TABLE track_progress DROP COLUMN conversation_owners;
   ALTER TABLE sms_bindings DROP COLUMN unsent;
   DELETE FROM schema_migrations WHERE version >= 21;

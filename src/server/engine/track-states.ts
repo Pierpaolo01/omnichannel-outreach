@@ -31,6 +31,9 @@ export function finishedStateOf(reason: FinishReason): Exclude<DependentTrackSta
       return "skipped";
     case "dropped_for_win_back":
       return "dropped_for_win_back";
+    // A LinkedIn invite not accepted in time (ADR 0004 3.3): the track ended, and the enrollment read names why.
+    case "invite_not_accepted":
+      return "finished";
     default: {
       const unhandled: never = reason;
       throw new Error(`A finish reason Activity has no state for: ${String(unhandled)}`);

@@ -34,7 +34,7 @@ const listOf = (parts: readonly string[]): string => (parts.length <= 2 ? parts.
 /** "a", "a or b", "a, b, or c". */
 const eitherOf = (parts: readonly string[]): string => (parts.length <= 2 ? parts.join(" or ") : `${parts.slice(0, -1).join(", ")}, or ${parts.at(-1)}`);
 
-type Channel = "email" | "sms";
+type Channel = "email" | "sms" | "linkedin";
 type Why = NeedsAttention["noUsableChannel"][number]["channels"][number]["why"];
 type ReachChannel = NeedsAttention["noUsableChannel"][number]["channels"][number]["channel"];
 
@@ -42,6 +42,7 @@ type ReachChannel = NeedsAttention["noUsableChannel"][number]["channels"][number
 const CHANNEL_WORDS: Record<Channel, { provider: string; accounts: string; account: string; send: (n: number) => string; due: (n: number) => string }> = {
   email: { provider: "Instantly", accounts: "inboxes", account: "inbox", send: (n) => `${n} email ${n === 1 ? "send" : "sends"}`, due: (n) => (n === 1 ? "email" : "emails") },
   sms: { provider: "the SMS provider", accounts: "numbers", account: "SMS number", send: (n) => `${n} ${n === 1 ? "text" : "texts"}`, due: (n) => (n === 1 ? "text" : "texts") },
+  linkedin: { provider: "the LinkedIn session", accounts: "LinkedIn sessions", account: "LinkedIn session", send: (n) => `${n} LinkedIn ${n === 1 ? "step" : "steps"}`, due: (n) => (n === 1 ? "LinkedIn step" : "LinkedIn steps") },
 };
 
 const capital = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
@@ -177,6 +178,8 @@ function detailLine(channel: ReachChannel, why: "missing" | "bad"): string {
       return why === "missing" ? "they have no mobile number" : "their mobile number is marked wrong";
     case "call":
       return why === "missing" ? "they have no number to call" : "every number to call is marked wrong";
+    case "linkedin":
+      return why === "missing" ? "they have no LinkedIn profile in the import" : "their LinkedIn profile is marked unreachable";
     default: {
       const unhandled: never = channel;
       throw new Error(`A channel with no sentence: ${String(unhandled)}`);

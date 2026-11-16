@@ -483,14 +483,16 @@ function Touches({ touches, notes, userZone }: { touches: readonly TouchView[]; 
 
 const PLAIN = "bg-raised text-muted shadow-[inset_0_0_0_1px_var(--color-line)]";
 
-function touchRow(t: TouchView): { icon: "email" | "sms" | "reply" | "call"; tone: string; title: string; body: string | null } {
+function touchRow(t: TouchView): { icon: "email" | "sms" | "reply" | "call" | "linkedin"; tone: string; title: string; body: string | null } {
   switch (t.kind) {
+    case "linkedin":
+      return { icon: "linkedin", tone: PLAIN, title: "LinkedIn step sent", body: null };
     case "email":
       return { icon: "email", tone: PLAIN, title: "Email sent", body: t.copy?.subject || null };
     case "sms":
       return { icon: "sms", tone: PLAIN, title: "Text sent", body: null };
     case "reply":
-      return { icon: "reply", tone: "bg-hand-soft text-hand", title: t.channel === "email" ? "Replied by email" : "Replied by text", body: null };
+      return { icon: "reply", tone: "bg-hand-soft text-hand", title: t.channel === "email" ? "Replied by email" : t.channel === "linkedin" ? "Marked replied on LinkedIn" : "Replied by text", body: null };
     case "call":
       return { icon: "call", tone: "bg-call-soft text-call", title: OUTCOME_TITLE[t.outcome], body: [t.declinedPath ? DECLINED_PATH_LINE[t.declinedPath].slice(0, -1) : null, dialledLine(t.number), t.note].filter(Boolean).join(". ") || null };
   }

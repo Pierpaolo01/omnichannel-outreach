@@ -33,6 +33,7 @@ export function stepWaitApi(why: StepWait): StepWaitApi {
     case "call_capacity":
     case "on_call_list":
     case "call_hours_closed":
+    case "awaiting_acceptance":
       return why;
     default: {
       const unhandled: never = why;
@@ -45,7 +46,12 @@ export function stepWaitApi(why: StepWait): StepWaitApi {
 export function stepWhenView(when: StepWhen, now: number, today: number): StepWhenView {
   switch (when.kind) {
     case "waits":
-      return when.channel ? { kind: "waits", why: stepWaitApi(when.why), channel: when.channel } : { kind: "waits", why: stepWaitApi(when.why) };
+      return {
+        kind: "waits",
+        why: stepWaitApi(when.why),
+        ...(when.channel ? { channel: when.channel } : {}),
+        ...(when.until !== undefined ? { until: new Date(when.until).toISOString() } : {}),
+      };
     case "ready":
       return { kind: "ready" };
     case "at":

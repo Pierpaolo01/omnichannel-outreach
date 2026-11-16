@@ -369,7 +369,7 @@ function ContactField({ id, label, icon, value, onChange, type, placeholder, err
   );
 }
 
-const STEP_ICON: Record<TestStepRow["channel"], IconName> = { email: "email", sms: "sms", call: "call" };
+const STEP_ICON: Record<TestStepRow["channel"], IconName> = { email: "email", sms: "sms", call: "call", linkedin: "linkedin" };
 
 function RunPanel({ tab, starting }: { tab: TestRunTabView; starting: boolean }) {
   const run = tab.run;
