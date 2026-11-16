@@ -465,7 +465,8 @@ export async function callTaskView(store: OutreachStore, taskId: string, now: nu
   for (const a of s.attempts) {
     if (a.state !== "sent") continue;
     const sentWall = s.work.find((w) => w.key === a.idempotencyKey)?.sentWall ?? a.handedWall ?? a.claimedWall;
-    const channel = s.campaign.definition.tracks.find((t) => t.id === a.trackId)?.channel === "sms" ? "sms" : "email";
+    const own = s.campaign.definition.tracks.find((t) => t.id === a.trackId)?.channel;
+    const channel = own === "sms" ? "sms" : own === "linkedin" ? "linkedin" : "email";
     touches.push({ touch: { kind: channel, at: iso(sentWall), stepId: a.stepId, copy: a.copy }, t: sentWall });
   }
   for (const r of s.replies) touches.push({ touch: { kind: "reply", channel: r.channel, at: iso(r.atWall) }, t: r.atWall });

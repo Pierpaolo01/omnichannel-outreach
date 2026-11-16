@@ -9,7 +9,7 @@ import { launchCheck, type LaunchCheck } from "../../domain/sequence/blockers.ts
 import { REQUEST_ID_DIFFERENT, REQUEST_ID_REUSED, type OutcomeInput } from "../../domain/sequence/calls.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
-import { runs, sealReckoning, settledEvaluation, settledReadiness, stillSettled, type SettledEvaluation } from "../../domain/sequence/progress.ts";
+import { awaitingAcceptance, runs, sealReckoning, settledEvaluation, settledReadiness, stillSettled, type SettledEvaluation } from "../../domain/sequence/progress.ts";
 import { definitionProblems, type CampaignDefinition } from "../../domain/sequence/definition.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
 import { judgeCampaignControl, type LeadControl, type LeadExpectation } from "../../domain/sequence/controls.ts";
@@ -579,6 +579,8 @@ export class Engine {
           .map((p) => ({ wall: now + ((p.dueAt ?? 0) - leadNow(s.subject.clock, now)), window: isCall(p.trackId) ? null : windowOf(s, p.trackId), zone: s.lead.zone }));
         // A track waiting to start after another (ticket 13) starts at its resolved instant; it has no window of its own to wait for then.
         for (const p of s.tracks) if (p.startedAt === null && p.startAt !== null) due.push({ wall: now + (p.startAt - leadNow(s.subject.clock, now)), window: [], zone: s.lead.zone });
+        // A LinkedIn invite's acceptance deadline (ADR 0004 3.3): its expiry finishes the track then, whatever the window.
+        for (const p of s.tracks) if (awaitingAcceptance(s, p.trackId) && p.acceptBy != null) due.push({ wall: now + (p.acceptBy - leadNow(s.subject.clock, now)), window: [], zone: s.lead.zone });
         // An open call task can expire at the user's next day (the skip limit, ticket 15).
         cached = { version, due, openCall: s.callTasks.some((t) => t.open && t.kind === "call") };
         this.wakeCache.set(id, cached);
@@ -1217,6 +1219,27 @@ export class Engine {
         return { write: out.state, answer: "accepted", reason: null, effect: JSON.stringify(effectOf(s, action, out.state, now)) };
       });
       return this.answerOf(record);
+    });
+  }
+
+  /**
+   * The user marks a lead (or a test run) replied on LinkedIn (ADR 0004 section 7): in one transaction with its request id,
+   * bound to its first answer like every control, judged on the subject as of the action's instant. Accepted, it stops the
+   * subject in this campaign only; the worker then runs, as after any accepted control.
+   */
+  markReplied(subjectId: string, requestId: string): Promise<{ ok: true; replayed: boolean } | { ok: false; reason: string }> {
+    return this.ticks.run(async () => {
+      const now = this.now();
+      const record = await this.store.controlSubject(subjectId, now, { id: requestId, action: "mark_replied", body: JSON.stringify({ action: "mark_replied", channel: "linkedin" }) }, this.rules.requestStanding, (stored) => {
+        const s = this.rules.asOfAction(stored, now, this.rules.evaluate);
+        const out = this.rules.markReplied(s, requestId, now);
+        if (!out.ok) return { write: same(s, stored) ? null : s, answer: "refused", reason: out.reason, effect: null };
+        return { write: out.state, answer: "accepted", reason: null, effect: JSON.stringify({ channel: "linkedin" }) };
+      });
+      if (record.kind === "reused" || record.kind === "different") return { ok: false as const, reason: CONTROL_REQUEST_REUSED };
+      if (record.answer === "refused") return { ok: false as const, reason: record.reason ?? "Refused." };
+      if (record.kind === "answered") await this.runTick();
+      return { ok: true as const, replayed: record.kind === "replayed" };
     });
   }
 

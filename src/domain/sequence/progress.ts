@@ -1114,6 +1114,8 @@ export interface SettledEvaluation {
 export function settledEvaluation(state: SubjectState, now: number, nextUserDay: number, conversations: string): SettledEvaluation {
   const lead = leadNow(state.subject.clock, now);
   const at = state.tracks.filter((p) => p.startedAt === null && p.startAt !== null).map((p) => now + ((p.startAt ?? 0) - lead));
+  // A LinkedIn invite's acceptance deadline: the evaluation at it finishes the track (ADR 0004 3.3).
+  for (const p of state.tracks) if (awaitingAcceptance(state, p.trackId) && p.acceptBy != null) at.push(now + (p.acceptBy - lead));
   if (state.callTasks.some((t) => t.open)) at.push(nextUserDay);
   const recheck = conversationRecheck(state, now);
   if (recheck.at !== null) at.push(recheck.at);

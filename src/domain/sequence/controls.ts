@@ -8,7 +8,8 @@
 import { leadNow, wallOfLead } from "./clock.ts";
 import type { TrackDefinition } from "./definition.ts";
 import type { OutreachStatus } from "../outreach-status.ts";
-import { advanceTrack, channelReaches, deriveStatus, end, enterMain, enterWinBack, evaluate, finishTrack, hasWorkLeft, liveTracksFor, progressOf, quiesce, runs, synced } from "./progress.ts";
+import { markedReplyId } from "./reply-identity.ts";
+import { advanceTrack, applyReply, channelReaches, deriveStatus, end, enterMain, enterWinBack, evaluate, finishTrack, hasWorkLeft, liveTracksFor, progressOf, quiesce, runs, synced } from "./progress.ts";
 import { isUncertain } from "./attempt.ts";
 import type { SubjectState } from "./state.ts";
 
@@ -287,4 +288,33 @@ export function judgeCampaignControl(
   rules: { readonly campaignPrecondition: typeof campaignPrecondition },
 ): string | null {
   return campaignRefusal(row, pause) ?? rules.campaignPrecondition(row, expected);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The user's reply mark (ADR 0004 section 7): the app detects no social reply, so the user marks it.
+
+export const NOTHING_SENT_ON_LINKEDIN = "Nothing has been sent to them on LinkedIn in this campaign, so there is no LinkedIn reply to mark.";
+
+/**
+ * Why marking a LinkedIn reply is refused, or null (ADR 0004 section 7, question Q39): a lead's campaign must be launched;
+ * a lead that already replied, or ended interested on a call, is not stopped again (ADR 0003 2.4's reply row); and some
+ * LinkedIn work of the subject must have been handed over in this campaign, since nothing else could be answered there.
+ */
+export function markRepliedRefusal(state: SubjectState): string | null {
+  const { subject, campaign } = state;
+  if (subject.kind === "enrollment" && campaign.launchedAt === null) return NOT_LAUNCHED;
+  if (subject.ended === "replied") return "They are already marked replied in this campaign.";
+  if (subject.ended === "interested_on_call") return "They were interested on a call: outreach to them has ended in this campaign.";
+  if (!state.work.some((w) => w.kind != null && w.firstHandedWall !== null)) return NOTHING_SENT_ON_LINKEDIN;
+  return null;
+}
+
+/**
+ * The mark (ADR 0004 section 7): a reply on LinkedIn at the mark's instant, stored under the control's request id, which
+ * stops this subject in this campaign only and quiesces it, by the engine's own reply rule (`applyReply`).
+ */
+export function markReplied(state: SubjectState, requestId: string, now: number): ControlResult {
+  const why = markRepliedRefusal(state);
+  if (why !== null) return refuse(why);
+  return accept(applyReply(state, { channel: "linkedin", atWall: now, providerRef: markedReplyId("linkedin", requestId) }, now));
 }

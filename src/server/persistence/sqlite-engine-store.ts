@@ -361,25 +361,37 @@ export class SqliteEngineStore implements EngineStore {
       const raw = strOrNull(c, column);
       return raw === null ? null : (JSON.parse(raw) as TestContact);
     };
-    const contacts: TestContacts = { email: contact("test_email"), mobile: contact("test_mobile") };
+    const linkedin = c["test_linkedin"] === undefined ? null : contact("test_linkedin");
+    const contacts: TestContacts = { email: contact("test_email"), mobile: contact("test_mobile"), ...(linkedin ? { linkedin } : {}) };
     return {
       contacts,
-      leadHas: { email: contacts.email !== null && this.leadHasKey("email", contacts.email.key), mobile: contacts.mobile !== null && this.leadHasKey("phone", contacts.mobile.key) },
+      leadHas: {
+        email: contacts.email !== null && this.leadHasKey("email", contacts.email.key),
+        mobile: contacts.mobile !== null && this.leadHasKey("phone", contacts.mobile.key),
+        ...(linkedin ? { linkedin: this.leadHasProfile(linkedin.key) } : {}),
+      },
     };
   }
 
+  /** Whether some person's record holds this LinkedIn profile (ADR 0004 section 8's boundary), read by the one key rule. */
+  private leadHasProfile(key: string): boolean {
+    return this.sql("SELECT linkedin_url FROM people WHERE linkedin_url <> ''").all().some((r) => linkedinProfileKey(str(r, "linkedin_url")) === key);
+  }
+
   async testContacts(campaignId: string): Promise<StoredTestContacts | null> {
-    const c = this.sql("SELECT test_email, test_mobile FROM campaigns WHERE id = ?").get(campaignId);
+    const c = this.sql("SELECT test_email, test_mobile, test_linkedin FROM campaigns WHERE id = ?").get(campaignId);
     return c ? this.storedTestContacts(c) : null;
   }
 
-  async saveTestContacts(campaignId: string, contacts: TestContacts): Promise<{ readonly ok: true } | { readonly ok: false; readonly field: "email" | "mobile"; readonly message: string } | { readonly ok: false; readonly missing: true }> {
+  async saveTestContacts(campaignId: string, contacts: TestContacts): Promise<{ readonly ok: true } | { readonly ok: false; readonly field: "email" | "mobile" | "linkedin"; readonly message: string } | { readonly ok: false; readonly missing: true }> {
     return this.transaction(() => {
       if (!this.sql("SELECT 1 FROM campaigns WHERE id = ?").get(campaignId)) return { ok: false as const, missing: true as const };
       // The boundary, read in the saving transaction: a contact a lead's record has is refused.
       if (contacts.email !== null && this.leadHasKey("email", contacts.email.key)) return { ok: false as const, field: "email" as const, message: CONTACT_IS_A_LEAD.email };
       if (contacts.mobile !== null && this.leadHasKey("phone", contacts.mobile.key)) return { ok: false as const, field: "mobile" as const, message: CONTACT_IS_A_LEAD.mobile };
-      this.run("UPDATE campaigns SET test_email = ?, test_mobile = ? WHERE id = ?", [contacts.email ? JSON.stringify(contacts.email) : null, contacts.mobile ? JSON.stringify(contacts.mobile) : null, campaignId]);
+      const linkedin = contacts.linkedin ?? null;
+      if (linkedin !== null && this.leadHasProfile(linkedin.key)) return { ok: false as const, field: "linkedin" as const, message: CONTACT_IS_A_LEAD.linkedin };
+      this.run("UPDATE campaigns SET test_email = ?, test_mobile = ?, test_linkedin = ? WHERE id = ?", [contacts.email ? JSON.stringify(contacts.email) : null, contacts.mobile ? JSON.stringify(contacts.mobile) : null, linkedin ? JSON.stringify(linkedin) : null, campaignId]);
       return { ok: true as const };
     });
   }
@@ -420,10 +432,10 @@ export class SqliteEngineStore implements EngineStore {
       this.run("INSERT INTO subjects (id, kind) VALUES (?, 'test_run')", [id]);
       this.run(
         `INSERT INTO test_runs (id, campaign_id, render_as, email_value, email_key, mobile_value, mobile_key, definition_version, definition_edited_at,
-           started_wall, request_id, status, frozen_since, frozen_total)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+           started_wall, request_id, status, frozen_since, frozen_total, linkedin_value, linkedin_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)`,
         [id, campaignId, request.renderAs, contacts.email?.value ?? null, contacts.email?.key ?? null, contacts.mobile?.value ?? null, contacts.mobile?.key ?? null,
-          num(c, "definition_version"), strOrNull(c, "definition_edited_at"), now, request.id, now, now],
+          num(c, "definition_version"), strOrNull(c, "definition_edited_at"), now, request.id, now, now, contacts.linkedin?.value ?? null, contacts.linkedin?.key ?? null],
       );
       this.run("INSERT INTO freezes (subject_id, from_wall, to_wall) VALUES (?, ?, NULL)", [id, now]);
       const base = this.load(id, now);
@@ -525,7 +537,7 @@ export class SqliteEngineStore implements EngineStore {
       .map((e) => this.mergeDataOf(e));
     const accounts = this.sql("SELECT id, channel, healthy FROM sender_accounts ORDER BY id")
       .all()
-      .map((a) => ({ id: str(a, "id"), channel: str(a, "channel") === "sms" ? ("sms" as const) : ("email" as const), healthy: num(a, "healthy") === 1 }));
+      .map((a) => ({ id: str(a, "id"), channel: replyChannelOf(str(a, "channel")), healthy: num(a, "healthy") === 1 }));
     return { leads, accounts };
   }
 
@@ -1435,7 +1447,7 @@ export class SqliteEngineStore implements EngineStore {
         .map((f) => ({ fromWall: num(f, "from_wall"), toWall: numOrNull(f, "to_wall") })),
       replies: this.sql("SELECT * FROM replies WHERE subject_id = ? ORDER BY at_wall, rowid")
         .all(subjectId)
-        .map((r) => ({ channel: str(r, "channel") === "sms" ? ("sms" as const) : ("email" as const), atWall: num(r, "at_wall"), providerRef: storedReplyIdFromRow(str(r, "provider_ref")) })),
+        .map((r) => ({ channel: replyChannelOf(str(r, "channel")), atWall: num(r, "at_wall"), providerRef: storedReplyIdFromRow(str(r, "provider_ref")) })),
       pendingReplies: this.sql(
         `SELECT DISTINCT inbox, address FROM reply_events
          WHERE state = 'pending'

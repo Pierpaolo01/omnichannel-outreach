@@ -1709,5 +1709,5 @@ export interface TestStepRow {
 
 /** A test contact refused: malformed (400), or a lead's (409), by field. */
 export interface TestContactsRefusal {
-  readonly error: { readonly code: "invalid_test_contact" | "test_contact_is_a_lead"; readonly message: string; readonly field: "email" | "mobile" };
+  readonly error: { readonly code: "invalid_test_contact" | "test_contact_is_a_lead"; readonly message: string; readonly field: "email" | "mobile" | "linkedin" };
 }

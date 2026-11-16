@@ -25,7 +25,7 @@ export interface TestRunRecord {
 /** A campaign's test contacts, and whether a lead's record now has either (the boundary). */
 export interface StoredTestContacts {
   readonly contacts: TestContacts;
-  readonly leadHas: { readonly email: boolean; readonly mobile: boolean };
+  readonly leadHas: { readonly email: boolean; readonly mobile: boolean; readonly linkedin?: boolean };
 }
 
 /** A sender account as the provider port reports it. */
@@ -286,7 +286,7 @@ export interface EngineStore {
   /** The campaign's test contacts and whether a lead's record has either now; null for no such campaign. */
   testContacts(campaignId: string): Promise<StoredTestContacts | null>;
   /** Stores the contacts in one transaction, refusing one a person's or company's live detail has. */
-  saveTestContacts(campaignId: string, contacts: TestContacts): Promise<{ readonly ok: true } | { readonly ok: false; readonly field: "email" | "mobile"; readonly message: string } | { readonly ok: false; readonly missing: true }>;
+  saveTestContacts(campaignId: string, contacts: TestContacts): Promise<{ readonly ok: true } | { readonly ok: false; readonly field: "email" | "mobile" | "linkedin"; readonly message: string } | { readonly ok: false; readonly missing: true }>;
   /**
    * Run test in one transaction with its request id (17a's binding): the facts are read, `refusal` judges them, and an
    * accepted run is inserted and entered with `enter`. The effect names the run.
