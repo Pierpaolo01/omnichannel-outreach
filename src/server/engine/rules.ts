@@ -163,6 +163,18 @@ export interface Rules {
   readonly stopTestOnEdit: (state: SubjectState, now: number) => SubjectState;
 }
 
+/**
+ * The rules an engine or a read runs by: the defaults with `given` in place, and `evaluate` reading the acceptance expiry
+ * through the rules (ADR 0004 3.5), so a swapped `inviteExpired` (ticket 27's attach point, and a mutation) is the one every
+ * evaluation applies. Every place that merges rules calls this.
+ */
+export function rulesWith(given: Partial<Rules> = {}): Rules {
+  const rules: Rules = { ...DEFAULT_RULES, ...given };
+  if (rules.inviteExpired === DEFAULT_RULES.inviteExpired) return rules;
+  const evaluateAt = rules.evaluate;
+  return { ...rules, evaluate: (state, now, options) => evaluateAt(state, now, { inviteExpired: rules.inviteExpired, ...options }) };
+}
+
 export const DEFAULT_RULES: Rules = {
   recordAcceptance,
   inviteExpired,

@@ -154,7 +154,7 @@ Priority: an invite to a new lead is a first contact; a message to a connected l
 
 ## 7. Replies
 
-- **A new control, `mark_replied`**, on `POST /api/enrollments/:id/controls` with `{ requestId, action: "mark_replied", channel: "linkedin" }`, judged by ADR 0003 "Ticket 17a"'s one order (`judgeControl`), with its request id bound to its first answer and its precondition (`expect`). It is a control, not a provider event, because the user is the only source.
+- **A new control, `mark_replied`, on a route of its own**: `POST /api/enrollments/:id/replies` with `{ requestId, channel: "linkedin" }`, through the store's `controlSubject` like every control, so its request id is bound to its first answer and body in the transaction that judges it, on the lead as of the action's instant (`asOfAction`). It is a control, not a provider event, because the user is the only source. It is not one of the reads' `LEAD_CONTROLS`, so no existing read, preview or generated control run changes; part b reads its refusal by the same function (`markRepliedRefusal`).
 - **Allowed** when the lead's campaign is launched, the lead has not ended `replied` or `interested_on_call` (ADR 0003 2.4's reply row: a reply to a lead ended otherwise sets replied), and the lead has LinkedIn work handed over in this campaign (an invite or a message: nothing else could be answered there; question Q39). Refused otherwise with a plain reason.
 - **Effect** is `applyReply` with channel `linkedin` and the stored id `linkedin:<request id>`: `ended = replied`, the stopping reply's channel and instant (the mark's), the lead quiesces in this campaign only. The status is the normal handoff status, "Replied", with its channel.
 - **Activity** says it from the reply record: "You marked them replied on LinkedIn", at the mark's instant, never as a detected reply.
@@ -212,14 +212,14 @@ Each must be killed by a recorded seed in `pnpm check`, failing the invariant it
 
 | Mutation | Invariant |
 | - | - |
-| an invite claimed again after its work settled sent (the invite is not recognised as a resolved step) | L1 |
+| an invite waiting for acceptance is offered as ready and sent again | L1 |
 | the first message's due time resolved at the invite's send, not the connection | L2 |
 | a reply mark recorded without ending the lead | L3 |
 | the acceptance expiry finishes the track without wanting the withdrawal | L4 |
-| the invite allowance ignored (every LinkedIn step counted as a message) | L5 |
+| the invite allowance ignored (one bucket for every LinkedIn action) | L5 |
 | an acceptance applied as a reply | L6 |
 | the note allowance ignored (every invite carries its note) | L7 |
-| the deadline counted from the invite's handover, not its send | L8 |
+| the expiry finishes the track at the instant evaluated, not at its deadline (the laptop off across a deadline shows it) | L8 |
 | the pre-send check's `connected` ignored | L9 |
 | the expiry ends the lead instead of finishing the track | L10 |
 
@@ -255,6 +255,15 @@ Verified with the simulated provider only (no LinkedIn session is connected, no 
 - "the laptop is off": the rules are the engine's interruption rules, verified on the fakes; whether a session survives a sleep and stays signed in is unverified.
 
 Nothing presents LinkedIn as a working integration: the running app's port lists no session, so a LinkedIn track cannot launch (blocker 3), and the simulated sessions exist only in tests.
+
+## As built (part a, 16 November 2026)
+
+- **Code.** `src/domain/linkedin-profile.ts` (the URL rule); `definition.ts` (`linkedin`, `acceptWaitDays`, `linkedinPool`, `linkedinStepKind`, the validator); `progress.ts` (the LinkedIn section: `awaitingAcceptance`, `acceptDeadline`, `connect`, `recordAcceptance`, `inviteExpired`, `inviteAlreadyConnected`, the withdrawal answer); `dispatch.ts` (`forAction`, the kind's view of an account; `noteFor`, decided in `handOver`; the `awaiting_acceptance` read); `controls.ts` (`markReplied`); the engine's LinkedIn port, event, pre-send and withdrawal passes; migration 22; `rulesWith` (`rules.ts`), so a swapped `inviteExpired` is the one every evaluation applies, in the engine and in the reads.
+- **Routes.** `POST /api/enrollments/:id/replies`, `PUT /api/sender-accounts/:id/allowances`, `GET /api/linkedin-provider`, and the test profile (`linkedin`) on `PUT /api/campaigns/:id/test-contacts`.
+- **Tests.** `src/domain/linkedin-profile.test.ts`; `src/server/engine/linkedin.test.ts` (invite with note, acceptance, follow-ups; already connected; the expiry with withdrawal and the track after it; a late acceptance; missing and unreachable profiles; allowances and the note; the reply mark; the running app's blocker 3); the generated runs `test/support/generated-linkedin.ts` with mutations in `test/support/linkedin-mutations.ts`, one per invariant, all killed (recorded seed offsets from 24000: L1 0, L2 0, L3 4, L4 0, L5 0, L6 0, L7 0, L8 5, L9 1, L10 0). Fixed seeds 0, 1, 4, 5, 12 and 18 reach every behaviour the runs name; all 100 offsets pass unmutated.
+- **L2 is checked on the handover log**, not only deliveries: the simulated platform refuses a message to a non-connection, so a broken engine's early message never lands, and the invariant is that the engine never asks.
+- **Two holes the first runs found and the record now models:** the acceptance deadline was neither a wake of the worker nor a horizon of its evaluation cache, so an expiry waited for an unrelated tick (`settledEvaluation` and `nextWakeAt` now include it); and the record's held-time arithmetic had to walk the holds forward (`afterHolds`) rather than iterate.
+- **Not built in part a:** the canvas, the record's screens and the measures panel (part b); a test run's tab line for awaiting acceptance (the read gives the reason; part b words it).
 
 ## Consequences
 

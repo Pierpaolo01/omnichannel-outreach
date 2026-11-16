@@ -21,7 +21,7 @@ import { UnconnectedEmailPort, UnprovisionedSmsPort } from "./engine/ports.ts";
 import { accountView, progressView, stepEnvOf } from "./engine/views.ts";
 import type { StepEnv } from "../domain/sequence/dispatch.ts";
 import { callsView, callTaskView, needsAttentionView, recordCalls, todayView } from "./engine/call-views.ts";
-import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
+import { rulesWith, type Rules } from "./engine/rules.ts";
 import { sealReckoning } from "../domain/sequence/progress.ts";
 import { editImpactView } from "./engine/edit-impact.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
@@ -223,7 +223,7 @@ const checkBody = requestObject({ businessesCsv: z.string().optional(), peopleCs
 
 /** The HTTP interface. Every route is under /api; the web client is served separately. */
 export function createApp({ store, now, newId, engine: givenEngine, emailProvider, smsProvider = "none", linkedinProvider = "none", rules: givenRules, bulkRules, measureRules }: AppDependencies): Hono {
-  const rules: Rules = { ...DEFAULT_RULES, ...givenRules };
+  const rules: Rules = rulesWith(givenRules);
   const engine = givenEngine ?? new Engine({ store: store.engine, port: new UnconnectedEmailPort(), smsPort: new UnprovisionedSmsPort(), now: () => Date.parse(now()), newId });
   const app = new Hono().basePath("/api");
   /**

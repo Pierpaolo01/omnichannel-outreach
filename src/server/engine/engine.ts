@@ -28,7 +28,7 @@ function outcomeBody(input: OutcomeInput): string {
   return JSON.stringify({ outcome: input.outcome, redial: input.redial, callbackAt: input.callbackAt, declinedPath: input.declinedPath, numberId: input.numberId, note: input.note, noteScope: input.noteScope });
 }
 import { callOutcome, UnconnectedLinkedInPort, UnprovisionedSmsPort, type AttemptRef, type CallOutcome, type PortCallResult, type HandoverRequest, type ProviderEvent, type SendPort } from "./ports.ts";
-import { DEFAULT_RULES, type Rules } from "./rules.ts";
+import { rulesWith, type Rules } from "./rules.ts";
 import { HEARTBEAT_KEY, NOTICE_KEY, parseInstant, PROVIDERS_KEY, TICK_ENDED_KEY, TICK_FAILED_KEY } from "./worker-state.ts";
 import { relevantChannels, waitingOn, type ProviderEvidence } from "../../domain/sequence/providers.ts";
 
@@ -292,7 +292,7 @@ export class Engine {
     this.clockNow = deps.now;
     this.now = () => this.applyingAt ?? deps.now();
     this.newId = deps.newId;
-    this.rules = { ...DEFAULT_RULES, ...deps.rules };
+    this.rules = rulesWith(deps.rules);
     this.hooks = deps.hooks ?? {};
     this.waitFor = deps.waitFor ?? waitWithTimer;
     this.locks = deps.locks ?? PROCESS_LOCKS;

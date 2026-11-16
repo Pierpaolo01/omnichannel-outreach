@@ -240,6 +240,37 @@ describe("the reply mark (ADR 0004 section 7)", () => {
   });
 });
 
+describe("a test run to the user's own test profile (ADR 0004 section 8)", () => {
+  test("the invite goes to the test profile, waits until the user accepts it by hand, then the messages follow a minute apart", async () => {
+    const { h, delivered } = await world();
+    const TEST = "https://www.linkedin.com/in/fictional-user-test-profile";
+    // A lead's own profile is refused as a test contact (the boundary).
+    const { campaign: c } = await h.createCampaign("Test me", { businesses: BUSINESSES, people: PEOPLE });
+    await h.defineSequence(c.id, definition([linkedin("li", [invite(), step("m1", 0, "Thanks."), step("m2", 2, "Following up.")], 3)]));
+    expect((await h.request("PUT", `/api/campaigns/${c.id}/test-contacts`, { email: "", mobile: "", linkedin: PAT })).status).toBe(409);
+    expect((await h.request("PUT", `/api/campaigns/${c.id}/test-contacts`, { email: "", mobile: "", linkedin: "not a profile" })).status).toBe(400);
+    expect((await h.request("PUT", `/api/campaigns/${c.id}/test-contacts`, { email: "", mobile: "", linkedin: TEST })).status).toBe(200);
+    const tab = (await h.request<{ definitionVersion: number }>("GET", `/api/campaigns/${c.id}/test-runs`)).body;
+    const lead = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${c.id}`)).body.rows[0]?.enrollments[0]?.id ?? "";
+    h.clock = MONDAY_9;
+    const run = await h.request("POST", `/api/campaigns/${c.id}/test-runs`, { requestId: "run-1", renderAs: lead, expect: { definitionVersion: tab.definitionVersion } });
+    expect(run.status).toBe(200);
+    await h.advanceTo(MONDAY_9 + 10 * MIN);
+    expect(delivered(TEST).map((d) => d.action)).toEqual(["invite"]);
+    // The acceptance wait is not cut to a minute (question Q40): an hour later nothing more has gone or expired.
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    expect(delivered(TEST)).toHaveLength(1);
+    expect(h.linkedin.withdrawalLog).toHaveLength(0);
+    // The user accepts the invite on their test profile; the messages follow with the test's minute waits.
+    expect(h.linkedin.acceptNow(TEST)).toBe(true);
+    await h.advanceTo(MONDAY_9 + 3 * H);
+    expect(delivered(TEST).map((d) => d.stepId)).toEqual(["inv", "m1", "m2"]);
+    expect(h.linkedin.deliveryLog.every((d) => d.destination === TEST)).toBe(true);
+    const m = (await h.request<CampaignMeasures>("GET", `/api/campaigns/${c.id}/measures`)).body;
+    expect(m.linkedin).toMatchObject({ invitesSent: 1, invitesAccepted: 1, messagesSent: 2, fromTests: { invitesSent: 1, invitesAccepted: 1, messagesSent: 2 } });
+  });
+});
+
 describe("the running app presents no LinkedIn integration (ADR 0004 1.1)", () => {
   test("with no session connected, the provider read says none and a LinkedIn track cannot launch (blocker 3)", async () => {
     const h = new EngineHarness({ start: MONDAY_9, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
