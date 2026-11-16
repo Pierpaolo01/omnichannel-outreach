@@ -5,6 +5,7 @@
  * not loaded: nothing is claimed.
  */
 import type { ConversationOwnerView, SmsProviderStatus } from "../../shared/api.ts";
+import type { ConversationChannel } from "../../domain/sequence/definition.ts";
 
 export function whyNoSmsNumber(status: SmsProviderStatus | null): string | null {
   if (status === null) return null;
@@ -31,7 +32,38 @@ export function ownersPhrase(owners: readonly ConversationOwnerView[]): string {
   return last === undefined ? "another campaign" : names.length === 1 ? last : `${names.slice(0, -1).join(", ")} and ${last}`;
 }
 
-export function conversationTaken(owners: readonly ConversationOwnerView[], whose: "their" | "your test" = "their", tense: "past" | "now" = "past"): string {
-  const with_ = ownersPhrase(owners);
-  return `${whose} mobile ${tense === "past" ? "was already" : "is"} in a text conversation with ${with_} on every number this campaign can use`;
+/**
+ * A conversation's channel in words (ADR 0004, question Q41; council on b21af02, item 1): the destination, what reached it,
+ * and the sender accounts. One entry per channel of conversations: a channel `holdsConversations` gains fails typecheck here
+ * until it has its words, so no sentence names another channel's destination. The stored reason ids keep "sms" in their
+ * names (ADR 0004, follow-up); the sentences never do.
+ */
+const CONVERSATION_WORDS: Readonly<Record<ConversationChannel, { readonly destination: string; readonly conversation: string; readonly first: string; readonly senders: string }>> = {
+  sms: { destination: "mobile", conversation: "a text conversation", first: "the first text", senders: "on every number this campaign can use" },
+  linkedin: { destination: "LinkedIn profile", conversation: "a LinkedIn conversation (an invite or a message)", first: "the first invite or message", senders: "on every LinkedIn session this campaign can use" },
+};
+
+/** The channel of a taken or unsettled conversation, from a read's channel: only SMS and LinkedIn tracks have one. */
+export function conversationChannelOf(channel: string | undefined): ConversationChannel {
+  switch (channel) {
+    case "linkedin":
+      return "linkedin";
+    case "sms":
+      return "sms";
+    default:
+      // A taken or unsettled conversation is only ever an SMS or LinkedIn track's; a read that names none is an SMS one's
+      // (reads stored before ticket 24 name no channel).
+      return "sms";
+  }
+}
+
+export function conversationTaken(owners: readonly ConversationOwnerView[], channel: ConversationChannel, whose: "their" | "your test" = "their", tense: "past" | "now" = "past"): string {
+  const w = CONVERSATION_WORDS[channel];
+  return `${whose} ${w.destination} ${tense === "past" ? "was already" : "is"} in ${w.conversation} with ${ownersPhrase(owners)} ${w.senders}`;
+}
+
+/** A wait on another subject's first action whose fate is not known yet (`sms_conversation_unsettled`), in its channel's words. */
+export function conversationUnsettled(owners: readonly ConversationOwnerView[], channel: ConversationChannel): string {
+  const w = CONVERSATION_WORDS[channel];
+  return `${w.first} from ${ownersPhrase(owners)} to the same ${w.destination}, ${w.senders}, isn’t known to have gone or not yet`;
 }

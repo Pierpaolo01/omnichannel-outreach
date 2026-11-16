@@ -55,7 +55,7 @@ export function finishedStateOf(reason: FinishReason): Exclude<DependentTrackSta
  */
 export function dependentStateOf(live: SubjectState, track: Pick<TrackDefinition, "id" | "channel">, now: number): DependentTrackState {
   const p = live.tracks.find((t) => t.trackId === track.id);
-  if (p?.finishReason === "skipped_conversation_taken") return { state: "skipped_conversation_taken", startsAt: null, owners: conversationOwnersView(live, track.id) };
+  if (p?.finishReason === "skipped_conversation_taken") return { state: "skipped_conversation_taken", startsAt: null, owners: conversationOwnersView(live, track.id), channel: track.channel === "linkedin" ? "linkedin" : "sms" };
   if (p?.finishReason) {
     const state = finishedStateOf(p.finishReason);
     // Only a taken conversation names its owners, above.

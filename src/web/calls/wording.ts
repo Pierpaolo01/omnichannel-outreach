@@ -10,7 +10,7 @@ import { STATUS_LABEL } from "../status.tsx";
 import type { DeskSnapshot } from "./callDesk.ts";
 import { dayLabel, zonedInstants, type CallbackChoice } from "./callbackTime.ts";
 import { capacityItems, heldTrackItems, noUsableChannelItem, providerWaitItems, sendingInterruptedItem } from "./interruption.ts";
-import { conversationTaken, ownersPhrase } from "../campaign/sms-wording.ts";
+import { conversationChannelOf, conversationTaken, conversationUnsettled } from "../campaign/sms-wording.ts";
 
 /** The outcome buttons, as the approved prototype labels them. */
 export const OUTCOME_LABEL = {
@@ -359,15 +359,16 @@ const SENDER_PROBLEM: Readonly<Record<string, string>> = {
  * Why a track is on hold, as a clause (ADR 0003 5.4): the one wording Needs attention, the person record and the Test run
  * tab use. A wait on another campaign's first text names that campaign (`owners`).
  */
-export const holdReasonClause = (reason: HoldReasonApi, owners: readonly ConversationOwnerView[] = []): string =>
-  reason === "sms_conversation_unsettled" ? `the first text from ${ownersPhrase(owners)} to the same mobile, on every number this campaign can use, isn’t known to have gone or not yet` : HOLD_REASON[reason];
+export const holdReasonClause = (reason: HoldReasonApi, owners: readonly ConversationOwnerView[] = [], channel?: string): string =>
+  reason === "sms_conversation_unsettled" ? conversationUnsettled(owners, conversationChannelOf(channel)) : HOLD_REASON[reason];
 
 const HOLD_REASON: Readonly<Record<HoldReasonApi, string>> = {
   unresolved: "the provider hasn’t confirmed whether a message went",
   render_failed: "a message couldn’t be put together from its copy",
   provider_skipped: "the provider skipped the lead",
   no_thread: "a follow-up has no earlier email to continue",
-  sms_conversation_unsettled: "the first text from another campaign to the same mobile, on every number this campaign can use, isn’t known to have gone or not yet",
+  // Worded with its channel by `holdReasonClause`, never from here.
+  sms_conversation_unsettled: "another campaign’s first contact with them isn’t known to have gone or not yet",
   invite_pending_elsewhere: "an invite to them is already pending on LinkedIn that this application didn’t send",
 };
 
@@ -758,7 +759,7 @@ export function declineTrackLine(a: DeclineTrackView, mode: "preview" | "record"
       return preview ? `${name} is skipped: there is nothing to reach them on for it.` : `${name} was skipped: there is nothing to reach them on for it.`;
     case "skipped_conversation_taken":
       // Already skipped when the preview is read, so the past tense in both modes (question Q7 answered).
-      return `${name} was skipped: ${conversationTaken(a.owners)}.`;
+      return `${name} was skipped: ${conversationTaken(a.owners, conversationChannelOf(a.channel))}.`;
     case "skipped":
       return `${name} was skipped.`;
     case "stopped":

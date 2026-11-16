@@ -13,7 +13,10 @@ export type TrackChannel = "email" | "sms" | "call" | "linkedin";
  * by ADR 0004, question Q41): an SMS number and a mobile, a LinkedIn session and a profile. A reply there cannot say which
  * campaign it answers, so the pair belongs to the first subject known to have reached it. The one test of it.
  */
-export const holdsConversations = (channel: TrackChannel | undefined): channel is "sms" | "linkedin" => channel === "sms" || channel === "linkedin";
+export type ConversationChannel = "sms" | "linkedin";
+export const holdsConversations = (channel: TrackChannel | undefined): channel is ConversationChannel => channel === "sms" || channel === "linkedin";
+/** Every channel of conversations, for tests that every one has its words. */
+export const CONVERSATION_CHANNELS: readonly ConversationChannel[] = ["sms", "linkedin"];
 
 /** The channels a sender account serves (a phone track needs none): email, SMS and the social channels (ADR 0004). */
 export type SendChannel = Exclude<TrackChannel, "call">;

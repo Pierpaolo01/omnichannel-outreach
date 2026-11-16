@@ -99,7 +99,7 @@ export function stepWaitWords(why: StepWaitApi, channel: "email" | "sms" | "call
     case "provider_skipped":
     case "no_thread":
     case "sms_conversation_unsettled":
-      return `held: ${holdReasonClause(why)}`;
+      return `held: ${holdReasonClause(why, [], channel)}`;
     case "no_window":
       return "not going: its sending hours never open";
     case "no_transport":
@@ -206,7 +206,7 @@ export function nextStepSentence(lead: RecordLead, userZone: string): string {
   const next = (): string => {
     if (!step) return refusalOf(lead, "skip") ?? "";
     if (campaignPaused) return join(`Next: ${stepPhrase(step)}.`, frozen);
-    if (held?.hold) return `Next: ${stepPhrase(step)}, on hold because ${holdReasonClause(held.hold, held.holdOwners)}.`;
+    if (held?.hold) return `Next: ${stepPhrase(step)}, on hold because ${holdReasonClause(held.hold, held.holdOwners, step.channel)}.`;
     return `Next: ${stepPhrase(step)}${due(dueOf(lead, step), userZone)}.`;
   };
   const status: OutreachStatus = lead.status;

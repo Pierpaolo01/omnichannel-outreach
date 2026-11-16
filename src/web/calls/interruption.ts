@@ -1,6 +1,6 @@
 import type { AttentionLead, InterruptionNoticeView, NeedsAttention, SendingInterruptedView } from "../../shared/api.ts";
 import { dateIn, holdReasonClause, isoDateIn, timeIn, type AttentionItem } from "./wording.ts";
-import { conversationTaken } from "../campaign/sms-wording.ts";
+import { conversationChannelOf, conversationTaken } from "../campaign/sms-wording.ts";
 
 /**
  * An instant as Today says it (ticket 20b): the time in the user's zone, with its date when that is not `today`, the
@@ -126,7 +126,7 @@ export function heldTrackItems(held: NeedsAttention["heldTracks"]): AttentionIte
     const first = tracks[0] as NeedsAttention["heldTracks"][number];
     const leads = new Set(tracks.map((h) => h.enrollmentId)).size;
     const owners = tracks.flatMap((h) => h.owners).filter((o, i, all) => all.findIndex((x) => x.name === o.name && x.test === o.test) === i);
-    const body = `On hold because ${holdReasonClause(first.reason, owners)}. Nothing is dropped.`;
+    const body = `On hold because ${holdReasonClause(first.reason, owners, first.channel)}. Nothing is dropped.`;
     if (leads === 1) return { key: `tracks-${first.campaign.id}-${first.reason}`, tone: "pause" as const, title: `${leadName(first)} is on hold in ${first.campaign.name}`, body, action: recordAction(first) };
     return {
       key: `tracks-${first.campaign.id}-${first.reason}`,
@@ -193,7 +193,7 @@ function unreachableLine(c: NeedsAttention["noUsableChannel"][number]["channels"
     case "declined":
       return "they have declined on a call";
     case "conversation_taken":
-      return conversationTaken(c.owners, "their", "now");
+      return conversationTaken(c.owners, conversationChannelOf(c.channel), "their", "now");
     case "missing":
     case "bad":
       return detailLine(c.channel, c.why);
@@ -205,7 +205,7 @@ function unreachableLine(c: NeedsAttention["noUsableChannel"][number]["channels"
 }
 
 /** Each reason the read can give, as a cause of several leads' endings: a new reason fails typecheck here. */
-const CAUSE: Record<Why, string> = { missing: "a missing detail", bad: "a detail marked wrong", declined: "a decline on a call", conversation_taken: "a mobile in another campaign’s text conversation" };
+const CAUSE: Record<Why, string> = { missing: "a missing detail", bad: "a detail marked wrong", declined: "a decline on a call", conversation_taken: "another campaign’s conversation with them" };
 
 /**
  * Leads left with no usable channel (`noUsableChannel`, most recently ended first): one entry. They stay listed while the

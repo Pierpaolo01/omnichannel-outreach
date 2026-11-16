@@ -661,7 +661,7 @@ export interface NeedsAttention {
    * LinkedIn action left unknown is unresolved work, listed with the other unresolved work (ADR 0003 5.4).
    */
   readonly inviteWithdrawalsUnknown?: readonly { readonly enrollmentId: string; readonly trackId: string; readonly unknownAnswers: number }[];
-  readonly heldTracks: readonly (AttentionLead & { readonly enrollmentId: string; readonly trackId: string; readonly reason: HoldReasonApi; readonly owners: readonly ConversationOwnerView[] })[];
+  readonly heldTracks: readonly (AttentionLead & { readonly enrollmentId: string; readonly trackId: string; readonly channel?: string; readonly reason: HoldReasonApi; readonly owners: readonly ConversationOwnerView[] })[];
   readonly accountWaits: readonly { readonly accountId: string; readonly reason: "quota" | "rate_limited"; readonly until: string | null }[];
   /**
    * Sender accounts on any channel that cannot send, each listed once (ticket 13; spec "Needs
@@ -1033,7 +1033,7 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
 export type DependentTrackState =
   | { readonly state: "waiting"; readonly startsAt: string }
   /** Skipped because its mobile's SMS conversation belongs to `owners` (question Q7 answered). */
-  | { readonly state: "skipped_conversation_taken"; readonly startsAt: null; readonly owners: readonly ConversationOwnerView[] }
+  | { readonly state: "skipped_conversation_taken"; readonly startsAt: null; readonly owners: readonly ConversationOwnerView[]; readonly channel?: "sms" | "linkedin" }
   | {
       readonly state:
         | "started"

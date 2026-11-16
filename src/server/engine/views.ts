@@ -238,7 +238,7 @@ export async function needsAttention(
     if (!stored) continue;
     for (const p of stored.tracks) {
       const reason = heldReason(stored, p.trackId, now);
-      if (reason) heldTracks.push({ enrollmentId: id, trackId: p.trackId, reason, owners: unsettledOwnersOf(stored, p.trackId, now).map((o) => ({ name: o.name, test: o.test })) });
+      if (reason) heldTracks.push({ enrollmentId: id, trackId: p.trackId, channel: stored.campaign.definition.tracks.find((t) => t.id === p.trackId)?.channel ?? "email", reason, owners: unsettledOwnersOf(stored, p.trackId, now).map((o) => ({ name: o.name, test: o.test })) });
     }
     // Ticket 20a: as of the read, each due step the claim's step guard accepts now that waits for a transport the
     // provider cannot use yet, or for an account full for its reset day (not for a pacing slot or an in-flight place).
