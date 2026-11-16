@@ -1,4 +1,4 @@
-import { UNDO_SINCE_18 } from "../../../test/support/undo-migrations.ts";
+import { UNDO_SINCE_18, UNDO_21 } from "../../../test/support/undo-migrations.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
@@ -46,7 +46,7 @@ describe("migration 15 on a database with calls logged before it", () => {
 
     // Back to just before migration 15.
     const db = new DatabaseSync(file);
-    db.exec(`
+    db.exec(`${UNDO_21}
       ALTER TABLE call_attempts DROP COLUMN declined_path;
       DROP TABLE IF EXISTS hold_intervals;
       DROP TABLE IF EXISTS control_requests;

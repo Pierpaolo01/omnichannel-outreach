@@ -60,17 +60,21 @@ function toWal(db: DatabaseSync): void {
 }
 
 /** Opens (creating if needed) the SQLite database at `path` and applies pending migrations. */
-export function openSqliteStore(path: string): OutreachStore {
-  return openStoreOn(openDatabase(path));
+export function openSqliteStore(path: string, now: () => number = Date.now): OutreachStore {
+  return openStoreOn(openDatabase(path), MIGRATIONS, now);
 }
 
 /**
  * The store on a database opened by `openDatabase`, its pending migrations applied first (ticket 20a, council F: `main.ts`
  * takes the worker's lease between the two, so a refused process never migrates). `migrations` is for tests.
  */
-export function openStoreOn(db: DatabaseSync, migrations: readonly Migration[] = MIGRATIONS): OutreachStore {
+export function openStoreOn(db: DatabaseSync, migrations: readonly Migration[] = MIGRATIONS, now: () => number = Date.now): OutreachStore {
   migrate(db, () => new Date().toISOString(), migrations);
-  return new SqliteStore(db);
+  const store = new SqliteStore(db);
+  // Before the store is handed to anyone: the one release rule over every standing binding (ADR 0003, Q7 point 10).
+  // Only once the schema has migration 21's `unsent` column: a test that migrates part way stops before it.
+  if ((migrations.at(-1)?.version ?? 0) >= 21) store.sqliteEngine.releaseUnsentAtOpen(now());
+  return store;
 }
 
 /** Opens (creating if needed) the SQLite database at `path`, with its settings, and migrates nothing. */
@@ -109,11 +113,13 @@ export function liveDetailRowOf(db: DatabaseSync, detailId: string): Row | undef
 class SqliteStore implements OutreachStore {
   private readonly db: DatabaseSync;
   readonly engine: EngineStore;
+  readonly sqliteEngine: SqliteEngineStore;
   readonly instantly: InstantlyStore;
 
   constructor(db: DatabaseSync) {
     this.db = db;
-    this.engine = new SqliteEngineStore(db);
+    this.sqliteEngine = new SqliteEngineStore(db);
+    this.engine = this.sqliteEngine;
     this.instantly = new SqliteInstantlyStore(db);
   }
 

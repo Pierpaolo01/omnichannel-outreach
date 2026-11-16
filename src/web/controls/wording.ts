@@ -9,7 +9,7 @@ import { STATUS_GROUPS, statusGroup, type StatusGroup } from "../../domain/outre
 import { clockTime } from "../time.ts";
 import type { CampaignPauseRead, ControlStepView, ControlView, LeadControlApi, OutreachStatus, RecordLead, StepWaitApi, StepWhenView } from "../../shared/api.ts";
 import { stepNoun } from "../../shared/track-label.ts";
-import { callHoldSentence, dateIn, HOLD_REASON, HOURS_CLOSED_PHRASE, listedForPhrase } from "../calls/wording.ts";
+import { callHoldSentence, dateIn, holdReasonClause, HOURS_CLOSED_PHRASE, listedForPhrase } from "../calls/wording.ts";
 import { dayLabel } from "../calls/callbackTime.ts";
 import { STATUS_GROUP_LABEL } from "../status.tsx";
 
@@ -97,8 +97,8 @@ export function stepWaitWords(why: StepWaitApi, channel: "email" | "sms" | "call
     case "render_failed":
     case "provider_skipped":
     case "no_thread":
-    case "sms_conversation_taken":
-      return `held: ${HOLD_REASON[why]}`;
+    case "sms_conversation_unsettled":
+      return `held: ${holdReasonClause(why)}`;
     case "no_window":
       return "not going: its sending hours never open";
     case "no_transport":
@@ -112,14 +112,12 @@ export function stepWaitWords(why: StepWaitApi, channel: "email" | "sms" | "call
     case "no_destination":
       return "not going: there is no good address to send it to";
     case "sender_slot":
-      // A claim its pacing slot holds back, its own or after another step on the same sender: no time is promised.
+      // Its claim's sender's pacing slot is not reached; a slot only moves later. No time is promised.
       return "waiting for its sender’s next sending slot";
     case "sender_rate_limited":
       return "waiting: the provider is limiting how fast its senders can send";
     case "sender_waiting":
       return "waiting for a sender that can take it";
-    case "sender_busy":
-      return "waiting for its sender to finish the sends it has under way";
     case "call_hours_closed":
       return HOURS_CLOSED_PHRASE;
     case "sender_unavailable":
@@ -138,23 +136,23 @@ export function stepWaitWords(why: StepWaitApi, channel: "email" | "sms" | "call
 }
 
 /**
- * When a step goes, from the read (`StepWhenView`): "due now" only when dispatch hands it over on its next round; a later
- * instant, given only while the step waits on time alone, as the earliest it can go, never as a promise ("earliest Tue 10 Nov
- * at 09:00", in the user's zone), since what holds a sender then is not known yet; or why it waits, with no time.
- * Provisional wording, for the principal.
+ * When a step goes, from the read (`StepWhenView`): ready, when its time has come and nothing of its own holds it, in line
+ * for its sender and never "now" (other leads may go first); a later instant, given only while the step waits on time alone,
+ * as the earliest it can go, never as a promise ("earliest Tue 10 Nov at 09:00", in the user's zone); or why it waits, with
+ * no time. Provisional wording, for the principal.
  */
 export function stepWhenPhrase(when: StepWhenView, userZone: string): string {
   switch (when.kind) {
-    case "now":
-      return "due now";
+    case "ready":
+      return "ready to send, in line for its sender";
     case "at":
       return `earliest ${whenIn(userZone, when.at)}`;
     case "waits":
       return stepWaitWords(when.why, when.channel);
     // A call goes on the list on a day, never at a time of day (council on 178de98, item 3).
     case "call_day":
-      // Placed on dispatch's next round only when `now`; a call later today waits for room judged then (council on cc9bf55, item 4).
-      if (when.now) return "going on your call list now";
+      // Due, with calling hours open and room on today's list: ready for the list, which the next round fills in order.
+      if (when.now) return "ready to go on your call list";
       return when.today ? "on your call list later today at the earliest" : `on your call list from ${dayLabel(when.day)} at the earliest`;
     case "listed_for":
       return listedForPhrase(when.day);
@@ -196,9 +194,12 @@ export function nextStepSentence(lead: RecordLead, userZone: string): string {
   const step = currentStepOf(lead);
   const campaignPaused = lead.campaignState.paused;
   const frozen = "Waiting times are frozen while this campaign is paused.";
+  // A held step is never said to be due: the row says why, in the wording Needs attention uses (ADR 0003 5.4).
+  const held = step ? lead.tracks.find((t) => t.trackId === step.trackId && t.nextStep?.stepId === step.stepId && t.hold !== null) : undefined;
   const next = (): string => {
     if (!step) return refusalOf(lead, "skip") ?? "";
     if (campaignPaused) return join(`Next: ${stepPhrase(step)}.`, frozen);
+    if (held?.hold) return `Next: ${stepPhrase(step)}, on hold because ${holdReasonClause(held.hold, held.holdOwners)}.`;
     return `Next: ${stepPhrase(step)}${due(dueOf(lead, step), userZone)}.`;
   };
   const status: OutreachStatus = lead.status;

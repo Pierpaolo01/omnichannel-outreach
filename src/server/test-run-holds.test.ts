@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { account, calledWork, handed, MOBILE, MONDAY_9, multiTrackState, step, subjectState, track, withAttempts } from "../../test/support/sequence-state.ts";
+import { calledWork, handed, MOBILE, MONDAY_9, multiTrackState, step, subjectState, track, withAttempts } from "../../test/support/sequence-state.ts";
 import { enterMain, evaluate } from "../domain/sequence/progress.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
 import { DEFAULT_RULES } from "./engine/rules.ts";
@@ -21,10 +21,10 @@ function testRun(steps = [step("s1", { threading: "new_subject" }), step("s2", {
 }
 const rowOf = (s: SubjectState, stepId: string, now = MONDAY_9) => stepsOf(s, DEFAULT_RULES, now).find((r) => r.stepId === stepId);
 
-describe("each hold is the Test run row's reason, never 'with the provider'", () => {
+describe("each hold is the Test run row's held state with its reason, ahead of 'with the provider' (every hold, email and SMS)", () => {
   test("silently sent work whose lookup answered unknown: unresolved, not 'With Instantly'", () => {
     const s = withAttempts(testRun(), [handed({ id: "a-0", idempotencyKey: "a-0" })], [calledWork({ key: "a-0", unresolvedSince: MONDAY_9 + 17 * 60_000 })]);
-    expect(rowOf(s, "s1", MONDAY_9 + 18 * 60_000)).toMatchObject({ state: "due", at: null, waits: "unresolved" });
+    expect(rowOf(s, "s1", MONDAY_9 + 18 * 60_000)).toMatchObject({ state: "held", at: null, hold: "unresolved" });
   });
   test("handed over and not yet answered: with the provider (no hold)", () => {
     const s = withAttempts(testRun(), [handed({ id: "a-0", idempotencyKey: "a-0" })]);
@@ -32,25 +32,27 @@ describe("each hold is the Test run row's reason, never 'with the provider'", ()
   });
   test("the provider skipped it: provider_skipped", () => {
     const s = withAttempts(testRun(), [handed({ id: "a-0", idempotencyKey: "a-0", state: "rejected", rejectReason: "provider_skipped" })], [calledWork({ key: "a-0", settled: "rejected" })]);
-    expect(rowOf(s, "s1", MONDAY_9 + 60_000)).toMatchObject({ state: "due", waits: "provider_skipped" });
+    expect(rowOf(s, "s1", MONDAY_9 + 60_000)).toMatchObject({ state: "held", at: null, hold: "provider_skipped" });
   });
   test("copy that cannot render: render_failed", () => {
-    expect(rowOf(testRun([step("s1", { threading: "new_subject", body: "Hi {{title}}" })]), "s1")).toMatchObject({ state: "due", waits: "render_failed" });
+    expect(rowOf(testRun([step("s1", { threading: "new_subject", body: "Hi {{title}}" })]), "s1")).toMatchObject({ state: "held", at: null, hold: "render_failed" });
   });
   test("a follow-up with no thread to continue: no_thread", () => {
-    expect(rowOf(testRun([step("s1", { threading: "continue_thread" })]), "s1")).toMatchObject({ state: "due", waits: "no_thread" });
+    expect(rowOf(testRun([step("s1", { threading: "continue_thread" })]), "s1")).toMatchObject({ state: "held", at: null, hold: "no_thread" });
   });
   test("no good address to send to: no_destination", () => {
     const s = testRun();
     const bad = { ...s, lead: { ...s.lead, resolved: { "d-email": { liveId: "d-email", bad: true, owned: true } } } };
     expect(rowOf(bad, "s1")).toMatchObject({ state: "due", waits: "no_destination" });
   });
-  test("the mobile is in another subject's conversation on every number: sms_conversation_taken", () => {
+});
+
+describe("an SMS hold on the Test run tab comes before the provider's progress, as an email's does (merge of 2c27d03)", () => {
+  test("a text whose work the provider has not confirmed: held as unresolved, not 'With the SMS provider'", () => {
     const base = multiTrackState([track("t2", "sms", [step("m1", { subject: "", body: "Hi {{first_name|there}}." })])]);
-    const s = evaluate(enterMain({ ...base, subject: { ...base.subject, kind: "test_run" }, accounts: { ...base.accounts, "inbox-a": account("inbox-a") } }, MONDAY_9), MONDAY_9);
-    const other = (sender: string) => ({ sender, recipient: MOBILE.key, owner: "another", ownerCampaignId: "camp-2", ownerEnded: false });
-    const taken = { ...s, smsBindings: [other("+447700900001"), other("+447700900002")] };
-    expect(rowOf(taken, "m1", MONDAY_9 + H)).toMatchObject({ state: "due", waits: "sms_conversation_taken" });
+    const s = evaluate(enterMain({ ...base, subject: { ...base.subject, kind: "test_run" } }, MONDAY_9), MONDAY_9);
+    const sent = withAttempts(s, [handed({ id: "a-0", idempotencyKey: "a-0", trackId: "t2", stepId: "m1", accountId: "+447700900001", destination: MOBILE.key })], [calledWork({ key: "a-0", trackId: "t2", stepId: "m1", accountId: "+447700900001", destination: MOBILE.key, unresolvedSince: MONDAY_9 + 17 * 60_000 })]);
+    expect(rowOf(sent, "m1", MONDAY_9 + 18 * 60_000)).toMatchObject({ channel: "sms", state: "held", at: null, hold: "unresolved" });
   });
 });
 

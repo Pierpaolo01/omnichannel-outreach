@@ -75,7 +75,7 @@ export async function logWithMouse(page: Page, outcome: string, note = ""): Prom
 
 const NEEDS_ATTENTION = {
   stalledInboxes: [],
-  heldTracks: [{ enrollmentId: "e1", trackId: "sms", reason: "sms_conversation_taken" }],
+  heldTracks: [{ person: { id: "p1", name: "Pat Oneil" }, company: { id: "c1", name: "Harbour Lane Physio" }, campaign: { id: "k1", name: "Clinics, London" }, enrollmentId: "e1", trackId: "sms", reason: "provider_skipped", owners: [] }],
   accountWaits: [{ accountId: "outreach@northlight-mail.example", reason: "rate_limited", until: "2026-11-09T11:30:00.000Z" }],
   senderProblems: [
     { accountId: "sms-1", channel: "sms", label: "+44 7700 900999", problem: "disconnected" },
@@ -216,7 +216,7 @@ export function galleryLead(id: string, campaignId: string, status: OutreachStat
     sender: null,
     smsSender: null,
     zone: "Europe/London",
-    tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, hold: null, nextStep: { stepId: "s2", number: 2, when: { kind: "at", at: "2026-11-11T09:00:00.000Z" } }, callTask: null, steps: [] }],
+    tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], hold: null, holdOwners: [], nextStep: { stepId: "s2", number: 2, when: { kind: "at", at: "2026-11-11T09:00:00.000Z" } }, callTask: null, steps: [] }],
     branch: status === "in_win_back" ? "win_back" : "main",
     winBackEnteredAt: null,
     declined: null,
@@ -663,7 +663,7 @@ async function everyEntry(page: Page, size: "many" | "one"): Promise<void> {
       sendingInterrupted: { since: new Date(at - 20 * 60_000).toISOString(), cause: "providers_unreachable", lastFailedRead: { channel: "email", part: "observation", at: new Date(at - 60_000).toISOString() }, lastRoundFailedAt: null },
       waitingOnProvider: [{ channel: "email", since: new Date(Date.parse(body.overdueCallbacks[0]?.dueAt ?? "2026-11-09T09:00:00Z")).toISOString(), sends: size === "one" ? 1 : 312 }, { channel: "sms", since: null, sends: 47 }],
       waitingForCapacity: Array.from({ length: count }, (_, i) => ({ ...lead(i + 1), enrollmentId: `e-${i}`, campaignId: (campaigns[(i + 1) % 2] ?? campaigns[0]!).id, trackId: "t1", stepId: "s1", channel: i % 2 === 0 ? ("email" as const) : ("sms" as const), dueAt: "2026-11-09T08:00:00.000Z", accountIds: ["inbox-a"], resetsAt: "2026-11-10T00:00:00.000Z" })),
-      noUsableChannel: Array.from({ length: size === "one" ? 1 : 40 }, (_, i) => ({ ...lead(i + 1), enrollmentId: `n-${i}`, campaignId: (campaigns[(i + 1) % 2] ?? campaigns[0]!).id, endedAt: "2026-11-08T15:00:00.000Z", channels: [{ channel: "email" as const, why: "bad" as const }, { channel: "sms" as const, why: "missing" as const }, { channel: "call" as const, why: "declined" as const }] })),
+      noUsableChannel: Array.from({ length: size === "one" ? 1 : 40 }, (_, i) => ({ ...lead(i + 1), enrollmentId: `n-${i}`, campaignId: (campaigns[(i + 1) % 2] ?? campaigns[0]!).id, endedAt: "2026-11-08T15:00:00.000Z", channels: [{ channel: "email" as const, why: "bad" as const, owners: [] }, { channel: "sms" as const, why: "missing" as const, owners: [] }, { channel: "call" as const, why: "declined" as const, owners: [] }] })),
     });
   });
   await page.clock.setFixedTime(f.harness.clock);

@@ -7,13 +7,15 @@ import { stepWhen, type StepEnv } from "../domain/sequence/dispatch.ts";
 import { stepWaitApi } from "./engine/step-when-view.ts";
 import { isLive, maySend } from "../domain/sequence/attempt.ts";
 import { liveSteps, type TrackDefinition } from "../domain/sequence/definition.ts";
-import { progressOf } from "../domain/sequence/progress.ts";
+import { progressOf, unsettledOwnersOf } from "../domain/sequence/progress.ts";
+import { heldReason } from "../domain/sequence/dispatch.ts";
 import type { EndReason, FinishReason, SubjectState } from "../domain/sequence/state.ts";
 import type { TestRunEnding, TestRunRead, TestRunTab, TestStepRow } from "../shared/api.ts";
 import { stepNoun, trackLabel } from "../shared/track-label.ts";
 import type { TestRunRecord } from "./engine/engine-store.ts";
 import type { OutreachStore } from "./persistence/store.ts";
 import { firstListedDay, type CallViewRules } from "./engine/call-views.ts";
+import { conversationOwnersView } from "./engine/views.ts";
 import { startOfLocalDay } from "../domain/sequence/clock.ts";
 
 const iso = (t: number) => new Date(t).toISOString();
@@ -91,9 +93,11 @@ export function stepsOf(s: SubjectState, rules: CallViewRules, now: number, env:
   const shown = (t: TrackDefinition) => !t.removed || progressOf(s, t.id)?.startedAt != null;
   const tracks = [...def.tracks.filter((t) => t.branch === "main" && shown(t)), ...def.tracks.filter((t) => t.branch === "win_back" && shown(t))];
   const rows: TestStepRow[] = [];
-  // A pending email or text the read holds (a track hold, or any other reason but "with the provider") says that reason,
-  // ahead of the provider's progress: the tab never shows ordinary progress for a held step (verifier on cc9bf55, item 10).
-  const heldHere = (track: TrackDefinition, stepId: string): TestStepRow["waits"] => {
+  // Held (5.4) first, every hold (unresolved and sms_conversation_unsettled included), ahead of the provider's progress, for
+  // email and SMS: never said to be due (council on faac357, item 4; the verifier on cc9bf55, item 10).
+  const held = (trackId: string) => heldReason(s, trackId, now);
+  // Any other reason the read gives (but "with the provider") also comes before the provider's progress.
+  const waitsHere = (track: TrackDefinition, stepId: string): TestStepRow["waits"] => {
     const p = progressOf(s, track.id);
     if (track.channel === "call" || s.subject.ended !== null || !p || p.finishedAt !== null || p.nextStepId !== stepId) return null;
     const when = (rules.stepWhen ?? stepWhen)(s, track.id, now, env);
@@ -130,17 +134,26 @@ export function stepsOf(s: SubjectState, rules: CallViewRules, now: number, env:
         const day = firstListedDay(s, task, rules);
         rows.push({ ...base, state: "listed_later", at: day === null ? null : iso(startOfLocalDay(day, s.callDay.userZone)) });
       }
-      else if (heldHere(track, step.id)) rows.push({ ...base, state: "due", at: null, waits: heldHere(track, step.id) });
+      else if (s.subject.ended === null && p && p.finishedAt === null && p.nextStepId === step.id && held(track.id) !== null) {
+        const hold = held(track.id);
+        rows.push(hold === null ? { ...base, state: "due", at: iso(p.dueWall ?? 0) } : { ...base, state: "held", at: null, hold, holdOwners: unsettledOwnersOf(s, track.id, now).map((o) => ({ name: o.name, test: o.test })) });
+      } else if (waitsHere(track, step.id)) rows.push({ ...base, state: "due", at: null, waits: waitsHere(track, step.id) });
       else if (live) rows.push({ ...base, state: "with_provider", at: live.handedWall === null ? null : iso(live.handedWall) });
       // A step of a track that finished without reaching it: skipped, with why its track finished (council on ffa202c, item 13).
-      else if (p?.finishReason) rows.push({ ...base, state: "skipped", at: p.finishedWall === null ? null : iso(p.finishedWall), reason: trackEndedBecause(p.finishReason) });
-      else if (s.subject.ended === null && p && p.finishedAt === null && p.nextStepId === step.id && p.dueWall !== null) {
-        // When it goes, by the engine's own decision functions at the read (ADR 0003 "Reads that say when"): its window's
-        // next opening once the cut wait has ended, or why it waits, with no time.
+      else if (p?.finishReason) {
+        const skipped = { ...base, state: "skipped" as const, at: p.finishedWall === null ? null : iso(p.finishedWall), reason: trackEndedBecause(p.finishReason) };
+        // A test mobile in another campaign's SMS conversation names its owner (question Q7 answered).
+        rows.push(p.finishReason === "skipped_conversation_taken" ? { ...skipped, owners: conversationOwnersView(s, track.id) } : skipped);
+      } else if (s.subject.ended === null && p && p.finishedAt === null && p.nextStepId === step.id && p.dueWall !== null) {
+        // When it goes, by the engine's own decision functions at the read (ADR 0003 "Reads that say when"): ready, its
+        // window's next opening once the cut wait has ended, or why it waits, with no time.
         const when = (rules.stepWhen ?? stepWhen)(s, track.id, now, env);
         switch (when?.kind) {
           case "waits":
             rows.push({ ...base, state: "due", at: null, waits: stepWaitApi(when.why) });
+            break;
+          case "ready":
+            rows.push({ ...base, state: "due", at: iso(now) });
             break;
           case "at":
             rows.push({ ...base, state: "due", at: iso(Math.max(when.at, now)) });
@@ -173,6 +186,8 @@ function trackEndedBecause(reason: FinishReason): string {
   switch (reason) {
     case "skipped_missing_channel":
       return "missing_channel";
+    case "skipped_conversation_taken":
+      return "sms_conversation_taken";
     case "failed_bad_destination":
       return "bad_destination";
     case "skipped_declined":

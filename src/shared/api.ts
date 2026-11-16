@@ -140,7 +140,6 @@ export type StepWaitApi =
   | "sender_slot"
   | "sender_unavailable"
   | "sender_rate_limited"
-  | "sender_busy"
   | "sending_capacity"
   | "sender_waiting"
   | "call_capacity"
@@ -148,18 +147,19 @@ export type StepWaitApi =
   | "call_hours_closed";
 
 /**
- * When a pending step goes, as the engine decides it at the read's instant (`stepWhen`): due now (dispatch's next round
- * hands it over); the earliest instant, when it waits on time alone (its wait's end, then its window's opening); or why it
- * waits, with no time.
+ * When a pending step goes, as the engine decides it at the read's instant (`stepWhen`): ready (its time has come and nothing
+ * of its own holds it; no instant is promised); the earliest instant, when it waits on time alone (its wait's end, then its
+ * window's opening); or why it waits, with no time.
  */
 export type StepWhenView =
-  | { readonly kind: "now" }
+  /** Its time has come and nothing of its own holds it: in line for its sender, with no instant promised. */
+  | { readonly kind: "ready" }
   | { readonly kind: "at"; readonly at: string }
   /** `channel` names the step's channel where the reason depends on it (no transport). */
   | { readonly kind: "waits"; readonly why: StepWaitApi; readonly channel?: "email" | "sms" }
   /**
    * A call not yet placed: the user's day (YYYY-MM-DD) it goes on the list, with no time of day; `today` when that is the
-   * read's day; `now` when dispatch places it on its next round (due, calling hours open today, room on today's list).
+   * read's day; `now` when it is ready for the list (due, calling hours open today, room on today's list), with no instant promised.
    */
   | { readonly kind: "call_day"; readonly day: string; readonly today: boolean; readonly now: boolean }
   /** An open call listed from a later user day (YYYY-MM-DD), as the record's call line says it. */
@@ -486,10 +486,20 @@ export interface SequenceView {
 
 export type FinishReasonApi = import("../domain/sequence/state.ts").FinishReason;
 /**
- * Why a track waits for the user (ADR 0003 5.4). `sms_conversation_taken`: every number the SMS
- * track may use is in another campaign's conversation with this mobile (4.5, question Q7).
+ * A campaign whose lead or test owns the SMS conversation a track was skipped for (ADR 0003, question Q7 answered): an
+ * SMS thread is one conversation between two numbers, so the campaign that texted first keeps it, and the reads name it.
  */
-export type HoldReasonApi = "unresolved" | "render_failed" | "provider_skipped" | "no_thread" | "sms_conversation_taken";
+export interface ConversationOwnerView {
+  readonly name: string;
+  /** The conversation belongs to that campaign's test run, not to one of its leads. */
+  readonly test: boolean;
+}
+/**
+ * Why a track waits for the user (ADR 0003 5.4). A mobile whose conversation is taken on every number is not a hold: its
+ * SMS track is skipped (`skipped_conversation_taken`, question Q7 answered). `sms_conversation_unsettled`: every number
+ * is in another campaign's conversation whose first text is not known sent or not sent yet; it waits for that answer.
+ */
+export type HoldReasonApi = "unresolved" | "render_failed" | "provider_skipped" | "no_thread" | "sms_conversation_unsettled";
 
 export interface SendView {
   readonly attemptId: string;
@@ -528,7 +538,11 @@ export interface TrackProgressView {
   readonly started: boolean;
   readonly finishReason: FinishReasonApi | null;
   readonly finishedAt: string | null;
+  /** For `skipped_conversation_taken` (reason `sms_conversation_taken`): who owns the conversation. Empty otherwise. */
+  readonly conversationOwners: readonly ConversationOwnerView[];
   readonly hold: HoldReasonApi | null;
+  /** For `sms_conversation_unsettled`: the campaigns whose first text the track waits on. Empty otherwise. */
+  readonly holdOwners: readonly ConversationOwnerView[];
   /** The pending step and when it goes, as the engine decides it at the read (`stepWhen`). */
   readonly nextStep: { readonly stepId: string; readonly number: number; readonly when: StepWhenView } | null;
   /** A phone track's call task once placed on the user's list (ticket 14): open until its outcome or its track's finish. */
@@ -596,7 +610,11 @@ export interface NeedsAttention {
    */
   readonly overdueCallbacks: readonly { readonly taskId: string; readonly enrollmentId: string; readonly campaignId: string; readonly callbackAt: string; readonly dueAt: string }[];
   readonly stalledInboxes: readonly { readonly accountId: string; readonly holding: readonly string[] }[];
-  readonly heldTracks: readonly { readonly enrollmentId: string; readonly trackId: string; readonly reason: HoldReasonApi }[];
+  /**
+   * Held tracks (5.4), each with whose lead it is (ticket 20b's names) and, for `sms_conversation_unsettled`, the
+   * campaigns whose first text it waits on (`owners`; empty for every other reason).
+   */
+  readonly heldTracks: readonly (AttentionLead & { readonly enrollmentId: string; readonly trackId: string; readonly reason: HoldReasonApi; readonly owners: readonly ConversationOwnerView[] })[];
   readonly accountWaits: readonly { readonly accountId: string; readonly reason: "quota" | "rate_limited"; readonly until: string | null }[];
   /**
    * Sender accounts on any channel that cannot send, each listed once (ticket 13; spec "Needs
@@ -650,7 +668,8 @@ export interface NeedsAttention {
     readonly enrollmentId: string;
     readonly campaignId: string;
     readonly endedAt: string;
-    readonly channels: readonly { readonly channel: "email" | "sms" | "call"; readonly why: "missing" | "bad" | "declined" }[];
+    /** `conversation_taken`: its SMS track was skipped because `owners` hold the conversation (question Q7 answered); `owners` is empty for every other reason. */
+    readonly channels: readonly { readonly channel: "email" | "sms" | "call"; readonly why: "missing" | "bad" | "declined" | "conversation_taken"; readonly owners: readonly ConversationOwnerView[] }[];
   })[];
   /**
    * While sending is interrupted, the providers the dispatch gate waits on (ticket 20a, council B): each not answering,
@@ -871,8 +890,11 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
           readonly copy: { readonly subject: string; readonly body: string } | null;
         }
       | { readonly kind: "failed"; readonly stepNumber: number; readonly to: string; readonly reason: string }
-      /** `no_email`, `no_mobile`, `company_lead` (a company lead is never texted, ADR 0003 Q10), `block_list`, or the step's reason. */
-      | { readonly kind: "skipped"; readonly stepNumber: number | null; readonly reason: string }
+      /**
+       * `no_email`, `no_mobile`, `company_lead` (a company lead is never texted, ADR 0003 Q10), `block_list`,
+       * `sms_conversation_taken` (with `owners`, question Q7 answered), or the step's reason.
+       */
+      | { readonly kind: "skipped"; readonly stepNumber: number | null; readonly reason: string; readonly owners?: readonly ConversationOwnerView[] }
       /** A hard bounce, or a number the carrier reported invalid after a text: the address or number is marked bad. */
       | { readonly kind: "bounced"; readonly stepNumber: number | null; readonly to: string }
       /** The track ended because its address or number is marked bad, with no bounce event of this campaign's. */
@@ -963,6 +985,8 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
  */
 export type DependentTrackState =
   | { readonly state: "waiting"; readonly startsAt: string }
+  /** Skipped because its mobile's SMS conversation belongs to `owners` (question Q7 answered). */
+  | { readonly state: "skipped_conversation_taken"; readonly startsAt: null; readonly owners: readonly ConversationOwnerView[] }
   | {
       readonly state:
         | "started"
@@ -1625,8 +1649,10 @@ export type TestStepState =
   | "skipped"
   /** Handed to the provider; no answer yet. */
   | "with_provider"
-  /** Not sent yet: it goes at `at` (the read's instant when due now, else its window's next opening), or `at` is null and `waits` says why. */
+  /** Not sent yet: ready when `at` is the read's instant, else the earliest `at` (its window's next opening), or `at` is null and `waits` says why. */
   | "due"
+  /** Held (ADR 0003 5.4): it waits on what `hold` names, not on its wait; never said to be due. */
+  | "held"
   /** A call on your Calls list now, by the engine's listing rule. */
   | "on_your_list"
   /** A call of a running test that is not on today's list: `at` is the start of the first day it is listed, or null. */
@@ -1655,9 +1681,14 @@ export interface TestStepRow {
   /**
    * Why a step was skipped or failed: the engine's word on its result (`missing_channel`, …), or, for a step its track
    * finished without reaching, why the track finished: `missing_channel`, `bad_destination`, `declined`, `skipped_by_you`,
-   * `unworked`, `win_back`, `interested` or `skipped`.
+   * `unworked`, `win_back`, `interested`, `sms_conversation_taken` (with `owners`) or `skipped`.
    */
   readonly reason: string | null;
+  /** For `sms_conversation_taken`: whose conversation the test mobile is in (ADR 0003, question Q7 answered). */
+  readonly owners?: readonly ConversationOwnerView[];
+  /** For `held`: why, as Needs attention names a held track's reason; for `sms_conversation_unsettled`, whose text. */
+  readonly hold?: HoldReasonApi;
+  readonly holdOwners?: readonly ConversationOwnerView[];
 }
 
 /** A test contact refused: malformed (400), or a lead's (409), by field. */

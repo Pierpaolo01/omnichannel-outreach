@@ -414,6 +414,11 @@ export interface EngineStore {
   disconnectUnlisted(channel: "email" | "sms", listed: readonly string[]): Promise<void>;
   /** Every SMS conversation binding of a mobile (E.164), from any number, oldest first (ADR 0003 4.5). */
   smsBindingsOf(recipient: string): Promise<SmsBindingRecord[]>;
+  /**
+   * A version of every SMS conversation (question Q7 answered): it changes when a binding is taken or released, or when a
+   * binding's owner has its text known sent. The evaluation caches look again at a waiting SMS track when it changes.
+   */
+  conversationsVersion(): Promise<string>;
   accounts(now: number): Promise<AccountState[]>;
   accountLabels(): Promise<Record<string, string>>;
   /** Moves the account's next pacing slot to at least `callStart` plus its gap. */
@@ -464,13 +469,6 @@ export interface EngineStore {
   /** Subjects with an open call task, whatever their state: the call list is built from them. */
   subjectsWithOpenCallTasks(): Promise<string[]>;
   /**
-   * Running subjects whose work dispatch's next round at `now` may put ahead of the steps a read asks about (ADR 0003 "Reads
-   * that say when"): a live attempt, or a pending email or text step due by `now` that ranks before them in priority order
-   * (4.3: touched leads first, then the oldest due). `bound` is the latest due wall of the asked steps of touched and of
-   * untouched leads (null: none of that kind). Stored due walls only move later with holds, so this is a superset.
-   */
-  subjectsDispatchMayServe(now: number, bound: RoundBound): Promise<string[]>;
-  /**
    * The instants open callbacks of leads that have not ended change on the user's list (ticket 15): the
    * start of each callback's user day, when it is listed, and its time, when it is ready.
    */
@@ -518,8 +516,3 @@ export interface MeasureFacts {
   readonly openCallbacks: readonly { readonly subjectId: string; readonly test: boolean; readonly ended: string | null; readonly open: boolean; readonly kind: "call" | "callback" }[];
 }
 
-/** The latest due wall among a read's asked steps, for touched and for untouched leads (`subjectsDispatchMayServe`). */
-export interface RoundBound {
-  readonly touched: number | null;
-  readonly untouched: number | null;
-}

@@ -1,4 +1,4 @@
-import { UNDO_SINCE_18 } from "../../../test/support/undo-migrations.ts";
+import { UNDO_SINCE_18, UNDO_21 } from "../../../test/support/undo-migrations.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
@@ -37,7 +37,7 @@ const body = (subject: string, save: { session: string; seq: number; base: numbe
 /** Takes a database back to just before migration 13: no sessions' saves, and none of migration 14's call fields (ticket 15a). */
 function beforeMigration13(file: string): void {
   const db = new DatabaseSync(file);
-  db.exec(`
+  db.exec(`${UNDO_21}
     DROP TABLE definition_saves;
     DROP INDEX call_tasks_open_callbacks;
     ALTER TABLE call_attempts DROP COLUMN declined_path;

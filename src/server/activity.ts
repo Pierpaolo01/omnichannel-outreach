@@ -103,6 +103,9 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
       if (track.finishedAt === null) continue;
       if (track.finishReason === "skipped_missing_channel" && track.steps.every((st) => st.result === null)) {
         entries.push({ campaign, at: track.finishedAt, kind: "skipped", channel, track: label, stepNumber: null, reason: missing });
+      } else if (track.finishReason === "skipped_conversation_taken") {
+        // The mobile is in another campaign's conversation on every number this track could use (question Q7 answered).
+        entries.push({ campaign, at: track.finishedAt, kind: "skipped", channel, track: label, stepNumber: null, reason: "sms_conversation_taken", owners: track.conversationOwners });
       } else if (track.finishReason === "failed_bad_destination" && !track.steps.some((st) => st.result === "failed") && !bounces.some((b) => b.trackId === track.trackId)) {
         // The track ended on a bad address with no bounce event of this campaign's: another campaign's
         // bounce marked it, or this campaign's bounce was observed before migration 10, which kept no
@@ -137,11 +140,11 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
 }
 
 /**
- * Why a track that started after another says so: the one before it was skipped (for want of a channel,
- * or by the user), skipped unworked by the call skip limit (ticket 15b), or failed on a bad destination.
+ * Why a track that started after another says so: the one before it was skipped (for want of a channel, for a
+ * conversation another campaign holds, or by the user), skipped unworked by the call skip limit (ticket 15b), or failed on a bad destination.
  */
 function releasedBecause(finish: string | null): "skipped" | "failed" | "unworked" | null {
-  if (finish === "skipped_missing_channel" || finish === "skipped") return "skipped";
+  if (finish === "skipped_missing_channel" || finish === "skipped_conversation_taken" || finish === "skipped") return "skipped";
   if (finish === "skipped_unworked") return "unworked";
   return finish === "failed_bad_destination" ? "failed" : null;
 }

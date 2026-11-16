@@ -1,5 +1,5 @@
 import { MIGRATIONS } from "./migrations.ts";
-import { UNDO_SINCE_18 } from "../../../test/support/undo-migrations.ts";
+import { UNDO_SINCE_18, UNDO_21 } from "../../../test/support/undo-migrations.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
@@ -50,7 +50,7 @@ describe("migration 16 on a database written before it", () => {
     await before.store.close();
 
     const db = new DatabaseSync(file);
-    db.exec(`
+    db.exec(`${UNDO_21}
       DROP TABLE hold_intervals;
       DROP TABLE control_requests;
       ALTER TABLE provider_work DROP COLUMN withdraw_wanted;
@@ -119,7 +119,7 @@ describe("migration 16 on a database written before it", () => {
       if (upgrade) {
         await h.store.close();
         const db = new DatabaseSync(file);
-        db.exec(`
+        db.exec(`${UNDO_21}
           DROP TABLE hold_intervals;
           DROP TABLE control_requests;
           ALTER TABLE provider_work DROP COLUMN withdraw_wanted;

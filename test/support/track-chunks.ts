@@ -21,7 +21,15 @@ import { TRACK_MUTATIONS } from "./track-mutations.ts";
  */
 // 11, 12, 29 and 78 (seeds 20261124, 20261125, 20261142, 20261191): regressions for the Activity
 // check's record at the instant a lead ends or a number goes bad (the search on 7401eb2).
-export const TRACK_FIXED_SEEDS: readonly number[] = [2, 3, 4, 11, 12, 29, 61, 78];
+// 43 and 57 (question Q7 answered): a number joins a campaign's pool after a skip there, and a skip a claim delayed; 43 also
+// a skip on a fixed sender after a mobile changed, 57 a number leaving a pool. 5 (after the reviews of bebdc06): a lead
+// held under the interim engine, skipped at the upgrade. 2, 3 and 12: a number refusing a text for an account reason.
+// 76 and 84 (the search on faac357): a skip the app could only decide once it learnt late that the track had started, and
+// a waiting claim tried at the instant its slot freed, ahead of a lower-priority handover there. 50 and 85 (the reviews
+// of faac357): a first text refused hours after its acceptance while another campaign's lead waits on it, and one never
+// answered, which the user marks not sent. 14 and 16: the mobile answers a first text the app does not yet know went,
+// while another campaign's lead on it waits.
+export const TRACK_FIXED_SEEDS: readonly number[] = [2, 3, 4, 5, 11, 12, 14, 16, 29, 43, 50, 57, 61, 76, 78, 84, 85];
 const SEARCH_SEEDS = 100;
 /** Seed offsets each mutation's search tries after its recorded seed. */
 const MAX_SEEDS = 30;
@@ -57,6 +65,27 @@ export function trackChunks(from: number, to: number): void {
       // that no lead here enters, including a lead with no usable channel at launch, whose skips Activity states.
       test("the fixed seeds reach a never-entered branch beside a running lead and beside a lead with no channel at launch", () => {
         expect(["a-lead-beside-a-branch-never-entered", "no-channel-at-launch-beside-a-branch"].filter((f) => !reached.has(f))).toEqual([]);
+      });
+      // Question Q7 answered: a track skipped for a taken conversation, one whose skip a waiting claim delayed, the track
+      // after one released by it, and a number joining that campaign's pool after the skip.
+      test("the fixed seeds skip SMS tracks for taken conversations, after a claim's wait too, release the tracks after them, and add a number after a skip", () => {
+        expect(
+          [
+            "conversation-taken",
+            "conversation-taken-skip-after-a-claim",
+            "conversation-taken-held-under-the-interim",
+            "conversation-taken-on-a-fixed-sender",
+            "released-after:skipped_conversation_taken",
+            "a-number-joined-after-a-skip-in-its-campaign",
+            "a-number-left-a-pool",
+            "a-mobile-changed",
+            "a-number-refuses-a-text",
+            "a-first-text-refused-after-acceptance",
+            "a-first-text-never-answered",
+            "held-on-an-unsettled-conversation",
+            "a-reply-before-its-text-was-known-sent",
+          ].filter((f) => !reached.has(f)),
+        ).toEqual([]);
       });
     }
   });

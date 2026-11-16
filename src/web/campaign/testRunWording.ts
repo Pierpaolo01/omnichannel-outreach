@@ -3,6 +3,8 @@ import { clockTime } from "../time.ts";
 import { stepWaitWords } from "../controls/wording.ts";
 
 const capitalise = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1);
+import { conversationTaken } from "./sms-wording.ts";
+import { holdReasonClause } from "../calls/wording.ts";
 
 /**
  * The Test run tab's words (ticket 21), from the read only: what each step's stored facts say, never more. Email has no
@@ -82,11 +84,14 @@ export function stepStateText(row: TestStepRow, zone: string, readAt: string): s
       return "Skipped";
     case "with_provider":
       return row.channel === "sms" ? "With the SMS provider" : "With Instantly";
+    case "held":
+      return "On hold";
     case "due": {
       // No time the engine can promise: the read's reason, in the one wording function (ADR 0003 "Reads that say when").
       if (row.at === null && row.waits !== null) return capitalise(stepWaitWords(row.waits, row.channel));
       const ms = row.at === null ? Infinity : Date.parse(row.at) - Date.parse(readAt);
-      if (ms <= 0) return "Due now";
+      // Its time has come and nothing of its own holds it: ready, in line for its sender, never "now" (ADR 0003).
+      if (ms <= 0) return "Ready to send, in line for its sender";
       // The earliest it can go, never a promise (verifier on 178de98, item 9).
       return ms <= 2 * 60_000 ? "Earliest in about 1 min" : `Earliest ${at}`;
     }
@@ -121,8 +126,10 @@ export function stepDetail(row: TestStepRow, run: Pick<TestRunRead, "email" | "m
     if (row.branch === "win_back") return "Runs if you log Not interested and the path is Win back";
     return row.channel === "call" ? "A test call goes on your Calls list when it is due" : "Waits for the steps before it";
   }
+  if (row.state === "skipped" && row.reason === "sms_conversation_taken") return `Skipped: ${conversationTaken(row.owners ?? [], "your test")}`;
   if (row.state === "skipped") return row.reason === "missing_channel" ? `Skipped: no test ${row.channel === "email" ? "email" : "mobile"} saved` : SKIPPED_BECAUSE[row.reason ?? ""] ?? "Skipped";
   if (row.channel === "call") return row.state === "on_your_list" ? "Log any outcome to continue. The canvas paths apply." : `To ${run.mobile ?? "your mobile"}`;
+  if (row.state === "held") return `On hold because ${row.hold ? holdReasonClause(row.hold, row.holdOwners ?? []) : "something waits on you"}. Nothing is dropped.`;
   if (row.state === "due") return "The wait is cut to about a minute";
   return `To ${(row.channel === "sms" ? run.mobile : run.email) ?? ""}`;
 }

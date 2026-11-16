@@ -306,19 +306,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     const fixed = emailSenderOf(s);
     return fixed ? [fixed] : inboxIds;
   };
-  /**
-   * The record's own count of an inbox's room on its UTC reset day at `t`: sends delivered that day plus work handed over and
-   * not yet given a final answer, within one of its capacity (the slack invariant F allows too).
-   */
-  const nearlyFullAt = (sender: string, t: number, claims = 0) => {
-    const day = isoOf(t).slice(0, 10);
-    const sent = email.deliveryLog.filter((d) => d.sender === sender && d.at <= t && isoOf(d.at).slice(0, 10) === day).length;
-    // A delivery settles its work's reservation only once the app can know it: its event seen, or a lookup answering "sent".
-    const knownSent = (key: string) => email.deliveryLog.some((d) => d.key === key && Math.min(d.visibleAt, email.lookupLog.find((l) => l.key === key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity) <= t);
-    const open = new Set(email.handoverLog.filter((c) => c.sender === sender && c.at <= t && !knownSent(c.key) && !(email.refusals.some((x) => x.attemptId === c.attemptId) && email.handoverLog.filter((y) => y.key === c.key).length <= 1) && !email.withdrawLog.some((w) => w.key === c.key && w.answer === "withdrawn")).map((c) => c.key)).size;
-    // Claims not yet handed over hold reservations too (4.2): the caller reads them from the store, as it reads a claim's expiry.
-    return sent + open + claims >= capacityOf(sender) - 1;
-  };
+
   /**
    * The outage the record has the sender in at `t`, as the engine can know it: unhealthy from its start; rate-limited only
    * once a send to it was refused as rate-limited (the engine then waits until the limit's end).
@@ -327,6 +315,29 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   // reading of the provider's retry-after (its answer instant plus that, or its own backoff), which the record takes from the
   // store where an instant must be explained, and never treats as down: at that instant the engine tries, and is refused.
   const outageUntil = (sender: string, t: number) => outages.find((o) => o.inbox === sender && o.kind === "unhealthy" && o.from <= t && t < o.to) ?? null;
+  /** The sender's sends known sent by `t` on its UTC reset day fill its daily room: full whatever the other leads do. */
+  const knownSentOn = (sender: string, t: number) => {
+    if (sender.startsWith("+")) return 0;
+    const day = isoOf(t).slice(0, 10);
+    return email.deliveryLog.filter((d) => d.sender === sender && isoOf(d.at).slice(0, 10) === day && Math.min(d.visibleAt, email.lookupLog.find((l) => l.key === d.key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity) <= t).length;
+  };
+  const fullBySendsAt = (sender: string, t: number) => knownSentOn(sender, t) >= capacityOf(sender);
+  /**
+   * The sender's pacing slot by the record before a round at `t`: its last send call made before the round (one made at `t`
+   * by an earlier round included: `marks` are the providers' log lengths when the round began) plus the gap.
+   */
+  const slotBefore = (sender: string, t: number, marks: { email: number; sms: number }) => {
+    const calls = [...email.handoverLog.slice(0, marks.email), ...sms.handoverLog.slice(0, marks.sms), ...[...h.swallowedHandovers, ...uncalledHandovers].filter((c) => c.at < t)].filter((c) => c.sender === sender && c.at <= t).map((c) => c.at);
+    return calls.length > 0 ? Math.max(...calls) + gap : -Infinity;
+  };
+  /** Work handed over on an inbox and with no final answer by `t`, by the provider's logs: the places it holds (4.2). */
+  const openOn = (sender: string, t: number, marks: { email: number; sms: number }) => {
+    if (sender.startsWith("+")) return 0;
+    const knownSent = (key: string) => email.deliveryLog.some((d) => d.key === key && Math.min(d.visibleAt, email.lookupLog.find((l) => l.key === key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity) <= t);
+    return new Set(email.handoverLog.slice(0, marks.email).filter((c) => c.sender === sender && c.at <= t && !knownSent(c.key) && !email.refusals.some((x) => x.attemptId === c.attemptId) && !email.withdrawLog.some((w) => w.key === c.key && w.answer !== "unknown" && w.at <= t)).map((c) => c.key)).size;
+  };
+  /** ADR 0003 1.3 (ruling 6): a lead is touched only by a send observed sent, or a logged call outcome other than skip for now. */
+  const touchedAt = (s: Subject, T: number) => (["email", "sms"] as const).some((ch) => deliveries(ch).some((d) => d.subjectId === s.id && d.visibleAt <= T)) || [...callsDone].some(([k, at]) => k.startsWith(`${s.id}/`) && at <= T);
 
   // ----------------------------------------------------------------------------------------------
   // The record.
@@ -905,14 +916,13 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
         if ((held || endedAt(s, now)) && when.kind !== "waits") problem(`W1: ${s.id}/${pending.stepId} is held or ended at ${isoOf(now)} but the read says ${JSON.stringify(when)}, a time it cannot promise`);
         if (held || endedAt(s, now)) continue;
         // W2, against the record's own model of wait ends and windows (ADR 0003 "Reads that say when"): an earliest instant
-        // is exactly the record's first open-window instant at or after the wait's end, and later than the read's own; "now"
-        // only when that instant is the read's own. No sender-side instant is ever given.
+        // is exactly the record's first open-window instant at or after the wait's end; "ready" only when that instant is the
+        // read's own and a sender the step may use is up and not full by its own sends. No sender-side instant is ever given.
         // A reason must be true of every sender it speaks for: "every account full" while the record has an inbox up and
-        // clearly not full is a read that hid another cause (council on cc9bf55, item 3).
+        // not full by its sends is a read that hid another cause (council on cc9bf55, item 3).
         if (drawsWindows && when.kind === "waits" && when.why === "sending_capacity" && t.channel === "email") {
-          // Claims not yet handed over hold reservations the providers' logs cannot show; at most the in-flight bound (2) each.
-          const roomy = sendersOf(s, t).filter((x) => outageUntil(x, now) === null && !nearlyFullAt(x, now, 2));
-          if (roomy.length > 0) problem(`W2: ${s.id}/${pending.stepId} reads "sending_capacity" at ${isoOf(now)}, but the record has room on ${roomy.join(", ")}${process.env["CONTROLS_DEBUG"] ? ` [engine accounts ${JSON.stringify(Object.values(st.accounts).map((a) => [a.id, a.healthy, a.used, a.reserved, a.capacity, a.dailyLimit, a.inFlight, a.k, isoOf(a.waitUntil)]))}; sender ${st.subject.emailSender}]` : ""}`);
+          const roomy = sendersOf(s, t).filter((x) => outageUntil(x, now) === null && !fullBySendsAt(x, now));
+          if (roomy.length > 0) problem(`W2: ${s.id}/${pending.stepId} reads "sending_capacity" at ${isoOf(now)}, but the record has room on ${roomy.join(", ")}`);
         }
         if (!inFlight(t, s, pending.stepId)) {
           const zone = zoneOfSubject(s);
@@ -921,7 +931,8 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
           // The time-only reason, checked against its cause: "its sending hours never open" only when the record's never do.
           if (when.kind === "waits" && when.why === "no_window" && Number.isFinite(opening)) problem(`W2: ${s.id}/${pending.stepId} reads "no_window" at ${isoOf(now)}, but the record's window opens at ${isoOf(opening)}`);
           if (when.kind === "at" && Date.parse(when.at) !== opening) problem(`W2: ${s.id}/${pending.stepId} reads "earliest ${when.at}" at ${isoOf(now)}; the record's first open instant at or after its due instant ${isoOf(pending.due)} is ${isoOf(opening)}`);
-          if (when.kind === "now" && opening !== now) problem(`W2: ${s.id}/${pending.stepId} reads "now" at ${isoOf(now)}; the record has it wait for ${isoOf(opening)} (due ${isoOf(pending.due)}, ${inWindow(window, zone, now) ? "inside" : "outside"} its window in ${zone})`);
+          if (when.kind === "ready" && opening !== now) problem(`W2: ${s.id}/${pending.stepId} reads "ready" at ${isoOf(now)}; the record has it wait for ${isoOf(opening)} (due ${isoOf(pending.due)}, ${inWindow(window, zone, now) ? "inside" : "outside"} its window in ${zone})`);
+          if (when.kind === "ready" && !sendersOf(s, t).some((x) => outageUntil(x, now) === null && !fullBySendsAt(x, now))) problem(`W2: ${s.id}/${pending.stepId} reads "ready" at ${isoOf(now)}, but the record has every sender it may use down or full by its sends (${sendersOf(s, t).join(", ")})`);
         }
         if (pending.due > pending.unheld) features.add("a-wait-moved-by-a-hold");
       }
@@ -1246,7 +1257,10 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     const sent = email.deliveryLog.filter((d) => d.visibleAt <= h.clock);
     if (sent.length === 0) return;
     const d = pick(sent);
-    if (r17() < 0.5) {
+    // The windows family draws no reply hidden from observation: only the pre-send check would find it, which no read can
+    // know (ADR 0003 "Reads that say when", a stated limit), so these runs avoid the state rather than waive it.
+    const hide = r17() < 0.5;
+    if (hide && !drawsWindows) {
       const s = subjects.get(d.subjectId);
       if (!s) return;
       const hiddenForMs = Math.round((1 + r17() * 5) * HOUR);
@@ -1568,11 +1582,46 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     features.add(feature);
     return true;
   }
+  /**
+   * A place a step read as ready could have taken in a round at `T` that went to no step the record ranks ahead of it, or
+   * null when there is none (ADR 0003 "Reads that say when", rule 3): on each sender the step may use that the record has up
+   * and not full by its sends, the place is held back by pacing (the sender's last call before `T` plus the gap), held by
+   * work with the provider at its in-flight bound, or taken in the round by a step the record ranks ahead (a step the round
+   * handed over that was not pending before it, a same-key retry, ranks ahead: retries go first). From the record and the
+   * fake providers' logs only.
+   */
+  function freePlace(s: Subject, t: TrackDefinition, stepId: string, T: number, round: readonly { sender: string; subjectId: string; stepId: string; at: number }[], ranks: ReadonlyMap<string, readonly [number, number, string, string]>, marks: { email: number; sms: number }, unclaimed: boolean): string | null {
+    const mine = ranks.get(`${s.id}/${stepId}`);
+    const ahead = (c: { subjectId: string; stepId: string }) => {
+      const k = ranks.get(`${c.subjectId}/${c.stepId}`);
+      if (!k || !mine) return true;
+      for (let i = 0; i < 4; i++) if (k[i] !== mine[i]) return (k[i] ?? 0) < (mine[i] ?? 0);
+      return false;
+    };
+    const usable = sendersOf(s, t).filter((x) => outageUntil(x, T) === null && !fullBySendsAt(x, T));
+    const room = (x: string) => capacityOf(x) - knownSentOn(x, T) - openOn(x, T, marks);
+    // Held: at its in-flight bound, or its day's room taken by known sends and work with the provider.
+    const held = (x: string) => openOn(x, T, marks) >= 2 || room(x) <= 0;
+    const free = usable.filter((x) => slotBefore(x, T, marks) <= T && !held(x) && !round.some((c) => c.sender === x && c.at === T && ahead(c)));
+    if (unclaimed) {
+      // A step no round could have claimed yet (the reads come between rounds at its first ready instant): the place it
+      // could take is its account choice's (4.2: the soonest slot, then the most room left, then the lowest id), by the
+      // record's own slots and room. That place must be held back by pacing, held, or taken by a step ranked ahead.
+      const chosen = usable.filter((x) => !held(x)).sort((x, y) => Math.max(slotBefore(x, T, marks), T) - Math.max(slotBefore(y, T, marks), T) || room(y) - room(x) || (x < y ? -1 : 1))[0];
+      return chosen !== undefined && free.includes(chosen) ? chosen : null;
+    }
+    // One an earlier round may have claimed is held to its claim's sender, which only the engine knows: one of its places
+    // must be held back, held, or taken by a step ranked ahead.
+    return usable.length > 0 && free.length === usable.length ? (free[0] ?? null) : null;
+  }
+  async function listedAfterOf(s: Subject): Promise<boolean> {
+    return [...(await h.request<CallsView>("GET", "/api/calls")).body.readyNow].some((x) => x.enrollmentId === s.id);
+  }
   async function checkReadsAgainstDispatch(): Promise<void> {
     // In half the rounds, the reads come between two rounds, as a 15-second worker leaves them: the clock moves to the
     // engine's next wake with no round, so steps fall due unread by dispatch. Only when no provider activity falls before
     // or at that instant: the engine then knows at the read all its next round can learn but the pre-send check's answer.
-    if (rW() < 0.5) await betweenRounds("w3-reads-between-rounds");
+    const unread = rW() < 0.5 ? await betweenRounds("w3-reads-between-rounds") : false;
     const now = h.clock;
     const reads: { s: Subject; t: TrackDefinition; stepId: string; when: NonNullable<EnrollmentRead["tracks"][number]["nextStep"]>["when"] }[] = [];
     for (const s of subjects.values()) {
@@ -1583,36 +1632,52 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
         if (next) reads.push({ s, t, stepId: next.stepId, when: next.when });
       }
     }
-    const mark = { email: email.handoverLog.length, sms: sms.handoverLog.length };
+    // The record's priority of each pending step before the round (4.3): touched first, then the stored due, then lead, step.
+    const ranks = new Map<string, [number, number, string, string]>();
+    for (const s of subjects.values()) {
+      for (const t of def(s).tracks) {
+        if (t.channel === "call") continue;
+        const pending = pendingOf(s, t, now);
+        if (pending) ranks.set(`${s.id}/${pending.stepId}`, [touchedAt(s, now) ? 0 : 1, pending.unheld, s.id, pending.stepId]);
+      }
+    }
+    const marks = { email: email.handoverLog.length, sms: sms.handoverLog.length };
     const previews = previewed.splice(0);
     await h.tick();
-    // W4: each preview against the round, as a read is.
-    const listedNow = new Set([...(await h.request<CallsView>("GET", "/api/calls")).body.readyNow].map((x) => x.enrollmentId));
     for (const v of previews) {
       if (v.channel === "call") {
-        if (v.when?.kind === "call_day" && v.when.now && !listedNow.has(v.s.id)) problem(`W4: ${v.action} on ${v.s.id} at ${isoOf(now)} previewed its call "going on your call list now", but the next round did not list it`);
+        if (v.when?.kind === "call_day" && v.when.now && !(await listedAfterOf(v.s))) problem(`W4: ${v.action} on ${v.s.id} at ${isoOf(v.at)} previewed its call "ready to go on your call list", but the next round did not list it`);
         continue;
       }
       const ch = v.channel === "sms" ? "sms" : "email";
       // From the control's own instant: its first round is the one the route runs after it.
-      const sinceControl = (ch === "sms" ? sms : email).handoverLog.slice(v.mark[ch]);
-      const handed = sinceControl.some((c) => c.subjectId === v.s.id && c.stepId === v.stepId && c.at === v.at);
-      if (v.when?.kind === "now") features.add("w4-a-preview-of-now");
-      if (v.when?.kind === "now" && !handed) problem(`W4: ${v.action} on ${v.s.id} at ${isoOf(now)} previewed ${v.stepId} "due now", but the next round handed nothing over${process.env["CONTROLS_DEBUG"] ? ` [read after the control ${JSON.stringify(reads.filter((r) => r.s.id === v.s.id).map((r) => [r.stepId, r.when]))}; all ${JSON.stringify((ch === "sms" ? sms : email).handoverLog.map((c, i) => [i, c.subjectId, c.stepId, isoOf(c.at)]).filter((x) => x[1] === v.s.id))}; mark ${v.mark[ch]}; attempts ${JSON.stringify((await h.store.engine.subject(v.s.id, now))?.attempts.map((a) => [a.stepId, a.state, a.accountId, a.endedBy]))}]` : ""}`);
-      if ((v.when?.kind === "at" || (v.when?.kind === "waits" && v.when.why !== "with_provider" && v.when.why !== "unresolved")) && handed) problem(`W4: ${v.action} on ${v.s.id} at ${isoOf(now)} previewed ${v.stepId} ${JSON.stringify(v.when)}, but the next round handed it over`);
-      if (v.when?.kind === "at" && !handed) promised.set(`${v.s.id}/${v.stepId}`, { s: v.s, stepId: v.stepId, ch, at: Date.parse(v.when.at), readAt: now });
+      const round = (ch === "sms" ? sms : email).handoverLog.slice(v.mark[ch]).filter((c) => c.at === v.at);
+      const handed = round.some((c) => c.subjectId === v.s.id && c.stepId === v.stepId);
+      const t = def(v.s).tracks.find((x) => x.steps.some((st) => st.id === v.stepId));
+      if (v.when?.kind === "ready") features.add("w4-a-preview-of-ready");
+      if (v.when?.kind === "ready" && !handed && t) {
+        const free = freePlace(v.s, t, v.stepId, v.at, round, ranks, v.mark, false);
+        if (free !== null) problem(`W4: ${v.action} on ${v.s.id} at ${isoOf(v.at)} previewed ${v.stepId} "ready", but the next round handed it nothing and gave ${free}'s place to no step the record ranks ahead of it`);
+      }
+      if ((v.when?.kind === "at" || (v.when?.kind === "waits" && v.when.why !== "with_provider" && v.when.why !== "unresolved")) && handed) problem(`W4: ${v.action} on ${v.s.id} at ${isoOf(v.at)} previewed ${v.stepId} ${JSON.stringify(v.when)}, but the next round handed it over`);
+      if (v.when?.kind === "at" && !handed) promised.set(`${v.s.id}/${v.stepId}`, { s: v.s, stepId: v.stepId, ch, at: Date.parse(v.when.at), readAt: v.at });
     }
     for (const r of reads) {
       const ch = r.t.channel === "sms" ? "sms" : "email";
-      const round = (ch === "sms" ? sms : email).handoverLog.slice(mark[ch]);
+      const round = (ch === "sms" ? sms : email).handoverLog.slice(marks[ch]);
       const mine = round.filter((c) => c.subjectId === r.s.id && c.stepId === r.stepId);
       switch (r.when.kind) {
-        case "now":
-          features.add("w3-a-read-of-now");
-          if (mine.length === 0) problem(`W3: ${r.s.id}/${r.stepId} read "due now" at ${isoOf(now)}, but the next round handed nothing over${process.env["CONTROLS_DEBUG"] ? ` [round ${JSON.stringify(round.map((c) => [c.subjectId, c.stepId, c.sender]))}]` : ""}`);
+        case "ready": {
+          features.add("w3-a-read-of-ready");
+          if (mine.length > 0) break;
+          const pending = pendingOf(r.s, r.t, now);
+          const opening = pending && Number.isFinite(pending.due) ? firstOpen(r.t.window, zoneOfSubject(r.s), pending.due) : -Infinity;
+          const free = freePlace(r.s, r.t, r.stepId, now, round, ranks, marks, unread && opening === now);
+          if (free !== null) problem(`W3: ${r.s.id}/${r.stepId} read "ready" at ${isoOf(now)}; the next round handed it nothing and gave ${free}'s place to no step the record ranks ahead of it${process.env["CONTROLS_DEBUG"] ? ` [round ${JSON.stringify(round.map((c) => [c.subjectId, c.stepId, c.sender]))}; slot ${isoOf(slotBefore(free, now, marks))}; open ${openOn(free, now, marks)}; engine ${JSON.stringify(await (async () => { const st = await h.store.engine.subject(r.s.id, h.clock); return { attempts: st?.attempts.map((a) => [a.stepId, a.state, a.accountId, isoOf(a.claimedWall), a.endedBy]), accounts: Object.values(st?.accounts ?? {}).map((a) => [a.id, a.healthy, isoOf(a.nextSlotAt), a.used, a.reserved, a.capacity, a.inFlight, a.k, isoOf(a.waitUntil)]), pending: st?.pendingReplies, sender: st?.subject.emailSender, tracks: st?.tracks.map((p) => [p.trackId, p.nextStepId, isoOf(p.dueWall), p.finishReason]) }; })())}; senders ${JSON.stringify(sendersOf(r.s, r.t))}]` : ""}`);
           break;
+        }
         case "waits":
-          if (r.when.why === "sender_slot" || r.when.why === "sender_waiting" || r.when.why === "sender_busy" || r.when.why === "sending_capacity" || r.when.why === "sender_rate_limited" || r.when.why === "sender_unavailable") features.add(`w3-a-read-of-${r.when.why}`);
+          if (r.when.why === "sender_slot" || r.when.why === "sender_waiting" || r.when.why === "sending_capacity" || r.when.why === "sender_rate_limited" || r.when.why === "sender_unavailable") features.add(`w3-a-read-of-${r.when.why}`);
           if (mine.length > 0 && r.when.why !== "with_provider" && r.when.why !== "unresolved") problem(`W3: ${r.s.id}/${r.stepId} read "${r.when.why}" at ${isoOf(now)}, but the next round handed it over`);
           break;
         case "at":
@@ -1647,7 +1712,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     const extra = r17();
     if (extra < 0.1) await retryRefused();
     else if (extra < 0.25 && lookupLags) await pauseThenSkip();
-    else if (extra < 0.4) await replyRestartReply();
+    else if (extra < 0.4 && !drawsWindows) await replyRestartReply();
     else if (extra < 0.55 && !outageUnderWay()) await actAtADueInstant();
     // One user action per instant: the event's own action comes a minute after an extra one.
     if (extra < 0.55) await h.advanceTo(h.clock + MINUTE);

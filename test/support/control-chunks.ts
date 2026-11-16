@@ -25,7 +25,7 @@ export const CONTROL_FIXED_SEEDS: readonly number[] = [17, 19, 33, 35, 48, 64, 7
  * The windows family's fixed offsets (ADR 0003 "Reads that say when"): runs that draw sending windows, prospect zones and
  * inbox outages, with W3 after every event. Chosen from a local sweep of offsets 0 to 99 on 15 November 2026.
  */
-export const CONTROL_WINDOW_SEEDS: readonly number[] = [0, 9, 12, 27, 33, 53, 57, 69, 86];
+export const CONTROL_WINDOW_SEEDS: readonly number[] = [0, 9, 12, 27, 33, 36, 44, 46, 48, 50, 53, 57, 62, 67, 69, 75, 79, 86];
 /** The scripted reply runs' seed offset (`smsReplyRestart`, `replyBeforeObservation`): the reply identity rule. */
 export const SMS_REPLY_SEED = 0;
 const SEARCH_SEEDS = 100;
@@ -40,13 +40,13 @@ export const CONTROL_FEATURES: readonly string[] = [
   "a-email-track",
   // The windows family's exact W3 and W4 (ADR 0003 "Reads that say when", redesign after ff01571).
   "w3-reads-between-rounds",
-  "w3-a-read-of-now",
+  "w3-a-read-of-ready",
   "w3-a-read-of-sender_slot",
   "w3-a-read-of-sender_unavailable",
   "w3-a-read-of-sender_rate_limited",
   "w3-a-read-of-sending_capacity",
   "w4-a-control-between-rounds",
-  "w4-a-preview-of-now",
+  "w4-a-preview-of-ready",
   "a-email-track-in-win-back",
   "a-hidden-reply",
   "a-hidden-reply-found-by-the-pre-send-check",

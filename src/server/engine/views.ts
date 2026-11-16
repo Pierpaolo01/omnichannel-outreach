@@ -2,15 +2,15 @@
 import { isLive, markable } from "../../domain/sequence/attempt.ts";
 import { carriedInto, isListed, listedForDay, reasonOf } from "../../domain/sequence/calls.ts";
 import { callRecordView, dateOfDay } from "./call-views.ts";
-import { accountAvailable, candidatesFor, claimRefusal, heldReason, inheritedWork, nextRound, readyItems, stalledAccounts, stepWhen, type Round, type StepEnv } from "../../domain/sequence/dispatch.ts";
+import { accountAvailable, candidatesFor, claimRefusal, heldReason, inheritedWork, readyItems, stalledAccounts, stepWhen, type StepEnv } from "../../domain/sequence/dispatch.ts";
 import { stepWhenView } from "./step-when-view.ts";
 import { localDayNumber, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { relevantChannels, waitingOn } from "../../domain/sequence/providers.ts";
 import { providerEvidence, sendingInterrupted } from "./worker-state.ts";
-import { channelOf, deriveStatus, liveTracksFor, unreachableWhy, wallAtLead } from "../../domain/sequence/progress.ts";
+import { channelOf, conversationOwnersOf, deriveStatus, liveTracksFor, unreachableWhy, unsettledOwnersOf, wallAtLead } from "../../domain/sequence/progress.ts";
 import type { AccountState, SubjectState } from "../../domain/sequence/state.ts";
-import type { AttentionLead, EnrollmentProgress, NeedsAttention, SenderAccountViewApi } from "../../shared/api.ts";
-import type { EngineStore, RoundBound } from "./engine-store.ts";
+import type { AttentionLead, ConversationOwnerView, EnrollmentProgress, NeedsAttention, SenderAccountViewApi } from "../../shared/api.ts";
+import type { EngineStore } from "./engine-store.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 
 const iso = (t: number | null) => (t === null ? null : new Date(t).toISOString());
@@ -26,20 +26,18 @@ const iso = (t: number | null) => (t === null ? null : new Date(t).toISOString()
  * (council on 4fd9ca4, item 6).
  */
 export async function stepEnvOf(
-  store: Pick<EngineStore, "meta" | "callSettings" | "subjectsWithOpenCallTasks" | "subject" | "subjectsDispatchMayServe">,
+  store: Pick<EngineStore, "meta" | "callSettings" | "subjectsWithOpenCallTasks" | "subject">,
   now: number,
   reading: readonly SubjectState[],
   transportAvailable?: StepEnv["transportAvailable"],
   known?: ReadonlyMap<string, SubjectState | null>,
   room = true,
-  round: RoundBound | false = false,
 ): Promise<StepEnv> {
   const interrupted = await sendingInterrupted(store, now);
   const evidence = interrupted ? await providerEvidence(store) : null;
   const gate = evidence ? { waitingOnProvider: (s: SubjectState, trackId: string) => waitingOn(evidence, relevantChannels(s, trackId), now).length > 0 } : {};
   const transport = transportAvailable ? { transportAvailable } : {};
-  const rounds = round ? { round: await roundAt(store, now, reading, round, { ...transport, ...gate }, known) } : {};
-  if (!room || !reading.some((s) => s.campaign.definition.tracks.some((t) => t.channel === "call"))) return { ...transport, ...gate, ...rounds };
+  if (!room || !reading.some((s) => s.campaign.definition.tracks.some((t) => t.channel === "call"))) return { ...transport, ...gate };
   // A later day's room, from every lead's calls the engine knows are carried into it (`carriedInto`), against the capacity,
   // with the subject asked about in place of its stored state (a preview's state after its control, item 8).
   const { dailyCapacity } = await store.callSettings();
@@ -58,51 +56,12 @@ export async function stepEnvOf(
     }
     return n + carriedInto(self, day) < dailyCapacity;
   };
-  return { callRoomOn, ...transport, ...gate, ...rounds };
+  return { callRoomOn, ...transport, ...gate };
 }
 
-/** Widens `bound` to cover every email or text step of `self` due by `now` (the steps its read may ask the round about). */
-export function roundBoundOf(bound: RoundBound | null, self: SubjectState, now: number): RoundBound {
-  // A claim the round may withdraw is claimed again in a later pass, after lower-ranked steps took room in the first: every
-  // due step can matter then.
-  if (self.attempts.some((a) => a.state === "claimed")) return { touched: now, untouched: now };
-  const walls = self.tracks.filter((p) => p.finishedAt === null && p.dueWall !== null && p.dueWall <= now).map((p) => p.dueWall ?? now);
-  const latest = walls.length > 0 ? Math.max(...walls) : now;
-  const was = bound ?? { touched: null, untouched: null };
-  return self.subject.touched ? { ...was, touched: Math.max(was.touched ?? latest, latest) } : { ...was, untouched: Math.max(was.untouched ?? latest, latest) };
-}
-
-/**
- * Dispatch's next round at `now` (`nextRound`) over every subject whose work it may put ahead of the asked steps (`bound`,
- * by priority: a step ranked after them cannot take their turn), each loaded once, with the subjects being read as loaded:
- * run once for the stored states, and again only for a state a read substitutes (a control's preview, item 8 of the council
- * on cc9bf55).
- */
-async function roundAt(
-  store: Pick<EngineStore, "subject" | "subjectsDispatchMayServe">,
-  now: number,
-  reading: readonly SubjectState[],
-  bound: RoundBound,
-  env: Pick<StepEnv, "transportAvailable" | "waitingOnProvider">,
-  known?: ReadonlyMap<string, SubjectState | null>,
-): Promise<NonNullable<StepEnv["round"]>> {
-  const states = new Map<string, SubjectState>(reading.map((s) => [s.subject.id, s]));
-  for (const id of await store.subjectsDispatchMayServe(now, bound)) {
-    if (states.has(id)) continue;
-    const s = known?.has(id) ? (known.get(id) ?? null) : await store.subject(id, now);
-    if (s) states.set(id, s);
-  }
-  const stored = nextRound([...states.values()], now, env);
-  const substituted = new WeakMap<SubjectState, Round>();
-  return (self) => {
-    if (states.get(self.subject.id) === self) return stored;
-    let r = substituted.get(self);
-    if (!r) {
-      r = nextRound([...[...states.values()].filter((s) => s.subject.id !== self.subject.id), self], now, env);
-      substituted.set(self, r);
-    }
-    return r;
-  };
+/** Who owns the conversation a track was skipped for (question Q7 answered), as every read names them. Empty otherwise. */
+export function conversationOwnersView(s: SubjectState, trackId: string): ConversationOwnerView[] {
+  return conversationOwnersOf(s, trackId).map((o) => ({ name: o.name, test: o.test }));
 }
 
 export function progressView(s: SubjectState, now: number, env: StepEnv = {}, when: typeof stepWhen = stepWhen): EnrollmentProgress {
@@ -150,7 +109,9 @@ export function progressView(s: SubjectState, now: number, env: StepEnv = {}, wh
           started: p?.startedAt != null,
           finishReason: p?.finishReason ?? null,
           finishedAt: iso(p?.finishedWall ?? null),
+          conversationOwners: conversationOwnersView(s, track.id),
           hold: heldReason(s, track.id, now),
+          holdOwners: unsettledOwnersOf(s, track.id, now).map((o) => ({ name: o.name, test: o.test })),
           // When it goes, by the engine's own decision functions at this instant (ADR 0003 "Reads that say when").
           nextStep: nextStepOf(s, track.id, numberOf, now, env, when),
           steps: track.steps.map((st, i) => {
@@ -221,7 +182,8 @@ export function accountView(a: AccountState, label: string): SenderAccountViewAp
  * Needs attention as the engine decides it: every list of the HTTP read, with each lead entry by its ids only. The
  * route adds whose lead each is (`needsAttentionView` in call-views.ts, ticket 20b); nothing else is added there.
  */
-export type EngineNeedsAttention = Omit<NeedsAttention, "waitingForCapacity" | "noUsableChannel" | "sendingInterrupted"> & {
+export type EngineNeedsAttention = Omit<NeedsAttention, "waitingForCapacity" | "noUsableChannel" | "sendingInterrupted" | "heldTracks"> & {
+  readonly heldTracks: readonly Omit<NeedsAttention["heldTracks"][number], keyof AttentionLead>[];
   readonly waitingForCapacity: readonly Omit<NeedsAttention["waitingForCapacity"][number], keyof AttentionLead>[];
   readonly noUsableChannel: readonly Omit<NeedsAttention["noUsableChannel"][number], keyof AttentionLead>[];
 };
@@ -261,7 +223,7 @@ export async function needsAttention(
     }
     heldCapacity.push({ accountId: acc.id, held: held.length, capacity: acc.capacity, sentToday: await store.sentToday(acc.id, now), work });
   }
-  const heldTracks: NeedsAttention["heldTracks"][number][] = [];
+  const heldTracks: EngineNeedsAttention["heldTracks"][number][] = [];
   const waitingForCapacity: EngineNeedsAttention["waitingForCapacity"][number][] = [];
   const waitingOnTransport: NeedsAttention["waitingOnTransport"][number][] = [];
   // Ticket 20a (council B): while sending is interrupted, which providers the gate holds due sends on, by its own function.
@@ -274,7 +236,7 @@ export async function needsAttention(
     if (!stored) continue;
     for (const p of stored.tracks) {
       const reason = heldReason(stored, p.trackId, now);
-      if (reason) heldTracks.push({ enrollmentId: id, trackId: p.trackId, reason });
+      if (reason) heldTracks.push({ enrollmentId: id, trackId: p.trackId, reason, owners: unsettledOwnersOf(stored, p.trackId, now).map((o) => ({ name: o.name, test: o.test })) });
     }
     // Ticket 20a: as of the read, each due step the claim's step guard accepts now that waits for a transport the
     // provider cannot use yet, or for an account full for its reset day (not for a pacing slot or an in-flight place).
@@ -312,7 +274,9 @@ export async function needsAttention(
     if (!s) continue;
     const channels = [...new Set(liveTracksFor(s).map((t) => t.channel))].flatMap((channel) => {
       const why = unreachableWhy(s, channel);
-      return why === null ? [] : [{ channel, why }];
+      // A taken conversation names its owners: every SMS track of the branch it skipped, once each.
+      const owners = why !== "conversation_taken" ? [] : liveTracksFor(s).filter((t) => t.channel === "sms").flatMap((t) => conversationOwnersView(s, t.id)).filter((o, i, all) => all.findIndex((x) => x.name === o.name && x.test === o.test) === i);
+      return why === null ? [] : [{ channel, why, owners }];
     });
     noUsableChannel.push({ enrollmentId: id, campaignId: s.campaign.id, endedAt: new Date(s.subject.endedWall ?? now).toISOString(), channels });
   }

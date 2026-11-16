@@ -324,8 +324,8 @@ describe("the next round at the read's instant, with two inboxes (review bot on 
   });
 });
 
-describe("'now' is dispatch's next round over every lead ahead in priority (ADR 0003 \"Reads that say when\")", () => {
-  test("two leads due at a window's opening on one inbox, read between rounds: one reads now and goes in the next round; the other waits for its sender's next slot", async () => {
+describe("ready reads this lead alone (ADR 0003 \"Reads that say when\", rule 3)", () => {
+  test("two leads due at a window's opening on one inbox, read between rounds: both read ready, and the next round hands over one of them", async () => {
     const h = new EngineHarness({ start: MONDAY_10, accounts: [{ id: "inbox-a", capacity: 50, gapMs: 10 * MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
     await h.tick();
     expect((await h.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "Europe/London" })).status).toBe(200);
@@ -338,12 +338,27 @@ describe("'now' is dispatch's next round over every lead ahead in priority (ADR 
     // 11:00, the window's opening, before the worker's round.
     h.clock = MONDAY_10 + H;
     const ids = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows.flatMap((r) => r.enrollments.map((e) => e.id));
-    const reads = new Map<string, StepWhenView | undefined>();
-    for (const id of ids) reads.set(id, (await h.request<EnrollmentRead>("GET", `/api/enrollments/${id}`)).body.tracks[0]?.nextStep?.when);
-    const now = [...reads].filter(([, w]) => w?.kind === "now").map(([id]) => id);
-    expect(now).toHaveLength(1);
-    expect([...reads.values()].filter((w) => w?.kind === "waits")).toEqual([{ kind: "waits", why: "sender_slot" }]);
+    for (const id of ids) expect((await h.request<EnrollmentRead>("GET", `/api/enrollments/${id}`)).body.tracks[0]?.nextStep?.when).toEqual({ kind: "ready" });
     await h.tick();
-    expect(h.fake.deliveryLog.map((d) => d.subjectId)).toEqual(now);
+    expect(h.fake.deliveryLog).toHaveLength(1);
+  });
+});
+
+
+describe("a read between two rounds evaluates its own lead first (the P2 seeds of the search on ab6fe8e)", () => {
+  test("a second track that starts after the first: read at its start instant, before the round, it has its first step pending", async () => {
+    const always = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
+    const def = definition([track("email", [email("s1")], { window: always }), track("email2", [email("t1")], { window: always, start: { kind: "after", trackId: "email", delayDays: 1 } })]);
+    const { h, pat, read } = await world(def);
+    await h.advanceTo(MONDAY_10 + 2 * H);
+    expect((await h.store.engine.subject(pat, h.clock))?.tracks.find((t) => t.trackId === "email2")?.startAt ?? null).not.toBeNull();
+    // The engine's next wake is the start instant; the clock moves there with no round, so the store has not started it.
+    const wake = await h.engine.nextWakeAt();
+    expect(wake).not.toBeNull();
+    h.clock = wake ?? h.clock;
+    expect((await h.store.engine.subject(pat, h.clock))?.tracks.find((t) => t.trackId === "email2")?.startedAt ?? null).toBeNull();
+    const next = (await read()).tracks.find((t) => t.trackId === "email2")?.nextStep;
+    expect(next?.stepId).toBe("t1");
+    expect(next?.when).toEqual({ kind: "ready" });
   });
 });

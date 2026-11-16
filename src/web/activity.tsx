@@ -8,6 +8,7 @@ import { dayLabel } from "./calls/callbackTime.ts";
 import { Icon, type IconName } from "./icons.tsx";
 import { stepNoun } from "../shared/track-label.ts";
 import { useNow, clockTime } from "./time.ts";
+import { conversationTaken } from "./campaign/sms-wording.ts";
 
 /**
  * The record's Activity: one timeline across campaigns, newest first, as in the approved
@@ -173,8 +174,11 @@ export function describeEntry(entry: ActivityEntry, userZone: string): { icon: I
       return { icon, tone: PLAIN, title: `${noun} ${entry.stepNumber} sent`, body: null, track };
     case "failed":
       return { icon: "bad", tone: CRIT, title: `${noun} ${entry.stepNumber} failed`, body: `${entry.to}: ${REASON[entry.reason] ?? entry.reason}`, track };
-    case "skipped":
-      return { icon: "system", tone: PLAIN, title: entry.stepNumber === null ? `${entry.track.label} skipped` : `${noun} ${entry.stepNumber} skipped`, body: REASON[entry.reason] ?? entry.reason, track: entry.stepNumber === null ? null : track };
+    case "skipped": {
+      // A taken conversation names the campaign that keeps it (question Q7 answered), through the one wording function.
+      const body = entry.reason === "sms_conversation_taken" ? `${conversationTaken(entry.owners ?? []).replace(/^t/, "T")}, so a reply couldn’t show which campaign it answers.` : (REASON[entry.reason] ?? entry.reason);
+      return { icon: "system", tone: PLAIN, title: entry.stepNumber === null ? `${entry.track.label} skipped` : `${noun} ${entry.stepNumber} skipped`, body, track: entry.stepNumber === null ? null : track };
+    }
     case "bounced":
       return sms
         ? { icon: "bad", tone: CRIT, title: entry.stepNumber === null ? "Bad number" : `${noun} ${entry.stepNumber}: bad number`, body: `${entry.to} was reported invalid and is marked wrong. Nothing more is texted to it.`, track }
@@ -259,6 +263,8 @@ export function dependentLine(a: { readonly track: { readonly label: string } } 
       return `${name} was skipped: its call wasn’t made within its skip limit.`;
     case "skipped_no_channel":
       return `${name} was skipped: there is nothing to reach them on for it.`;
+    case "skipped_conversation_taken":
+      return `${name} was skipped: ${conversationTaken(a.owners)}.`;
     case "skipped":
       return `${name} was skipped.`;
     case "stopped":

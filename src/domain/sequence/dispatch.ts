@@ -5,12 +5,31 @@
  * the transaction that writes its result.
  */
 import { ENGINE_PARAMS, isLive, isUncertain } from "./attempt.ts";
-import { leadNow, localDayNumber, windowOpen, windowOpensAt } from "./clock.ts";
-import { render } from "./copy.ts";
-import { ownSubject, poolOf, type TrackChannel } from "./definition.ts";
-import { applyToAttempt, callbackHold, campaignLets, channelOf, progressOf, runs, trackHold, type HoldReason } from "./progress.ts";
+import { leadNow, localDayNumber, windowOpen } from "./clock.ts";
+import { poolOf } from "./definition.ts";
+import {
+  applyToAttempt,
+  callbackHold,
+  campaignLets,
+  candidatesFor,
+  channelOf,
+  claimRefusal,
+  conversationUnsettled,
+  lacksThread,
+  pairFree,
+  progressOf,
+  renderStep,
+  runs,
+  senderOf,
+  sendableFrom,
+  stepDef,
+  threadOf,
+  trackHold,
+  windowOf,
+  type HoldReason,
+} from "./progress.ts";
 import { callPlacedFrom, callRoom, isListed, listedForDay, userDay } from "./calls.ts";
-import type { AccountState, Attempt, ProviderWork, RenderedCopy, SubjectState } from "./state.ts";
+import type { AccountState, Attempt, ProviderWork, SubjectState } from "./state.ts";
 
 export interface ReadyItem {
   readonly subjectId: string;
@@ -29,64 +48,9 @@ export function comparePriority(a: ReadyItem, b: ReadyItem): number {
   return a.stepId < b.stepId ? -1 : a.stepId > b.stepId ? 1 : 0;
 }
 
-const stepDef = (state: SubjectState, trackId: string, stepId: string) =>
-  state.campaign.definition.tracks.find((t) => t.id === trackId)?.steps.find((s) => s.id === stepId);
-
-/** The copy for one step and lead, rendered from the current definition. A text has no subject. */
-export function renderStep(state: SubjectState, trackId: string, stepId: string): RenderedCopy | null {
-  const step = stepDef(state, trackId, stepId);
-  if (!step) return null;
-  // A text has no subject; an email renders only a subject it starts (a continuing one has none).
-  const subject = render(channelOf(state, trackId) === "sms" ? "" : ownSubject(step), state.lead.mergeData);
-  const body = render(step.body, state.lead.mergeData);
-  return subject.ok && body.ok ? { subject: subject.text, body: body.text } : null;
-}
-
-/** The thread a continue-thread step continues: the provider reference of the track's latest send. */
-export function threadOf(state: SubjectState, trackId: string): string | null {
-  const sent = state.work
-    .filter((w) => w.trackId === trackId && (w.settled === "sent" || w.settled === "user_sent") && state.attempts.some((a) => a.idempotencyKey === w.key && a.state === "sent"))
-    .sort((a, b) => (a.sentWall ?? 0) - (b.sentWall ?? 0));
-  return sent.at(-1)?.providerRef ?? null;
-}
-
-/** A continue-thread email with no thread to continue is held, not sent (ruling 1). A text has no thread. */
-export function lacksThread(state: SubjectState, trackId: string, stepId: string): boolean {
-  return channelOf(state, trackId) === "email" && stepDef(state, trackId, stepId)?.threading === "continue_thread" && threadOf(state, trackId) === null;
-}
-
-/** The subject's fixed sender on a channel (1.3). */
-export function senderOf(state: SubjectState, channel: TrackChannel): string | null {
-  return channel === "sms" ? state.subject.smsSender : channel === "email" ? state.subject.emailSender : null;
-}
-
-/**
- * Whether `sender` may text `recipient` for this subject (4.5): the pair has no unreleased owner,
- * or this subject owns it. An enrollment's binding is never transferred.
- */
-export function pairFree(state: SubjectState, sender: string, recipient: string): boolean {
-  return state.smsBindings.every((b) => b.sender !== sender || b.recipient !== recipient || b.owner === state.subject.id);
-}
-
-/** The mobile an SMS track texts: its destination's key (E.164). */
-function recipientOf(state: SubjectState, trackId: string): string | null {
-  const id = progressOf(state, trackId)?.destinationDetailId;
-  const live = id ? state.lead.resolved[id]?.liveId : undefined;
-  return state.lead.details.find((d) => d.id === live)?.key ?? null;
-}
-
-/**
- * The accounts a claim for a step on this track may choose from: the fixed sender, else the pool;
- * for SMS, only numbers whose conversation with the mobile is free or this subject's (4.5).
- */
-export function candidatesFor(state: SubjectState, trackId: string): string[] {
-  const channel = channelOf(state, trackId) ?? "email";
-  const fixed = senderOf(state, channel);
-  const ids = fixed !== null ? [fixed] : [...poolOf(state.campaign.definition, channel)];
-  if (channel !== "sms") return ids;
-  const recipient = recipientOf(state, trackId);
-  return recipient === null ? ids : ids.filter((id) => pairFree(state, id, recipient));
-}
+// The claim's step guard and the SMS conversation candidates live beside evaluation, which skips a track on them
+// (ADR 0003, question Q7 answered); they are re-exported here, where the claim reads them.
+export { candidatesFor, claimRefusal, lacksThread, pairFree, renderStep, sendableFrom, senderOf, threadOf, windowOf };
 
 /** A held track's reason (5.4), including a pending step whose copy cannot render for this lead. */
 export function heldReason(state: SubjectState, trackId: string, now: number): HoldReason | null {
@@ -98,8 +62,9 @@ export function heldReason(state: SubjectState, trackId: string, now: number): H
   if (state.attempts.some((a) => a.stepId === progress.nextStepId && isLive(a))) return null;
   if (lacksThread(state, trackId, progress.nextStepId)) return "no_thread";
   if (!renderStep(state, trackId, progress.nextStepId)) return "render_failed";
-  // Every number this SMS track may use is in another subject's conversation with the mobile (4.5, Q7).
-  if (channelOf(state, trackId) === "sms" && candidatesFor(state, trackId).length === 0) return "sms_conversation_taken";
+  // A conversation taken on every number the track may use is not a hold: evaluation skips the track (4.5, Q7 answered).
+  // One whose owner's first text is not known sent or not sent yet holds it, until that work settles (point 10).
+  if (conversationUnsettled(state, trackId, now)) return "sms_conversation_unsettled";
   return null;
 }
 
@@ -115,39 +80,20 @@ export function readyItems(state: SubjectState, now: number): ReadyItem[] {
     const stepId = p.nextStepId;
     if (state.results.some((r) => r.stepId === stepId)) return [];
     if (state.attempts.some((a) => a.stepId === stepId && isLive(a))) return [];
-    // A track whose conversation is taken stays ready: a number may join the pool, and the claim decides.
-    const held = heldReason(state, p.trackId, now);
-    if (held && held !== "sms_conversation_taken") return [];
+    if (heldReason(state, p.trackId, now)) return [];
     return [{ subjectId: state.subject.id, trackId: p.trackId, stepId, touched: state.subject.touched, dueWall: p.dueWall }];
   });
-}
-
-/** The wall instant the pending step became due: its stored due wall moved by every freeze since. */
-export function windowOf(state: SubjectState, trackId: string) {
-  return state.campaign.definition.tracks.find((t) => t.id === trackId)?.window ?? [];
-}
-
-/**
- * The first instant at or after `now` at which the claim's time conditions hold for the track's pending email or text,
- * the lead running (ADR 0003 "Reads that say when"): its wait has ended in lead time, and its track's window is open in
- * the prospect's zone. The claim's step guard refuses "the sending window is closed" exactly when it is not `now`. Null
- * when there is no pending step with a due time, or the window never opens.
- */
-export function sendableFrom(state: SubjectState, trackId: string, now: number, from: number = now): number | null {
-  const p = progressOf(state, trackId);
-  if (!p || p.dueAt === null) return null;
-  const dueWall = now + Math.max(0, p.dueAt - leadNow(state.subject.clock, now));
-  return windowOpensAt(windowOf(state, trackId), state.lead.zone, Math.max(dueWall, from));
 }
 
 /**
  * Why a pending step has no time a read may promise (ADR 0003 "Reads that say when"). Everything that is not about time or a
  * sender: a lead or campaign hold, an ending, work with a provider, a held track (5.4), no window, no transport for the step
- * on its port, sending interrupted on its provider, no good destination. Once its time has come, why dispatch's next round
- * does not hand it over: a reply from its destination waiting for its thread (predicate 18); its claim waiting for its
- * sender's next sending slot (`sender_slot`), its own or after another step's; or, with no claim, the cause every candidate
- * sender shares (none can send, all rate-limited, all full today, all at their in-flight bound), and otherwise the general
- * `sender_waiting`. A call: today's list full, or already on the list, on a later day, or waiting for calling hours.
+ * on its port, sending interrupted on its provider, no good destination. Once its time has come, a reason only when this
+ * subject's own state makes the handover impossible at the read's instant whatever the other leads do: a reply from its
+ * destination waiting for its thread on every sender it may use (predicate 18); its claim's sender's pacing slot not reached
+ * (`sender_slot`: a slot only moves later); every candidate sender unable to send whatever the others do (unavailable,
+ * rate-limited, or full today by its sends alone), with the cause they share, else the general `sender_waiting`. A call:
+ * today's list full, or already on the list, on a later day, or waiting for calling hours.
  */
 export type StepWait =
   | "campaign_not_launched"
@@ -165,7 +111,6 @@ export type StepWait =
   | "sender_slot"
   | "sender_unavailable"
   | "sender_rate_limited"
-  | "sender_busy"
   | "sending_capacity"
   | "sender_waiting"
   | "call_capacity"
@@ -173,11 +118,13 @@ export type StepWait =
   | "call_hours_closed";
 
 /**
- * When the track's pending step goes, as every read says it: the engine's instant (at or after `now`); for a call, the
+ * When the track's pending step goes, as every read says it: ready (its time has come and nothing of its own holds it; it
+ * is in line for its sender, with no instant promised); the earliest instant, when it waits on time alone; for a call, the
  * user day it goes on the list (`call_day`, at the instant it is placed), or the user day an open call is listed for
  * (`listed_for`); or why it waits.
  */
 export type StepWhen =
+  | { readonly kind: "ready" }
   | { readonly kind: "at"; readonly at: number }
   | { readonly kind: "call_day"; readonly at: number; readonly day: number }
   | { readonly kind: "listed_for"; readonly day: number }
@@ -194,7 +141,7 @@ export function holdWait(hold: HoldReason): StepWait {
     case "render_failed":
     case "provider_skipped":
     case "no_thread":
-    case "sms_conversation_taken":
+    case "sms_conversation_unsettled":
       return hold;
     default: {
       const unhandled: never = hold;
@@ -217,22 +164,18 @@ export interface StepEnv {
    * of its stored state (council on cc9bf55, item 8).
    */
   readonly callRoomOn?: (day: number, self: SubjectState) => boolean;
-  /**
-   * Dispatch's next round at the read's instant over every subject it would consider (`nextRound`), with `self` in place of
-   * its stored state. Without it, the round is run over the subject alone.
-   */
-  readonly round?: (self: SubjectState) => Round;
 }
 
 /**
- * The one read of when a track's pending step goes (ADR 0003 "Reads that say when"). It predicts nothing a sender will do
- * later; it answers from dispatch's own functions at the read's instant, in this order:
+ * The one read of when a track's pending step goes (ADR 0003 "Reads that say when"), from this subject's own state and
+ * dispatch's own per-step checks at the read's instant; it loads no other lead and predicts nothing:
  * 1. anything that is not about time or a sender (a hold, a pause, an ending, no transport, an interruption): that reason;
  * 2. waiting on time alone (its wait has not ended, or its window is closed): the first instant at or after the wait's end
- *    at which the window is open (`sendableFrom`), said as an earliest time, unless the engine knows no sender could take
- *    it (none connected, or every candidate's daily limit zero), or the lead has no good destination;
- * 3. its time has come: dispatch's next round at the read's instant (`nextRound`, on the real state, any real claim
- *    included) hands it over ("now"), or gives why not, with no time.
+ *    at which the window is open (`sendableFrom`), as an earliest time, unless the engine knows no sender could take it
+ *    (none connected, or every candidate's daily limit zero), or the lead has no good destination;
+ * 3. its time has come: the step guard (`claimRefusal`), the account choice (`chooseAccount`) and, for its claim, the
+ *    handover predicates (`handoverFailures`). A reason only when they make the handover impossible at this instant whatever
+ *    the other leads do; otherwise **ready**, in line for its sender, with no instant promised.
  * A call: `callPlacedFrom` (`readyCalls`) and `callRoom`, then for an open task the listing rule (`isListed`).
  * Null when the track has no pending step with a due time.
  */
@@ -262,14 +205,51 @@ export function stepWhen(state: SubjectState, trackId: string, now: number, env:
   const opens = sendableFrom(state, trackId, now);
   if (opens === null) return waits("no_window");
   if (opens > now) return leadWait(state, trackId, stepId) ?? noSenderKnown(state, trackId) ?? { kind: "at", at: opens };
-  // 3. Its time has come. Every hold keeps its own reason (review bot on cc9bf55), then dispatch's next round.
+  // 3. Its time has come. Every hold keeps its own reason (review bot on cc9bf55), then the per-step checks.
   if (!live) {
     const held = heldReason(state, trackId, now);
     if (held) return waits(holdWait(held));
+    return unclaimedWhen(state, trackId, stepId, now);
   }
-  const fate = (env.round?.(state) ?? nextRound([state], now, env)).get(roundKey(subject.id, stepId));
-  if (fate === undefined) return waits(leadWait(state, trackId, stepId)?.why ?? "sender_waiting");
-  return fate.handed ? { kind: "at", at: now } : waits(fate.why);
+  const account = state.accounts[live.accountId];
+  const expired = now - live.claimedWall >= ENGINE_PARAMS.SETTLING;
+  if (account && !expired) {
+    const failed = handoverFailures(state, live, account, now).filter((f) => f !== 14);
+    if (failed.length === 0) return { kind: "ready" };
+    // The engine examines no claim on an account whose slot is not reached, and a slot only moves later.
+    if (failed.includes(16)) return waits("sender_slot");
+    // A reply awaiting its thread keeps the claim, as `tryHandover` does.
+    if (failed.every((f) => f === 18)) return waits("reply_pending");
+  }
+  // At this instant the engine expires the claim, or withdraws it on its failed predicates, and claims the step again.
+  const event = expired ? ({ kind: "claim_expired", now } as const) : ({ kind: "guard_failed" } as const);
+  return unclaimedWhen(releasedBy(state, applyToAttempt(state, live.id, event, now).state), trackId, stepId, now);
+}
+
+/** An unclaimed step whose time has come: the claim's step guard, then the account choice, from this subject's state. */
+function unclaimedWhen(state: SubjectState, trackId: string, stepId: string, now: number): StepWhen {
+  const refusal = claimRefusal(state, { trackId, stepId }, now);
+  if (refusal !== null) return { kind: "waits", why: refusalWait(refusal) };
+  const destination = destinationOf(state, trackId);
+  const candidates = candidatesOf(state, trackId);
+  // Predicate 18 on every sender it may use: whichever the claim takes, the handover waits.
+  if (candidates.length > 0 && candidates.every((a) => replyPending(state, a.id, destination))) return { kind: "waits", why: "reply_pending" };
+  if (chooseAccount(state, now, stepId)) return { kind: "ready" };
+  const why = senderWait(state, trackId, stepId, now);
+  return why === null ? { kind: "ready" } : { kind: "waits", why };
+}
+
+/** The candidate accounts of the track's channel, as `chooseAccount` reads them. */
+function candidatesOf(state: SubjectState, trackId: string): AccountState[] {
+  const channel = channelOf(state, trackId);
+  return candidatesFor(state, trackId).map((id) => state.accounts[id]).filter((a): a is AccountState => a !== undefined && a.channel === channel);
+}
+
+/** The address or mobile a step of the track goes to, as the claim writes it. */
+function destinationOf(state: SubjectState, trackId: string): string {
+  const p = progressOf(state, trackId);
+  const d = state.lead.details.find((x) => x.id === state.lead.resolved[p?.destinationDetailId ?? ""]?.liveId);
+  return (channelOf(state, trackId) === "sms" ? d?.key : d?.value) ?? "";
 }
 
 /** A claim's step guard on the lead alone: a destination that is not a good address, copy that does not render, no thread. */
@@ -297,7 +277,8 @@ function noSenderKnown(state: SubjectState, trackId: string): { kind: "waits"; w
 /**
  * `after` with the reservations its withdrawals free (4.2): a claimed attempt withdrawn before any call settles its work,
  * and the store then releases that account's place and reservation. A read of a state a transition produces (a control's
- * preview, the next round's own withdrawals) sees each account as the store would report it then (council on cc9bf55, item 8).
+ * preview, a claim the engine withdraws at the read's instant) sees each account as the store would report it then
+ * (council on cc9bf55, item 8).
  */
 export function releasedBy(before: SubjectState, after: SubjectState): SubjectState {
   let accounts = after.accounts;
@@ -310,13 +291,7 @@ export function releasedBy(before: SubjectState, after: SubjectState): SubjectSt
   return accounts === after.accounts ? after : { ...after, accounts };
 }
 
-/** What dispatch's next round does with a step: hands it over, or why not. */
-export type RoundFate = { readonly handed: true } | { readonly handed: false; readonly why: StepWait };
-/** The next round's fate of each step it considers, by `roundKey`. */
-export type Round = ReadonlyMap<string, RoundFate>;
-export const roundKey = (subjectId: string, stepId: string) => `${subjectId}/${stepId}`;
-
-/** Why the claim pass refused a ready item, as a read says it. */
+/** Why the claim's step guard refused the step, as a read says it. */
 function refusalWait(refusal: string): StepWait {
   if (refusal === "the destination is not a good address of the lead") return "no_destination";
   if (refusal === "the copy does not render for this lead") return "render_failed";
@@ -326,141 +301,24 @@ function refusalWait(refusal: string): StepWait {
 }
 
 /**
- * Why `chooseAccount` chose none for the step at `now`: the cause every candidate shares, else the general sentence. Each
- * cause is true of every candidate it speaks for (an inherited reservation needs no room on its own account).
+ * Why no candidate sender can take the step at `now` whatever the other leads do, or null when one might: each candidate is
+ * unavailable (not healthy), held by a provider's wait (a rate limit, a quota), or full today by its sends alone (its open
+ * reservations aside, which another lead's withdrawn claim can free). The cause they share, else the general sentence.
  */
-export function senderWait(state: SubjectState, trackId: string, stepId: string, now: number): StepWait {
-  const channel = channelOf(state, trackId);
+export function senderWait(state: SubjectState, trackId: string, stepId: string, now: number): StepWait | null {
   const reserved = inheritedWork(state, stepId)?.accountId ?? null;
-  const candidates = candidatesFor(state, trackId).map((id) => state.accounts[id]).filter((a): a is AccountState => a !== undefined && a.channel === channel);
+  const candidates = candidatesOf(state, trackId);
   if (candidates.length === 0) return "sender_unavailable";
-  const causes = new Set<StepWait>(
-    candidates.map((a): StepWait => {
-      if (!a.healthy) return "sender_unavailable";
-      if (a.waitUntil !== null && now < a.waitUntil) return a.waitReason === "rate_limited" ? "sender_rate_limited" : "sender_unavailable";
-      if (reserved === a.id) return "sender_waiting";
-      if (a.used >= a.capacity) return "sending_capacity";
-      if (a.inFlight >= a.k) return "sender_busy";
-      return "sender_waiting";
-    }),
-  );
-  const [only] = causes;
-  return causes.size === 1 && only !== undefined ? only : "sender_waiting";
-}
-
-const ROUND_PASSES = 4;
-
-/**
- * Dispatch's next round at `now` over `states` (ADR 0003 "Reads that say when"), with the engine's own functions in the
- * engine's order (`runTick`): claims expired at `now` (`claim_expired`); the claim pass over every ready item in priority
- * order (`readyItems`, `claimRefusal`, the port's transport, the dispatch gate, `chooseAccount`, `claim`); the handover pass
- * per account (retries first, then claims by priority; the slot, `handoverFailures` without the pre-send check, then
- * `handOver`, or the engine's wait, skip or withdrawal); and again while a pass changed something. The accounts are shared
- * by every subject, as the store's are. Pure: nothing is written. What it cannot know: a provider's answer the engine has
- * not read yet (a reply the pre-send check would find, an inbox gone down since the last sync).
- */
-export function nextRound(states: readonly SubjectState[], now: number, env: Pick<StepEnv, "transportAvailable" | "waitingOnProvider"> = {}): Round {
-  let accounts: Record<string, AccountState> = {};
-  for (const s of states) for (const a of Object.values(s.accounts)) accounts[a.id] ??= a;
-  const latest = new Map(states.map((s) => [s.subject.id, s]));
-  const shared = (s: SubjectState): SubjectState => ({ ...s, accounts });
-  const set = (s: SubjectState) => {
-    latest.set(s.subject.id, s);
-    accounts = { ...accounts, ...s.accounts };
-  };
-  const handed = new Set<string>();
-  const replyWaits = new Set<string>();
-  const refused = new Map<string, StepWait>();
-  for (let pass = 0; pass < ROUND_PASSES; pass++) {
-    let changed = false;
-    for (const stored of [...latest.values()]) {
-      for (const a of stored.attempts) {
-        if (a.state !== "claimed" || now - a.claimedWall < ENGINE_PARAMS.SETTLING) continue;
-        const s = shared(latest.get(stored.subject.id) ?? stored);
-        set(releasedBy(s, applyToAttempt(s, a.id, { kind: "claim_expired", now }, now).state));
-        changed = true;
-      }
-    }
-    const ready = [...latest.values()].flatMap((s) => readyItems(shared(s), now)).sort(comparePriority);
-    for (const item of ready) {
-      const current = latest.get(item.subjectId);
-      if (!current) continue;
-      const s = shared(current);
-      const key = roundKey(item.subjectId, item.stepId);
-      const refusal = claimRefusal(s, item, now);
-      if (refusal !== null) {
-        refused.set(key, refusalWait(refusal));
-        continue;
-      }
-      const channel = channelOf(s, item.trackId) === "sms" ? "sms" : "email";
-      if (env.transportAvailable && !env.transportAvailable(channel, stepDef(s, item.trackId, item.stepId)?.threading ?? "new_subject")) {
-        refused.set(key, "no_transport");
-        continue;
-      }
-      if (env.waitingOnProvider?.(s, item.trackId) === true) {
-        refused.set(key, "waiting_on_provider");
-        continue;
-      }
-      const account = chooseAccount(s, now, item.stepId);
-      if (!account) {
-        refused.set(key, senderWait(s, item.trackId, item.stepId, now));
-        continue;
-      }
-      refused.delete(key);
-      set(claim(s, item, account, { attemptId: `round:${key}:${pass}`, retryable: false, notSentIsFinal: false, now }));
-      changed = true;
-    }
-    for (const accountId of Object.keys(accounts).sort()) {
-      const skipped = new Set<string>();
-      for (let i = 0; i < 100; i++) {
-        const candidates = [...latest.values()].flatMap((s) =>
-          s.attempts
-            .filter((a) => a.accountId === accountId && !skipped.has(a.id) && isLive(a) && (a.state === "claimed" || (a.state === "handed" && (a.retry === "wanted" || a.retry === "wanted_after_not_sent"))))
-            .map((a) => ({ a, s, retry: a.state === "handed", item: { subjectId: s.subject.id, trackId: a.trackId, stepId: a.stepId, touched: s.subject.touched, dueWall: s.tracks.find((t) => t.trackId === a.trackId)?.dueWall ?? 0 } })),
-        );
-        candidates.sort((x, y) => (x.retry !== y.retry ? (x.retry ? -1 : 1) : comparePriority(x.item, y.item)));
-        const next = candidates[0];
-        const account = accounts[accountId];
-        if (!next || !account) break;
-        if (!next.retry && now < account.nextSlotAt) break;
-        if (env.waitingOnProvider?.(next.s, next.a.trackId) === true) break;
-        const s = shared(next.s);
-        if (next.retry) {
-          const pending = retryFailures(s, next.a, account, now).filter((f) => f !== "predicate 14");
-          if (pending.length > 0 && pending.every((f) => f === "slot")) break;
-          if (pending.length === 0) set(authorizeRetry(s, next.a, account, now));
-          skipped.add(next.a.id);
-          continue;
-        }
-        const key = roundKey(next.s.subject.id, next.a.stepId);
-        const failed = handoverFailures(s, next.a, account, now).filter((f) => f !== 14);
-        if (failed.length === 0) {
-          set(handOver(s, next.a, account, now));
-          handed.add(key);
-          continue;
-        }
-        if (failed.every((f) => f === 16 || f === 18) && failed.includes(18)) {
-          replyWaits.add(key);
-          skipped.add(next.a.id);
-          continue;
-        }
-        if (failed.every((f) => f === 16)) break;
-        set(releasedBy(s, applyToAttempt(s, next.a.id, { kind: "guard_failed" }, now).state));
-        changed = true;
-      }
-    }
-    if (!changed) break;
+  const causes: StepWait[] = [];
+  for (const a of candidates) {
+    if (!a.healthy) causes.push("sender_unavailable");
+    else if (a.waitUntil !== null && now < a.waitUntil) causes.push(a.waitReason === "rate_limited" ? "sender_rate_limited" : "sender_unavailable");
+    else if (reserved !== a.id && a.used - a.reserved >= a.capacity) causes.push("sending_capacity");
+    else return null;
   }
-  const out = new Map<string, RoundFate>();
-  for (const s of latest.values()) {
-    for (const a of s.attempts) {
-      const key = roundKey(s.subject.id, a.stepId);
-      if (handed.has(key)) out.set(key, { handed: true });
-      else if (a.state === "claimed") out.set(key, { handed: false, why: replyWaits.has(key) ? "reply_pending" : "sender_slot" });
-    }
-  }
-  for (const [key, why] of refused) if (!out.has(key)) out.set(key, { handed: false, why });
-  return out;
+  const kinds = new Set(causes);
+  const [only] = kinds;
+  return kinds.size === 1 && only !== undefined ? only : "sender_waiting";
 }
 
 /** A call step: the user day it goes on the list (`readyCalls`, `callRoom`), or, once placed, where its task is (`isListed`). */
@@ -480,26 +338,6 @@ function callWhen(state: SubjectState, trackId: string, stepId: string, now: num
   // A later day already filled by calls the engine knows are carried into it: no room it can name a day for.
   if (day > state.callDay.day && env.callRoomOn?.(day, state) === false) return { kind: "waits", why: "call_capacity" };
   return { kind: "call_day", at, day };
-}
-
-/** The claim's step guard (4.2 step 1). Null when it holds; otherwise why not. */
-export function claimRefusal(state: SubjectState, item: ReadyItem, now: number): string | null {
-  if (!runs(state)) return "the lead is not running";
-  const p = progressOf(state, item.trackId);
-  if (!p || p.startedAt === null || p.finishedAt !== null) return "the track is not running";
-  if (p.nextStepId !== item.stepId) return "the step is not the track's pending step";
-  const step = stepDef(state, item.trackId, item.stepId);
-  if (!step || step.removed) return "the step was removed";
-  if (state.results.some((r) => r.stepId === item.stepId)) return "the step already has a result";
-  if (state.attempts.some((a) => a.stepId === item.stepId && isLive(a))) return "the step already has a live attempt";
-  if (p.dueAt === null || p.dueAt > leadNow(state.subject.clock, now)) return "the step is not due";
-  // The step's time conditions hold exactly at the instant the reads give (`sendableFrom`, ADR 0003 "Reads that say when").
-  if (sendableFrom(state, item.trackId, now) !== now) return "the sending window is closed";
-  const dest = p.destinationDetailId ? state.lead.resolved[p.destinationDetailId] : undefined;
-  if (!dest || dest.bad || !dest.owned) return "the destination is not a good address of the lead";
-  if (!renderStep(state, item.trackId, item.stepId)) return "the copy does not render for this lead";
-  if (lacksThread(state, item.trackId, item.stepId)) return "there is no thread to continue";
-  return null;
 }
 
 export function accountAvailable(account: AccountState, now: number): boolean {
@@ -699,7 +537,7 @@ export function handOver(state: SubjectState, attempt: Attempt, account: Account
   return {
     ...state,
     subject: sms ? { ...state.subject, smsSender: state.subject.smsSender ?? account.id } : { ...state.subject, emailSender: state.subject.emailSender ?? account.id },
-    smsBindings: binds ? [...state.smsBindings, { sender: account.id, recipient: attempt.destination, owner: state.subject.id, ownerCampaignId: state.campaign.id, ownerEnded: false }] : state.smsBindings,
+    smsBindings: binds ? [...state.smsBindings, { sender: account.id, recipient: attempt.destination, owner: state.subject.id, ownerCampaignId: state.campaign.id, ownerCampaignName: null, ownerIsTest: state.subject.kind === "test_run", ownerEnded: false, ownerSent: false, ownerAnswered: false }] : state.smsBindings,
     attempts: state.attempts.map((a) => (a.id === attempt.id ? handed : a)),
     work: state.work.map((w) => (w.key === attempt.idempotencyKey ? { ...w, calls: w.calls + 1, firstHandedWall: w.firstHandedWall ?? now, unresolvedSince: null } : w)),
     accounts: { ...state.accounts, [account.id]: { ...account, nextSlotAt: now + account.gapMs } },

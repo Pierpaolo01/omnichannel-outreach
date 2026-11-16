@@ -19,7 +19,7 @@ export function stepWaitApi(why: StepWait): StepWaitApi {
     case "render_failed":
     case "provider_skipped":
     case "no_thread":
-    case "sms_conversation_taken":
+    case "sms_conversation_unsettled":
     case "no_window":
     case "no_transport":
     case "waiting_on_provider":
@@ -28,7 +28,6 @@ export function stepWaitApi(why: StepWait): StepWaitApi {
     case "sender_slot":
     case "sender_unavailable":
     case "sender_rate_limited":
-    case "sender_busy":
     case "sending_capacity":
     case "sender_waiting":
     case "call_capacity":
@@ -42,13 +41,15 @@ export function stepWaitApi(why: StepWait): StepWaitApi {
   }
 }
 
-/** The read of `stepWhen(…, now)`: due now at the read's own instant, a later instant, a call's day, or why it waits. `today` is the user's day number. */
+/** The read of `stepWhen(…, now)`: ready, a later instant, a call's day, or why it waits. `today` is the user's day number. */
 export function stepWhenView(when: StepWhen, now: number, today: number): StepWhenView {
   switch (when.kind) {
     case "waits":
       return when.channel ? { kind: "waits", why: stepWaitApi(when.why), channel: when.channel } : { kind: "waits", why: stepWaitApi(when.why) };
+    case "ready":
+      return { kind: "ready" };
     case "at":
-      return when.at <= now ? { kind: "now" } : { kind: "at", at: new Date(when.at).toISOString() };
+      return when.at <= now ? { kind: "ready" } : { kind: "at", at: new Date(when.at).toISOString() };
     case "call_day":
       return { kind: "call_day", day: dateOfDay(when.day), today: when.day <= today, now: when.at <= now };
     case "listed_for":

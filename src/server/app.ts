@@ -16,9 +16,9 @@ import type { OutreachStore } from "./persistence/store.ts";
 import { launchCheck } from "../domain/sequence/blockers.ts";
 import { definitionProblems, emptyDefinition, liveTracks, type CampaignDefinition } from "../domain/sequence/definition.ts";
 import { Engine } from "./engine/engine.ts";
-import type { RoundBound, StoredDefinition, StoredNote } from "./engine/engine-store.ts";
+import type { StoredDefinition, StoredNote } from "./engine/engine-store.ts";
 import { UnconnectedEmailPort, UnprovisionedSmsPort } from "./engine/ports.ts";
-import { accountView, progressView, roundBoundOf, stepEnvOf } from "./engine/views.ts";
+import { accountView, progressView, stepEnvOf } from "./engine/views.ts";
 import type { StepEnv } from "../domain/sequence/dispatch.ts";
 import { callsView, callTaskView, needsAttentionView, recordCalls, todayView } from "./engine/call-views.ts";
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
@@ -617,14 +617,19 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
    * loaded only when a call not yet on the list would go on it on a later day.
    */
   const withEnv = async <T>(at: number, reading: readonly SubjectState[], known: ReadonlyMap<string, SubjectState | null> | undefined, compute: (env: StepEnv) => T | Promise<T>): Promise<T> => {
-    // Dispatch's next round is loaded only when a step's time has come (ADR 0003 "Reads that say when", step 3).
-    const light = await stepEnvOf(store.engine, at, reading, transport, known, false, false);
-    // The round is asked about specific steps: only work ranked before them in priority order is loaded (`roundBoundOf`).
-    const probe: { room: boolean; round: RoundBound | null } = { room: false, round: null };
-    const first = await compute({ ...light, callRoomOn: () => ((probe.room = true), true), round: (self) => ((probe.round = roundBoundOf(probe.round, self, at)), new Map()) });
-    return probe.room || probe.round ? compute(await stepEnvOf(store.engine, at, reading, transport, known, probe.room, probe.round ?? false)) : first;
+    const light = await stepEnvOf(store.engine, at, reading, transport, known, false);
+    const probe = { asked: false };
+    const first = await compute({ ...light, callRoomOn: () => ((probe.asked = true), true) });
+    return probe.asked ? compute(await stepEnvOf(store.engine, at, reading, transport, known)) : first;
   };
-  const readOf = (state: SubjectState, at: number, env: StepEnv): EnrollmentRead => ({ ...progressView(state, at, env, rules.stepWhen), controls: controlsView(state, at, rules, env), mayStillSend: state.work.filter(maySend).length });
+  // The read is this subject as the engine evaluates it at the read's instant (`previewAsOf`, the rule the controls' preview
+  // already reads through: the engine's own `asOfAction`): a track
+  // whose start or a step whose due falls between two rounds is read as started or due, never as having no pending step
+  // (the P2 seeds of the search on ab6fe8e). Pure: nothing is written; the next round evaluates the same.
+  const readOf = (stored: SubjectState, at: number, env: StepEnv): EnrollmentRead => {
+    const state = rules.previewAsOf(stored, at, rules.evaluate);
+    return { ...progressView(state, at, env, rules.stepWhen), controls: controlsView(state, at, rules, env), mayStillSend: state.work.filter(maySend).length };
+  };
   const enrollmentRead = async (id: string): Promise<EnrollmentRead | null> => {
     const at = Date.parse(now());
     const state = await store.engine.subject(id, at);
