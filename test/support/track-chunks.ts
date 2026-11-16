@@ -24,7 +24,11 @@ import { TRACK_MUTATIONS } from "./track-mutations.ts";
 // 43 and 57 (question Q7 answered): a number joins a campaign's pool after a skip there, and a skip a claim delayed; 43 also
 // a skip on a fixed sender after a mobile changed, 57 a number leaving a pool. 5 (after the reviews of bebdc06): a lead
 // held under the interim engine, skipped at the upgrade. 2, 3 and 12: a number refusing a text for an account reason.
-export const TRACK_FIXED_SEEDS: readonly number[] = [2, 3, 4, 5, 11, 12, 29, 43, 57, 61, 78];
+// 76 and 84 (the search on faac357): a skip the app could only decide once it learnt late that the track had started, and
+// a waiting claim tried at the instant its slot freed, ahead of a lower-priority handover there. 50 and 85 (the reviews
+// of faac357): a first text refused hours after its acceptance while another campaign's lead waits on it, and one never
+// answered, which the user marks not sent.
+export const TRACK_FIXED_SEEDS: readonly number[] = [2, 3, 4, 5, 11, 12, 29, 43, 50, 57, 61, 76, 78, 84, 85];
 const SEARCH_SEEDS = 100;
 /** Seed offsets each mutation's search tries after its recorded seed. */
 const MAX_SEEDS = 30;
@@ -75,6 +79,9 @@ export function trackChunks(from: number, to: number): void {
             "a-number-left-a-pool",
             "a-mobile-changed",
             "a-number-refuses-a-text",
+            "a-first-text-refused-after-acceptance",
+            "a-first-text-never-answered",
+            "held-on-an-unsettled-conversation",
           ].filter((f) => !reached.has(f)),
         ).toEqual([]);
       });

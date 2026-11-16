@@ -68,10 +68,14 @@ export class FakeSmsPort implements SendPort {
   readonly invalidAfterSend = new Set<string>();
   /** Texts that go but are never reported: no sent event, and every lookup answers unknown (as the email fake's silent-send). */
   silentSends = false;
+  /** Mobiles whose texts go but are never reported, with every lookup answering unknown: `silentSends` for one mobile. */
+  readonly silentTo = new Set<string>();
   /** Question Q7 answered, point 10. Numbers whose next calls are refused for an account reason, with how many and why. */
   readonly refuseFrom = new Map<string, { calls: number; reason: "rate_limited" | "payment_required"; retryAfterMs?: number }>();
   /** Mobiles whose texts are accepted and then refused by the provider: a `rejected` event a minute later, nothing sent. */
   readonly failAfterAccept = new Set<string>();
+  /** How long after accepting such a text the provider reports it refused (a minute unless a test says otherwise). */
+  failAfterAcceptDelayMs = MINUTE;
   /** Mobiles whose next calls get no answer and are never sent: lookups find nothing (`not-sent`). */
   readonly dropUnanswered = new Map<string, number>();
   /** Mobiles whose texts are sent but whose answer is lost (`unknown`) and never reported: only a lookup finds them sent. */
@@ -156,11 +160,11 @@ export class FakeSmsPort implements SendPort {
     const providerRef = `sms-${++this.nextRef}`;
     if (this.failAfterAccept.has(request.destination)) {
       this.texts.push({ key: request.idempotencyKey, request, providerRef, sendAt: Number.POSITIVE_INFINITY, sentAt: null, cancelled: true, observeDelay: 0 });
-      this.emit(now + MINUTE, { id: `sms-rejected-${providerRef}`, kind: "rejected", key: request.idempotencyKey, providerRef, reason: "provider_skipped" });
+      this.emit(now + this.failAfterAcceptDelayMs, { id: `sms-rejected-${providerRef}`, kind: "rejected", key: request.idempotencyKey, providerRef, reason: "provider_skipped" });
       return { kind: "accepted", providerRef };
     }
     const delay = mode === "late-send" ? Math.round((1 + this.random() * 59) * MINUTE) : 0;
-    this.texts.push({ key: request.idempotencyKey, request, providerRef, sendAt: now + delay, sentAt: null, cancelled: false, observeDelay: this.silentSends || this.loseAnswer.has(request.destination) ? Number.POSITIVE_INFINITY : mode === "late-send" ? Math.round(this.random() * 30 * MINUTE) : 0 });
+    this.texts.push({ key: request.idempotencyKey, request, providerRef, sendAt: now + delay, sentAt: null, cancelled: false, observeDelay: this.silentSends || this.silentTo.has(request.destination) || this.loseAnswer.has(request.destination) ? Number.POSITIVE_INFINITY : mode === "late-send" ? Math.round(this.random() * 30 * MINUTE) : 0 });
     this.advance();
     return mode === "lost-response" || mode === "5xx" || this.loseAnswer.has(request.destination) ? { kind: "unknown" } : { kind: "accepted", providerRef };
   }
@@ -239,7 +243,7 @@ export class FakeSmsPort implements SendPort {
   lookup(attempt: AttemptRef): Promise<LookupResult> {
     const now = this.now();
     const t = this.texts.find((x) => x.key === attempt.idempotencyKey);
-    const answer: LookupResult = t && this.silentSends ? { kind: "unknown" } : !t || t.cancelled ? { kind: "not-sent" } : t.sentAt !== null && t.sentAt <= now ? { kind: "sent", sentAt: t.sentAt, providerRef: t.providerRef } : { kind: "queued" };
+    const answer: LookupResult = t && (this.silentSends || this.silentTo.has(t.request.destination)) ? { kind: "unknown" } : !t || t.cancelled ? { kind: "not-sent" } : t.sentAt !== null && t.sentAt <= now ? { kind: "sent", sentAt: t.sentAt, providerRef: t.providerRef } : { kind: "queued" };
     this.lookupLog.push({ at: now, key: attempt.idempotencyKey, answer: answer.kind });
     return Promise.resolve(answer);
   }

@@ -1,5 +1,6 @@
 import type { CampaignDefinition, StepDefinition, TrackChannel, TrackDefinition } from "../../src/domain/sequence/definition.ts";
 import type { SubjectState } from "../../src/domain/sequence/state.ts";
+import { heldReason } from "../../src/domain/sequence/dispatch.ts";
 import { DEFAULT_RULES, type Rules } from "../../src/server/engine/rules.ts";
 import type { ActivityView, CompanyRecord, EnrollmentProgress, LeadSearchResult, NeedsAttention, OutreachStatus, PersonRecord } from "../../src/shared/api.ts";
 import { trackLabel } from "../../src/shared/track-label.ts";
@@ -182,6 +183,24 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
   const removalAt = lateRand() < 0.3 ? { event: lateRand(), campaign: lateRand(), which: lateRand() } : null;
   const mobileChangeAt = lateRand() < 0.35 ? { event: lateRand(), person: lateRand() } : null;
   const interimUntil = lateRand() < 0.25 ? { event: lateRand() } : null;
+  // After the reviews of faac357, from the same stream after its earlier draws: the next text to a mobile two campaigns
+  // share is never known sent (point 10): accepted then refused by the provider, or never answered. Its binding is
+  // unsettled meanwhile, then released as unsent, and the other campaign's lead held on it becomes ready again.
+  const unsentAt = lateRand() < 0.45 ? { event: lateRand(), failAfterAccept: lateRand() < 0.5, refusedAfterMs: lateRand() < 0.5 ? 2 * HOUR : 9 * HOUR } : null;
+  /** The mobile whose next text is never known sent, from when, until a text to it is handed over. */
+  let unsentArmed: "armed" | "used" | null = null;
+  // The mobile answers a first text the app does not yet know went, while another campaign's lead on that mobile waits
+  // (the coordinator's ruling on item 3 of faac357's review): the reply stops the owner only, and makes the conversation.
+  const answerUnknownAt = lateRand() < 0.4 ? { event: lateRand() } : null;
+  let answerUnknownArmed = false;
+  /** The text whose answer the provider loses, which the mobile answers right after the tick that handed it over. */
+  let answerAfterTick: { mobile: string; sender: string } | null = null;
+  /** A text never answered: its outcome stays unknown until the user marks it, which the drain does as the user would. */
+  const unanswered: { attemptId: string; at: number; mark: "sent" | "not_sent" }[] = [];
+  /** Texts the user marked sent, by idempotency key, and when: known sent from then on. */
+  const markedSent = new Map<string, number>();
+  /** A text the provider accepted and then refused (`provider_skipped`): its step is held until the user acts (5.4). */
+  const refusedAfterAcceptance = new Set<string>();
   /** When the interim engine was replaced by the engine as built, in a run that starts under it. */
   let upgradeAt: number | null = null;
   /** People whose mobile a later export changed, and when. */
@@ -369,6 +388,17 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
     features.add(providerAt === null ? "sms-reply" : "sms-reply-reported-late");
     return true;
   }
+  /**
+   * The user marks each text whose outcome stays unknown, as Needs attention asks: one never answered as not sent (its
+   * binding is released as unsent), one the mobile answered as sent.
+   */
+  async function markUnanswered(): Promise<void> {
+    for (const { attemptId: id, mark } of unanswered.splice(0)) {
+      // Refused when its outcome is no longer unknown (a later call of the same attempt went, or the lead stopped).
+      if ((await h.engine.markAttempt(id, mark)) && mark === "sent") markedSent.set(id, h.clock);
+    }
+    await h.tick();
+  }
   /** The record's decided skips, by subject and track: each fixed once its instant has come, in track order. */
   const decidedSkips = new Map<string, number>();
   /** Every claim the record saw made (the `afterClaim` hook): which subject, step and number, and when. */
@@ -392,6 +422,42 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
   const smsProbe = probe(h, problem, "sms", checkHandoverPriority);
   sms.onHandover = async (call) => {
     await smsProbe(call);
+    // The drawn text never known sent (point 10): the first text on its pair after the draw, once; the provider's answer
+    // is decided after this hook.
+    sms.failAfterAccept.clear();
+    if (answerUnknownArmed && answerAfterTick === null) {
+      const owner = subjects.get(call.subjectId);
+      const firstOnPair = sms.handoverLog.filter((x) => x.sender === call.sender && x.destination === call.destination).length === 1;
+      if (owner && firstOnPair && [...subjects.values()].some((o) => o.campaign !== owner.campaign && mobileOf(o) === call.destination && !sms.deliveryLog.some((x) => x.subjectId === o.id))) {
+        // It goes, but the provider never reports it and every lookup answers unknown; the mobile answers it meanwhile.
+        sms.silentTo.add(call.destination);
+        unanswered.push({ attemptId: call.attemptId, at: call.at, mark: "sent" });
+        answerUnknownArmed = false;
+        answerAfterTick = { mobile: call.destination, sender: call.sender };
+      }
+    }
+    if (unsentAt && unsentArmed === "armed") {
+      // The first text on its pair to a mobile another campaign's lead, not yet texted, may text from the same number.
+      const firstOnPair = sms.handoverLog.filter((x) => x.sender === call.sender && x.destination === call.destination).length === 1;
+      const owner = subjects.get(call.subjectId);
+      // That lead's first SMS track has started and its window is open: it would text now.
+      const dueNow = (o: Subject) => campaigns[o.campaign]!.definition.tracks.some((t) => t.channel === "sms" && (startOf(o, t) ?? Infinity) <= h.clock && inWindow(t.window, zoneFor(o), h.clock));
+      // Every other number that lead may use already has someone else's text to the mobile, so it waits on this one.
+      const onlyThis = (o: Subject) => poolAt(o.campaign, h.clock).every((n) => n === call.sender || sms.handoverLog.some((x) => x.sender === n && x.destination === call.destination && x.subjectId !== o.id));
+      const other = owner && [...subjects.values()].some((o) => o.campaign !== owner.campaign && mobileOf(o) === call.destination && poolAt(o.campaign, h.clock).includes(call.sender) && onlyThis(o) && !sms.deliveryLog.some((d) => d.subjectId === o.id) && dueNow(o));
+      if (firstOnPair && other) {
+        unsentArmed = "used";
+        if (unsentAt.failAfterAccept) {
+          sms.failAfterAccept.add(call.destination);
+          sms.failAfterAcceptDelayMs = unsentAt.refusedAfterMs;
+          refusedAfterAcceptance.add(call.attemptId);
+        } else {
+          sms.dropUnanswered.set(call.destination, 1);
+          unanswered.push({ attemptId: call.attemptId, at: call.at, mark: "not_sent" });
+        }
+        features.add(unsentAt.failAfterAccept ? "a-first-text-refused-after-acceptance" : "a-first-text-never-answered");
+      }
+    }
     // An email reply from the same lead while its text is with the provider: it must stop the SMS track too.
     if (hookBudget <= 0 || !chance(0.3)) return;
     const address = email.deliveryLog.filter((d) => d.subjectId === call.subjectId).at(-1)?.destination;
@@ -400,6 +466,31 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
       features.add("email-reply-during-a-text");
     }
   };
+  // 29. The worker's caches follow the stored facts: right after each of its ticks, a freshly started engine at the same
+  // instant finds nothing to change and nothing to hand over. A cache keyed on less than what it read (a change of
+  // conversations, say) leaves the worker idle where a fresh one acts; checked at every tick, since the cache's own
+  // horizon heals the stall before a later check would see it.
+  let draining = false;
+  h.afterTick = async () => {
+    await freshCheck();
+    if (answerAfterTick && sms.deliveryLog.some((d) => d.destination === answerAfterTick!.mobile && d.sender === answerAfterTick!.sender)) {
+      sms.silentTo.delete(answerAfterTick.mobile);
+      const replied = textBack(answerAfterTick.mobile, answerAfterTick.sender);
+      answerAfterTick = null;
+      if (replied) {
+        features.add("a-reply-before-its-text-was-known-sent");
+        // Observed at once, before the lookup that would find the text sent.
+        await h.tick();
+      }
+    }
+  };
+  async function freshCheck(): Promise<void> {
+    if (draining || h.stopped || problems.length > 0) return;
+    const handed = sms.handoverLog.length + email.handoverLog.length;
+    const changed = await h.freshEngineTick();
+    const more = sms.handoverLog.length + email.handoverLog.length - handed;
+    if (changed.length > 0 || more > 0) problem(`29: at ${new Date(h.clock).toISOString()} a fresh engine handed over ${more} and changed what the running worker had left: ${changed.join("; ").slice(0, 600)}`);
+  }
   await h.tick();
   for (const [ci, c] of campaigns.entries()) {
     const wait = Math.floor(rand() * 3) * HOUR;
@@ -489,7 +580,7 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
   /** When the app could first know of a send: its sent event, or a lookup that confirmed it. */
   function knownAt(channel: TrackChannel, d: { key: string; at: number; visibleAt: number }): number {
     const looked = (channel === "sms" ? sms.lookupLog : email.lookupLog).find((l) => l.key === d.key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity;
-    return Math.min(d.visibleAt, looked);
+    return Math.min(d.visibleAt, looked, channel === "sms" ? (markedSent.get(d.key) ?? Infinity) : Infinity);
   }
   function badAtOf(s: Subject, channel: TrackChannel): number {
     const detail = channel === "email" ? addressOf(s) : mobileOf(s);
@@ -585,7 +676,10 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
    */
   function takenFor(s: Subject, sender: string, mobile: string): number | null {
     const first = sms.deliveryLog.find((d) => d.sender === sender && d.destination === mobile);
-    return first && first.subjectId !== s.id ? knownAt("sms", first) : null;
+    if (!first || first.subjectId === s.id) return null;
+    // Point 10 and the reply rule: a conversation once a text is known sent, or once the mobile answered on that number.
+    const answered = sms.replyLog.find((r) => r.from === mobile && r.to === sender && r.at >= first.at)?.at ?? Infinity;
+    return Math.min(knownAt("sms", first), answered);
   }
   /** Whether every number `s` may use at `t` had a text known sent to `mobile` for someone else by `t` (4.5, point 10). */
   function allTakenAt(s: Subject, t: number, mobile: string): boolean {
@@ -594,6 +688,20 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
       const at = takenFor(s, n, mobile);
       return at !== null && at <= t;
     });
+  }
+  /**
+   * A pending step's priority item by the record (4.3): touched once a send of the subject's was known by then; due at its
+   * track's start for a first step, else its wait after the step before it went.
+   */
+  function itemAt(subjectId: string, stepId: string, at: number): { touched: boolean; dueWall: number; subjectId: string; stepId: string } | null {
+    const rec = subjects.get(subjectId);
+    const t = rec ? campaigns[rec.campaign]!.definition.tracks.find((x) => x.steps.some((st) => st.id === stepId)) : undefined;
+    if (!rec || !t) return null;
+    const i = t.steps.findIndex((st) => st.id === stepId);
+    const prev = i > 0 ? deliveryOf(t.channel, rec.id, t.steps[i - 1]!.id) : undefined;
+    const due = i === 0 ? startOf(rec, t) : prev ? dueAfter(prev.at, t.steps[i]!.waitDays, zoneFor(rec)) : null;
+    const touched = (["sms", "email"] as const).some((c) => deliveriesOf(c).some((d) => d.subjectId === subjectId && knownAt(c, d) <= at));
+    return { touched, dueWall: due ?? Infinity, subjectId, stepId };
   }
   /** The pacing gap of a number, as the generator gave it. */
   const gapOf = (accountId: string) => [...numbers, ...(lateNumber ? [lateNumber] : [])].find((n) => n.id === accountId)?.gapMs ?? 0;
@@ -606,12 +714,21 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
   function claimEnd(s: Subject, stepId: string, t: number): number | null {
     const waiting = claims.filter((c) => c.subjectId === s.id && c.stepId === stepId && c.at <= t && !sms.handoverLog.some((x) => x.attemptId === c.attemptId) && c.at + SETTLING > t).at(-1);
     if (!waiting) return null;
-    const onNumber = sms.handoverLog.filter((x) => x.sender === waiting.accountId).map((x) => x.at);
+    const onNumber = sms.handoverLog.filter((x) => x.sender === waiting.accountId);
+    const ours = itemAt(s.id, stepId, t);
+    const aheadOf = (x: { subjectId: string; stepId: string; at: number }) => {
+      const theirs = itemAt(x.subjectId, x.stepId, x.at);
+      return ours === null || theirs === null || higherPriority(theirs, ours);
+    };
+    // Claims on one number are taken in priority order (4.3, 5.5). A handover at an instant for someone ahead of this claim
+    // took the slot first; one behind it came after this claim was tried in that instant (a claim whose handover fails
+    // takes no slot), so it does not hold this claim back there.
+    const before = (x: { subjectId: string; stepId: string; at: number }, at: number) => x.at < at || (x.at === at && x.subjectId !== s.id && aheadOf(x));
     let at = t;
     for (let guard = 0; guard < 1000; guard++) {
-      // The slot frees a gap after the number's last handover; a handover there for someone else takes it first.
-      const free = Math.max(at, Math.max(-Infinity, ...onNumber.filter((x) => x <= at)) + gapOf(waiting.accountId));
-      if (free > at && onNumber.includes(free)) {
+      // The slot frees a gap after the number's last handover that came before this claim.
+      const free = Math.max(at, Math.max(-Infinity, ...onNumber.filter((x) => before(x, at)).map((x) => x.at)) + gapOf(waiting.accountId));
+      if (free > at && onNumber.some((x) => x.at === free && before(x, free))) {
         at = free;
         continue;
       }
@@ -635,8 +752,10 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
     if (sms.deliveryLog.some((d) => d.subjectId === s.id && t.steps.some((st) => st.id === d.stepId))) return null;
     if (interimUntil && upgradeAt === null) return null;
     const zone = zoneFor(s);
-    const instants = [start, upgradeAt ?? start, ...sms.deliveryLog.filter((d) => d.destination === mobile && d.subjectId !== s.id).map((d) => knownAt("sms", d)), ...campaigns[s.campaign]!.poolEdits.map((e) => e.at)]
-      .filter((x) => Number.isFinite(x) && x >= Math.max(start, upgradeAt ?? start))
+    // Never before the app can know the track started: its predecessor's finish seen (a send reported late).
+    const seen = Math.max(start, startSeenAt(s, t) ?? start);
+    const instants = [seen, upgradeAt ?? seen, ...sms.deliveryLog.filter((d) => d.destination === mobile && d.subjectId !== s.id).map((d) => knownAt("sms", d)), ...campaigns[s.campaign]!.poolEdits.map((e) => e.at)]
+      .filter((x) => Number.isFinite(x) && x >= Math.max(seen, upgradeAt ?? seen))
       .sort((a, b) => a - b);
     for (const from of instants) {
       if (!allTakenAt(s, from, mobile)) continue;
@@ -697,6 +816,10 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
       sms.refuseFrom.set(n.id, { calls: 1, reason: "rate_limited", retryAfterMs: refusalAt.retryMs });
       features.add("a-number-refuses-a-text");
     }
+    if (unsentAt && e === at(unsentAt.event)) unsentArmed = "armed";
+    if (answerUnknownAt && e === at(answerUnknownAt.event)) answerUnknownArmed = true;
+    // The user marks a text whose outcome stays unknown a day after it went to the provider, as Needs attention asks.
+    if (unanswered.some((u) => u.at <= h.clock - DAY)) await markUnanswered();
     if (removalAt && e === at(removalAt.event)) {
       // The user removes a number from a running campaign's SMS senders.
       const ci = Math.floor(removalAt.campaign * campaigns.length);
@@ -763,11 +886,15 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
 
   if (problems.length === 0 && options.drain !== false) {
     hookBudget = 0;
+    draining = true;
+    // The user marks each text whose outcome stays unknown (Needs attention lists it).
+    await markUnanswered();
     for (const n of numbers) {
       n.healthy = true;
       n.listed = true;
     }
     await h.advanceTo(h.clock + 21 * DAY);
+    await markUnanswered();
     for (let week = 0; week < 6; week++) {
       let waiting = false;
       for (const id of await h.store.engine.runningLeadIds()) {
@@ -814,6 +941,9 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
     for (const id of subjects.keys()) {
       const s = await h.store.engine.subject(id, now);
       if (s) states.set(id, s);
+    }
+    for (const st of states.values()) {
+      if (st.subject.ended === null && st.tracks.some((p) => p.finishedAt === null && heldReason(st, p.trackId, now) === "sms_conversation_unsettled")) features.add("held-on-an-unsettled-conversation");
     }
     // Needs attention answers at every check; a taken conversation is no longer one of its holds (28).
     if ((await h.request<NeedsAttention>("GET", "/api/needs-attention")).status !== 200) problem("18: Needs attention did not answer");
@@ -1188,6 +1318,8 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
     const stepId = p.nextStepId;
     if (st.results.some((r) => r.stepId === stepId)) return false;
     if (st.attempts.some((a) => a.id !== ignoreAttempt && a.stepId === stepId && ["claimed", "handed", "accepted"].includes(a.state))) return false;
+    // The provider refused this step's text after accepting it: held until the user skips or resumes it (5.4).
+    if (st.attempts.some((a) => a.stepId === stepId && refusedAfterAcceptance.has(a.id))) return false;
     if (p.dueAt > (st.subject.clock.frozenSince ?? now) - st.subject.clock.frozenTotal) return false;
     if (!inWindow(t.window, zoneFor(rec), now)) return false;
     if (!accountUp(accountId)) return false;

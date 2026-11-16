@@ -1,3 +1,4 @@
+import type { DatabaseSync } from "node:sqlite";
 import { createApp } from "../../src/server/app.ts";
 import type { BulkRules } from "../../src/server/bulk.ts";
 import type { MeasureRules } from "../../src/server/measures.ts";
@@ -431,6 +432,29 @@ export class EngineHarness {
   async otherProcessSave(campaignId: string, definition: CampaignDefinition): Promise<string> {
     const other = new Engine({ ...this.options.engine, ticks: new TickQueue(), store: this.store.engine, port: this.provider, ...(this.smsProvider ? { smsPort: this.smsProvider } : {}), now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) });
     return (await other.saveDefinition(campaignId, definition, new Date(this.clock).toISOString(), null, { tick: false })).outcome;
+  }
+
+  /**
+   * One tick of a freshly started engine at the same instant, on the same store and providers, with the test's rules and
+   * none of its hooks, and the providers not moved on: the stored rows it changed, row versions aside (a fresh engine
+   * replays the providers' events from its own cursor, which rewrites a subject unchanged). A worker whose caches still
+   * follow the stored facts leaves a fresh engine nothing to change at the instant it last ticked.
+   */
+  async freshEngineTick(): Promise<string[]> {
+    const db = (this.store.engine as unknown as { db: DatabaseSync }).db;
+    const tables = ["subjects", "enrollments", "track_progress", "attempts", "provider_work", "sms_bindings", "hold_intervals", "freezes", "step_results", "test_runs", "call_tasks", "call_attempts"];
+    const dump = () =>
+      new Map(tables.map((t) => [t, new Set(db.prepare(`SELECT * FROM ${t}`).all().map((r) => JSON.stringify({ ...r, version: undefined })))]));
+    const before = dump();
+    await new Engine({ ...this.options.engine, ticks: new TickQueue(), store: this.store.engine, port: this.gated(this.provider), ...(this.smsProvider ? { smsPort: this.gated(this.smsProvider) } : {}), now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) }).tick();
+    const after = dump();
+    return tables.flatMap((t) => {
+      const a = before.get(t)!;
+      const b = after.get(t)!;
+      const changed = [...b].filter((r) => !a.has(r));
+      const gone = [...a].filter((r) => !b.has(r));
+      return changed.length + gone.length > 0 ? [`${t}: ${gone.length} row(s) changed or gone, first ${gone[0] ?? "none"} -> ${changed[0] ?? "none"}`] : [];
+    });
   }
 
   /** A fresh engine on the same store and provider, settling what the crash left open. */
