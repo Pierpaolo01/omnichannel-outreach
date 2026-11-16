@@ -381,6 +381,7 @@ export interface EngineStore {
    * (ADR 0003 "Ticket 21", rule 4; council on ffa202c, item 8).
    */
   runningLeadIds(): Promise<string[]>;
+  runningLeadIdsAndTests(): Promise<string[]>;
   /** Test runs that have not ended: the worker runs them beside the leads; only the Test run tab shows them. */
   runningTestRunIds(): Promise<string[]>;
   /** For each running subject, a key that changes whenever its state, its campaign's, or the lead facts it reads change. */

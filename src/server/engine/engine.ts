@@ -9,7 +9,7 @@ import { launchCheck, type LaunchCheck } from "../../domain/sequence/blockers.ts
 import { REQUEST_ID_DIFFERENT, REQUEST_ID_REUSED, type OutcomeInput } from "../../domain/sequence/calls.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
-import { awaitingAcceptance, markInviteWithdrawal, invitePendingElsewhere, invitePendingUntil, runs, sealReckoning, settledEvaluation, settledReadiness, stillSettled, type SettledEvaluation } from "../../domain/sequence/progress.ts";
+import { awaitingAcceptance, connectionCheckDue, connectionChecked, markInviteWithdrawal, invitePendingElsewhere, invitePendingUntil, runs, sealReckoning, settledEvaluation, settledReadiness, stillSettled, type SettledEvaluation } from "../../domain/sequence/progress.ts";
 import { definitionProblems, type CampaignDefinition } from "../../domain/sequence/definition.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
 import type { OutreachStatus } from "../../domain/outreach-status.ts";
@@ -540,6 +540,7 @@ export class Engine {
       changed = (await this.withdrawInvites()) || changed;
       changed = (await this.evaluateAll()) || changed;
       changed = (await this.placeCallsAll()) || changed;
+      changed = (await this.checkConnections()) || changed;
       changed = (await this.claimAll()) || changed;
       changed = (await this.handOverAll()) || changed;
       if (!changed) break;
@@ -585,6 +586,8 @@ export class Engine {
         for (const p of s.tracks) {
           const until = invitePendingUntil(s, p.trackId);
           if (until !== null) due.push({ wall: until, window: [], zone: s.lead.zone });
+          // A connection check stands for a settling period; an invite still unclaimed then is checked again.
+          if (p.invitePendingCheckedWall != null && p.finishedAt === null) due.push({ wall: p.invitePendingCheckedWall + ENGINE_PARAMS.SETTLING, window: [], zone: s.lead.zone });
         }
         for (const p of s.tracks) if (awaitingAcceptance(s, p.trackId) && p.acceptBy != null) due.push({ wall: now + (p.acceptBy - leadNow(s.subject.clock, now)), window: [], zone: s.lead.zone });
         // An open call task can expire at the user's next day (the skip limit, ticket 15).
@@ -1326,6 +1329,34 @@ export class Engine {
 
   // -------------------------------------------------------------------------------------------
   // Claims (4.2) in priority order (4.3).
+
+  /**
+   * The connection check of every LinkedIn invite due (ADR 0004 3.3; council on b21af02, item 4): asked of a session the
+   * track may use, outside every allowance, before any invite is claimed. One port read per invite per settling period.
+   */
+  private async checkConnections(): Promise<boolean> {
+    let changed = false;
+    const now = this.now();
+    for (const id of await this.store.runningLeadIdsAndTests()) {
+      const s = await this.store.subject(id, now);
+      if (!s) continue;
+      for (const p of s.tracks) {
+        const session = connectionCheckDue(s, p.trackId, now);
+        if (session === null) continue;
+        const destination = s.lead.details.find((d) => d.id === s.lead.resolved[p.destinationDetailId ?? ""]?.liveId)?.key ?? "";
+        if (!this.leaseIsMine(this.clockNow())) return changed;
+        const port = this.ports.linkedin;
+        const asked = await this.bounded(() => port.presendCheck({ sender: session, destination, threadRefs: [], knownReplies: [] }), { kind: "unavailable" as const }, "linkedin", (result) => ({ call: "presendCheck", result }));
+        if (asked.kind === "unavailable" || asked.kind === "reply") continue;
+        const answer = asked.kind === "connected" ? "connected" : asked.kind === "pending" && this.rules.outstandingInviteStops() ? "pending" : "clear";
+        changed = (await this.update(id, now, (st) => {
+          if (connectionCheckDue(st, p.trackId, now) !== session) return null;
+          return connectionChecked(st, p.trackId, session, destination, answer, now);
+        })) !== null || changed;
+      }
+    }
+    return changed;
+  }
 
   private async claimAll(): Promise<boolean> {
     const now = this.now();

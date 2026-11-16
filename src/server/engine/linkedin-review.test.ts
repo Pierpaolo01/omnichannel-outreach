@@ -290,3 +290,75 @@ describe("items 4 to 7, 12 to 14: reads, withdrawals, marks, profile-only leads"
     expect(next).toMatchObject({ stepId: "a-m2", number: 2 });
   });
 });
+
+describe("the second pass on b21af02", () => {
+  const SMS = "+447700900001";
+  const MOBILE = "+447700900101";
+  const smsTrack = (id: string): TrackDefinition => ({ id, channel: "sms", branch: "main", window: ALWAYS, steps: [step(`${id}-t1`, 0, "A text.")], start: { kind: "entry" }, removed: false });
+  async function both(order: "sms_first" | "linkedin_first") {
+    const h = new EngineHarness({ start: MONDAY_9 - H, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }], sms: { numbers: [{ id: SMS, capacity: 50, gapMs: MIN, k: 2, healthy: true, resetZone: "Europe/London" }] }, linkedin: { sessions: [session("s1")] } });
+    await h.tick();
+    await h.request("PUT", "/api/sender-accounts/s1/allowances", { invitesPerDay: 5, messagesPerDay: 5, notesPerMonth: 5 });
+    h.clock = MONDAY_9;
+    const people = [person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", dial_phone: MOBILE, dial_phone_type: "mobile", linkedin_url: PAT })];
+    const { campaign: c } = await h.createCampaign("Both", { businesses: BUSINESSES, people });
+    const tracks = order === "sms_first" ? [smsTrack("t"), { ...li("l", "l"), start: { kind: "after" as const, trackId: "t", delayDays: 0 } }] : [li("l", "l", 1, 1), { ...smsTrack("t"), start: { kind: "after" as const, trackId: "l", delayDays: 0 } }];
+    await h.defineSequence(c.id, { ...def(tracks, ["s1"]), smsPool: [SMS] });
+    expect((await h.launch(c.id)).status).toBe(200);
+    return h;
+  }
+
+  test("item 3: an SMS pair is never the LinkedIn sender: SMS first, then LinkedIn, the invite goes from the session", async () => {
+    const h = await both("sms_first");
+    await h.advanceTo(MONDAY_9 + 2 * DAY);
+    expect(h.sms.deliveryLog).toHaveLength(1);
+    expect(h.linkedin.deliveryLog.map((d) => [d.action, d.sender])).toEqual([["invite", "s1"]]);
+  });
+
+  test("item 3, the reverse: LinkedIn first, then SMS: the text goes from the number", async () => {
+    const h = await both("linkedin_first");
+    await h.advanceTo(MONDAY_9 + 3 * DAY);
+    expect(h.sms.deliveryLog.map((d) => d.sender)).toEqual([SMS]);
+  });
+
+  test("item 4: an existing connection needs no invite allowance: with none left, the first message goes on the message allowance", async () => {
+    for (const invites of [0, 1]) {
+      const w = await world(["s1"], { s1: { invitesPerDay: invites, messagesPerDay: 10, notesPerMonth: 0 } });
+      w.h.linkedin.profiles.set(PAT, { connected: true });
+      // With one invite a day, another lead's invite spends it first.
+      const other = person({ person_id: "p2", business_id: "b1", full_name: "Nia Cole", linkedin_url: "https://www.linkedin.com/in/fictional-nia-cole" });
+      await w.campaign("Spring", [li("a", "a")], ["s1"], [other, ...PEOPLE]);
+      await w.h.advanceTo(MONDAY_9 + 2 * H);
+      expect(w.h.linkedin.deliveryLog.filter((d) => d.destination === PAT).map((d) => d.action), `invites ${invites}`).toEqual(["message"]);
+    }
+  });
+
+  test("item 4: no message allowance: the invite still goes, and the messages wait", async () => {
+    const w = await world(["s1"], { s1: { invitesPerDay: 5, messagesPerDay: 0, notesPerMonth: 5 } });
+    w.h.linkedin.profiles.set(PAT, { acceptAfterMs: H });
+    await w.campaign("Spring", [li("a", "a")]);
+    await w.h.advanceTo(MONDAY_9 + DAY);
+    expect(w.h.linkedin.deliveryLog.map((d) => d.action)).toEqual(["invite"]);
+  });
+
+  test("item 5: an existing connection is not outreach: with nothing handed over, the mark is refused", async () => {
+    const w = await world(["s1"], { s1: { invitesPerDay: 5, messagesPerDay: 0, notesPerMonth: 5 } });
+    w.h.linkedin.profiles.set(PAT, { connected: true });
+    const a = await w.campaign("Spring", [li("a", "a")]);
+    await w.h.advanceTo(MONDAY_9 + 2 * H);
+    expect((await w.track(a.lead, "a"))?.connection).toBe("already_connected");
+    expect((await w.mark(a.lead)).status).toBe(409);
+  });
+
+  test("item 7: the user's 'withdrawn' mark on an ended lead releases the pair at once: another campaign then invites", async () => {
+    const w = await world();
+    w.h.linkedin.profiles.set(PAT, { withdrawUnknown: 50 });
+    const a = await w.campaign("Spring", [li("a", "a", 1, 1)]);
+    await w.h.advanceTo(MONDAY_9 + 2 * DAY + 2 * H);
+    expect((await w.read(a.lead)).status).toBe("sequence_finished_no_response");
+    expect((await w.h.request("POST", `/api/enrollments/${a.lead}/invite-withdrawal`, { requestId: "iw-1", trackId: "a", answer: "withdrawn" })).status).toBe(200);
+    const b = await w.campaign("Autumn", [li("b", "b")]);
+    await w.h.advanceTo(w.h.clock + H);
+    expect(w.h.linkedin.deliveryLog.filter((d) => d.action === "invite").map((d) => d.subjectId)).toEqual([a.lead, b.lead]);
+  });
+});

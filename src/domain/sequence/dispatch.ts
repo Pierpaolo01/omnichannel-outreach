@@ -87,6 +87,8 @@ export function readyItems(state: SubjectState, now: number): ReadyItem[] {
     if (state.results.some((r) => r.stepId === stepId)) return [];
     if (state.attempts.some((a) => a.stepId === stepId && isLive(a))) return [];
     if (heldReason(state, p.trackId, now)) return [];
+    // An invite is claimed only after a clear connection check within a settling period (council on b21af02, item 4).
+    if (channelOf(state, p.trackId) === "linkedin" && actionOfStep(state, p.trackId, stepId) === "invite" && ((p.invitePendingCheckedWall ?? null) === null || now >= (p.invitePendingCheckedWall ?? 0) + ENGINE_PARAMS.SETTLING || (p.invitePendingSeenWall ?? null) !== null)) return [];
     return [{ subjectId: state.subject.id, trackId: p.trackId, stepId, touched: state.subject.touched, dueWall: p.dueWall }];
   });
 }

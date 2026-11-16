@@ -1168,6 +1168,8 @@ export function settledReadiness(state: SubjectState, now: number, conversations
   const at = [
     // An invite held as pending elsewhere is checked again at the end of its settling period (question Q42's interim).
     ...state.tracks.flatMap((p) => invitePendingUntil(state, p.trackId) ?? []),
+    // A clear connection check stands for a settling period; then the invite is checked again before it is claimed.
+    ...state.tracks.flatMap((p) => (p.invitePendingCheckedWall != null ? [p.invitePendingCheckedWall + ENGINE_PARAMS.SETTLING] : [])),
     ...state.tracks.filter((p) => p.finishedAt === null && p.dueAt !== null).map((p) => now + ((p.dueAt ?? 0) - lead)),
     ...state.tracks.filter((p) => p.startedAt === null && p.startAt !== null).map((p) => now + ((p.startAt ?? 0) - lead)),
   ];
@@ -1368,7 +1370,7 @@ export function invitePendingElsewhere(state: SubjectState, attemptId: string, n
 export function invitePendingUntil(state: SubjectState, trackId: string): number | null {
   const p = progressOf(state, trackId);
   const track = state.campaign.definition.tracks.find((t) => t.id === trackId);
-  if (!p || !track || p.nextStepId === null || linkedinStepKind(track, p.nextStepId) !== "invite" || (p.invitePendingCheckedWall ?? null) === null) return null;
+  if (!p || !track || p.nextStepId === null || linkedinStepKind(track, p.nextStepId) !== "invite" || (p.invitePendingCheckedWall ?? null) === null || (p.invitePendingSeenWall ?? null) === null) return null;
   return (p.invitePendingCheckedWall ?? 0) + ENGINE_PARAMS.SETTLING;
 }
 
@@ -1425,4 +1427,42 @@ export function realignAcceptance(state: SubjectState, now: number): SubjectStat
     s = withTrack(s, p.trackId, (t) => ({ ...t, acceptBy, acceptByWall, acceptByZone: zone, acceptByDays: days }));
   }
   return s;
+}
+
+/**
+ * The connection check (ADR 0004 3.3 and 6; council on b21af02, item 4): before an invite is claimed, the session is asked
+ * whether the person is already connected, or an invite is already pending. It spends no allowance and needs none: it
+ * runs whatever the invite allowance, so an existing connection moves the track on to its messages, which spend the
+ * message allowance only when one goes. Due for a running subject's LinkedIn track whose pending step is the invite, due
+ * and inside its window, with a good profile, not checked within a settling period. Returns the session to ask, or null.
+ */
+export function connectionCheckDue(state: SubjectState, trackId: string, now: number): string | null {
+  const p = progressOf(state, trackId);
+  const track = state.campaign.definition.tracks.find((t) => t.id === trackId);
+  if (!p || !track || track.channel !== "linkedin" || p.nextStepId === null || linkedinStepKind(track, p.nextStepId) !== "invite") return null;
+  if (claimRefusal(state, { trackId, stepId: p.nextStepId }, now) !== null) return null;
+  if ((p.invitePendingCheckedWall ?? null) !== null && now < (p.invitePendingCheckedWall ?? 0) + ENGINE_PARAMS.SETTLING) return null;
+  return candidatesFor(state, trackId).find((id) => state.accounts[id]?.healthy === true) ?? null;
+}
+
+/**
+ * The check's answer, applied in one write: `connected` skips the invite as already connected, takes the pair and fixes
+ * the session, and the first message follows with its own wait; `pending` holds the invite (question Q42); `clear` leaves
+ * the invite to be claimed under the invite allowance, for one settling period.
+ */
+export function connectionChecked(state: SubjectState, trackId: string, session: string, destination: string, answer: "connected" | "pending" | "clear", now: number): SubjectState {
+  const p = progressOf(state, trackId);
+  if (!p || p.nextStepId === null) return state;
+  if (answer === "pending") return withTrack(state, trackId, (t) => ({ ...t, invitePendingSeenWall: t.invitePendingSeenWall ?? now, invitePendingCheckedWall: now }));
+  if (answer === "clear") return withTrack(state, trackId, (t) => ({ ...t, invitePendingSeenWall: null, invitePendingCheckedWall: now }));
+  const at = leadNow(state.subject.clock, now);
+  const atWall = wallOfLead(state.subject.clock, now);
+  let s: SubjectState = { ...state, results: [...state.results, { stepId: p.nextStepId, trackId, result: "skipped", reason: "already_connected", at, atWall, attemptId: null }] };
+  const binds = !s.smsBindings.some((b) => b.sender === session && b.recipient === destination);
+  s = {
+    ...s,
+    subject: { ...s.subject, linkedinSender: s.subject.linkedinSender ?? session },
+    smsBindings: binds ? [...s.smsBindings, { sender: session, recipient: destination, owner: s.subject.id, ownerCampaignId: s.campaign.id, ownerCampaignName: null, ownerIsTest: s.subject.kind === "test_run", ownerEnded: false, ownerSent: true, ownerAnswered: false, channel: "linkedin" as const }] : s.smsBindings,
+  };
+  return attend(connect(s, trackId, "already_connected", at, atWall), now);
 }

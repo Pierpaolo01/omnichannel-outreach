@@ -587,6 +587,20 @@ export class SqliteEngineStore implements EngineStore {
     });
   }
 
+  /** Subjects with a LinkedIn track that may need a connection check: running leads and running test runs (ADR 0004 3.3). */
+  async runningLeadIdsAndTests(): Promise<string[]> {
+    return this.sql(
+      `SELECT DISTINCT t.subject_id AS id FROM track_progress t
+         WHERE t.finished_at IS NULL AND t.started_at IS NOT NULL AND t.destination_detail_id IS NOT NULL
+           AND (t.destination_detail_id LIKE 'linkedin:%' OR t.destination_detail_id LIKE 'test:%:linkedin')
+           AND t.subject_id IN (SELECT e.id FROM enrollments e JOIN campaigns c ON c.id = e.campaign_id WHERE c.launched_at IS NOT NULL AND e.ended IS NULL
+                                UNION SELECT id FROM test_runs WHERE ended IS NULL)
+         ORDER BY t.subject_id`,
+    )
+      .all()
+      .map((r) => str(r, "id"));
+  }
+
   async runningLeadIds(): Promise<string[]> {
     return this.sql(
         `SELECT e.id FROM enrollments e JOIN campaigns c ON c.id = e.campaign_id
