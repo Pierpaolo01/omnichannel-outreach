@@ -743,7 +743,8 @@ export class SqliteEngineStore implements EngineStore {
       `SELECT b.sender_number, b.owner_subject, b.released_at, b.unsent,
               EXISTS (SELECT 1 FROM provider_work w WHERE w.subject_id = b.owner_subject AND w.account_id = b.sender_number AND w.destination = b.recipient_key AND (w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL))
                 OR EXISTS (SELECT 1 FROM reply_events re WHERE re.event_id LIKE 'sms:%' AND re.state = 'resolved' AND re.inbox = b.sender_number AND re.address = b.recipient_key AND re.received_wall >= b.created_at) AS confirmed
-       FROM sms_bindings b WHERE b.recipient_key = ? ORDER BY COALESCE(b.released_at, b.created_at), b.seq`,
+       FROM sms_bindings b WHERE b.recipient_key = ? AND COALESCE((SELECT sa.channel FROM sender_accounts sa WHERE sa.id = b.sender_number), 'sms') = 'sms'
+       ORDER BY COALESCE(b.released_at, b.created_at), b.seq`,
     )
       .all(recipient)
       .map((b): SmsBindingRecord => ({ kind: "binding", sender: str(b, "sender_number"), owner: str(b, "owner_subject"), released: b["released_at"] != null, unsent: Number(b["unsent"]) === 1, confirmed: Number(b["confirmed"]) === 1 }));
@@ -1468,7 +1469,7 @@ export class SqliteEngineStore implements EngineStore {
                  OR EXISTS (SELECT 1 FROM track_progress t WHERE t.subject_id = b.owner_subject AND t.connection = 'already_connected'
                   AND (t.destination_detail_id = 'linkedin:' || COALESCE(e.person_id, '') || ':' || b.recipient_key
                     OR (t.destination_detail_id = 'test:' || b.owner_subject || ':linkedin' AND tr.linkedin_key = b.recipient_key)))) AS owner_sent,
-                EXISTS (SELECT 1 FROM reply_events re WHERE re.event_id LIKE 'sms:%' AND re.state = 'resolved' AND re.inbox = b.sender_number AND re.address = b.recipient_key AND re.received_wall >= b.created_at) AS owner_answered FROM sms_bindings b
+                EXISTS (SELECT 1 FROM reply_events re WHERE re.event_id LIKE 'sms:%' AND re.state = 'resolved' AND re.inbox = b.sender_number AND re.address = b.recipient_key AND re.received_wall >= b.created_at) AS owner_answered, (SELECT sa.channel FROM sender_accounts sa WHERE sa.id = b.sender_number) AS pair_channel FROM sms_bindings b
          LEFT JOIN enrollments e ON e.id = b.owner_subject
          LEFT JOIN test_runs tr ON tr.id = b.owner_subject
          LEFT JOIN campaigns c ON c.id = COALESCE(e.campaign_id, tr.campaign_id)
@@ -1481,7 +1482,7 @@ export class SqliteEngineStore implements EngineStore {
       )
         // The lead's LinkedIn profile is a destination of conversations too (ADR 0004, question Q41): its session's pairs.
         .all({ kind: owner?.kind ?? "", owner: owner?.id ?? "", own: JSON.stringify(owner ? [] : details.filter((d) => d.mobile).map((d) => d.key)), profiles: JSON.stringify(details.filter((d) => d.channel === "linkedin").map((d) => d.key)), subject: subjectId })
-        .map((b) => ({ sender: str(b, "sender_number"), recipient: str(b, "recipient_key"), owner: str(b, "owner_subject"), ownerCampaignId: strOrNull(b, "owner_campaign"), ownerCampaignName: strOrNull(b, "owner_campaign_name"), ownerIsTest: Number(b["owner_is_test"]) === 1, ownerEnded: b["owner_ended"] != null, ownerSent: Number(b["owner_sent"]) === 1, ownerAnswered: Number(b["owner_answered"]) === 1 })),
+        .map((b) => ({ channel: strOrNull(b, "pair_channel") === "linkedin" ? ("linkedin" as const) : ("sms" as const), sender: str(b, "sender_number"), recipient: str(b, "recipient_key"), owner: str(b, "owner_subject"), ownerCampaignId: strOrNull(b, "owner_campaign"), ownerCampaignName: strOrNull(b, "owner_campaign_name"), ownerIsTest: Number(b["owner_is_test"]) === 1, ownerEnded: b["owner_ended"] != null, ownerSent: Number(b["owner_sent"]) === 1, ownerAnswered: Number(b["owner_answered"]) === 1 })),
       lead: { zone, details, resolved, mergeData, phones },
       markBad: [],
       accounts,
@@ -1504,7 +1505,15 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   /** Writes what `next` changed relative to `base`, with the version bump and the derived status. */
-  private write(base: SubjectState, next: SubjectState, now: number): SubjectState {
+  /**
+   * The one release rule (ADR 0003, Q7 answered, point 10; ADR 0004, Q41), applied by every write of a subject in its own
+   * transaction (council on b21af02, item 7): the engine's updates, each control, the user's marks, the reply marks, an
+   * edit's reconciliation, Run test, a campaign pause. The engine sets its own rule here, so a broken one reaches every path.
+   */
+  releaseRule: (state: SubjectState) => SubjectState = releaseUnsentBindings;
+
+  private write(base: SubjectState, given: SubjectState, now: number): SubjectState {
+    const next = this.releaseRule(given);
     const id = base.subject.id;
     if (next.subject.id !== id) throw new Error("a change may not move to another subject");
     const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
@@ -1517,17 +1526,19 @@ export class SqliteEngineStore implements EngineStore {
         `INSERT OR REPLACE INTO track_progress (subject_id, track_id, start_at, start_basis_at, start_basis_wall, start_zone, started_at,
            destination_detail_id, next_step_id, basis_at, basis_wall, due_at, due_wall, due_zone, finished_at, finished_wall, finish_reason, conversation_owners,
            connection, connected_at, connected_wall, accepted_wall, accept_by, accept_by_wall, accept_by_zone, invite_withdrawal, invite_withdrawal_last_wall,
-           invite_withdrawal_unknowns, invite_pending_seen_wall, invite_pending_checked_wall)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           invite_withdrawal_unknowns, invite_pending_seen_wall, invite_pending_checked_wall, accept_by_days)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id, t.trackId, t.startAt, t.startBasisAt, t.startBasisWall, t.startZone, t.startedAt, t.destinationDetailId, t.nextStepId, t.basisAt, t.basisWall, t.dueAt, t.dueWall, t.dueZone, t.finishedAt, t.finishedWall, t.finishReason, t.conversationOwners ? JSON.stringify(t.conversationOwners) : null,
           t.connection ?? null, t.connectedAt ?? null, t.connectedWall ?? null, t.acceptedWall ?? null, t.acceptBy ?? null, t.acceptByWall ?? null, t.acceptByZone ?? null, t.inviteWithdrawal ?? null, t.inviteWithdrawalLastWall ?? null,
-          t.inviteWithdrawalUnknowns ?? 0, t.invitePendingSeenWall ?? null, t.invitePendingCheckedWall ?? null,
+          t.inviteWithdrawalUnknowns ?? 0, t.invitePendingSeenWall ?? null, t.invitePendingCheckedWall ?? null, t.acceptByDays ?? null,
         ],
       );
       // Stored once and only forward (ADR 0004 10.4): a connection never changes once set, a withdrawal never moves back.
       const was = base.tracks.find((b) => b.trackId === t.trackId);
       if ((was?.connection ?? null) !== null && was?.connection !== t.connection) throw new Error(`a track's connection is set once (${t.trackId})`);
+      // The deadline is stored once: it moves only with the wait it was resolved from (an edit), never on its own.
+      if (was?.acceptBy != null && t.acceptBy !== was.acceptBy && t.acceptByDays === was.acceptByDays) throw new Error(`an acceptance deadline moves only with an edit of its wait (${t.trackId})`);
       const order = { wanted: 1, withdrawn: 2, accepted_first: 2, kept_by_user: 2 } as const;
       if (was?.inviteWithdrawal && (!t.inviteWithdrawal || order[t.inviteWithdrawal] < order[was.inviteWithdrawal] || (order[was.inviteWithdrawal] === 2 && t.inviteWithdrawal !== was.inviteWithdrawal))) throw new Error(`an invite's withdrawal only moves forward (${t.trackId})`);
     }
@@ -1806,7 +1817,7 @@ function toTrack(r: Row): TrackProgress {
     // A LinkedIn track's fields (ADR 0004 3.2), present only once set, so no other track's state reads any differently.
     ...(r["connection"] == null ? {} : { connection: str(r, "connection") === "accepted" ? ("accepted" as const) : ("already_connected" as const), connectedAt: numOrNull(r, "connected_at"), connectedWall: numOrNull(r, "connected_wall") }),
     ...(r["accepted_wall"] == null ? {} : { acceptedWall: num(r, "accepted_wall") }),
-    ...(r["accept_by"] == null ? {} : { acceptBy: num(r, "accept_by"), acceptByWall: numOrNull(r, "accept_by_wall"), acceptByZone: strOrNull(r, "accept_by_zone") }),
+    ...(r["accept_by"] == null ? {} : { acceptBy: num(r, "accept_by"), acceptByWall: numOrNull(r, "accept_by_wall"), acceptByZone: strOrNull(r, "accept_by_zone"), acceptByDays: numOrNull(r, "accept_by_days") }),
     ...(r["invite_withdrawal"] == null ? {} : { inviteWithdrawal: str(r, "invite_withdrawal") as NonNullable<TrackProgress["inviteWithdrawal"]>, inviteWithdrawalLastWall: numOrNull(r, "invite_withdrawal_last_wall"), inviteWithdrawalUnknowns: num(r, "invite_withdrawal_unknowns") }),
     ...(r["invite_pending_checked_wall"] == null ? {} : { invitePendingSeenWall: numOrNull(r, "invite_pending_seen_wall"), invitePendingCheckedWall: num(r, "invite_pending_checked_wall") }),
   };

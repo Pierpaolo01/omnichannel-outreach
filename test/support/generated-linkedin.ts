@@ -406,7 +406,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       }
     }
     for (const [id] of marked) {
-      if (!li.deliveryLog.some((d) => d.subjectId === id) && !li.presendLog.some((p) => p.answer === "connected" && leadOfSubject(id)?.profile === p.destination)) problem(`L12: ${id} was marked replied on LinkedIn though nothing reached them there`);
+      if (!li.deliveryLog.some((d) => d.subjectId === id && d.at <= (marked.get(id) ?? 0)) && !li.handoverLog.some((x) => x.subjectId === id && x.at <= (marked.get(id) ?? 0))) problem(`L12: ${id} was marked replied on LinkedIn though nothing reached them there`);
     }
 
     // L2, on the handover log: the engine never even asks the session for a message before the track's connection (an

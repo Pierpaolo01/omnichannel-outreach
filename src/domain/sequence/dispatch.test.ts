@@ -213,7 +213,7 @@ describe("SMS dispatch and conversations (ADR 0003 4.5, ticket 13)", () => {
   // An SMS track only; its second step's threading is never read.
   const smsOnly = () => launched(multiTrackState([track("t2", "sms", [step("m1", { subject: "", body: "Hi {{first_name|there}}, {{company}} here." }), step("m2", { subject: "", waitDays: 1 })])]));
   const smsItem = item({ trackId: "t2", stepId: "m1" });
-  const other = (sender: string, ownerEnded = false) => ({ sender, recipient: MOBILE.key, owner: "lead-in-another-campaign", ownerCampaignId: "camp-2", ownerCampaignName: "Spring clinics", ownerIsTest: false, ownerEnded, ownerSent: true, ownerAnswered: false });
+  const other = (sender: string, ownerEnded = false) => ({ sender, recipient: MOBILE.key, owner: "lead-in-another-campaign", ownerCampaignId: "camp-2", ownerCampaignName: "Spring clinics", ownerIsTest: false, ownerEnded, ownerSent: true, ownerAnswered: false, channel: "sms" as const });
 
   test("a due SMS step is ready, and its claim uses a number from the SMS pool, never an inbox, to the mobile's E.164 key", () => {
     const s = smsOnly();
@@ -256,7 +256,7 @@ describe("SMS dispatch and conversations (ADR 0003 4.5, ticket 13)", () => {
     const h = handOver(ready, a, ready.accounts[N1]!, MONDAY_9);
     expect(h.attempts[0]).toMatchObject({ state: "handed", copy: { subject: "", body: "Hi Pat, Harbour Lane Physio here." }, threadRef: null });
     expect(h.subject).toMatchObject({ smsSender: N1, emailSender: null });
-    expect(h.smsBindings).toEqual([{ sender: N1, recipient: MOBILE.key, owner: "lead-1", ownerCampaignId: "camp-1", ownerCampaignName: null, ownerIsTest: false, ownerEnded: false, ownerSent: false, ownerAnswered: false }]);
+    expect(h.smsBindings).toEqual([{ sender: N1, recipient: MOBILE.key, owner: "lead-1", ownerCampaignId: "camp-1", ownerCampaignName: null, ownerIsTest: false, ownerEnded: false, ownerSent: false, ownerAnswered: false, channel: "sms" as const }]);
   });
 
   test("a conversation taken by another subject between the claim and the handover fails predicate 11; another fixed number fails 10", () => {

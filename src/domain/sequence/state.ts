@@ -107,6 +107,8 @@ export interface TrackProgress {
   readonly acceptBy?: number | null;
   readonly acceptByWall?: number | null;
   readonly acceptByZone?: string | null;
+  /** The wait in days the deadline was resolved with: re-resolved only when the definition's wait differs (council item 8). */
+  readonly acceptByDays?: number | null;
   /** The invite's withdrawal after the deadline: wanted, done, or found accepted first (ADR 0004 3.3). */
   readonly inviteWithdrawal?: "wanted" | "withdrawn" | "accepted_first" | "kept_by_user" | null;
   readonly inviteWithdrawalLastWall?: number | null;
@@ -262,6 +264,11 @@ export interface SmsBinding {
    * conversation: the other subject is skipped, and it is never released as unsent.
    */
   readonly ownerAnswered: boolean;
+  /**
+   * The conversation's channel: its sender account's stored channel (`sender_accounts.channel`), never inferred from the
+   * destination (review bot on b21af02). Every lookup, ownership check and release reads only its own channel's pairs.
+   */
+  readonly channel: "sms" | "linkedin";
 }
 
 /**

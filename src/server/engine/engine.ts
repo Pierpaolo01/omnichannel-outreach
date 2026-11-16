@@ -294,6 +294,7 @@ export class Engine {
     this.now = () => this.applyingAt ?? deps.now();
     this.newId = deps.newId;
     this.rules = rulesWith(deps.rules);
+    if ("releaseRule" in this.store) this.store.releaseRule = this.rules.releaseUnsent;
     this.hooks = deps.hooks ?? {};
     this.waitFor = deps.waitFor ?? waitWithTimer;
     this.locks = deps.locks ?? PROCESS_LOCKS;
@@ -1221,7 +1222,7 @@ export class Engine {
         const out = this.rules.judgeControl(this.rules.confirmedAgainst(stored, s), s, action, now, expected, this.rules);
         if (!out.ok) return { write: caughtUp, answer: "refused", reason: out.reason, effect: null };
         // The answer's effect is the read's preview at this instant: the same transition on the same state (verifier B4).
-        return { write: out.state, answer: "accepted", reason: null, effect: JSON.stringify(effectOf(s, action, out.state, now)) };
+        return { write: this.rules.releaseUnsent(out.state), answer: "accepted", reason: null, effect: JSON.stringify(effectOf(s, action, out.state, now)) };
       });
       return this.answerOf(record);
     });
@@ -1243,7 +1244,7 @@ export class Engine {
         const unconfirmed = marked.ok ? this.rules.markPrecondition(this.rules.confirmedAgainst(stored, s), expected) : null;
         const out = unconfirmed === null ? marked : ({ ok: false, reason: unconfirmed } as const);
         if (!out.ok) return { write: same(s, stored) ? null : s, answer: "refused", reason: out.reason, effect: null };
-        return { write: out.state, answer: "accepted", reason: null, effect: JSON.stringify({ channel: "linkedin" }) };
+        return { write: this.rules.releaseUnsent(out.state), answer: "accepted", reason: null, effect: JSON.stringify({ channel: "linkedin" }) };
       });
       if (record.kind === "reused" || record.kind === "different") return { ok: false as const, reason: CONTROL_REQUEST_REUSED };
       if (record.answer === "refused") return { ok: false as const, reason: record.reason ?? "Refused." };
@@ -1262,7 +1263,7 @@ export class Engine {
       const body = JSON.stringify({ action: "invite_withdrawal", trackId, answer });
       const record = await this.store.controlSubject(subjectId, now, { id: requestId, action: "invite_withdrawal", body }, this.rules.requestStanding, (stored) => {
         const next = markInviteWithdrawal(stored, trackId, answer, now);
-        return next === null ? { write: null, answer: "refused", reason: "No withdrawal of an invite is waiting for an answer on this track.", effect: null } : { write: next, answer: "accepted", reason: null, effect: JSON.stringify({ answer }) };
+        return next === null ? { write: null, answer: "refused", reason: "No withdrawal of an invite is waiting for an answer on this track.", effect: null } : { write: this.rules.releaseUnsent(next), answer: "accepted", reason: null, effect: JSON.stringify({ answer }) };
       });
       if (record.kind === "reused" || record.kind === "different") return { ok: false as const, reason: CONTROL_REQUEST_REUSED };
       if (record.answer === "refused") return { ok: false as const, reason: record.reason ?? "Refused." };

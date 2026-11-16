@@ -308,7 +308,8 @@ export function markRepliedRefusal(state: SubjectState): string | null {
   // Something must have reached the person on LinkedIn (council on 194fc44, item 7): work known sent, or handed over and not
   // yet settled. A refused invite (an unreachable profile), a withdrawn claim or a final "not sent" reached nobody.
   const reached = (w: (typeof state.work)[number]) => w.kind != null && w.firstHandedWall !== null && (w.settled === null || w.settled === "sent" || w.settled === "user_sent" || w.sentWall !== null);
-  if (!state.work.some(reached) && !state.tracks.some((p) => p.connection === "already_connected")) return NOTHING_SENT_ON_LINKEDIN;
+  // A connection that existed before is not outreach (council on b21af02, item 5): only this subject's own work counts.
+  if (!state.work.some(reached)) return NOTHING_SENT_ON_LINKEDIN;
   return null;
 }
 

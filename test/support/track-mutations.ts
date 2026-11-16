@@ -73,7 +73,7 @@ function pretendTaken(s: SubjectState, which: (accountId: string, s: SubjectStat
   const fake = [...smsMobiles(s)].flatMap(([trackId, recipient]) =>
     (s.campaign.definition.smsPool ?? [])
       .filter((n) => which(n, s, trackId) && !s.smsBindings.some((b) => b.sender === n && b.recipient === recipient))
-      .map((n) => ({ sender: n, recipient, owner: PRETEND, ownerCampaignId: null, ownerCampaignName: null, ownerIsTest: false, ownerEnded: false, ownerSent: true, ownerAnswered: false })),
+      .map((n) => ({ sender: n, recipient, owner: PRETEND, ownerCampaignId: null, ownerCampaignName: null, ownerIsTest: false, ownerEnded: false, ownerSent: true, ownerAnswered: false, channel: "sms" as const })),
   );
   return fake.length === 0 ? s : { ...s, smsBindings: [...s.smsBindings, ...fake] };
 }
@@ -107,7 +107,7 @@ const RULES: Record<string, Partial<Rules>> = {
       const out = R.claim(s, item, acc, input);
       const claimed = out.attempts.find((x) => x.id === input.attemptId);
       if (!claimed || acc.channel !== "sms" || out.smsBindings.some((b) => b.sender === acc.id && b.recipient === claimed.destination)) return out;
-      return { ...out, smsBindings: [...out.smsBindings, { sender: acc.id, recipient: claimed.destination, owner: s.subject.id, ownerCampaignId: s.campaign.id, ownerCampaignName: null, ownerIsTest: s.subject.kind === "test_run", ownerEnded: false, ownerSent: false, ownerAnswered: false }] };
+      return { ...out, smsBindings: [...out.smsBindings, { sender: acc.id, recipient: claimed.destination, owner: s.subject.id, ownerCampaignId: s.campaign.id, ownerCampaignName: null, ownerIsTest: s.subject.kind === "test_run", ownerEnded: false, ownerSent: false, ownerAnswered: false, channel: "sms" as const }] };
     },
   },
   "ending check too late": {
@@ -151,7 +151,7 @@ const RULES: Record<string, Partial<Rules>> = {
   // Point 10: a first text refused or never sent keeps its conversation, as if a text had gone.
   "a binding with nothing sent counts as taken": {
     releaseUnsent: (s) => s,
-    evaluate: (s, now, options) => ({ ...R.evaluate({ ...s, smsBindings: s.smsBindings.map((b) => ({ ...b, ownerSent: true, ownerAnswered: false })) }, now, options), smsBindings: s.smsBindings }),
+    evaluate: (s, now, options) => ({ ...R.evaluate({ ...s, smsBindings: s.smsBindings.map((b) => ({ ...b, ownerSent: true, ownerAnswered: false, channel: "sms" as const })) }, now, options), smsBindings: s.smsBindings }),
   },
 
   // The worker's readiness cache ("nothing is ready until") kept across a change of conversations: a lead held on an

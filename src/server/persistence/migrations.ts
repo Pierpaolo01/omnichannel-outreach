@@ -1037,6 +1037,7 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE track_progress ADD COLUMN accept_by INTEGER;
       ALTER TABLE track_progress ADD COLUMN accept_by_wall INTEGER;
       ALTER TABLE track_progress ADD COLUMN accept_by_zone TEXT;
+      ALTER TABLE track_progress ADD COLUMN accept_by_days INTEGER;
       ALTER TABLE track_progress ADD COLUMN invite_withdrawal TEXT CHECK (invite_withdrawal IN ('wanted', 'withdrawn', 'accepted_first', 'kept_by_user'));
       ALTER TABLE track_progress ADD COLUMN invite_withdrawal_unknowns INTEGER NOT NULL DEFAULT 0;
       -- An invite already pending on LinkedIn that this application did not send (ADR 0004 3.3, question Q42).

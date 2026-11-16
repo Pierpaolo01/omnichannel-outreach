@@ -560,7 +560,7 @@ export function handoverFailures(state: SubjectState, attempt: Attempt, account:
   if (account.channel !== channel || (fixed !== null ? fixed !== account.id : !poolOf(state.campaign.definition, channel).includes(account.id))) failed.push(10);
   // 11. For SMS, the pair is unbound, or bound to this subject.
   // 11. For a channel of conversations (SMS, LinkedIn), the pair is unbound, or bound to this subject.
-  if (holdsConversations(channel) && !pairFree(state, account.id, attempt.destination)) failed.push(11);
+  if (holdsConversations(channel) && !pairFree(state, account.id, attempt.destination, channel)) failed.push(11);
   if (!presendFresh(attempt, now)) failed.push(14);
   if (!renderStep(state, attempt.trackId, attempt.stepId)) failed.push(5);
   if (lacksThread(state, attempt.trackId, attempt.stepId)) failed.push(17);
@@ -609,7 +609,7 @@ export function handOver(state: SubjectState, attempt: Attempt, account: Account
   return {
     ...state,
     subject,
-    smsBindings: binds ? [...state.smsBindings, { sender: account.id, recipient: attempt.destination, owner: state.subject.id, ownerCampaignId: state.campaign.id, ownerCampaignName: null, ownerIsTest: state.subject.kind === "test_run", ownerEnded: false, ownerSent: false, ownerAnswered: false }] : state.smsBindings,
+    smsBindings: binds ? [...state.smsBindings, { sender: account.id, recipient: attempt.destination, owner: state.subject.id, ownerCampaignId: state.campaign.id, ownerCampaignName: null, ownerIsTest: state.subject.kind === "test_run", ownerEnded: false, ownerSent: false, ownerAnswered: false, channel: channel === "linkedin" ? "linkedin" : "sms" }] : state.smsBindings,
     attempts: state.attempts.map((a) => (a.id === attempt.id ? handed : a)),
     work: state.work.map((w) => (w.key === attempt.idempotencyKey ? { ...w, calls: w.calls + 1, firstHandedWall: w.firstHandedWall ?? now, unresolvedSince: null, ...(note !== null ? { note } : {}) } : w)),
     accounts: { ...state.accounts, [account.id]: { ...base, nextSlotAt: now + base.gapMs, ...notes } },

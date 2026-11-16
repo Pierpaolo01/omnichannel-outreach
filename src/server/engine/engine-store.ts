@@ -390,6 +390,8 @@ export interface EngineStore {
   attempt(attemptId: string): Promise<Attempt | null>;
   /** Unsettled provider work a quiesce wants withdrawn (ticket 17a; council A). */
   workToWithdraw(): Promise<ProviderWork[]>;
+  /** The release rule every write of a subject applies (council on b21af02, item 7); set by the engine. */
+  releaseRule?: (state: SubjectState) => SubjectState;
   /** LinkedIn tracks whose invite an acceptance expiry wants withdrawn, with the invite's sent work (ADR 0004 3.3). */
   invitesToWithdraw(): Promise<{ readonly subjectId: string; readonly trackId: string; readonly workKey: string; readonly progress: TrackProgress }[]>;
   /** A social account's allowances, the user's settings (ADR 0004 1.2); null when none are set. */

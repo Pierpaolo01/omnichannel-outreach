@@ -7,7 +7,7 @@ import type { OutreachStatus } from "../outreach-status.ts";
 import { applyAttemptEvent, applyLookup, ENGINE_PARAMS, isLive, isUncertain, markable, maySend, withRef, type AttemptEffect, type AttemptEvent, type WorkEvent } from "./attempt.ts";
 import { leadNow, localDayNumber, nextWindowOpen, sendPoint, span, startOfLocalDay, syncClock, waitSpan, wallOfLead, windowOpensAt, type Freeze, type LeadClock } from "./clock.ts";
 import { render } from "./copy.ts";
-import { holdsConversations, linkedinStepKind, liveSteps, ownSubject, poolOf, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
+import { holdsConversations, type ConversationChannel, linkedinStepKind, liveSteps, ownSubject, poolOf, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
 import type { StoredReplyId } from "./reply-identity.ts";
 import type { Attempt, ConversationCause, EndReason, FinishReason, LeadDetail, ProviderWork, RenderedCopy, ReplyChannelName, SmsBinding, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
 
@@ -918,8 +918,13 @@ export function senderOf(state: SubjectState, channel: TrackChannel): string | n
  * Whether `sender` may text `recipient` for this subject (4.5): the pair has no unreleased owner,
  * or this subject owns it. An enrollment's binding is never transferred.
  */
-export function pairFree(state: SubjectState, sender: string, recipient: string): boolean {
-  return state.smsBindings.every((b) => b.sender !== sender || b.recipient !== recipient || b.owner === state.subject.id);
+export function pairFree(state: SubjectState, sender: string, recipient: string, channel: ConversationChannel): boolean {
+  return pairsOn(state, channel).every((b) => b.sender !== sender || b.recipient !== recipient || b.owner === state.subject.id);
+}
+
+/** The subject's known pairs of one channel only (review bot on b21af02): no rule reads another channel's conversations. */
+export function pairsOn(state: SubjectState, channel: ConversationChannel): readonly SmsBinding[] {
+  return state.smsBindings.filter((b) => b.channel === channel);
 }
 
 /** The mobile an SMS track texts: its destination's key (E.164). */
@@ -939,7 +944,7 @@ export function candidatesFor(state: SubjectState, trackId: string): string[] {
   const ids = fixed !== null ? [fixed] : [...poolOf(state.campaign.definition, channel)];
   if (!holdsConversations(channel)) return ids;
   const recipient = recipientOf(state, trackId);
-  return recipient === null ? ids : ids.filter((id) => pairFree(state, id, recipient));
+  return recipient === null ? ids : ids.filter((id) => pairFree(state, id, recipient, channel));
 }
 
 /** The track's sending window (4.1). */
@@ -987,8 +992,8 @@ function usableNumbers(state: SubjectState, channel: "sms" | "linkedin"): readon
 }
 
 /** Another subject's binding of `sender` with the track's mobile, if any. */
-function otherBinding(state: SubjectState, sender: string, recipient: string): SmsBinding | undefined {
-  return state.smsBindings.find((b) => b.sender === sender && b.recipient === recipient && b.owner !== state.subject.id);
+function otherBinding(state: SubjectState, sender: string, recipient: string, channel: ConversationChannel): SmsBinding | undefined {
+  return pairsOn(state, channel).find((b) => b.sender === sender && b.recipient === recipient && b.owner !== state.subject.id);
 }
 
 /**
@@ -1004,7 +1009,7 @@ function blockedNumbers(state: SubjectState, trackId: string, now: number): SmsB
   const numbers = usableNumbers(state, channel);
   const recipient = recipientOf(state, trackId);
   if (numbers.length === 0 || recipient === null || candidatesFor(state, trackId).length > 0) return null;
-  return numbers.flatMap((n) => otherBinding(state, n, recipient) ?? []);
+  return numbers.flatMap((n) => otherBinding(state, n, recipient, channel) ?? []);
 }
 
 /**
@@ -1058,7 +1063,7 @@ export function bindingUnsent(state: SubjectState, binding: Pick<SmsBinding, "se
  * released or found sent between an evaluation and its write makes them differ, and the write is refused.
  */
 export function sameConversations(a: SubjectState, b: SubjectState): boolean {
-  const key = (s: SubjectState) => s.smsBindings.map((x) => `${x.sender}|${x.recipient}|${x.owner}|${x.ownerSent ? 1 : 0}|${x.ownerAnswered ? 1 : 0}`).sort().join("\n");
+  const key = (s: SubjectState) => s.smsBindings.map((x) => `${x.channel}|${x.sender}|${x.recipient}|${x.owner}|${x.ownerSent ? 1 : 0}|${x.ownerAnswered ? 1 : 0}`).sort().join("\n");
   return key(a) === key(b);
 }
 
@@ -1237,10 +1242,11 @@ export function awaitingAcceptance(state: SubjectState, trackId: string): boolea
  * The acceptance deadline (ADR 0004 3.2): the invite's send point plus the track's acceptance wait in calendar days in the
  * prospect's zone, in lead time. Not cut short for a test run (question Q40): a person accepts the test invite by hand.
  */
-export function acceptDeadline(state: SubjectState, track: TrackDefinition, at: number, atWall: number): Pick<TrackProgress, "acceptBy" | "acceptByWall" | "acceptByZone"> {
+export function acceptDeadline(state: SubjectState, track: TrackDefinition, at: number, atWall: number): Pick<TrackProgress, "acceptBy" | "acceptByWall" | "acceptByZone" | "acceptByDays"> {
   const zone = state.lead.zone;
-  const s = span(atWall, track.acceptWaitDays ?? 1, zone);
-  return { acceptBy: at + s, acceptByWall: atWall + s, acceptByZone: zone };
+  const days = track.acceptWaitDays ?? 1;
+  const s = span(atWall, days, zone);
+  return { acceptBy: at + s, acceptByWall: atWall + s, acceptByZone: zone, acceptByDays: days };
 }
 
 /** The invite's own sent result on the track, if any: the basis of its acceptance deadline. */
@@ -1308,7 +1314,7 @@ export function inviteAlreadyConnected(state: SubjectState, attemptId: string, n
   s = {
     ...s,
     subject: { ...s.subject, linkedinSender: s.subject.linkedinSender ?? a.accountId },
-    smsBindings: binds ? [...s.smsBindings, { sender: a.accountId, recipient: a.destination, owner: s.subject.id, ownerCampaignId: s.campaign.id, ownerCampaignName: null, ownerIsTest: s.subject.kind === "test_run", ownerEnded: false, ownerSent: true, ownerAnswered: false }] : s.smsBindings,
+    smsBindings: binds ? [...s.smsBindings, { sender: a.accountId, recipient: a.destination, owner: s.subject.id, ownerCampaignId: s.campaign.id, ownerCampaignName: null, ownerIsTest: s.subject.kind === "test_run", ownerEnded: false, ownerSent: true, ownerAnswered: false, channel: "linkedin" as const }] : s.smsBindings,
   };
   return attend(connect(s, a.trackId, "already_connected", at, atWall), now);
 }
@@ -1373,12 +1379,14 @@ export function invitePendingUntil(state: SubjectState, trackId: string): number
  * it (a fixed sender that is full, unavailable or removed from the pool keeps it, by ADR 0003 5.2's rule). Null before.
  */
 export function linkedinSessionOf(state: SubjectState): string | null {
+  // Only LinkedIn pairs, and only the LinkedIn tracks' profiles (review bot on b21af02: an SMS pair is never a session).
   const profiles = new Set(state.lead.details.filter((d) => d.channel === "linkedin").map((d) => d.key));
   for (const p of state.tracks) {
+    if (channelOf(state, p.trackId) !== "linkedin") continue;
     const key = recipientOf(state, p.trackId);
     if (key !== null) profiles.add(key);
   }
-  return state.smsBindings.find((b) => b.owner === state.subject.id && profiles.has(b.recipient))?.sender ?? state.subject.linkedinSender ?? null;
+  return pairsOn(state, "linkedin").find((b) => b.owner === state.subject.id && profiles.has(b.recipient))?.sender ?? state.subject.linkedinSender ?? null;
 }
 
 /**
@@ -1404,14 +1412,17 @@ export function realignAcceptance(state: SubjectState, now: number): SubjectStat
     }
     const sent = track ? inviteResult(s, track) : undefined;
     if (!track || !sent || sent.result !== "sent") continue;
+    // Stored once (council on b21af02, item 8): re-resolved only when the definition's wait differs from the one the stored
+    // deadline was resolved with, so a later change of provider work never moves an edited, already-passed deadline again.
+    const days = track.acceptWaitDays ?? 1;
+    if ((p.acceptByDays ?? days) === days) continue;
     const zone = p.acceptByZone ?? s.lead.zone;
-    const span_ = span(sent.atWall, track.acceptWaitDays ?? 1, zone);
-    if (sent.at + span_ === p.acceptBy) continue;
+    const span_ = span(sent.atWall, days, zone);
     const lead = leadNow(s.subject.clock, now);
     const passed = sent.at + span_ < lead;
     const acceptBy = passed ? lead : sent.at + span_;
     const acceptByWall = passed ? wallOfLead(s.subject.clock, now) : sent.atWall + span_;
-    s = withTrack(s, p.trackId, (t) => ({ ...t, acceptBy, acceptByWall, acceptByZone: zone }));
+    s = withTrack(s, p.trackId, (t) => ({ ...t, acceptBy, acceptByWall, acceptByZone: zone, acceptByDays: days }));
   }
   return s;
 }

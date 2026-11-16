@@ -30,6 +30,7 @@ export const UNDO_22 = `
   ALTER TABLE track_progress DROP COLUMN accept_by;
   ALTER TABLE track_progress DROP COLUMN accept_by_wall;
   ALTER TABLE track_progress DROP COLUMN accept_by_zone;
+  ALTER TABLE track_progress DROP COLUMN accept_by_days;
   ALTER TABLE track_progress DROP COLUMN invite_withdrawal;
   ALTER TABLE track_progress DROP COLUMN invite_withdrawal_last_wall;
   ALTER TABLE track_progress DROP COLUMN invite_withdrawal_unknowns;
