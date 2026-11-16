@@ -1,4 +1,4 @@
-import { applyReply, candidatesFor, finishTrack, progressOf } from "../../src/domain/sequence/progress.ts";
+import { applyReply, candidatesFor, finishTrack, progressOf, rules as progressRules } from "../../src/domain/sequence/progress.ts";
 import { leadNow, wallOfLead } from "../../src/domain/sequence/clock.ts";
 import type { StoredReplyId } from "../../src/domain/sequence/reply-identity.ts";
 import type { SubjectState, TrackProgress } from "../../src/domain/sequence/state.ts";
@@ -239,6 +239,19 @@ const RULES: Record<string, Partial<Rules>> = {
   // Verifier F1: each ordering rule of 4.3, across both channels.
   "first messages before follow-ups": priority((a, b) => R.claimOrder({ ...a, touched: !a.touched }, { ...b, touched: !b.touched })),
   "newest due first": priority((a, b) => (a.touched !== b.touched || a.dueWall === b.dueWall ? R.claimOrder(a, b) : b.dueWall - a.dueWall)),
+  // Review bot on b21af02: the LinkedIn session taken from any pair the subject owns, whatever its channel (a module seam,
+  // `PATCHES` below).
+  "a binding lookup ignores the channel": {},
+};
+
+/** Swaps outside the engine's rules (a module seam), applied for a replay and undone after it. */
+const PATCHES: Record<string, () => () => void> = {
+  "a binding lookup ignores the channel": () => {
+    progressRules.pairsByChannel = false;
+    return () => {
+      progressRules.pairsByChannel = true;
+    };
+  },
 };
 
 /** The invariant each mutation must break, and the seed offset known to show it (refreshed by the CI search). */
@@ -274,12 +287,14 @@ const EXPECTED: Record<string, { invariant: string; seed: number }> = {
   "a skipped track finishes a day late": { invariant: "7", seed: 0 },
   "first messages before follow-ups": { invariant: "12", seed: 3 },
   "newest due first": { invariant: "12", seed: 3 },
+  "a binding lookup ignores the channel": { invariant: "L16", seed: 3 },
 };
 
-export const TRACK_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number }> = Object.fromEntries(
+export const TRACK_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number; readonly patch?: () => () => void }> = Object.fromEntries(
   Object.entries(EXPECTED).map(([name, e]) => {
     const rules = RULES[name];
     if (!rules) throw new Error(`no mutation named ${name}`);
-    return [name, { rules, ...e }];
+    const patch = PATCHES[name];
+    return [name, { rules, ...e, ...(patch ? { patch } : {}) }];
   }),
 );

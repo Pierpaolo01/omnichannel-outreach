@@ -66,6 +66,10 @@ export function trackChunks(from: number, to: number): void {
       test("the fixed seeds reach a never-entered branch beside a running lead and beside a lead with no channel at launch", () => {
         expect(["a-lead-beside-a-branch-never-entered", "no-channel-at-launch-beside-a-branch"].filter((f) => !reached.has(f))).toEqual([]);
       });
+      // Review bot on b21af02: a LinkedIn track started after its text, in the campaign beside SMS.
+      test("the fixed seeds start a LinkedIn track after a text on the same person", () => {
+        expect(reached.has("linkedin-after-its-text")).toBe(true);
+      });
       // Question Q7 answered: a track skipped for a taken conversation, one whose skip a waiting claim delayed, the track
       // after one released by it, and a number joining that campaign's pool after the skip.
       test("the fixed seeds skip SMS tracks for taken conversations, after a claim's wait too, release the tracks after them, and add a number after a skip", () => {
@@ -105,19 +109,29 @@ export function trackOracle(): void {
     const run = inShard(index) ? test : test.skip;
     run(`the generated track runs fail invariant ${mutation.invariant} for an engine with "${name}"`, async () => {
       const breaks = (problems: readonly string[]) => problems.some((p) => trackInvariantsOf(p).includes(mutation.invariant));
-      if (!FULL_SEARCH) {
-        const { problems } = await runTracks(SEED + mutation.seed, { rules: mutation.rules, maxWrites: RUN_WRITES });
-        expect(problems.filter((p) => trackInvariantsOf(p).includes(mutation.invariant)), `seed ${SEED + mutation.seed} no longer breaks invariant ${mutation.invariant}; run the sequence-search workflow and update its seed. Problems: ${problems.join("; ")}`).not.toEqual([]);
-        return;
+      const undo = mutation.patch?.();
+      try {
+        await replay(name, mutation, breaks);
+      } finally {
+        undo?.();
       }
-      let caught: string | null = null;
-      if (breaks((await runTracks(SEED + mutation.seed, { rules: mutation.rules, maxWrites: RUN_WRITES })).problems)) caught = `recorded seed offset ${mutation.seed}`;
-      else report(`recorded seed offset ${mutation.seed} no longer breaks invariant ${mutation.invariant} for track mutation "${name}"`);
-      for (let i = 0; i < MAX_SEEDS && caught === null; i++) {
-        if (breaks((await runTracks(SEED + i, { rules: mutation.rules, maxWrites: RUN_WRITES })).problems)) caught = `seed offset ${i}`;
-      }
-      report(`killing seed: track mutation "${name}" (invariant ${mutation.invariant}): ${caught ?? `none in offsets 0-${MAX_SEEDS - 1}`}; recorded seed ${mutation.seed}`);
-      expect(caught, `no seed broke invariant ${mutation.invariant} for "${name}"`).not.toBeNull();
     }, 1_800_000);
   }
+}
+
+/** One mutation's replay: in `pnpm check` its recorded seed; in the search that seed, then the first of MAX_SEEDS offsets. */
+async function replay(name: string, mutation: (typeof TRACK_MUTATIONS)[string], breaks: (problems: readonly string[]) => boolean): Promise<void> {
+  if (!FULL_SEARCH) {
+    const { problems } = await runTracks(SEED + mutation.seed, { rules: mutation.rules, maxWrites: RUN_WRITES });
+    expect(problems.filter((p) => trackInvariantsOf(p).includes(mutation.invariant)), `seed ${SEED + mutation.seed} no longer breaks invariant ${mutation.invariant}; run the sequence-search workflow and update its seed. Problems: ${problems.join("; ")}`).not.toEqual([]);
+    return;
+  }
+  let caught: string | null = null;
+  if (breaks((await runTracks(SEED + mutation.seed, { rules: mutation.rules, maxWrites: RUN_WRITES })).problems)) caught = `recorded seed offset ${mutation.seed}`;
+  else report(`recorded seed offset ${mutation.seed} no longer breaks invariant ${mutation.invariant} for track mutation "${name}"`);
+  for (let i = 0; i < MAX_SEEDS && caught === null; i++) {
+    if (breaks((await runTracks(SEED + i, { rules: mutation.rules, maxWrites: RUN_WRITES })).problems)) caught = `seed offset ${i}`;
+  }
+  report(`killing seed: track mutation "${name}" (invariant ${mutation.invariant}): ${caught ?? `none in offsets 0-${MAX_SEEDS - 1}`}; recorded seed ${mutation.seed}`);
+  expect(caught, `no seed broke invariant ${mutation.invariant} for "${name}"`).not.toBeNull();
 }

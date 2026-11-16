@@ -75,7 +75,7 @@ export async function logWithMouse(page: Page, outcome: string, note = ""): Prom
 
 const NEEDS_ATTENTION = {
   stalledInboxes: [],
-  heldTracks: [{ person: { id: "p1", name: "Pat Oneil" }, company: { id: "c1", name: "Harbour Lane Physio" }, campaign: { id: "k1", name: "Clinics, London" }, enrollmentId: "e1", trackId: "sms", reason: "provider_skipped", owners: [] }],
+  heldTracks: [{ person: { id: "p1", name: "Pat Oneil" }, company: { id: "c1", name: "Harbour Lane Physio" }, campaign: { id: "k1", name: "Clinics, London" }, enrollmentId: "e1", trackId: "sms", channel: "email", reason: "provider_skipped", owners: [] }],
   accountWaits: [{ accountId: "outreach@northlight-mail.example", reason: "rate_limited", until: "2026-11-09T11:30:00.000Z" }],
   senderProblems: [
     { accountId: "sms-1", channel: "sms", label: "+44 7700 900999", problem: "disconnected" },

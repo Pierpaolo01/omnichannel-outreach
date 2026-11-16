@@ -174,7 +174,8 @@ export type StepWhenView =
   | { readonly kind: "ready" }
   | { readonly kind: "at"; readonly at: string }
   /** `channel` names the step's channel where the reason depends on it (no transport). */
-  | { readonly kind: "waits"; readonly why: StepWaitApi; readonly channel?: "email" | "sms" | "linkedin"; readonly until?: string }
+  /** `channel`: the track's, so a reason is worded in its channel's words (council on b21af02, item 1). */
+  | { readonly kind: "waits"; readonly why: StepWaitApi; readonly channel: "email" | "sms" | "call" | "linkedin"; readonly until?: string }
   /**
    * A call not yet placed: the user's day (YYYY-MM-DD) it goes on the list, with no time of day; `today` when that is the
    * read's day; `now` when it is ready for the list (due, calling hours open today, room on today's list), with no instant promised.
@@ -660,8 +661,8 @@ export interface NeedsAttention {
    * the user checks LinkedIn and marks it withdrawn or still there (`POST /api/enrollments/:id/invite-withdrawal`). Any other
    * LinkedIn action left unknown is unresolved work, listed with the other unresolved work (ADR 0003 5.4).
    */
-  readonly inviteWithdrawalsUnknown?: readonly { readonly enrollmentId: string; readonly trackId: string; readonly unknownAnswers: number }[];
-  readonly heldTracks: readonly (AttentionLead & { readonly enrollmentId: string; readonly trackId: string; readonly channel?: string; readonly reason: HoldReasonApi; readonly owners: readonly ConversationOwnerView[] })[];
+  readonly inviteWithdrawalsUnknown?: readonly (AttentionLead & { readonly enrollmentId: string; readonly trackId: string; readonly unknownAnswers: number })[];
+  readonly heldTracks: readonly (AttentionLead & { readonly enrollmentId: string; readonly trackId: string; readonly channel: "email" | "sms" | "call" | "linkedin"; readonly reason: HoldReasonApi; readonly owners: readonly ConversationOwnerView[] })[];
   readonly accountWaits: readonly { readonly accountId: string; readonly reason: "quota" | "rate_limited"; readonly until: string | null }[];
   /**
    * Sender accounts on any channel that cannot send, each listed once (ticket 13; spec "Needs
@@ -1033,7 +1034,7 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
 export type DependentTrackState =
   | { readonly state: "waiting"; readonly startsAt: string }
   /** Skipped because its mobile's SMS conversation belongs to `owners` (question Q7 answered). */
-  | { readonly state: "skipped_conversation_taken"; readonly startsAt: null; readonly owners: readonly ConversationOwnerView[]; readonly channel?: "sms" | "linkedin" }
+  | { readonly state: "skipped_conversation_taken"; readonly startsAt: null; readonly owners: readonly ConversationOwnerView[]; readonly channel: "sms" | "linkedin" }
   | {
       readonly state:
         | "started"

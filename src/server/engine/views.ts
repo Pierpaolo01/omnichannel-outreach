@@ -4,7 +4,7 @@ import { isLive, markable } from "../../domain/sequence/attempt.ts";
 import { carriedInto, isListed, listedForDay, reasonOf } from "../../domain/sequence/calls.ts";
 import { callRecordView, dateOfDay } from "./call-views.ts";
 import { accountAvailable, candidatesFor, claimRefusal, heldReason, inheritedWork, readyItems, stalledAccounts, stepWhen, type StepEnv } from "../../domain/sequence/dispatch.ts";
-import { stepWhenView } from "./step-when-view.ts";
+import { channelOfTrack, stepWhenView } from "./step-when-view.ts";
 import { localDayNumber, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { relevantChannels, waitingOn } from "../../domain/sequence/providers.ts";
 import { providerEvidence, sendingInterrupted } from "./worker-state.ts";
@@ -153,7 +153,7 @@ export function progressView(s: SubjectState, now: number, env: StepEnv = {}, wh
 function nextStepOf(s: SubjectState, trackId: string, numberOf: (stepId: string) => number, now: number, env: StepEnv, read: typeof stepWhen): EnrollmentProgress["tracks"][number]["nextStep"] {
   const p = s.tracks.find((x) => x.trackId === trackId);
   const when = read(s, trackId, now, env);
-  return p?.nextStepId && when ? { stepId: p.nextStepId, number: numberOf(p.nextStepId), when: stepWhenView(when, now, s.callDay.day) } : null;
+  return p?.nextStepId && when ? { stepId: p.nextStepId, number: numberOf(p.nextStepId), when: stepWhenView(when, now, s.callDay.day, channelOfTrack(s, trackId)) } : null;
 }
 
 /** A branch's tracks for the lead: not removed, or already started by it (5.1). */
@@ -184,8 +184,9 @@ export function accountView(a: AccountState, label: string): SenderAccountViewAp
  * Needs attention as the engine decides it: every list of the HTTP read, with each lead entry by its ids only. The
  * route adds whose lead each is (`needsAttentionView` in call-views.ts, ticket 20b); nothing else is added there.
  */
-export type EngineNeedsAttention = Omit<NeedsAttention, "waitingForCapacity" | "noUsableChannel" | "sendingInterrupted" | "heldTracks"> & {
+export type EngineNeedsAttention = Omit<NeedsAttention, "waitingForCapacity" | "noUsableChannel" | "sendingInterrupted" | "heldTracks" | "inviteWithdrawalsUnknown"> & {
   readonly heldTracks: readonly Omit<NeedsAttention["heldTracks"][number], keyof AttentionLead>[];
+  readonly inviteWithdrawalsUnknown: readonly Omit<NonNullable<NeedsAttention["inviteWithdrawalsUnknown"]>[number], keyof AttentionLead>[];
   readonly waitingForCapacity: readonly Omit<NeedsAttention["waitingForCapacity"][number], keyof AttentionLead>[];
   readonly noUsableChannel: readonly Omit<NeedsAttention["noUsableChannel"][number], keyof AttentionLead>[];
 };

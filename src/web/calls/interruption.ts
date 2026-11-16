@@ -1,6 +1,6 @@
 import type { AttentionLead, InterruptionNoticeView, NeedsAttention, SendingInterruptedView } from "../../shared/api.ts";
 import { dateIn, holdReasonClause, isoDateIn, timeIn, type AttentionItem } from "./wording.ts";
-import { conversationChannelOf, conversationTaken } from "../campaign/sms-wording.ts";
+import { conversationTaken } from "../campaign/sms-wording.ts";
 
 /**
  * An instant as Today says it (ticket 20b): the time in the user's zone, with its date when that is not `today`, the
@@ -193,7 +193,7 @@ function unreachableLine(c: NeedsAttention["noUsableChannel"][number]["channels"
     case "declined":
       return "they have declined on a call";
     case "conversation_taken":
-      return conversationTaken(c.owners, conversationChannelOf(c.channel), "their", "now");
+      return conversationTaken(c.owners, c.channel, "their", "now");
     case "missing":
     case "bad":
       return detailLine(c.channel, c.why);

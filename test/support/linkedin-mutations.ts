@@ -42,6 +42,17 @@ function connectedAtTheSend(s: SubjectState): SubjectState {
   return next;
 }
 
+/** A swap of one of progress.ts's rule flags for a replay, undone after it. */
+function flag<K extends "notConnectedMarksBad" | "pairsByChannel" | "waitEditRealigns">(name: K, value: (typeof progressRules)[K]): () => () => void {
+  return () => {
+    const was = progressRules[name];
+    progressRules[name] = value;
+    return () => {
+      progressRules[name] = was;
+    };
+  };
+}
+
 export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
   // L1: an invite waiting for acceptance is offered again as ready, and claimed and handed over again.
   "an invite waiting for acceptance is sent again": {
@@ -73,7 +84,7 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
   // L3: the mark is recorded, but the lead is not ended.
   "a reply mark that does not end the lead": {
     invariant: "L3",
-    seed: 4,
+    seed: 9,
     rules: {
       markReplied: (state, requestId, now) => {
         const refused = DEFAULT_RULES.markReplied(state, requestId, now);
@@ -143,11 +154,15 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
       },
     },
   },
-  // L9: the pre-send check's "connected" is ignored: the invite is neither sent nor skipped.
+  // L9: "connected" ignored, by the connection check (taken as clear) and by the pre-send check: the invite is neither sent
+  // nor skipped.
   "an existing connection is ignored": {
     invariant: "L9",
-    seed: 1,
-    rules: { inviteAlreadyConnected: (state) => state },
+    seed: 11,
+    rules: {
+      inviteAlreadyConnected: (state) => state,
+      connectionChecked: (state, trackId, session, destination, answer, now) => DEFAULT_RULES.connectionChecked(state, trackId, session, destination, answer === "connected" ? "clear" : answer, now),
+    },
   },
   // L10: the expiry ends the lead instead of finishing the track.
   "the expiry ends the lead": {
@@ -160,7 +175,7 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
   // L2, the gate in full (review bot on 194fc44): the gate covers only the first message, so a skip reaches a follow-up.
   "the connection gate covers only the first message": {
     invariant: "L2",
-    seed: 22,
+    seed: 0,
     rules: { outstandingInviteStops: () => false },
     patch: () => {
       const was = progressRules.connectionGate;
@@ -173,11 +188,17 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
   // L11: other subjects' pairs ignored on LinkedIn: a second campaign reaches a profile another campaign's session owns.
   "a LinkedIn pair owned by another subject is ignored": {
     invariant: "L11",
-    seed: 25,
+    seed: 1,
     rules: {
       chooseAccount: (state, now, stepId) => DEFAULT_RULES.chooseAccount(ownPairsOnly(state), now, stepId),
       handoverFailures: (state, attempt, account, now) => DEFAULT_RULES.handoverFailures(ownPairsOnly(state), attempt, account, now),
-      evaluate: (state, now, options) => DEFAULT_RULES.evaluate(ownPairsOnly(state), now, options),
+      // Evaluated on its own pairs, and written with the others' kept: the store refuses a write that removes another's pair.
+      evaluate: (state, now, options) => {
+        const own = ownPairsOnly(state);
+        const out = DEFAULT_RULES.evaluate(own, now, options);
+        return { ...out, smsBindings: [...out.smsBindings, ...state.smsBindings.filter((b) => !own.smsBindings.includes(b))] };
+      },
+      connectionCheckDue: (state, trackId, now) => DEFAULT_RULES.connectionCheckDue(ownPairsOnly(state), trackId, now),
     },
   },
   // L12: the mark accepted on a lead nothing reached on LinkedIn.
@@ -185,6 +206,41 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
     invariant: "L12",
     seed: 0,
     rules: { markReplied: (state, requestId, now) => ({ ok: true, state: applyReply(state, { channel: "linkedin", atWall: now, providerRef: markedReplyId("linkedin", requestId) }, now) }) },
+  },
+  // L1 (Q42): the check's and the handover's "pending" taken as clear: an invite pending from elsewhere is sent again.
+  "a pending invitation from elsewhere is sent again": {
+    invariant: "L1",
+    seed: 0,
+    rules: { outstandingInviteStops: () => false },
+  },
+  // L14 (Q37): a message refused because the connection is gone marks the profile bad.
+  "a removed connection marks the profile bad": {
+    invariant: "L14",
+    seed: 10,
+    rules: {},
+    patch: flag("notConnectedMarksBad", true),
+  },
+  // Review bot on b21af02: the LinkedIn session taken from any pair the subject owns, whatever its channel. Here an SMS pair
+  // taken first leaves the invite waiting for ever on a number no LinkedIn action can use (L13); the SMS track runs, whose
+  // LinkedIn track starts after its text, see it as L16.
+  "a binding lookup ignores the channel": {
+    invariant: "L13",
+    seed: 1,
+    rules: {},
+    patch: flag("pairsByChannel", false),
+  },
+  // L15 (Q41): a pair whose invite was withdrawn and never accepted, or to which nothing went, is never released.
+  "a withheld release": {
+    invariant: "L15",
+    seed: 0,
+    rules: { releaseUnsent: (state) => state },
+  },
+  // L8 (council on b21af02, item 8): an edit of the wait leaves every waiting deadline where it was.
+  "an edited wait keeps the old deadline": {
+    invariant: "L8",
+    seed: 2,
+    rules: {},
+    patch: flag("waitEditRealigns", false),
   },
   // L13: a taken pair held instead of skipped: the second campaign's lead is left waiting on it for ever.
   "a taken LinkedIn pair is held, not skipped": {

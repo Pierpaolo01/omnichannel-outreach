@@ -127,6 +127,8 @@ ADR 0003's holds apply unchanged. A pause or a stop freezes lead time, so it fre
 
 The acceptance expiry is one rule, `inviteExpired(state, track, now)` in `progress.ts`, swappable as a `Rules` entry. Today it withdraws and finishes. Ticket 27 adds the track's `inmailFallback` switch and an InMail step kind: with the fallback on and an eligible sender, the same rule leaves the track running with the InMail as the pending step, due at once (its kind decided by position, after the invite), and the first message and follow-ups after it, so they follow the InMail as the decision says. The withdrawal of the invite is then ticket 27's to state. Nothing in 3.1 to 3.4 changes.
 
+The second attachment point is the connection gate, `rules.connectionGate(track, stepId, progress)` in `progress.ts`: the one test of whether a step must wait for a connection, read by the due-time resolution (3.2) and by handover predicate 19. Today it holds every LinkedIn step after the invite until a connection is stored. Ticket 27 must make it let through the InMail step (which goes to a person who is not a connection) and nothing else: the first message and follow-ups stay gated, so a fallback never sends a connection message to a stranger (council on b21af02, item 9).
+
 ## 4. The note allowance
 
 - **Whose:** the user's setting on each LinkedIn sender account, `notesPerMonth`, a whole number, no default (0: every invite goes without its note). The research: free accounts have a limited number of personalised notes; Premium removes the limit. The user knows which their account is.
@@ -149,6 +151,7 @@ The engine's rules, per kind of action. Reused unchanged: the claim (`claimAll`,
 - **`AccountState.kinds`**, for a social account: per kind (`invite`, `message`), the allowance and what is used today (sent on the reset day plus reservations), counted from `provider_work.kind`, which the claim writes. `accountHasRoom(account, reserved, kind)` checks the kind's bucket as well as the in-flight bound; email and SMS pass no kind and are unchanged.
 - **One pacing gap per account** across kinds: one session does one thing at a time. Its default is ADR 0003 4.1's, from the shortest window it serves and the sum of its daily allowances.
 - **Withdrawals** take no allowance and no pacing slot, as ADR 0003's withdrawals do not (question Q36).
+- **Which action spends which allowance, and when** (council on b21af02, item 4). An invite spends one of the session's invites per day, and a note one of its notes per month if it carries one, from its claim (a reservation) and for good once its handover is sent or unsettled; a refused or withdrawn-unsent invite gives both back. A first message or follow-up spends one message per day the same way. The connection check (`checkConnections`, run each settling period before any invite is claimed) and the pre-send check spend nothing and need no room: an existing connection is found and skipped as `already_connected` with the invite allowance at zero or used up, and its first message then waits only for the message allowance. A step whose kind of action every session it may use allows none of reads `sending_capacity`, never a time.
 
 Priority: an invite to a new lead is a first contact; a message to a connected lead, or any step of a touched lead, is a follow-up. So messages go before invites when a session's slot is contested, then oldest due first, and what does not fit a reset day's allowance waits for the next, never dropped.
 
@@ -198,7 +201,12 @@ ADR 0003's invariants 1 to 14 and 18 to 26 hold for LinkedIn steps too, and the 
 
 11. **L11 No pair ever moves.** Every action to a (session, profile) belongs to the first subject that acted there, until that subject's invite was withdrawn unaccepted with no message.
 12. **L12 A reply is the owner's.** A reply is marked only on a subject something reached on LinkedIn; the skipping campaign's mark is refused.
-13. **L13 Nothing pending for ever, on every channel.** After the drain, every pending step of a running lead has a due time, a hold with its reason, or a LinkedIn acceptance wait; and none has been due for days with nothing holding it (a lead left waiting on a taken pair).
+13. **L13 Nothing pending for ever, on every channel.** After the drain, every pending step of a running lead has a due time, a hold with its reason, or a LinkedIn acceptance wait; and none has been due for days with nothing holding it (a lead left waiting on a taken pair). Every hold is one the record derives itself (an invite pending from elsewhere, work whose outcome the session never told or a crash left unresolved, another subject's unsettled first action on the pair), never the engine's word; and a step whose kind no session allows reads `sending_capacity`.
+14. **L14 A removed connection keeps the profile** (Q37): a message refused because the connection is gone never marks the profile bad.
+15. **L15 A release frees the pair** (Q41): a LinkedIn track is skipped as taken only while, on every session its campaign's pool had at that instant, another subject held the conversation by the record's rule (nothing went and nothing is unknown, or every invite withdrawn, by the session or by the user's hand and mark, never accepted and no message: released).
+16. **L16 Each handover on its own channel, from the expected sender.** Every LinkedIn handover is on the LinkedIn track, to a profile the person has had, an invite from a session in its campaign's pool at that instant, a message from the session of its own conversation (the delivered invite's sender, or the check that found it connected); every text is on the SMS track, from the SMS number, to the person's mobile. In the SMS track runs, every started LinkedIn track beside SMS is handed its invite from the session by the drain.
+
+L1 also holds for an invite pending from elsewhere (Q42): none is ever handed over. L8 is asserted at the expiry and at each edit of the wait, for every lead still waiting, with the record's own deadline (no edit, held or not, is exempt). L12 counts as reached only a delivery or a handover whose outcome was still untold at the mark: a refused handover or a connection the check found is not outreach.
 
 ### 10.2 The generated test
 
@@ -206,34 +214,43 @@ ADR 0003's invariants 1 to 14 and 18 to 26 hold for LinkedIn steps too, and the 
 
 - **Generated:** one or two campaigns sharing one or two LinkedIn sessions; a LinkedIn track (invite and one to three messages, acceptance wait 1 to 5 days, a note or none) and, in half the runs, an email or SMS track together or after it; people with and without a profile URL (a valid one, a company page, garbage); allowances (invites, messages, notes) from 0 to 4; real sending windows drawn as the control runs draw them (ADR 0003 "Reads that say when"), and zones London, New York and Sydney; pacing gaps of 5 and 30 minutes.
 - **The provider, scripted per profile:** accepts after a delay (minutes to days), never accepts, already connected, refuses the profile (`invalid_destination`), refuses for a limit (`rate_limited`), loses an answer (the action done, the answer `unknown`, found by lookup), an acceptance reported late, a withdrawal answered `unknown` then `withdrawn`, a withdrawal that finds the invite accepted.
-- **Events:** clock advances from minutes to days; lead pauses and resumes; campaign pauses and resumes; stops; skips at every state (an invite not sent, a message waiting for acceptance, a follow-up); the user's reply mark (accepted and refused); the laptop off with a restart; a crash between a handover's commit and its call; a session signing out for hours; running edits (the acceptance wait changed; a message inserted, removed or two reordered); the user's mark of unresolved work, by what the session did; and two campaigns sharing people on one session. The later events draw from a stream of their own.
+- **Events:** clock advances from minutes to days; lead pauses and resumes; campaign pauses and resumes; stops, and restarts of stopped leads from their next step; skips at every state (an invite not sent, a message waiting for acceptance, a follow-up); the user's reply mark (accepted and refused); the laptop off with a restart; a crash between a handover's commit and its call; a session signing out for hours; running edits (the acceptance wait changed; a message inserted, removed or two reordered); pool edits that add or remove a session; a re-import that gives a person another profile; a person of the first campaign imported into the second later, after the first's invite was withdrawn (the pair released) or while the first owns it; the user's mark of unresolved work on every channel, by what the provider did; a withdrawal the session keeps answering unknown, listed in Needs attention, withdrawn by the user's hand and marked withdrawn; and two campaigns sharing people on one session. The later events draw from a stream of their own.
+- **Allowances and scripts, from the second stream:** a session's invite or message allowance at zero; an invite already pending from elsewhere (Q42); a connection removed after acceptance (Q37); an SMS track beside the LinkedIn one, at entry or after it, with every person's mobile, so the person's mobile and profile are pairs of two channels.
+- **Not drawn here, and where each is covered instead:** test runs (`linkedin.test.ts` "a test run", `linkedin-review.test.ts` items 1 and 13, and the test-run runs of ADR 0003); call tracks beside LinkedIn and a LinkedIn track in a win-back branch (the engine's call and branch rules take no LinkedIn branch; the re-check of `b21af02` ran both by hand; no example test pins them yet); a LinkedIn track after a text on the same person is also drawn in the SMS track runs (`generated-tracks.ts`, `linkedinBesideSms`, invariant L16 there): in 60% of runs, a campaign of its own people, number and session, in an engine of its own under the run's rules and mutation, because a campaign in the same engine moves state every campaign shares (the conversations' version the readiness caches key on) and so changed the modelled runs and two of their mutations' seeds. A LinkedIn track inside the SMS record's own campaigns is not drawn: a profile is a usable channel, which would change what that record predicts for every lead.
 - **The record** keeps its own copy of each definition, each lead's held intervals and the provider's logs, and predicts each invite's note, each deadline (its own calendar-day arithmetic in the prospect's zone from the delivered send time), each first message's earliest instant (the acceptance or the check, plus its wait, then the window), each track's finish and the status.
 - **Seeds and the search.** `pnpm check` runs fixed seeds (`LINKEDIN_FIXED_SEEDS`) and each mutation's recorded killing seed; the full search runs all 100 offsets in the `sequence-search` workflow's shards.
 
 ### 10.3 Mutations, one per invariant
 
-Each must be killed by a recorded seed in `pnpm check`, failing the invariant it names:
+Each must be killed by a recorded seed in `pnpm check`, failing the invariant it names (seed offsets from 24000, found over offsets 0 to 29 on 16 November 2026 after the re-check of `b21af02`):
 
-| Mutation | Invariant |
-| - | - |
-| an invite waiting for acceptance is offered as ready and sent again | L1 |
-| the first message's due time resolved at the invite's send, not the connection | L2 |
-| a reply mark recorded without ending the lead | L3 |
-| the acceptance expiry finishes the track without wanting the withdrawal | L4 |
-| the invite allowance ignored (one bucket for every LinkedIn action) | L5 |
-| an acceptance applied as a reply | L6 |
-| the note allowance ignored (every invite carries its note) | L7 |
-| the expiry finishes the track at the instant evaluated, not at its deadline (the laptop off across a deadline shows it) | L8 |
-| the pre-send check's `connected` ignored | L9 |
-| the expiry ends the lead instead of finishing the track | L10 |
-| the connection gate covers only the first message | L2 |
-| a LinkedIn pair owned by another subject is ignored | L11 |
-| a reply marked where nothing reached the person | L12 |
-| a taken LinkedIn pair is held, not skipped | L13 |
+| Mutation | Invariant | Seed |
+| - | - | - |
+| an invite waiting for acceptance is offered as ready and sent again | L1 | 0 |
+| the first message's due time resolved at the invite's send, not the connection | L2 | 0 |
+| a reply mark recorded without ending the lead | L3 | 9 |
+| the acceptance expiry finishes the track without wanting the withdrawal | L4 | 0 |
+| the invite allowance ignored (one bucket for every LinkedIn action) | L5 | 0 |
+| an acceptance applied as a reply | L6 | 0 |
+| the note allowance ignored (every invite carries its note) | L7 | 0 |
+| the expiry finishes the track at the instant evaluated, not at its deadline (the laptop off across a deadline shows it) | L8 | 5 |
+| `connected` ignored, by the connection check (taken as clear) and by the pre-send check | L9 | 11 |
+| the expiry ends the lead instead of finishing the track | L10 | 0 |
+| the connection gate covers only the first message | L2 | 0 |
+| a LinkedIn pair owned by another subject is ignored (in evaluation, the connection check, the account choice and the handover) | L11 | 1 |
+| a reply marked where nothing reached the person | L12 | 0 |
+| a taken LinkedIn pair is held, not skipped | L13 | 10 |
+| a pending invitation from elsewhere is sent again | L1 | 0 |
+| a removed connection marks the profile bad | L14 | 10 |
+| a withheld release (the release rule leaves every pair taken) | L15 | 0 |
+| an edited wait keeps the old deadline | L8 | 2 |
+| a binding lookup ignores the channel (the LinkedIn session taken from any pair the subject owns) | L13 here (the invite waits for ever on the SMS number); L16 in the SMS track runs, seed 3 from their SEED | 1 |
+
+The connection check pass is a layer the first mutations did not reach, so it is a `Rules` entry (`connectionCheckDue`, `connectionChecked`) and the L9 and L11 mutations swap it as well.
 
 ### 10.4 By construction
 
-The connection, the deadline and the withdrawal state are stored once and only move forward (the store refuses a `connection` that changes once set, an `accept_by` that moves but by an edit's re-resolution, and a withdrawal state that moves back). A pending message has no due time until a connection is stored, so no claim can see it due. The note choice is stored with the work at the handover and never recomputed.
+The connection, the deadline and the withdrawal state are stored once and only move forward (the store refuses a `connection` that changes once set, an `accept_by` that moves without its `accept_by_days` changing, and a withdrawal state that moves back). The deadline is stored with the wait it was resolved from (`accept_by_days`, migration 22): an edit re-resolves it only when the definition's wait differs from that stored wait, so a later write never moves an edited, already-passed deadline again (council on b21af02, item 8). Pair keys never coincide across channels (a session is not a number, a profile is not a mobile), so a per-channel filter on reads that match both sender and recipient is defence in depth; the reads that match on the owner alone are the ones a mutation can break, and L16 kills it. A pending message has no due time until a connection is stored, so no claim can see it due. The note choice is stored with the work at the handover and never recomputed.
 
 ### 10.5 Nothing changes for email, SMS or calls
 
@@ -287,11 +304,30 @@ Fifteen items, each reproduced first as a failing test through HTTP (`src/server
 14. **Step numbers** in reads count from 1 over the steps the track has now (`stepNumber`); a pending message an edit removed moves to the next live one.
 15. **The description** marks each criterion verified on the simulated provider, left for part b, or unverified.
 
+## The second pass on `b21af02` and its re-check (council, review bot and re-check, 16 November 2026)
+
+Twelve items. Each real bug is reproduced through HTTP first (`linkedin-review.test.ts`, "the second pass on b21af02"), or in the wording tests for item 1.
+
+1. **A conversation in its own channel's words.** Every sentence about a taken or unsettled conversation comes from one table over every track channel (`CONVERSATION_WORDS` in `sms-wording.ts`), and every caller passes the track's channel, required: no read and no caller falls back to SMS. The read's `waits` and the held tracks and dependent skips of Needs attention and Activity now carry their channel, required. A reply marked on LinkedIn says "Carry on the conversation on LinkedIn" in Activity. `conversation-wording.test.ts` runs each of the nine sentences the re-check reported on a LinkedIn read. *Follow-up, not done here:* the stored reason ids and API fields keep "sms" in their names (`skipped_conversation_taken` for both channels is fine; `sms_conversation_taken`, `sms_conversation_unsettled`, `smsBindings`, `sms_bindings` are not); renaming them is a migration and an API change for part b or later.
+2. **Pending from elsewhere and a removed connection are drawn**, with L1's extension and L14, and a mutation each.
+3. **Bindings carry their channel** (`sms_bindings.channel`, from the sender account's channel), and every function reading them reads one channel's (`pairsOn`): `pairFree`, `otherBinding` (the taken-pair test), `linkedinSessionOf`, the release (`releaseUnsentBindings`, over the subject's own pairs of either channel, each judged by its own work), the reply attribution (`smsReplyOwner`, over the store's `smsBindingsOf`, which returns SMS pairs only). A LinkedIn pair cannot affect an SMS track, nor an SMS pair a LinkedIn one. Tests: SMS then LinkedIn, LinkedIn then SMS, and one person in two campaigns, one owning the SMS conversation and the other the LinkedIn one, each skipping only its own channel's track, with a text reply attributed among SMS pairs only.
+4. **An existing connection needs no invite allowance** (section 6): the connection check runs outside every allowance.
+5. **The mark with nothing reached is refused**, for leads and test runs: it requires this subject's own work, sent or handed and unsettled; a connection the check found is not outreach.
+6. **The runs draw what they claim**: 10.2 lists exactly what is drawn and what is not.
+7. **Every write applies the release rule.** The store's one subject write (`write` in `sqlite-engine-store.ts`) applies `releaseRule`, which the engine sets to its own `rules.releaseUnsent`: the engine's updates, each lead control, the user's attempt marks, the reply marks, the invite-withdrawal mark, an edit's reconciliation, Run test and a campaign pause or resume. The user's "withdrawn" mark of a stuck withdrawal releases the pair in its own write; the runs draw it, then another campaign reaching that profile.
+8. **The deadline is stored once, with its wait** (10.4).
+9. **`connectionGate` is ticket 27's second attachment point** (3.5).
+10. **Q42's pending invite, a release followed by another campaign inviting, and the pool edits** are drawn. A LinkedIn track in a win-back branch is not (10.2).
+11. **The stuck-withdrawal entry in Needs attention** carries the lead, company and campaign every other entry carries.
+12. **The record asserts each point itself**: at a release (L15), at each edit of the wait (L8), each hold (L13), and the sender and channel of every handover (L16); L12 no longer excuses a handover that was refused. "A withheld release" and "an edited wait keeps the old deadline" are now mutations killed by recorded seeds. The leftover probe file is gone.
+
+What the new draws found in the engine, fixed here: an invite pending from elsewhere was not held between two checks outside its window (it is now held until a check finds it gone); and a LinkedIn step whose kind no session allowed read a time it could never keep (it reads `sending_capacity`). And in the record, fixed: a re-import that replaced a connected profile, a rate-limited invite retried from another session, and a request a crash failed after its write committed.
+
 ## As built (part a, 16 November 2026)
 
 - **Code.** `src/domain/linkedin-profile.ts` (the URL rule); `definition.ts` (`linkedin`, `acceptWaitDays`, `linkedinPool`, `linkedinStepKind`, the validator); `progress.ts` (the LinkedIn section: `awaitingAcceptance`, `acceptDeadline`, `connect`, `recordAcceptance`, `inviteExpired`, `inviteAlreadyConnected`, the withdrawal answer); `dispatch.ts` (`forAction`, the kind's view of an account; `noteFor`, decided in `handOver`; the `awaiting_acceptance` read); `controls.ts` (`markReplied`); the engine's LinkedIn port, event, pre-send and withdrawal passes; migration 22; `rulesWith` (`rules.ts`), so a swapped `inviteExpired` is the one every evaluation applies, in the engine and in the reads.
 - **Routes.** `POST /api/enrollments/:id/replies`, `PUT /api/sender-accounts/:id/allowances`, `GET /api/linkedin-provider`, and the test profile (`linkedin`) on `PUT /api/campaigns/:id/test-contacts`.
-- **Tests.** `src/domain/linkedin-profile.test.ts`; `src/server/engine/linkedin.test.ts` (invite with note, acceptance, follow-ups; already connected; the expiry with withdrawal and the track after it; a late acceptance; missing and unreachable profiles; allowances and the note; the reply mark; the running app's blocker 3); the generated runs `test/support/generated-linkedin.ts` with mutations in `test/support/linkedin-mutations.ts`, each killed by its recorded seed offset from 24000: L1 0, L2 0 (the first message at the send) and 22 (the gate covering only the first message), L3 4, L4 0, L5 0, L6 0, L7 0, L8 5, L9 1, L10 0, L11 25, L12 0, L13 10. Fixed seeds 0, 2, 3, 16, 25 and 29 reach every behaviour the runs name (`LINKEDIN_FEATURES`); two more are pinned by example tests. The connection gate is one function (`connectionGate`), read by the due-time resolution and by handover predicate 19; the pre-send check's `pending` is a second layer (`outstandingInviteStops`), so the mutations of the first layer turn it off too.
+- **Tests.** `src/domain/linkedin-profile.test.ts`; `src/server/engine/linkedin.test.ts` (invite with note, acceptance, follow-ups; already connected; the expiry with withdrawal and the track after it; a late acceptance; missing and unreachable profiles; allowances and the note; the reply mark; the running app's blocker 3); the generated runs `test/support/generated-linkedin.ts` with mutations in `test/support/linkedin-mutations.ts`, each killed by its recorded seed offset from 24000 (10.3's table). Fixed seeds 0, 2, 3, 5, 9, 16, 25 and 29 reach every behaviour the runs name (`LINKEDIN_FEATURES`); one more (`unresolved-marked-sent`) is pinned by an example test. The connection gate is one function (`connectionGate`), read by the due-time resolution and by handover predicate 19; the pre-send check's `pending` is a second layer (`outstandingInviteStops`), so the mutations of the first layer turn it off too.
 - **L2 is checked on the handover log**, not only deliveries: the simulated platform refuses a message to a non-connection, so a broken engine's early message never lands, and the invariant is that the engine never asks.
 - **Two holes the first runs found and the record now models:** the acceptance deadline was neither a wake of the worker nor a horizon of its evaluation cache, so an expiry waited for an unrelated tick (`settledEvaluation` and `nextWakeAt` now include it); and the record's held-time arithmetic had to walk the holds forward (`afterHolds`) rather than iterate.
 - **Not built in part a:** the canvas, the record's screens and the measures panel (part b); a test run's tab line for awaiting acceptance (the read gives the reason; part b words it).

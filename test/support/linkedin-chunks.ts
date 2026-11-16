@@ -11,47 +11,63 @@ import { FULL_SEARCH, inShard } from "./sequence-chunks.ts";
  * killing seed. Counts, never times: every mutation replay stops after RUN_WRITES engine writes.
  */
 export const LINKEDIN_SEED = 24000;
-/** Offsets from LINKEDIN_SEED: a greedy cover of every behaviour below over offsets 0 to 29 (16 November 2026, after the review of 194fc44). */
-export const LINKEDIN_FIXED_SEEDS: readonly number[] = [0, 2, 3, 16, 25, 29];
+/** Offsets from LINKEDIN_SEED: a greedy cover of every behaviour below over offsets 0 to 29 (16 November 2026, after the re-check of b21af02). */
+export const LINKEDIN_FIXED_SEEDS: readonly number[] = [0, 2, 3, 5, 9, 16, 25, 29];
 /** Every behaviour the fixed seeds must reach (`stats.features`); a run that reports a name not listed here fails. */
 export const LINKEDIN_FEATURES: readonly string[] = [
   "a-campaign-paused",
   "a-campaign-resumed",
   "a-crash-between-the-handover-and-its-answer",
+  "a-deadline-checked-at-an-edit",
   "a-lead-paused",
   "a-lead-resumed",
   "a-lead-stopped",
   "a-lost-answer-found-by-lookup",
   "a-message-after-acceptance",
   "a-message-to-an-existing-connection",
+  "a-pair-released-then-invited-by-another",
+  "a-person-enrolled-after-a-release",
+  "a-person-enrolled-later",
   "a-person-in-two-campaigns",
+  "a-profile-changed-by-a-reimport",
   "a-rate-limit",
+  "a-removed-connection",
   "a-reply-mark-refused",
   "a-reply-marked",
   "a-running-edit:insert",
   "a-running-edit:remove",
   "a-running-edit:reorder",
   "a-running-edit:wait",
+  "a-second-invite-after-a-withdrawal",
+  "a-session-added-to-a-pool",
+  "a-session-removed-from-a-pool",
   "a-session-signed-out",
   "a-skip",
+  "a-skip-of-a-taken-pair",
   "a-skip-of-the-invite",
   "a-skip-while-waiting-for-acceptance",
+  "a-step-waiting-on-a-zero-allowance",
+  "a-stopped-lead-restarted",
+  "a-stuck-withdrawal-marked-by-the-user",
   "a-withdrawal-answered-unknown",
   "a-withdrawal-found-it-accepted",
   "already-connected",
   "an-edit-of-the-wait-while-waiting",
   "an-expiry-while-the-laptop-was-off",
   "an-invite-expired",
+  "an-invite-pending-elsewhere",
   "an-invite-without-its-note",
   "connected-by-acceptance",
   "email-after-linkedin",
   "email-beside-linkedin",
   "released-after-an-expiry",
+  "sms-after-linkedin",
+  "sms-beside-linkedin",
   "the-laptop-was-off",
   "unresolved-marked-not-sent",
 ];
 /** Behaviours the runs can name that the fixed seeds do not reach, each pinned by an example test instead (`linkedin-review.test.ts`). */
-export const LINKEDIN_OTHER_FEATURES: readonly string[] = ["a-second-invite-after-a-withdrawal", "unresolved-marked-sent"];
+export const LINKEDIN_OTHER_FEATURES: readonly string[] = ["unresolved-marked-sent"];
 const SEARCH_SEEDS = 100;
 const MAX_SEEDS = 30;
 /** Every mutation replay stops after this many engine writes or ticks: an unmutated run of the 100 needs under 300 of each. */
@@ -68,7 +84,7 @@ const reached = new Set<string>();
 
 export function linkedinChunks(): void {
   const offsets = FULL_SEARCH ? Array.from({ length: SEARCH_SEEDS }, (_, i) => i).filter(inShard) : [...LINKEDIN_FIXED_SEEDS];
-  describe(`generated LinkedIn runs keep L1 to L10 (${FULL_SEARCH ? "full search" : "fixed seeds"})`, () => {
+  describe(`generated LinkedIn runs keep L1 to L16 (${FULL_SEARCH ? "full search" : "fixed seeds"})`, () => {
     if (offsets.length === 0) test.skip("no seed of this run in this shard", () => undefined);
     for (let i = 0; i < offsets.length; i += 10) {
       const chunk = offsets.slice(i, i + 10);

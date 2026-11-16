@@ -68,9 +68,9 @@ export function heldReason(state: SubjectState, trackId: string, now: number): H
   // A conversation taken on every number the track may use is not a hold: evaluation skips the track (4.5, Q7 answered).
   // One whose owner's first text is not known sent or not sent yet holds it, until that work settles (point 10).
   if (conversationUnsettled(state, trackId, now)) return "sms_conversation_unsettled";
-  // An invite already pending on LinkedIn that this application did not send: checked again after a settling period (Q42).
-  const pendingUntil = invitePendingUntil(state, trackId);
-  if (pendingUntil !== null && now < pendingUntil) return "invite_pending_elsewhere";
+  // An invite already pending on LinkedIn that this application did not send: held until a check finds it gone, checked
+  // again each settling period while a claim could be made (Q42). The hold lasts between checks, as outside the window.
+  if (invitePendingUntil(state, trackId) !== null) return "invite_pending_elsewhere";
   return null;
 }
 
@@ -310,6 +310,11 @@ function leadWait(state: SubjectState, trackId: string, stepId: string): { kind:
 /** What the engine knows at the read rules out every sender for the step: none connected, or every daily limit zero. */
 function noSenderKnown(state: SubjectState, trackId: string): { kind: "waits"; why: StepWait } | null {
   const channel = channelOf(state, trackId) ?? "email";
+  // A LinkedIn step: every session it may use allows none of its kind of action, the user's setting (ADR 0004 4, item 6).
+  if (channel === "linkedin") {
+    const sessions = candidatesOf(state, trackId);
+    return sessions.length > 0 && sessions.every((a) => a.dailyLimit <= 0) ? { kind: "waits", why: "sending_capacity" } : null;
+  }
   if (channel !== "email" && channel !== "sms") return null;
   const fixed = senderOf(state, channel);
   const ids = fixed !== null ? [fixed] : [...poolOf(state.campaign.definition, channel)];

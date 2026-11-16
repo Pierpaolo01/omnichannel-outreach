@@ -9,7 +9,7 @@ import { launchCheck, type LaunchCheck } from "../../domain/sequence/blockers.ts
 import { REQUEST_ID_DIFFERENT, REQUEST_ID_REUSED, type OutcomeInput } from "../../domain/sequence/calls.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
-import { awaitingAcceptance, connectionCheckDue, connectionChecked, markInviteWithdrawal, invitePendingElsewhere, invitePendingUntil, runs, sealReckoning, settledEvaluation, settledReadiness, stillSettled, type SettledEvaluation } from "../../domain/sequence/progress.ts";
+import { awaitingAcceptance, markInviteWithdrawal, invitePendingElsewhere, invitePendingUntil, runs, sealReckoning, settledEvaluation, settledReadiness, stillSettled, type SettledEvaluation } from "../../domain/sequence/progress.ts";
 import { definitionProblems, type CampaignDefinition } from "../../domain/sequence/definition.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
 import type { OutreachStatus } from "../../domain/outreach-status.ts";
@@ -1341,7 +1341,7 @@ export class Engine {
       const s = await this.store.subject(id, now);
       if (!s) continue;
       for (const p of s.tracks) {
-        const session = connectionCheckDue(s, p.trackId, now);
+        const session = this.rules.connectionCheckDue(s, p.trackId, now);
         if (session === null) continue;
         const destination = s.lead.details.find((d) => d.id === s.lead.resolved[p.destinationDetailId ?? ""]?.liveId)?.key ?? "";
         if (!this.leaseIsMine(this.clockNow())) return changed;
@@ -1350,8 +1350,8 @@ export class Engine {
         if (asked.kind === "unavailable" || asked.kind === "reply") continue;
         const answer = asked.kind === "connected" ? "connected" : asked.kind === "pending" && this.rules.outstandingInviteStops() ? "pending" : "clear";
         changed = (await this.update(id, now, (st) => {
-          if (connectionCheckDue(st, p.trackId, now) !== session) return null;
-          return connectionChecked(st, p.trackId, session, destination, answer, now);
+          if (this.rules.connectionCheckDue(st, p.trackId, now) !== session) return null;
+          return this.rules.connectionChecked(st, p.trackId, session, destination, answer, now);
         })) !== null || changed;
       }
     }

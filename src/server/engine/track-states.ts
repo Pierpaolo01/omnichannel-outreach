@@ -59,7 +59,7 @@ export function dependentStateOf(live: SubjectState, track: Pick<TrackDefinition
   if (p?.finishReason) {
     const state = finishedStateOf(p.finishReason);
     // Only a taken conversation names its owners, above.
-    return state === "skipped_conversation_taken" ? { state, startsAt: null, owners: [] } : { state, startsAt: null };
+    return state === "skipped_conversation_taken" ? { state, startsAt: null, owners: [], channel: track.channel === "linkedin" ? "linkedin" : "sms" } : { state, startsAt: null };
   }
   if (live.subject.ended !== null) return { state: p && p.startedAt !== null ? "stopped_after_start" : "stopped", startsAt: null };
   if (track.channel === "call" && live.subject.noMoreCalls) return { state: "no_more_calls", startsAt: null };

@@ -194,7 +194,7 @@ describe("items 3 and 11: the deadline on the lead's own clock, and edits of the
     const until = () => w.read(a.lead).then((r) => r.tracks[0]?.nextStep?.when);
     expect(await until()).toMatchObject({ kind: "waits", why: "awaiting_acceptance", until: "2026-11-05T00:00:00.000Z" });
     await w.control(a.lead, "pause");
-    expect(await until()).toEqual({ kind: "waits", why: "lead_paused" });
+    expect(await until()).toEqual({ kind: "waits", why: "lead_paused", channel: "linkedin" });
     await w.h.advanceTo(MONDAY_9 + 25 * H);
     await w.control(a.lead, "resume");
     expect(await until()).toMatchObject({ until: "2026-11-06T00:00:00.000Z" });
@@ -230,6 +230,12 @@ describe("items 4 to 7, 12 to 14: reads, withdrawals, marks, profile-only leads"
     await w.h.advanceTo(MONDAY_9 + 2 * DAY + 2 * H);
     const attention = (await w.h.request<NeedsAttention>("GET", "/api/needs-attention")).body;
     expect(attention.inviteWithdrawalsUnknown?.map((x) => x.enrollmentId)).toEqual([a.lead]);
+    // Council on b21af02, item 11: the entry names its lead, company and campaign, as every other attention entry does.
+    const entry = attention.inviteWithdrawalsUnknown?.[0];
+    const row = (await w.h.request<LeadSearchResult>("GET", `/api/leads?campaign=${a.id}`)).body.rows.find((x) => x.enrollments.some((e) => e.id === a.lead));
+    expect(entry?.campaign).toEqual({ id: a.id, name: "Spring" });
+    expect(entry?.person).toEqual({ id: expect.any(String), name: row?.name });
+    expect(entry?.company).toEqual({ id: expect.any(String), name: expect.stringMatching(/\S/) });
     expect((await w.h.request("POST", `/api/enrollments/${a.lead}/invite-withdrawal`, { requestId: "iw-1", trackId: "a", answer: "kept" })).status).toBe(200);
     await w.h.advanceTo(MONDAY_9 + 4 * DAY);
     expect((await w.read(a.lead)).tracks[0]?.linkedin).toMatchObject({ withdrawal: "kept_by_user", acceptedAfterFinish: true });
@@ -350,12 +356,54 @@ describe("the second pass on b21af02", () => {
     expect((await w.mark(a.lead)).status).toBe(409);
   });
 
+  test("item 3: one person in two campaigns, A owning the SMS conversation and B the LinkedIn one: each skips only its own channel's track, and a text reply is A's alone", async () => {
+    const h = new EngineHarness({ start: MONDAY_9 - H, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }], sms: { numbers: [{ id: SMS, capacity: 50, gapMs: MIN, k: 2, healthy: true, resetZone: "Europe/London" }] }, linkedin: { sessions: [session("s1")] } });
+    await h.tick();
+    await h.request("PUT", "/api/sender-accounts/s1/allowances", { invitesPerDay: 5, messagesPerDay: 5, notesPerMonth: 5 });
+    h.clock = MONDAY_9;
+    const people = [person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", dial_phone: MOBILE, dial_phone_type: "mobile", linkedin_url: PAT })];
+    const launch = async (name: string, tracks: TrackDefinition[]) => {
+      const { campaign: c } = await h.createCampaign(name, { businesses: BUSINESSES, people });
+      await h.defineSequence(c.id, { ...def(tracks, ["s1"]), smsPool: [SMS] });
+      expect((await h.launch(c.id)).status).toBe(200);
+      const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${c.id}`)).body.rows;
+      return rows[0]?.enrollments.find((e) => e.campaign.id === c.id)?.id ?? "";
+    };
+    const finish = async (id: string, trackId: string) => (await h.store.engine.subject(id, h.clock))?.tracks.find((t) => t.trackId === trackId)?.finishReason ?? null;
+    // A texts first; its LinkedIn track starts four days after the text.
+    const a = await launch("Spring", [smsTrack("at"), { ...li("al", "al"), start: { kind: "after", trackId: "at", delayDays: 4 } }]);
+    await h.advanceTo(MONDAY_9 + H);
+    expect(h.sms.deliveryLog.map((d) => d.subjectId)).toEqual([a]);
+    // B, launched now, invites at once (the LinkedIn pair is free) and finds the SMS pair A's. Pat accepts B's invite, so
+    // the LinkedIn conversation stays B's (an invite withdrawn unaccepted would release it, Q41).
+    h.linkedin.profiles.set(PAT, { acceptAfterMs: H });
+    const b = await launch("Autumn", [li("bl", "bl"), smsTrack("bt")]);
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    expect(h.linkedin.deliveryLog.filter((d) => d.action === "invite").map((d) => d.subjectId)).toEqual([b]);
+    expect(await finish(b, "bt")).toBe("skipped_conversation_taken");
+    expect(await finish(b, "bl")).toBeNull();
+    // A's LinkedIn track, when it starts, finds the LinkedIn pair B's; its SMS track is untouched.
+    await h.advanceTo(MONDAY_9 + 5 * DAY);
+    expect(await finish(a, "al")).toBe("skipped_conversation_taken");
+    expect(await finish(a, "at")).toBe("completed");
+    expect(h.linkedin.handoverLog.some((x) => x.subjectId === a)).toBe(false);
+    expect(h.sms.handoverLog.some((x) => x.subjectId === b)).toBe(false);
+    // A text back from the mobile is attributed among SMS pairs only: it is A's reply, and none of B's, whose pair with the
+    // person is on LinkedIn.
+    expect(h.sms.prospectTexts(MOBILE)).toBe(true);
+    await h.advanceTo(h.clock + H);
+    expect((await h.store.engine.subject(a, h.clock))?.subject.ended).toBe("replied");
+    expect((await h.store.engine.subject(b, h.clock))?.subject.ended).not.toBe("replied");
+    expect((await h.store.engine.subject(b, h.clock))?.replies ?? []).toEqual([]);
+  });
+
   test("item 7: the user's 'withdrawn' mark on an ended lead releases the pair at once: another campaign then invites", async () => {
     const w = await world();
     w.h.linkedin.profiles.set(PAT, { withdrawUnknown: 50 });
     const a = await w.campaign("Spring", [li("a", "a", 1, 1)]);
     await w.h.advanceTo(MONDAY_9 + 2 * DAY + 2 * H);
     expect((await w.read(a.lead)).status).toBe("sequence_finished_no_response");
+    w.h.linkedin.withdrawByHand(PAT);
     expect((await w.h.request("POST", `/api/enrollments/${a.lead}/invite-withdrawal`, { requestId: "iw-1", trackId: "a", answer: "withdrawn" })).status).toBe(200);
     const b = await w.campaign("Autumn", [li("b", "b")]);
     await w.h.advanceTo(w.h.clock + H);

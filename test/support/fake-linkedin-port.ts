@@ -76,6 +76,8 @@ export class FakeLinkedInPort implements SendPort {
   readonly deliveryLog: LinkedinDelivery[] = [];
   readonly acceptanceLog: { at: number; key: string; sender: string; profile: string }[] = [];
   readonly withdrawalLog: { at: number; key: string; answer: InviteWithdrawal["kind"] }[] = [];
+  /** Invites the user withdrew on LinkedIn by hand (`withdrawByHand`), outside the application. */
+  readonly handWithdrawalLog: { at: number; key: string }[] = [];
   readonly presendLog: { at: number; sender: string; destination: string; answer: PresendResult["kind"] }[] = [];
   readonly lookupLog: { at: number; key: string; answer: LookupResult["kind"] }[] = [];
   readonly refusals: { at: number; key: string; destination: string; reason: string }[] = [];
@@ -176,6 +178,18 @@ export class FakeLinkedInPort implements SendPort {
       ...this.events.filter((e) => e.visibleAt > now && Number.isFinite(e.visibleAt)).map((e) => e.visibleAt),
     ];
     return times.length > 0 ? Math.min(...times) : null;
+  }
+
+  /** The user withdraws an invite by hand on LinkedIn (what they do before marking a stuck withdrawal "withdrawn"). */
+  withdrawByHand(profile: string): void {
+    const now = this.now();
+    for (const i of this.invites) {
+      if (i.profile !== profile || i.withdrawnAt !== null || (i.acceptedAt !== null && i.acceptedAt <= now)) continue;
+      // An acceptance scripted for later never comes: the invite is gone.
+      i.withdrawnAt = now;
+      i.acceptedAt = null;
+      this.handWithdrawalLog.push({ at: now, key: i.key });
+    }
   }
 
   /** The person accepts the invite the user sent by hand outside the application: they are connected from now. */

@@ -266,6 +266,16 @@ export function remainingSteps(state: SubjectState, track: TrackDefinition): str
  * connection. A mutable seam, so the generated runs can prove they see a gate that covers only the first message.
  */
 export const rules = {
+  /**
+   * Pairs are read per channel (review bot on b21af02); false only for the generated runs' mutation, which also takes the
+   * LinkedIn session from any pair the subject owns (the bot's reproduction). Pair keys never coincide across channels (a
+   * session is not a number, a profile not a mobile), so the per-channel filter in the other reads is defence in depth.
+   */
+  pairsByChannel: true,
+  /** A refusal because the connection is gone fails the track and keeps the profile good (Q37); true only for a mutation. */
+  notConnectedMarksBad: false,
+  /** An edit of the acceptance wait re-resolves every waiting deadline (ADR 0004 3.2); false only for a mutation. */
+  waitEditRealigns: true,
   connectionGate: (track: TrackDefinition, stepId: string, progress: TrackProgress): boolean => {
     const kind = linkedinStepKind(track, stepId);
     return kind !== null && kind !== "invite" && (progress.connection ?? null) === null;
@@ -782,6 +792,7 @@ function recordRejected(state: SubjectState, attempt: Attempt, reason: Attempt["
   }
   // A LinkedIn message refused because the connection is gone (ADR 0004 2.2, question Q37): the track fails, the profile
   // stays good (it is still theirs), and the lead's other tracks continue.
+  if (reason === "not_connected" && rules.notConnectedMarksBad) return applyBadDestination(state, attempt, now);
   if (reason === "not_connected") {
     if (!progress || progress.finishedAt !== null) return state;
     const failed = state.results.some((r) => r.stepId === attempt.stepId)
@@ -924,7 +935,7 @@ export function pairFree(state: SubjectState, sender: string, recipient: string,
 
 /** The subject's known pairs of one channel only (review bot on b21af02): no rule reads another channel's conversations. */
 export function pairsOn(state: SubjectState, channel: ConversationChannel): readonly SmsBinding[] {
-  return state.smsBindings.filter((b) => b.channel === channel);
+  return rules.pairsByChannel ? state.smsBindings.filter((b) => b.channel === channel) : state.smsBindings;
 }
 
 /** The mobile an SMS track texts: its destination's key (E.164). */
@@ -1388,6 +1399,8 @@ export function linkedinSessionOf(state: SubjectState): string | null {
     const key = recipientOf(state, p.trackId);
     if (key !== null) profiles.add(key);
   }
+  // The mutation (`pairsByChannel` false) is the review bot's bug itself: any pair the subject owns, whatever its channel.
+  if (!rules.pairsByChannel) return state.smsBindings.find((b) => b.owner === state.subject.id)?.sender ?? state.subject.linkedinSender ?? null;
   return pairsOn(state, "linkedin").find((b) => b.owner === state.subject.id && profiles.has(b.recipient))?.sender ?? state.subject.linkedinSender ?? null;
 }
 
@@ -1417,7 +1430,7 @@ export function realignAcceptance(state: SubjectState, now: number): SubjectStat
     // Stored once (council on b21af02, item 8): re-resolved only when the definition's wait differs from the one the stored
     // deadline was resolved with, so a later change of provider work never moves an edited, already-passed deadline again.
     const days = track.acceptWaitDays ?? 1;
-    if ((p.acceptByDays ?? days) === days) continue;
+    if ((p.acceptByDays ?? days) === days || !rules.waitEditRealigns) continue;
     const zone = p.acceptByZone ?? s.lead.zone;
     const span_ = span(sent.atWall, days, zone);
     const lead = leadNow(s.subject.clock, now);

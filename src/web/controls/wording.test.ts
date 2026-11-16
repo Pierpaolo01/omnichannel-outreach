@@ -62,7 +62,7 @@ describe("when a step goes, in one wording function (ADR 0003 \"Reads that say w
   test("ready, an earliest instant in the user's zone, or why it waits with no time", () => {
     expect(stepWhenPhrase({ kind: "ready" }, ZONE)).toBe("ready to send, in line for its sender");
     expect(stepWhenPhrase(at("2026-11-10T09:00:00.000Z"), ZONE)).toBe("earliest Tue 10 Nov at 09:00");
-    expect(stepWhenPhrase({ kind: "waits", why: "sending_capacity" }, ZONE)).toBe("waiting for sending capacity: every account it may use is full today");
+    expect(stepWhenPhrase({ kind: "waits", why: "sending_capacity", channel: "email" }, ZONE)).toBe("waiting for sending capacity: every account it may use is full today");
     // A call: the day it goes on the list, never a time of day; once listed for a later day, the call line's own words.
     expect(stepWhenPhrase({ kind: "call_day", day: "2026-11-10", today: false, now: false }, ZONE)).toBe("on your call list from Tue 10 Nov at the earliest");
     expect(stepWhenPhrase({ kind: "call_day", day: "2026-11-09", today: true, now: false }, ZONE)).toBe("on your call list later today at the earliest");
@@ -70,11 +70,11 @@ describe("when a step goes, in one wording function (ADR 0003 \"Reads that say w
     expect(stepWhenPhrase({ kind: "waits", why: "no_transport", channel: "sms" }, ZONE)).toBe("waiting: the SMS provider can’t send this text yet");
     expect(stepWhenPhrase({ kind: "waits", why: "no_transport", channel: "email" }, ZONE)).toBe("waiting: the email provider can’t send a follow-up in its thread yet");
     expect(stepWhenPhrase({ kind: "listed_for", day: "2026-11-10" }, ZONE)).toBe("on the list for Tue 10 Nov");
-    expect(stepWhenPhrase({ kind: "waits", why: "call_hours_closed" }, ZONE)).toBe("waits for a day their calling hours open");
+    expect(stepWhenPhrase({ kind: "waits", why: "call_hours_closed", channel: "email" }, ZONE)).toBe("waits for a day their calling hours open");
     // The sender-side reasons give no time (the read stops predicting what a sender does later).
-    expect(stepWhenPhrase({ kind: "waits", why: "sender_slot" }, ZONE)).toBe("waiting for its sender’s next sending slot");
-    expect(stepWhenPhrase({ kind: "waits", why: "sender_rate_limited" }, ZONE)).toBe("waiting: the provider is limiting how fast its senders can send");
-    expect(stepWhenPhrase({ kind: "waits", why: "sender_waiting" }, ZONE)).toBe("waiting for a sender that can take it");
+    expect(stepWhenPhrase({ kind: "waits", why: "sender_slot", channel: "email" }, ZONE)).toBe("waiting for its sender’s next sending slot");
+    expect(stepWhenPhrase({ kind: "waits", why: "sender_rate_limited", channel: "email" }, ZONE)).toBe("waiting: the provider is limiting how fast its senders can send");
+    expect(stepWhenPhrase({ kind: "waits", why: "sender_waiting", channel: "email" }, ZONE)).toBe("waiting for a sender that can take it");
   });
 
   test("every reason the read can give has words, and none promises a time", () => {
@@ -85,7 +85,7 @@ describe("when a step goes, in one wording function (ADR 0003 \"Reads that say w
       sender_slot: true, sender_rate_limited: true, sender_waiting: true,
     };
     for (const why of Object.keys(reasons) as StepWaitApi[]) {
-      const words = stepWhenPhrase({ kind: "waits", why }, ZONE);
+      const words = stepWhenPhrase({ kind: "waits", why, channel: "email" }, ZONE);
       expect(words, why).not.toBe("");
       expect(words, why).not.toMatch(/\d{2}:\d{2}|due/);
       // No reason says what happens next (council on cc9bf55, item 9).
@@ -95,7 +95,7 @@ describe("when a step goes, in one wording function (ADR 0003 \"Reads that say w
 
   test("the record's row says the read's reason in place of a time", () => {
     const r = running("active");
-    const full = { ...r, tracks: r.tracks.map((t) => ({ ...t, nextStep: t.nextStep && { ...t.nextStep, when: { kind: "waits" as const, why: "sending_capacity" as const } } })) };
+    const full = { ...r, tracks: r.tracks.map((t) => ({ ...t, nextStep: t.nextStep && { ...t.nextStep, when: { kind: "waits" as const, why: "sending_capacity" as const, channel: "email" as const } } })) };
     expect(nextStepSentence(full, ZONE)).toBe("Next: email 2 of 3, waiting for sending capacity: every account it may use is full today.");
     const ready = { ...r, tracks: r.tracks.map((t) => ({ ...t, nextStep: t.nextStep && { ...t.nextStep, when: { kind: "ready" as const } } })) };
     expect(nextStepSentence(ready, ZONE)).toBe("Next: email 2 of 3, ready to send, in line for its sender.");
@@ -114,8 +114,8 @@ describe("the plain next-step sentence, for every status", () => {
   test("queued and active after launch: the step the read names, and when it is due", () => {
     expect(nextStepSentence(running("queued"), ZONE)).toBe("Nothing has gone out yet. Next: email 2 of 3, earliest Tue 3 Nov at 09:00.");
     // A held step is never said to be due: the row says why, naming whose text it waits on (verifier on faac357, item 5).
-    const held = running("queued", { tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], linkedin: null, hold: "sms_conversation_unsettled", holdOwners: [{ name: "Spring clinics", test: false }], nextStep: { stepId: "s2", number: 2, when: at("2026-11-03T09:00:00.000Z") }, callTask: null, steps: [] }] });
-    expect(nextStepSentence(held, ZONE)).toBe("Nothing has gone out yet. Next: email 2 of 3, on hold because the first text from campaign Spring clinics to the same mobile, on every number this campaign can use, isn’t known to have gone or not yet.");
+    const held = running("queued", { tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], linkedin: null, hold: "unresolved", holdOwners: [], nextStep: { stepId: "s2", number: 2, when: at("2026-11-03T09:00:00.000Z") }, callTask: null, steps: [] }] });
+    expect(nextStepSentence(held, ZONE)).toBe("Nothing has gone out yet. Next: email 2 of 3, on hold because the provider hasn’t confirmed whether a message went.");
     expect(nextStepSentence(running("active"), ZONE)).toBe("Next: email 2 of 3, earliest Tue 3 Nov at 09:00.");
   });
 

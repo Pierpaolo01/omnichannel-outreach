@@ -49,13 +49,13 @@ describe("the enrollment read's next step (person and company records, GET /api/
   test("inside the window, with no room on the only inbox today, the read gives the reason and no time", async () => {
     const { h, when } = await world(definition([track("email", [email("s1")], { window: [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 })) })]), 0);
     await h.advanceTo(MONDAY_10 + MIN);
-    expect(await when()).toEqual({ kind: "waits", why: "sending_capacity" });
+    expect(await when()).toEqual({ kind: "waits", why: "sending_capacity", channel: "email" });
   });
 
   test("while the campaign is paused the read promises no time; after the resume it says Tuesday's opening again", async () => {
     const { h, campaign, when } = await world(definition([track("email", [email("s1")])]));
     expect((await h.request("POST", `/api/campaigns/${campaign.id}/pause`, { requestId: "pause-1" })).status).toBe(200);
-    expect(await when()).toEqual({ kind: "waits", why: "campaign_paused" });
+    expect(await when()).toEqual({ kind: "waits", why: "campaign_paused", channel: "email" });
     await h.advanceTo(MONDAY_10 + 3 * H);
     expect((await h.request("POST", `/api/campaigns/${campaign.id}/resume`, { requestId: "resume-1" })).status).toBe(200);
     expect(await when()).toEqual({ kind: "at", at: new Date(TUESDAY_9).toISOString() });
@@ -89,10 +89,10 @@ describe("the earliest instant, from everything the engine knows at the read (th
   test("item 9, email: a Tuesday-only window and a sender whose daily limit is zero read as no room, never a Tuesday time", async () => {
     const { h, when } = await world(definition([track("email", [email("s1")])]), 0);
     await h.advanceTo(MONDAY_10 + H);
-    expect(await when()).toEqual({ kind: "waits", why: "sending_capacity" });
+    expect(await when()).toEqual({ kind: "waits", why: "sending_capacity", channel: "email" });
     await h.advanceTo(TUESDAY_9 + 3 * H);
     expect(h.fake.deliveryLog).toEqual([]);
-    expect(await when()).toEqual({ kind: "waits", why: "sending_capacity" });
+    expect(await when()).toEqual({ kind: "waits", why: "sending_capacity", channel: "email" });
   });
 
   test("item 9, calls: Friday, two call-only leads, weekday hours, capacity 1, the first left unworked: on Saturday the second reads no room, and is placed on Tuesday", async () => {
@@ -114,7 +114,7 @@ describe("the earliest instant, from everything the engine knows at the read (th
     const whenOf = async () => (await h.request<EnrollmentRead>("GET", `/api/enrollments/${waiting}`)).body.tracks[0]?.nextStep?.when;
     // Saturday: Monday's room is taken by Friday's unworked call, which no day before Monday can list.
     await h.advanceTo(Date.parse("2026-11-14T12:00:00Z"));
-    expect(await whenOf()).toEqual({ kind: "waits", why: "call_capacity" });
+    expect(await whenOf()).toEqual({ kind: "waits", why: "call_capacity", channel: "call" });
     // What the engine does: Monday's carried call takes the room; the second is placed on Tuesday.
     await h.advanceTo(Date.parse("2026-11-17T12:00:00Z"));
     const task = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${waiting}`)).body.tracks[0]?.callTask;
@@ -135,7 +135,7 @@ describe("the earliest instant, from everything the engine knows at the read (th
     const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows;
     const second = rows.flatMap((r) => r.enrollments).find((e) => e.id !== first.subjectId)?.id ?? "";
     const read = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${second}`)).body;
-    expect(read.tracks[0]?.nextStep?.when).toEqual({ kind: "waits", why: "sender_slot" });
+    expect(read.tracks[0]?.nextStep?.when).toEqual({ kind: "waits", why: "sender_slot", channel: "email" });
     await h.advanceTo(MONDAY_10 + 2 * H);
     expect(h.fake.deliveryLog.find((d) => d.subjectId === second)?.at).toBe(first.at + H);
   });
@@ -146,7 +146,7 @@ describe("the earliest instant, from everything the engine knows at the read (th
     expect(h.fake.deliveryLog).toHaveLength(1);
     h.cutProvidersOff(MONDAY_10 + 3 * 24 * H);
     await h.advanceTo(MONDAY_10 + 2 * 24 * H);
-    expect(await when()).toEqual({ kind: "waits", why: "waiting_on_provider" });
+    expect(await when()).toEqual({ kind: "waits", why: "waiting_on_provider", channel: "email" });
     expect(h.fake.deliveryLog).toHaveLength(1);
   });
 });
@@ -191,7 +191,7 @@ describe("a reason promises nothing (council on cc9bf55, item 9)", () => {
     const { h, when } = await world(definition([track("email", [email("s1")])]));
     h.cutProvidersOff(MONDAY_10 + 2 * H);
     await h.advanceTo(MONDAY_10 + H + 30 * MIN);
-    expect(await when()).toEqual({ kind: "waits", why: "waiting_on_provider" });
+    expect(await when()).toEqual({ kind: "waits", why: "waiting_on_provider", channel: "email" });
     await h.advanceTo(MONDAY_10 + 3 * H);
     expect(await when()).toEqual({ kind: "at", at: new Date(TUESDAY_9).toISOString() });
     expect(h.fake.deliveryLog).toEqual([]);
@@ -220,7 +220,7 @@ describe("a claimed step's pacing slot after the window closes (review bot on cc
     // cc9bf55 this read gave 17:01.
     expect((await h.store.engine.subject(second, h.clock))?.attempts.some((a) => a.state === "claimed")).toBe(true);
     const read = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${second}`)).body;
-    expect(read.tracks[0]?.nextStep?.when).toEqual({ kind: "waits", why: "sender_slot" });
+    expect(read.tracks[0]?.nextStep?.when).toEqual({ kind: "waits", why: "sender_slot", channel: "email" });
     await h.advanceTo(Date.parse("2026-11-02T17:00:00Z"));
     expect((await h.request<EnrollmentRead>("GET", `/api/enrollments/${second}`)).body.tracks[0]?.nextStep?.when).toEqual({ kind: "at", at: "2026-11-03T09:00:00.000Z" });
     await h.advanceTo(Date.parse("2026-11-03T10:00:00Z"));
@@ -298,7 +298,7 @@ describe("the next round at the read's instant, with two inboxes (review bot on 
     expect(claim?.accountId).toBe("inbox-a");
     // On ff01571 this read withdrew the claim hypothetically and said "now".
     const read = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${second}`)).body;
-    expect(read.tracks[0]?.nextStep?.when).toEqual({ kind: "waits", why: "sender_slot" });
+    expect(read.tracks[0]?.nextStep?.when).toEqual({ kind: "waits", why: "sender_slot", channel: "email" });
     await h.tick();
     expect(h.fake.deliveryLog).toHaveLength(1);
     await h.advanceTo(Date.parse("2026-11-03T10:00:00Z"));
@@ -316,7 +316,7 @@ describe("the next round at the read's instant, with two inboxes (review bot on 
     expect((await h.launch(campaign.id)).status).toBe(200);
     const pat = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows[0]?.enrollments[0]?.id ?? "";
     // On ff01571 this read gave 10:05, inbox-b's recovery.
-    expect((await h.request<EnrollmentRead>("GET", `/api/enrollments/${pat}`)).body.tracks[0]?.nextStep?.when).toEqual({ kind: "waits", why: "sender_slot" });
+    expect((await h.request<EnrollmentRead>("GET", `/api/enrollments/${pat}`)).body.tracks[0]?.nextStep?.when).toEqual({ kind: "waits", why: "sender_slot", channel: "email" });
     await h.tick();
     expect((await h.store.engine.subject(pat, h.clock))?.attempts.find((a) => a.state === "claimed")?.accountId).toBe("inbox-a");
     await h.advanceTo(MONDAY_10 + 20 * MIN);

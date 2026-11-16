@@ -6,7 +6,7 @@
  */
 import { stepNumber } from "../../domain/sequence/definition.ts";
 import { releasedBy, stepWhen, type StepEnv } from "../../domain/sequence/dispatch.ts";
-import { stepWhenView } from "./step-when-view.ts";
+import { channelOfTrack, stepWhenView } from "./step-when-view.ts";
 import { currentStep, judgeCampaignControl, previewDigest, LEAD_CONTROLS, skipTarget, type LeadControl } from "../../domain/sequence/controls.ts";
 import { isLive } from "../../domain/sequence/attempt.ts";
 import { deriveStatus } from "../../domain/sequence/progress.ts";
@@ -34,7 +34,7 @@ function stepView(state: SubjectState, step: NonNullable<ReturnType<typeof curre
 
 function whenOf(state: SubjectState, trackId: string, now: number, env: StepEnv, read: typeof stepWhen): ControlStepView["when"] {
   const when = read(state, trackId, now, env);
-  return when ? stepWhenView(when, now, state.callDay.day) : null;
+  return when ? stepWhenView(when, now, state.callDay.day, channelOfTrack(state, trackId)) : null;
 }
 
 /** A call step's record: its calls logged so far (skip for now is no call), and whether its open task is a callback. */

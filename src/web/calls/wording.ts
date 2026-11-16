@@ -5,12 +5,12 @@
  */
 import type { PausedCampaignCalls, CallbackListingView, CallNumberView, CallOffListView, CallOutcomeApi, DeclinedPathApi, DeclinePreviewView, DeclineTrackView, CallQueueItem, CallsView, CallTaskView, FinishReasonApi, NeedsAttention, OutreachStatus, RecordCallView, RecordCalls, RecordedNumberView, TodayView, WindowRule, HoldReasonApi, ConversationOwnerView } from "../../shared/api.ts";
 import { clockTime, localClock } from "../time.ts";
-import { WIN_BACK_HAS_NO_TRACKS } from "../../domain/sequence/definition.ts";
+import { WIN_BACK_HAS_NO_TRACKS, type TrackChannel } from "../../domain/sequence/definition.ts";
 import { STATUS_LABEL } from "../status.tsx";
 import type { DeskSnapshot } from "./callDesk.ts";
 import { dayLabel, zonedInstants, type CallbackChoice } from "./callbackTime.ts";
 import { capacityItems, heldTrackItems, noUsableChannelItem, providerWaitItems, sendingInterruptedItem } from "./interruption.ts";
-import { conversationChannelOf, conversationTaken, conversationUnsettled } from "../campaign/sms-wording.ts";
+import { conversationTaken, conversationUnsettled } from "../campaign/sms-wording.ts";
 
 /** The outcome buttons, as the approved prototype labels them. */
 export const OUTCOME_LABEL = {
@@ -359,8 +359,9 @@ const SENDER_PROBLEM: Readonly<Record<string, string>> = {
  * Why a track is on hold, as a clause (ADR 0003 5.4): the one wording Needs attention, the person record and the Test run
  * tab use. A wait on another campaign's first text names that campaign (`owners`).
  */
-export const holdReasonClause = (reason: HoldReasonApi, owners: readonly ConversationOwnerView[] = [], channel?: string): string =>
-  reason === "sms_conversation_unsettled" ? conversationUnsettled(owners, conversationChannelOf(channel)) : HOLD_REASON[reason];
+// `channel` is the held track's, required (council on b21af02, item 1): a hold is never worded in another channel's words.
+export const holdReasonClause = (reason: HoldReasonApi, owners: readonly ConversationOwnerView[], channel: TrackChannel): string =>
+  reason === "sms_conversation_unsettled" ? conversationUnsettled(owners, channel) : HOLD_REASON[reason];
 
 const HOLD_REASON: Readonly<Record<HoldReasonApi, string>> = {
   unresolved: "the provider hasn’t confirmed whether a message went",
@@ -759,7 +760,7 @@ export function declineTrackLine(a: DeclineTrackView, mode: "preview" | "record"
       return preview ? `${name} is skipped: there is nothing to reach them on for it.` : `${name} was skipped: there is nothing to reach them on for it.`;
     case "skipped_conversation_taken":
       // Already skipped when the preview is read, so the past tense in both modes (question Q7 answered).
-      return `${name} was skipped: ${conversationTaken(a.owners, conversationChannelOf(a.channel))}.`;
+      return `${name} was skipped: ${conversationTaken(a.owners, a.channel)}.`;
     case "skipped":
       return `${name} was skipped.`;
     case "stopped":
