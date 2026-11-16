@@ -702,13 +702,23 @@ export interface FakeTakenConversationApp {
 }
 
 let takenStarted: Promise<FakeTakenConversationApp> | null = null;
+let unsettledStarted: Promise<FakeTakenConversationApp> | null = null;
 
 export function fakeTakenConversationApp(): Promise<FakeTakenConversationApp> {
-  takenStarted ??= startTakenConversation();
+  takenStarted ??= startTakenConversation(false);
   return takenStarted;
 }
 
-async function startTakenConversation(): Promise<FakeTakenConversationApp> {
+/**
+ * The same two campaigns, but Spring clinics' text to Pat goes and is never reported, every lookup answering unknown
+ * (ADR 0003 Q7 point 10): Autumn clinics' text to Pat is on hold while that first text isn't known to have gone or not.
+ */
+export function fakeUnsettledConversationApp(): Promise<FakeTakenConversationApp> {
+  unsettledStarted ??= startTakenConversation(true);
+  return unsettledStarted;
+}
+
+async function startTakenConversation(patUnknown: boolean): Promise<FakeTakenConversationApp> {
   const ALWAYS = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
   const harness = new EngineHarness({
     start: MONDAY_8 + H,
@@ -716,6 +726,7 @@ async function startTakenConversation(): Promise<FakeTakenConversationApp> {
     sms: { numbers: [{ id: FAKE_NUMBERS[0], capacity: 40, gapMs: 60_000, k: 2, healthy: true, resetZone: "Europe/London" }] },
   });
   await harness.tick();
+  if (patUnknown) harness.sms.silentTo.add("+447700900101");
   const harbour = business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101", city: "London" });
   const people = [
     person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", title: "Clinic owner", email: "pat@harbourlane.example", dial_phone: "+447700900101", dial_phone_type: "mobile" }),
