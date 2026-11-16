@@ -74,7 +74,7 @@ describe("sending not running now, by the read's cause", () => {
       key: "sending-interrupted",
       tone: "crit",
       title: "Sending is not running",
-      body: "No sending round has run since 09:10. Due email and texts wait, and due calls may not reach your list until it runs again; nothing is dropped.",
+      body: "No sending round has run since 09:10. While no round runs, due email and texts are not sent and due calls may not reach your list; nothing is dropped.",
       action: null,
     });
   });
@@ -83,11 +83,11 @@ describe("sending not running now, by the read's cause", () => {
     // Interrupted since 09:00, a round ended at 09:10 while a provider was down, a round failed at 09:11.
     expect(sendingInterruptedItem({ since: "2026-11-15T08:00:00Z", cause: "ticks_failing", lastFailedRead: null, lastRoundFailedAt: "2026-11-15T08:11:00Z" }, TODAY, ZONE)).toMatchObject({
       title: "Sending is failing",
-      body: "Sending has been interrupted since 09:00, and the last sending round failed at 09:11. Due email and texts wait, and due calls may not reach your list until a round succeeds; nothing is dropped.",
+      body: "Sending has been interrupted since 09:00, and the last sending round failed at 09:11. While rounds fail, due email and texts are not sent and due calls may not reach your list; nothing is dropped.",
     });
     // Dated when it began on another day.
     expect(sendingInterruptedItem({ since: "2026-11-14T21:00:00Z", cause: "ticks_failing", lastFailedRead: null, lastRoundFailedAt: "2026-11-15T08:11:00Z" }, TODAY, ZONE).body).toBe(
-      "Sending has been interrupted since Sat 14 Nov at 22:00, and the last sending round failed at 09:11. Due email and texts wait, and due calls may not reach your list until a round succeeds; nothing is dropped.",
+      "Sending has been interrupted since Sat 14 Nov at 22:00, and the last sending round failed at 09:11. While rounds fail, due email and texts are not sent and due calls may not reach your list; nothing is dropped.",
     );
   });
 
@@ -113,8 +113,8 @@ describe("sending not running now, by the read's cause", () => {
 describe("sends waiting on a provider that is not answering", () => {
   test("one entry per provider: the provider, since when, and how many sends", () => {
     expect(providerWaitItems([{ channel: "email", since: "2026-11-15T08:10:00Z", sends: 12 }, { channel: "sms", since: null, sends: 1 }], TODAY, ZONE)).toEqual([
-      { key: "provider-email", tone: "crit", title: "Instantly isn’t answering", body: "It hasn’t answered since 09:10. 12 email sends wait on it; they go once it answers, and nothing is dropped." },
-      { key: "provider-sms", tone: "crit", title: "The SMS provider isn’t answering", body: "It hasn’t answered yet. 1 text waits on it; it goes once it answers, and nothing is dropped." },
+      { key: "provider-email", tone: "crit", title: "Instantly isn’t answering", body: "It hasn’t answered since 09:10. 12 email sends wait on it; nothing is dropped." },
+      { key: "provider-sms", tone: "crit", title: "The SMS provider isn’t answering", body: "It hasn’t answered yet. 1 text waits on it; nothing is dropped." },
     ]);
   });
 });
@@ -265,5 +265,35 @@ describe("the order of Needs attention (ticket 20b): the prototype's, with the n
   test("nothing in either read: no entry, so the page says nothing needs you", () => {
     const empty = { overdueCallbacks: [], stalledInboxes: [], heldTracks: [], accountWaits: [], senderProblems: [], heldCapacity: [], anomalies: [], waitingForCapacity: [], noUsableChannel: [], waitingOnProvider: [], waitingOnTransport: [], sendingInterrupted: null };
     expect(attentionItems(empty, { overdueCallbacks: [], userZone: ZONE, date: TODAY, carriedOver: 0, carriedOverLastDay: 0 })).toEqual([]);
+  });
+});
+
+describe("a notice states what is known and promises nothing (the re-check of ff01571)", () => {
+  const read = (fields: Partial<Parameters<typeof attentionItems>[0]>) =>
+    attentionItems(
+      { overdueCallbacks: [], stalledInboxes: [], heldTracks: [], accountWaits: [], senderProblems: [], heldCapacity: [], anomalies: [], waitingForCapacity: [], noUsableChannel: [], waitingOnProvider: [], waitingOnTransport: [], sendingInterrupted: null, ...fields },
+      { overdueCallbacks: [], userZone: ZONE, date: TODAY, carriedOver: 0, carriedOverLastDay: 0 },
+    );
+
+  test("an inbox rate-limited until noon: the provider's request and its end, never a time sending resumes", () => {
+    // Noon in the user's zone (UTC+1 in November).
+    const [item] = read({ accountWaits: [{ accountId: "inbox-b", reason: "rate_limited", until: "2026-11-15T11:00:00Z" }] });
+    expect(item?.body).toBe("Instantly asked this inbox to slow down until 12:00; nothing is dropped.");
+  });
+
+  test("no sentence on Needs attention or the interruption notice says a send will happen", () => {
+    const items = read({
+      stalledInboxes: [{ accountId: "inbox-b", holding: ["x"] }],
+      heldTracks: [{ enrollmentId: "e9", trackId: "t1", reason: "unresolved" }],
+      accountWaits: [{ accountId: "inbox-c", reason: "quota", until: null }, { accountId: "inbox-e", reason: "rate_limited", until: "2026-11-15T12:00:00Z" }],
+      senderProblems: [{ accountId: "sms-1", channel: "sms", label: "+31 97 0102 3344", problem: "disconnected" }],
+      heldCapacity: [{ accountId: "inbox-d", held: 1, capacity: 30, sentToday: 4, work: [] }],
+      waitingForCapacity: [capacity("e1", SAM, CLINICS, "email", "2026-11-15T23:00:00Z")],
+      waitingOnProvider: [{ channel: "email", since: "2026-11-15T08:10:00Z", sends: 3 }, { channel: "sms", since: null, sends: 1 }],
+    });
+    const causes = (["not_running", "ticks_failing", "providers_unreachable"] as const).map((cause) => sendingInterruptedItem({ since: "2026-11-15T08:10:00Z", cause, lastFailedRead: null, lastRoundFailedAt: "2026-11-15T09:11:00Z" }, TODAY, ZONE));
+    for (const item of [...items, ...causes]) {
+      expect(item.body, item.key).not.toMatch(/resum|once it|until it|until a round|goes |they go|will |as soon as|comes back|starts again/i);
+    }
   });
 });

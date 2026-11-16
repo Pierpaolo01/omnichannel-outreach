@@ -16,9 +16,9 @@ import type { OutreachStore } from "./persistence/store.ts";
 import { launchCheck } from "../domain/sequence/blockers.ts";
 import { definitionProblems, emptyDefinition, liveTracks, type CampaignDefinition } from "../domain/sequence/definition.ts";
 import { Engine } from "./engine/engine.ts";
-import type { StoredDefinition, StoredNote } from "./engine/engine-store.ts";
+import type { RoundBound, StoredDefinition, StoredNote } from "./engine/engine-store.ts";
 import { UnconnectedEmailPort, UnprovisionedSmsPort } from "./engine/ports.ts";
-import { accountView, progressView, stepEnvOf } from "./engine/views.ts";
+import { accountView, progressView, roundBoundOf, stepEnvOf } from "./engine/views.ts";
 import type { StepEnv } from "../domain/sequence/dispatch.ts";
 import { callsView, callTaskView, needsAttentionView, recordCalls, todayView } from "./engine/call-views.ts";
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
@@ -611,17 +611,18 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   // When each step goes is read with what dispatch knows beyond the lead (ADR 0003 "Reads that say when"): the port's
   // transport, and the dispatch gate while sending is interrupted.
   const transport = (channel: "email" | "sms", threading: "new_subject" | "continue_thread") => engine.transportAvailable?.(channel, threading) ?? true;
-  const envAt = (at: number, reading: readonly SubjectState[], known?: ReadonlyMap<string, SubjectState | null>) => stepEnvOf(store.engine, at, reading, transport, known);
   /**
    * A read with what dispatch knows, computed once with a probe in place of the later days' call room, and again with the
    * room only when some step asked for it (council and verifier on cc9bf55, items 6 and 12): the other leads' open calls are
    * loaded only when a call not yet on the list would go on it on a later day.
    */
   const withEnv = async <T>(at: number, reading: readonly SubjectState[], known: ReadonlyMap<string, SubjectState | null> | undefined, compute: (env: StepEnv) => T | Promise<T>): Promise<T> => {
-    const light = await stepEnvOf(store.engine, at, reading, transport, known, false);
-    const probe = { asked: false };
-    const first = await compute({ ...light, callRoomOn: () => ((probe.asked = true), true) });
-    return probe.asked ? compute(await envAt(at, reading, known)) : first;
+    // Dispatch's next round is loaded only when a step's time has come (ADR 0003 "Reads that say when", step 3).
+    const light = await stepEnvOf(store.engine, at, reading, transport, known, false, false);
+    // The round is asked about specific steps: only work ranked before them in priority order is loaded (`roundBoundOf`).
+    const probe: { room: boolean; round: RoundBound | null } = { room: false, round: null };
+    const first = await compute({ ...light, callRoomOn: () => ((probe.room = true), true), round: (self) => ((probe.round = roundBoundOf(probe.round, self, at)), new Map()) });
+    return probe.room || probe.round ? compute(await stepEnvOf(store.engine, at, reading, transport, known, probe.room, probe.round ?? false)) : first;
   };
   const readOf = (state: SubjectState, at: number, env: StepEnv): EnrollmentRead => ({ ...progressView(state, at, env, rules.stepWhen), controls: controlsView(state, at, rules, env), mayStillSend: state.work.filter(maySend).length });
   const enrollmentRead = async (id: string): Promise<EnrollmentRead | null> => {

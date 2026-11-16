@@ -4,6 +4,7 @@ import { enterMain, evaluate } from "../domain/sequence/progress.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
 import { DEFAULT_RULES } from "./engine/rules.ts";
 import { stepsOf } from "./test-runs.ts";
+import { stepStateText } from "../web/campaign/testRunWording.ts";
 
 /**
  * The Test run tab never shows ordinary progress for a held step (ADR 0003 "Reads that say when"; the verifier on cc9bf55,
@@ -50,5 +51,15 @@ describe("each hold is the Test run row's reason, never 'with the provider'", ()
     const other = (sender: string) => ({ sender, recipient: MOBILE.key, owner: "another", ownerCampaignId: "camp-2", ownerEnded: false });
     const taken = { ...s, smsBindings: [other("+447700900001"), other("+447700900002")] };
     expect(rowOf(taken, "m1", MONDAY_9 + H)).toMatchObject({ state: "due", waits: "sms_conversation_taken" });
+  });
+});
+
+describe("a text held for its transport (the re-check of ff01571)", () => {
+  test("the row is an SMS row waiting on no_transport, and the tab words it with the SMS provider", () => {
+    const base = multiTrackState([track("t2", "sms", [step("m1", { subject: "", body: "Hi {{first_name|there}}." }), step("m2", { subject: "", body: "Again, {{first_name|there}}." })])]);
+    const s = evaluate(enterMain({ ...base, subject: { ...base.subject, kind: "test_run" } }, MONDAY_9), MONDAY_9);
+    const row = stepsOf(s, DEFAULT_RULES, MONDAY_9 + H, { transportAvailable: (channel) => channel !== "sms" }).find((r) => r.stepId === "m1");
+    expect(row).toMatchObject({ channel: "sms", state: "due", at: null, waits: "no_transport" });
+    expect(row && stepStateText(row, "Europe/London", new Date(MONDAY_9 + H).toISOString())).toBe("Waiting: the SMS provider can’t send this text yet");
   });
 });

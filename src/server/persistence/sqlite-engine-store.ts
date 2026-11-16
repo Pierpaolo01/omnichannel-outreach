@@ -37,7 +37,7 @@ import { isOutreachStatus } from "../../domain/outreach-status.ts";
 import type { RunTestFacts } from "../../domain/sequence/test-runs.ts";
 import { CONTACT_IS_A_LEAD } from "../../domain/sequence/test-runs.ts";
 import type { TestContact, TestContacts } from "../../domain/test-contacts.ts";
-import type { StoredTestContacts, TestRunRecord, TestStop } from "../engine/engine-store.ts";
+import type { RoundBound, StoredTestContacts, TestRunRecord, TestStop } from "../engine/engine-store.ts";
 import type { BounceEvent, CallNoteRecord, MeasureFacts, CallSettings, CampaignEngineRow, DefinitionSave, EngineStore, LaunchOutcome, RunningSave, ReplyEvent, SaveResult, SenderAccountConfig, StoredDefinition, StoredNote, WorkerLease } from "../engine/engine-store.ts";
 import { liveDetailRowOf } from "./sqlite-store.ts";
 import { holdsLeaseOn, releaseLeaseOn, takeLeaseOn } from "./lease-table.ts";
@@ -873,6 +873,28 @@ export class SqliteEngineStore implements EngineStore {
 
   async subjectsWithOpenCallTasks(): Promise<string[]> {
     return this.sql("SELECT DISTINCT subject_id FROM call_tasks WHERE open = 1 ORDER BY subject_id").all().map((r) => str(r, "subject_id"));
+  }
+
+  async subjectsDispatchMayServe(now: number, bound: RoundBound): Promise<string[]> {
+    // No asked step of a kind: a bound below every instant. A touched lead ranks before every untouched one.
+    const none = Number.MIN_SAFE_INTEGER;
+    const touchedBound = bound.untouched !== null ? now : (bound.touched ?? none);
+    const untouchedBound = bound.untouched ?? none;
+    return this.sql(
+      `SELECT r.id FROM (
+         SELECT e.id, e.touched, e.campaign_id FROM enrollments e JOIN campaigns c ON c.id = e.campaign_id WHERE c.launched_at IS NOT NULL AND e.ended IS NULL
+         UNION ALL SELECT t.id, t.touched, t.campaign_id FROM test_runs t WHERE t.ended IS NULL
+       ) r JOIN campaigns c ON c.id = r.campaign_id
+       WHERE EXISTS (SELECT 1 FROM attempts a WHERE a.subject_id = r.id AND a.state IN ${LIVE_STATES})
+          OR EXISTS (
+            SELECT 1 FROM track_progress p
+            WHERE p.subject_id = r.id AND p.finished_at IS NULL AND p.next_step_id IS NOT NULL AND p.due_wall IS NOT NULL AND p.due_wall <= ?
+              AND p.due_wall <= CASE WHEN r.touched = 1 THEN ? ELSE ? END
+              AND EXISTS (SELECT 1 FROM json_each(c.definition, '$.tracks') d WHERE json_extract(d.value, '$.id') = p.track_id AND json_extract(d.value, '$.channel') IN ('email', 'sms')))
+       ORDER BY r.id`,
+    )
+      .all(now, touchedBound, untouchedBound)
+      .map((r) => str(r, "id"));
   }
 
   async openCallbackInstants(): Promise<number[]> {

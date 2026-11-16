@@ -71,6 +71,10 @@ describe("when a step goes, in one wording function (ADR 0003 \"Reads that say w
     expect(stepWhenPhrase({ kind: "waits", why: "no_transport", channel: "email" }, ZONE)).toBe("waiting: the email provider can’t send a follow-up in its thread yet");
     expect(stepWhenPhrase({ kind: "listed_for", day: "2026-11-10" }, ZONE)).toBe("on the list for Tue 10 Nov");
     expect(stepWhenPhrase({ kind: "waits", why: "call_hours_closed" }, ZONE)).toBe("waits for a day their calling hours open");
+    // The sender-side reasons give no time (the read stops predicting what a sender does later).
+    expect(stepWhenPhrase({ kind: "waits", why: "sender_slot" }, ZONE)).toBe("waiting for its sender’s next sending slot");
+    expect(stepWhenPhrase({ kind: "waits", why: "sender_rate_limited" }, ZONE)).toBe("waiting: the provider is limiting how fast its senders can send");
+    expect(stepWhenPhrase({ kind: "waits", why: "sender_waiting" }, ZONE)).toBe("waiting for a sender that can take it");
   });
 
   test("every reason the read can give has words, and none promises a time", () => {
@@ -78,6 +82,7 @@ describe("when a step goes, in one wording function (ADR 0003 \"Reads that say w
       campaign_not_launched: true, campaign_paused: true, lead_paused: true, callback: true, ended: true, with_provider: true, unresolved: true, render_failed: true,
       provider_skipped: true, no_thread: true, sms_conversation_taken: true, no_window: true, sender_unavailable: true, sending_capacity: true, call_capacity: true, on_call_list: true,
       no_transport: true, waiting_on_provider: true, reply_pending: true, no_destination: true, sender_busy: true, call_hours_closed: true,
+      sender_slot: true, sender_rate_limited: true, sender_waiting: true,
     };
     for (const why of Object.keys(reasons) as StepWaitApi[]) {
       const words = stepWhenPhrase({ kind: "waits", why }, ZONE);

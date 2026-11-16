@@ -158,25 +158,21 @@ const RULES: Record<string, Partial<Rules>> = {
       return out.ok && action === "skip" ? { ok: true, state: { ...out.state, subject: { ...out.state.subject, touched: true } } } : out;
     },
   },
-  // Council on cc9bf55, item 3: a pool with one full inbox and another held until a known instant reads the full one's reason.
-  "a mixed pool gives the full sender's reason": {
+  // ADR 0003 "Reads that say when", the redesign after ff01571: a pool whose candidates wait for different causes reads the
+  // full inbox's reason, which is not true of every candidate it speaks for.
+  "a mixed pool reads the full sender's reason": {
     stepWhen: (s, trackId, now, env) => {
       const when = R.stepWhen(s, trackId, now, env);
-      if (when?.kind !== "at" || when.at <= now) return when;
+      if (when?.kind !== "waits" || when.why !== "sender_waiting") return when;
       const pool = candidatesFor(s, trackId).map((id) => s.accounts[id]).filter((a) => a !== undefined);
-      const held = pool.some((a) => a.waitUntil === when.at);
-      const full = pool.some((a) => a.used >= a.capacity);
-      return held && full ? { kind: "waits", why: "sending_capacity" } : when;
+      return pool.some((a) => a.used >= a.capacity) ? { kind: "waits", why: "sending_capacity" } : when;
     },
   },
-  // The review bot on cc9bf55, item 1: a claimed step reads its account's pacing slot without the handover's checks at it.
-  "a pacing slot is given without checking the window at it": {
+  // The review bot on ff01571, item 1, in the new design: a claim only its pacing slot holds back reads "now".
+  "a claimed step held by pacing reads now": {
     stepWhen: (s, trackId, now, env) => {
       const when = R.stepWhen(s, trackId, now, env);
-      const stepId = progressOf(s, trackId)?.nextStepId ?? null;
-      const claimed = s.attempts.find((a) => a.stepId === stepId && a.state === "claimed");
-      const slot = claimed ? s.accounts[claimed.accountId]?.nextSlotAt : undefined;
-      return when?.kind === "at" && slot !== undefined && slot > now && when.at !== slot ? { kind: "at", at: slot } : when;
+      return when?.kind === "waits" && when.why === "sender_slot" ? { kind: "at", at: now } : when;
     },
   },
   // Council on cc9bf55, item 7: the controls' preview of the next step gives the wait's end, while the read gives the truth.
@@ -189,9 +185,9 @@ const RULES: Record<string, Partial<Rules>> = {
       return { kind: "at", at: now + Math.max(0, p.dueAt - leadNow(s.subject.clock, now)) };
     },
   },
-  // Ticket 23's defect 2 restored in the read alone: an email or text whose wait has ended reads as due at the wait's end
-  // (now, once it has passed), not at its window's next opening.
-  "due is the wait's end, not the window's opening": {
+  // Ticket 23's defect 2 restored in the read alone: an email or text waiting on time reads its wait's end (now, once it has
+  // passed), not the first instant its window is open after it.
+  "an earliest instant ignores the window": {
     stepWhen: (s, trackId, now, env) => {
       const when = R.stepWhen(s, trackId, now, env);
       const p = progressOf(s, trackId);
@@ -243,11 +239,11 @@ const EXPECTED: Record<string, { invariant: string; seed: number; options?: Part
   "a confirmation sends the click-time expectation": { invariant: "P13", seed: 0, options: { clickTimeExpectation: true } },
   // ADR 0003 "Reads that say when": the windows family, in which the record models windows, zones and outages (W1 to W3).
   "a skipped step counts as touching the lead": { invariant: "18", seed: 9 },
-  "a mixed pool gives the full sender's reason": { invariant: "W2", seed: 110, options: { windows: true } },
-  "a pacing slot is given without checking the window at it": { invariant: "W2", seed: 137, options: { windows: true } },
+  "a mixed pool reads the full sender's reason": { invariant: "W2", seed: 37, options: { windows: true } },
+  "a claimed step held by pacing reads now": { invariant: "W3", seed: 1, options: { windows: true } },
+  "an earliest instant ignores the window": { invariant: "W2", seed: 0, options: { windows: true } },
   "a preview's time is the wait's end": { invariant: "W4", seed: 0, options: { windows: true } },
-  "an inherited reservation skips the availability check in the read": { invariant: "W3", seed: 136, options: { windows: true } },
-  "due is the wait's end, not the window's opening": { invariant: "W2", seed: 1, options: { windows: true } },
+  "an inherited reservation skips the availability check in the read": { invariant: "W3", seed: 1, options: { windows: true } },
 };
 
 export const CONTROL_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number; readonly options?: Partial<ControlRunOptions> }> = Object.fromEntries(

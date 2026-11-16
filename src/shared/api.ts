@@ -137,16 +137,20 @@ export type StepWaitApi =
   | "waiting_on_provider"
   | "reply_pending"
   | "no_destination"
+  | "sender_slot"
   | "sender_unavailable"
+  | "sender_rate_limited"
   | "sender_busy"
   | "sending_capacity"
+  | "sender_waiting"
   | "call_capacity"
   | "on_call_list"
   | "call_hours_closed";
 
 /**
- * When a pending step goes, as the engine decides it at the read's instant (`stepWhen`): due now; at a later instant (its
- * window's next opening, for an email or text whose wait has ended outside it); or waiting, with why, and no time.
+ * When a pending step goes, as the engine decides it at the read's instant (`stepWhen`): due now (dispatch's next round
+ * hands it over); the earliest instant, when it waits on time alone (its wait's end, then its window's opening); or why it
+ * waits, with no time.
  */
 export type StepWhenView =
   | { readonly kind: "now" }

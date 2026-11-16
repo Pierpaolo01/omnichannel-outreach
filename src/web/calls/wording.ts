@@ -463,14 +463,16 @@ export function attentionItems(n: NeedsAttention, today: Pick<TodayView, "overdu
       key: `wait-${w.accountId}`,
       tone: "pause",
       title: `${w.accountId} is waiting`,
-      body: w.reason === "quota" ? "Instantly refused more sends for now. Sending resumes when it allows; nothing is dropped." : `Instantly asked to slow down. Sending resumes${w.until ? ` at ${timeIn(userZone, w.until)}` : ""}; nothing is dropped.`,
+      // What the provider said, and its own end where it gave one; never a time anything will send (the re-check of ff01571:
+      // at that time the campaign may be paused, or every other sender full).
+      body: w.reason === "quota" ? "Instantly refused more sends from this inbox for now; nothing is dropped." : `Instantly asked this inbox to slow down${w.until ? ` until ${timeIn(userZone, w.until)}` : ""}; nothing is dropped.`,
     });
   }
   for (const s of n.stalledInboxes) {
     items.push({ key: `stalled-${s.accountId}`, tone: "pause", title: `Sends from ${s.accountId} are stalled`, body: `${s.holding.length} ${s.holding.length === 1 ? "send waits" : "sends wait"} on it. Nothing is dropped.` });
   }
   for (const c of n.heldCapacity) {
-    items.push({ key: `held-${c.accountId}`, tone: "pause", title: `${c.held} of ${c.accountId}’s ${c.capacity} sends today are held`, body: "The provider hasn’t confirmed whether those messages went, so their room is kept until it does." });
+    items.push({ key: `held-${c.accountId}`, tone: "pause", title: `${c.held} of ${c.accountId}’s ${c.capacity} sends today are held`, body: "The provider hasn’t confirmed whether those messages went, so their room stays taken while it hasn’t." });
   }
   const byReason = new Map<HoldReasonApi, number>();
   for (const t of n.heldTracks) byReason.set(t.reason, (byReason.get(t.reason) ?? 0) + 1);

@@ -121,7 +121,7 @@ describe("the earliest instant, from everything the engine knows at the read (th
     expect(task?.placedAt.slice(0, 10)).toBe("2026-11-17");
   });
 
-  test("item 10: the sender's pacing gap holds the second lead's email: it reads the slot's instant, and goes then", async () => {
+  test("item 10: the sender's pacing gap holds the second lead's email: it reads its sender's next slot with no time, and goes at the slot", async () => {
     const h = new EngineHarness({ start: MONDAY_10, accounts: [{ id: "inbox-a", capacity: 50, gapMs: H, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
     await h.tick();
     expect((await h.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "Europe/London" })).status).toBe(200);
@@ -135,7 +135,7 @@ describe("the earliest instant, from everything the engine knows at the read (th
     const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows;
     const second = rows.flatMap((r) => r.enrollments).find((e) => e.id !== first.subjectId)?.id ?? "";
     const read = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${second}`)).body;
-    expect(read.tracks[0]?.nextStep?.when).toEqual({ kind: "at", at: new Date(first.at + H).toISOString() });
+    expect(read.tracks[0]?.nextStep?.when).toEqual({ kind: "waits", why: "sender_slot" });
     await h.advanceTo(MONDAY_10 + 2 * H);
     expect(h.fake.deliveryLog.find((d) => d.subjectId === second)?.at).toBe(first.at + H);
   });
@@ -201,7 +201,7 @@ describe("a reason promises nothing (council on cc9bf55, item 9)", () => {
 });
 
 describe("a claimed step's pacing slot after the window closes (review bot on cc9bf55, item 1)", () => {
-  test("two leads launched Monday 16:58, weekday 09:00 to 17:00, a three-minute gap: at 16:59 the second reads Tuesday 09:00 and goes then", async () => {
+  test("two leads launched Monday 16:58, weekday 09:00 to 17:00, a three-minute gap: at 16:59 the second reads its sender's next slot, at 17:00 Tuesday 09:00, and goes then", async () => {
     const MONDAY_1658 = Date.parse("2026-11-02T16:58:00Z");
     const h = new EngineHarness({ start: MONDAY_1658, accounts: [{ id: "inbox-a", capacity: 50, gapMs: 3 * MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
     await h.tick();
@@ -220,7 +220,9 @@ describe("a claimed step's pacing slot after the window closes (review bot on cc
     // cc9bf55 this read gave 17:01.
     expect((await h.store.engine.subject(second, h.clock))?.attempts.some((a) => a.state === "claimed")).toBe(true);
     const read = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${second}`)).body;
-    expect(read.tracks[0]?.nextStep?.when).toEqual({ kind: "at", at: "2026-11-03T09:00:00.000Z" });
+    expect(read.tracks[0]?.nextStep?.when).toEqual({ kind: "waits", why: "sender_slot" });
+    await h.advanceTo(Date.parse("2026-11-02T17:00:00Z"));
+    expect((await h.request<EnrollmentRead>("GET", `/api/enrollments/${second}`)).body.tracks[0]?.nextStep?.when).toEqual({ kind: "at", at: "2026-11-03T09:00:00.000Z" });
     await h.advanceTo(Date.parse("2026-11-03T10:00:00Z"));
     expect(h.fake.deliveryLog.find((d) => d.subjectId === second)?.at).toBe(Date.parse("2026-11-03T09:00:00Z"));
   });
@@ -255,5 +257,93 @@ describe("a control's preview reads the state the control would produce (council
     expect((await read()).tracks.find((t) => t.trackId === "phone2")?.nextStep?.when).toEqual(previewed);
     await h.advanceTo(Date.parse("2026-11-16T12:00:00Z"));
     expect((await read()).tracks.find((t) => t.trackId === "phone2")?.callTask?.placedAt.slice(0, 10)).toBe("2026-11-16");
+  });
+});
+
+/**
+ * The review bot on ff01571: the read stops predicting what a sender does later (ADR 0003 "Reads that say when"). Each
+ * reproduction reads through HTTP and then runs the engine's own next round at the read's instant; both failed on ff01571.
+ */
+describe("the next round at the read's instant, with two inboxes (review bot on ff01571)", () => {
+  const twoInboxes = async (start: number, window: TrackDefinition["window"], b: { healthy: boolean }) => {
+    const h = new EngineHarness({
+      start,
+      accounts: [
+        { id: "inbox-a", capacity: 50, gapMs: 3 * MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" },
+        { id: "inbox-b", capacity: 50, gapMs: 3 * MIN, k: 2, healthy: b.healthy, quotaAvailable: true, resetZone: "UTC" },
+      ],
+    });
+    await h.tick();
+    expect((await h.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "Europe/London" })).status).toBe(200);
+    return h;
+  };
+  const NIA = person({ person_id: "p2", business_id: "b1", full_name: "Nia Cole", email: "nia@larkstreet.example" });
+  const pooled = (window: TrackDefinition["window"]): CampaignDefinition => ({ ...definition([track("email", [email("s1")], { window })]), emailPool: ["inbox-a", "inbox-b"] });
+
+  test("item 1: a claim on inbox-a whose slot (17:01) lies past the close, inbox-b restored at 16:59: no 'now'; nothing goes in the next round; Tuesday 09:00", async () => {
+    const MONDAY_1658 = Date.parse("2026-11-02T16:58:00Z");
+    const weekdays = [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 }));
+    const h = await twoInboxes(MONDAY_1658, weekdays, { healthy: false });
+    const { campaign } = await h.createCampaign("Spring follow-up, Bristol", { businesses: [LARK], people: [PAT, NIA] });
+    await h.defineSequence(campaign.id, pooled(weekdays));
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_1658 + MIN);
+    expect(h.fake.deliveryLog).toHaveLength(1);
+    const first = h.fake.deliveryLog[0]!;
+    const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows;
+    const second = rows.flatMap((r) => r.enrollments).find((e) => e.id !== first.subjectId)?.id ?? "";
+    h.fake.accountsById.get("inbox-b")!.healthy = true;
+    await h.tick();
+    const claim = (await h.store.engine.subject(second, h.clock))?.attempts.find((a) => a.state === "claimed");
+    expect(claim?.accountId).toBe("inbox-a");
+    // On ff01571 this read withdrew the claim hypothetically and said "now".
+    const read = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${second}`)).body;
+    expect(read.tracks[0]?.nextStep?.when).toEqual({ kind: "waits", why: "sender_slot" });
+    await h.tick();
+    expect(h.fake.deliveryLog).toHaveLength(1);
+    await h.advanceTo(Date.parse("2026-11-03T10:00:00Z"));
+    expect(h.fake.deliveryLog.find((d) => d.subjectId === second)?.at).toBe(Date.parse("2026-11-03T09:00:00Z"));
+  });
+
+  test("item 2: inbox-a available with its slot at 10:10, inbox-b rate-limited until 10:05: no time; the next round claims inbox-a, which sends at 10:10", async () => {
+    const always = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
+    const h = await twoInboxes(MONDAY_10, always, { healthy: true });
+    const { campaign } = await h.createCampaign("Spring follow-up, Bristol", { businesses: [LARK], people: [PAT] });
+    await h.defineSequence(campaign.id, pooled(always));
+    // The state the review bot read: inbox-a's slot at 10:10, inbox-b held until 10:05 by a rate limit, before the worker.
+    await h.store.engine.updateAccount("inbox-b", { waitUntil: MONDAY_10 + 5 * MIN, waitReason: "rate_limited" });
+    await h.store.engine.pushSlot("inbox-a", MONDAY_10 + 10 * MIN - 3 * MIN);
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    const pat = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows[0]?.enrollments[0]?.id ?? "";
+    // On ff01571 this read gave 10:05, inbox-b's recovery.
+    expect((await h.request<EnrollmentRead>("GET", `/api/enrollments/${pat}`)).body.tracks[0]?.nextStep?.when).toEqual({ kind: "waits", why: "sender_slot" });
+    await h.tick();
+    expect((await h.store.engine.subject(pat, h.clock))?.attempts.find((a) => a.state === "claimed")?.accountId).toBe("inbox-a");
+    await h.advanceTo(MONDAY_10 + 20 * MIN);
+    expect(h.fake.deliveryLog.map((d) => [d.sender, d.at])).toEqual([["inbox-a", MONDAY_10 + 10 * MIN]]);
+  });
+});
+
+describe("'now' is dispatch's next round over every lead ahead in priority (ADR 0003 \"Reads that say when\")", () => {
+  test("two leads due at a window's opening on one inbox, read between rounds: one reads now and goes in the next round; the other waits for its sender's next slot", async () => {
+    const h = new EngineHarness({ start: MONDAY_10, accounts: [{ id: "inbox-a", capacity: 50, gapMs: 10 * MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }] });
+    await h.tick();
+    expect((await h.request("PUT", "/api/call-settings", { dailyCapacity: 20, userZone: "Europe/London" })).status).toBe(200);
+    const NIA = person({ person_id: "p2", business_id: "b1", full_name: "Nia Cole", email: "nia@larkstreet.example" });
+    const { campaign } = await h.createCampaign("Spring follow-up, Bristol", { businesses: [LARK], people: [PAT, NIA] });
+    const fromEleven = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 11, end: 17 }));
+    await h.defineSequence(campaign.id, definition([track("email", [email("s1")], { window: fromEleven })]));
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_10 + 30 * MIN);
+    // 11:00, the window's opening, before the worker's round.
+    h.clock = MONDAY_10 + H;
+    const ids = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows.flatMap((r) => r.enrollments.map((e) => e.id));
+    const reads = new Map<string, StepWhenView | undefined>();
+    for (const id of ids) reads.set(id, (await h.request<EnrollmentRead>("GET", `/api/enrollments/${id}`)).body.tracks[0]?.nextStep?.when);
+    const now = [...reads].filter(([, w]) => w?.kind === "now").map(([id]) => id);
+    expect(now).toHaveLength(1);
+    expect([...reads.values()].filter((w) => w?.kind === "waits")).toEqual([{ kind: "waits", why: "sender_slot" }]);
+    await h.tick();
+    expect(h.fake.deliveryLog.map((d) => d.subjectId)).toEqual(now);
   });
 });

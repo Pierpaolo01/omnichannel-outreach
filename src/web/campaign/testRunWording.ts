@@ -84,7 +84,7 @@ export function stepStateText(row: TestStepRow, zone: string, readAt: string): s
       return row.channel === "sms" ? "With the SMS provider" : "With Instantly";
     case "due": {
       // No time the engine can promise: the read's reason, in the one wording function (ADR 0003 "Reads that say when").
-      if (row.at === null && row.waits !== null) return capitalise(stepWaitWords(row.waits));
+      if (row.at === null && row.waits !== null) return capitalise(stepWaitWords(row.waits, row.channel));
       const ms = row.at === null ? Infinity : Date.parse(row.at) - Date.parse(readAt);
       if (ms <= 0) return "Due now";
       // The earliest it can go, never a promise (verifier on 178de98, item 9).

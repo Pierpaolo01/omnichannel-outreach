@@ -25,9 +25,12 @@ export function stepWaitApi(why: StepWait): StepWaitApi {
     case "waiting_on_provider":
     case "reply_pending":
     case "no_destination":
+    case "sender_slot":
     case "sender_unavailable":
+    case "sender_rate_limited":
     case "sender_busy":
     case "sending_capacity":
+    case "sender_waiting":
     case "call_capacity":
     case "on_call_list":
     case "call_hours_closed":

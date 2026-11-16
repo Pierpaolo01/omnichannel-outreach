@@ -79,11 +79,11 @@ export function sendingInterruptedItem(s: SendingInterruptedView, today: string,
   const base = { key: "sending-interrupted", tone: "crit" as const, action: null };
   switch (s.cause) {
     case "not_running":
-      return { ...base, title: "Sending is not running", body: `No sending round has run since ${since}. Due email and texts wait, and due calls may not reach your list until it runs again; nothing is dropped.` };
+      return { ...base, title: "Sending is not running", body: `No sending round has run since ${since}. While no round runs, due email and texts are not sent and due calls may not reach your list; nothing is dropped.` };
     case "ticks_failing": {
       // Rounds may have ended between `since` and the failure (council on 7622b8b): never "every round failed".
       const last = s.lastRoundFailedAt ? `, and the last sending round failed ${whenPhrase(s.lastRoundFailedAt, userZone, today)}` : "";
-      return { ...base, title: "Sending is failing", body: `Sending has been interrupted since ${since}${last}. Due email and texts wait, and due calls may not reach your list until a round succeeds; nothing is dropped.` };
+      return { ...base, title: "Sending is failing", body: `Sending has been interrupted since ${since}${last}. While rounds fail, due email and texts are not sent and due calls may not reach your list; nothing is dropped.` };
     }
     case "providers_unreachable": {
       const last = s.lastFailedRead ? `; ${failedReadLine(s.lastFailedRead)} last failed ${whenPhrase(s.lastFailedRead.at, userZone, today)}. Due sends that depend on it wait` : ". Due sends that depend on a provider not answering wait";
@@ -106,7 +106,8 @@ export function providerWaitItems(waits: NeedsAttention["waitingOnProvider"], to
       key: `provider-${w.channel}`,
       tone: "crit" as const,
       title: `${capital(words.provider)} isn’t answering`,
-      body: `${since} ${words.send(w.sends)} ${one ? "waits" : "wait"} on it; ${one ? "it goes" : "they go"} once it answers, and nothing is dropped.`,
+      // A notice states what is known and promises nothing (the re-check of ff01571): no clause says a send will happen.
+      body: `${since} ${words.send(w.sends)} ${one ? "waits" : "wait"} on it; nothing is dropped.`,
     };
   });
 }

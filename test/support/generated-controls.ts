@@ -1,6 +1,6 @@
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../src/domain/sequence/definition.ts";
 import type { Rules } from "../../src/server/engine/rules.ts";
-import type { CallsView, CampaignDetail, CallTaskView, EnrollmentRead, InterruptionNoticeView, LeadSearchResult, LeadControlApi, OutreachStatus, TodayView } from "../../src/shared/api.ts";
+import type { CallsView, CampaignDetail, CallTaskView, ControlStepView, EnrollmentRead, InterruptionNoticeView, LeadSearchResult, LeadControlApi, OutreachStatus, TodayView } from "../../src/shared/api.ts";
 import { Crash, EngineHarness, quickWait } from "./engine-harness.ts";
 import type { CrashPoint } from "../../src/server/engine/engine.ts";
 import { business, person } from "./export-builder.ts";
@@ -305,12 +305,6 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     if (t.channel === "sms") return [numbers[s.campaign]!.id];
     const fixed = emailSenderOf(s);
     return fixed ? [fixed] : inboxIds;
-  };
-  /** The sender's next pacing slot by the record: its last send call plus the gap (P3's own rule). */
-  const slotOf = (sender: string) => {
-    // Every send call the sender made, a call an outage swallowed or never made included, as the engine takes a slot for each.
-    const calls = [...email.handoverLog, ...sms.handoverLog, ...h.swallowedHandovers, ...uncalledHandovers].filter((c) => c.sender === sender && c.at <= h.clock).map((c) => c.at);
-    return calls.length > 0 ? Math.max(...calls) + gap : -Infinity;
   };
   /**
    * The record's own count of an inbox's room on its UTC reset day at `t`: sends delivered that day plus work handed over and
@@ -852,9 +846,6 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     if (engineDay.committed !== committed) problem(`P12: ${engineDay.committed} calls are committed on ${isoOf(dayStart)}'s day; the record counts ${committed}`);
     const q = (await h.request<CallsView>("GET", "/api/calls")).body;
     const listed = new Set([...q.readyNow, ...q.laterToday].map((x) => x.enrollmentId));
-    // Each sender's claims not yet handed over, across every lead: reservations the record's provider logs cannot see.
-    const claimsOn = new Map<string, number>();
-    for (const x of subjects.values()) for (const a of (await h.store.engine.subject(x.id, now))?.attempts ?? []) if (a.state === "claimed") claimsOn.set(a.accountId, (claimsOn.get(a.accountId) ?? 0) + 1);
     for (const s of subjects.values()) {
       const st = await h.store.engine.subject(s.id, now);
       const read = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${s.id}`)).body;
@@ -913,39 +904,24 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
         if (when.kind === "at" && Date.parse(when.at) <= now) problem(`W1: ${s.id}/${pending.stepId} reads as due at ${when.at}, not after the read's instant ${isoOf(now)}`);
         if ((held || endedAt(s, now)) && when.kind !== "waits") problem(`W1: ${s.id}/${pending.stepId} is held or ended at ${isoOf(now)} but the read says ${JSON.stringify(when)}, a time it cannot promise`);
         if (held || endedAt(s, now)) continue;
-        // W2, against the record's own model: an instant the read gives (now, or later) lies inside the track's window in the
-        // prospect's zone and is never before the window's first opening at or after the due instant; it is later than that
-        // opening only by what the record can name, the sender's pacing slot or its outage; and never while the record
-        // has the sender down.
-        // A reason must be one the record can name too: "every account full" while the record has an inbox up and clearly not
-        // full is a read that hid an instant (council on cc9bf55, item 3).
+        // W2, against the record's own model of wait ends and windows (ADR 0003 "Reads that say when"): an earliest instant
+        // is exactly the record's first open-window instant at or after the wait's end, and later than the read's own; "now"
+        // only when that instant is the read's own. No sender-side instant is ever given.
+        // A reason must be true of every sender it speaks for: "every account full" while the record has an inbox up and
+        // clearly not full is a read that hid another cause (council on cc9bf55, item 3).
         if (drawsWindows && when.kind === "waits" && when.why === "sending_capacity" && t.channel === "email") {
-          const roomy = sendersOf(s, t).filter((x) => outageUntil(x, now) === null && !nearlyFullAt(x, now, claimsOn.get(x) ?? 0));
-          if (roomy.length > 0) problem(`W2: ${s.id}/${pending.stepId} reads "sending_capacity" at ${isoOf(now)}, but the record has room on ${roomy.join(", ")}${process.env["CONTROLS_DEBUG"] ? ` [engine accounts ${JSON.stringify(Object.values(st.accounts).map((a) => [a.id, a.healthy, a.used, a.reserved, a.capacity, a.dailyLimit, a.inFlight, a.k, isoOf(a.waitUntil)]))}; sender ${st.subject.emailSender}; deliveries ${JSON.stringify(email.deliveryLog.filter((d) => isoOf(d.at).slice(0, 10) === isoOf(now).slice(0, 10)).map((d) => [d.sender, isoOf(d.at)]))}]` : ""}`);
+          // Claims not yet handed over hold reservations the providers' logs cannot show; at most the in-flight bound (2) each.
+          const roomy = sendersOf(s, t).filter((x) => outageUntil(x, now) === null && !nearlyFullAt(x, now, 2));
+          if (roomy.length > 0) problem(`W2: ${s.id}/${pending.stepId} reads "sending_capacity" at ${isoOf(now)}, but the record has room on ${roomy.join(", ")}${process.env["CONTROLS_DEBUG"] ? ` [engine accounts ${JSON.stringify(Object.values(st.accounts).map((a) => [a.id, a.healthy, a.used, a.reserved, a.capacity, a.dailyLimit, a.inFlight, a.k, isoOf(a.waitUntil)]))}; sender ${st.subject.emailSender}]` : ""}`);
         }
-        const shownAt = when.kind === "at" ? Date.parse(when.at) : when.kind === "now" ? now : null;
-        if (shownAt !== null && !inFlight(t, s, pending.stepId)) {
+        if (!inFlight(t, s, pending.stepId)) {
           const zone = zoneOfSubject(s);
           const window: readonly Hours[] = t.window;
           const opening = Number.isFinite(pending.due) ? firstOpen(window, zone, Math.max(pending.due, now)) : Infinity;
-          const senders = sendersOf(s, t);
-          const downs = senders.map((x) => outageUntil(x, shownAt));
-          const down = downs.every((x) => x !== null) ? downs[0]! : null;
-          const sender = senders.join("/");
-          if (!inWindow(window, zone, shownAt)) problem(`W2: ${s.id}/${pending.stepId} reads ${JSON.stringify(when)} at ${isoOf(now)}, outside its window in ${zone} (the record's next opening is ${isoOf(opening)})`);
-          else if (shownAt < opening) problem(`W2: ${s.id}/${pending.stepId} reads ${JSON.stringify(when)} at ${isoOf(now)}, before the record's first opening ${isoOf(opening)} after its due instant ${isoOf(pending.due)}`);
-          else if (down !== null) problem(`W2: ${s.id}/${pending.stepId} reads ${JSON.stringify(when)} at ${isoOf(now)} while the record has its sender ${sender} ${down.kind} until ${isoOf(down.to)}${process.env["CONTROLS_DEBUG"] ? ` [engine accounts ${JSON.stringify(Object.values(st.accounts).map((a) => [a.id, a.healthy, isoOf(a.waitUntil), a.waitReason, isoOf(a.nextSlotAt)]))}; attempts ${JSON.stringify(st.attempts.filter((a) => a.stepId === pending.stepId).map((a) => [a.state, a.accountId, isoOf(a.claimedWall), a.rejectReason]))}; refusals ${JSON.stringify(email.refusals.map((x) => [isoOf(x.at), x.reason]))}]` : ""}`);
-          else {
-            const slot = Math.min(...senders.map(slotOf));
-            const after = (t: number) => (Number.isFinite(t) ? firstOpen(window, zone, t) : Infinity);
-            const waits = senders.map((x) => st.accounts[x]?.waitUntil ?? null).filter((w): w is number => w !== null && Number.isFinite(w) && w < 8e15 && w > opening);
-            const ends = [...outages.filter((o) => senders.includes(o.inbox) && o.kind === "unhealthy" && o.to > opening && Number.isFinite(o.to)).map((o) => o.to), ...waits];
-            // A claim made for the step expires one settling period (15 minutes, ADR 0003 5.3) after it was made, and the step
-            // is claimed again from then: the stored claim's instant, read from the store, is the record's to name.
-            const expiries = st.attempts.filter((a) => a.stepId === pending.stepId && a.state === "claimed").map((a) => a.claimedWall + 15 * MINUTE);
-            const explained = [opening, ...senders.map((x) => after(Math.max(opening, slotOf(x)))), ...ends.flatMap((end) => senders.map((x) => after(Math.max(opening, end, slotOf(x))))), ...expiries.flatMap((e) => [after(Math.max(opening, e)), ...senders.map((x) => after(Math.max(opening, e, slotOf(x))))])];
-            if (!explained.includes(shownAt)) problem(`W2: ${s.id}/${pending.stepId} reads ${JSON.stringify(when)} at ${isoOf(now)}; the record has it go at its opening ${isoOf(opening)}, or its sender's slot ${isoOf(slot)}, and names nothing later`);
-          }
+          // The time-only reason, checked against its cause: "its sending hours never open" only when the record's never do.
+          if (when.kind === "waits" && when.why === "no_window" && Number.isFinite(opening)) problem(`W2: ${s.id}/${pending.stepId} reads "no_window" at ${isoOf(now)}, but the record's window opens at ${isoOf(opening)}`);
+          if (when.kind === "at" && Date.parse(when.at) !== opening) problem(`W2: ${s.id}/${pending.stepId} reads "earliest ${when.at}" at ${isoOf(now)}; the record's first open instant at or after its due instant ${isoOf(pending.due)} is ${isoOf(opening)}`);
+          if (when.kind === "now" && opening !== now) problem(`W2: ${s.id}/${pending.stepId} reads "now" at ${isoOf(now)}; the record has it wait for ${isoOf(opening)} (due ${isoOf(pending.due)}, ${inWindow(window, zone, now) ? "inside" : "outside"} its window in ${zone})`);
         }
         if (pending.due > pending.unheld) features.add("a-wait-moved-by-a-hold");
       }
@@ -1004,7 +980,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   /** Each lead's last read a control was judged on, for a confirmation left open on it (the stale-confirmation stream). */
   const lastReads = new Map<string, EnrollmentRead>();
   /** One control on one lead, checked against the record, the read before it, and its own repeat. */
-  async function control(s: Subject, action: LeadControlApi, options: { readonly othersMayMove?: boolean } = {}): Promise<void> {
+  async function control(s: Subject, action: LeadControlApi, options: { readonly othersMayMove?: boolean; readonly preview?: boolean } = {}): Promise<void> {
     // What the app found while the clock moved (a hidden reply at a pre-send check) is in the record before any action.
     settleHidden();
     const now = h.clock;
@@ -1021,6 +997,8 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     const requestId = `c-${++requests}`;
     const uncertain = (await h.store.engine.subject(s.id, now))?.work.some((w) => w.settled === null && w.calls > 0) ?? false;
     const body = { requestId, action, expect: expectOf(read, action) };
+    // The route runs the worker's round after the control: W4 counts handovers from before the request.
+    const markBefore = { email: email.handoverLog.length, sms: sms.handoverLog.length };
     const res = await h.request<{ error?: { message: string }; replayed?: boolean; effect?: unknown }>("POST", `/api/enrollments/${s.id}/controls`, body);
     const accepted = res.status === 200;
     // The answer's effect is the read's preview at that instant, field for field (verifier B4).
@@ -1028,12 +1006,9 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     // did is history, and says no time. P11 compares the two without it.
     const timeless = (x: unknown) => JSON.stringify(x, (key, value: unknown) => (key === "when" ? undefined : value));
     if (accepted && offered?.allowed && timeless(res.body.effect) !== timeless(offered)) problem(`P11: ${action} on ${s.id} at ${isoOf(now)} answered the effect ${JSON.stringify(res.body.effect)}; the read previewed ${JSON.stringify(offered)}`);
-    // W4 (council on cc9bf55, items 7 and 8): the preview's time, read before the control, is the read's time for that step
-    // after it, at the same instant: a preview reads the state the control would produce.
-    // The answer's effect is the control's own transition at that instant, before the worker's round the route runs after it;
-    // outside the interruption family (whose dispatch gate the effect does not ask) the two times are the same read.
-    const effectNext = (res.body.effect as { next?: { stepId?: string; when?: unknown } } | undefined)?.next;
-    if (accepted && offered?.allowed && offered.next && !interrupting && effectNext?.stepId === offered.next.stepId && JSON.stringify(effectNext.when) !== JSON.stringify(offered.next.when)) problem(`W4: ${action} on ${s.id} at ${isoOf(now)} previewed ${offered.next.stepId} ${JSON.stringify(offered.next.when)}; the control's own transition gives ${JSON.stringify(effectNext.when)}`);
+    // W4 (council on cc9bf55, items 7 and 8; the re-check of ff01571): the preview's time, read before the control, against
+    // what the engine then does in its next round at the same instant (the route's own round): the fake providers' logs and the list.
+    if (options.preview === true && accepted && offered?.allowed && offered.next) previewed.push({ s, action, stepId: offered.next.stepId, channel: offered.next.channel, when: offered.next.when, at: now, mark: markBefore });
     if (!accepted && res.body.error) refused.push({ path: `/api/enrollments/${s.id}/controls`, body, message: res.body.error.message });
     if (uncertain) features.add(accepted ? `${action}-with-uncertain-work` : `${action}-refused-with-uncertain-work`);
     if (accepted !== expected) problem(`P11: ${action} on ${s.id} at ${isoOf(now)} was ${accepted ? "accepted" : `refused (${res.body.error?.message ?? res.status})`}; the record says it must be ${expected ? "accepted" : "refused"}`);
@@ -1240,7 +1215,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     } else endings.push({ subjectId: s.id, kind: "replied", at, restartedAt: Infinity });
   }
 
-  async function campaignControl(ci: number, action: "pause" | "resume"): Promise<void> {
+  async function campaignControl(ci: number, action: "pause" | "resume", othersMayMove = false): Promise<void> {
     settleHidden();
     const now = h.clock;
     const paused = campaignPausedAt(ci, now);
@@ -1253,7 +1228,8 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     const res = await h.request<{ error?: { message: string } }>("POST", `/api/campaigns/${campaignIds[ci]!}/${action}`, body);
     if (res.status !== 200 && res.body.error) refused.push({ path: `/api/campaigns/${campaignIds[ci]!}/${action}`, body, message: res.body.error.message });
     if ((res.status === 200) !== expected) problem(`P11: ${action} of campaign ${ci + 1} at ${isoOf(now)} was ${res.status === 200 ? "accepted" : "refused"}; the record says ${expected ? "accept" : "refuse"}`);
-    await unchanged(before, `${action} of campaign ${ci + 1}`);
+    // Between rounds, the round the route runs may apply what fell due to other leads.
+    if (!othersMayMove) await unchanged(before, `${action} of campaign ${ci + 1}`);
     if (!expected) return;
     if (action === "pause") campaignPauses.push({ campaign: ci, from: now, to: Infinity });
     else for (const p of campaignPauses) if (p.campaign === ci && p.to === Infinity) p.to = now;
@@ -1570,17 +1546,33 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     }
   }
   /**
-   * W3 (ADR 0003 "Reads that say when"; the verifier's rule on 178de98): the read and dispatch agree, checked by running the
-   * dispatcher's next round at the read's own instant. A read of "now" is handed over in that round, with no exception
-   * but the one the record names: the sender handed another lead's step over in it (priority) or the lead's pre-send
-   * check found a reply. A read of a reason is not handed over in that round. A read of a later instant is never handed
-   * over before it; and when the record's model has room at it (the lead neither held nor ended nor acted on, no reply,
-   * the sender up and handing nothing else over), it is handed over at it.
+   * W3 (ADR 0003 "Reads that say when"): the read and dispatch agree, checked by running the dispatcher's next round at
+   * the read's own instant, nothing else changing. The round before the event's control has read every provider, so the
+   * engine knows at the read all a round can learn but what only the handover itself asks: the pre-send check. A read of
+   * "now" is handed over in that round, unless that check found a reply the record of the lead did not hold (the round
+   * stores it). A read of a reason is not handed over in it. A read of an earliest instant is never handed over before it.
    */
-  const promised = new Map<string, { s: Subject; stepId: string; ch: "email" | "sms"; senders: string[]; at: number; readAt: number }>();
-  const seenAccounts = new Map<string, unknown>();
-  const repliedBy = (s: Subject, T: number) => [...email.replyLog.filter((x) => x.subjectId === s.id), ...(s.person.mobile ? sms.replyLog.filter((x) => x.from === s.person.mobile) : [])].some((x) => x.at <= T);
+  const promised = new Map<string, { s: Subject; stepId: string; ch: "email" | "sms"; at: number; readAt: number }>();
+  /** The main event's control previews, checked in W3's round (W4). */
+  const previewed: { s: Subject; action: string; stepId: string; channel: string; when: ControlStepView["when"]; at: number; mark: { email: number; sms: number } }[] = [];
+  /**
+   * The clock moves to the engine's next wake with no round, as between a 15-second worker's rounds, so steps fall due unread
+   * by dispatch: only when no provider activity falls before or at that instant, so the engine then knows all its next round
+   * can learn but the pre-send check's answer.
+   */
+  async function betweenRounds(feature: string): Promise<boolean> {
+    const wake = await h.engine.nextWakeAt();
+    const activity = [h.provider.nextActivityAt(), h.smsProvider?.nextActivityAt() ?? null].filter((t): t is number => t !== null && t > h.clock);
+    if (wake === null || wake <= h.clock || wake > h.clock + DAY || !activity.every((t) => t > wake)) return false;
+    h.clock = wake;
+    features.add(feature);
+    return true;
+  }
   async function checkReadsAgainstDispatch(): Promise<void> {
+    // In half the rounds, the reads come between two rounds, as a 15-second worker leaves them: the clock moves to the
+    // engine's next wake with no round, so steps fall due unread by dispatch. Only when no provider activity falls before
+    // or at that instant: the engine then knows at the read all its next round can learn but the pre-send check's answer.
+    if (rW() < 0.5) await betweenRounds("w3-reads-between-rounds");
     const now = h.clock;
     const reads: { s: Subject; t: TrackDefinition; stepId: string; when: NonNullable<EnrollmentRead["tracks"][number]["nextStep"]>["when"] }[] = [];
     for (const s of subjects.values()) {
@@ -1591,27 +1583,41 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
         if (next) reads.push({ s, t, stepId: next.stepId, when: next.when });
       }
     }
-    for (const s of subjects.values()) {
-      const st = await h.store.engine.subject(s.id, now);
-      if (st) seenAccounts.set(s.id, Object.values(st.accounts).map((a) => [a.id, a.healthy, isoOf(a.nextSlotAt), isoOf(a.waitUntil), a.waitReason, a.used, a.capacity, a.inFlight, a.k]));
-    }
     const mark = { email: email.handoverLog.length, sms: sms.handoverLog.length };
+    const previews = previewed.splice(0);
     await h.tick();
+    // W4: each preview against the round, as a read is.
+    const listedNow = new Set([...(await h.request<CallsView>("GET", "/api/calls")).body.readyNow].map((x) => x.enrollmentId));
+    for (const v of previews) {
+      if (v.channel === "call") {
+        if (v.when?.kind === "call_day" && v.when.now && !listedNow.has(v.s.id)) problem(`W4: ${v.action} on ${v.s.id} at ${isoOf(now)} previewed its call "going on your call list now", but the next round did not list it`);
+        continue;
+      }
+      const ch = v.channel === "sms" ? "sms" : "email";
+      // From the control's own instant: its first round is the one the route runs after it.
+      const sinceControl = (ch === "sms" ? sms : email).handoverLog.slice(v.mark[ch]);
+      const handed = sinceControl.some((c) => c.subjectId === v.s.id && c.stepId === v.stepId && c.at === v.at);
+      if (v.when?.kind === "now") features.add("w4-a-preview-of-now");
+      if (v.when?.kind === "now" && !handed) problem(`W4: ${v.action} on ${v.s.id} at ${isoOf(now)} previewed ${v.stepId} "due now", but the next round handed nothing over${process.env["CONTROLS_DEBUG"] ? ` [read after the control ${JSON.stringify(reads.filter((r) => r.s.id === v.s.id).map((r) => [r.stepId, r.when]))}; all ${JSON.stringify((ch === "sms" ? sms : email).handoverLog.map((c, i) => [i, c.subjectId, c.stepId, isoOf(c.at)]).filter((x) => x[1] === v.s.id))}; mark ${v.mark[ch]}; attempts ${JSON.stringify((await h.store.engine.subject(v.s.id, now))?.attempts.map((a) => [a.stepId, a.state, a.accountId, a.endedBy]))}]` : ""}`);
+      if ((v.when?.kind === "at" || (v.when?.kind === "waits" && v.when.why !== "with_provider" && v.when.why !== "unresolved")) && handed) problem(`W4: ${v.action} on ${v.s.id} at ${isoOf(now)} previewed ${v.stepId} ${JSON.stringify(v.when)}, but the next round handed it over`);
+      if (v.when?.kind === "at" && !handed) promised.set(`${v.s.id}/${v.stepId}`, { s: v.s, stepId: v.stepId, ch, at: Date.parse(v.when.at), readAt: now });
+    }
     for (const r of reads) {
       const ch = r.t.channel === "sms" ? "sms" : "email";
-      const senders = sendersOf(r.s, r.t);
       const round = (ch === "sms" ? sms : email).handoverLog.slice(mark[ch]);
       const mine = round.filter((c) => c.subjectId === r.s.id && c.stepId === r.stepId);
       switch (r.when.kind) {
         case "now":
-          if (mine.length === 0 && !round.some((c) => senders.includes(c.sender)) && !repliedBy(r.s, now)) problem(`W3: ${r.s.id}/${r.stepId} read "due now" at ${isoOf(now)}, but the next round handed nothing over and the record names no reason`);
+          features.add("w3-a-read-of-now");
+          if (mine.length === 0) problem(`W3: ${r.s.id}/${r.stepId} read "due now" at ${isoOf(now)}, but the next round handed nothing over${process.env["CONTROLS_DEBUG"] ? ` [round ${JSON.stringify(round.map((c) => [c.subjectId, c.stepId, c.sender]))}]` : ""}`);
           break;
         case "waits":
+          if (r.when.why === "sender_slot" || r.when.why === "sender_waiting" || r.when.why === "sender_busy" || r.when.why === "sending_capacity" || r.when.why === "sender_rate_limited" || r.when.why === "sender_unavailable") features.add(`w3-a-read-of-${r.when.why}`);
           if (mine.length > 0 && r.when.why !== "with_provider" && r.when.why !== "unresolved") problem(`W3: ${r.s.id}/${r.stepId} read "${r.when.why}" at ${isoOf(now)}, but the next round handed it over`);
           break;
         case "at":
           if (mine.length > 0) problem(`W3: ${r.s.id}/${r.stepId} read "earliest ${r.when.at}" at ${isoOf(now)}, but the next round handed it over before then`);
-          else promised.set(`${r.s.id}/${r.stepId}`, { s: r.s, stepId: r.stepId, ch, senders, at: Date.parse(r.when.at), readAt: now });
+          else promised.set(`${r.s.id}/${r.stepId}`, { s: r.s, stepId: r.stepId, ch, at: Date.parse(r.when.at), readAt: now });
           break;
         case "call_day":
         case "listed_for":
@@ -1622,36 +1628,12 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
         }
       }
     }
-    // The review bot on cc9bf55: advance to the earliest instant a read gave, nothing else changing, and dispatch must hand
-    // the step over at it (in half the rounds, so the runs keep their other shapes too).
-    const soonest = [...promised.values()].filter((p) => p.readAt === now && p.at <= now + 3 * DAY).sort((a, b) => a.at - b.at)[0];
-    if (soonest && rW() < 0.5) {
-      await h.advanceTo(soonest.at);
-      for (const p of [...promised.values()].filter((x) => x.readAt === now && x.at === soonest.at)) {
-        const all = (p.ch === "sms" ? sms : email).handoverLog;
-        const got = all.find((c) => c.subjectId === p.s.id && c.stepId === p.stepId && c.at > p.readAt);
-        const other = all.some((c) => p.senders.includes(c.sender) && c.at > p.readAt && c.at <= p.at && !(c.subjectId === p.s.id && c.stepId === p.stepId));
-        if (got?.at !== p.at && !other && !repliedBy(p.s, p.at)) problem(`W3: ${p.s.id}/${p.stepId} read "earliest ${isoOf(p.at)}" at ${isoOf(p.readAt)}; advancing to it with nothing else changing, it was handed over ${got ? `at ${isoOf(got.at)} on ${got.sender}` : "not at all"}${process.env["CONTROLS_DEBUG"] ? ` [accounts at the read ${JSON.stringify(seenAccounts.get(p.s.id))}; refusals ${JSON.stringify(email.refusals.map((x) => [isoOf(x.at), x.reason]))}; outages ${JSON.stringify(outages.map((o) => [o.inbox, o.kind, isoOf(o.from), isoOf(o.to)]))}]` : ""}`);
-        promised.delete(`${p.s.id}/${p.stepId}`);
-      }
-    }
-    // Each promised instant once it has passed by a round: never handed over before it; handed over at it where the record has room.
+    // Each earliest instant once it has passed: never handed over before it. Nothing is promised at it.
     for (const [key, p] of promised) {
-      if (h.clock < p.at + MINUTE) continue;
+      if (h.clock < p.at) continue;
       promised.delete(key);
-      const all = (p.ch === "sms" ? sms : email).handoverLog;
-      // Only handovers after the read: a step handed over before, its work withdrawn as not sent, is pending again.
-      const first = all.find((c) => c.subjectId === p.s.id && c.stepId === p.stepId && c.at > p.readAt);
-      if (first && first.at < p.at) {
-        problem(`W3: ${p.s.id}/${p.stepId} read "earliest ${isoOf(p.at)}" at ${isoOf(p.readAt)}, but was handed over at ${isoOf(first.at)}, before it`);
-        continue;
-      }
-      const span = (x: { from: number; to: number }) => x.from < p.at + MINUTE && x.to > p.readAt;
-      const actedOn = holdsOf(p.s).some(span) || skips.some((x) => x.subjectId === p.s.id && x.at >= p.readAt) || leadPauses.some((x) => x.subjectId === p.s.id && x.from >= p.readAt) || (winBack.get(p.s.id) ?? -Infinity) >= p.readAt || endedAt(p.s, p.at);
-      const busy = all.some((c) => p.senders.includes(c.sender) && c.at >= p.readAt && c.at <= p.at + MINUTE && !(c.subjectId === p.s.id && c.stepId === p.stepId));
-      const down = outages.some((o) => p.senders.includes(o.inbox) && span(o));
-      if (actedOn || repliedBy(p.s, p.at + MINUTE) || busy || down) continue;
-      if (!first || first.at > p.at + MINUTE) problem(`W3: ${p.s.id}/${p.stepId} read "earliest ${isoOf(p.at)}" at ${isoOf(p.readAt)}; the record had room then, but it was handed over ${first ? `at ${isoOf(first.at)}` : "not at all"}`);
+      const first = (p.ch === "sms" ? sms : email).handoverLog.find((c) => c.subjectId === p.s.id && c.stepId === p.stepId && c.at > p.readAt);
+      if (first && first.at < p.at) problem(`W3: ${p.s.id}/${p.stepId} read "earliest ${isoOf(p.at)}" at ${isoOf(p.readAt)}, but was handed over at ${isoOf(first.at)}, before it`);
     }
   }
 
@@ -1669,21 +1651,33 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     else if (extra < 0.55 && !outageUnderWay()) await actAtADueInstant();
     // One user action per instant: the event's own action comes a minute after an extra one.
     if (extra < 0.55) await h.advanceTo(h.clock + MINUTE);
+    // In the windows family, a round reads every provider before the event, so W3's reads know what a round can learn; in
+    // half the events the control then comes between rounds, so its preview may name a step due unread (W4).
+    let unread = false;
+    if (drawsWindows) {
+      await h.tick();
+      if (rW() < 0.5) unread = await betweenRounds("w4-a-control-between-rounds");
+    }
     listedBefore = new Set([...(await h.request<CallsView>("GET", "/api/calls")).body.readyNow].map((x) => x.enrollmentId));
     const kind = rand();
     if (kind < 0.6) {
       const s = pick([...subjects.values()]);
       // Mostly an action that applies to the lead as the record has it; sometimes any.
       const fitting = ACTIONS.filter((a) => accepts(s, a, h.clock));
-      await control(s, fitting.length > 0 && chance(0.8) ? pick(fitting) : pick(ACTIONS));
+      await control(s, fitting.length > 0 && chance(0.8) ? pick(fitting) : pick(ACTIONS), { preview: drawsWindows && !interrupting, othersMayMove: unread });
     } else if (kind < 0.75) {
       const ci = Math.floor(rand() * campaignIds.length);
-      await campaignControl(ci, campaignPausedAt(ci, h.clock) ? "resume" : "pause");
+      await campaignControl(ci, campaignPausedAt(ci, h.clock) ? "resume" : "pause", unread);
     } else if (kind < 0.9) await autoReply();
-    if (r18() < 0.3) await staleSkip();
+    // A stale skip is a second user action at the same instant: the main control's preview no longer describes what follows.
+    if (r18() < 0.3) {
+      previewed.length = 0;
+      await staleSkip();
+    }
     await checkAll();
-    // In the windows family, after every event: the extra round runs at the read's own instant.
-    if (drawsWindows) await checkReadsAgainstDispatch();
+    // In the windows family, after every event the engine applied (an auto-reply is the provider's, read by the next
+    // round): the extra round runs at the read's own instant.
+    if (drawsWindows && (kind < 0.75 || kind >= 0.9)) await checkReadsAgainstDispatch();
     if (interrupting && r20() < 0.4 && calm()) {
       await interrupt();
       await checkAll();

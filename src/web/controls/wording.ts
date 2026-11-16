@@ -77,7 +77,9 @@ export function stepPhrase(step: Pick<ControlStepView, "channel" | "track" | "nu
  * Why a step has no time, as the read gives it (`StepWaitApi`), in one exhaustive switch. None promises a time: the engine
  * cannot know when what holds the step ends (ADR 0003 "Reads that say when"). Provisional wording, for the principal.
  */
-export function stepWaitWords(why: StepWaitApi, channel?: "email" | "sms"): string {
+// `channel` is required, never defaulted: a caller that forgot it would word a text's reason as an email's (the re-check of
+// ff01571: the Test run tab named the email provider for an SMS transport hold).
+export function stepWaitWords(why: StepWaitApi, channel: "email" | "sms" | "call" | undefined): string {
   switch (why) {
     case "campaign_not_launched":
       return "waiting for this campaign to launch";
@@ -109,6 +111,13 @@ export function stepWaitWords(why: StepWaitApi, channel?: "email" | "sms"): stri
       return "waiting while a reply from them is matched to its thread";
     case "no_destination":
       return "not going: there is no good address to send it to";
+    case "sender_slot":
+      // A claim its pacing slot holds back, its own or after another step on the same sender: no time is promised.
+      return "waiting for its sender’s next sending slot";
+    case "sender_rate_limited":
+      return "waiting: the provider is limiting how fast its senders can send";
+    case "sender_waiting":
+      return "waiting for a sender that can take it";
     case "sender_busy":
       return "waiting for its sender to finish the sends it has under way";
     case "call_hours_closed":
@@ -130,9 +139,9 @@ export function stepWaitWords(why: StepWaitApi, channel?: "email" | "sms"): stri
 
 /**
  * When a step goes, from the read (`StepWhenView`): "due now" only when dispatch hands it over on its next round; a later
- * instant as the earliest it can go, never as a promise ("earliest Tue 10 Nov at 09:00", in the user's zone), since what the
- * engine cannot know yet (another lead going first, tomorrow's room) can move it later (verifier on 178de98, item 9); or
- * why it waits. Provisional wording, for the principal.
+ * instant, given only while the step waits on time alone, as the earliest it can go, never as a promise ("earliest Tue 10 Nov
+ * at 09:00", in the user's zone), since what holds a sender then is not known yet; or why it waits, with no time.
+ * Provisional wording, for the principal.
  */
 export function stepWhenPhrase(when: StepWhenView, userZone: string): string {
   switch (when.kind) {

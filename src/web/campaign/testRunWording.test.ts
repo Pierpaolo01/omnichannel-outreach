@@ -23,6 +23,11 @@ describe("the Test run tab says only what the run's facts say (ticket 21)", () =
     expect(stepStateText(row({ channel: "call", state: "logged", outcome: "not_interested" }), "Europe/London", READ)).toBe("Logged 10:41: Not interested");
   });
 
+  test("a text held for its transport names the SMS provider, an email the email provider (the re-check of ff01571)", () => {
+    expect(stepStateText(row({ channel: "sms", stepId: "m2", name: "Text 2", state: "due", at: null, waits: "no_transport" }), "Europe/London", READ)).toBe("Waiting: the SMS provider can’t send this text yet");
+    expect(stepStateText(row({ state: "due", at: null, waits: "no_transport" }), "Europe/London", READ)).toBe("Waiting: the email provider can’t send a follow-up in its thread yet");
+  });
+
   test("a step names where it went, and a win-back step not reached says when it would run", () => {
     const run = { email: "alex.own@personal-mail.example", mobile: "+44 7700 900456", running: true };
     expect(stepDetail(row({}), run)).toBe("To alex.own@personal-mail.example");
