@@ -32,11 +32,13 @@ const HOURS = [[9, 17], [8, 12], [13, 18], [20, 24], [22, 2], [0, 24], [0, 24], 
 export interface LinkedinRunOptions {
   readonly rules?: Partial<Rules>;
   readonly maxWrites?: number;
+  /** A replay also stops after this many engine ticks: a broken engine can tick for ever writing little. */
+  readonly maxTicks?: number;
 }
 
 export interface LinkedinRun {
   readonly problems: string[];
-  readonly stats: { readonly features: Set<string> };
+  readonly stats: { readonly features: Set<string>; readonly writes: number; readonly ticks: number };
 }
 
 /**
@@ -178,6 +180,8 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     for (const l of own) l.id = rows.find((r) => r.name === l.name)?.enrollments.find((e) => e.campaign.id === c.id)?.id ?? "";
   }
 
+  const bounded = () => (options.maxWrites !== undefined && h.writes > options.maxWrites) || (options.maxTicks !== undefined && h.ticks > options.maxTicks);
+
   // --- The record's own log of what the user did.
   const held = new Map<string, { from: number; to: number | null }[]>();
   const marked = new Map<string, number>();
@@ -187,7 +191,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   // --- Events.
   const end = START + 12 * DAY;
   let requestNo = 0;
-  while (h.clock < end && !(options.maxWrites !== undefined && h.writes > options.maxWrites)) {
+  while (h.clock < end && !bounded()) {
     const step = pickOf(rnd, [10 * MIN, 45 * MIN, 3 * H, 9 * H, DAY]);
     await h.advanceTo(Math.min(end, h.clock + step));
     const roll = rnd();
@@ -226,9 +230,12 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     const r = await h.request("POST", `/api/enrollments/${l.id}/controls`, { requestId: `g-${++requestNo}`, action: "resume" });
     if (r.status === 200) open.to = h.clock;
   }
-  await h.advanceTo(h.clock + 25 * DAY);
+  // A day at a time, so a broken engine that loops (a claim expired and made again every tick) stops at the same count of
+  // engine writes on every machine; the drain's checks then judge what was reached.
+  const drainEnd = h.clock + 25 * DAY;
+  while (h.clock < drainEnd && !bounded()) await h.advanceTo(Math.min(drainEnd, h.clock + DAY));
   await check(true);
-  return { problems, stats: { features } };
+  return { problems, stats: { features, writes: h.writes, ticks: h.ticks } };
 
   // --- The checks, from the record and the providers' logs.
   async function check(drained: boolean): Promise<void> {

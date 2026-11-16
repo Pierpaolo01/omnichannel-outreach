@@ -37,7 +37,9 @@ export const LINKEDIN_FEATURES: readonly string[] = [
 ];
 const SEARCH_SEEDS = 100;
 const MAX_SEEDS = 30;
-const RUN_WRITES = 10_000;
+/** Every mutation replay stops after this many engine writes or ticks: an unmutated run of the 100 needs under 300 of each. */
+const RUN_WRITES = 3_000;
+const RUN_TICKS = 2_000;
 
 function report(line: string): void {
   console.info(line);
@@ -82,12 +84,12 @@ export function linkedinOracle(): void {
     run(`the generated LinkedIn runs fail ${mutation.invariant} for an engine with "${name}"`, async () => {
       const breaks = (problems: readonly string[]) => problems.some((p) => linkedinInvariantsOf(p).includes(mutation.invariant));
       if (!FULL_SEARCH) {
-        const { problems } = await runLinkedin(LINKEDIN_SEED + mutation.seed, { rules: mutation.rules, maxWrites: RUN_WRITES });
+        const { problems } = await runLinkedin(LINKEDIN_SEED + mutation.seed, { rules: mutation.rules, maxWrites: RUN_WRITES, maxTicks: RUN_TICKS });
         expect(breaks(problems), `seed ${LINKEDIN_SEED + mutation.seed} no longer breaks ${mutation.invariant}; run the sequence-search workflow and update its seed. Problems: ${problems.join("; ")}`).toBe(true);
         return;
       }
-      let caught: string | null = breaks((await runLinkedin(LINKEDIN_SEED + mutation.seed, { rules: mutation.rules, maxWrites: RUN_WRITES })).problems) ? `recorded seed offset ${mutation.seed}` : null;
-      for (let i = 0; i < MAX_SEEDS && caught === null; i++) if (breaks((await runLinkedin(LINKEDIN_SEED + i, { rules: mutation.rules, maxWrites: RUN_WRITES })).problems)) caught = `seed offset ${i}`;
+      let caught: string | null = breaks((await runLinkedin(LINKEDIN_SEED + mutation.seed, { rules: mutation.rules, maxWrites: RUN_WRITES, maxTicks: RUN_TICKS })).problems) ? `recorded seed offset ${mutation.seed}` : null;
+      for (let i = 0; i < MAX_SEEDS && caught === null; i++) if (breaks((await runLinkedin(LINKEDIN_SEED + i, { rules: mutation.rules, maxWrites: RUN_WRITES, maxTicks: RUN_TICKS })).problems)) caught = `seed offset ${i}`;
       report(`killing seed: LinkedIn mutation "${name}" (${mutation.invariant}): ${caught ?? `none in offsets 0-${MAX_SEEDS - 1}`}; recorded seed ${mutation.seed}`);
       expect(caught, `no seed broke ${mutation.invariant} for "${name}"`).not.toBeNull();
     }, 1_800_000);
