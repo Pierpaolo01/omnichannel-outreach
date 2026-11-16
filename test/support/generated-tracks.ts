@@ -468,8 +468,10 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
   };
   // 29. The worker's caches follow the stored facts: right after each of its ticks, a freshly started engine at the same
   // instant finds nothing to change and nothing to hand over. A cache keyed on less than what it read (a change of
-  // conversations, say) leaves the worker idle where a fresh one acts; checked at every tick, since the cache's own
-  // horizon heals the stall before a later check would see it.
+  // conversations, say) leaves the worker idle where a fresh one acts. Checked after each tick, since the cache's own
+  // horizon heals the stall before a later check would see it; not while draining, after a problem, or once the run has
+  // stopped at its bound. It compares the tables `freshEngineTick` names, without row versions, and the handovers; it
+  // covers the worker's caches, not the projection's or the HTTP reads.
   let draining = false;
   h.afterTick = async () => {
     await freshCheck();

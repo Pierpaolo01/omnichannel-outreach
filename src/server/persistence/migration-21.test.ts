@@ -11,12 +11,12 @@ import type { EnrollmentProgress, LeadSearchResult, NeedsAttention } from "../..
 import { DEFAULT_RULES, type Rules } from "../engine/rules.ts";
 
 /**
- * Migration 21 (ADR 0003, question Q7 answered): a skip records its cause, and a binding none of whose texts went is
- * released as unsent. The database before it is built here, as the integration tip (`231b639`) left one, then taken
- * back to 20 (`UNDO_21`), as the other upgrade tests do: the tip's engine held a lead whose mobile's conversation was
- * taken instead of skipping it, and released no binding when a first text was refused. So the old world is written by
- * the current build with exactly those two rules as the tip had them: the skip switched off, no unsent release. Fictitious
- * data only.
+ * Migration 21 (ADR 0003, question Q7 answered): a skip records its cause; the migration releases no binding, and the
+ * engine's first tick after it starts applies its one release rule (a binding none of whose texts went, and none
+ * answered, is released as unsent). The database before it is not made by the integration tip's (`231b639`) own code:
+ * it is written by this branch's code with two of the tip's rules substituted (`AT_THE_TIP`: a taken conversation held,
+ * not skipped; no unsent release), then its schema is taken back to version 20 (`UNDO_21`), as the other upgrade tests
+ * do. Fictitious data only.
  *
  * Spring clinics texts Pat on the one number at 09:00 on Monday 2 November 2026 and owns that conversation; its text to
  * Nia is refused at the call (her mobile reported invalid), which leaves a binding though nothing was sent; Autumn
