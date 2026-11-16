@@ -51,6 +51,7 @@ h.clock = Date.parse("2026-11-02T08:00:00Z");
 await h.launch(campaign.id);
 
 const lists: unknown[] = [];
+const outcomes: unknown[] = [];
 let requestNo = 0;
 for (let day = 0; day < 10; day++) {
   await h.advanceTo(Date.parse("2026-11-02T10:00:00Z") + day * DAY);
@@ -61,13 +62,13 @@ for (let day = 0; day < 10; day++) {
   if (first) {
     const task = (await h.request<CallTaskView>("GET", `/api/call-tasks/${first.taskId}`)).body;
     const logged = await h.request("POST", `/api/call-tasks/${first.taskId}/outcome`, { requestId: `digest-${++requestNo}`, outcome: "no_answer", ...(day % 2 === 1 ? { redial: true } : {}), numberId: task.numbers[0]?.detailId });
-    lists.push({ day, logged: logged.status });
+    outcomes.push({ day, logged: logged.status });
   }
 }
 await h.advanceTo(Date.parse("2026-11-20T10:00:00Z"));
 
 const strip = <T extends object>(entries: readonly T[]) => entries.map((e) => JSON.parse(JSON.stringify(e)) as unknown);
-const record = { emailHandovers: strip(h.fake.handoverLog), emailDeliveries: strip(h.fake.deliveryLog), smsHandovers: strip(h.sms.handoverLog), smsDeliveries: strip(h.sms.deliveryLog), callLists: lists };
+const record = { emailHandovers: strip(h.fake.handoverLog), emailDeliveries: strip(h.fake.deliveryLog), smsHandovers: strip(h.sms.handoverLog), smsDeliveries: strip(h.sms.deliveryLog), callLists: lists, outcomes };
 const text_ = JSON.stringify(record);
-console.info(`email handovers ${h.fake.handoverLog.length}, deliveries ${h.fake.deliveryLog.length}; SMS handovers ${h.sms.handoverLog.length}, deliveries ${h.sms.deliveryLog.length}; call lists ${lists.length}`);
+console.info(`email handovers ${h.fake.handoverLog.length}, deliveries ${h.fake.deliveryLog.length}; SMS handovers ${h.sms.handoverLog.length}, deliveries ${h.sms.deliveryLog.length}; call lists ${lists.length} (one a day), outcomes logged ${outcomes.length}`);
 console.info(`digest ${createHash("sha256").update(text_).digest("hex")}`);

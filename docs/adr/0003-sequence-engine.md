@@ -2861,6 +2861,10 @@ Mutations, each killed by a fixed seed in `pnpm check`:
 - **Fixed seeds.** `TRACK_FIXED_SEEDS` gains 5 (a lead skipped at the upgrade), 43 and 57; after the reviews of `faac357`, 76 and 84 (the two search seeds whose record was wrong: a skip the app could only decide once it learnt late that the track had started, and a waiting claim tried at the instant its slot freed, ahead of a lower-priority handover there), 50 and 85 (a first text refused hours after acceptance while another lead waits on it, and one never answered) and 14 and 16 (a reply to a first text not yet known sent); a test asserts they reach every new event. `TEST_RUN_FIXED_SEEDS` gains 25. Local sweeps of offsets 0 to 59, unmutated, of both generators found no problem; the full search runs in CI.
 - **Reads checked.** The Before launch projection runs the engine's own `evaluate` and the shared settling rule; coverage counts leads with a mobile, not sends, so it is unchanged. Outcome measures tally sent attempts, replies and statuses, so a skipped track counts nothing, as a missing channel does. Bulk previews are per-lead control previews on the engine's state.
 
+## Generalised by ADR 0004: a conversation between a sender account and a destination (16 November 2026)
+
+"Question Q7 answered" and 4.5 hold for every channel whose sends are a conversation between one sender account and one destination: an SMS number and a mobile, a LinkedIn session and a profile (`holdsConversations` in `definition.ts`, the one test). The rules, the caches' key and the generated SMS runs are unchanged; LinkedIn's additions (the already-connected skip takes the pair; a withdrawn, never-accepted invite releases it) are ADR 0004's, question Q41.
+
 ## Consequences
 
 - **ADR 0001.** The merge that deletes a contact-detail row becomes a redirect in 12a. Enrollments gain the fields in 1.3. `status` stays the one stored status column.

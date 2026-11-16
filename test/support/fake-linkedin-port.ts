@@ -40,6 +40,8 @@ export interface ProfileScript {
   loseAnswer?: number;
   /** Its next withdrawals answer `unknown`, this many times, before they take effect. */
   withdrawUnknown?: number;
+  /** An invite to the profile is already pending, sent by hand outside this application (the pre-send check: `pending`). */
+  pendingElsewhere?: boolean;
   /** The connection is removed after acceptance: a message is refused `not_connected`. */
   readonly connectionRemoved?: boolean;
 }
@@ -117,7 +119,9 @@ export class FakeLinkedInPort implements SendPort {
   /** The pre-send check reads the connection (ADR 0004 2.3): never a reply. */
   presendCheck(request: PresendRequest): Promise<PresendResult> {
     const session = this.sessions.get(request.sender);
-    const answer: PresendResult = !session?.healthy ? { kind: "unavailable" } : this.connectedNow(request.sender, request.destination) ? { kind: "connected" } : { kind: "clear" };
+    const now = this.now();
+    const outstanding = this.script(request.destination).pendingElsewhere === true || this.invites.some((i) => i.sender === request.sender && i.profile === request.destination && i.withdrawnAt === null && (i.acceptedAt === null || i.acceptedAt > now));
+    const answer: PresendResult = !session?.healthy ? { kind: "unavailable" } : this.connectedNow(request.sender, request.destination) ? { kind: "connected" } : outstanding ? { kind: "pending" } : { kind: "clear" };
     this.presendLog.push({ at: this.now(), sender: request.sender, destination: request.destination, answer: answer.kind });
     return Promise.resolve(answer);
   }
@@ -172,6 +176,11 @@ export class FakeLinkedInPort implements SendPort {
       ...this.events.filter((e) => e.visibleAt > now && Number.isFinite(e.visibleAt)).map((e) => e.visibleAt),
     ];
     return times.length > 0 ? Math.min(...times) : null;
+  }
+
+  /** The person accepts the invite the user sent by hand outside the application: they are connected from now. */
+  acceptElsewhere(profile: string): void {
+    this.profiles.set(profile, { ...this.script(profile), pendingElsewhere: false, connected: true });
   }
 
   /** The user accepts a test invite on their own profile now (ADR 0004 section 8): what a person does by hand. */

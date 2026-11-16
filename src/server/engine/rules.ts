@@ -48,6 +48,11 @@ export interface Rules {
   readonly inviteWithdrawalAnswer: typeof inviteWithdrawalAnswer;
   /** The social action a step asks for (ADR 0004 2.1, 6): what the pre-send check's "connected" means for it. */
   readonly actionOfStep: typeof actionOfStep;
+  /**
+   * Whether the pre-send check's `pending` (an invite outstanding on LinkedIn) stops the handover (council on 194fc44, item
+   * 1): a second layer under the connection gate and the pair's ownership. A rule, so the generated runs can prove each.
+   */
+  readonly outstandingInviteStops: () => boolean;
   /** The user's LinkedIn reply mark (ADR 0004 section 7). */
   readonly markReplied: typeof markReplied;
   /** The mark's confirmation, checked after its own rule (council on 194fc44, item 7). */
@@ -184,6 +189,7 @@ export const DEFAULT_RULES: Rules = {
   inviteWithdrawalDue,
   inviteWithdrawalAnswer,
   actionOfStep,
+  outstandingInviteStops: () => true,
   markReplied,
   markPrecondition,
   evaluate,

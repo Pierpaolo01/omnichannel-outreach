@@ -8,6 +8,7 @@ import { ENGINE_PARAMS, isLive, isUncertain } from "./attempt.ts";
 import { leadNow, localDayNumber, windowOpen } from "./clock.ts";
 import { holdsConversations, linkedinStepKind, poolOf, socialActionOf, type SocialAction } from "./definition.ts";
 import {
+  rules as gateRules,
   invitePendingUntil,
   applyToAttempt,
   awaitingAcceptance,
@@ -566,7 +567,7 @@ export function handoverFailures(state: SubjectState, attempt: Attempt, account:
   // 19. A LinkedIn message only once the track is connected (ADR 0004 3.2), checked again in the write that authorizes it.
   const track = state.campaign.definition.tracks.find((t) => t.id === attempt.trackId);
   const progress = progressOf(state, attempt.trackId);
-  if (track && progress && linkedinStepKind(track, attempt.stepId) !== "invite" && linkedinStepKind(track, attempt.stepId) !== null && (progress.connection ?? null) === null) failed.push(19);
+  if (track && progress && gateRules.connectionGate(track, attempt.stepId, progress)) failed.push(19);
   if (now < account.nextSlotAt) failed.push(16);
   return [...new Set(failed)].sort((a, b) => a - b);
 }

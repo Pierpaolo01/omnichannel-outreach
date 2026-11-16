@@ -1454,7 +1454,8 @@ export class Engine {
     if (channel === "linkedin") {
       if (asked.kind === "unavailable") return false;
       const invite = subject !== null && this.rules.actionOfStep(subject, a.trackId, a.stepId) === "invite";
-      if ((asked.kind === "connected" || asked.kind === "pending") && invite) {
+      const pendingStops = asked.kind === "pending" && this.rules.outstandingInviteStops();
+      if ((asked.kind === "connected" || pendingStops) && invite) {
         await this.update(a.subjectId, now, (s) => {
           const current = s.attempts.find((x) => x.id === a.id);
           const account = current ? s.accounts[current.accountId] : undefined;
@@ -1465,7 +1466,7 @@ export class Engine {
         });
         return false;
       }
-      if (asked.kind === "pending") return false;
+      if (pendingStops) return false;
       await this.update(a.subjectId, now, (s) => ({ ...s, attempts: s.attempts.map((x) => (x.id === a.id ? { ...x, presendCheckedWall: now, presendFoundReply: false } : x)) }));
       this.hooks.crashPoint?.("after_presend", a.id);
       return true;

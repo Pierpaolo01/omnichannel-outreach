@@ -1,6 +1,7 @@
 import type { Rules } from "../../src/server/engine/rules.ts";
 import { DEFAULT_RULES } from "../../src/server/engine/rules.ts";
-import { applyReply, awaitingAcceptance, connect, end, finishTrack, progressOf } from "../../src/domain/sequence/progress.ts";
+import { applyReply, awaitingAcceptance, connect, end, finishTrack, progressOf, rules as progressRules } from "../../src/domain/sequence/progress.ts";
+import { linkedinStepKind } from "../../src/domain/sequence/definition.ts";
 import { markedReplyId } from "../../src/domain/sequence/reply-identity.ts";
 import { wallAtLead } from "../../src/domain/sequence/progress.ts";
 import { leadNow, wallOfLead } from "../../src/domain/sequence/clock.ts";
@@ -14,6 +15,14 @@ export interface LinkedinMutation {
   readonly invariant: string;
   readonly seed: number;
   readonly rules: Partial<Rules>;
+  /** A swap outside the engine's rules (a module seam), applied for the replay and undone after it. */
+  readonly patch?: () => () => void;
+}
+
+/** The subject's state with only its own LinkedIn pairs (L11's mutation): other subjects' conversations with its profile unseen. */
+function ownPairsOnly(s: SubjectState): SubjectState {
+  const profiles = new Set(s.lead.details.filter((d) => d.channel === "linkedin").map((d) => d.key));
+  return { ...s, smsBindings: s.smsBindings.filter((b) => b.owner === s.subject.id || !profiles.has(b.recipient)) };
 }
 
 /** A LinkedIn track's invite step: its first live step. */
@@ -52,13 +61,14 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
         const failed = DEFAULT_RULES.handoverFailures(state, attempt, account, now);
         return inviteStepOf(state, attempt.trackId) === attempt.stepId ? failed.filter((f) => f !== 3 && f !== 4 && f !== 6 && f !== 7) : failed;
       },
+      outstandingInviteStops: () => false,
     },
   },
   // L2: the first message is due at the invite's send, as if every invite were accepted at once.
   "the first message is due at the invite's send": {
     invariant: "L2",
     seed: 0,
-    rules: { evaluate: (state, now, options) => DEFAULT_RULES.evaluate(connectedAtTheSend(state), now, options) },
+    rules: { evaluate: (state, now, options) => DEFAULT_RULES.evaluate(connectedAtTheSend(state), now, options), outstandingInviteStops: () => false },
   },
   // L3: the mark is recorded, but the lead is not ended.
   "a reply mark that does not end the lead": {
@@ -146,5 +156,40 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
     rules: {
       inviteExpired: (state, trackId, now) => end(DEFAULT_RULES.inviteExpired(state, trackId, now), "finished_no_usable_channel", now),
     },
+  },
+  // L2, the gate in full (review bot on 194fc44): the gate covers only the first message, so a skip reaches a follow-up.
+  "the connection gate covers only the first message": {
+    invariant: "L2",
+    seed: 22,
+    rules: { outstandingInviteStops: () => false },
+    patch: () => {
+      const was = progressRules.connectionGate;
+      progressRules.connectionGate = (track, stepId, progress) => linkedinStepKind(track, stepId) === "first_message" && (progress.connection ?? null) === null;
+      return () => {
+        progressRules.connectionGate = was;
+      };
+    },
+  },
+  // L11: other subjects' pairs ignored on LinkedIn: a second campaign reaches a profile another campaign's session owns.
+  "a LinkedIn pair owned by another subject is ignored": {
+    invariant: "L11",
+    seed: 25,
+    rules: {
+      chooseAccount: (state, now, stepId) => DEFAULT_RULES.chooseAccount(ownPairsOnly(state), now, stepId),
+      handoverFailures: (state, attempt, account, now) => DEFAULT_RULES.handoverFailures(ownPairsOnly(state), attempt, account, now),
+      evaluate: (state, now, options) => DEFAULT_RULES.evaluate(ownPairsOnly(state), now, options),
+    },
+  },
+  // L12: the mark accepted on a lead nothing reached on LinkedIn.
+  "a reply marked where nothing reached the person": {
+    invariant: "L12",
+    seed: 0,
+    rules: { markReplied: (state, requestId, now) => ({ ok: true, state: applyReply(state, { channel: "linkedin", atWall: now, providerRef: markedReplyId("linkedin", requestId) }, now) }) },
+  },
+  // L13: a taken pair held instead of skipped: the second campaign's lead is left waiting on it for ever.
+  "a taken LinkedIn pair is held, not skipped": {
+    invariant: "L13",
+    seed: 10,
+    rules: { evaluate: (state, now, options) => DEFAULT_RULES.evaluate(state, now, { ...options, skipTakenConversations: false }) },
   },
 };
