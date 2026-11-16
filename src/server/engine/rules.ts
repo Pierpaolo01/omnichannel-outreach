@@ -50,6 +50,12 @@ export interface Rules {
   readonly stepWhen: typeof stepWhen;
   /** The same read for a control's preview of its next step: its own rule, so a mutation can break the preview alone. */
   readonly previewStepWhen: typeof stepWhen;
+  /**
+   * The lead a confirmation's expectation is checked against, given the stored lead and the lead as of the action's instant:
+   * the evaluated one, as the read that produced the expectation showed it (the review bot on 712884b). A rule so a
+   * mutation can judge the stored one.
+   */
+  readonly confirmedAgainst: (stored: SubjectState, evaluated: SubjectState) => SubjectState;
   /** Claims are made in this order (4.3). */
   readonly claimOrder: typeof comparePriority;
   /** Claimed attempts on one account are handed over in this order (5.5 step 2). */
@@ -155,6 +161,7 @@ export const DEFAULT_RULES: Rules = {
   readyItems,
   stepWhen,
   previewStepWhen: stepWhen,
+  confirmedAgainst: (_stored, evaluated) => evaluated,
   claimOrder: comparePriority,
   handoverOrder: comparePriority,
   claimRefusal,

@@ -159,6 +159,15 @@ const RULES: Record<string, Partial<Rules>> = {
       return pool.some((a) => a.used >= a.capacity) ? { kind: "waits", why: "sending_capacity" } : when;
     },
   },
+
+  // Rule 3 broken (the coordinator on 712884b): a claim whose own slot is not reached reads "ready", though the engine
+  // cannot hand it over at that instant.
+  "a claimed step whose slot is not reached reads ready": {
+    stepWhen: (s, trackId, now, env) => {
+      const when = R.stepWhen(s, trackId, now, env);
+      return when?.kind === "waits" && when.why === "sender_slot" ? { kind: "ready" } : when;
+    },
+  },
   // ADR 0003 "Reads that say when", rule 3 (the coordinator on ab6fe8e): a held step's reason replaced by "ready".
   "a held step reads ready": {
     stepWhen: (s, trackId, now, env) => {
@@ -253,6 +262,7 @@ const EXPECTED: Record<string, { invariant: string; seed: number; options?: Part
   // ADR 0003 "Reads that say when": the windows family, in which the record models windows, zones and outages (W1 to W3).
   "a skipped step counts as touching the lead": { invariant: "18", seed: 9 },
   "a mixed pool reads the full sender's reason": { invariant: "W2", seed: 110, options: { windows: true } },
+  "a claimed step whose slot is not reached reads ready": { invariant: "W3", seed: 1, options: { windows: true } },
   "a held step reads ready": { invariant: "W1", seed: 1, options: { windows: true } },
   "a step outside its window reads ready": { invariant: "W2", seed: 0, options: { windows: true } },
   "a step whose every sender is full reads ready": { invariant: "W2", seed: 21, options: { windows: true } },

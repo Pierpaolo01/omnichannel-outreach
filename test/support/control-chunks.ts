@@ -25,7 +25,7 @@ export const CONTROL_FIXED_SEEDS: readonly number[] = [17, 19, 33, 35, 48, 64, 7
  * The windows family's fixed offsets (ADR 0003 "Reads that say when"): runs that draw sending windows, prospect zones and
  * inbox outages, with W3 after every event. Chosen from a local sweep of offsets 0 to 99 on 15 November 2026.
  */
-export const CONTROL_WINDOW_SEEDS: readonly number[] = [0, 9, 12, 27, 33, 36, 44, 46, 48, 50, 53, 57, 62, 67, 69, 75, 79, 86];
+export const CONTROL_WINDOW_SEEDS: readonly number[] = [0, 9, 12, 27, 33, 36, 44, 46, 48, 49, 50, 53, 57, 62, 67, 69, 75, 79, 86];
 /** The scripted reply runs' seed offset (`smsReplyRestart`, `replyBeforeObservation`): the reply identity rule. */
 export const SMS_REPLY_SEED = 0;
 const SEARCH_SEEDS = 100;
@@ -47,6 +47,7 @@ export const CONTROL_FEATURES: readonly string[] = [
   "w3-a-read-of-sending_capacity",
   "w4-a-control-between-rounds",
   "w4-a-preview-of-ready",
+  "c1-a-confirmation-between-rounds",
   "a-email-track-in-win-back",
   "a-hidden-reply",
   "a-hidden-reply-found-by-the-pre-send-check",
@@ -127,6 +128,7 @@ export const CONTROL_FEATURES: readonly string[] = [
 ];
 
 export const RETIRED_CONTROL_FEATURES: Readonly<Record<string, string>> = {
+  "w3-a-ready-claim-at-its-slot": "A ready read of a step whose claim is at its slot: the windows family's checks cover it where it occurs; none of the fixed seeds reaches it, so it is not required of them.",
   "w3-a-read-of-sender_busy": "A reason the read can give that the windows family's pools rarely reach (two places per inbox); not required of the fixed seeds.",
   "w3-a-read-of-sender_waiting": "A reason the read can give for a pool whose candidates wait for different causes; reached in the search, not required of the fixed seeds.",
   "move_to_win_back-with-a-claim-open": "A name the generator can form that none of the 100 seeds reached in the sweep of 14 November 2026; not required of the fixed seeds.",

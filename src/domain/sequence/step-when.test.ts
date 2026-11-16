@@ -140,9 +140,22 @@ describe("a call step: when it goes on the user's list", () => {
 });
 
 describe("the window's opening around a clock change: the read's instant is the first instant dispatch's own check accepts", () => {
-  /** Steps the claim's step guard forward minute by minute from `from`: the first instant it accepts. */
+  /**
+   * The first instant from `from` that the claim's step guard accepts, over ten days. It strides 30 minutes at a time while
+   * the guard refuses, then steps back over the last stride a minute at a time. Exact here: windows open and close on whole
+   * local hours and these zones' offsets change by a whole hour, so no accepted span is shorter than a stride and none can
+   * be stepped over. A window opens on a whole minute, so a minute is the smallest step that can find its first instant.
+   */
   function firstAccepted(s: SubjectState, from: number): number {
-    for (let t = from; t < from + 10 * 24 * H; t += MIN) if (claimRefusal(s, item, t) === null) return t;
+    const STRIDE = 30 * MIN;
+    const accepts = (t: number) => claimRefusal(s, item, t) === null;
+    if (accepts(from)) return from;
+    for (let t = from; t < from + 10 * 24 * H; t += STRIDE) {
+      if (!accepts(t + STRIDE)) continue;
+      // Back over the last stride, a minute at a time: the first accepted instant, and none earlier in it.
+      for (let u = t + MIN; u <= t + STRIDE; u += MIN) if (accepts(u)) return u;
+      throw new Error("the stride's end is accepted but no instant in it is");
+    }
     throw new Error("never accepted");
   }
   const cases: { name: string; zone: string; window: WindowRule[]; at: string }[] = [

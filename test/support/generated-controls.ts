@@ -7,6 +7,7 @@ import { business, person } from "./export-builder.ts";
 import type { FakeAccount } from "./fake-email-port.ts";
 import type { FakeNumber } from "./fake-sms-port.ts";
 import { random } from "./generated-sequences.ts";
+import { CHANGED_SINCE_CONFIRMED, PREVIEW_CHANGED } from "../../src/domain/sequence/controls.ts";
 import { dueAfter, firstOpen, inWindow, local, startOfDay, type Hours } from "./sequence-model.ts";
 
 /**
@@ -170,6 +171,27 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   const lateTexts = random(seed ^ 0x180)() < 0.5;
   if (lateTexts) features.add("texts-sent-late");
   const h = new EngineHarness({ start, accounts: inboxes, modes: [...(lookupLags ? ["lookup-lags" as const] : lateSends ? ["honest" as const, "late-send" as const] : ["honest" as const]), ...(silentSends ? ["silent-send" as const] : [])], random: random(seed ^ 0x17c), engine: { waitFor: quickWait }, sms: { numbers, modes: lateTexts ? ["honest", "late-send"] : ["honest"] }, ...(options.rules ? { rules: options.rules } : {}) });
+  /**
+   * The record's log of claims, as each is made (the engine's claim event: which step, which inbox, when), so the "ready"
+   * checks know a claim's actual inbox and slot (the coordinator on 712884b).
+   */
+  const claimLog: { subjectId: string; stepId: string; sender: string; at: number; seq: number }[] = [];
+  /**
+   * The record's events that withdraw a lead's claims, in order (a numbered log, since a control and a claim can share an
+   * instant: the route's round claims after its control, a round before an event claims before it): an accepted pause,
+   * stop, restart or win-back of the lead, a skip of one step, a campaign's pause, a reply.
+   */
+  const withdrawals: { subjectId: string | null; campaign: number | null; stepId: string | null; seq: number }[] = [];
+  let recordSeq = 0;
+  const hooksBefore = h.hooks;
+  h.hooks = {
+    ...hooksBefore,
+    afterClaim: async (id) => {
+      const a = await h.store.engine.attempt(id);
+      if (a) claimLog.push({ subjectId: a.subjectId, stepId: a.stepId, sender: a.accountId, at: h.clock, seq: ++recordSeq });
+      await hooksBefore.afterClaim?.(id);
+    },
+  };
   h.maxWrites = options.maxWrites ?? null;
   if (silentSends) h.fake.silentRevealAfterMs = DAY;
   // A provider that keeps what it was asked to withdraw: in the runs whose lookups lag too, so a pause meets work withdrawn
@@ -1010,6 +1032,9 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     const body = { requestId, action, expect: expectOf(read, action) };
     // The route runs the worker's round after the control: W4 counts handovers from before the request.
     const markBefore = { email: email.handoverLog.length, sms: sms.handoverLog.length };
+    const claimsBefore = claimLog.length;
+    // Numbered before the request: the route's round claims after the control, within it.
+    const seqOfControl = ++recordSeq;
     const res = await h.request<{ error?: { message: string }; replayed?: boolean; effect?: unknown }>("POST", `/api/enrollments/${s.id}/controls`, body);
     const accepted = res.status === 200;
     // The answer's effect is the read's preview at that instant, field for field (verifier B4).
@@ -1019,13 +1044,18 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     if (accepted && offered?.allowed && timeless(res.body.effect) !== timeless(offered)) problem(`P11: ${action} on ${s.id} at ${isoOf(now)} answered the effect ${JSON.stringify(res.body.effect)}; the read previewed ${JSON.stringify(offered)}`);
     // W4 (council on cc9bf55, items 7 and 8; the re-check of ff01571): the preview's time, read before the control, against
     // what the engine then does in its next round at the same instant (the route's own round): the fake providers' logs and the list.
-    if (options.preview === true && accepted && offered?.allowed && offered.next) previewed.push({ s, action, stepId: offered.next.stepId, channel: offered.next.channel, when: offered.next.when, at: now, mark: markBefore });
+    if (options.preview === true && accepted && offered?.allowed && offered.next) previewed.push({ s, action, stepId: offered.next.stepId, channel: offered.next.channel, when: offered.next.when, at: now, mark: markBefore, claims: claimsBefore });
+    // C1 (the coordinator on 712884b): a control confirmed with the expectation of a read taken at the same instant, nothing in
+    // between, is never refused as changed, between rounds as after one: the check sees the lead as the read did.
+    if (offered?.allowed && !accepted && (res.body.error?.message === CHANGED_SINCE_CONFIRMED || res.body.error?.message === PREVIEW_CHANGED)) problem(`C1: ${action} on ${s.id} at ${isoOf(now)}, confirmed on the read of that instant with nothing in between, was refused as changed ("${res.body.error.message}")`);
+    if (offered?.allowed && options.othersMayMove === true) features.add("c1-a-confirmation-between-rounds");
     if (!accepted && res.body.error) refused.push({ path: `/api/enrollments/${s.id}/controls`, body, message: res.body.error.message });
     if (uncertain) features.add(accepted ? `${action}-with-uncertain-work` : `${action}-refused-with-uncertain-work`);
     if (accepted !== expected) problem(`P11: ${action} on ${s.id} at ${isoOf(now)} was ${accepted ? "accepted" : `refused (${res.body.error?.message ?? res.status})`}; the record says it must be ${expected ? "accepted" : "refused"}`);
     if (offered && !offered.allowed && !accepted && offered.reason !== res.body.error?.message) problem(`P11: ${s.id}'s read refuses ${action} with "${offered.reason}"; the action says "${res.body.error?.message ?? ""}"`);
     // Acting before the worker's tick at a due instant, the tick the control runs may apply what fell due to other leads.
     if (options.othersMayMove !== true) await unchanged(before, `${action} on ${s.id}`);
+    if (accepted && action !== "resume") withdrawals.push({ subjectId: s.id, campaign: null, stepId: action === "skip" ? (offered?.allowed ? (offered.skips?.stepId ?? null) : null) : null, seq: seqOfControl });
     if (expected) {
       const ending = endingAt(s, now);
       switch (action) {
@@ -1217,6 +1247,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   }
   /** The record's reply: ends a running, held, stopped or finished lead as replied at `at` (2.1); a replied one stays. */
   function replied(s: Subject, at: number): void {
+    withdrawals.push({ subjectId: s.id, campaign: null, stepId: null, seq: ++recordSeq });
     if (endingAt(s, at)?.kind === "replied") return;
     const stopped = endingAt(s, at);
     if (stopped) {
@@ -1235,12 +1266,14 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     const offered = detail.controls.find((c) => c.action === action);
     if (offered?.allowed !== expected) problem(`P11: campaign ${ci + 1}'s read ${offered?.allowed ? "offers" : "refuses"} ${action}; the record says ${expected ? "accept" : "refuse"}`);
     const before = await others(null, ci);
+    const seqOfControl = ++recordSeq;
     const body = { requestId: `c-${++requests}`, expect: { pausedSince: detail.pause.pausedSince } };
     const res = await h.request<{ error?: { message: string } }>("POST", `/api/campaigns/${campaignIds[ci]!}/${action}`, body);
     if (res.status !== 200 && res.body.error) refused.push({ path: `/api/campaigns/${campaignIds[ci]!}/${action}`, body, message: res.body.error.message });
     if ((res.status === 200) !== expected) problem(`P11: ${action} of campaign ${ci + 1} at ${isoOf(now)} was ${res.status === 200 ? "accepted" : "refused"}; the record says ${expected ? "accept" : "refuse"}`);
     // Between rounds, the round the route runs may apply what fell due to other leads.
     if (!othersMayMove) await unchanged(before, `${action} of campaign ${ci + 1}`);
+    if (expected && action === "pause") withdrawals.push({ subjectId: null, campaign: ci, stepId: null, seq: seqOfControl });
     if (!expected) return;
     if (action === "pause") campaignPauses.push({ campaign: ci, from: now, to: Infinity });
     else for (const p of campaignPauses) if (p.campaign === ci && p.to === Infinity) p.to = now;
@@ -1566,9 +1599,23 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
    * "now" is handed over in that round, unless that check found a reply the record of the lead did not hold (the round
    * stores it). A read of a reason is not handed over in it. A read of an earliest instant is never handed over before it.
    */
+  /**
+   * The step's claim still open before a round at `T` by the record (`claims`: the log's length when the round began), or
+   * null: none made, handed over since, expired (15 minutes, ADR 0003 5.3), or the lead acted on since (a pause, skip, stop,
+   * restart, win-back or reply withdraws its claims). A claim whose slot is not reached is not examined, so its inbox's
+   * health does not end it; at its slot, an inbox that is down withdraws it (the caller asks).
+   */
+  const liveClaim = (s: Subject, stepId: string, T: number, claims: number): { sender: string; at: number } | null => {
+    const c = claimLog.slice(0, claims).filter((x) => x.subjectId === s.id && x.stepId === stepId && x.at <= T).at(-1);
+    if (!c) return null;
+    const handed = [...email.handoverLog, ...sms.handoverLog].some((x) => x.subjectId === s.id && x.stepId === stepId && x.at >= c.at && x.at <= T);
+    const actedOn = withdrawals.some((w) => w.seq > c.seq && (w.subjectId === s.id || w.campaign === s.campaign) && (w.stepId === null || w.stepId === stepId));
+    if (handed || actedOn || T - c.at >= 15 * MINUTE) return null;
+    return c;
+  };
   const promised = new Map<string, { s: Subject; stepId: string; ch: "email" | "sms"; at: number; readAt: number }>();
   /** The main event's control previews, checked in W3's round (W4). */
-  const previewed: { s: Subject; action: string; stepId: string; channel: string; when: ControlStepView["when"]; at: number; mark: { email: number; sms: number } }[] = [];
+  const previewed: { s: Subject; action: string; stepId: string; channel: string; when: ControlStepView["when"]; at: number; mark: { email: number; sms: number }; claims: number }[] = [];
   /**
    * The clock moves to the engine's next wake with no round, as between a 15-second worker's rounds, so steps fall due unread
    * by dispatch: only when no provider activity falls before or at that instant, so the engine then knows all its next round
@@ -1590,7 +1637,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
    * handed over that was not pending before it, a same-key retry, ranks ahead: retries go first). From the record and the
    * fake providers' logs only.
    */
-  function freePlace(s: Subject, t: TrackDefinition, stepId: string, T: number, round: readonly { sender: string; subjectId: string; stepId: string; at: number }[], ranks: ReadonlyMap<string, readonly [number, number, string, string]>, marks: { email: number; sms: number }, unclaimed: boolean): string | null {
+  function freePlace(s: Subject, t: TrackDefinition, stepId: string, T: number, round: readonly { sender: string; subjectId: string; stepId: string; at: number }[], ranks: ReadonlyMap<string, readonly [number, number, string, string]>, marks: { email: number; sms: number }, claim: { sender: string } | null): string | null {
     const mine = ranks.get(`${s.id}/${stepId}`);
     const ahead = (c: { subjectId: string; stepId: string }) => {
       const k = ranks.get(`${c.subjectId}/${c.stepId}`);
@@ -1602,17 +1649,14 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     const room = (x: string) => capacityOf(x) - knownSentOn(x, T) - openOn(x, T, marks);
     // Held: at its in-flight bound, or its day's room taken by known sends and work with the provider.
     const held = (x: string) => openOn(x, T, marks) >= 2 || room(x) <= 0;
-    const free = usable.filter((x) => slotBefore(x, T, marks) <= T && !held(x) && !round.some((c) => c.sender === x && c.at === T && ahead(c)));
-    if (unclaimed) {
-      // A step no round could have claimed yet (the reads come between rounds at its first ready instant): the place it
-      // could take is its account choice's (4.2: the soonest slot, then the most room left, then the lowest id), by the
-      // record's own slots and room. That place must be held back by pacing, held, or taken by a step ranked ahead.
-      const chosen = usable.filter((x) => !held(x)).sort((x, y) => Math.max(slotBefore(x, T, marks), T) - Math.max(slotBefore(y, T, marks), T) || room(y) - room(x) || (x < y ? -1 : 1))[0];
-      return chosen !== undefined && free.includes(chosen) ? chosen : null;
-    }
-    // One an earlier round may have claimed is held to its claim's sender, which only the engine knows: one of its places
-    // must be held back, held, or taken by a step ranked ahead.
-    return usable.length > 0 && free.length === usable.length ? (free[0] ?? null) : null;
+    const taken = (x: string) => round.some((c) => c.sender === x && c.at === T && ahead(c));
+    // A claimed step's place is its claim's inbox (its slot reached: the caller asks for the slot reason otherwise); a step
+    // with no claim takes its account choice's (4.2: the soonest slot, then the most room left, then the lowest id), by
+    // the record's own slots and room. That place must be held back by pacing, held, or taken by a step ranked ahead.
+    const place = claim ? claim.sender : usable.filter((x) => !held(x)).sort((x, y) => Math.max(slotBefore(x, T, marks), T) - Math.max(slotBefore(y, T, marks), T) || room(y) - room(x) || (x < y ? -1 : 1))[0];
+    if (place === undefined) return null;
+    if (slotBefore(place, T, marks) > T || (!claim && held(place)) || taken(place)) return null;
+    return place;
   }
   async function listedAfterOf(s: Subject): Promise<boolean> {
     return [...(await h.request<CallsView>("GET", "/api/calls")).body.readyNow].some((x) => x.enrollmentId === s.id);
@@ -1621,7 +1665,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
     // In half the rounds, the reads come between two rounds, as a 15-second worker leaves them: the clock moves to the
     // engine's next wake with no round, so steps fall due unread by dispatch. Only when no provider activity falls before
     // or at that instant: the engine then knows at the read all its next round can learn but the pre-send check's answer.
-    const unread = rW() < 0.5 ? await betweenRounds("w3-reads-between-rounds") : false;
+    if (rW() < 0.5) await betweenRounds("w3-reads-between-rounds");
     const now = h.clock;
     const reads: { s: Subject; t: TrackDefinition; stepId: string; when: NonNullable<EnrollmentRead["tracks"][number]["nextStep"]>["when"] }[] = [];
     for (const s of subjects.values()) {
@@ -1642,6 +1686,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
       }
     }
     const marks = { email: email.handoverLog.length, sms: sms.handoverLog.length };
+    const claims = claimLog.length;
     const previews = previewed.splice(0);
     await h.tick();
     for (const v of previews) {
@@ -1656,7 +1701,8 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
       const t = def(v.s).tracks.find((x) => x.steps.some((st) => st.id === v.stepId));
       if (v.when?.kind === "ready") features.add("w4-a-preview-of-ready");
       if (v.when?.kind === "ready" && !handed && t) {
-        const free = freePlace(v.s, t, v.stepId, v.at, round, ranks, v.mark, false);
+        const open = liveClaim(v.s, v.stepId, v.at, v.claims);
+        const free = freePlace(v.s, t, v.stepId, v.at, round, ranks, v.mark, open && slotBefore(open.sender, v.at, v.mark) <= v.at && outageUntil(open.sender, v.at) !== null ? null : open);
         if (free !== null) problem(`W4: ${v.action} on ${v.s.id} at ${isoOf(v.at)} previewed ${v.stepId} "ready", but the next round handed it nothing and gave ${free}'s place to no step the record ranks ahead of it`);
       }
       if ((v.when?.kind === "at" || (v.when?.kind === "waits" && v.when.why !== "with_provider" && v.when.why !== "unresolved")) && handed) problem(`W4: ${v.action} on ${v.s.id} at ${isoOf(v.at)} previewed ${v.stepId} ${JSON.stringify(v.when)}, but the next round handed it over`);
@@ -1669,14 +1715,26 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
       switch (r.when.kind) {
         case "ready": {
           features.add("w3-a-read-of-ready");
+          // A claim whose own slot is not reached cannot be handed over at this instant: the read owes the slot reason.
+          const open = liveClaim(r.s, r.stepId, now, claims);
+          // At its slot, a claim whose inbox is down is withdrawn at this instant and the step chooses again.
+          const claim = open && slotBefore(open.sender, now, marks) <= now && outageUntil(open.sender, now) !== null ? null : open;
+          if (claim && slotBefore(claim.sender, now, marks) > now) {
+            problem(`W3: ${r.s.id}/${r.stepId} read "ready" at ${isoOf(now)}, but the record has its claim on ${claim.sender} (made ${isoOf(claim.at)}) waiting for its slot at ${isoOf(slotBefore(claim.sender, now, marks))}`);
+            break;
+          }
+          if (claim) features.add("w3-a-ready-claim-at-its-slot");
           if (mine.length > 0) break;
-          const pending = pendingOf(r.s, r.t, now);
-          const opening = pending && Number.isFinite(pending.due) ? firstOpen(r.t.window, zoneOfSubject(r.s), pending.due) : -Infinity;
-          const free = freePlace(r.s, r.t, r.stepId, now, round, ranks, marks, unread && opening === now);
-          if (free !== null) problem(`W3: ${r.s.id}/${r.stepId} read "ready" at ${isoOf(now)}; the next round handed it nothing and gave ${free}'s place to no step the record ranks ahead of it${process.env["CONTROLS_DEBUG"] ? ` [round ${JSON.stringify(round.map((c) => [c.subjectId, c.stepId, c.sender]))}; slot ${isoOf(slotBefore(free, now, marks))}; open ${openOn(free, now, marks)}; engine ${JSON.stringify(await (async () => { const st = await h.store.engine.subject(r.s.id, h.clock); return { attempts: st?.attempts.map((a) => [a.stepId, a.state, a.accountId, isoOf(a.claimedWall), a.endedBy]), accounts: Object.values(st?.accounts ?? {}).map((a) => [a.id, a.healthy, isoOf(a.nextSlotAt), a.used, a.reserved, a.capacity, a.inFlight, a.k, isoOf(a.waitUntil)]), pending: st?.pendingReplies, sender: st?.subject.emailSender, tracks: st?.tracks.map((p) => [p.trackId, p.nextStepId, isoOf(p.dueWall), p.finishReason]) }; })())}; senders ${JSON.stringify(sendersOf(r.s, r.t))}]` : ""}`);
+          const free = freePlace(r.s, r.t, r.stepId, now, round, ranks, marks, claim);
+          if (free !== null) problem(`W3: ${r.s.id}/${r.stepId} read "ready" at ${isoOf(now)}; the next round handed it nothing and gave ${free}'s place to no step the record ranks ahead of it${process.env["CONTROLS_DEBUG"] ? ` [round ${JSON.stringify(round.map((c) => [c.subjectId, c.stepId, c.sender]))}; claim ${JSON.stringify(claim)}; slot ${isoOf(slotBefore(free, now, marks))}; open ${openOn(free, now, marks)}]` : ""}`);
           break;
         }
         case "waits":
+          // The slot reason exactly when the record has the step's claim waiting for a slot not reached.
+          if (r.when.why === "sender_slot") {
+            const claim = liveClaim(r.s, r.stepId, now, claims);
+            if (!claim || slotBefore(claim.sender, now, marks) <= now) problem(`W3: ${r.s.id}/${r.stepId} read "sender_slot" at ${isoOf(now)}, but the record has ${claim ? `its claim on ${claim.sender} at its slot (${isoOf(slotBefore(claim.sender, now, marks))})` : "no claim open for it"}${process.env["CONTROLS_DEBUG"] ? ` [claims ${JSON.stringify(claimLog.filter((x) => x.subjectId === r.s.id).map((x) => [x.stepId, x.sender, isoOf(x.at)]))}; log ${claimLog.length}; claimsMark ${claims}; pauses ${JSON.stringify(leadPauses.filter((p) => p.subjectId === r.s.id).map((p) => [isoOf(p.from), isoOf(p.to)]))}; cpauses ${JSON.stringify(campaignPauses.filter((p) => p.campaign === r.s.campaign).map((p) => [isoOf(p.from), isoOf(p.to)]))}; skips ${JSON.stringify(skips.filter((x) => x.subjectId === r.s.id).map((x) => [x.stepId, isoOf(x.at)]))}; endings ${JSON.stringify(endings.filter((e) => e.subjectId === r.s.id).map((e) => [e.kind, isoOf(e.at), isoOf(e.restartedAt)]))}; winBack ${isoOf(winBack.get(r.s.id))}; engine ${JSON.stringify((await h.store.engine.subject(r.s.id, now))?.attempts.map((a) => [a.stepId, a.state, a.accountId, isoOf(a.claimedWall)]))}]` : ""}`);
+          }
           if (r.when.why === "sender_slot" || r.when.why === "sender_waiting" || r.when.why === "sending_capacity" || r.when.why === "sender_rate_limited" || r.when.why === "sender_unavailable") features.add(`w3-a-read-of-${r.when.why}`);
           if (mine.length > 0 && r.when.why !== "with_provider" && r.when.why !== "unresolved") problem(`W3: ${r.s.id}/${r.stepId} read "${r.when.why}" at ${isoOf(now)}, but the next round handed it over`);
           break;
