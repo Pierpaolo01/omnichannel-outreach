@@ -378,8 +378,6 @@ export interface EngineStore {
   runningTestRunIds(): Promise<string[]>;
   /** For each running subject, a key that changes whenever its state, its campaign's, or the lead facts it reads change. */
   runningSubjectVersions(): Promise<Map<string, string>>;
-  /** Every subject, running or ended, that owns an SMS binding not released (ADR 0003, question Q7 answered, point 10). */
-  bindingOwners(): Promise<string[]>;
   /** Every attempt that is not terminal. */
   openAttempts(): Promise<Attempt[]>;
   attempt(attemptId: string): Promise<Attempt | null>;

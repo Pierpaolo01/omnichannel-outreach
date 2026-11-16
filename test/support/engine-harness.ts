@@ -95,7 +95,7 @@ export class EngineHarness {
     this.hooks = options.hooks ?? {};
     this.engineIds = sequentialIds(options.idPrefix ?? "att");
     this.clock = options.start;
-    this.store = openSqliteStore(options.databasePath ?? ":memory:");
+    this.store = openSqliteStore(options.databasePath ?? ":memory:", () => this.clock);
     // Count the engine's subject writes: a deterministic measure of a run's work, the same on every machine.
     const store = this.store.engine;
     const update = store.update.bind(store);

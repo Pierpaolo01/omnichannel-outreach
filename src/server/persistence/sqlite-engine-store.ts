@@ -9,7 +9,7 @@ import { defaultGap } from "../../domain/sequence/dispatch.ts";
 import type { MergeData } from "../../domain/sequence/copy.ts";
 import { emptyDefinition, poolOf, type CampaignDefinition, type DeclinedPath } from "../../domain/sequence/definition.ts";
 import { callableOnDay, skipDeadlineOf, skipLimitOf } from "../../domain/sequence/calls.ts";
-import { bindingUnsent, deriveStatus } from "../../domain/sequence/progress.ts";
+import { bindingUnsent, deriveStatus, releaseUnsentBindings } from "../../domain/sequence/progress.ts";
 import { maySend, occupyingKeys } from "../../domain/sequence/attempt.ts";
 import type { ConversationCause } from "../../domain/sequence/state.ts";
 import type {
@@ -739,8 +739,22 @@ export class SqliteEngineStore implements EngineStore {
     return [...bindings, ...skips];
   }
 
-  async bindingOwners(): Promise<string[]> {
-    return this.sql("SELECT DISTINCT owner_subject FROM sms_bindings WHERE released_at IS NULL ORDER BY owner_subject").all().map((r) => str(r, "owner_subject"));
+  /**
+   * Point 10's release rule over every binding standing in the database (review bots on 50788ac and 393f78a): each subject
+   * owning an unreleased binding, running or ended, is written with `releaseUnsentBindings`, the one statement of the rule
+   * the engine's writes apply too, so a binding none of whose texts went and none answered is released as unsent. Run by
+   * `openStoreOn` before the store is handed out, so nothing (recovery, a tick, an HTTP route, the Before launch
+   * projection, another process) reads a binding a database written under an older rule left standing. Nothing is
+   * written for an owner whose bindings all stand.
+   */
+  releaseUnsentAtOpen(now: number): void {
+    const owners = this.sql("SELECT DISTINCT owner_subject FROM sms_bindings WHERE released_at IS NULL ORDER BY owner_subject").all().map((r) => str(r, "owner_subject"));
+    for (const owner of owners) {
+      this.updateNow(owner, now, (s) => {
+        const next = releaseUnsentBindings(s);
+        return next === s ? null : next;
+      });
+    }
   }
 
   async conversationsVersion(): Promise<string> {

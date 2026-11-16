@@ -515,23 +515,6 @@ export class Engine {
     if (this.lastAnyAnswer === null) this.lastAnyAnswer = parseInstant(await this.store.meta(HEARTBEAT_KEY));
   }
 
-  /** Whether this engine has applied the unsent-binding rule to every binding's owner since it started. */
-  private unsentChecked = false;
-
-  /**
-   * On the first tick after the engine starts: every subject owning an unreleased binding, running or ended, is written
-   * through `update`, which releases its bindings that own no conversation by the one rule (`rules.releaseUnsent`). A
-   * running engine releases them in the write that settles their work; this reaches a database written under an older
-   * rule (migration 21 releases nothing itself), and a subject with nothing else to write. Nothing is written for an owner
-   * whose bindings all stand.
-   */
-  private async releaseUnsentAtStart(): Promise<void> {
-    if (this.unsentChecked) return;
-    const now = this.now();
-    for (const owner of await this.store.bindingOwners()) await this.update(owner, now, (s) => (this.rules.releaseUnsent(s) === s ? null : s));
-    this.unsentChecked = true;
-  }
-
   private async runTick(): Promise<void> {
     await this.startSilenceClock();
     this.tickStarted = this.now();
@@ -539,7 +522,6 @@ export class Engine {
     this.newRound();
     this.heartbeatSeen = parseInstant(await this.store.meta(HEARTBEAT_KEY));
     await this.syncAccounts();
-    await this.releaseUnsentAtStart();
     for (let pass = 0; pass < MAX_PASSES; pass++) {
       let changed = false;
       const observed = await this.observe();
